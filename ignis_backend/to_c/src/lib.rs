@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use analyzer::{
   ir::{
     instruction::{
-      IRInstruction, variable::IRVariable, function::IRFunction, ir_return, call::IRCall,
-      import::IRImport,
+      IRInstruction, variable::IRVariable, function::IRFunction, call::IRCall, ir_if::IRIf,
+      ir_while::IRWhile,
     },
     instruction_type::IRInstructionType,
   },
@@ -18,7 +18,8 @@ enum TranspilerContext {
   While,
   Continue(Box<TranspilerContext>),
   Call,
-  Printf,
+  DontNeedSemicolon,
+  Condition,
 }
 
 pub struct TranspilerToC {
@@ -38,7 +39,7 @@ impl TranspilerToC {
     }
   }
 
-  fn transpile_opeartor_to_c(&self, operator: &IRInstructionType) -> String {
+  fn transpile_operator_to_c(&self, operator: &IRInstructionType) -> String {
     match operator {
       IRInstructionType::Add => "+",
       IRInstructionType::Sub => "-",
@@ -162,7 +163,7 @@ impl TranspilerToC {
     code
   }
 
-  fn transpile_print_to_C(&mut self, call: &IRCall, indent_level: usize) -> String {
+  fn transpile_print_to_c(&mut self, call: &IRCall, indent_level: usize) -> String {
     let mut code: String = String::new();
     let mut format_string: String = String::new();
     let mut args: String = String::new();
@@ -186,7 +187,7 @@ impl TranspilerToC {
           format_string.push_str(&self.get_format_string_from_data_type(&v.data_type));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
         }
-        IRInstruction::Logical(l) => {
+        IRInstruction::Logical(_) => {
           format_string.push_str(&self.get_format_string_from_data_type(&DataType::Boolean));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
         }
@@ -231,13 +232,13 @@ impl TranspilerToC {
 
     let name = match call.name.as_str() {
       "println" => {
-        return self.transpile_print_to_C(call, indent_level);
+        return self.transpile_print_to_c(call, indent_level);
       }
       "toString" => "toString",
       _ => &call.name,
     };
 
-    let mut args = call
+    let args = call
       .arguments
       .iter()
       .map(|x| match x {
@@ -257,9 +258,9 @@ impl TranspilerToC {
 
     if let Some(x) = self.context.last() {
       match x {
-        TranspilerContext::Call => {
-          println!("{:?}", self.context);
-        }
+        TranspilerContext::Call
+        | TranspilerContext::Condition
+        | TranspilerContext::DontNeedSemicolon => {}
         _ => {
           code.push_str(";\n");
         }
@@ -269,6 +270,62 @@ impl TranspilerToC {
     }
 
     return code;
+  }
+
+  fn transpile_if_to_c(&mut self, if_instruction: &IRIf, indent_level: usize) -> String {
+    let mut code: String = String::new();
+
+    self.context.push(TranspilerContext::Condition);
+    let condition = self.transpile_ir_to_c(&if_instruction.condition, indent_level);
+    self.context.pop();
+
+    let mut if_block = String::new();
+    let mut else_block = String::new();
+
+    if_block.push_str(&self.transpile_ir_to_c(&if_instruction.then_branch, indent_level + 2));
+
+    if let Some(else_block_instructions) = &if_instruction.else_branch {
+      else_block.push_str(&self.transpile_ir_to_c(&else_block_instructions, indent_level + 2));
+    }
+
+    code.push_str(&format!(
+      "{}if ({}) {{\n{}{}}}",
+      " ".repeat(indent_level),
+      condition,
+      if_block,
+      " ".repeat(indent_level)
+    ));
+
+    if !else_block.is_empty() {
+      code.push_str(&format!(
+        " else {{\n{}{}}}",
+        else_block,
+        " ".repeat(indent_level)
+      ))
+    }
+
+    code.push('\n');
+
+    code
+  }
+
+  fn transpile_while_to_c(&mut self, while_instruction: &IRWhile, indent_level: usize) -> String {
+    let mut code: String = String::new();
+
+    self.context.push(TranspilerContext::Condition);
+    let condition = self.transpile_ir_to_c(&while_instruction.condition, indent_level);
+    self.context.pop();
+
+    let block = &self.transpile_ir_to_c(&while_instruction.body, indent_level + 2);
+
+    code.push_str(&format!(
+      "{}while ({}) {{{}}}\n",
+      " ".repeat(indent_level),
+      condition,
+      block
+    ));
+
+    code
   }
 
   fn transpile_ir_to_c(&mut self, instruction: &IRInstruction, indent_level: usize) -> String {
@@ -286,7 +343,7 @@ impl TranspilerToC {
       IRInstruction::Binary(binary) => {
         let left = self.transpile_ir_to_c(&binary.left, indent_level);
         let right = self.transpile_ir_to_c(&binary.right, indent_level);
-        let op = self.transpile_opeartor_to_c(&binary.instruction_type);
+        let op = self.transpile_operator_to_c(&binary.instruction_type);
 
         code.push_str(&format!("{} {} {}", left, op, right));
       }
@@ -297,7 +354,7 @@ impl TranspilerToC {
       }
       IRInstruction::Unary(unary) => {
         let value = self.transpile_ir_to_c(&unary.right, indent_level);
-        let op = self.transpile_opeartor_to_c(&unary.instruction_type);
+        let op = self.transpile_operator_to_c(&unary.instruction_type);
 
         code.push_str(&format!("{} {}", op, value));
       }
@@ -307,12 +364,14 @@ impl TranspilerToC {
       IRInstruction::Logical(logical) => {
         let left = self.transpile_ir_to_c(&logical.left, indent_level);
         let right = self.transpile_ir_to_c(&logical.right, indent_level);
-        let op = self.transpile_opeartor_to_c(&logical.instruction_type);
+        let op = self.transpile_operator_to_c(&logical.instruction_type);
 
         code.push_str(&format!("{} {} {}", left, op, right));
       }
-      IRInstruction::If(_) => todo!(),
-      IRInstruction::While(_) => todo!(),
+      IRInstruction::If(i) => code.push_str(self.transpile_if_to_c(&i, indent_level).as_str()),
+      IRInstruction::While(w) => {
+        code.push_str(self.transpile_while_to_c(&w, indent_level).as_str())
+      }
       IRInstruction::Function(fun) => {
         code.push_str(self.transpile_function_to_c(fun, indent_level).as_str())
       }
@@ -320,7 +379,9 @@ impl TranspilerToC {
         code.push_str(&self.transpile_call_to_c(call, indent_level));
       }
       IRInstruction::Return(ir_return) => {
+        self.context.push(TranspilerContext::DontNeedSemicolon);
         let value = self.transpile_ir_to_c(&ir_return.value, indent_level);
+        self.context.pop();
 
         code.push_str(&format!("{}return {};\n", " ".repeat(indent_level), value))
       }
