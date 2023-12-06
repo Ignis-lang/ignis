@@ -81,4 +81,30 @@ impl DataType {
       _ => DataType::None,
     }
   }
+  pub fn to_c_type(&self, is_mutable: bool) -> String {
+    let mut kind: String = if !is_mutable {
+      String::from("const ")
+    } else {
+      "".to_string()
+    };
+
+    match self {
+      DataType::Int | DataType::Boolean => kind.push_str("int"),
+      DataType::Float => kind.push_str("float"),
+      DataType::Char => kind.push_str("char"),
+      DataType::String => kind.push_str("char*"),
+      DataType::Void | DataType::Null | DataType::None | DataType::Pending => kind.push_str("void"),
+      DataType::Variable(name) => todo!(),
+      DataType::ClassType(name) => todo!(),
+      DataType::Array(array) => kind.push_str(array.to_c_type(is_mutable).as_str()),
+      DataType::Callable(_, _) => todo!(),
+      DataType::GenericType { base, parameters } => todo!(),
+      DataType::UnionType(_) => todo!(),
+      DataType::IntersectionType(_) => todo!(),
+      DataType::TupleType(_) => todo!(),
+      DataType::AliasType(_) => todo!(),
+    };
+
+    kind
+  }
 }

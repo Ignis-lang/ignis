@@ -20,6 +20,8 @@ pub enum DebugPrint {
 pub enum Backend {
   /// Transpile to Lua
   Lua,
+  /// Backend in C
+  C,
   /// Transpile to bytecode for the IVM
   Bytecode,
   /// Transpile to LLVM IR and compile to native code
@@ -28,7 +30,7 @@ pub enum Backend {
 
 #[derive(Parser, Debug, Clone, PartialEq)]
 pub struct BuildCommand {
-	pub file_path: String,
+  pub file_path: String,
 }
 
 #[derive(Subcommand, Clone, PartialEq)]
@@ -40,12 +42,12 @@ pub enum SubCommand {
 #[command(author, version, about = "The Ignis land compiler", long_about = None)]
 #[command(propagate_version = true)]
 pub struct Cli {
-	#[command(subcommand)]
-	pub subcommand: SubCommand,
+  #[command(subcommand)]
+  pub subcommand: SubCommand,
 
   #[arg(short, long, value_enum, default_value = "none")]
   pub debug: Vec<DebugPrint>,
 
-  #[arg(short, long, value_enum, default_value = "lua")]
+  #[arg(short, long, value_enum, default_value = "c")]
   pub backend: Backend,
 }
