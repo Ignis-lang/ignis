@@ -195,7 +195,10 @@ impl TranspilerToC {
         IRInstruction::Return(_) => todo!(),
         IRInstruction::Assign(_) => todo!(),
         IRInstruction::Class(_) => todo!(),
-        IRInstruction::Ternary(_) => todo!(),
+        IRInstruction::Ternary(ternary) => {
+          format_string.push_str(&self.get_format_string_from_data_type(&ternary.data_type));
+          args.push_str(&self.transpile_ir_to_c(arg, 0));
+        }
         IRInstruction::ForIn(_) => todo!(),
         IRInstruction::Array(_) => todo!(),
         IRInstruction::Import(_) => todo!(),
@@ -391,7 +394,19 @@ impl TranspilerToC {
         ))
       }
       IRInstruction::Class(_) => todo!(),
-      IRInstruction::Ternary(_) => todo!(),
+      IRInstruction::Ternary(ternary) => {
+        self.context.push(TranspilerContext::Condition);
+        let condition = self.transpile_ir_to_c(&ternary.condition, indent_level);
+        self.context.pop();
+
+        let then_branch = self.transpile_ir_to_c(&ternary.then_branch, indent_level);
+        let else_branch = self.transpile_ir_to_c(&ternary.else_branch, indent_level);
+
+        code.push_str(&format!(
+          "{} ? {} : {}",
+          condition, then_branch, else_branch
+        ))
+      }
       IRInstruction::ForIn(_) => todo!(),
       IRInstruction::Array(_) => todo!(),
       IRInstruction::Import(import) => {
