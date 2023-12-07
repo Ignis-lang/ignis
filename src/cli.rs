@@ -22,9 +22,9 @@ pub enum Backend {
   Lua,
   /// Backend in C
   C,
-  /// Transpile to bytecode for the IVM
+  /// Transpile to bytecode for the IVM (TODO)
   Bytecode,
-  /// Transpile to LLVM IR and compile to native code
+  /// Transpile to LLVM IR and compile to native code (TODO)
   LLVM,
 }
 

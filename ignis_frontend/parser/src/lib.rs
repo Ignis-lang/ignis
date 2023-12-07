@@ -450,7 +450,11 @@ impl Parser {
     }
   }
 
+<<<<<<< HEAD:ignis_frontend/parser/src/lib.rs
   fn continue_statement(&mut self) -> ParserResult<Statement> {
+=======
+  fn continue_statement(&mut self) -> Result<Statement, ParserDiagnosticError> {
+>>>>>>> 7abb219 (Added ternary to c):parser/src/lib.rs
     let token = self.previous();
 
     self.consume(TokenType::SemiColon)?;
@@ -734,6 +738,7 @@ impl Parser {
       Box::new(condition),
       Box::new(then_branch),
       Box::new(else_branch),
+      Box::new(self.peek()),
       DataType::Pending,
     ));
 
@@ -742,6 +747,7 @@ impl Parser {
         Box::new(children.pop().unwrap()),
         Box::new(expression),
         Box::new(children.pop().unwrap()),
+        Box::new(self.peek()),
         DataType::Pending,
       ));
     }
@@ -798,7 +804,11 @@ impl Parser {
     )))
   }
 
+<<<<<<< HEAD:ignis_frontend/parser/src/lib.rs
   fn for_statement(&mut self) -> ParserResult<Statement> {
+=======
+  fn for_statement(&mut self) -> Result<Statement, ParserDiagnosticError> {
+>>>>>>> 7abb219 (Added ternary to c):parser/src/lib.rs
     self.consume(TokenType::LeftParen)?;
 
     self.consume(TokenType::Let)?;

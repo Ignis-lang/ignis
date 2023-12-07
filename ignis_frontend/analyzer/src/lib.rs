@@ -320,10 +320,28 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let then_branch = self.analyzer(&expression.then_branch)?;
     let else_branch = self.analyzer(&expression.else_branch)?;
 
+    if self.extract_data_type(&condition) != DataType::Boolean {
+      return Err(AnalyzerDiagnosticError::InvalidCondition(
+        *expression.token.clone(),
+      ));
+    }
+    
+    let then_type = self.extract_data_type(&then_branch);
+    let else_type = self.extract_data_type(&else_branch);
+    
+    if then_type != else_type {
+      return Err(AnalyzerDiagnosticError::TypeMismatch(
+        then_type,
+        else_type,
+        *expression.token.clone(),
+      ));
+    }
+
     Ok(IRInstruction::Ternary(IRTernary::new(
       Box::new(condition),
       Box::new(then_branch),
       Box::new(else_branch),
+      then_type,
     )))
   }
 

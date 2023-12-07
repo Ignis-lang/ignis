@@ -79,6 +79,13 @@ impl Diagnostic {
     );
     println!("{:4}|", (diagnostic.token.span.line - 2).to_string().blue());
   }
+
+  fn report_invalid_condition(&mut self, token: &Token) {
+    self.report_error(
+      format!("Invalid condition, expected boolean"),
+      token.span.clone(),
+    )
+  }
 }
 
 impl Default for Diagnostic {

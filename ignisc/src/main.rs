@@ -98,13 +98,13 @@ impl App {
       let mut path = code_result.file_name.split("/").collect::<Vec<&str>>();
       let code = code_result.code.clone();
 
-      let mut name = path.last().unwrap().replace(r".ign", "");
+      let name = path.last().unwrap().replace(r".ign", "");
 
       path.pop();
 
       fs::create_dir_all(format!("build/{}", path.join("/"))).unwrap();
 
-      let mut build_path = "build/".to_string() + path.join("/").as_str();
+      let build_path = "build/".to_string() + path.join("/").as_str();
 
       fs::write(format!("{}/{}.c", &build_path, &name), &code).unwrap();
 
@@ -137,7 +137,7 @@ impl App {
       Ok(content) => {
         self.source = content;
 
-        let result = self.run()?;
+        let _ = self.run()?;
 
         Ok(())
       }
@@ -155,14 +155,14 @@ impl App {
         let mut code_results: Vec<CodeResult> = vec![];
 
         for result in irs.iter() {
-          println!("Transpiling {}", result.0);
+          println!("Transpiling: {}", result.0.split("/").last().unwrap());
           transpiler.transpile(result.1);
 
           code_results.push(CodeResult::new(transpiler.code.clone(), result.0.clone()));
         }
 
-        self.create_lua_files(code_results);
-        
+        let _ = self.create_lua_files(code_results);
+
         println!("Done!");
       }
       Backend::C => {
@@ -170,21 +170,18 @@ impl App {
         let mut code_results: Vec<CodeResult> = vec![];
 
         for result in irs.into_iter() {
-          println!("Compiling {}", result.0);
+          println!("Compiling: {}", result.0.split("/").last().unwrap());
           transpiler.transpile(result.1);
 
           code_results.push(CodeResult::new(transpiler.code.clone(), result.0.clone()));
         }
 
-        self.create_c_files(code_results);
+        let _ = self.create_c_files(code_results);
 
         println!("Done!");
       }
       Backend::Bytecode => todo!(),
       Backend::LLVM => todo!(),
-      _ => {
-        println!("Backend not implemented");
-      }
     }
   }
 
@@ -311,7 +308,7 @@ impl App {
 }
 
 fn main() {
-  let mut cli = Cli::parse();
+  let cli = Cli::parse();
 
   let mut app = App::new(cli);
 
