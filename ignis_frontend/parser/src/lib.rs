@@ -450,11 +450,7 @@ impl Parser {
     }
   }
 
-<<<<<<< HEAD:ignis_frontend/parser/src/lib.rs
   fn continue_statement(&mut self) -> ParserResult<Statement> {
-=======
-  fn continue_statement(&mut self) -> Result<Statement, ParserDiagnosticError> {
->>>>>>> 7abb219 (Added ternary to c):parser/src/lib.rs
     let token = self.previous();
 
     self.consume(TokenType::SemiColon)?;
@@ -518,11 +514,16 @@ impl Parser {
         self.consume(TokenType::Colon)?;
         let token = self.advance();
 
-        parameters.push(FunctionParameter::new(
-          param,
-          DataType::from_token_type(token.kind),
-          is_mut,
-        ));
+        let mut data_type = DataType::from_token_type(token.kind);
+
+        if self.check(TokenType::LeftBrack) {
+          self.advance();
+          self.consume(TokenType::RightBrack)?;
+
+          data_type = DataType::Array(Box::new(data_type));
+        }
+
+        parameters.push(FunctionParameter::new(param, data_type, is_mut));
 
         if !self.match_token(&[TokenType::Comma]) {
           break;
@@ -542,6 +543,13 @@ impl Parser {
       TokenType::BooleanType,
       TokenType::CharType,
     ]) {
+      let mut data_type: DataType = DataType::from_token_type(self.previous().kind);
+
+      if self.check(TokenType::LeftBrack) {
+        self.consume(TokenType::RightBrack)?;
+        Some(DataType::Array(Box::new(data_type)));
+      }
+
       Some(DataType::from_token_type(self.previous().kind))
     } else {
       let token = &self.peek();
@@ -804,11 +812,7 @@ impl Parser {
     )))
   }
 
-<<<<<<< HEAD:ignis_frontend/parser/src/lib.rs
   fn for_statement(&mut self) -> ParserResult<Statement> {
-=======
-  fn for_statement(&mut self) -> Result<Statement, ParserDiagnosticError> {
->>>>>>> 7abb219 (Added ternary to c):parser/src/lib.rs
     self.consume(TokenType::LeftParen)?;
 
     self.consume(TokenType::Let)?;

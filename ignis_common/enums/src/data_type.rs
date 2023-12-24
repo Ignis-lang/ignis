@@ -96,7 +96,7 @@ impl DataType {
       DataType::Void | DataType::Null | DataType::None | DataType::Pending => kind.push_str("void"),
       DataType::Variable(name) => todo!(),
       DataType::ClassType(name) => todo!(),
-      DataType::Array(array) => kind.push_str(array.to_c_type(is_mutable).as_str()),
+      DataType::Array(array) => kind.push_str(format!("{}", array.to_c_type(true)).as_str()),
       DataType::Callable(_, _) => todo!(),
       DataType::GenericType { base, parameters } => todo!(),
       DataType::UnionType(_) => todo!(),

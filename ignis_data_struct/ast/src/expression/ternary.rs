@@ -1,5 +1,5 @@
 use enums::data_type::DataType;
-use lexer::token::Token;
+use token::token::Token;
 
 use super::Expression;
 

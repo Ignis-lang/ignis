@@ -321,20 +321,20 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let else_branch = self.analyzer(&expression.else_branch)?;
 
     if self.extract_data_type(&condition) != DataType::Boolean {
-      return Err(AnalyzerDiagnosticError::InvalidCondition(
-        *expression.token.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::InvalidCondition(*expression.token.clone()),
+        self.find_token_line(&expression.token.span.line),
+      )));
     }
-    
+
     let then_type = self.extract_data_type(&then_branch);
     let else_type = self.extract_data_type(&else_branch);
-    
+
     if then_type != else_type {
-      return Err(AnalyzerDiagnosticError::TypeMismatch(
-        then_type,
-        else_type,
-        *expression.token.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::TypeMismatch(then_type, else_type, *expression.token.clone()),
+        self.find_token_line(&expression.token.span.line),
+      )));
     }
 
     Ok(IRInstruction::Ternary(IRTernary::new(
