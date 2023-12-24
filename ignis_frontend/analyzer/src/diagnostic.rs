@@ -37,6 +37,7 @@ pub enum AnalyzerDiagnosticError {
   ImportedFunctionIsNotExported(Token),
   BreakOutsideLoop(Token),
   ContinueOutsideLoop(Token),
+  InvalidCondition(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +194,7 @@ impl AnalyzerDiagnostic {
       AnalyzerDiagnosticError::ImportedFunctionIsNotExported(_) => todo!(),
       AnalyzerDiagnosticError::BreakOutsideLoop(_) => todo!(),
       AnalyzerDiagnosticError::ContinueOutsideLoop(_) => todo!(),
+      AnalyzerDiagnosticError::InvalidCondition(_) => todo!(),
     }
   }
 }
