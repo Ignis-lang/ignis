@@ -323,9 +323,9 @@ impl DiagnosticError {
       DiagnosticError::ContinueOutsideLoop(token) => {
         diagnostics.report_continue_outside_loop(token);
       }
-        DiagnosticError::InvalidCondition(token) => {
+      DiagnosticError::InvalidCondition(token) => {
         diagnostics.report_invalid_condition(token);
-        }
+      }
     }
   }
 }

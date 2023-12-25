@@ -7,8 +7,8 @@ use crate::{
   statement::{
     expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
     while_statement::WhileStatement, function::FunctionStatement, return_statement::Return,
-    class::Class, for_in::ForIn, import::Import, break_statement::BreakStatement, continue_statement::Continue,
-    for_statement::For,
+    class::Class, for_in::ForIn, import::Import, break_statement::BreakStatement,
+    continue_statement::Continue, for_statement::For,
   },
 };
 

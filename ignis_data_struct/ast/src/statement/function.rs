@@ -68,7 +68,7 @@ impl FunctionStatement {
       body,
       return_type,
       is_exported,
-      annotations
+      annotations,
     }
   }
 }
