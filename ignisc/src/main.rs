@@ -109,12 +109,12 @@ impl App {
       fs::write(format!("{}/{}.c", &build_path, &name), &code).unwrap();
 
       let mut child = Command::new("gcc")
-        .args(&["-x", "c", "-", "-o", &format!("{}/{}", &build_path, &name)]) // -x c indica que el input viene de stdin, "-" significa stdin
+        .args(&["-x", "c", "-", "-o", &format!("{}/{}", &build_path, &name)])
         .stdin(Stdio::piped())
         .spawn()?;
 
       {
-        let stdin = child.stdin.as_mut().ok_or("Error al obtener stdin")?;
+        let stdin = child.stdin.as_mut().ok_or("Error getting stdin")?;
         stdin.write_all(code.as_bytes())?;
       }
 

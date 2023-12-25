@@ -16,8 +16,8 @@ pub enum DataType {
   Variable(String),
   Array(Box<DataType>),
   Callable(Vec<DataType>, Box<DataType>),
-  // TODO: Type non-primitive
   ClassType(String),
+  // TODO: Type non-primitive
   GenericType {
     base: Box<DataType>,
     parameters: Vec<DataType>,
