@@ -21,7 +21,7 @@ impl IRTernary {
       condition,
       then_branch,
       else_branch,
-      data_type
+      data_type,
     }
   }
 
