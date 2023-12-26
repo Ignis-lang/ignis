@@ -9,6 +9,7 @@ pub struct Call {
   pub paren: Token,
   pub arguments: Vec<Expression>,
   pub return_type: DataType,
+  pub is_constuctor: bool,
 }
 
 impl Call {
@@ -17,12 +18,14 @@ impl Call {
     paren: Token,
     arguments: Vec<Expression>,
     return_type: DataType,
+    is_constuctor: bool,
   ) -> Self {
     Self {
       callee,
       paren,
       arguments,
       return_type,
+      is_constuctor
     }
   }
 }

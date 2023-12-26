@@ -272,6 +272,7 @@ impl<'a> Lexer<'a> {
       "void" => Some(TokenType::Void),
       "extern" => Some(TokenType::Extern),
       "continue" => Some(TokenType::Continue),
+      "new" => Some(TokenType::New),
       _ => None,
     }
   }

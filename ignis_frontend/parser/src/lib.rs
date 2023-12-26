@@ -13,7 +13,7 @@ use ast::{
     continue_statement::Continue,
     for_statement::For,
   },
-  expression::array::Array,
+  expression::{array::Array, new::NewExpression},
 };
 use enums::{data_type::DataType, token_type::TokenType};
 use {
@@ -209,7 +209,8 @@ impl Parser {
       )));
     }
 
-    match self.call()? {
+    let is_constructor: bool = self.check(TokenType::New);
+    match self.call(is_constructor)? {
       Expression::Variable(v) => {
         match self.match_token(&[TokenType::Increment, TokenType::Decrement]) {
           true => {
@@ -234,15 +235,19 @@ impl Parser {
     }
   }
 
-  fn call(&mut self) -> ParserResult<Expression> {
+  fn call(&mut self, is_constructor: bool) -> ParserResult<Expression> {
+    if is_constructor {
+      self.advance();
+    }
+
     let mut expression: Expression = self.primary()?;
 
     loop {
-      if self.match_token(&[TokenType::LeftParen]) {
-        expression = self.finish_call(expression)?;
-      } else {
+      if !self.match_token(&[TokenType::LeftParen]) {
         break;
       }
+
+      expression = self.finish_call(expression, is_constructor)?;
     }
 
     Ok(expression)
@@ -303,7 +308,7 @@ impl Parser {
     }
   }
 
-  fn finish_call(&mut self, callee: Expression) -> ParserResult<Expression> {
+  fn finish_call(&mut self, callee: Expression, is_constructor: bool) -> ParserResult<Expression> {
     let mut arguments: Vec<Expression> = Vec::new();
 
     if !self.check(TokenType::RightParen) {
@@ -332,6 +337,7 @@ impl Parser {
       token,
       arguments,
       DataType::Pending,
+      is_constructor,
     )))
   }
 
@@ -1160,7 +1166,7 @@ impl Parser {
 
     self.class_declarations.push(name.span.literal.clone());
 
-    let methods: Vec<FunctionStatement> = Vec::new();
+    let mut methods: Vec<FunctionStatement> = Vec::new();
     let mut attributes: Vec<Variable> = Vec::new();
 
     self.consume(TokenType::LeftBrace)?;
@@ -1181,7 +1187,7 @@ impl Parser {
       let name = self.consume(TokenType::Identifier)?;
 
       if self.match_token(&[TokenType::LeftParen]) {
-        self.method_declaration(name, is_public, None)?;
+        methods.push(self.method_declaration(name, is_public, None)?);
       } else if self.match_token(&[TokenType::Colon]) {
         attributes.push(self.attribute_class_declaration(name, false, is_public)?);
       } else {

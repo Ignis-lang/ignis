@@ -35,7 +35,7 @@ use ast::{
   expression::{
     binary::Binary, Expression, literal::Literal, unary::Unary, grouping::Grouping,
     logical::Logical, assign::Assign, variable::VariableExpression, ternary::Ternary, call::Call,
-    array::Array,
+    array::Array, new::NewExpression,
   },
   statement::{
     Statement,
@@ -798,6 +798,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(IRInstruction::Continue(IRContinue::new(
       statement.token.clone(),
     )))
+  }
+
+  fn visit_new_expression(&mut self, _expression: &NewExpression) -> AnalyzerResult {
+    todo!()
   }
 
   fn visit_for_statement(&mut self, _statement: &For) -> AnalyzerResult {

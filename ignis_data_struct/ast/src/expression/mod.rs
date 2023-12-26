@@ -2,7 +2,7 @@ use serde_json::json;
 
 use self::{
   binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression,
-  logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array,
+  logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array
 };
 
 use super::visitor::Visitor;
@@ -14,6 +14,7 @@ pub mod call;
 pub mod grouping;
 pub mod literal;
 pub mod logical;
+pub mod new;
 pub mod ternary;
 pub mod unary;
 pub mod variable;

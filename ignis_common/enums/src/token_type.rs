@@ -68,6 +68,7 @@ pub enum TokenType {
   Class,
   Super,
   Static,
+  New,
   Final,
   ReadOnly,
   Public,
@@ -192,6 +193,7 @@ impl Display for TokenType {
       TokenType::Continue => write!(f, "continue"),
       TokenType::Increment => write!(f, "++"),
       TokenType::Decrement => write!(f, "--"),
+      TokenType::New => write!(f, "new"),
     }
   }
 }
