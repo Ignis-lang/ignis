@@ -135,8 +135,8 @@ impl Statement {
         json!({
           "type": "Class",
           "name": class.name.span.literal,
-          // "methods": class.methods.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
-          // "properties": class.properties.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+          "methods": class.methods.iter().map(|x| Statement::FunctionStatement(x.clone()).to_json()).collect::<Vec<serde_json::Value>>(),
+          "properties": class.properties.iter().map(|x| Statement::Variable(x.clone()).to_json()).collect::<Vec<serde_json::Value>>(),
         })
       }
       Statement::ForIn(for_in) => {

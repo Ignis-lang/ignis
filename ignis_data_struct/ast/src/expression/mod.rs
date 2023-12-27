@@ -2,15 +2,14 @@ use serde_json::json;
 
 use self::{
   binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression,
-  logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array
+  logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array, get::Get
 };
 
 use super::visitor::Visitor;
 
 pub mod array;
 pub mod assign;
-pub mod binary;
-pub mod call;
+pub mod binary; pub mod call;
 pub mod grouping;
 pub mod literal;
 pub mod logical;
@@ -18,6 +17,7 @@ pub mod new;
 pub mod ternary;
 pub mod unary;
 pub mod variable;
+pub mod get;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
@@ -31,6 +31,7 @@ pub enum Expression {
   Ternary(Ternary),
   Call(Call),
   Array(Array),
+  Get(Get)
 }
 
 impl Expression {
@@ -46,6 +47,8 @@ impl Expression {
       Expression::Ternary(ternary) => visitor.visit_ternary_expression(ternary),
       Expression::Call(call) => visitor.visit_call_expression(call),
       Expression::Array(array) => visitor.visit_array_expression(array),
+      Expression::Get(get) => visitor.visit_get_expression(get),
+          
     }
   }
 
@@ -119,6 +122,7 @@ impl Expression {
           "callee": call.callee.to_json(),
           "arguments": call.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": call.return_type.to_string(),
+          "is_constructor": call.is_constructor,
         })
       }
       Expression::Array(array) => {
@@ -126,6 +130,13 @@ impl Expression {
           "type": "Array",
           "elements": array.elements.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "data_type": array.data_type.to_string(),
+        })
+      }
+      Expression::Get(get) => {
+        json!({
+          "type": "Get",
+          "object": get.object.to_json(),
+          "name": get.name.span.literal,
         })
       }
     }
@@ -213,6 +224,9 @@ impl Expression {
             .collect::<Vec<String>>()
             .join(", ")
         )
+      }
+      Expression::Get(get) => {
+        format!("{}.{}", get.object.to_string(), get.name.span.literal)
       }
     }
   }

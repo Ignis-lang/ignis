@@ -6,15 +6,15 @@ use super::{function::FunctionStatement, variable::Variable};
 pub struct Class {
   pub name: Token,
   pub methods: Vec<FunctionStatement>,
-  pub attributes: Vec<Variable>,
+  pub properties: Vec<Variable>,
 }
 
 impl Class {
-  pub fn new(name: Token, methods: Vec<FunctionStatement>, attributes: Vec<Variable>) -> Self {
+  pub fn new(name: Token, methods: Vec<FunctionStatement>, properties: Vec<Variable>) -> Self {
     Self {
       name,
       methods,
-      attributes,
+      properties,
     }
   }
 }
