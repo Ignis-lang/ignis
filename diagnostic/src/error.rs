@@ -55,6 +55,8 @@ pub enum DiagnosticError {
   ModuleNotFound(Token),
   ImportedFunctionIsNotExported(Token),
   InvalidCondition(Token),
+  NotAClass(Token),
+  UndefinedProperty(Token),
 }
 
 impl DiagnosticError {
@@ -148,6 +150,8 @@ impl DiagnosticError {
         DiagnosticError::ContinueOutsideLoop(token)
       }
       AnalyzerDiagnosticError::InvalidCondition(token) => DiagnosticError::InvalidCondition(token),
+      AnalyzerDiagnosticError::NotAClass(_) => todo!(),
+      AnalyzerDiagnosticError::UndefinedProperty(_) => todo!(),
     }
   }
 
@@ -326,6 +330,8 @@ impl DiagnosticError {
       DiagnosticError::InvalidCondition(token) => {
         diagnostics.report_invalid_condition(token);
       }
+        DiagnosticError::NotAClass(_) => todo!(),
+        DiagnosticError::UndefinedProperty(_) => todo!(),
     }
   }
 }

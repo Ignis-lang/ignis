@@ -217,6 +217,7 @@ impl TranspilerToC {
         IRInstruction::Import(_) => todo!(),
         IRInstruction::Break(_) => todo!(),
         IRInstruction::Continue(_) => todo!(),
+        IRInstruction::Get(_) => todo!(),
       };
 
       args.push_str(",");
@@ -446,6 +447,7 @@ impl TranspilerToC {
       }
       IRInstruction::Break(_) => todo!(),
       IRInstruction::Continue(_) => todo!(),
+        IRInstruction::Get(_) => todo!(),
     };
 
     code

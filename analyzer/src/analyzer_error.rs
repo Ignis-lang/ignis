@@ -38,4 +38,6 @@ pub enum AnalyzerDiagnosticError {
   BreakOutsideLoop(Token),
   ContinueOutsideLoop(Token),
   InvalidCondition(Token),
+  NotAClass(Token),
+UndefinedProperty(Token),
 }

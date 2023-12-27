@@ -243,6 +243,7 @@ impl TranspilerToLua {
 
         code.push_str(&format!("{}goto continue\n", " ".repeat(indent_level)));
       }
+      IRInstruction::Get(_) => todo!(),
     };
 
     code
@@ -399,7 +400,7 @@ impl TranspilerToLua {
         var_value
       )
     } else {
-      variable.name.clone()
+      variable.name.to_string()
     }
   }
 }

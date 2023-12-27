@@ -520,7 +520,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       ),
     );
 
-    self.define(&variable.name);
+    self.define(variable.name.clone());
 
     self.scopes_variables.push(variable.clone());
 
@@ -594,11 +594,11 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    self.declare(&statement.name.span.literal);
-    self.define(&statement.name.span.literal);
+    self.declare(statement.name.span.literal.clone());
+    self.define(statement.name.span.literal.clone());
 
     for param in &statement.parameters {
-      self.define_parameter(&param.name.span.literal);
+      self.define_parameter(param.name.span.literal.clone());
       let parameter = IRVariable::new(
         param.name.span.literal.clone(),
         param.data_type.clone(),
@@ -700,7 +700,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
   }
 
   fn visit_for_in_statement(&mut self, statement: &ForIn) -> AnalyzerResult {
-    self.declare(&statement.variable.name.span.literal);
+    self.declare(statement.variable.name.span.literal.clone());
 
     let iterable = self.analyzer(&statement.iterable)?;
     let data_type = self.extract_data_type(&iterable);
@@ -714,7 +714,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     self.begin_scope();
 
-    self.define(&statement.variable.name.span.literal);
+    self.define(statement.variable.name.span.literal.clone());
 
     let variable = IRVariable::new(
       statement.variable.name.span.literal.clone(),
@@ -806,6 +806,42 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
   fn visit_for_statement(&mut self, _statement: &For) -> AnalyzerResult {
     todo!()
+  }
+
+  fn visit_get_expression(&mut self, expression: &ast::expression::get::Get) -> AnalyzerResult {
+    let ir_object = self.analyzer(&expression.object)?;
+
+    let object = match ir_object {
+      IRInstruction::Class(c) => c,
+      _ => return Err(AnalyzerDiagnosticError::NotAClass(expression.name.clone())),
+    };
+
+    if object.properties.is_empty() {
+      return Err(AnalyzerDiagnosticError::UndefinedProperty(
+        expression.name.clone(),
+      ));
+    }
+
+    let object_binding = object.clone();
+
+    let property = object_binding
+      .properties
+      .iter()
+      .find(|p| p.name == expression.name.span.literal);
+
+    if property.is_none() {
+      return Err(AnalyzerDiagnosticError::UndefinedProperty(
+        expression.name.clone(),
+      ));
+    }
+
+    let instruction = IRInstruction::Get(IRGet::new(
+      expression.name.span.literal.clone(),
+      Box::new(object),
+      self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
+    ));
+
+    Ok(instruction)
   }
 }
 
