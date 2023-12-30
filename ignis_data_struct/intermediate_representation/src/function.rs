@@ -1,6 +1,6 @@
 use enums::data_type::DataType;
 
-use super::{variable::IRVariable, block::IRBlock};
+use super::{variable::IRVariable, block::IRBlock, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRFunctionMetadata {
@@ -10,6 +10,7 @@ pub struct IRFunctionMetadata {
   pub is_extern: bool,
   pub is_static: bool,
   pub is_public: bool,
+  pub is_constructor: bool,
 }
 
 impl IRFunctionMetadata {
@@ -20,6 +21,7 @@ impl IRFunctionMetadata {
     is_extern: bool,
     is_static: bool,
     is_public: bool,
+    is_constructor: bool,
   ) -> Self {
     Self {
       is_recursive,
@@ -28,16 +30,8 @@ impl IRFunctionMetadata {
       is_extern,
       is_public,
       is_static,
+      is_constructor,
     }
-  }
-
-  pub fn to_json(&self) -> serde_json::Value {
-    serde_json::json!({
-      "is_recursive": self.is_recursive,
-      "is_exported": self.is_exported,
-      "is_imported": self.is_imported,
-      "is_extern": self.is_extern,
-    })
   }
 }
 
@@ -66,17 +60,29 @@ impl IRFunction {
       metadata,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRFunction {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
+      "type": "function",
       "name": self.name,
-      "parameters": self.parameters.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+      "parameters": self.parameters.iter().map(|p| p.to_json()).collect::<Vec<serde_json::Value>>(),
       "return_type": self.return_type.to_string(),
-      "body": match &self.body {
-        Some(body) => body.to_json(),
-        None => serde_json::json!(null),
+      "body": if let Some(body) = &self.body {
+        body.to_json()
+      } else {
+        serde_json::Value::Null
       },
-      "metadata": self.metadata.to_json(),
+      "metadata": {
+        "is_recursive": self.metadata.is_recursive,
+        "is_exported": self.metadata.is_exported,
+        "is_imported": self.metadata.is_imported,
+        "is_extern": self.metadata.is_extern,
+        "is_static": self.metadata.is_static,
+        "is_public": self.metadata.is_public,
+        "is_constructor": self.metadata.is_constructor,
+      }
     })
   }
 }

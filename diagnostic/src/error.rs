@@ -58,6 +58,10 @@ pub enum DiagnosticError {
   InvalidCondition(Token),
   NotAClass(Token),
   UndefinedProperty(Token),
+  PropertyOutsideClass(Token),
+  PropertyAlreadyDefined(Token),
+  UndefinedClass(Token),
+  UndefinedMethods(Token),
 }
 
 impl DiagnosticError {
@@ -151,16 +155,26 @@ impl DiagnosticError {
         DiagnosticError::ContinueOutsideLoop(token)
       }
       AnalyzerDiagnosticError::InvalidCondition(token) => DiagnosticError::InvalidCondition(token),
-      AnalyzerDiagnosticError::NotAClass(_) => todo!(),
-      AnalyzerDiagnosticError::UndefinedProperty(_) => todo!(),
+      AnalyzerDiagnosticError::NotAClass(token) => {
+        DiagnosticError::NotAClass(token)
+      }
+      AnalyzerDiagnosticError::UndefinedProperty(token) => {
+        DiagnosticError::UndefinedProperty(token)
+      }
       AnalyzerDiagnosticError::MethodOutsideClass(token) => {
         DiagnosticError::MethodOutsideClass(token)
       }
       AnalyzerDiagnosticError::MethodAlreadyDefined(token) => {
         DiagnosticError::FunctionAlreadyDefined(token.span.literal.clone(), token.clone())
       }
-        AnalyzerDiagnosticError::PropertyOutsideClass(_) => todo!(),
-        AnalyzerDiagnosticError::PropertyAlreadyDefined(_) => todo!(),
+      AnalyzerDiagnosticError::PropertyOutsideClass(token) => {
+        DiagnosticError::PropertyOutsideClass(*token)
+      }
+      AnalyzerDiagnosticError::PropertyAlreadyDefined(token) => {
+        DiagnosticError::PropertyAlreadyDefined(*token)
+      }
+      AnalyzerDiagnosticError::UndefinedClass(token) => DiagnosticError::UndefinedClass(token),
+      AnalyzerDiagnosticError::UndefinedMethods(token) => DiagnosticError::UndefinedMethods(token),
     }
   }
 
@@ -212,97 +226,97 @@ impl DiagnosticError {
   pub fn report(&self, diagnostics: &mut DiagnosticList) {
     match self {
       DiagnosticError::ExpectedExpression(token) => {
-        diagnostics.report_expected_expression(&token);
+        diagnostics.report_expected_expression(token);
       }
       DiagnosticError::ExpectedToken(kind, token) => {
-        diagnostics.report_expected_token(&kind, &token);
+        diagnostics.report_expected_token(kind, token);
       }
       DiagnosticError::ExpectedVariableName(token) => {
-        diagnostics.report_expected_variable_name(&token);
+        diagnostics.report_expected_variable_name(token);
       }
       DiagnosticError::ExpectedReturnTypeAfterFunction(token) => {
-        diagnostics.report_expected_return_type_after_function(&token);
+        diagnostics.report_expected_return_type_after_function(token);
       }
       DiagnosticError::ExpectedAfterExpression(kind, expression, token) => {
-        diagnostics.report_expected_after_expression(&kind, &expression, &token);
+        diagnostics.report_expected_after_expression(kind, expression, token);
       }
       DiagnosticError::ExpectedExpressionAfter(token) => {
-        diagnostics.report_expected_expression(&token);
+        diagnostics.report_expected_expression(token);
       }
       DiagnosticError::UnexpectedToken(kind, token) => {
-        diagnostics.report_unexpected_token(&kind, &token);
+        diagnostics.report_unexpected_token(kind, token);
       }
       DiagnosticError::InvalidAssignmentTarget(span) => {
-        diagnostics.report_invalid_assignment_target(&span);
+        diagnostics.report_invalid_assignment_target(span);
       }
       DiagnosticError::UndeclaredVariable(expression) => {
-        diagnostics.report_undeclared_variable(&expression);
+        diagnostics.report_undeclared_variable(expression);
       }
       DiagnosticError::InvalidUnaryOperatorForDataType(operator, right) => {
-        diagnostics.report_invalid_unary_operator_for_data_type(&operator, &right);
+        diagnostics.report_invalid_unary_operator_for_data_type(operator, right);
       }
       DiagnosticError::NotCallable(expression) => {
-        diagnostics.report_not_callable(&expression);
+        diagnostics.report_not_callable(expression);
       }
       DiagnosticError::InvalidNumberOfArguments(arity, arguments, token) => {
-        diagnostics.report_invalid_number_of_arguments(&arity, &arguments, &token);
+        diagnostics.report_invalid_number_of_arguments(arity, arguments, token);
       }
       DiagnosticError::AssingInvalidType(argument, data_type, name) => {
-        diagnostics.report_assing_invalid_type(&argument, &data_type, &name);
+        diagnostics.report_assing_invalid_type(argument, data_type, name);
       }
       DiagnosticError::InvalidArgumentType(argument) => {
-        diagnostics.report_invalid_argument_type(&argument);
+        diagnostics.report_invalid_argument_type(argument);
       }
       DiagnosticError::MissingArgument(name, token) => {
-        diagnostics.report_missing_argument(&name, &token.clone());
+        diagnostics.report_missing_argument(name, token);
       }
       DiagnosticError::InvalidComparison(left, right, token) => {
-        diagnostics.report_invalid_comparison(&left, &right, &token);
+        diagnostics.report_invalid_comparison(left, right, token);
       }
       DiagnosticError::InvalidOperator(token) => {
-        diagnostics.report_invalid_operator(&token);
+        diagnostics.report_invalid_operator(token);
       }
       DiagnosticError::InvalidUnaryOperator(token) => {
-        diagnostics.report_invalid_unary_operator(&token);
+        diagnostics.report_invalid_unary_operator(token);
       }
       DiagnosticError::UndefinedVariable(token) => {
-        diagnostics.report_undefined_variable(&token);
+        diagnostics.report_undefined_variable(token);
       }
       DiagnosticError::VariableAlreadyDefined(name, data_type) => {
         diagnostics.report_variable_already_defined(name, data_type);
       }
       DiagnosticError::ExpectedTypeAfterVariable(token) => {
-        diagnostics.report_expected_type_after_variable(&token);
+        diagnostics.report_expected_type_after_variable(token);
       }
       DiagnosticError::InvalidReassignedVariable(span) => {
-        diagnostics.report_invalid_reassigned_variable(&span);
+        diagnostics.report_invalid_reassigned_variable(span);
       }
       DiagnosticError::TypeMismatch(left, right, token) => {
-        diagnostics.report_type_mismatch(&left, &right, &token);
+        diagnostics.report_type_mismatch(left, right, token);
       }
       DiagnosticError::CannotSubtract(left, right, token) => {
-        diagnostics.report_cannot_subtract(&left, &right, &token);
+        diagnostics.report_cannot_subtract(left, right, token);
       }
       DiagnosticError::CannotMultiply(left, right, token) => {
-        diagnostics.report_cannot_multiply(&left, &right, &token);
+        diagnostics.report_cannot_multiply(left, right, token);
       }
       DiagnosticError::CannotDivide(left, right, token) => {
-        diagnostics.report_cannot_divide(&left, &right, &token);
+        diagnostics.report_cannot_divide(left, right, token);
       }
       DiagnosticError::CannotModulo(left, right, token) => {
-        diagnostics.report_cannot_modulo(&left, &right, &token);
+        diagnostics.report_cannot_modulo(left, right, token);
       }
       DiagnosticError::FunctionAlreadyDefined(name, token) => {
-        diagnostics.report_function_already_defined(&name, token);
+        diagnostics.report_function_already_defined(name, token);
       }
       DiagnosticError::ClassAlreadyDefined(name) => {
-        diagnostics.report_class_already_defined(&name);
+        diagnostics.report_class_already_defined(name);
       }
       DiagnosticError::ArgumentTypeMismatch(expected, recived, token) => {
-        diagnostics.report_argument_type_mismatch(&expected, &recived, &token);
+        diagnostics.report_argument_type_mismatch(expected, recived, token);
       }
       DiagnosticError::TypeMismatchUnary(right, token) => {
-        diagnostics.report_type_mismatch_unary(&right, &token);
+        diagnostics.report_type_mismatch_unary(right, token);
       }
       DiagnosticError::ImmutableVariableAsMutableParameter(
         parameter_name,
@@ -310,13 +324,13 @@ impl DiagnosticError {
         token,
       ) => {
         diagnostics.report_immutable_variable_as_mutable_parameter(
-          &parameter_name,
-          &variable_name,
-          &token,
+          parameter_name,
+          variable_name,
+          token,
         );
       }
       DiagnosticError::ReturnOutsideFunction(token) => {
-        diagnostics.report_return_outside_function(&token);
+        diagnostics.report_return_outside_function(token);
       }
       DiagnosticError::NotIterable(token) => {
         diagnostics.report_not_iterable(token);
@@ -339,10 +353,26 @@ impl DiagnosticError {
       DiagnosticError::InvalidCondition(token) => {
         diagnostics.report_invalid_condition(token);
       }
-      DiagnosticError::NotAClass(_) => todo!(),
-      DiagnosticError::UndefinedProperty(_) => todo!(),
+      DiagnosticError::NotAClass(token) => {
+        diagnostics.report_not_a_class(token);
+      }
+      DiagnosticError::UndefinedProperty(token) => {
+        diagnostics.report_undefined_property(token);
+      }
       DiagnosticError::MethodOutsideClass(token) => {
         diagnostics.report_method_outside_class(token);
+      }
+      DiagnosticError::PropertyOutsideClass(token) => {
+        diagnostics.report_property_outside_class(token);
+      }
+      DiagnosticError::PropertyAlreadyDefined(token) => {
+        diagnostics.report_property_already_defined(token);
+      }
+      DiagnosticError::UndefinedClass(token) => {
+        diagnostics.report_undefined_class(token);
+      }
+      DiagnosticError::UndefinedMethods(token) => {
+        diagnostics.report_undefined_methods(token);
       }
     }
   }

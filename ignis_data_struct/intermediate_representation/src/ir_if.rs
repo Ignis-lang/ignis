@@ -1,4 +1,4 @@
-use super::IRInstruction;
+use super::{IRInstruction, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRIf {
@@ -19,10 +19,12 @@ impl IRIf {
       else_branch,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRIf {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "type": "if",
+      "type": "IRIf",
       "condition": self.condition.to_json(),
       "then_branch": self.then_branch.to_json(),
       "else_branch": if let Some(else_branch) = &self.else_branch {

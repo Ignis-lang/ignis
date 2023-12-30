@@ -7,7 +7,7 @@ use std::{
 
 mod cli;
 
-use analyzer::{Analyzer, debug::display_ir, ir::instruction::IRInstruction};
+use analyzer::{Analyzer, ir::instruction::IRInstruction};
 use clap::Parser as ClapParser;
 use cli::{Cli, DebugPrint, Backend, SubCommand};
 use parser::Parser;
@@ -233,7 +233,7 @@ impl App {
       for result in &analyzer.irs {
         println!("IR for {}", result.0);
         for ir in result.1 {
-          display_ir(ir, 1);
+          ir.display_ir()
         }
       }
     }

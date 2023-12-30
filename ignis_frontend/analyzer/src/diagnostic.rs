@@ -44,6 +44,8 @@ pub enum AnalyzerDiagnosticError {
   MethodAlreadyDefined(Token),
   UndefinedProperty(Token),
   NotAClass(Token),
+UndefinedClass(Token),
+UndefinedMethods(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +209,8 @@ impl AnalyzerDiagnostic {
       AnalyzerDiagnosticError::MethodAlreadyDefined(_) => todo!(),
       AnalyzerDiagnosticError::UndefinedProperty(_) => todo!(),
       AnalyzerDiagnosticError::NotAClass(_) => todo!(),
+        AnalyzerDiagnosticError::UndefinedClass(_) => todo!(),
+        AnalyzerDiagnosticError::UndefinedMethods(_) => todo!(),
     }
   }
 }

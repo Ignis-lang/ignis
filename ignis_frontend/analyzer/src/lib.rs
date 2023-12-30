@@ -29,6 +29,7 @@ use intermediate_representation::{
   ir_break::IRBreak,
   ir_continue::IRContinue,
   class::IRClass,
+  class_instance::IRClassInstance,
 };
 
 use lexer::Lexer;
@@ -39,7 +40,7 @@ use ast::{
   expression::{
     binary::Binary, Expression, literal::Literal, unary::Unary, grouping::Grouping,
     logical::Logical, assign::Assign, variable::VariableExpression, ternary::Ternary, call::Call,
-    array::Array, new::NewExpression,
+    array::Array, new::NewExpression, get::Get,
   },
   statement::{
     Statement,
@@ -243,12 +244,12 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
       let instruction = IRInstruction::Variable(variable.clone());
 
-      return Ok(instruction);
+      Ok(instruction)
     } else {
-      return Err(Box::new(AnalyzerDiagnostic::new(
+      Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
         self.find_token_line(&variable.name.span.line),
-      )));
+      )))
     }
   }
 
@@ -523,6 +524,9 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Array(array) => {
           value = IRInstruction::Array(array);
         }
+        IRInstruction::ClassInstance(class) => {
+          value = IRInstruction::ClassInstance(class);
+        }
         _ => (),
       }
     }
@@ -538,6 +542,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
         false,
         false,
         true,
+        false,
         false,
         false,
       ),
@@ -635,6 +640,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           false,
           false,
           false,
+          false,
         ),
       );
 
@@ -656,7 +662,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
       parameters.clone(),
       statement.return_type.clone().unwrap_or(DataType::Void),
       None,
-      IRFunctionMetadata::new(false, statement.is_exported, false, is_extern, false, false),
+      IRFunctionMetadata::new(
+        false,
+        statement.is_exported,
+        false,
+        is_extern,
+        false,
+        false,
+        false,
+      ),
     );
 
     self.current_function = Some(current_function.clone());
@@ -766,7 +780,17 @@ impl Visitor<AnalyzerResult> for Analyzer {
             f.name.clone(),
             DataType::None,
             None,
-            IRVariableMetadata::new(false, false, false, false, false, false, false, false),
+            IRVariableMetadata::new(
+              false,
+              false,
+              false,
+              false,
+              false,
+              false,
+              false,
+              false,
+              f.metadata.is_constructor,
+            ),
           ));
 
           ir.push(f);
@@ -820,6 +844,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       IRVariableMetadata::new(
         statement.variable.metadata.is_mutable,
         statement.variable.metadata.is_reference,
+        false,
         false,
         false,
         false,
@@ -899,19 +924,62 @@ impl Visitor<AnalyzerResult> for Analyzer {
     )))
   }
 
-  fn visit_new_expression(&mut self, _expression: &NewExpression) -> AnalyzerResult {
-    todo!()
+  fn visit_new_expression(&mut self, expression: &NewExpression) -> AnalyzerResult {
+    let class_info = self.find_class_in_ir(expression.name.span.literal.clone());
+
+    if class_info.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let class = class_info.unwrap();
+
+    if class.methods.is_empty() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedMethods(expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let mut arguments = Vec::<IRInstruction>::new();
+
+    for arg in &expression.arguments {
+      let arg_type = self.analyzer(arg)?;
+
+      arguments.push(arg_type);
+    }
+
+    let constructor = self.find_matching_constructor(&class, &arguments);
+
+    if constructor.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedMethods(expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let constructor = constructor.unwrap();
+
+    let instruction = IRInstruction::ClassInstance(IRClassInstance::new(
+      Box::new(class),
+      constructor.name,
+      arguments,
+    ));
+
+    Ok(instruction)
   }
 
   fn visit_for_statement(&mut self, _statement: &For) -> AnalyzerResult {
     todo!()
   }
 
-  fn visit_get_expression(&mut self, expression: &ast::expression::get::Get) -> AnalyzerResult {
+  fn visit_get_expression(&mut self, expression: &Get) -> AnalyzerResult {
     let ir_object = self.analyzer(&expression.object)?;
 
     let object = match ir_object {
-      IRInstruction::Class(c) => c,
+      IRInstruction::Variable(c) => c,
       _ => {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::NotAClass(expression.name.clone()),
@@ -920,16 +988,35 @@ impl Visitor<AnalyzerResult> for Analyzer {
       }
     };
 
-    if object.properties.is_empty() {
+    let class = self.find_class_in_ir(match object.data_type {
+      DataType::ClassType(name) => name,
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotAClass(expression.name.clone()),
+          self.find_token_line(&expression.name.span.line),
+        )))
+      }
+    });
+
+    if class.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let class = class.unwrap();
+
+    if class.properties.is_empty() {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::UndefinedProperty(expression.name.clone()),
         self.find_token_line(&expression.name.span.line),
       )));
     }
 
-    let object_binding = object.clone();
+    let class_binding = class.clone();
 
-    let property = object_binding
+    let property = class_binding
       .properties
       .iter()
       .find(|p| p.name == expression.name.span.literal);
@@ -943,7 +1030,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let instruction = IRInstruction::Get(IRGet::new(
       expression.name.span.literal.clone(),
-      Box::new(object),
+      Box::new(class),
       self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
     ));
 
@@ -951,8 +1038,6 @@ impl Visitor<AnalyzerResult> for Analyzer {
   }
 
   fn visit_method_statement(&mut self, statement: &MethodStatement) -> AnalyzerResult {
-    println!("Context: {:?}", self.context);
-
     if self.is_allready_declared(&statement.name.span.literal) && !statement.metadata.is_contructor
     {
       return Err(Box::new(AnalyzerDiagnostic::new(
@@ -994,6 +1079,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           false,
           false,
           false,
+          false,
         ),
       );
 
@@ -1016,6 +1102,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
         false,
         statement.metadata.is_static,
         statement.metadata.is_public,
+        statement.metadata.is_contructor,
       ),
     );
 
@@ -1120,6 +1207,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
         true,
         false,
         false,
+        false,
       ),
     );
 
@@ -1222,11 +1310,11 @@ impl Analyzer {
             "message".to_string(),
             DataType::None,
             None,
-            IRVariableMetadata::new(false, false, true, false, false, false, false, false),
+            IRVariableMetadata::new(false, false, true, false, false, false, false, false, false),
           )],
           DataType::Void,
           None,
-          IRFunctionMetadata::new(false, true, true, true, false, false),
+          IRFunctionMetadata::new(false, true, true, true, false, false, false),
         )));
 
         block_stack.insert("println".to_string(), true);
@@ -1238,11 +1326,11 @@ impl Analyzer {
             "value".to_string(),
             DataType::None,
             None,
-            IRVariableMetadata::new(false, false, true, false, false, false, false, false),
+            IRVariableMetadata::new(false, false, true, false, false, false, false, false, false),
           )],
           DataType::String,
           None,
-          IRFunctionMetadata::new(false, true, true, true, false, false),
+          IRFunctionMetadata::new(false, true, true, true, false, false, false),
         )));
 
         block_stack.insert("toString".to_string(), true);
@@ -1355,14 +1443,11 @@ impl Analyzer {
   }
 
   fn is_allready_declared(&self, name: &String) -> bool {
-    println!("Name: {}", name);
     if self.block_stack.is_empty() {
       return false;
     }
 
     let current_block = self.block_stack.last().unwrap();
-
-    println!("Current block: {:?}", current_block);
 
     current_block.get(name).is_some()
   }
@@ -1467,6 +1552,8 @@ impl Analyzer {
       IRInstruction::Call(c) => c.return_type.clone(),
       IRInstruction::Return(r) => r.data_type.clone(),
       IRInstruction::Array(array) => array.data_type.clone(),
+      IRInstruction::Class(c) => DataType::ClassType(c.name.clone()),
+      IRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.clone()),
       _ => DataType::None,
     }
   }
@@ -1592,5 +1679,64 @@ impl Analyzer {
       IRInstruction::Variable(var) => matches!(var.data_type, DataType::Array(_)),
       _ => false,
     }
+  }
+
+  fn find_class_in_ir(&self, name: String) -> Option<IRClass> {
+    let irs = self.irs.get(&self.current_file).unwrap();
+
+    let class = irs.iter().find(|ir| match ir {
+      IRInstruction::Class(c) => c.name == name,
+      _ => false,
+    });
+
+    match class {
+      Some(IRInstruction::Class(c)) => Some(c.clone()),
+      _ => None,
+    }
+  }
+
+  fn find_matching_constructor(
+    &self,
+    class: &IRClass,
+    arguments: &[IRInstruction],
+  ) -> Option<IRFunction> {
+    let constructors = class.methods.iter().filter(|m| m.metadata.is_constructor);
+    for constructor in constructors {
+      if constructor.parameters.len() != arguments.len() {
+        continue;
+      }
+
+      let mut is_matching = true;
+
+      for (i, arg) in arguments.iter().enumerate() {
+        let arg_type = self.extract_data_type(arg);
+        let param_type = constructor.parameters[i].data_type.clone();
+        if arg_type != param_type {
+          is_matching = false;
+          break;
+        }
+      }
+      if is_matching {
+        return Some(constructor.clone());
+      }
+    }
+
+    None
+  }
+
+  fn _verify_arguments(&self, arguments: &[IRInstruction], parameters: &[IRVariable]) -> bool {
+    if arguments.len() != parameters.len() {
+      return false;
+    }
+
+    for (i, arg) in arguments.iter().enumerate() {
+      let arg_type = self.extract_data_type(arg);
+      let param_type = parameters[i].data_type.clone();
+      if arg_type != param_type {
+        return false;
+      }
+    }
+
+    true
   }
 }

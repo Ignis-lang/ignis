@@ -1,8 +1,6 @@
 use diagnostic_report::DiagnosticReport;
 use colored::*;
 
-pub struct Diagnostic {}
-
 /**
  * {level}[{error_code}]: {message}
  *  --> {file_path}:{line}:{column}
@@ -10,6 +8,8 @@ pub struct Diagnostic {}
  *{line} |       {code}
  *       |
  * */
+pub struct Diagnostic {}
+
 impl Diagnostic {
   pub fn new() -> Self {
     Self {}

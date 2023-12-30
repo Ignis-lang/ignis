@@ -44,4 +44,6 @@ pub enum AnalyzerDiagnosticError {
   MethodAlreadyDefined(Token),
   PropertyOutsideClass(Box<Token>),
   PropertyAlreadyDefined(Box<Token>),
+UndefinedClass(Token),
+UndefinedMethods(Token),
 }

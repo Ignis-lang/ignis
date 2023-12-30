@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use analyzer::Analyzer;
 use diagnostic_report::DiagnosticReport;
-use intermediate_representation::IRInstruction;
+use intermediate_representation::{IRInstruction, IRInstructionTrait};
 use lexer::Lexer;
 use parser::Parser;
 use ast::Ast;
