@@ -75,14 +75,15 @@ impl Diagnostic {
         .token_line
         .iter()
         .map(|token| token.span.literal.clone())
-        .collect::<Vec<String>>().join(" ")
+        .collect::<Vec<String>>()
+        .join(" ")
     );
     println!("{:4}|", (diagnostic.token.span.line - 2).to_string().blue());
   }
 }
 
 impl Default for Diagnostic {
-    fn default() -> Self {
-        Self::new()
-    }
+  fn default() -> Self {
+    Self::new()
+  }
 }

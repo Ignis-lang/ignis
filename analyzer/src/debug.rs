@@ -119,7 +119,26 @@ pub fn display_ir(instruction: &IRInstruction, indent_level: usize) {
       println!("{}Value:", indent_subtext);
       display_ir(&a.value, indent_level);
     }
-    IRInstruction::Class(_) => todo!(),
+    IRInstruction::Class(class) => {
+      println!("{}Class:", indent);
+      println!("{}Name: {}", indent_subtext, class.name);
+      println!("{}Methods:", indent_subtext);
+      if class.methods.is_empty() {
+        println!("{}Empty", indent_subtext.repeat(2));
+      } else {
+        for method in &class.methods {
+          display_ir(&IRInstruction::Function(method.clone()), indent_level);
+        }
+      }
+      println!("{}Properties:", indent_subtext);
+      if class.properties.is_empty() {
+        println!("{}Empty", indent_subtext.repeat(2));
+      } else {
+        for property in &class.properties {
+          display_ir(&IRInstruction::Variable(property.clone()), indent_level);
+        }
+      }
+    }
     IRInstruction::Ternary(t) => {
       println!("{}Ternary:", indent);
       println!("{}Condition:", indent_subtext);
@@ -178,7 +197,7 @@ pub fn display_ir(instruction: &IRInstruction, indent_level: usize) {
       println!("{}Object:", indent_subtext);
       // display_ir(&*get.object, indent_level);
       println!("{}Property: {}", indent_subtext, get.name);
-      println!("{}DataType: {}", indent_subtext, get.data_type.to_string());
+      println!("{}DataType: {}", indent_subtext, get.data_type);
     }
   };
 }

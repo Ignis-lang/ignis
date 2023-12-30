@@ -27,7 +27,7 @@ pub enum AnalyzerDiagnosticError {
   CannotDivide(AnalyzerValue, AnalyzerValue, Token),
   CannotModulo(AnalyzerValue, AnalyzerValue, Token),
   FunctionAlreadyDefined(String, Token),
-  ClassAlreadyDefined(String),
+  ClassAlreadyDefined(Token),
   ArgumentTypeMismatch(DataType, DataType, Token),
   ImmutableVariableAsMutableParameter(String, String, Token),
   ReturnOutsideFunction(Token),
@@ -38,6 +38,12 @@ pub enum AnalyzerDiagnosticError {
   BreakOutsideLoop(Token),
   ContinueOutsideLoop(Token),
   InvalidCondition(Token),
+  PropertyOutsideClass(Box<Token>),
+  PropertyAlreadyDefined(Box<Token>),
+  MethodOutsideClass(Token),
+  MethodAlreadyDefined(Token),
+  UndefinedProperty(Token),
+  NotAClass(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +201,12 @@ impl AnalyzerDiagnostic {
       AnalyzerDiagnosticError::BreakOutsideLoop(_) => todo!(),
       AnalyzerDiagnosticError::ContinueOutsideLoop(_) => todo!(),
       AnalyzerDiagnosticError::InvalidCondition(_) => todo!(),
+      AnalyzerDiagnosticError::PropertyOutsideClass(_) => todo!(),
+      AnalyzerDiagnosticError::PropertyAlreadyDefined(_) => todo!(),
+      AnalyzerDiagnosticError::MethodOutsideClass(_) => todo!(),
+      AnalyzerDiagnosticError::MethodAlreadyDefined(_) => todo!(),
+      AnalyzerDiagnosticError::UndefinedProperty(_) => todo!(),
+      AnalyzerDiagnosticError::NotAClass(_) => todo!(),
     }
   }
 }

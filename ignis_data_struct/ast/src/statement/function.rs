@@ -1,4 +1,6 @@
 use token::token::Token;
+use std::fmt::{Display, Formatter};
+
 use enums::data_type::DataType;
 use serde_json::json;
 
@@ -29,10 +31,6 @@ impl FunctionParameter {
     }
   }
 
-  pub fn to_string(&self) -> String {
-    format!("{}: {}", self.name.span.literal, self.data_type.to_string())
-  }
-
   pub fn to_json(&self) -> serde_json::Value {
     json!({
       "name": self.name.span.literal,
@@ -40,6 +38,12 @@ impl FunctionParameter {
       "is_mutable": self.is_mutable,
       "is_reference": self.is_reference,
     })
+  }
+}
+
+impl Display for FunctionParameter {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}: {}", self.name.span.literal, self.data_type)
   }
 }
 

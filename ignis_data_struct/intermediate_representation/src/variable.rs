@@ -11,6 +11,8 @@ pub struct IRVariableMetadata {
   pub is_function: bool,
   pub is_class: bool,
   pub is_declaration: bool,
+  pub is_static: bool,
+  pub is_public: bool,
 }
 
 impl IRVariableMetadata {
@@ -21,6 +23,8 @@ impl IRVariableMetadata {
     is_function: bool,
     is_class: bool,
     is_declaration: bool,
+    is_static: bool,
+    is_public: bool,
   ) -> Self {
     Self {
       is_mutable,
@@ -29,6 +33,8 @@ impl IRVariableMetadata {
       is_function,
       is_class,
       is_declaration,
+      is_static,
+      is_public,
     }
   }
 

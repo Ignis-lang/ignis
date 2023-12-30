@@ -44,7 +44,8 @@ pub enum DiagnosticError {
   CannotDivide(AnalyzerValue, AnalyzerValue, Token),
   CannotModulo(AnalyzerValue, AnalyzerValue, Token),
   FunctionAlreadyDefined(String, Token),
-  ClassAlreadyDefined(String),
+  ClassAlreadyDefined(Token),
+  MethodOutsideClass(Token),
   ArgumentTypeMismatch(DataType, DataType, Token),
   ImmutableVariableAsMutableParameter(String, String, Token),
   ReturnOutsideFunction(Token),
@@ -152,6 +153,14 @@ impl DiagnosticError {
       AnalyzerDiagnosticError::InvalidCondition(token) => DiagnosticError::InvalidCondition(token),
       AnalyzerDiagnosticError::NotAClass(_) => todo!(),
       AnalyzerDiagnosticError::UndefinedProperty(_) => todo!(),
+      AnalyzerDiagnosticError::MethodOutsideClass(token) => {
+        DiagnosticError::MethodOutsideClass(token)
+      }
+      AnalyzerDiagnosticError::MethodAlreadyDefined(token) => {
+        DiagnosticError::FunctionAlreadyDefined(token.span.literal.clone(), token.clone())
+      }
+        AnalyzerDiagnosticError::PropertyOutsideClass(_) => todo!(),
+        AnalyzerDiagnosticError::PropertyAlreadyDefined(_) => todo!(),
     }
   }
 
@@ -330,8 +339,11 @@ impl DiagnosticError {
       DiagnosticError::InvalidCondition(token) => {
         diagnostics.report_invalid_condition(token);
       }
-        DiagnosticError::NotAClass(_) => todo!(),
-        DiagnosticError::UndefinedProperty(_) => todo!(),
+      DiagnosticError::NotAClass(_) => todo!(),
+      DiagnosticError::UndefinedProperty(_) => todo!(),
+      DiagnosticError::MethodOutsideClass(token) => {
+        diagnostics.report_method_outside_class(token);
+      }
     }
   }
 }
