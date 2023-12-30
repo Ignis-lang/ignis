@@ -12,6 +12,8 @@ use ast::{
     break_statement::BreakStatement,
     continue_statement::Continue,
     for_statement::For,
+    method::{MethodStatement, MethodMetadata},
+    property::PropertyStatement,
   },
   expression::{array::Array, get::Get},
 };
@@ -393,7 +395,7 @@ impl Parser {
       Expression::Ternary(ternary) => ternary.data_type.clone(),
       Expression::Call(call) => call.return_type.clone(),
       Expression::Array(a) => a.data_type.clone(),
-        Expression::Get(_) => DataType::Pending
+      Expression::Get(_) => DataType::Pending,
     }
   }
 
@@ -1012,12 +1014,12 @@ impl Parser {
     self.tokens[self.current - 1].clone()
   }
 
-  fn attribute_class_declaration(
+  fn property_class_declaration(
     &mut self,
     name: Token,
     is_mutable: bool,
     is_public: bool,
-  ) -> ParserResult<Variable> {
+  ) -> ParserResult<Statement> {
     let token = self.peek();
     let mut type_annotation = DataType::from_token_type(token.kind.clone());
 
@@ -1059,12 +1061,12 @@ impl Parser {
 
     let _ = self.consume(TokenType::SemiColon);
 
-    Ok(Variable::new(
+    Ok(Statement::Property(PropertyStatement::new(
       Box::new(name),
       initializer,
       type_annotation,
       VariableMetadata::new(is_mutable, false, false, is_public, false),
-    ))
+    )))
   }
 
   fn method_declaration(
@@ -1072,7 +1074,7 @@ impl Parser {
     name: Token,
     is_public: bool,
     decorator: Option<FunctionDecorator>,
-  ) -> ParserResult<FunctionStatement> {
+  ) -> ParserResult<Statement> {
     let mut parameters: Vec<FunctionParameter> = Vec::new();
 
     if !self.check(TokenType::RightParen) {
@@ -1156,18 +1158,24 @@ impl Parser {
       body.push(self.block()?);
     }
 
-    Ok(FunctionStatement::new(
+    let metadata = MethodMetadata::new(
+      is_public,
+      false,
+      self.class_declarations.contains(&name.span.literal),
+    );
+
+    Ok(Statement::Method(MethodStatement::new(
       name,
       parameters,
       body,
       return_type,
-      is_public,
       if decorator.is_some() {
         vec![decorator.unwrap()]
       } else {
         vec![]
       },
-    ))
+      metadata,
+    )))
   }
 
   fn class_declaration(&mut self) -> ParserResult<Statement> {
@@ -1175,8 +1183,8 @@ impl Parser {
 
     self.class_declarations.push(name.span.literal.clone());
 
-    let mut methods: Vec<FunctionStatement> = Vec::new();
-    let mut attributes: Vec<Variable> = Vec::new();
+    let mut methods: Vec<Statement> = Vec::new();
+    let mut properties: Vec<Statement> = Vec::new();
 
     self.consume(TokenType::LeftBrace)?;
 
@@ -1189,7 +1197,7 @@ impl Parser {
 
       if self.match_token(&[TokenType::Mut]) {
         let name = self.consume(TokenType::Identifier)?;
-        attributes.push(self.attribute_class_declaration(name, true, is_public)?);
+        properties.push(self.property_class_declaration(name, true, is_public)?);
         continue;
       }
 
@@ -1198,7 +1206,7 @@ impl Parser {
       if self.match_token(&[TokenType::LeftParen]) {
         methods.push(self.method_declaration(name, is_public, None)?);
       } else if self.match_token(&[TokenType::Colon]) {
-        attributes.push(self.attribute_class_declaration(name, false, is_public)?);
+        properties.push(self.property_class_declaration(name, false, is_public)?);
       } else {
         let token = self.peek();
         return Err(Box::new(ParserDiagnostic::new(
@@ -1210,7 +1218,7 @@ impl Parser {
 
     self.consume(TokenType::RightBrace)?;
 
-    Ok(Statement::Class(Class::new(name, methods, attributes)))
+    Ok(Statement::Class(Class::new(name, methods, properties)))
   }
 
   fn import_statement(&mut self) -> ParserResult<Statement> {
