@@ -1,4 +1,4 @@
-use super::{instruction_type::IRInstructionType, IRInstruction};
+use super::{instruction_type::IRInstructionType, IRInstruction, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRLogical {
@@ -19,11 +19,12 @@ impl IRLogical {
       right,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRLogical {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "type": "logical",
-      "instruction_type": self.instruction_type.to_string(),
+      "type": self.instruction_type.to_string(),
       "left": self.left.to_json(),
       "right": self.right.to_json(),
     })

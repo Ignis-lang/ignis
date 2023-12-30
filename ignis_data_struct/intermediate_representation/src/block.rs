@@ -1,3 +1,5 @@
+use crate::IRInstructionTrait;
+
 use super::{IRInstruction, variable::IRVariable};
 
 #[derive(Debug, Clone)]
@@ -13,10 +15,12 @@ impl IRBlock {
       scopes_variables,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRBlock {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "type": "block",
+      "type": "IRBlock",
       "instructions": self.instructions.iter().map(|instruction| instruction.to_json()).collect::<Vec<serde_json::Value>>(),
       "scopes_variables": self.scopes_variables.iter().map(|variable| variable.to_json()).collect::<Vec<serde_json::Value>>(),
     })

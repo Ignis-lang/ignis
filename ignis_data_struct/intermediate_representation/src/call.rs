@@ -1,6 +1,6 @@
 use enums::data_type::DataType;
 
-use super::IRInstruction;
+use super::{IRInstruction, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRCall {
@@ -10,17 +10,23 @@ pub struct IRCall {
 }
 
 impl IRCall {
-  pub fn new(name: String, arguments: Vec<IRInstruction>, return_type: DataType) -> Self {
+  pub fn new(
+    name: String,
+    arguments: Vec<IRInstruction>,
+    return_type: DataType,
+  ) -> Self {
     Self {
       name,
       arguments,
       return_type,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRCall {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "type": "call",
+      "type": "IRCall",
       "name": self.name,
       "arguments": self.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
       "return_type": self.return_type.to_string(),

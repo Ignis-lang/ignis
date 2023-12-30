@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter, self};
+
 use enums::token_type::TokenType;
 
 use super::text_span::TextSpan;
@@ -22,5 +24,11 @@ impl Token {
 
   pub fn vec_to_json(tokens: Vec<Token>) -> Vec<serde_json::Value> {
     tokens.iter().map(|token| token.to_json()).collect()
+  }
+}
+
+impl Display for Token {
+  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    write!(f, "{} - {}", self.kind, self.span)
   }
 }

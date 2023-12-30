@@ -74,6 +74,7 @@ impl TranspilerToLua {
         AnalyzerValue::Return(r) => r.to_string(),
         AnalyzerValue::Function(f) => f.name.clone(),
         AnalyzerValue::Null | AnalyzerValue::None => "nil".to_string(),
+        AnalyzerValue::Class(_) => todo!(),
       }),
       IRInstruction::Binary(binary) => {
         let left = self.transpile_ir_to_lua(&binary.left, indent_level);
@@ -244,6 +245,7 @@ impl TranspilerToLua {
         code.push_str(&format!("{}goto continue\n", " ".repeat(indent_level)));
       }
       IRInstruction::Get(_) => todo!(),
+        IRInstruction::ClassInstance(_) => todo!(),
     };
 
     code

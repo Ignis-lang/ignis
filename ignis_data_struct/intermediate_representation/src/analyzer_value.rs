@@ -1,8 +1,8 @@
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 
 use enums::{data_type::DataType, literal_value::LiteralValue};
 
-use crate::function::IRFunction;
+use crate::{function::IRFunction, class_instance::IRClassInstance};
 
 #[derive(Debug)]
 pub enum AnalyzerValue {
@@ -12,6 +12,7 @@ pub enum AnalyzerValue {
   Boolean(bool),
   Return(Box<AnalyzerValue>),
   Function(Box<IRFunction>),
+  Class(Box<IRClassInstance>),
   Null,
   None,
 }
@@ -27,12 +28,13 @@ impl Clone for AnalyzerValue {
       AnalyzerValue::None => AnalyzerValue::None,
       AnalyzerValue::Return(r) => r.as_ref().clone(),
       AnalyzerValue::Function(f) => AnalyzerValue::Function(f.clone()),
+      AnalyzerValue::Class(_) => todo!(),
     }
   }
 }
 
 impl Display for AnalyzerValue {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     match self {
       AnalyzerValue::String(s) => write!(f, "{}", s),
       AnalyzerValue::Int(i) => write!(f, "{}", i),
@@ -42,6 +44,10 @@ impl Display for AnalyzerValue {
       AnalyzerValue::None => write!(f, "none"),
       AnalyzerValue::Return(r) => write!(f, "{}", r),
       AnalyzerValue::Function(_) => write!(f, "function"),
+      AnalyzerValue::Class(class) => {
+        let class = class.as_ref();
+        write!(f, "{}", class.name)
+      }
     }
   }
 }
@@ -56,6 +62,10 @@ impl AnalyzerValue {
       AnalyzerValue::None | AnalyzerValue::Null => DataType::None,
       AnalyzerValue::Return(r) => r.to_data_type(),
       AnalyzerValue::Function(f) => f.return_type.clone(),
+      AnalyzerValue::Class(class) => {
+        let class = class.as_ref();
+        DataType::ClassType(class.name.clone())
+      }
     }
   }
 

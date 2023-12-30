@@ -1,6 +1,6 @@
 use enums::data_type::DataType;
 
-use super::IRInstruction;
+use super::{IRInstruction, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRReturn {
@@ -12,10 +12,12 @@ impl IRReturn {
   pub fn new(value: Box<IRInstruction>, data_type: DataType) -> Self {
     Self { value, data_type }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRReturn {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "type": "return",
+      "type": "IRReturn",
       "value": self.value.to_json(),
       "data_type": self.data_type.to_string(),
     })

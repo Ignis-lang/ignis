@@ -1,6 +1,6 @@
-use token::token::Token;
+use lexer::token::Token;
 
-use crate::IRInstructionTrait;
+use super::IRInstructionTrait;
 
 pub type ImportName = Vec<(Token, Option<Token>)>;
 

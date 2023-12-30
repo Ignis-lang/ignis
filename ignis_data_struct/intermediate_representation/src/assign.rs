@@ -1,4 +1,5 @@
-use super::IRInstruction;
+use super::{IRInstruction, IRInstructionTrait};
+use serde_json::{json, Value};
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -15,6 +16,16 @@ impl IRAssign {
   pub fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
       "type": "assign",
+      "name": self.name,
+      "value": self.value.to_json(),
+    })
+  }
+}
+
+impl IRInstructionTrait for IRAssign {
+  fn to_json(&self) -> Value {
+    json!({
+      "type": "IRAssign",
       "name": self.name,
       "value": self.value.to_json(),
     })

@@ -1,4 +1,4 @@
-use super::{function::IRFunction, variable::IRVariable};
+use super::{function::IRFunction, variable::IRVariable, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRClass {
@@ -18,12 +18,15 @@ impl IRClass {
       superclass: None,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRClass {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "type": "class",
+      "type": "IRClass",
       "name": self.name,
-      "methods": self.methods.iter().map(|x| x.to_json()).collect::<Vec<_>>(),
+      "methods": self.methods.iter().map(|m| m.to_json()).collect::<Vec<serde_json::Value>>(),
+      "properties": self.properties.iter().map(|p| p.to_json()).collect::<Vec<serde_json::Value>>(),
     })
   }
 }
