@@ -15,7 +15,7 @@ use ast::{
     method::{MethodStatement, MethodMetadata},
     property::PropertyStatement,
   },
-  expression::{array::Array, get::Get, new::NewExpression},
+  expression::{array::Array, get::Get, new::NewExpression, set::Set},
 };
 use enums::{data_type::DataType, token_type::TokenType};
 use {
@@ -420,6 +420,7 @@ impl Parser {
       Expression::Array(a) => a.data_type.clone(),
       Expression::Get(_) => DataType::Pending,
       Expression::New(new) => DataType::ClassType(new.name.span.literal.clone()),
+      Expression::Set(set) => set.data_type.clone(),
     }
   }
 
@@ -765,17 +766,28 @@ impl Parser {
       let equals: Token = self.previous();
       let value: Expression = self.assignment()?;
 
-      if let Expression::Variable(variable) = expression {
-        expression = Expression::Assign(Assign::new(
-          variable.name,
-          Box::new(value),
-          variable.data_type,
-        ));
-      } else {
-        return Err(Box::new(ParserDiagnostic::new(
-          ParserDiagnosticError::InvalidAssignmentTarget(equals.clone()),
-          self.find_token_line(&equals.span.line),
-        )));
+      match expression {
+        Expression::Variable(variable) => {
+          expression = Expression::Assign(Assign::new(
+            variable.name,
+            Box::new(value),
+            variable.data_type,
+          ));
+        }
+        Expression::Get(get) => {
+          expression = Expression::Set(Set::new(
+            Box::new(get.name),
+            Box::new(value.clone()),
+            get.object,
+            self.get_expression_type(&value),
+          ));
+        }
+        _ => {
+          return Err(Box::new(ParserDiagnostic::new(
+            ParserDiagnosticError::InvalidAssignmentTarget(equals.clone()),
+            self.find_token_line(&equals.span.line),
+          )))
+        }
       }
     }
 
@@ -1044,7 +1056,10 @@ impl Parser {
     is_mutable: bool,
     is_public: bool,
   ) -> ParserResult<Statement> {
+    self.consume(TokenType::Colon)?;
+
     let token = self.peek();
+
     let mut type_annotation = DataType::from_token_type(token.kind.clone());
 
     if type_annotation == DataType::None && self.class_declarations.contains(&token.span.literal) {
@@ -1213,11 +1228,9 @@ impl Parser {
     self.consume(TokenType::LeftBrace)?;
 
     while !self.check(TokenType::RightBrace) && !self.is_at_end() {
-      let is_public = self.match_token(&[TokenType::Public]);
+      let is_public = self.check(TokenType::Public);
 
-      if self.match_token(&[TokenType::Public, TokenType::Private]) {
-        self.advance();
-      }
+      self.match_token(&[TokenType::Public, TokenType::Private]);
 
       if self.match_token(&[TokenType::Mut]) {
         let name = self.consume(TokenType::Identifier)?;

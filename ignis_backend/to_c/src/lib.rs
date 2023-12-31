@@ -219,6 +219,7 @@ impl TranspilerToC {
         IRInstruction::Continue(_) => todo!(),
         IRInstruction::Get(_) => todo!(),
         IRInstruction::ClassInstance(_) => todo!(),
+        IRInstruction::Set(_) => todo!(),
       };
 
       args.push_str(",");
@@ -451,6 +452,7 @@ impl TranspilerToC {
       IRInstruction::Continue(_) => todo!(),
         IRInstruction::Get(_) => todo!(),
         IRInstruction::ClassInstance(_) => todo!(),
+        IRInstruction::Set(_) => todo!(),
     };
 
     code
