@@ -4,6 +4,7 @@ pub mod binary;
 pub mod block;
 pub mod call;
 pub mod class;
+pub mod class_instance;
 pub mod function;
 pub mod import;
 pub mod instruction_type;
@@ -11,16 +12,16 @@ pub mod ir_array;
 pub mod ir_break;
 pub mod ir_continue;
 pub mod ir_for_in;
+pub mod ir_get;
 pub mod ir_if;
 pub mod ir_return;
+pub mod ir_set;
 pub mod ir_while;
 pub mod literal;
 pub mod logical;
 pub mod ternary;
 pub mod unary;
 pub mod variable;
-pub mod ir_get;
-pub mod class_instance;
 
 use serde_json::Value;
 
@@ -28,9 +29,8 @@ use self::{
   binary::IRBinary, block::IRBlock, literal::IRLiteral, unary::IRUnary, variable::IRVariable,
   logical::IRLogical, ir_if::IRIf, ir_while::IRWhile, function::IRFunction, call::IRCall,
   class::IRClass, assign::IRAssign, ir_return::IRReturn, ternary::IRTernary, ir_for_in::IRForIn,
-  ir_array::IRArray, import::IRImport, ir_break::IRBreak, ir_continue::IRContinue,
-  ir_get::IRGet,
-  class_instance::IRClassInstance
+  ir_array::IRArray, import::IRImport, ir_break::IRBreak, ir_continue::IRContinue, ir_get::IRGet,
+  ir_set::IRSet, class_instance::IRClassInstance,
 };
 
 #[derive(Debug, Clone)]
@@ -55,7 +55,8 @@ pub enum IRInstruction {
   Break(IRBreak),
   Continue(IRContinue),
   Get(IRGet),
-  ClassInstance(IRClassInstance)
+  ClassInstance(IRClassInstance),
+  Set(IRSet),
 }
 
 pub trait IRInstructionTrait {
@@ -86,7 +87,7 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::Break(instruction) => instruction.to_json(),
       IRInstruction::Continue(instruction) => instruction.to_json(),
       IRInstruction::ClassInstance(instruction) => instruction.to_json(),
+      IRInstruction::Set(set) => set.to_json(),
     }
   }
 }
-

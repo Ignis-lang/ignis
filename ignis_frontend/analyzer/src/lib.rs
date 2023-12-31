@@ -7,6 +7,7 @@ use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
 use diagnostic_report::DiagnosticReport;
 use intermediate_representation::instruction_type::IRInstructionType;
 use intermediate_representation::ir_get::IRGet;
+use intermediate_representation::ir_set::IRSet;
 use intermediate_representation::{
   analyzer_value::AnalyzerValue,
   IRInstruction,
@@ -40,7 +41,7 @@ use ast::{
   expression::{
     binary::Binary, Expression, literal::Literal, unary::Unary, grouping::Grouping,
     logical::Logical, assign::Assign, variable::VariableExpression, ternary::Ternary, call::Call,
-    array::Array, new::NewExpression, get::Get,
+    array::Array, new::NewExpression, get::Get, set::Set,
   },
   statement::{
     Statement,
@@ -542,8 +543,8 @@ impl Visitor<AnalyzerResult> for Analyzer {
         false,
         false,
         true,
-        false,
-        false,
+        variable.metadata.is_static,
+        variable.metadata.is_public,
         false,
       ),
     );
@@ -1205,8 +1206,8 @@ impl Visitor<AnalyzerResult> for Analyzer {
         false,
         false,
         true,
-        false,
-        false,
+        statement.metadata.is_static,
+        statement.metadata.is_public,
         false,
       ),
     );
@@ -1216,6 +1217,93 @@ impl Visitor<AnalyzerResult> for Analyzer {
     self.scopes_variables.push(variable.clone());
 
     Ok(IRInstruction::Variable(variable.clone()))
+  }
+
+  fn visit_set_expression(&mut self, set: &Set) -> AnalyzerResult {
+    let value = self.analyzer(&set.value)?;
+
+    let object = self.analyzer(&set.object)?;
+
+    let object = match object {
+      IRInstruction::Variable(c) => c,
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotAClass(*set.name.clone()),
+          self.find_token_line(&set.name.span.line),
+        )))
+      }
+    };
+
+    let class = self.find_class_in_ir(match object.data_type {
+      DataType::ClassType(name) => name,
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotAClass(*set.name.clone()),
+          self.find_token_line(&set.name.span.line),
+        )))
+      }
+    });
+
+    if class.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(*set.name.clone()),
+        self.find_token_line(&set.name.span.line),
+      )));
+    }
+
+    let class = class.unwrap();
+
+    if class.properties.is_empty() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedProperty(*set.name.clone()),
+        self.find_token_line(&set.name.span.line),
+      )));
+    }
+
+    let class_binding = class.clone();
+
+    let property = class_binding
+      .properties
+      .iter()
+      .find(|p| p.name == set.name.span.literal);
+
+    if property.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedProperty(*set.name.clone()),
+        self.find_token_line(&set.name.span.line),
+      )));
+    }
+
+    if !property.unwrap().metadata.is_public {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::PrivateProperty(*set.name.clone()),
+        self.find_token_line(&set.name.span.line),
+      )));
+    }
+
+    if !property.unwrap().metadata.is_mutable {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::ImmutableProperty(*set.name.clone()),
+        self.find_token_line(&set.name.span.line),
+      )));
+    }
+
+    let class_instance = self.find_class_instance(class.name);
+
+    if class_instance.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(*set.name.clone()),
+        self.find_token_line(&set.name.span.line),
+      )));
+    }
+
+    let instruction = IRInstruction::Set(IRSet::new(
+      set.name.span.literal.clone(),
+      Box::new(value),
+      Box::new(class_instance.unwrap()),
+    ));
+
+    Ok(instruction)
   }
 }
 
@@ -1738,5 +1826,33 @@ impl Analyzer {
     }
 
     true
+  }
+
+  fn find_class_instance(&self, instance_name: String) -> Option<IRClassInstance> {
+    if self.scopes_variables.is_empty() {
+      return None;
+    }
+
+    let scopes_variables = &self.scopes_variables;
+
+    let mut class_instance = None;
+
+    for variable in scopes_variables {
+      if variable.data_type != DataType::ClassType(instance_name.clone()) {
+        continue;
+      }
+
+      let value = variable.value.clone();
+
+      match value.unwrap().as_ref() {
+        IRInstruction::ClassInstance(c) if c.name == instance_name => {
+          class_instance = Some(c.clone());
+          break;
+        }
+        _ => (),
+      }
+    }
+
+    class_instance
   }
 }

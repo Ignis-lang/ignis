@@ -36,17 +36,17 @@ impl Clone for AnalyzerValue {
 impl Display for AnalyzerValue {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     match self {
-      AnalyzerValue::String(s) => write!(f, "{}", s),
-      AnalyzerValue::Int(i) => write!(f, "{}", i),
-      AnalyzerValue::Float(d) => write!(f, "{}", d),
-      AnalyzerValue::Boolean(b) => write!(f, "{}", b),
+      AnalyzerValue::String(s) => write!(f, "String: {}", s),
+      AnalyzerValue::Int(i) => write!(f, "Int: {}", i),
+      AnalyzerValue::Float(d) => write!(f, "Float: {}", d),
+      AnalyzerValue::Boolean(b) => write!(f, "Boolean: {}", b),
       AnalyzerValue::Null => write!(f, "null"),
       AnalyzerValue::None => write!(f, "none"),
-      AnalyzerValue::Return(r) => write!(f, "{}", r),
+      AnalyzerValue::Return(r) => write!(f, "Return: {}", r),
       AnalyzerValue::Function(_) => write!(f, "function"),
       AnalyzerValue::Class(class) => {
         let class = class.as_ref();
-        write!(f, "{}", class.name)
+        write!(f, "Class: {}", class.name)
       }
     }
   }

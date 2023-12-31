@@ -5,7 +5,7 @@ use serde_json::json;
 use self::{
   binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression,
   logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array, get::Get,
-  new::NewExpression,
+  new::NewExpression, set::Set,
 };
 
 use super::visitor::Visitor;
@@ -19,6 +19,7 @@ pub mod grouping;
 pub mod literal;
 pub mod logical;
 pub mod new;
+pub mod set;
 pub mod ternary;
 pub mod unary;
 pub mod variable;
@@ -36,6 +37,7 @@ pub enum Expression {
   Call(Call),
   Array(Array),
   Get(Get),
+  Set(Set),
   New(NewExpression),
 }
 
@@ -54,6 +56,7 @@ impl Expression {
       Expression::Array(array) => visitor.visit_array_expression(array),
       Expression::Get(get) => visitor.visit_get_expression(get),
       Expression::New(new) => visitor.visit_new_expression(new),
+      Expression::Set(set) => visitor.visit_set_expression(set),
     }
   }
 
@@ -150,6 +153,15 @@ impl Expression {
           "arguments": new.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
         })
       }
+      Expression::Set(set) => {
+        json!({
+          "type": "Set",
+          "name": set.name.span.literal,
+          "value": set.value.to_json(),
+          "object": set.object.to_json(),
+          "data_type": set.data_type.to_string(),
+        })
+      }
     }
   }
 }
@@ -241,6 +253,9 @@ impl Display for Expression {
             .collect::<Vec<String>>()
             .join(", ")
         )
+      }
+      Expression::Set(set) => {
+        write!(f, "{}.{} = {}", set.object, set.name.span.literal, set.value)
       }
     }
   }
