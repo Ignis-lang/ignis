@@ -41,7 +41,7 @@ use ast::{
   expression::{
     binary::Binary, Expression, literal::Literal, unary::Unary, grouping::Grouping,
     logical::Logical, assign::Assign, variable::VariableExpression, ternary::Ternary, call::Call,
-    array::Array, new::NewExpression, get::Get, set::Set,
+    array::Array, new::NewExpression, get::Get, set::Set, method_call::MethodCall,
   },
   statement::{
     Statement,
@@ -1304,6 +1304,26 @@ impl Visitor<AnalyzerResult> for Analyzer {
     ));
 
     Ok(instruction)
+  }
+
+  fn visit_method_call_expression(&mut self, method_call: &MethodCall) -> AnalyzerResult {
+    println!("{:?}", method_call.calle);
+
+    let calle = self.analyzer(&method_call.calle)?;
+
+    let method = match calle {
+      IRInstruction::Call(f) => Some(f),
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotCallable(*method_call.name.clone()),
+          self.find_token_line(&method_call.name.span.line),
+        )));
+      }
+    };
+
+    println!("{:?}", method);
+
+    todo!()
   }
 }
 

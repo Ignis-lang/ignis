@@ -15,7 +15,7 @@ use ast::{
     method::{MethodStatement, MethodMetadata},
     property::PropertyStatement,
   },
-  expression::{array::Array, get::Get, new::NewExpression, set::Set},
+  expression::{array::Array, get::Get, new::NewExpression, set::Set, method_call::MethodCall},
 };
 use enums::{data_type::DataType, token_type::TokenType};
 use {
@@ -272,6 +272,21 @@ impl Parser {
       if self.match_token(&[TokenType::Dot]) {
         let name = self.consume(TokenType::Identifier)?;
 
+        if self.match_token(&[TokenType::LeftParen]) {
+          expression = Expression::Variable(VariableExpression::new(name.clone(), DataType::Pending));
+
+          let calle = self.finish_call(expression.clone())?;
+
+          expression = Expression::MethodCall(MethodCall::new(
+            Box::new(name),
+            Box::new(calle.clone()),
+            self.get_expression_type(&calle),
+            Box::new(expression),
+          ));
+
+          continue;
+        }
+
         expression = Expression::Get(Get::new(Box::new(expression), name));
 
         continue;
@@ -421,6 +436,7 @@ impl Parser {
       Expression::Get(_) => DataType::Pending,
       Expression::New(new) => DataType::ClassType(new.name.span.literal.clone()),
       Expression::Set(set) => set.data_type.clone(),
+      Expression::MethodCall(method) => method.data_type.clone(),
     }
   }
 

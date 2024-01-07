@@ -5,21 +5,23 @@ use serde_json::json;
 use self::{
   binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression,
   logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array, get::Get,
-  new::NewExpression, set::Set,
+  new::NewExpression, set::Set, method_call::MethodCall,
 };
 
 use super::visitor::Visitor;
+
+pub mod get;
+pub mod method_call;
+pub mod new;
+pub mod set;
 
 pub mod array;
 pub mod assign;
 pub mod binary;
 pub mod call;
-pub mod get;
 pub mod grouping;
 pub mod literal;
 pub mod logical;
-pub mod new;
-pub mod set;
 pub mod ternary;
 pub mod unary;
 pub mod variable;
@@ -39,6 +41,7 @@ pub enum Expression {
   Get(Get),
   Set(Set),
   New(NewExpression),
+  MethodCall(MethodCall),
 }
 
 impl Expression {
@@ -57,6 +60,7 @@ impl Expression {
       Expression::Get(get) => visitor.visit_get_expression(get),
       Expression::New(new) => visitor.visit_new_expression(new),
       Expression::Set(set) => visitor.visit_set_expression(set),
+      Expression::MethodCall(method) => visitor.visit_method_call_expression(method),
     }
   }
 
@@ -162,6 +166,15 @@ impl Expression {
           "data_type": set.data_type.to_string(),
         })
       }
+      Expression::MethodCall(method) => {
+        json!({
+          "type": "MethodCall",
+          "name": method.name.span.literal,
+          "arguments": method.calle.to_json(),
+          "data_type": method.data_type.to_string(),
+          "instance": method.instance.to_json(),
+        })
+      }
     }
   }
 }
@@ -255,7 +268,14 @@ impl Display for Expression {
         )
       }
       Expression::Set(set) => {
-        write!(f, "{}.{} = {}", set.object, set.name.span.literal, set.value)
+        write!(
+          f,
+          "{}.{} = {}",
+          set.object, set.name.span.literal, set.value
+        )
+      }
+      Expression::MethodCall(method) => {
+        write!(f, "{}.{}{}", method.instance, method.name, method.calle,)
       }
     }
   }

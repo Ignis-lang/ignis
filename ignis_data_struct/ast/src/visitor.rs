@@ -2,7 +2,7 @@ use crate::{
   expression::{
     binary::Binary, literal::Literal, unary::Unary, grouping::Grouping,
     variable::VariableExpression, assign::Assign, logical::Logical, ternary::Ternary, call::Call,
-    array::Array, new::NewExpression, get::Get, set::Set,
+    array::Array, new::NewExpression, get::Get, set::Set, method_call::MethodCall,
   },
   statement::{
     expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
@@ -28,6 +28,7 @@ pub trait Visitor<R> {
   fn visit_new_expression(&mut self, expression: &NewExpression) -> R;
   fn visit_get_expression(&mut self, expression: &Get) -> R;
   fn visit_set_expression(&mut self, set: &Set) -> R;
+  fn visit_method_call_expression(&mut self, method: &MethodCall) -> R;
 
   // Statements
   fn visit_expression_statement(&mut self, statement: &ExpressionStatement) -> R;
