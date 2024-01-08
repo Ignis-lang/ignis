@@ -118,6 +118,8 @@ impl<'a> Lexer<'a> {
       }
       '-' => {
         token = if self.match_char('=') {
+          TokenType::DecrementAndAssign
+        } else if self.match_char('-') {
           TokenType::Decrement
         } else if self.match_char('>') {
           TokenType::Arrow
@@ -127,6 +129,8 @@ impl<'a> Lexer<'a> {
       }
       '+' => {
         token = if self.match_char('=') {
+          TokenType::IncrementAndAssign
+        } else if self.match_char('+') {
           TokenType::Increment
         } else {
           TokenType::Plus

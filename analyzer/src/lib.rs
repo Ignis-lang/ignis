@@ -27,7 +27,7 @@ use ast::{
     for_in::ForIn,
     import::Import,
     break_statement::BreakStatement,
-    continue_statement::Continue,
+    continue_statement::Continue, for_statement::For,
   },
 };
 use enums::{data_type::DataType, token_type::TokenType};
@@ -50,7 +50,8 @@ use ir::{
     ir_for_in::IRForIn,
     ir_array::IRArray,
     import::IRImport,
-    ir_break::IRBreak, ir_continue::IRContinue,
+    ir_break::IRBreak,
+    ir_continue::IRContinue,
   },
   instruction_type::IRInstructionType,
 };
@@ -380,6 +381,34 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
+  fn visit_array_expression(&mut self, expression: &Array) -> AnalyzerResult {
+    let mut elements = Vec::new();
+    let mut element_types = Vec::new();
+
+    for elem in &expression.elements {
+      let analyzed_elem = self.analyzer(elem)?;
+      let elem_type = self.extract_data_type(&analyzed_elem);
+
+      elements.push(analyzed_elem);
+      element_types.push(elem_type);
+    }
+
+    let first_type = element_types.first().unwrap_or(&DataType::None);
+
+    if !element_types.iter().all(|t| t == first_type) {
+      return Err(AnalyzerDiagnosticError::ArrayElementTypeMismatch(
+        expression.token.clone(),
+      ));
+    }
+
+    let instruction = IRInstruction::Array(IRArray::new(
+      elements,
+      DataType::Array(Box::new(first_type.clone())),
+    ));
+
+    Ok(instruction)
+  }
+
   fn visit_expression_statement(&mut self, statement: &ExpressionStatement) -> AnalyzerResult {
     self.analyzer(&statement.expression)
   }
@@ -620,34 +649,6 @@ impl Visitor<AnalyzerResult> for Analyzer {
     todo!()
   }
 
-  fn visit_array_expression(&mut self, expression: &Array) -> AnalyzerResult {
-    let mut elements = Vec::new();
-    let mut element_types = Vec::new();
-
-    for elem in &expression.elements {
-      let analyzed_elem = self.analyzer(elem)?;
-      let elem_type = self.extract_data_type(&analyzed_elem);
-
-      elements.push(analyzed_elem);
-      element_types.push(elem_type);
-    }
-
-    let first_type = element_types.first().unwrap_or(&DataType::None);
-
-    if !element_types.iter().all(|t| t == first_type) {
-      return Err(AnalyzerDiagnosticError::ArrayElementTypeMismatch(
-        expression.token.clone(),
-      ));
-    }
-
-    let instruction = IRInstruction::Array(IRArray::new(
-      elements,
-      DataType::Array(Box::new(first_type.clone())),
-    ));
-
-    Ok(instruction)
-  }
-
   fn visit_for_in_statement(&mut self, statement: &ForIn) -> AnalyzerResult {
     self.declare(&statement.variable.name.span.literal);
 
@@ -744,6 +745,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(IRInstruction::Continue(IRContinue::new(
       statement.token.clone(),
     )))
+  }
+
+  fn visit_for_statement(
+    &mut self,
+    statement: &For,
+  ) -> AnalyzerResult {
+    todo!()
   }
 }
 

@@ -5,7 +5,9 @@ use ast::{
     for_in::ForIn,
     import::{Import, ImportSource, ImportSymbol},
     function::FunctionDecorator,
-    break_statement::BreakStatement, continue_statement::Continue,
+    break_statement::BreakStatement,
+    continue_statement::Continue,
+    for_statement::For,
   },
   expression::array::Array,
 };
@@ -181,9 +183,14 @@ impl Parser {
     Ok(expression)
   }
 
-  // unary -> ("!" | "-") unary | call;
+  // unary -> ("!" | "-" | "++" | "++") unary | call ("++" | "--")?;
   fn unary(&mut self) -> ParserResult<Expression> {
-    if self.match_token(&[TokenType::Bang, TokenType::Minus]) {
+    if self.match_token(&[
+      TokenType::Bang,
+      TokenType::Minus,
+      TokenType::Increment,
+      TokenType::Decrement,
+    ]) {
       let operator = self.previous();
       let right: Expression = self.unary()?;
 
@@ -194,10 +201,33 @@ impl Parser {
         operator,
         Box::new(right),
         self.get_data_type_by_operator(None, right_type, operator_kind),
+        true
       )));
     }
 
-    self.call()
+    match self.call()? {
+      Expression::Variable(v) => {
+        match self.match_token(&[TokenType::Increment, TokenType::Decrement]) {
+          true => {
+            let operator = self.previous();
+
+            let right = Expression::Variable(v.clone());
+            let right_type = self.get_expression_type(&right);
+
+            let operator_kind = operator.kind.clone();
+
+            return Ok(Expression::Unary(Unary::new(
+              operator,
+              Box::new(right),
+              self.get_data_type_by_operator(None, right_type, operator_kind),
+              false
+            )));
+          }
+          false => Ok(Expression::Variable(v)),
+        }
+      }
+      e => Ok(e),
+    }
   }
 
   fn call(&mut self) -> ParserResult<Expression> {
@@ -409,7 +439,7 @@ impl Parser {
     if self.match_token(&[TokenType::Break]) {
       return self.break_statement();
     }
-    
+
     if self.match_token(&[TokenType::Continue]) {
       return self.continue_statement();
     }
@@ -422,7 +452,7 @@ impl Parser {
       }
     }
   }
-  
+
   fn continue_statement(&mut self) -> Result<Statement, ParserDiagnosticError> {
     let token = self.previous();
 
@@ -761,7 +791,7 @@ impl Parser {
     self.consume(TokenType::RightParen)?;
 
     let body: Statement = self.statement()?;
-    
+
     Ok(Statement::WhileStatement(WhileStatement::new(
       Box::new(condition),
       Box::new(body),
@@ -769,19 +799,51 @@ impl Parser {
   }
 
   fn for_statement(&mut self) -> Result<Statement, ParserDiagnosticError> {
-
     self.consume(TokenType::LeftParen)?;
 
     self.consume(TokenType::Let)?;
     let item: Token = self.consume(TokenType::Identifier)?;
 
-    let variable = Variable::new(
+    let mut variable = Variable::new(
       Box::new(item.clone()),
       None,
       DataType::Pending,
       VariableMetadata::new(true, false, false, false, false),
     );
 
+    if self.check(TokenType::In) {
+      return self.for_in_statement(variable);
+    }
+
+    self.consume(TokenType::Equal)?;
+
+    let initializer = self.expression()?;
+
+    variable.initializer = Some(Box::new(initializer));
+
+    self.consume(TokenType::SemiColon)?;
+
+    let mut condition: Expression = self.expression()?;
+
+    self.consume(TokenType::SemiColon)?;
+
+    let increment_decrement: Expression = self.expression()?;
+
+    self.consume(TokenType::RightParen)?;
+
+    self.consume(TokenType::LeftBrace)?;
+
+    let body = self.statement()?;
+
+    Ok(Statement::For(For::new(
+      Box::new(variable),
+      Box::new(condition),
+      Box::new(increment_decrement),
+      Box::new(body),
+    )))
+  }
+
+  fn for_in_statement(&mut self, variable: Variable) -> Result<Statement, ParserDiagnosticError> {
     self.consume(TokenType::In)?;
 
     let iterable: Expression = self.expression()?;
@@ -790,7 +852,7 @@ impl Parser {
 
     let body: Statement = self.statement()?;
 
-    let statement = ForIn::new(variable, iterable, body, item);
+    let statement = ForIn::new(variable, iterable, body, self.previous());
 
     Ok(Statement::ForIn(statement))
   }

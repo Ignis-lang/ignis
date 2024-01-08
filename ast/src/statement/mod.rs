@@ -6,7 +6,7 @@ pub mod export;
 pub mod expression;
 pub mod extern_statement;
 pub mod for_in;
-pub mod forof;
+pub mod for_statement;
 pub mod function;
 pub mod if_statement;
 pub mod import;
@@ -19,7 +19,7 @@ use serde_json::json;
 use self::{
   expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
   while_statement::WhileStatement, function::FunctionStatement, return_statement::Return,
-  class::Class, for_in::ForIn, import::Import, break_statement::BreakStatement,
+  class::Class, for_in::ForIn, for_statement::For, import::Import, break_statement::BreakStatement,
   continue_statement::Continue,
 };
 
@@ -35,6 +35,7 @@ pub enum Statement {
   FunctionStatement(FunctionStatement),
   Return(Return),
   Class(Class),
+  For(For),
   ForIn(ForIn),
   Import(Import),
   Break(BreakStatement),
@@ -60,6 +61,7 @@ impl Statement {
       Statement::Continue(continue_statement) => {
         visitor.visit_continue_statement(continue_statement)
       }
+      Statement::For(_) => todo!(),
     }
   }
 
@@ -173,6 +175,7 @@ impl Statement {
             "type": "Continue",
         })
       }
+      Statement::For(_) => todo!(),
     }
   }
 }

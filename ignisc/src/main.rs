@@ -118,6 +118,11 @@ impl App {
   }
 
   fn run(&mut self) -> Result<Vec<CodeResult>, ()> {
+    if self.source.is_empty() {
+      println!("No source code to run");
+      exit(1);
+    }
+
     let mut lexer: Lexer<'_> = Lexer::new(&self.source, self.file_path.clone());
     lexer.scan_tokens();
 

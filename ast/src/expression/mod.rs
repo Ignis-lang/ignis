@@ -76,6 +76,7 @@ impl Expression {
           "operator": unary.operator.span.literal,
           "right": unary.right.to_json(),
           "data_type": unary.data_type.to_string(),
+          "is_prefix": unary.is_prefix
         })
       }
       Expression::Variable(variable) => {
@@ -151,14 +152,16 @@ impl Expression {
         operator,
         right,
         data_type,
+        is_prefix,
       }) => {
         let operator_str = operator.span.literal.clone();
         let right_str = (*right).to_string();
         format!(
-          "({} {}): {}",
+          "({} {}): {} | {}",
           operator_str,
           right_str,
-          data_type.to_string()
+          data_type.to_string(),
+          is_prefix
         )
       }
       Expression::Variable(VariableExpression { name, data_type }) => {

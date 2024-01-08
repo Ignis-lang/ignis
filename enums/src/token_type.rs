@@ -30,19 +30,21 @@ pub enum TokenType {
   ExpressionEnd,       // }
 
   // One or two character tokens
-  Equal,        // =
-  EqualEqual,   // ==
-  Bang,         // !
-  BangEqual,    // !=
-  Greater,      // >
-  GreaterEqual, // >=
-  Less,         // <
-  LessEqual,    // <=
-  Or,           // ||
-  And,          // &&
-  Arrow,        // ->
-  Increment,    // +=
-  Decrement,    // -=
+  Equal,              // =
+  EqualEqual,         // ==
+  Bang,               // !
+  BangEqual,          // !=
+  Greater,            // >
+  GreaterEqual,       // >=
+  Less,               // <
+  LessEqual,          // <=
+  Or,                 // ||
+  And,                // &&
+  Arrow,              // ->
+  IncrementAndAssign, // +=
+  DecrementAndAssign, // -=
+  Increment,          // ++
+  Decrement,          // --
 
   // Separator
   Comma,     // ,
@@ -135,8 +137,10 @@ impl TokenType {
       TokenType::Or => "||".to_string(),
       TokenType::And => "&&".to_string(),
       TokenType::Arrow => "->".to_string(),
-      TokenType::Increment => "+=".to_string(),
-      TokenType::Decrement => "-=".to_string(),
+      TokenType::IncrementAndAssign => "+=".to_string(),
+      TokenType::Increment => "++".to_string(),
+      TokenType::DecrementAndAssign => "-=".to_string(),
+      TokenType::Decrement => "--".to_string(),
       TokenType::Int => "int".to_string(),
       TokenType::Float => "Float".to_string(),
       TokenType::Char => "char".to_string(),
@@ -219,8 +223,8 @@ impl Display for TokenType {
       TokenType::Or => write!(f, "||"),
       TokenType::And => write!(f, "&&"),
       TokenType::Arrow => write!(f, "->"),
-      TokenType::Increment => write!(f, "+="),
-      TokenType::Decrement => write!(f, "-="),
+      TokenType::IncrementAndAssign => write!(f, "+="),
+      TokenType::DecrementAndAssign => write!(f, "-="),
       TokenType::Int => write!(f, "int"),
       TokenType::Float => write!(f, "Float"),
       TokenType::Char => write!(f, "char"),
@@ -273,6 +277,8 @@ impl Display for TokenType {
       TokenType::ExpressionStart => write!(f, "${{"),
       TokenType::ExpressionEnd => write!(f, "}}"),
       TokenType::Continue => write!(f, "continue"),
+      TokenType::Increment => write!(f, "++"),
+      TokenType::Decrement => write!(f, "--"),
     }
   }
 }
