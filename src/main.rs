@@ -1,6 +1,6 @@
 use std::{
   io::{self, Write, BufRead},
-  process::exit,
+  process::{exit, Command, Stdio},
   fs,
 };
 
@@ -60,6 +60,48 @@ impl App {
 
       fs::write(build_path, code).unwrap();
     }
+  }
+
+  pub fn create_c_files(
+    &self,
+    code_results: Vec<CodeResult>,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    for code_result in code_results {
+      let mut path = code_result.file_name.split('/').collect::<Vec<&str>>();
+      let code = code_result.code.clone();
+
+      let name = path.last().unwrap().replace(r".ign", "");
+
+      path.pop();
+
+      fs::create_dir_all(format!("build/{}", path.join("/"))).unwrap();
+
+      let build_path = "build/".to_string() + path.join("/").as_str();
+
+      fs::write(format!("{}/{}.c", &build_path, &name), &code).unwrap();
+
+      let mut child = Command::new("gcc")
+        .args(["-x", "c", "-", "-o", &format!("{}/{}", &build_path, &name)])
+        .stdin(Stdio::piped())
+        .spawn()?;
+
+      {
+        let stdin = child.stdin.as_mut().ok_or("Error getting stdin")?;
+        stdin.write_all(code.as_bytes())?;
+      }
+
+      let output = child.wait_with_output()?;
+
+      if !output.status.success() {
+        eprintln!(
+          "Compilation error: {}",
+          String::from_utf8_lossy(&output.stderr)
+        );
+        return Err("Failed compilation".into());
+      }
+    }
+
+    Ok(())
   }
 
   pub fn run_file(&mut self) -> Result<(), Vec<DiagnosticReport>> {
