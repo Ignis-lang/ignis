@@ -1,5 +1,5 @@
 use enums::data_type::DataType;
-use token::Token;
+use token::token::Token;
 
 use crate::expression::Expression;
 

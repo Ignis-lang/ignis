@@ -1,4 +1,4 @@
-use token::Token;
+use token::token::Token;
 use serde_json::json;
 
 #[derive(Debug, PartialEq, Clone)]

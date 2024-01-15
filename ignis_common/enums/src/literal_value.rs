@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::token_type::TokenType;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -10,17 +12,20 @@ pub enum LiteralValue {
   Null,
 }
 
-impl LiteralValue {
-  pub fn to_string(&self) -> String {
+impl Display for LiteralValue {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      LiteralValue::Boolean(x) => x.to_string(),
-      LiteralValue::Null => "null".to_string(),
-      LiteralValue::Float(x) => x.to_string(),
-      LiteralValue::Int(x) => x.to_string(),
-      LiteralValue::String(x) => x.clone(),
-      LiteralValue::Char(x) => x.to_string(),
+      LiteralValue::Int(x) => write!(f, "{}", x),
+      LiteralValue::Float(x) => write!(f, "{}", x),
+      LiteralValue::Char(x) => write!(f, "{}", x),
+      LiteralValue::String(x) => write!(f, "{}", x),
+      LiteralValue::Boolean(x) => write!(f, "{}", x),
+      LiteralValue::Null => write!(f, "null"),
     }
   }
+}
+
+impl LiteralValue {
   pub fn from_token_type(kind: TokenType, value: String) -> Self {
     match kind {
       TokenType::Int => Self::Int(value.parse().unwrap()),

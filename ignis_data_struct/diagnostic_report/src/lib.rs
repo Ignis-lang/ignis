@@ -4,6 +4,7 @@ pub enum DiagnosticLevel {
   Info,
   Warning,
   Error,
+  Hint
 }
 
 pub struct DiagnosticReport {
@@ -11,8 +12,8 @@ pub struct DiagnosticReport {
   pub token: Box<Token>,
   pub token_line: Vec<Token>,
   pub level: DiagnosticLevel,
-  pub hint: Option<DiagnosticReport>,
-  pub error_code: String, /// Format: I{module}{number}
+  pub hint: Option<Box<DiagnosticReport>>,
+  pub error_code: String, // Format: I{module}{number}
 }
 
 impl DiagnosticReport {
@@ -21,7 +22,7 @@ impl DiagnosticReport {
     token: Box<Token>,
     token_line: Vec<Token>,
     level: DiagnosticLevel,
-    hint: Option<DiagnosticReport>,
+    hint: Option<Box<DiagnosticReport>>,
     error_code: String,
   ) -> Self {
     Self {

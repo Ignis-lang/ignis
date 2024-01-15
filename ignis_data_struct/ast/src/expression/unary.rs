@@ -1,5 +1,5 @@
 use super::Expression;
-use {token::Token, enums::data_type::DataType};
+use {token::token::Token, enums::data_type::DataType};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Unary {

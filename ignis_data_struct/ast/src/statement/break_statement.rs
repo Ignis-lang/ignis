@@ -1,4 +1,4 @@
-use token::Token;
+use token::token::Token;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct BreakStatement {
