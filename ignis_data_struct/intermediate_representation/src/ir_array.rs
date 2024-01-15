@@ -15,4 +15,12 @@ impl IRArray {
       data_type,
     }
   }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "type": "array",
+      "elements": self.elements.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+      "data_type": self.data_type.to_string(),
+    })
+  }
 }

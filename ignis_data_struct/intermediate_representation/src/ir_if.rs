@@ -19,4 +19,17 @@ impl IRIf {
       else_branch,
     }
   }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "type": "if",
+      "condition": self.condition.to_json(),
+      "then_branch": self.then_branch.to_json(),
+      "else_branch": if let Some(else_branch) = &self.else_branch {
+        else_branch.to_json()
+      } else {
+        serde_json::Value::Null
+      },
+    })
+  }
 }

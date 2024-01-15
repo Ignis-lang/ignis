@@ -31,6 +31,17 @@ impl IRVariableMetadata {
       is_declaration,
     }
   }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "is_mutable": self.is_mutable,
+      "is_reference": self.is_reference,
+      "is_parameter": self.is_parameter,
+      "is_function": self.is_function,
+      "is_class": self.is_class,
+      "is_declaration": self.is_declaration,
+    })
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -54,5 +65,19 @@ impl IRVariable {
       value,
       metadata,
     }
+  }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "type": "variable",
+      "name": self.name,
+      "data_type": self.data_type.to_string(),
+      "value": if let Some(v) = &self.value {
+        v.to_json()
+      } else {
+        serde_json::Value::Null
+      },
+      "metadata": self.metadata.to_json(),
+    })
   }
 }

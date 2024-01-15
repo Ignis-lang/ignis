@@ -2,7 +2,7 @@ use std::{vec, collections::HashMap};
 
 use intermediate_representation::{
   {
-    instruction::{IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable},
+    IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable,
     instruction_type::IRInstructionType,
   },
   analyzer_value::AnalyzerValue,
@@ -28,7 +28,7 @@ impl TranspilerToLua {
       code: String::new(),
       statement_exported: vec![],
       statement_imported: HashMap::new(),
-      context: Vec::new(),
+      context: vec![],
     }
   }
 
@@ -72,7 +72,7 @@ impl TranspilerToLua {
         AnalyzerValue::Float(num) => num.to_string(),
         AnalyzerValue::Boolean(boolean) => boolean.to_string(),
         AnalyzerValue::Return(r) => r.to_string(),
-        AnalyzerValue::Function(f) => f.name.span.literal.clone(),
+        AnalyzerValue::Function(f) => f.name.clone(),
         AnalyzerValue::Null | AnalyzerValue::None => "nil".to_string(),
       }),
       IRInstruction::Binary(binary) => {
@@ -136,14 +136,11 @@ impl TranspilerToLua {
 
         code.push_str(&self.transpile_ir_to_lua(&ir_while.body, indent_level + 2));
 
-        match self.context.last().unwrap() {
-          TranspilerContext::Continue(l) => {
-            if **l == TranspilerContext::While {
-              code.push_str(&format!("{}::continue::\n", " ".repeat(indent_level)));
-              self.context.pop();
-            }
+        if let TranspilerContext::Continue(l) = self.context.last().unwrap() {
+          if **l == TranspilerContext::While {
+            code.push_str(&format!("{}::continue::\n", " ".repeat(indent_level)));
+            self.context.pop();
           }
-          _ => (),
         };
 
         code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
@@ -188,14 +185,11 @@ impl TranspilerToLua {
 
         code.push_str(&self.transpile_ir_to_lua(&for_in.body, indent_level + 2));
 
-        match self.context.last().unwrap() {
-          TranspilerContext::Continue(l) => {
-            if **l == TranspilerContext::While {
-              code.push_str(&format!("{}::continue::\n", " ".repeat(indent_level)));
-              self.context.pop();
-            }
+        if let TranspilerContext::Continue(l) = self.context.last().unwrap() {
+          if **l == TranspilerContext::While {
+            code.push_str(&format!("{}::continue::\n", " ".repeat(indent_level)));
+            self.context.pop();
           }
-          _ => (),
         };
 
         code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
@@ -216,7 +210,7 @@ impl TranspilerToLua {
       }
       IRInstruction::Import(import) => {
         if !import.path.contains("std:") {
-          let module_path = import.path.split("/").collect::<Vec<&str>>();
+          let module_path = import.path.split('/').collect::<Vec<&str>>();
           let module_name = module_path.last().unwrap().to_string();
 
           for (name, alias) in &import.name {
@@ -365,7 +359,7 @@ impl TranspilerToLua {
         call
           .arguments
           .iter()
-          .map(|f| self.transpile_ir_to_lua(&f, indent_level))
+          .map(|f| self.transpile_ir_to_lua(f, indent_level))
           .collect::<Vec<String>>()
           .join(", ")
       ));
@@ -380,12 +374,12 @@ impl TranspilerToLua {
       call
         .arguments
         .iter()
-        .map(|f| self.transpile_ir_to_lua(&f, indent_level))
+        .map(|f| self.transpile_ir_to_lua(f, indent_level))
         .collect::<Vec<String>>()
         .join(", ")
     ));
 
-    code.push_str("\n");
+    code.push('\n');
 
     code
   }
@@ -405,7 +399,13 @@ impl TranspilerToLua {
         var_value
       )
     } else {
-      format!("{}", variable.name)
+      variable.name.clone()
     }
   }
+}
+
+impl Default for TranspilerToLua {
+    fn default() -> Self {
+        Self::new()
+    }
 }

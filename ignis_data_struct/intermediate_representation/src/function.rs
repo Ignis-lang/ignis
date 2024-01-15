@@ -19,6 +19,15 @@ impl IRFunctionMetadata {
       is_extern,
     }
   }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "is_recursive": self.is_recursive,
+      "is_exported": self.is_exported,
+      "is_imported": self.is_imported,
+      "is_extern": self.is_extern,
+    })
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -45,5 +54,18 @@ impl IRFunction {
       body,
       metadata,
     }
+  }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "name": self.name,
+      "parameters": self.parameters.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+      "return_type": self.return_type.to_string(),
+      "body": match &self.body {
+        Some(body) => body.to_json(),
+        None => serde_json::json!(null),
+      },
+      "metadata": self.metadata.to_json(),
+    })
   }
 }

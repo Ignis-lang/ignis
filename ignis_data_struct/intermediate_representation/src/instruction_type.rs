@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use enums::token_type::TokenType;
 
 #[derive(Debug, Clone)]
@@ -22,30 +24,32 @@ pub enum IRInstructionType {
   Concatenate,
 }
 
-impl IRInstructionType {
-  pub fn to_string(&self) -> String {
+impl Display for IRInstructionType {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      IRInstructionType::Add => String::from("add"),
-      IRInstructionType::Sub => String::from("sub"),
-      IRInstructionType::Mul => String::from("mul"),
-      IRInstructionType::Div => String::from("div"),
-      IRInstructionType::GreaterEqual => String::from("greater_equal"),
-      IRInstructionType::Greater => String::from("greater"),
-      IRInstructionType::LessEqual => String::from("less_equal"),
-      IRInstructionType::Less => String::from("less"),
-      IRInstructionType::Equal => String::from("equal"),
-      IRInstructionType::NotEqual => String::from("not_equal"),
-      IRInstructionType::And => String::from("and"),
-      IRInstructionType::Or => String::from("or"),
-      IRInstructionType::Not => String::from("not"),
-      IRInstructionType::Assign => String::from("assign"),
-      IRInstructionType::AssignAdd => String::from("assign_add"),
-      IRInstructionType::AssignSub => String::from("assign_sub"),
-      IRInstructionType::Mod => String::from("mod"),
-      IRInstructionType::Concatenate => String::from("concatenate"),
+      IRInstructionType::Add => write!(f, "add"),
+      IRInstructionType::Sub => write!(f, "sub"),
+      IRInstructionType::Mul => write!(f, "mul"),
+      IRInstructionType::Div => write!(f, "div"),
+      IRInstructionType::GreaterEqual => write!(f, "greater_equal"),
+      IRInstructionType::Greater => write!(f, "greater"),
+      IRInstructionType::LessEqual => write!(f, "less_equal"),
+      IRInstructionType::Less => write!(f, "less"),
+      IRInstructionType::Equal => write!(f, "equal"),
+      IRInstructionType::NotEqual => write!(f, "not_equal"),
+      IRInstructionType::And => write!(f, "and"),
+      IRInstructionType::Or => write!(f, "or"),
+      IRInstructionType::Not => write!(f, "not"),
+      IRInstructionType::Assign => write!(f, "assign"),
+      IRInstructionType::AssignAdd => write!(f, "assign_add"),
+      IRInstructionType::AssignSub => write!(f, "assign_sub"),
+      IRInstructionType::Mod => write!(f, "mod"),
+      IRInstructionType::Concatenate => write!(f, "concatenate"),
     }
   }
+}
 
+impl IRInstructionType {
   pub fn from_token_kind(kind: &TokenType) -> Self {
     match kind {
       TokenType::Plus => IRInstructionType::Add,

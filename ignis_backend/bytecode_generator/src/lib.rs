@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Display};
 
 pub mod debug;
 
-use intermediate_representation ::{instruction::IRInstruction, analyzer_value::AnalyzerValue};
+use intermediate_representation::{IRInstruction, analyzer_value::AnalyzerValue};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OpCode {

@@ -1,12 +1,35 @@
-pub mod analyzer_error;
-pub mod analyzer_value;
-pub mod debug;
-pub mod ir;
-
+mod diagnostic;
 use std::{collections::HashMap, vec, fs};
 
-use analyzer_error::AnalyzerDiagnosticError;
-use analyzer_value::AnalyzerValue;
+use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
+use diagnostic_report::DiagnosticReport;
+use intermediate_representation::{
+  analyzer_value::AnalyzerValue,
+  IRInstruction,
+  binary::IRBinary,
+  logical::IRLogical,
+  literal::IRLiteral,
+  unary::IRUnary,
+  function::{IRFunction, IRFunctionMetadata},
+  variable::{IRVariable, IRVariableMetadata},
+  block::IRBlock,
+  assign::IRAssign,
+  ternary::IRTernary,
+  call::IRCall,
+  ir_if::IRIf,
+  ir_while::IRWhile,
+  ir_return::IRReturn,
+  ir_for_in::IRForIn,
+  ir_array::IRArray,
+  import::IRImport,
+  ir_break::IRBreak,
+  ir_continue::IRContinue,
+  instruction_type::IRInstructionType,
+};
+
+use lexer::Lexer;
+use token::token;
+
 use ast::{
   visitor::Visitor,
   expression::{
@@ -27,38 +50,15 @@ use ast::{
     for_in::ForIn,
     import::Import,
     break_statement::BreakStatement,
-    continue_statement::Continue, for_statement::For,
+    continue_statement::Continue,
+    for_statement::For,
   },
 };
 use enums::{data_type::DataType, token_type::TokenType};
-use ir::{
-  instruction::{
-    IRInstruction,
-    binary::IRBinary,
-    logical::IRLogical,
-    literal::IRLiteral,
-    unary::IRUnary,
-    function::{IRFunction, IRFunctionMetadata},
-    variable::{IRVariable, IRVariableMetadata},
-    block::IRBlock,
-    assign::IRAssign,
-    ternary::IRTernary,
-    call::IRCall,
-    ir_if::IRIf,
-    ir_while::IRWhile,
-    ir_return::IRReturn,
-    ir_for_in::IRForIn,
-    ir_array::IRArray,
-    import::IRImport,
-    ir_break::IRBreak,
-    ir_continue::IRContinue,
-  },
-  instruction_type::IRInstructionType,
-};
-use lexer::{Lexer, token::Token};
 use parser::Parser;
+use ::token::token::Token;
 
-pub type AnalyzerResult = Result<IRInstruction, AnalyzerDiagnosticError>;
+pub type AnalyzerResult = Result<IRInstruction, Box<AnalyzerDiagnostic>>;
 type CheckCompatibility<T> = (bool, T);
 
 enum AnalyzerContext {
@@ -72,8 +72,9 @@ enum AnalyzerContext {
 
 pub struct Analyzer {
   pub irs: HashMap<String, Vec<IRInstruction>>,
+  tokens: Vec<Token>,
   pub block_stack: Vec<HashMap<String, bool>>,
-  pub diagnostics: Vec<AnalyzerDiagnosticError>,
+  pub diagnostics: Vec<Box<AnalyzerDiagnostic>>,
   pub scopes_variables: Vec<IRVariable>,
   pub current_function: Option<IRFunction>,
   pub current_file: String,
@@ -82,8 +83,8 @@ pub struct Analyzer {
 
 impl Visitor<AnalyzerResult> for Analyzer {
   fn visit_binary_expression(&mut self, expression: &Binary) -> AnalyzerResult {
-    let left = self.analyzer(&*expression.left)?;
-    let right = self.analyzer(&*expression.right)?;
+    let left = self.analyzer(&expression.left)?;
+    let right = self.analyzer(&expression.right)?;
     let operator = expression.operator.clone();
     let instruction_type = if operator.kind == TokenType::Plus {
       if self.extract_data_type(&left) == DataType::String
@@ -102,11 +103,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let right_type = self.extract_data_type(&right);
 
     if !result {
-      return Err(AnalyzerDiagnosticError::TypeMismatch(
-        left_type,
-        right_type,
-        operator.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::TypeMismatch(left_type, right_type, operator.clone()),
+        self.find_token_line(&operator.span.line),
+      )));
     }
 
     let instruction = IRInstruction::Binary(IRBinary::new(
@@ -132,15 +132,16 @@ impl Visitor<AnalyzerResult> for Analyzer {
   }
 
   fn visit_unary_expression(&mut self, expression: &Unary) -> AnalyzerResult {
-    let right = self.analyzer(&*expression.right)?;
+    let right = self.analyzer(&expression.right)?;
     let instruction_type = IRInstructionType::from_token_kind(&expression.operator.kind);
 
     if !self.are_types_unary_compatible(&right, &instruction_type) {
       let right_type = self.extract_data_type(&right);
-      return Err(AnalyzerDiagnosticError::TypeMismatchUnary(
-        right_type,
-        expression.operator.clone(),
-      ));
+
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::TypeMismatchUnary(right_type, expression.operator.clone()),
+        self.find_token_line(&expression.operator.span.line),
+      )));
     }
 
     let instruction = IRInstruction::Unary(IRUnary::new(
@@ -154,13 +155,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
   fn visit_variable_expression(&mut self, variable: &VariableExpression) -> AnalyzerResult {
     if self.block_stack.is_empty() {
-      return Err(AnalyzerDiagnosticError::UndeclaredVariable(
-        variable.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
+        self.find_token_line(&variable.name.span.line),
+      )));
     }
 
     let irs = &self.irs.get(&self.current_file).unwrap();
-    let is_function = irs.into_iter().find(|ir| match ir {
+    let is_function = irs.iter().find(|ir| match ir {
       IRInstruction::Function(f) => f.name == variable.name.span.literal,
       _ => false,
     });
@@ -187,25 +189,34 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     if let Some(block) = env {
       if block.get(&variable.name.span.literal).is_none() {
-        return Err(AnalyzerDiagnosticError::UndeclaredVariable(
-          variable.clone(),
-        ));
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
+          self.find_token_line(&variable.name.span.line),
+        )));
       }
 
       let is_declared = *block.get(variable.name.span.literal.as_str()).unwrap();
 
       if !is_declared {
-        return Err(AnalyzerDiagnosticError::UndeclaredVariable(
-          variable.clone(),
-        ));
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
+          self.find_token_line(&variable.name.span.line),
+        )));
       }
 
-      let mut variable = self
+      let mut variable = match self
         .scopes_variables
         .iter()
         .find(|v| v.name == variable.name.span.literal)
-        .unwrap()
-        .clone();
+      {
+        Some(v) => v.clone(),
+        None => {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
+            self.find_token_line(&variable.name.span.line),
+          )))
+        }
+      };
 
       variable.metadata.is_declaration = false;
 
@@ -213,9 +224,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
       Ok(instruction)
     } else {
-      Err(AnalyzerDiagnosticError::UndeclaredVariable(
-        variable.clone(),
-      ))
+      Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
+        self.find_token_line(&variable.name.span.line),
+      )))
     }
   }
 
@@ -228,15 +240,16 @@ impl Visitor<AnalyzerResult> for Analyzer {
         .get(&expression.name.span.literal)
         .is_none()
     {
-      return Err(AnalyzerDiagnosticError::UndefinedVariable(
-        expression.name.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedVariable(expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
     }
 
     let value = self.analyzer(&expression.value)?;
     let current_block = self.block_stack.last().unwrap();
 
-    let env = current_block.into_iter().find(|(name, is_declared)| {
+    let env = current_block.iter().find(|(name, is_declared)| {
       name.as_str() == expression.name.span.literal.as_str() && **is_declared
     });
 
@@ -255,14 +268,16 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
         Ok(instruction)
       } else {
-        Err(AnalyzerDiagnosticError::InvalidReassignedVariable(
-          expression.name.span.clone(),
-        ))
+        Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::InvalidReassignedVariable(expression.name.clone()),
+          self.find_token_line(&expression.name.span.line),
+        )))
       }
     } else {
-      Err(AnalyzerDiagnosticError::UndefinedVariable(
-        expression.name.clone(),
-      ))
+      Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedVariable(expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )))
     }
   }
 
@@ -275,11 +290,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
     match instruction_type {
       IRInstructionType::And | IRInstructionType::Or => {
         if !self.are_types_logical_compatibel(&left, &right, &instruction_type) {
-          return Err(AnalyzerDiagnosticError::TypeMismatch(
-            self.extract_data_type(&left),
-            self.extract_data_type(&right),
-            expression.operator.clone(),
-          ));
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::TypeMismatch(
+              self.extract_data_type(&left),
+              self.extract_data_type(&right),
+              expression.operator.clone(),
+            ),
+            self.find_token_line(&expression.operator.span.line),
+          )));
         }
 
         let instruction = IRInstruction::Logical(IRLogical::new(
@@ -290,16 +308,17 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
         Ok(instruction)
       }
-      _ => Err(AnalyzerDiagnosticError::InvalidOperator(
-        expression.operator.clone(),
-      )),
+      _ => Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::InvalidOperator(expression.operator.clone()),
+        self.find_token_line(&expression.operator.span.line),
+      ))),
     }
   }
 
   fn visit_ternary_expression(&mut self, expression: &Ternary) -> AnalyzerResult {
-    let condition = self.analyzer(&*expression.condition)?;
-    let then_branch = self.analyzer(&*expression.then_branch)?;
-    let else_branch = self.analyzer(&*expression.else_branch)?;
+    let condition = self.analyzer(&expression.condition)?;
+    let then_branch = self.analyzer(&expression.then_branch)?;
+    let else_branch = self.analyzer(&expression.else_branch)?;
 
     Ok(IRInstruction::Ternary(IRTernary::new(
       Box::new(condition),
@@ -314,26 +333,30 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let function = match calle {
       IRInstruction::Function(f) => Some(f),
       _ => {
-        return Err(AnalyzerDiagnosticError::NotCallable(
-          expression.paren.clone(),
-        ))
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotCallable(expression.paren.clone()),
+          self.find_token_line(&expression.paren.span.line),
+        )))
       }
     };
 
     let function = function.unwrap();
 
     if function.parameters.len() != expression.arguments.len() {
-      return Err(AnalyzerDiagnosticError::InvalidNumberOfArguments(
-        function.parameters.len(),
-        expression.arguments.len(),
-        expression.paren.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::InvalidNumberOfArguments(
+          function.parameters.len(),
+          expression.arguments.len(),
+          expression.paren.clone(),
+        ),
+        self.find_token_line(&expression.paren.span.line),
+      )));
     }
 
     let mut arguments = Vec::<IRInstruction>::new();
 
     for (i, arg) in expression.arguments.iter().enumerate() {
-      let arg_type = self.analyzer(&arg)?;
+      let arg_type = self.analyzer(arg)?;
 
       let kind = match &arg_type {
         IRInstruction::Literal(l) => l.value.to_data_type(),
@@ -350,26 +373,27 @@ impl Visitor<AnalyzerResult> for Analyzer {
       if kind != function.parameters[i].data_type
         && function.parameters[i].data_type != DataType::None
       {
-        return Err(AnalyzerDiagnosticError::ArgumentTypeMismatch(
-          function.parameters[i].data_type.clone(),
-          kind,
-          expression.paren.clone(),
-        ));
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::ArgumentTypeMismatch(
+            function.parameters[i].data_type.clone(),
+            kind,
+            expression.paren.clone(),
+          ),
+          self.find_token_line(&expression.paren.span.line),
+        )));
       }
 
-      match &arg_type {
-        IRInstruction::Variable(v) => {
-          if !v.metadata.is_mutable && function.parameters[i].metadata.is_mutable {
-            return Err(
-              AnalyzerDiagnosticError::ImmutableVariableAsMutableParameter(
-                function.parameters[i].name.clone(),
-                v.name.clone(),
-                expression.paren.clone(),
-              ),
-            );
-          }
+      if let IRInstruction::Variable(v) = &arg_type {
+        if !v.metadata.is_mutable && function.parameters[i].metadata.is_mutable {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::ImmutableVariableAsMutableParameter(
+              function.parameters[i].name.clone(),
+              v.name.clone(),
+              expression.paren.clone(),
+            ),
+            self.find_token_line(&expression.paren.span.line),
+          )));
         }
-        _ => (),
       };
 
       arguments.push(arg_type);
@@ -396,9 +420,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let first_type = element_types.first().unwrap_or(&DataType::None);
 
     if !element_types.iter().all(|t| t == first_type) {
-      return Err(AnalyzerDiagnosticError::ArrayElementTypeMismatch(
-        expression.token.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::ArrayElementTypeMismatch(expression.token.clone()),
+        self.find_token_line(&expression.token.span.line),
+      )));
     }
 
     let instruction = IRInstruction::Array(IRArray::new(
@@ -414,13 +439,23 @@ impl Visitor<AnalyzerResult> for Analyzer {
   }
 
   fn visit_variable_statement(&mut self, variable: &Variable) -> AnalyzerResult {
+    if self.is_allready_declared(&variable.name.span.literal) {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::VariableAlreadyDefined(
+          variable.name.span.literal.clone(),
+          *variable.name.clone(),
+        ),
+        self.find_token_line(&variable.name.span.line),
+      )));
+    }
+
     self.declare(&variable.name.span.literal);
 
     let mut value = IRInstruction::Literal(IRLiteral::new(AnalyzerValue::Null));
     let data_type = variable.type_annotation.clone();
 
     if let Some(initializer) = &variable.initializer {
-      let expression = self.analyzer(&initializer)?;
+      let expression = self.analyzer(initializer)?;
       match expression {
         IRInstruction::Literal(literal) => {
           value = IRInstruction::Literal(literal);
@@ -532,10 +567,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let mut parameters = Vec::<IRVariable>::new();
 
     if self.is_allready_declared(&statement.name.span.literal) {
-      return Err(AnalyzerDiagnosticError::FunctionAlreadyDefined(
-        statement.name.span.literal.clone(),
-        statement.name.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::FunctionAlreadyDefined(
+          statement.name.span.literal.clone(),
+          statement.name.clone(),
+        ),
+        self.find_token_line(&statement.name.span.line),
+      )));
     }
 
     self.declare(&statement.name.span.literal);
@@ -568,11 +606,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       .annotations
       .clone()
       .into_iter()
-      .find(|a| match a {
-        FunctionDecorator::Extern(_) => true,
-        _ => false,
-      })
-      .is_some();
+      .any(|a| matches!(&a, FunctionDecorator::Extern(_)));
 
     let mut current_function = IRFunction::new(
       statement.name.span.literal.clone(),
@@ -613,18 +647,16 @@ impl Visitor<AnalyzerResult> for Analyzer {
   }
 
   fn visit_return_statement(&mut self, statement: &Return) -> AnalyzerResult {
-    if self
-      .context
-      .iter()
-      .find(|context| match context {
-        AnalyzerContext::Function | AnalyzerContext::Method => true,
-        _ => false,
-      })
-      .is_none()
-    {
-      return Err(AnalyzerDiagnosticError::ReturnOutsideFunction(
-        *statement.keyword.clone(),
-      ));
+    if !self.context.iter().any(|context| {
+      matches!(
+        &context,
+        AnalyzerContext::Function | AnalyzerContext::Method
+      )
+    }) {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::ReturnOutsideFunction(*statement.keyword.clone()),
+        self.find_token_line(&statement.keyword.span.line),
+      )));
     }
 
     let value = &statement.value;
@@ -637,7 +669,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       return Ok(instruction);
     }
 
-    let value = self.analyzer(&value.as_ref().unwrap())?;
+    let value = self.analyzer(value.as_ref().unwrap())?;
     let data_type = self.extract_data_type(&value);
 
     let instruction = IRInstruction::Return(IRReturn::new(Box::new(value), data_type));
@@ -652,13 +684,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
   fn visit_for_in_statement(&mut self, statement: &ForIn) -> AnalyzerResult {
     self.declare(&statement.variable.name.span.literal);
 
-    let iterable = self.analyzer(&*statement.iterable)?;
+    let iterable = self.analyzer(&statement.iterable)?;
     let data_type = self.extract_data_type(&iterable);
 
     if !self.is_iterable(&iterable) {
-      return Err(AnalyzerDiagnosticError::NotIterable(
-        statement.token.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::NotIterable(statement.token.clone()),
+        self.find_token_line(&statement.token.span.line),
+      )));
     }
 
     self.begin_scope();
@@ -716,30 +749,32 @@ impl Visitor<AnalyzerResult> for Analyzer {
   }
 
   fn visit_break_statement(&mut self, statement: &BreakStatement) -> AnalyzerResult {
-    let is_loop = self.context.iter().find(|context| match context {
-      AnalyzerContext::Loop | AnalyzerContext::Switch => true,
-      _ => false,
-    });
+    let is_loop = self
+      .context
+      .iter()
+      .find(|context| matches!(context, AnalyzerContext::Loop | AnalyzerContext::Switch));
 
     if is_loop.is_none() {
-      return Err(AnalyzerDiagnosticError::BreakOutsideLoop(
-        statement.token.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::BreakOutsideLoop(statement.token.clone()),
+        self.find_token_line(&statement.token.span.line),
+      )));
     }
 
     Ok(IRInstruction::Break(IRBreak::new(statement.token.clone())))
   }
 
   fn visit_continue_statement(&mut self, statement: &Continue) -> AnalyzerResult {
-    let is_loop = self.context.iter().find(|context| match context {
-      AnalyzerContext::Loop => true,
-      _ => false,
-    });
+    let is_loop = self
+      .context
+      .iter()
+      .find(|context| matches!(context, AnalyzerContext::Loop));
 
     if is_loop.is_none() {
-      return Err(AnalyzerDiagnosticError::ContinueOutsideLoop(
-        statement.token.clone(),
-      ));
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::ContinueOutsideLoop(statement.token.clone()),
+        self.find_token_line(&statement.token.span.line),
+      )));
     }
 
     Ok(IRInstruction::Continue(IRContinue::new(
@@ -747,16 +782,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
     )))
   }
 
-  fn visit_for_statement(
-    &mut self,
-    statement: &For,
-  ) -> AnalyzerResult {
+  fn visit_for_statement(&mut self, _statement: &For) -> AnalyzerResult {
     todo!()
   }
 }
 
 impl Analyzer {
-  pub fn new(current_file: String) -> Self {
+  pub fn new(current_file: String, tokens: Vec<Token>) -> Self {
     let mut irs = HashMap::new();
     let block_stack: HashMap<String, bool> = HashMap::new();
 
@@ -764,6 +796,7 @@ impl Analyzer {
 
     Self {
       irs,
+      tokens,
       diagnostics: Vec::new(),
       block_stack: vec![block_stack],
       scopes_variables: Vec::new(),
@@ -773,16 +806,37 @@ impl Analyzer {
     }
   }
 
-  pub fn analyze(&mut self, statements: &Vec<Statement>) {
+  fn find_token_line(&self, line: &usize) -> Vec<Token> {
+    self
+      .tokens
+      .clone()
+      .into_iter()
+      .filter(|t| t.span.line == *line)
+      .collect::<Vec<Token>>()
+  }
+
+  pub fn analyze(&mut self, statements: &Vec<Statement>) -> Result<(), Vec<DiagnosticReport>> {
     for statement in statements {
       match self.analyze_statement(statement) {
         Ok(ir) => {
-          let mut current_ir = self.irs.get_mut(&self.current_file).unwrap();
+          let current_ir = self.irs.get_mut(&self.current_file).unwrap();
           current_ir.push(ir.clone());
         }
         Err(e) => self.diagnostics.push(e),
       }
     }
+
+    if !self.diagnostics.is_empty() {
+      let mut reports = Vec::<DiagnosticReport>::new();
+
+      for diagnostic in &self.diagnostics {
+        reports.push(diagnostic.report_diagnostic());
+      }
+
+      return Err(reports);
+    }
+
+    Ok(())
   }
 
   fn analyzer(&mut self, expression: &Expression) -> AnalyzerResult {
@@ -803,18 +857,18 @@ impl Analyzer {
     self.block_stack.pop().unwrap();
   }
 
-  fn declare(&mut self, name: &String) {
+  fn declare(&mut self, name: &str) {
     if self.block_stack.is_empty() {
       return;
     }
 
     let current_block = self.block_stack.last_mut().unwrap();
 
-    current_block.insert(name.clone(), false);
+    current_block.insert(name.to_string(), false);
   }
 
   fn resolve_std_import(&mut self, lib: String, block_stack: &mut HashMap<String, bool>) {
-    let mut current_ir = self.irs.get_mut(&self.current_file).unwrap();
+    let current_ir = self.irs.get_mut(&self.current_file).unwrap();
     match lib.clone().as_str() {
       "std:io" => {
         current_ir.push(IRInstruction::Function(IRFunction::new(
@@ -856,32 +910,32 @@ impl Analyzer {
     &mut self,
     statement: &Import,
     block_stack: &mut HashMap<String, bool>,
-  ) -> Result<(), AnalyzerDiagnosticError> {
-    let mut analyzer = Analyzer::new(statement.module_path.span.literal.clone());
+  ) -> Result<(), Box<AnalyzerDiagnostic>> {
+    let mut analyzer = Analyzer::new(statement.module_path.span.literal.clone(), Vec::new());
     match fs::read_to_string(format!("{}.{}", statement.module_path.span.literal, "ign")) {
       Ok(source) => {
         let mut lexer: Lexer<'_> = Lexer::new(&source, statement.module_path.span.literal.clone());
         lexer.scan_tokens();
 
+        analyzer.tokens = lexer.tokens.clone();
+
         let mut parser: Parser = Parser::new(lexer.tokens);
         let statements = parser.parse();
 
-        match statements {
-          Ok(parser_reult) => {
-            analyzer.analyze(&parser_reult);
-          }
-          Err(_) => {}
+        if let Ok(parser_reult) = statements {
+          analyzer.analyze(&parser_reult);
         }
       }
       Err(_) => {
-        return Err(AnalyzerDiagnosticError::ModuleNotFound(
-          statement.module_path.clone(),
-        ))
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::ModuleNotFound(statement.module_path.clone()),
+          self.find_token_line(&statement.module_path.span.line),
+        )))
       }
     };
 
     analyzer.diagnostics.iter().for_each(|d| {
-      self.diagnostics.push(d.clone());
+      self.diagnostics.push(Box::new(*d.clone()));
     });
 
     let current_ir = analyzer
@@ -907,54 +961,52 @@ impl Analyzer {
     statement: &Import,
     ir: IRInstruction,
     block_stack: &mut HashMap<String, bool>,
-  ) -> Result<(), AnalyzerDiagnosticError> {
-    let mut current_ir = self.irs.get_mut(&self.current_file).unwrap();
+  ) -> Result<(), Box<AnalyzerDiagnostic>> {
+    let current_ir = self.irs.get_mut(&self.current_file).unwrap();
 
-    match ir {
-      IRInstruction::Function(f) => {
-        for symbol in &statement.symbols {
-          if symbol.name.span.literal == f.name && !f.metadata.is_exported {
-            return Err(AnalyzerDiagnosticError::ImportedFunctionIsNotExported(
-              symbol.name.clone(),
-            ));
-          }
+    if let IRInstruction::Function(f) = ir {
+      for symbol in &statement.symbols {
+        if symbol.name.span.literal == f.name && !f.metadata.is_exported {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::ImportedFunctionIsNotExported(symbol.name.clone()),
+            self.find_token_line(&symbol.name.span.line),
+          )));
+        }
 
-          if symbol.name.span.literal == f.name && f.metadata.is_exported {
-            let mut metadata = f.metadata.clone();
-            metadata.is_imported = true;
-            if symbol.alias.is_some() {
-              block_stack.insert(symbol.alias.as_ref().unwrap().span.literal.clone(), true);
-              current_ir.push(
-                IRInstruction::Function(IRFunction::new(
-                  symbol.alias.as_ref().unwrap().span.literal.clone(),
-                  f.parameters.clone(),
-                  f.return_type.clone(),
-                  f.body.clone(),
-                  metadata,
-                ))
-                .clone(),
-              );
-            } else {
-              block_stack.insert(symbol.name.span.literal.clone(), true);
-              metadata.is_exported = false;
-              current_ir.push(
-                IRInstruction::Function(IRFunction::new(
-                  symbol.name.span.literal.clone(),
-                  f.parameters.clone(),
-                  f.return_type.clone(),
-                  f.body.clone(),
-                  metadata,
-                ))
-                .clone(),
-              );
-            }
+        if symbol.name.span.literal == f.name && f.metadata.is_exported {
+          let mut metadata = f.metadata.clone();
+          metadata.is_imported = true;
+          if symbol.alias.is_some() {
+            block_stack.insert(symbol.alias.as_ref().unwrap().span.literal.clone(), true);
+            current_ir.push(
+              IRInstruction::Function(IRFunction::new(
+                symbol.alias.as_ref().unwrap().span.literal.clone(),
+                f.parameters.clone(),
+                f.return_type.clone(),
+                f.body.clone(),
+                metadata,
+              ))
+              .clone(),
+            );
+          } else {
+            block_stack.insert(symbol.name.span.literal.clone(), true);
+            metadata.is_exported = false;
+            current_ir.push(
+              IRInstruction::Function(IRFunction::new(
+                symbol.name.span.literal.clone(),
+                f.parameters.clone(),
+                f.return_type.clone(),
+                f.body.clone(),
+                metadata,
+              ))
+              .clone(),
+            );
           }
         }
       }
-      _ => {}
     };
 
-    return Ok(());
+    Ok(())
   }
 
   fn is_allready_declared(&self, name: &String) -> bool {
@@ -967,30 +1019,30 @@ impl Analyzer {
     current_block.get(name).is_some()
   }
 
-  fn define(&mut self, name: &String) {
+  fn define(&mut self, name: &str) {
     if self.block_stack.is_empty() {
       return;
     }
 
     let current_block = self.block_stack.last_mut().unwrap();
 
-    current_block.insert(name.clone(), true);
+    current_block.insert(name.to_string(), true);
   }
 
-  fn define_parameter(&mut self, name: &String) {
+  fn define_parameter(&mut self, name: &str) {
     if self.block_stack.is_empty() {
       return;
     }
 
     let current_block = self.block_stack.last_mut().unwrap();
 
-    current_block.insert(name.clone(), true);
+    current_block.insert(name.to_string(), true);
   }
 
   fn _find_function_in_ir(&self, name: String) -> Option<IRFunction> {
     let irs = self.irs.get(&self.current_file).unwrap();
 
-    let function = irs.into_iter().find(|ir| match ir {
+    let function = irs.iter().find(|ir| match ir {
       IRInstruction::Function(f) => f.name == name,
       _ => false,
     });
@@ -1008,7 +1060,8 @@ impl Analyzer {
     operator: &IRInstructionType,
   ) -> bool {
     match operator {
-      IRInstructionType::And | IRInstructionType::Or => match (left, right) {
+      IRInstructionType::And | IRInstructionType::Or => matches!(
+        (left, right),
         (
           IRInstruction::Literal(IRLiteral {
             value: AnalyzerValue::Boolean(_),
@@ -1016,9 +1069,8 @@ impl Analyzer {
           IRInstruction::Literal(IRLiteral {
             value: AnalyzerValue::Boolean(_),
           }),
-        ) => true,
-        _ => false,
-      },
+        )
+      ),
       _ => false,
     }
   }
@@ -1029,33 +1081,28 @@ impl Analyzer {
     operator: &IRInstructionType,
   ) -> bool {
     match operator {
-      IRInstructionType::Sub => match right {
+      IRInstructionType::Sub => matches!(
+        right,
         IRInstruction::Literal(IRLiteral {
           value: AnalyzerValue::Int(_),
-        })
-        | IRInstruction::Literal(IRLiteral {
+        }) | IRInstruction::Literal(IRLiteral {
           value: AnalyzerValue::Float(_),
-        }) => true,
-        _ => false,
-      },
-      IRInstructionType::Not => match right {
+        })
+      ),
+      IRInstructionType::Not => matches!(
+        right,
         IRInstruction::Literal(IRLiteral {
           value: AnalyzerValue::Boolean(_),
-        })
-        | IRInstruction::Literal(IRLiteral {
+        }) | IRInstruction::Literal(IRLiteral {
           value: AnalyzerValue::Int(_),
-        })
-        | IRInstruction::Literal(IRLiteral {
+        }) | IRInstruction::Literal(IRLiteral {
           value: AnalyzerValue::String(_),
-        })
-        | IRInstruction::Literal(IRLiteral {
+        }) | IRInstruction::Literal(IRLiteral {
           value: AnalyzerValue::Float(_),
-        })
-        | IRInstruction::Literal(IRLiteral {
+        }) | IRInstruction::Literal(IRLiteral {
           value: AnalyzerValue::Null,
-        }) => true,
-        _ => false,
-      },
+        })
+      ),
       _ => false,
     }
   }
@@ -1068,7 +1115,7 @@ impl Analyzer {
       IRInstruction::Binary(b) => b.data_type.clone(),
       IRInstruction::Unary(u) => u.data_type.clone(),
       IRInstruction::Logical(_) => DataType::Boolean,
-      IRInstruction::Assign(a) => self.extract_data_type(&*a.value.clone()),
+      IRInstruction::Assign(a) => self.extract_data_type(&a.value.clone()),
       IRInstruction::Call(c) => c.return_type.clone(),
       IRInstruction::Return(r) => r.data_type.clone(),
       IRInstruction::Array(array) => array.data_type.clone(),
@@ -1194,10 +1241,7 @@ impl Analyzer {
 
   fn is_iterable(&self, iterable: &IRInstruction) -> bool {
     match iterable {
-      IRInstruction::Variable(var) => match var.data_type {
-        DataType::Array(_) => true,
-        _ => false,
-      },
+      IRInstruction::Variable(var) => matches!(var.data_type, DataType::Array(_)),
       _ => false,
     }
   }

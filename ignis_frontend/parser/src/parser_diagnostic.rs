@@ -2,6 +2,7 @@ use diagnostic_report::{DiagnosticReport, DiagnosticLevel};
 use enums::token_type::TokenType;
 use token::token::Token;
 
+#[derive(Debug, Clone)]
 pub enum ParserDiagnosticError {
   ExpectedExpression(Token),
   ExpectedToken(TokenType, Token),
@@ -15,6 +16,7 @@ pub enum ParserDiagnosticError {
   InvalidNumberOfArguments(usize, usize, Token),
 }
 
+#[derive(Debug, Clone)]
 pub struct ParserDiagnostic {
   pub error: ParserDiagnosticError,
   pub token_line: Vec<Token>,

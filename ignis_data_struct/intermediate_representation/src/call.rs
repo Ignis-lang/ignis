@@ -17,4 +17,13 @@ impl IRCall {
       return_type,
     }
   }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "type": "call",
+      "name": self.name,
+      "arguments": self.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+      "return_type": self.return_type.to_string(),
+    })
+  }
 }

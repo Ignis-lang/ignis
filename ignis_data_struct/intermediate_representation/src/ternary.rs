@@ -19,4 +19,13 @@ impl IRTernary {
       else_branch,
     }
   }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "type": "ternary",
+      "condition": self.condition.to_json(),
+      "then_branch": self.then_branch.to_json(),
+      "else_branch": self.else_branch.to_json(),
+    })
+  }
 }

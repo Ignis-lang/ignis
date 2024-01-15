@@ -24,4 +24,13 @@ impl IRForIn {
       token,
     }
   }
+
+  pub fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "type": "for_in",
+      "variable": self.variable.to_json(),
+      "iterable": self.iterable.to_json(),
+      "body": self.body.to_json(),
+    })
+  }
 }

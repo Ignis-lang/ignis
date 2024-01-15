@@ -25,4 +25,8 @@ impl Ast {
       .map(|x| x.to_json())
       .collect::<Vec<serde_json::Value>>()
   }
+
+  pub fn vec_to_json(ast: &[Ast]) -> Vec<Vec<serde_json::Value>> {
+    ast.iter().map(|x| x.to_json()).collect()
+  }
 }

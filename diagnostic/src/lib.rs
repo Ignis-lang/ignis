@@ -1,4 +1,5 @@
 use diagnostic_report::DiagnosticReport;
+use colored::*;
 
 pub struct Diagnostic {}
 
@@ -22,51 +23,66 @@ impl Diagnostic {
 
   pub fn print(&self, diagnostic: &DiagnosticReport) {
     self.print_header(diagnostic);
-    self.print_body(diagnostic)
+    self.print_body(diagnostic);
+    println!();
   }
 
   fn print_header(&self, diagnostic: &DiagnosticReport) {
     match diagnostic.level {
       diagnostic_report::DiagnosticLevel::Info => {
         println!(
-          "\x1b[1;34mInfo[{}]: {}\x1b[0m",
-          diagnostic.error_code, diagnostic.message
+          "{}[{}]: {}",
+          "Info".blue().bold(),
+          diagnostic.error_code.blue(),
+          diagnostic.message
         )
       }
       diagnostic_report::DiagnosticLevel::Warning => {
         println!(
-          "\x1b[1;33mWarning[{}]: {}\x1b[0m",
-          diagnostic.error_code, diagnostic.message
+          "{}[{}]: {}",
+          "Warning".yellow().bold(),
+          diagnostic.error_code.yellow(),
+          diagnostic.message
         )
       }
       diagnostic_report::DiagnosticLevel::Error => {
         println!(
-          "\x1b[1;31mError[{}]: {}\x1b[0m",
-          diagnostic.error_code, diagnostic.message
+          "{}[{}]: {}",
+          "Error".red().bold(),
+          diagnostic.error_code.red(),
+          diagnostic.message
         )
       }
       diagnostic_report::DiagnosticLevel::Hint => {
         println!(
-          "\x1b[1;32mHint[{}]: {}\x1b[0m",
-          diagnostic.error_code, diagnostic.message
+          "{}[{}]: {}",
+          "Hint".cyan().bold(),
+          diagnostic.error_code.cyan(),
+          diagnostic.message
         )
       }
     }
   }
 
   fn print_body(&self, diagnostic: &DiagnosticReport) {
-    println!("{:4}|", "");
+    println!("{:3}--> {}", "", diagnostic.token.span.file.clone());
+    println!("{:4}|", (diagnostic.token.span.line - 1).to_string().blue());
     println!(
-      "{:4} |{:4} {}",
+      "{:4}|{:4} {}",
+      diagnostic.token.span.line.to_string().blue(),
       "",
-      "",
-      diagnostic.token.span.line,
       diagnostic
         .token_line
         .iter()
-        .map(|token| token.span.literal)
-        .collect::<String>()
+        .map(|token| token.span.literal.clone())
+        .collect::<Vec<String>>().join(" ")
     );
-    println!("{:4}|", "");
+    println!("{:4}|", (diagnostic.token.span.line - 2).to_string().blue());
   }
+}
+
+impl Default for Diagnostic {
+    fn default() -> Self {
+        Self::new()
+    }
 }
