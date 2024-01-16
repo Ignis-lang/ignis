@@ -273,6 +273,7 @@ impl<'a> Lexer<'a> {
       "extern" => Some(TokenType::Extern),
       "continue" => Some(TokenType::Continue),
       "new" => Some(TokenType::New),
+      "unkown" => Some(TokenType::Unknown),
       _ => None,
     }
   }

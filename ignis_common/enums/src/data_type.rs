@@ -10,7 +10,7 @@ pub enum DataType {
   Boolean,
   Char,
   Null,
-  None,
+  Unwnown,
   Pending,
   Void,
   Variable(String),
@@ -37,7 +37,7 @@ impl Display for DataType {
       DataType::Boolean => write!(f, "Boolean"),
       DataType::Char => write!(f, "Char"),
       DataType::Null => write!(f, "Null"),
-      DataType::None => write!(f, "None"),
+      DataType::Unwnown => write!(f, "Unwnown"),
       DataType::Pending => write!(f, "Pending"),
       DataType::Void => write!(f, "Void"),
       DataType::Variable(name) => write!(f, "{}", name),
@@ -78,7 +78,8 @@ impl DataType {
       TokenType::IntType => DataType::Int,
       TokenType::Void => DataType::Void,
       TokenType::Null => DataType::Null,
-      _ => DataType::None,
+      TokenType::Unknown => DataType::Unwnown,
+      _ => DataType::Pending
     }
   }
   pub fn to_c_type(&self, is_mutable: bool) -> String {
@@ -93,10 +94,12 @@ impl DataType {
       DataType::Float => kind.push_str("float"),
       DataType::Char => kind.push_str("char"),
       DataType::String => kind.push_str("char*"),
-      DataType::Void | DataType::Null | DataType::None | DataType::Pending => kind.push_str("void"),
+      DataType::Void | DataType::Null | DataType::Unwnown | DataType::Pending => {
+        kind.push_str("void")
+      }
       DataType::Variable(_name) => todo!(),
       DataType::ClassType(_name) => todo!(),
-      DataType::Array(array) => kind.push_str(format!("{}", array.to_c_type(true)).as_str()),
+      DataType::Array(array) => kind.push_str(array.to_c_type(true).to_string().as_str()),
       DataType::Callable(_, _) => todo!(),
       DataType::GenericType { base, parameters } => todo!(),
       DataType::UnionType(_) => todo!(),

@@ -99,6 +99,7 @@ pub enum TokenType {
   Void,
   Extern,
   Continue,
+  Unknown,
 
   Bad,
   Identifier,
@@ -194,6 +195,7 @@ impl Display for TokenType {
       TokenType::Increment => write!(f, "++"),
       TokenType::Decrement => write!(f, "--"),
       TokenType::New => write!(f, "new"),
+      TokenType::Unknown => write!(f, "unknown"),
     }
   }
 }

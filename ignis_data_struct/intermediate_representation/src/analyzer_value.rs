@@ -14,7 +14,7 @@ pub enum AnalyzerValue {
   Function(Box<IRFunction>),
   Class(Box<IRClassInstance>),
   Null,
-  None,
+  Unknown,
 }
 
 impl Clone for AnalyzerValue {
@@ -25,10 +25,10 @@ impl Clone for AnalyzerValue {
       AnalyzerValue::Float(d) => AnalyzerValue::Float(*d),
       AnalyzerValue::Boolean(b) => AnalyzerValue::Boolean(*b),
       AnalyzerValue::Null => AnalyzerValue::Null,
-      AnalyzerValue::None => AnalyzerValue::None,
+      AnalyzerValue::Unknown => AnalyzerValue::Unknown,
       AnalyzerValue::Return(r) => r.as_ref().clone(),
       AnalyzerValue::Function(f) => AnalyzerValue::Function(f.clone()),
-      AnalyzerValue::Class(_) => todo!(),
+      AnalyzerValue::Class(class) => AnalyzerValue::Class(class.clone()),
     }
   }
 }
@@ -41,9 +41,9 @@ impl Display for AnalyzerValue {
       AnalyzerValue::Float(d) => write!(f, "Float: {}", d),
       AnalyzerValue::Boolean(b) => write!(f, "Boolean: {}", b),
       AnalyzerValue::Null => write!(f, "null"),
-      AnalyzerValue::None => write!(f, "none"),
+      AnalyzerValue::Unknown => write!(f, "unknown"),
       AnalyzerValue::Return(r) => write!(f, "Return: {}", r),
-      AnalyzerValue::Function(_) => write!(f, "function"),
+      AnalyzerValue::Function(func) => write!(f, "Function: {}", func.name),
       AnalyzerValue::Class(class) => {
         let class = class.as_ref();
         write!(f, "Class: {}", class.name)
@@ -59,7 +59,7 @@ impl AnalyzerValue {
       AnalyzerValue::Int(_) => DataType::Int,
       AnalyzerValue::Float(_) => DataType::Float,
       AnalyzerValue::Boolean(_) => DataType::Boolean,
-      AnalyzerValue::None | AnalyzerValue::Null => DataType::None,
+      AnalyzerValue::Unknown | AnalyzerValue::Null => DataType::Unwnown,
       AnalyzerValue::Return(r) => r.to_data_type(),
       AnalyzerValue::Function(f) => f.return_type.clone(),
       AnalyzerValue::Class(class) => {

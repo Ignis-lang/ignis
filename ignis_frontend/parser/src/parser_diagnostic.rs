@@ -14,6 +14,7 @@ pub enum ParserDiagnosticError {
   InvalidAssignmentTarget(Token),
   ExpectedTypeAfterVariable(Token),
   InvalidNumberOfArguments(usize, usize, Token),
+  ExpectedSemicolonAfterExpression(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +117,14 @@ impl ParserDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IP0010".to_string(),
+      ),
+      ParserDiagnosticError::ExpectedSemicolonAfterExpression(token) => DiagnosticReport::new(
+        "Expected ';' after expression".to_string(),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IP0011".to_string(),
       ),
     }
   }

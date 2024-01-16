@@ -408,11 +408,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Binary(b) => b.data_type.clone(),
         IRInstruction::Unary(u) => u.data_type.clone(),
         IRInstruction::Logical(_) => DataType::Boolean,
-        _ => DataType::None,
+        IRInstruction::Class(c) => DataType::ClassType(c.name.clone()),
+        IRInstruction::ClassInstance(c) => DataType::ClassType(c.name.clone()),
+        _ => DataType::Unwnown,
       };
 
       if kind != function.parameters[i].data_type
-        && function.parameters[i].data_type != DataType::None
+        && kind != DataType::Unwnown
+        && function.parameters[i].data_type != DataType::Unwnown
       {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::ArgumentTypeMismatch(
@@ -458,7 +461,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       element_types.push(elem_type);
     }
 
-    let first_type = element_types.first().unwrap_or(&DataType::None);
+    let first_type = element_types.first().unwrap_or(&DataType::Unwnown);
 
     if !element_types.iter().all(|t| t == first_type) {
       return Err(Box::new(AnalyzerDiagnostic::new(
@@ -779,7 +782,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Function(f) => {
           self.scopes_variables.push(IRVariable::new(
             f.name.clone(),
-            DataType::None,
+            DataType::Unwnown,
             None,
             IRVariableMetadata::new(
               false,
@@ -1140,7 +1143,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
   fn visit_property_statement(&mut self, statement: &PropertyStatement) -> AnalyzerResult {
     if self.is_allready_declared(&statement.name.span.literal) {
       return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::PropertyAlreadyDefined(statement.name.clone()),
+        AnalyzerDiagnosticError::PropertyAlreadyDefined(*statement.name.clone()),
         self.find_token_line(&statement.name.span.line),
       )));
     }
@@ -1151,7 +1154,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       .any(|c| !matches!(c, AnalyzerContext::Class))
     {
       return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::PropertyOutsideClass(statement.name.clone()),
+        AnalyzerDiagnosticError::PropertyOutsideClass(*statement.name.clone()),
         self.find_token_line(&statement.name.span.line),
       )));
     }
@@ -1307,8 +1310,6 @@ impl Visitor<AnalyzerResult> for Analyzer {
   }
 
   fn visit_method_call_expression(&mut self, method_call: &MethodCall) -> AnalyzerResult {
-    println!("{:?}", method_call.calle);
-
     let calle = self.analyzer(&method_call.calle)?;
 
     let method = match calle {
@@ -1320,8 +1321,6 @@ impl Visitor<AnalyzerResult> for Analyzer {
         )));
       }
     };
-
-    println!("{:?}", method);
 
     todo!()
   }
@@ -1416,7 +1415,7 @@ impl Analyzer {
           "println".to_string(),
           vec![IRVariable::new(
             "message".to_string(),
-            DataType::None,
+            DataType::Unwnown,
             None,
             IRVariableMetadata::new(false, false, true, false, false, false, false, false, false),
           )],
@@ -1432,7 +1431,7 @@ impl Analyzer {
           "toString".to_string(),
           vec![IRVariable::new(
             "value".to_string(),
-            DataType::None,
+            DataType::Unwnown,
             None,
             IRVariableMetadata::new(false, false, true, false, false, false, false, false, false),
           )],
@@ -1662,7 +1661,7 @@ impl Analyzer {
       IRInstruction::Array(array) => array.data_type.clone(),
       IRInstruction::Class(c) => DataType::ClassType(c.name.clone()),
       IRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.clone()),
-      _ => DataType::None,
+      _ => DataType::Unwnown,
     }
   }
 
@@ -1673,11 +1672,18 @@ impl Analyzer {
   ) -> CheckCompatibility<DataType> {
     match (left, right) {
       (DataType::Int, DataType::Int) => (true, DataType::Int),
+      (DataType::Int, DataType::Unwnown) => (true, DataType::Unwnown),
+      (DataType::Unwnown, DataType::Int) => (true, DataType::Unwnown),
       (DataType::Float, DataType::Float) => (true, DataType::Float),
+      (DataType::Float, DataType::Unwnown) => (true, DataType::Unwnown),
+      (DataType::Unwnown, DataType::Float) => (true, DataType::Unwnown),
       (DataType::String, DataType::String) => (true, DataType::String),
+      (DataType::String, DataType::Unwnown) => (true, DataType::Unwnown),
+      (DataType::Unwnown, DataType::String) => (true, DataType::Unwnown),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      _ => (false, DataType::None),
+      (DataType::Unwnown, DataType::Unwnown) => (true, DataType::Unwnown),
+      _ => (false, DataType::Unwnown),
     }
   }
 
@@ -1693,7 +1699,7 @@ impl Analyzer {
       (DataType::Float, DataType::Int) => (true, DataType::Float),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      _ => (false, DataType::None),
+      _ => (false, DataType::Unwnown),
     }
   }
 
@@ -1709,7 +1715,7 @@ impl Analyzer {
       (DataType::Float, DataType::Int) => (true, DataType::Boolean),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      _ => (false, DataType::None),
+      _ => (false, DataType::Unwnown),
     }
   }
 
@@ -1725,7 +1731,7 @@ impl Analyzer {
       (DataType::Boolean, DataType::Boolean) => (true, DataType::Boolean),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      _ => (false, DataType::None),
+      _ => (false, DataType::Unwnown),
     }
   }
 
@@ -1736,7 +1742,7 @@ impl Analyzer {
   ) -> CheckCompatibility<DataType> {
     match (left, right) {
       (DataType::Boolean, DataType::Boolean) => (true, DataType::Boolean),
-      _ => (false, DataType::None),
+      _ => (false, DataType::Unwnown),
     }
   }
 
@@ -1754,7 +1760,7 @@ impl Analyzer {
         if left_type == DataType::String && right_type == DataType::String {
           (true, DataType::String)
         } else {
-          (false, DataType::None)
+          (false, DataType::Unwnown)
         }
       }
       IRInstructionType::Add => self.check_add_compatibility(&left_type, &right_type),
@@ -1775,10 +1781,10 @@ impl Analyzer {
         if left_type == DataType::Int && right_type == DataType::Int {
           (true, DataType::Int)
         } else {
-          (false, DataType::None)
+          (false, DataType::Unwnown)
         }
       }
-      _ => (false, DataType::None),
+      _ => (false, DataType::Unwnown),
     }
   }
 

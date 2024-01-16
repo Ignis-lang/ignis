@@ -73,7 +73,7 @@ impl TranspilerToLua {
         AnalyzerValue::Boolean(boolean) => boolean.to_string(),
         AnalyzerValue::Return(r) => r.to_string(),
         AnalyzerValue::Function(f) => f.name.clone(),
-        AnalyzerValue::Null | AnalyzerValue::None => "nil".to_string(),
+        AnalyzerValue::Null | AnalyzerValue::Unknown => "nil".to_string(),
         AnalyzerValue::Class(_) => todo!(),
       }),
       IRInstruction::Binary(binary) => {
