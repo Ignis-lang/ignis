@@ -1,12 +1,16 @@
 use diagnostic_report::DiagnosticReport;
 use colored::*;
+use token::token::Token;
+use enums::token_type::TokenType;
 
 /**
- * {level}[{error_code}]: {message}
- *  --> {file_path}:{line}:{column}
+ *{level}[{error_code}]: {message}
+ *      --> {file_path}:{line}:{column}
+ *{line} |       {prev_code}
  *       |
  *{line} |       {code}
  *       |
+ *{line} |       {after_code}
  * */
 pub struct Diagnostic {}
 
@@ -28,57 +32,83 @@ impl Diagnostic {
   }
 
   fn print_header(&self, diagnostic: &DiagnosticReport) {
+    let message = diagnostic.message.bold();
+    let code = diagnostic.error_code.bold();
+
     match diagnostic.level {
       diagnostic_report::DiagnosticLevel::Info => {
-        println!(
-          "{}[{}]: {}",
-          "Info".blue().bold(),
-          diagnostic.error_code.blue(),
-          diagnostic.message
-        )
+        println!("{}[{}]: {}", "Info".blue().bold(), code.blue(), message)
       }
       diagnostic_report::DiagnosticLevel::Warning => {
         println!(
           "{}[{}]: {}",
           "Warning".yellow().bold(),
-          diagnostic.error_code.yellow(),
-          diagnostic.message
+          code.yellow(),
+          message
         )
       }
       diagnostic_report::DiagnosticLevel::Error => {
         println!(
           "{}[{}]: {}",
           "Error".red().bold(),
-          diagnostic.error_code.red(),
-          diagnostic.message
+          code.red().bold(),
+          message
         )
       }
       diagnostic_report::DiagnosticLevel::Hint => {
-        println!(
-          "{}[{}]: {}",
-          "Hint".cyan().bold(),
-          diagnostic.error_code.cyan(),
-          diagnostic.message
-        )
+        println!("{}[{}]: {}", "Hint".cyan().bold(), code.cyan(), message)
       }
     }
   }
 
   fn print_body(&self, diagnostic: &DiagnosticReport) {
-    println!("{:3}--> {}", "", diagnostic.token.span.file.clone());
-    println!("{:4}|", (diagnostic.token.span.line - 1).to_string().blue());
+    let pipe = "|".blue().bold();
+    let code = std::fs::read_to_string(diagnostic.token.span.file.clone());
+
+    if code.is_err() {
+      panic!("File not found");
+    }
+
+    let code = code.unwrap();
+
+    let lines = code.lines().collect::<Vec<&str>>();
+
     println!(
-      "{:4}|{:4} {}",
-      diagnostic.token.span.line.to_string().blue(),
+      "{:2}{} {}:{}:{}",
       "",
-      diagnostic
-        .token_line
-        .iter()
-        .map(|token| token.span.literal.clone())
-        .collect::<Vec<String>>()
-        .join(" ")
+      "-->".blue().bold(),
+      diagnostic.token.span.file.bold(),
+      diagnostic.token.span.line.to_string().bold(),
+      diagnostic.token.span.column.to_string().bold(),
     );
-    println!("{:4}|", (diagnostic.token.span.line - 2).to_string().blue());
+    println!(
+      "{:3}{:3}{}",
+      (diagnostic.token.span.line - 1).to_string().blue().bold(),
+      pipe,
+      lines[diagnostic.token.span.line - 2].dimmed()
+    );
+    println!("{:3}{:3}", "", pipe);
+    println!(
+      "{:3}{:3}{}",
+      diagnostic.token.span.line.to_string().blue().bold(),
+      pipe,
+      lines[diagnostic.token.span.line - 1].bold()
+    );
+
+    if diagnostic.token.span.line < lines.len() {
+      println!("{:3}{:3}", "", pipe);
+      println!(
+        "{:3}{:3}{}",
+        (diagnostic.token.span.line + 1).to_string().blue().bold(),
+        pipe,
+        lines[diagnostic.token.span.line].dimmed()
+      );
+    }
+    println!(
+      "{:3}{}",
+      (diagnostic.token.span.line + 1).to_string().blue().bold(),
+      pipe
+    );
   }
 }
 

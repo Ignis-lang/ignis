@@ -59,6 +59,8 @@ impl App {
       build_path.push_str(format!("/{}", &name).as_str());
 
       fs::write(build_path, code).unwrap();
+
+      println!("Done: {}", code_result.file_name);
     }
   }
 

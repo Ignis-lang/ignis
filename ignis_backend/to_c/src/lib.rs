@@ -350,7 +350,7 @@ impl TranspilerToC {
         AnalyzerValue::Float(num) => num.to_string(),
         AnalyzerValue::String(s) => format!("\"{}\"", s),
         AnalyzerValue::Boolean(boolean) => if *boolean { "0" } else { "1" }.to_string(),
-        AnalyzerValue::Null | AnalyzerValue::None => "NULL".to_string(),
+        AnalyzerValue::Null | AnalyzerValue::Unknown => "NULL".to_string(),
         AnalyzerValue::Return(_) => todo!(),
         AnalyzerValue::Function(_) => todo!(),
         AnalyzerValue::Class(_) => todo!(),

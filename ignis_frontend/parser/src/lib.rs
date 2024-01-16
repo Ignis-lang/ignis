@@ -273,7 +273,8 @@ impl Parser {
         let name = self.consume(TokenType::Identifier)?;
 
         if self.match_token(&[TokenType::LeftParen]) {
-          expression = Expression::Variable(VariableExpression::new(name.clone(), DataType::Pending));
+          expression =
+            Expression::Variable(VariableExpression::new(name.clone(), DataType::Pending));
 
           let calle = self.finish_call(expression.clone())?;
 
@@ -691,11 +692,12 @@ impl Parser {
 
     let mut type_annotation = DataType::from_token_type(token.kind.clone());
 
-    if type_annotation == DataType::None && self.class_declarations.contains(&token.span.literal) {
+    if type_annotation == DataType::Pending && self.class_declarations.contains(&token.span.literal)
+    {
       type_annotation = DataType::ClassType(token.span.literal.clone());
     }
 
-    if type_annotation == DataType::None {
+    if type_annotation == DataType::Pending {
       return Err(Box::new(ParserDiagnostic::new(
         ParserDiagnosticError::ExpectedTypeAfterVariable(token.clone()),
         self.find_token_line(&token.span.line),
@@ -988,22 +990,27 @@ impl Parser {
       return Ok(self.advance());
     }
 
-    let token_line = self.find_token_line(&token.span.line);
+    let token_previous = self.previous();
+    let line = token_previous.span.line;
+
+    let token_line = self.find_token_line(&line);
     let error = match kind {
-      TokenType::SemiColon => ParserDiagnostic::new(
-        ParserDiagnosticError::UnexpectedToken(TokenType::SemiColon, token.clone()),
-        token_line,
-      ),
+      TokenType::SemiColon => {
+        ParserDiagnostic::new(
+          ParserDiagnosticError::ExpectedSemicolonAfterExpression(token_previous.clone()),
+          token_line,
+        )
+      }
       TokenType::Colon => ParserDiagnostic::new(
-        ParserDiagnosticError::UnexpectedToken(TokenType::Colon, token.clone()),
+        ParserDiagnosticError::UnexpectedToken(TokenType::Colon, token_previous.clone()),
         token_line,
       ),
       TokenType::Identifier => ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedVariableName(token.clone()),
+        ParserDiagnosticError::ExpectedVariableName(token_previous.clone()),
         token_line,
       ),
       TokenType::QuestionMark => ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedToken(TokenType::QuestionMark, token.clone()),
+        ParserDiagnosticError::ExpectedToken(TokenType::QuestionMark, token_previous.clone()),
         token_line,
       ),
       TokenType::LeftParen | TokenType::RightParen => {
@@ -1019,8 +1026,8 @@ impl Parser {
         )
       }
       _ => ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedToken(kind.clone(), token.clone()),
-        self.find_token_line(&token.span.line),
+        ParserDiagnosticError::ExpectedToken(kind.clone(), token_previous.clone()),
+        token_line,
       ),
     };
 
@@ -1078,11 +1085,12 @@ impl Parser {
 
     let mut type_annotation = DataType::from_token_type(token.kind.clone());
 
-    if type_annotation == DataType::None && self.class_declarations.contains(&token.span.literal) {
+    if type_annotation == DataType::Pending && self.class_declarations.contains(&token.span.literal)
+    {
       type_annotation = DataType::ClassType(token.span.literal.clone());
     }
 
-    if type_annotation == DataType::None {
+    if type_annotation == DataType::Pending {
       let token = self.peek();
       return Err(Box::new(ParserDiagnostic::new(
         ParserDiagnosticError::ExpectedTypeAfterVariable(self.peek()),
@@ -1182,11 +1190,11 @@ impl Parser {
 
       let mut data_type: DataType = DataType::from_token_type(token.kind.clone());
 
-      if data_type == DataType::None && self.class_declarations.contains(&token.span.literal) {
+      if data_type == DataType::Pending && self.class_declarations.contains(&token.span.literal) {
         data_type = DataType::ClassType(token.span.literal.clone());
       }
 
-      if data_type == DataType::None {
+      if data_type == DataType::Pending {
         let token = &self.peek();
 
         return Err(Box::new(ParserDiagnostic::new(
