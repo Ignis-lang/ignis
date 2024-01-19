@@ -22,6 +22,8 @@ pub enum IRInstructionType {
   AssignSub,
   Mod,
   Concatenate,
+  Increment,
+  Decrement,
 }
 
 impl Display for IRInstructionType {
@@ -45,6 +47,8 @@ impl Display for IRInstructionType {
       IRInstructionType::AssignSub => write!(f, "assign_sub"),
       IRInstructionType::Mod => write!(f, "mod"),
       IRInstructionType::Concatenate => write!(f, "concatenate"),
+      IRInstructionType::Increment => write!(f, "increment"),
+      IRInstructionType::Decrement => write!(f, "decrement"),
     }
   }
 }
@@ -67,8 +71,8 @@ impl IRInstructionType {
       TokenType::Or => IRInstructionType::Or,
       TokenType::Bang => IRInstructionType::Not,
       TokenType::Equal => IRInstructionType::Assign,
-      TokenType::Increment => IRInstructionType::AssignAdd,
-      TokenType::Decrement => IRInstructionType::AssignSub,
+      TokenType::Increment => IRInstructionType::Increment,
+      TokenType::Decrement => IRInstructionType::Decrement,
       _ => panic!("Invalid token type"), // TODO:
     }
   }
