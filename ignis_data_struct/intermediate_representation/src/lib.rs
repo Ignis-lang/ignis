@@ -9,8 +9,10 @@ pub mod function;
 pub mod import;
 pub mod instruction_type;
 pub mod ir_array;
+pub mod ir_array_access;
 pub mod ir_break;
 pub mod ir_continue;
+pub mod ir_for;
 pub mod ir_for_in;
 pub mod ir_get;
 pub mod ir_if;
@@ -23,6 +25,8 @@ pub mod ternary;
 pub mod unary;
 pub mod variable;
 
+use ir_array_access::IRArrayAccess;
+use ir_for::IRFor;
 use serde_json::Value;
 
 use self::{
@@ -49,8 +53,10 @@ pub enum IRInstruction {
   Assign(IRAssign),
   Class(IRClass),
   Ternary(IRTernary),
+  For(IRFor),
   ForIn(IRForIn),
   Array(IRArray),
+  ArrayAccess(IRArrayAccess),
   Import(IRImport),
   Break(IRBreak),
   Continue(IRContinue),
@@ -88,6 +94,8 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::Continue(instruction) => instruction.to_json(),
       IRInstruction::ClassInstance(instruction) => instruction.to_json(),
       IRInstruction::Set(set) => set.to_json(),
+      IRInstruction::For(_for) => _for.to_json(),
+      IRInstruction::ArrayAccess(array) => array.to_json(),
     }
   }
 }

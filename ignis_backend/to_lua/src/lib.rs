@@ -1,5 +1,7 @@
 use std::{vec, collections::HashMap};
+use colored::*;
 
+use code_result::CodeResult;
 use intermediate_representation::{
   {
     IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable,
@@ -13,6 +15,7 @@ enum TranspilerContext {
   For,
   While,
   Continue(Box<TranspilerContext>),
+  ArrayAccess,
 }
 
 pub struct TranspilerToLua {
@@ -20,19 +23,21 @@ pub struct TranspilerToLua {
   pub statement_exported: Vec<(String, String)>,
   pub statement_imported: HashMap<String, String>,
   context: Vec<TranspilerContext>,
+  irs: HashMap<String, Vec<IRInstruction>>,
 }
 
 impl TranspilerToLua {
-  pub fn new() -> Self {
+  pub fn new(irs: HashMap<String, Vec<IRInstruction>>) -> Self {
     Self {
       code: String::new(),
       statement_exported: vec![],
       statement_imported: HashMap::new(),
       context: vec![],
+      irs,
     }
   }
 
-  pub fn transpile(&mut self, ir: &Vec<IRInstruction>) {
+  fn transpile(&mut self, ir: &Vec<IRInstruction>) {
     self.statement_exported = vec![];
     self.code = String::new();
     self.statement_imported = HashMap::new();
@@ -67,7 +72,18 @@ impl TranspilerToLua {
 
     match instruction {
       IRInstruction::Literal(literal) => code.push_str(&match &literal.value {
-        AnalyzerValue::Int(num) => num.to_string(),
+        AnalyzerValue::Int(num) => {
+          if let Some(c) = self.context.last() {
+            if c == &TranspilerContext::ArrayAccess {
+              if *num == 0 {
+                return "1".to_string();
+              } else {
+                return num.to_string();
+              }
+            }
+          }
+          return num.to_string();
+        }
         AnalyzerValue::String(s) => format!("\"{}\"", s),
         AnalyzerValue::Float(num) => num.to_string(),
         AnalyzerValue::Boolean(boolean) => boolean.to_string(),
@@ -80,6 +96,12 @@ impl TranspilerToLua {
         let left = self.transpile_ir_to_lua(&binary.left, indent_level);
         let right = self.transpile_ir_to_lua(&binary.right, indent_level);
         let op = self.transpile_opeartor_to_lua(&binary.instruction_type);
+
+        if let Some(c) = self.context.last() {
+          if c == &TranspilerContext::For {
+            return right.to_string();
+          }
+        }
 
         code.push_str(&format!("{} {} {}", left, op, right));
       }
@@ -94,6 +116,12 @@ impl TranspilerToLua {
       IRInstruction::Unary(unary) => {
         let value = self.transpile_ir_to_lua(&unary.right, indent_level);
         let op = self.transpile_opeartor_to_lua(&unary.instruction_type);
+
+        if let Some(c) = self.context.last() {
+          if c == &TranspilerContext::For {
+            return op.to_string();
+          }
+        }
 
         code.push_str(&format!("{} {}", op, value));
       }
@@ -197,7 +225,7 @@ impl TranspilerToLua {
       }
       IRInstruction::Array(array) => {
         code.push_str(&format!(
-          "{}{{{}",
+          "{}{{ {}",
           " ".repeat(indent_level),
           array
             .elements
@@ -207,7 +235,7 @@ impl TranspilerToLua {
             .join(", ")
         ));
 
-        code.push_str("}\n");
+        code.push_str(" }\n");
       }
       IRInstruction::Import(import) => {
         if !import.path.contains("std:") {
@@ -245,8 +273,41 @@ impl TranspilerToLua {
         code.push_str(&format!("{}goto continue\n", " ".repeat(indent_level)));
       }
       IRInstruction::Get(_) => todo!(),
-        IRInstruction::ClassInstance(_) => todo!(),
-        IRInstruction::Set(_) => todo!(),
+      IRInstruction::ClassInstance(_) => todo!(),
+      IRInstruction::Set(_) => todo!(),
+      IRInstruction::For(_for) => {
+        self.context.push(TranspilerContext::For);
+        code.push_str(&format!(
+          "{}for {}, {}, {} do\n",
+          " ".repeat(indent_level),
+          self.transpile_ir_to_lua(&_for.initializer, 0),
+          self.transpile_ir_to_lua(&_for.condition, indent_level),
+          self.transpile_ir_to_lua(&_for.increment, 0)
+        ));
+
+        self.context.pop();
+        code.push_str(&self.transpile_ir_to_lua(&_for.body, indent_level + 2));
+
+        if let Some(l) = self.context.last() {
+          if l == &TranspilerContext::Continue(Box::new(TranspilerContext::For)) {
+            self.context.pop();
+            code.push_str(&format!("{}::continue::\n", " ".repeat(indent_level)));
+          }
+        };
+
+        code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
+      }
+      IRInstruction::ArrayAccess(array) => {
+        self.context.push(TranspilerContext::ArrayAccess);
+
+        code.push_str(&format!(
+          "{}[{}]",
+          array.name,
+          self.transpile_ir_to_lua(&array.index, 0)
+        ));
+
+        self.context.pop();
+      }
     };
 
     code
@@ -333,6 +394,8 @@ impl TranspilerToLua {
       IRInstructionType::AssignSub => "-=",
       IRInstructionType::Mod => "%",
       IRInstructionType::Concatenate => "..",
+      IRInstructionType::Increment => "1",
+      IRInstructionType::Decrement => "-1",
     }
     .to_string()
   }
@@ -349,6 +412,12 @@ impl TranspilerToLua {
     if name == "toString" {
       code.push_str(&self.transpile_ir_to_lua(&call.arguments[0], indent_level));
 
+      return code;
+    }
+
+    if name == "length" {
+      code.push('#');
+      code.push_str(&self.transpile_ir_to_lua(&call.arguments[0], 0));
       return code;
     }
 
@@ -396,6 +465,24 @@ impl TranspilerToLua {
     };
 
     if variable.metadata.is_declaration {
+      if let Some(l) = self.context.last() {
+        let value = var_value.parse::<i32>().unwrap();
+
+        match l {
+          TranspilerContext::For => {
+            return format!(
+              "{}{} = {}",
+              " ".repeat(indent_level),
+              variable.name,
+              if value == 0 { 1 } else { value }
+            );
+          }
+          TranspilerContext::While => todo!(),
+          TranspilerContext::Continue(_) => todo!(),
+          TranspilerContext::ArrayAccess => todo!(),
+        }
+      }
+
       format!(
         "{}local {} = {}\n",
         " ".repeat(indent_level),
@@ -406,10 +493,37 @@ impl TranspilerToLua {
       variable.name.to_string()
     }
   }
-}
 
-impl Default for TranspilerToLua {
-    fn default() -> Self {
-        Self::new()
+  pub fn process(&mut self) {
+    let mut code_results = Vec::new();
+    let irs = self.irs.clone();
+
+    for result in irs.iter() {
+      self.transpile(result.1);
+      code_results.push(CodeResult::new(self.code.clone(), result.0.clone()));
     }
+
+    self.create_files(code_results);
+  }
+
+  fn create_files(&self, code_results: Vec<CodeResult>) {
+    for code_result in code_results {
+      let path = code_result.file_name.split('/').collect::<Vec<&str>>();
+      let code = code_result.code.clone();
+
+      let mut name = path.last().unwrap().replace(r".ign", "");
+
+      name.push_str(".lua");
+
+      let mut build_path = "build/".to_string() + path.join("/").as_str();
+
+      std::fs::create_dir_all(build_path.clone()).unwrap();
+
+      build_path.push_str(format!("/{}", &name).as_str());
+
+      std::fs::write(build_path, code).unwrap();
+
+      println!("{}: {}", "[Done]".blue().bold(), code_result.file_name);
+    }
+  }
 }

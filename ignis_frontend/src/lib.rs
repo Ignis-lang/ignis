@@ -33,12 +33,26 @@ impl IgnisFrontend {
     lexer.scan_tokens();
     let tokens = lexer.tokens;
 
+    if self.debug.contains(&FrontendDebugPrint::Lexer) {
+      for token in &tokens {
+        let pretty_string = serde_json::to_string_pretty(&token.to_json()).unwrap();
+        println!("{}", pretty_string);
+      }
+    }
+
     let mut parser = Parser::new(tokens.clone());
-    let statements = Ast::new(parser.parse()?);
+
+    let result = parser.parse();
+
+    let statements = Ast::new(result.0);
 
     if self.debug.contains(&FrontendDebugPrint::Ast) {
       let pretty_string = serde_json::to_string_pretty(&statements.to_json()).unwrap();
       println!("{}", pretty_string);
+    }
+
+    if !result.1.is_empty() {
+      return Err(result.1);
     }
 
     let mut analyzer = Analyzer::new(self.path.clone(), tokens);

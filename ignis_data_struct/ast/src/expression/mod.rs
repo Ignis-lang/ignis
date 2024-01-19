@@ -5,7 +5,7 @@ use serde_json::json;
 use self::{
   binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression,
   logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array, get::Get,
-  new::NewExpression, set::Set, method_call::MethodCall,
+  new::NewExpression, set::Set, method_call::MethodCall, array_access::ArrayAccess,
 };
 
 use super::visitor::Visitor;
@@ -16,6 +16,7 @@ pub mod new;
 pub mod set;
 
 pub mod array;
+pub mod array_access;
 pub mod assign;
 pub mod binary;
 pub mod call;
@@ -38,6 +39,7 @@ pub enum Expression {
   Ternary(Ternary),
   Call(Call),
   Array(Array),
+  ArrayAccess(ArrayAccess),
   Get(Get),
   Set(Set),
   New(NewExpression),
@@ -57,6 +59,7 @@ impl Expression {
       Expression::Ternary(ternary) => visitor.visit_ternary_expression(ternary),
       Expression::Call(call) => visitor.visit_call_expression(call),
       Expression::Array(array) => visitor.visit_array_expression(array),
+      Expression::ArrayAccess(array) => visitor.visit_array_access_expression(array),
       Expression::Get(get) => visitor.visit_get_expression(get),
       Expression::New(new) => visitor.visit_new_expression(new),
       Expression::Set(set) => visitor.visit_set_expression(set),
@@ -141,6 +144,13 @@ impl Expression {
           "type": "Array",
           "elements": array.elements.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "data_type": array.data_type.to_string(),
+        })
+      }
+      Expression::ArrayAccess(array) => {
+        json!({
+          "type": "ArrayAccess",
+          "name": array.name.to_json(),
+          "index": array.index.to_json(),
         })
       }
       Expression::Get(get) => {
@@ -250,6 +260,9 @@ impl Display for Expression {
             .collect::<Vec<String>>()
             .join(", ")
         )
+      }
+      Expression::ArrayAccess(array) => {
+        write!(f, "{}[{}]", array.name, array.index)
       }
       Expression::Get(get) => {
         write!(f, "{}.{}", get.object, get.name.span.literal)

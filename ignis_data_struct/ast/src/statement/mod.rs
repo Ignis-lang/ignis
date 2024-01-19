@@ -66,7 +66,7 @@ impl Statement {
       Statement::Continue(continue_statement) => {
         visitor.visit_continue_statement(continue_statement)
       }
-      Statement::For(_) => todo!(),
+      Statement::For(_for) => visitor.visit_for_statement(_for),
       Statement::Method(method) => visitor.visit_method_statement(method),
       Statement::Property(property) => visitor.visit_property_statement(property),
     }
@@ -182,7 +182,14 @@ impl Statement {
             "type": "Continue",
         })
       }
-      Statement::For(_) => todo!(),
+      Statement::For(_for) => {
+        json!({
+          "type": "For",
+          "condition": _for.condition.to_json(),
+          "increment": _for.increment.to_json(),
+          "body": _for.body.to_json(),
+        })
+      }
       Statement::Method(method) => {
         json!({
           "type": "Method",

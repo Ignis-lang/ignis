@@ -15,7 +15,10 @@ use ast::{
     method::{MethodStatement, MethodMetadata},
     property::PropertyStatement,
   },
-  expression::{array::Array, get::Get, new::NewExpression, set::Set, method_call::MethodCall},
+  expression::{
+    array::Array, get::Get, new::NewExpression, set::Set, method_call::MethodCall,
+    array_access::ArrayAccess,
+  },
 };
 use enums::{data_type::DataType, token_type::TokenType};
 use {
@@ -39,9 +42,11 @@ use {
 
 type ParserResult<T> = Result<T, Box<ParserDiagnostic>>;
 
+#[derive(Debug, Clone, PartialEq)]
 enum ParserContext {
   Function,
   Class,
+  ArrayAccess,
 }
 
 pub struct Parser {
@@ -67,7 +72,7 @@ impl Parser {
     self.diagnostics.push(error);
   }
 
-  pub fn parse(&mut self) -> Result<Vec<Statement>, Vec<DiagnosticReport>> {
+  pub fn parse(&mut self) -> (Vec<Statement>, Vec<DiagnosticReport>) {
     let mut statements: Vec<Statement> = vec![];
     while !self.is_at_end() {
       match self.declaration() {
@@ -78,17 +83,14 @@ impl Parser {
       };
     }
 
-    if !self.diagnostics.is_empty() {
-      let errors = &self.diagnostics;
-      return Err(
-        errors
-          .iter()
-          .map(|e| e.report_diagnostic())
-          .collect::<Vec<DiagnosticReport>>(),
-      );
-    }
-
-    Ok(statements)
+    (
+      statements,
+      self
+        .diagnostics
+        .iter()
+        .map(|e| e.report_diagnostic())
+        .collect::<Vec<DiagnosticReport>>(),
+    )
   }
 
   fn expression(&mut self) -> ParserResult<Expression> {
@@ -303,6 +305,28 @@ impl Parser {
     Ok(expression)
   }
 
+  fn array_access(&mut self, var: Expression) -> ParserResult<Expression> {
+    let token = self.previous();
+    self.context.push(ParserContext::ArrayAccess);
+    if self.match_token(&[TokenType::LeftBrack]) {
+      let index = self.expression()?;
+
+      self.consume(TokenType::RightBrack)?;
+
+      self.context.pop();
+      Ok(Expression::ArrayAccess(ArrayAccess::new(
+        Box::new(token),
+        Box::new(var),
+        Box::new(index),
+      )))
+    } else {
+      Err(Box::new(ParserDiagnostic::new(
+        ParserDiagnosticError::ExpectedToken(TokenType::LeftBrack, token.clone()),
+        self.find_token_line(&token.span.line),
+      )))
+    }
+  }
+
   fn primary(&mut self) -> ParserResult<Expression> {
     let token = self.peek();
 
@@ -346,10 +370,18 @@ impl Parser {
       TokenType::Identifier => {
         self.advance();
         let kind = token.kind.clone();
-        Ok(Expression::Variable(VariableExpression::new(
+
+        let var = Expression::Variable(VariableExpression::new(
           token,
           DataType::from_token_type(kind),
-        )))
+        ));
+
+        if self.check(TokenType::LeftBrack) {
+          let array = self.array_access(var);
+          return array;
+        }
+
+        Ok(var)
       }
       _ => Err(Box::new(ParserDiagnostic::new(
         ParserDiagnosticError::ExpectedExpression(token.clone()),
@@ -438,6 +470,13 @@ impl Parser {
       Expression::New(new) => DataType::ClassType(new.name.span.literal.clone()),
       Expression::Set(set) => set.data_type.clone(),
       Expression::MethodCall(method) => method.data_type.clone(),
+      Expression::ArrayAccess(array) => {
+        if let DataType::Array(a) = self.get_expression_type(&array.variable) {
+          *a
+        } else {
+          DataType::Pending
+        }
+      }
     }
   }
 
@@ -925,6 +964,7 @@ impl Parser {
     let initializer = self.expression()?;
 
     variable.initializer = Some(Box::new(initializer));
+    variable.type_annotation = DataType::Int;
 
     self.consume(TokenType::SemiColon)?;
 
@@ -939,6 +979,8 @@ impl Parser {
     self.consume(TokenType::LeftBrace)?;
 
     let body = self.statement()?;
+
+    self.consume(TokenType::RightBrace)?;
 
     Ok(Statement::For(For::new(
       Box::new(variable),
@@ -995,12 +1037,10 @@ impl Parser {
 
     let token_line = self.find_token_line(&line);
     let error = match kind {
-      TokenType::SemiColon => {
-        ParserDiagnostic::new(
-          ParserDiagnosticError::ExpectedSemicolonAfterExpression(token_previous.clone()),
-          token_line,
-        )
-      }
+      TokenType::SemiColon => ParserDiagnostic::new(
+        ParserDiagnosticError::ExpectedSemicolonAfterExpression(token_previous.clone()),
+        token_line,
+      ),
       TokenType::Colon => ParserDiagnostic::new(
         ParserDiagnosticError::UnexpectedToken(TokenType::Colon, token_previous.clone()),
         token_line,

@@ -1,5 +1,11 @@
-use std::collections::HashMap;
+use std::{
+  collections::HashMap,
+  process::{Command, Stdio},
+  fs,
+  io::Write,
+};
 
+use code_result::CodeResult;
 use intermediate_representation::{
   IRInstruction, variable::IRVariable, function::IRFunction, call::IRCall, ir_if::IRIf,
   ir_while::IRWhile, instruction_type::IRInstructionType, analyzer_value::AnalyzerValue,
@@ -21,15 +27,17 @@ pub struct TranspilerToC {
   pub statement_exported: Vec<(String, String)>,
   pub statement_imported: HashMap<String, String>,
   context: Vec<TranspilerContext>,
+  irs: HashMap<String, Vec<IRInstruction>>,
 }
 
 impl TranspilerToC {
-  pub fn new() -> Self {
+  pub fn new(irs: HashMap<String, Vec<IRInstruction>>) -> Self {
     Self {
       code: String::new(),
       statement_exported: Vec::new(),
       statement_imported: HashMap::new(),
       context: Vec::new(),
+      irs,
     }
   }
 
@@ -53,6 +61,8 @@ impl TranspilerToC {
       IRInstructionType::AssignSub => "-=",
       IRInstructionType::Mod => "%",
       IRInstructionType::Concatenate => "+",
+      IRInstructionType::Increment => "++",
+      IRInstructionType::Decrement => "--",
     }
     .to_string()
   }
@@ -74,7 +84,7 @@ impl TranspilerToC {
       AnalyzerValue::Int(_) => "%d".to_string(),
       AnalyzerValue::Float(_) => "%f".to_string(),
       AnalyzerValue::Boolean(_) => "%d".to_string(),
-      AnalyzerValue::Return(r) => self.get_format_string_from_analyzer_value(&r).to_string(),
+      AnalyzerValue::Return(r) => self.get_format_string_from_analyzer_value(r).to_string(),
       _ => "%p".to_string(),
     }
   }
@@ -98,26 +108,26 @@ impl TranspilerToC {
     if variable.metadata.is_declaration {
       match variable.data_type {
         DataType::Array(_) => {
-          return format!(
+          format!(
             "{}{} {}[] = {};\n",
             " ".repeat(indent_level),
             variable.data_type.to_c_type(variable.metadata.is_mutable),
             variable.name,
             var_value
-          );
+          )
         }
         _ => {
-          return format!(
+          format!(
             "{}{} {} = {};\n",
             " ".repeat(indent_level),
             variable.data_type.to_c_type(variable.metadata.is_mutable),
             variable.name,
             var_value
-          );
+          )
         }
       }
     } else {
-      format!("{}", variable.name)
+      variable.name.to_string()
     }
   }
 
@@ -183,7 +193,7 @@ impl TranspilerToC {
         }
         IRInstruction::Block(_) => todo!(),
         IRInstruction::Literal(l) => {
-          format_string.push_str(&&self.get_format_string_from_analyzer_value(&l.value));
+          format_string.push_str(&self.get_format_string_from_analyzer_value(&l.value));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
         }
         IRInstruction::Unary(u) => {
@@ -220,9 +230,11 @@ impl TranspilerToC {
         IRInstruction::Get(_) => todo!(),
         IRInstruction::ClassInstance(_) => todo!(),
         IRInstruction::Set(_) => todo!(),
+        IRInstruction::For(_) => todo!(),
+        IRInstruction::ArrayAccess(_) => todo!(),
       };
 
-      args.push_str(",");
+      args.push(',');
     }
 
     args.pop();
@@ -282,7 +294,7 @@ impl TranspilerToC {
       code.push_str(";\n");
     }
 
-    return code;
+    code
   }
 
   fn transpile_if_to_c(&mut self, if_instruction: &IRIf, indent_level: usize) -> String {
@@ -298,7 +310,7 @@ impl TranspilerToC {
     if_block.push_str(&self.transpile_ir_to_c(&if_instruction.then_branch, indent_level + 2));
 
     if let Some(else_block_instructions) = &if_instruction.else_branch {
-      else_block.push_str(&self.transpile_ir_to_c(&else_block_instructions, indent_level + 2));
+      else_block.push_str(&self.transpile_ir_to_c(else_block_instructions, indent_level + 2));
     }
 
     code.push_str(&format!(
@@ -450,15 +462,17 @@ impl TranspilerToC {
       }
       IRInstruction::Break(_) => todo!(),
       IRInstruction::Continue(_) => todo!(),
-        IRInstruction::Get(_) => todo!(),
-        IRInstruction::ClassInstance(_) => todo!(),
-        IRInstruction::Set(_) => todo!(),
+      IRInstruction::Get(_) => todo!(),
+      IRInstruction::ClassInstance(_) => todo!(),
+      IRInstruction::Set(_) => todo!(),
+      IRInstruction::For(_) => todo!(),
+      IRInstruction::ArrayAccess(_) => todo!(),
     };
 
     code
   }
 
-  pub fn transpile(&mut self, ir: &Vec<IRInstruction>) {
+  fn transpile(&mut self, ir: &Vec<IRInstruction>) {
     self.statement_exported = vec![];
     self.code = String::new();
     self.statement_imported = HashMap::new();
@@ -467,6 +481,69 @@ impl TranspilerToC {
       let code = self.transpile_ir_to_c(instruction, 0).clone();
 
       self.code.push_str(code.as_str());
+    }
+  }
+
+  pub fn process(&mut self) {
+    let mut code_results = Vec::new();
+    let irs = self.irs.clone();
+
+    for result in irs.iter() {
+      self.transpile(result.1);
+      code_results.push(CodeResult::new(self.code.clone(), result.0.clone()));
+    }
+
+    self.create_files(code_results);
+  }
+
+  fn create_files(&self, code_results: Vec<CodeResult>) {
+    for code_result in code_results {
+      let mut path = code_result.file_name.split('/').collect::<Vec<&str>>();
+      let code = code_result.code.clone();
+
+      let name = path.last().unwrap().replace(r".ign", "");
+
+      path.pop();
+
+      fs::create_dir_all(format!("build/{}", path.join("/"))).unwrap();
+
+      let build_path = "build/".to_string() + path.join("/").as_str();
+
+      fs::write(format!("{}/{}.c", &build_path, &name), &code).unwrap();
+
+      let child = Command::new("gcc")
+        .args(["-x", "c", "-", "-o", &format!("{}/{}", &build_path, &name)])
+        .stdin(Stdio::piped())
+        .spawn();
+
+      if child.is_err() {
+        eprintln!("Error spawning gcc");
+        return;
+      }
+
+      let mut child = child.unwrap();
+      {
+        let stdin = child.stdin.as_mut().ok_or("Error getting stdin").unwrap();
+        stdin.write_all(code.as_bytes()).unwrap();
+      }
+
+      let output = child.wait_with_output();
+
+      if output.is_err() {
+        eprintln!("Error waiting for gcc");
+        return;
+      }
+
+      let output = output.unwrap();
+
+      if !output.status.success() {
+        eprintln!(
+          "Compilation error: {}",
+          String::from_utf8_lossy(&output.stderr)
+        );
+
+        return;
+      }
     }
   }
 }

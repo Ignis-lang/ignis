@@ -47,8 +47,10 @@ pub enum AnalyzerDiagnosticError {
   UndefinedMethods(Token),
   ImmutableProperty(Token),
   PrivateProperty(Token),
-
+  FunctionNotDefined(String, Token),
   VariableNeverUsed(Token),
+  NotAnArray(Token),
+  InvalidArrayIndex(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -423,6 +425,30 @@ impl AnalyzerDiagnostic {
         DiagnosticLevel::Warning,
         None,
         "IA0043".to_string(),
+      ),
+      AnalyzerDiagnosticError::FunctionNotDefined(name, token) => DiagnosticReport::new(
+        format!("Function '{}' not defined", name),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0044".to_string(),
+      ),
+      AnalyzerDiagnosticError::NotAnArray(token) => DiagnosticReport::new(
+        "Not an array".to_string(),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0045".to_string(),
+      ),
+      AnalyzerDiagnosticError::InvalidArrayIndex(token) => DiagnosticReport::new(
+        "Invalid array index".to_string(),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0046".to_string(),
       ),
     }
   }

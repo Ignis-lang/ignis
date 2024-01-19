@@ -1,7 +1,5 @@
 use diagnostic_report::DiagnosticReport;
 use colored::*;
-use token::token::Token;
-use enums::token_type::TokenType;
 
 /**
  *{level}[{error_code}]: {message}
@@ -104,11 +102,6 @@ impl Diagnostic {
         lines[diagnostic.token.span.line].dimmed()
       );
     }
-    println!(
-      "{:3}{}",
-      (diagnostic.token.span.line + 1).to_string().blue().bold(),
-      pipe
-    );
   }
 }
 
