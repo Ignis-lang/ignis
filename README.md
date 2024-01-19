@@ -18,9 +18,11 @@ languages, especially Lua and Python, that would be ideal.
 - Lua (for running transpiled scripts)
 
 ```bash
-git clone https://github.com/BasileusErwin/ignis-lang.git
+git clone https://github.com/Ignis/ignis.git
 cd ignis-lang
 cargo install --path . ignisc
+# Or
+cargo build --release
 ```
 
 ## Usage
@@ -42,40 +44,26 @@ lua ./build/main.lua
 > it to have syntax highlighting 
 
 ```Typescript
-import { toString } from "std:string";
 import { println } from "std:io";
+import { length } from "std:array";
+import { toString } from "std:string";
 
-function printFactorial(num: int, fact: int): void {
-  println("The factorial of " + toString(num) + " is: " + toString(fact));
+function sum(nums: int[]): int {
+  let mut total: int = 0;
+
+  for (let i = 0; i < length(nums); i++) {
+    total = total + nums[i];
+  }
+
+  return total;
 }
 
 function main(): void {
-  let x: int = 10;
-  let y: int = 20;
+  let array: int[] = [1, 2, 3, 4, 5];
 
-  let num: int = 5;
-  let fact: int = factorial(num);
+  println("Lenght: " + toString(length(array)));
 
-  printFactorial(num, fact);
-
-  let z: int = x + y;
-
-  if (isEven(z)) {
-    println("z is even");
-  } else {
-    println("z is odd");
-  }
-
-  let mut count: int = 0;
-
-  while (count < 5) {
-    println(count);
-    count = count + 1;
-  }
-
-  let result: int = sum(x, y);
-
-  println("The sum is: " + toString(result));
+  println(sum(array));
 }
 ```
 
