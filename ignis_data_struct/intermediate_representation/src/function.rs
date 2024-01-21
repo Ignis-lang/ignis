@@ -1,4 +1,5 @@
 use enums::data_type::DataType;
+use token::token::Token;
 
 use super::{variable::IRVariable, block::IRBlock, IRInstructionTrait};
 
@@ -37,7 +38,7 @@ impl IRFunctionMetadata {
 
 #[derive(Debug, Clone)]
 pub struct IRFunction {
-  pub name: String,
+  pub name: Token,
   pub parameters: Vec<IRVariable>,
   pub return_type: DataType,
   pub body: Option<Box<IRBlock>>,
@@ -46,7 +47,7 @@ pub struct IRFunction {
 
 impl IRFunction {
   pub fn new(
-    name: String,
+    name: Token,
     parameters: Vec<IRVariable>,
     return_type: DataType,
     body: Option<Box<IRBlock>>,
@@ -66,7 +67,7 @@ impl IRInstructionTrait for IRFunction {
   fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
       "type": "function",
-      "name": self.name,
+      "name": self.name.to_json(),
       "parameters": self.parameters.iter().map(|p| p.to_json()).collect::<Vec<serde_json::Value>>(),
       "return_type": self.return_type.to_string(),
       "body": if let Some(body) = &self.body {

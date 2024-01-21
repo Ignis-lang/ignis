@@ -96,7 +96,10 @@ impl AnalyzerDiagnostic {
         "IA0003".to_string(),
       ),
       AnalyzerDiagnosticError::InvalidNumberOfArguments(max, num, token) => DiagnosticReport::new(
-        format!("Expected {} arguments, but got {} arguments", max, num),
+        format!(
+          "Function '{}': expected {} arguments, but got {} arguments",
+          token.span.literal, max, num
+        ),
         Box::new(token.clone()),
         self.token_line.clone(),
         DiagnosticLevel::Error,

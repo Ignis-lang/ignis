@@ -45,13 +45,11 @@ lua ./build/main.lua
 
 ```Typescript
 import { println } from "std:io";
-import { length } from "std:array";
-import { toString } from "std:string";
 
 function sum(nums: int[]): int {
   let mut total: int = 0;
 
-  for (let i = 0; i < length(nums); i++) {
+  for (let i = 0; i < nums.length; i++) {
     total = total + nums[i];
   }
 
@@ -61,7 +59,7 @@ function sum(nums: int[]): int {
 function main(): void {
   let array: int[] = [1, 2, 3, 4, 5];
 
-  println("Lenght: " + toString(length(array)));
+  println("Lenght: " + array.length.toString());
 
   println(sum(array));
 }
