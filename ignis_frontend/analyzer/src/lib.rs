@@ -2012,15 +2012,51 @@ impl Analyzer {
     match data_type {
       DataType::String => self.string_methods(expression),
       DataType::Int | DataType::Float => self.number_methods(expression, &object),
-      DataType::Boolean => self.boolean_methods(expression),
+      DataType::Boolean => self.boolean_methods(expression, &object),
       DataType::Array(_) => self.array_methods(expression),
       DataType::Unwnown => todo!(),
       _ => todo!(),
     }
   }
 
-  fn boolean_methods(&mut self, expression: &MethodCall) -> AnalyzerResult {
-    todo!("boolean")
+  fn boolean_methods(&mut self, expression: &MethodCall, object: &IRInstruction) -> AnalyzerResult {
+    let mut current_ir = self.irs.get_mut(&self.current_file).unwrap().clone();
+    match expression.name.span.literal.as_str() {
+      "toString" => {
+        let current_index = current_ir.len() - 1;
+
+        current_ir.push(IRInstruction::Function(IRFunction::new(
+          *expression.name.clone(),
+          vec![],
+          DataType::String,
+          None,
+          IRFunctionMetadata::new(false, true, true, true, false, true, false),
+        )));
+
+        self.irs.insert(self.current_file.clone(), current_ir);
+
+        self
+          .block_stack
+          .last_mut()
+          .unwrap()
+          .insert("toString".to_string(), true);
+
+        let value = self.analyzer(&expression.calle)?;
+        let mut current_ir = self.irs.get_mut(&self.current_file).unwrap().clone();
+
+        current_ir.remove(current_index);
+        self.block_stack.last_mut().unwrap().remove("toString");
+
+        Ok(IRInstruction::MethodCall(IRMethodCall::new(
+          expression.name.clone(),
+          Box::new(value),
+          DataType::String,
+          Box::new(object.clone()),
+          MethodCallMetadata::new(DataType::String, self.extract_data_type(object)),
+        )))
+      }
+      _ => todo!(),
+    }
   }
 
   fn number_methods(&mut self, expression: &MethodCall, object: &IRInstruction) -> AnalyzerResult {
