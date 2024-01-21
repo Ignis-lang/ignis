@@ -322,10 +322,30 @@ impl TranspilerToLua {
         DataType::Int | DataType::Float => {
           code.push_str(&self.transpile_number_methods(call, indent_level))
         }
+        DataType::Boolean => {
+          code.push_str(&self.transpile_boolean_methods(call, indent_level))
+        }
         _ => todo!(),
       },
     };
 
+    code
+  }
+
+  fn transpile_boolean_methods(&mut self, call: &IRMethodCall, indent_level: usize) -> String {
+    let mut code = String::new();
+    match call.name.span.literal.as_str() {
+      "toString" => {
+        code.push_str(
+          format!(
+            "tostring({})",
+            &self.transpile_ir_to_lua(&call.object, indent_level)
+          )
+          .as_str(),
+        );
+      }
+      _ => todo!(),
+    }
     code
   }
 
