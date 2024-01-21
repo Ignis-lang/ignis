@@ -1,20 +1,17 @@
 use enums::data_type::DataType;
+use token::token::Token;
 
 use super::{IRInstruction, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRCall {
-  pub name: String,
+  pub name: Token,
   pub arguments: Vec<IRInstruction>,
   pub return_type: DataType,
 }
 
 impl IRCall {
-  pub fn new(
-    name: String,
-    arguments: Vec<IRInstruction>,
-    return_type: DataType,
-  ) -> Self {
+  pub fn new(name: Token, arguments: Vec<IRInstruction>, return_type: DataType) -> Self {
     Self {
       name,
       arguments,
@@ -27,7 +24,7 @@ impl IRInstructionTrait for IRCall {
   fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
       "type": "IRCall",
-      "name": self.name,
+      "name": self.name.to_json() ,
       "arguments": self.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
       "return_type": self.return_type.to_string(),
     })

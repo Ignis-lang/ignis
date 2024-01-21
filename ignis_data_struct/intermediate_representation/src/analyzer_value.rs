@@ -64,7 +64,7 @@ impl AnalyzerValue {
       AnalyzerValue::Function(f) => f.return_type.clone(),
       AnalyzerValue::Class(class) => {
         let class = class.as_ref();
-        DataType::ClassType(class.name.clone())
+        DataType::ClassType(class.name.span.literal.clone())
       }
     }
   }

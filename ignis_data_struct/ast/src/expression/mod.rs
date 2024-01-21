@@ -182,7 +182,7 @@ impl Expression {
           "name": method.name.span.literal,
           "arguments": method.calle.to_json(),
           "data_type": method.data_type.to_string(),
-          "instance": method.instance.to_json(),
+          "instance": method.object.to_json(),
         })
       }
     }
@@ -288,7 +288,7 @@ impl Display for Expression {
         )
       }
       Expression::MethodCall(method) => {
-        write!(f, "{}.{}{}", method.instance, method.name, method.calle,)
+        write!(f, "{}.{}{}", method.object, method.name, method.calle,)
       }
     }
   }

@@ -16,6 +16,7 @@ pub mod ir_for;
 pub mod ir_for_in;
 pub mod ir_get;
 pub mod ir_if;
+pub mod ir_method_call;
 pub mod ir_return;
 pub mod ir_set;
 pub mod ir_while;
@@ -27,6 +28,7 @@ pub mod variable;
 
 use ir_array_access::IRArrayAccess;
 use ir_for::IRFor;
+use ir_method_call::IRMethodCall;
 use serde_json::Value;
 
 use self::{
@@ -63,6 +65,7 @@ pub enum IRInstruction {
   Get(IRGet),
   ClassInstance(IRClassInstance),
   Set(IRSet),
+  MethodCall(IRMethodCall),
 }
 
 pub trait IRInstructionTrait {
@@ -96,6 +99,7 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::Set(set) => set.to_json(),
       IRInstruction::For(_for) => _for.to_json(),
       IRInstruction::ArrayAccess(array) => array.to_json(),
+      IRInstruction::MethodCall(call) => call.to_json(),
     }
   }
 }

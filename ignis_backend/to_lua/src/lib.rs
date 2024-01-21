@@ -2,12 +2,15 @@ use std::{vec, collections::HashMap};
 use colored::*;
 
 use code_result::CodeResult;
+use enums::data_type::DataType;
 use intermediate_representation::{
   {
     IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable,
     instruction_type::IRInstructionType,
   },
   analyzer_value::AnalyzerValue,
+  ir_get::IRGet,
+  ir_method_call::IRMethodCall,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +91,7 @@ impl TranspilerToLua {
         AnalyzerValue::Float(num) => num.to_string(),
         AnalyzerValue::Boolean(boolean) => boolean.to_string(),
         AnalyzerValue::Return(r) => r.to_string(),
-        AnalyzerValue::Function(f) => f.name.clone(),
+        AnalyzerValue::Function(f) => f.name.span.literal.clone(),
         AnalyzerValue::Null | AnalyzerValue::Unknown => "nil".to_string(),
         AnalyzerValue::Class(_) => todo!(),
       }),
@@ -272,7 +275,14 @@ impl TranspilerToLua {
 
         code.push_str(&format!("{}goto continue\n", " ".repeat(indent_level)));
       }
-      IRInstruction::Get(_) => todo!(),
+      IRInstruction::Get(get) => {
+        let result = match get.metadata.object_data_type {
+          DataType::Array(_) => self.transpile_array_property(&get),
+          _ => todo!(),
+        };
+
+        code.push_str(&result);
+      }
       IRInstruction::ClassInstance(_) => todo!(),
       IRInstruction::Set(_) => todo!(),
       IRInstruction::For(_for) => {
@@ -308,8 +318,31 @@ impl TranspilerToLua {
 
         self.context.pop();
       }
+      IRInstruction::MethodCall(call) => match call.metadata.object_data_type {
+        DataType::Int | DataType::Float => {
+          code.push_str(&self.transpile_number_methods(call, indent_level))
+        }
+        _ => todo!(),
+      },
     };
 
+    code
+  }
+
+  fn transpile_number_methods(&mut self, call: &IRMethodCall, indent_level: usize) -> String {
+    let mut code = String::new();
+    match call.name.span.literal.as_str() {
+      "toString" => {
+        code.push_str(
+          format!(
+            "tostring({})",
+            &self.transpile_ir_to_lua(&call.object, indent_level)
+          )
+          .as_str(),
+        );
+      }
+      _ => todo!(),
+    }
     code
   }
 
@@ -331,7 +364,7 @@ impl TranspilerToLua {
       if func.metadata.is_exported {
         self
           .statement_exported
-          .push((func.name.clone(), String::new()));
+          .push((func.name.span.literal.clone(), String::new()));
       }
 
       if func.metadata.is_imported {
@@ -342,20 +375,20 @@ impl TranspilerToLua {
         code.push_str(&format!(
           "{}local {}\n",
           " ".repeat(indent_level),
-          func.name
+          func.name.span.literal
         ));
 
         code.push_str(&format!(
           "{}{} = function({})\n",
           " ".repeat(indent_level),
-          func.name,
+          func.name.span.literal,
           parameters
         ));
       } else {
         code.push_str(&format!(
           "{}local {} = function({})\n",
           " ".repeat(indent_level),
-          func.name,
+          func.name.span.literal,
           parameters
         ));
       }
@@ -366,12 +399,21 @@ impl TranspilerToLua {
 
       code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
 
-      if func.name == "main" {
-        code.push_str(&format!("{}{}()\n", " ".repeat(indent_level), func.name));
+      if func.name.span.literal == "main" {
+        code.push_str(&format!("{}{}()\n", " ".repeat(indent_level), func.name.span.literal));
       }
     }
 
     code
+  }
+
+  fn transpile_array_property(&mut self, array: &IRGet) -> String {
+    match array.name.as_str() {
+      "length" => {
+        format!("#{}", self.transpile_ir_to_lua(&array.object, 0))
+      }
+      _ => todo!(),
+    }
   }
 
   fn transpile_opeartor_to_lua(&self, operator: &IRInstructionType) -> String {
@@ -403,23 +445,10 @@ impl TranspilerToLua {
   fn transpile_call_to_lua(&mut self, call: &IRCall, indent_level: usize) -> String {
     let mut code = String::new();
 
-    let name = match call.name.as_str() {
+    let name = match call.name.span.literal.as_str() {
       "println" => "print".to_string(),
-      "toString" => "toString".to_string(),
-      _ => call.name.clone(),
+      _ => call.name.span.literal.clone(),
     };
-
-    if name == "toString" {
-      code.push_str(&self.transpile_ir_to_lua(&call.arguments[0], indent_level));
-
-      return code;
-    }
-
-    if name == "length" {
-      code.push('#');
-      code.push_str(&self.transpile_ir_to_lua(&call.arguments[0], 0));
-      return code;
-    }
 
     if self.statement_imported.contains_key(&name) {
       let module_name = self.statement_imported.get(&name).unwrap().clone();

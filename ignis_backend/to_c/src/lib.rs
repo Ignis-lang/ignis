@@ -155,7 +155,7 @@ impl TranspilerToC {
       if func.metadata.is_exported {
         self
           .statement_exported
-          .push((func.name.clone(), String::new()));
+          .push((func.name.span.literal.clone(), String::new()));
       }
 
       if func.metadata.is_imported {
@@ -232,6 +232,7 @@ impl TranspilerToC {
         IRInstruction::Set(_) => todo!(),
         IRInstruction::For(_) => todo!(),
         IRInstruction::ArrayAccess(_) => todo!(),
+        IRInstruction::MethodCall(_) => todo!(),
       };
 
       args.push(',');
@@ -255,12 +256,12 @@ impl TranspilerToC {
   fn transpile_call_to_c(&mut self, call: &IRCall, indent_level: usize) -> String {
     let mut code = String::new();
 
-    let name = match call.name.as_str() {
+    let name = match call.name.span.literal.as_str() {
       "println" => {
         return self.transpile_print_to_c(call, indent_level);
       }
       "toString" => "toString",
-      _ => &call.name,
+      _ => &call.name.span.literal,
     };
 
     let args = call
@@ -467,6 +468,7 @@ impl TranspilerToC {
       IRInstruction::Set(_) => todo!(),
       IRInstruction::For(_) => todo!(),
       IRInstruction::ArrayAccess(_) => todo!(),
+        IRInstruction::MethodCall(_) => todo!(),
     };
 
     code

@@ -268,6 +268,7 @@ impl Parser {
       return Ok(Expression::New(NewExpression::new(name, arguments)));
     }
 
+    let token = self.peek();
     let mut expression: Expression = self.primary()?;
 
     loop {
@@ -275,6 +276,7 @@ impl Parser {
         let name = self.consume(TokenType::Identifier)?;
 
         if self.match_token(&[TokenType::LeftParen]) {
+          let object = expression.clone();
           expression =
             Expression::Variable(VariableExpression::new(name.clone(), DataType::Pending));
 
@@ -284,13 +286,17 @@ impl Parser {
             Box::new(name),
             Box::new(calle.clone()),
             self.get_expression_type(&calle),
-            Box::new(expression),
+            Box::new(object),
           ));
 
           continue;
         }
 
-        expression = Expression::Get(Get::new(Box::new(expression), name));
+        expression = Expression::Get(Get::new(
+          Box::new(expression),
+          Box::new(token.clone()),
+          Box::new(name),
+        ));
 
         continue;
       }
@@ -833,7 +839,7 @@ impl Parser {
         }
         Expression::Get(get) => {
           expression = Expression::Set(Set::new(
-            Box::new(get.name),
+            get.name,
             Box::new(value.clone()),
             get.object,
             self.get_expression_type(&value),

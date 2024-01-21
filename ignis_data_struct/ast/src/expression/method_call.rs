@@ -8,7 +8,7 @@ pub struct MethodCall {
   pub name: Box<Token>,
   pub calle: Box<Expression>,
   pub data_type: DataType,
-  pub instance: Box<Expression>,
+  pub object: Box<Expression>,
 }
 
 impl MethodCall {
@@ -16,13 +16,13 @@ impl MethodCall {
     name: Box<Token>,
     calle: Box<Expression>,
     data_type: DataType,
-    instance: Box<Expression>,
+    object: Box<Expression>,
   ) -> Self {
     Self {
       name,
       calle,
       data_type,
-      instance,
+      object,
     }
   }
 }
