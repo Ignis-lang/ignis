@@ -3,7 +3,7 @@ use crate::{
     binary::Binary, literal::Literal, unary::Unary, grouping::Grouping,
     variable::VariableExpression, assign::Assign, logical::Logical, ternary::Ternary, call::Call,
     array::Array, new::NewExpression, get::Get, set::Set, method_call::MethodCall,
-    array_access::ArrayAccess,
+    array_access::ArrayAccess, this::This,
   },
   statement::{
     expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
@@ -31,6 +31,7 @@ pub trait Visitor<R> {
   fn visit_set_expression(&mut self, set: &Set) -> R;
   fn visit_method_call_expression(&mut self, method: &MethodCall) -> R;
   fn visit_array_access_expression(&mut self, array: &ArrayAccess) -> R;
+  fn visit_this_expression(&mut self, this: &This) -> R;
 
   // Statements
   fn visit_expression_statement(&mut self, statement: &ExpressionStatement) -> R;

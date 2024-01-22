@@ -46,7 +46,7 @@ impl Display for AnalyzerValue {
       AnalyzerValue::Function(func) => write!(f, "Function: {}", func.name),
       AnalyzerValue::Class(class) => {
         let class = class.as_ref();
-        write!(f, "Class: {}", class.name)
+        write!(f, "Class: {}", class.class.name)
       }
     }
   }
@@ -64,7 +64,7 @@ impl AnalyzerValue {
       AnalyzerValue::Function(f) => f.return_type.clone(),
       AnalyzerValue::Class(class) => {
         let class = class.as_ref();
-        DataType::ClassType(class.name.span.literal.clone())
+        DataType::ClassType(class.class.name.clone())
       }
     }
   }

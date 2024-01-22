@@ -4,14 +4,17 @@ use std::{collections::HashMap, vec, fs};
 use std::fmt::{Display, Formatter};
 
 use ast::expression::array_access::ArrayAccess;
+use ast::expression::this::This;
 use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
 use diagnostic_report::DiagnosticReport;
 use intermediate_representation::instruction_type::IRInstructionType;
 use intermediate_representation::ir_array_access::IRArrayAccess;
 use intermediate_representation::ir_for::IRFor;
 use intermediate_representation::ir_get::{IRGet, GetMetadata};
+use intermediate_representation::ir_method::IRMethod;
 use intermediate_representation::ir_method_call::{IRMethodCall, MethodCallMetadata};
 use intermediate_representation::ir_set::IRSet;
+use intermediate_representation::ir_this::IRThis;
 use intermediate_representation::{
   analyzer_value::AnalyzerValue,
   IRInstruction,
@@ -76,6 +79,7 @@ type CheckCompatibility<T> = (bool, T);
 
 #[derive(Debug, Clone, PartialEq)]
 enum AnalyzerContext {
+  Variable(Token),
   Function,
   Method,
   Class,
@@ -87,6 +91,7 @@ enum AnalyzerContext {
 impl Display for AnalyzerContext {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     match self {
+      AnalyzerContext::Variable(token) => write!(f, "Variable: {}", token.span.literal),
       AnalyzerContext::Function => write!(f, "Function"),
       AnalyzerContext::Method => write!(f, "Method"),
       AnalyzerContext::Class => write!(f, "Class"),
@@ -97,13 +102,19 @@ impl Display for AnalyzerContext {
   }
 }
 
+enum CalleableDeclaration {
+  Function(IRFunction),
+  Method(IRMethod),
+  // Lambda,
+}
+
 pub struct Analyzer {
   pub irs: HashMap<String, Vec<IRInstruction>>,
   tokens: Vec<Token>,
   pub block_stack: Vec<HashMap<String, bool>>,
   pub diagnostics: Vec<Box<AnalyzerDiagnostic>>,
   pub scopes_variables: Vec<IRVariable>,
-  pub current_function: Option<IRFunction>,
+  current_function: Option<CalleableDeclaration>,
   pub current_file: String,
   pub current_class: Option<IRClass>,
   context: Vec<AnalyzerContext>,
@@ -202,12 +213,23 @@ impl Visitor<AnalyzerResult> for Analyzer {
     }
 
     if let Some(f) = &mut self.current_function {
-      if f.name.span.literal == variable.name.span.literal {
-        f.metadata.is_recursive = true;
+      match f {
+        CalleableDeclaration::Function(f) => {
+          if f.name.span.literal == variable.name.span.literal {
+            f.metadata.is_recursive = true;
 
-        let instruction = IRInstruction::Function(f.clone());
+            let instruction = IRInstruction::Function(f.clone());
 
-        return Ok(instruction);
+            return Ok(instruction);
+          }
+        }
+        CalleableDeclaration::Method(method) => {
+          if method.name.span.literal == variable.name.span.literal {
+            method.metadata.is_recursive = true;
+            let instruction = IRInstruction::Method(method.clone());
+            return Ok(instruction);
+          }
+        }
       }
     }
 
@@ -272,7 +294,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
+    self
+      .context
+      .push(AnalyzerContext::Variable(expression.name.clone()));
+
     let value = self.analyzer(&expression.value)?;
+
+    self.context.pop();
+
     let current_block = self.block_stack.last().unwrap();
 
     let env = current_block.iter().find(|(name, is_declared)| {
@@ -412,7 +441,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Unary(u) => u.data_type.clone(),
         IRInstruction::Logical(_) => DataType::Boolean,
         IRInstruction::Class(c) => DataType::ClassType(c.name.clone()),
-        IRInstruction::ClassInstance(c) => DataType::ClassType(c.name.span.literal.clone()),
+        IRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.clone()),
         IRInstruction::Array(a) => a.data_type.clone(),
         _ => DataType::Unwnown,
       };
@@ -521,11 +550,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let constructor = constructor.unwrap();
 
-    let instruction = IRInstruction::ClassInstance(IRClassInstance::new(
-      Box::new(class),
-      constructor.name,
-      arguments,
-    ));
+    let mut instruction = IRClassInstance::new(Box::new(class), constructor.name, arguments);
+
+    if let Some(c) = self.context.last() {
+      if let AnalyzerContext::Variable(n) = c.clone() {
+        instruction.var_name = n.clone()
+      }
+    }
+
+    let instruction = IRInstruction::ClassInstance(instruction);
 
     Ok(instruction)
   }
@@ -586,9 +619,20 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
+    let class_instance = self.find_class_instance(object.name);
+
+    if class_instance.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(*expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
     let instruction = IRInstruction::Get(IRGet::new(
       expression.name.span.literal.clone(),
-      Box::new(IRInstruction::Class(class)),
+      Box::new(IRInstruction::ClassInstance(
+        class_instance.unwrap().clone(),
+      )),
       self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
       GetMetadata::new(object_data_type.clone()),
     ));
@@ -679,6 +723,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       Box::new(value),
       Box::new(class_instance.unwrap()),
       self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
+      object.name,
     ));
 
     Ok(instruction)
@@ -701,19 +746,90 @@ impl Visitor<AnalyzerResult> for Analyzer {
       return self.type_methods(method_call);
     }
 
-    let calle = self.analyzer(&method_call.calle)?;
-
-    let method = match calle {
-      IRInstruction::Call(f) => Some(f),
+    let object = match instance {
+      IRInstruction::Variable(c) => c,
       _ => {
         return Err(Box::new(AnalyzerDiagnostic::new(
-          AnalyzerDiagnosticError::NotCallable(*method_call.name.clone()),
+          AnalyzerDiagnosticError::NotAClass(*method_call.name.clone()),
           self.find_token_line(&method_call.name.span.line),
-        )));
+        )))
       }
     };
 
-    todo!()
+    let class = self.find_class_in_ir(match object.data_type {
+      DataType::ClassType(name) => name,
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotAClass(*method_call.name.clone()),
+          self.find_token_line(&method_call.name.span.line),
+        )))
+      }
+    });
+
+    if class.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(*method_call.name.clone()),
+        self.find_token_line(&method_call.name.span.line),
+      )));
+    }
+
+    let class = class.unwrap();
+
+    if class.methods.is_empty() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedMethods(*method_call.name.clone()),
+        self.find_token_line(&method_call.name.span.line),
+      )));
+    }
+
+    let class_binding = class.clone();
+
+    let method = class_binding
+      .methods
+      .iter()
+      .find(|p| p.name.span.literal == method_call.name.span.literal);
+
+    if method.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedProperty(*method_call.name.clone()),
+        self.find_token_line(&method_call.name.span.line),
+      )));
+    }
+
+    let method = method.unwrap();
+
+    if !method.metadata.is_public {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::PrivateProperty(*method_call.name.clone()),
+        self.find_token_line(&method_call.name.span.line),
+      )));
+    }
+
+    let calle = self.analyzer(&method_call.object)?;
+
+    let class_instance = self.find_class_instance(object.name);
+
+    if class_instance.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(*method_call.name.clone()),
+        self.find_token_line(&method_call.name.span.line),
+      )));
+    }
+
+    let instruction = IRInstruction::MethodCall(IRMethodCall::new(
+      method_call.name.clone(),
+      Box::new(calle),
+      method.return_type.clone(),
+      Box::new(IRInstruction::ClassInstance(
+        class_instance.clone().unwrap().clone(),
+      )),
+      MethodCallMetadata::new(
+        method.return_type.clone(),
+        DataType::ClassType(class_instance.unwrap().class.name.clone()),
+      ),
+    ));
+
+    Ok(instruction)
   }
 
   fn visit_array_access_expression(&mut self, array: &ArrayAccess) -> AnalyzerResult {
@@ -769,6 +885,31 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
+  fn visit_this_expression(&mut self, this: &This) -> AnalyzerResult {
+    if self.current_class.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::ThisOutsideOfClass(this.keyword.clone()),
+        self.find_token_line(&this.keyword.span.line),
+      )));
+    }
+
+    let mut access: Option<Box<IRInstruction>> = None;
+    let mut data_type: DataType = DataType::Null;
+    if this.access.is_some() {
+      let result = self.analyzer(this.access.as_ref().unwrap())?;
+      data_type = self.extract_data_type(&result);
+      access = Some(Box::new(result))
+    }
+
+    let instruction = IRInstruction::This(IRThis::new(
+      Box::new(this.keyword.clone()),
+      access,
+      Box::new(data_type),
+    ));
+
+    Ok(instruction)
+  }
+
   fn visit_expression_statement(&mut self, statement: &ExpressionStatement) -> AnalyzerResult {
     self.analyzer(&statement.expression)
   }
@@ -790,6 +931,9 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let data_type = variable.type_annotation.clone();
 
     if let Some(initializer) = &variable.initializer {
+      self
+        .context
+        .push(AnalyzerContext::Variable(*variable.name.clone()));
       let expression = self.analyzer(initializer)?;
       match expression {
         IRInstruction::Literal(literal) => {
@@ -823,7 +967,9 @@ impl Visitor<AnalyzerResult> for Analyzer {
           value = IRInstruction::ClassInstance(class);
         }
         _ => (),
-      }
+      };
+
+      self.context.pop();
     }
 
     let variable = IRVariable::new(
@@ -965,10 +1111,11 @@ impl Visitor<AnalyzerResult> for Analyzer {
         false,
         false,
         false,
+        false,
       ),
     );
 
-    self.current_function = Some(current_function.clone());
+    self.current_function = Some(CalleableDeclaration::Function(current_function.clone()));
 
     for body in &statement.body {
       let result = self.analyze_statement(body)?;
@@ -986,7 +1133,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     self.end_scope();
 
-    current_function = self.current_function.as_ref().unwrap().clone();
+    current_function = match self.current_function.as_ref().unwrap() {
+      CalleableDeclaration::Function(f) => f.clone(),
+      _ => todo!(),
+    };
 
     current_function.body = Some(Box::new(ir.clone()));
 
@@ -1059,7 +1209,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       };
     }
 
-    let mut ir: Vec<IRFunction> = Vec::new();
+    let mut ir: Vec<IRMethod> = Vec::new();
 
     let mut current_class =
       IRClass::new(statement.name.span.literal.clone(), Vec::new(), properties);
@@ -1070,7 +1220,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       let result = self.analyze_statement(method)?;
 
       match result {
-        IRInstruction::Function(f) => {
+        IRInstruction::Method(f) => {
           self.scopes_variables.push(IRVariable::new(
             f.name.span.literal.clone(),
             DataType::Unwnown,
@@ -1287,7 +1437,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let mut ir: IRBlock = IRBlock::new(Vec::new(), Vec::new());
 
-    let mut current_function = IRFunction::new(
+    let mut current_function = IRMethod::new(
       statement.name.clone(),
       parameters.clone(),
       statement.return_type.clone().unwrap_or(DataType::Void),
@@ -1300,10 +1450,12 @@ impl Visitor<AnalyzerResult> for Analyzer {
         statement.metadata.is_static,
         statement.metadata.is_public,
         statement.metadata.is_contructor,
+        true,
       ),
+      statement.class_name.clone(),
     );
 
-    self.current_function = Some(current_function.clone());
+    self.current_function = Some(CalleableDeclaration::Method(current_function.clone()));
 
     for body in &statement.body {
       let result = self.analyze_statement(body)?;
@@ -1321,11 +1473,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     self.end_scope();
 
-    current_function = self.current_function.as_ref().unwrap().clone();
+    current_function = match self.current_function.as_ref().unwrap() {
+      CalleableDeclaration::Method(m) => m.clone(),
+      _ => unreachable!(),
+    };
 
     current_function.body = Some(Box::new(ir.clone()));
 
-    let instruction = IRInstruction::Function(current_function);
+    let instruction = IRInstruction::Method(current_function);
 
     self.context.pop();
     self.current_function = None;
@@ -1514,7 +1669,7 @@ impl Analyzer {
           )],
           DataType::Void,
           None,
-          IRFunctionMetadata::new(false, true, true, true, false, false, false),
+          IRFunctionMetadata::new(false, true, true, true, false, false, false, false),
         )));
 
         block_stack.insert("println".to_string(), true);
@@ -1744,6 +1899,7 @@ impl Analyzer {
         DataType::Array(t) => *t.clone(),
         _ => DataType::Unwnown,
       },
+      IRInstruction::This(this) => *this.data_type.clone(),
       _ => DataType::Unwnown,
     }
   }
@@ -1900,7 +2056,7 @@ impl Analyzer {
     &self,
     class: &IRClass,
     arguments: &[IRInstruction],
-  ) -> Option<IRFunction> {
+  ) -> Option<IRMethod> {
     let constructors = class.methods.iter().filter(|m| m.metadata.is_constructor);
     for constructor in constructors {
       if constructor.parameters.len() != arguments.len() {
@@ -1917,6 +2073,7 @@ impl Analyzer {
           break;
         }
       }
+
       if is_matching {
         return Some(constructor.clone());
       }
@@ -1951,14 +2108,18 @@ impl Analyzer {
     let mut class_instance = None;
 
     for variable in scopes_variables {
-      if variable.data_type != DataType::ClassType(instance_name.clone()) {
+      if variable.name != instance_name.clone() {
         continue;
       }
 
       let value = variable.value.clone();
 
+      if value.is_none() {
+        continue;
+      }
+
       match value.unwrap().as_ref() {
-        IRInstruction::ClassInstance(c) if c.name.span.literal == instance_name => {
+        IRInstruction::ClassInstance(c) if c.var_name.span.literal == instance_name => {
           class_instance = Some(c.clone());
           break;
         }
@@ -2030,7 +2191,7 @@ impl Analyzer {
           vec![],
           DataType::String,
           None,
-          IRFunctionMetadata::new(false, true, true, true, false, true, false),
+          IRFunctionMetadata::new(false, true, true, true, false, true, false, true),
         )));
 
         self.irs.insert(self.current_file.clone(), current_ir);
@@ -2071,7 +2232,7 @@ impl Analyzer {
           vec![],
           DataType::String,
           None,
-          IRFunctionMetadata::new(false, true, true, true, false, true, false),
+          IRFunctionMetadata::new(false, true, true, true, false, true, false, true),
         )));
 
         self.irs.insert(self.current_file.clone(), current_ir);

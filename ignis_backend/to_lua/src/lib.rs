@@ -1,4 +1,4 @@
-use std::{vec, collections::HashMap};
+use std::{vec, collections::HashMap, fmt::format};
 use colored::*;
 
 use code_result::CodeResult;
@@ -11,6 +11,7 @@ use intermediate_representation::{
   analyzer_value::AnalyzerValue,
   ir_get::IRGet,
   ir_method_call::IRMethodCall,
+  class::IRClass,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +32,7 @@ pub struct TranspilerToLua {
 
 impl TranspilerToLua {
   pub fn new(irs: HashMap<String, Vec<IRInstruction>>) -> Self {
+    println!("{}: Transpiling to Lua...", "[Transpiler]".green().bold());
     Self {
       code: String::new(),
       statement_exported: vec![],
@@ -193,7 +195,9 @@ impl TranspilerToLua {
           value
         ));
       }
-      IRInstruction::Class(_) => todo!(),
+      IRInstruction::Class(class) => {
+        code.push_str(&self.transpile_class_to_lua(class, indent_level))
+      }
       IRInstruction::Ternary(ternary) => {
         let condition = self.transpile_ir_to_lua(&ternary.condition, indent_level);
 
@@ -277,14 +281,35 @@ impl TranspilerToLua {
       }
       IRInstruction::Get(get) => {
         let result = match get.metadata.object_data_type {
-          DataType::Array(_) => self.transpile_array_property(&get),
-          _ => todo!(),
+          DataType::Array(_) => self.transpile_array_property(get),
+          _ => self.transpile_get_to_lua(get, indent_level),
         };
 
         code.push_str(&result);
       }
-      IRInstruction::ClassInstance(_) => todo!(),
-      IRInstruction::Set(_) => todo!(),
+      IRInstruction::ClassInstance(class) => {
+        code.push_str(&format!(
+          "{}{}:new({})",
+          " ".repeat(indent_level),
+          class.class.name,
+          class
+            .constructor_args
+            .iter()
+            .map(|a| { self.transpile_ir_to_lua(a, indent_level) })
+            .collect::<Vec<String>>()
+            .join(", ")
+        ));
+      }
+      IRInstruction::Set(set) => {
+        let value = self.transpile_ir_to_lua(&set.value, indent_level);
+        code.push_str(&format!(
+          "{}{}.{} = {}\n",
+          " ".repeat(indent_level),
+          set.var_name,
+          set.name,
+          value
+        ));
+      }
       IRInstruction::For(_for) => {
         self.context.push(TranspilerContext::For);
         code.push_str(&format!(
@@ -322,12 +347,149 @@ impl TranspilerToLua {
         DataType::Int | DataType::Float => {
           code.push_str(&self.transpile_number_methods(call, indent_level))
         }
-        DataType::Boolean => {
-          code.push_str(&self.transpile_boolean_methods(call, indent_level))
-        }
-        _ => todo!(),
+        DataType::Boolean => code.push_str(&self.transpile_boolean_methods(call, indent_level)),
+        _ => code.push_str(&self.transpile_method_call(call, indent_level)),
       },
+      IRInstruction::Method(_) => todo!(),
+      IRInstruction::This(this) => {
+        code.push_str(&format!("{}self", " ".repeat(indent_level)));
+        if let Some(access) = &this.access {
+          code.push('.');
+          code.push_str(&self.transpile_ir_to_lua(access, 0))
+        }
+      }
     };
+
+    code
+  }
+
+  fn transpile_get_to_lua(&mut self, get: &IRGet, indent_level: usize) -> String {
+    let mut code = String::new();
+
+    match *get.object.clone() {
+      IRInstruction::ClassInstance(inst) => {
+        code.push_str(&format!(
+          "{}{}",
+          " ".repeat(indent_level),
+          inst.var_name.span.literal
+        ));
+      }
+      _ => todo!(),
+    };
+
+    code.push_str(format!(".{}", get.name).as_str());
+
+    code
+  }
+
+  fn transpile_class_to_lua(&mut self, class: &IRClass, indent_level: usize) -> String {
+    let mut code = String::new();
+
+    code.push_str(&format!(
+      "{}{} = {{\n",
+      " ".repeat(indent_level),
+      class.name
+    ));
+
+    for property in &class.properties {
+      code.push_str(&format!(
+        "{}{} = ",
+        " ".repeat(indent_level + 2),
+        property.name,
+      ));
+
+      if let Some(value) = &property.value {
+        code.push_str(&self.transpile_ir_to_lua(value, 0));
+      } else {
+        code.push_str("nil");
+      }
+
+      code.push(',');
+      code.push('\n');
+    }
+
+    code.push_str("}\n");
+    code.push('\n');
+
+    code.push_str(&format!(
+      "{}{}.__index = {}\n",
+      " ".repeat(indent_level),
+      class.name,
+      class.name
+    ));
+
+    for method in &class.methods {
+      let parameters = method
+        .parameters
+        .iter()
+        .map(|x| x.name.clone())
+        .collect::<Vec<String>>()
+        .join(", ");
+
+      let name = if class.name == method.name.span.literal {
+        "new".to_string()
+      } else {
+        method.name.span.literal.clone()
+      };
+
+      code.push_str(&format!(
+        "{}function {}:{}({})\n",
+        " ".repeat(indent_level),
+        class.name,
+        name,
+        parameters
+      ));
+
+      if let Some(body) = &method.body {
+        if name == "new" {
+          code.push_str(
+            format!(
+              "{}{}",
+              " ".repeat(indent_level + 2),
+              "local instance = {}\n"
+            )
+            .as_str(),
+          );
+          code.push_str(
+            format!(
+              "{}setmetatable(instance, {})\n",
+              " ".repeat(indent_level + 2),
+              class.name,
+            )
+            .as_str(),
+          );
+        }
+        for instr in &body.instructions {
+          let result = &self.transpile_ir_to_lua(instr, indent_level + 2);
+          if name == "new" {
+            code.push_str(result.replace("self", "instance").as_str());
+          } else {
+            code.push_str(result);
+          }
+        }
+      }
+
+      if name == "new" {
+        code.push_str(format!("{}{}", " ".repeat(indent_level + 2), "return instance \n").as_str());
+      }
+
+      code.push_str("end\n");
+    }
+
+    code
+  }
+
+  fn transpile_method_call(&mut self, call: &IRMethodCall, indent_level: usize) -> String {
+    let mut code = String::new();
+
+    let calle = self.transpile_ir_to_lua(&call.calle, indent_level);
+
+    code.push_str(&format!(
+      "{}{}:{}()",
+      " ".repeat(indent_level),
+      calle,
+      call.name.span.literal
+    ));
 
     code
   }
@@ -420,7 +582,11 @@ impl TranspilerToLua {
       code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
 
       if func.name.span.literal == "main" {
-        code.push_str(&format!("{}{}()\n", " ".repeat(indent_level), func.name.span.literal));
+        code.push_str(&format!(
+          "{}{}()\n",
+          " ".repeat(indent_level),
+          func.name.span.literal
+        ));
       }
     }
 

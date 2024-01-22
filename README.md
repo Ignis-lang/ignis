@@ -19,8 +19,8 @@ languages, especially Lua and Python, that would be ideal.
 
 ```bash
 git clone https://github.com/Ignis/ignis.git
-cd ignis-lang
-cargo install --path . ignisc
+cd ignis
+cargo install --path . ignis
 # Or
 cargo build --release
 ```
@@ -32,7 +32,7 @@ cargo build --release
 
 ```bash
 # Transpile an Ignis file to Lua and execute it
-ignisc -b lua build main.ign
+ignis build main.ign
 
 lua ./build/main.lua
 ```

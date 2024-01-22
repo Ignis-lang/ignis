@@ -5,7 +5,7 @@ use serde_json::json;
 use self::{
   binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression,
   logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array, get::Get,
-  new::NewExpression, set::Set, method_call::MethodCall, array_access::ArrayAccess,
+  new::NewExpression, set::Set, method_call::MethodCall, array_access::ArrayAccess, this::This,
 };
 
 use super::visitor::Visitor;
@@ -14,6 +14,7 @@ pub mod get;
 pub mod method_call;
 pub mod new;
 pub mod set;
+pub mod this;
 
 pub mod array;
 pub mod array_access;
@@ -44,6 +45,7 @@ pub enum Expression {
   Set(Set),
   New(NewExpression),
   MethodCall(MethodCall),
+  This(This)
 }
 
 impl Expression {
@@ -64,6 +66,7 @@ impl Expression {
       Expression::New(new) => visitor.visit_new_expression(new),
       Expression::Set(set) => visitor.visit_set_expression(set),
       Expression::MethodCall(method) => visitor.visit_method_call_expression(method),
+      Expression::This(this) => visitor.visit_this_expression(this),
     }
   }
 
@@ -185,6 +188,11 @@ impl Expression {
           "instance": method.object.to_json(),
         })
       }
+      Expression::This(_) => {
+        json!({
+          "type": "This",
+        })
+      }
     }
   }
 }
@@ -290,6 +298,7 @@ impl Display for Expression {
       Expression::MethodCall(method) => {
         write!(f, "{}.{}{}", method.object, method.name, method.calle,)
       }
+      Expression::This(_) => write!(f, "this"),
     }
   }
 }

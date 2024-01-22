@@ -16,6 +16,7 @@ pub mod ir_for;
 pub mod ir_for_in;
 pub mod ir_get;
 pub mod ir_if;
+pub mod ir_method;
 pub mod ir_method_call;
 pub mod ir_return;
 pub mod ir_set;
@@ -25,10 +26,13 @@ pub mod logical;
 pub mod ternary;
 pub mod unary;
 pub mod variable;
+pub mod ir_this;
 
 use ir_array_access::IRArrayAccess;
 use ir_for::IRFor;
+use ir_method::IRMethod;
 use ir_method_call::IRMethodCall;
+use ir_this::IRThis;
 use serde_json::Value;
 
 use self::{
@@ -54,6 +58,7 @@ pub enum IRInstruction {
   Return(IRReturn),
   Assign(IRAssign),
   Class(IRClass),
+  Method(IRMethod),
   Ternary(IRTernary),
   For(IRFor),
   ForIn(IRForIn),
@@ -66,6 +71,7 @@ pub enum IRInstruction {
   ClassInstance(IRClassInstance),
   Set(IRSet),
   MethodCall(IRMethodCall),
+  This(IRThis),
 }
 
 pub trait IRInstructionTrait {
@@ -100,6 +106,8 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::For(_for) => _for.to_json(),
       IRInstruction::ArrayAccess(array) => array.to_json(),
       IRInstruction::MethodCall(call) => call.to_json(),
+      IRInstruction::Method(method) => method.to_json(),
+      IRInstruction::This(this) => this.to_json(),
     }
   }
 }

@@ -1,16 +1,18 @@
-use super::{function::IRFunction, variable::IRVariable, IRInstructionTrait};
+use crate::ir_method::IRMethod;
+
+use super::{variable::IRVariable, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRClass {
   pub name: String,
   pub properties: Vec<IRVariable>,
-  pub methods: Vec<IRFunction>,
+  pub methods: Vec<IRMethod>,
   pub superclass: Option<Box<IRClass>>,
   // pub interfaces: Vec<IRClass>,
 }
 
 impl IRClass {
-  pub fn new(name: String, methods: Vec<IRFunction>, properties: Vec<IRVariable>) -> Self {
+  pub fn new(name: String, methods: Vec<IRMethod>, properties: Vec<IRVariable>) -> Self {
     Self {
       name,
       methods,

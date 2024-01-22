@@ -8,6 +8,7 @@ pub struct IRSet {
   pub name: String,
   pub value: Box<IRInstruction>,
   pub object: Box<IRClassInstance>,
+  pub var_name: String,
   pub data_type: DataType,
 }
 
@@ -23,11 +24,12 @@ impl IRInstructionTrait for IRSet {
 }
 
 impl IRSet {
-  pub fn new(name: String, value: Box<IRInstruction>, object: Box<IRClassInstance>, data_type: DataType) -> Self {
+  pub fn new(name: String, value: Box<IRInstruction>, object: Box<IRClassInstance>, data_type: DataType, var_name: String) -> Self {
     Self {
       name,
       value,
       object,
+      var_name,
       data_type,
     }
   }
