@@ -17,7 +17,7 @@ use ast::{
   },
   expression::{
     array::Array, get::Get, new::NewExpression, set::Set, method_call::MethodCall,
-    array_access::ArrayAccess,
+    array_access::ArrayAccess, this::This,
   },
 };
 use enums::{data_type::DataType, token_type::TokenType};
@@ -389,6 +389,18 @@ impl Parser {
 
         Ok(var)
       }
+      TokenType::This => {
+        self.advance();
+
+        if self.peek().kind != TokenType::Dot {
+          Ok(Expression::This(This::new(token, None)))
+        } else {
+          self.advance();
+          let access = self.expression()?;
+
+          Ok(Expression::This(This::new(token, Some(Box::new(access)))))
+        }
+      }
       _ => Err(Box::new(ParserDiagnostic::new(
         ParserDiagnosticError::ExpectedExpression(token.clone()),
         self.find_token_line(&token.span.line),
@@ -483,6 +495,7 @@ impl Parser {
           DataType::Pending
         }
       }
+      Expression::This(_) => DataType::Pending,
     }
   }
 
@@ -1183,6 +1196,7 @@ impl Parser {
     name: Token,
     is_public: bool,
     decorator: Option<FunctionDecorator>,
+    class_name: &Token,
   ) -> ParserResult<Statement> {
     let mut parameters: Vec<FunctionParameter> = Vec::new();
 
@@ -1284,13 +1298,16 @@ impl Parser {
         vec![]
       },
       metadata,
+      class_name.clone(),
     )))
   }
 
   fn class_declaration(&mut self) -> ParserResult<Statement> {
-    let name: Token = self.consume(TokenType::Identifier)?;
+    let class_name: Token = self.consume(TokenType::Identifier)?;
 
-    self.class_declarations.push(name.span.literal.clone());
+    self
+      .class_declarations
+      .push(class_name.span.literal.clone());
 
     let mut methods: Vec<Statement> = Vec::new();
     let mut properties: Vec<Statement> = Vec::new();
@@ -1311,7 +1328,7 @@ impl Parser {
       let name = self.consume(TokenType::Identifier)?;
 
       if self.match_token(&[TokenType::LeftParen]) {
-        methods.push(self.method_declaration(name, is_public, None)?);
+        methods.push(self.method_declaration(name, is_public, None, &class_name)?);
       } else if self.match_token(&[TokenType::Colon]) {
         properties.push(self.property_class_declaration(name, false, is_public)?);
       } else {
@@ -1325,7 +1342,9 @@ impl Parser {
 
     self.consume(TokenType::RightBrace)?;
 
-    Ok(Statement::Class(Class::new(name, methods, properties)))
+    Ok(Statement::Class(Class::new(
+      class_name, methods, properties,
+    )))
   }
 
   fn import_statement(&mut self) -> ParserResult<Statement> {

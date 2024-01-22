@@ -233,6 +233,8 @@ impl TranspilerToC {
         IRInstruction::For(_) => todo!(),
         IRInstruction::ArrayAccess(_) => todo!(),
         IRInstruction::MethodCall(_) => todo!(),
+        IRInstruction::Method(_) => todo!(),
+        IRInstruction::This(_) => todo!(),
       };
 
       args.push(',');
@@ -469,6 +471,8 @@ impl TranspilerToC {
       IRInstruction::For(_) => todo!(),
       IRInstruction::ArrayAccess(_) => todo!(),
         IRInstruction::MethodCall(_) => todo!(),
+        IRInstruction::Method(_) => todo!(),
+        IRInstruction::This(_) => todo!(),
     };
 
     code

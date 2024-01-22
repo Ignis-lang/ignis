@@ -51,6 +51,7 @@ pub enum AnalyzerDiagnosticError {
   VariableNeverUsed(Token),
   NotAnArray(Token),
   InvalidArrayIndex(Token),
+  ThisOutsideOfClass(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -452,6 +453,14 @@ impl AnalyzerDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IA0046".to_string(),
+      ),
+      AnalyzerDiagnosticError::ThisOutsideOfClass(toke) => DiagnosticReport::new(
+        "Invalid 'this' outside of class".to_string(),
+        Box::new(toke.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0047".to_string(),
       ),
     }
   }

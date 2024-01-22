@@ -52,6 +52,7 @@ pub struct MethodStatement {
   pub return_type: Option<DataType>,
   pub annotations: Vec<FunctionDecorator>,
   pub metadata: MethodMetadata,
+  pub class_name: Token,
 }
 
 impl MethodStatement {
@@ -62,6 +63,7 @@ impl MethodStatement {
     return_type: Option<DataType>,
     annotations: Vec<FunctionDecorator>,
     metadata: MethodMetadata,
+    class_name: Token,
   ) -> Self {
     Self {
       name,
@@ -70,6 +72,7 @@ impl MethodStatement {
       return_type,
       annotations,
       metadata,
+      class_name
     }
   }
 }

@@ -12,6 +12,7 @@ pub struct IRFunctionMetadata {
   pub is_static: bool,
   pub is_public: bool,
   pub is_constructor: bool,
+  pub is_method: bool
 }
 
 impl IRFunctionMetadata {
@@ -23,6 +24,7 @@ impl IRFunctionMetadata {
     is_static: bool,
     is_public: bool,
     is_constructor: bool,
+    is_method: bool
   ) -> Self {
     Self {
       is_recursive,
@@ -32,9 +34,26 @@ impl IRFunctionMetadata {
       is_public,
       is_static,
       is_constructor,
+      is_method
     }
   }
 }
+
+impl IRInstructionTrait for IRFunctionMetadata {
+  fn to_json(&self) -> serde_json::Value {
+    serde_json::json!({
+      "is_recursive": self.is_recursive,
+      "is_exported": self.is_exported,
+      "is_imported": self.is_imported,
+      "is_extern": self.is_extern,
+      "is_static": self.is_static,
+      "is_public": self.is_public,
+      "is_constructor": self.is_constructor,
+      "is_method": self.is_method
+    })
+  }
+}
+
 
 #[derive(Debug, Clone)]
 pub struct IRFunction {
@@ -75,15 +94,7 @@ impl IRInstructionTrait for IRFunction {
       } else {
         serde_json::Value::Null
       },
-      "metadata": {
-        "is_recursive": self.metadata.is_recursive,
-        "is_exported": self.metadata.is_exported,
-        "is_imported": self.metadata.is_imported,
-        "is_extern": self.metadata.is_extern,
-        "is_static": self.metadata.is_static,
-        "is_public": self.metadata.is_public,
-        "is_constructor": self.metadata.is_constructor,
-      }
+      "metadata": self.metadata.to_json(),
     })
   }
 }
