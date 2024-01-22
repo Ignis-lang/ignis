@@ -1,4 +1,4 @@
-use std::{vec, collections::HashMap, fmt::format};
+use std::{vec, collections::HashMap};
 use colored::*;
 
 use code_result::CodeResult;
@@ -7,11 +7,13 @@ use intermediate_representation::{
   {
     IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable,
     instruction_type::IRInstructionType,
+    IRInstructionTrait
   },
   analyzer_value::AnalyzerValue,
   ir_get::IRGet,
   ir_method_call::IRMethodCall,
   class::IRClass,
+  ir_this::IRThis,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -247,7 +249,7 @@ impl TranspilerToLua {
       IRInstruction::Import(import) => {
         if !import.path.contains("std:") {
           let module_path = import.path.split('/').collect::<Vec<&str>>();
-          let module_name = module_path.last().unwrap().to_string();
+          let mut module_name = module_path.last().unwrap().to_string();
 
           for (name, alias) in &import.name {
             let value = if alias.is_some() {
@@ -256,7 +258,9 @@ impl TranspilerToLua {
               name.span.literal.clone()
             };
 
-            self.statement_imported.insert(value, module_name.clone());
+            module_name = value.clone();
+
+            self.statement_imported.insert(module_name.clone(), value);
           }
 
           code.push_str(&format!(
@@ -288,10 +292,18 @@ impl TranspilerToLua {
         code.push_str(&result);
       }
       IRInstruction::ClassInstance(class) => {
+        let mut name = class.class.name.clone();
+
+        if class.class.is_imported {
+          if let Some(n) = self.statement_imported.get(&name.clone()) {
+            name = n.clone() + "." + &name;
+          }
+        }
+
         code.push_str(&format!(
           "{}{}:new({})",
           " ".repeat(indent_level),
-          class.class.name,
+          name,
           class
             .constructor_args
             .iter()
@@ -351,14 +363,30 @@ impl TranspilerToLua {
         _ => code.push_str(&self.transpile_method_call(call, indent_level)),
       },
       IRInstruction::Method(_) => todo!(),
-      IRInstruction::This(this) => {
-        code.push_str(&format!("{}self", " ".repeat(indent_level)));
-        if let Some(access) = &this.access {
-          code.push('.');
-          code.push_str(&self.transpile_ir_to_lua(access, 0))
-        }
-      }
+      IRInstruction::This(this) => code.push_str(&self.transpile_this_to_lua(this, indent_level)),
     };
+
+    code
+  }
+
+  fn transpile_this_to_lua(&mut self, this: &IRThis, indent_level: usize) -> String {
+    let mut code = String::new();
+
+    code.push_str(&format!("{}self", " ".repeat(indent_level)));
+
+    if let Some(access) = &this.access {
+      let access = *access.clone();
+      match &access {
+        IRInstruction::MethodCall(_) | IRInstruction::Call(_) => {
+          code.push(':');
+          code.push_str(&self.transpile_ir_to_lua(&access, 0));
+        },
+        _ => {
+          code.push('.');
+          code.push_str(&self.transpile_ir_to_lua(&access, 0));
+        }
+      };
+    }
 
     code
   }
@@ -384,6 +412,16 @@ impl TranspilerToLua {
 
   fn transpile_class_to_lua(&mut self, class: &IRClass, indent_level: usize) -> String {
     let mut code = String::new();
+
+    if class.is_exported {
+      self
+        .statement_exported
+        .push((class.name.clone(), String::new()));
+    }
+
+    if class.is_imported {
+      return code;
+    }
 
     code.push_str(&format!(
       "{}{} = {{\n",
@@ -470,7 +508,7 @@ impl TranspilerToLua {
       }
 
       if name == "new" {
-        code.push_str(format!("{}{}", " ".repeat(indent_level + 2), "return instance \n").as_str());
+        code.push_str(format!("{}{}", " ".repeat(indent_level + 2), "return instance\n").as_str());
       }
 
       code.push_str("end\n");
@@ -485,10 +523,13 @@ impl TranspilerToLua {
     let calle = self.transpile_ir_to_lua(&call.calle, indent_level);
 
     code.push_str(&format!(
-      "{}{}:{}()",
+      "{}{}:{}",
       " ".repeat(indent_level),
+      match *call.object.clone() {
+        IRInstruction::ClassInstance(inst) => inst.var_name.span.literal,
+        _ => todo!(),
+      },
       calle,
-      call.name.span.literal
     ));
 
     code
@@ -730,7 +771,10 @@ impl TranspilerToLua {
 
       name.push_str(".lua");
 
-      let mut build_path = "build/".to_string() + path.join("/").as_str();
+      let mut build_output = path.clone();
+      build_output.pop();
+
+      let mut build_path = "build/".to_string() + build_output.join("/").as_str();
 
       std::fs::create_dir_all(build_path.clone()).unwrap();
 

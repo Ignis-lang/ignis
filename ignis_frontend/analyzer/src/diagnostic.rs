@@ -52,6 +52,7 @@ pub enum AnalyzerDiagnosticError {
   NotAnArray(Token),
   InvalidArrayIndex(Token),
   ThisOutsideOfClass(Token),
+  ImportedClassIsNotExported(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +462,14 @@ impl AnalyzerDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IA0047".to_string(),
+      ),
+      AnalyzerDiagnosticError::ImportedClassIsNotExported(token) => DiagnosticReport::new(
+        format!("Imported class '{}' is not exported", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0048".to_string(),
       ),
     }
   }

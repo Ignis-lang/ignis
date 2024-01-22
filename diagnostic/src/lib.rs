@@ -64,6 +64,7 @@ impl Diagnostic {
     let code = std::fs::read_to_string(diagnostic.token.span.file.clone());
 
     if code.is_err() {
+      println!("{:?}", diagnostic.token);
       panic!("File not found");
     }
 
