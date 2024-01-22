@@ -102,6 +102,7 @@ impl Display for AnalyzerContext {
   }
 }
 
+#[derive(Debug, Clone)]
 enum CalleableDeclaration {
   Function(IRFunction),
   Method(IRMethod),
@@ -230,6 +231,17 @@ impl Visitor<AnalyzerResult> for Analyzer {
             return Ok(instruction);
           }
         }
+      }
+    }
+
+    if let Some(c) = &self.current_class {
+      let method = c
+        .methods
+        .iter()
+        .find(|m| m.name.span.literal == variable.name.span.literal);
+      if let Some(m) = method {
+        let instruction = IRInstruction::Method(m.clone());
+        return Ok(instruction);
       }
     }
 
@@ -403,8 +415,21 @@ impl Visitor<AnalyzerResult> for Analyzer {
   fn visit_call_expression(&mut self, expression: &Call) -> AnalyzerResult {
     let calle = self.analyzer(&expression.callee)?;
 
-    let function = match calle {
-      IRInstruction::Function(f) => Some(f),
+    let parameters: Vec<IRVariable>;
+    let function_name: Token;
+    let return_type: DataType;
+
+    match calle {
+      IRInstruction::Function(f) => {
+        parameters = f.parameters.clone();
+        function_name = f.name.clone();
+        return_type = f.return_type.clone();
+      }
+      IRInstruction::Method(m) => {
+        parameters = m.parameters.clone();
+        function_name = m.name.clone();
+        return_type = m.return_type.clone();
+      }
       _ => {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::NotCallable(expression.paren.clone()),
@@ -413,14 +438,12 @@ impl Visitor<AnalyzerResult> for Analyzer {
       }
     };
 
-    let function = function.unwrap();
-
-    if function.parameters.len() != expression.arguments.len() {
+    if parameters.len() != expression.arguments.len() {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::InvalidNumberOfArguments(
-          function.parameters.len(),
+          parameters.len(),
           expression.arguments.len(),
-          function.name,
+          function_name,
         ),
         self.find_token_line(&expression.paren.span.line),
       )));
@@ -446,14 +469,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
         _ => DataType::Unwnown,
       };
 
-      if kind != function.parameters[i].data_type
+      if kind != parameters[i].data_type
         && kind != DataType::Unwnown
-        && function.parameters[i].data_type != DataType::Array(Box::new(DataType::Unwnown))
-        && function.parameters[i].data_type != DataType::Unwnown
+        && parameters[i].data_type != DataType::Array(Box::new(DataType::Unwnown))
+        && parameters[i].data_type != DataType::Unwnown
       {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::ArgumentTypeMismatch(
-            function.parameters[i].data_type.clone(),
+            parameters[i].data_type.clone(),
             kind,
             expression.paren.clone(),
           ),
@@ -462,10 +485,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
       }
 
       if let IRInstruction::Variable(v) = &arg_type {
-        if !v.metadata.is_mutable && function.parameters[i].metadata.is_mutable {
+        if !v.metadata.is_mutable && parameters[i].metadata.is_mutable {
           return Err(Box::new(AnalyzerDiagnostic::new(
             AnalyzerDiagnosticError::ImmutableVariableAsMutableParameter(
-              function.parameters[i].name.clone(),
+              parameters[i].name.clone(),
               v.name.clone(),
               expression.paren.clone(),
             ),
@@ -477,8 +500,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       arguments.push(arg_type);
     }
 
-    let instruction =
-      IRInstruction::Call(IRCall::new(function.name, arguments, function.return_type));
+    let instruction = IRInstruction::Call(IRCall::new(function_name, arguments, return_type));
 
     Ok(instruction)
   }
@@ -805,8 +827,6 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    let calle = self.analyzer(&method_call.object)?;
-
     let class_instance = self.find_class_instance(object.name);
 
     if class_instance.is_none() {
@@ -815,6 +835,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
         self.find_token_line(&method_call.name.span.line),
       )));
     }
+
+    self.current_class = Some(class.clone());
+
+    let calle = self.analyzer(&method_call.calle)?;
 
     let instruction = IRInstruction::MethodCall(IRMethodCall::new(
       method_call.name.clone(),
@@ -828,6 +852,8 @@ impl Visitor<AnalyzerResult> for Analyzer {
         DataType::ClassType(class_instance.unwrap().class.name.clone()),
       ),
     ));
+
+    self.current_class = None;
 
     Ok(instruction)
   }
@@ -965,6 +991,9 @@ impl Visitor<AnalyzerResult> for Analyzer {
         }
         IRInstruction::ClassInstance(class) => {
           value = IRInstruction::ClassInstance(class);
+        }
+        IRInstruction::MethodCall(call) => {
+          value = IRInstruction::MethodCall(call);
         }
         _ => (),
       };
@@ -1211,8 +1240,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let mut ir: Vec<IRMethod> = Vec::new();
 
-    let mut current_class =
-      IRClass::new(statement.name.span.literal.clone(), Vec::new(), properties);
+    let mut current_class = IRClass::new(
+      statement.name.span.literal.clone(),
+      Vec::new(),
+      properties,
+      statement.metadata.is_exported,
+      false,
+    );
 
     self.current_class = Some(current_class.clone());
 
@@ -1686,7 +1720,8 @@ impl Analyzer {
     let mut analyzer = Analyzer::new(statement.module_path.span.literal.clone(), Vec::new());
     let _ = match fs::read_to_string(format!("{}.{}", statement.module_path.span.literal, "ign")) {
       Ok(source) => {
-        let mut lexer: Lexer<'_> = Lexer::new(&source, statement.module_path.span.literal.clone());
+        let mut lexer: Lexer<'_> =
+          Lexer::new(&source, statement.module_path.span.literal.clone() + ".ign");
         lexer.scan_tokens();
 
         analyzer.tokens = lexer.tokens.clone();
@@ -1734,46 +1769,87 @@ impl Analyzer {
   ) -> Result<(), Box<AnalyzerDiagnostic>> {
     let current_ir = self.irs.get_mut(&self.current_file).unwrap();
 
-    if let IRInstruction::Function(f) = ir {
-      for symbol in &statement.symbols {
-        if symbol.name.span.literal == f.name.span.literal && !f.metadata.is_exported {
-          return Err(Box::new(AnalyzerDiagnostic::new(
-            AnalyzerDiagnosticError::ImportedFunctionIsNotExported(symbol.name.clone()),
-            self.find_token_line(&symbol.name.span.line),
-          )));
-        }
+    match ir {
+      IRInstruction::Function(f) => {
+        for symbol in &statement.symbols {
+          if symbol.name.span.literal == f.name.span.literal && !f.metadata.is_exported {
+            return Err(Box::new(AnalyzerDiagnostic::new(
+              AnalyzerDiagnosticError::ImportedFunctionIsNotExported(symbol.name.clone()),
+              self.find_token_line(&symbol.name.span.line),
+            )));
+          }
 
-        if symbol.name.span.literal == f.name.span.literal && f.metadata.is_exported {
-          let mut metadata = f.metadata.clone();
-          metadata.is_imported = true;
-          if symbol.alias.is_some() {
-            block_stack.insert(symbol.alias.as_ref().unwrap().span.literal.clone(), true);
-            current_ir.push(
-              IRInstruction::Function(IRFunction::new(
-                symbol.alias.as_ref().unwrap().clone(),
-                f.parameters.clone(),
-                f.return_type.clone(),
-                f.body.clone(),
-                metadata,
-              ))
-              .clone(),
-            );
-          } else {
-            block_stack.insert(symbol.name.span.literal.clone(), true);
-            metadata.is_exported = false;
-            current_ir.push(
-              IRInstruction::Function(IRFunction::new(
-                symbol.name.clone(),
-                f.parameters.clone(),
-                f.return_type.clone(),
-                f.body.clone(),
-                metadata,
-              ))
-              .clone(),
-            );
+          if symbol.name.span.literal == f.name.span.literal && f.metadata.is_exported {
+            let mut metadata = f.metadata.clone();
+            metadata.is_imported = true;
+            if symbol.alias.is_some() {
+              block_stack.insert(symbol.alias.as_ref().unwrap().span.literal.clone(), true);
+              current_ir.push(
+                IRInstruction::Function(IRFunction::new(
+                  symbol.alias.as_ref().unwrap().clone(),
+                  f.parameters.clone(),
+                  f.return_type.clone(),
+                  f.body.clone(),
+                  metadata,
+                ))
+                .clone(),
+              );
+            } else {
+              block_stack.insert(symbol.name.span.literal.clone(), true);
+              metadata.is_exported = false;
+              current_ir.push(
+                IRInstruction::Function(IRFunction::new(
+                  symbol.name.clone(),
+                  f.parameters.clone(),
+                  f.return_type.clone(),
+                  f.body.clone(),
+                  metadata,
+                ))
+                .clone(),
+              );
+            }
           }
         }
       }
+      IRInstruction::Class(c) => {
+        for symbol in &statement.symbols {
+          if symbol.name.span.literal == c.name && !c.is_exported {
+            return Err(Box::new(AnalyzerDiagnostic::new(
+              AnalyzerDiagnosticError::ImportedClassIsNotExported(symbol.name.clone()),
+              self.find_token_line(&symbol.name.span.line),
+            )));
+          }
+
+          if symbol.name.span.literal == c.name && c.is_exported {
+            if symbol.alias.is_some() {
+              block_stack.insert(symbol.alias.as_ref().unwrap().span.literal.clone(), true);
+              current_ir.push(
+                IRInstruction::Class(IRClass::new(
+                  symbol.alias.as_ref().unwrap().span.literal.clone(),
+                  c.methods.clone(),
+                  c.properties.clone(),
+                  false,
+                  true,
+                ))
+                .clone(),
+              );
+            } else {
+              block_stack.insert(symbol.name.span.literal.clone(), true);
+              current_ir.push(
+                IRInstruction::Class(IRClass::new(
+                  symbol.name.span.literal.clone(),
+                  c.methods.clone(),
+                  c.properties.clone(),
+                  false,
+                  true,
+                ))
+                .clone(),
+              );
+            }
+          }
+        }
+      }
+      _ => (),
     };
 
     Ok(())

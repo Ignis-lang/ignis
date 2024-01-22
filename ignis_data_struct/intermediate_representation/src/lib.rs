@@ -79,7 +79,7 @@ pub trait IRInstructionTrait {
 }
 
 impl IRInstructionTrait for IRInstruction {
-  fn to_json(&self) -> Value {
+  fn to_json(&self) -> serde_json::Value {
     match self {
       IRInstruction::Binary(instruction) => instruction.to_json(),
       IRInstruction::Block(instruction) => instruction.to_json(),

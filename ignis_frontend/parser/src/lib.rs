@@ -4,7 +4,7 @@ use diagnostic_report::DiagnosticReport;
 use parser_diagnostic::{ParserDiagnosticError, ParserDiagnostic};
 use ast::{
   statement::{
-    class::Class,
+    class::{Class, ClassMetadata},
     variable::VariableMetadata,
     for_in::ForIn,
     import::{Import, ImportSource, ImportSymbol},
@@ -55,6 +55,7 @@ pub struct Parser {
   pub diagnostics: Vec<ParserDiagnostic>,
   context: Vec<ParserContext>,
   class_declarations: Vec<String>,
+  import_declarations: Vec<String>,
 }
 
 impl Parser {
@@ -65,6 +66,7 @@ impl Parser {
       diagnostics: Vec::new(),
       context: Vec::new(),
       class_declarations: Vec::new(),
+      import_declarations: Vec::new(),
     }
   }
 
@@ -514,6 +516,9 @@ impl Parser {
         | TokenType::Const
         | TokenType::For
         | TokenType::If
+        | TokenType::While
+        | TokenType::Import
+        | TokenType::Export
         | TokenType::Return => return,
         _ => (),
       };
@@ -529,7 +534,7 @@ impl Parser {
 
     if self.match_token(&[TokenType::Class]) {
       self.context.push(ParserContext::Class);
-      let value = self.class_declaration();
+      let value = self.class_declaration(false);
 
       self.context.pop();
 
@@ -750,7 +755,9 @@ impl Parser {
 
     let mut type_annotation = DataType::from_token_type(token.kind.clone());
 
-    if type_annotation == DataType::Pending && self.class_declarations.contains(&token.span.literal)
+    if type_annotation == DataType::Pending
+      && (self.class_declarations.contains(&token.span.literal)
+        || self.import_declarations.contains(&token.span.literal))
     {
       type_annotation = DataType::ClassType(token.span.literal.clone());
     }
@@ -1302,7 +1309,7 @@ impl Parser {
     )))
   }
 
-  fn class_declaration(&mut self) -> ParserResult<Statement> {
+  fn class_declaration(&mut self, is_public: bool) -> ParserResult<Statement> {
     let class_name: Token = self.consume(TokenType::Identifier)?;
 
     self
@@ -1343,7 +1350,10 @@ impl Parser {
     self.consume(TokenType::RightBrace)?;
 
     Ok(Statement::Class(Class::new(
-      class_name, methods, properties,
+      class_name,
+      methods,
+      properties,
+      ClassMetadata::new(is_public),
     )))
   }
 
@@ -1371,6 +1381,10 @@ impl Parser {
         None
       };
 
+      self
+        .import_declarations
+        .push(symbol_name.span.literal.clone());
+
       symbols.push(ImportSymbol::new(symbol_name, symbol));
     }
 
@@ -1396,11 +1410,6 @@ impl Parser {
     )))
   }
 
-  /*
-   *  export function sum(a: int, b: int): int {
-   *    return a + b;
-   * }
-   */
   fn export_statement(&mut self) -> ParserResult<Statement> {
     if self.match_token(&[TokenType::Function]) {
       self.context.push(ParserContext::Function);
@@ -1410,6 +1419,13 @@ impl Parser {
       self.context.pop();
 
       Ok(function)
+    } else if self.match_token(&[TokenType::Class]) {
+      self.context.push(ParserContext::Class);
+
+      let class = self.class_declaration(true)?;
+
+      self.context.pop();
+      Ok(class)
     } else {
       let token = self.peek();
       let line = token.span.line;
