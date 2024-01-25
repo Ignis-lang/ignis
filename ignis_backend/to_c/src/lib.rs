@@ -139,18 +139,18 @@ impl TranspilerToC {
     }
 
     if let Some(body) = &func.body {
-      let parameters = func
-        .parameters
-        .iter()
-        .map(|x| {
-          format!(
-            "{} {}",
-            x.data_type.to_c_type(x.metadata.is_mutable),
-            x.name.clone()
-          )
-        })
-        .collect::<Vec<String>>()
-        .join(", ");
+      // let parameters = func
+      //   .parameters
+      //   .iter()
+      //   .map(|x| {
+      //     format!(
+      //       "{} {}",
+      //       x.data_type.to_c_type(x.metadata.is_mutable),
+      //       x.name.clone()
+      //     )
+      //   })
+      //   .collect::<Vec<String>>()
+      //   .join(", ");
 
       if func.metadata.is_exported {
         self
@@ -162,13 +162,13 @@ impl TranspilerToC {
         return code;
       }
 
-      code.push_str(&format!(
-        "{}{} {}({}) {{\n",
-        " ".repeat(indent_level),
-        func.return_type.to_c_type(true),
-        func.name,
-        parameters
-      ));
+      // code.push_str(&format!(
+      //   "{}{} {}({}) {{\n",
+      //   " ".repeat(indent_level),
+      //   func.return_type.to_c_type(true),
+      //   func.name,
+      //   parameters
+      // ));
 
       for instr in &body.instructions {
         code.push_str(&self.transpile_ir_to_c(instr, indent_level + 2));

@@ -1,6 +1,6 @@
 use enums::data_type::DataType;
 use intermediate_representation::analyzer_value::AnalyzerValue;
-use crate::token::Token;
+use token::token::Token;
 use diagnostic_report::{DiagnosticReport, DiagnosticLevel};
 
 #[derive(Debug, Clone)]
@@ -53,6 +53,7 @@ pub enum AnalyzerDiagnosticError {
   InvalidArrayIndex(Token),
   ThisOutsideOfClass(Token),
   ImportedClassIsNotExported(Token),
+  InvalidVariableInitializer(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -470,6 +471,14 @@ impl AnalyzerDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IA0048".to_string(),
+      ),
+      AnalyzerDiagnosticError::InvalidVariableInitializer(token) => DiagnosticReport::new(
+        format!("Invalid variable initializer '{}'", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0049".to_string(),
       ),
     }
   }

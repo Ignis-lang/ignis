@@ -2,14 +2,14 @@ use enums::data_type::DataType;
 use token::token::Token;
 
 use crate::{
-  variable::IRVariable, block::IRBlock, function::IRFunctionMetadata, class::IRClass,
-  IRInstructionTrait,
+  block::IRBlock, function::IRFunctionMetadata,
+  IRInstructionTrait, IRInstruction,
 };
 
 #[derive(Debug, Clone)]
 pub struct IRMethod {
   pub name: Token,
-  pub parameters: Vec<IRVariable>,
+  pub parameters: Vec<IRInstruction>,
   pub return_type: DataType,
   pub body: Option<Box<IRBlock>>,
   pub metadata: IRFunctionMetadata,
@@ -19,7 +19,7 @@ pub struct IRMethod {
 impl IRMethod {
   pub fn new(
     name: Token,
-    parameters: Vec<IRVariable>,
+    parameters: Vec<IRInstruction>,
     return_type: DataType,
     body: Option<Box<IRBlock>>,
     metadata: IRFunctionMetadata,

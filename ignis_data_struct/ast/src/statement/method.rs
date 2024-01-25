@@ -6,7 +6,8 @@ use serde_json::json;
 
 use super::{
   Statement,
-  function::{FunctionParameter, FunctionDecorator},
+  variable::Variable,
+  function::FunctionDecorator,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,7 +48,7 @@ impl Display for MethodMetadata {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodStatement {
   pub name: Token,
-  pub parameters: Vec<FunctionParameter>,
+  pub parameters: Vec<Variable>,
   pub body: Vec<Statement>,
   pub return_type: Option<DataType>,
   pub annotations: Vec<FunctionDecorator>,
@@ -58,7 +59,7 @@ pub struct MethodStatement {
 impl MethodStatement {
   pub fn new(
     name: Token,
-    parameters: Vec<FunctionParameter>,
+    parameters: Vec<Variable>,
     body: Vec<Statement>,
     return_type: Option<DataType>,
     annotations: Vec<FunctionDecorator>,
@@ -72,7 +73,7 @@ impl MethodStatement {
       return_type,
       annotations,
       metadata,
-      class_name
+      class_name,
     }
   }
 }

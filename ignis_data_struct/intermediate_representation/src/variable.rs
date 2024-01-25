@@ -14,10 +14,11 @@ pub struct IRVariableMetadata {
   pub is_static: bool,
   pub is_public: bool,
   pub is_constructor: bool,
+  pub complex_data_type: Option<Box<IRInstruction>>,
 }
 
 impl IRVariableMetadata {
-  pub fn new(
+pub fn new(
     is_mutable: bool,
     is_reference: bool,
     is_parameter: bool,
@@ -27,6 +28,7 @@ impl IRVariableMetadata {
     is_static: bool,
     is_public: bool,
     is_constructor: bool,
+    complex_data_type: Option<Box<IRInstruction>>,
   ) -> Self {
     Self {
       is_mutable,
@@ -37,7 +39,8 @@ impl IRVariableMetadata {
       is_declaration,
       is_static,
       is_public,
-      is_constructor
+      is_constructor,
+      complex_data_type
     }
   }
 }
@@ -85,6 +88,10 @@ impl  IRInstructionTrait for IRVariable {
         "is_static": self.metadata.is_static,
         "is_public": self.metadata.is_public,
         "is_constructor": self.metadata.is_constructor,
+        "complex_data_type": match &self.metadata.complex_data_type {
+          Some(data_type) => data_type.to_json(),
+          None => serde_json::Value::Null,
+        }
       }
     })
   }
