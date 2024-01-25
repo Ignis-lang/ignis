@@ -4,16 +4,9 @@ use colored::*;
 use code_result::CodeResult;
 use enums::data_type::DataType;
 use intermediate_representation::{
-  {
-    IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable,
-    instruction_type::IRInstructionType,
-    IRInstructionTrait
-  },
-  analyzer_value::AnalyzerValue,
-  ir_get::IRGet,
-  ir_method_call::IRMethodCall,
-  class::IRClass,
-  ir_this::IRThis,
+  IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable,
+  instruction_type::IRInstructionType, analyzer_value::AnalyzerValue, ir_get::IRGet,
+  ir_method_call::IRMethodCall, class::IRClass, ir_this::IRThis,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -380,7 +373,7 @@ impl TranspilerToLua {
         IRInstruction::MethodCall(_) | IRInstruction::Call(_) => {
           code.push(':');
           code.push_str(&self.transpile_ir_to_lua(&access, 0));
-        },
+        }
         _ => {
           code.push('.');
           code.push_str(&self.transpile_ir_to_lua(&access, 0));
@@ -457,12 +450,7 @@ impl TranspilerToLua {
     ));
 
     for method in &class.methods {
-      let parameters = method
-        .parameters
-        .iter()
-        .map(|x| x.name.clone())
-        .collect::<Vec<String>>()
-        .join(", ");
+      let parameters = self.transpile_function_params(&method.parameters);
 
       let name = if class.name == method.name.span.literal {
         "new".to_string()
@@ -576,20 +564,14 @@ impl TranspilerToLua {
       return code;
     }
 
+    if func.metadata.is_exported {
+      self
+        .statement_exported
+        .push((func.name.span.literal.clone(), String::new()));
+    }
+
+    let parameters = self.transpile_function_params(&func.parameters);
     if let Some(body) = &func.body {
-      let parameters = func
-        .parameters
-        .iter()
-        .map(|x| x.name.clone())
-        .collect::<Vec<String>>()
-        .join(", ");
-
-      if func.metadata.is_exported {
-        self
-          .statement_exported
-          .push((func.name.span.literal.clone(), String::new()));
-      }
-
       if func.metadata.is_imported {
         return code;
       }
@@ -630,6 +612,19 @@ impl TranspilerToLua {
         ));
       }
     }
+
+    code
+  }
+
+  fn transpile_function_params(&mut self, params: &Vec<IRInstruction>) -> String {
+    let mut code = String::new();
+    
+    for param in params {
+      code.push_str(&self.transpile_ir_to_lua(param, 0));
+      code.push_str(",");
+    }
+
+    code.pop();
 
     code
   }
@@ -719,6 +714,10 @@ impl TranspilerToLua {
     } else {
       "".to_string()
     };
+
+    if variable.metadata.is_parameter {
+      return format!("{}{}", " ".repeat(indent_level), variable.name);
+    }
 
     if variable.metadata.is_declaration {
       if let Some(l) = self.context.last() {

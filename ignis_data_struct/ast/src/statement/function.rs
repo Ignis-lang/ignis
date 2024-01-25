@@ -1,10 +1,8 @@
 use token::token::Token;
-use std::fmt::{Display, Formatter};
 
 use enums::data_type::DataType;
-use serde_json::json;
 
-use super::Statement;
+use super::{Statement, variable::Variable};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FunctionDecorator {
@@ -13,44 +11,9 @@ pub enum FunctionDecorator {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FunctionParameter {
-  pub name: Token,
-  pub data_type: DataType,
-  // TODO:
-  pub is_mutable: bool,
-  pub is_reference: bool,
-}
-
-impl FunctionParameter {
-  pub fn new(name: Token, data_type: DataType, is_mutable: bool) -> Self {
-    Self {
-      name,
-      data_type,
-      is_mutable,
-      is_reference: false,
-    }
-  }
-
-  pub fn to_json(&self) -> serde_json::Value {
-    json!({
-      "name": self.name.span.literal,
-      "data_type": self.data_type.to_string(),
-      "is_mutable": self.is_mutable,
-      "is_reference": self.is_reference,
-    })
-  }
-}
-
-impl Display for FunctionParameter {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-    write!(f, "{}: {}", self.name.span.literal, self.data_type)
-  }
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct FunctionStatement {
   pub name: Token,
-  pub parameters: Vec<FunctionParameter>,
+  pub parameters: Vec<Variable>,
   pub body: Vec<Statement>,
   pub return_type: Option<DataType>,
   pub is_exported: bool,
@@ -60,7 +23,7 @@ pub struct FunctionStatement {
 impl FunctionStatement {
   pub fn new(
     name: Token,
-    parameters: Vec<FunctionParameter>,
+    parameters: Vec<Variable>,
     body: Vec<Statement>,
     return_type: Option<DataType>,
     is_exported: bool,

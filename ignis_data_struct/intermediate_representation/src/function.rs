@@ -1,6 +1,8 @@
 use enums::data_type::DataType;
 use token::token::Token;
 
+use crate::IRInstruction;
+
 use super::{variable::IRVariable, block::IRBlock, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
@@ -58,7 +60,7 @@ impl IRInstructionTrait for IRFunctionMetadata {
 #[derive(Debug, Clone)]
 pub struct IRFunction {
   pub name: Token,
-  pub parameters: Vec<IRVariable>,
+  pub parameters: Vec<IRInstruction>,
   pub return_type: DataType,
   pub body: Option<Box<IRBlock>>,
   pub metadata: IRFunctionMetadata,
@@ -67,7 +69,7 @@ pub struct IRFunction {
 impl IRFunction {
   pub fn new(
     name: Token,
-    parameters: Vec<IRVariable>,
+    parameters: Vec<IRInstruction>,
     return_type: DataType,
     body: Option<Box<IRBlock>>,
     metadata: IRFunctionMetadata,

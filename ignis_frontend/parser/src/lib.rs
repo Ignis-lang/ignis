@@ -29,13 +29,8 @@ use {
   },
   enums::literal_value::LiteralValue,
   ast::statement::{
-    Statement,
-    variable::Variable,
-    expression::ExpressionStatement,
-    if_statement::IfStatement,
-    block::Block,
-    while_statement::WhileStatement,
-    function::{FunctionStatement, FunctionParameter},
+    Statement, variable::Variable, expression::ExpressionStatement, if_statement::IfStatement,
+    block::Block, while_statement::WhileStatement, function::FunctionStatement,
     return_statement::Return,
   },
 };
@@ -633,7 +628,7 @@ impl Parser {
 
     self.consume(TokenType::LeftParen)?;
 
-    let mut parameters: Vec<FunctionParameter> = Vec::new();
+    let mut parameters: Vec<Variable> = Vec::new();
 
     if !self.check(TokenType::RightParen) {
       loop {
@@ -658,6 +653,10 @@ impl Parser {
 
         let mut data_type = DataType::from_token_type(token.kind);
 
+        if data_type == DataType::Variable("".to_string()) {
+          data_type = DataType::Variable(token.span.literal.clone());
+        }
+
         if self.check(TokenType::LeftBrack) {
           self.advance();
           self.consume(TokenType::RightBrack)?;
@@ -665,7 +664,12 @@ impl Parser {
           data_type = DataType::Array(Box::new(data_type));
         }
 
-        parameters.push(FunctionParameter::new(param, data_type, is_mut));
+        parameters.push(Variable::new(
+          Box::new(param),
+          None,
+          data_type,
+          VariableMetadata::new(is_mut, false, false, false, false, true),
+        ));
 
         if !self.match_token(&[TokenType::Comma]) {
           break;
@@ -776,7 +780,7 @@ impl Parser {
         Box::new(name),
         None,
         type_annotation,
-        VariableMetadata::new(mutable, false, false, false, false),
+        VariableMetadata::new(mutable, false, false, false, false, false),
       )));
     }
 
@@ -807,7 +811,7 @@ impl Parser {
         Box::new(name),
         Some(Box::new(ini)),
         type_annotation,
-        VariableMetadata::new(mutable, false, false, false, false),
+        VariableMetadata::new(mutable, false, false, false, false, false),
       )))
     } else {
       let token = self.peek();
@@ -978,7 +982,7 @@ impl Parser {
       Box::new(item.clone()),
       None,
       DataType::Pending,
-      VariableMetadata::new(true, false, false, false, false),
+      VariableMetadata::new(true, false, false, false, false, false),
     );
 
     if self.check(TokenType::In) {
@@ -1194,7 +1198,7 @@ impl Parser {
       Box::new(name),
       initializer,
       type_annotation,
-      VariableMetadata::new(is_mutable, false, false, is_public, false),
+      VariableMetadata::new(is_mutable, false, false, is_public, false, false),
     )))
   }
 
@@ -1205,7 +1209,7 @@ impl Parser {
     decorator: Option<FunctionDecorator>,
     class_name: &Token,
   ) -> ParserResult<Statement> {
-    let mut parameters: Vec<FunctionParameter> = Vec::new();
+    let mut parameters: Vec<Variable> = Vec::new();
 
     if !self.check(TokenType::RightParen) {
       loop {
@@ -1237,7 +1241,12 @@ impl Parser {
           data_type = DataType::Array(Box::new(data_type));
         }
 
-        parameters.push(FunctionParameter::new(param, data_type, is_mut));
+        parameters.push(Variable::new(
+          Box::new(param),
+          None,
+          data_type,
+          VariableMetadata::new(is_mut, false, false, false, false, true),
+        ));
 
         if !self.match_token(&[TokenType::Comma]) {
           break;

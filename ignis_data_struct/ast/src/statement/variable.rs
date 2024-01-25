@@ -10,6 +10,7 @@ pub struct VariableMetadata {
   pub is_static: bool,
   pub is_public: bool,
   pub is_reference: bool,
+  pub is_parameter: bool,
 }
 
 impl VariableMetadata {
@@ -19,6 +20,7 @@ impl VariableMetadata {
     is_static: bool,
     is_public: bool,
     is_reference: bool,
+    is_parameter: bool,
   ) -> Self {
     Self {
       is_mutable,
@@ -26,6 +28,7 @@ impl VariableMetadata {
       is_static,
       is_public,
       is_reference,
+      is_parameter
     }
   }
 }

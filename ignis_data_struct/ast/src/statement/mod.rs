@@ -121,7 +121,7 @@ impl Statement {
         json!({
           "type": "FunctionStatement",
           "name": function.name.span.literal,
-          "parameters": function.parameters.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+          "parameters": function.parameters.iter().map(|x| Statement::Variable(x.clone()).to_json()).collect::<Vec<serde_json::Value>>(),
           "body": function.body.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": match &function.return_type {
             Some(return_type) => return_type.to_string(),
@@ -194,7 +194,7 @@ impl Statement {
         json!({
           "type": "Method",
           "name": method.name.span.literal,
-          "parameters": method.parameters.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+          "parameters": method.parameters.iter().map(|x| Statement::Variable(x.clone()).to_json()).collect::<Vec<serde_json::Value>>(),
           "body": method.body.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": match &method.return_type {
             Some(return_type) => return_type.to_string(),

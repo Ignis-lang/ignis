@@ -79,6 +79,7 @@ impl DataType {
       TokenType::Void => DataType::Void,
       TokenType::Null => DataType::Null,
       TokenType::Unknown => DataType::Unwnown,
+      TokenType::Identifier => DataType::Variable("".to_string()),
       _ => DataType::Pending
     }
   }
