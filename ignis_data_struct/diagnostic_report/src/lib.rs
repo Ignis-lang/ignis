@@ -4,7 +4,7 @@ pub enum DiagnosticLevel {
   Info,
   Warning,
   Error,
-  Hint
+  Hint,
 }
 
 pub struct DiagnosticReport {

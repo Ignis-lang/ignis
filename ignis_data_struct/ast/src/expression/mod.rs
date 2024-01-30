@@ -45,7 +45,7 @@ pub enum Expression {
   Set(Set),
   New(NewExpression),
   MethodCall(MethodCall),
-  This(This)
+  This(This),
 }
 
 impl Expression {

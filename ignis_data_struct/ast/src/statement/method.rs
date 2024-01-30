@@ -4,11 +4,7 @@ use token::token::Token;
 use enums::data_type::DataType;
 use serde_json::json;
 
-use super::{
-  Statement,
-  variable::Variable,
-  function::FunctionDecorator,
-};
+use super::{Statement, variable::Variable, function::FunctionDecorator};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodMetadata {

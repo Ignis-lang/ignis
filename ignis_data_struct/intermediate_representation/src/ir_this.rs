@@ -10,8 +10,16 @@ pub struct IRThis {
 }
 
 impl IRThis {
-  pub fn new(keyword: Box<Token>, access: Option<Box<IRInstruction>>, data_type: Box<DataType>) -> Self {
-    Self { keyword, access, data_type }
+  pub fn new(
+    keyword: Box<Token>,
+    access: Option<Box<IRInstruction>>,
+    data_type: Box<DataType>,
+  ) -> Self {
+    Self {
+      keyword,
+      access,
+      data_type,
+    }
   }
 }
 

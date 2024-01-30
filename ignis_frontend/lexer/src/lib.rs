@@ -375,7 +375,9 @@ impl<'a> Lexer<'a> {
   fn number(&mut self) -> bool {
     let mut is_float: bool = false;
     while self.peek().is_ascii_digit() || self.peek() == '_' {
-      if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
+      if self.peek() == '_'
+        && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit())
+      {
         return false;
       }
 
@@ -386,7 +388,9 @@ impl<'a> Lexer<'a> {
       self.advance();
 
       while self.peek().is_ascii_digit() || self.peek() == '_' {
-        if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
+        if self.peek() == '_'
+          && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit())
+        {
           return false;
         }
 

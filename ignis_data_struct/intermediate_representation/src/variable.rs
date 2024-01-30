@@ -18,7 +18,7 @@ pub struct IRVariableMetadata {
 }
 
 impl IRVariableMetadata {
-pub fn new(
+  pub fn new(
     is_mutable: bool,
     is_reference: bool,
     is_parameter: bool,
@@ -40,7 +40,7 @@ pub fn new(
       is_static,
       is_public,
       is_constructor,
-      complex_data_type
+      complex_data_type,
     }
   }
 }
@@ -69,7 +69,7 @@ impl IRVariable {
   }
 }
 
-impl  IRInstructionTrait for IRVariable {
+impl IRInstructionTrait for IRVariable {
   fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
       "name": self.name,

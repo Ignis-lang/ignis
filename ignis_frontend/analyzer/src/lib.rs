@@ -1,4 +1,5 @@
 mod diagnostic;
+use std::path::Path;
 use std::{collections::HashMap, vec, fs};
 
 use std::fmt::{Display, Formatter};
@@ -41,8 +42,7 @@ use intermediate_representation::{
 };
 
 use lexer::Lexer;
-use ::token::text_span::TextSpan;
-use token::token;
+use token::token::Token;
 
 use ast::{
   visitor::Visitor,
@@ -72,7 +72,6 @@ use ast::{
 };
 use enums::{data_type::DataType, token_type::TokenType};
 use parser::Parser;
-use token::Token;
 
 pub type AnalyzerResult = Result<IRInstruction, Box<AnalyzerDiagnostic>>;
 type CheckCompatibility<T> = (bool, T);
@@ -113,7 +112,7 @@ pub struct Analyzer {
   pub irs: HashMap<String, Vec<IRInstruction>>,
   pub diagnostics: Vec<Box<AnalyzerDiagnostic>>,
   tokens: Vec<Token>,
-  block_stack: Vec<HashMap<String, bool>>,
+  pub block_stack: Vec<HashMap<String, bool>>,
   scopes_variables: Vec<IRVariable>,
   current_function: Option<CalleableDeclaration>,
   current_file: String,
@@ -1671,29 +1670,51 @@ impl Analyzer {
 
   fn resolve_std_import(&mut self, lib: String, block_stack: &mut HashMap<String, bool>) {
     let current_ir = self.irs.get_mut(&self.current_file).unwrap();
-    match lib.clone().as_str() {
-      "std:io" => {
-        current_ir.push(IRInstruction::Function(IRFunction::new(
-          Token::new(
-            enums::token_type::TokenType::Identifier,
-            TextSpan::new(0, 0, 0, "println".to_string(), 0, lib.clone()),
-          ),
-          vec![IRInstruction::Variable(IRVariable::new(
-            "message".to_string(),
-            DataType::Unwnown,
-            None,
-            IRVariableMetadata::new(
-              false, false, true, false, false, false, false, false, false, None,
-            ),
-          ))],
-          DataType::Void,
-          None,
-          IRFunctionMetadata::new(false, true, true, true, false, false, false, false),
-        )));
+    let mut env = std::env::var("IGNITE_HOME");
 
-        block_stack.insert("println".to_string(), true);
+    if env.is_err() {
+      env = std::env::var("PWD");
+    }
+
+    let std_path = Path::new(&env.unwrap()).join("std");
+
+    let file = match lib.clone().as_str() {
+      "std:io" => {
+        let file = fs::read(std_path.join("io").join("mod.ign"));
+
+        if file.is_err() {
+          println!("{:?}", file);
+          return;
+        }
+
+        file.unwrap()
       }
-      &_ => {}
+      &_ => return,
+    };
+
+    let source = String::from_utf8(file).unwrap();
+    let mut lexer = Lexer::new(&source, lib.clone() + ".ign");
+    let _ = lexer.scan_tokens();
+
+    let mut parser = Parser::new(lexer.tokens);
+    let statements = parser.parse().0;
+
+    let mut analyzer = Analyzer::new(lib.clone(), Vec::new());
+    let _ = analyzer.analyze(&statements);
+
+    analyzer.diagnostics.iter().for_each(|d| {
+      self.diagnostics.push(Box::new(*d.clone()));
+    });
+
+    for ir in analyzer.irs.get(&lib).unwrap() {
+      current_ir.push(ir.clone());
+
+      match ir {
+        IRInstruction::Function(f) => {
+          block_stack.insert(f.name.span.literal.clone(), true);
+        }
+        _ => {}
+      }
     }
   }
 

@@ -20,13 +20,13 @@ pub mod ir_method;
 pub mod ir_method_call;
 pub mod ir_return;
 pub mod ir_set;
+pub mod ir_this;
 pub mod ir_while;
 pub mod literal;
 pub mod logical;
 pub mod ternary;
 pub mod unary;
 pub mod variable;
-pub mod ir_this;
 
 use ir_array_access::IRArrayAccess;
 use ir_for::IRFor;

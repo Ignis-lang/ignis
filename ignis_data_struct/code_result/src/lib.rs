@@ -8,5 +8,3 @@ impl CodeResult {
     Self { code, file_name }
   }
 }
-
-
