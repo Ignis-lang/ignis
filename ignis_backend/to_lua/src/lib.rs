@@ -618,7 +618,7 @@ impl TranspilerToLua {
 
   fn transpile_function_params(&mut self, params: &Vec<IRInstruction>) -> String {
     let mut code = String::new();
-    
+
     for param in params {
       code.push_str(&self.transpile_ir_to_lua(param, 0));
       code.push_str(",");

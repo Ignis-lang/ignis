@@ -1,10 +1,7 @@
 use enums::data_type::DataType;
 use token::token::Token;
 
-use crate::{
-  block::IRBlock, function::IRFunctionMetadata,
-  IRInstructionTrait, IRInstruction,
-};
+use crate::{block::IRBlock, function::IRFunctionMetadata, IRInstructionTrait, IRInstruction};
 
 #[derive(Debug, Clone)]
 pub struct IRMethod {

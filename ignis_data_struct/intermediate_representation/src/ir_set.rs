@@ -24,7 +24,13 @@ impl IRInstructionTrait for IRSet {
 }
 
 impl IRSet {
-  pub fn new(name: String, value: Box<IRInstruction>, object: Box<IRClassInstance>, data_type: DataType, var_name: String) -> Self {
+  pub fn new(
+    name: String,
+    value: Box<IRInstruction>,
+    object: Box<IRClassInstance>,
+    data_type: DataType,
+    var_name: String,
+  ) -> Self {
     Self {
       name,
       value,

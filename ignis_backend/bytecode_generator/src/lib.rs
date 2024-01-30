@@ -117,7 +117,7 @@ impl BytecodeGenerator {
               AnalyzerValue::Function(_) => todo!(),
               AnalyzerValue::Null => todo!(),
               AnalyzerValue::Unknown => todo!(),
-                AnalyzerValue::Class(_) => todo!(),
+              AnalyzerValue::Class(_) => todo!(),
             };
           }
           _ => todo!(),

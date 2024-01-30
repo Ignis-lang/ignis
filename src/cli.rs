@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum, Subcommand, Arg};
+use clap::{Parser, ValueEnum, Subcommand};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum DebugPrint {

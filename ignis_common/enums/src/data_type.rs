@@ -80,7 +80,7 @@ impl DataType {
       TokenType::Null => DataType::Null,
       TokenType::Unknown => DataType::Unwnown,
       TokenType::Identifier => DataType::Variable("".to_string()),
-      _ => DataType::Pending
+      _ => DataType::Pending,
     }
   }
   pub fn to_c_type(&self, is_mutable: bool) -> String {

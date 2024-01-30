@@ -28,7 +28,7 @@ impl VariableMetadata {
       is_static,
       is_public,
       is_reference,
-      is_parameter
+      is_parameter,
     }
   }
 }

@@ -470,9 +470,9 @@ impl TranspilerToC {
       IRInstruction::Set(_) => todo!(),
       IRInstruction::For(_) => todo!(),
       IRInstruction::ArrayAccess(_) => todo!(),
-        IRInstruction::MethodCall(_) => todo!(),
-        IRInstruction::Method(_) => todo!(),
-        IRInstruction::This(_) => todo!(),
+      IRInstruction::MethodCall(_) => todo!(),
+      IRInstruction::Method(_) => todo!(),
+      IRInstruction::This(_) => todo!(),
     };
 
     code

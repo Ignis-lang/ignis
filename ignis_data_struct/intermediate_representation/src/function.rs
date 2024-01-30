@@ -14,7 +14,7 @@ pub struct IRFunctionMetadata {
   pub is_static: bool,
   pub is_public: bool,
   pub is_constructor: bool,
-  pub is_method: bool
+  pub is_method: bool,
 }
 
 impl IRFunctionMetadata {
@@ -26,7 +26,7 @@ impl IRFunctionMetadata {
     is_static: bool,
     is_public: bool,
     is_constructor: bool,
-    is_method: bool
+    is_method: bool,
   ) -> Self {
     Self {
       is_recursive,
@@ -36,7 +36,7 @@ impl IRFunctionMetadata {
       is_public,
       is_static,
       is_constructor,
-      is_method
+      is_method,
     }
   }
 }
@@ -55,7 +55,6 @@ impl IRInstructionTrait for IRFunctionMetadata {
     })
   }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct IRFunction {
