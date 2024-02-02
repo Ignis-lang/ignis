@@ -5,7 +5,7 @@ pub mod continue_statement;
 pub mod export;
 pub mod expression;
 pub mod extern_statement;
-pub mod for_in;
+pub mod for_of;
 pub mod for_statement;
 pub mod function;
 pub mod if_statement;
@@ -21,7 +21,7 @@ use serde_json::json;
 use self::{
   expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
   while_statement::WhileStatement, function::FunctionStatement, return_statement::Return,
-  class::Class, for_in::ForIn, import::Import, break_statement::BreakStatement,
+  class::Class, for_of::ForOf, import::Import, break_statement::BreakStatement,
   continue_statement::Continue, method::MethodStatement, property::PropertyStatement,
   for_statement::For,
 };
@@ -39,7 +39,7 @@ pub enum Statement {
   Return(Return),
   Class(Class),
   For(For),
-  ForIn(ForIn),
+  ForOf(ForOf),
   Import(Import),
   Break(BreakStatement),
   Continue(Continue),
@@ -60,7 +60,7 @@ impl Statement {
       }
       Statement::Return(r) => visitor.visit_return_statement(r),
       Statement::Class(class) => visitor.visit_class_statement(class),
-      Statement::ForIn(for_in) => visitor.visit_for_in_statement(for_in),
+      Statement::ForOf(for_of) => visitor.visit_for_of_statement(for_of),
       Statement::Import(import) => visitor.visit_import_statement(import),
       Statement::Break(break_statement) => visitor.visit_break_statement(break_statement),
       Statement::Continue(continue_statement) => {
@@ -146,11 +146,11 @@ impl Statement {
           "properties": class.properties.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
         })
       }
-      Statement::ForIn(for_in) => {
+      Statement::ForOf(for_of) => {
         json!({
-          "type": "ForIn",
-          "iterable": for_in.iterable.to_json(),
-          "body": for_in.body.to_json(),
+          "type": "ForOf",
+          "iterable": for_of.iterable.to_json(),
+          "body": for_of.body.to_json(),
         })
       }
       Statement::Import(import) => {

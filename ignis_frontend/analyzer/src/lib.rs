@@ -11,6 +11,7 @@ use diagnostic_report::DiagnosticReport;
 use intermediate_representation::instruction_type::IRInstructionType;
 use intermediate_representation::ir_array_access::IRArrayAccess;
 use intermediate_representation::ir_for::IRFor;
+use intermediate_representation::ir_for_of::IRForOf;
 use intermediate_representation::ir_get::{IRGet, GetMetadata};
 use intermediate_representation::ir_method::IRMethod;
 use intermediate_representation::ir_method_call::{IRMethodCall, MethodCallMetadata};
@@ -32,7 +33,6 @@ use intermediate_representation::{
   ir_if::IRIf,
   ir_while::IRWhile,
   ir_return::IRReturn,
-  ir_for_in::IRForIn,
   ir_array::IRArray,
   import::IRImport,
   ir_break::IRBreak,
@@ -61,7 +61,7 @@ use ast::{
     function::{FunctionStatement, FunctionDecorator},
     return_statement::Return,
     class::Class,
-    for_in::ForIn,
+    for_of::ForOf,
     import::Import,
     break_statement::BreakStatement,
     continue_statement::Continue,
@@ -1312,7 +1312,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
     )))
   }
 
-  fn visit_for_in_statement(&mut self, statement: &ForIn) -> AnalyzerResult {
+  fn visit_for_of_statement(&mut self, statement: &ForOf) -> AnalyzerResult {
     self.declare(&statement.variable.name.span.literal);
 
     let iterable = self.analyzer(&statement.iterable)?;
@@ -1353,7 +1353,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     self.end_scope();
 
-    let instruction = IRInstruction::ForIn(IRForIn::new(
+    let instruction = IRInstruction::ForOf(IRForOf::new(
       variable,
       Box::new(iterable),
       Box::new(body),

@@ -222,7 +222,7 @@ impl TranspilerToC {
           format_string.push_str(&self.get_format_string_from_data_type(&ternary.data_type));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
         }
-        IRInstruction::ForIn(_) => todo!(),
+        IRInstruction::ForOf(_) => todo!(),
         IRInstruction::Array(_) => todo!(),
         IRInstruction::Import(_) => todo!(),
         IRInstruction::Break(_) => todo!(),
@@ -439,7 +439,7 @@ impl TranspilerToC {
           condition, then_branch, else_branch
         ))
       }
-      IRInstruction::ForIn(_) => todo!(),
+      IRInstruction::ForOf(_) => todo!(),
       IRInstruction::Array(array) => {
         let mut elements = String::new();
 

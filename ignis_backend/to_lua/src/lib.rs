@@ -123,6 +123,26 @@ impl TranspilerToLua {
           }
         }
 
+        if unary.instruction_type == IRInstructionType::Increment {
+          return format!(
+            "{}{} = {} + {}\n",
+            " ".repeat(indent_level),
+            value,
+            value,
+            op
+          );
+        }
+
+        if unary.instruction_type == IRInstructionType::Decrement {
+          return format!(
+            "{}{} = {} - {}\n",
+            " ".repeat(indent_level),
+            value,
+            value,
+            op
+          );
+        }
+
         code.push_str(&format!("{} {}", op, value));
       }
       IRInstruction::Variable(var) => {
@@ -158,7 +178,7 @@ impl TranspilerToLua {
         self.context.push(TranspilerContext::While);
 
         code.push_str(&format!(
-          "{}while {} do\n",
+          "{}while ({}) do\n",
           " ".repeat(indent_level),
           condition
         ));
@@ -204,24 +224,26 @@ impl TranspilerToLua {
           condition, then_branch, else_branch
         ));
       }
-      IRInstruction::ForIn(for_in) => {
+      IRInstruction::ForOf(for_of) => {
         self.context.push(TranspilerContext::For);
 
         code.push_str(&format!(
           "{}for _, {} in pairs({}) do\n",
           " ".repeat(indent_level),
-          for_in.variable.name,
-          self.transpile_ir_to_lua(&for_in.iterable, indent_level)
+          for_of.variable.name,
+          self.transpile_ir_to_lua(&for_of.iterable, indent_level)
         ));
 
-        code.push_str(&self.transpile_ir_to_lua(&for_in.body, indent_level + 2));
+        code.push_str(&self.transpile_ir_to_lua(&for_of.body, indent_level + 2));
 
         if let TranspilerContext::Continue(l) = self.context.last().unwrap() {
-          if **l == TranspilerContext::While {
+          if **l == TranspilerContext::For {
             code.push_str(&format!("{}::continue::\n", " ".repeat(indent_level)));
             self.context.pop();
           }
         };
+
+        self.context.pop();
 
         code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
       }
@@ -334,6 +356,8 @@ impl TranspilerToLua {
             code.push_str(&format!("{}::continue::\n", " ".repeat(indent_level)));
           }
         };
+
+        self.context.pop();
 
         code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
       }
