@@ -6,7 +6,7 @@ use ast::{
   statement::{
     class::{Class, ClassMetadata},
     variable::VariableMetadata,
-    for_in::ForIn,
+    for_of::ForOf,
     import::{Import, ImportSource, ImportSymbol},
     function::FunctionDecorator,
     break_statement::BreakStatement,
@@ -985,8 +985,8 @@ impl Parser {
       VariableMetadata::new(true, false, false, false, false, false),
     );
 
-    if self.check(TokenType::In) {
-      return self.for_in_statement(variable);
+    if self.check(TokenType::Of) {
+      return self.for_of_statement(variable);
     }
 
     self.consume(TokenType::Equal)?;
@@ -1020,8 +1020,8 @@ impl Parser {
     )))
   }
 
-  fn for_in_statement(&mut self, variable: Variable) -> ParserResult<Statement> {
-    self.consume(TokenType::In)?;
+  fn for_of_statement(&mut self, variable: Variable) -> ParserResult<Statement> {
+    self.consume(TokenType::Of)?;
 
     let iterable: Expression = self.expression()?;
 
@@ -1029,9 +1029,9 @@ impl Parser {
 
     let body: Statement = self.statement()?;
 
-    let statement = ForIn::new(variable, iterable, body, self.previous());
+    let statement = ForOf::new(variable, iterable, body, self.previous());
 
-    Ok(Statement::ForIn(statement))
+    Ok(Statement::ForOf(statement))
   }
 
   fn if_statement(&mut self) -> ParserResult<Statement> {

@@ -242,6 +242,7 @@ impl<'a> Lexer<'a> {
       "function" => Some(TokenType::Function),
       "for" => Some(TokenType::For),
       "in" => Some(TokenType::In),
+      "of" => Some(TokenType::Of),
       "if" => Some(TokenType::If),
       "null" => Some(TokenType::Null),
       "return" => Some(TokenType::Return),

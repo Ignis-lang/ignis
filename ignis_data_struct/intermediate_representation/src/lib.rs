@@ -13,7 +13,7 @@ pub mod ir_array_access;
 pub mod ir_break;
 pub mod ir_continue;
 pub mod ir_for;
-pub mod ir_for_in;
+pub mod ir_for_of;
 pub mod ir_get;
 pub mod ir_if;
 pub mod ir_method;
@@ -38,7 +38,7 @@ use serde_json::Value;
 use self::{
   binary::IRBinary, block::IRBlock, literal::IRLiteral, unary::IRUnary, variable::IRVariable,
   logical::IRLogical, ir_if::IRIf, ir_while::IRWhile, function::IRFunction, call::IRCall,
-  class::IRClass, assign::IRAssign, ir_return::IRReturn, ternary::IRTernary, ir_for_in::IRForIn,
+  class::IRClass, assign::IRAssign, ir_return::IRReturn, ternary::IRTernary, ir_for_of::IRForOf,
   ir_array::IRArray, import::IRImport, ir_break::IRBreak, ir_continue::IRContinue, ir_get::IRGet,
   ir_set::IRSet, class_instance::IRClassInstance,
 };
@@ -61,7 +61,7 @@ pub enum IRInstruction {
   Method(IRMethod),
   Ternary(IRTernary),
   For(IRFor),
-  ForIn(IRForIn),
+  ForOf(IRForOf),
   Array(IRArray),
   ArrayAccess(IRArrayAccess),
   Import(IRImport),
@@ -96,7 +96,7 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::Class(instruction) => instruction.to_json(),
       IRInstruction::Get(instruction) => instruction.to_json(),
       IRInstruction::Ternary(instruction) => instruction.to_json(),
-      IRInstruction::ForIn(instruction) => instruction.to_json(),
+      IRInstruction::ForOf(instruction) => instruction.to_json(),
       IRInstruction::Array(instruction) => instruction.to_json(),
       IRInstruction::Import(instruction) => instruction.to_json(),
       IRInstruction::Break(instruction) => instruction.to_json(),

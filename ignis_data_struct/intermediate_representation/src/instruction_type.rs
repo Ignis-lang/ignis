@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use enums::token_type::TokenType;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IRInstructionType {
   Add,
   Sub,
