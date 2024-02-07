@@ -242,6 +242,7 @@ impl<'a> Lexer<'a> {
       "function" => Some(TokenType::Function),
       "for" => Some(TokenType::For),
       "in" => Some(TokenType::In),
+      "of" => Some(TokenType::Of),
       "if" => Some(TokenType::If),
       "null" => Some(TokenType::Null),
       "return" => Some(TokenType::Return),
@@ -272,6 +273,8 @@ impl<'a> Lexer<'a> {
       "void" => Some(TokenType::Void),
       "extern" => Some(TokenType::Extern),
       "continue" => Some(TokenType::Continue),
+      "new" => Some(TokenType::New),
+      "unknown" => Some(TokenType::Unknown),
       _ => None,
     }
   }
@@ -373,7 +376,9 @@ impl<'a> Lexer<'a> {
   fn number(&mut self) -> bool {
     let mut is_float: bool = false;
     while self.peek().is_ascii_digit() || self.peek() == '_' {
-      if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
+      if self.peek() == '_'
+        && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit())
+      {
         return false;
       }
 
@@ -384,7 +389,9 @@ impl<'a> Lexer<'a> {
       self.advance();
 
       while self.peek().is_ascii_digit() || self.peek() == '_' {
-        if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
+        if self.peek() == '_'
+          && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit())
+        {
           return false;
         }
 

@@ -4,16 +4,23 @@ pub mod binary;
 pub mod block;
 pub mod call;
 pub mod class;
+pub mod class_instance;
 pub mod function;
 pub mod import;
 pub mod instruction_type;
 pub mod ir_array;
+pub mod ir_array_access;
 pub mod ir_break;
 pub mod ir_continue;
-pub mod ir_for_in;
+pub mod ir_for;
+pub mod ir_for_of;
+pub mod ir_get;
 pub mod ir_if;
-pub mod ir_println;
+pub mod ir_method;
+pub mod ir_method_call;
 pub mod ir_return;
+pub mod ir_set;
+pub mod ir_this;
 pub mod ir_while;
 pub mod literal;
 pub mod logical;
@@ -21,13 +28,19 @@ pub mod ternary;
 pub mod unary;
 pub mod variable;
 
-use serde_json::json;
+use ir_array_access::IRArrayAccess;
+use ir_for::IRFor;
+use ir_method::IRMethod;
+use ir_method_call::IRMethodCall;
+use ir_this::IRThis;
+use serde_json::Value;
 
 use self::{
   binary::IRBinary, block::IRBlock, literal::IRLiteral, unary::IRUnary, variable::IRVariable,
   logical::IRLogical, ir_if::IRIf, ir_while::IRWhile, function::IRFunction, call::IRCall,
-  class::IRClass, assign::IRAssign, ir_return::IRReturn, ternary::IRTernary, ir_for_in::IRForIn,
-  ir_array::IRArray, import::IRImport, ir_break::IRBreak, ir_continue::IRContinue,
+  class::IRClass, assign::IRAssign, ir_return::IRReturn, ternary::IRTernary, ir_for_of::IRForOf,
+  ir_array::IRArray, import::IRImport, ir_break::IRBreak, ir_continue::IRContinue, ir_get::IRGet,
+  ir_set::IRSet, class_instance::IRClassInstance,
 };
 
 #[derive(Debug, Clone)]
@@ -45,36 +58,56 @@ pub enum IRInstruction {
   Return(IRReturn),
   Assign(IRAssign),
   Class(IRClass),
+  Method(IRMethod),
   Ternary(IRTernary),
-  ForIn(IRForIn),
+  For(IRFor),
+  ForOf(IRForOf),
   Array(IRArray),
+  ArrayAccess(IRArrayAccess),
   Import(IRImport),
   Break(IRBreak),
   Continue(IRContinue),
+  Get(IRGet),
+  ClassInstance(IRClassInstance),
+  Set(IRSet),
+  MethodCall(IRMethodCall),
+  This(IRThis),
 }
 
-impl IRInstruction {
-  pub fn to_json(&self) -> serde_json::Value {
+pub trait IRInstructionTrait {
+  fn to_json(&self) -> Value;
+}
+
+impl IRInstructionTrait for IRInstruction {
+  fn to_json(&self) -> serde_json::Value {
     match self {
-      IRInstruction::Binary(binary) => binary.to_json(),
-      IRInstruction::Block(block) => block.to_json(),
-      IRInstruction::Literal(literal) => literal.to_json(),
-      IRInstruction::Unary(unary) => unary.to_json(),
-      IRInstruction::Variable(variable) => variable.to_json(),
-      IRInstruction::Logical(logical) => logical.to_json(),
-      IRInstruction::If(ir_if) => ir_if.to_json(),
-      IRInstruction::While(ir_while) => ir_while.to_json(),
-      IRInstruction::Function(function) => function.to_json(),
-      IRInstruction::Call(call) => call.to_json(),
-      IRInstruction::Return(re) => re.to_json(),
-      IRInstruction::Assign(assign) => assign.to_json(),
-      IRInstruction::Class(class) => class.to_json(),
-      IRInstruction::Ternary(ternary) => ternary.to_json(),
-      IRInstruction::ForIn(for_in) => for_in.to_json(),
-      IRInstruction::Array(array) => array.to_json(),
-      IRInstruction::Import(import) => import.to_json(),
-      IRInstruction::Break(ir_break) => ir_break.to_json(),
-      IRInstruction::Continue(cont) => cont.to_json(),
+      IRInstruction::Binary(instruction) => instruction.to_json(),
+      IRInstruction::Block(instruction) => instruction.to_json(),
+      IRInstruction::Literal(instruction) => instruction.to_json(),
+      IRInstruction::Unary(instruction) => instruction.to_json(),
+      IRInstruction::Variable(instruction) => instruction.to_json(),
+      IRInstruction::Logical(instruction) => instruction.to_json(),
+      IRInstruction::If(instruction) => instruction.to_json(),
+      IRInstruction::While(instruction) => instruction.to_json(),
+      IRInstruction::Function(instruction) => instruction.to_json(),
+      IRInstruction::Call(instruction) => instruction.to_json(),
+      IRInstruction::Return(instruction) => instruction.to_json(),
+      IRInstruction::Assign(instruction) => instruction.to_json(),
+      IRInstruction::Class(instruction) => instruction.to_json(),
+      IRInstruction::Get(instruction) => instruction.to_json(),
+      IRInstruction::Ternary(instruction) => instruction.to_json(),
+      IRInstruction::ForOf(instruction) => instruction.to_json(),
+      IRInstruction::Array(instruction) => instruction.to_json(),
+      IRInstruction::Import(instruction) => instruction.to_json(),
+      IRInstruction::Break(instruction) => instruction.to_json(),
+      IRInstruction::Continue(instruction) => instruction.to_json(),
+      IRInstruction::ClassInstance(instruction) => instruction.to_json(),
+      IRInstruction::Set(set) => set.to_json(),
+      IRInstruction::For(_for) => _for.to_json(),
+      IRInstruction::ArrayAccess(array) => array.to_json(),
+      IRInstruction::MethodCall(call) => call.to_json(),
+      IRInstruction::Method(method) => method.to_json(),
+      IRInstruction::This(this) => this.to_json(),
     }
   }
 }

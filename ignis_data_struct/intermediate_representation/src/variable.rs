@@ -1,6 +1,6 @@
 use enums::data_type::DataType;
 
-use super::IRInstruction;
+use super::{IRInstruction, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRVariableMetadata {
@@ -11,6 +11,10 @@ pub struct IRVariableMetadata {
   pub is_function: bool,
   pub is_class: bool,
   pub is_declaration: bool,
+  pub is_static: bool,
+  pub is_public: bool,
+  pub is_constructor: bool,
+  pub complex_data_type: Option<Box<IRInstruction>>,
 }
 
 impl IRVariableMetadata {
@@ -21,6 +25,10 @@ impl IRVariableMetadata {
     is_function: bool,
     is_class: bool,
     is_declaration: bool,
+    is_static: bool,
+    is_public: bool,
+    is_constructor: bool,
+    complex_data_type: Option<Box<IRInstruction>>,
   ) -> Self {
     Self {
       is_mutable,
@@ -29,18 +37,11 @@ impl IRVariableMetadata {
       is_function,
       is_class,
       is_declaration,
+      is_static,
+      is_public,
+      is_constructor,
+      complex_data_type,
     }
-  }
-
-  pub fn to_json(&self) -> serde_json::Value {
-    serde_json::json!({
-      "is_mutable": self.is_mutable,
-      "is_reference": self.is_reference,
-      "is_parameter": self.is_parameter,
-      "is_function": self.is_function,
-      "is_class": self.is_class,
-      "is_declaration": self.is_declaration,
-    })
   }
 }
 
@@ -66,18 +67,32 @@ impl IRVariable {
       metadata,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
+impl IRInstructionTrait for IRVariable {
+  fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "type": "variable",
       "name": self.name,
       "data_type": self.data_type.to_string(),
-      "value": if let Some(v) = &self.value {
-        v.to_json()
-      } else {
-        serde_json::Value::Null
+      "value": match &self.value {
+        Some(value) => value.to_json(),
+        None => serde_json::Value::Null,
       },
-      "metadata": self.metadata.to_json(),
+      "metadata": {
+        "is_mutable": self.metadata.is_mutable,
+        "is_reference": self.metadata.is_reference,
+        "is_parameter": self.metadata.is_parameter,
+        "is_function": self.metadata.is_function,
+        "is_class": self.metadata.is_class,
+        "is_declaration": self.metadata.is_declaration,
+        "is_static": self.metadata.is_static,
+        "is_public": self.metadata.is_public,
+        "is_constructor": self.metadata.is_constructor,
+        "complex_data_type": match &self.metadata.complex_data_type {
+          Some(data_type) => data_type.to_json(),
+          None => serde_json::Value::Null,
+        }
+      }
     })
   }
 }

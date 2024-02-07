@@ -2,13 +2,15 @@ use crate::{
   expression::{
     binary::Binary, literal::Literal, unary::Unary, grouping::Grouping,
     variable::VariableExpression, assign::Assign, logical::Logical, ternary::Ternary, call::Call,
-    array::Array,
+    array::Array, new::NewExpression, get::Get, set::Set, method_call::MethodCall,
+    array_access::ArrayAccess, this::This,
   },
   statement::{
     expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
     while_statement::WhileStatement, function::FunctionStatement, return_statement::Return,
-    class::Class, for_in::ForIn, import::Import, break_statement::BreakStatement, continue_statement::Continue,
-    for_statement::For,
+    class::Class, for_of::ForOf, import::Import, break_statement::BreakStatement,
+    continue_statement::Continue, for_statement::For, method::MethodStatement,
+    property::PropertyStatement,
   },
 };
 
@@ -24,6 +26,12 @@ pub trait Visitor<R> {
   fn visit_ternary_expression(&mut self, expression: &Ternary) -> R;
   fn visit_call_expression(&mut self, expression: &Call) -> R;
   fn visit_array_expression(&mut self, expression: &Array) -> R;
+  fn visit_new_expression(&mut self, expression: &NewExpression) -> R;
+  fn visit_get_expression(&mut self, expression: &Get) -> R;
+  fn visit_set_expression(&mut self, set: &Set) -> R;
+  fn visit_method_call_expression(&mut self, method: &MethodCall) -> R;
+  fn visit_array_access_expression(&mut self, array: &ArrayAccess) -> R;
+  fn visit_this_expression(&mut self, this: &This) -> R;
 
   // Statements
   fn visit_expression_statement(&mut self, statement: &ExpressionStatement) -> R;
@@ -35,8 +43,10 @@ pub trait Visitor<R> {
   fn visit_return_statement(&mut self, statement: &Return) -> R;
   fn visit_class_statement(&mut self, statement: &Class) -> R;
   fn visit_for_statement(&mut self, statement: &For) -> R;
-  fn visit_for_in_statement(&mut self, statement: &ForIn) -> R;
+  fn visit_for_of_statement(&mut self, statement: &ForOf) -> R;
   fn visit_import_statement(&mut self, statement: &Import) -> R;
   fn visit_break_statement(&mut self, statement: &BreakStatement) -> R;
   fn visit_continue_statement(&mut self, statement: &Continue) -> R;
+  fn visit_method_statement(&mut self, statement: &MethodStatement) -> R;
+  fn visit_property_statement(&mut self, statement: &PropertyStatement) -> R;
 }

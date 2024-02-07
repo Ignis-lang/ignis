@@ -68,6 +68,7 @@ pub enum TokenType {
   Class,
   Super,
   Static,
+  New,
   Final,
   ReadOnly,
   Public,
@@ -78,6 +79,7 @@ pub enum TokenType {
   Function,
   For,
   In,
+  Of,
   If,
   Null,
   Return,
@@ -98,6 +100,7 @@ pub enum TokenType {
   Void,
   Extern,
   Continue,
+  Unknown,
 
   Bad,
   Identifier,
@@ -160,6 +163,7 @@ impl Display for TokenType {
       TokenType::Function => write!(f, "function"),
       TokenType::For => write!(f, "for"),
       TokenType::In => write!(f, "in"),
+      TokenType::Of => write!(f, "of"),
       TokenType::If => write!(f, "if"),
       TokenType::Null => write!(f, "null"),
       TokenType::Return => write!(f, "return"),
@@ -192,6 +196,8 @@ impl Display for TokenType {
       TokenType::Continue => write!(f, "continue"),
       TokenType::Increment => write!(f, "++"),
       TokenType::Decrement => write!(f, "--"),
+      TokenType::New => write!(f, "new"),
+      TokenType::Unknown => write!(f, "unknown"),
     }
   }
 }

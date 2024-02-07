@@ -1,9 +1,9 @@
 use enums::data_type::DataType;
+use serde_json::{json, Value};
 
-use super::{
-  IRInstruction,
-  instruction_type::IRInstructionType
-};
+use crate::instruction_type::IRInstructionType;
+
+use super::{IRInstruction, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRBinary {
@@ -27,10 +27,12 @@ impl IRBinary {
       data_type,
     }
   }
+}
 
-  pub fn to_json(&self) -> serde_json::Value {
-    serde_json::json!({
-      "type": "binary",
+impl IRInstructionTrait for IRBinary {
+  fn to_json(&self) -> Value {
+    json!({
+      "type": "IRBinary",
       "instruction_type": self.instruction_type.to_string(),
       "left": self.left.to_json(),
       "right": self.right.to_json(),

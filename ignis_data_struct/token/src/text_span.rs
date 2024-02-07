@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,5 +40,11 @@ impl TextSpan {
       "file": self.file,
       "literal": self.literal,
     })
+  }
+}
+
+impl Display for TextSpan {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}: {} - {}", self.literal, self.start, self.end)
   }
 }

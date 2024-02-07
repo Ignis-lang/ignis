@@ -1,8 +1,8 @@
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 
 use enums::{data_type::DataType, literal_value::LiteralValue};
 
-use crate::function::IRFunction;
+use crate::{function::IRFunction, class_instance::IRClassInstance};
 
 #[derive(Debug)]
 pub enum AnalyzerValue {
@@ -12,8 +12,9 @@ pub enum AnalyzerValue {
   Boolean(bool),
   Return(Box<AnalyzerValue>),
   Function(Box<IRFunction>),
+  Class(Box<IRClassInstance>),
   Null,
-  None,
+  Unknown,
 }
 
 impl Clone for AnalyzerValue {
@@ -24,24 +25,29 @@ impl Clone for AnalyzerValue {
       AnalyzerValue::Float(d) => AnalyzerValue::Float(*d),
       AnalyzerValue::Boolean(b) => AnalyzerValue::Boolean(*b),
       AnalyzerValue::Null => AnalyzerValue::Null,
-      AnalyzerValue::None => AnalyzerValue::None,
+      AnalyzerValue::Unknown => AnalyzerValue::Unknown,
       AnalyzerValue::Return(r) => r.as_ref().clone(),
       AnalyzerValue::Function(f) => AnalyzerValue::Function(f.clone()),
+      AnalyzerValue::Class(class) => AnalyzerValue::Class(class.clone()),
     }
   }
 }
 
 impl Display for AnalyzerValue {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     match self {
-      AnalyzerValue::String(s) => write!(f, "{}", s),
-      AnalyzerValue::Int(i) => write!(f, "{}", i),
-      AnalyzerValue::Float(d) => write!(f, "{}", d),
-      AnalyzerValue::Boolean(b) => write!(f, "{}", b),
+      AnalyzerValue::String(s) => write!(f, "String: {}", s),
+      AnalyzerValue::Int(i) => write!(f, "Int: {}", i),
+      AnalyzerValue::Float(d) => write!(f, "Float: {}", d),
+      AnalyzerValue::Boolean(b) => write!(f, "Boolean: {}", b),
       AnalyzerValue::Null => write!(f, "null"),
-      AnalyzerValue::None => write!(f, "none"),
-      AnalyzerValue::Return(r) => write!(f, "{}", r),
-      AnalyzerValue::Function(_) => write!(f, "function"),
+      AnalyzerValue::Unknown => write!(f, "unknown"),
+      AnalyzerValue::Return(r) => write!(f, "Return: {}", r),
+      AnalyzerValue::Function(func) => write!(f, "Function: {}", func.name),
+      AnalyzerValue::Class(class) => {
+        let class = class.as_ref();
+        write!(f, "Class: {}", class.class.name)
+      }
     }
   }
 }
@@ -53,9 +59,13 @@ impl AnalyzerValue {
       AnalyzerValue::Int(_) => DataType::Int,
       AnalyzerValue::Float(_) => DataType::Float,
       AnalyzerValue::Boolean(_) => DataType::Boolean,
-      AnalyzerValue::None | AnalyzerValue::Null => DataType::None,
+      AnalyzerValue::Unknown | AnalyzerValue::Null => DataType::Unwnown,
       AnalyzerValue::Return(r) => r.to_data_type(),
       AnalyzerValue::Function(f) => f.return_type.clone(),
+      AnalyzerValue::Class(class) => {
+        let class = class.as_ref();
+        DataType::ClassType(class.class.name.clone())
+      }
     }
   }
 

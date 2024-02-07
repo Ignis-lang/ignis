@@ -7,15 +7,16 @@ use std::{
 mod cli;
 
 use clap::Parser as ClapParser;
-use cli::{Cli, DebugPrint, Backend, SubCommand};
+use cli::{Cli, DebugPrint, Target, SubCommand};
 use diagnostic::Diagnostic;
 use diagnostic_report::DiagnosticReport;
 use ignis_frontend::{IgnisFrontend, FrontendDebugPrint};
-use ignis_backend::{IgnisBackend, CodeResult, BackendTarget};
+use ignis_backend::IgnisBackend;
 
 struct App {
   pub args: Cli,
   pub file_path: String,
+  pub target: Target,
   pub build: bool,
   pub relp: bool,
   pub source: String,
@@ -25,40 +26,24 @@ impl App {
   pub fn new(args: Cli) -> Self {
     let file_path: String;
     let build: bool;
+    let target: Target;
 
     match &args.subcommand {
       SubCommand::Build(b) => {
         file_path = b.file_path.clone();
         build = true;
+        target = b.target;
       }
+      SubCommand::Run(_) => todo!(),
     };
 
     Self {
       args,
       file_path,
       build,
+      target,
       relp: false,
       source: String::new(),
-    }
-  }
-
-  pub fn create_lua_files(&self, code_results: Vec<CodeResult>) {
-    for code_result in code_results {
-      let mut path = code_result.file_name.split('/').collect::<Vec<&str>>();
-      let code = code_result.code.clone();
-
-      let mut name = path.last().unwrap().replace(r".ign", "");
-
-      name.push_str(".lua");
-      path.pop();
-
-      let mut build_path = "build/".to_string() + path.join("/").as_str();
-
-      fs::create_dir_all(build_path.clone()).unwrap();
-
-      build_path.push_str(format!("/{}", &name).as_str());
-
-      fs::write(build_path, code).unwrap();
     }
   }
 
@@ -67,16 +52,7 @@ impl App {
       Ok(content) => {
         self.source = content;
 
-        let result = self.run()?;
-
-        match self.args.backend {
-          Backend::Lua => {
-            self.create_lua_files(result);
-          }
-          _ => {
-            println!("Backend not implemented");
-          }
-        };
+        self.run()?;
 
         Ok(())
       }
@@ -87,7 +63,7 @@ impl App {
     }
   }
 
-  fn run(&mut self) -> Result<Vec<CodeResult>, Vec<DiagnosticReport>> {
+  fn run(&mut self) -> Result<(), Vec<DiagnosticReport>> {
     if self.source.is_empty() {
       println!("No source code to run");
       exit(1);
@@ -101,11 +77,9 @@ impl App {
         DebugPrint::Lexer => {
           debug_frontend.push(FrontendDebugPrint::Lexer);
         }
-        DebugPrint::Parser => (),
         DebugPrint::Ast => {
           debug_frontend.push(FrontendDebugPrint::Ast);
         }
-        DebugPrint::Analyzer => (),
         DebugPrint::Ir => {
           debug_frontend.push(FrontendDebugPrint::IR);
         }
@@ -118,10 +92,10 @@ impl App {
 
     let result = frontend.process()?;
 
-    let backend = IgnisBackend::new(BackendTarget::Lua);
-    let code_results: Vec<CodeResult> = backend.process(result)?;
+    let backend = IgnisBackend::new(self.target.to_backend(), result);
+    backend.process()?;
 
-    Ok(code_results)
+    Ok(())
   }
 
   pub fn _run_prompt(&mut self) -> Result<(), String> {
@@ -180,8 +154,6 @@ impl App {
 
 fn main() {
   let mut cli = Cli::parse();
-
-  cli.backend = Backend::Lua;
 
   let mut app = App::new(cli);
 

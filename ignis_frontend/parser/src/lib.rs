@@ -4,16 +4,21 @@ use diagnostic_report::DiagnosticReport;
 use parser_diagnostic::{ParserDiagnosticError, ParserDiagnostic};
 use ast::{
   statement::{
-    class::Class,
+    class::{Class, ClassMetadata},
     variable::VariableMetadata,
-    for_in::ForIn,
+    for_of::ForOf,
     import::{Import, ImportSource, ImportSymbol},
     function::FunctionDecorator,
     break_statement::BreakStatement,
     continue_statement::Continue,
     for_statement::For,
+    method::{MethodStatement, MethodMetadata},
+    property::PropertyStatement,
   },
-  expression::array::Array,
+  expression::{
+    array::Array, get::Get, new::NewExpression, set::Set, method_call::MethodCall,
+    array_access::ArrayAccess, this::This,
+  },
 };
 use enums::{data_type::DataType, token_type::TokenType};
 use {
@@ -22,25 +27,30 @@ use {
     Expression, binary::Binary, unary::Unary, literal::Literal, grouping::Grouping,
     logical::Logical, assign::Assign, variable::VariableExpression, ternary, call::Call,
   },
-  enums::{literal_value::LiteralValue, function_kind::FunctionKind},
+  enums::literal_value::LiteralValue,
   ast::statement::{
-    Statement,
-    variable::Variable,
-    expression::ExpressionStatement,
-    if_statement::IfStatement,
-    block::Block,
-    while_statement::WhileStatement,
-    function::{FunctionStatement, FunctionParameter},
+    Statement, variable::Variable, expression::ExpressionStatement, if_statement::IfStatement,
+    block::Block, while_statement::WhileStatement, function::FunctionStatement,
     return_statement::Return,
   },
 };
 
 type ParserResult<T> = Result<T, Box<ParserDiagnostic>>;
 
+#[derive(Debug, Clone, PartialEq)]
+enum ParserContext {
+  Function,
+  Class,
+  ArrayAccess,
+}
+
 pub struct Parser {
   pub tokens: Vec<Token>,
   current: usize,
   pub diagnostics: Vec<ParserDiagnostic>,
+  context: Vec<ParserContext>,
+  class_declarations: Vec<String>,
+  import_declarations: Vec<String>,
 }
 
 impl Parser {
@@ -49,6 +59,9 @@ impl Parser {
       tokens,
       current: 0,
       diagnostics: Vec::new(),
+      context: Vec::new(),
+      class_declarations: Vec::new(),
+      import_declarations: Vec::new(),
     }
   }
 
@@ -56,7 +69,7 @@ impl Parser {
     self.diagnostics.push(error);
   }
 
-  pub fn parse(&mut self) -> Result<Vec<Statement>, Vec<DiagnosticReport>> {
+  pub fn parse(&mut self) -> (Vec<Statement>, Vec<DiagnosticReport>) {
     let mut statements: Vec<Statement> = vec![];
     while !self.is_at_end() {
       match self.declaration() {
@@ -67,17 +80,14 @@ impl Parser {
       };
     }
 
-    if !self.diagnostics.is_empty() {
-      let errors = &self.diagnostics;
-      return Err(
-        errors
-          .iter()
-          .map(|e| e.report_diagnostic())
-          .collect::<Vec<DiagnosticReport>>(),
-      );
-    }
-
-    Ok(statements)
+    (
+      statements,
+      self
+        .diagnostics
+        .iter()
+        .map(|e| e.report_diagnostic())
+        .collect::<Vec<DiagnosticReport>>(),
+    )
   }
 
   fn expression(&mut self) -> ParserResult<Expression> {
@@ -226,17 +236,98 @@ impl Parser {
   }
 
   fn call(&mut self) -> ParserResult<Expression> {
+    if self.match_token(&[TokenType::New]) {
+      let name = self.consume(TokenType::Identifier)?;
+
+      self.consume(TokenType::LeftParen)?;
+
+      let mut arguments: Vec<Expression> = Vec::new();
+
+      if !self.check(TokenType::RightParen) {
+        loop {
+          if arguments.len() >= 255 {
+            let token = &self.peek();
+            return Err(Box::new(ParserDiagnostic::new(
+              ParserDiagnosticError::InvalidNumberOfArguments(255, arguments.len(), token.clone()),
+              self.find_token_line(&token.span.line),
+            )));
+          }
+
+          arguments.push(self.expression()?);
+          if !self.match_token(&[TokenType::Comma]) {
+            break;
+          }
+        }
+      }
+
+      self.consume(TokenType::RightParen)?;
+
+      return Ok(Expression::New(NewExpression::new(name, arguments)));
+    }
+
+    let token = self.peek();
     let mut expression: Expression = self.primary()?;
 
     loop {
-      if self.match_token(&[TokenType::LeftParen]) {
-        expression = self.finish_call(expression)?;
-      } else {
+      if self.match_token(&[TokenType::Dot]) {
+        let name = self.consume(TokenType::Identifier)?;
+
+        if self.match_token(&[TokenType::LeftParen]) {
+          let object = expression.clone();
+          expression =
+            Expression::Variable(VariableExpression::new(name.clone(), DataType::Pending));
+
+          let calle = self.finish_call(expression.clone())?;
+
+          expression = Expression::MethodCall(MethodCall::new(
+            Box::new(name),
+            Box::new(calle.clone()),
+            self.get_expression_type(&calle),
+            Box::new(object),
+          ));
+
+          continue;
+        }
+
+        expression = Expression::Get(Get::new(
+          Box::new(expression),
+          Box::new(token.clone()),
+          Box::new(name),
+        ));
+
+        continue;
+      }
+
+      if !self.match_token(&[TokenType::LeftParen]) {
         break;
       }
+
+      expression = self.finish_call(expression)?;
     }
 
     Ok(expression)
+  }
+
+  fn array_access(&mut self, var: Expression) -> ParserResult<Expression> {
+    let token = self.previous();
+    self.context.push(ParserContext::ArrayAccess);
+    if self.match_token(&[TokenType::LeftBrack]) {
+      let index = self.expression()?;
+
+      self.consume(TokenType::RightBrack)?;
+
+      self.context.pop();
+      Ok(Expression::ArrayAccess(ArrayAccess::new(
+        Box::new(token),
+        Box::new(var),
+        Box::new(index),
+      )))
+    } else {
+      Err(Box::new(ParserDiagnostic::new(
+        ParserDiagnosticError::ExpectedToken(TokenType::LeftBrack, token.clone()),
+        self.find_token_line(&token.span.line),
+      )))
+    }
   }
 
   fn primary(&mut self) -> ParserResult<Expression> {
@@ -282,10 +373,30 @@ impl Parser {
       TokenType::Identifier => {
         self.advance();
         let kind = token.kind.clone();
-        Ok(Expression::Variable(VariableExpression::new(
+
+        let var = Expression::Variable(VariableExpression::new(
           token,
           DataType::from_token_type(kind),
-        )))
+        ));
+
+        if self.check(TokenType::LeftBrack) {
+          let array = self.array_access(var);
+          return array;
+        }
+
+        Ok(var)
+      }
+      TokenType::This => {
+        self.advance();
+
+        if self.peek().kind != TokenType::Dot {
+          Ok(Expression::This(This::new(token, None)))
+        } else {
+          self.advance();
+          let access = self.expression()?;
+
+          Ok(Expression::This(This::new(token, Some(Box::new(access)))))
+        }
       }
       _ => Err(Box::new(ParserDiagnostic::new(
         ParserDiagnosticError::ExpectedExpression(token.clone()),
@@ -370,6 +481,18 @@ impl Parser {
       Expression::Ternary(ternary) => ternary.data_type.clone(),
       Expression::Call(call) => call.return_type.clone(),
       Expression::Array(a) => a.data_type.clone(),
+      Expression::Get(_) => DataType::Pending,
+      Expression::New(new) => DataType::ClassType(new.name.span.literal.clone()),
+      Expression::Set(set) => set.data_type.clone(),
+      Expression::MethodCall(method) => method.data_type.clone(),
+      Expression::ArrayAccess(array) => {
+        if let DataType::Array(a) = self.get_expression_type(&array.variable) {
+          *a
+        } else {
+          DataType::Pending
+        }
+      }
+      Expression::This(_) => DataType::Pending,
     }
   }
 
@@ -388,6 +511,9 @@ impl Parser {
         | TokenType::Const
         | TokenType::For
         | TokenType::If
+        | TokenType::While
+        | TokenType::Import
+        | TokenType::Export
         | TokenType::Return => return,
         _ => (),
       };
@@ -402,11 +528,22 @@ impl Parser {
     }
 
     if self.match_token(&[TokenType::Class]) {
-      return self.class_declaration();
+      self.context.push(ParserContext::Class);
+      let value = self.class_declaration(false);
+
+      self.context.pop();
+
+      return value;
     }
 
     if self.match_token(&[TokenType::Function]) {
-      return self.function(FunctionKind::Function, false, None);
+      self.context.push(ParserContext::Function);
+
+      let value = self.function_statement(false, None);
+
+      self.context.pop();
+
+      return value;
     }
 
     if self.match_token(&[TokenType::Return]) {
@@ -491,7 +628,7 @@ impl Parser {
 
     self.consume(TokenType::LeftParen)?;
 
-    let mut parameters: Vec<FunctionParameter> = Vec::new();
+    let mut parameters: Vec<Variable> = Vec::new();
 
     if !self.check(TokenType::RightParen) {
       loop {
@@ -514,10 +651,24 @@ impl Parser {
         self.consume(TokenType::Colon)?;
         let token = self.advance();
 
-        parameters.push(FunctionParameter::new(
-          param,
-          DataType::from_token_type(token.kind),
-          is_mut,
+        let mut data_type = DataType::from_token_type(token.kind);
+
+        if data_type == DataType::Variable("".to_string()) {
+          data_type = DataType::Variable(token.span.literal.clone());
+        }
+
+        if self.check(TokenType::LeftBrack) {
+          self.advance();
+          self.consume(TokenType::RightBrack)?;
+
+          data_type = DataType::Array(Box::new(data_type));
+        }
+
+        parameters.push(Variable::new(
+          Box::new(param),
+          None,
+          data_type,
+          VariableMetadata::new(is_mut, false, false, false, false, true),
         ));
 
         if !self.match_token(&[TokenType::Comma]) {
@@ -538,7 +689,15 @@ impl Parser {
       TokenType::BooleanType,
       TokenType::CharType,
     ]) {
-      Some(DataType::from_token_type(self.previous().kind))
+      let data_type: DataType = DataType::from_token_type(self.previous().kind);
+
+      if self.check(TokenType::LeftBrack) {
+        self.consume(TokenType::RightBrack)?;
+
+        Some(DataType::Array(Box::new(data_type)))
+      } else {
+        Some(data_type)
+      }
     } else {
       let token = &self.peek();
 
@@ -568,20 +727,6 @@ impl Parser {
         vec![]
       },
     )))
-  }
-
-  fn function(
-    &mut self,
-    kind: FunctionKind,
-    is_public: bool,
-    decorator: Option<FunctionDecorator>,
-  ) -> ParserResult<Statement> {
-    match kind {
-      FunctionKind::Function => self.function_statement(is_public, decorator),
-      FunctionKind::Method => todo!(),
-      FunctionKind::Initializer => todo!(),
-      FunctionKind::Lambda => todo!(),
-    }
   }
 
   fn block(&mut self) -> ParserResult<Statement> {
@@ -614,7 +759,14 @@ impl Parser {
 
     let mut type_annotation = DataType::from_token_type(token.kind.clone());
 
-    if type_annotation == DataType::None {
+    if type_annotation == DataType::Pending
+      && (self.class_declarations.contains(&token.span.literal)
+        || self.import_declarations.contains(&token.span.literal))
+    {
+      type_annotation = DataType::ClassType(token.span.literal.clone());
+    }
+
+    if type_annotation == DataType::Pending {
       return Err(Box::new(ParserDiagnostic::new(
         ParserDiagnosticError::ExpectedTypeAfterVariable(token.clone()),
         self.find_token_line(&token.span.line),
@@ -622,6 +774,15 @@ impl Parser {
     }
 
     self.advance();
+
+    if self.match_token(&[TokenType::SemiColon]) {
+      return Ok(Statement::Variable(Variable::new(
+        Box::new(name),
+        None,
+        type_annotation,
+        VariableMetadata::new(mutable, false, false, false, false, false),
+      )));
+    }
 
     if self.match_token(&[TokenType::LeftBrack]) {
       self.consume(TokenType::RightBrack)?;
@@ -650,7 +811,7 @@ impl Parser {
         Box::new(name),
         Some(Box::new(ini)),
         type_annotation,
-        VariableMetadata::new(mutable, false, false, false, false),
+        VariableMetadata::new(mutable, false, false, false, false, false),
       )))
     } else {
       let token = self.peek();
@@ -692,17 +853,28 @@ impl Parser {
       let equals: Token = self.previous();
       let value: Expression = self.assignment()?;
 
-      if let Expression::Variable(variable) = expression {
-        expression = Expression::Assign(Assign::new(
-          variable.name,
-          Box::new(value),
-          variable.data_type,
-        ));
-      } else {
-        return Err(Box::new(ParserDiagnostic::new(
-          ParserDiagnosticError::InvalidAssignmentTarget(equals.clone()),
-          self.find_token_line(&equals.span.line),
-        )));
+      match expression {
+        Expression::Variable(variable) => {
+          expression = Expression::Assign(Assign::new(
+            variable.name,
+            Box::new(value),
+            variable.data_type,
+          ));
+        }
+        Expression::Get(get) => {
+          expression = Expression::Set(Set::new(
+            get.name,
+            Box::new(value.clone()),
+            get.object,
+            self.get_expression_type(&value),
+          ));
+        }
+        _ => {
+          return Err(Box::new(ParserDiagnostic::new(
+            ParserDiagnosticError::InvalidAssignmentTarget(equals.clone()),
+            self.find_token_line(&equals.span.line),
+          )))
+        }
       }
     }
 
@@ -734,6 +906,7 @@ impl Parser {
       Box::new(condition),
       Box::new(then_branch),
       Box::new(else_branch),
+      Box::new(self.peek()),
       DataType::Pending,
     ));
 
@@ -742,6 +915,7 @@ impl Parser {
         Box::new(children.pop().unwrap()),
         Box::new(expression),
         Box::new(children.pop().unwrap()),
+        Box::new(self.peek()),
         DataType::Pending,
       ));
     }
@@ -808,11 +982,11 @@ impl Parser {
       Box::new(item.clone()),
       None,
       DataType::Pending,
-      VariableMetadata::new(true, false, false, false, false),
+      VariableMetadata::new(true, false, false, false, false, false),
     );
 
-    if self.check(TokenType::In) {
-      return self.for_in_statement(variable);
+    if self.check(TokenType::Of) {
+      return self.for_of_statement(variable);
     }
 
     self.consume(TokenType::Equal)?;
@@ -820,6 +994,7 @@ impl Parser {
     let initializer = self.expression()?;
 
     variable.initializer = Some(Box::new(initializer));
+    variable.type_annotation = DataType::Int;
 
     self.consume(TokenType::SemiColon)?;
 
@@ -835,6 +1010,8 @@ impl Parser {
 
     let body = self.statement()?;
 
+    self.consume(TokenType::RightBrace)?;
+
     Ok(Statement::For(For::new(
       Box::new(variable),
       Box::new(condition),
@@ -843,8 +1020,8 @@ impl Parser {
     )))
   }
 
-  fn for_in_statement(&mut self, variable: Variable) -> ParserResult<Statement> {
-    self.consume(TokenType::In)?;
+  fn for_of_statement(&mut self, variable: Variable) -> ParserResult<Statement> {
+    self.consume(TokenType::Of)?;
 
     let iterable: Expression = self.expression()?;
 
@@ -852,9 +1029,9 @@ impl Parser {
 
     let body: Statement = self.statement()?;
 
-    let statement = ForIn::new(variable, iterable, body, self.previous());
+    let statement = ForOf::new(variable, iterable, body, self.previous());
 
-    Ok(Statement::ForIn(statement))
+    Ok(Statement::ForOf(statement))
   }
 
   fn if_statement(&mut self) -> ParserResult<Statement> {
@@ -885,22 +1062,25 @@ impl Parser {
       return Ok(self.advance());
     }
 
-    let token_line = self.find_token_line(&token.span.line);
+    let token_previous = self.previous();
+    let line = token_previous.span.line;
+
+    let token_line = self.find_token_line(&line);
     let error = match kind {
       TokenType::SemiColon => ParserDiagnostic::new(
-        ParserDiagnosticError::UnexpectedToken(TokenType::SemiColon, token.clone()),
+        ParserDiagnosticError::ExpectedSemicolonAfterExpression(token_previous.clone()),
         token_line,
       ),
       TokenType::Colon => ParserDiagnostic::new(
-        ParserDiagnosticError::UnexpectedToken(TokenType::Colon, token.clone()),
+        ParserDiagnosticError::UnexpectedToken(TokenType::Colon, token_previous.clone()),
         token_line,
       ),
       TokenType::Identifier => ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedVariableName(token.clone()),
+        ParserDiagnosticError::ExpectedVariableName(token_previous.clone()),
         token_line,
       ),
       TokenType::QuestionMark => ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedToken(TokenType::QuestionMark, token.clone()),
+        ParserDiagnosticError::ExpectedToken(TokenType::QuestionMark, token_previous.clone()),
         token_line,
       ),
       TokenType::LeftParen | TokenType::RightParen => {
@@ -916,8 +1096,8 @@ impl Parser {
         )
       }
       _ => ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedToken(kind.clone(), token.clone()),
-        self.find_token_line(&token.span.line),
+        ParserDiagnosticError::ExpectedToken(kind.clone(), token_previous.clone()),
+        token_line,
       ),
     };
 
@@ -963,23 +1143,227 @@ impl Parser {
     self.tokens[self.current - 1].clone()
   }
 
-  fn class_declaration(&mut self) -> ParserResult<Statement> {
-    let name: Token = self.consume(TokenType::Identifier)?;
+  fn property_class_declaration(
+    &mut self,
+    name: Token,
+    is_mutable: bool,
+    is_public: bool,
+  ) -> ParserResult<Statement> {
+    self.consume(TokenType::Colon)?;
 
-    let methods: Vec<FunctionStatement> = Vec::new();
+    let token = self.peek();
 
-    // self.consume(TokenType::LeftBrace)?;
+    let mut type_annotation = DataType::from_token_type(token.kind.clone());
 
-    // while !self.check(TokenType::RightBrace) && !self.is_at_end() {
-    //   let method = match self.function(FunctionKind::Method)? {
-    //     Statement::FunctionStatement(function) => methods.push(function),
-    //     _ => (),
-    //   };
-    // }
+    if type_annotation == DataType::Pending && self.class_declarations.contains(&token.span.literal)
+    {
+      type_annotation = DataType::ClassType(token.span.literal.clone());
+    }
+
+    if type_annotation == DataType::Pending {
+      let token = self.peek();
+      return Err(Box::new(ParserDiagnostic::new(
+        ParserDiagnosticError::ExpectedTypeAfterVariable(self.peek()),
+        self.find_token_line(&token.span.line),
+      )));
+    }
+
+    self.advance();
+
+    if self.match_token(&[TokenType::LeftBrack]) {
+      self.consume(TokenType::RightBrack)?;
+
+      type_annotation = DataType::Array(Box::new(type_annotation));
+    }
+
+    let mut initializer: Option<Box<Expression>> = None;
+
+    if self.match_token(&[TokenType::Equal]) {
+      let mut value = self.expression()?;
+
+      if let Expression::Array(a) = value {
+        value = Expression::Array(Array::new(
+          a.token.clone(),
+          a.elements,
+          type_annotation.clone(),
+        ));
+      };
+
+      initializer = Some(Box::new(value));
+    }
+
+    let _ = self.consume(TokenType::SemiColon);
+
+    Ok(Statement::Property(PropertyStatement::new(
+      Box::new(name),
+      initializer,
+      type_annotation,
+      VariableMetadata::new(is_mutable, false, false, is_public, false, false),
+    )))
+  }
+
+  fn method_declaration(
+    &mut self,
+    name: Token,
+    is_public: bool,
+    decorator: Option<FunctionDecorator>,
+    class_name: &Token,
+  ) -> ParserResult<Statement> {
+    let mut parameters: Vec<Variable> = Vec::new();
+
+    if !self.check(TokenType::RightParen) {
+      loop {
+        if parameters.len() >= 255 {
+          return Err(Box::new(ParserDiagnostic::new(
+            ParserDiagnosticError::InvalidNumberOfArguments(255, parameters.len(), name.clone()),
+            self.find_token_line(&name.span.line),
+          )));
+        }
+
+        let is_mut: bool = if self.peek().kind == TokenType::Mut {
+          self.advance();
+          true
+        } else {
+          false
+        };
+
+        let param = self.consume(TokenType::Identifier)?;
+
+        self.consume(TokenType::Colon)?;
+        let token = self.advance();
+
+        let mut data_type = DataType::from_token_type(token.kind);
+
+        if self.check(TokenType::LeftBrack) {
+          self.advance();
+          self.consume(TokenType::RightBrack)?;
+
+          data_type = DataType::Array(Box::new(data_type));
+        }
+
+        parameters.push(Variable::new(
+          Box::new(param),
+          None,
+          data_type,
+          VariableMetadata::new(is_mut, false, false, false, false, true),
+        ));
+
+        if !self.match_token(&[TokenType::Comma]) {
+          break;
+        }
+      }
+    }
+
+    self.consume(TokenType::RightParen)?;
+
+    let return_type: Option<DataType>;
+    if self.class_declarations.contains(&name.span.literal) {
+      return_type = Some(DataType::ClassType(name.span.literal.clone()));
+    } else {
+      self.consume(TokenType::Colon)?;
+
+      let token = self.peek();
+
+      let mut data_type: DataType = DataType::from_token_type(token.kind.clone());
+
+      if data_type == DataType::Pending && self.class_declarations.contains(&token.span.literal) {
+        data_type = DataType::ClassType(token.span.literal.clone());
+      }
+
+      if data_type == DataType::Pending {
+        let token = &self.peek();
+
+        return Err(Box::new(ParserDiagnostic::new(
+          ParserDiagnosticError::ExpectedReturnTypeAfterFunction(token.clone()),
+          self.find_token_line(&token.span.line),
+        )));
+      }
+
+      self.advance();
+
+      if self.check(TokenType::LeftBrack) {
+        self.consume(TokenType::RightBrack)?;
+        data_type = DataType::Array(Box::new(data_type));
+      }
+
+      return_type = Some(data_type);
+    }
+
+    let mut body: Vec<Statement> = Vec::new();
+
+    if !self.match_token(&[TokenType::SemiColon]) {
+      self.consume(TokenType::LeftBrace)?;
+
+      body.push(self.block()?);
+    }
+
+    let metadata = MethodMetadata::new(
+      is_public,
+      false,
+      self.class_declarations.contains(&name.span.literal),
+    );
+
+    Ok(Statement::Method(MethodStatement::new(
+      name,
+      parameters,
+      body,
+      return_type,
+      if decorator.is_some() {
+        vec![decorator.unwrap()]
+      } else {
+        vec![]
+      },
+      metadata,
+      class_name.clone(),
+    )))
+  }
+
+  fn class_declaration(&mut self, is_public: bool) -> ParserResult<Statement> {
+    let class_name: Token = self.consume(TokenType::Identifier)?;
+
+    self
+      .class_declarations
+      .push(class_name.span.literal.clone());
+
+    let mut methods: Vec<Statement> = Vec::new();
+    let mut properties: Vec<Statement> = Vec::new();
+
+    self.consume(TokenType::LeftBrace)?;
+
+    while !self.check(TokenType::RightBrace) && !self.is_at_end() {
+      let is_public = self.check(TokenType::Public);
+
+      self.match_token(&[TokenType::Public, TokenType::Private]);
+
+      if self.match_token(&[TokenType::Mut]) {
+        let name = self.consume(TokenType::Identifier)?;
+        properties.push(self.property_class_declaration(name, true, is_public)?);
+        continue;
+      }
+
+      let name = self.consume(TokenType::Identifier)?;
+
+      if self.match_token(&[TokenType::LeftParen]) {
+        methods.push(self.method_declaration(name, is_public, None, &class_name)?);
+      } else if self.match_token(&[TokenType::Colon]) {
+        properties.push(self.property_class_declaration(name, false, is_public)?);
+      } else {
+        let token = self.peek();
+        return Err(Box::new(ParserDiagnostic::new(
+          ParserDiagnosticError::ExpectedToken(TokenType::SemiColon, self.peek()),
+          self.find_token_line(&token.span.line),
+        )));
+      }
+    }
 
     self.consume(TokenType::RightBrace)?;
 
-    Ok(Statement::Class(Class::new(name, methods)))
+    Ok(Statement::Class(Class::new(
+      class_name,
+      methods,
+      properties,
+      ClassMetadata::new(is_public),
+    )))
   }
 
   fn import_statement(&mut self) -> ParserResult<Statement> {
@@ -1006,6 +1390,10 @@ impl Parser {
         None
       };
 
+      self
+        .import_declarations
+        .push(symbol_name.span.literal.clone());
+
       symbols.push(ImportSymbol::new(symbol_name, symbol));
     }
 
@@ -1031,15 +1419,22 @@ impl Parser {
     )))
   }
 
-  /*
-   *  export function sum(a: int, b: int): int {
-   *    return a + b;
-   * }
-   */
   fn export_statement(&mut self) -> ParserResult<Statement> {
     if self.match_token(&[TokenType::Function]) {
-      let function = self.function(FunctionKind::Function, true, None)?;
+      self.context.push(ParserContext::Function);
+
+      let function = self.function_statement(true, None)?;
+
+      self.context.pop();
+
       Ok(function)
+    } else if self.match_token(&[TokenType::Class]) {
+      self.context.push(ParserContext::Class);
+
+      let class = self.class_declaration(true)?;
+
+      self.context.pop();
+      Ok(class)
     } else {
       let token = self.peek();
       let line = token.span.line;
@@ -1053,7 +1448,14 @@ impl Parser {
 
   fn decoration_statement(&mut self) -> ParserResult<Statement> {
     match self.peek().kind {
-      TokenType::Function => Ok(self.function(FunctionKind::Function, true, None)?),
+      TokenType::Function => {
+        self.context.push(ParserContext::Function);
+
+        let function = self.function_statement(true, None)?;
+
+        self.context.pop();
+        Ok(function)
+      }
       TokenType::Extern => {
         self.advance();
         self.consume(TokenType::LeftParen)?;
@@ -1066,11 +1468,13 @@ impl Parser {
 
         self.consume(TokenType::Function)?;
 
-        Ok(self.function(
-          FunctionKind::Function,
-          is_public,
-          Some(FunctionDecorator::Extern(path)),
-        )?)
+        self.context.push(ParserContext::Function);
+
+        let func = self.function_statement(is_public, Some(FunctionDecorator::Extern(path)))?;
+
+        self.context.pop();
+
+        Ok(func)
       }
       TokenType::Identifier => {
         todo!()

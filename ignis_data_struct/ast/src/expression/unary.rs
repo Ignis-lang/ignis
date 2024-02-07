@@ -10,12 +10,17 @@ pub struct Unary {
 }
 
 impl Unary {
-  pub fn new(operator: Token, right: Box<Expression>, data_type: DataType, is_prefix: bool) -> Self {
+  pub fn new(
+    operator: Token,
+    right: Box<Expression>,
+    data_type: DataType,
+    is_prefix: bool,
+  ) -> Self {
     Self {
       operator,
       right,
       data_type,
-      is_prefix
+      is_prefix,
     }
   }
 }

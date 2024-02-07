@@ -5,11 +5,13 @@ pub mod continue_statement;
 pub mod export;
 pub mod expression;
 pub mod extern_statement;
-pub mod for_in;
+pub mod for_of;
 pub mod for_statement;
 pub mod function;
 pub mod if_statement;
 pub mod import;
+pub mod method;
+pub mod property;
 pub mod return_statement;
 pub mod variable;
 pub mod while_statement;
@@ -19,8 +21,9 @@ use serde_json::json;
 use self::{
   expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
   while_statement::WhileStatement, function::FunctionStatement, return_statement::Return,
-  class::Class, for_in::ForIn, for_statement::For, import::Import, break_statement::BreakStatement,
-  continue_statement::Continue,
+  class::Class, for_of::ForOf, import::Import, break_statement::BreakStatement,
+  continue_statement::Continue, method::MethodStatement, property::PropertyStatement,
+  for_statement::For,
 };
 
 use crate::{visitor::Visitor, statement::import::ImportSource};
@@ -36,10 +39,12 @@ pub enum Statement {
   Return(Return),
   Class(Class),
   For(For),
-  ForIn(ForIn),
+  ForOf(ForOf),
   Import(Import),
   Break(BreakStatement),
   Continue(Continue),
+  Method(MethodStatement),
+  Property(PropertyStatement),
 }
 
 impl Statement {
@@ -55,13 +60,15 @@ impl Statement {
       }
       Statement::Return(r) => visitor.visit_return_statement(r),
       Statement::Class(class) => visitor.visit_class_statement(class),
-      Statement::ForIn(for_in) => visitor.visit_for_in_statement(for_in),
+      Statement::ForOf(for_of) => visitor.visit_for_of_statement(for_of),
       Statement::Import(import) => visitor.visit_import_statement(import),
       Statement::Break(break_statement) => visitor.visit_break_statement(break_statement),
       Statement::Continue(continue_statement) => {
         visitor.visit_continue_statement(continue_statement)
       }
-      Statement::For(_) => todo!(),
+      Statement::For(_for) => visitor.visit_for_statement(_for),
+      Statement::Method(method) => visitor.visit_method_statement(method),
+      Statement::Property(property) => visitor.visit_property_statement(property),
     }
   }
 
@@ -114,7 +121,7 @@ impl Statement {
         json!({
           "type": "FunctionStatement",
           "name": function.name.span.literal,
-          "parameters": function.parameters.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+          "parameters": function.parameters.iter().map(|x| Statement::Variable(x.clone()).to_json()).collect::<Vec<serde_json::Value>>(),
           "body": function.body.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": match &function.return_type {
             Some(return_type) => return_type.to_string(),
@@ -135,15 +142,15 @@ impl Statement {
         json!({
           "type": "Class",
           "name": class.name.span.literal,
-          // "methods": class.methods.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
-          // "properties": class.properties.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+          "methods": class.methods.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+          "properties": class.properties.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
         })
       }
-      Statement::ForIn(for_in) => {
+      Statement::ForOf(for_of) => {
         json!({
-          "type": "ForIn",
-          "iterable": for_in.iterable.to_json(),
-          "body": for_in.body.to_json(),
+          "type": "ForOf",
+          "iterable": for_of.iterable.to_json(),
+          "body": for_of.body.to_json(),
         })
       }
       Statement::Import(import) => {
@@ -175,7 +182,41 @@ impl Statement {
             "type": "Continue",
         })
       }
-      Statement::For(_) => todo!(),
+      Statement::For(_for) => {
+        json!({
+          "type": "For",
+          "condition": _for.condition.to_json(),
+          "increment": _for.increment.to_json(),
+          "body": _for.body.to_json(),
+        })
+      }
+      Statement::Method(method) => {
+        json!({
+          "type": "Method",
+          "name": method.name.span.literal,
+          "parameters": method.parameters.iter().map(|x| Statement::Variable(x.clone()).to_json()).collect::<Vec<serde_json::Value>>(),
+          "body": method.body.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+          "return_type": match &method.return_type {
+            Some(return_type) => return_type.to_string(),
+            None => String::new(),
+          },
+          "is_static": method.metadata.is_static,
+          "is_public": method.metadata.is_public,
+        })
+      }
+      Statement::Property(property) => {
+        json!({
+          "type": "Property",
+          "name": property.name.span.literal,
+          "initializer": match &property.initializer {
+            Some(initializer) => initializer.to_json(),
+            None => json!(null),
+          },
+          "type_annotation": property.type_annotation.to_string(),
+          "is_static": property.metadata.is_static,
+          "is_public": property.metadata.is_public,
+        })
+      }
     }
   }
 }
