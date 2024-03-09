@@ -114,7 +114,9 @@ impl App {
           if n == 0 {
             println!();
             return Ok(());
-          } else if n == 1 {
+          }
+
+          if n == 1 {
             continue;
           }
         }
@@ -158,6 +160,10 @@ fn main() {
   let mut app = App::new(cli);
 
   if let Err(errors) = app.run_file() {
+    if app.args.no_diagnostic {
+      return;
+    }
+
     for error in errors {
       let diagnostic = Diagnostic::new();
       diagnostic.print(&error);
