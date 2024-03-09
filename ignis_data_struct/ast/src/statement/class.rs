@@ -19,6 +19,8 @@ pub struct Class {
   pub methods: Vec<Statement>,
   pub properties: Vec<Statement>,
   pub metadata: ClassMetadata,
+  pub interfaces: Vec<Token>,
+  pub extends: Option<Token>,
 }
 
 impl Class {
@@ -27,12 +29,16 @@ impl Class {
     methods: Vec<Statement>,
     properties: Vec<Statement>,
     metadata: ClassMetadata,
+    interfaces: Vec<Token>,
+    extends: Option<Token>,
   ) -> Self {
     Self {
       name,
       methods,
       properties,
       metadata,
+      interfaces,
+      extends,
     }
   }
 }

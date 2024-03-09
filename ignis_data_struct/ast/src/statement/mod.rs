@@ -10,6 +10,7 @@ pub mod for_statement;
 pub mod function;
 pub mod if_statement;
 pub mod import;
+pub mod interface_statement;
 pub mod method;
 pub mod property;
 pub mod return_statement;
@@ -19,11 +20,11 @@ pub mod while_statement;
 use serde_json::json;
 
 use self::{
-  expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
-  while_statement::WhileStatement, function::FunctionStatement, return_statement::Return,
-  class::Class, for_of::ForOf, import::Import, break_statement::BreakStatement,
-  continue_statement::Continue, method::MethodStatement, property::PropertyStatement,
-  for_statement::For,
+  block::Block, break_statement::BreakStatement, class::Class, continue_statement::Continue,
+  expression::ExpressionStatement, for_of::ForOf, for_statement::For, function::FunctionStatement,
+  if_statement::IfStatement, import::Import, interface_statement::InterfaceStatement,
+  method::MethodStatement, property::PropertyStatement, return_statement::Return,
+  variable::Variable, while_statement::WhileStatement,
 };
 
 use crate::{visitor::Visitor, statement::import::ImportSource};
@@ -45,6 +46,7 @@ pub enum Statement {
   Continue(Continue),
   Method(MethodStatement),
   Property(PropertyStatement),
+  Interface(InterfaceStatement),
 }
 
 impl Statement {
@@ -69,6 +71,7 @@ impl Statement {
       Statement::For(_for) => visitor.visit_for_statement(_for),
       Statement::Method(method) => visitor.visit_method_statement(method),
       Statement::Property(property) => visitor.visit_property_statement(property),
+      Statement::Interface(interface) => visitor.visit_interface_statement(interface),
     }
   }
 
@@ -215,6 +218,13 @@ impl Statement {
           "type_annotation": property.type_annotation.to_string(),
           "is_static": property.metadata.is_static,
           "is_public": property.metadata.is_public,
+        })
+      }
+      Statement::Interface(interface) => {
+        json!({
+          "type": "Interface",
+          "name": interface.name.span.literal,
+          "methods": interface.methods.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
         })
       }
     }

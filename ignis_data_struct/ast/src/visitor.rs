@@ -1,16 +1,16 @@
 use crate::{
   expression::{
-    binary::Binary, literal::Literal, unary::Unary, grouping::Grouping,
-    variable::VariableExpression, assign::Assign, logical::Logical, ternary::Ternary, call::Call,
-    array::Array, new::NewExpression, get::Get, set::Set, method_call::MethodCall,
-    array_access::ArrayAccess, this::This,
+    array::Array, array_access::ArrayAccess, assign::Assign, binary::Binary, call::Call, get::Get,
+    grouping::Grouping, literal::Literal, logical::Logical, method_call::MethodCall,
+    new::NewExpression, set::Set, ternary::Ternary, this::This, unary::Unary,
+    variable::VariableExpression,
   },
   statement::{
-    expression::ExpressionStatement, variable::Variable, if_statement::IfStatement, block::Block,
-    while_statement::WhileStatement, function::FunctionStatement, return_statement::Return,
-    class::Class, for_of::ForOf, import::Import, break_statement::BreakStatement,
-    continue_statement::Continue, for_statement::For, method::MethodStatement,
-    property::PropertyStatement,
+    block::Block, break_statement::BreakStatement, class::Class, continue_statement::Continue,
+    expression::ExpressionStatement, for_of::ForOf, for_statement::For,
+    function::FunctionStatement, if_statement::IfStatement, import::Import,
+    interface_statement::InterfaceStatement, method::MethodStatement, property::PropertyStatement,
+    return_statement::Return, variable::Variable, while_statement::WhileStatement,
   },
 };
 
@@ -49,4 +49,5 @@ pub trait Visitor<R> {
   fn visit_continue_statement(&mut self, statement: &Continue) -> R;
   fn visit_method_statement(&mut self, statement: &MethodStatement) -> R;
   fn visit_property_statement(&mut self, statement: &PropertyStatement) -> R;
+  fn visit_interface_statement(&mut self, statement: &InterfaceStatement) -> R;
 }

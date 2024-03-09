@@ -3,21 +3,22 @@ pub mod parser_diagnostic;
 use diagnostic_report::DiagnosticReport;
 use parser_diagnostic::{ParserDiagnosticError, ParserDiagnostic};
 use ast::{
-  statement::{
-    class::{Class, ClassMetadata},
-    variable::VariableMetadata,
-    for_of::ForOf,
-    import::{Import, ImportSource, ImportSymbol},
-    function::FunctionDecorator,
-    break_statement::BreakStatement,
-    continue_statement::Continue,
-    for_statement::For,
-    method::{MethodStatement, MethodMetadata},
-    property::PropertyStatement,
-  },
   expression::{
-    array::Array, get::Get, new::NewExpression, set::Set, method_call::MethodCall,
-    array_access::ArrayAccess, this::This,
+    array::Array, array_access::ArrayAccess, get::Get, method_call::MethodCall, new::NewExpression,
+    set::Set, this::This,
+  },
+  statement::{
+    break_statement::BreakStatement,
+    class::{Class, ClassMetadata},
+    continue_statement::Continue,
+    for_of::ForOf,
+    for_statement::For,
+    function::FunctionDecorator,
+    import::{Import, ImportSource, ImportSymbol},
+    interface_statement::InterfaceStatement,
+    method::{MethodMetadata, MethodStatement},
+    property::PropertyStatement,
+    variable::VariableMetadata,
   },
 };
 use enums::{data_type::DataType, token_type::TokenType};
@@ -536,6 +537,10 @@ impl Parser {
       return value;
     }
 
+    if self.match_token(&[TokenType::Interface]) {
+      return self.interface_declaration();
+    }
+
     if self.match_token(&[TokenType::Function]) {
       self.context.push(ParserContext::Function);
 
@@ -585,6 +590,21 @@ impl Parser {
         Err(error)
       }
     }
+  }
+
+  fn interface_declaration(&mut self) -> ParserResult<Statement> {
+    let name: Token = self.consume(TokenType::Identifier)?;
+
+    self.consume(TokenType::LeftBrace)?;
+    let mut methods: Vec<Statement> = Vec::new();
+
+    while !self.check(TokenType::RightBrace) && !self.is_at_end() {
+      methods.push(self.function_statement(false, None)?);
+    }
+
+    self.consume(TokenType::RightBrace)?;
+
+    Ok(Statement::Interface(InterfaceStatement::new(name, methods)))
   }
 
   fn continue_statement(&mut self) -> ParserResult<Statement> {
@@ -1327,6 +1347,24 @@ impl Parser {
 
     let mut methods: Vec<Statement> = Vec::new();
     let mut properties: Vec<Statement> = Vec::new();
+    let mut interfaces: Vec<Token> = Vec::new();
+    let mut extends: Option<Token> = None;
+
+    if self.match_token(&[TokenType::Implements]) {
+      loop {
+        let token = self.consume(TokenType::Identifier)?;
+
+        interfaces.push(token);
+
+        if !self.match_token(&[TokenType::Comma]) {
+          break;
+        }
+      }
+    }
+
+    if self.match_token(&[TokenType::Extends]) {
+      extends = Some(self.consume(TokenType::Identifier)?);
+    }
 
     self.consume(TokenType::LeftBrace)?;
 
@@ -1363,6 +1401,8 @@ impl Parser {
       methods,
       properties,
       ClassMetadata::new(is_public),
+      interfaces,
+      extends,
     )))
   }
 

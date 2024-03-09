@@ -1585,6 +1585,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     Ok(IRInstruction::Variable(variable.clone()))
   }
+
+  fn visit_interface_statement(
+    &mut self,
+    statement: &ast::statement::interface_statement::InterfaceStatement,
+  ) -> AnalyzerResult {
+    todo!()
+  }
 }
 
 impl Analyzer {
