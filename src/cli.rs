@@ -61,9 +61,15 @@ pub struct Cli {
   #[command(subcommand)]
   pub subcommand: SubCommand,
 
+  /// Print debug information
   #[arg(short, long, value_enum, default_value = "none")]
   pub debug: Vec<DebugPrint>,
 
+  /// Optimize the output
   #[arg(short, long)]
   pub optimize: bool,
+
+  /// Don't print any diagnostic
+  #[arg(long, default_value = "false")]
+  pub no_diagnostic: bool,
 }
