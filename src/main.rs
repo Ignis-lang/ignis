@@ -1,7 +1,8 @@
 use std::{
-  io::{self, Write, BufRead},
-  process::exit,
+  collections::HashMap,
   fs,
+  io::{self, BufRead, Write},
+  process::exit,
 };
 
 mod cli;
@@ -12,6 +13,7 @@ use diagnostic::Diagnostic;
 use diagnostic_report::DiagnosticReport;
 use ignis_frontend::{IgnisFrontend, FrontendDebugPrint};
 use ignis_backend::IgnisBackend;
+use backend_trait::BackendTrait;
 
 struct App {
   pub args: Cli,
@@ -70,7 +72,7 @@ impl App {
     }
 
     let mut debug_frontend: Vec<FrontendDebugPrint> = vec![];
-    let mut debug_backend: Vec<DebugPrint> = vec![];
+    let _debug_backend: Vec<DebugPrint> = vec![];
 
     for debug in self.args.debug.clone() {
       match debug {
@@ -92,7 +94,7 @@ impl App {
 
     let result = frontend.process()?;
 
-    let backend = IgnisBackend::new(self.target.to_backend(), result);
+    let mut backend: IgnisBackend = IgnisBackend::new(self.target.to_backend(), result);
     backend.process()?;
 
     Ok(())
@@ -142,7 +144,7 @@ impl App {
         continue;
       }
 
-      self.source = buffer.clone();
+      self.source.clone_from(&buffer);
 
       if let Err(errors) = self.run() {
         for error in errors {
@@ -155,7 +157,7 @@ impl App {
 }
 
 fn main() {
-  let mut cli = Cli::parse();
+  let cli = Cli::parse();
 
   let mut app = App::new(cli);
 

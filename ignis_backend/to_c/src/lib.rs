@@ -5,6 +5,7 @@ use std::{
   io::Write,
 };
 
+use backend_trait::BackendTrait;
 use code_result::CodeResult;
 use intermediate_representation::{
   IRInstruction, variable::IRVariable, function::IRFunction, call::IRCall, ir_if::IRIf,
@@ -28,6 +29,20 @@ pub struct TranspilerToC {
   pub statement_imported: HashMap<String, String>,
   context: Vec<TranspilerContext>,
   irs: HashMap<String, Vec<IRInstruction>>,
+}
+
+impl BackendTrait<()> for TranspilerToC {
+  fn process(&mut self) -> () {
+    let mut code_results = Vec::new();
+    let irs = self.irs.clone();
+
+    for result in irs.iter() {
+      self.transpile(result.1);
+      code_results.push(CodeResult::new(self.code.clone(), result.0.clone()));
+    }
+
+    self.create_files(code_results);
+  }
 }
 
 impl TranspilerToC {
@@ -488,18 +503,6 @@ impl TranspilerToC {
 
       self.code.push_str(code.as_str());
     }
-  }
-
-  pub fn process(&mut self) {
-    let mut code_results = Vec::new();
-    let irs = self.irs.clone();
-
-    for result in irs.iter() {
-      self.transpile(result.1);
-      code_results.push(CodeResult::new(self.code.clone(), result.0.clone()));
-    }
-
-    self.create_files(code_results);
   }
 
   fn create_files(&self, code_results: Vec<CodeResult>) {

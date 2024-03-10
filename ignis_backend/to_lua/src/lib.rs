@@ -8,6 +8,7 @@ use intermediate_representation::{
   instruction_type::IRInstructionType, analyzer_value::AnalyzerValue, ir_get::IRGet,
   ir_method_call::IRMethodCall, class::IRClass, ir_this::IRThis,
 };
+use backend_trait::BackendTrait;
 
 #[derive(Debug, Clone, PartialEq)]
 enum TranspilerContext {
@@ -23,6 +24,20 @@ pub struct TranspilerToLua {
   pub statement_imported: HashMap<String, String>,
   context: Vec<TranspilerContext>,
   irs: HashMap<String, Vec<IRInstruction>>,
+}
+
+impl BackendTrait<()> for TranspilerToLua {
+  fn process(&mut self) {
+    let mut code_results = Vec::new();
+    let irs = self.irs.clone();
+
+    for result in irs.iter() {
+      self.transpile(result.1);
+      code_results.push(CodeResult::new(self.code.clone(), result.0.clone()));
+    }
+
+    self.create_files(code_results);
+  }
 }
 
 impl TranspilerToLua {
@@ -771,18 +786,6 @@ impl TranspilerToLua {
     } else {
       variable.name.to_string()
     }
-  }
-
-  pub fn process(&mut self) {
-    let mut code_results = Vec::new();
-    let irs = self.irs.clone();
-
-    for result in irs.iter() {
-      self.transpile(result.1);
-      code_results.push(CodeResult::new(self.code.clone(), result.0.clone()));
-    }
-
-    self.create_files(code_results);
   }
 
   fn create_files(&self, code_results: Vec<CodeResult>) {

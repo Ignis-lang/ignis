@@ -3,6 +3,7 @@ use std::{collections::HashMap, fmt::Display};
 pub mod debug;
 
 use intermediate_representation::{IRInstruction, analyzer_value::AnalyzerValue};
+use backend_trait::BackendTrait;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OpCode {
@@ -80,6 +81,14 @@ impl Bytecode {
 pub struct BytecodeGenerator {
   pub bytecodes: HashMap<String, Bytecode>,
   pub irs: HashMap<String, Vec<IRInstruction>>,
+}
+
+impl BackendTrait<()> for BytecodeGenerator {
+  fn process(&mut self) {
+    let irs = self.irs.clone();
+
+    self.generate(irs);
+  }
 }
 
 impl BytecodeGenerator {

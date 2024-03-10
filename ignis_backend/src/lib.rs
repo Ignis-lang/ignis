@@ -4,6 +4,9 @@ use diagnostic_report::DiagnosticReport;
 use intermediate_representation::IRInstruction;
 use to_c::TranspilerToC;
 use to_lua::TranspilerToLua;
+use backend_trait::BackendTrait;
+
+type BackendResult = Result<(), Vec<DiagnosticReport>>;
 
 pub enum BackendTarget {
   Lua,
@@ -18,30 +21,22 @@ pub struct IgnisBackend {
   irs: HashMap<String, Vec<IRInstruction>>,
 }
 
-impl IgnisBackend {
-  pub fn new(backend: BackendTarget, irs: HashMap<String, Vec<IRInstruction>>) -> Self {
-    Self { backend, irs }
-  }
-
-  pub fn process(&self) -> Result<(), Vec<DiagnosticReport>> {
-    match self.backend {
-      BackendTarget::Lua => self.to_lua(),
-      BackendTarget::C => self.to_c(),
+impl BackendTrait<BackendResult> for IgnisBackend {
+  fn process(&mut self) -> BackendResult {
+    let mut backend: Box<dyn BackendTrait<()>> = match self.backend {
+      BackendTarget::Lua => Box::new(TranspilerToLua::new(self.irs.clone())),
+      BackendTarget::C => Box::new(TranspilerToC::new(self.irs.clone())),
       _ => todo!("Backend target not implemented"),
     };
 
+    backend.process();
+
     Ok(())
   }
+}
 
-  fn to_c(&self) {
-    let irs = &self.irs;
-    let mut transpiler = TranspilerToC::new(irs.clone());
-    transpiler.process();
-  }
-
-  fn to_lua(&self) {
-    let irs = &self.irs;
-    let mut transpiler = TranspilerToLua::new(irs.clone());
-    transpiler.process();
+impl IgnisBackend {
+  pub fn new(backend: BackendTarget, irs: HashMap<String, Vec<IRInstruction>>) -> Self {
+    Self { backend, irs }
   }
 }
