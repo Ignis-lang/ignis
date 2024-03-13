@@ -10,7 +10,10 @@ pub struct IRArray {
 }
 
 impl IRArray {
-  pub fn new(elements: Vec<IRInstruction>, data_type: DataType) -> Self {
+  pub fn new(
+    elements: Vec<IRInstruction>,
+    data_type: DataType,
+  ) -> Self {
     Self {
       lenght: elements.len(),
       elements,

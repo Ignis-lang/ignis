@@ -8,7 +8,10 @@ pub struct Return {
 }
 
 impl Return {
-  pub fn new(value: Option<Box<Expression>>, keyword: Box<Token>) -> Self {
+  pub fn new(
+    value: Option<Box<Expression>>,
+    keyword: Box<Token>,
+  ) -> Self {
     Self { value, keyword }
   }
 }

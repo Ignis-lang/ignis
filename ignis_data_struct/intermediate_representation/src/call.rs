@@ -11,7 +11,11 @@ pub struct IRCall {
 }
 
 impl IRCall {
-  pub fn new(name: Token, arguments: Vec<IRInstruction>, return_type: DataType) -> Self {
+  pub fn new(
+    name: Token,
+    arguments: Vec<IRInstruction>,
+    return_type: DataType,
+  ) -> Self {
     Self {
       name,
       arguments,

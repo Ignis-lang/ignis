@@ -12,6 +12,7 @@ pub mod ir_array;
 pub mod ir_array_access;
 pub mod ir_break;
 pub mod ir_continue;
+pub mod ir_enum;
 pub mod ir_for;
 pub mod ir_for_of;
 pub mod ir_get;
@@ -29,6 +30,7 @@ pub mod unary;
 pub mod variable;
 
 use ir_array_access::IRArrayAccess;
+use ir_enum::IREnum;
 use ir_for::IRFor;
 use ir_method::IRMethod;
 use ir_method_call::IRMethodCall;
@@ -36,11 +38,10 @@ use ir_this::IRThis;
 use serde_json::Value;
 
 use self::{
-  binary::IRBinary, block::IRBlock, literal::IRLiteral, unary::IRUnary, variable::IRVariable,
-  logical::IRLogical, ir_if::IRIf, ir_while::IRWhile, function::IRFunction, call::IRCall,
-  class::IRClass, assign::IRAssign, ir_return::IRReturn, ternary::IRTernary, ir_for_of::IRForOf,
-  ir_array::IRArray, import::IRImport, ir_break::IRBreak, ir_continue::IRContinue, ir_get::IRGet,
-  ir_set::IRSet, class_instance::IRClassInstance,
+  binary::IRBinary, block::IRBlock, literal::IRLiteral, unary::IRUnary, variable::IRVariable, logical::IRLogical,
+  ir_if::IRIf, ir_while::IRWhile, function::IRFunction, call::IRCall, class::IRClass, assign::IRAssign,
+  ir_return::IRReturn, ternary::IRTernary, ir_for_of::IRForOf, ir_array::IRArray, import::IRImport, ir_break::IRBreak,
+  ir_continue::IRContinue, ir_get::IRGet, ir_set::IRSet, class_instance::IRClassInstance,
 };
 
 #[derive(Debug, Clone)]
@@ -72,6 +73,7 @@ pub enum IRInstruction {
   Set(IRSet),
   MethodCall(IRMethodCall),
   This(IRThis),
+  Enum(IREnum),
 }
 
 pub trait IRInstructionTrait {
@@ -108,6 +110,7 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::MethodCall(call) => call.to_json(),
       IRInstruction::Method(method) => method.to_json(),
       IRInstruction::This(this) => this.to_json(),
+      IRInstruction::Enum(e) => e.to_json(),
     }
   }
 }

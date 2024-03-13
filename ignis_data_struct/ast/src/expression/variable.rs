@@ -7,7 +7,10 @@ pub struct VariableExpression {
 }
 
 impl VariableExpression {
-  pub fn new(name: Token, data_type: DataType) -> Self {
+  pub fn new(
+    name: Token,
+    data_type: DataType,
+  ) -> Self {
     Self { name, data_type }
   }
 }

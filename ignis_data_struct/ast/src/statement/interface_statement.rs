@@ -9,7 +9,10 @@ pub struct InterfaceStatement {
 }
 
 impl InterfaceStatement {
-  pub fn new(name: Token, methods: Vec<Statement>) -> Self {
+  pub fn new(
+    name: Token,
+    methods: Vec<Statement>,
+  ) -> Self {
     Self { name, methods }
   }
 }

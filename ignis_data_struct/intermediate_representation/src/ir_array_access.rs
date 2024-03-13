@@ -10,12 +10,12 @@ pub struct IRArrayAccess {
 }
 
 impl IRArrayAccess {
-  pub fn new(name: String, index: Box<IRInstruction>, data_type: DataType) -> Self {
-    Self {
-      name,
-      index,
-      data_type,
-    }
+  pub fn new(
+    name: String,
+    index: Box<IRInstruction>,
+    data_type: DataType,
+  ) -> Self {
+    Self { name, index, data_type }
   }
 }
 

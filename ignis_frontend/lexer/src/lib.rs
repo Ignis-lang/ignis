@@ -22,7 +22,10 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-  pub fn new(source: &'a str, module_path: String) -> Self {
+  pub fn new(
+    source: &'a str,
+    module_path: String,
+  ) -> Self {
     Self {
       source,
       tokens: vec![],
@@ -50,14 +53,7 @@ impl<'a> Lexer<'a> {
 
     self.tokens.push(Token::new(
       TokenType::Eof,
-      TextSpan::new(
-        0,
-        0,
-        self.line,
-        '\0'.to_string(),
-        0,
-        self.module_path.clone(),
-      ),
+      TextSpan::new(0, 0, self.line, '\0'.to_string(), 0, self.module_path.clone()),
     ));
   }
 
@@ -84,34 +80,34 @@ impl<'a> Lexer<'a> {
     match c {
       '(' => {
         token = TokenType::LeftParen;
-      }
+      },
       ')' => {
         token = TokenType::RightParen;
-      }
+      },
       '{' => {
         token = TokenType::LeftBrace;
-      }
+      },
       '}' => {
         token = TokenType::RightBrace;
-      }
+      },
       '[' => {
         token = TokenType::LeftBrack;
-      }
+      },
       ']' => {
         token = TokenType::RightBrack;
-      }
+      },
       ',' => {
         token = TokenType::Comma;
-      }
+      },
       '.' => {
         token = TokenType::Dot;
-      }
+      },
       ';' => {
         token = TokenType::SemiColon;
-      }
+      },
       '@' => {
         token = TokenType::At;
-      }
+      },
       '-' => {
         token = if self.match_char('=') {
           TokenType::DecrementAndAssign
@@ -122,7 +118,7 @@ impl<'a> Lexer<'a> {
         } else {
           TokenType::Minus
         };
-      }
+      },
       '+' => {
         token = if self.match_char('=') {
           TokenType::IncrementAndAssign
@@ -131,61 +127,61 @@ impl<'a> Lexer<'a> {
         } else {
           TokenType::Plus
         };
-      }
+      },
       '*' => {
         token = TokenType::Asterisk;
-      }
+      },
       ':' => {
         token = TokenType::Colon;
-      }
+      },
       '%' => {
         token = TokenType::Mod;
-      }
+      },
       '!' => {
         token = if self.match_char('=') {
           TokenType::BangEqual
         } else {
           TokenType::Bang
         };
-      }
+      },
       '=' => {
         token = if self.match_char('=') {
           TokenType::EqualEqual
         } else {
           TokenType::Equal
         };
-      }
+      },
       '<' => {
         token = if self.match_char('=') {
           TokenType::LessEqual
         } else {
           TokenType::Less
         };
-      }
+      },
       '>' => {
         token = if self.match_char('=') {
           TokenType::GreaterEqual
         } else {
           TokenType::Greater
         };
-      }
+      },
       '|' => {
         token = if self.match_char('|') {
           TokenType::Or
         } else {
           TokenType::Pipe
         };
-      }
+      },
       '&' => {
         token = if self.match_char('&') {
           TokenType::And
         } else {
           TokenType::Ampersand
         };
-      }
+      },
       '?' => {
         token = TokenType::QuestionMark;
-      }
+      },
       '/' => {
         token = TokenType::Comment;
         if self.match_char('*') {
@@ -203,17 +199,17 @@ impl<'a> Lexer<'a> {
         } else {
           token = TokenType::Slash;
         }
-      }
+      },
       '"' => {
         if let Some(value) = self.string() {
           self.add_token_string(value);
           return;
         }
-      }
+      },
       '`' => {
         self.start = self.current - 1; // Guardar la posición inicial del literal de plantilla
         self.template_string();
-      }
+      },
       _ => {
         if c.is_ascii_digit() {
           if self.number() {
@@ -226,7 +222,7 @@ impl<'a> Lexer<'a> {
         if c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_' {
           token = self.identifier();
         }
-      }
+      },
     }
 
     self.add_token(token);
@@ -292,15 +288,15 @@ impl<'a> Lexer<'a> {
           self.add_token(TokenType::TemplateStringEnd);
           self.advance();
           break;
-        }
+        },
         '$' if self.peek_next() == '{' => {
           self.add_token(TokenType::ExpressionStart);
           self.advance();
           self.advance();
-        }
+        },
         _ => {
           self.advance();
-        }
+        },
       }
 
       if self.is_at_end() {
@@ -330,7 +326,7 @@ impl<'a> Lexer<'a> {
         match self.peek() {
           '\"' => result.push('\"'),
           '\\' => result.push('\\'),
-          _ => {}
+          _ => {},
         }
       } else {
         result.push(self.peek());
@@ -355,7 +351,10 @@ impl<'a> Lexer<'a> {
   if these cases are met then it returns `false`.
   Otherwise, it increments `current` by one and returns true.
   */
-  fn match_char(&mut self, c: char) -> bool {
+  fn match_char(
+    &mut self,
+    c: char,
+  ) -> bool {
     if self.is_at_end() || self.peek() != c {
       return false;
     }
@@ -376,9 +375,7 @@ impl<'a> Lexer<'a> {
   fn number(&mut self) -> bool {
     let mut is_float: bool = false;
     while self.peek().is_ascii_digit() || self.peek() == '_' {
-      if self.peek() == '_'
-        && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit())
-      {
+      if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
         return false;
       }
 
@@ -389,9 +386,7 @@ impl<'a> Lexer<'a> {
       self.advance();
 
       while self.peek().is_ascii_digit() || self.peek() == '_' {
-        if self.peek() == '_'
-          && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit())
-        {
+        if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
           return false;
         }
 
@@ -420,7 +415,10 @@ impl<'a> Lexer<'a> {
     self.source.chars().nth(self.current).unwrap_or('\0')
   }
 
-  fn add_token_string(&mut self, value: String) {
+  fn add_token_string(
+    &mut self,
+    value: String,
+  ) {
     self.tokens.push(Token::new(
       TokenType::String,
       TextSpan::new(
@@ -438,7 +436,10 @@ impl<'a> Lexer<'a> {
   Where `advance()` is for input, `addToken()` is for output.
   It takes the text of the current lexeme and creates a new token.
   */
-  fn add_token(&mut self, kind: TokenType) {
+  fn add_token(
+    &mut self,
+    kind: TokenType,
+  ) {
     let mut literal = self.source[self.start..self.current].to_string();
 
     if kind == TokenType::Comment {

@@ -33,7 +33,7 @@ impl App {
         file_path = b.file_path.clone();
         build = true;
         target = b.target;
-      }
+      },
       SubCommand::Run(_) => todo!(),
     };
 
@@ -55,11 +55,11 @@ impl App {
         self.run()?;
 
         Ok(())
-      }
+      },
       Err(e) => {
         println!("{:?}", e);
         Err(vec![])
-      }
+      },
     }
   }
 
@@ -70,25 +70,24 @@ impl App {
     }
 
     let mut debug_frontend: Vec<FrontendDebugPrint> = vec![];
-    let mut debug_backend: Vec<DebugPrint> = vec![];
+    let _debug_backend: Vec<DebugPrint> = vec![];
 
     for debug in self.args.debug.clone() {
       match debug {
         DebugPrint::Lexer => {
           debug_frontend.push(FrontendDebugPrint::Lexer);
-        }
+        },
         DebugPrint::Ast => {
           debug_frontend.push(FrontendDebugPrint::Ast);
-        }
+        },
         DebugPrint::Ir => {
           debug_frontend.push(FrontendDebugPrint::IR);
-        }
+        },
         _ => (),
       }
     }
 
-    let mut frontend =
-      IgnisFrontend::new(self.source.clone(), self.file_path.clone(), debug_frontend);
+    let mut frontend = IgnisFrontend::new(self.source.clone(), self.file_path.clone(), debug_frontend);
 
     let result = frontend.process()?;
 
@@ -119,7 +118,7 @@ impl App {
           if n == 1 {
             continue;
           }
-        }
+        },
         Err(_) => return Err("Clound not read line".to_string()),
       }
 
@@ -129,9 +128,7 @@ impl App {
       }
 
       if buffer.contains("load") {
-        let path = buffer.split("load").collect::<Vec<&str>>()[1]
-          .trim()
-          .to_string();
+        let path = buffer.split("load").collect::<Vec<&str>>()[1].trim().to_string();
 
         self.file_path = path;
 
@@ -142,7 +139,7 @@ impl App {
         continue;
       }
 
-      self.source = buffer.clone();
+      self.source.clone_from(&buffer);
 
       if let Err(errors) = self.run() {
         for error in errors {

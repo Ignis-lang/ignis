@@ -9,7 +9,10 @@ pub struct IRAssign {
 }
 
 impl IRAssign {
-  pub fn new(name: String, value: Box<IRInstruction>) -> Self {
+  pub fn new(
+    name: String,
+    value: Box<IRInstruction>,
+  ) -> Self {
     Self { name, value }
   }
 

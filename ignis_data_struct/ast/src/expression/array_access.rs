@@ -10,11 +10,11 @@ pub struct ArrayAccess {
 }
 
 impl ArrayAccess {
-  pub fn new(name: Box<Token>, variable: Box<Expression>, index: Box<Expression>) -> Self {
-    Self {
-      name,
-      variable,
-      index,
-    }
+  pub fn new(
+    name: Box<Token>,
+    variable: Box<Expression>,
+    index: Box<Expression>,
+  ) -> Self {
+    Self { name, variable, index }
   }
 }

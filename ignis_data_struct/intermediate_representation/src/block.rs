@@ -9,7 +9,10 @@ pub struct IRBlock {
 }
 
 impl IRBlock {
-  pub fn new(instructions: Vec<IRInstruction>, scopes_variables: Vec<IRVariable>) -> Self {
+  pub fn new(
+    instructions: Vec<IRInstruction>,
+    scopes_variables: Vec<IRVariable>,
+  ) -> Self {
     Self {
       instructions,
       scopes_variables,

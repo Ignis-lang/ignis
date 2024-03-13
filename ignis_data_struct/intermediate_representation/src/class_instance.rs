@@ -10,7 +10,11 @@ pub struct IRClassInstance {
 }
 
 impl IRClassInstance {
-  pub fn new(class: Box<IRClass>, var_name: Token, constructor_args: Vec<IRInstruction>) -> Self {
+  pub fn new(
+    class: Box<IRClass>,
+    var_name: Token,
+    constructor_args: Vec<IRInstruction>,
+  ) -> Self {
     Self {
       class,
       var_name,

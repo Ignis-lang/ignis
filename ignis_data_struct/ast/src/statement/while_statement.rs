@@ -9,7 +9,10 @@ pub struct WhileStatement {
 }
 
 impl WhileStatement {
-  pub fn new(condition: Box<Expression>, body: Box<Statement>) -> Self {
+  pub fn new(
+    condition: Box<Expression>,
+    body: Box<Statement>,
+  ) -> Self {
     Self { condition, body }
   }
 }

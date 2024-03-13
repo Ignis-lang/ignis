@@ -8,7 +8,10 @@ pub struct NewExpression {
 }
 
 impl NewExpression {
-  pub fn new(name: Token, arguments: Vec<Expression>) -> Self {
+  pub fn new(
+    name: Token,
+    arguments: Vec<Expression>,
+  ) -> Self {
     Self { name, arguments }
   }
 }

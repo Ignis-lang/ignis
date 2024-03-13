@@ -4,7 +4,10 @@ pub struct CodeResult {
 }
 
 impl CodeResult {
-  pub fn new(code: String, file_name: String) -> Self {
+  pub fn new(
+    code: String,
+    file_name: String,
+  ) -> Self {
     Self { code, file_name }
   }
 }

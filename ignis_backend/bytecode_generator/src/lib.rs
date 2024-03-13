@@ -39,7 +39,10 @@ pub enum Value {
 }
 
 impl Display for Value {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       Value::Int(int) => write!(f, "{}", int),
       Value::Float(float) => write!(f, "{}", float),
@@ -66,12 +69,19 @@ impl Bytecode {
     }
   }
 
-  pub fn write(&mut self, byte: u8, line: usize) {
+  pub fn write(
+    &mut self,
+    byte: u8,
+    line: usize,
+  ) {
     self.code.push(byte);
     self.lines.push(line);
   }
 
-  pub fn add_constant(&mut self, value: Value) -> usize {
+  pub fn add_constant(
+    &mut self,
+    value: Value,
+  ) -> usize {
     self.constants.push(value);
     self.constants.len() - 1
   }
@@ -90,7 +100,10 @@ impl BytecodeGenerator {
     }
   }
 
-  pub fn generate(&mut self, irs: HashMap<String, Vec<IRInstruction>>) {
+  pub fn generate(
+    &mut self,
+    irs: HashMap<String, Vec<IRInstruction>>,
+  ) {
     for (file_name, ir) in irs.into_iter() {
       self.bytecodes.insert(file_name.clone(), Bytecode::new());
       let bytecode = self.bytecodes.get_mut(file_name.as_str()).unwrap();
@@ -107,11 +120,11 @@ impl BytecodeGenerator {
               AnalyzerValue::Int(int) => {
                 bytecode.write(OpCode::ConstantInt as u8, 123);
                 bytecode.add_constant(Value::Int(int));
-              }
+              },
               AnalyzerValue::Float(float) => {
                 bytecode.write(OpCode::ConstantFloat as u8, 123);
                 bytecode.add_constant(Value::Float(float));
-              }
+              },
               AnalyzerValue::Boolean(_) => todo!(),
               AnalyzerValue::Return(_) => todo!(),
               AnalyzerValue::Function(_) => todo!(),
@@ -119,7 +132,7 @@ impl BytecodeGenerator {
               AnalyzerValue::Unknown => todo!(),
               AnalyzerValue::Class(_) => todo!(),
             };
-          }
+          },
           _ => todo!(),
         }
 

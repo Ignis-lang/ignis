@@ -15,7 +15,10 @@ pub struct ImportSymbol {
 }
 
 impl ImportSymbol {
-  pub fn new(name: Token, alias: Option<Token>) -> Self {
+  pub fn new(
+    name: Token,
+    alias: Option<Token>,
+  ) -> Self {
     Self { name, alias }
   }
 

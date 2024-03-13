@@ -7,8 +7,8 @@ use std::{
 
 use code_result::CodeResult;
 use intermediate_representation::{
-  IRInstruction, variable::IRVariable, function::IRFunction, call::IRCall, ir_if::IRIf,
-  ir_while::IRWhile, instruction_type::IRInstructionType, analyzer_value::AnalyzerValue,
+  IRInstruction, variable::IRVariable, function::IRFunction, call::IRCall, ir_if::IRIf, ir_while::IRWhile,
+  instruction_type::IRInstructionType, analyzer_value::AnalyzerValue,
 };
 use enums::data_type::DataType;
 
@@ -41,7 +41,10 @@ impl TranspilerToC {
     }
   }
 
-  fn transpile_operator_to_c(&self, operator: &IRInstructionType) -> String {
+  fn transpile_operator_to_c(
+    &self,
+    operator: &IRInstructionType,
+  ) -> String {
     match operator {
       IRInstructionType::Add => "+",
       IRInstructionType::Sub => "-",
@@ -67,7 +70,10 @@ impl TranspilerToC {
     .to_string()
   }
 
-  fn get_format_string_from_data_type(&self, data_type: &DataType) -> String {
+  fn get_format_string_from_data_type(
+    &self,
+    data_type: &DataType,
+  ) -> String {
     match data_type {
       DataType::Int => "%d",
       DataType::Float => "%f",
@@ -78,7 +84,10 @@ impl TranspilerToC {
     .to_string()
   }
 
-  fn get_format_string_from_analyzer_value(&self, analyzer_value: &AnalyzerValue) -> String {
+  fn get_format_string_from_analyzer_value(
+    &self,
+    analyzer_value: &AnalyzerValue,
+  ) -> String {
     match analyzer_value {
       AnalyzerValue::String(_) => "%s".to_string(),
       AnalyzerValue::Int(_) => "%d".to_string(),
@@ -89,7 +98,11 @@ impl TranspilerToC {
     }
   }
 
-  fn transpile_variable_to_c(&mut self, variable: &IRVariable, indent_level: usize) -> String {
+  fn transpile_variable_to_c(
+    &mut self,
+    variable: &IRVariable,
+    indent_level: usize,
+  ) -> String {
     let var_value = if let Some(value) = &variable.value {
       match **value {
         IRInstruction::Call(_) => {
@@ -98,7 +111,7 @@ impl TranspilerToC {
           self.context.pop();
 
           result
-        }
+        },
         _ => self.transpile_ir_to_c(value, 0),
       }
     } else {
@@ -115,7 +128,7 @@ impl TranspilerToC {
             variable.name,
             var_value
           )
-        }
+        },
         _ => {
           format!(
             "{}{} {} = {};\n",
@@ -124,14 +137,18 @@ impl TranspilerToC {
             variable.name,
             var_value
           )
-        }
+        },
       }
     } else {
       variable.name.to_string()
     }
   }
 
-  fn transpile_function_to_c(&mut self, func: &IRFunction, indent_level: usize) -> String {
+  fn transpile_function_to_c(
+    &mut self,
+    func: &IRFunction,
+    indent_level: usize,
+  ) -> String {
     let mut code = String::new();
 
     if func.metadata.is_extern {
@@ -180,7 +197,11 @@ impl TranspilerToC {
     code
   }
 
-  fn transpile_print_to_c(&mut self, call: &IRCall, indent_level: usize) -> String {
+  fn transpile_print_to_c(
+    &mut self,
+    call: &IRCall,
+    indent_level: usize,
+  ) -> String {
     let mut code: String = String::new();
     let mut format_string: String = String::new();
     let mut args: String = String::new();
@@ -190,38 +211,38 @@ impl TranspilerToC {
         IRInstruction::Binary(b) => {
           format_string.push_str(&self.get_format_string_from_data_type(&b.data_type));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
-        }
+        },
         IRInstruction::Block(_) => todo!(),
         IRInstruction::Literal(l) => {
           format_string.push_str(&self.get_format_string_from_analyzer_value(&l.value));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
-        }
+        },
         IRInstruction::Unary(u) => {
           format_string.push_str(&self.get_format_string_from_data_type(&u.data_type));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
-        }
+        },
         IRInstruction::Variable(v) => {
           format_string.push_str(&self.get_format_string_from_data_type(&v.data_type));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
-        }
+        },
         IRInstruction::Logical(_) => {
           format_string.push_str(&self.get_format_string_from_data_type(&DataType::Boolean));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
-        }
+        },
         IRInstruction::If(_) => todo!(),
         IRInstruction::While(_) => todo!(),
         IRInstruction::Function(_) => todo!(),
         IRInstruction::Call(c) => {
           format_string.push_str(&self.get_format_string_from_data_type(&c.return_type));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
-        }
+        },
         IRInstruction::Return(_) => todo!(),
         IRInstruction::Assign(_) => todo!(),
         IRInstruction::Class(_) => todo!(),
         IRInstruction::Ternary(ternary) => {
           format_string.push_str(&self.get_format_string_from_data_type(&ternary.data_type));
           args.push_str(&self.transpile_ir_to_c(arg, 0));
-        }
+        },
         IRInstruction::ForOf(_) => todo!(),
         IRInstruction::Array(_) => todo!(),
         IRInstruction::Import(_) => todo!(),
@@ -235,6 +256,7 @@ impl TranspilerToC {
         IRInstruction::MethodCall(_) => todo!(),
         IRInstruction::Method(_) => todo!(),
         IRInstruction::This(_) => todo!(),
+        IRInstruction::Enum(_) => todo!(),
       };
 
       args.push(',');
@@ -242,26 +264,22 @@ impl TranspilerToC {
 
     args.pop();
 
-    code.push_str(
-      format!(
-        "{}printf(\"{}\\n\", {});\n",
-        " ".repeat(indent_level),
-        format_string,
-        args
-      )
-      .as_str(),
-    );
+    code.push_str(format!("{}printf(\"{}\\n\", {});\n", " ".repeat(indent_level), format_string, args).as_str());
 
     code
   }
 
-  fn transpile_call_to_c(&mut self, call: &IRCall, indent_level: usize) -> String {
+  fn transpile_call_to_c(
+    &mut self,
+    call: &IRCall,
+    indent_level: usize,
+  ) -> String {
     let mut code = String::new();
 
     let name = match call.name.span.literal.as_str() {
       "println" => {
         return self.transpile_print_to_c(call, indent_level);
-      }
+      },
       "toString" => "toString",
       _ => &call.name.span.literal,
     };
@@ -276,7 +294,7 @@ impl TranspilerToC {
 
           self.context.pop();
           value
-        }
+        },
         _ => self.transpile_ir_to_c(x, 0),
       })
       .collect::<Vec<String>>()
@@ -286,12 +304,10 @@ impl TranspilerToC {
 
     if let Some(x) = self.context.last() {
       match x {
-        TranspilerContext::Call
-        | TranspilerContext::Condition
-        | TranspilerContext::DontNeedSemicolon => {}
+        TranspilerContext::Call | TranspilerContext::Condition | TranspilerContext::DontNeedSemicolon => {},
         _ => {
           code.push_str(";\n");
-        }
+        },
       };
     } else {
       code.push_str(";\n");
@@ -300,7 +316,11 @@ impl TranspilerToC {
     code
   }
 
-  fn transpile_if_to_c(&mut self, if_instruction: &IRIf, indent_level: usize) -> String {
+  fn transpile_if_to_c(
+    &mut self,
+    if_instruction: &IRIf,
+    indent_level: usize,
+  ) -> String {
     let mut code: String = String::new();
 
     self.context.push(TranspilerContext::Condition);
@@ -325,11 +345,7 @@ impl TranspilerToC {
     ));
 
     if !else_block.is_empty() {
-      code.push_str(&format!(
-        " else {{\n{}{}}}",
-        else_block,
-        " ".repeat(indent_level)
-      ))
+      code.push_str(&format!(" else {{\n{}{}}}", else_block, " ".repeat(indent_level)))
     }
 
     code.push('\n');
@@ -337,7 +353,11 @@ impl TranspilerToC {
     code
   }
 
-  fn transpile_while_to_c(&mut self, while_instruction: &IRWhile, indent_level: usize) -> String {
+  fn transpile_while_to_c(
+    &mut self,
+    while_instruction: &IRWhile,
+    indent_level: usize,
+  ) -> String {
     let mut code: String = String::new();
 
     self.context.push(TranspilerContext::Condition);
@@ -357,7 +377,11 @@ impl TranspilerToC {
     code
   }
 
-  fn transpile_ir_to_c(&mut self, instruction: &IRInstruction, indent_level: usize) -> String {
+  fn transpile_ir_to_c(
+    &mut self,
+    instruction: &IRInstruction,
+    indent_level: usize,
+  ) -> String {
     let mut code = String::new();
     match instruction {
       IRInstruction::Literal(literal) => code.push_str(&match &literal.value {
@@ -376,55 +400,44 @@ impl TranspilerToC {
         let op = self.transpile_operator_to_c(&binary.instruction_type);
 
         code.push_str(&format!("{} {} {}", left, op, right));
-      }
+      },
       IRInstruction::Block(block) => {
         for instr in &block.instructions {
           code.push_str(&self.transpile_ir_to_c(instr, indent_level));
         }
-      }
+      },
       IRInstruction::Unary(unary) => {
         let value = self.transpile_ir_to_c(&unary.right, indent_level);
         let op = self.transpile_operator_to_c(&unary.instruction_type);
 
         code.push_str(&format!("{} {}", op, value));
-      }
-      IRInstruction::Variable(var) => {
-        code.push_str(self.transpile_variable_to_c(var, indent_level).as_str())
-      }
+      },
+      IRInstruction::Variable(var) => code.push_str(self.transpile_variable_to_c(var, indent_level).as_str()),
       IRInstruction::Logical(logical) => {
         let left = self.transpile_ir_to_c(&logical.left, indent_level);
         let right = self.transpile_ir_to_c(&logical.right, indent_level);
         let op = self.transpile_operator_to_c(&logical.instruction_type);
 
         code.push_str(&format!("{} {} {}", left, op, right));
-      }
+      },
       IRInstruction::If(i) => code.push_str(self.transpile_if_to_c(&i, indent_level).as_str()),
-      IRInstruction::While(w) => {
-        code.push_str(self.transpile_while_to_c(&w, indent_level).as_str())
-      }
-      IRInstruction::Function(fun) => {
-        code.push_str(self.transpile_function_to_c(fun, indent_level).as_str())
-      }
+      IRInstruction::While(w) => code.push_str(self.transpile_while_to_c(&w, indent_level).as_str()),
+      IRInstruction::Function(fun) => code.push_str(self.transpile_function_to_c(fun, indent_level).as_str()),
       IRInstruction::Call(call) => {
         code.push_str(&self.transpile_call_to_c(call, indent_level));
-      }
+      },
       IRInstruction::Return(ir_return) => {
         self.context.push(TranspilerContext::DontNeedSemicolon);
         let value = self.transpile_ir_to_c(&ir_return.value, indent_level);
         self.context.pop();
 
         code.push_str(&format!("{}return {};\n", " ".repeat(indent_level), value))
-      }
+      },
       IRInstruction::Assign(assign) => {
         let value = self.transpile_ir_to_c(&assign.value, indent_level);
 
-        code.push_str(&format!(
-          "{}{} = {};\n",
-          " ".repeat(indent_level),
-          assign.name,
-          value
-        ))
-      }
+        code.push_str(&format!("{}{} = {};\n", " ".repeat(indent_level), assign.name, value))
+      },
       IRInstruction::Class(_) => todo!(),
       IRInstruction::Ternary(ternary) => {
         self.context.push(TranspilerContext::Condition);
@@ -434,11 +447,8 @@ impl TranspilerToC {
         let then_branch = self.transpile_ir_to_c(&ternary.then_branch, indent_level);
         let else_branch = self.transpile_ir_to_c(&ternary.else_branch, indent_level);
 
-        code.push_str(&format!(
-          "{} ? {} : {}",
-          condition, then_branch, else_branch
-        ))
-      }
+        code.push_str(&format!("{} ? {} : {}", condition, then_branch, else_branch))
+      },
       IRInstruction::ForOf(_) => todo!(),
       IRInstruction::Array(array) => {
         let mut elements = String::new();
@@ -452,17 +462,17 @@ impl TranspilerToC {
         elements.pop();
 
         code.push_str(&format!("{{ {} }}", elements))
-      }
+      },
       IRInstruction::Import(import) => {
         if import.path.contains("std:") {
           match import.path.as_str() {
             "std:io" => {
               code.push_str("#include <stdio.h>\n");
-            }
+            },
             _ => (),
           }
         }
-      }
+      },
       IRInstruction::Break(_) => todo!(),
       IRInstruction::Continue(_) => todo!(),
       IRInstruction::Get(_) => todo!(),
@@ -473,12 +483,16 @@ impl TranspilerToC {
       IRInstruction::MethodCall(_) => todo!(),
       IRInstruction::Method(_) => todo!(),
       IRInstruction::This(_) => todo!(),
+      IRInstruction::Enum(_) => todo!(),
     };
 
     code
   }
 
-  fn transpile(&mut self, ir: &Vec<IRInstruction>) {
+  fn transpile(
+    &mut self,
+    ir: &Vec<IRInstruction>,
+  ) {
     self.statement_exported = vec![];
     self.code = String::new();
     self.statement_imported = HashMap::new();
@@ -502,7 +516,10 @@ impl TranspilerToC {
     self.create_files(code_results);
   }
 
-  fn create_files(&self, code_results: Vec<CodeResult>) {
+  fn create_files(
+    &self,
+    code_results: Vec<CodeResult>,
+  ) {
     for code_result in code_results {
       let mut path = code_result.file_name.split('/').collect::<Vec<&str>>();
       let code = code_result.code.clone();
@@ -543,10 +560,7 @@ impl TranspilerToC {
       let output = output.unwrap();
 
       if !output.status.success() {
-        eprintln!(
-          "Compilation error: {}",
-          String::from_utf8_lossy(&output.stderr)
-        );
+        eprintln!("Compilation error: {}", String::from_utf8_lossy(&output.stderr));
 
         return;
       }

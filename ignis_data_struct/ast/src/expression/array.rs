@@ -11,7 +11,11 @@ pub struct Array {
 }
 
 impl Array {
-  pub fn new(token: Token, elements: Vec<Expression>, data_type: DataType) -> Self {
+  pub fn new(
+    token: Token,
+    elements: Vec<Expression>,
+    data_type: DataType,
+  ) -> Self {
     Self {
       token,
       elements,

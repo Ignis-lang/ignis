@@ -9,7 +9,10 @@ pub struct IRReturn {
 }
 
 impl IRReturn {
-  pub fn new(value: Box<IRInstruction>, data_type: DataType) -> Self {
+  pub fn new(
+    value: Box<IRInstruction>,
+    data_type: DataType,
+  ) -> Self {
     Self { value, data_type }
   }
 }

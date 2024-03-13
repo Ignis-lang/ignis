@@ -20,12 +20,12 @@ pub struct IgnisFrontend {
 }
 
 impl IgnisFrontend {
-  pub fn new(source: String, path: String, debug: Vec<FrontendDebugPrint>) -> Self {
-    Self {
-      source,
-      path,
-      debug,
-    }
+  pub fn new(
+    source: String,
+    path: String,
+    debug: Vec<FrontendDebugPrint>,
+  ) -> Self {
+    Self { source, path, debug }
   }
 
   pub fn process(&mut self) -> Result<HashMap<String, Vec<IRInstruction>>, Vec<DiagnosticReport>> {
@@ -60,13 +60,8 @@ impl IgnisFrontend {
 
     if self.debug.contains(&FrontendDebugPrint::IR) {
       for (name, ir) in &analyzer.irs {
-        let pretty_string = serde_json::to_string_pretty(
-          &ir
-            .iter()
-            .map(|i| i.to_json())
-            .collect::<serde_json::Value>(),
-        )
-        .unwrap();
+        let pretty_string =
+          serde_json::to_string_pretty(&ir.iter().map(|i| i.to_json()).collect::<serde_json::Value>()).unwrap();
         println!("{}:\n{}", name, pretty_string);
       }
     }

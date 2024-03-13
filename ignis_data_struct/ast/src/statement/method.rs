@@ -14,7 +14,11 @@ pub struct MethodMetadata {
 }
 
 impl MethodMetadata {
-  pub fn new(is_public: bool, is_static: bool, is_contructor: bool) -> Self {
+  pub fn new(
+    is_public: bool,
+    is_static: bool,
+    is_contructor: bool,
+  ) -> Self {
     Self {
       is_public,
       is_static,
@@ -32,7 +36,10 @@ impl MethodMetadata {
 }
 
 impl Display for MethodMetadata {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut Formatter<'_>,
+  ) -> std::fmt::Result {
     write!(
       f,
       "is_public: {}, is_static: {}, is_constructor: {}",

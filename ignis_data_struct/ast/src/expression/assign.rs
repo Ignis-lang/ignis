@@ -11,11 +11,11 @@ pub struct Assign {
 }
 
 impl Assign {
-  pub fn new(name: Token, value: Box<Expression>, data_type: DataType) -> Self {
-    Self {
-      name,
-      value,
-      data_type,
-    }
+  pub fn new(
+    name: Token,
+    value: Box<Expression>,
+    data_type: DataType,
+  ) -> Self {
+    Self { name, value, data_type }
   }
 }

@@ -34,7 +34,10 @@ impl Clone for AnalyzerValue {
 }
 
 impl Display for AnalyzerValue {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       AnalyzerValue::String(s) => write!(f, "String: {}", s),
       AnalyzerValue::Int(i) => write!(f, "Int: {}", i),
@@ -47,7 +50,7 @@ impl Display for AnalyzerValue {
       AnalyzerValue::Class(class) => {
         let class = class.as_ref();
         write!(f, "Class: {}", class.class.name)
-      }
+      },
     }
   }
 }
@@ -65,7 +68,7 @@ impl AnalyzerValue {
       AnalyzerValue::Class(class) => {
         let class = class.as_ref();
         DataType::ClassType(class.class.name.clone())
-      }
+      },
     }
   }
 

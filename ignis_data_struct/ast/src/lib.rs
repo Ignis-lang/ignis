@@ -14,7 +14,10 @@ impl Ast {
     Self { statements }
   }
 
-  pub fn add(&mut self, statement: Statement) {
+  pub fn add(
+    &mut self,
+    statement: Statement,
+  ) {
     self.statements.push(statement);
   }
 

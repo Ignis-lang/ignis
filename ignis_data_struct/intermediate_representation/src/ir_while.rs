@@ -9,7 +9,10 @@ pub struct IRWhile {
 }
 
 impl IRWhile {
-  pub fn new(condition: Box<IRInstruction>, body: Box<IRInstruction>) -> Self {
+  pub fn new(
+    condition: Box<IRInstruction>,
+    body: Box<IRInstruction>,
+  ) -> Self {
     Self { condition, body }
   }
 }

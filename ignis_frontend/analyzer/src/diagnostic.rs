@@ -1,3 +1,5 @@
+use std::fmt::format;
+
 use enums::data_type::DataType;
 use intermediate_representation::analyzer_value::AnalyzerValue;
 use token::token::Token;
@@ -54,6 +56,8 @@ pub enum AnalyzerDiagnosticError {
   ThisOutsideOfClass(Token),
   ImportedClassIsNotExported(Token),
   InvalidVariableInitializer(Token),
+  EnumAlreadyDefined(Token),
+  EnumMemberTypeMismatch(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +67,10 @@ pub struct AnalyzerDiagnostic {
 }
 
 impl AnalyzerDiagnostic {
-  pub fn new(error: AnalyzerDiagnosticError, token_line: Vec<Token>) -> Self {
+  pub fn new(
+    error: AnalyzerDiagnosticError,
+    token_line: Vec<Token>,
+  ) -> Self {
     Self { error, token_line }
   }
 
@@ -77,19 +84,14 @@ impl AnalyzerDiagnostic {
         None,
         "IA0001".to_string(),
       ),
-      AnalyzerDiagnosticError::InvalidUnaryOperatorForDataType(token, value) => {
-        DiagnosticReport::new(
-          format!(
-            "Invalid unary operator '{}' for data type '{}'",
-            token.span.literal, value
-          ),
-          Box::new(token.clone()),
-          self.token_line.clone(),
-          DiagnosticLevel::Error,
-          None,
-          "IA0002".to_string(),
-        )
-      }
+      AnalyzerDiagnosticError::InvalidUnaryOperatorForDataType(token, value) => DiagnosticReport::new(
+        format!("Invalid unary operator '{}' for data type '{}'", token.span.literal, value),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0002".to_string(),
+      ),
       AnalyzerDiagnosticError::NotCallable(token) => DiagnosticReport::new(
         format!("'{}' is not callable", token.span.literal),
         Box::new(token.clone()),
@@ -205,26 +207,22 @@ impl AnalyzerDiagnostic {
         None,
         "IA0016".to_string(),
       ),
-      AnalyzerDiagnosticError::CannotSubtract(left_kind, right_kind, token) => {
-        DiagnosticReport::new(
-          format!("Cannot subtract '{}' and '{}'", left_kind, right_kind),
-          Box::new(token.clone()),
-          self.token_line.clone(),
-          DiagnosticLevel::Error,
-          None,
-          "IA0017".to_string(),
-        )
-      }
-      AnalyzerDiagnosticError::CannotMultiply(left_kind, right_kind, token) => {
-        DiagnosticReport::new(
-          format!("Cannot multiply '{}' and '{}'", left_kind, right_kind),
-          Box::new(token.clone()),
-          self.token_line.clone(),
-          DiagnosticLevel::Error,
-          None,
-          "IA0018".to_string(),
-        )
-      }
+      AnalyzerDiagnosticError::CannotSubtract(left_kind, right_kind, token) => DiagnosticReport::new(
+        format!("Cannot subtract '{}' and '{}'", left_kind, right_kind),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0017".to_string(),
+      ),
+      AnalyzerDiagnosticError::CannotMultiply(left_kind, right_kind, token) => DiagnosticReport::new(
+        format!("Cannot multiply '{}' and '{}'", left_kind, right_kind),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0018".to_string(),
+      ),
       AnalyzerDiagnosticError::CannotDivide(left_kind, right_kind, token) => DiagnosticReport::new(
         format!("Cannot divide '{}' and '{}'", left_kind, right_kind),
         Box::new(token.clone()),
@@ -257,29 +255,22 @@ impl AnalyzerDiagnostic {
         None,
         "IA0022".to_string(),
       ),
-      AnalyzerDiagnosticError::ArgumentTypeMismatch(expected, gived, token) => {
-        DiagnosticReport::new(
-          format!("Expected argument type '{}', but got '{}'", expected, gived),
-          Box::new(token.clone()),
-          self.token_line.clone(),
-          DiagnosticLevel::Error,
-          None,
-          "IA0023".to_string(),
-        )
-      }
-      AnalyzerDiagnosticError::ImmutableVariableAsMutableParameter(parameter, var, token) => {
-        DiagnosticReport::new(
-          format!(
-            "Cannot use immutable variable '{}' as mutable parameter '{}'",
-            var, parameter
-          ),
-          Box::new(token.clone()),
-          self.token_line.clone(),
-          DiagnosticLevel::Error,
-          None,
-          "IA0024".to_string(),
-        )
-      }
+      AnalyzerDiagnosticError::ArgumentTypeMismatch(expected, gived, token) => DiagnosticReport::new(
+        format!("Expected argument type '{}', but got '{}'", expected, gived),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0023".to_string(),
+      ),
+      AnalyzerDiagnosticError::ImmutableVariableAsMutableParameter(parameter, var, token) => DiagnosticReport::new(
+        format!("Cannot use immutable variable '{}' as mutable parameter '{}'", var, parameter),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0024".to_string(),
+      ),
       AnalyzerDiagnosticError::ReturnOutsideFunction(token) => DiagnosticReport::new(
         "Return outside function".to_string(),
         Box::new(token.clone()),
@@ -479,6 +470,22 @@ impl AnalyzerDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IA0049".to_string(),
+      ),
+      AnalyzerDiagnosticError::EnumAlreadyDefined(token) => DiagnosticReport::new(
+        format!("Enum '{}' already defined", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0050".to_string(),
+      ),
+      AnalyzerDiagnosticError::EnumMemberTypeMismatch(token) => DiagnosticReport::new(
+        format!("Enum member type mismatch '{}'", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0051".to_string(),
       ),
     }
   }

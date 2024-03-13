@@ -11,6 +11,7 @@ pub struct VariableMetadata {
   pub is_public: bool,
   pub is_reference: bool,
   pub is_parameter: bool,
+  pub is_enum_member: bool,
 }
 
 impl VariableMetadata {
@@ -21,6 +22,7 @@ impl VariableMetadata {
     is_public: bool,
     is_reference: bool,
     is_parameter: bool,
+    is_enum_member: bool,
   ) -> Self {
     Self {
       is_mutable,
@@ -29,6 +31,7 @@ impl VariableMetadata {
       is_public,
       is_reference,
       is_parameter,
+      is_enum_member,
     }
   }
 }

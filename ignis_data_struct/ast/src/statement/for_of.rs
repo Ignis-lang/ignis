@@ -13,7 +13,12 @@ pub struct ForOf {
 }
 
 impl ForOf {
-  pub fn new(variable: Variable, iterable: Expression, body: Statement, token: Token) -> Self {
+  pub fn new(
+    variable: Variable,
+    iterable: Expression,
+    body: Statement,
+    token: Token,
+  ) -> Self {
     Self {
       variable,
       iterable: Box::new(iterable),

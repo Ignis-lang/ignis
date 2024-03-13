@@ -12,7 +12,11 @@ pub struct Logical {
 }
 
 impl Logical {
-  pub fn new(left: Box<Expression>, operator: Token, right: Box<Expression>) -> Self {
+  pub fn new(
+    left: Box<Expression>,
+    operator: Token,
+    right: Box<Expression>,
+  ) -> Self {
     Self {
       left,
       operator,

@@ -3,9 +3,9 @@ use std::fmt::{Display, Formatter};
 use serde_json::json;
 
 use self::{
-  binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression,
-  logical::Logical, assign::Assign, ternary::Ternary, call::Call, array::Array, get::Get,
-  new::NewExpression, set::Set, method_call::MethodCall, array_access::ArrayAccess, this::This,
+  binary::Binary, grouping::Grouping, literal::Literal, unary::Unary, variable::VariableExpression, logical::Logical,
+  assign::Assign, ternary::Ternary, call::Call, array::Array, get::Get, new::NewExpression, set::Set,
+  method_call::MethodCall, array_access::ArrayAccess, this::This,
 };
 
 use super::visitor::Visitor;
@@ -49,7 +49,10 @@ pub enum Expression {
 }
 
 impl Expression {
-  pub fn accept<R>(&self, visitor: &mut dyn Visitor<R>) -> R {
+  pub fn accept<R>(
+    &self,
+    visitor: &mut dyn Visitor<R>,
+  ) -> R {
     match self {
       Expression::Grouping(grouping) => visitor.visit_grouping_expression(grouping),
       Expression::Binary(binary) => visitor.visit_binary_expression(binary),
@@ -79,19 +82,19 @@ impl Expression {
           "operator": binary.operator.span.literal,
           "right": binary.right.to_json(),
         })
-      }
+      },
       Expression::Grouping(grouping) => {
         json!({
           "type": "Grouping",
           "expression": grouping.expression.to_json(),
         })
-      }
+      },
       Expression::Literal(literal) => {
         json!({
           "type": "Literal",
           "value": literal.value.to_string(),
         })
-      }
+      },
       Expression::Unary(unary) => {
         json!({
           "type": "Unary",
@@ -100,14 +103,14 @@ impl Expression {
           "data_type": unary.data_type.to_string(),
           "is_prefix": unary.is_prefix
         })
-      }
+      },
       Expression::Variable(variable) => {
         json!({
           "type": "Variable",
           "name": variable.name.span.literal,
           "data_type": variable.data_type.to_string(),
         })
-      }
+      },
       Expression::Assign(assign) => {
         json!({
           "type": "Assign",
@@ -115,7 +118,7 @@ impl Expression {
           "value": assign.value.to_json(),
           "data_type": assign.data_type.to_string(),
         })
-      }
+      },
       Expression::Logical(logical) => {
         json!({
           "type": "Logical",
@@ -124,7 +127,7 @@ impl Expression {
           "right": logical.right.to_json(),
           "data_type": logical.data_type.to_string(),
         })
-      }
+      },
       Expression::Ternary(ternary) => {
         json!({
           "type": "Ternary",
@@ -133,7 +136,7 @@ impl Expression {
           "else_branch": ternary.else_branch.to_json(),
           "data_type": ternary.data_type.to_string(),
         })
-      }
+      },
       Expression::Call(call) => {
         json!({
           "type": "Call",
@@ -141,35 +144,35 @@ impl Expression {
           "arguments": call.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": call.return_type.to_string(),
         })
-      }
+      },
       Expression::Array(array) => {
         json!({
           "type": "Array",
           "elements": array.elements.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "data_type": array.data_type.to_string(),
         })
-      }
+      },
       Expression::ArrayAccess(array) => {
         json!({
           "type": "ArrayAccess",
           "name": array.name.to_json(),
           "index": array.index.to_json(),
         })
-      }
+      },
       Expression::Get(get) => {
         json!({
           "type": "Get",
           "object": get.object.to_json(),
           "name": get.name.span.literal,
         })
-      }
+      },
       Expression::New(new) => {
         json!({
           "type": "New",
           "class_name": new.name.span.literal,
           "arguments": new.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
         })
-      }
+      },
       Expression::Set(set) => {
         json!({
           "type": "Set",
@@ -178,7 +181,7 @@ impl Expression {
           "object": set.object.to_json(),
           "data_type": set.data_type.to_string(),
         })
-      }
+      },
       Expression::MethodCall(method) => {
         json!({
           "type": "MethodCall",
@@ -187,32 +190,31 @@ impl Expression {
           "data_type": method.data_type.to_string(),
           "instance": method.object.to_json(),
         })
-      }
+      },
       Expression::This(_) => {
         json!({
           "type": "This",
         })
-      }
+      },
     }
   }
 }
 
 impl Display for Expression {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       Expression::Binary(Binary {
         left,
         operator,
         right,
         data_type,
-      }) => write!(
-        f,
-        "({} {} {}): {}",
-        operator.span.literal, left, right, data_type,
-      ),
+      }) => write!(f, "({} {} {}): {}", operator.span.literal, left, right, data_type,),
       Expression::Grouping(Grouping { expression }) => {
         write!(f, "(group {})", *expression)
-      }
+      },
       Expression::Literal(Literal { value }) => write!(f, "{}", value),
       Expression::Unary(Unary {
         operator,
@@ -222,23 +224,16 @@ impl Display for Expression {
       }) => {
         let operator_str = operator.span.literal.clone();
         let right_str = (*right).to_string();
-        write!(
-          f,
-          "({} {}): {} | {}",
-          operator_str, right_str, data_type, is_prefix
-        )
-      }
+        write!(f, "({} {}): {} | {}", operator_str, right_str, data_type, is_prefix)
+      },
       Expression::Variable(VariableExpression { name, data_type }) => {
         write!(f, "{:?}: {:?}", name, data_type)
-      }
+      },
       Expression::Assign(Assign { name, value, .. }) => {
         write!(f, "{} = {}", name.span.literal, value)
-      }
+      },
       Expression::Logical(Logical {
-        left,
-        operator,
-        right,
-        ..
+        left, operator, right, ..
       }) => write!(f, "({} {} {})", left, operator.span.literal, right),
       Expression::Ternary(Ternary {
         condition,
@@ -268,13 +263,13 @@ impl Display for Expression {
             .collect::<Vec<String>>()
             .join(", ")
         )
-      }
+      },
       Expression::ArrayAccess(array) => {
         write!(f, "{}[{}]", array.name, array.index)
-      }
+      },
       Expression::Get(get) => {
         write!(f, "{}.{}", get.object, get.name.span.literal)
-      }
+      },
       Expression::New(new) => {
         write!(
           f,
@@ -287,17 +282,13 @@ impl Display for Expression {
             .collect::<Vec<String>>()
             .join(", ")
         )
-      }
+      },
       Expression::Set(set) => {
-        write!(
-          f,
-          "{}.{} = {}",
-          set.object, set.name.span.literal, set.value
-        )
-      }
+        write!(f, "{}.{} = {}", set.object, set.name.span.literal, set.value)
+      },
       Expression::MethodCall(method) => {
         write!(f, "{}.{}{}", method.object, method.name, method.calle,)
-      }
+      },
       Expression::This(_) => write!(f, "this"),
     }
   }

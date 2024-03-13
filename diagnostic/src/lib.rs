@@ -17,49 +17,51 @@ impl Diagnostic {
     Self {}
   }
 
-  pub fn report(&self, diagnostic: Vec<DiagnosticReport>) {
+  pub fn report(
+    &self,
+    diagnostic: Vec<DiagnosticReport>,
+  ) {
     for report in diagnostic {
       self.print(&report);
     }
   }
 
-  pub fn print(&self, diagnostic: &DiagnosticReport) {
+  pub fn print(
+    &self,
+    diagnostic: &DiagnosticReport,
+  ) {
     self.print_header(diagnostic);
     self.print_body(diagnostic);
     println!();
   }
 
-  fn print_header(&self, diagnostic: &DiagnosticReport) {
+  fn print_header(
+    &self,
+    diagnostic: &DiagnosticReport,
+  ) {
     let message = diagnostic.message.bold();
     let code = diagnostic.error_code.bold();
 
     match diagnostic.level {
       diagnostic_report::DiagnosticLevel::Info => {
         println!("{}[{}]: {}", "Info".blue().bold(), code.blue(), message)
-      }
+      },
       diagnostic_report::DiagnosticLevel::Warning => {
-        println!(
-          "{}[{}]: {}",
-          "Warning".yellow().bold(),
-          code.yellow(),
-          message
-        )
-      }
+        println!("{}[{}]: {}", "Warning".yellow().bold(), code.yellow(), message)
+      },
       diagnostic_report::DiagnosticLevel::Error => {
-        println!(
-          "{}[{}]: {}",
-          "Error".red().bold(),
-          code.red().bold(),
-          message
-        )
-      }
+        println!("{}[{}]: {}", "Error".red().bold(), code.red().bold(), message)
+      },
       diagnostic_report::DiagnosticLevel::Hint => {
         println!("{}[{}]: {}", "Hint".cyan().bold(), code.cyan(), message)
-      }
+      },
     }
   }
 
-  fn print_body(&self, diagnostic: &DiagnosticReport) {
+  fn print_body(
+    &self,
+    diagnostic: &DiagnosticReport,
+  ) {
     let pipe = "|".blue().bold();
     let code = std::fs::read_to_string(diagnostic.token.span.file.clone());
 

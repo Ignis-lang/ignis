@@ -109,7 +109,10 @@ pub enum TokenType {
 }
 
 impl Display for TokenType {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       TokenType::Plus => write!(f, "+"),
       TokenType::Minus => write!(f, "-"),

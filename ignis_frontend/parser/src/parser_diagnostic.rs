@@ -15,6 +15,7 @@ pub enum ParserDiagnosticError {
   ExpectedTypeAfterVariable(Token),
   InvalidNumberOfArguments(usize, usize, Token),
   ExpectedSemicolonAfterExpression(Token),
+  InvalidEnumMember(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -24,7 +25,10 @@ pub struct ParserDiagnostic {
 }
 
 impl ParserDiagnostic {
-  pub fn new(error: ParserDiagnosticError, token_line: Vec<Token>) -> Self {
+  pub fn new(
+    error: ParserDiagnosticError,
+    token_line: Vec<Token>,
+  ) -> Self {
     Self { error, token_line }
   }
 
@@ -39,10 +43,7 @@ impl ParserDiagnostic {
         "IP0001".to_string(),
       ),
       ParserDiagnosticError::ExpectedToken(expected_token, token) => DiagnosticReport::new(
-        format!(
-          "Expected '{}' after '{}'",
-          expected_token, token.span.literal
-        ),
+        format!("Expected '{}' after '{}'", expected_token, token.span.literal),
         Box::new(token.clone()),
         self.token_line.clone(),
         DiagnosticLevel::Error,
@@ -65,19 +66,17 @@ impl ParserDiagnostic {
         None,
         "IP0004".to_string(),
       ),
-      ParserDiagnosticError::ExpectedAfterExpression(expected_token_type, token, token2) => {
-        DiagnosticReport::new(
-          format!(
-            "Expected '{}' after '{}' in expression",
-            expected_token_type, token.span.literal
-          ),
-          token.clone(),
-          self.token_line.clone(),
-          DiagnosticLevel::Error,
-          None,
-          "IP0005".to_string(),
-        )
-      }
+      ParserDiagnosticError::ExpectedAfterExpression(expected_token_type, token, token2) => DiagnosticReport::new(
+        format!(
+          "Expected '{}' after '{}' in expression",
+          expected_token_type, token.span.literal
+        ),
+        token.clone(),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IP0005".to_string(),
+      ),
       ParserDiagnosticError::ExpectedExpressionAfter(token) => DiagnosticReport::new(
         format!("Expected expression after '{}'", token.span.literal),
         Box::new(token.clone()),
@@ -125,6 +124,14 @@ impl ParserDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IP0011".to_string(),
+      ),
+      ParserDiagnosticError::InvalidEnumMember(token) => DiagnosticReport::new(
+        "Invalid enum member".to_string(),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IP0012".to_string(),
       ),
     }
   }

@@ -19,7 +19,10 @@ pub struct IgnisBackend {
 }
 
 impl IgnisBackend {
-  pub fn new(backend: BackendTarget, irs: HashMap<String, Vec<IRInstruction>>) -> Self {
+  pub fn new(
+    backend: BackendTarget,
+    irs: HashMap<String, Vec<IRInstruction>>,
+  ) -> Self {
     Self { backend, irs }
   }
 

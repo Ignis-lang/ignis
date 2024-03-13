@@ -11,7 +11,10 @@ pub struct Token {
 }
 
 impl Token {
-  pub fn new(kind: TokenType, span: TextSpan) -> Self {
+  pub fn new(
+    kind: TokenType,
+    span: TextSpan,
+  ) -> Self {
     Self { kind, span }
   }
 
@@ -28,7 +31,10 @@ impl Token {
 }
 
 impl Display for Token {
-  fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut Formatter<'_>,
+  ) -> fmt::Result {
     write!(f, "{} - {}", self.kind, self.span)
   }
 }

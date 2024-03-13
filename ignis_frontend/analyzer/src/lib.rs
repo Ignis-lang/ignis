@@ -4,21 +4,9 @@ use std::{collections::HashMap, vec, fs};
 
 use std::fmt::{Display, Formatter};
 
-use ast::expression::array_access::ArrayAccess;
-use ast::expression::this::This;
-use ast::statement::enum_statement::Enum;
-use ast::statement::interface_statement::InterfaceStatement;
 use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
 use diagnostic_report::DiagnosticReport;
-use intermediate_representation::instruction_type::IRInstructionType;
-use intermediate_representation::ir_array_access::IRArrayAccess;
-use intermediate_representation::ir_for::IRFor;
-use intermediate_representation::ir_for_of::IRForOf;
-use intermediate_representation::ir_get::{IRGet, GetMetadata};
-use intermediate_representation::ir_method::IRMethod;
-use intermediate_representation::ir_method_call::{IRMethodCall, MethodCallMetadata};
-use intermediate_representation::ir_set::IRSet;
-use intermediate_representation::ir_this::IRThis;
+use enums::data_type;
 use intermediate_representation::{
   analyzer_value::AnalyzerValue,
   IRInstruction,
@@ -41,6 +29,16 @@ use intermediate_representation::{
   ir_continue::IRContinue,
   class::IRClass,
   class_instance::IRClassInstance,
+  ir_enum::IREnum,
+  instruction_type::IRInstructionType,
+  ir_array_access::IRArrayAccess,
+  ir_for::IRFor,
+  ir_for_of::IRForOf,
+  ir_get::{IRGet, GetMetadata},
+  ir_method::IRMethod,
+  ir_method_call::{IRMethodCall, MethodCallMetadata},
+  ir_set::IRSet,
+  ir_this::IRThis,
 };
 
 use lexer::Lexer;
@@ -49,9 +47,9 @@ use token::token::Token;
 use ast::{
   visitor::Visitor,
   expression::{
-    binary::Binary, Expression, literal::Literal, unary::Unary, grouping::Grouping,
-    logical::Logical, assign::Assign, variable::VariableExpression, ternary::Ternary, call::Call,
-    array::Array, new::NewExpression, get::Get, set::Set, method_call::MethodCall,
+    binary::Binary, Expression, literal::Literal, unary::Unary, grouping::Grouping, logical::Logical, assign::Assign,
+    variable::VariableExpression, ternary::Ternary, call::Call, array::Array, new::NewExpression, get::Get, set::Set,
+    method_call::MethodCall, array_access::ArrayAccess, this::This,
   },
   statement::{
     Statement,
@@ -70,6 +68,8 @@ use ast::{
     for_statement::For,
     method::MethodStatement,
     property::PropertyStatement,
+    interface_statement::InterfaceStatement,
+    enum_statement::Enum,
   },
 };
 use enums::{data_type::DataType, token_type::TokenType};
@@ -90,7 +90,10 @@ enum AnalyzerContext {
 }
 
 impl Display for AnalyzerContext {
-  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       AnalyzerContext::Variable(token) => write!(f, "Variable: {}", token.span.literal),
       AnalyzerContext::Function => write!(f, "Function"),
@@ -123,7 +126,10 @@ pub struct Analyzer {
 }
 
 impl Visitor<AnalyzerResult> for Analyzer {
-  fn visit_binary_expression(&mut self, expression: &Binary) -> AnalyzerResult {
+  fn visit_binary_expression(
+    &mut self,
+    expression: &Binary,
+  ) -> AnalyzerResult {
     let left = self.analyzer(&expression.left)?;
     let right = self.analyzer(&expression.right)?;
     let operator = expression.operator.clone();
@@ -152,29 +158,33 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    let instruction = IRInstruction::Binary(IRBinary::new(
-      instruction_type,
-      Box::new(left),
-      Box::new(right),
-      data_type,
-    ));
+    let instruction =
+      IRInstruction::Binary(IRBinary::new(instruction_type, Box::new(left), Box::new(right), data_type));
 
     Ok(instruction)
   }
 
-  fn visit_grouping_expression(&mut self, expression: &Grouping) -> AnalyzerResult {
+  fn visit_grouping_expression(
+    &mut self,
+    expression: &Grouping,
+  ) -> AnalyzerResult {
     self.analyzer(&expression.expression)
   }
 
-  fn visit_literal_expression(&mut self, expression: &Literal) -> AnalyzerResult {
-    let instruction = IRInstruction::Literal(IRLiteral::new(AnalyzerValue::from_literation_value(
-      expression.value.clone(),
-    )));
+  fn visit_literal_expression(
+    &mut self,
+    expression: &Literal,
+  ) -> AnalyzerResult {
+    let instruction =
+      IRInstruction::Literal(IRLiteral::new(AnalyzerValue::from_literation_value(expression.value.clone())));
 
     Ok(instruction)
   }
 
-  fn visit_unary_expression(&mut self, expression: &Unary) -> AnalyzerResult {
+  fn visit_unary_expression(
+    &mut self,
+    expression: &Unary,
+  ) -> AnalyzerResult {
     let right = self.analyzer(&expression.right)?;
     let instruction_type = IRInstructionType::from_token_kind(&expression.operator.kind);
     let right_type = self.extract_data_type(&right);
@@ -186,13 +196,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    let instruction =
-      IRInstruction::Unary(IRUnary::new(instruction_type, Box::new(right), right_type));
+    let instruction = IRInstruction::Unary(IRUnary::new(instruction_type, Box::new(right), right_type));
 
     Ok(instruction)
   }
 
-  fn visit_variable_expression(&mut self, variable: &VariableExpression) -> AnalyzerResult {
+  fn visit_variable_expression(
+    &mut self,
+    variable: &VariableExpression,
+  ) -> AnalyzerResult {
     if self.block_stack.is_empty() {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
@@ -224,14 +236,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
             return Ok(instruction);
           }
-        }
+        },
         CalleableDeclaration::Method(method) => {
           if method.name.span.literal == variable.name.span.literal {
             method.metadata.is_recursive = true;
             let instruction = IRInstruction::Method(method.clone());
             return Ok(instruction);
           }
-        }
+        },
       }
     }
 
@@ -276,7 +288,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
             AnalyzerDiagnosticError::UndeclaredVariable(variable.name.clone()),
             self.find_token_line(&variable.name.span.line),
           )))
-        }
+        },
       };
 
       variable.metadata.is_declaration = false;
@@ -292,7 +304,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     }
   }
 
-  fn visit_assign_expression(&mut self, expression: &Assign) -> AnalyzerResult {
+  fn visit_assign_expression(
+    &mut self,
+    expression: &Assign,
+  ) -> AnalyzerResult {
     if self.block_stack.is_empty()
       || self
         .block_stack
@@ -307,9 +322,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    self
-      .context
-      .push(AnalyzerContext::Variable(expression.name.clone()));
+    self.context.push(AnalyzerContext::Variable(expression.name.clone()));
 
     let value = self.analyzer(&expression.value)?;
 
@@ -317,22 +330,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let current_block = self.block_stack.last().unwrap();
 
-    let env = current_block.iter().find(|(name, is_declared)| {
-      name.as_str() == expression.name.span.literal.as_str() && **is_declared
-    });
+    let env = current_block
+      .iter()
+      .find(|(name, is_declared)| name.as_str() == expression.name.span.literal.as_str() && **is_declared);
 
     if let Some((name, _)) = env {
-      let variable = self
-        .scopes_variables
-        .iter()
-        .find(|v| v.name == *name)
-        .unwrap();
+      let variable = self.scopes_variables.iter().find(|v| v.name == *name).unwrap();
 
       if variable.metadata.is_mutable {
-        let instruction = IRInstruction::Assign(IRAssign::new(
-          expression.name.span.literal.clone(),
-          Box::new(value),
-        ));
+        let instruction = IRInstruction::Assign(IRAssign::new(expression.name.span.literal.clone(), Box::new(value)));
 
         Ok(instruction)
       } else {
@@ -349,7 +355,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     }
   }
 
-  fn visit_logical_expression(&mut self, expression: &Logical) -> AnalyzerResult {
+  fn visit_logical_expression(
+    &mut self,
+    expression: &Logical,
+  ) -> AnalyzerResult {
     let left = self.analyzer(&expression.left)?;
     let right = self.analyzer(&expression.right)?;
 
@@ -368,14 +377,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
           )));
         }
 
-        let instruction = IRInstruction::Logical(IRLogical::new(
-          instruction_type,
-          Box::new(left),
-          Box::new(right),
-        ));
+        let instruction = IRInstruction::Logical(IRLogical::new(instruction_type, Box::new(left), Box::new(right)));
 
         Ok(instruction)
-      }
+      },
       _ => Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::InvalidOperator(expression.operator.clone()),
         self.find_token_line(&expression.operator.span.line),
@@ -383,7 +388,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     }
   }
 
-  fn visit_ternary_expression(&mut self, expression: &Ternary) -> AnalyzerResult {
+  fn visit_ternary_expression(
+    &mut self,
+    expression: &Ternary,
+  ) -> AnalyzerResult {
     let condition = self.analyzer(&expression.condition)?;
     let then_branch = self.analyzer(&expression.then_branch)?;
     let else_branch = self.analyzer(&expression.else_branch)?;
@@ -413,7 +421,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     )))
   }
 
-  fn visit_call_expression(&mut self, expression: &Call) -> AnalyzerResult {
+  fn visit_call_expression(
+    &mut self,
+    expression: &Call,
+  ) -> AnalyzerResult {
     let calle = self.analyzer(&expression.callee)?;
 
     let parameters: Vec<IRInstruction>;
@@ -425,27 +436,23 @@ impl Visitor<AnalyzerResult> for Analyzer {
         parameters = f.parameters.clone();
         function_name = f.name.clone();
         return_type = f.return_type.clone();
-      }
+      },
       IRInstruction::Method(m) => {
         parameters = m.parameters.clone();
         function_name = m.name.clone();
         return_type = m.return_type.clone();
-      }
+      },
       _ => {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::NotCallable(expression.paren.clone()),
           self.find_token_line(&expression.paren.span.line),
         )))
-      }
+      },
     };
 
     if parameters.len() != expression.arguments.len() {
       return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::InvalidNumberOfArguments(
-          parameters.len(),
-          expression.arguments.len(),
-          function_name,
-        ),
+        AnalyzerDiagnosticError::InvalidNumberOfArguments(parameters.len(), expression.arguments.len(), function_name),
         self.find_token_line(&expression.paren.span.line),
       )));
     }
@@ -487,11 +494,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
         && data_type != DataType::Unwnown
       {
         return Err(Box::new(AnalyzerDiagnostic::new(
-          AnalyzerDiagnosticError::ArgumentTypeMismatch(
-            data_type.clone(),
-            kind,
-            expression.paren.clone(),
-          ),
+          AnalyzerDiagnosticError::ArgumentTypeMismatch(data_type.clone(), kind, expression.paren.clone()),
           self.find_token_line(&expression.paren.span.line),
         )));
       }
@@ -509,7 +512,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
                 ),
                 self.find_token_line(&expression.paren.span.line),
               )))
-            }
+            },
           };
         }
       }
@@ -522,7 +525,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_array_expression(&mut self, expression: &Array) -> AnalyzerResult {
+  fn visit_array_expression(
+    &mut self,
+    expression: &Array,
+  ) -> AnalyzerResult {
     let mut elements = Vec::new();
     let mut element_types = Vec::new();
 
@@ -543,15 +549,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    let instruction = IRInstruction::Array(IRArray::new(
-      elements,
-      DataType::Array(Box::new(first_type.clone())),
-    ));
+    let instruction = IRInstruction::Array(IRArray::new(elements, DataType::Array(Box::new(first_type.clone()))));
 
     Ok(instruction)
   }
 
-  fn visit_new_expression(&mut self, expression: &NewExpression) -> AnalyzerResult {
+  fn visit_new_expression(
+    &mut self,
+    expression: &NewExpression,
+  ) -> AnalyzerResult {
     let class_info = self.find_class_in_ir(&expression.name.span.literal);
 
     if class_info.is_none() {
@@ -602,7 +608,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_get_expression(&mut self, expression: &Get) -> AnalyzerResult {
+  fn visit_get_expression(
+    &mut self,
+    expression: &Get,
+  ) -> AnalyzerResult {
     let ir_object = self.analyzer(&expression.object)?;
 
     let object = match ir_object {
@@ -612,7 +621,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           AnalyzerDiagnosticError::NotAClass(*expression.object_token.clone()),
           self.find_token_line(&expression.name.span.line),
         )))
-      }
+      },
     };
 
     let object_data_type = object.data_type.clone();
@@ -625,7 +634,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           AnalyzerDiagnosticError::NotAClass(*expression.object_token.clone()),
           self.find_token_line(&expression.object_token.span.line),
         )))
-      }
+      },
     });
 
     if class.is_none() {
@@ -669,9 +678,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let instruction = IRInstruction::Get(IRGet::new(
       expression.name.span.literal.clone(),
-      Box::new(IRInstruction::ClassInstance(
-        class_instance.unwrap().clone(),
-      )),
+      Box::new(IRInstruction::ClassInstance(class_instance.unwrap().clone())),
       self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
       GetMetadata::new(object_data_type.clone()),
     ));
@@ -679,7 +686,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_set_expression(&mut self, set: &Set) -> AnalyzerResult {
+  fn visit_set_expression(
+    &mut self,
+    set: &Set,
+  ) -> AnalyzerResult {
     let value = self.analyzer(&set.value)?;
 
     let object = self.analyzer(&set.object)?;
@@ -691,7 +701,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           AnalyzerDiagnosticError::NotAClass(*set.name.clone()),
           self.find_token_line(&set.name.span.line),
         )))
-      }
+      },
     };
 
     let class = self.find_class_in_ir(match &object.data_type {
@@ -701,7 +711,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           AnalyzerDiagnosticError::NotAClass(*set.name.clone()),
           self.find_token_line(&set.name.span.line),
         )))
-      }
+      },
     });
 
     if class.is_none() {
@@ -768,19 +778,17 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_method_call_expression(&mut self, method_call: &MethodCall) -> AnalyzerResult {
+  fn visit_method_call_expression(
+    &mut self,
+    method_call: &MethodCall,
+  ) -> AnalyzerResult {
     let instance = self.analyzer(&method_call.object)?;
 
     let instance_type = self.extract_data_type(&instance);
 
     if matches!(
       instance_type,
-      DataType::Int
-        | DataType::Float
-        | DataType::Boolean
-        | DataType::String
-        | DataType::Unwnown
-        | DataType::Array(_)
+      DataType::Int | DataType::Float | DataType::Boolean | DataType::String | DataType::Unwnown | DataType::Array(_)
     ) {
       return self.type_methods(method_call);
     }
@@ -792,7 +800,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           AnalyzerDiagnosticError::NotAClass(*method_call.name.clone()),
           self.find_token_line(&method_call.name.span.line),
         )))
-      }
+      },
     };
 
     let class = self.find_class_in_ir(match &object.data_type {
@@ -802,7 +810,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           AnalyzerDiagnosticError::NotAClass(*method_call.name.clone()),
           self.find_token_line(&method_call.name.span.line),
         )))
-      }
+      },
     });
 
     if class.is_none() {
@@ -861,9 +869,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       method_call.name.clone(),
       Box::new(calle),
       method.return_type.clone(),
-      Box::new(IRInstruction::ClassInstance(
-        class_instance.clone().unwrap().clone(),
-      )),
+      Box::new(IRInstruction::ClassInstance(class_instance.clone().unwrap().clone())),
       MethodCallMetadata::new(
         method.return_type.clone(),
         DataType::ClassType(class_instance.unwrap().class.name.clone()),
@@ -875,7 +881,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_array_access_expression(&mut self, array: &ArrayAccess) -> AnalyzerResult {
+  fn visit_array_access_expression(
+    &mut self,
+    array: &ArrayAccess,
+  ) -> AnalyzerResult {
     let var = self.analyzer(&array.variable)?;
     let index = self.analyzer(&array.index)?;
 
@@ -895,7 +904,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
           AnalyzerDiagnosticError::NotAnArray(*array.name.clone()),
           self.find_token_line(&array.name.span.line),
         )));
-      }
+      },
     };
 
     match &index {
@@ -906,7 +915,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
             self.find_token_line(&array.name.span.line),
           )));
         }
-      }
+      },
       _ => {
         let kind = self.extract_data_type(&index);
 
@@ -916,19 +925,18 @@ impl Visitor<AnalyzerResult> for Analyzer {
             self.find_token_line(&array.name.span.line),
           )));
         }
-      }
+      },
     }
 
-    let instruction = IRInstruction::ArrayAccess(IRArrayAccess::new(
-      var.name.clone(),
-      Box::new(index),
-      var_type,
-    ));
+    let instruction = IRInstruction::ArrayAccess(IRArrayAccess::new(var.name.clone(), Box::new(index), var_type));
 
     Ok(instruction)
   }
 
-  fn visit_this_expression(&mut self, this: &This) -> AnalyzerResult {
+  fn visit_this_expression(
+    &mut self,
+    this: &This,
+  ) -> AnalyzerResult {
     if self.current_class.is_none() {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::ThisOutsideOfClass(this.keyword.clone()),
@@ -944,26 +952,25 @@ impl Visitor<AnalyzerResult> for Analyzer {
       access = Some(Box::new(result))
     }
 
-    let instruction = IRInstruction::This(IRThis::new(
-      Box::new(this.keyword.clone()),
-      access,
-      Box::new(data_type),
-    ));
+    let instruction = IRInstruction::This(IRThis::new(Box::new(this.keyword.clone()), access, Box::new(data_type)));
 
     Ok(instruction)
   }
 
-  fn visit_expression_statement(&mut self, statement: &ExpressionStatement) -> AnalyzerResult {
+  fn visit_expression_statement(
+    &mut self,
+    statement: &ExpressionStatement,
+  ) -> AnalyzerResult {
     self.analyzer(&statement.expression)
   }
 
-  fn visit_variable_statement(&mut self, variable: &Variable) -> AnalyzerResult {
+  fn visit_variable_statement(
+    &mut self,
+    variable: &Variable,
+  ) -> AnalyzerResult {
     if self.is_allready_declared(&variable.name.span.literal) {
       return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::VariableAlreadyDefined(
-          variable.name.span.literal.clone(),
-          *variable.name.clone(),
-        ),
+        AnalyzerDiagnosticError::VariableAlreadyDefined(variable.name.span.literal.clone(), *variable.name.clone()),
         self.find_token_line(&variable.name.span.line),
       )));
     }
@@ -974,9 +981,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let data_type = variable.type_annotation.clone();
 
     if let Some(initializer) = &variable.initializer {
-      self
-        .context
-        .push(AnalyzerContext::Variable(*variable.name.clone()));
+      self.context.push(AnalyzerContext::Variable(*variable.name.clone()));
 
       let expression = self.analyzer(initializer)?;
 
@@ -997,7 +1002,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
             AnalyzerDiagnosticError::InvalidVariableInitializer(*variable.name.clone()),
             self.find_token_line(&variable.name.span.line),
           )))
-        }
+        },
       };
 
       self.context.pop();
@@ -1011,9 +1016,11 @@ impl Visitor<AnalyzerResult> for Analyzer {
       if class.is_some() {
         let class = class.unwrap();
 
-        complex_type = Some(Box::new(IRInstruction::ClassInstance(
-          IRClassInstance::new(Box::new(class), *variable.name.clone(), Vec::new()),
-        )));
+        complex_type = Some(Box::new(IRInstruction::ClassInstance(IRClassInstance::new(
+          Box::new(class),
+          *variable.name.clone(),
+          Vec::new(),
+        ))));
       }
     }
 
@@ -1042,7 +1049,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(IRInstruction::Variable(variable.clone()))
   }
 
-  fn visit_block(&mut self, block: &Block) -> AnalyzerResult {
+  fn visit_block(
+    &mut self,
+    block: &Block,
+  ) -> AnalyzerResult {
     let scopes_variables = self.scopes_variables.clone();
 
     self.begin_scope();
@@ -1061,28 +1071,28 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(IRInstruction::Block(ir_block))
   }
 
-  fn visit_if_statement(&mut self, statement: &IfStatement) -> AnalyzerResult {
+  fn visit_if_statement(
+    &mut self,
+    statement: &IfStatement,
+  ) -> AnalyzerResult {
     let condition = self.analyzer(&statement.condition)?;
     let then_branch = self.analyze_statement(&statement.then_branch)?;
 
     let else_branch: Option<Box<IRInstruction>> = if statement.else_branch.is_some() {
-      Some(Box::new(
-        self.analyze_statement(statement.else_branch.as_ref().unwrap())?,
-      ))
+      Some(Box::new(self.analyze_statement(statement.else_branch.as_ref().unwrap())?))
     } else {
       None
     };
 
-    let instruction = IRInstruction::If(IRIf::new(
-      Box::new(condition),
-      Box::new(then_branch),
-      else_branch,
-    ));
+    let instruction = IRInstruction::If(IRIf::new(Box::new(condition), Box::new(then_branch), else_branch));
 
     Ok(instruction)
   }
 
-  fn visit_while_statement(&mut self, statement: &WhileStatement) -> AnalyzerResult {
+  fn visit_while_statement(
+    &mut self,
+    statement: &WhileStatement,
+  ) -> AnalyzerResult {
     self.context.push(AnalyzerContext::Loop);
     let condition = self.analyzer(&statement.condition)?;
     let body = self.analyze_statement(&statement.body)?;
@@ -1094,17 +1104,17 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_function_statement(&mut self, statement: &FunctionStatement) -> AnalyzerResult {
+  fn visit_function_statement(
+    &mut self,
+    statement: &FunctionStatement,
+  ) -> AnalyzerResult {
     self.begin_scope();
     self.context.push(AnalyzerContext::Function);
     let mut parameters = Vec::<IRInstruction>::new();
 
     if self.is_allready_declared(&statement.name.span.literal) {
       return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::FunctionAlreadyDefined(
-          statement.name.span.literal.clone(),
-          statement.name.clone(),
-        ),
+        AnalyzerDiagnosticError::FunctionAlreadyDefined(statement.name.span.literal.clone(), statement.name.clone()),
         self.find_token_line(&statement.name.span.line),
       )));
     }
@@ -1131,16 +1141,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       parameters.clone(),
       statement.return_type.clone().unwrap_or(DataType::Void),
       None,
-      IRFunctionMetadata::new(
-        false,
-        statement.is_exported,
-        false,
-        is_extern,
-        false,
-        false,
-        false,
-        false,
-      ),
+      IRFunctionMetadata::new(false, statement.is_exported, false, is_extern, false, false, false, false),
     );
 
     self.current_function = Some(CalleableDeclaration::Function(current_function.clone()));
@@ -1152,10 +1153,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Variable(v) => {
           self.scopes_variables.push(v.clone());
           ir.scopes_variables.push(v);
-        }
+        },
         _ => {
           ir.instructions.push(result);
-        }
+        },
       };
     }
 
@@ -1176,13 +1177,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_return_statement(&mut self, statement: &Return) -> AnalyzerResult {
-    if !self.context.iter().any(|context| {
-      matches!(
-        &context,
-        AnalyzerContext::Function | AnalyzerContext::Method
-      )
-    }) {
+  fn visit_return_statement(
+    &mut self,
+    statement: &Return,
+  ) -> AnalyzerResult {
+    if !self
+      .context
+      .iter()
+      .any(|context| matches!(&context, AnalyzerContext::Function | AnalyzerContext::Method))
+    {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::ReturnOutsideFunction(*statement.keyword.clone()),
         self.find_token_line(&statement.keyword.span.line),
@@ -1207,7 +1210,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_class_statement(&mut self, statement: &Class) -> AnalyzerResult {
+  fn visit_class_statement(
+    &mut self,
+    statement: &Class,
+  ) -> AnalyzerResult {
     self.context.push(AnalyzerContext::Class);
     let mut properties = Vec::<IRVariable>::new();
 
@@ -1230,10 +1236,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
         Ok(IRInstruction::Variable(v)) => {
           self.scopes_variables.push(v.clone());
           properties.push(v);
-        }
+        },
         _ => {
           todo!()
-        }
+        },
       };
     }
 
@@ -1273,13 +1279,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
           ));
 
           ir.push(f);
-        }
+        },
         _ => {
           return Err(Box::new(AnalyzerDiagnostic::new(
             AnalyzerDiagnosticError::ClassAlreadyDefined(statement.name.clone()),
             self.find_token_line(&statement.name.span.line),
           )));
-        }
+        },
       };
     }
 
@@ -1299,7 +1305,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_for_statement(&mut self, _statement: &For) -> AnalyzerResult {
+  fn visit_for_statement(
+    &mut self,
+    _statement: &For,
+  ) -> AnalyzerResult {
     let variable = self.analyze_statement(&Statement::Variable(*_statement.variable.clone()))?;
     let condition = self.analyzer(&_statement.condition)?;
     let increment = self.analyzer(&_statement.increment)?;
@@ -1314,7 +1323,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     )))
   }
 
-  fn visit_for_of_statement(&mut self, statement: &ForOf) -> AnalyzerResult {
+  fn visit_for_of_statement(
+    &mut self,
+    statement: &ForOf,
+  ) -> AnalyzerResult {
     self.declare(&statement.variable.name.span.literal);
 
     let iterable = self.analyzer(&statement.iterable)?;
@@ -1365,7 +1377,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_import_statement(&mut self, statement: &Import) -> AnalyzerResult {
+  fn visit_import_statement(
+    &mut self,
+    statement: &Import,
+  ) -> AnalyzerResult {
     let mut block_stack: HashMap<String, bool> = self.block_stack.last_mut().unwrap().clone();
 
     if !statement.is_std {
@@ -1385,7 +1400,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     )))
   }
 
-  fn visit_break_statement(&mut self, statement: &BreakStatement) -> AnalyzerResult {
+  fn visit_break_statement(
+    &mut self,
+    statement: &BreakStatement,
+  ) -> AnalyzerResult {
     let is_loop = self
       .context
       .iter()
@@ -1401,7 +1419,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(IRInstruction::Break(IRBreak::new(statement.token.clone())))
   }
 
-  fn visit_continue_statement(&mut self, statement: &Continue) -> AnalyzerResult {
+  fn visit_continue_statement(
+    &mut self,
+    statement: &Continue,
+  ) -> AnalyzerResult {
     let is_loop = self
       .context
       .iter()
@@ -1414,25 +1435,21 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    Ok(IRInstruction::Continue(IRContinue::new(
-      statement.token.clone(),
-    )))
+    Ok(IRInstruction::Continue(IRContinue::new(statement.token.clone())))
   }
 
-  fn visit_method_statement(&mut self, statement: &MethodStatement) -> AnalyzerResult {
-    if self.is_allready_declared(&statement.name.span.literal) && !statement.metadata.is_contructor
-    {
+  fn visit_method_statement(
+    &mut self,
+    statement: &MethodStatement,
+  ) -> AnalyzerResult {
+    if self.is_allready_declared(&statement.name.span.literal) && !statement.metadata.is_contructor {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::MethodAlreadyDefined(statement.name.clone()),
         self.find_token_line(&statement.name.span.line),
       )));
     }
 
-    if self
-      .context
-      .iter()
-      .any(|c| !matches!(c, AnalyzerContext::Class))
-    {
+    if self.context.iter().any(|c| !matches!(c, AnalyzerContext::Class)) {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::MethodOutsideClass(statement.name.clone()),
         self.find_token_line(&statement.name.span.line),
@@ -1481,10 +1498,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Variable(v) => {
           self.scopes_variables.push(v.clone());
           ir.scopes_variables.push(v);
-        }
+        },
         _ => {
           ir.instructions.push(result);
-        }
+        },
       };
     }
 
@@ -1505,7 +1522,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
     Ok(instruction)
   }
 
-  fn visit_property_statement(&mut self, statement: &PropertyStatement) -> AnalyzerResult {
+  fn visit_property_statement(
+    &mut self,
+    statement: &PropertyStatement,
+  ) -> AnalyzerResult {
     if self.is_allready_declared(&statement.name.span.literal) {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::PropertyAlreadyDefined(*statement.name.clone()),
@@ -1513,11 +1533,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    if self
-      .context
-      .iter()
-      .any(|c| !matches!(c, AnalyzerContext::Class))
-    {
+    if self.context.iter().any(|c| !matches!(c, AnalyzerContext::Class)) {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::PropertyOutsideClass(*statement.name.clone()),
         self.find_token_line(&statement.name.span.line),
@@ -1531,35 +1547,17 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     if let Some(initializer) = &statement.initializer {
       let expression = self.analyzer(initializer)?;
-      match expression {
-        IRInstruction::Literal(literal) => {
-          value = IRInstruction::Literal(literal);
-        }
-        IRInstruction::Binary(binary) => {
-          value = IRInstruction::Binary(binary);
-        }
-        IRInstruction::Unary(unary) => {
-          value = IRInstruction::Unary(unary);
-        }
-        IRInstruction::Variable(variable) => {
-          value = IRInstruction::Variable(variable);
-        }
-        IRInstruction::Ternary(ternary) => {
-          value = IRInstruction::Ternary(ternary);
-        }
-        IRInstruction::Call(call) => {
-          value = IRInstruction::Call(call);
-        }
-        IRInstruction::Class(class) => {
-          value = IRInstruction::Class(class);
-        }
-        IRInstruction::Logical(logical) => {
-          value = IRInstruction::Logical(logical);
-        }
-        IRInstruction::Array(array) => {
-          value = IRInstruction::Array(array);
-        }
-        _ => (),
+      value = match expression {
+        IRInstruction::Literal(literal) => IRInstruction::Literal(literal),
+        IRInstruction::Binary(binary) => IRInstruction::Binary(binary),
+        IRInstruction::Unary(unary) => IRInstruction::Unary(unary),
+        IRInstruction::Variable(variable) => IRInstruction::Variable(variable),
+        IRInstruction::Ternary(ternary) => IRInstruction::Ternary(ternary),
+        IRInstruction::Call(call) => IRInstruction::Call(call),
+        IRInstruction::Class(class) => IRInstruction::Class(class),
+        IRInstruction::Logical(logical) => IRInstruction::Logical(logical),
+        IRInstruction::Array(array) => IRInstruction::Array(array),
+        _ => todo!(),
       }
     }
 
@@ -1599,12 +1597,78 @@ impl Visitor<AnalyzerResult> for Analyzer {
     &mut self,
     statement: &Enum,
   ) -> AnalyzerResult {
-    todo!()
+    if self.is_allready_declared(&statement.name.span.literal) {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::EnumAlreadyDefined(statement.name.clone()),
+        self.find_token_line(&statement.name.span.line),
+      )));
+    }
+
+    self.declare(&statement.name.span.literal);
+    self.define(&statement.name.span.literal);
+
+    self.begin_scope();
+    let mut members = Vec::<IRVariable>::new();
+    let mut data_type = DataType::Pending;
+
+    for member in &statement.members {
+      let result = self.analyze_statement(&Statement::Variable(member.clone()))?;
+
+      if let IRInstruction::Variable(v) = &result {
+        if let Some(value) = &v.value {
+          if data_type == DataType::Pending {
+            data_type = self.extract_data_type(value);
+          } else if self.extract_data_type(value) != data_type {
+            return Err(Box::new(AnalyzerDiagnostic::new(
+              AnalyzerDiagnosticError::EnumMemberTypeMismatch(*member.name.clone()),
+              self.find_token_line(&member.name.span.line),
+            )));
+          }
+        }
+
+        self.scopes_variables.push(v.clone());
+        members.push(v.clone());
+      }
+    }
+
+    self.end_scope();
+    let mut no_initializers = false;
+
+    if matches!(
+      data_type,
+      DataType::Pending | DataType::Null | DataType::Unwnown | DataType::Void
+    ) {
+      data_type = DataType::Int;
+      no_initializers = true;
+    }
+
+    let members_cloned = members.clone();
+
+    for member in &mut members {
+      member.data_type = data_type.clone();
+
+      if data_type == DataType::Int && no_initializers {
+        let position = members_cloned.iter().position(|m| m.name == member.name).unwrap() as i64;
+
+        member.value = Some(Box::new(IRInstruction::Literal(IRLiteral::new(AnalyzerValue::Int(position)))));
+      }
+    }
+
+    Ok(IRInstruction::Enum(IREnum::new(
+      Box::new(statement.name.clone()),
+      members,
+      data_type,
+      statement.is_exported,
+      statement.generic.clone(),
+    )))
   }
 }
 
 impl Analyzer {
-  pub fn new(current_file: String, tokens: Vec<Token>) -> Self {
+  pub fn new(
+    current_file: String,
+    tokens: Vec<Token>,
+  ) -> Self {
     let mut irs = HashMap::new();
     let block_stack: HashMap<String, bool> = HashMap::new();
 
@@ -1623,7 +1687,10 @@ impl Analyzer {
     }
   }
 
-  fn find_token_line(&self, line: &usize) -> Vec<Token> {
+  fn find_token_line(
+    &self,
+    line: &usize,
+  ) -> Vec<Token> {
     self
       .tokens
       .clone()
@@ -1632,13 +1699,16 @@ impl Analyzer {
       .collect::<Vec<Token>>()
   }
 
-  pub fn analyze(&mut self, statements: &Vec<Statement>) -> Result<(), Vec<DiagnosticReport>> {
+  pub fn analyze(
+    &mut self,
+    statements: &Vec<Statement>,
+  ) -> Result<(), Vec<DiagnosticReport>> {
     for statement in statements {
       match self.analyze_statement(statement) {
         Ok(ir) => {
           let current_ir = self.irs.get_mut(&self.current_file).unwrap();
           current_ir.push(ir.clone());
-        }
+        },
         Err(e) => self.diagnostics.push(e),
       }
     }
@@ -1656,25 +1726,32 @@ impl Analyzer {
     Ok(())
   }
 
-  fn analyzer(&mut self, expression: &Expression) -> AnalyzerResult {
+  fn analyzer(
+    &mut self,
+    expression: &Expression,
+  ) -> AnalyzerResult {
     expression.accept(self)
   }
 
-  fn analyze_statement(&mut self, statement: &Statement) -> AnalyzerResult {
+  fn analyze_statement(
+    &mut self,
+    statement: &Statement,
+  ) -> AnalyzerResult {
     statement.accept(self)
   }
 
   fn begin_scope(&mut self) {
-    self
-      .block_stack
-      .push(self.block_stack.clone().last().unwrap().clone());
+    self.block_stack.push(self.block_stack.clone().last().unwrap().clone());
   }
 
   fn end_scope(&mut self) {
     self.block_stack.pop().unwrap();
   }
 
-  fn declare(&mut self, name: &str) {
+  fn declare(
+    &mut self,
+    name: &str,
+  ) {
     if self.block_stack.is_empty() {
       return;
     }
@@ -1684,7 +1761,11 @@ impl Analyzer {
     current_block.insert(name.to_string(), false);
   }
 
-  fn resolve_std_import(&mut self, lib: String, block_stack: &mut HashMap<String, bool>) {
+  fn resolve_std_import(
+    &mut self,
+    lib: String,
+    block_stack: &mut HashMap<String, bool>,
+  ) {
     let current_ir = self.irs.get_mut(&self.current_file).unwrap();
     let mut env = std::env::var("IGNITE_HOME");
 
@@ -1704,7 +1785,7 @@ impl Analyzer {
         }
 
         file.unwrap()
-      }
+      },
       &_ => return,
     };
 
@@ -1728,8 +1809,8 @@ impl Analyzer {
       match ir {
         IRInstruction::Function(f) => {
           block_stack.insert(f.name.span.literal.clone(), true);
-        }
-        _ => {}
+        },
+        _ => {},
       }
     }
   }
@@ -1742,8 +1823,7 @@ impl Analyzer {
     let mut analyzer = Analyzer::new(statement.module_path.span.literal.clone(), Vec::new());
     let _ = match fs::read_to_string(format!("{}.{}", statement.module_path.span.literal, "ign")) {
       Ok(source) => {
-        let mut lexer: Lexer<'_> =
-          Lexer::new(&source, statement.module_path.span.literal.clone() + ".ign");
+        let mut lexer: Lexer<'_> = Lexer::new(&source, statement.module_path.span.literal.clone() + ".ign");
         lexer.scan_tokens();
 
         analyzer.tokens = lexer.tokens.clone();
@@ -1752,33 +1832,28 @@ impl Analyzer {
         let statements = parser.parse();
 
         analyzer.analyze(&statements.0)
-      }
+      },
       Err(_) => {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::ModuleNotFound(statement.module_path.clone()),
           self.find_token_line(&statement.module_path.span.line),
         )))
-      }
+      },
     };
 
     analyzer.diagnostics.iter().for_each(|d| {
       self.diagnostics.push(Box::new(*d.clone()));
     });
 
-    let current_ir = analyzer
-      .irs
-      .get(&statement.module_path.span.literal)
-      .unwrap()
-      .clone();
+    let current_ir = analyzer.irs.get(&statement.module_path.span.literal).unwrap().clone();
 
     for ir in &current_ir {
       self.define_import(statement, ir.clone(), block_stack)?;
     }
 
-    self.irs.insert(
-      statement.module_path.span.literal.clone(),
-      current_ir.clone(),
-    );
+    self
+      .irs
+      .insert(statement.module_path.span.literal.clone(), current_ir.clone());
 
     Ok(())
   }
@@ -1832,7 +1907,7 @@ impl Analyzer {
             }
           }
         }
-      }
+      },
       IRInstruction::Class(c) => {
         for symbol in &statement.symbols {
           if symbol.name.span.literal == c.name && !c.is_exported {
@@ -1870,14 +1945,17 @@ impl Analyzer {
             }
           }
         }
-      }
+      },
       _ => (),
     };
 
     Ok(())
   }
 
-  fn is_allready_declared(&self, name: &String) -> bool {
+  fn is_allready_declared(
+    &self,
+    name: &String,
+  ) -> bool {
     if self.block_stack.is_empty() {
       return false;
     }
@@ -1887,7 +1965,10 @@ impl Analyzer {
     current_block.get(name).is_some()
   }
 
-  fn define(&mut self, name: &str) {
+  fn define(
+    &mut self,
+    name: &str,
+  ) {
     if self.block_stack.is_empty() {
       return;
     }
@@ -1897,7 +1978,10 @@ impl Analyzer {
     current_block.insert(name.to_string(), true);
   }
 
-  fn define_parameter(&mut self, name: &str) {
+  fn define_parameter(
+    &mut self,
+    name: &str,
+  ) {
     if self.block_stack.is_empty() {
       return;
     }
@@ -1971,12 +2055,15 @@ impl Analyzer {
             metadata: _
           })
         )
-      }
+      },
       _ => false,
     }
   }
 
-  fn extract_data_type(&self, instruction: &IRInstruction) -> DataType {
+  fn extract_data_type(
+    &self,
+    instruction: &IRInstruction,
+  ) -> DataType {
     match instruction {
       IRInstruction::Literal(l) => l.value.to_data_type(),
       IRInstruction::Variable(v) => v.data_type.clone(),
@@ -2103,40 +2190,42 @@ impl Analyzer {
         } else {
           (false, DataType::Unwnown)
         }
-      }
+      },
       IRInstructionType::Add => self.check_add_compatibility(&left_type, &right_type),
       IRInstructionType::Sub | IRInstructionType::Mul | IRInstructionType::Div => {
         self.check_arithmetic_compatibility(&left_type, &right_type)
-      }
+      },
       IRInstructionType::GreaterEqual
       | IRInstructionType::Greater
       | IRInstructionType::LessEqual
       | IRInstructionType::Less => self.check_comparation_compatibility(&left_type, &right_type),
-      IRInstructionType::Equal | IRInstructionType::NotEqual => {
-        self.check_equal_compatibility(&left_type, &right_type)
-      }
-      IRInstructionType::And | IRInstructionType::Or => {
-        self.check_logical_compatibility(&left_type, &right_type)
-      }
+      IRInstructionType::Equal | IRInstructionType::NotEqual => self.check_equal_compatibility(&left_type, &right_type),
+      IRInstructionType::And | IRInstructionType::Or => self.check_logical_compatibility(&left_type, &right_type),
       IRInstructionType::Mod => {
         if left_type == DataType::Int && right_type == DataType::Int {
           (true, DataType::Int)
         } else {
           (false, DataType::Unwnown)
         }
-      }
+      },
       _ => (false, DataType::Unwnown),
     }
   }
 
-  fn is_iterable(&self, iterable: &IRInstruction) -> bool {
+  fn is_iterable(
+    &self,
+    iterable: &IRInstruction,
+  ) -> bool {
     match iterable {
       IRInstruction::Variable(var) => matches!(var.data_type, DataType::Array(_)),
       _ => false,
     }
   }
 
-  fn find_class_in_ir(&self, name: &String) -> Option<IRClass> {
+  fn find_class_in_ir(
+    &self,
+    name: &String,
+  ) -> Option<IRClass> {
     let irs = self.irs.get(&self.current_file).unwrap();
 
     let class = irs.iter().find(|ir| match ir {
@@ -2182,7 +2271,11 @@ impl Analyzer {
     None
   }
 
-  fn _verify_arguments(&self, arguments: &[IRInstruction], parameters: &[IRVariable]) -> bool {
+  fn _verify_arguments(
+    &self,
+    arguments: &[IRInstruction],
+    parameters: &[IRVariable],
+  ) -> bool {
     if arguments.len() != parameters.len() {
       return false;
     }
@@ -2198,7 +2291,10 @@ impl Analyzer {
     true
   }
 
-  fn find_class_instance(&self, instance_name: &String) -> Option<IRClassInstance> {
+  fn find_class_instance(
+    &self,
+    instance_name: &String,
+  ) -> Option<IRClassInstance> {
     if self.scopes_variables.is_empty() {
       return None;
     }
@@ -2213,12 +2309,7 @@ impl Analyzer {
       }
 
       if variable.metadata.complex_data_type.is_some() {
-        let complex = variable
-          .metadata
-          .complex_data_type
-          .as_ref()
-          .unwrap()
-          .clone();
+        let complex = variable.metadata.complex_data_type.as_ref().unwrap().clone();
         class_instance = match *complex {
           IRInstruction::ClassInstance(c) => Some(c.clone()),
           _ => None,
@@ -2234,7 +2325,7 @@ impl Analyzer {
         IRInstruction::ClassInstance(c) if &c.var_name.span.literal == instance_name => {
           class_instance = Some(c.clone());
           break;
-        }
+        },
         _ => (),
       }
     }
@@ -2242,14 +2333,20 @@ impl Analyzer {
     class_instance
   }
 
-  fn is_array(&self, var: &IRInstruction) -> bool {
+  fn is_array(
+    &self,
+    var: &IRInstruction,
+  ) -> bool {
     match var {
       IRInstruction::Variable(v) => matches!(v.data_type, DataType::Array(_)),
       _ => false,
     }
   }
 
-  fn array_property(&mut self, expression: &Get) -> AnalyzerResult {
+  fn array_property(
+    &mut self,
+    expression: &Get,
+  ) -> AnalyzerResult {
     let ir_array = self.analyzer(&expression.object)?;
 
     let array = self.extract_data_type(&ir_array);
@@ -2269,7 +2366,7 @@ impl Analyzer {
           DataType::Int,
           GetMetadata::new(array.clone()),
         )))
-      }
+      },
 
       _ => Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::UndefinedProperty(*expression.name.clone()),
@@ -2278,7 +2375,10 @@ impl Analyzer {
     }
   }
 
-  fn type_methods(&mut self, expression: &MethodCall) -> AnalyzerResult {
+  fn type_methods(
+    &mut self,
+    expression: &MethodCall,
+  ) -> AnalyzerResult {
     let object = self.analyzer(&expression.object)?;
     let data_type = self.extract_data_type(&object);
 
@@ -2292,7 +2392,11 @@ impl Analyzer {
     }
   }
 
-  fn boolean_methods(&mut self, expression: &MethodCall, object: &IRInstruction) -> AnalyzerResult {
+  fn boolean_methods(
+    &mut self,
+    expression: &MethodCall,
+    object: &IRInstruction,
+  ) -> AnalyzerResult {
     let mut current_ir = self.irs.get_mut(&self.current_file).unwrap().clone();
     match expression.name.span.literal.as_str() {
       "toString" => {
@@ -2327,12 +2431,16 @@ impl Analyzer {
           Box::new(object.clone()),
           MethodCallMetadata::new(DataType::String, self.extract_data_type(object)),
         )))
-      }
+      },
       _ => todo!(),
     }
   }
 
-  fn number_methods(&mut self, expression: &MethodCall, object: &IRInstruction) -> AnalyzerResult {
+  fn number_methods(
+    &mut self,
+    expression: &MethodCall,
+    object: &IRInstruction,
+  ) -> AnalyzerResult {
     let mut current_ir = self.irs.get_mut(&self.current_file).unwrap().clone();
 
     match expression.name.span.literal.as_str() {
@@ -2368,16 +2476,22 @@ impl Analyzer {
           Box::new(object.clone()),
           MethodCallMetadata::new(DataType::String, self.extract_data_type(object)),
         )))
-      }
+      },
       _ => todo!(),
     }
   }
 
-  fn array_methods(&mut self, expression: &MethodCall) -> AnalyzerResult {
+  fn array_methods(
+    &mut self,
+    expression: &MethodCall,
+  ) -> AnalyzerResult {
     todo!("array")
   }
 
-  fn string_methods(&mut self, expression: &MethodCall) -> AnalyzerResult {
+  fn string_methods(
+    &mut self,
+    expression: &MethodCall,
+  ) -> AnalyzerResult {
     todo!("string")
   }
 }

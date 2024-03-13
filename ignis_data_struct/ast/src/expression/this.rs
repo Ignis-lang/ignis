@@ -9,7 +9,10 @@ pub struct This {
 }
 
 impl This {
-  pub fn new(keyword: Token, access: Option<Box<Expression>>) -> Self {
+  pub fn new(
+    keyword: Token,
+    access: Option<Box<Expression>>,
+  ) -> Self {
     Self { keyword, access }
   }
 }

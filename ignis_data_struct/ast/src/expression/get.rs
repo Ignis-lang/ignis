@@ -9,7 +9,11 @@ pub struct Get {
 }
 
 impl Get {
-  pub fn new(object: Box<Expression>, object_token: Box<Token>, name: Box<Token>) -> Self {
+  pub fn new(
+    object: Box<Expression>,
+    object_token: Box<Token>,
+    name: Box<Token>,
+  ) -> Self {
     Self {
       object,
       object_token,

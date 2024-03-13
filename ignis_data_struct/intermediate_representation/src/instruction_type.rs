@@ -27,7 +27,10 @@ pub enum IRInstructionType {
 }
 
 impl Display for IRInstructionType {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       IRInstructionType::Add => write!(f, "add"),
       IRInstructionType::Sub => write!(f, "sub"),

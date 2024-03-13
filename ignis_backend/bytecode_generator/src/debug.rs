@@ -23,7 +23,7 @@ impl BytecodeDebug {
           OpCode::ConstantInt | OpCode::ConstantFloat => {
             let constant = code.constants[i];
             println!("{:05}\t{:?}\t{}", i, op, constant);
-          }
+          },
           OpCode::Add => todo!(),
           OpCode::Subtract => todo!(),
           OpCode::Multiply => todo!(),

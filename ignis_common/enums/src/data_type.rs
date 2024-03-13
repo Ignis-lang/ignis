@@ -30,7 +30,10 @@ pub enum DataType {
 }
 
 impl Display for DataType {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       DataType::String => write!(f, "String"),
       DataType::Int => write!(f, "Int"),
@@ -46,28 +49,28 @@ impl Display for DataType {
       DataType::Callable(params, ret) => {
         let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
         write!(f, "({}) -> {}", params.join(", "), ret)
-      }
+      },
       DataType::ClassType(name) => write!(f, "{}", name),
       DataType::GenericType { base, parameters } => {
         let params: Vec<String> = parameters.iter().map(|p| p.to_string()).collect();
         write!(f, "{}<{}>", base, params.join(", "))
-      }
+      },
       DataType::UnionType(types) => {
         let type_strings: Vec<String> = types.iter().map(|t| t.to_string()).collect();
         write!(f, "Union<{}>", type_strings.join(" | "))
-      }
+      },
       DataType::IntersectionType(types) => {
         let type_strings: Vec<String> = types.iter().map(|t| t.to_string()).collect();
         write!(f, "Intersection<{}>", type_strings.join(" & "))
-      }
+      },
       DataType::TupleType(types) => {
         let type_strings: Vec<String> = types.iter().map(|t| t.to_string()).collect();
         write!(f, "Tuple<{}>", type_strings.join(", "))
-      }
+      },
       DataType::AliasType(alias) => write!(f, "{}", alias),
       DataType::Enum(name) => {
         write!(f, "Enum<{}>", name)
-      }
+      },
     }
   }
 }
@@ -87,7 +90,10 @@ impl DataType {
       _ => DataType::Pending,
     }
   }
-  pub fn to_c_type(&self, is_mutable: bool) -> String {
+  pub fn to_c_type(
+    &self,
+    is_mutable: bool,
+  ) -> String {
     let mut kind: String = if !is_mutable {
       String::from("const ")
     } else {
@@ -99,9 +105,7 @@ impl DataType {
       DataType::Float => kind.push_str("float"),
       DataType::Char => kind.push_str("char"),
       DataType::String => kind.push_str("char*"),
-      DataType::Void | DataType::Null | DataType::Unwnown | DataType::Pending => {
-        kind.push_str("void")
-      }
+      DataType::Void | DataType::Null | DataType::Unwnown | DataType::Pending => kind.push_str("void"),
       DataType::Variable(_name) => todo!(),
       DataType::ClassType(_name) => todo!(),
       DataType::Array(array) => kind.push_str(array.to_c_type(true).to_string().as_str()),

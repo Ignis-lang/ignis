@@ -10,7 +10,10 @@ pub struct MethodCallMetadata {
 }
 
 impl MethodCallMetadata {
-  pub fn new(return_type: DataType, object_data_type: DataType) -> Self {
+  pub fn new(
+    return_type: DataType,
+    object_data_type: DataType,
+  ) -> Self {
     Self {
       return_type,
       object_data_type,

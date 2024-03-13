@@ -13,7 +13,10 @@ pub enum LiteralValue {
 }
 
 impl Display for LiteralValue {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
     match self {
       LiteralValue::Int(x) => write!(f, "{}", x),
       LiteralValue::Float(x) => write!(f, "{}", x),
@@ -26,7 +29,10 @@ impl Display for LiteralValue {
 }
 
 impl LiteralValue {
-  pub fn from_token_type(kind: TokenType, value: String) -> Self {
+  pub fn from_token_type(
+    kind: TokenType,
+    value: String,
+  ) -> Self {
     match kind {
       TokenType::Int => Self::Int(value.parse().unwrap()),
       TokenType::Float => Self::Float(value.parse().unwrap()),
