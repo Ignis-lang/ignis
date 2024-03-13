@@ -7,7 +7,7 @@ use crate::{
   },
   statement::{
     block::Block, break_statement::BreakStatement, class::Class, continue_statement::Continue,
-    expression::ExpressionStatement, for_of::ForOf, for_statement::For,
+    enum_statement::Enum, expression::ExpressionStatement, for_of::ForOf, for_statement::For,
     function::FunctionStatement, if_statement::IfStatement, import::Import,
     interface_statement::InterfaceStatement, method::MethodStatement, property::PropertyStatement,
     return_statement::Return, variable::Variable, while_statement::WhileStatement,
@@ -50,4 +50,5 @@ pub trait Visitor<R> {
   fn visit_method_statement(&mut self, statement: &MethodStatement) -> R;
   fn visit_property_statement(&mut self, statement: &PropertyStatement) -> R;
   fn visit_interface_statement(&mut self, statement: &InterfaceStatement) -> R;
+  fn visit_enum_statement(&mut self, statement: &Enum) -> R;
 }

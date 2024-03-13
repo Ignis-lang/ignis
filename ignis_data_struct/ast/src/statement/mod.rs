@@ -2,6 +2,7 @@ pub mod block;
 pub mod break_statement;
 pub mod class;
 pub mod continue_statement;
+pub mod enum_statement;
 pub mod export;
 pub mod expression;
 pub mod extern_statement;
@@ -21,13 +22,16 @@ use serde_json::json;
 
 use self::{
   block::Block, break_statement::BreakStatement, class::Class, continue_statement::Continue,
-  expression::ExpressionStatement, for_of::ForOf, for_statement::For, function::FunctionStatement,
-  if_statement::IfStatement, import::Import, interface_statement::InterfaceStatement,
-  method::MethodStatement, property::PropertyStatement, return_statement::Return,
-  variable::Variable, while_statement::WhileStatement,
+  enum_statement::Enum, expression::ExpressionStatement, for_of::ForOf, for_statement::For,
+  function::FunctionStatement, if_statement::IfStatement, import::Import,
+  interface_statement::InterfaceStatement, method::MethodStatement, property::PropertyStatement,
+  return_statement::Return, variable::Variable, while_statement::WhileStatement,
 };
 
-use crate::{visitor::Visitor, statement::import::ImportSource};
+use crate::{
+  statement::{enum_statement::EnumMemberValue, import::ImportSource},
+  visitor::Visitor,
+};
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
@@ -47,6 +51,7 @@ pub enum Statement {
   Method(MethodStatement),
   Property(PropertyStatement),
   Interface(InterfaceStatement),
+  Enum(Enum),
 }
 
 impl Statement {
@@ -72,6 +77,7 @@ impl Statement {
       Statement::Method(method) => visitor.visit_method_statement(method),
       Statement::Property(property) => visitor.visit_property_statement(property),
       Statement::Interface(interface) => visitor.visit_interface_statement(interface),
+      Statement::Enum(enum_) => visitor.visit_enum_statement(enum_),
     }
   }
 
@@ -225,6 +231,31 @@ impl Statement {
           "type": "Interface",
           "name": interface.name.span.literal,
           "methods": interface.methods.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
+        })
+      }
+      Statement::Enum(enum_) => {
+        json!({
+          "type": "Enum",
+          "name": enum_.name.span.literal,
+          "members": enum_.members.iter().map(|x| match &x.value {
+            EnumMemberValue::Int(value) => json!({
+              "name": x.name.span.literal,
+              "value": value,
+            }),
+            EnumMemberValue::String(value) => json!({
+              "name": x.name.span.literal,
+              "value": value,
+            }),
+            EnumMemberValue::None => json!({
+              "name": x.name.span.literal,
+              "value": null,
+            })
+        }).collect::<Vec<serde_json::Value>>(),
+          "is_exported": enum_.is_exported,
+          "generic": match &enum_.generic {
+            Some(generic) => generic.iter().map(|x| x.to_string()).collect::<Vec<String>>(),
+            None => vec![],
+          },
         })
       }
     }

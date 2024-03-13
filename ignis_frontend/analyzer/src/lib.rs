@@ -6,6 +6,8 @@ use std::fmt::{Display, Formatter};
 
 use ast::expression::array_access::ArrayAccess;
 use ast::expression::this::This;
+use ast::statement::enum_statement::Enum;
+use ast::statement::interface_statement::InterfaceStatement;
 use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
 use diagnostic_report::DiagnosticReport;
 use intermediate_representation::instruction_type::IRInstructionType;
@@ -1588,7 +1590,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
   fn visit_interface_statement(
     &mut self,
-    statement: &ast::statement::interface_statement::InterfaceStatement,
+    statement: &InterfaceStatement,
+  ) -> AnalyzerResult {
+    todo!()
+  }
+
+  fn visit_enum_statement(
+    &mut self,
+    statement: &Enum,
   ) -> AnalyzerResult {
     todo!()
   }

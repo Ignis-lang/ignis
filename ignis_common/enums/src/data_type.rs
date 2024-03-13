@@ -17,6 +17,7 @@ pub enum DataType {
   Array(Box<DataType>),
   Callable(Vec<DataType>, Box<DataType>),
   ClassType(String),
+  Enum(String),
   // TODO: Type non-primitive
   GenericType {
     base: Box<DataType>,
@@ -64,6 +65,9 @@ impl Display for DataType {
         write!(f, "Tuple<{}>", type_strings.join(", "))
       }
       DataType::AliasType(alias) => write!(f, "{}", alias),
+      DataType::Enum(name) => {
+        write!(f, "Enum<{}>", name)
+      }
     }
   }
 }
@@ -107,6 +111,7 @@ impl DataType {
       DataType::IntersectionType(_) => todo!(),
       DataType::TupleType(_) => todo!(),
       DataType::AliasType(_) => todo!(),
+      DataType::Enum(_) => todo!(),
     };
 
     kind

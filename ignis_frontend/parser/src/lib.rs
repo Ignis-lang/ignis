@@ -11,6 +11,7 @@ use ast::{
     break_statement::BreakStatement,
     class::{Class, ClassMetadata},
     continue_statement::Continue,
+    enum_statement::{Enum, EnumMember, EnumMemberValue},
     for_of::ForOf,
     for_statement::For,
     function::FunctionDecorator,
@@ -541,6 +542,10 @@ impl Parser {
       return self.interface_declaration();
     }
 
+    if self.match_token(&[TokenType::Enum]) {
+      return self.enum_declaration(false);
+    }
+
     if self.match_token(&[TokenType::Function]) {
       self.context.push(ParserContext::Function);
 
@@ -590,6 +595,47 @@ impl Parser {
         Err(error)
       }
     }
+  }
+
+  fn enum_declaration(&mut self, is_exported: bool) -> ParserResult<Statement> {
+    let name: Token = self.consume(TokenType::Identifier)?;
+
+    self.consume(TokenType::LeftBrace)?;
+
+    let mut members: Vec<EnumMember> = Vec::new();
+
+    while !self.check(TokenType::RightBrace) && !self.is_at_end() {
+      let name = self.consume(TokenType::Identifier)?;
+
+      if self.match_token(&[TokenType::Equal]) {
+        let value = self.expression()?;
+
+        match value {
+          Expression::Literal(l) => match l.value {
+            LiteralValue::Int(int) => {
+              members.push(EnumMember::new(name, EnumMemberValue::Int(int)));
+            }
+            LiteralValue::String(str) => {
+              members.push(EnumMember::new(name, EnumMemberValue::String(str.clone())));
+            }
+            _ => members.push(EnumMember::new(name, EnumMemberValue::None)),
+          },
+          _ => {
+            members.push(EnumMember::new(name, EnumMemberValue::None));
+          }
+        }
+      } else {
+        members.push(EnumMember::new(name, EnumMemberValue::None));
+      }
+
+      if !self.match_token(&[TokenType::Comma]) {
+        break;
+      }
+    }
+
+    self.consume(TokenType::RightBrace)?;
+
+    Ok(Statement::Enum(Enum::new(name, members, is_exported, None)))
   }
 
   fn interface_declaration(&mut self) -> ParserResult<Statement> {
