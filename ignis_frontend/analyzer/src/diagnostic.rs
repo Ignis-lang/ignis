@@ -57,7 +57,7 @@ pub enum AnalyzerDiagnosticError {
   ImportedClassIsNotExported(Token),
   InvalidVariableInitializer(Token),
   EnumAlreadyDefined(Token),
-  EnumMemberTypeMismatch(Token),
+  EnumMemberTypeMismatch(Token, DataType, DataType),
   NotAnEnum(Token),
   UndefinedEnum(Token),
   UndefinedEnumMember(Token),
@@ -487,8 +487,11 @@ impl AnalyzerDiagnostic {
         None,
         "IA0050".to_string(),
       ),
-      AnalyzerDiagnosticError::EnumMemberTypeMismatch(token) => DiagnosticReport::new(
-        format!("Enum member type mismatch '{}'", token.span.literal),
+      AnalyzerDiagnosticError::EnumMemberTypeMismatch(token, target, source) => DiagnosticReport::new(
+        format!(
+          "Enum member '{}' type mismatch. Expected '{}', but got '{}'",
+          token.span.literal, target, source
+        ),
         Box::new(token.clone()),
         self.token_line.clone(),
         DiagnosticLevel::Error,
@@ -532,7 +535,7 @@ impl AnalyzerDiagnostic {
           .token_line
           .clone()
           .into_iter()
-          .find(|t| t.span.literal.eq_ignore_ascii_case(&name))
+          .find(|t| t.span.literal.eq_ignore_ascii_case(name))
           .unwrap();
 
         DiagnosticReport::new(

@@ -1606,8 +1606,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
           if data_type == DataType::Pending {
             data_type = self.extract_data_type(value);
           } else if self.extract_data_type(value) != data_type {
+            let value_data_type = self.extract_data_type(value);
+
             return Err(Box::new(AnalyzerDiagnostic::new(
-              AnalyzerDiagnosticError::EnumMemberTypeMismatch(*member.name.clone()),
+              AnalyzerDiagnosticError::EnumMemberTypeMismatch(*member.name.clone(), data_type, value_data_type),
               self.find_token_line(&member.name.span.line),
             )));
           }
