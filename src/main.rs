@@ -152,7 +152,7 @@ impl App {
 }
 
 fn main() {
-  let mut cli = Cli::parse();
+  let cli = Cli::parse();
 
   let mut app = App::new(cli);
 
