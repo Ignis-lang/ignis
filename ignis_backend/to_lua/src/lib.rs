@@ -1,12 +1,12 @@
-use std::{vec, collections::HashMap};
+use std::{collections::HashMap, result, vec};
 use colored::*;
 
 use code_result::CodeResult;
 use enums::data_type::DataType;
 use intermediate_representation::{
   analyzer_value::AnalyzerValue, call::IRCall, class::IRClass, function::IRFunction,
-  instruction_type::IRInstructionType, ir_enum::IREnum, ir_get::IRGet, ir_method_call::IRMethodCall, ir_this::IRThis,
-  variable::IRVariable, IRInstruction,
+  function_instance::IRFunctionInstance, instruction_type::IRInstructionType, ir_enum::IREnum, ir_get::IRGet,
+  ir_method_call::IRMethodCall, ir_this::IRThis, variable::IRVariable, IRInstruction,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -351,7 +351,62 @@ impl TranspilerToLua {
       IRInstruction::Method(_) => todo!(),
       IRInstruction::This(this) => code.push_str(&self.transpile_this_to_lua(this, indent_level)),
       IRInstruction::Enum(enum_) => code.push_str(&self.transpile_enum_to_lua(enum_, indent_level)),
+      IRInstruction::FunctionInstance(func) => {
+        let result = self.transpile_function_instance(func, indent_level + 2);
+        self.code.push_str(&result);
+      },
     };
+
+    code
+  }
+
+  fn transpile_function_instance(
+    &mut self,
+    func: &IRFunctionInstance,
+    indent_level: usize,
+  ) -> String {
+    let mut code = String::new();
+
+    if func.metadata.is_exported {
+      self
+        .statement_exported
+        .push((func.instance_name.span.literal.clone(), String::new()));
+    }
+
+    let parameters = self.transpile_function_params(&func.parameters);
+
+    if let Some(body) = &func.body {
+      if func.metadata.is_recursive {
+        code.push_str(&format!(
+          "{}local {}\n",
+          " ".repeat(indent_level),
+          func.instance_name.span.literal
+        ));
+        code.push_str(&format!(
+          "{}{} = function({})\n",
+          " ".repeat(indent_level),
+          func.instance_name.span.literal,
+          parameters
+        ));
+      } else {
+        code.push_str(&format!(
+          "{}local {} = function({})\n",
+          " ".repeat(indent_level),
+          func.instance_name.span.literal,
+          parameters
+        ));
+      }
+
+      for instr in &body.instructions {
+        code.push_str(&self.transpile_ir_to_lua(instr, indent_level + 2));
+      }
+
+      code.push_str(format!("{}end\n", " ".repeat(indent_level)).as_str());
+
+      if func.instance_name.span.literal == "main" {
+        code.push_str(&format!("{}{}()\n", " ".repeat(indent_level), func.instance_name.span.literal));
+      }
+    }
 
     code
   }
@@ -388,7 +443,12 @@ impl TranspilerToLua {
         "nil".to_string()
       };
 
-      code.push_str(&format!("{}{} = {},\n", " ".repeat(indent_level + 2), member.name.span.literal, value));
+      code.push_str(&format!(
+        "{}{} = {},\n",
+        " ".repeat(indent_level + 2),
+        member.name.span.literal,
+        value
+      ));
     }
 
     code.push_str("}\n");

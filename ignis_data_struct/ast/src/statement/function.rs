@@ -5,6 +5,21 @@ use enums::data_type::DataType;
 use super::{Statement, variable::Variable};
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct GenericParameter {
+  pub name: Token,
+  pub constraints: Vec<DataType>,
+}
+
+impl GenericParameter {
+  pub fn new(
+    name: Token,
+    constraints: Vec<DataType>,
+  ) -> Self {
+    Self { name, constraints }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum FunctionDecorator {
   Extern(Token),
   Custom,
@@ -18,6 +33,7 @@ pub struct FunctionStatement {
   pub return_type: Option<DataType>,
   pub is_exported: bool,
   pub annotations: Vec<FunctionDecorator>,
+  pub generic_parameters: Vec<GenericParameter>,
 }
 
 impl FunctionStatement {
@@ -28,6 +44,7 @@ impl FunctionStatement {
     return_type: Option<DataType>,
     is_exported: bool,
     annotations: Vec<FunctionDecorator>,
+    generic_parameters: Vec<GenericParameter>,
   ) -> Self {
     Self {
       name,
@@ -36,6 +53,7 @@ impl FunctionStatement {
       return_type,
       is_exported,
       annotations,
+      generic_parameters,
     }
   }
 }

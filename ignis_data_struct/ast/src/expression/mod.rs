@@ -143,6 +143,7 @@ impl Expression {
           "callee": call.callee.to_json(),
           "arguments": call.arguments.iter().map(|x| x.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": call.return_type.to_string(),
+          "type_arguments": call.type_arguments.iter().map(|x| x.to_string()).collect::<Vec<String>>(),
         })
       },
       Expression::Array(array) => {

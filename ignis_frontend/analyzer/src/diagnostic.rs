@@ -1,5 +1,3 @@
-use std::fmt::format;
-
 use enums::data_type::DataType;
 use intermediate_representation::analyzer_value::AnalyzerValue;
 use token::token::Token;
@@ -63,6 +61,9 @@ pub enum AnalyzerDiagnosticError {
   UndefinedEnumMember(Token),
   EnumAssignmentError(Token, String),
   UndefinedImport(String),
+  PotentialTypeMismatch(DataType, DataType, Token),
+  IncorrectNumberOfGenericArguments(Token, usize, usize),
+  InvalidTypeArgument(DataType, Box<DataType>, Token),
 }
 
 #[derive(Debug, Clone)]
@@ -547,6 +548,39 @@ impl AnalyzerDiagnostic {
           "IA0056".to_string(),
         )
       },
+      AnalyzerDiagnosticError::PotentialTypeMismatch(left, right, op) => DiagnosticReport::new(
+        format!("Potential type mismatch between '{}' and '{}' in {}", left, right, op.span.literal),
+        Box::new(op.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Warning,
+        Some(Box::new(DiagnosticReport::new(
+          format!("You are attempting to perform, {} between a generic type '{}' and a non-generic type '{}'. This might lead to unexpected behavior or runtime errors if '{}' and '{}' are not compatible. Please verify that this operation is intentional and consider enforcing type compatibility or explicit type conversion where applicable.",
+            op.span.literal, left, right, left, right
+          ),
+          Box::new(op.clone()),
+          self.token_line.clone(),
+          DiagnosticLevel::Hint,
+          None,
+          "IA0057".to_string(),
+        ))),
+        "IA0057".to_string(),
+      ),
+    AnalyzerDiagnosticError::IncorrectNumberOfGenericArguments(name, generic_length, type_length) => DiagnosticReport::new(
+        format!("Incorrect number of generic arguments for '{}'. Expected {}, but got {}", name, generic_length, type_length),
+          Box::new(name.clone()),
+       self.token_line. clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0058".to_string(),
+      ),
+      AnalyzerDiagnosticError::InvalidTypeArgument(provided_type, generic_type, token) => DiagnosticReport::new(
+        format!("Invalid type argument '{}'. Expected '{}'", provided_type, generic_type),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0059".to_string(),
+              ),
     }
   }
 }

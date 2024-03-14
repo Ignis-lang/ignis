@@ -1,37 +1,41 @@
 pub mod parser_diagnostic;
 
+use std::any::type_name;
+
 use diagnostic_report::DiagnosticReport;
 use parser_diagnostic::{ParserDiagnosticError, ParserDiagnostic};
 use ast::{
   expression::{
-    array::Array, array_access::ArrayAccess, get::Get, method_call::MethodCall, new::NewExpression, set::Set,
-    this::This, Expression, binary::Binary, unary::Unary, literal::Literal, grouping::Grouping, logical::Logical,
-    assign::Assign, variable::VariableExpression, ternary, call::Call,
+    array::Array, array_access::ArrayAccess, assign::Assign, binary::Binary, call::Call, get::Get, grouping::Grouping,
+    literal::Literal, logical::Logical, method_call::MethodCall, new::NewExpression, set::Set, ternary, this::This,
+    unary::Unary, variable::VariableExpression, Expression,
   },
   statement::{
+    block::Block,
     break_statement::BreakStatement,
     class::{Class, ClassMetadata},
     continue_statement::Continue,
     enum_statement::Enum,
+    expression::ExpressionStatement,
     for_of::ForOf,
     for_statement::For,
-    function::FunctionDecorator,
+    function::{FunctionDecorator, FunctionStatement, GenericParameter},
+    if_statement::IfStatement,
     import::{Import, ImportSource, ImportSymbol},
     interface_statement::InterfaceStatement,
     method::{MethodMetadata, MethodStatement},
     property::PropertyStatement,
-    variable::VariableMetadata,
-    Statement,
-    variable::Variable,
-    expression::ExpressionStatement,
-    if_statement::IfStatement,
-    block::Block,
-    while_statement::WhileStatement,
-    function::FunctionStatement,
     return_statement::Return,
+    variable::{Variable, VariableMetadata},
+    while_statement::WhileStatement,
+    Statement,
   },
 };
-use enums::{data_type::DataType, token_type::TokenType, literal_value::LiteralValue};
+use enums::{
+  data_type::{self, DataType, GenericType},
+  literal_value::LiteralValue,
+  token_type::TokenType,
+};
 use token::token::Token;
 
 type ParserResult<T> = Result<T, Box<ParserDiagnostic>>;
@@ -261,6 +265,12 @@ impl Parser {
     let token = self.peek();
     let mut expression: Expression = self.primary()?;
 
+    let mut type_arguments: Vec<DataType> = Vec::new();
+
+    if self.check(TokenType::Less) {
+      self.resolve_generics(&mut type_arguments)?;
+    }
+
     loop {
       if self.match_token(&[TokenType::Dot]) {
         let name = self.consume(TokenType::Identifier)?;
@@ -269,7 +279,7 @@ impl Parser {
           let object = expression.clone();
           expression = Expression::Variable(VariableExpression::new(name.clone(), DataType::Pending));
 
-          let calle = self.finish_call(expression.clone())?;
+          let calle = self.finish_call(expression.clone(), type_arguments.clone())?;
 
           expression = Expression::MethodCall(MethodCall::new(
             Box::new(name),
@@ -290,7 +300,7 @@ impl Parser {
         break;
       }
 
-      expression = self.finish_call(expression)?;
+      expression = self.finish_call(expression, type_arguments.clone())?;
     }
 
     Ok(expression)
@@ -389,9 +399,57 @@ impl Parser {
     }
   }
 
+  fn resolve_generics(
+    &mut self,
+    type_arguments: &mut Vec<DataType>,
+  ) -> ParserResult<()> {
+    self.advance();
+
+    loop {
+      let token = self.peek();
+      if self.match_token(&[
+        TokenType::StringType,
+        TokenType::IntType,
+        TokenType::FloatType,
+        TokenType::Void,
+        TokenType::Unknown,
+      ]) {
+        if self.check(TokenType::LeftBrack) {
+          self.advance();
+
+          self.consume(TokenType::RightBrack)?;
+
+          type_arguments.push(DataType::Array(Box::new(DataType::from_token_type(&token.kind))));
+        } else {
+          type_arguments.push(DataType::from_token_type(&token.kind));
+        }
+      } else if self.match_token(&[TokenType::Identifier]) {
+        let token = self.consume(TokenType::Identifier)?;
+
+        if self.class_declarations.contains(&token.span.literal) {
+          type_arguments.push(DataType::ClassType(token.span.literal.clone()));
+        } else if self.enum_declarations.contains(&token.span.literal) {
+          type_arguments.push(DataType::Enum(token.span.literal.clone()));
+        } else if self.import_declarations.contains(&token.span.literal) {
+          type_arguments.push(DataType::PendingImport(token.span.literal.clone()));
+        }
+      }
+
+      if !self.match_token(&[TokenType::Comma]) {
+        break;
+      }
+
+      self.advance();
+    }
+    self.consume(TokenType::Greater)?;
+
+    Ok(())
+  }
+
   fn finish_call(
     &mut self,
     callee: Expression,
+    type_arguments: Vec<DataType>,
   ) -> ParserResult<Expression> {
     let mut arguments: Vec<Expression> = Vec::new();
 
@@ -420,6 +478,7 @@ impl Parser {
       Box::new(callee),
       token,
       arguments,
+      type_arguments,
       DataType::Pending,
     )))
   }
@@ -676,6 +735,152 @@ impl Parser {
   ) -> ParserResult<Statement> {
     let name: Token = self.consume(TokenType::Identifier)?;
 
+    let mut generic_parameters: Vec<GenericParameter> = Vec::new();
+
+    if self.check(TokenType::Less) {
+      self.advance();
+
+      loop {
+        let name = self.consume(TokenType::Identifier)?;
+        let mut constraints: Vec<DataType> = Vec::new();
+
+        if self.match_token(&[TokenType::As]) {
+          self.consume(TokenType::As)?;
+
+          loop {
+            constraints.push(DataType::from_token_type(&self.peek().kind));
+
+            if !self.match_token(&[TokenType::Comma]) {
+              break;
+            }
+          }
+        }
+
+        generic_parameters.push(GenericParameter::new(name, constraints));
+
+        if !self.match_token(&[TokenType::Comma]) {
+          break;
+        }
+      }
+
+      self.consume(TokenType::Greater)?;
+    }
+
+    let parameters = self.parameters(&name, &generic_parameters)?;
+    let return_type = self.return_type(&generic_parameters)?;
+
+    let mut body: Vec<Statement> = Vec::new();
+
+    if !self.match_token(&[TokenType::SemiColon]) {
+      self.consume(TokenType::LeftBrace)?;
+
+      body.push(self.block()?);
+    }
+
+    Ok(Statement::FunctionStatement(FunctionStatement::new(
+      name,
+      parameters,
+      body,
+      return_type,
+      is_public,
+      if decorator.is_some() {
+        vec![decorator.unwrap()]
+      } else {
+        vec![]
+      },
+      generic_parameters,
+    )))
+  }
+
+  fn block(&mut self) -> ParserResult<Statement> {
+    let mut statements: Vec<Statement> = Vec::new();
+
+    while !self.check(TokenType::RightBrace) && !self.is_at_end() {
+      statements.push(self.declaration()?);
+    }
+
+    self.consume(TokenType::RightBrace)?;
+
+    Ok(Statement::Block(Block::new(statements)))
+  }
+
+  fn enum_member(&mut self) -> ParserResult<Statement> {
+    let name: Token = self.consume(TokenType::Identifier)?;
+
+    let mut value: Option<Box<Expression>> = None;
+
+    if self.match_token(&[TokenType::Equal]) {
+      value = Some(Box::new(self.expression()?));
+    }
+
+    Ok(Statement::Variable(Variable::new(
+      Box::new(name),
+      value,
+      DataType::Pending,
+      VariableMetadata::new(false, false, true, true, false, false, true),
+    )))
+  }
+
+  fn return_type(
+    &mut self,
+    generic_parameters: &[GenericParameter],
+  ) -> ParserResult<Option<DataType>> {
+    self.consume(TokenType::Colon)?;
+
+    if self.match_token(&[TokenType::Void]) {
+      return Ok(Some(DataType::Void));
+    }
+
+    if self.match_token(&[
+      TokenType::IntType,
+      TokenType::FloatType,
+      TokenType::StringType,
+      TokenType::BooleanType,
+      TokenType::CharType,
+      TokenType::Identifier,
+    ]) {
+      let token: Token = self.previous();
+      let mut data_type: DataType = DataType::from_token_type(&token.kind);
+
+      if data_type == DataType::Pending {
+        if self.class_declarations.contains(&token.span.literal) {
+          data_type = DataType::ClassType(token.span.literal.clone());
+        } else if self.enum_declarations.contains(&token.span.literal) {
+          data_type = DataType::Enum(token.span.literal.clone());
+        } else if self.import_declarations.contains(&token.span.literal) {
+          data_type = DataType::PendingImport(token.span.literal.clone());
+        } else if let Some(g) = generic_parameters
+          .iter()
+          .find(|g| g.name.span.literal == token.span.literal)
+        {
+          data_type = DataType::GenericType(GenericType::new(
+            Box::new(DataType::Variable(g.name.span.literal.clone())),
+            Vec::new(),
+          ));
+        }
+      }
+
+      if self.check(TokenType::LeftBrack) {
+        self.consume(TokenType::RightBrack)?;
+        return Ok(Some(DataType::Array(Box::new(data_type))));
+      }
+
+      return Ok(Some(data_type));
+    }
+
+    let token = &self.peek();
+
+    Err(Box::new(ParserDiagnostic::new(
+      ParserDiagnosticError::ExpectedReturnTypeAfterFunction(token.clone()),
+      self.find_token_line(&token.span.line),
+    )))
+  }
+
+  fn parameters(
+    &mut self,
+    name: &Token,
+    generic_parameters: &[GenericParameter],
+  ) -> ParserResult<Vec<Variable>> {
     self.consume(TokenType::LeftParen)?;
 
     let mut parameters: Vec<Variable> = Vec::new();
@@ -710,6 +915,14 @@ impl Parser {
             data_type = DataType::Enum(token.span.literal.clone());
           } else if self.import_declarations.contains(&token.span.literal) {
             data_type = DataType::PendingImport(token.span.literal.clone());
+          } else if let Some(g) = generic_parameters
+            .iter()
+            .find(|g| g.name.span.literal == token.span.literal)
+          {
+            data_type = DataType::GenericType(GenericType::new(
+              Box::new(DataType::Variable(g.name.span.literal.clone())),
+              Vec::new(),
+            ));
           }
         }
 
@@ -735,83 +948,7 @@ impl Parser {
 
     self.consume(TokenType::RightParen)?;
 
-    self.consume(TokenType::Colon)?;
-
-    let return_type: Option<DataType> = if self.match_token(&[
-      TokenType::Void,
-      TokenType::IntType,
-      TokenType::FloatType,
-      TokenType::StringType,
-      TokenType::BooleanType,
-      TokenType::CharType,
-    ]) {
-      let data_type: DataType = DataType::from_token_type(&self.previous().kind);
-
-      if self.check(TokenType::LeftBrack) {
-        self.consume(TokenType::RightBrack)?;
-
-        Some(DataType::Array(Box::new(data_type)))
-      } else {
-        Some(data_type)
-      }
-    } else {
-      let token = &self.peek();
-
-      return Err(Box::new(ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedReturnTypeAfterFunction(token.clone()),
-        self.find_token_line(&token.span.line),
-      )));
-    };
-
-    let mut body: Vec<Statement> = Vec::new();
-
-    if !self.match_token(&[TokenType::SemiColon]) {
-      self.consume(TokenType::LeftBrace)?;
-
-      body.push(self.block()?);
-    }
-
-    Ok(Statement::FunctionStatement(FunctionStatement::new(
-      name,
-      parameters,
-      body,
-      return_type,
-      is_public,
-      if decorator.is_some() {
-        vec![decorator.unwrap()]
-      } else {
-        vec![]
-      },
-    )))
-  }
-
-  fn block(&mut self) -> ParserResult<Statement> {
-    let mut statements: Vec<Statement> = Vec::new();
-
-    while !self.check(TokenType::RightBrace) && !self.is_at_end() {
-      statements.push(self.declaration()?);
-    }
-
-    self.consume(TokenType::RightBrace)?;
-
-    Ok(Statement::Block(Block::new(statements)))
-  }
-
-  fn enum_member(&mut self) -> ParserResult<Statement> {
-    let name: Token = self.consume(TokenType::Identifier)?;
-
-    let mut value: Option<Box<Expression>> = None;
-
-    if self.match_token(&[TokenType::Equal]) {
-      value = Some(Box::new(self.expression()?));
-    }
-
-    Ok(Statement::Variable(Variable::new(
-      Box::new(name),
-      value,
-      DataType::Pending,
-      VariableMetadata::new(false, false, true, true, false, false, true),
-    )))
+    Ok(parameters)
   }
 
   fn variable_declaration(&mut self) -> ParserResult<Statement> {
@@ -1148,6 +1285,10 @@ impl Parser {
       },
       TokenType::QuestionMark => ParserDiagnostic::new(
         ParserDiagnosticError::ExpectedToken(TokenType::QuestionMark, token_previous.clone()),
+        token_line,
+      ),
+      TokenType::Greater => ParserDiagnostic::new(
+        ParserDiagnosticError::ExpectedToken(TokenType::Greater, token_previous.clone()),
         token_line,
       ),
       TokenType::LeftParen | TokenType::RightParen => {

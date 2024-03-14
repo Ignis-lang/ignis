@@ -6,6 +6,7 @@ pub mod call;
 pub mod class;
 pub mod class_instance;
 pub mod function;
+pub mod function_instance;
 pub mod import;
 pub mod instruction_type;
 pub mod ir_array;
@@ -29,6 +30,7 @@ pub mod ternary;
 pub mod unary;
 pub mod variable;
 
+use function_instance::IRFunctionInstance;
 use ir_array_access::IRArrayAccess;
 use ir_enum::IREnum;
 use ir_for::IRFor;
@@ -55,6 +57,7 @@ pub enum IRInstruction {
   If(IRIf),
   While(IRWhile),
   Function(IRFunction),
+  FunctionInstance(IRFunctionInstance),
   Call(IRCall),
   Return(IRReturn),
   Assign(IRAssign),
@@ -111,6 +114,7 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::Method(method) => method.to_json(),
       IRInstruction::This(this) => this.to_json(),
       IRInstruction::Enum(e) => e.to_json(),
+      IRInstruction::FunctionInstance(f) => f.to_json(),
     }
   }
 }

@@ -32,6 +32,20 @@ impl Diagnostic {
   ) {
     self.print_header(diagnostic);
     self.print_body(diagnostic);
+
+    if let Some(diagnostic_report) = &diagnostic.hint {
+      self.print_hint(diagnostic_report);
+    }
+
+    println!();
+  }
+
+  fn print_hint(
+    &self,
+    diagnostic: &DiagnosticReport,
+  ) {
+    self.print_header(diagnostic);
+    self.print_body(diagnostic);
     println!();
   }
 
@@ -82,19 +96,26 @@ impl Diagnostic {
       diagnostic.token.span.line.to_string().bold(),
       diagnostic.token.span.column.to_string().bold(),
     );
-    println!(
-      "{:3}{:3}{}",
-      (diagnostic.token.span.line - 1).to_string().blue().bold(),
-      pipe,
-      lines[diagnostic.token.span.line - 2].dimmed()
-    );
-    println!("{:3}{:3}", "", pipe);
-    println!(
-      "{:3}{:3}{}",
-      diagnostic.token.span.line.to_string().blue().bold(),
-      pipe,
-      lines[diagnostic.token.span.line - 1].bold()
-    );
+
+    if diagnostic.token.span.line > 2 {
+      println!("{:3}{:3}", "", pipe);
+      println!(
+        "{:3}{:3}{}",
+        (diagnostic.token.span.line - 1).to_string().blue().bold(),
+        pipe,
+        lines[diagnostic.token.span.line - 2].dimmed()
+      );
+    }
+
+    if diagnostic.token.span.line > 1 {
+      println!("{:3}{:3}", "", pipe);
+      println!(
+        "{:3}{:3}{}",
+        diagnostic.token.span.line.to_string().blue().bold(),
+        pipe,
+        lines[diagnostic.token.span.line - 1].dimmed()
+      );
+    }
 
     if diagnostic.token.span.line < lines.len() {
       println!("{:3}{:3}", "", pipe);

@@ -3,6 +3,21 @@ use std::fmt::Display;
 use super::token_type::TokenType;
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct GenericType {
+  pub base: Box<DataType>,
+  pub parameters: Vec<DataType>,
+}
+
+impl GenericType {
+  pub fn new(
+    base: Box<DataType>,
+    parameters: Vec<DataType>,
+  ) -> Self {
+    Self { base, parameters }
+  }
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum DataType {
   String,
   Int,
@@ -20,10 +35,7 @@ pub enum DataType {
   Enum(String),
   PendingImport(String),
   // TODO: Type non-primitive
-  GenericType {
-    base: Box<DataType>,
-    parameters: Vec<DataType>,
-  },
+  GenericType(GenericType),
   UnionType(Vec<DataType>),
   IntersectionType(Vec<DataType>),
   TupleType(Vec<DataType>),
@@ -52,9 +64,14 @@ impl Display for DataType {
         write!(f, "({}) -> {}", params.join(", "), ret)
       },
       DataType::ClassType(name) => write!(f, "{}", name),
-      DataType::GenericType { base, parameters } => {
-        let params: Vec<String> = parameters.iter().map(|p| p.to_string()).collect();
-        write!(f, "{}<{}>", base, params.join(", "))
+      DataType::GenericType(generic) => {
+        let params: Vec<String> = generic.parameters.iter().map(|p| p.to_string()).collect();
+
+        if params.is_empty() {
+          write!(f, "{}", generic.base)
+        } else {
+          write!(f, "{}<{}>", generic.base, params.join(", "))
+        }
       },
       DataType::UnionType(types) => {
         let type_strings: Vec<String> = types.iter().map(|t| t.to_string()).collect();
@@ -113,7 +130,7 @@ impl DataType {
       DataType::ClassType(_name) => todo!(),
       DataType::Array(array) => kind.push_str(array.to_c_type(true).to_string().as_str()),
       DataType::Callable(_, _) => todo!(),
-      DataType::GenericType { base, parameters } => todo!(),
+      DataType::GenericType(_) => todo!(),
       DataType::UnionType(_) => todo!(),
       DataType::IntersectionType(_) => todo!(),
       DataType::TupleType(_) => todo!(),

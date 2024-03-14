@@ -63,6 +63,7 @@ pub struct IRFunction {
   pub return_type: DataType,
   pub body: Option<Box<IRBlock>>,
   pub metadata: IRFunctionMetadata,
+  pub generic_parameters: Vec<DataType>,
 }
 
 impl IRFunction {
@@ -72,6 +73,7 @@ impl IRFunction {
     return_type: DataType,
     body: Option<Box<IRBlock>>,
     metadata: IRFunctionMetadata,
+    generic_parameters: Vec<DataType>,
   ) -> Self {
     Self {
       name,
@@ -79,6 +81,7 @@ impl IRFunction {
       return_type,
       body,
       metadata,
+      generic_parameters,
     }
   }
 }

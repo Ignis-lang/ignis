@@ -6,9 +6,11 @@ use std::fmt::{Display, Formatter};
 
 use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
 use diagnostic_report::DiagnosticReport;
+use enums::data_type::GenericType;
 use intermediate_representation::{
   analyzer_value::AnalyzerValue,
   IRInstruction,
+  function_instance::IRFunctionInstance,
   binary::IRBinary,
   logical::IRLogical,
   literal::IRLiteral,
@@ -42,6 +44,7 @@ use intermediate_representation::{
 
 use lexer::Lexer;
 use token::token::Token;
+use token::text_span::TextSpan;
 
 use ast::{
   visitor::Visitor,
@@ -84,8 +87,8 @@ enum AnalyzerContext {
   Method,
   Class,
   Loop,
-  Switch,
-  Match,
+  _Switch,
+  _Match,
 }
 
 impl Display for AnalyzerContext {
@@ -99,8 +102,8 @@ impl Display for AnalyzerContext {
       AnalyzerContext::Method => write!(f, "Method"),
       AnalyzerContext::Class => write!(f, "Class"),
       AnalyzerContext::Loop => write!(f, "Loop"),
-      AnalyzerContext::Switch => write!(f, "Switch"),
-      AnalyzerContext::Match => write!(f, "Match"),
+      AnalyzerContext::_Switch => write!(f, "Switch"),
+      AnalyzerContext::_Match => write!(f, "Match"),
     }
   }
 }
@@ -146,9 +149,38 @@ impl Visitor<AnalyzerResult> for Analyzer {
       IRInstructionType::from_token_kind(&operator.kind)
     };
 
+    match (&left_type, &right_type) {
+      (DataType::GenericType(left_generic), DataType::GenericType(right_generic)) => {
+        if !left_generic.clone().parameters.contains(&right_type)
+          && !right_generic.clone().parameters.contains(&left_type)
+          && left_type != right_type
+        {
+          self.diagnostics.push(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::PotentialTypeMismatch(left_type.clone(), right_type.clone(), operator.clone()),
+            self.find_token_line(&operator.span.line),
+          )))
+        }
+      },
+      (DataType::GenericType(left_generic), _) => {
+        if !left_generic.clone().parameters.contains(&right_type) {
+          self.diagnostics.push(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::PotentialTypeMismatch(left_type.clone(), right_type.clone(), operator.clone()),
+            self.find_token_line(&operator.span.line),
+          )))
+        }
+      },
+      (_, DataType::GenericType(right_generic)) => {
+        if !right_generic.clone().parameters.contains(&left_type) {
+          self.diagnostics.push(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::PotentialTypeMismatch(right_type.clone(), left_type.clone(), operator.clone()),
+            self.find_token_line(&operator.span.line),
+          )))
+        }
+      },
+      _ => (),
+    };
+
     let (result, data_type) = self.are_types_compatible(&left, &right, &instruction_type);
-    let left_type = self.extract_data_type(&left);
-    let right_type = self.extract_data_type(&right);
 
     if !result {
       return Err(Box::new(AnalyzerDiagnostic::new(
@@ -429,20 +461,28 @@ impl Visitor<AnalyzerResult> for Analyzer {
   ) -> AnalyzerResult {
     let calle = self.analyzer(&expression.callee)?;
 
-    let parameters: Vec<IRInstruction>;
-    let function_name: Token;
-    let return_type: DataType;
+    let mut parameters: Vec<IRInstruction> = vec![];
+    let mut function_name: Token;
+    let mut return_type: DataType;
+    let mut generic_parameter: Vec<DataType> = Vec::new();
+    let mut metadata = IRFunctionMetadata::new(false, false, false, false, false, false, false, false);
+    let mut body: Option<Box<IRBlock>> = None;
 
     match calle {
       IRInstruction::Function(f) => {
-        parameters = f.parameters.clone();
+        parameters.clone_from(&f.parameters);
         function_name = f.name.clone();
         return_type = f.return_type.clone();
+        generic_parameter.clone_from(&f.generic_parameters);
+        metadata = f.metadata.clone();
+        body.clone_from(&f.body);
       },
       IRInstruction::Method(m) => {
-        parameters = m.parameters.clone();
+        parameters.clone_from(&m.parameters);
         function_name = m.name.clone();
         return_type = m.return_type.clone();
+        metadata = m.metadata.clone();
+        body.clone_from(&m.body);
       },
       _ => {
         return Err(Box::new(AnalyzerDiagnostic::new(
@@ -457,6 +497,69 @@ impl Visitor<AnalyzerResult> for Analyzer {
         AnalyzerDiagnosticError::InvalidNumberOfArguments(parameters.len(), expression.arguments.len(), function_name),
         self.find_token_line(&expression.paren.span.line),
       )));
+    }
+
+    if !generic_parameter.is_empty() {
+      if expression.type_arguments.len() != generic_parameter.len() {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::IncorrectNumberOfGenericArguments(
+            expression.paren.clone(),
+            generic_parameter.len(),
+            expression.type_arguments.len(),
+          ),
+          self.find_token_line(&expression.paren.span.line),
+        )));
+      }
+
+      let instance_name = Token::new(
+        TokenType::Identifier,
+        TextSpan::new(
+          function_name.span.start,
+          function_name.span.end,
+          function_name.span.line,
+          format!(
+            "{}_{}",
+            function_name.span.literal,
+            expression
+              .type_arguments
+              .iter()
+              .map(|p| if let DataType::GenericType(g) = p {
+                g.base.to_string()
+              } else {
+                p.to_string()
+              })
+              .collect::<Vec<String>>()
+              .join("_")
+          ),
+          function_name.span.column,
+          function_name.span.file.clone(),
+        ),
+      );
+
+      let func: Option<IRFunctionInstance> = self.find_function_instance(&instance_name.span.literal);
+
+      if let Some(func) = func {
+        return_type = func.return_type.clone();
+        parameters.clone_from(&func.parameters);
+        body.clone_from(&func.body);
+        function_name = instance_name.clone();
+      } else {
+        let func: IRFunctionInstance = self.resolve_generic_params(
+          expression,
+          &mut parameters,
+          &function_name,
+          &instance_name,
+          &return_type,
+          &mut generic_parameter,
+          &metadata,
+          &body,
+        )?;
+
+        return_type = func.return_type.clone();
+        parameters.clone_from(&func.parameters);
+        body.clone_from(&func.body);
+        function_name = instance_name.clone();
+      }
     }
 
     let mut arguments = Vec::<IRInstruction>::new();
@@ -1124,6 +1227,17 @@ impl Visitor<AnalyzerResult> for Analyzer {
       statement.return_type.clone().unwrap_or(DataType::Void),
       None,
       IRFunctionMetadata::new(false, statement.is_exported, false, is_extern, false, false, false, false),
+      statement
+        .generic_parameters
+        .clone()
+        .into_iter()
+        .map(|g| {
+          DataType::GenericType(GenericType::new(
+            Box::new(DataType::Variable(g.name.span.literal.clone())),
+            Vec::new(),
+          ))
+        })
+        .collect(),
     );
 
     self.current_function = Some(CalleableDeclaration::Function(current_function.clone()));
@@ -1391,7 +1505,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let is_loop = self
       .context
       .iter()
-      .find(|context| matches!(context, AnalyzerContext::Loop | AnalyzerContext::Switch));
+      .find(|context| matches!(context, AnalyzerContext::Loop | AnalyzerContext::_Switch));
 
     if is_loop.is_none() {
       return Err(Box::new(AnalyzerDiagnostic::new(
@@ -1574,7 +1688,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
   fn visit_interface_statement(
     &mut self,
-    statement: &InterfaceStatement,
+    _statement: &InterfaceStatement,
   ) -> AnalyzerResult {
     todo!()
   }
@@ -1805,7 +1919,7 @@ impl Analyzer {
 
     let source = String::from_utf8(file).unwrap();
     let mut lexer = Lexer::new(&source, lib.clone() + ".ign");
-    let _ = lexer.scan_tokens();
+    lexer.scan_tokens();
 
     let mut parser = Parser::new(lexer.tokens);
     let statements = parser.parse().0;
@@ -1820,11 +1934,8 @@ impl Analyzer {
     for ir in analyzer.irs.get(&lib).unwrap() {
       current_ir.push(ir.clone());
 
-      match ir {
-        IRInstruction::Function(f) => {
-          block_stack.insert(f.name.span.literal.clone(), true);
-        },
-        _ => {},
+      if let IRInstruction::Function(f) = ir {
+        block_stack.insert(f.name.span.literal.clone(), true);
       }
     }
   }
@@ -1840,7 +1951,7 @@ impl Analyzer {
         let mut lexer: Lexer<'_> = Lexer::new(&source, statement.module_path.span.literal.clone() + ".ign");
         lexer.scan_tokens();
 
-        analyzer.tokens = lexer.tokens.clone();
+        analyzer.tokens.clone_from(&lexer.tokens);
 
         let mut parser: Parser = Parser::new(lexer.tokens);
         let statements = parser.parse();
@@ -1902,6 +2013,7 @@ impl Analyzer {
                   f.return_type.clone(),
                   f.body.clone(),
                   metadata,
+                  f.generic_parameters.clone(),
                 ))
                 .clone(),
               );
@@ -1915,6 +2027,7 @@ impl Analyzer {
                   f.return_type.clone(),
                   f.body.clone(),
                   metadata,
+                  f.generic_parameters.clone(),
                 ))
                 .clone(),
               );
@@ -1992,7 +2105,7 @@ impl Analyzer {
     current_block.insert(name.to_string(), true);
   }
 
-  fn define_parameter(
+  fn _define_parameter(
     &mut self,
     name: &str,
   ) {
@@ -2122,6 +2235,11 @@ impl Analyzer {
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
       (DataType::Unknown, DataType::Unknown) => (true, DataType::Unknown),
+      (DataType::GenericType(left_generic), DataType::GenericType(right_generic)) if left_generic == right_generic => {
+        (true, DataType::GenericType(left_generic.clone()))
+      },
+      (DataType::GenericType(_), _) => (true, DataType::Unknown),
+      (_, DataType::GenericType(_)) => (true, DataType::Unknown),
       _ => (false, DataType::Unknown),
     }
   }
@@ -2442,6 +2560,7 @@ impl Analyzer {
           DataType::String,
           None,
           IRFunctionMetadata::new(false, true, true, true, false, true, false, true),
+          vec![],
         )));
 
         self.irs.insert(self.current_file.clone(), current_ir);
@@ -2486,6 +2605,7 @@ impl Analyzer {
           DataType::String,
           None,
           IRFunctionMetadata::new(false, true, true, true, false, true, false, true),
+          vec![],
         )));
 
         self.irs.insert(self.current_file.clone(), current_ir);
@@ -2531,6 +2651,7 @@ impl Analyzer {
           DataType::String,
           None,
           IRFunctionMetadata::new(false, true, true, true, false, true, false, true),
+          vec![],
         )));
 
         self.irs.insert(self.current_file.clone(), current_ir);
@@ -2561,14 +2682,14 @@ impl Analyzer {
 
   fn array_methods(
     &mut self,
-    expression: &MethodCall,
+    _expression: &MethodCall,
   ) -> AnalyzerResult {
     todo!("array")
   }
 
   fn string_methods(
     &mut self,
-    expression: &MethodCall,
+    _expression: &MethodCall,
   ) -> AnalyzerResult {
     todo!("string")
   }
@@ -2693,9 +2814,9 @@ impl Analyzer {
     import: &DataType,
   ) -> AnalyzerResult {
     if let DataType::PendingImport(name) = import {
-      if let Some(class) = self.find_class_in_ir(&name) {
+      if let Some(class) = self.find_class_in_ir(name) {
         Ok(IRInstruction::Class(class))
-      } else if let Some(enum_) = self.find_enum_in_ir(&name) {
+      } else if let Some(enum_) = self.find_enum_in_ir(name) {
         Ok(IRInstruction::Enum(enum_))
       } else {
         Err(Box::new(AnalyzerDiagnostic::new(
@@ -2709,5 +2830,108 @@ impl Analyzer {
         self.find_token_line(&0),
       )))
     }
+  }
+
+  fn find_function_instance(
+    &self,
+    instance_name: &String,
+  ) -> Option<IRFunctionInstance> {
+    let name_file = &self.current_file;
+    let function_ir = self.irs.get(name_file).unwrap();
+
+    if let Some(f) = function_ir
+      .iter()
+      .find(|ir| matches!(ir, IRInstruction::FunctionInstance(f) if f.instance_name.span.literal == *instance_name))
+    {
+      if let IRInstruction::FunctionInstance(f) = f {
+        return Some(f.clone());
+      }
+
+      return None;
+    }
+
+    None
+  }
+
+  fn resolve_generic_params(
+    &mut self,
+    expression: &Call,
+    parameters: &mut [IRInstruction],
+    function_name: &Token,
+    instance_name: &Token,
+    return_type: &DataType,
+    generic_parameter: &mut [DataType],
+    metadata: &IRFunctionMetadata,
+    body: &Option<Box<IRBlock>>,
+  ) -> Result<IRFunctionInstance, Box<AnalyzerDiagnostic>> {
+    let mut return_type: DataType = return_type.clone();
+
+    for (i, generic) in generic_parameter.to_owned().clone().iter().enumerate() {
+      if let DataType::GenericType(g) = generic {
+        let provided_type = &expression.type_arguments[i];
+
+        let is_valid_type = g.parameters.iter().any(|allowed_type| allowed_type == provided_type);
+
+        if g.parameters.is_empty() {
+          generic_parameter[i] = provided_type.clone();
+        } else if !is_valid_type {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::InvalidTypeArgument(
+              provided_type.clone(),
+              g.base.clone(),
+              expression.paren.clone(),
+            ),
+            self.find_token_line(&expression.paren.span.line),
+          )));
+        }
+
+        parameters.iter_mut().for_each(|p| {
+          if let IRInstruction::Variable(v) = p {
+            if let DataType::GenericType(ref x) = v.data_type {
+              if x.base == g.base {
+                v.data_type = provided_type.clone();
+              }
+            };
+          }
+        });
+      }
+    }
+
+    if let DataType::GenericType(x) = &return_type {
+      if let Some(lv) = expression.type_arguments.last() {
+        if x.parameters.contains(lv) || x.parameters.is_empty() {
+          return_type = generic_parameter.last().unwrap().clone();
+        } else {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::InvalidTypeArgument(lv.clone(), x.base.clone(), expression.paren.clone()),
+            self.find_token_line(&expression.paren.span.line),
+          )));
+        }
+      }
+    }
+
+    let function_instance = IRFunctionInstance::new(
+      Box::new(function_name.clone()),
+      Box::new(instance_name.clone()),
+      generic_parameter.to_owned().clone(),
+      parameters.to_owned().clone(),
+      return_type.clone(),
+      body.clone(),
+      metadata.clone(),
+    );
+
+    let instruction = IRInstruction::FunctionInstance(function_instance.clone());
+    let name_file = &self.current_file;
+
+    self.irs.get_mut(name_file).unwrap().push(instruction.clone());
+
+    self.scopes_variables.push(IRVariable::new(
+      instance_name.clone(),
+      return_type.clone(),
+      None,
+      IRVariableMetadata::new(false, false, false, false, false, false, false, false, false, false, None),
+    ));
+
+    Ok(function_instance)
   }
 }
