@@ -4,8 +4,9 @@ use colored::*;
 use code_result::CodeResult;
 use enums::data_type::DataType;
 use intermediate_representation::{
-  IRInstruction, function::IRFunction, call::IRCall, variable::IRVariable, instruction_type::IRInstructionType,
-  analyzer_value::AnalyzerValue, ir_get::IRGet, ir_method_call::IRMethodCall, class::IRClass, ir_this::IRThis,
+  analyzer_value::AnalyzerValue, call::IRCall, class::IRClass, function::IRFunction,
+  instruction_type::IRInstructionType, ir_enum::IREnum, ir_get::IRGet, ir_method_call::IRMethodCall, ir_this::IRThis,
+  variable::IRVariable, IRInstruction,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -338,15 +339,59 @@ impl TranspilerToLua {
 
         self.context.pop();
       },
-      IRInstruction::MethodCall(call) => match call.metadata.object_data_type {
-        DataType::Int | DataType::Float => code.push_str(&self.transpile_number_methods(call, indent_level)),
-        DataType::Boolean => code.push_str(&self.transpile_boolean_methods(call, indent_level)),
-        _ => code.push_str(&self.transpile_method_call(call, indent_level)),
-      },
+      IRInstruction::MethodCall(call) => code.push_str(
+        match call.metadata.object_data_type {
+          DataType::Int | DataType::Float => self.transpile_number_methods(call, indent_level),
+          DataType::Boolean => self.transpile_boolean_methods(call, indent_level),
+          DataType::Enum(_) => self.transpile_enum_methods_call_to_lua(call, indent_level),
+          _ => self.transpile_method_call(call, indent_level),
+        }
+        .as_str(),
+      ),
       IRInstruction::Method(_) => todo!(),
       IRInstruction::This(this) => code.push_str(&self.transpile_this_to_lua(this, indent_level)),
-      IRInstruction::Enum(_) => todo!(),
+      IRInstruction::Enum(enum_) => code.push_str(&self.transpile_enum_to_lua(enum_, indent_level)),
     };
+
+    code
+  }
+
+  fn transpile_enum_methods_call_to_lua(
+    &mut self,
+    call: &IRMethodCall,
+    indent_level: usize,
+  ) -> String {
+    let mut code = String::new();
+
+    match call.name.span.literal.as_str() {
+      "toString" => {
+        code.push_str(format!("tostring({})", &self.transpile_ir_to_lua(&call.object, indent_level)).as_str());
+      },
+      _ => todo!(),
+    }
+    code
+  }
+
+  fn transpile_enum_to_lua(
+    &mut self,
+    _enum: &IREnum,
+    indent_level: usize,
+  ) -> String {
+    let mut code = String::new();
+
+    code.push_str(&format!("local {}{} = {{\n", " ".repeat(indent_level), _enum.name.span.literal));
+
+    for member in &_enum.members {
+      let value = if let Some(value) = &member.value {
+        self.transpile_ir_to_lua(value, 0)
+      } else {
+        "nil".to_string()
+      };
+
+      code.push_str(&format!("{}{} = {},\n", " ".repeat(indent_level + 2), member.name, value,));
+    }
+
+    code.push_str("}\n");
 
     code
   }
@@ -387,6 +432,9 @@ impl TranspilerToLua {
     match *get.object.clone() {
       IRInstruction::ClassInstance(inst) => {
         code.push_str(&format!("{}{}", " ".repeat(indent_level), inst.var_name.span.literal));
+      },
+      IRInstruction::Enum(_enum) => {
+        code.push_str(&format!("{}{}", " ".repeat(indent_level), _enum.name.span.literal));
       },
       _ => todo!(),
     };
@@ -702,7 +750,7 @@ impl TranspilerToLua {
     };
 
     if variable.metadata.is_parameter {
-      return format!("{}{}", " ".repeat(indent_level), variable.name);
+      return format!("{}{}", " ".repeat(indent_level), variable.name.span.literal);
     }
 
     if variable.metadata.is_declaration {
@@ -714,7 +762,7 @@ impl TranspilerToLua {
             return format!(
               "{}{} = {}",
               " ".repeat(indent_level),
-              variable.name,
+              variable.name.span.literal,
               if value == 0 { 1 } else { value }
             );
           },
@@ -724,9 +772,14 @@ impl TranspilerToLua {
         }
       }
 
-      format!("{}local {} = {}\n", " ".repeat(indent_level), variable.name, var_value)
+      format!(
+        "{}local {} = {}\n",
+        " ".repeat(indent_level),
+        variable.name.span.literal,
+        var_value
+      )
     } else {
-      variable.name.to_string()
+      variable.name.span.literal.to_string()
     }
   }
 

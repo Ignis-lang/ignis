@@ -6,7 +6,6 @@ use std::fmt::{Display, Formatter};
 
 use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
 use diagnostic_report::DiagnosticReport;
-use enums::data_type;
 use intermediate_representation::{
   analyzer_value::AnalyzerValue,
   IRInstruction,
@@ -276,11 +275,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
           self.find_token_line(&variable.name.span.line),
         )));
       }
-
       let mut variable = match self
         .scopes_variables
         .iter()
-        .find(|v| v.name == variable.name.span.literal)
+        .find(|v| v.name.span.literal == variable.name.span.literal)
       {
         Some(v) => v.clone(),
         None => {
@@ -335,7 +333,11 @@ impl Visitor<AnalyzerResult> for Analyzer {
       .find(|(name, is_declared)| name.as_str() == expression.name.span.literal.as_str() && **is_declared);
 
     if let Some((name, _)) = env {
-      let variable = self.scopes_variables.iter().find(|v| v.name == *name).unwrap();
+      let variable = self
+        .scopes_variables
+        .iter()
+        .find(|v| v.name.span.literal == *name)
+        .unwrap();
 
       if variable.metadata.is_mutable {
         let instruction = IRInstruction::Assign(IRAssign::new(expression.name.span.literal.clone(), Box::new(value)));
@@ -483,15 +485,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Class(c) => DataType::ClassType(c.name.clone()),
         IRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.clone()),
         IRInstruction::Array(a) => a.data_type.clone(),
-        _ => DataType::Unwnown,
+        _ => DataType::Unknown,
       };
 
       let data_type = self.extract_data_type(&parameters[i]);
 
       if kind != data_type
-        && kind != DataType::Unwnown
-        && data_type != DataType::Array(Box::new(DataType::Unwnown))
-        && data_type != DataType::Unwnown
+        && kind != DataType::Unknown
+        && data_type != DataType::Array(Box::new(DataType::Unknown))
+        && data_type != DataType::Unknown
       {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::ArgumentTypeMismatch(data_type.clone(), kind, expression.paren.clone()),
@@ -500,7 +502,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       }
 
       if let IRInstruction::Variable(v) = &arg_type {
-        if data_type != DataType::Unwnown {
+        if data_type != DataType::Unknown {
           match (v.metadata.is_mutable, parameter.metadata.is_mutable) {
             (true, true) | (false, false) => (),
             _ => {
@@ -540,7 +542,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       element_types.push(elem_type);
     }
 
-    let first_type = element_types.first().unwrap_or(&DataType::Unwnown);
+    let first_type = element_types.first().unwrap_or(&DataType::Unknown);
 
     if !element_types.iter().all(|t| t == first_type) {
       return Err(Box::new(AnalyzerDiagnostic::new(
@@ -626,64 +628,14 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let object_data_type = object.data_type.clone();
 
-    let class = self.find_class_in_ir(match &object.data_type {
-      DataType::ClassType(name) => name,
-      DataType::Array(_) => return self.array_property(expression),
-      _ => {
-        return Err(Box::new(AnalyzerDiagnostic::new(
-          AnalyzerDiagnosticError::NotAClass(*expression.object_token.clone()),
-          self.find_token_line(&expression.object_token.span.line),
-        )))
-      },
-    });
-
-    if class.is_none() {
-      return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::UndefinedClass(*expression.object_token.clone()),
+    match object_data_type {
+      DataType::ClassType(_) => self.case_get_of_class(expression, &object),
+      DataType::Enum(_) => self.case_get_of_enum(expression, &object),
+      _ => Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::NotAClass(*expression.object_token.clone()),
         self.find_token_line(&expression.name.span.line),
-      )));
+      ))),
     }
-
-    let class = class.unwrap();
-
-    if class.properties.is_empty() {
-      return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::UndefinedProperty(*expression.name.clone()),
-        self.find_token_line(&expression.name.span.line),
-      )));
-    }
-
-    let class_binding = class.clone();
-
-    let property = class_binding
-      .properties
-      .iter()
-      .find(|p| p.name == expression.name.span.literal);
-
-    if property.is_none() {
-      return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::UndefinedProperty(*expression.name.clone()),
-        self.find_token_line(&expression.name.span.line),
-      )));
-    }
-
-    let class_instance = self.find_class_instance(&object.name);
-
-    if class_instance.is_none() {
-      return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::UndefinedClass(*expression.name.clone()),
-        self.find_token_line(&expression.name.span.line),
-      )));
-    }
-
-    let instruction = IRInstruction::Get(IRGet::new(
-      expression.name.span.literal.clone(),
-      Box::new(IRInstruction::ClassInstance(class_instance.unwrap().clone())),
-      self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
-      GetMetadata::new(object_data_type.clone()),
-    ));
-
-    Ok(instruction)
   }
 
   fn visit_set_expression(
@@ -706,6 +658,12 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let class = self.find_class_in_ir(match &object.data_type {
       DataType::ClassType(name) => name,
+      DataType::Enum(name) => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::EnumAssignmentError(*set.name.clone(), name.to_string()),
+          self.find_token_line(&set.name.span.line),
+        )))
+      },
       _ => {
         return Err(Box::new(AnalyzerDiagnostic::new(
           AnalyzerDiagnosticError::NotAClass(*set.name.clone()),
@@ -735,7 +693,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
     let property = class_binding
       .properties
       .iter()
-      .find(|p| p.name == set.name.span.literal);
+      .find(|p| p.name.span.literal == set.name.span.literal);
 
     if property.is_none() {
       return Err(Box::new(AnalyzerDiagnostic::new(
@@ -772,7 +730,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       Box::new(value),
       Box::new(class_instance.unwrap()),
       self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
-      object.name,
+      object.name.span.literal,
     ));
 
     Ok(instruction)
@@ -788,7 +746,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     if matches!(
       instance_type,
-      DataType::Int | DataType::Float | DataType::Boolean | DataType::String | DataType::Unwnown | DataType::Array(_)
+      DataType::Int
+        | DataType::Float
+        | DataType::Boolean
+        | DataType::String
+        | DataType::Unknown
+        | DataType::Array(_)
+        | DataType::Enum(_)
     ) {
       return self.type_methods(method_call);
     }
@@ -807,7 +771,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       DataType::ClassType(name) | DataType::Variable(name) => name,
       _ => {
         return Err(Box::new(AnalyzerDiagnostic::new(
-          AnalyzerDiagnosticError::NotAClass(*method_call.name.clone()),
+          AnalyzerDiagnosticError::NotAClass(object.name.clone()),
           self.find_token_line(&method_call.name.span.line),
         )))
       },
@@ -852,7 +816,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    let class_instance = self.find_class_instance(&object.name);
+    let class_instance = self.find_class_instance(&object.name.span.literal);
 
     if class_instance.is_none() {
       return Err(Box::new(AnalyzerDiagnostic::new(
@@ -928,7 +892,8 @@ impl Visitor<AnalyzerResult> for Analyzer {
       },
     }
 
-    let instruction = IRInstruction::ArrayAccess(IRArrayAccess::new(var.name.clone(), Box::new(index), var_type));
+    let instruction: IRInstruction =
+      IRInstruction::ArrayAccess(IRArrayAccess::new(var.name.span.literal.clone(), Box::new(index), var_type));
 
     Ok(instruction)
   }
@@ -969,16 +934,24 @@ impl Visitor<AnalyzerResult> for Analyzer {
     variable: &Variable,
   ) -> AnalyzerResult {
     if self.is_allready_declared(&variable.name.span.literal) {
-      return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::VariableAlreadyDefined(variable.name.span.literal.clone(), *variable.name.clone()),
-        self.find_token_line(&variable.name.span.line),
-      )));
+      let v =
+        <std::vec::Vec<intermediate_representation::variable::IRVariable> as Clone>::clone(&self.scopes_variables)
+          .into_iter()
+          .find(|v| v.name.span.literal == variable.name.span.literal)
+          .unwrap();
+
+      if !v.metadata.is_property {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::VariableAlreadyDefined(variable.name.span.literal.clone(), *variable.name.clone()),
+          self.find_token_line(&variable.name.span.line),
+        )));
+      }
     }
 
     self.declare(&variable.name.span.literal);
 
     let mut value = IRInstruction::Literal(IRLiteral::new(AnalyzerValue::Null));
-    let data_type = variable.type_annotation.clone();
+    let mut data_type = variable.type_annotation.clone();
 
     if let Some(initializer) = &variable.initializer {
       self.context.push(AnalyzerContext::Variable(*variable.name.clone()));
@@ -997,6 +970,8 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Array(array) => IRInstruction::Array(array),
         IRInstruction::ClassInstance(class) => IRInstruction::ClassInstance(class),
         IRInstruction::MethodCall(call) => IRInstruction::MethodCall(call),
+        IRInstruction::Enum(_enum) => IRInstruction::Enum(_enum),
+        IRInstruction::Get(get) => IRInstruction::Get(get),
         _ => {
           return Err(Box::new(AnalyzerDiagnostic::new(
             AnalyzerDiagnosticError::InvalidVariableInitializer(*variable.name.clone()),
@@ -1010,28 +985,35 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     let mut complex_type = None;
 
-    if let DataType::Variable(value) = &data_type {
-      let class = self.find_class_in_ir(value);
+    if let DataType::PendingImport(_) = &data_type {
+      let import = self.resolve_pedding_import(&data_type)?;
 
-      if class.is_some() {
-        let class = class.unwrap();
+      match import {
+        IRInstruction::Class(class) => {
+          data_type = DataType::ClassType(class.name.clone());
 
-        complex_type = Some(Box::new(IRInstruction::ClassInstance(IRClassInstance::new(
-          Box::new(class),
-          *variable.name.clone(),
-          Vec::new(),
-        ))));
+          complex_type = Some(Box::new(IRInstruction::ClassInstance(IRClassInstance::new(
+            Box::new(class),
+            *variable.name.clone(),
+            Vec::new(),
+          ))));
+        },
+        IRInstruction::Enum(_enum) => {
+          data_type = DataType::Enum(_enum.name.span.literal.clone());
+        },
+        _ => (),
       }
     }
 
     let variable = IRVariable::new(
-      variable.name.span.literal.clone(),
+      *variable.name.clone(),
       data_type.clone(),
       Some(Box::new(value.clone())),
       IRVariableMetadata::new(
         variable.metadata.is_mutable,
         variable.metadata.is_reference,
         variable.metadata.is_parameter,
+        false,
         false,
         false,
         true,
@@ -1042,7 +1024,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       ),
     );
 
-    self.define(&variable.name);
+    self.define(&variable.name.span.literal);
 
     self.scopes_variables.push(variable.clone());
 
@@ -1261,10 +1243,11 @@ impl Visitor<AnalyzerResult> for Analyzer {
       match result {
         IRInstruction::Method(f) => {
           self.scopes_variables.push(IRVariable::new(
-            f.name.span.literal.clone(),
-            DataType::Unwnown,
+            f.name.clone(),
+            DataType::Unknown,
             None,
             IRVariableMetadata::new(
+              false,
               false,
               false,
               false,
@@ -1295,7 +1278,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     current_class = self.current_class.as_ref().unwrap().clone();
 
-    current_class.methods = ir.clone();
+    current_class.methods.clone_from(&ir);
 
     let instruction = IRInstruction::Class(current_class.clone());
 
@@ -1344,12 +1327,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
     self.define(&statement.variable.name.span.literal);
 
     let variable = IRVariable::new(
-      statement.variable.name.span.literal.clone(),
+      *statement.variable.name.clone(),
       data_type,
       None,
       IRVariableMetadata::new(
         statement.variable.metadata.is_mutable,
         statement.variable.metadata.is_reference,
+        false,
         false,
         false,
         false,
@@ -1557,12 +1541,13 @@ impl Visitor<AnalyzerResult> for Analyzer {
         IRInstruction::Class(class) => IRInstruction::Class(class),
         IRInstruction::Logical(logical) => IRInstruction::Logical(logical),
         IRInstruction::Array(array) => IRInstruction::Array(array),
+        IRInstruction::Enum(e) => IRInstruction::Enum(e),
         _ => todo!(),
       }
     }
 
     let variable = IRVariable::new(
-      statement.name.span.literal.clone(),
+      *statement.name.clone(),
       data_type.clone(),
       Some(Box::new(value.clone())),
       IRVariableMetadata::new(
@@ -1572,6 +1557,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
         false,
         false,
         true,
+        true,
         statement.metadata.is_static,
         statement.metadata.is_public,
         false,
@@ -1579,7 +1565,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       ),
     );
 
-    self.define(&variable.name.clone());
+    self.define(&variable.name.span.literal.clone());
 
     self.scopes_variables.push(variable.clone());
 
@@ -1604,10 +1590,11 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
+    self.begin_scope();
+
     self.declare(&statement.name.span.literal);
     self.define(&statement.name.span.literal);
 
-    self.begin_scope();
     let mut members = Vec::<IRVariable>::new();
     let mut data_type = DataType::Pending;
 
@@ -1632,11 +1619,15 @@ impl Visitor<AnalyzerResult> for Analyzer {
     }
 
     self.end_scope();
+
+    self.declare(&statement.name.span.literal);
+    self.define(&statement.name.span.literal);
+
     let mut no_initializers = false;
 
     if matches!(
       data_type,
-      DataType::Pending | DataType::Null | DataType::Unwnown | DataType::Void
+      DataType::Pending | DataType::Null | DataType::Unknown | DataType::Void
     ) {
       data_type = DataType::Int;
       no_initializers = true;
@@ -1648,19 +1639,40 @@ impl Visitor<AnalyzerResult> for Analyzer {
       member.data_type = data_type.clone();
 
       if data_type == DataType::Int && no_initializers {
-        let position = members_cloned.iter().position(|m| m.name == member.name).unwrap() as i64;
+        let position: i64 = members_cloned.iter().position(|m| m.name == member.name).unwrap() as i64;
 
         member.value = Some(Box::new(IRInstruction::Literal(IRLiteral::new(AnalyzerValue::Int(position)))));
       }
     }
 
-    Ok(IRInstruction::Enum(IREnum::new(
+    let _enum = IRInstruction::Enum(IREnum::new(
       Box::new(statement.name.clone()),
       members,
       data_type,
       statement.is_exported,
       statement.generic.clone(),
-    )))
+    ));
+
+    self.scopes_variables.push(IRVariable::new(
+      statement.name.clone(),
+      DataType::Enum(statement.name.span.literal.clone()),
+      None,
+      IRVariableMetadata::new(
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        statement.is_exported,
+        false,
+        Some(Box::new(_enum.clone())),
+      ),
+    ));
+
+    Ok(_enum)
   }
 }
 
@@ -2080,12 +2092,13 @@ impl Analyzer {
       IRInstruction::MethodCall(m) => m.return_type.clone(),
       IRInstruction::Get(g) => g.data_type.clone(),
       IRInstruction::Set(s) => s.data_type.clone(),
+      IRInstruction::Enum(e) => DataType::Enum(e.name.span.literal.clone()),
       IRInstruction::ArrayAccess(array) => match &array.data_type {
         DataType::Array(t) => *t.clone(),
-        _ => DataType::Unwnown,
+        _ => DataType::Unknown,
       },
       IRInstruction::This(this) => *this.data_type.clone(),
-      _ => DataType::Unwnown,
+      _ => DataType::Unknown,
     }
   }
 
@@ -2096,18 +2109,18 @@ impl Analyzer {
   ) -> CheckCompatibility<DataType> {
     match (left, right) {
       (DataType::Int, DataType::Int) => (true, DataType::Int),
-      (DataType::Int, DataType::Unwnown) => (true, DataType::Unwnown),
-      (DataType::Unwnown, DataType::Int) => (true, DataType::Unwnown),
+      (DataType::Int, DataType::Unknown) => (true, DataType::Unknown),
+      (DataType::Unknown, DataType::Int) => (true, DataType::Unknown),
       (DataType::Float, DataType::Float) => (true, DataType::Float),
-      (DataType::Float, DataType::Unwnown) => (true, DataType::Unwnown),
-      (DataType::Unwnown, DataType::Float) => (true, DataType::Unwnown),
+      (DataType::Float, DataType::Unknown) => (true, DataType::Unknown),
+      (DataType::Unknown, DataType::Float) => (true, DataType::Unknown),
       (DataType::String, DataType::String) => (true, DataType::String),
-      (DataType::String, DataType::Unwnown) => (true, DataType::Unwnown),
-      (DataType::Unwnown, DataType::String) => (true, DataType::Unwnown),
+      (DataType::String, DataType::Unknown) => (true, DataType::Unknown),
+      (DataType::Unknown, DataType::String) => (true, DataType::Unknown),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      (DataType::Unwnown, DataType::Unwnown) => (true, DataType::Unwnown),
-      _ => (false, DataType::Unwnown),
+      (DataType::Unknown, DataType::Unknown) => (true, DataType::Unknown),
+      _ => (false, DataType::Unknown),
     }
   }
 
@@ -2123,7 +2136,7 @@ impl Analyzer {
       (DataType::Float, DataType::Int) => (true, DataType::Float),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      _ => (false, DataType::Unwnown),
+      _ => (false, DataType::Unknown),
     }
   }
 
@@ -2134,16 +2147,16 @@ impl Analyzer {
   ) -> CheckCompatibility<DataType> {
     match (left, right) {
       (DataType::Int, DataType::Int) => (true, DataType::Boolean),
-      (DataType::Unwnown, DataType::Int) => (true, DataType::Boolean),
-      (DataType::Int, DataType::Unwnown) => (true, DataType::Boolean),
+      (DataType::Unknown, DataType::Int) => (true, DataType::Boolean),
+      (DataType::Int, DataType::Unknown) => (true, DataType::Boolean),
       (DataType::Float, DataType::Float) => (true, DataType::Boolean),
-      (DataType::Float, DataType::Unwnown) => (true, DataType::Boolean),
-      (DataType::Unwnown, DataType::Float) => (true, DataType::Boolean),
+      (DataType::Float, DataType::Unknown) => (true, DataType::Boolean),
+      (DataType::Unknown, DataType::Float) => (true, DataType::Boolean),
       (DataType::Int, DataType::Float) => (true, DataType::Boolean),
       (DataType::Float, DataType::Int) => (true, DataType::Boolean),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      _ => (false, DataType::Unwnown),
+      _ => (false, DataType::Unknown),
     }
   }
 
@@ -2159,7 +2172,7 @@ impl Analyzer {
       (DataType::Boolean, DataType::Boolean) => (true, DataType::Boolean),
       (_, DataType::Null) => (true, left.clone()),
       (DataType::Null, _) => (true, right.clone()),
-      _ => (false, DataType::Unwnown),
+      _ => (false, DataType::Unknown),
     }
   }
 
@@ -2170,7 +2183,7 @@ impl Analyzer {
   ) -> CheckCompatibility<DataType> {
     match (left, right) {
       (DataType::Boolean, DataType::Boolean) => (true, DataType::Boolean),
-      _ => (false, DataType::Unwnown),
+      _ => (false, DataType::Unknown),
     }
   }
 
@@ -2188,7 +2201,7 @@ impl Analyzer {
         if left_type == DataType::String && right_type == DataType::String {
           (true, DataType::String)
         } else {
-          (false, DataType::Unwnown)
+          (false, DataType::Unknown)
         }
       },
       IRInstructionType::Add => self.check_add_compatibility(&left_type, &right_type),
@@ -2205,10 +2218,10 @@ impl Analyzer {
         if left_type == DataType::Int && right_type == DataType::Int {
           (true, DataType::Int)
         } else {
-          (false, DataType::Unwnown)
+          (false, DataType::Unknown)
         }
       },
-      _ => (false, DataType::Unwnown),
+      _ => (false, DataType::Unknown),
     }
   }
 
@@ -2235,6 +2248,23 @@ impl Analyzer {
 
     match class {
       Some(IRInstruction::Class(c)) => Some(c.clone()),
+      _ => None,
+    }
+  }
+
+  fn find_enum_in_ir(
+    &self,
+    name: &String,
+  ) -> Option<IREnum> {
+    let irs = self.irs.get(&self.current_file).unwrap();
+
+    let enum_ = irs.iter().find(|ir| match ir {
+      IRInstruction::Enum(e) => &e.name.span.literal == name,
+      _ => false,
+    });
+
+    match enum_ {
+      Some(IRInstruction::Enum(e)) => Some(e.clone()),
       _ => None,
     }
   }
@@ -2304,7 +2334,7 @@ impl Analyzer {
     let mut class_instance = None;
 
     for variable in scopes_variables {
-      if variable.name != instance_name.clone() {
+      if variable.name.span.literal != instance_name.clone() {
         continue;
       }
 
@@ -2387,7 +2417,53 @@ impl Analyzer {
       DataType::Int | DataType::Float => self.number_methods(expression, &object),
       DataType::Boolean => self.boolean_methods(expression, &object),
       DataType::Array(_) => self.array_methods(expression),
-      DataType::Unwnown => todo!(),
+      DataType::Unknown => todo!(),
+      DataType::Enum(_) => self.enum_methods(expression, &object),
+      _ => todo!(),
+    }
+  }
+
+  fn enum_methods(
+    &mut self,
+    expression: &MethodCall,
+    object: &IRInstruction,
+  ) -> AnalyzerResult {
+    let mut current_ir = self.irs.get_mut(&self.current_file).unwrap().clone();
+
+    match expression.name.span.literal.as_str() {
+      "toString" => {
+        let current_index = current_ir.len() - 1;
+
+        current_ir.push(IRInstruction::Function(IRFunction::new(
+          *expression.name.clone(),
+          vec![],
+          DataType::String,
+          None,
+          IRFunctionMetadata::new(false, true, true, true, false, true, false, true),
+        )));
+
+        self.irs.insert(self.current_file.clone(), current_ir);
+
+        self
+          .block_stack
+          .last_mut()
+          .unwrap()
+          .insert("toString".to_string(), true);
+
+        let value = self.analyzer(&expression.calle)?;
+        let mut current_ir = self.irs.get_mut(&self.current_file).unwrap().clone();
+
+        current_ir.remove(current_index);
+        self.block_stack.last_mut().unwrap().remove("toString");
+
+        Ok(IRInstruction::MethodCall(IRMethodCall::new(
+          expression.name.clone(),
+          Box::new(value),
+          DataType::String,
+          Box::new(object.clone()),
+          MethodCallMetadata::new(DataType::String, self.extract_data_type(object)),
+        )))
+      },
       _ => todo!(),
     }
   }
@@ -2493,5 +2569,143 @@ impl Analyzer {
     expression: &MethodCall,
   ) -> AnalyzerResult {
     todo!("string")
+  }
+
+  fn case_get_of_enum(
+    &mut self,
+    expression: &Get,
+    object: &IRVariable,
+  ) -> AnalyzerResult {
+    let object_data_type = object.data_type.clone();
+
+    let _enum = self.find_enum_in_ir(match &object.data_type {
+      DataType::Enum(name) => name,
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotAnEnum(*expression.object_token.clone()),
+          self.find_token_line(&expression.object_token.span.line),
+        )))
+      },
+    });
+
+    if _enum.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedEnum(*expression.object_token.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let _enum = _enum.unwrap();
+
+    let member = &_enum
+      .members
+      .iter()
+      .find(|p| p.name.span.literal == expression.name.span.literal);
+
+    if member.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedEnumMember(*expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let instruction = IRInstruction::Get(IRGet::new(
+      expression.name.span.literal.clone(),
+      Box::new(IRInstruction::Enum(_enum.clone())),
+      self.extract_data_type(&IRInstruction::Variable(member.unwrap().clone())),
+      GetMetadata::new(object_data_type.clone()),
+    ));
+
+    Ok(instruction)
+  }
+
+  fn case_get_of_class(
+    &mut self,
+    expression: &Get,
+    object: &IRVariable,
+  ) -> AnalyzerResult {
+    let object_data_type = object.data_type.clone();
+
+    let class = self.find_class_in_ir(match &object.data_type {
+      DataType::ClassType(name) => name,
+      DataType::Array(_) => return self.array_property(expression),
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::NotAClass(*expression.object_token.clone()),
+          self.find_token_line(&expression.object_token.span.line),
+        )))
+      },
+    });
+
+    if class.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(*expression.object_token.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let class = class.unwrap();
+
+    if class.properties.is_empty() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedProperty(*expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let class_binding = class.clone();
+
+    let property = class_binding
+      .properties
+      .iter()
+      .find(|p| p.name.span.literal == expression.name.span.literal);
+
+    if property.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedProperty(*expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let class_instance = self.find_class_instance(&object.name.span.literal);
+
+    if class_instance.is_none() {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedClass(*expression.name.clone()),
+        self.find_token_line(&expression.name.span.line),
+      )));
+    }
+
+    let instruction = IRInstruction::Get(IRGet::new(
+      expression.name.span.literal.clone(),
+      Box::new(IRInstruction::ClassInstance(class_instance.unwrap().clone())),
+      self.extract_data_type(&IRInstruction::Variable(property.unwrap().clone())),
+      GetMetadata::new(object_data_type.clone()),
+    ));
+
+    Ok(instruction)
+  }
+
+  fn resolve_pedding_import(
+    &mut self,
+    import: &DataType,
+  ) -> AnalyzerResult {
+    if let DataType::PendingImport(name) = import {
+      if let Some(class) = self.find_class_in_ir(&name) {
+        Ok(IRInstruction::Class(class))
+      } else if let Some(enum_) = self.find_enum_in_ir(&name) {
+        Ok(IRInstruction::Enum(enum_))
+      } else {
+        Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::UndefinedImport(name.to_string()),
+          self.find_token_line(&0),
+        )))
+      }
+    } else {
+      Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::UndefinedImport(import.to_string()),
+        self.find_token_line(&0),
+      )))
+    }
   }
 }

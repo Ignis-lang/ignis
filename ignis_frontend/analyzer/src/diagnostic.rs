@@ -30,7 +30,7 @@ pub enum AnalyzerDiagnosticError {
   FunctionAlreadyDefined(String, Token),
   ClassAlreadyDefined(Token),
   ArgumentTypeMismatch(DataType, DataType, Token),
-  ImmutableVariableAsMutableParameter(String, String, Token),
+  ImmutableVariableAsMutableParameter(Token, Token, Token),
   ReturnOutsideFunction(Token),
   NotIterable(Token),
   ArrayElementTypeMismatch(Token),
@@ -58,6 +58,11 @@ pub enum AnalyzerDiagnosticError {
   InvalidVariableInitializer(Token),
   EnumAlreadyDefined(Token),
   EnumMemberTypeMismatch(Token),
+  NotAnEnum(Token),
+  UndefinedEnum(Token),
+  UndefinedEnumMember(Token),
+  EnumAssignmentError(Token, String),
+  UndefinedImport(String),
 }
 
 #[derive(Debug, Clone)]
@@ -264,7 +269,10 @@ impl AnalyzerDiagnostic {
         "IA0023".to_string(),
       ),
       AnalyzerDiagnosticError::ImmutableVariableAsMutableParameter(parameter, var, token) => DiagnosticReport::new(
-        format!("Cannot use immutable variable '{}' as mutable parameter '{}'", var, parameter),
+        format!(
+          "Cannot use immutable variable '{}' as mutable parameter '{}'",
+          var.span.literal, parameter.span.literal
+        ),
         Box::new(token.clone()),
         self.token_line.clone(),
         DiagnosticLevel::Error,
@@ -487,6 +495,55 @@ impl AnalyzerDiagnostic {
         None,
         "IA0051".to_string(),
       ),
+      AnalyzerDiagnosticError::NotAnEnum(token) => DiagnosticReport::new(
+        format!("'{}' is not an enum", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0052".to_string(),
+      ),
+      AnalyzerDiagnosticError::UndefinedEnum(token) => DiagnosticReport::new(
+        format!("Undefined enum '{}'", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0053".to_string(),
+      ),
+      AnalyzerDiagnosticError::UndefinedEnumMember(token) => DiagnosticReport::new(
+        format!("Undefined enum member '{}'", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0054".to_string(),
+      ),
+      AnalyzerDiagnosticError::EnumAssignmentError(token, name) => DiagnosticReport::new(
+        format!("Cannot assign to a member of enum '{}'", name),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0055".to_string(),
+      ),
+      AnalyzerDiagnosticError::UndefinedImport(name) => {
+        let token = self
+          .token_line
+          .clone()
+          .into_iter()
+          .find(|t| t.span.literal.eq_ignore_ascii_case(&name))
+          .unwrap();
+
+        DiagnosticReport::new(
+          "Undefined import".to_string(),
+          Box::new(token),
+          self.token_line.clone(),
+          DiagnosticLevel::Error,
+          None,
+          "IA0056".to_string(),
+        )
+      },
     }
   }
 }

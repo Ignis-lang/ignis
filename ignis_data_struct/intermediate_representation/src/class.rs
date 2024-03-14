@@ -40,7 +40,7 @@ impl IRInstructionTrait for IRClass {
       "methods": self.methods.iter().map(|m| m.to_json()).collect::<Vec<serde_json::Value>>(),
       "properties": self.properties.iter().map(|p| p.to_json()).collect::<Vec<serde_json::Value>>(),
       "is_exported": self.is_exported,
-    "is_imported": self.is_imported,
+      "is_imported": self.is_imported,
     })
   }
 }

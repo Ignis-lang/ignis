@@ -1,4 +1,5 @@
 use enums::data_type::DataType;
+use token::token::Token;
 
 use super::{IRInstruction, IRInstructionTrait};
 
@@ -11,6 +12,7 @@ pub struct IRVariableMetadata {
   pub is_function: bool,
   pub is_class: bool,
   pub is_declaration: bool,
+  pub is_property: bool,
   pub is_static: bool,
   pub is_public: bool,
   pub is_constructor: bool,
@@ -24,6 +26,7 @@ impl IRVariableMetadata {
     is_parameter: bool,
     is_function: bool,
     is_class: bool,
+    is_property: bool,
     is_declaration: bool,
     is_static: bool,
     is_public: bool,
@@ -36,6 +39,7 @@ impl IRVariableMetadata {
       is_parameter,
       is_function,
       is_class,
+      is_property,
       is_declaration,
       is_static,
       is_public,
@@ -47,7 +51,7 @@ impl IRVariableMetadata {
 
 #[derive(Debug, Clone)]
 pub struct IRVariable {
-  pub name: String,
+  pub name: Token,
   pub data_type: DataType,
   pub value: Option<Box<IRInstruction>>,
   pub metadata: IRVariableMetadata,
@@ -55,7 +59,7 @@ pub struct IRVariable {
 
 impl IRVariable {
   pub fn new(
-    name: String,
+    name: Token,
     data_type: DataType,
     value: Option<Box<IRInstruction>>,
     metadata: IRVariableMetadata,
@@ -72,7 +76,7 @@ impl IRVariable {
 impl IRInstructionTrait for IRVariable {
   fn to_json(&self) -> serde_json::Value {
     serde_json::json!({
-      "name": self.name,
+      "name": self.name.span.literal,
       "data_type": self.data_type.to_string(),
       "value": match &self.value {
         Some(value) => value.to_json(),

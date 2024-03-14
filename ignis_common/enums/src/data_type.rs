@@ -10,7 +10,7 @@ pub enum DataType {
   Boolean,
   Char,
   Null,
-  Unwnown,
+  Unknown,
   Pending,
   Void,
   Variable(String),
@@ -18,6 +18,7 @@ pub enum DataType {
   Callable(Vec<DataType>, Box<DataType>),
   ClassType(String),
   Enum(String),
+  PendingImport(String),
   // TODO: Type non-primitive
   GenericType {
     base: Box<DataType>,
@@ -41,7 +42,7 @@ impl Display for DataType {
       DataType::Boolean => write!(f, "Boolean"),
       DataType::Char => write!(f, "Char"),
       DataType::Null => write!(f, "Null"),
-      DataType::Unwnown => write!(f, "Unwnown"),
+      DataType::Unknown => write!(f, "Unknown"),
       DataType::Pending => write!(f, "Pending"),
       DataType::Void => write!(f, "Void"),
       DataType::Variable(name) => write!(f, "{}", name),
@@ -71,12 +72,15 @@ impl Display for DataType {
       DataType::Enum(name) => {
         write!(f, "Enum<{}>", name)
       },
+      DataType::PendingImport(import) => {
+        write!(f, "PendingImport<{}>", import)
+      },
     }
   }
 }
 
 impl DataType {
-  pub fn from_token_type(kind: TokenType) -> Self {
+  pub fn from_token_type(kind: &TokenType) -> Self {
     match kind {
       TokenType::StringType => DataType::String,
       TokenType::FloatType => DataType::Float,
@@ -85,8 +89,7 @@ impl DataType {
       TokenType::IntType => DataType::Int,
       TokenType::Void => DataType::Void,
       TokenType::Null => DataType::Null,
-      TokenType::Unknown => DataType::Unwnown,
-      TokenType::Identifier => DataType::Variable("".to_string()),
+      TokenType::Unknown => DataType::Unknown,
       _ => DataType::Pending,
     }
   }
@@ -105,7 +108,7 @@ impl DataType {
       DataType::Float => kind.push_str("float"),
       DataType::Char => kind.push_str("char"),
       DataType::String => kind.push_str("char*"),
-      DataType::Void | DataType::Null | DataType::Unwnown | DataType::Pending => kind.push_str("void"),
+      DataType::Void | DataType::Null | DataType::Unknown | DataType::Pending => kind.push_str("void"),
       DataType::Variable(_name) => todo!(),
       DataType::ClassType(_name) => todo!(),
       DataType::Array(array) => kind.push_str(array.to_c_type(true).to_string().as_str()),
@@ -116,6 +119,7 @@ impl DataType {
       DataType::TupleType(_) => todo!(),
       DataType::AliasType(_) => todo!(),
       DataType::Enum(_) => todo!(),
+      DataType::PendingImport(_) => todo!(),
     };
 
     kind

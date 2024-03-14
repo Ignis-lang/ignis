@@ -51,6 +51,7 @@ pub struct Parser {
   context: Vec<ParserContext>,
   class_declarations: Vec<String>,
   import_declarations: Vec<String>,
+  enum_declarations: Vec<String>,
 }
 
 impl Parser {
@@ -62,6 +63,7 @@ impl Parser {
       context: Vec::new(),
       class_declarations: Vec::new(),
       import_declarations: Vec::new(),
+      enum_declarations: Vec::new(),
     }
   }
 
@@ -359,7 +361,7 @@ impl Parser {
         self.advance();
         let kind = token.kind.clone();
 
-        let var = Expression::Variable(VariableExpression::new(token, DataType::from_token_type(kind)));
+        let var = Expression::Variable(VariableExpression::new(token, DataType::from_token_type(&kind)));
 
         if self.check(TokenType::LeftBrack) {
           let array = self.array_access(var);
@@ -615,6 +617,8 @@ impl Parser {
 
     self.context.pop();
 
+    self.enum_declarations.push(name.span.literal.clone());
+
     Ok(Statement::Enum(Enum::new(name, members, is_exported, None)))
   }
 
@@ -697,10 +701,16 @@ impl Parser {
         self.consume(TokenType::Colon)?;
         let token = self.advance();
 
-        let mut data_type = DataType::from_token_type(token.kind);
+        let mut data_type = DataType::from_token_type(&token.kind);
 
-        if data_type == DataType::Variable("".to_string()) {
-          data_type = DataType::Variable(token.span.literal.clone());
+        if data_type == DataType::Pending {
+          if self.class_declarations.contains(&token.span.literal) {
+            data_type = DataType::ClassType(token.span.literal.clone());
+          } else if self.enum_declarations.contains(&token.span.literal) {
+            data_type = DataType::Enum(token.span.literal.clone());
+          } else if self.import_declarations.contains(&token.span.literal) {
+            data_type = DataType::PendingImport(token.span.literal.clone());
+          }
         }
 
         if self.check(TokenType::LeftBrack) {
@@ -735,7 +745,7 @@ impl Parser {
       TokenType::BooleanType,
       TokenType::CharType,
     ]) {
-      let data_type: DataType = DataType::from_token_type(self.previous().kind);
+      let data_type: DataType = DataType::from_token_type(&self.previous().kind);
 
       if self.check(TokenType::LeftBrack) {
         self.consume(TokenType::RightBrack)?;
@@ -820,13 +830,16 @@ impl Parser {
 
     let token = self.peek();
 
-    let mut type_annotation = DataType::from_token_type(token.kind.clone());
+    let mut type_annotation = DataType::from_token_type(&token.kind);
 
-    if type_annotation == DataType::Pending
-      && (self.class_declarations.contains(&token.span.literal)
-        || self.import_declarations.contains(&token.span.literal))
-    {
-      type_annotation = DataType::ClassType(token.span.literal.clone());
+    if type_annotation == DataType::Pending {
+      if self.class_declarations.contains(&token.span.literal) {
+        type_annotation = DataType::ClassType(token.span.literal.clone());
+      } else if self.enum_declarations.contains(&token.span.literal) {
+        type_annotation = DataType::Enum(token.span.literal.clone());
+      } else if self.import_declarations.contains(&token.span.literal) {
+        type_annotation = DataType::PendingImport(token.span.literal.clone());
+      }
     }
 
     if type_annotation == DataType::Pending {
@@ -1213,7 +1226,7 @@ impl Parser {
 
     let token = self.peek();
 
-    let mut type_annotation = DataType::from_token_type(token.kind.clone());
+    let mut type_annotation = DataType::from_token_type(&token.kind);
 
     if type_annotation == DataType::Pending && self.class_declarations.contains(&token.span.literal) {
       type_annotation = DataType::ClassType(token.span.literal.clone());
@@ -1287,7 +1300,17 @@ impl Parser {
         self.consume(TokenType::Colon)?;
         let token = self.advance();
 
-        let mut data_type = DataType::from_token_type(token.kind);
+        let mut data_type = DataType::from_token_type(&token.kind);
+
+        if data_type == DataType::Pending {
+          if self.class_declarations.contains(&token.span.literal) {
+            data_type = DataType::ClassType(token.span.literal.clone());
+          } else if self.enum_declarations.contains(&token.span.literal) {
+            data_type = DataType::Enum(token.span.literal.clone());
+          } else if self.import_declarations.contains(&token.span.literal) {
+            data_type = DataType::PendingImport(token.span.literal.clone());
+          }
+        }
 
         if self.check(TokenType::LeftBrack) {
           self.advance();
@@ -1319,7 +1342,7 @@ impl Parser {
 
       let token = self.peek();
 
-      let mut data_type: DataType = DataType::from_token_type(token.kind.clone());
+      let mut data_type: DataType = DataType::from_token_type(&token.kind);
 
       if data_type == DataType::Pending && self.class_declarations.contains(&token.span.literal) {
         data_type = DataType::ClassType(token.span.literal.clone());

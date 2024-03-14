@@ -62,7 +62,7 @@ impl AnalyzerValue {
       AnalyzerValue::Int(_) => DataType::Int,
       AnalyzerValue::Float(_) => DataType::Float,
       AnalyzerValue::Boolean(_) => DataType::Boolean,
-      AnalyzerValue::Unknown | AnalyzerValue::Null => DataType::Unwnown,
+      AnalyzerValue::Unknown | AnalyzerValue::Null => DataType::Unknown,
       AnalyzerValue::Return(r) => r.to_data_type(),
       AnalyzerValue::Function(f) => f.return_type.clone(),
       AnalyzerValue::Class(class) => {
