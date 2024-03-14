@@ -388,7 +388,7 @@ impl TranspilerToLua {
         "nil".to_string()
       };
 
-      code.push_str(&format!("{}{} = {},\n", " ".repeat(indent_level + 2), member.name, value,));
+      code.push_str(&format!("{}{} = {},\n", " ".repeat(indent_level + 2), member.name.span.literal, value));
     }
 
     code.push_str("}\n");
