@@ -355,7 +355,7 @@ impl TranspilerToLua {
         let result = self.transpile_function_instance(func, indent_level + 2);
         self.code.push_str(&result);
       },
-      IRInstruction::Interface(_) => ()
+      IRInstruction::Interface(_) => (),
     };
 
     code
@@ -523,7 +523,7 @@ impl TranspilerToLua {
     code.push_str(&format!("{}{} = {{\n", " ".repeat(indent_level), class.name));
 
     for property in &class.properties {
-      code.push_str(&format!("{}{} = ", " ".repeat(indent_level + 2), property.name,));
+      code.push_str(&format!("{}{} = ", " ".repeat(indent_level + 2), property.name.span.literal));
 
       if let Some(value) = &property.value {
         code.push_str(&self.transpile_ir_to_lua(value, 0));

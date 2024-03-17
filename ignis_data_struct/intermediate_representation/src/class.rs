@@ -1,4 +1,4 @@
-use crate::ir_method::IRMethod;
+use crate::{ir_interface::IRInterface, ir_method::IRMethod};
 
 use super::{variable::IRVariable, IRInstructionTrait};
 
@@ -10,7 +10,7 @@ pub struct IRClass {
   pub superclass: Option<Box<IRClass>>,
   pub is_exported: bool,
   pub is_imported: bool,
-  // pub interfaces: Vec<IRClass>,
+  pub interfaces: Vec<IRInterface>,
 }
 
 impl IRClass {
@@ -20,6 +20,7 @@ impl IRClass {
     properties: Vec<IRVariable>,
     is_exported: bool,
     is_imported: bool,
+    interfaces: Vec<IRInterface>,
   ) -> Self {
     Self {
       name,
@@ -28,6 +29,7 @@ impl IRClass {
       superclass: None,
       is_exported,
       is_imported,
+      interfaces,
     }
   }
 }
@@ -41,6 +43,7 @@ impl IRInstructionTrait for IRClass {
       "properties": self.properties.iter().map(|p| p.to_json()).collect::<Vec<serde_json::Value>>(),
       "is_exported": self.is_exported,
       "is_imported": self.is_imported,
+      "interfaces": self.interfaces.iter().map(|i| i.to_json()).collect::<Vec<serde_json::Value>>(),
     })
   }
 }

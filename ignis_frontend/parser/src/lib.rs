@@ -32,7 +32,7 @@ use ast::{
   },
 };
 use enums::{
-  data_type::{self, DataType, GenericType},
+  data_type::{DataType, GenericType},
   literal_value::LiteralValue,
   token_type::TokenType,
 };
@@ -56,6 +56,7 @@ pub struct Parser {
   class_declarations: Vec<String>,
   import_declarations: Vec<String>,
   enum_declarations: Vec<String>,
+  interface_declarations: Vec<String>,
 }
 
 impl Parser {
@@ -68,6 +69,7 @@ impl Parser {
       class_declarations: Vec::new(),
       import_declarations: Vec::new(),
       enum_declarations: Vec::new(),
+      interface_declarations: Vec::new(),
     }
   }
 
@@ -693,6 +695,8 @@ impl Parser {
 
     self.consume(TokenType::RightBrace)?;
 
+    self.interface_declarations.push(name.span.literal.clone());
+
     Ok(Statement::Interface(InterfaceStatement::new(name, methods)))
   }
 
@@ -976,6 +980,8 @@ impl Parser {
         type_annotation = DataType::Enum(token.span.literal.clone());
       } else if self.import_declarations.contains(&token.span.literal) {
         type_annotation = DataType::PendingImport(token.span.literal.clone());
+      } else if self.interface_declarations.contains(&token.span.literal) {
+        type_annotation = DataType::Interface(token.span.literal.clone());
       }
     }
 

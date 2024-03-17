@@ -125,6 +125,7 @@ pub struct Analyzer {
   current_function: Option<CalleableDeclaration>,
   current_file: String,
   current_class: Option<IRClass>,
+  current_inerface: Option<IRInterface>,
   context: Vec<AnalyzerContext>,
 }
 
@@ -286,6 +287,19 @@ impl Visitor<AnalyzerResult> for Analyzer {
         .find(|m| m.name.span.literal == variable.name.span.literal);
       if let Some(m) = method {
         let instruction = IRInstruction::Method(m.clone());
+        return Ok(instruction);
+      }
+    }
+
+    if let Some(i) = &self.current_inerface {
+      let method = i
+        .methods
+        .iter()
+        .find(|m| m.name.span.literal == variable.name.span.literal);
+
+      if let Some(m) = method {
+        let instruction = IRInstruction::Method(m.clone());
+
         return Ok(instruction);
       }
     }
@@ -871,36 +885,54 @@ impl Visitor<AnalyzerResult> for Analyzer {
       },
     };
 
-    let class = self.find_class_in_ir(match &object.data_type {
-      DataType::ClassType(name) | DataType::Variable(name) => name,
-      _ => {
-        return Err(Box::new(AnalyzerDiagnostic::new(
-          AnalyzerDiagnosticError::NotAClass(object.name.clone()),
-          self.find_token_line(&method_call.name.span.line),
-        )))
-      },
-    });
-
-    if class.is_none() {
+    if object.value.is_none() {
       return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::UndefinedClass(*method_call.name.clone()),
+        AnalyzerDiagnosticError::NotAClass(*method_call.name.clone()),
         self.find_token_line(&method_call.name.span.line),
       )));
     }
 
-    let class = class.unwrap();
+    let methods: Vec<IRMethod> = match object.data_type {
+      DataType::ClassType(a) => {
+        let class = self.find_class_in_ir(&a);
+        if class.is_none() {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::UndefinedClass(*method_call.name.clone()),
+            self.find_token_line(&method_call.name.span.line),
+          )));
+        }
 
-    if class.methods.is_empty() {
+        let class = class.unwrap();
+        self.current_class = Some(class.clone());
+
+        class.methods
+      },
+      DataType::Interface(i) => {
+        let interface = self.find_interface_in_ir(&i);
+
+        if interface.is_none() {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::UndefinedInterface(*method_call.name.clone()),
+            self.find_token_line(&method_call.name.span.line),
+          )));
+        }
+
+        let interface = interface.unwrap();
+        self.current_inerface = Some(interface.clone());
+
+        interface.methods
+      },
+      _ => [].to_vec(),
+    };
+
+    if methods.is_empty() {
       return Err(Box::new(AnalyzerDiagnostic::new(
         AnalyzerDiagnosticError::UndefinedMethods(*method_call.name.clone()),
         self.find_token_line(&method_call.name.span.line),
       )));
     }
 
-    let class_binding = class.clone();
-
-    let method = class_binding
-      .methods
+    let method = methods
       .iter()
       .find(|p| p.name.span.literal == method_call.name.span.literal);
 
@@ -920,16 +952,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
-    let class_instance = self.find_class_instance(&object.name.span.literal);
-
-    if class_instance.is_none() {
-      return Err(Box::new(AnalyzerDiagnostic::new(
-        AnalyzerDiagnosticError::UndefinedClass(*method_call.name.clone()),
-        self.find_token_line(&method_call.name.span.line),
-      )));
-    }
-
-    self.current_class = Some(class.clone());
+    let object_instance = *object.value.unwrap();
 
     let calle = self.analyzer(&method_call.calle)?;
 
@@ -937,14 +960,19 @@ impl Visitor<AnalyzerResult> for Analyzer {
       method_call.name.clone(),
       Box::new(calle),
       method.return_type.clone(),
-      Box::new(IRInstruction::ClassInstance(class_instance.clone().unwrap().clone())),
+      Box::new(object_instance.clone()),
       MethodCallMetadata::new(
         method.return_type.clone(),
-        DataType::ClassType(class_instance.unwrap().class.name.clone()),
+        match object_instance {
+          IRInstruction::Interface(i) => DataType::Interface(i.name.span.literal.clone()),
+          IRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.clone()),
+          _ => DataType::Unknown,
+        },
       ),
     ));
 
     self.current_class = None;
+    self.current_inerface = None;
 
     Ok(instruction)
   }
@@ -1063,19 +1091,66 @@ impl Visitor<AnalyzerResult> for Analyzer {
       let expression = self.analyzer(initializer)?;
 
       value = match expression {
-        IRInstruction::Literal(literal) => IRInstruction::Literal(literal),
-        IRInstruction::Binary(binary) => IRInstruction::Binary(binary),
-        IRInstruction::Unary(unary) => IRInstruction::Unary(unary),
-        IRInstruction::Variable(variable) => IRInstruction::Variable(variable),
-        IRInstruction::Ternary(ternary) => IRInstruction::Ternary(ternary),
-        IRInstruction::Call(call) => IRInstruction::Call(call),
-        IRInstruction::Class(class) => IRInstruction::Class(class),
-        IRInstruction::Logical(logical) => IRInstruction::Logical(logical),
-        IRInstruction::Array(array) => IRInstruction::Array(array),
-        IRInstruction::ClassInstance(class) => IRInstruction::ClassInstance(class),
-        IRInstruction::MethodCall(call) => IRInstruction::MethodCall(call),
-        IRInstruction::Enum(_enum) => IRInstruction::Enum(_enum),
-        IRInstruction::Get(get) => IRInstruction::Get(get),
+        IRInstruction::Literal(literal) => {
+          self.check_type_mismatch(&literal.value.to_data_type(), &data_type, &variable.name)?;
+
+          IRInstruction::Literal(literal)
+        },
+        IRInstruction::Binary(binary) => {
+          self.check_type_mismatch(&binary.data_type, &data_type, &variable.name)?;
+
+          IRInstruction::Binary(binary)
+        },
+        IRInstruction::Unary(unary) => {
+          self.check_type_mismatch(&unary.data_type, &data_type, &variable.name)?;
+
+          IRInstruction::Unary(unary)
+        },
+        IRInstruction::Variable(variable) => {
+          self.check_type_mismatch(&variable.data_type, &data_type, &variable.name)?;
+
+          IRInstruction::Variable(variable)
+        },
+        IRInstruction::Ternary(ternary) => {
+          self.check_type_mismatch(&ternary.data_type, &data_type, &variable.name)?;
+
+          IRInstruction::Ternary(ternary)
+        },
+        IRInstruction::Call(call) => {
+          self.check_type_mismatch(&call.return_type, &data_type, &variable.name)?;
+
+          IRInstruction::Call(call)
+        },
+        IRInstruction::Class(class) => {
+          self.check_type_mismatch(&DataType::ClassType(class.name.clone()), &data_type, &variable.name)?;
+
+          IRInstruction::Class(class)
+        },
+        IRInstruction::Logical(logical) => {
+          self.check_type_mismatch(&DataType::Boolean, &data_type, &variable.name)?;
+
+          IRInstruction::Logical(logical)
+        },
+        IRInstruction::Array(array) => {
+          self.check_type_mismatch(&array.data_type, &data_type, &variable.name)?;
+          IRInstruction::Array(array)
+        },
+        IRInstruction::ClassInstance(class) => {
+          self.check_type_mismatch(&DataType::ClassType(class.class.name.clone()), &data_type, &variable.name)?;
+          IRInstruction::ClassInstance(class)
+        },
+        IRInstruction::MethodCall(call) => {
+          self.check_type_mismatch(&call.return_type, &data_type, &variable.name)?;
+          IRInstruction::MethodCall(call)
+        },
+        IRInstruction::Enum(_enum) => {
+          self.check_type_mismatch(&DataType::Enum(_enum.name.span.literal.clone()), &data_type, &variable.name)?;
+          IRInstruction::Enum(_enum)
+        },
+        IRInstruction::Get(get) => {
+          self.check_type_mismatch(&get.data_type, &data_type, &variable.name)?;
+          IRInstruction::Get(get)
+        },
         _ => {
           return Err(Box::new(AnalyzerDiagnostic::new(
             AnalyzerDiagnosticError::InvalidVariableInitializer(*variable.name.clone()),
@@ -1101,6 +1176,10 @@ impl Visitor<AnalyzerResult> for Analyzer {
             *variable.name.clone(),
             Vec::new(),
           ))));
+        },
+        IRInstruction::Interface(i) => {
+          data_type = DataType::Interface(i.name.span.literal.clone());
+          complex_type = Some(Box::new(IRInstruction::Interface(i)));
         },
         IRInstruction::Enum(_enum) => {
           data_type = DataType::Enum(_enum.name.span.literal.clone());
@@ -1321,6 +1400,33 @@ impl Visitor<AnalyzerResult> for Analyzer {
       )));
     }
 
+    let mut interfaces = Vec::<IRInterface>::new();
+    let mut interfaces_methods = Vec::<HashMap<String, bool>>::new();
+
+    if !statement.interfaces.is_empty() {
+      for token in &statement.interfaces {
+        let interface = self.find_interface_in_ir(&token.span.literal);
+
+        if interface.is_none() {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::UndefinedInterface(token.clone()),
+            self.find_token_line(&token.span.line),
+          )));
+        }
+
+        let interface = interface.unwrap();
+        let mut interface_methods = HashMap::<String, bool>::new();
+
+        for method in &interface.methods {
+          interface_methods.insert(method.name.span.literal.clone(), false);
+        }
+
+        interfaces_methods.push(interface_methods);
+
+        interfaces.push(interface);
+      }
+    }
+
     self.begin_scope();
 
     self.declare(&statement.name.span.literal);
@@ -1348,6 +1454,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
       properties,
       statement.metadata.is_exported,
       false,
+      vec![],
     );
 
     self.current_class = Some(current_class.clone());
@@ -1355,36 +1462,83 @@ impl Visitor<AnalyzerResult> for Analyzer {
     for method in &statement.methods {
       let result = self.analyze_statement(method)?;
 
-      match result {
-        IRInstruction::Method(f) => {
-          self.scopes_variables.push(IRVariable::new(
-            f.name.clone(),
-            DataType::Unknown,
-            None,
-            IRVariableMetadata::new(
-              false,
-              false,
-              false,
-              false,
-              false,
-              false,
-              false,
-              false,
-              false,
-              f.metadata.is_constructor,
-              None,
-            ),
-          ));
+      if let IRInstruction::Method(f) = result {
+        let interface = interfaces.iter().find(|i| {
+          i.methods
+            .clone()
+            .into_iter()
+            .any(|m| m.name.span.literal == f.name.span.literal)
+        });
 
-          ir.push(f);
-        },
-        _ => {
-          return Err(Box::new(AnalyzerDiagnostic::new(
-            AnalyzerDiagnosticError::ClassAlreadyDefined(statement.name.clone()),
-            self.find_token_line(&statement.name.span.line),
-          )));
-        },
+        if let Some(interface) = interface {
+          let method = interface
+            .methods
+            .iter()
+            .find(|m| m.name.span.literal == f.name.span.literal)
+            .unwrap();
+
+          self.check_interface_method_implementation(interface, method, &f)?;
+
+          let mut methods = interfaces_methods
+            .iter_mut()
+            .find(|i| i.contains_key(&f.name.span.literal))
+            .unwrap();
+
+          methods.insert(f.name.span.literal.clone(), true);
+        }
+
+        self.scopes_variables.push(IRVariable::new(
+          f.name.clone(),
+          DataType::Unknown,
+          None,
+          IRVariableMetadata::new(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            f.metadata.is_constructor,
+            None,
+          ),
+        ));
+
+        ir.push(f);
+      } else {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::ClassAlreadyDefined(statement.name.clone()),
+          self.find_token_line(&statement.name.span.line),
+        )));
       };
+    }
+
+    let mut unimplementeds: Vec<String> = Vec::new();
+
+    for methods in interfaces_methods {
+      for (name, is_implemented) in methods {
+        if !is_implemented {
+          unimplementeds.push(name.clone())
+        }
+      }
+    }
+
+    match unimplementeds.len() {
+      0 => (),
+      1 => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::UnimplementedInterfaceMethod(unimplementeds[0].clone(), statement.name.clone()),
+          self.find_token_line(&statement.name.span.line),
+        )));
+      },
+      _ => {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::UnimplementedInterfaceMethods(unimplementeds, statement.name.clone()),
+          self.find_token_line(&statement.name.span.line),
+        )));
+      },
     }
 
     self.end_scope();
@@ -1394,6 +1548,7 @@ impl Visitor<AnalyzerResult> for Analyzer {
     current_class = self.current_class.as_ref().unwrap().clone();
 
     current_class.methods.clone_from(&ir);
+    current_class.interfaces.clone_from(&interfaces);
 
     let instruction = IRInstruction::Class(current_class.clone());
 
@@ -1700,12 +1855,50 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
     self.define(&statement.name.span.literal);
 
-    let mut methods = Vec::<IRInstruction>::new();
+    self.begin_scope();
+
+    let mut methods = Vec::<IRMethod>::new();
 
     for method in &statement.methods {
       let result = self.analyze_statement(method)?;
-      methods.push(result);
+
+      match result {
+        IRInstruction::Function(f) => {
+          let mut function = f.clone();
+
+          function.metadata.is_public = true;
+          function.metadata.is_method = true;
+
+          let method = IRMethod::new(
+            function.name.clone(),
+            function.parameters.clone(),
+            function.return_type.clone(),
+            function.body.clone(),
+            function.metadata.clone(),
+            statement.name.clone(),
+          );
+
+          self.define(&f.name.span.literal);
+
+          self.scopes_variables.push(IRVariable::new(
+            f.name.clone(),
+            DataType::Unknown,
+            None,
+            IRVariableMetadata::new(false, false, false, true, false, false, true, false, true, false, None),
+          ));
+
+          methods.push(method);
+        },
+        _ => {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::InvalidInterfaceMethod(statement.name.clone()),
+            self.find_token_line(&statement.name.span.line),
+          )))
+        },
+      };
     }
+
+    self.end_scope();
 
     let interface = IRInstruction::Interface(IRInterface::new(statement.name.clone(), methods));
 
@@ -1831,6 +2024,7 @@ impl Analyzer {
       current_file,
       current_class: None,
       context: Vec::new(),
+      current_inerface: None,
     }
   }
 
@@ -2073,6 +2267,7 @@ impl Analyzer {
                   c.properties.clone(),
                   false,
                   true,
+                  c.interfaces.clone(),
                 ))
                 .clone(),
               );
@@ -2085,6 +2280,7 @@ impl Analyzer {
                   c.properties.clone(),
                   false,
                   true,
+                  c.interfaces.clone(),
                 ))
                 .clone(),
               );
@@ -2404,6 +2600,23 @@ impl Analyzer {
 
     match enum_ {
       Some(IRInstruction::Enum(e)) => Some(e.clone()),
+      _ => None,
+    }
+  }
+
+  fn find_interface_in_ir(
+    &self,
+    name: &String,
+  ) -> Option<IRInterface> {
+    let irs = self.irs.get(&self.current_file).unwrap();
+
+    let interface = irs.iter().find(|ir| match ir {
+      IRInstruction::Interface(i) => &i.name.span.literal == name,
+      _ => false,
+    });
+
+    match interface {
+      Some(IRInstruction::Interface(i)) => Some(i.clone()),
       _ => None,
     }
   }
@@ -2952,5 +3165,140 @@ impl Analyzer {
     ));
 
     Ok(function_instance)
+  }
+
+  fn check_interface_method_implementation(
+    &mut self,
+    interface: &IRInterface,
+    interface_menthod: &IRMethod,
+    method: &IRMethod,
+  ) -> Result<bool, Box<AnalyzerDiagnostic>> {
+    if interface_menthod.return_type != method.return_type {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::MethodImplementationReturnTypeMismatch(
+          method.name.clone(),
+          method.return_type.clone(),
+          interface_menthod.return_type.clone(),
+        ),
+        self.find_token_line(&method.name.span.line),
+      )));
+    }
+
+    for (index, paramater) in method.parameters.iter().enumerate() {
+      let prop = match paramater {
+        IRInstruction::Variable(v) => Some(v),
+        _ => None,
+      };
+
+      if prop.is_none() {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::MethodImplementationError(method.name.clone(), interface.name.clone()),
+          self.find_token_line(&method.name.span.line),
+        )));
+      }
+
+      let prop = prop.unwrap();
+
+      let method_prop = method.parameters.get(index);
+
+      if method_prop.is_none() {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::MethodImplementationError(prop.name.clone(), method.name.clone()),
+          self.find_token_line(&method.name.span.line),
+        )));
+      }
+
+      let method_prop = match method_prop.unwrap() {
+        IRInstruction::Variable(v) => Some(v),
+        _ => None,
+      };
+
+      if method_prop.is_none() {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::MethodImplementationError(prop.name.clone(), method.name.clone()),
+          self.find_token_line(&method.name.span.line),
+        )));
+      }
+
+      let method_prop = method_prop.unwrap();
+
+      if prop.data_type != method_prop.data_type {
+        return Err(Box::new(AnalyzerDiagnostic::new(
+          AnalyzerDiagnosticError::MethodImplementationReturnTypeMismatch(
+            method.name.clone(),
+            prop.data_type.clone(),
+            method_prop.data_type.clone(),
+          ),
+          self.find_token_line(&method.name.span.line),
+        )));
+      }
+    }
+
+    Ok(true)
+  }
+
+  fn find_object_instance(
+    &self,
+    instance_name: &String,
+  ) -> Option<IRInstruction> {
+    let name_file = &self.current_file;
+    let irs = self.irs.get(name_file).unwrap();
+
+    irs
+      .iter()
+      .find(|ir| match ir {
+        IRInstruction::ClassInstance(c) => &c.class.name == instance_name,
+        IRInstruction::Interface(i) => &i.name.span.literal == instance_name,
+        IRInstruction::Variable(v) => &v.name.span.literal == instance_name,
+        _ => false,
+      })
+      .cloned()
+  }
+
+  fn check_type_mismatch(
+    &mut self,
+    left: &DataType,
+    right: &DataType,
+    token: &Token,
+  ) -> Result<(), Box<AnalyzerDiagnostic>> {
+    match (left, right) {
+      (DataType::ClassType(c), DataType::Interface(interface))
+      | (DataType::Interface(interface), DataType::ClassType(c)) => {
+        let class = self.find_class_in_ir(c);
+
+        if class.is_none() {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::UndefinedClass(token.clone()),
+            self.find_token_line(&token.span.line),
+          )));
+        }
+
+        let class = class.unwrap();
+
+        let implemement = class.interfaces.iter().find(|i| &i.name.span.literal == interface);
+
+        if implemement.is_none() {
+          return Err(Box::new(AnalyzerDiagnostic::new(
+            AnalyzerDiagnosticError::TypeMismatch(left.clone(), right.clone(), token.clone()),
+            self.find_token_line(&token.span.line),
+          )));
+        }
+
+        return Ok(());
+      },
+      _ => (),
+    };
+
+    if left != right
+      && (!matches!(right, DataType::PendingImport(_) | DataType::Pending)
+        || !matches!(left, DataType::PendingImport(_) | DataType::Pending))
+    {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::TypeMismatch(left.clone(), right.clone(), token.clone()),
+        self.find_token_line(&token.span.line),
+      )));
+    }
+
+    Ok(())
   }
 }

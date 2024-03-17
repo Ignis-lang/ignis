@@ -486,8 +486,8 @@ impl TranspilerToC {
       IRInstruction::Method(_) => todo!(),
       IRInstruction::This(_) => todo!(),
       IRInstruction::Enum(_) => todo!(),
-        IRInstruction::FunctionInstance(_) => todo!(),
-        IRInstruction::Interface(_) => todo!(),
+      IRInstruction::FunctionInstance(_) => todo!(),
+      IRInstruction::Interface(_) => todo!(),
     };
 
     code

@@ -1,18 +1,18 @@
 use serde_json::{Map, Value};
 use token::token::Token;
 
-use crate::{IRInstruction, IRInstructionTrait};
+use crate::{ir_method::IRMethod, IRInstructionTrait};
 
 #[derive(Debug, Clone)]
 pub struct IRInterface {
   pub name: Token,
-  pub methods: Vec<IRInstruction>,
+  pub methods: Vec<IRMethod>,
 }
 
 impl IRInterface {
   pub fn new(
     name: Token,
-    methods: Vec<IRInstruction>,
+    methods: Vec<IRMethod>,
   ) -> Self {
     Self { name, methods }
   }

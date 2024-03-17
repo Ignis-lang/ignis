@@ -113,7 +113,7 @@ impl Diagnostic {
         "{:3}{:3}{}",
         diagnostic.token.span.line.to_string().blue().bold(),
         pipe,
-        lines[diagnostic.token.span.line - 1].dimmed()
+        lines[diagnostic.token.span.line - 1]
       );
     }
 

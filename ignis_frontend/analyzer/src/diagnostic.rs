@@ -65,6 +65,13 @@ pub enum AnalyzerDiagnosticError {
   IncorrectNumberOfGenericArguments(Token, usize, usize),
   InvalidTypeArgument(DataType, Box<DataType>, Token),
   InterfaceAlreadyDefined(Token),
+  UndefinedInterface(Token),
+  InvalidInterfaceMethod(Token),
+  MethodImplementationParameterMismatch(Token, DataType, DataType),
+  MethodImplementationError(Token, Token),
+  MethodImplementationReturnTypeMismatch(Token, DataType, DataType),
+  UnimplementedInterfaceMethod(String, Token),
+  UnimplementedInterfaceMethods(Vec<String>, Token),
 }
 
 #[derive(Debug, Clone)]
@@ -566,10 +573,10 @@ impl AnalyzerDiagnostic {
         ))),
         "IA0057".to_string(),
       ),
-    AnalyzerDiagnosticError::IncorrectNumberOfGenericArguments(name, generic_length, type_length) => DiagnosticReport::new(
+      AnalyzerDiagnosticError::IncorrectNumberOfGenericArguments(name, generic_length, type_length) => DiagnosticReport::new(
         format!("Incorrect number of generic arguments for '{}'. Expected {}, but got {}", name, generic_length, type_length),
-          Box::new(name.clone()),
-       self.token_line. clone(),
+        Box::new(name.clone()),
+        self.token_line. clone(),
         DiagnosticLevel::Error,
         None,
         "IA0058".to_string(),
@@ -581,7 +588,7 @@ impl AnalyzerDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IA0059".to_string(),
-              ),
+      ),
       AnalyzerDiagnosticError::InterfaceAlreadyDefined(token) => DiagnosticReport::new(
         format!("Interface '{}' already defined", token.span.literal),
         Box::new(token.clone()),
@@ -589,6 +596,64 @@ impl AnalyzerDiagnostic {
         DiagnosticLevel::Error,
         None,
         "IA0060".to_string(),
+      ),
+      AnalyzerDiagnosticError::UndefinedInterface(token) => DiagnosticReport::new(
+        format!("Undefined interface '{}'", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0061".to_string(),
+      ),
+      AnalyzerDiagnosticError::InvalidInterfaceMethod(token) => DiagnosticReport::new(
+        format!("Invalid interface method '{}'", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0062".to_string(),
+      ),
+      AnalyzerDiagnosticError::MethodImplementationParameterMismatch(method,implementation_type, method_type) => DiagnosticReport::new(
+        format!("Method implementation parameter mismatch. Expected '{}' but got '{}'", method_type, implementation_type),
+        Box::new(method.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0063".to_string(),
+
+      ),
+      AnalyzerDiagnosticError::MethodImplementationError(interface, method) => DiagnosticReport::new(
+        format!("Method '{}' implementation Interface '{}' error", method.span.literal, interface.span.literal),
+        Box::new(method.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0064".to_string(),
+
+      ),
+      AnalyzerDiagnosticError::MethodImplementationReturnTypeMismatch(method, implementation_type, method_type) => DiagnosticReport::new(
+        format!("Method implementation return type mismatch. Expected '{}' but got '{}'", method_type, implementation_type),
+        Box::new(method.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0065".to_string(),
+      ),
+      AnalyzerDiagnosticError::UnimplementedInterfaceMethod(method, class) =>  DiagnosticReport::new(
+        format!("Method '{}' is not implemented in class '{}'", method, class.span.literal),
+        Box::new(class.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0066".to_string(),
+      ),
+      AnalyzerDiagnosticError::UnimplementedInterfaceMethods(methods, class) => DiagnosticReport::new(
+        format!("Methods '{}' are not implemented in class '{}'", methods.join(", "), class.span.literal),
+        Box::new(class.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0067".to_string(),
       ),
     }
   }

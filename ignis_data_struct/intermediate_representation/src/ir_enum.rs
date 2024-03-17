@@ -9,7 +9,7 @@ pub struct IREnum {
   pub members: Vec<IRVariable>,
   pub is_exported: bool,
   pub generic: Option<Vec<String>>,
-  pub data_type: DataType
+  pub data_type: DataType,
 }
 
 impl IRInstructionTrait for IREnum {

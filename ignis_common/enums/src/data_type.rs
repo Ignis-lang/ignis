@@ -34,6 +34,7 @@ pub enum DataType {
   ClassType(String),
   Enum(String),
   PendingImport(String),
+  Interface(String),
   // TODO: Type non-primitive
   GenericType(GenericType),
   UnionType(Vec<DataType>),
@@ -92,6 +93,9 @@ impl Display for DataType {
       DataType::PendingImport(import) => {
         write!(f, "PendingImport<{}>", import)
       },
+      DataType::Interface(i) => {
+        write!(f, "Interface<{}>", i)
+      },
     }
   }
 }
@@ -137,6 +141,7 @@ impl DataType {
       DataType::AliasType(_) => todo!(),
       DataType::Enum(_) => todo!(),
       DataType::PendingImport(_) => todo!(),
+      DataType::Interface(_) => todo!(),
     };
 
     kind
