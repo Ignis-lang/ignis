@@ -7,6 +7,7 @@ use std::fmt::{Display, Formatter};
 use diagnostic::{AnalyzerDiagnostic, AnalyzerDiagnosticError};
 use diagnostic_report::DiagnosticReport;
 use enums::data_type::GenericType;
+use intermediate_representation::ir_interface::IRInterface;
 use intermediate_representation::{
   analyzer_value::AnalyzerValue,
   IRInstruction,
@@ -1688,9 +1689,27 @@ impl Visitor<AnalyzerResult> for Analyzer {
 
   fn visit_interface_statement(
     &mut self,
-    _statement: &InterfaceStatement,
+    statement: &InterfaceStatement,
   ) -> AnalyzerResult {
-    todo!()
+    if self.is_allready_declared(&statement.name.span.literal) {
+      return Err(Box::new(AnalyzerDiagnostic::new(
+        AnalyzerDiagnosticError::InterfaceAlreadyDefined(statement.name.clone()),
+        self.find_token_line(&statement.name.span.line),
+      )));
+    }
+
+    self.define(&statement.name.span.literal);
+
+    let mut methods = Vec::<IRInstruction>::new();
+
+    for method in &statement.methods {
+      let result = self.analyze_statement(method)?;
+      methods.push(result);
+    }
+
+    let interface = IRInstruction::Interface(IRInterface::new(statement.name.clone(), methods));
+
+    Ok(interface)
   }
 
   fn visit_enum_statement(

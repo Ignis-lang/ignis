@@ -258,6 +258,7 @@ impl TranspilerToC {
         IRInstruction::This(_) => todo!(),
         IRInstruction::Enum(_) => todo!(),
         IRInstruction::FunctionInstance(_) => todo!(),
+        IRInstruction::Interface(_) => todo!(),
       };
 
       args.push(',');
@@ -486,6 +487,7 @@ impl TranspilerToC {
       IRInstruction::This(_) => todo!(),
       IRInstruction::Enum(_) => todo!(),
         IRInstruction::FunctionInstance(_) => todo!(),
+        IRInstruction::Interface(_) => todo!(),
     };
 
     code

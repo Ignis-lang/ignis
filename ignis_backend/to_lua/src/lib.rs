@@ -355,6 +355,7 @@ impl TranspilerToLua {
         let result = self.transpile_function_instance(func, indent_level + 2);
         self.code.push_str(&result);
       },
+      IRInstruction::Interface(_) => ()
     };
 
     code

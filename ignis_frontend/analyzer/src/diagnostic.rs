@@ -64,6 +64,7 @@ pub enum AnalyzerDiagnosticError {
   PotentialTypeMismatch(DataType, DataType, Token),
   IncorrectNumberOfGenericArguments(Token, usize, usize),
   InvalidTypeArgument(DataType, Box<DataType>, Token),
+  InterfaceAlreadyDefined(Token),
 }
 
 #[derive(Debug, Clone)]
@@ -581,6 +582,14 @@ impl AnalyzerDiagnostic {
         None,
         "IA0059".to_string(),
               ),
+      AnalyzerDiagnosticError::InterfaceAlreadyDefined(token) => DiagnosticReport::new(
+        format!("Interface '{}' already defined", token.span.literal),
+        Box::new(token.clone()),
+        self.token_line.clone(),
+        DiagnosticLevel::Error,
+        None,
+        "IA0060".to_string(),
+      ),
     }
   }
 }

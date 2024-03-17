@@ -18,6 +18,7 @@ pub mod ir_for;
 pub mod ir_for_of;
 pub mod ir_get;
 pub mod ir_if;
+pub mod ir_interface;
 pub mod ir_method;
 pub mod ir_method_call;
 pub mod ir_return;
@@ -34,6 +35,7 @@ use function_instance::IRFunctionInstance;
 use ir_array_access::IRArrayAccess;
 use ir_enum::IREnum;
 use ir_for::IRFor;
+use ir_interface::IRInterface;
 use ir_method::IRMethod;
 use ir_method_call::IRMethodCall;
 use ir_this::IRThis;
@@ -77,6 +79,7 @@ pub enum IRInstruction {
   MethodCall(IRMethodCall),
   This(IRThis),
   Enum(IREnum),
+  Interface(IRInterface),
 }
 
 pub trait IRInstructionTrait {
@@ -115,6 +118,7 @@ impl IRInstructionTrait for IRInstruction {
       IRInstruction::This(this) => this.to_json(),
       IRInstruction::Enum(e) => e.to_json(),
       IRInstruction::FunctionInstance(f) => f.to_json(),
+      IRInstruction::Interface(i) => i.to_json(),
     }
   }
 }
