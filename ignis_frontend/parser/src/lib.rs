@@ -269,7 +269,17 @@ impl Parser {
 
     let mut type_arguments: Vec<DataType> = Vec::new();
 
-    if self.check(TokenType::Less) {
+    if self.check(TokenType::Less)
+      && matches!(
+        self.next().kind,
+        TokenType::Identifier
+          | TokenType::IntType
+          | TokenType::FloatType
+          | TokenType::StringType
+          | TokenType::Void
+          | TokenType::Unknown
+      )
+    {
       self.resolve_generics(&mut type_arguments)?;
     }
 
@@ -443,6 +453,7 @@ impl Parser {
 
       self.advance();
     }
+
     self.consume(TokenType::Greater)?;
 
     Ok(())
@@ -1728,5 +1739,15 @@ impl Parser {
       .into_iter()
       .filter(|t| t.span.line == *line)
       .collect::<Vec<Token>>()
+  }
+
+  fn next(&self) -> Token {
+    let index = self.current + 1;
+
+    if index >= self.tokens.len() {
+      return self.tokens[self.current].clone();
+    }
+
+    self.tokens[index].clone()
   }
 }
