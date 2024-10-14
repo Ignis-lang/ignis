@@ -4,6 +4,7 @@ use clap::Parser as ClapParser;
 use std::{fs::File, path::Path};
 
 use cli::{Cli, SubCommand};
+use ignis_core::IgnisCore;
 use ignis_config;
 
 fn check_if_project() -> bool {
@@ -73,5 +74,7 @@ fn main() {
 
   let config = parse_cli_to_config(&cli);
 
-  println!("{:#?}", config);
+  let mut core = IgnisCore::new(&config);
+
+  core.run();
 }

@@ -65,7 +65,7 @@ impl IgnisProjectConfig {
 #[derive(Debug, Clone)]
 pub struct IgnisBuildConfig {
   pub file: Option<String>,
-  pub isProject: bool,
+  pub is_project: bool,
   pub target: TargetBackend,
   pub optimize: bool,
   pub output_dir: String,
@@ -75,13 +75,13 @@ impl IgnisBuildConfig {
   pub fn new(
     file: Option<String>,
     target: TargetBackend,
-    isProject: bool,
+    is_project: bool,
     optimize: bool,
     output_dir: String,
   ) -> Self {
     Self {
       file,
-      isProject,
+      is_project,
       target,
       optimize,
       output_dir,
