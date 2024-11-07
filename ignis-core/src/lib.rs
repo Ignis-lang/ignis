@@ -1,5 +1,5 @@
 pub mod frontend;
-pub mod lexer;
+pub mod diagnostics;
 
 use ignis_config::IgnisConfig;
 use frontend::IgnisFrontend;

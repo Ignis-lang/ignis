@@ -1,7 +1,8 @@
 use crate::token_types::TokenType;
 use ascii_table::AsciiTable;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Token {
   pub type_: TokenType,
   pub lexeme: String,
@@ -51,7 +52,7 @@ impl Token {
     ]
   }
 
-  pub fn vec_to_ascii_table(tokens: Vec<Token>) -> Vec<Vec<String>> {
+  pub fn vec_to_ascii_table(tokens: &Vec<Token>) -> Vec<Vec<String>> {
     let mut result: Vec<Vec<String>> = vec![];
 
     for token in tokens {
@@ -61,7 +62,7 @@ impl Token {
     result
   }
 
-  pub fn print_ascii_table(tokens: Vec<Token>) {
+  pub fn print_ascii_table(tokens: &Vec<Token>) {
     let mut ascii_table = AsciiTable::default();
     ascii_table.column(0).set_header("Type");
     ascii_table.column(1).set_header("Lexeme");
@@ -69,6 +70,6 @@ impl Token {
     ascii_table.column(3).set_header("Column");
     ascii_table.column(4).set_header("File Name");
 
-    ascii_table.print(Self::vec_to_ascii_table(tokens));
+    ascii_table.print(Self::vec_to_ascii_table(&tokens));
   }
 }

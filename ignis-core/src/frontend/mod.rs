@@ -1,8 +1,14 @@
+mod diagnostics;
+pub mod lexer;
+pub mod parser;
+
+use crate::diagnostics::{Diagnostic, diagnostic_report::DiagnosticReport};
+
 use std::io::Read;
 
 use ignis_config::{DebugPrint, IgnisConfig};
 use ignis_token::token::Token;
-use crate::lexer::Lexer;
+use lexer::Lexer;
 
 fn get_file_content(path: &String) -> String {
   let file = std::fs::File::open(path);
@@ -21,11 +27,15 @@ fn get_file_content(path: &String) -> String {
 
 pub struct IgnisFrontend {
   config: Box<IgnisConfig>,
+  diagnostics: Vec<DiagnosticReport>,
 }
 
 impl IgnisFrontend {
   pub fn new(config: Box<IgnisConfig>) -> Self {
-    Self { config }
+    Self {
+      config,
+      diagnostics: Vec::new(),
+    }
   }
 
   pub fn process(&mut self) {
@@ -41,10 +51,29 @@ impl IgnisFrontend {
 
     if self.config.debug.contains(&DebugPrint::Lexer) && !self.config.quiet {
       if self.config.verbose == 0 {
-        Token::print_ascii_table(tokens);
+        Token::print_ascii_table(&tokens);
       } else {
         println!("{:#?}", tokens);
       }
+    }
+
+    let mut parser = parser::IgnisParser::new(self.config.clone(), tokens);
+
+    let (statements, diagnostics) = parser.parse(false);
+
+    if self.config.debug.contains(&DebugPrint::Ast) && !self.config.quiet {
+      println!("{:#?}", statements);
+    }
+
+
+    for diagnostic in diagnostics {
+      self.diagnostics.push(diagnostic.report_diagnostic());
+    }
+
+    if !self.config.quiet {
+      let diagnostics: Diagnostic = Diagnostic::default();
+
+      diagnostics.report(self.diagnostics.clone());
     }
   }
 }

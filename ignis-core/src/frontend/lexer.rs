@@ -23,7 +23,11 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-  pub fn new(config: Box<IgnisConfig>, source: &'a str, file: String) -> Self {
+  pub fn new(
+    config: Box<IgnisConfig>,
+    source: &'a str,
+    file: String,
+  ) -> Self {
     Self {
       config,
       chars: source.chars(),
@@ -123,7 +127,17 @@ impl<'a> Lexer<'a> {
         token = TokenType::Comma;
       },
       '.' => {
-        token = TokenType::Dot;
+        token = if self.match_char('.') {
+          if self.match_char('.') {
+            TokenType::Variadic
+          } else if self.match_char('=') {
+            TokenType::RangeInclusive
+          } else {
+            TokenType::Range
+          }
+        } else {
+          TokenType::Dot
+        };
       },
       ';' => {
         token = TokenType::SemiColon;
@@ -155,7 +169,11 @@ impl<'a> Lexer<'a> {
         token = TokenType::Asterisk;
       },
       ':' => {
-        token = TokenType::Colon;
+        token = if self.match_char(':') {
+          TokenType::DoubleColon
+        } else {
+          TokenType::Colon
+        };
       },
       '%' => {
         token = TokenType::Mod;
@@ -286,70 +304,6 @@ impl<'a> Lexer<'a> {
     }
   }
 
-  fn get_keyword(key: &str) -> Option<TokenType> {
-    match key {
-      "class" => Some(TokenType::Class),
-      "super" => Some(TokenType::Super),
-      "else" => Some(TokenType::Else),
-      "false" => Some(TokenType::False),
-      "true" => Some(TokenType::True),
-      "function" => Some(TokenType::Function),
-      "for" => Some(TokenType::For),
-      "in" => Some(TokenType::In),
-      "of" => Some(TokenType::Of),
-      "if" => Some(TokenType::If),
-      "null" => Some(TokenType::Null),
-      "return" => Some(TokenType::Return),
-      "this" => Some(TokenType::This),
-      "let" => Some(TokenType::Let),
-      "const" => Some(TokenType::Const),
-      "while" => Some(TokenType::While),
-      "enum" => Some(TokenType::Enum),
-      "export" => Some(TokenType::Export),
-      "import" => Some(TokenType::Import),
-      "from" => Some(TokenType::From),
-      "mut" => Some(TokenType::Mut),
-      "as" => Some(TokenType::As),
-      "break" => Some(TokenType::Break),
-      "readonly" => Some(TokenType::ReadOnly),
-      "static" => Some(TokenType::Static),
-      "final" => Some(TokenType::Final),
-      "public" => Some(TokenType::Public),
-      "private" => Some(TokenType::Private),
-      "interface" => Some(TokenType::Interface),
-      "extends" => Some(TokenType::Extends),
-      "implements" => Some(TokenType::Implements),
-      "string" => Some(TokenType::StringType),
-      "boolean" => Some(TokenType::BooleanType),
-      "i8" => Some(TokenType::Int8Type),
-      "i16" => Some(TokenType::Int16Type),
-      "i32" => Some(TokenType::Int32Type),
-      "i64" => Some(TokenType::Int64Type),
-      "u8" => Some(TokenType::UnsignedInt8Type),
-      "u16" => Some(TokenType::UnsignedInt16Type),
-      "u32" => Some(TokenType::UnsignedInt32Type),
-      "u64" => Some(TokenType::UnsignedInt64Type),
-      "f32" => Some(TokenType::Float32Type),
-      "f64" => Some(TokenType::Float64Type),
-      "char" => Some(TokenType::CharType),
-      "void" => Some(TokenType::Void),
-      "hex" => Some(TokenType::HexType),
-      "binary" => Some(TokenType::BinaryType),
-      "extern" => Some(TokenType::Extern),
-      "continue" => Some(TokenType::Continue),
-      "new" => Some(TokenType::New),
-      "unknown" => Some(TokenType::Unknown),
-      "type" => Some(TokenType::Type),
-      "is" => Some(TokenType::Is),
-      "record" => Some(TokenType::Record),
-      "decorator" => Some(TokenType::Decorator),
-      "meta" => Some(TokenType::Meta),
-      "declare" => Some(TokenType::Declare),
-      "namespace" => Some(TokenType::Namespace),
-      _ => None,
-    }
-  }
-
   fn is_identifier_letter(&self) -> bool {
     let c: char = self.peek();
 
@@ -362,7 +316,7 @@ impl<'a> Lexer<'a> {
     }
 
     let value: String = self.source[self.start..self.current].to_string();
-    let kind: Option<TokenType> = Self::get_keyword(value.as_str());
+    let kind: Option<TokenType> = TokenType::get_keyword_from_string(value.as_str());
 
     kind.unwrap_or(TokenType::Identifier)
   }
