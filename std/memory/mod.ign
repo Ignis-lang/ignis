@@ -1,0 +1,162 @@
+import {
+  FFIDeclarationType,
+  CTypes,
+  FFILanguage,
+  FFIFlags,
+  FFIConfig,
+  FFIParam,
+} from "std:ffi";
+import { MutOnly } from "std:meta";
+
+export extern memory {
+  /**
+   * @brief Memory allocation function.
+   *
+   * Allocates a block of memory of the specified size using the external
+   * `allocate` function, which interacts with low-level memory management
+   * (as declared in `memory.h` and implemented in `memory.c`). 
+   *
+   * @param T The type of pointer to return, allowing for type-safe allocation.
+   *
+   * @param size The size of the memory block to allocate, in bytes.
+   *
+   * @return A pointer of type `T` to the allocated memory.
+   *
+   * @note Provides an abstraction over low-level memory operations.
+   *
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "allocate",
+    params: [
+      {
+        name: "size",
+        type_: CTypes.U64,
+        flags: [],
+      }
+    ],
+    returnType: CTypes.VOID_POINTER,
+    requireImport: true,
+    file: {
+      headerPath: "memory/memory.h",
+      sourcePath: "std/memory/memory.c",
+    }
+  })
+  function allocate<T>(size: u64): T;
+
+  /**
+   * @brief Memory deallocation function.
+   *
+   * Frees a previously allocated block of memory using the external 
+   * `freeMemory` function, ensuring that the program does not leak resources.
+   *
+   * @param address A pointer (of type `string` in this case) to the memory 
+   *                block to free.
+   *
+   * @return void
+   *
+   * @note Proper use is critical to avoid memory leaks in dynamic memory.
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "freeMemory",
+    params: [
+      {
+        name: "address",
+        type_: CTypes.VOID_POINTER,
+        flags: [],
+      }
+    ],
+    returnType: CTypes.VOID,
+    requireImport: true,
+    file: {
+      headerPath: "memory/memory.h",
+      sourcePath: "std/memory/memory.c",
+    }
+  })
+  function free(address: string): void;
+
+  /**
+   * @brief Zero-initialized memory allocation function.
+   *
+   * Allocates a block of memory for an array of elements, each of a specified
+   * size. The memory is zero-initialized (all bits set to zero).
+   *
+   * @param T The type of pointer to return, allowing for type-safe allocation.
+   *
+   * @param size The size of each element in the array, in bytes.
+   *
+   * @param count The number of elements to allocate.
+   *
+   * @return A pointer of type `T` to the allocated and zero-initialized memory.
+   *
+   * @note Useful for arrays or buffers that require zero-initialization.
+   *
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "allocateZeroed",
+    params: [
+      {
+        name: "size",
+        type_: CTypes.U64,
+        flags: [],
+      },
+      {
+        name: "count",
+        type_: CTypes.U64,
+        flags: [],
+      }
+    ],
+    returnType: CTypes.VOID_POINTER,
+    requireImport: true,
+    file: {
+      headerPath: "memory/memory.h",
+      sourcePath: "std/memory/memory.c",
+    }
+  })
+  function allocateZeroed<T>(size: u64, count: u64): T;
+
+  /**
+   * @brief Memory reallocation function.
+   *
+   * Resizes a previously allocated block of memory using the external
+   * `reallocate` function. The new block of memory may be in a different
+   * location, and the function returns a pointer to the new block.
+   *
+   * @param T The type of pointer to return, allowing for type-safe allocation.
+   *
+   * @param address A pointer to the memory block to be reallocated.
+   *
+   * @param size The new size for the memory block, in bytes.
+   *
+   * @return A pointer of type `T` to the reallocated memory.
+   *
+   * @note Reallocation may move the memory block. The original block is not
+   *       freed if reallocation fails, so handle this case properly.
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "reallocate",
+    params: [
+      {
+        name: "address",
+        type_: CTypes.VOID_POINTER,
+        flags: [],
+      },
+      {
+        name: "size",
+        type_: CTypes.U64,
+        flags: [],
+      }
+    ],
+    returnType: CTypes.VOID_POINTER,
+    requireImport: true,
+    file: {
+      headerPath: "memory/memory.h",
+      sourcePath: "std/memory/memory.c",
+    }
+  })
+  function reallocate<T>(address: string, size: u64): T;
+}
+

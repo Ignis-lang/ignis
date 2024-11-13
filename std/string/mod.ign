@@ -1,0 +1,733 @@
+import {
+  FFIDeclarationType,
+  CTypes,
+  FFILanguage,
+  FFIFlags,
+  FFIConfig,
+  FFIParam,
+} from "std:ffi";
+import { MutOnly } from "std:meta";
+import { IgnisNumbersType } from "std:types";
+
+export record string {
+  /**
+   * Gets the length of the string.
+   *
+   * @return {u32} The length of the string.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "Hello, world!";
+   * let len: u32 = str.length;
+   * println(len); // Output: 13
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringLength",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.UINT,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  length: u32;
+
+  /**
+   * Checks if the string includes the specified substring.
+   *
+   * @param {string} search - The substring to search for.
+   * @return {boolean} True if the substring is found, false otherwise.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "Hello, world!";
+   * let includesWorld: string = str.includes("world");
+   * println(includesWorld); // Output: true
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringIncludes",
+    params: [
+      {
+        name: "value",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "search",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.BOOLEAN,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  includes(search: string): boolean;
+
+  /**
+   * Splits the string into an array of substrings using the specified separator.
+   *
+   * @param {string} separator - The character or string to use for separating the string.
+   * @return {string[]} An array of substrings.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "a,b,c";
+   * let arr: string[] = str.split(",");
+   * println(arr); // Output: ["a", "b", "c"]
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringSplit",
+    params: [
+      {
+        name: "value",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "separator",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  split(separator: string): string[];
+
+  /**
+   * Returns the character at the specified index.
+   *
+   * @param {u32} index - The index of the character to return.
+   * @return {char} The character at the specified index.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "Hello";
+   * let char: char = str.charAt(1);
+   * println(char); // Output: "e"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringCharAt",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "index",
+        type_: CTypes.INT,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  charAt(index: u32): char; // TODO: implement this with Optional<char>
+
+  /**
+   * Converts the string to uppercase.
+   *
+   * @return {string} The uppercase version of the string.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "Hello";
+   * let upperStr: string = str.toUpperCase();
+   * println(upperStr); // Output: "HELLO"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringToUpperCase",
+    params: [{
+      name: "this",
+      type_: CTypes.STRING,
+      flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+      isFormatted: false
+    }],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  toUpperCase(): string;
+
+  /**
+   * Converts the string to lowercase.
+   *
+   * @return {string} The lowercase version of the string.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "Hello";
+   * let lowerStr: string = str.toLowerCase();
+   * println(lowerStr); // Output: "hello"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringToLowerCase",
+    params: [{
+      name: "this",
+      type_: CTypes.STRING,
+      flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+      isFormatted: false
+    }],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  toLowerCase(): string;
+
+  /**
+   * Converts the string to a number.
+   *
+   * @return {T} The numeric value of the string.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "123";
+   * let num: i32 = str.toNumber<i32>();
+   * println(num); // Output: 123
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringToNumber",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "type",
+        type_: CTypes.INT,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.VOID,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  toNumber<T as IgnisNumbersType>(): T; // TODO: implement this with Result<O, E>
+
+  /**
+   * Converts the string to a boolean.
+   *
+   * @return {boolean} True if the string is "true", false otherwise.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "true";
+   * let bool: boolean = str.toBoolean();
+   * println(bool); // Output: true
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringToBoolean",
+    params: [{
+      name: "this",
+      type_: CTypes.STRING,
+      flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+      isFormatted: false
+    }],
+    returnType: CTypes.BOOLEAN,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  toBoolean(): boolean; // TODO: implement this with Result<O, E>
+
+  /**
+   * Converts the string to an array of bytes.
+   * @return {u8[]} An array of bytes representing the string.
+   * @example
+   * ```
+   * let str = "Hello";
+   * let bytes = str.toBytes();
+   * println(bytes); // Output: [72, 101, 108, 108, 111]
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringToBytes",
+    params: [{
+      name: "this",
+      type_: CTypes.STRING,
+      flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+      isFormatted: false
+    }],
+    returnType: CTypes.VOID,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  toBytes(): u8[]; // TODO: implement this with Result<O, E>
+
+  /**
+   * Trims whitespace from both ends of the string.
+   *
+   * @return {string} The trimmed string.
+   * @example
+   * ```
+   * let str = "  Hello  ";
+   * str.trim();
+   * println(trimmedStr); // Output: "Hello"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringTrim",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  trim(): string;
+
+  /**
+   * Trims whitespace from the beginning of the string.
+   * @return {string} The trimmed string.
+   * @example
+   * ```
+   * let str = "  Hello";
+   * let trimmedStr = str.trimStart();
+   * println(trimmedStr); // Output: "Hello"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringTrimStart",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  trimStart(): string;
+
+  /**
+   * Trims whitespace from the end of the string.
+   *
+   * @return {string} The trimmed string.
+   *
+   * @example
+   * ```
+   * let str = "Hello  ";
+   * let trimmedStr = str.trimEnd();
+   * println(trimmedStr); // Output: "Hello"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringTrimEnd",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  trimEnd(): string;
+
+  /**
+   * Checks if the string starts with the specified substring.
+   * @param {string} search - The substring to search for.
+   * @return {boolean} True if the string starts with the substring, false otherwise.
+   * @example
+   * ```
+   * let str = "Hello, world!";
+   * let startsWithHello = str.startsWith("Hello");
+   * println(startsWithHello); // Output: true
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringStartsWith",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "search",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.BOOLEAN,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  startsWith(search: string): boolean;
+
+  /**
+   * Checks if the string ends with the specified substring.
+   * @param {string} search - The substring to search for.
+   * @return {boolean} True if the string ends with the substring, false otherwise.
+   * @example
+   * ```
+   * let str = "Hello, world!";
+   * let endsWithWorld = str.endWith("world!");
+   * println(endsWithWorld); // Output: true
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringEndWith",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "search",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.BOOLEAN,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  endWith(search: string): boolean;
+
+  /**
+   * Extracts a section of the string and returns it as a new string.
+   *
+   * @param {i32} start - The start index of the slice.
+   * @param {i32} end - The end index of the slice.
+   * @return {string} The extracted section of the string.
+   *
+   * @example
+   * ```ignis
+   * let str: string = "Hello, world!";
+   * let slice: string = str.slice(0, 5);
+   * println(slice); // Output: "Hello"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringSlice",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "start",
+        type_: CTypes.INT,
+        flags: [],
+        isFormatted: false
+      },
+      {
+        name: "end",
+        type_: CTypes.INT,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  slice(start: i32, end: i32): string;
+
+  /**
+   * Clones the string.
+   *
+   * @return {string} A new string that is a clone of the original string.
+   *
+   * @example
+   * ```
+   * let str: string = "Hello";
+   * let clonedStr: string = str.clone();
+   * println(clonedStr); // Output: "Hello"
+   * ```
+   */
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringClone",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  clone(): string;
+
+// #region Mutating Methods
+
+  /**
+   * Appends a value to the end of the string.
+   *
+   * @param {string} value - The value to append to the string.
+   *
+   * @example
+   * ```ignis
+   * let mut str: string = "Hello";
+   * str.push(", world!");
+   * println(str); // Output: "Hello, world!"
+   * ```
+   */
+  @MutOnly
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringPush",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "value",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  push(value: string): void;
+
+  /**
+   * Removes the last character from the string.
+   *
+   * @return {string} The removed character.
+   *
+   * @example
+   * ```ignis
+   * let mut str: string = "Hello";
+   * let lastChar: string = str.pop();
+   * println(lastChar); // Output: "o"
+   * println(str); // Output: "Hell"
+   * ```
+   */
+  @MutOnly
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringPop",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.STRING,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  pop(): string;
+
+  /**
+   * Concatenates the string with another string.
+   *
+   * @param {string} value - The string to concatenate with.
+   *
+   * @example
+   * ```ignis
+   * let mut str: string = "Hello";
+   * str.concat(", world!");
+   * println(str); // Output: "Hello, world!"
+   * ```
+   */
+  @MutOnly
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringConcat",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false,
+      },
+      {
+        name: "value",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    },
+    returnType: CTypes.VOID,
+  })
+  concat(value: string): void;
+
+  /**
+   * Clears the string, making it an empty string.
+   *
+   * @example
+   * ```ignis
+   * let mut str: string = "Hello";
+   * str.clear();
+   * println(str); // Output: ""
+   * ```
+   */
+  @MutOnly
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringClear",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      }
+    ],
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  clear(): void;
+
+  /**
+   * Replaces occurrences of a substring within the string with a new substring.
+   *
+   * @param {string} search - The substring to replace.
+   * @param {string} replace - The new substring to insert.
+   * @return {string} The new string with the replaced values.
+   *
+   * @example
+   * ```ignis
+   * let mut str: string = "Hello, world!";
+   * println(str); // "Hello, world!"
+   * str.replace("world", "Ignis");
+   * println(newStr); // Output: "Hello, Ignis!"
+   * ```
+   */
+  @MutOnly
+  @FFILanguage({
+    type_: FFIDeclarationType.FUNCTION,
+    name: "stringReplace",
+    params: [
+      {
+        name: "this",
+        type_: CTypes.STRING,
+        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
+        isFormatted: false
+      },
+      {
+        name: "search",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      },
+      {
+        name: "replace",
+        type_: CTypes.STRING,
+        flags: [],
+        isFormatted: false
+      }
+    ],
+    returnType: CTypes.VOID,
+    file: {
+      headerPath: "string/string.h",
+      sourcePath: "string/string.c",
+    }
+  })
+  replace(search: string, replace: string): void; // TODO: Include option for use Regex
+// #endregion
+}

@@ -1,0 +1,133 @@
+import { NotTranspile } from "std:meta";
+
+/**
+ * Lists the types of statements that can be exampled in FFI.
+ */
+@NotTranspile
+export enum FFIDeclarationType {
+  FUNCTION,
+  METHOD,
+  PROPIERTY,
+  OPERATOR,
+  MACRO,
+  CLASS,
+  RECORD,
+  INTERFACES,
+  ENUM,
+}
+
+/**
+ * Lists the types supported by Ignis FFI system.
+ */
+@NotTranspile
+export enum CTypes {
+  VOID,
+  VOID_POINTER,
+  CHAR,
+  STRING,
+  INT,
+  UINT,
+  LONG,
+  I8,
+  I16,
+  I32,
+  I64,
+  U8,
+  U16,
+  U32,
+  U64,
+  FLOAT,
+  F32,
+  F64,
+  DOUBLE,
+  UNION,
+  STRUCT,
+  BOOLEAN,
+  FUNCTION
+}
+
+@NotTranspile
+export enum FFIFlags {
+  REFERENCE,
+  MUTABLE,
+  POINTER,
+  CONST,
+  PRE_OPERATOR,
+  RECEIVER,
+  RECEIVER_TYPE,
+}
+
+/**
+ * Defines the parameters for the FFI functions.
+ *
+ * @field name Name of the parameter.
+ * @field type_ Data type of the parameter.
+ * @field flags Optional, flags for the parameter.
+ * @field isFormatted Optional, specifies if the parameter is formatted.
+ *        Default is false.
+ */
+export record FFIParam {
+  name: string;
+  type_: CTypes;
+  flags?: FFIFlags[];
+}
+
+/**
+ * Specifies a file required for import in the FFI context.
+ *
+ * @field headerPath Path of the header file.
+ * @field sourcePath Optional, path of the source file.
+ * @field isLocal Optional, specifies if the file is local.
+ *        Default is false.
+ */
+export record FFIFile {
+  headerPath: string;
+  sourcePath?: string;
+  isLocal?: boolean;
+}
+
+/**
+ * Configures how a statement should be handled in the FFI context.
+ *
+ * @field type_ Type of external declaration.
+ * @field name Name of the function or type in the target language.
+ * @field params Array of FFIParam.
+ * @field returnType FFI return type.
+ * @field requireImport Optional, if a specific file import is required.
+ *        Default is false.
+ * @field file Optional, specifies the required file via FFIFile.
+ */
+export record FFIConfig {
+  type_: FFIDeclarationType;
+  name: string;
+  params: FFIParam[];
+  paramsFormatted?: boolean;
+  returnType: CTypes;
+  flags?: FFIFlags[];
+  requireImport?: boolean;
+  file?: FFIFile;
+}
+
+/**
+ * Decorator to configure how an Ignis function is exposed to an external 
+ * language through FFI.
+ * Allows specifying declaration type, parameters, and return type.
+ *
+ * @param config FFI configuration.
+ *
+ * @example
+ * ```ignis
+ * @FFILanguage({
+ *  type_: FFIDeclarationType.FUNCTION,
+ *  name: "externalPrint",
+ *  params: [{ name: "message", type_: CTypes.STRING }],
+ *  returnType: CTypes.VOID,
+ *  requireImport: true,
+ *  file: { path: "path/to/lua/file.lua" }
+ * })
+ * function externalPrint(message: string);
+ * ```
+ */
+@NotTranspile
+export decorator FFILanguage(config: FFIConfig);
+
