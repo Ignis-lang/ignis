@@ -749,6 +749,7 @@ impl IgnisParser {
       TokenType::Function => self.function(false),
       TokenType::Const => self.const_(false),
       TokenType::Record => self.record(false),
+      TokenType::Declare => self.declare(false),
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),

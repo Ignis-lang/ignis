@@ -152,6 +152,12 @@ impl<'a> Lexer<'a> {
           TokenType::Decrement
         } else if self.match_char('>') {
           TokenType::Arrow
+        } else if self.peek().is_ascii_digit() {
+          if self.number() {
+            TokenType::Float
+          } else {
+            TokenType::Int
+          }
         } else {
           TokenType::Minus
         };
