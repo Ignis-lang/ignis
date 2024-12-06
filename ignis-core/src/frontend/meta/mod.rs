@@ -1,4 +1,5 @@
 use diagnostics::{MetaDiagnostic, MetaDiagnosticError};
+use enum_statement::{ASTEnum, ASTEnumItem};
 use ignis_ast::{
   expressions::{match_expression::ASTMatchCase, *},
   metadata::*,
@@ -681,6 +682,18 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
       type_alias.metadata.clone(),
       type_alias.generics.clone(),
     ))))
+  }
+
+  fn visitor_enum_statement(
+    &mut self,
+    enum_: &ignis_ast::statements::enum_statement::ASTEnum,
+  ) -> IgnisMetaResult {
+    return Ok(ASTStatement::Enum(Box::new(ASTEnum::new(
+      enum_.name.clone(),
+      enum_.members.clone(),
+      enum_.metadata.clone(),
+      enum_.generics.clone(),
+    ))));
   }
 }
 

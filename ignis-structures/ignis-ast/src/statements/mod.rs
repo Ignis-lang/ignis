@@ -2,6 +2,7 @@ pub mod block;
 pub mod comment;
 pub mod constant;
 pub mod declare;
+pub mod enum_statement;
 pub mod export;
 pub mod r#extern;
 pub mod for_of_statement;
@@ -21,6 +22,7 @@ pub mod while_statement;
 
 use block::ASTBlock;
 use comment::ASTComment;
+use enum_statement::{ASTEnum, ASTEnumItem};
 use r#extern::ASTExtern;
 use for_of_statement::ASTForOf;
 use for_statement::ASTFor;
@@ -65,6 +67,7 @@ pub enum ASTStatement {
   Source(Box<Token>),
   Namespace(Box<ASTNamespace>),
   TypeAlias(Box<ASTTypeAlias>),
+  Enum(Box<ASTEnum>),
 }
 
 impl ASTStatement {
@@ -102,6 +105,7 @@ impl ASTStatement {
       ASTStatement::Source(source) => visitor.visit_source_statement(source),
       ASTStatement::Namespace(namespace) => visitor.visit_namespace_statement(namespace),
       ASTStatement::TypeAlias(type_alias) => visitor.visit_type_alias_statement(type_alias),
+      ASTStatement::Enum(enum_) => visitor.visitor_enum_statement(enum_),
     }
   }
 
@@ -276,6 +280,19 @@ impl ASTStatement {
           "metadata": type_alias.metadata.to_json(),
         })
       },
+      ASTStatement::Enum(enum_) => {
+        json!({
+          "type": "ENUM",
+          "name": enum_.name.lexeme,
+          "members": enum_.members.iter().map(|s| json!({
+            "name": s.name.lexeme,
+            "value": s.value.as_ref().map(|e| e.to_json()),
+            "data_type": s.data_type,
+            "metadata": s.metadata.to_json(),
+          })).collect::<Vec<serde_json::Value>>(),
+          "metadata": enum_.metadata.to_json(),
+        })
+      },
     }
   }
 }
@@ -305,6 +322,7 @@ impl Into<TokenType> for &ASTStatement {
       ASTStatement::Source(_) => TokenType::Source,
       ASTStatement::Namespace(_) => TokenType::Namespace,
       ASTStatement::TypeAlias(_) => TokenType::Type,
+      ASTStatement::Enum(_) => TokenType::Enum,
     }
   }
 }
@@ -334,6 +352,7 @@ impl Into<Token> for &ASTStatement {
       ASTStatement::Source(source) => source.as_ref().clone(),
       ASTStatement::Namespace(namespace) => namespace.name.as_ref().into(),
       ASTStatement::TypeAlias(type_alias) => type_alias.name.clone(),
+      ASTStatement::Enum(enum_) => enum_.name.clone(),
     }
   }
 }

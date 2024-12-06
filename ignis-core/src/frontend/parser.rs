@@ -29,6 +29,7 @@ use ignis_ast::{
     block::ASTBlock,
     comment::{ASTComment, ASTCommentType},
     constant::ASTConstant,
+    enum_statement::{ASTEnum, ASTEnumItem},
     r#extern::ASTExtern,
     for_of_statement::ASTForOf,
     for_statement::ASTFor,
@@ -823,6 +824,7 @@ impl IgnisParser {
         Ok(ASTStatement::Source(Box::new(path)))
       },
       TokenType::Type => self.type_alias(false),
+      TokenType::Enum => self.enum_statement(false),
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),
@@ -895,6 +897,7 @@ impl IgnisParser {
 
         self.statement()
       },
+      TokenType::Enum => self.enum_statement(false),
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),
@@ -932,6 +935,65 @@ impl IgnisParser {
       generic_parameters,
     ))))
   }
+
+  /// <enum> ::= "enum" <identifier> <generic-type>? "{" (<enum-item> ","?)* "}"
+  fn enum_statement(
+    &mut self,
+    is_exported: bool,
+  ) -> IgnisParserResult<ASTStatement> {
+    self.consume(TokenType::Enum)?;
+
+    let name = self.consume(TokenType::Identifier)?;
+
+    let generic_parameters = self.resolve_generic_params()?;
+
+    self.consume(TokenType::LeftBrace)?;
+
+    let mut members: Vec<ASTEnumItem> = vec![];
+
+    while !self.check(TokenType::RightBrace) {
+      members.push(self.enum_item()?);
+
+      if !self.match_token(&[TokenType::Comma]) {
+        break;
+      }
+    }
+
+    self.consume(TokenType::RightBrace)?;
+
+    let mut metadata = ASTMetadata::new(vec![]);
+
+    if is_exported {
+      metadata.push(ASTMetadataFlags::Export);
+    }
+
+    Ok(ASTStatement::Enum(Box::new(ASTEnum::new(
+      name,
+      members,
+      metadata,
+      generic_parameters,
+    ))))
+  }
+
+  /// <enum-item> ::= <identifier> | <identifier> "=" <expression> | <enum-complex-item>
+  fn enum_item(&mut self) -> IgnisParserResult<ASTEnumItem> {
+    let name = self.consume(TokenType::Identifier)?;
+    let metadata = ASTMetadata::new(vec![]);
+    let mut value = None;
+    let mut data_type = DataType::Int32;
+
+    if self.match_token(&[TokenType::Equal]) {
+      let expression = self.expression()?;
+
+      data_type = expression.clone().into();
+
+      value = Some(expression);
+    }
+
+    Ok(ASTEnumItem::new(name, value, data_type, metadata))
+  }
+
+  /// <enum-complex-item> ::= <identifier> "(" <expression> ")"
 
   /// <statement> ::= <declaration> | <if> | <for> | <for-of> | <while> | <return> | <break> | <continue> | <block> | <variable> | <expression> ";"
   fn statement(&mut self) -> IgnisParserResult<ASTStatement> {
