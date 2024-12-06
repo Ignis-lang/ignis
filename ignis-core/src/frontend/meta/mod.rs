@@ -251,6 +251,7 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
         Box::new(body),
         expression.return_type.clone(),
         expression.lambda_type.clone(),
+        expression.generic_parameters.clone(),
       ),
     )))))
   }
@@ -390,6 +391,7 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
         body,
         expression.return_type.clone(),
         expression.metadata.clone(),
+        expression.generic_parameters.clone(),
       ),
     )))
   }
@@ -557,6 +559,7 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
       record.name.clone(),
       items,
       record.metadata.clone(),
+      record.generic_parameters.clone(),
     ))))
   }
 

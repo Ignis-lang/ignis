@@ -3,6 +3,21 @@ use std::fmt::Display;
 use ignis_token::{token::Token, token_types::TokenType};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct GenericType {
+  pub base: Box<DataType>,
+  pub constraints: Vec<DataType>,
+}
+
+impl GenericType {
+  pub fn new(
+    base: Box<DataType>,
+    constraints: Vec<DataType>,
+  ) -> Self {
+    Self { base, constraints }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DataType {
   Hex,
@@ -34,15 +49,13 @@ pub enum DataType {
   Reference(Box<DataType>),
   Pointer(Box<DataType>),
   Optional(Box<DataType>),
-  // TODO: Ignis v0.2.0
-  // GenericType(GenericType),
-  //
+  GenericType(GenericType),
+  Enum(String),
+  AliasType(String),
+  UnionType(Vec<DataType>),
   // TODO: Ignis v0.3.0
   // Interface(String),
-  // Enum(String),
   // ClassType(String),
-  // AliasType(String),
-  // UnionType(Vec<DataType>),
   // IntersectionType(Vec<DataType>),
   // TupleType(Vec<DataType>),
 }
@@ -131,6 +144,28 @@ impl Display for DataType {
         return_type
       ),
       DataType::Optional(data_type) => write!(f, "optional({})", data_type),
+      DataType::GenericType(generic_type) => write!(
+        f,
+        "generic<{}, {}>",
+        generic_type.base,
+        generic_type
+          .constraints
+          .iter()
+          .map(|c| c.to_string())
+          .collect::<Vec<String>>()
+          .join(", ")
+      ),
+      DataType::Enum(name) => write!(f, "enum({})", name),
+      DataType::AliasType(name) => write!(f, "alias({})", name),
+      DataType::UnionType(types) => write!(
+        f,
+        "union<{}>",
+        types
+          .iter()
+          .map(|t| t.to_string())
+          .collect::<Vec<String>>()
+          .join(", ")
+      ),
     }
   }
 }

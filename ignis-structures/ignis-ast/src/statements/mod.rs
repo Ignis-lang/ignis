@@ -121,6 +121,7 @@ impl ASTStatement {
           "body": function.body.iter().map(|s| s.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": function.return_type,
           "metadata": function.metadata.to_json(),
+          "generic_parameters": function.generic_parameters,
         })
       },
       ASTStatement::Variable(variable) => {
