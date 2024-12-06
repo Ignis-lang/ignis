@@ -14,4 +14,4 @@ IgnisGenericType *ignisGenericTypeNew(IgnisType dataType) {
   return type;
 }
 
-void ignisGenericTypeFree(IgnisGenericType *type) { freeMemory(type); }
+void ignisGenericTypeFree(IgnisGenericType *type) { deallocate(type); }

@@ -14,6 +14,7 @@ in
       tinycc
       valgrind
       gdb
+      lldb
     ];
 
     CARGO_HOME = "${homeDir}/.cargo";

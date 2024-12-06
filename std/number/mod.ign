@@ -1,13 +1,17 @@
-import {
-  FFIDeclarationType,
-  CTypes,
-  FFILanguage,
-  FFIFlags,
-  FFIConfig,
-  FFIParam,
-} from "std:ffi";
-import { MutOnly } from "std:meta";
+import { FFILink } from "std:meta";
 import { IgnisNumbersType, IgnisFloatType } from "std:types";
+
+extern ffi::number {
+  include "std/number/number.h";
+  source "std/number/number.c";
+
+  function numberToString(this: unknown, type: unknown): string;
+  function numberAbs(this: unknown, type: unknown): u64 | f64;
+  function numberToFixed(this: unknown, digits: u32, type: unknown): unknown;
+  function numberRound(this: unknown, type: unknown): unknown;
+  function numberFloor(this: unknown, type: unknown): unknown;
+  function numberCeil(this: unknown, type: unknown): unknown;
+}
 
 export record<T as IgnisNumbersType> Numbers {
   /**
@@ -20,32 +24,10 @@ export record<T as IgnisNumbersType> Numbers {
    * ```ignis
    * let num: i32 = 42;
    * let str: string = num.toString();
-   * println(str); // Output: "42"
+   * io::println(str); // Output: "42"
    * ```
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "numberToString",
-    params: [
-      {
-        name: "value",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER, FFIFlags.REFERENCE],
-        isFormatted: false,
-      },
-      {
-        name: "type",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER_TYPE, FFIFlags.POINTER],
-        isFormatted: false,
-      },
-    ],
-    returnType: CTypes.STRING,
-    file: {
-      headerPath: "number/number.h",
-      sourcePath: "std/number/number.c",
-    }
-  })
+  #FFILink("numberToString")
   toString(): string;
 
   /**
@@ -57,32 +39,10 @@ export record<T as IgnisNumbersType> Numbers {
    * ```ignis
    * let num: i32 = -42;
    * let absNum: i32 = num.abs();
-   * println(absNum); // Output: 42
+   * io::println(absNum); // Output: 42
    * ```
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "number_abs",
-    params: [
-      {
-        name: "this",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER, FFIFlags.POINTER],
-        isFormatted: false,
-      },
-      {
-        name: "type_",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER_TYPE, FFIFlags.POINTER],
-        isFormatted: false,
-      },
-    ],
-    returnType: CTypes.VOID,
-    file: {
-      headerPath: "number/number.h",
-      sourcePath: "number/number.c",
-    }
-  })
+  #FFILink("numberAbs")
   abs(): u64 | f64;
 }
 
@@ -97,32 +57,10 @@ export record<F as IgnisFloatType> Floats {
    * ```ignis
    * let num: f64 = 3.14159265359;
    * let formatted: string = num.toFixed(2);
-   * println(formatted); // Output: 3.14
+   * io::println(formatted); // Output: 3.14
    * ```
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "number_toFixed",
-    params: [
-      {
-        name: "this",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      },
-      {
-        name: "digits",
-        type_: CTypes.U32,
-        flags: [],
-        isFormatted: false
-      },
-    ],
-    returnType: CTypes.VOID_POINTER,
-    file: {
-      headerPath: "number/number.h",
-      sourcePath: "number/number.c",
-    }
-  })
+  #FFILink("numberToFixed")
   toFixed(digits: u32): F;
 
   /**
@@ -134,26 +72,10 @@ export record<F as IgnisFloatType> Floats {
    * ```ignis
    * let num: f64 = 3.14159265359;
    * let rounded: f64 = num.round();
-   * println(rounded); // Output: 3
+   * io::println(rounded); // Output: 3
    * ```
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "number_round",
-    params: [
-      {
-        name: "this",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      }
-    ],
-    returnType: CTypes.VOID_POINTER,
-    file: {
-      headerPath: "number/number.h",
-      sourcePath: "number/number.c",
-    }
-  })
+  #FFILink("numberRound")
   round<R>(): R;
 
   /**
@@ -165,26 +87,10 @@ export record<F as IgnisFloatType> Floats {
    * ```ignis
    * let num: f64 = 3.14159265359;
    * let floored: f64 = num.floor();
-   * println(floored); // Output: 3
+   * io::println(floored); // Output: 3
    * ```
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "number_floor",
-    params: [
-      {
-        name: "this",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      }
-    ],
-    returnType: CTypes.VOID_POINTER,
-    file: {
-      headerPath: "number/number.h",
-      sourcePath: "number/number.c",
-    }
-  })
+  #FFILink("numberFloor")
   floor<R>(): R;
 
   /**
@@ -196,25 +102,9 @@ export record<F as IgnisFloatType> Floats {
    * ```ignis
    * let num: f64 = 3.14159265359;
    * let ceiled: f64 = num.heil();
-   * println(ceiled); // Output: 4
+   * io::println(ceiled); // Output: 4
    * ```
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "number_ceil",
-    params: [
-      {
-        name: "this",
-        type_: CTypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      }
-    ],
-    returnType: CTypes.VOID_POINTER,
-    file: {
-      headerPath: "number/number.h",
-      sourcePath: "number/number.c",
-    }
-  })
+  #FFILink("numberCeil")
   ceil<R>(): R;
 }

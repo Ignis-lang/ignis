@@ -1,20 +1,22 @@
-import {
-  FFIDeclarationType,
-  CTypes,
-  FFILanguage,
-  FFIFlags,
-  FFIConfig,
-  FFIParam,
-} from "std:ffi";
-import { MutOnly } from "std:meta";
+import { FFILink } from "std:meta";
 
-export extern memory {
+extern ffi::memory {
+  include "std/memory/memory.h";
+  source "std/memory/memory.c";
+
+  function allocate(u64: u32): unknown;
+  function deallocate(address: unknown): void;
+  function reallocate(address: unknown, size: u64): unknown;
+  function allocateZeroed(size: u64, count: u64): unknown;
+}
+
+export namespace memory {
   /**
    * @brief Memory allocation function.
    *
    * Allocates a block of memory of the specified size using the external
    * `allocate` function, which interacts with low-level memory management
-   * (as declared in `memory.h` and implemented in `memory.c`). 
+   * (as declared in `memory.h` and implemented in `memory.c`).
    *
    * @param T The type of pointer to return, allowing for type-safe allocation.
    *
@@ -25,55 +27,23 @@ export extern memory {
    * @note Provides an abstraction over low-level memory operations.
    *
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "allocate",
-    params: [
-      {
-        name: "size",
-        type_: CTypes.U64,
-        flags: [],
-      }
-    ],
-    returnType: CTypes.VOID_POINTER,
-    requireImport: true,
-    file: {
-      headerPath: "memory/memory.h",
-      sourcePath: "std/memory/memory.c",
-    }
-  })
+  #FFILink("allocate")
   function allocate<T>(size: u64): T;
 
   /**
    * @brief Memory deallocation function.
    *
-   * Frees a previously allocated block of memory using the external 
-   * `freeMemory` function, ensuring that the program does not leak resources.
+   * Frees a previously allocated block of memory using the external
+   * `deallocate` function, ensuring that the program does not leak resources.
    *
-   * @param address A pointer (of type `string` in this case) to the memory 
+   * @param address A pointer (of type `string` in this case) to the memory
    *                block to free.
    *
    * @return void
    *
    * @note Proper use is critical to avoid memory leaks in dynamic memory.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "freeMemory",
-    params: [
-      {
-        name: "address",
-        type_: CTypes.VOID_POINTER,
-        flags: [],
-      }
-    ],
-    returnType: CTypes.VOID,
-    requireImport: true,
-    file: {
-      headerPath: "memory/memory.h",
-      sourcePath: "std/memory/memory.c",
-    }
-  })
+  #FFILink("deallocate")
   function free(address: string): void;
 
   /**
@@ -93,28 +63,7 @@ export extern memory {
    * @note Useful for arrays or buffers that require zero-initialization.
    *
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "allocateZeroed",
-    params: [
-      {
-        name: "size",
-        type_: CTypes.U64,
-        flags: [],
-      },
-      {
-        name: "count",
-        type_: CTypes.U64,
-        flags: [],
-      }
-    ],
-    returnType: CTypes.VOID_POINTER,
-    requireImport: true,
-    file: {
-      headerPath: "memory/memory.h",
-      sourcePath: "std/memory/memory.c",
-    }
-  })
+  #FFILink("allocateZeroed")
   function allocateZeroed<T>(size: u64, count: u64): T;
 
   /**
@@ -135,28 +84,6 @@ export extern memory {
    * @note Reallocation may move the memory block. The original block is not
    *       freed if reallocation fails, so handle this case properly.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "reallocate",
-    params: [
-      {
-        name: "address",
-        type_: CTypes.VOID_POINTER,
-        flags: [],
-      },
-      {
-        name: "size",
-        type_: CTypes.U64,
-        flags: [],
-      }
-    ],
-    returnType: CTypes.VOID_POINTER,
-    requireImport: true,
-    file: {
-      headerPath: "memory/memory.h",
-      sourcePath: "std/memory/memory.c",
-    }
-  })
+  #FFILink("reallocate")
   function reallocate<T>(address: string, size: u64): T;
 }
-

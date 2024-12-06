@@ -1,13 +1,26 @@
-import {
-  FFIDeclarationType,
-  CTypes,
-  FFILanguage,
-  FFIFlags,
-  FFIConfig,
-  FFIParam,
-} from "std:ffi";
-import { MutOnly } from "std:meta";
+import { MutOnly, FFILink } from "std:meta";
 import { IgnisIntegerType } from "std:types";
+
+extern ffi::array {
+  include "std/array/array.h";
+  source "std/array/array.c";
+
+  function arrayLength<T>(this: *T[]): u32;
+  function arrayMap<T, R>(this: *T[], fn: (value: T) -> R): R[];
+  function arrayFind<T, R>(this: *T[], fn: (value: T) -> boolean): R;
+  function arrayFindIndex<T>(this: *T[], fn: (value: T) -> boolean): u32;
+  function arrayFilter<T, R>(this: *T[], fn: (value: T) -> boolean): R[];
+  function arrayReduce<T, R>(this: *T[], fn: (acc: R, value: T) -> R, arrayialValue: R): R;
+  function arrayIncludes(this: *string, search: string): boolean;
+  function arraySome<T>(this: *T[], fn: (value: T) -> boolean): boolean;
+  function arrayEvery<T>(this: *T[], fn: (value: T) -> boolean): boolean;
+  function arrayMax<T>(this: *T[]): T;
+  function arrayMin<T>(this: *T[]): T;
+  function arrayClone<T>(this: *T[]): T[];
+  function arrayPush<T>(this: *T[], value: T): void;
+  function arrayPop<T>(this: *T[]): T;
+  function arrayShift<T>(this: *T[]): T;
+}
 
 export record<T> T[] {
   /**
@@ -21,29 +34,7 @@ export record<T> T[] {
    * let len: u32 = arr.length;
    * ```
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_length",
-    params: [
-      {
-        name: "this",
-        type_: CTypes.VOID_POINTER,
-        flags: [ FFIFlags.RECEIVER ],
-        isFormatted: false,
-      },
-      {
-        name: "type",
-        type_: FFITypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER_TYPE, FFITypes.POINTER],
-        isFormatted: false,
-      },
-    ],
-    returnType: CTypes.U32,
-    file: {
-      headerPath: "std/array/array.h",
-      sourcePath: "std/array/array.c",
-    }
-  })
+  #FFILink("arrayLength")
   length(): u32;
 
   /**
@@ -53,30 +44,7 @@ export record<T> T[] {
    *
    * @return {R[]} A new array with each element being the result of the callback function.
    */
-  @FFILanguage({
-      type_: FFIDeclarationType.FUNCTION,
-      name: "array_map",
-      params: [
-        {
-          name: "array",
-          type_: FFITypes.VOID_POINTER,
-          flags: [FFIFlags.RECEIVER],
-          isFormatted: false
-        },
-        {
-          name: "fn",
-          type_: FFITypes.FUNCTION,
-          params: [{ name: "value", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false }],
-          returnType: FFITypes.VOID_POINTER,
-          flags: [],
-          isFormatted: false
-        }
-      ],
-      returnType: FFITypes.VOID_POINTER,
-      file: {
-        path: "std/array/array.c"
-      }
-  })
+  #FFILink("arrayMap")
   map<R>(fn: (value: T) -> R): R[];
 
   /**
@@ -85,26 +53,7 @@ export record<T> T[] {
    * @param {function(T, number, T[]): boolean} fn - to execute on each value in the array.
    * @return {R} The first element that satisfies the provided testing function, or undefined if no elements satisfy it.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_find",
-    params: [
-      {
-        name: "array",
-        type_: FFITypes.VOID_POINTER,
-        flags: [ FFIFlags.RECEIVER ],
-        isFormatted: false
-      },
-      {
-        name: "fn",
-        type_: FFITypes.FUNCTION,
-        params: [{ name: "value", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false }],
-        returnType: FFITypes.BOOLEAN,
-        flags: [],
-        isFormatted: false
-      }
-    ],
-  })
+  #FFILink("arrayFind")
   find<R>(fn: (value: T) -> boolean): R; // TODO: Change return for Optional<R>
 
   /**
@@ -113,30 +62,7 @@ export record<T> T[] {
    * @param {function(T, number, T[]): boolean} fn - to execute on each value in the array.
    * @return {u32} The index of the first element that satisfies the provided testing function, or -1 if no elements satisfy it.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_findIndex",
-    params: [
-      {
-        name: "array",
-        type_: FFITypes.VOID_POINTER,
-        flags: [ FFIFlags.RECEIVER ],
-        isFormatted: false
-      },
-      {
-        name: "fn",
-        type_: FFITypes.FUNCTION,
-        params: [{ name: "value", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false }],
-        returnType: FFITypes.BOOLEAN,
-        flags: [],
-        isFormatted: false
-      }
-    ],
-    returnType: FFITypes.U32,
-    file: {
-      path: "std/array/array.c",
-    }
-  })
+  #FFILink("arrayFindIndex")
   findIndex(fn: (value: T) -> boolean): u32;
 
   /**
@@ -144,26 +70,7 @@ export record<T> T[] {
    * @param {function(T, number, T[]): boolean} fn - to test each element of the array.
    * @return {R[]} A new array with the elements that pass the test.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_filter",
-    params: [
-      {
-        name: "array",
-        type_: FFITypes.VOID_POINTER,
-        flags: [ FFIFlags.RECEIVER ],
-        isFormatted: false
-      },
-      {
-        name: "fn",
-        type_: FFITypes.FUNCTION,
-        params: [{ name: "value", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false }],
-        returnType: FFITypes.BOOLEAN,
-        flags: [],
-        isFormatted: false
-      }
-    ],
-  })
+  #FFILink("arrayFilter")
   filter<R>(fn: (value: T) -> boolean): R[];
 
   /**
@@ -172,36 +79,7 @@ export record<T> T[] {
    * @param {R} arrayialValue - Value to use as the first argument to the first call of the function.
    * @return {R} The value that results from the reduction.
    */
-  @FFILanguage({
-      type_: FFIDeclarationType.FUNCTION,
-      name: "array_reduce",
-      params: [
-        {
-          name: "array",
-          type_: FFITypes.VOID_POINTER,
-          flags: [FFIFlags.RECEIVER],
-          isFormatted: false
-        },
-        {
-          name: "fn",
-          type_: FFITypes.FUNCTION,
-          params: [
-            { name: "acc", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false },
-            { name: "value", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false }
-          ],
-          returnType: FFITypes.VOID_POINTER,
-          flags: [],
-          isFormatted: false
-        },
-        {
-          name: "arrayialValue",
-          type_: FFITypes.VOID_POINTER,
-          flags: [],
-          isFormatted: false
-        }
-      ],
-    }
-  ])
+  #FFILink("arrayReduce")
   reduce<R>(fn: (acc: R, value: T) -> R, arrayialValue: R): R;
 
   /**
@@ -209,28 +87,7 @@ export record<T> T[] {
    * @param {string} search - The value to search for.
    * @return {boolean} True if the value is found, false otherwise.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_includes",
-    params: [
-      {
-        name: "value",
-        type_: FFITypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      },
-      {
-        name: "search",
-        type_: FFITypes.STRING,
-        flags: [],
-        isFormatted: false
-      }
-    ],
-    returnType: FFITypes.BOOLEAN,
-    file: {
-      path: "std/string/array.c"
-    }
-  })
+  #FFILink("arrayIncludes")
   includes(search: string): boolean;
 
   /**
@@ -238,30 +95,7 @@ export record<T> T[] {
    * @param {function(T, number, T[]): boolean} fn - to test each element.
    * @return {boolean} True if the callback returns a truthy value for at least one element, otherwise false.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_some",
-    params: [
-      {
-        name: "value",
-        type_: FFITypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      },
-      {
-        name: "fn",
-        type_: FFITypes.FUNCTION,
-        params: [{ name: "value", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false }],
-        returnType: FFITypes.BOOLEAN,
-        flags: [],
-        isFormatted: false
-      }
-    ],
-    returnType: FFITypes.BOOLEAN,
-    file: {
-      path: "std/string/array.c"
-    }
-  })
+  #FFILink("arraySome")
   some(fn: (value: T) -> boolean): boolean;
 
   /**
@@ -269,158 +103,48 @@ export record<T> T[] {
    * @param {function(T, number, T[]): boolean} fn - to test each element.
    * @return {boolean} True if the callback returns a truthy value for all elements, otherwise false.
    */
-  @FFILanguage([
-    {
-      language: FFILanguageSupported.c,
-      type_: FFIDeclarationType.FUNCTION,
-      name: "array_every",
-      params: [
-        {
-          name: "value",
-          type_: FFITypes.VOID_POINTER,
-          flags: [FFIFlags.RECEIVER],
-          isFormatted: false
-        },
-        {
-          name: "fn",
-          type_: FFITypes.FUNCTION,
-          params: [{ name: "value", type_: FFITypes.VOID_POINTER, flags: [], isFormatted: false }],
-          returnType: FFITypes.BOOLEAN,
-          flags: [],
-          isFormatted: false
-        }
-      ],
-    }
-  ])
+  #FFILink("arrayEvery")
   every(fn: (value: T) -> boolean): boolean;
 
   /**
    * Returns the maximum value in the array.
    * @return {T} The maximum value in the array.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_max",
-    params: [
-      {
-        name: "array",
-        type_: FFITypes.VOID_POINTER,
-        flags: [ FFIFlags.RECEIVER ],
-        isFormatted: false
-      }
-    ],
-    returnType: FFITypes.VOID_POINTER,
-    file: {
-      path: "std/array/array.c"
-    }
-  })
+  #FFILink("arrayMax")
   max(): T;
 
   /**
    * Returns the minimum value in the array.
    * @return {T} The minimum value in the array.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_min",
-    params: [
-      {
-        name: "array",
-        type_: FFITypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      }
-    ],
-    returnType: FFITypes.VOID_POINTER,
-    file: {
-      path: "std/array/array.c"
-    }
-  })
+  #FFILink("arrayMin")
   min(): T;
 
   /**
    * Creates a shallow copy of the array.
    * @return {T[]} A new array that is a shallow copy of the input array.
    */
-  @FFILanguage({
-    type_: FFIDeclarationType.OPERATOR,
-    name: "array_clone",
-    params: [
-      {
-        name: "array",
-        type_: FFITypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER],
-        isFormatted: false
-      }
-    ],
-    returnType: FFITypes.VOID_POINTER,
-    file: {
-      path: "std/array/array.c"
-    }
-  })
+  #FFILink("arrayClone")
   clone(): T[];
 
   /**
    * Adds one or more elements to the end of the array.
    * @param {T} value - The value to add to the array.
    */
-  @MutOnly
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_push",
-    params: [
-      {
-        name: "value",
-        type_: FFITypes.VOID_POINTER,
-        flags: [FFIFlags.RECEIVER, FFIFlags.MUTABLE, FFIFlags.REFERENCE],
-        isFormatted: false
-      }
-    ],
-    file: {
-      path: "std/array/array.c",
-    }
-  })
+  #[MutOnly, FFILink("arrayPush")]
   push(value: T): void;
 
   /**
    * Removes the last element from the array and returns it.
    * @return {T} The removed element from the array.
    */
-  @MutOnly
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_pop",
-    params: [{
-      name: "value",
-      type_: FFITypes.VOID_POINTER,
-      flags: [FFIFlags.RECEIVER, FFIFlags.MUTABLE, FFIFlags.REFERENCE],
-      isFormatted: false
-    }],
-    returnType: FFITypes.VOID_POINTER,
-    file: {
-      path: "std/array/array.c",
-    }
-  })
+  #[MutOnly, FFILink("arrayPop")]
   pop(): T;
 
   /**
    * Removes the first element from the array and returns it.
    * @return {T} The removed element from the array.
    */
-  @MutOnly
-  @FFILanguage({
-    type_: FFIDeclarationType.FUNCTION,
-    name: "array_shift",
-    params: [{
-      name: "value",
-      type_: FFITypes.VOID_POINTER,
-      flags: [FFIFlags.RECEIVER, FFIFlags.MUTABLE, FFIFlags.REFERENCE],
-      isFormatted: false
-    }],
-    returnType: FFITypes.VOID_POINTER,
-    file: {
-      path: "std/array/array.c",
-    }
-  })
+  #[MutOnly, FFILink("arrayShift")]
   shift(): T;
 }

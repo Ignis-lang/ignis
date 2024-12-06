@@ -4,15 +4,15 @@ use super::ASTExpression;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ASTMatchCase {
-  pub pattern: Box<Vec<ASTExpression>>,
-  pub when: Option<Box<ASTExpression>>,
+  pub pattern: Vec<ASTExpression>,
+  pub when: Option<ASTExpression>,
   pub block: Box<ASTStatement>,
 }
 
 impl ASTMatchCase {
   pub fn new(
-    pattern: Box<Vec<ASTExpression>>,
-    when: Option<Box<ASTExpression>>,
+    pattern: Vec<ASTExpression>,
+    when: Option<ASTExpression>,
     block: Box<ASTStatement>,
   ) -> Self {
     Self { pattern, when, block }

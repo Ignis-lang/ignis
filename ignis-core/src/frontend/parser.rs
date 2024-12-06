@@ -3,24 +3,7 @@ use std::collections::HashMap;
 use colored::Colorize;
 use ignis_ast::{
   expressions::{
-    assign::ASTAssignment,
-    binary::ASTBinary,
-    call::ASTCall,
-    cast::ASTCast,
-    grouping::ASTGrouping,
-    lambda::ASTLambda,
-    literal::{ASTLiteral, ASTLiteralValue},
-    logical::ASTLogical,
-    match_expression::{ASTMatchCase, ASTMatchExpression},
-    member_access::ASTMemberAccess,
-    object_literal::ASTObject,
-    ternary::ASTTernary,
-    this::ASTThis,
-    unary::ASTUnary,
-    variable::ASTVariableExpression,
-    vector::ASTVector,
-    vector_access::ASTVectorAccess,
-    ASTExpression,
+    assign::ASTAssignment, binary::ASTBinary, call::ASTCall, cast::ASTCast, grouping::ASTGrouping, lambda::ASTLambda, literal::{ASTLiteral, ASTLiteralValue}, logical::ASTLogical, match_expression::{ASTMatchCase, ASTMatchExpression}, member_access::ASTMemberAccess, meta::{ASTMeta, ASTMetaEntity}, object_literal::ASTObject, spread::ASTSpread, ternary::ASTTernary, this::ASTThis, unary::ASTUnary, variable::ASTVariableExpression, vector::ASTVector, vector_access::ASTVectorAccess, ASTExpression
   },
   metadata::{ASTMetadata, ASTMetadataFlags},
   statements::{
@@ -34,6 +17,7 @@ use ignis_ast::{
     if_statement::ASTIf,
     import::{ASTImport, ASTImportSource, ASTImportSymbol},
     method::ASTMethod,
+    namespace::ASTNamespace,
     property::ASTProperty,
     record::ASTRecord,
     return_::ASTReturn,
@@ -83,7 +67,7 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 /// ```bnf
 /// <type-modifier> ::= ("mut" | "&" | "*")*
 /// <type-parameter> ::= <type> ("as" <type>)?
-/// <qualified-identifier> ::= <identifier> ( "::" <identifier> )*
+/// <qualified-identifier> ::= <identifier> ( ("::" | "." ) <identifier> )*
 ///
 /// <type> ::= <type-modifier>? (<qualified-identifier> | <primitive> | <function-type> | <vector-type>)
 ///
@@ -127,7 +111,7 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 ///   | <declare>
 ///   | <meta>
 ///
-/// <function> ::= "function" <identifier> (<generic-type>)? "(" <parameters>? ")" ":" <type> <block>
+/// <function> ::= "function" <identifier> "(" <parameters>? ")" ":" <type> (<block> | ";")
 /// <parameters> ::= <parameter> ("," <parameter>)*
 /// <parameter> ::= "..."? <identifier> "?"? ":" <type>
 ///
@@ -146,8 +130,12 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 /// <record-method> ::= <identifier> "?"? "(" <parameters> ")" ":" <type> ";"
 ///
 /// # Extern syntax
-/// <extern> ::= "extern" <identifier> "{" <extern-item>* "}"
-/// <extern-item> ::= <declaration>
+/// <extern> ::= "extern" (<qualified-identifier>) "{" <extern-item>* "}"
+/// <extern-item> ::= <declaration> | "include" <string> ";" | "source" <string> ";"
+///
+/// # Namespace syntax
+/// <namespace> ::= "namespace" <qualified-identifier> "{" <namespace-item>* "}"
+/// <namespace-item> ::= <function> | <const> | <record> | <class> | <enum> | <type-alias> | <interface> | <declare>
 ///
 /// # Declare syntax
 /// <declare> ::= "declare" <identifier> ":" <type>
@@ -215,6 +203,7 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 ///   | <group>
 ///   | <meta-expression>
 ///   | <this>
+///   | "..." <expression>
 ///
 /// # literal
 /// <integer> ::= <numbers> ("_" <numbers>)*
@@ -239,7 +228,7 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 /// <this> ::= "this"
 /// <literal> ::= <integer> | <float> | <hex> | <binary> | <string> | <boolean> | <null> | <vector> | <object>
 /// <decorator-expression> ::= "@" <qualified-identifier> "(" <expression>? ")"
-/// <meta-expression> ::= "#" <qualified-identifier> ("(" <expression>*? ")")? | "#" "[" (<expression>? ","?)* "]"
+/// <meta-expression> ::= "#" <qualified-identifier> ("(" <expression>*? ")")? ";"? | "#" "[" (<expression>? ","?)* "]"
 /// <lambda> ::= "(" <parameters>? ")" ":" <type> "->" (<expression> | <block>)
 ///
 /// <comment> ::= "//" ([a-zA-Z_][a-zA-Z0-9_]*)?
@@ -330,6 +319,8 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 ///   | "mut"
 ///   | "override"
 ///   | "super"
+///   | "include"
+///   | "source"
 /// ```
 #[derive(Debug, Clone)]
 pub struct IgnisParser {
@@ -402,34 +393,36 @@ impl IgnisParser {
   }
 
   fn synchronize(&mut self) {
-    let mut token = self.advance();
+    loop {
+      let token = self.advance();
 
-    while !self.is_at_end() {
-      if token.type_ == TokenType::SemiColon {
-        return;
+      // Save point for continue with parsing
+      if matches!(token.type_, TokenType::SemiColon | TokenType::RightBrace) || self.is_at_end() {
+        break;
       }
 
       match self.peek().type_ {
         TokenType::Class
-        | TokenType::Function
-        | TokenType::Let
         | TokenType::Const
-        | TokenType::For
-        | TokenType::While
-        | TokenType::If
+        | TokenType::Declare
         | TokenType::Enum
         | TokenType::Export
+        | TokenType::Extern
+        | TokenType::For
+        | TokenType::Function
+        | TokenType::If
         | TokenType::Import
+        | TokenType::Let
+        | TokenType::Meta
+        | TokenType::Return
         | TokenType::Type
-        | TokenType::Return => return,
+        | TokenType::While => return,
         _ => (),
       };
-
-      token = self.advance();
     }
   }
 
-  /// <declaration> ::= <function> | <import> | <export> | <const> | <record> | <extern> | <declare> | <meta>
+  /// <declaration> ::= <function> | <import> | <export> | <const> | <record> | <extern> | <declare> | <meta> | <namespace>
   fn declaration(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
 
@@ -442,6 +435,7 @@ impl IgnisParser {
       TokenType::Extern => self.extern_(false),
       TokenType::Declare => self.declare(false),
       TokenType::Meta => self.meta(false),
+      TokenType::Namespace => self.namespace(false),
       _ => match self.statement() {
         Ok(statement) => Ok(statement),
         Err(error) => {
@@ -452,7 +446,7 @@ impl IgnisParser {
     }
   }
 
-  /// <function> ::= "function" <identifier> "(" <parameters>? ")" ":" <type> <block>
+  /// <function> ::= "function" <identifier> "(" <parameters>? ")" ":" <type> (<block> | ";")
   fn function(
     &mut self,
     is_exported: bool,
@@ -469,8 +463,18 @@ impl IgnisParser {
 
     let mut body: Vec<ASTStatement> = Vec::new();
 
-    if !self.match_token(&[TokenType::SemiColon]) {
+    if self.check(TokenType::LeftBrace) {
       body.push(self.block()?);
+    } else if !self.match_token(&[TokenType::SemiColon]) {
+      return Err(Box::new(ParserDiagnostic::new(
+        ParserDiagnosticError::ExpectedSemicolonAfterExpression(self.peek()),
+      )));
+    }
+
+    let mut metadata = ASTMetadata::default();
+
+    if is_exported {
+      metadata.push(ASTMetadataFlags::Export);
     }
 
     Ok(ASTStatement::Function(Box::new(ASTFunction::new(
@@ -478,7 +482,7 @@ impl IgnisParser {
       parameters,
       body,
       return_type,
-      is_exported,
+      metadata,
     ))))
   }
 
@@ -563,6 +567,7 @@ impl IgnisParser {
       TokenType::Extern => self.extern_(true),
       TokenType::Declare => self.declare(true),
       TokenType::Meta => self.meta(true),
+      TokenType::Namespace => self.namespace(true),
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),
@@ -713,14 +718,16 @@ impl IgnisParser {
     ))))
   }
 
-  /// <extern> ::= "extern" <identifier> "{" <extern-item>* "}"
+  /// <extern> ::= "extern" (<qualified-identifier>) "{" <extern-item>* "}"
   fn extern_(
     &mut self,
     is_exported: bool,
   ) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Extern)?;
 
-    let name = self.consume(TokenType::Identifier)?;
+    self.context.push(IgnisParserContext::Extern);
+
+    let name = self.expression()?;
 
     self.consume(TokenType::LeftBrace)?;
 
@@ -738,10 +745,12 @@ impl IgnisParser {
       metadata.push(ASTMetadataFlags::Export);
     }
 
-    Ok(ASTStatement::Extern(Box::new(ASTExtern::new(name, items, metadata))))
+    self.context.pop();
+
+    Ok(ASTStatement::Extern(Box::new(ASTExtern::new(Box::new(name), items, metadata))))
   }
 
-  /// <extern-item> ::= <declaration>
+  /// <extern-item> ::= <declaration> | "include" <string> ";" | "source" <string> ";"
   fn extern_item(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
 
@@ -750,6 +759,23 @@ impl IgnisParser {
       TokenType::Const => self.const_(false),
       TokenType::Record => self.record(false),
       TokenType::Declare => self.declare(false),
+      TokenType::Hash | TokenType::At => self.statement(),
+      TokenType::Include => {
+        self.consume(TokenType::Include)?;
+        let path = self.consume(TokenType::String)?;
+
+        self.consume(TokenType::SemiColon)?;
+
+        Ok(ASTStatement::Include(Box::new(path)))
+      },
+      TokenType::Source => {
+        self.consume(TokenType::Source)?;
+        let path = self.consume(TokenType::String)?;
+
+        self.consume(TokenType::SemiColon)?;
+
+        Ok(ASTStatement::Source(Box::new(path)))
+      },
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),
@@ -773,6 +799,62 @@ impl IgnisParser {
     todo!()
   }
 
+  /// <namespace> ::= "namespace" <qualified-identifier> "{" <namespace-item>* "}"
+  fn namespace(
+    &mut self,
+    is_exported: bool,
+  ) -> IgnisParserResult<ASTStatement> {
+    self.consume(TokenType::Namespace)?;
+
+    let name = self.expression()?;
+
+    self.consume(TokenType::LeftBrace)?;
+
+    let mut members: Vec<ASTStatement> = vec![];
+
+    while !self.check(TokenType::RightBrace) {
+      members.push(self.namespace_item()?);
+    }
+
+    self.consume(TokenType::RightBrace)?;
+    let mut metadata = ASTMetadata::new(vec![]);
+
+    if is_exported {
+      metadata.push(ASTMetadataFlags::Export);
+    }
+
+    Ok(ASTStatement::Namespace(Box::new(ASTNamespace::new(
+      Box::new(name),
+      members,
+      metadata,
+    ))))
+  }
+
+  /// <namespace-item> ::= <function> | <const> | <record> | <class> | <enum> | <type-alias> | <interface> | <declare>
+  fn namespace_item(&mut self) -> IgnisParserResult<ASTStatement> {
+    let token = self.peek();
+
+    match token.type_ {
+      TokenType::Function => self.function(false),
+      TokenType::Const => self.const_(false),
+      TokenType::Record => self.record(false),
+      TokenType::Declare => self.declare(false),
+      TokenType::Identifier => {
+        if TokenType::get_keyword_from_string(token.lexeme.as_str()).is_some() {
+          return Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::UnexpectedKeyword(
+            token.clone(),
+          ))));
+        }
+
+        self.statement()
+      },
+      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
+        TokenType::Function,
+        self.peek(),
+      )))),
+    }
+  }
+
   /// <statement> ::= <declaration> | <if> | <for> | <for-of> | <while> | <return> | <break> | <continue> | <block> | <variable> | <expression> ";"
   fn statement(&mut self) -> IgnisParserResult<ASTStatement> {
     match self.peek().type_ {
@@ -788,9 +870,13 @@ impl IgnisParser {
       TokenType::MultiLineComment => self.multiline_comment(),
       TokenType::DocComment => self.documentation_comment(),
       _ => {
-        let expression = ASTStatement::Expression(Box::new(self.expression()?));
-        self.consume(TokenType::SemiColon)?;
-        Ok(expression)
+        let expression = self.expression()?;
+
+        if !matches!(expression, ASTExpression::Meta(_) | ASTExpression::MetaEntity(_)) {
+          self.consume(TokenType::SemiColon)?;
+        }
+
+        Ok(ASTStatement::Expression(Box::new(expression)))
       },
     }
   }
@@ -905,7 +991,7 @@ impl IgnisParser {
 
     let body: ASTStatement = self.statement()?;
 
-    let statement = ASTForOf::new(variable, Box::new(iterable), Box::new(body), self.previous());
+    let statement = ASTForOf::new(Box::new(variable), Box::new(iterable), Box::new(body), self.previous());
 
     Ok(ASTStatement::ForOf(Box::new(statement)))
   }
@@ -1074,7 +1160,7 @@ impl IgnisParser {
     let pattern = self.match_pattern()?;
 
     let when = if self.match_token(&[TokenType::When]) {
-      Some(Box::new(self.expression()?))
+      Some(self.expression()?)
     } else {
       None
     };
@@ -1087,7 +1173,7 @@ impl IgnisParser {
       ASTStatement::Expression(Box::new(self.expression()?))
     };
 
-    Ok(ASTMatchCase::new(Box::new(pattern), when, Box::new(block)))
+    Ok(ASTMatchCase::new(pattern, when, Box::new(block)))
   }
 
   /// <match-pattern> ::= <pattern> ( "|" <pattern> )*
@@ -1434,6 +1520,7 @@ impl IgnisParser {
     }
 
     self.consume(TokenType::RightParen)?;
+
     Ok(arguments)
   }
 
@@ -1508,6 +1595,14 @@ impl IgnisParser {
         self.consume(TokenType::This)?;
 
         Ok(ASTExpression::This(Box::new(ASTThis::new(token))))
+      },
+      TokenType::Variadic => {
+        self.consume(TokenType::Variadic)?;
+
+        Ok(ASTExpression::Spread(Box::new(ASTSpread::new(
+          Box::new(self.expression()?),
+          token,
+        ))))
       },
       _ => self.literal(),
     }
@@ -1591,7 +1686,7 @@ impl IgnisParser {
     let mut methods: Vec<ASTMethod> = vec![];
 
     loop {
-      if self.match_token(&[TokenType::RightBrace]) {
+      if self.check(TokenType::RightBrace) {
         break;
       }
 
@@ -1698,9 +1793,60 @@ impl IgnisParser {
     Ok(ASTExpression::Grouping(Box::new(ASTGrouping::new(Box::new(expression)))))
   }
 
-  /// <meta-expression> ::= "#" <qualified-identifier> ("(" <expression>*? ")")? | "#" "[" (<expression>? ","?)* "]"
+  /// <meta-expression> ::= "#" <qualified-identifier> ("(" <expression>*? ")")? ";"? | "#" "[" (<expression>? ","?)* "]"
   fn meta_expression(&mut self) -> IgnisParserResult<ASTExpression> {
-    todo!()
+    self.consume(TokenType::Hash)?;
+
+    let mut meta: Vec<ASTMeta> = vec![];
+
+    if self.match_token(&[TokenType::LeftBrack]) {
+      loop {
+        let name = self.expression()?;
+
+        meta.push(ASTMeta::new(Box::new(name)));
+
+        if !self.match_token(&[TokenType::Comma]) {
+          break;
+        }
+      }
+
+      self.consume(TokenType::RightBrack)?;
+    } else {
+      let name = self.expression()?;
+
+      meta.push(ASTMeta::new(Box::new(name)));
+    }
+
+    let entity: Option<ASTStatement> = if self.check(TokenType::SemiColon) {
+      None
+    } else {
+      Some(self.meta_entity()?)
+    };
+
+    Ok(ASTExpression::MetaEntity(Box::new(ASTMetaEntity::new(meta, entity))))
+  }
+
+  fn meta_entity(&mut self) -> IgnisParserResult<ASTStatement> {
+    let token = self.peek();
+    match token.type_ {
+      TokenType::Function => self.function(false),
+      TokenType::Const => self.const_(false),
+      TokenType::Record => self.record(false),
+      TokenType::Declare => self.declare(false),
+      TokenType::Identifier => {
+        if TokenType::get_keyword_from_string(token.lexeme.as_str()).is_some() {
+          return Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::UnexpectedKeyword(
+            token.clone(),
+          ))));
+        }
+
+        self.statement()
+      },
+      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
+        TokenType::Function,
+        self.peek(),
+      )))),
+    }
   }
 
   /// <lambda> ::= "(" <parameters>? ")" ":" <type> "->" (<expression> | <block>)
@@ -2085,16 +2231,20 @@ impl IgnisParser {
   ) -> Token {
     let mut index = 0;
     loop {
-      let token = self.tokens[self.current - index].clone();
+      if let Some(pos) = self.current.checked_sub(index) {
+        let token = self.tokens[pos].clone();
 
-      if token.type_ == token_type {
-        return token;
+        if token.type_ == token_type {
+          return token;
+        }
+      } else {
+        return self.tokens[0].clone();
       }
 
       index += 1;
 
       if self.current - index == 0 {
-        return token;
+        return self.tokens[0].clone();
       }
     }
   }
@@ -2125,13 +2275,21 @@ impl IgnisParser {
   }
 
   fn advance(&mut self) -> Token {
+    if self.is_at_end() {
+      return self.tokens[self.current - 1].clone();
+    }
+
     self.current += 1;
 
     self.tokens[self.current - 1].clone()
   }
 
   fn previous(&mut self) -> Token {
-    self.tokens[self.current - 1].clone()
+    if self.current == 0 {
+      self.tokens[self.current].clone()
+    } else {
+      self.tokens[self.current - 1].clone()
+    }
   }
 
   fn peek(&mut self) -> Token {

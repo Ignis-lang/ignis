@@ -20,13 +20,16 @@ pub mod unary;
 pub mod variable;
 pub mod vector;
 pub mod vector_access;
+pub mod spread;
 
 use assign::ASTAssignment;
 use call::ASTCall;
 use lambda::ASTLambda;
 use match_expression::ASTMatchExpression;
 use member_access::ASTMemberAccess;
+use meta::{ASTMeta, ASTMetaEntity};
 use object_literal::ASTObject;
+use spread::ASTSpread;
 use this::ASTThis;
 use vector::ASTVector;
 use vector_access::ASTVectorAccess;
@@ -61,6 +64,9 @@ pub enum ASTExpression {
   Lambda(Box<ASTLambda>),
   Object(Box<ASTObject>),
   This(Box<ASTThis>),
+  Meta(Box<ASTMeta>),
+  MetaEntity(Box<ASTMetaEntity>),
+  Spread(Box<ASTSpread>),
 }
 
 impl From<ASTExpression> for DataType {
@@ -83,6 +89,8 @@ impl From<ASTExpression> for DataType {
       ASTExpression::Lambda(lambda) => lambda.lambda_type.clone(),
       ASTExpression::Object(object_literal) => object_literal.data_type.clone(),
       ASTExpression::This(_) => DataType::Pending,
+      ASTExpression::Meta(_) | ASTExpression::MetaEntity(_) => DataType::Pending,
+      ASTExpression::Spread(spread) => (*spread.expression).into(),
     }
   }
 }
@@ -107,6 +115,9 @@ impl Into<Token> for &ASTExpression {
       ASTExpression::Object(object) => object.token.clone(),
       ASTExpression::Lambda(_) => todo!(),
       ASTExpression::This(this) => this.token.clone(),
+      ASTExpression::Meta(meta) => meta.expression.clone().as_ref().into(),
+      ASTExpression::MetaEntity(meta) => meta.metas.first().unwrap().expression.clone().as_ref().into(),
+      ASTExpression::Spread(spread) => spread.token.clone(),
     }
   }
 }
@@ -134,6 +145,9 @@ impl ASTExpression {
       ASTExpression::Lambda(lambda) => visitor.visit_lambda_expression(lambda),
       ASTExpression::Object(object) => visitor.visit_object_expression(object),
       ASTExpression::This(this) => visitor.visit_this_expression(this),
+      ASTExpression::Meta(meta) => visitor.visit_meta_expression(meta),
+      ASTExpression::MetaEntity(meta) => visitor.visit_meta_entity_expression(meta),
+      ASTExpression::Spread(spread) => visitor.visit_spread_expression(spread),
     }
   }
 
@@ -265,6 +279,26 @@ impl ASTExpression {
         json!({
           "type": "THIS",
           "token": this.token.lexeme,
+        })
+      },
+      ASTExpression::Meta(meta) => {
+        json!({
+          "type": "META",
+          "expression": meta.expression.to_json(),
+        })
+      },
+      ASTExpression::MetaEntity(meta) => {
+        json!({
+          "type": "META_ENTITY",
+          "metas": meta.metas.iter().map(|m| ASTExpression::Meta(Box::new(m.clone())).to_json()).collect::<Vec<serde_json::Value>>(),
+          "entity": meta.entity.as_ref().map(|e| e.to_json()),
+        })
+      },
+      ASTExpression::Spread(spread) => {
+        json!({
+          "type": "SPREAD",
+          "expression": spread.expression.to_json(),
+          "token": spread.token.lexeme,
         })
       },
     }

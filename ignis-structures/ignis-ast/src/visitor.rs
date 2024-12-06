@@ -72,6 +72,18 @@ pub trait ASTVisitor<R> {
     &mut self,
     expression: &crate::expressions::this::ASTThis,
   ) -> R;
+  fn visit_meta_expression(
+    &mut self,
+    expression: &crate::expressions::meta::ASTMeta,
+  ) -> R;
+  fn visit_meta_entity_expression(
+    &mut self,
+    expression: &crate::expressions::meta::ASTMetaEntity,
+  ) -> R;
+  fn visit_spread_expression(
+    &mut self,
+    expression: &crate::expressions::spread::ASTSpread,
+  ) -> R;
   // #endregion
 
   // #region Statements
@@ -146,6 +158,18 @@ pub trait ASTVisitor<R> {
   fn visit_extern_statement(
     &mut self,
     extern_: &crate::statements::r#extern::ASTExtern,
+  ) -> R;
+  fn visit_include_statement(
+    &mut self,
+    include: &Token,
+  ) -> R;
+  fn visit_source_statement(
+    &mut self,
+    source: &Token,
+  ) -> R;
+  fn visit_namespace_statement(
+    &mut self,
+    namespace: &crate::statements::namespace::ASTNamespace,
   ) -> R;
   // #endregion
 }

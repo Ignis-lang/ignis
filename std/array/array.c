@@ -25,10 +25,10 @@ IgnisArray *arrayNew(IgnisType type, u32 length, void *data) {
 
 void freeArray(IgnisArray *array) {
   if (array->data) {
-    freeMemory(array->data);
+    deallocate(array->data);
   }
 
-  freeMemory(array);
+  deallocate(array);
 }
 
 u32 arrayLength(IgnisArray *array) { return array->length; }

@@ -11,6 +11,7 @@ pub mod if_statement;
 pub mod import;
 pub mod meta;
 pub mod method;
+pub mod namespace;
 pub mod property;
 pub mod record;
 pub mod return_;
@@ -24,9 +25,10 @@ use for_of_statement::ASTForOf;
 use for_statement::ASTFor;
 use function::ASTFunction;
 use if_statement::ASTIf;
-use ignis_token::token::Token;
+use ignis_token::{token::Token, token_types::TokenType};
 use import::ASTImport;
 use method::ASTMethod;
+use namespace::ASTNamespace;
 use property::ASTProperty;
 use record::ASTRecord;
 use return_::ASTReturn;
@@ -57,9 +59,19 @@ pub enum ASTStatement {
   Method(Box<ASTMethod>),
   Property(Box<ASTProperty>),
   Extern(Box<ASTExtern>),
+  Include(Box<Token>),
+  Source(Box<Token>),
+  Namespace(Box<ASTNamespace>),
 }
 
 impl ASTStatement {
+  pub fn as_expression(&self) -> &ASTExpression {
+    match self {
+      ASTStatement::Expression(expression) => expression,
+      _ => unreachable!(),
+    }
+  }
+
   pub fn accept<R>(
     &self,
     visitor: &mut dyn ASTVisitor<R>,
@@ -83,6 +95,9 @@ impl ASTStatement {
       ASTStatement::Method(method) => visitor.visit_method_statement(method),
       ASTStatement::Property(property) => visitor.visit_property_statement(property),
       ASTStatement::Extern(extern_) => visitor.visit_extern_statement(extern_),
+      ASTStatement::Include(include) => visitor.visit_include_statement(include),
+      ASTStatement::Source(source) => visitor.visit_source_statement(source),
+      ASTStatement::Namespace(namespace) => visitor.visit_namespace_statement(namespace),
     }
   }
 
@@ -105,7 +120,7 @@ impl ASTStatement {
           "parameters": function.parameters.iter().map(|p| ASTStatement::Variable(Box::new(p.clone())).to_json()).collect::<Vec<serde_json::Value>>(),
           "body": function.body.iter().map(|s| s.to_json()).collect::<Vec<serde_json::Value>>(),
           "return_type": function.return_type,
-          "is_exported": function.is_exported,
+          "metadata": function.metadata.to_json(),
         })
       },
       ASTStatement::Variable(variable) => {
@@ -143,7 +158,7 @@ impl ASTStatement {
       ASTStatement::ForOf(for_of_statement) => {
         json!({
           "type": "FOR_OF",
-          "variable": ASTStatement::Variable(Box::new(for_of_statement.variable.clone())).to_json(),
+          "variable": ASTStatement::Variable(for_of_statement.variable.clone()).to_json(),
           "iterable": for_of_statement.iterable.to_json(),
           "body": for_of_statement.body.to_json(),
           "token": for_of_statement.token,
@@ -222,11 +237,87 @@ impl ASTStatement {
       ASTStatement::Extern(extern_) => {
         json!({
           "type": "EXTERN",
-          "name": extern_.name.lexeme,
+          "name": extern_.name.as_ref().to_json(),
           "body": extern_.body.iter().map(|s| s.to_json()).collect::<Vec<serde_json::Value>>(),
           "metadata": extern_.metadata.to_json(),
         })
       },
+      ASTStatement::Include(include) => {
+        json!({
+          "type": "INCLUDE",
+          "path": include,
+        })
+      },
+      ASTStatement::Source(source) => {
+        json!({
+          "type": "SOURCE",
+          "path": source,
+        })
+      },
+      ASTStatement::Namespace(namespace) => {
+        json!({
+          "type": "NAMESPACE",
+          "name": namespace.name.to_json(),
+          "members": namespace.members.iter().map(|s| s.to_json()).collect::<Vec<serde_json::Value>>(),
+          "metadata": namespace.metadata.to_json(),
+        })
+      },
+    }
+  }
+}
+
+impl Into<TokenType> for &ASTStatement {
+  fn into(self) -> TokenType {
+    match self {
+      ASTStatement::Expression(_) => todo!(),
+      ASTStatement::Constant(_) => TokenType::Const,
+      ASTStatement::Function(_) => TokenType::Function,
+      ASTStatement::Variable(_) => TokenType::Identifier,
+      ASTStatement::Block(_) => TokenType::LeftBrace,
+      ASTStatement::If(_) => TokenType::If,
+      ASTStatement::For(_) => TokenType::For,
+      ASTStatement::ForOf(_) => TokenType::For,
+      ASTStatement::While(_) => TokenType::While,
+      ASTStatement::Break { .. } => TokenType::Break,
+      ASTStatement::Continue { .. } => TokenType::Continue,
+      ASTStatement::Return(_) => TokenType::Return,
+      ASTStatement::Import(_) => TokenType::Import,
+      ASTStatement::Comment(_) => TokenType::Comment,
+      ASTStatement::Record(_) => TokenType::Record,
+      ASTStatement::Method(_) => TokenType::Identifier,
+      ASTStatement::Property(_) => TokenType::Identifier,
+      ASTStatement::Extern(_) => TokenType::Extern,
+      ASTStatement::Include(_) => TokenType::Include,
+      ASTStatement::Source(_) => TokenType::Source,
+      ASTStatement::Namespace(_) => TokenType::Namespace,
+    }
+  }
+}
+
+impl Into<Token> for &ASTStatement {
+  fn into(self) -> Token {
+    match self {
+      ASTStatement::Expression(expression) => expression.as_ref().into(),
+      ASTStatement::Constant(constant) => constant.name.clone(),
+      ASTStatement::Function(function) => function.name.clone(),
+      ASTStatement::Variable(variable) => variable.name.clone(),
+      ASTStatement::Block(_) => todo!(),
+      ASTStatement::If(if_) => if_.condition.as_ref().into(),
+      ASTStatement::For(for_) => for_.variable.name.clone(),
+      ASTStatement::ForOf(for_of) => for_of.variable.name.clone(),
+      ASTStatement::While(while_) => while_.condition.as_ref().into(),
+      ASTStatement::Break { token } => token.clone(),
+      ASTStatement::Continue { token } => token.clone(),
+      ASTStatement::Return(return_) => return_.token.clone(),
+      ASTStatement::Import(import) => import.module_path.clone(),
+      ASTStatement::Comment(comment) => comment.token.clone(),
+      ASTStatement::Record(record) => record.name.clone(),
+      ASTStatement::Method(method) => method.name.clone(),
+      ASTStatement::Property(property) => property.name.as_ref().clone(),
+      ASTStatement::Extern(extern_) => extern_.name.as_ref().into(),
+      ASTStatement::Include(include) => include.as_ref().clone(),
+      ASTStatement::Source(source) => source.as_ref().clone(),
+      ASTStatement::Namespace(namespace) => namespace.name.as_ref().into(),
     }
   }
 }

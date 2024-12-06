@@ -6,7 +6,7 @@ use super::{variable::ASTVariable, ASTStatement};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ASTForOf {
-  pub variable: ASTVariable,
+  pub variable: Box<ASTVariable>,
   pub iterable: Box<ASTExpression>,
   pub body: Box<ASTStatement>,
   pub token: Token,
@@ -14,7 +14,7 @@ pub struct ASTForOf {
 
 impl ASTForOf {
   pub fn new(
-    variable: ASTVariable,
+    variable: Box<ASTVariable>,
     iterable: Box<ASTExpression>,
     body: Box<ASTStatement>,
     token: Token,

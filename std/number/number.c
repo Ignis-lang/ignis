@@ -166,3 +166,191 @@ unknown numberAbs(unknown inputValue, IgnisType type) {
 
   return value;
 }
+
+unknown numberToFixed(unknown inputValue, u32 digits, IgnisType type) {
+  if (inputValue == NULL) {
+    return NULL;
+  }
+
+  IgnisGenericType *value = ignisGenericTypeNew(type);
+
+  switch (type) {
+  case TYPE_I8:
+    value->data.i8 = (inputValue->data.i8);
+    break;
+  case TYPE_I16:
+    value->data.i16 = (inputValue->data.i16);
+    break;
+  case TYPE_I32:
+    value->data.i32 = (inputValue->data.i32);
+    break;
+  case TYPE_I64:
+    value->data.i64 = (inputValue->data.i64);
+    break;
+  case TYPE_U8:
+    value->data.u8 = (inputValue->data.u8);
+    break;
+  case TYPE_U16:
+    value->data.u16 = (inputValue->data.u16);
+    break;
+  case TYPE_U32:
+    value->data.u32 = (inputValue->data.u32);
+    break;
+  case TYPE_U64:
+    value->data.u64 = (inputValue->data.u64);
+    break;
+  case TYPE_F32:
+    value->data.f32 = (inputValue->data.f32);
+    break;
+  case TYPE_F64:
+    value->data.f64 = (inputValue->data.f64);
+    break;
+  default:
+    ignisGenericTypeFree(value);
+    return NULL;
+    break;
+  }
+
+  return value;
+}
+
+unknown numberRound(unknown inputValue, IgnisType type) {
+  if (inputValue == NULL) {
+    return NULL;
+  }
+
+  IgnisGenericType *value = ignisGenericTypeNew(type);
+
+  switch (type) {
+  case TYPE_I8:
+    value->data.i8 = (inputValue->data.i8);
+    break;
+  case TYPE_I16:
+    value->data.i16 = (inputValue->data.i16);
+    break;
+  case TYPE_I32:
+    value->data.i32 = (inputValue->data.i32);
+    break;
+  case TYPE_I64:
+    value->data.i64 = (inputValue->data.i64);
+    break;
+  case TYPE_U8:
+    value->data.u8 = (inputValue->data.u8);
+    break;
+  case TYPE_U16:
+    value->data.u16 = (inputValue->data.u16);
+    break;
+  case TYPE_U32:
+    value->data.u32 = (inputValue->data.u32);
+    break;
+  case TYPE_U64:
+    value->data.u64 = (inputValue->data.u64);
+    break;
+  case TYPE_F32:
+    value->data.f32 = (inputValue->data.f32);
+    break;
+  case TYPE_F64:
+    value->data.f64 = (inputValue->data.f64);
+    break;
+  default:
+    ignisGenericTypeFree(value);
+    return NULL;
+    break;
+  }
+
+  return value;
+}
+
+unknown numberFloor(unknown inputValue, IgnisType type) {
+  if (inputValue == NULL) {
+    return NULL;
+  }
+
+  IgnisGenericType *value = ignisGenericTypeNew(type);
+
+  switch (type) {
+  case TYPE_I8:
+    value->data.i8 = (inputValue->data.i8);
+    break;
+  case TYPE_I16:
+    value->data.i16 = (inputValue->data.i16);
+    break;
+  case TYPE_I32:
+    value->data.i32 = (inputValue->data.i32);
+    break;
+  case TYPE_I64:
+    value->data.i64 = (inputValue->data.i64);
+    break;
+  case TYPE_U8:
+    value->data.u8 = (inputValue->data.u8);
+    break;
+  case TYPE_U16:
+    value->data.u16 = (inputValue->data.u16);
+    break;
+  case TYPE_U32:
+    value->data.u32 = (inputValue->data.u32);
+    break;
+  case TYPE_U64:
+    value->data.u64 = (inputValue->data.u64);
+    break;
+  case TYPE_F32:
+    value->data.f32 = (inputValue->data.f32);
+    break;
+  case TYPE_F64:
+    value->data.f64 = (inputValue->data.f64);
+    break;
+  default:
+    ignisGenericTypeFree(value);
+    return NULL;
+    break;
+  }
+
+  return value;
+}
+
+unknown numberCeil(unknown inputValue, IgnisType type) {
+  if (inputValue == NULL) {
+    return NULL;
+  }
+
+  IgnisGenericType *value = ignisGenericTypeNew(type);
+
+  switch (type) {
+  case TYPE_I8:
+    value->data.i8 = (inputValue->data.i8);
+    break;
+  case TYPE_I16:
+    value->data.i16 = (inputValue->data.i16);
+    break;
+  case TYPE_I32:
+    value->data.i32 = (inputValue->data.i32);
+    break;
+  case TYPE_I64:
+    value->data.i64 = (inputValue->data.i64);
+    break;
+  case TYPE_U8:
+    value->data.u8 = (inputValue->data.u8);
+    break;
+  case TYPE_U16:
+    value->data.u16 = (inputValue->data.u16);
+    break;
+  case TYPE_U32:
+    value->data.u32 = (inputValue->data.u32);
+    break;
+  case TYPE_U64:
+    value->data.u64 = (inputValue->data.u64);
+    break;
+  case TYPE_F32:
+    value->data.f32 = (inputValue->data.f32);
+    break;
+  case TYPE_F64:
+    value->data.f64 = (inputValue->data.f64);
+    break;
+  default:
+    ignisGenericTypeFree(value);
+    return NULL;
+    break;
+  }
+
+  return value;
+}

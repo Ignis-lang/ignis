@@ -1,5 +1,6 @@
 mod diagnostics;
 pub mod lexer;
+mod meta;
 pub mod parser;
 
 use crate::diagnostics::{Diagnostic, diagnostic_report::DiagnosticReport};
@@ -62,11 +63,21 @@ impl IgnisFrontend {
     let (statements, diagnostics) = parser.parse(false);
 
     if self.config.debug.contains(&DebugPrint::Ast) && !self.config.quiet {
-      println!("{:#?}", statements);
+      println!("Pre-Meta AST: {:#?}", statements);
     }
 
-
     for diagnostic in diagnostics {
+      self.diagnostics.push(diagnostic.report_diagnostic());
+    }
+
+    let mut meta_processor = meta::IgnisMetaProcessor::new(statements);
+    meta_processor.process();
+
+    if self.config.debug.contains(&DebugPrint::Ast) && !self.config.quiet {
+      println!("Post-Meta AST: {:#?}", meta_processor.new_ast);
+    }
+
+    for diagnostic in meta_processor.diagnostics {
       self.diagnostics.push(diagnostic.report_diagnostic());
     }
 
@@ -74,6 +85,7 @@ impl IgnisFrontend {
       let diagnostics: Diagnostic = Diagnostic::default();
 
       diagnostics.report(self.diagnostics.clone());
+      std::process::exit(1);
     }
   }
 }

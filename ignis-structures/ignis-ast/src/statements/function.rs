@@ -1,9 +1,9 @@
 use ignis_data_type::DataType;
 use ignis_token::token::Token;
 
+use crate::metadata::ASTMetadata;
+
 use super::{variable::ASTVariable, ASTStatement};
-
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ASTFunction {
@@ -11,7 +11,7 @@ pub struct ASTFunction {
   pub parameters: Vec<ASTVariable>,
   pub body: Vec<ASTStatement>,
   pub return_type: DataType,
-  pub is_exported: bool,
+  pub metadata: ASTMetadata,
 }
 
 impl ASTFunction {
@@ -20,14 +20,14 @@ impl ASTFunction {
     parameters: Vec<ASTVariable>,
     body: Vec<ASTStatement>,
     return_type: DataType,
-    is_exported: bool,
+    metadata: ASTMetadata,
   ) -> Self {
     Self {
       name,
       parameters,
       body,
       return_type,
-      is_exported,
+      metadata,
     }
   }
 }

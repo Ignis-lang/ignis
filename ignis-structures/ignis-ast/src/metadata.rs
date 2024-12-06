@@ -19,6 +19,8 @@ pub enum ASTMetadataFlags {
   Static,
   Variable,
   Variadic,
+  Spread,
+  Meta(IgnisCompilerMeta),
   None,
 }
 
@@ -44,7 +46,9 @@ impl std::fmt::Display for ASTMetadataFlags {
       ASTMetadataFlags::Static => write!(f, "Static"),
       ASTMetadataFlags::Variable => write!(f, "Variable"),
       ASTMetadataFlags::Variadic => write!(f, "Variadic"),
+      ASTMetadataFlags::Meta(meta) => write!(f, "{:?}", meta),
       ASTMetadataFlags::None => write!(f, "None"),
+      ASTMetadataFlags::Spread => write!(f, "Spread"),
     }
   }
 }
@@ -124,4 +128,26 @@ impl ASTMetadata {
   pub fn reset(&mut self) {
     self.flags.clear();
   }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum IgnisCompilerMeta {
+  MutOnly,
+  ToDo(Option<String>),
+  Ignore,
+  NotTranspile,
+  Feature(String, String),
+  Deprecated(String, String),
+  PlatformSpecific(String, String),
+  Experimental(String, String),
+  Internal(String),
+  Global(String),
+  DisableLint,
+  EnableLint,
+  MainFunction,
+  Optimize(u8),
+  Panic(Option<String>),
+  Copy,
+  Clone,
+  FFILink(String),
 }
