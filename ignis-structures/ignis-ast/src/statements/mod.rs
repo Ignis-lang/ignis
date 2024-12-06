@@ -15,6 +15,7 @@ pub mod namespace;
 pub mod property;
 pub mod record;
 pub mod return_;
+pub mod type_alias;
 pub mod variable;
 pub mod while_statement;
 
@@ -33,6 +34,7 @@ use property::ASTProperty;
 use record::ASTRecord;
 use return_::ASTReturn;
 use serde_json::json;
+use type_alias::ASTTypeAlias;
 use variable::ASTVariable;
 use while_statement::ASTWhile;
 
@@ -62,6 +64,7 @@ pub enum ASTStatement {
   Include(Box<Token>),
   Source(Box<Token>),
   Namespace(Box<ASTNamespace>),
+  TypeAlias(Box<ASTTypeAlias>),
 }
 
 impl ASTStatement {
@@ -98,6 +101,7 @@ impl ASTStatement {
       ASTStatement::Include(include) => visitor.visit_include_statement(include),
       ASTStatement::Source(source) => visitor.visit_source_statement(source),
       ASTStatement::Namespace(namespace) => visitor.visit_namespace_statement(namespace),
+      ASTStatement::TypeAlias(type_alias) => visitor.visit_type_alias_statement(type_alias),
     }
   }
 
@@ -263,6 +267,15 @@ impl ASTStatement {
           "metadata": namespace.metadata.to_json(),
         })
       },
+      ASTStatement::TypeAlias(type_alias) => {
+        json!({
+          "type": "TYPE_ALIAS",
+          "name": type_alias.name.lexeme,
+          "value": type_alias.value,
+          "generic_parameters": type_alias.generics,
+          "metadata": type_alias.metadata.to_json(),
+        })
+      },
     }
   }
 }
@@ -291,6 +304,7 @@ impl Into<TokenType> for &ASTStatement {
       ASTStatement::Include(_) => TokenType::Include,
       ASTStatement::Source(_) => TokenType::Source,
       ASTStatement::Namespace(_) => TokenType::Namespace,
+      ASTStatement::TypeAlias(_) => TokenType::Type,
     }
   }
 }
@@ -319,6 +333,7 @@ impl Into<Token> for &ASTStatement {
       ASTStatement::Include(include) => include.as_ref().clone(),
       ASTStatement::Source(source) => source.as_ref().clone(),
       ASTStatement::Namespace(namespace) => namespace.name.as_ref().into(),
+      ASTStatement::TypeAlias(type_alias) => type_alias.name.clone(),
     }
   }
 }

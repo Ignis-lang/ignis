@@ -9,6 +9,7 @@ use ignis_data_type::DataType;
 use ignis_token::token::Token;
 use literal::ASTLiteralValue;
 use namespace::ASTNamespace;
+use type_alias::ASTTypeAlias;
 pub mod diagnostics;
 
 pub struct IgnisMetaProcessor {
@@ -331,6 +332,18 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
 
     Ok(ASTStatement::Expression(Box::new(ASTExpression::MetaEntity(Box::new(
       expression.clone(),
+    )))))
+  }
+
+  fn visit_spread_expression(
+    &mut self,
+    expression: &ignis_ast::expressions::spread::ASTSpread,
+  ) -> IgnisMetaResult {
+    Ok(ASTStatement::Expression(Box::new(ASTExpression::Spread(Box::new(
+      ignis_ast::expressions::spread::ASTSpread::new(
+        Box::new(expression.expression.accept(self)?.as_expression().clone()),
+        expression.token.clone(),
+      ),
     )))))
   }
 
@@ -658,16 +671,16 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
     ))))
   }
 
-  fn visit_spread_expression(
+  fn visit_type_alias_statement(
     &mut self,
-    expression: &ignis_ast::expressions::spread::ASTSpread,
+    type_alias: &ignis_ast::statements::type_alias::ASTTypeAlias,
   ) -> IgnisMetaResult {
-    Ok(ASTStatement::Expression(Box::new(ASTExpression::Spread(Box::new(
-      ignis_ast::expressions::spread::ASTSpread::new(
-        Box::new(expression.expression.accept(self)?.as_expression().clone()),
-        expression.token.clone(),
-      ),
-    )))))
+    Ok(ASTStatement::TypeAlias(Box::new(ASTTypeAlias::new(
+      type_alias.name.clone(),
+      type_alias.value.clone(),
+      type_alias.metadata.clone(),
+      type_alias.generics.clone(),
+    ))))
   }
 }
 
@@ -746,6 +759,22 @@ impl IgnisMetaProcessor {
       ASTStatement::Function(function) => {
         let metadata = self.current_metadata.clone();
         function.metadata.push_all(metadata);
+      },
+      ASTStatement::TypeAlias(type_alias) => {
+        let metadata = self.current_metadata.clone();
+        type_alias.metadata.push_all(metadata);
+      },
+      ASTStatement::Namespace(namespace) => {
+        let metadata = self.current_metadata.clone();
+        namespace.metadata.push_all(metadata);
+      },
+      ASTStatement::Constant(constant) => {
+        let metadata = self.current_metadata.clone();
+        constant.metadata.push_all(metadata);
+      },
+      ASTStatement::Record(record) => {
+        let metadata = self.current_metadata.clone();
+        record.metadata.push_all(metadata);
       },
       _ => {
         let kind = entity.into();

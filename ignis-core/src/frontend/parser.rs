@@ -40,6 +40,7 @@ use ignis_ast::{
     property::ASTProperty,
     record::ASTRecord,
     return_::ASTReturn,
+    type_alias::ASTTypeAlias,
     variable::ASTVariable,
     while_statement::ASTWhile,
     ASTStatement,
@@ -450,7 +451,7 @@ impl IgnisParser {
     }
   }
 
-  /// <declaration> ::= <function> | <import> | <export> | <const> | <record> | <extern> | <declare> | <meta> | <namespace>
+  /// <declaration> ::= <function> | <import> | <export> | <const> | <record> | <extern> | <declare> | <meta> | <namespace> | <type-alias>
   fn declaration(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
 
@@ -464,6 +465,7 @@ impl IgnisParser {
       TokenType::Declare => self.declare(false),
       TokenType::Meta => self.meta(false),
       TokenType::Namespace => self.namespace(false),
+      TokenType::Type => self.type_alias(false),
       _ => match self.statement() {
         Ok(statement) => Ok(statement),
         Err(error) => {
@@ -599,6 +601,7 @@ impl IgnisParser {
       TokenType::Declare => self.declare(true),
       TokenType::Meta => self.meta(true),
       TokenType::Namespace => self.namespace(true),
+      TokenType::Type => self.type_alias(true),
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),
@@ -819,6 +822,7 @@ impl IgnisParser {
 
         Ok(ASTStatement::Source(Box::new(path)))
       },
+      TokenType::Type => self.type_alias(false),
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),
@@ -896,6 +900,37 @@ impl IgnisParser {
         self.peek(),
       )))),
     }
+  }
+
+  // <type-alias> ::= "type" <identifier> <generic-type>? "=" <type> ";"
+  fn type_alias(
+    &mut self,
+    is_exported: bool,
+  ) -> IgnisParserResult<ASTStatement> {
+    self.consume(TokenType::Type)?;
+
+    let name = self.consume(TokenType::Identifier)?;
+
+    let generic_parameters = self.resolve_generic_params()?;
+
+    self.consume(TokenType::Equal)?;
+
+    let value = self.resolve_type(&generic_parameters)?;
+
+    self.consume(TokenType::SemiColon)?;
+
+    let mut metadata = ASTMetadata::new(vec![]);
+
+    if is_exported {
+      metadata.push(ASTMetadataFlags::Export);
+    }
+
+    Ok(ASTStatement::TypeAlias(Box::new(ASTTypeAlias::new(
+      name,
+      Box::new(value),
+      metadata,
+      generic_parameters,
+    ))))
   }
 
   /// <statement> ::= <declaration> | <if> | <for> | <for-of> | <while> | <return> | <break> | <continue> | <block> | <variable> | <expression> ";"
@@ -1899,8 +1934,11 @@ impl IgnisParser {
 
   fn meta_entity(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
+
     match token.type_ {
       TokenType::Function => self.function(false),
+      TokenType::Type => self.type_alias(false),
+      TokenType::Namespace => self.namespace(false),
       TokenType::Const => self.const_(false),
       TokenType::Record => self.record(false),
       TokenType::Declare => self.declare(false),
@@ -1913,6 +1951,7 @@ impl IgnisParser {
 
         self.statement()
       },
+      TokenType::Export => self.export(),
       _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
         TokenType::Function,
         self.peek(),
@@ -2138,7 +2177,7 @@ impl IgnisParser {
       let mut data_type: DataType = DataType::from(&token.type_);
 
       if data_type == DataType::Pending {
-        data_type = self.resolve_pending_type(&token);
+        data_type = self.resolve_pending_type(&token, generic_parameters);
       }
 
       if self.match_token(&[TokenType::LeftBrack]) {
@@ -2160,6 +2199,36 @@ impl IgnisParser {
         data_type = DataType::Pointer(Box::new(data_type));
       }
 
+      if matches!(self.peek().type_, TokenType::Pipe | TokenType::Ampersand) {
+        let is_union: bool = self.match_token(&[TokenType::Pipe]);
+
+        let mut members: Vec<DataType> = vec![data_type];
+
+        loop {
+          let token: Token = self.peek();
+
+          let mut type_: DataType = DataType::from(&token.type_);
+
+          if self.match_token(&[TokenType::LeftBrack]) {
+            self.consume(TokenType::RightBrack)?;
+            type_ = DataType::Vector(Box::new(type_), None);
+          }
+
+          self.advance();
+          members.push(type_);
+
+          if !self.match_token(&[TokenType::Pipe, TokenType::Ampersand]) {
+            break;
+          }
+        }
+
+        if is_union {
+          data_type = DataType::UnionType(members);
+        } else {
+          data_type = DataType::IntersectionType(members);
+        }
+      }
+
       return Ok(data_type);
     }
 
@@ -2173,16 +2242,16 @@ impl IgnisParser {
   fn resolve_pending_type(
     &self,
     token: &Token,
+    generic_parameters: &[ASTGenericParameter],
   ) -> DataType {
     // TODO: Ignis v0.3.0
     // if self.is_declared(ParserDeclaration::Class, token) {
     //   DataType::ClassType(token.lexeme.clone())
     // } else if self.is_declared(ParserDeclaration::Interface, token) {
     //   DataType::Interface(token.lexeme.clone())
-    // } else if self.is_declared(ParserDeclaration::Enum, token) {
-    //   DataType::Enum(token.lexeme.clone())
-    // } else
-    if self.is_declared(ParserDeclaration::Import, token) {
+    if self.is_declared(ParserDeclaration::Enum, token) {
+      DataType::Enum(token.lexeme.clone())
+    } else if self.is_declared(ParserDeclaration::Import, token) {
       DataType::PendingImport(token.lexeme.clone())
     } else if self.is_declared(ParserDeclaration::Record, token) {
       let record = match self
@@ -2204,16 +2273,11 @@ impl IgnisParser {
       };
 
       DataType::Record(record.0, record.1)
-
-    // TODO: Ignis v0.2.0
-    // } else if let Some(g) = generic_parameters
-    //   .iter()
-    //   .find(|g| g.name.lexeme == token.lexeme)
-    // {
-    //   DataType::GenericType(GenericType::new(
-    //     Box::new(DataType::Variable(g.name.lexeme.clone())),
-    //     Vec::new(),
-    //   ))
+    } else if let Some(g) = generic_parameters.iter().find(|g| g.name.lexeme == token.lexeme) {
+      DataType::GenericType(GenericType::new(
+        Box::new(DataType::Variable(g.name.lexeme.clone())),
+        Vec::new(),
+      ))
     } else {
       DataType::Pending
     }

@@ -171,5 +171,9 @@ pub trait ASTVisitor<R> {
     &mut self,
     namespace: &crate::statements::namespace::ASTNamespace,
   ) -> R;
+  fn visit_type_alias_statement(
+    &mut self,
+    type_alias: &crate::statements::type_alias::ASTTypeAlias,
+  ) -> R;
   // #endregion
 }

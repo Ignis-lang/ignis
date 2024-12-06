@@ -53,10 +53,10 @@ pub enum DataType {
   Enum(String),
   AliasType(String),
   UnionType(Vec<DataType>),
+  IntersectionType(Vec<DataType>),
   // TODO: Ignis v0.3.0
   // Interface(String),
   // ClassType(String),
-  // IntersectionType(Vec<DataType>),
   // TupleType(Vec<DataType>),
 }
 
@@ -160,6 +160,15 @@ impl Display for DataType {
       DataType::UnionType(types) => write!(
         f,
         "union<{}>",
+        types
+          .iter()
+          .map(|t| t.to_string())
+          .collect::<Vec<String>>()
+          .join(", ")
+      ),
+      DataType::IntersectionType(types) => write!(
+        f,
+        "intersection<{}>",
         types
           .iter()
           .map(|t| t.to_string())
