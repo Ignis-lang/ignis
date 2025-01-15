@@ -1,15 +1,14 @@
-mod diagnostics;
 pub mod lexer;
 mod meta;
 pub mod parser;
-
-use crate::diagnostics::{Diagnostic, diagnostic_report::DiagnosticReport};
 
 use std::io::Read;
 
 use ignis_config::{DebugPrint, IgnisConfig};
 use ignis_token::token::Token;
 use lexer::Lexer;
+
+use crate::diagnostics::{diagnostic_report::DiagnosticReport, Diagnostic};
 
 fn get_file_content(path: &String) -> String {
   let file = std::fs::File::open(path);
@@ -48,6 +47,11 @@ impl IgnisFrontend {
 
     let mut lexer = Lexer::new(self.config.clone(), source.as_str(), file);
     lexer.scan_tokens(false);
+
+    for diagnostic in lexer.diagnostics {
+      self.diagnostics.push(diagnostic.report());
+    }
+
     let tokens = lexer.tokens;
 
     if self.config.debug.contains(&DebugPrint::Lexer) && !self.config.quiet {
@@ -67,7 +71,7 @@ impl IgnisFrontend {
     }
 
     for diagnostic in diagnostics {
-      self.diagnostics.push(diagnostic.report_diagnostic());
+      self.diagnostics.push(diagnostic.report());
     }
 
     let mut meta_processor = meta::IgnisMetaProcessor::new(statements);

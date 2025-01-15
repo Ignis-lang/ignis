@@ -2,6 +2,8 @@ use ignis_config::IgnisConfig;
 use ignis_token::{token::Token, token_types::TokenType};
 use colored::*;
 
+use crate::diagnostics::message::DiagnosticMessage;
+
 /*
  * Lexer
  *
@@ -20,6 +22,7 @@ pub struct Lexer<'a> {
   line: usize,
   current: usize,
   module_path: String,
+  pub diagnostics: Vec<DiagnosticMessage>,
 }
 
 impl<'a> Lexer<'a> {
@@ -37,6 +40,7 @@ impl<'a> Lexer<'a> {
       line: 0,
       current: 0,
       module_path: file,
+      diagnostics: vec![],
     }
   }
 
@@ -93,7 +97,6 @@ impl<'a> Lexer<'a> {
 
   fn scan_token(&mut self) {
     let c: char = self.advance();
-    let mut token: TokenType = TokenType::Bad;
 
     if c == ' ' || c == '\r' || c == '\t' {
       return;
@@ -106,138 +109,138 @@ impl<'a> Lexer<'a> {
 
     match c {
       '(' => {
-        token = TokenType::LeftParen;
+        self.add_token(TokenType::LeftParen);
       },
       ')' => {
-        token = TokenType::RightParen;
+        self.add_token(TokenType::RightParen);
       },
       '{' => {
-        token = TokenType::LeftBrace;
+        self.add_token(TokenType::LeftBrace);
       },
       '}' => {
-        token = TokenType::RightBrace;
+        self.add_token(TokenType::RightBrace);
       },
       '[' => {
-        token = TokenType::LeftBrack;
+        self.add_token(TokenType::LeftBrack);
       },
       ']' => {
-        token = TokenType::RightBrack;
+        self.add_token(TokenType::RightBrack);
       },
       ',' => {
-        token = TokenType::Comma;
+        self.add_token(TokenType::Comma);
       },
       '.' => {
-        token = if self.match_char('.') {
+        if self.match_char('.') {
           if self.match_char('.') {
-            TokenType::Variadic
+            self.add_token(TokenType::Variadic);
           } else if self.match_char('=') {
-            TokenType::RangeInclusive
+            self.add_token(TokenType::RangeInclusive);
           } else {
-            TokenType::Range
+            self.add_token(TokenType::Range);
           }
         } else {
-          TokenType::Dot
-        };
+          self.add_token(TokenType::Dot);
+        }
       },
       ';' => {
-        token = TokenType::SemiColon;
+        self.add_token(TokenType::SemiColon);
       },
       '@' => {
-        token = TokenType::At;
+        self.add_token(TokenType::At);
       },
       '-' => {
-        token = if self.match_char('=') {
-          TokenType::SubtractAssign
+        if self.match_char('=') {
+          self.add_token(TokenType::SubtractAssign);
         } else if self.match_char('-') {
-          TokenType::Decrement
+          self.add_token(TokenType::Decrement);
         } else if self.match_char('>') {
-          TokenType::Arrow
+          self.add_token(TokenType::Arrow);
         } else if self.peek().is_ascii_digit() {
           if self.number() {
-            TokenType::Float
+            self.add_token(TokenType::Float);
           } else {
-            TokenType::Int
+            self.add_token(TokenType::Int);
           }
         } else {
-          TokenType::Minus
-        };
+          self.add_token(TokenType::Minus);
+        }
       },
       '+' => {
-        token = if self.match_char('=') {
-          TokenType::AddAssign
+        if self.match_char('=') {
+          self.add_token(TokenType::AddAssign);
         } else if self.match_char('+') {
-          TokenType::Increment
+          self.add_token(TokenType::Increment);
         } else {
-          TokenType::Plus
+          self.add_token(TokenType::Plus);
         };
       },
       '*' => {
-        token = TokenType::Asterisk;
+        self.add_token(TokenType::Asterisk);
       },
       ':' => {
-        token = if self.match_char(':') {
-          TokenType::DoubleColon
+        if self.match_char(':') {
+          self.add_token(TokenType::DoubleColon);
         } else {
-          TokenType::Colon
+          self.add_token(TokenType::Colon);
         };
       },
       '%' => {
-        token = TokenType::Mod;
+        self.add_token(TokenType::Mod);
       },
       '!' => {
-        token = if self.match_char('=') {
-          TokenType::BangEqual
+        if self.match_char('=') {
+          self.add_token(TokenType::BangEqual);
         } else {
-          TokenType::Bang
+          self.add_token(TokenType::Bang);
         };
       },
       '=' => {
-        token = if self.match_char('=') {
-          TokenType::EqualEqual
+        if self.match_char('=') {
+          self.add_token(TokenType::EqualEqual);
         } else {
-          TokenType::Equal
+          self.add_token(TokenType::Equal);
         };
       },
       '<' => {
-        token = if self.match_char('=') {
-          TokenType::LessEqual
+        if self.match_char('=') {
+          self.add_token(TokenType::LessEqual);
         } else {
-          TokenType::Less
+          self.add_token(TokenType::Less);
         };
       },
       '>' => {
-        token = if self.match_char('=') {
-          TokenType::GreaterEqual
+        if self.match_char('=') {
+          self.add_token(TokenType::GreaterEqual);
         } else {
-          TokenType::Greater
+          self.add_token(TokenType::Greater);
         };
       },
       '|' => {
-        token = if self.match_char('|') {
-          TokenType::Or
+        if self.match_char('|') {
+          self.add_token(TokenType::Or);
         } else {
-          TokenType::Pipe
+          self.add_token(TokenType::Pipe);
         };
       },
       '&' => {
-        token = if self.match_char('&') {
-          TokenType::And
+        if self.match_char('&') {
+          self.add_token(TokenType::And);
         } else {
-          TokenType::Ampersand
+          self.add_token(TokenType::Ampersand);
         };
       },
       '#' => {
-        token = TokenType::Hash;
+        self.add_token(TokenType::Hash);
       },
       '?' => {
-        token = TokenType::QuestionMark;
+        self.add_token(TokenType::QuestionMark);
       },
       '/' => {
         if self.peek() == '/' || self.peek() == '*' {
           self.comments();
           return;
         } else {
-          token = TokenType::Slash;
+          self.add_token(TokenType::Slash);
         }
       },
       '"' => {
@@ -248,29 +251,28 @@ impl<'a> Lexer<'a> {
       },
       '0' if self.peek() == 'x' => {
         self.hex_number();
-        token = TokenType::Hex;
+        self.add_token(TokenType::Hex);
       },
       '0' if self.peek() == 'b' => {
         self.advance();
         self.binary_number();
-        token = TokenType::Binary;
+        self.add_token(TokenType::Binary);
       },
       _ => {
         if c.is_ascii_digit() {
           if self.number() {
-            token = TokenType::Float;
+            self.add_token(TokenType::Float);
           } else {
-            token = TokenType::Int;
+            self.add_token(TokenType::Int);
           }
         }
 
         if c.is_ascii_lowercase() || c.is_ascii_uppercase() || c == '_' {
-          token = self.identifier();
+          let token = self.identifier();
+          self.add_token(token);
         }
       },
     }
-
-    self.add_token(token);
   }
 
   fn comments(&mut self) {
@@ -308,6 +310,14 @@ impl<'a> Lexer<'a> {
         TokenType::MultiLineComment
       });
     }
+
+    self.diagnostics.push(DiagnosticMessage::UntermintedComment(Token::new(
+      TokenType::Comment,
+      self.source[self.start..self.current].to_string(),
+      self.line + 1,
+      self.current - self.start,
+      self.module_path.clone(),
+    )));
   }
 
   fn is_identifier_letter(&self) -> bool {
@@ -337,6 +347,10 @@ impl<'a> Lexer<'a> {
         match self.peek() {
           '\"' => result.push('\"'),
           '\\' => result.push('\\'),
+          'n' => result.push('\n'),
+          'r' => result.push('\r'),
+          't' => result.push('\t'),
+          '0' => result.push('\0'),
           _ => {},
         }
       } else {
@@ -347,6 +361,14 @@ impl<'a> Lexer<'a> {
     }
 
     if self.is_at_end() {
+      self.diagnostics.push(DiagnosticMessage::UnterminatedString(Token::new(
+        TokenType::String,
+        result.clone(),
+        self.line + 1,
+        self.current - self.start,
+        self.module_path.clone(),
+      )));
+
       return None;
     }
 

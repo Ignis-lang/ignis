@@ -1,4 +1,5 @@
 pub mod diagnostic_report;
+pub mod message;
 
 use diagnostic_report::DiagnosticReport;
 use colored::*;

@@ -51,9 +51,9 @@ use ignis_config::IgnisConfig;
 use ignis_data_type::{DataType, GenericType};
 use ignis_token::{token_types::TokenType, token::Token};
 
-use super::diagnostics::{ParserDiagnostic, ParserDiagnosticError};
+use crate::diagnostics::message::DiagnosticMessage;
 
-type IgnisParserResult<T> = Result<T, Box<ParserDiagnostic>>;
+type IgnisParserResult<T> = Result<T, Box<DiagnosticMessage>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum IgnisParserContext {
@@ -359,7 +359,7 @@ pub struct IgnisParser {
   declarations: StructDeclaration,
   tokens: Vec<Token>,
   current: usize,
-  diagnostics: Vec<ParserDiagnostic>,
+  diagnostics: Vec<DiagnosticMessage>,
 }
 
 impl IgnisParser {
@@ -386,7 +386,7 @@ impl IgnisParser {
   pub fn parse(
     &mut self,
     std: bool,
-  ) -> (Vec<ASTStatement>, Vec<ParserDiagnostic>) {
+  ) -> (Vec<ASTStatement>, Vec<DiagnosticMessage>) {
     if !self.config.quiet {
       let file = &self.tokens.last();
 
@@ -499,9 +499,7 @@ impl IgnisParser {
     if self.check(TokenType::LeftBrace) {
       body.push(self.block()?);
     } else if !self.match_token(&[TokenType::SemiColon]) {
-      return Err(Box::new(ParserDiagnostic::new(
-        ParserDiagnosticError::ExpectedSemicolonAfterExpression(self.peek()),
-      )));
+      return Err(Box::new(DiagnosticMessage::ExpectedSemicolonAfterExpression(self.peek())));
     }
 
     let mut metadata = ASTMetadata::default();
@@ -603,10 +601,7 @@ impl IgnisParser {
       TokenType::Meta => self.meta(true),
       TokenType::Namespace => self.namespace(true),
       TokenType::Type => self.type_alias(true),
-      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-        TokenType::Function,
-        self.peek(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
     }
   }
 
@@ -698,10 +693,7 @@ impl IgnisParser {
       return self.record_method(record, name, is_optional, generic_parameters);
     }
 
-    Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-      TokenType::Colon,
-      self.peek(),
-    ))))
+    Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Colon, self.peek())))
   }
 
   /// <record-property> ::= <identifier> "?"? ":" <type> ("=" <expression>)? ";"
@@ -825,10 +817,7 @@ impl IgnisParser {
       },
       TokenType::Type => self.type_alias(false),
       TokenType::Enum => self.enum_statement(false),
-      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-        TokenType::Function,
-        self.peek(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
     }
   }
 
@@ -890,18 +879,13 @@ impl IgnisParser {
       TokenType::Declare => self.declare(false),
       TokenType::Identifier => {
         if TokenType::get_keyword_from_string(token.lexeme.as_str()).is_some() {
-          return Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::UnexpectedKeyword(
-            token.clone(),
-          ))));
+          return Err(Box::new(DiagnosticMessage::UnexpectedKeyword(token.clone())));
         }
 
         self.statement()
       },
       TokenType::Enum => self.enum_statement(false),
-      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-        TokenType::Function,
-        self.peek(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
     }
   }
 
@@ -1255,9 +1239,7 @@ impl IgnisParser {
       ))))
     } else {
       let token = self.peek();
-      Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedExpression(
-        token.clone(),
-      ))))
+      Err(Box::new(DiagnosticMessage::ExpectedExpression(token.clone())))
     }
   }
 
@@ -1352,9 +1334,7 @@ impl IgnisParser {
       | TokenType::Null
       | TokenType::LeftBrace
       | TokenType::LeftBrack => self.literal(),
-      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedPattern(
-        token.clone(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::ExpectedPattern(token.clone()))),
     }
   }
 
@@ -1646,8 +1626,10 @@ impl IgnisParser {
     if !self.check(TokenType::RightParen) {
       loop {
         if arguments.len() >= 255 {
-          return Err(Box::new(ParserDiagnostic::new(
-            ParserDiagnosticError::InvalidNumberOfArguments(255, arguments.len(), self.peek().clone()),
+          return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
+            255,
+            arguments.len(),
+            self.peek().clone(),
           )));
         }
 
@@ -1789,9 +1771,7 @@ impl IgnisParser {
         Ok(ASTExpression::Literal(Box::new(ASTLiteral::new(value, token.clone()))))
       },
       TokenType::LeftBrack => self.vector(),
-      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedExpression(
-        token.clone(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::ExpectedExpression(token.clone()))),
     }
   }
 
@@ -2006,18 +1986,13 @@ impl IgnisParser {
       TokenType::Declare => self.declare(false),
       TokenType::Identifier => {
         if TokenType::get_keyword_from_string(token.lexeme.as_str()).is_some() {
-          return Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::UnexpectedKeyword(
-            token.clone(),
-          ))));
+          return Err(Box::new(DiagnosticMessage::UnexpectedKeyword(token.clone())));
         }
 
         self.statement()
       },
       TokenType::Export => self.export(),
-      _ => Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-        TokenType::Function,
-        self.peek(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
     }
   }
 
@@ -2067,8 +2042,10 @@ impl IgnisParser {
     if !self.check(TokenType::RightParen) {
       loop {
         if parameters.len() >= 255 {
-          return Err(Box::new(ParserDiagnostic::new(
-            ParserDiagnosticError::InvalidNumberOfArguments(255, parameters.len(), name.clone()),
+          return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
+            255,
+            parameters.len(),
+            name.clone(),
           )));
         }
 
@@ -2296,9 +2273,7 @@ impl IgnisParser {
 
     let token = &self.peek();
 
-    Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedType(
-      token.clone(),
-    ))))
+    Err(Box::new(DiagnosticMessage::ExpectedType(token.clone())))
   }
 
   fn resolve_pending_type(
@@ -2355,8 +2330,10 @@ impl IgnisParser {
       loop {
         if parameters.len() >= 255 {
           let token = &self.peek();
-          return Err(Box::new(ParserDiagnostic::new(
-            ParserDiagnosticError::InvalidNumberOfArguments(255, parameters.len(), token.clone()),
+          return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
+            255,
+            parameters.len(),
+            token.clone(),
           )));
         }
 
@@ -2364,18 +2341,11 @@ impl IgnisParser {
 
         if name.type_ != TokenType::Identifier {
           let token = &self.peek();
-          return Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-            TokenType::Identifier,
-            token.clone(),
-          ))));
+          return Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Identifier, token.clone())));
         }
 
         if !self.match_token(&[TokenType::Colon]) {
-          let token = &self.peek();
-          return Err(Box::new(ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-            TokenType::Colon,
-            self.peek(),
-          ))));
+          return Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Colon, self.peek())));
         }
 
         parameters.push(self.resolve_type(generic_parameters)?);
@@ -2410,40 +2380,29 @@ impl IgnisParser {
       TokenType::Equal => {
         if self.context.contains(&IgnisParserContext::Const) {
           let name = self.get_previous_token_by_token_type(TokenType::Identifier);
-          ParserDiagnostic::new(ParserDiagnosticError::UninitializedConstant(name.clone()))
+          DiagnosticMessage::UninitializedConstant(name.clone())
         } else {
-          ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(TokenType::Equal, token_previous.clone()))
+          DiagnosticMessage::ExpectedToken(TokenType::Equal, token_previous.clone())
         }
       },
-      TokenType::SemiColon => {
-        ParserDiagnostic::new(ParserDiagnosticError::ExpectedSemicolonAfterExpression(token_previous.clone()))
-      },
-      TokenType::Colon => ParserDiagnostic::new(ParserDiagnosticError::ExpectedType(token_previous.clone())),
+      TokenType::SemiColon => DiagnosticMessage::ExpectedSemicolonAfterExpression(token_previous.clone()),
+      TokenType::Colon => DiagnosticMessage::ExpectedType(token_previous.clone()),
       TokenType::Identifier => {
         if TokenType::get_keywords().contains(&token_previous.type_) {
-          ParserDiagnostic::new(ParserDiagnosticError::UnexpectedKeyword(token_previous.clone()))
+          DiagnosticMessage::UnexpectedKeyword(token_previous.clone())
         } else {
-          ParserDiagnostic::new(ParserDiagnosticError::ExpectedIdentifier(token.clone()))
+          DiagnosticMessage::ExpectedIdentifier(token.clone())
         }
       },
-      TokenType::QuestionMark => ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(
-        TokenType::QuestionMark,
-        token_previous.clone(),
-      )),
-      TokenType::Greater => {
-        ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(TokenType::Greater, token_previous.clone()))
-      },
+      TokenType::QuestionMark => DiagnosticMessage::ExpectedToken(TokenType::QuestionMark, token_previous.clone()),
+      TokenType::Greater => DiagnosticMessage::ExpectedToken(TokenType::Greater, token_previous.clone()),
       TokenType::LeftParen | TokenType::RightParen => {
         let expression = self.previous();
 
-        ParserDiagnostic::new(ParserDiagnosticError::ExpectedAfterExpression(
-          Box::new(kind.clone()),
-          expression.clone(),
-          Box::new(token.clone()),
-        ))
+        DiagnosticMessage::ExpectedAfterExpression(Box::new(kind.clone()), expression.clone(), Box::new(token.clone()))
       },
-      TokenType::RightBrace => ParserDiagnostic::new(ParserDiagnosticError::ExpectedDelimiter(token)),
-      _ => ParserDiagnostic::new(ParserDiagnosticError::ExpectedToken(kind.clone(), token_previous.clone())),
+      TokenType::RightBrace => DiagnosticMessage::ExpectedDelimiter(token),
+      _ => DiagnosticMessage::ExpectedToken(kind.clone(), token_previous.clone()),
     };
 
     self.synchronize();
@@ -2549,7 +2508,7 @@ impl IgnisParser {
     })
   }
 
-  fn resolve_generic_params(&mut self) -> Result<Vec<ASTGenericParameter>, Box<ParserDiagnostic>> {
+  fn resolve_generic_params(&mut self) -> Result<Vec<ASTGenericParameter>, Box<DiagnosticMessage>> {
     let mut generic_parameters: Vec<ASTGenericParameter> = Vec::new();
 
     if self.check(TokenType::Less) {

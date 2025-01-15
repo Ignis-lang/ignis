@@ -1,4 +1,12 @@
-use ignis_token::token::Token;
+use ignis_token::{token::Token, token_types::TokenType};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiagnosticLevel {
+  Info,
+  Warning,
+  Error,
+  Hint,
+}
 
 #[derive(Debug, Clone)]
 pub struct DiagnosticReport {
@@ -7,14 +15,6 @@ pub struct DiagnosticReport {
   pub error_code: String,
   pub token: Token,
   pub hint: Option<Box<DiagnosticReport>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum DiagnosticLevel {
-  Info,
-  Warning,
-  Error,
-  Hint,
 }
 
 impl DiagnosticReport {
