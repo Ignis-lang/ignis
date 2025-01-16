@@ -1425,14 +1425,134 @@ impl IgnisParser {
       TokenType::LeftShiftAssign,
       TokenType::RightShiftAssign,
     ]) {
-      let operator = self.previous();
-      let right = self.assignment()?;
+      let mut operator = self.previous();
+      let mut left = expression.clone();
+      let mut right = self.assignment()?;
 
-      expression = ASTExpression::Assigment(Box::new(ASTAssignment::new(
-        Box::new(expression),
-        Box::new(operator),
-        Box::new(right),
-      )));
+      match operator.type_.clone() {
+        TokenType::AddAssign => {
+          let token = Token::new(
+            TokenType::Plus,
+            "+".to_string(),
+            operator.line,
+            operator.column,
+            operator.file_name.clone(),
+          );
+          let type_: DataType = expression.clone().into();
+
+          right = ASTExpression::Binary(Box::new(ASTBinary::new(
+            Box::new(expression.clone()),
+            token,
+            Box::new(right.clone()),
+            type_,
+          )));
+        },
+        TokenType::SubtractAssign => {
+          let token = Token::new(
+            TokenType::Minus,
+            "-".to_string(),
+            operator.line,
+            operator.column,
+            operator.file_name.clone(),
+          );
+          let type_: DataType = expression.clone().into();
+
+          right = ASTExpression::Binary(Box::new(ASTBinary::new(
+            Box::new(expression.clone()),
+            token,
+            Box::new(right.clone()),
+            type_,
+          )));
+        },
+        TokenType::MulAssign => {
+          let token = Token::new(
+            TokenType::Asterisk,
+            "*".to_string(),
+            operator.line,
+            operator.column,
+            operator.file_name.clone(),
+          );
+          let type_: DataType = expression.clone().into();
+
+          right = ASTExpression::Binary(Box::new(ASTBinary::new(
+            Box::new(expression.clone()),
+            token,
+            Box::new(right.clone()),
+            type_,
+          )));
+        },
+        TokenType::DivAssign => {
+          let token = Token::new(
+            TokenType::Slash,
+            "/".to_string(),
+            operator.line,
+            operator.column,
+            operator.file_name.clone(),
+          );
+          let type_: DataType = expression.clone().into();
+
+          right = ASTExpression::Binary(Box::new(ASTBinary::new(
+            Box::new(expression.clone()),
+            token,
+            Box::new(right.clone()),
+            type_,
+          )));
+        },
+        TokenType::ModAssign => {
+          let token = Token::new(
+            TokenType::Mod,
+            "%".to_string(),
+            operator.line,
+            operator.column,
+            operator.file_name.clone(),
+          );
+          let type_: DataType = expression.clone().into();
+
+          right = ASTExpression::Binary(Box::new(ASTBinary::new(
+            Box::new(expression.clone()),
+            token,
+            Box::new(right.clone()),
+            type_,
+          )));
+        },
+        TokenType::LeftShiftAssign => {
+          let token = Token::new(
+            TokenType::LeftShift,
+            "<<".to_string(),
+            operator.line,
+            operator.column,
+            operator.file_name.clone(),
+          );
+          let type_: DataType = expression.clone().into();
+
+          right = ASTExpression::Binary(Box::new(ASTBinary::new(
+            Box::new(expression.clone()),
+            token,
+            Box::new(right.clone()),
+            type_,
+          )));
+        },
+        TokenType::RightShiftAssign => {
+          let token = Token::new(
+            TokenType::RightShift,
+            ">>".to_string(),
+            operator.line,
+            operator.column,
+            operator.file_name.clone(),
+          );
+          let type_: DataType = expression.clone().into();
+
+          right = ASTExpression::Binary(Box::new(ASTBinary::new(
+            Box::new(expression.clone()),
+            token,
+            Box::new(right.clone()),
+            type_,
+          )));
+        },
+        _ => (),
+      };
+
+      expression = ASTExpression::Assigment(Box::new(ASTAssignment::new(operator, Box::new(left), Box::new(right))));
     }
 
     Ok(expression)

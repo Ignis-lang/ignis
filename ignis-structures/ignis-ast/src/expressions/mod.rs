@@ -43,7 +43,7 @@ use unary::ASTUnary;
 use variable::ASTVariableExpression;
 
 use self::{binary::ASTBinary, literal::ASTLiteral, logical::ASTLogical};
-use crate::{statements::ASTStatement, visitor::ASTVisitor};
+use crate::visitor::ASTVisitor;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ASTExpression {
@@ -110,7 +110,7 @@ impl Into<Token> for &ASTExpression {
       ASTExpression::Grouping(grouping) => (&grouping.expression.as_ref().clone()).into(),
       ASTExpression::MemberAccess(member_access) => member_access.member.as_ref().clone(),
       ASTExpression::Call(call) => call.name.clone(),
-      ASTExpression::Assigment(assignment) => assignment.operator.as_ref().clone(),
+      ASTExpression::Assigment(assignment) => assignment.token.clone(),
       ASTExpression::Match(match_) => (&match_.expression.as_ref().clone()).into(),
       ASTExpression::Object(object) => object.token.clone(),
       ASTExpression::Lambda(_) => todo!(),

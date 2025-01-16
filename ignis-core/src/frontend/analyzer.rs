@@ -10,8 +10,8 @@ use ignis_ast::{
 use ignis_config::IgnisConfig;
 use ignis_data_type::{value::IgnisLiteralValue, DataType, GenericType};
 use ignis_hir::{
-  hir_binary::HIRBinary, hir_block::HIRBlock, hir_call::HIRCall, hir_cast::HIRCast, hir_comment::HIRComment,
-  hir_const::HIRConstant, hir_for::HIRFor, hir_for_of::HIRForOf, hir_function::HIRFunction,
+  hir_assign::HIRAssign, hir_binary::HIRBinary, hir_block::HIRBlock, hir_call::HIRCall, hir_cast::HIRCast,
+  hir_comment::HIRComment, hir_const::HIRConstant, hir_for::HIRFor, hir_for_of::HIRForOf, hir_function::HIRFunction,
   hir_function_instance::HIRFunctionInstance, hir_if::HIRIf, hir_literal::HIRLiteral, hir_logical::HIRLogical,
   hir_method::HIRMethod, hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn,
   hir_ternary::HIRTernary, hir_this::HIRThis, hir_unary::HIRUnary, hir_variable::HIRVariable, hir_vector::HIRVector,
@@ -671,7 +671,24 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     expression: &ignis_ast::expressions::assign::ASTAssignment,
   ) -> AnalyzerResult {
-    todo!()
+    let left = self.analyzer(&expression.left)?;
+    let right = self.analyzer(&expression.right)?;
+    let left_type = self.extract_data_type(&left);
+    let right_type = self.extract_data_type(&right);
+
+    if left_type != right_type {
+      return Err(Box::new(DiagnosticMessage::TypeMismatch(
+        left_type,
+        right_type,
+        expression.token.clone(),
+      )));
+    }
+
+    Ok(HIRInstruction::Assign(HIRAssign::new(
+      expression.token.clone(),
+      Box::new(left),
+      Box::new(right),
+    )))
   }
 
   fn visit_call_expression(
@@ -1768,7 +1785,6 @@ impl IgnisAnalyzer {
       HIRInstruction::Unary(u) => u.data_type.clone(),
       HIRInstruction::Logical(_) => DataType::Boolean,
       HIRInstruction::Cast(cast) => cast.target_type.clone(),
-      // HIRInstruction::Assign(a) => self.extract_data_type(&a.value.clone()),
       HIRInstruction::Call(c) => c.return_type.clone(),
       HIRInstruction::Return(r) => r.data_type.clone(),
       HIRInstruction::Vector(array) => array.data_type.clone(),

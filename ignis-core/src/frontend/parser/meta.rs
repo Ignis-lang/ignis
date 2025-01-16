@@ -183,7 +183,7 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
     let right = expression.right.accept(self)?.as_expression().clone();
 
     Ok(ASTStatement::Expression(Box::new(ASTExpression::Assigment(Box::new(
-      ignis_ast::expressions::assign::ASTAssignment::new(Box::new(left), expression.operator.clone(), Box::new(right)),
+      ignis_ast::expressions::assign::ASTAssignment::new(expression.token.clone(), Box::new(left), Box::new(right)),
     )))))
   }
 

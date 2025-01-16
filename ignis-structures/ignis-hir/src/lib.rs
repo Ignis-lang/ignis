@@ -1,3 +1,4 @@
+pub mod hir_assign;
 pub mod hir_binary;
 pub mod hir_block;
 pub mod hir_break;
@@ -16,6 +17,7 @@ pub mod hir_if;
 pub mod hir_import;
 pub mod hir_literal;
 pub mod hir_logical;
+pub mod hir_member_access;
 pub mod hir_method;
 pub mod hir_method_call;
 pub mod hir_object;
@@ -30,10 +32,10 @@ pub mod hir_variable;
 pub mod hir_vector;
 pub mod hir_vector_access;
 pub mod hir_while;
-pub mod hir_member_access;
 
 use std::fmt::{self, Display, Formatter};
 
+use hir_assign::HIRAssign;
 use hir_block::HIRBlock;
 use hir_call::HIRCall;
 use hir_cast::HIRCast;
@@ -113,7 +115,8 @@ pub enum HIRInstruction {
   Object(HIRObjectLiteral),
   Return(HIRReturn),
   This(HIRThis),
-  MemberAccess(HIRMemberAccess)
+  MemberAccess(HIRMemberAccess),
+  Assign(HIRAssign),
 }
 
 impl HIRInstructionType {
