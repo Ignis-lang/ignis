@@ -14,13 +14,13 @@ pub mod method_call;
 pub mod new;
 pub mod object_literal;
 pub mod set;
+pub mod spread;
 pub mod ternary;
 pub mod this;
 pub mod unary;
 pub mod variable;
 pub mod vector;
 pub mod vector_access;
-pub mod spread;
 
 use assign::ASTAssignment;
 use call::ASTCall;
@@ -29,6 +29,7 @@ use match_expression::ASTMatchExpression;
 use member_access::ASTMemberAccess;
 use meta::{ASTMeta, ASTMetaEntity};
 use object_literal::ASTObject;
+use serde::Serialize;
 use spread::ASTSpread;
 use this::ASTThis;
 use vector::ASTVector;
@@ -37,7 +38,6 @@ use cast::ASTCast;
 use grouping::ASTGrouping;
 use ignis_data_type::DataType;
 use ignis_token::token::Token;
-use serde_json::json;
 use ternary::ASTTernary;
 use unary::ASTUnary;
 use variable::ASTVariableExpression;
@@ -45,7 +45,7 @@ use variable::ASTVariableExpression;
 use self::{binary::ASTBinary, literal::ASTLiteral, logical::ASTLogical};
 use crate::{statements::ASTStatement, visitor::ASTVisitor};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ASTExpression {
   Binary(Box<ASTBinary>),
   Literal(Box<ASTLiteral>),
@@ -109,7 +109,7 @@ impl Into<Token> for &ASTExpression {
       ASTExpression::Vector(vector) => vector.token.clone(),
       ASTExpression::Grouping(grouping) => (&grouping.expression.as_ref().clone()).into(),
       ASTExpression::MemberAccess(member_access) => member_access.member.as_ref().clone(),
-      ASTExpression::Call(call) => (&call.callee.as_ref().clone()).into(),
+      ASTExpression::Call(call) => call.name.clone(),
       ASTExpression::Assigment(assignment) => assignment.operator.as_ref().clone(),
       ASTExpression::Match(match_) => (&match_.expression.as_ref().clone()).into(),
       ASTExpression::Object(object) => object.token.clone(),
@@ -148,159 +148,6 @@ impl ASTExpression {
       ASTExpression::Meta(meta) => visitor.visit_meta_expression(meta),
       ASTExpression::MetaEntity(meta) => visitor.visit_meta_entity_expression(meta),
       ASTExpression::Spread(spread) => visitor.visit_spread_expression(spread),
-    }
-  }
-
-  pub fn to_json(&self) -> serde_json::Value {
-    match self {
-      ASTExpression::Binary(binary) => {
-        json!({
-          "type": "BINARY",
-          "left": binary.left.to_json(),
-          "operator": binary.operator.lexeme,
-          "right": binary.right.to_json(),
-        })
-      },
-      ASTExpression::Literal(literal) => {
-        json!({
-          "type": "LITERAL",
-          "value": literal.value,
-          "token": literal.token.lexeme,
-        })
-      },
-      ASTExpression::Logical(logical) => {
-        json!({
-          "type": "LOGICAL",
-          "left": logical.left.to_json(),
-          "operator": logical.operator.lexeme,
-          "right": logical.right.to_json(),
-        })
-      },
-      ASTExpression::Ternary(ternary) => {
-        json!({
-          "type": "TERNARY",
-          "condition": ternary.condition.to_json(),
-          "then_branch": ternary.then_branch.to_json(),
-          "else_branch": ternary.else_branch.to_json(),
-          "token": ternary.token.lexeme,
-        })
-      },
-      ASTExpression::Cast(cast) => {
-        json!({
-          "type": "CAST",
-          "token": cast.token.lexeme,
-          "target_type": cast.target_type,
-          "operand": cast.operand.to_json(),
-        })
-      },
-      ASTExpression::Unary(unary) => {
-        json!({
-          "type": "UNARY",
-          "operator": unary.operator.lexeme,
-          "operand": unary.operator,
-        })
-      },
-      ASTExpression::Variable(variable) => {
-        json!({
-          "type": "VARIABLE",
-          "name": variable.name.lexeme,
-          "data_type": variable.data_type,
-          "metadata": variable.metadata.to_json(),
-        })
-      },
-      ASTExpression::VectorAccess(vector_access) => {
-        json!({
-          "type": "VECTOR_ACCESS",
-          "name": vector_access.name.lexeme,
-          "variable": vector_access.variable.to_json(),
-          "index": vector_access.index.to_json(),
-        })
-      },
-      ASTExpression::Vector(vector) => {
-        json!({
-          "type": "VECTOR",
-          "token": vector.token.lexeme,
-          "elements": vector.elements.iter().map(|e| e.to_json()).collect::<Vec<serde_json::Value>>(),
-          "data_type": vector.data_type,
-        })
-      },
-      ASTExpression::Grouping(grouping) => {
-        json!({
-          "type": "GROUPING",
-          "expression": grouping.expression.to_json(),
-        })
-      },
-      ASTExpression::MemberAccess(member_access) => {
-        json!({
-          "type": "MEMBER_ACCESS",
-          "object": member_access.object.to_json(),
-          "member": member_access.member,
-        })
-      },
-      ASTExpression::Call(call) => {
-        json!({
-          "type": "CALL",
-          "callee": call.callee.to_json(),
-          "arguments": call.arguments.iter().map(|a| a.to_json()).collect::<Vec<serde_json::Value>>(),
-        })
-      },
-      ASTExpression::Assigment(assignment) => {
-        json!({
-          "type": "ASSIGNMENT",
-          "left": assignment.left.to_json(),
-          "operator": assignment.operator.lexeme,
-          "right": assignment.right.to_json(),
-        })
-      },
-      ASTExpression::Match(match_) => {
-        json!({
-          "type": "MATCH",
-          "expression": match_.expression.to_json(),
-          "cases": match_.cases.iter().map(|c| c.to_json()).collect::<Vec<serde_json::Value>>(),
-        })
-      },
-      ASTExpression::Lambda(lambda) => {
-        json!({
-          "type": "LAMBDA",
-          "parameters": lambda.parameters.iter().map(|p| ASTStatement::Variable(Box::new(p.clone())).to_json()).collect::<Vec<serde_json::Value>>(),
-          "body": lambda.body.to_json(),
-          "return_type": lambda.return_type,
-        })
-      },
-      ASTExpression::Object(object) => {
-        json!({
-          "type": "OBJECT",
-          "properties": object.properties.iter().map(|p|ASTStatement::Property(Box::new(p.clone())).to_json()).collect::<Vec<serde_json::Value>>(),
-          "methods": object.methods.iter().map(|m|ASTStatement::Method(Box::new(m.clone())).to_json()).collect::<Vec<serde_json::Value>>(),
-          "data_type": object.data_type,
-        })
-      },
-      ASTExpression::This(this) => {
-        json!({
-          "type": "THIS",
-          "token": this.token.lexeme,
-        })
-      },
-      ASTExpression::Meta(meta) => {
-        json!({
-          "type": "META",
-          "expression": meta.expression.to_json(),
-        })
-      },
-      ASTExpression::MetaEntity(meta) => {
-        json!({
-          "type": "META_ENTITY",
-          "metas": meta.metas.iter().map(|m| ASTExpression::Meta(Box::new(m.clone())).to_json()).collect::<Vec<serde_json::Value>>(),
-          "entity": meta.entity.as_ref().map(|e| e.to_json()),
-        })
-      },
-      ASTExpression::Spread(spread) => {
-        json!({
-          "type": "SPREAD",
-          "expression": spread.expression.to_json(),
-          "token": spread.token.lexeme,
-        })
-      },
     }
   }
 }

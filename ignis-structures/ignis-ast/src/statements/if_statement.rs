@@ -1,8 +1,10 @@
+use serde::Serialize;
+
 use crate::expressions::ASTExpression;
 
 use super::ASTStatement;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTIf {
   pub condition: Box<ASTExpression>,
   pub then_branch: Box<ASTStatement>,

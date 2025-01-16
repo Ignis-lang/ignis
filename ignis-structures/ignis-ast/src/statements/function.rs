@@ -21,7 +21,7 @@ impl ASTGenericParameter {
   }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTFunction {
   pub name: Token,
   pub parameters: Vec<ASTVariable>,

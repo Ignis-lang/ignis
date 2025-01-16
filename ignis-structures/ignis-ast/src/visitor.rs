@@ -179,5 +179,9 @@ pub trait ASTVisitor<R> {
     &mut self,
     enum_: &crate::statements::enum_statement::ASTEnum,
   ) -> R;
+  fn visit_meta_statement(
+    &mut self,
+    meta: &crate::statements::meta::ASTMetaStatement
+  ) -> R;
   // #endregion
 }

@@ -165,4 +165,7 @@ pub struct Cli {
   /// Use verbose output
   #[arg(long, short, action = clap::ArgAction::Count, global = true)]
   pub verbose: u8,
+
+  #[arg(short, long, default_value = "IGNIS_STD_PATH")]
+  pub std_path: String,
 }

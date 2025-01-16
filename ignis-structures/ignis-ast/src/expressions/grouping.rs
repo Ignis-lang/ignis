@@ -1,6 +1,8 @@
+use serde::Serialize;
+
 use super::ASTExpression;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTGrouping {
   pub expression: Box<ASTExpression>,
 }

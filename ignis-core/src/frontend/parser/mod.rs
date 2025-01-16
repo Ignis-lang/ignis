@@ -1,3 +1,5 @@
+mod meta;
+
 use std::collections::HashMap;
 
 use colored::Colorize;
@@ -9,7 +11,7 @@ use ignis_ast::{
     cast::ASTCast,
     grouping::ASTGrouping,
     lambda::ASTLambda,
-    literal::{ASTLiteral, ASTLiteralValue},
+    literal::ASTLiteral,
     logical::ASTLogical,
     match_expression::{ASTMatchCase, ASTMatchExpression},
     member_access::ASTMemberAccess,
@@ -36,9 +38,9 @@ use ignis_ast::{
     function::{ASTFunction, ASTGenericParameter},
     if_statement::ASTIf,
     import::{ASTImport, ASTImportSource, ASTImportSymbol},
+    meta::ASTMetaStatement,
     method::ASTMethod,
     namespace::ASTNamespace,
-    property::ASTProperty,
     record::ASTRecord,
     return_::ASTReturn,
     type_alias::ASTTypeAlias,
@@ -47,11 +49,11 @@ use ignis_ast::{
     ASTStatement,
   },
 };
-use ignis_config::IgnisConfig;
-use ignis_data_type::{DataType, GenericType};
+use ignis_config::{DebugPrint, IgnisConfig};
+use ignis_data_type::{DataType, GenericType, value::IgnisLiteralValue};
 use ignis_token::{token_types::TokenType, token::Token};
 
-use crate::diagnostics::message::DiagnosticMessage;
+use crate::diagnostics::{diagnostic_report::DiagnosticReport, message::DiagnosticMessage};
 
 type IgnisParserResult<T> = Result<T, Box<DiagnosticMessage>>;
 
@@ -224,7 +226,8 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 /// <cast> ::= <unary> ( "as" <type> )?
 /// <unary> ::= ( "++" | "--" | "-" | "!" | "~" )* <postfix>
 /// <postfix> ::= <primary> ( ("++" | "--") | <call-suffix> )*
-/// <call-suffix> ::= <arguments> | <member-access>
+/// <call-suffix> ::= <generics>? <arguments> | <generics>? <member-access>
+/// <generics> ::= "<" <type-list> ("," <types-lits>)* ">"
 /// <arguments> ::= "(" <expression> ("," <expression>)* ")"
 /// <member-access> ::= ("." | "::") <identifier>
 ///
@@ -386,7 +389,7 @@ impl IgnisParser {
   pub fn parse(
     &mut self,
     std: bool,
-  ) -> (Vec<ASTStatement>, Vec<DiagnosticMessage>) {
+  ) -> (Vec<ASTStatement>, Vec<DiagnosticReport>) {
     if !self.config.quiet {
       let file = &self.tokens.last();
 
@@ -419,7 +422,28 @@ impl IgnisParser {
       };
     }
 
-    (statements, self.diagnostics.clone())
+    if self.config.debug.contains(&DebugPrint::Ast) && !self.config.quiet {
+      println!("Pre-Meta AST: {:#?}", statements);
+    }
+
+    let mut meta_processor = meta::IgnisMetaProcessor::new(statements);
+    meta_processor.process();
+
+    if self.config.debug.contains(&DebugPrint::Ast) && !self.config.quiet {
+      println!("Post-Meta AST: {:#?}", meta_processor.new_ast);
+    }
+
+    let mut diagnostics: Vec<DiagnosticReport> = vec![];
+
+    for diagnostic in &self.diagnostics {
+      diagnostics.push(diagnostic.report());
+    }
+
+    for diagnostic in &meta_processor.diagnostics {
+      diagnostics.push(diagnostic.report());
+    }
+
+    (meta_processor.new_ast, diagnostics)
   }
 
   fn synchronize(&mut self) {
@@ -650,6 +674,7 @@ impl IgnisParser {
     self.consume(TokenType::Record)?;
 
     let name = self.consume(TokenType::Identifier)?;
+    let mut data_type: Vec<(String, DataType)> = vec![];
     let generic_parameters = self.resolve_generic_params()?;
 
     self.consume(TokenType::LeftBrace)?;
@@ -657,7 +682,12 @@ impl IgnisParser {
     let mut items: Vec<ASTStatement> = vec![];
 
     while !self.check(TokenType::RightBrace) {
-      items.push(self.record_item(&name, &generic_parameters)?);
+      if self.is_current_a_comment() {
+        self.advance();
+        continue;
+      }
+
+      items.push(self.record_item(&name, &generic_parameters, &mut data_type)?);
     }
 
     self.consume(TokenType::RightBrace)?;
@@ -667,6 +697,12 @@ impl IgnisParser {
     if is_exported {
       metadata.push(ASTMetadataFlags::Export);
     }
+
+    self
+      .declarations
+      .get_mut(&ParserDeclaration::Record)
+      .unwrap()
+      .push(ParserDeclarationList::Record(name.lexeme.clone(), data_type));
 
     Ok(ASTStatement::Record(Box::new(ASTRecord::new(
       name,
@@ -681,16 +717,17 @@ impl IgnisParser {
     &mut self,
     record: &Token,
     generic_parameters: &[ASTGenericParameter],
+    record_type: &mut Vec<(String, DataType)>,
   ) -> IgnisParserResult<ASTStatement> {
     let name = self.consume(TokenType::Identifier)?;
 
     let is_optional = self.match_token(&[TokenType::QuestionMark]);
     if self.match_token(&[TokenType::Colon]) {
-      return self.record_property(name, is_optional, generic_parameters);
+      return self.record_property(name, is_optional, record_type, generic_parameters);
     }
 
     if self.check(TokenType::LeftParen) {
-      return self.record_method(record, name, is_optional, generic_parameters);
+      return self.record_method(record, name, is_optional, record_type, generic_parameters);
     }
 
     Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Colon, self.peek())))
@@ -701,6 +738,7 @@ impl IgnisParser {
     &mut self,
     name: Token,
     is_optional: bool,
+    record_type: &mut Vec<(String, DataType)>,
     generic_parameters: &[ASTGenericParameter],
   ) -> IgnisParserResult<ASTStatement> {
     let mut data_type = self.resolve_type(generic_parameters)?;
@@ -717,6 +755,8 @@ impl IgnisParser {
       metadata.push(ASTMetadataFlags::Optional);
     }
 
+    record_type.push((name.lexeme.clone(), data_type.clone()));
+
     Ok(ASTStatement::Variable(Box::new(ASTVariable::new(
       name, None, data_type, metadata,
     ))))
@@ -728,6 +768,7 @@ impl IgnisParser {
     record: &Token,
     name: Token,
     is_optional: bool,
+    record_type: &mut Vec<(String, DataType)>,
     generic_parameters: &[ASTGenericParameter],
   ) -> IgnisParserResult<ASTStatement> {
     let mut method_generic_parameters = self.resolve_generic_params()?;
@@ -746,6 +787,8 @@ impl IgnisParser {
     if is_optional {
       metadata.push(ASTMetadataFlags::Optional);
     }
+
+    record_type.push((name.lexeme.clone(), return_type.clone()));
 
     Ok(ASTStatement::Method(Box::new(ASTMethod::new(
       name,
@@ -834,7 +877,31 @@ impl IgnisParser {
     &mut self,
     is_exported: bool,
   ) -> IgnisParserResult<ASTStatement> {
-    todo!()
+    self.consume(TokenType::Meta)?;
+    let meta = self.consume(TokenType::Identifier)?;
+
+    let generic_parameters = self.resolve_generic_params()?;
+
+    let mut parameters = vec![];
+
+    if self.check(TokenType::LeftParen) {
+      parameters = self.parameters(&meta, &generic_parameters)?;
+    }
+
+    self.consume(TokenType::SemiColon)?;
+
+    let mut metadata = vec![];
+
+    if is_exported {
+      metadata.push(ASTMetadataFlags::Export);
+    }
+
+    Ok(ASTStatement::Meta(Box::new(ASTMetaStatement::new(
+      meta,
+      parameters,
+      ASTMetadata::new(metadata),
+      generic_parameters,
+    ))))
   }
 
   /// <namespace> ::= "namespace" <qualified-identifier> "{" <namespace-item>* "}"
@@ -1124,7 +1191,12 @@ impl IgnisParser {
   fn while_(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::While)?;
 
+    self.consume(TokenType::LeftParen)?;
+
     let condition = self.expression()?;
+
+    self.consume(TokenType::RightParen)?;
+
     let body = self.block()?;
 
     Ok(ASTStatement::While(Box::new(ASTWhile::new(
@@ -1209,9 +1281,10 @@ impl IgnisParser {
     }
 
     if self.match_token(&[TokenType::LeftBrack]) {
-      let mut size: Option<Token> = None;
+      let mut size: Option<usize> = None;
       if self.match_token(&[TokenType::Int]) {
-        size.clone_from(&Some(self.consume(TokenType::Int)?));
+        let value = self.consume(TokenType::Int)?;
+        size.clone_from(&Some(value.lexeme.parse().unwrap()));
       }
 
       self.consume(TokenType::RightBrack)?;
@@ -1457,10 +1530,10 @@ impl IgnisParser {
     let mut expression: ASTExpression = self.range()?;
 
     while self.match_token(&[
-      TokenType::Less,
       TokenType::Greater,
-      TokenType::LessEqual,
       TokenType::GreaterEqual,
+      TokenType::Less,
+      TokenType::LessEqual,
     ]) {
       let operator: Token = self.previous();
       let right = self.range()?;
@@ -1555,7 +1628,13 @@ impl IgnisParser {
   fn unary(&mut self) -> IgnisParserResult<ASTExpression> {
     let mut expression: ASTExpression = self.postfix()?;
 
-    while self.match_token(&[TokenType::Plus, TokenType::Minus, TokenType::Bang, TokenType::Tilde]) {
+    while self.match_token(&[
+      TokenType::Increment,
+      TokenType::Decrement,
+      TokenType::Minus,
+      TokenType::Bang,
+      TokenType::Tilde,
+    ]) {
       let operator: Token = self.previous();
       let right = self.postfix()?;
       let type_: DataType = expression.clone().into();
@@ -1566,10 +1645,9 @@ impl IgnisParser {
     Ok(expression)
   }
 
-  /// <postfix> ::= <primary> ( ("++" | "--") | <call-suffix> )* | <vector-access>
+  /// <postfix> ::= <primary> <generics>? ( ("++" | "--") | <call-suffix> )* | <vector-access>
   fn postfix(&mut self) -> IgnisParserResult<ASTExpression> {
     let mut expression: ASTExpression = self.primary()?;
-
     while self.match_token(&[
       TokenType::Increment,
       TokenType::Decrement,
@@ -1579,11 +1657,12 @@ impl IgnisParser {
       TokenType::LeftBrack,
     ]) {
       let operator: Token = self.previous().clone();
+      let mut generics: Vec<DataType> = self.generic_arguments()?;
 
       expression = match operator.type_ {
-        TokenType::Dot => self.member_access(&expression, false)?,
-        TokenType::DoubleColon => self.member_access(&expression, true)?,
-        TokenType::LeftParen => self.call_suffix(&expression)?,
+        TokenType::Dot => self.member_access(&expression, &mut generics, false)?,
+        TokenType::DoubleColon => self.member_access(&expression, &mut generics, true)?,
+        TokenType::LeftParen => self.call_suffix(&expression, &mut generics)?,
         TokenType::LeftBrack => self.vector_access(expression)?,
         TokenType::Increment | TokenType::Decrement => ASTExpression::Unary(Box::new(ASTUnary::new(
           operator,
@@ -1598,25 +1677,56 @@ impl IgnisParser {
     Ok(expression)
   }
 
-  /// <call-suffix> ::= <arguments> | <member-access>
+  /// <call-suffix> ::= <generics>? <arguments> | <generics>? <member-access>
   fn call_suffix(
     &mut self,
     previous_expression: &ASTExpression,
+    generics: &mut Vec<DataType>,
   ) -> IgnisParserResult<ASTExpression> {
+    let mut new_generics = self.generic_arguments()?;
+    generics.append(&mut new_generics);
+
     let arguments: Vec<ASTExpression> = self.arguments()?;
 
-    let mut expression = ASTExpression::Call(Box::new(ASTCall::new(Box::new(previous_expression.clone()), arguments)));
+    let mut expression = ASTExpression::Call(Box::new(ASTCall::new(
+      Into::into(previous_expression),
+      Box::new(previous_expression.clone()),
+      arguments,
+      generics.clone(),
+    )));
 
     while self.match_token(&[TokenType::Dot, TokenType::LeftParen, TokenType::DoubleColon]) {
       expression = match self.previous().type_ {
-        TokenType::Dot => self.member_access(&expression, false)?,
-        TokenType::DoubleColon => self.member_access(&expression, true)?,
-        TokenType::LeftParen => self.call_suffix(&expression)?,
+        TokenType::Dot => self.member_access(&expression, generics, false)?,
+        TokenType::DoubleColon => self.member_access(&expression, generics, true)?,
+        TokenType::LeftParen => self.call_suffix(&expression, generics)?,
         _ => unreachable!(),
       };
     }
 
     return Ok(expression);
+  }
+
+  fn generic_arguments(&mut self) -> Result<Vec<DataType>, Box<DiagnosticMessage>> {
+    let mut generics: Vec<DataType> = vec![];
+
+    if self.match_token(&[TokenType::Less]) {
+      loop {
+        if self.check(TokenType::Greater) {
+          break;
+        }
+
+        generics.push(self.resolve_type(&[])?);
+
+        if !self.match_token(&[TokenType::Comma]) {
+          break;
+        }
+      }
+
+      self.consume(TokenType::Greater)?;
+    }
+
+    return Ok(generics);
   }
 
   /// <arguments> ::= "(" <expression> ("," <expression>)* ")"
@@ -1646,13 +1756,16 @@ impl IgnisParser {
     Ok(arguments)
   }
 
-  /// <member-access> ::= ("." | "::") <identifier>
+  /// <member-access> ::= ("." | "::") <identifier> ("<" <type-list> ("," <types-lits>)* ">")?
   fn member_access(
     &mut self,
     previous_expression: &ASTExpression,
+    generics: &mut Vec<DataType>,
     is_namespace: bool,
   ) -> IgnisParserResult<ASTExpression> {
     let member_name = self.consume(TokenType::Identifier)?;
+
+    let mut new_generics = self.generic_arguments()?;
 
     let mut metadata = ASTMetadata::new(vec![]);
 
@@ -1664,13 +1777,20 @@ impl IgnisParser {
       Box::new(previous_expression.clone()),
       Box::new(member_name),
       metadata,
+      generics.clone(),
     )));
 
     while self.match_token(&[TokenType::Dot, TokenType::LeftParen, TokenType::DoubleColon]) {
-      expression = match self.previous().type_ {
-        TokenType::Dot => self.member_access(&expression, false)?,
-        TokenType::DoubleColon => self.member_access(&expression, true)?,
-        TokenType::LeftParen => self.call_suffix(&expression)?,
+      let token = self.previous();
+
+      if new_generics.len() > 0 && token.type_ == TokenType::Dot {
+        return Err(Box::new(DiagnosticMessage::UnexpectedGenerics(token)));
+      }
+
+      expression = match token.type_ {
+        TokenType::Dot => self.member_access(&expression, &mut new_generics, false)?,
+        TokenType::DoubleColon => self.member_access(&expression, &mut new_generics, true)?,
+        TokenType::LeftParen => self.call_suffix(&expression, &mut new_generics)?,
         _ => unreachable!(),
       };
     }
@@ -1753,6 +1873,7 @@ impl IgnisParser {
   /// <literal> ::= <integer> | <float> | <hex> | <binary> | <string> | <boolean> | <null> | <vector> | <object>
   fn literal(&mut self) -> IgnisParserResult<ASTExpression> {
     let token = &self.peek();
+
     match token.type_ {
       TokenType::LeftBrace => self.object(),
       TokenType::True
@@ -1766,7 +1887,7 @@ impl IgnisParser {
       | TokenType::Char => {
         self.advance();
 
-        let value: ASTLiteralValue = ASTLiteralValue::from((token.type_.clone(), token.lexeme.clone()));
+        let value: IgnisLiteralValue = IgnisLiteralValue::from((token.type_.clone(), token.lexeme.clone()));
 
         Ok(ASTExpression::Literal(Box::new(ASTLiteral::new(value, token.clone()))))
       },
@@ -1802,8 +1923,9 @@ impl IgnisParser {
   fn object(&mut self) -> IgnisParserResult<ASTExpression> {
     let token = self.consume(TokenType::LeftBrace)?;
 
-    let mut properties: Vec<ASTProperty> = vec![];
+    let mut properties: Vec<(Token, ASTExpression)> = vec![];
     let mut methods: Vec<ASTMethod> = vec![];
+    let mut data_type: Vec<(String, DataType)> = vec![];
 
     loop {
       if self.check(TokenType::RightBrace) {
@@ -1815,7 +1937,7 @@ impl IgnisParser {
         continue;
       }
 
-      let _ = self.object_item(&mut properties, &mut methods)?;
+      let _ = self.object_item(&mut properties, &mut methods, &mut data_type)?;
 
       if !self.match_token(&[TokenType::Comma]) {
         break;
@@ -1824,21 +1946,20 @@ impl IgnisParser {
 
     self.consume(TokenType::RightBrace)?;
 
-    let data_type = DataType::Object((
-      properties.iter().map(|p| p.type_annotation.clone()).collect(),
-      methods.iter().map(|m| m.return_type.clone()).collect(),
-    ));
-
     Ok(ASTExpression::Object(Box::new(ASTObject::new(
-      token, properties, methods, data_type,
+      token,
+      properties,
+      methods,
+      DataType::Object(data_type),
     ))))
   }
 
   /// <object-item> ::= (<object-property> | <object-method>) ","?
   fn object_item(
     &mut self,
-    properties: &mut Vec<ASTProperty>,
+    properties: &mut Vec<(Token, ASTExpression)>,
     methods: &mut Vec<ASTMethod>,
+    data_type: &mut Vec<(String, DataType)>,
   ) -> IgnisParserResult<()> {
     let name = self.consume(TokenType::Identifier)?;
 
@@ -1870,15 +1991,27 @@ impl IgnisParser {
     };
 
     if self.check(TokenType::LeftParen) {
-      let method = self.object_method(name, &generic_parameters)?;
+      let method = self.object_method(&name, &generic_parameters)?;
+      let type_ = DataType::Function(
+        method
+          .parameters
+          .iter()
+          .map(|p| p.type_annotation.clone())
+          .collect::<Vec<DataType>>(),
+        Box::new(method.return_type.clone()),
+      );
+
+      data_type.push((name.lexeme.clone(), type_));
 
       methods.push(method);
       return Ok(());
     }
 
-    let property = self.object_property(name)?;
+    let property = self.object_property(&name)?;
 
-    properties.push(property);
+    data_type.push((name.lexeme.clone(), property.2.clone()));
+
+    properties.push((property.0, property.1));
 
     return Ok(());
   }
@@ -1886,25 +2019,27 @@ impl IgnisParser {
   /// <object-property> ::= <identifier> ":" <expression>
   fn object_property(
     &mut self,
-    name: Token,
-  ) -> IgnisParserResult<ASTProperty> {
+    name: &Token,
+  ) -> IgnisParserResult<(Token, ASTExpression, DataType)> {
     let initializer = if self.match_token(&[TokenType::Colon]) {
-      Some(Box::new(self.expression()?))
+      self.expression()?
     } else {
-      None
+      ASTExpression::Variable(Box::new(ASTVariableExpression::new(
+        name.clone(),
+        DataType::Variable(name.lexeme.clone(), Box::new(DataType::Pending)),
+        ASTMetadata::new(vec![]),
+      )))
     };
 
-    let type_annotation = initializer.clone().map_or(DataType::Pending, |e| (*e.clone()).into());
+    let type_annotation = initializer.clone().into();
 
-    let metadata = ASTMetadata::new(vec![]);
-
-    Ok(ASTProperty::new(Box::new(name), initializer, type_annotation, metadata))
+    Ok((name.clone(), initializer, type_annotation))
   }
 
   /// <object-method> ::= <identifier> "(" <parameters>? ")" ":" <type>  <block>
   fn object_method(
     &mut self,
-    name: Token,
+    name: &Token,
     generic_parameters: &[ASTGenericParameter],
   ) -> IgnisParserResult<ASTMethod> {
     let arguments = self.parameters(&name, generic_parameters)?;
@@ -1919,7 +2054,7 @@ impl IgnisParser {
       Box::new(ASTBlock::new(vec![]))
     };
 
-    let metadata = ASTMetadata::new(vec![]);
+    let metadata = ASTMetadata::new(vec![ASTMetadataFlags::ObjectMember]);
 
     Ok(ASTMethod::new(
       name.clone(),
@@ -2049,7 +2184,7 @@ impl IgnisParser {
           )));
         }
 
-        let mut metadata = ASTMetadata::new(vec![]);
+        let mut metadata = ASTMetadata::new(vec![ASTMetadataFlags::Parameter, ASTMetadataFlags::Declaration]);
 
         if self.match_token(&[TokenType::Variadic]) {
           metadata.push(ASTMetadataFlags::Variadic);
@@ -2151,7 +2286,7 @@ impl IgnisParser {
     for generic in generic_parameters {
       if self.match_token(&[TokenType::Identifier]) && self.previous().lexeme == generic.name.lexeme {
         let value = DataType::GenericType(GenericType::new(
-          Box::new(DataType::Variable(generic.name.lexeme.clone())),
+          Box::new(DataType::Variable(generic.name.lexeme.clone(), Box::new(DataType::Unknown))),
           generic.constraints.clone(),
         ));
 
@@ -2220,10 +2355,11 @@ impl IgnisParser {
       }
 
       if self.match_token(&[TokenType::LeftBrack]) {
-        let mut size: Option<Token> = None;
+        let mut size: Option<usize> = None;
 
         if self.check(TokenType::Int) {
-          size.clone_from(&Some(self.consume(TokenType::Int)?));
+          let value = self.consume(TokenType::Int)?;
+          size.clone_from(&Some(value.lexeme.parse().unwrap()));
         }
 
         self.consume(TokenType::RightBrack)?;
@@ -2312,7 +2448,7 @@ impl IgnisParser {
       DataType::Record(record.0, record.1)
     } else if let Some(g) = generic_parameters.iter().find(|g| g.name.lexeme == token.lexeme) {
       DataType::GenericType(GenericType::new(
-        Box::new(DataType::Variable(g.name.lexeme.clone())),
+        Box::new(DataType::Variable(g.name.lexeme.clone(), Box::new(DataType::Unknown))),
         Vec::new(),
       ))
     } else {
@@ -2521,7 +2657,7 @@ impl IgnisParser {
         if self.match_token(&[TokenType::As]) {
           loop {
             if self.check(TokenType::Identifier) {
-              constraints.push(DataType::Variable(self.peek().lexeme.clone()));
+              constraints.push(DataType::Variable(self.peek().lexeme.clone(), Box::new(DataType::Unknown)));
             } else {
               constraints.push(DataType::from(&self.peek().type_));
             }

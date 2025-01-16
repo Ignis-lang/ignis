@@ -282,6 +282,7 @@ impl<'a> Lexer<'a> {
       }
 
       self.add_token(TokenType::Comment);
+      return;
     } else if self.match_char('*') {
       let mut is_doc_comment = false;
 
@@ -309,12 +310,13 @@ impl<'a> Lexer<'a> {
       } else {
         TokenType::MultiLineComment
       });
+      return;
     }
 
     self.diagnostics.push(DiagnosticMessage::UntermintedComment(Token::new(
       TokenType::Comment,
       self.source[self.start..self.current].to_string(),
-      self.line + 1,
+      self.line,
       self.current - self.start,
       self.module_path.clone(),
     )));

@@ -1,8 +1,10 @@
+use serde::Serialize;
+
 use crate::{expressions::ASTExpression, metadata::ASTMetadata};
 
 use super::ASTStatement;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTExtern {
   pub name: Box<ASTExpression>,
   pub body: Vec<ASTStatement>,

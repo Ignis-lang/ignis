@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DebugPrint {
   None,
@@ -8,15 +10,31 @@ pub enum DebugPrint {
   Ir,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum TargetBackend {
+  #[default]
   C,
   Bytecode,
   Iir,
   None,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IgnisProjectBuildConfig {
+  pub source_dir: String,
+  pub main_file: String,
+  pub target: TargetBackend,
+  pub optimize: bool,
+  pub output_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IgnisProjectIgnisConfig {
+  pub std_path: String,
+  pub std: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IgnisProjectConfig {
   pub name: String,
   pub version: String,
@@ -25,10 +43,8 @@ pub struct IgnisProjectConfig {
   pub keywords: Vec<String>,
   pub license: String,
   pub repository: String,
-  pub target: TargetBackend,
-  pub main_file: String,
-  pub output_dir: String,
-  pub source_dir: String,
+  pub build: IgnisProjectBuildConfig,
+  pub ignis: IgnisProjectIgnisConfig,
   // TODO: dependencies
 }
 
@@ -45,6 +61,9 @@ impl IgnisProjectConfig {
     main_file: String,
     output_dir: String,
     source_dir: String,
+    optimize: bool,
+    std_path: String,
+    std: bool,
   ) -> Self {
     Self {
       name,
@@ -54,10 +73,14 @@ impl IgnisProjectConfig {
       keywords,
       license,
       repository,
-      target,
-      main_file,
-      output_dir,
-      source_dir,
+      build: IgnisProjectBuildConfig {
+        source_dir,
+        main_file,
+        target,
+        optimize,
+        output_dir,
+      },
+      ignis: IgnisProjectIgnisConfig { std_path, std },
     }
   }
 }
@@ -139,6 +162,7 @@ pub struct IgnisConfig {
   pub build: bool,
   pub test: bool,
   pub init: bool,
+  pub std_path: String,
 }
 
 impl IgnisConfig {
@@ -152,6 +176,7 @@ impl IgnisConfig {
     build: bool,
     test: bool,
     init: bool,
+    std_path: String,
   ) -> Self {
     Self {
       project_config,
@@ -163,6 +188,7 @@ impl IgnisConfig {
       build,
       test,
       init,
+      std_path,
     }
   }
 
@@ -170,6 +196,7 @@ impl IgnisConfig {
     debug: Vec<DebugPrint>,
     quiet: bool,
     verbose: u8,
+    std_path: String,
   ) -> Self {
     Self {
       debug,

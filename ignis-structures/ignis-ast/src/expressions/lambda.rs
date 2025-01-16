@@ -1,8 +1,9 @@
 use ignis_data_type::DataType;
+use serde::Serialize;
 
 use crate::statements::{function::ASTGenericParameter, variable::ASTVariable, ASTStatement};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTLambda {
   pub parameters: Vec<ASTVariable>,
   pub body: Box<ASTStatement>,

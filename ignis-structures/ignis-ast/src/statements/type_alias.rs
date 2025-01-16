@@ -1,11 +1,12 @@
 use ignis_data_type::DataType;
 use ignis_token::token::Token;
+use serde::Serialize;
 
 use crate::metadata::ASTMetadata;
 
 use super::function::ASTGenericParameter;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTTypeAlias {
   pub name: Token,
   pub value: Box<DataType>,

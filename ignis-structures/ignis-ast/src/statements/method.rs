@@ -1,11 +1,12 @@
 use ignis_data_type::DataType;
 use ignis_token::token::Token;
+use serde::Serialize;
 
 use crate::metadata::ASTMetadata;
 
 use super::{block::ASTBlock, variable::ASTVariable};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTMethod {
   pub name: Token,
   pub parameters: Vec<ASTVariable>,

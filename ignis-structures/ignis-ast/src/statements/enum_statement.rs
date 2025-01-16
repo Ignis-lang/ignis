@@ -1,11 +1,12 @@
 use ignis_data_type::DataType;
 use ignis_token::token::Token;
+use serde::Serialize;
 
 use crate::{expressions::ASTExpression, metadata::ASTMetadata};
 
 use super::function::ASTGenericParameter;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTEnumItem {
   pub name: Token,
   pub value: Option<ASTExpression>,
@@ -29,7 +30,7 @@ impl ASTEnumItem {
   }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTEnum {
   pub name: Token,
   pub members: Vec<ASTEnumItem>,

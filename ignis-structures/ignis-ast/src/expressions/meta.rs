@@ -1,8 +1,10 @@
+use serde::Serialize;
+
 use crate::statements::ASTStatement;
 
 use super::ASTExpression;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTMeta {
   pub expression: Box<ASTExpression>,
 }
@@ -15,7 +17,7 @@ impl ASTMeta {
   }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTMetaEntity {
   pub metas: Vec<ASTMeta>,
   pub entity: Option<ASTStatement>,

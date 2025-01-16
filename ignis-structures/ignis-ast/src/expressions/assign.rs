@@ -1,8 +1,9 @@
 use ignis_token::token::Token;
+use serde::Serialize;
 
 use super::ASTExpression;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize)]
 pub struct ASTAssignment {
   pub left: Box<ASTExpression>,
   pub operator: Box<Token>,

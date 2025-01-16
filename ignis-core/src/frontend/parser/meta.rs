@@ -1,26 +1,24 @@
-use diagnostics::{MetaDiagnostic, MetaDiagnosticError};
-use enum_statement::{ASTEnum, ASTEnumItem};
 use ignis_ast::{
   expressions::{match_expression::ASTMatchCase, *},
   metadata::*,
-  statements::{variable::ASTVariable, method::ASTMethod, property::ASTProperty, *},
+  statements::{enum_statement::ASTEnum, meta::ASTMetaStatement, method::ASTMethod, variable::ASTVariable, *},
   visitor::ASTVisitor,
 };
-use ignis_data_type::DataType;
+use ignis_data_type::{value::IgnisLiteralValue, DataType};
 use ignis_token::token::Token;
-use literal::ASTLiteralValue;
 use namespace::ASTNamespace;
 use type_alias::ASTTypeAlias;
-pub mod diagnostics;
+
+use crate::diagnostics::message::DiagnosticMessage;
 
 pub struct IgnisMetaProcessor {
   ast: Vec<ASTStatement>,
   pub new_ast: Vec<ASTStatement>,
-  pub diagnostics: Vec<MetaDiagnostic>,
+  pub diagnostics: Vec<DiagnosticMessage>,
   pub current_metadata: Vec<ASTMetadataFlags>,
 }
 
-type IgnisMetaResult = Result<ASTStatement, Box<MetaDiagnostic>>;
+type IgnisMetaResult = Result<ASTStatement, Box<DiagnosticMessage>>;
 
 impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
   fn visit_binary_expression(
@@ -172,6 +170,7 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
         Box::new(object),
         expression.member.clone(),
         expression.metadata.clone(),
+        expression.generics.clone(),
       ),
     )))))
   }
@@ -198,7 +197,12 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
     }
 
     Ok(ASTStatement::Expression(Box::new(ASTExpression::Call(Box::new(
-      ignis_ast::expressions::call::ASTCall::new(expression.callee.clone(), arguments),
+      ignis_ast::expressions::call::ASTCall::new(
+        expression.name.clone(),
+        expression.callee.clone(),
+        arguments,
+        expression.generics.clone(),
+      ),
     )))))
   }
 
@@ -262,11 +266,12 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
     &mut self,
     expression: &ignis_ast::expressions::object_literal::ASTObject,
   ) -> IgnisMetaResult {
-    let mut properties: Vec<ASTProperty> = vec![];
-    for property in &expression.properties {
-      let prop = ASTStatement::Property(Box::new(property.clone())).accept(self)?;
-      if let ASTStatement::Property(prop) = prop {
-        properties.push(prop.as_ref().clone());
+    let mut properties: Vec<(Token, ASTExpression)> = vec![];
+    for (name, property) in &expression.properties {
+      let prop = property.accept(self)?;
+
+      if let ASTStatement::Expression(prop) = prop {
+        properties.push((name.clone(), prop.as_ref().clone()));
       }
     }
 
@@ -695,6 +700,18 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
       enum_.generics.clone(),
     ))));
   }
+
+  fn visit_meta_statement(
+    &mut self,
+    meta: &ignis_ast::statements::meta::ASTMetaStatement,
+  ) -> IgnisMetaResult {
+    Ok(ASTStatement::Meta(Box::new(ASTMetaStatement::new(
+      meta.name.clone(),
+      meta.parameters.clone(),
+      meta.metadata.clone(),
+      meta.generic_parameters.clone(),
+    ))))
+  }
 }
 
 impl IgnisMetaProcessor {
@@ -720,7 +737,7 @@ impl IgnisMetaProcessor {
   fn process_variable_meta_expression(
     &mut self,
     expression: &ignis_ast::expressions::variable::ASTVariableExpression,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     match expression.name.lexeme.as_str() {
       "MutOnly" => Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::MutOnly)),
       "Ignore" => Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Ignore)),
@@ -730,16 +747,14 @@ impl IgnisMetaProcessor {
       "MainFunction" => Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::MainFunction)),
       "Copy" => Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Copy)),
       "Clone" => Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Clone)),
-      _ => Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::UndefinedMeta(
-        expression.name.clone(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::UndefinedMeta(expression.name.clone()))),
     }
   }
 
   fn process_call_meta_expression(
     &mut self,
     call: &ignis_ast::expressions::call::ASTCall,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     match call.callee.as_ref() {
       ASTExpression::Variable(variable) => match variable.name.lexeme.as_str() {
         "ToDo" => self.process_todo(&variable.name, &call.arguments),
@@ -753,12 +768,12 @@ impl IgnisMetaProcessor {
         _ => {
           let token = variable.name.clone();
 
-          return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::UndefinedMeta(token))));
+          return Err(Box::new(DiagnosticMessage::UndefinedMeta(token)));
         },
       },
-      _ => Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::UndefinedMeta(Into::into(
+      _ => Err(Box::new(DiagnosticMessage::UndefinedMeta(Into::into(
         &call.callee.as_ref().clone(),
-      ))))),
+      )))),
     }
   }
 
@@ -792,10 +807,7 @@ impl IgnisMetaProcessor {
       _ => {
         let kind = entity.into();
 
-        return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidMetaEntity(
-          kind,
-          entity.into(),
-        ))));
+        return Err(Box::new(DiagnosticMessage::InvalidMetaEntity(kind, entity.into())));
       },
     };
 
@@ -808,13 +820,13 @@ impl IgnisMetaProcessor {
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() > 1 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         1,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     if arguments.len() == 0 {
@@ -824,36 +836,34 @@ impl IgnisMetaProcessor {
     let message = arguments[0].clone();
 
     if let ASTExpression::Literal(literal) = &message {
-      if let ASTLiteralValue::String(message) = &literal.value {
+      if let IgnisLiteralValue::String(message) = &literal.value {
         return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::ToDo(Some(message.clone()))));
       }
     }
 
-    Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::MissingArgument(
-      callee.clone(),
-    ))))
+    Err(Box::new(DiagnosticMessage::MissingArgument(callee.clone())))
   }
 
   fn process_feature(
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() != 2 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         2,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     let message = arguments[1].clone();
     let name = arguments[0].clone();
 
     if let ASTExpression::Literal(literal) = &message {
-      if let ASTLiteralValue::String(message) = &literal.value {
+      if let IgnisLiteralValue::String(message) = &literal.value {
         if let ASTExpression::Literal(literal) = &name {
-          if let ASTLiteralValue::String(name) = &literal.value {
+          if let IgnisLiteralValue::String(name) = &literal.value {
             return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Feature(
               name.clone(),
               message.clone(),
@@ -870,22 +880,22 @@ impl IgnisMetaProcessor {
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() != 2 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         2,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     let message = arguments[1].clone();
     let version = arguments[0].clone();
 
     if let ASTExpression::Literal(literal) = &message {
-      if let ASTLiteralValue::String(message) = &literal.value {
+      if let IgnisLiteralValue::String(message) = &literal.value {
         if let ASTExpression::Literal(literal) = &version {
-          if let ASTLiteralValue::String(version) = &literal.value {
+          if let IgnisLiteralValue::String(version) = &literal.value {
             return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Deprecated(
               version.clone(),
               message.clone(),
@@ -902,22 +912,22 @@ impl IgnisMetaProcessor {
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() != 2 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         2,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     let message = arguments[1].clone();
     let platform = arguments[0].clone();
 
     if let ASTExpression::Literal(literal) = &message {
-      if let ASTLiteralValue::String(message) = &literal.value {
+      if let IgnisLiteralValue::String(message) = &literal.value {
         if let ASTExpression::Literal(literal) = &platform {
-          if let ASTLiteralValue::String(platform) = &literal.value {
+          if let IgnisLiteralValue::String(platform) = &literal.value {
             return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::PlatformSpecific(
               platform.clone(),
               message.clone(),
@@ -934,22 +944,22 @@ impl IgnisMetaProcessor {
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() != 2 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         2,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     let message = arguments[1].clone();
     let version = arguments[0].clone();
 
     if let ASTExpression::Literal(literal) = &message {
-      if let ASTLiteralValue::String(message) = &literal.value {
+      if let IgnisLiteralValue::String(message) = &literal.value {
         if let ASTExpression::Literal(literal) = &version {
-          if let ASTLiteralValue::String(version) = &literal.value {
+          if let IgnisLiteralValue::String(version) = &literal.value {
             return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Experimental(
               version.clone(),
               message.clone(),
@@ -966,82 +976,76 @@ impl IgnisMetaProcessor {
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() != 1 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         1,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     let message = arguments[0].clone();
 
     if let ASTExpression::Literal(literal) = &message {
-      if let ASTLiteralValue::String(message) = &literal.value {
+      if let IgnisLiteralValue::String(message) = &literal.value {
         return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Internal(message.clone())));
       }
     }
 
-    Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::MissingArgument(
-      callee.clone(),
-    ))))
+    Err(Box::new(DiagnosticMessage::MissingArgument(callee.clone())))
   }
 
   fn process_global(
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() != 1 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         1,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     let message = arguments[0].clone();
 
     if let ASTExpression::Literal(literal) = &message {
-      if let ASTLiteralValue::String(message) = &literal.value {
+      if let IgnisLiteralValue::String(message) = &literal.value {
         return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::Global(message.clone())));
       }
     }
 
-    Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::MissingArgument(
-      callee.clone(),
-    ))))
+    Err(Box::new(DiagnosticMessage::MissingArgument(callee.clone())))
   }
 
   fn process_ffi_link(
     &self,
     callee: &Token,
     arguments: &Vec<ASTExpression>,
-  ) -> Result<ASTMetadataFlags, Box<MetaDiagnostic>> {
+  ) -> Result<ASTMetadataFlags, Box<DiagnosticMessage>> {
     if arguments.len() != 1 {
-      return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidNumberOfArguments(
+      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
         1,
         arguments.len(),
         callee.clone(),
-      ))));
+      )));
     }
 
     for argument in arguments {
       if let ASTExpression::Literal(object) = argument {
-        if let ASTLiteralValue::String(object) = &object.value {
+        if let IgnisLiteralValue::String(object) = &object.value {
           return Ok(ASTMetadataFlags::Meta(IgnisCompilerMeta::FFILink(object.clone())));
         }
 
-        return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::InvalidArgumentType(
+        return Err(Box::new(DiagnosticMessage::InvalidArgumentType(
           DataType::String,
           object.token.clone(),
-        ))));
+        )));
       }
     }
 
-    return Err(Box::new(MetaDiagnostic::new(MetaDiagnosticError::MissingArgument(
-      callee.clone(),
-    ))));
+    return Err(Box::new(DiagnosticMessage::MissingArgument(callee.clone())));
   }
 }

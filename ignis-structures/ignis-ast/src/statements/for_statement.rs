@@ -1,8 +1,10 @@
+use serde::Serialize;
+
 use crate::expressions::ASTExpression;
 
 use super::{variable::ASTVariable, ASTStatement};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize)]
 pub struct ASTFor {
   pub variable: Box<ASTVariable>,
   pub condition: Box<ASTExpression>,

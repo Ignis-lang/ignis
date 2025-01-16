@@ -1,14 +1,14 @@
 use ignis_token::token::Token;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ASTCommentType {
   SingleLine,
   MultiLine,
   Documentation,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTComment {
   pub comment: String,
   pub type_: ASTCommentType,
@@ -16,7 +16,10 @@ pub struct ASTComment {
 }
 
 impl ASTComment {
-  pub fn new(token: Token, type_: ASTCommentType) -> Self {
+  pub fn new(
+    token: Token,
+    type_: ASTCommentType,
+  ) -> Self {
     Self {
       comment: token.lexeme.clone(),
       type_,

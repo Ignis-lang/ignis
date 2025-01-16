@@ -11,6 +11,18 @@ pub struct Token {
   pub file_name: String,
 }
 
+impl Default for Token {
+  fn default() -> Self {
+    Self {
+      type_: TokenType::Eof,
+      lexeme: String::new(),
+      line: 0,
+      column: 0,
+      file_name: String::new(),
+    }
+  }
+}
+
 impl Token {
   pub fn new(
     type_: TokenType,

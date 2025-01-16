@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ASTMetadataFlags {
+  Declaration,
   Constructor,
   EnumMember,
   Export,
@@ -21,6 +22,8 @@ pub enum ASTMetadataFlags {
   Variadic,
   Spread,
   Meta(IgnisCompilerMeta),
+  ObjectMember,
+  ExplicitReference,
   None,
 }
 
@@ -30,6 +33,7 @@ impl std::fmt::Display for ASTMetadataFlags {
     f: &mut std::fmt::Formatter<'_>,
   ) -> std::fmt::Result {
     match self {
+      ASTMetadataFlags::Declaration => write!(f, "Declaration"),
       ASTMetadataFlags::Constructor => write!(f, "Constructor"),
       ASTMetadataFlags::EnumMember => write!(f, "EnumMember"),
       ASTMetadataFlags::Export => write!(f, "Export"),
@@ -49,11 +53,13 @@ impl std::fmt::Display for ASTMetadataFlags {
       ASTMetadataFlags::Meta(meta) => write!(f, "{:?}", meta),
       ASTMetadataFlags::None => write!(f, "None"),
       ASTMetadataFlags::Spread => write!(f, "Spread"),
+      ASTMetadataFlags::ExplicitReference => write!(f, "ExplicitReference"),
+      ASTMetadataFlags::ObjectMember => write!(f, "ObjectMember"),
     }
   }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ASTMetadata {
   flags: Vec<ASTMetadataFlags>,
 }
@@ -128,9 +134,20 @@ impl ASTMetadata {
   pub fn reset(&mut self) {
     self.flags.clear();
   }
+
+  pub fn is(
+    &self,
+    flag: ASTMetadataFlags,
+  ) -> bool {
+    self.flags.contains(&flag)
+  }
+
+  pub fn get(&self) -> Vec<ASTMetadataFlags> {
+    self.flags.clone()
+  }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Eq)]
 pub enum IgnisCompilerMeta {
   MutOnly,
   ToDo(Option<String>),
@@ -150,4 +167,32 @@ pub enum IgnisCompilerMeta {
   Copy,
   Clone,
   FFILink(String),
+}
+
+impl std::fmt::Display for IgnisCompilerMeta {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    match self {
+      IgnisCompilerMeta::MutOnly => write!(f, "mut_only"),
+      IgnisCompilerMeta::ToDo(value) => write!(f, "todo({})", value.as_ref().unwrap()),
+      IgnisCompilerMeta::Ignore => write!(f, "ignore"),
+      IgnisCompilerMeta::NotTranspile => write!(f, "not_transpile"),
+      IgnisCompilerMeta::Feature(feature, value) => write!(f, "feature({}, {})", feature, value),
+      IgnisCompilerMeta::Deprecated(feature, value) => write!(f, "deprecated({}, {})", feature, value),
+      IgnisCompilerMeta::PlatformSpecific(feature, value) => write!(f, "platform_specific({}, {})", feature, value),
+      IgnisCompilerMeta::Experimental(feature, value) => write!(f, "experimental({}, {})", feature, value),
+      IgnisCompilerMeta::Internal(value) => write!(f, "internal({})", value),
+      IgnisCompilerMeta::Global(value) => write!(f, "global({})", value),
+      IgnisCompilerMeta::DisableLint => write!(f, "disable_lint"),
+      IgnisCompilerMeta::Clone => write!(f, "clone"),
+      IgnisCompilerMeta::Copy => write!(f, "copy"),
+      IgnisCompilerMeta::FFILink(value) => write!(f, "ffi_link({})", value),
+      IgnisCompilerMeta::EnableLint => write!(f, "enable_lint"),
+      IgnisCompilerMeta::MainFunction => write!(f, "main_function"),
+      IgnisCompilerMeta::Optimize(value) => write!(f, "optimize({})", value),
+      IgnisCompilerMeta::Panic(value) => write!(f, "panic({})", value.as_ref().unwrap()),
+    }
+  }
 }

@@ -1,6 +1,7 @@
+pub mod value;
 use std::fmt::Display;
 
-use ignis_token::{token::Token, token_types::TokenType};
+use ignis_token::token_types::TokenType;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -39,13 +40,13 @@ pub enum DataType {
   Unknown,
   Pending,
   Void,
-  Variable(String),
-  Vector(Box<DataType>, Option<Token>),
+  Variable(String, Box<DataType>),
+  Vector(Box<DataType>, Option<usize>),
   Callable(Vec<DataType>, Box<DataType>),
   Function(Vec<DataType>, Box<DataType>),
   PendingImport(String),
   Record(String, Vec<(String, DataType)>),
-  Object((Vec<DataType>, Vec<DataType>)),
+  Object(Vec<(String, DataType)>),
   Reference(Box<DataType>),
   Pointer(Box<DataType>),
   Optional(Box<DataType>),
@@ -55,9 +56,25 @@ pub enum DataType {
   UnionType(Vec<DataType>),
   IntersectionType(Vec<DataType>),
   // TODO: Ignis v0.3.0
-  // Interface(String),
-  // ClassType(String),
-  // TupleType(Vec<DataType>),
+  Interface(String),
+  ClassType(String),
+  TupleType(Vec<DataType>),
+}
+
+impl DataType {
+  pub fn get_number_range(&self) -> String {
+    match self {
+      DataType::Int8 => format!("{} to {}", i8::MIN, i8::MAX),
+      DataType::Int16 => format!("{} to {}", i16::MIN, i16::MAX),
+      DataType::Int32 => format!("{} to {}", i32::MIN, i32::MAX),
+      DataType::Int64 => format!("{} to {}", i64::MIN, i64::MAX),
+      DataType::UnsignedInt8 => format!("0 to {}", u8::MAX),
+      DataType::UnsignedInt16 => format!("0 to {}", u16::MAX),
+      DataType::UnsignedInt32 => format!("0 to {}", u32::MAX),
+      DataType::UnsignedInt64 => format!("0 to {}", u64::MAX),
+      _ => String::new(),
+    }
+  }
 }
 
 impl From<&TokenType> for DataType {
@@ -113,16 +130,13 @@ impl Display for DataType {
       DataType::Pending => write!(f, "pending"),
       DataType::PendingImport(name) => write!(f, "pending_import({})", name),
       DataType::Record(name, _) => write!(f, "record({})", name),
-      DataType::Object(_) => write!(f, "object"),
+      DataType::Object(object) => write!(f, "object<{:?}>", object),
       DataType::Reference(data_type) => write!(f, "reference({})", data_type),
       DataType::Pointer(data_type) => write!(f, "pointer({})", data_type),
-      DataType::Variable(name) => write!(f, "variable({})", name),
-      DataType::Vector(data_type, size) => write!(
-        f,
-        "vector<{}, {}>",
-        data_type,
-        size.as_ref().map(|s| s.lexeme.clone()).unwrap_or("1024".to_string())
-      ),
+      DataType::Variable(name, data_type) => write!(f, "variable({}, {})", name, data_type),
+      DataType::Vector(data_type, size) => {
+        write!(f, "vector<{}, {}>", data_type, size.as_ref().map(|s| s.clone()).unwrap_or(1024))
+      },
       DataType::Callable(parameters, return_type) => write!(
         f,
         "callable<{}, {}>",
@@ -160,20 +174,19 @@ impl Display for DataType {
       DataType::UnionType(types) => write!(
         f,
         "union<{}>",
-        types
-          .iter()
-          .map(|t| t.to_string())
-          .collect::<Vec<String>>()
-          .join(", ")
+        types.iter().map(|t| t.to_string()).collect::<Vec<String>>().join(", ")
       ),
       DataType::IntersectionType(types) => write!(
         f,
         "intersection<{}>",
-        types
-          .iter()
-          .map(|t| t.to_string())
-          .collect::<Vec<String>>()
-          .join(", ")
+        types.iter().map(|t| t.to_string()).collect::<Vec<String>>().join(", ")
+      ),
+      DataType::Interface(name) => write!(f, "interface({})", name),
+      DataType::ClassType(name) => write!(f, "class({})", name),
+      DataType::TupleType(types) => write!(
+        f,
+        "tuple<{}>",
+        types.iter().map(|t| t.to_string()).collect::<Vec<String>>().join(", ")
       ),
     }
   }

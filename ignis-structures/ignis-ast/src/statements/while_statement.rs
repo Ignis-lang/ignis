@@ -1,8 +1,10 @@
+use serde::Serialize;
+
 use crate::expressions::ASTExpression;
 
 use super::ASTStatement;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize)]
 pub struct ASTWhile {
   pub condition: Box<ASTExpression>,
   pub body: Box<ASTStatement>,

@@ -1,5 +1,5 @@
+pub mod analyzer;
 pub mod lexer;
-mod meta;
 pub mod parser;
 
 use std::io::Read;
@@ -45,7 +45,7 @@ impl IgnisFrontend {
 
     let source = get_file_content(&file);
 
-    let mut lexer = Lexer::new(self.config.clone(), source.as_str(), file);
+    let mut lexer = Lexer::new(self.config.clone(), source.as_str(), file.clone());
     lexer.scan_tokens(false);
 
     for diagnostic in lexer.diagnostics {
@@ -66,23 +66,19 @@ impl IgnisFrontend {
 
     let (statements, diagnostics) = parser.parse(false);
 
-    if self.config.debug.contains(&DebugPrint::Ast) && !self.config.quiet {
-      println!("Pre-Meta AST: {:#?}", statements);
+    self.diagnostics.append(&mut diagnostics.clone());
+
+    let std = analyzer::IgnisAnalyzer::load_primitive_std(&self.config);
+
+    let mut analyzer = analyzer::IgnisAnalyzer::new(file, statements, std.0.clone(), std.1.clone());
+    let analyzer_result = analyzer.process(true);
+
+    if analyzer_result.is_err() {
+      self.diagnostics.append(&mut analyzer_result.unwrap_err());
     }
 
-    for diagnostic in diagnostics {
-      self.diagnostics.push(diagnostic.report());
-    }
-
-    let mut meta_processor = meta::IgnisMetaProcessor::new(statements);
-    meta_processor.process();
-
-    if self.config.debug.contains(&DebugPrint::Ast) && !self.config.quiet {
-      println!("Post-Meta AST: {:#?}", meta_processor.new_ast);
-    }
-
-    for diagnostic in meta_processor.diagnostics {
-      self.diagnostics.push(diagnostic.report_diagnostic());
+    if self.config.debug.contains(&DebugPrint::Hir) && !self.config.quiet {
+      println!("HIR: {:#?}", analyzer.get_hir());
     }
 
     if !self.config.quiet {

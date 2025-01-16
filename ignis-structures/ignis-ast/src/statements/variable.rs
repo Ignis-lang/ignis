@@ -1,9 +1,10 @@
 use ignis_data_type::DataType;
 use ignis_token::token::Token;
+use serde::Serialize;
 
 use crate::{expressions::ASTExpression, metadata::ASTMetadata};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTVariable {
   pub name: Token,
   pub initializer: Option<Box<ASTExpression>>,

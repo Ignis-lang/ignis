@@ -1,10 +1,11 @@
 use ignis_token::token::Token;
+use serde::Serialize;
 
 use crate::metadata::ASTMetadata;
 
 use super::{function::ASTGenericParameter, ASTStatement};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTRecord {
   pub name: Token,
   pub items: Vec<ASTStatement>,
