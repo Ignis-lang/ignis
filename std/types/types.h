@@ -30,8 +30,8 @@ typedef u16 hex;
 
 #define NULL ((void*)0)
 
-#define TRUE 1
-#define FALSE 0
+#define TRUE 0
+#define FALSE 1
 
 typedef enum IgnisType {
   TYPE_I8,
@@ -93,5 +93,14 @@ static const u64 TYPE_SIZES[14] = {
     sizeof(string),  // TYPE_STRING
     sizeof(unknown), // TYPE_UNKNOWN
 };
+
+IgnisType typeOf(unknown value);
+boolean isType(unknown value, IgnisType type);
+boolean isNumber(unknown value);
+boolean isString(unknown value);
+boolean isBoolean(unknown value);
+boolean isChar(unknown value);
+boolean isNull(unknown value);
+boolean isArray(unknown value);
 
 #endif // IGNIS_STD_TYPES_H
