@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fs, ops::{Deref, DerefMut}, path::Path};
+use std::{
+  collections::HashMap,
+  fs,
+  ops::{Deref, DerefMut},
+  path::Path,
+};
 
 use super::{lexer::IgnisLexer, parser::IgnisParser};
 use colored::*;
@@ -14,15 +19,16 @@ use ignis_hir::{
   hir_assign::HIRAssign, hir_binary::HIRBinary, hir_block::HIRBlock, hir_call::HIRCall, hir_cast::HIRCast,
   hir_comment::HIRComment, hir_const::HIRConstant, hir_extern::HIRExtern, hir_for::HIRFor, hir_for_of::HIRForOf,
   hir_function::HIRFunction, hir_function_instance::HIRFunctionInstance, hir_grouping::HIRGrouping, hir_if::HIRIf,
-  hir_import::HIRImport, hir_include::HIRInclude, hir_literal::HIRLiteral, hir_logical::HIRLogical,
+  hir_import::HIRImport, hir_include::HIRInclude, hir_literal::HIRLiteral, hir_logical::HIRLogical, hir_meta::HIRMeta,
   hir_method::HIRMethod, hir_namespace::HIRNamespace, hir_object::HIRObjectLiteral, hir_record::HIRRecord,
   hir_return::HIRReturn, hir_source::HIRSource, hir_spread::HIRSpread, hir_ternary::HIRTernary, hir_this::HIRThis,
-  hir_unary::HIRUnary, hir_variable::HIRVariable, hir_vector::HIRVector, hir_vector_access::HIRVectorAccess,
-  hir_while::HIRWhile, HIRInstruction, HIRInstructionType, HIRMetadata, HIRMetadataFlags,
+  hir_type::HIRType, hir_unary::HIRUnary, hir_variable::HIRVariable, hir_vector::HIRVector,
+  hir_vector_access::HIRVectorAccess, hir_while::HIRWhile, HIRInstruction, HIRInstructionType, HIRMetadata,
+  HIRMetadataFlags,
 };
 use ignis_token::{token::Token, token_types::TokenType};
 
-use crate::diagnostics::{diagnostic_report::DiagnosticReport, message::DiagnosticMessage};
+use crate::diagnostics::{self, diagnostic_report::DiagnosticReport, message::DiagnosticMessage, Diagnostic};
 
 pub type AnalyzerResult = Result<HIRInstruction, Box<DiagnosticMessage>>;
 type CheckCompatibility<T> = (bool, T);
@@ -67,6 +73,7 @@ pub enum SymbolKind {
   Constant,
   Extern,
   Namespace,
+  Meta,
 }
 
 #[derive(Debug, Clone)]
@@ -1972,7 +1979,46 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     type_alias: &ignis_ast::statements::type_alias::ASTTypeAlias,
   ) -> AnalyzerResult {
-    todo!()
+    if self.is_declared(&type_alias.name.lexeme) {
+      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
+        type_alias.name.lexeme.clone(),
+        type_alias.name.clone(),
+      )));
+    }
+
+    let mut metadata: Vec<HIRMetadataFlags> = vec![];
+
+    for value in type_alias.metadata.get().iter() {
+      metadata.push(value.into());
+    }
+
+    self.declare(
+      type_alias.name.lexeme.clone(),
+      SymbolInfo::new(
+        type_alias.name.clone(),
+        type_alias.value.as_ref().clone(),
+        metadata.clone(),
+        SymbolKind::TypeAlias,
+        None,
+      ),
+    );
+
+    Ok(HIRInstruction::Type(HIRType::new(
+      type_alias.name.clone(),
+      type_alias.value.clone(),
+      HIRMetadata::new(metadata.clone(), None),
+      type_alias
+        .generics
+        .clone()
+        .into_iter()
+        .map(|g| {
+          DataType::GenericType(GenericType::new(
+            Box::new(DataType::Variable(g.name.lexeme.clone(), Box::new(DataType::Unknown))),
+            g.constraints.clone(),
+          ))
+        })
+        .collect(),
+    )))
   }
 
   fn visitor_enum_statement(
@@ -1986,7 +2032,58 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     meta: &ignis_ast::statements::meta::ASTMetaStatement,
   ) -> AnalyzerResult {
-    todo!()
+    if self.is_declared(&meta.name.lexeme) {
+      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
+        meta.name.lexeme.clone(),
+        meta.name.clone(),
+      )));
+    }
+
+    let mut metadata = vec![];
+
+    for value in meta.metadata.get().iter() {
+      metadata.push(value.into());
+    }
+
+    self.declare(
+      meta.name.lexeme.clone(),
+      SymbolInfo::new(meta.name.clone(), DataType::Null, metadata.clone(), SymbolKind::Meta, None),
+    );
+
+    self.begin_scope();
+
+    let mut parameters = vec![];
+
+    for param in &meta.parameters {
+      let hir = self.analyze_statement(&ASTStatement::Variable(Box::new(param.clone())))?;
+      parameters.push(hir);
+    }
+
+    self.end_scope();
+
+    let hir = HIRInstruction::Meta(HIRMeta::new(
+      meta.name.clone(),
+      parameters,
+      HIRMetadata::new(metadata.clone(), None),
+      meta
+        .generic_parameters
+        .clone()
+        .into_iter()
+        .map(|g| {
+          DataType::GenericType(GenericType::new(
+            Box::new(DataType::Variable(g.name.lexeme.clone(), Box::new(DataType::Unknown))),
+            g.constraints.clone(),
+          ))
+        })
+        .collect(),
+    ));
+
+    self.edit_symbol(
+      meta.name.lexeme.clone(),
+      SymbolInfo::new(meta.name.clone(), DataType::Null, metadata, SymbolKind::Meta, Some(hir.clone())),
+    );
+
+    Ok(hir)
   }
 }
 
@@ -3223,8 +3320,7 @@ impl IgnisAnalyzer {
     HashMap<String, Vec<HIRInstruction>>,
     HashMap<String, Vec<HashMap<String, SymbolInfo>>>,
   ) {
-    return (HashMap::new(), HashMap::new());
-
+    let mut diagnostics: Vec<DiagnosticReport> = Vec::new();
     let names = [
       "meta".to_string(),
       "types".to_string(),
@@ -3257,24 +3353,44 @@ impl IgnisAnalyzer {
       let source = String::from_utf8(file_row).unwrap();
       let config = Box::new(config.clone());
 
-      let mut lexer = IgnisLexer::new(config, &source, lib.clone());
+      let mut lexer = IgnisLexer::new(config.clone(), &source, lib.clone());
       lexer.scan_tokens(true);
+      for diagnostic in &lexer.diagnostics {
+        diagnostics.push(diagnostic.report());
+      }
 
-      let mut parser = IgnisParser::new(config, lexer.tokens.clone());
+      let mut parser = IgnisParser::new(config.clone(), lexer.tokens.clone());
       let result = parser.parse(true);
+
+      for diagnostic in &result.1 {
+        diagnostics.push(diagnostic.clone());
+      }
 
       let statements = result.0;
       let mut analyzer = Self::new(
-        config,
+        config.clone(),
         lib.clone(),
         statements,
         result_std.clone(),
         result_scopes_variables.clone(),
       );
-      let _ = analyzer.process(true);
+
+      let analyzer_report = analyzer.process(true);
+
+      if analyzer_report.is_err() {
+        for diagnostic in &analyzer_report.err().unwrap() {
+          diagnostics.push(diagnostic.clone());
+        }
+      }
 
       result_std.insert(lib.clone(), analyzer.hir.get(&lib).unwrap().clone());
       result_scopes_variables.insert(lib.clone(), analyzer.symbol_stack.clone());
+    }
+
+    if !config.quiet {
+      let diagnostic: Diagnostic = Diagnostic::default();
+
+      diagnostic.report(diagnostics.clone());
     }
 
     (result_std, result_scopes_variables)

@@ -672,10 +672,38 @@ impl IgnisParser {
     is_exported: bool,
   ) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Record)?;
+    let mut generic_parameters: Vec<ASTGenericParameter> = Vec::new();
 
-    let name = self.consume(TokenType::Identifier)?;
+    if self.match_token(&[TokenType::Less]) {
+      loop {
+        let name = self.consume(TokenType::Identifier)?;
+        let mut constraints: Vec<DataType> = Vec::new();
+
+        if self.match_token(&[TokenType::As]) {
+          let token = self.advance();
+          let mut kind = DataType::from(&token.type_);
+          if matches!(kind, DataType::Pending) {
+            kind = self.resolve_pending_type(&token, &generic_parameters);
+          }
+          constraints.push(kind);
+        }
+
+        generic_parameters.push(ASTGenericParameter::new(name, constraints));
+        if !self.match_token(&[TokenType::Comma]) {
+          break;
+        }
+      }
+
+      self.consume(TokenType::Greater)?;
+    }
+
+    let name: Token = if self.check_if_type() {
+      self.advance()
+    } else {
+      self.consume(TokenType::Identifier)?
+    };
+
     let mut data_type: Vec<(String, DataType)> = vec![];
-    let generic_parameters = self.resolve_generic_params()?;
 
     self.consume(TokenType::LeftBrace)?;
 
@@ -687,7 +715,22 @@ impl IgnisParser {
         continue;
       }
 
-      items.push(self.record_item(&name, &generic_parameters, &mut data_type)?);
+      let mut meta = None;
+
+      if self.check(TokenType::Hash) {
+        meta = Some(self.meta_expression(false)?);
+      }
+
+      let mut item = self.record_item(&name, &generic_parameters, &mut data_type)?;
+
+      if let Some(meta) = &mut meta {
+        if let ASTExpression::MetaEntity(meta) = meta {
+          meta.entity = Some(item);
+          item = ASTStatement::Expression(Box::new(ASTExpression::MetaEntity(meta.clone())));
+        }
+      }
+
+      items.push(item);
     }
 
     self.consume(TokenType::RightBrace)?;
@@ -712,7 +755,7 @@ impl IgnisParser {
     ))))
   }
 
-  /// <record-item> ::= <record-property> | <record-method>
+  /// <record-item> ::= <meta-expression>? <record-property> | <record-method>
   fn record_item(
     &mut self,
     record: &Token,
@@ -721,13 +764,16 @@ impl IgnisParser {
   ) -> IgnisParserResult<ASTStatement> {
     let name = self.consume(TokenType::Identifier)?;
 
+    let mut item_generics: Vec<ASTGenericParameter> = self.resolve_generic_params()?;
+    item_generics.append(&mut generic_parameters.to_vec());
+
     let is_optional = self.match_token(&[TokenType::QuestionMark]);
     if self.match_token(&[TokenType::Colon]) {
-      return self.record_property(name, is_optional, record_type, generic_parameters);
+      return self.record_property(name, is_optional, record_type, &item_generics);
     }
 
     if self.check(TokenType::LeftParen) {
-      return self.record_method(record, name, is_optional, record_type, generic_parameters);
+      return self.record_method(record, name, is_optional, record_type, &item_generics);
     }
 
     Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Colon, self.peek())))
@@ -1937,7 +1983,7 @@ impl IgnisParser {
 
         self.group()
       },
-      TokenType::Hash => self.meta_expression(),
+      TokenType::Hash => self.meta_expression(true),
       TokenType::Identifier => {
         self.consume(TokenType::Identifier)?;
 
@@ -2193,7 +2239,10 @@ impl IgnisParser {
   }
 
   /// <meta-expression> ::= "#" <qualified-identifier> ("(" <expression>*? ")")? ";"? | "#" "[" (<expression>? ","?)* "]"
-  fn meta_expression(&mut self) -> IgnisParserResult<ASTExpression> {
+  fn meta_expression(
+    &mut self,
+    include_entity: bool,
+  ) -> IgnisParserResult<ASTExpression> {
     self.consume(TokenType::Hash)?;
 
     let mut meta: Vec<ASTMeta> = vec![];
@@ -2216,10 +2265,10 @@ impl IgnisParser {
       meta.push(ASTMeta::new(Box::new(name)));
     }
 
-    let entity: Option<ASTStatement> = if self.check(TokenType::SemiColon) {
-      None
-    } else {
+    let entity: Option<ASTStatement> = if !self.check(TokenType::SemiColon) && include_entity {
       Some(self.meta_entity()?)
+    } else {
+      None
     };
 
     Ok(ASTExpression::MetaEntity(Box::new(ASTMetaEntity::new(meta, entity))))
@@ -2310,6 +2359,10 @@ impl IgnisParser {
         }
 
         let param = self.consume(TokenType::Identifier)?;
+
+        if self.match_token(&[TokenType::QuestionMark]) {
+          metadata.push(ASTMetadataFlags::Optional);
+        }
 
         self.consume(TokenType::Colon)?;
 
@@ -2802,5 +2855,28 @@ impl IgnisParser {
     }
 
     Ok(generic_parameters)
+  }
+
+  fn check_if_type(&mut self) -> bool {
+    matches!(
+      self.peek().type_,
+      TokenType::Int8Type
+        | TokenType::Int16Type
+        | TokenType::Int32Type
+        | TokenType::Int64Type
+        | TokenType::UnsignedInt8Type
+        | TokenType::UnsignedInt16Type
+        | TokenType::UnsignedInt32Type
+        | TokenType::UnsignedInt64Type
+        | TokenType::Float32Type
+        | TokenType::Float64Type
+        | TokenType::BooleanType
+        | TokenType::StringType
+        | TokenType::CharType
+        | TokenType::Void
+        | TokenType::Unknown
+        | TokenType::BinaryType
+        | TokenType::HexType
+    )
   }
 }

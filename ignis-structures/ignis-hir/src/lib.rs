@@ -13,12 +13,14 @@ pub mod hir_for_of;
 pub mod hir_function;
 pub mod hir_function_instance;
 pub mod hir_get;
+pub mod hir_grouping;
 pub mod hir_if;
 pub mod hir_import;
 pub mod hir_include;
 pub mod hir_literal;
 pub mod hir_logical;
 pub mod hir_member_access;
+pub mod hir_meta;
 pub mod hir_method;
 pub mod hir_method_call;
 pub mod hir_namespace;
@@ -30,13 +32,13 @@ pub mod hir_source;
 pub mod hir_spread;
 pub mod hir_ternary;
 pub mod hir_this;
+pub mod hir_type;
 pub mod hir_unary;
 pub mod hir_value;
 pub mod hir_variable;
 pub mod hir_vector;
 pub mod hir_vector_access;
 pub mod hir_while;
-pub mod hir_grouping;
 
 use std::fmt::{self, Display, Formatter};
 
@@ -59,6 +61,7 @@ use hir_literal::HIRLiteral;
 use hir_binary::HIRBinary;
 use hir_logical::HIRLogical;
 use hir_member_access::HIRMemberAccess;
+use hir_meta::HIRMeta;
 use hir_method::HIRMethod;
 use hir_namespace::HIRNamespace;
 use hir_object::HIRObjectLiteral;
@@ -68,6 +71,7 @@ use hir_source::HIRSource;
 use hir_spread::HIRSpread;
 use hir_ternary::HIRTernary;
 use hir_this::HIRThis;
+use hir_type::HIRType;
 use hir_variable::HIRVariable;
 use hir_vector::HIRVector;
 use hir_vector_access::HIRVectorAccess;
@@ -160,7 +164,9 @@ pub enum HIRInstruction {
   Include(HIRInclude),
   Source(HIRSource),
   Spread(HIRSpread),
-  Import(HIRImport)
+  Import(HIRImport),
+  Meta(HIRMeta),
+  Type(HIRType),
 }
 
 impl HIRInstruction {

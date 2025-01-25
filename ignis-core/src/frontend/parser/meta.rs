@@ -783,26 +783,29 @@ impl IgnisMetaProcessor {
   ) -> IgnisMetaResult {
     let mut statement = entity.accept(self)?;
 
+    let metadata = self.current_metadata.clone();
+
     match &mut statement {
       ASTStatement::Function(function) => {
-        let metadata = self.current_metadata.clone();
         function.metadata.push_all(metadata);
       },
       ASTStatement::TypeAlias(type_alias) => {
-        let metadata = self.current_metadata.clone();
         type_alias.metadata.push_all(metadata);
       },
       ASTStatement::Namespace(namespace) => {
-        let metadata = self.current_metadata.clone();
         namespace.metadata.push_all(metadata);
       },
       ASTStatement::Constant(constant) => {
-        let metadata = self.current_metadata.clone();
         constant.metadata.push_all(metadata);
       },
       ASTStatement::Record(record) => {
-        let metadata = self.current_metadata.clone();
         record.metadata.push_all(metadata);
+      },
+      ASTStatement::Variable(var) => {
+        var.metadata.push_all(metadata);
+      },
+      ASTStatement::Method(method) => {
+        method.metadata.push_all(metadata);
       },
       _ => {
         let kind = entity.into();
