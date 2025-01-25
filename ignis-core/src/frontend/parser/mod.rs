@@ -2158,8 +2158,8 @@ impl IgnisParser {
         method
           .parameters
           .iter()
-          .map(|p| (p.name.clone(), p.type_annotation.clone()))
-          .collect::<Vec<(Token, DataType)>>(),
+          .map(|p| p.type_annotation.clone())
+          .collect::<Vec<DataType>>(),
         Box::new(method.return_type.clone()),
       );
 
@@ -2316,10 +2316,7 @@ impl IgnisParser {
     };
 
     let lambda_type = DataType::Function(
-      parameters
-        .iter()
-        .map(|p| (p.name.clone(), p.type_annotation.clone()))
-        .collect(),
+      parameters.iter().map(|p| p.type_annotation.clone()).collect(),
       Box::new(return_type.clone()),
     );
 
@@ -2456,11 +2453,12 @@ impl IgnisParser {
     let is_pointer = self.match_token(&[TokenType::Asterisk]);
 
     for generic in generic_parameters {
-      if self.match_token(&[TokenType::Identifier]) && self.previous().lexeme == generic.name.lexeme {
+      if self.peek().lexeme == generic.name.lexeme {
         let value = DataType::GenericType(GenericType::new(
           Box::new(DataType::Variable(generic.name.lexeme.clone(), Box::new(DataType::Unknown))),
           generic.constraints.clone(),
         ));
+        self.advance();
 
         if is_refence {
           return Ok(DataType::Reference(Box::new(value)));
@@ -2468,6 +2466,19 @@ impl IgnisParser {
 
         if is_pointer {
           return Ok(DataType::Pointer(Box::new(value)));
+        }
+
+        if self.match_token(&[TokenType::LeftBrack]) {
+          let mut size: Option<usize> = None;
+
+          if self.match_token(&[TokenType::Int]) {
+            let value = self.consume(TokenType::Int)?;
+            size.clone_from(&Some(value.lexeme.parse().unwrap()));
+          }
+
+          self.consume(TokenType::RightBrack)?;
+
+          return Ok(DataType::Vector(Box::new(value), size));
         }
 
         return Ok(value);
@@ -2632,7 +2643,7 @@ impl IgnisParser {
     &mut self,
     generic_parameters: &[ASTGenericParameter],
   ) -> IgnisParserResult<DataType> {
-    let mut parameters: Vec<(Token, DataType)> = Vec::new();
+    let mut parameters: Vec<DataType> = Vec::new();
 
     if !self.check(TokenType::RightParen) {
       loop {
@@ -2645,18 +2656,9 @@ impl IgnisParser {
           )));
         }
 
-        let name = self.advance();
+        let type_: DataType = self.resolve_type(generic_parameters)?;
 
-        if name.type_ != TokenType::Identifier {
-          let token = &self.peek();
-          return Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Identifier, token.clone())));
-        }
-
-        if !self.match_token(&[TokenType::Colon]) {
-          return Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Colon, self.peek())));
-        }
-
-        parameters.push((name, self.resolve_type(generic_parameters)?));
+        parameters.push(type_);
 
         if !self.match_token(&[TokenType::Comma]) {
           break;

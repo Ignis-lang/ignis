@@ -724,19 +724,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
                 object_instance = Some(HIRVariable::new(
                   fun.name.clone(),
                   DataType::Function(
-                    fun
-                      .parameters
-                      .iter()
-                      .map(|p| {
-                        let name = if let HIRInstruction::Variable(var) = p {
-                          var.name.clone()
-                        } else {
-                          unreachable!()
-                        };
-
-                        (name, self.extract_data_type(p))
-                      })
-                      .collect(),
+                    fun.parameters.iter().map(|p| self.extract_data_type(p)).collect(),
                     Box::new(fun.return_type.clone()),
                   ),
                   None,
@@ -756,19 +744,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
                 object_instance = Some(HIRVariable::new(
                   fun.name.clone(),
                   DataType::Function(
-                    fun
-                      .parameters
-                      .iter()
-                      .map(|p| {
-                        let name = if let HIRInstruction::Variable(var) = p {
-                          var.name.clone()
-                        } else {
-                          unreachable!()
-                        };
-
-                        (name, self.extract_data_type(p))
-                      })
-                      .collect(),
+                    fun.parameters.iter().map(|p| self.extract_data_type(p)).collect(),
                     Box::new(fun.return_type.clone()),
                   ),
                   None,
@@ -837,7 +813,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         f.generic_parameters.clone(),
       ),
       HIRInstruction::Variable(var) => {
-        if let DataType::Function(params, ret) = &var.data_type {
+        if let DataType::Function(_, ret) = &var.data_type {
           let fun = if let HIRInstruction::Function(f) = var.metadata.complex_type.clone().unwrap().as_ref() {
             f.clone()
           } else {
@@ -845,23 +821,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           };
 
           (
-            params
-              .iter()
-              .map(|p| {
-                fun
-                  .parameters
-                  .iter()
-                  .find(|x| {
-                    if let HIRInstruction::Variable(v) = x {
-                      v.name.lexeme == p.0.lexeme
-                    } else {
-                      false
-                    }
-                  })
-                  .unwrap()
-                  .clone()
-              })
-              .collect(),
+            fun.parameters.clone(),
             (**ret).clone(),
             var.metadata.clone(),
             None,
@@ -2348,17 +2308,7 @@ impl IgnisAnalyzer {
 
           if let HIRInstruction::Method(method) = property {
             let return_type = method.return_type.clone();
-            let params: Vec<(Token, DataType)> = method
-              .parameters
-              .iter()
-              .map(|p| {
-                if let HIRInstruction::Variable(v) = p {
-                  (v.name.clone(), self.extract_data_type(p))
-                } else {
-                  unreachable!()
-                }
-              })
-              .collect();
+            let params: Vec<DataType> = method.parameters.iter().map(|p| self.extract_data_type(p)).collect();
             let type_ = DataType::Function(params, Box::new(return_type));
 
             if method.metadata.is(HIRMetadataFlags::Optional) {
@@ -2385,17 +2335,7 @@ impl IgnisAnalyzer {
 
         for method in &object.methods {
           let return_type = method.return_type.clone();
-          let params: Vec<(Token, DataType)> = method
-            .parameters
-            .iter()
-            .map(|p| {
-              if let HIRInstruction::Variable(v) = p {
-                (v.name.clone(), self.extract_data_type(p))
-              } else {
-                unreachable!()
-              }
-            })
-            .collect();
+          let params: Vec<DataType> = method.parameters.iter().map(|p| self.extract_data_type(p)).collect();
           let type_ = DataType::Function(params, Box::new(return_type));
 
           if method.metadata.is(HIRMetadataFlags::Optional) {
@@ -3136,10 +3076,10 @@ impl IgnisAnalyzer {
             }
 
             for (left, right) in left_param.iter().zip(right_param) {
-              if left.1 != right.1 {
+              if left != &right {
                 return Err(Box::new(DiagnosticMessage::TypeMismatch(
-                  left.1.clone(),
-                  right.1.clone(),
+                  left.clone(),
+                  right.clone(),
                   token.clone(),
                 )));
               }
