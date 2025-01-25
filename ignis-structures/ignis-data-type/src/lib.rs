@@ -1,7 +1,7 @@
 pub mod value;
 use std::fmt::Display;
 
-use ignis_token::token_types::TokenType;
+use ignis_token::{token::Token, token_types::TokenType};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -43,7 +43,7 @@ pub enum DataType {
   Variable(String, Box<DataType>),
   Vector(Box<DataType>, Option<usize>),
   Callable(Vec<DataType>, Box<DataType>),
-  Function(Vec<DataType>, Box<DataType>),
+  Function(Vec<(Token, DataType)>, Box<DataType>),
   PendingImport(String),
   Record(String, Vec<(String, DataType)>),
   Object(Vec<(String, DataType)>),
@@ -152,7 +152,7 @@ impl Display for DataType {
         "function<{}, {}>",
         parameters
           .iter()
-          .map(|p| p.to_string())
+          .map(|p| format!("{}: {}", p.0.lexeme, p.1))
           .collect::<Vec<String>>()
           .join(", "),
         return_type

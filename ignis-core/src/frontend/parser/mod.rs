@@ -809,7 +809,7 @@ impl IgnisParser {
 
     self.context.push(IgnisParserContext::Extern);
 
-    let name = self.expression()?;
+    let name = self.consume(TokenType::Identifier)?;
 
     self.consume(TokenType::LeftBrace)?;
 
@@ -829,7 +829,7 @@ impl IgnisParser {
 
     self.context.pop();
 
-    Ok(ASTStatement::Extern(Box::new(ASTExtern::new(Box::new(name), items, metadata))))
+    Ok(ASTStatement::Extern(Box::new(ASTExtern::new(name, items, metadata))))
   }
 
   /// <extern-item> ::= <declaration> | "include" <string> ";" | "source" <string> ";"
@@ -911,7 +911,7 @@ impl IgnisParser {
   ) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Namespace)?;
 
-    let name = self.expression()?;
+    let name = self.consume(TokenType::Identifier)?;
 
     self.consume(TokenType::LeftBrace)?;
 
@@ -928,11 +928,7 @@ impl IgnisParser {
       metadata.push(ASTMetadataFlags::Export);
     }
 
-    Ok(ASTStatement::Namespace(Box::new(ASTNamespace::new(
-      Box::new(name),
-      members,
-      metadata,
-    ))))
+    Ok(ASTStatement::Namespace(Box::new(ASTNamespace::new(name, members, metadata))))
   }
 
   /// <namespace-item> ::= <function> | <const> | <record> | <class> | <enum> | <type-alias> | <interface> | <declare>
@@ -2116,8 +2112,8 @@ impl IgnisParser {
         method
           .parameters
           .iter()
-          .map(|p| p.type_annotation.clone())
-          .collect::<Vec<DataType>>(),
+          .map(|p| (p.name.clone(), p.type_annotation.clone()))
+          .collect::<Vec<(Token, DataType)>>(),
         Box::new(method.return_type.clone()),
       );
 
@@ -2271,7 +2267,10 @@ impl IgnisParser {
     };
 
     let lambda_type = DataType::Function(
-      parameters.iter().map(|p| p.type_annotation.clone()).collect(),
+      parameters
+        .iter()
+        .map(|p| (p.name.clone(), p.type_annotation.clone()))
+        .collect(),
       Box::new(return_type.clone()),
     );
 
@@ -2580,7 +2579,7 @@ impl IgnisParser {
     &mut self,
     generic_parameters: &[ASTGenericParameter],
   ) -> IgnisParserResult<DataType> {
-    let mut parameters: Vec<DataType> = Vec::new();
+    let mut parameters: Vec<(Token, DataType)> = Vec::new();
 
     if !self.check(TokenType::RightParen) {
       loop {
@@ -2604,7 +2603,7 @@ impl IgnisParser {
           return Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Colon, self.peek())));
         }
 
-        parameters.push(self.resolve_type(generic_parameters)?);
+        parameters.push((name, self.resolve_type(generic_parameters)?));
 
         if !self.match_token(&[TokenType::Comma]) {
           break;

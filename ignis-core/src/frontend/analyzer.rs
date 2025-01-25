@@ -4,19 +4,20 @@ use colored::*;
 use ignis_ast::{
   expressions::{call::ASTCall, ASTExpression},
   metadata::ASTMetadataFlags,
-  statements::{method, property, ASTStatement},
+  statements::ASTStatement,
   visitor::ASTVisitor,
 };
 use ignis_config::IgnisConfig;
 use ignis_data_type::{value::IgnisLiteralValue, DataType, GenericType};
 use ignis_hir::{
   hir_assign::HIRAssign, hir_binary::HIRBinary, hir_block::HIRBlock, hir_call::HIRCall, hir_cast::HIRCast,
-  hir_comment::HIRComment, hir_const::HIRConstant, hir_for::HIRFor, hir_for_of::HIRForOf, hir_function::HIRFunction,
-  hir_function_instance::HIRFunctionInstance, hir_if::HIRIf, hir_literal::HIRLiteral, hir_logical::HIRLogical,
-  hir_method::HIRMethod, hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn,
-  hir_ternary::HIRTernary, hir_this::HIRThis, hir_unary::HIRUnary, hir_variable::HIRVariable, hir_vector::HIRVector,
-  hir_vector_access::HIRVectorAccess, hir_while::HIRWhile, HIRInstruction, HIRInstructionType, HIRMetadata,
-  HIRMetadataFlags,
+  hir_comment::HIRComment, hir_const::HIRConstant, hir_extern::HIRExtern, hir_for::HIRFor, hir_for_of::HIRForOf,
+  hir_function::HIRFunction, hir_function_instance::HIRFunctionInstance, hir_grouping::HIRGrouping, hir_if::HIRIf,
+  hir_include::HIRInclude, hir_literal::HIRLiteral, hir_logical::HIRLogical, hir_method::HIRMethod,
+  hir_namespace::HIRNamespace, hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn,
+  hir_source::HIRSource, hir_spread::HIRSpread, hir_ternary::HIRTernary, hir_this::HIRThis, hir_unary::HIRUnary,
+  hir_variable::HIRVariable, hir_vector::HIRVector, hir_vector_access::HIRVectorAccess, hir_while::HIRWhile,
+  HIRInstruction, HIRInstructionType, HIRMetadata, HIRMetadataFlags,
 };
 use ignis_token::{token::Token, token_types::TokenType};
 
@@ -42,6 +43,7 @@ enum AnalyzerContext {
   Extern,
   Lambda,
   Match,
+  Namespace,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +66,8 @@ pub enum SymbolKind {
   TypeAlias,
   Decorator,
   Constant,
+  Extern,
+  Namespace,
 }
 
 #[derive(Debug, Clone)]
@@ -409,7 +413,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           CalleableDeclaration::Function(f) => {
             for var in f.parameters.iter() {
               if let HIRInstruction::Variable(v) = var {
-                if v.name.lexeme == symbol.name.lexeme {
+                if v.name.lexeme == Into::<Token>::into(symbol.name.clone()).lexeme {
                   let mut var = v.clone();
 
                   if var.metadata.is(HIRMetadataFlags::Moved) {
@@ -438,7 +442,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           CalleableDeclaration::Method(method) => {
             for var in method.parameters.iter() {
               if let HIRInstruction::Variable(v) = var {
-                if v.name.lexeme == symbol.name.lexeme {
+                if v.name.lexeme == Into::<Token>::into(symbol.name.clone()).lexeme {
                   let mut var = v.clone();
 
                   if var.metadata.is(HIRMetadataFlags::Moved) {
@@ -479,6 +483,36 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           constant.metadata.push(HIRMetadataFlags::Declaration);
 
           return Ok(HIRInstruction::Constant(constant));
+        }
+
+        unreachable!()
+      },
+      SymbolKind::Namespace => {
+        let is_namespace = irs.iter().find(|ir| match ir {
+          HIRInstruction::Namespace(n) => n.name.lexeme == expression.name.lexeme,
+          _ => false,
+        });
+
+        if let Some(HIRInstruction::Namespace(n)) = is_namespace {
+          let mut namespace = n.clone();
+          namespace.metadata.push(HIRMetadataFlags::Declaration);
+
+          return Ok(HIRInstruction::Namespace(namespace));
+        }
+
+        unreachable!()
+      },
+      SymbolKind::Extern => {
+        let is_extern = irs.iter().find(|ir| match ir {
+          HIRInstruction::Extern(e) => e.name.lexeme == expression.name.lexeme,
+          _ => false,
+        });
+
+        if let Some(HIRInstruction::Extern(e)) = is_extern {
+          let mut extern_ = e.clone();
+          extern_.metadata.push(HIRMetadataFlags::Declaration);
+
+          return Ok(HIRInstruction::Extern(extern_));
         }
 
         unreachable!()
@@ -567,17 +601,15 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     expression: &ignis_ast::expressions::grouping::ASTGrouping,
   ) -> AnalyzerResult {
-    todo!()
+    Ok(HIRInstruction::Grouping(HIRGrouping::new(Box::new(
+      self.analyzer(&expression.expression)?,
+    ))))
   }
 
   fn visit_member_access_expression(
     &mut self,
     expression: &ignis_ast::expressions::member_access::ASTMemberAccess,
   ) -> AnalyzerResult {
-    if expression.metadata.is(ASTMetadataFlags::NamespaceMember) {
-      todo!()
-    }
-
     let instance: HIRInstruction = self.analyzer(expression.object.as_ref())?;
     let instance_type = self.extract_data_type(&instance);
 
@@ -650,6 +682,70 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           object_instance = Some(v);
         }
       },
+      HIRInstruction::Extern(extern_) => {
+        for statement in &extern_.body {
+          match &statement {
+            HIRInstruction::Function(fun) => {
+              if fun.name.lexeme == expression.member.as_ref().lexeme {
+                object_instance = Some(HIRVariable::new(
+                  fun.name.clone(),
+                  DataType::Function(
+                    fun
+                      .parameters
+                      .iter()
+                      .map(|p| {
+                        let name = if let HIRInstruction::Variable(var) = p {
+                          var.name.clone()
+                        } else {
+                          unreachable!()
+                        };
+
+                        (name, self.extract_data_type(p))
+                      })
+                      .collect(),
+                    Box::new(fun.return_type.clone()),
+                  ),
+                  None,
+                  HIRMetadata::new(fun.metadata.flags.clone(), Some(Box::new(statement.clone()))),
+                ))
+              }
+            },
+            _ => (),
+          }
+        }
+      },
+      HIRInstruction::Namespace(namespace) => {
+        for statement in &namespace.members {
+          match &statement {
+            HIRInstruction::Function(fun) => {
+              if fun.name.lexeme == expression.member.as_ref().lexeme {
+                object_instance = Some(HIRVariable::new(
+                  fun.name.clone(),
+                  DataType::Function(
+                    fun
+                      .parameters
+                      .iter()
+                      .map(|p| {
+                        let name = if let HIRInstruction::Variable(var) = p {
+                          var.name.clone()
+                        } else {
+                          unreachable!()
+                        };
+
+                        (name, self.extract_data_type(p))
+                      })
+                      .collect(),
+                    Box::new(fun.return_type.clone()),
+                  ),
+                  None,
+                  HIRMetadata::new(fun.metadata.flags.clone(), Some(Box::new(statement.clone()))),
+                ))
+              }
+            },
+            _ => (),
+          }
+        }
+      },
       _ => {
         return Err(Box::new(DiagnosticMessage::UndefinedProperty(
           expression.member.as_ref().clone(),
@@ -657,7 +753,6 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       },
     };
 
-    // Aquí devolvemos el resultado en lugar de `todo!()`
     if let Some(v) = object_instance {
       Ok(HIRInstruction::Variable(v))
     } else {
@@ -698,33 +793,66 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     self.context.push(AnalyzerContext::Call);
     let callee = self.analyzer(&expression.callee)?;
 
-    let mut parameters = Vec::new();
-    let mut function_name: Token;
-    let mut return_type: DataType = DataType::Unknown;
-    let mut generic_parameters: Vec<DataType> = Vec::new();
-    let mut metadata = HIRMetadata::new(vec![], None);
-    let mut body = None;
-
-    match callee {
-      HIRInstruction::Function(f) => {
-        parameters = f.parameters.clone();
-        function_name = f.name.clone();
-        return_type = f.return_type.clone();
-        generic_parameters = f.generic_parameters.clone();
-        metadata = f.metadata.clone();
-        body = f.body.clone();
-      },
-      HIRInstruction::Method(_m) => {
-        // TODO: logica para métodos
-        todo!()
-      },
+    let (parameters, return_type, metadata, body, function_name, generic_parameters) = match callee {
+      HIRInstruction::Function(f) => (
+        f.parameters.clone(),
+        f.return_type.clone(),
+        f.metadata.clone(),
+        f.body.clone(),
+        f.name.clone(),
+        f.generic_parameters.clone(),
+      ),
       HIRInstruction::Variable(var) => {
-        return self.resolve_callback(expression, &var);
+        if let DataType::Function(params, ret) = &var.data_type {
+          let fun = if let HIRInstruction::Function(f) = var.metadata.complex_type.clone().unwrap().as_ref() {
+            f.clone()
+          } else {
+            return Err(Box::new(DiagnosticMessage::NotCallable(expression.name.clone())));
+          };
+
+          (
+            params
+              .iter()
+              .map(|p| {
+                fun
+                  .parameters
+                  .iter()
+                  .find(|x| {
+                    if let HIRInstruction::Variable(v) = x {
+                      v.name.lexeme == p.0.lexeme
+                    } else {
+                      false
+                    }
+                  })
+                  .unwrap()
+                  .clone()
+              })
+              .collect(),
+            (**ret).clone(),
+            var.metadata.clone(),
+            None,
+            var.name.clone(),
+            vec![],
+          )
+        } else {
+          return Err(Box::new(DiagnosticMessage::NotCallable(expression.name.clone())));
+        }
+      },
+      HIRInstruction::Method(m) => {
+        // lógica para métodos
+        todo!();
       },
       _ => {
         return Err(Box::new(DiagnosticMessage::NotCallable(expression.name.clone())));
       },
-    }
+    };
+
+    let mut parameters = parameters;
+    let mut metadata = metadata;
+    let mut body = body;
+    let mut function_name = function_name;
+    let mut generic_parameters = generic_parameters;
+    let mut return_type = return_type;
 
     if !generic_parameters.is_empty() {
       if expression.arguments.len() < generic_parameters.len() {
@@ -742,34 +870,10 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         function_name.column.clone(),
         function_name.file_name.clone(),
       );
-      // Token::new(
-      //   TokenType::Identifier,
-      //   TextSpan::new(
-      //     function_name.span.start,
-      //     function_name.span.end,
-      //     function_name.span.line,
-      //     format!(
-      //       "{}_{}",
-      //       function_name.span.literal,
-      //       expression
-      //         .type_arguments
-      //         .iter()
-      //         .map(|p| if let DataType::GenericType(g) = p {
-      //           g.base.to_string()
-      //         } else {
-      //           p.to_string()
-      //         })
-      //         .collect::<Vec<String>>()
-      //         .join("_")
-      //     ),
-      //     function_name.span.column,
-      //     function_name.span.file.clone(),
-      //   ),
-      // );
 
       let func: Option<HIRFunctionInstance> = self.find_function_instance(&instance_name.lexeme);
 
-      if let Some(func) = func {
+      if let Some(func) = &func {
         return_type = func.return_type.clone();
         parameters.clone_from(&func.parameters);
         body.clone_from(&func.body);
@@ -793,33 +897,46 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       }
     }
 
-    if parameters.len() != expression.arguments.len() {
-      return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
-        parameters.len(),
-        expression.arguments.len(),
-        function_name.clone(),
-      )));
-    }
-
     let mut arguments = Vec::<HIRInstruction>::new();
 
-    for (i, arg) in expression.arguments.iter().enumerate() {
-      let arg_hir = self.analyzer(arg)?;
+    if !parameters.is_empty() {
+      let last_param_instruction = parameters.last().unwrap();
+      let last_params_is_variadic = last_param_instruction.get_metadata().is(HIRMetadataFlags::Variadic);
 
-      let param_instruction = &parameters[i];
-      let param_type = self.extract_data_type(param_instruction);
+      let required_args_count = if last_params_is_variadic {
+        parameters.len() - 1
+      } else {
+        parameters.len()
+      };
 
-      let arg_type = self.extract_data_type(&arg_hir);
-
-      if arg_type != param_type && arg_type != DataType::Unknown && param_type != DataType::Unknown {
-        return Err(Box::new(DiagnosticMessage::ArgumentTypeMismatch(
-          param_type,
-          arg_type,
-          arg.into(),
+      if expression.arguments.len() < required_args_count
+        || (!last_params_is_variadic && expression.arguments.len() != required_args_count)
+      {
+        return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
+          parameters.len(),
+          expression.arguments.len(),
+          expression.name.clone(),
         )));
       }
 
-      arguments.push(arg_hir);
+      for (i, arg) in expression.arguments.iter().enumerate() {
+        let arg_hir = self.analyzer(arg)?;
+
+        let param_instruction = &parameters[i];
+        let param_type = self.extract_data_type(param_instruction);
+
+        let arg_type = self.extract_data_type(&arg_hir);
+
+        if arg_type != param_type && arg_type != DataType::Unknown && param_type != DataType::Unknown {
+          return Err(Box::new(DiagnosticMessage::ArgumentTypeMismatch(
+            param_type,
+            arg_type,
+            arg.into(),
+          )));
+        }
+
+        arguments.push(arg_hir);
+      }
     }
 
     let instruction = HIRInstruction::Call(HIRCall::new(
@@ -969,7 +1086,19 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     expression: &ignis_ast::expressions::spread::ASTSpread,
   ) -> AnalyzerResult {
-    todo!()
+    let var = self.analyzer(expression.expression.as_ref())?;
+    let var_type = self.extract_data_type(&var);
+
+    match var_type {
+      DataType::Vector(_, _) | DataType::Object(_) | DataType::Record(_, _) | DataType::String => (),
+      _ => return Err(Box::new(DiagnosticMessage::InvalidSpreadExpression(expression.token.clone()))),
+    };
+
+    Ok(HIRInstruction::Spread(HIRSpread::new(
+      Box::new(var),
+      expression.token.clone(),
+      var_type,
+    )))
   }
 
   fn visit_comment_statement(
@@ -1061,9 +1190,33 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     self.begin_scope();
 
     let mut parameters: Vec<HIRInstruction> = vec![];
+    let mut has_variadic = false;
+    let mut has_optional = false;
 
     for parameter in &expression.parameters {
       let hir = self.analyze_statement(&ASTStatement::Variable(Box::new(parameter.clone())))?;
+
+      if has_variadic {
+        return Err(Box::new(DiagnosticMessage::InvalidParameterAfterVariadic(
+          parameter.name.clone(),
+        )));
+      }
+
+      let metadata = hir.get_metadata().clone();
+
+      if has_optional && !metadata.is(HIRMetadataFlags::Optional) {
+        return Err(Box::new(DiagnosticMessage::InvalidParameterAfterOptional(
+          parameter.name.clone(),
+        )));
+      }
+
+      if metadata.is(HIRMetadataFlags::Variadic) {
+        has_variadic = true;
+      }
+
+      if metadata.is(HIRMetadataFlags::Optional) {
+        has_optional = true;
+      }
 
       parameters.push(hir);
     }
@@ -1628,28 +1781,118 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     extern_: &ignis_ast::statements::r#extern::ASTExtern,
   ) -> AnalyzerResult {
-    todo!()
+    self.context.push(AnalyzerContext::Extern);
+    if self.is_declared(&extern_.name.lexeme) {
+      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
+        extern_.name.lexeme.clone(),
+        extern_.name.clone(),
+      )));
+    }
+
+    self.declare(
+      extern_.name.lexeme.clone(),
+      SymbolInfo::new(extern_.name.clone(), DataType::Null, vec![], SymbolKind::Extern, None),
+    );
+
+    self.begin_scope();
+
+    let mut metadata: Vec<HIRMetadataFlags> = vec![];
+
+    for value in extern_.metadata.get().iter() {
+      metadata.push(value.into());
+    }
+
+    let mut body: Vec<HIRInstruction> = vec![];
+
+    for statement in &extern_.body {
+      let hir = self.analyze_statement(statement)?;
+
+      body.push(hir);
+    }
+
+    self.end_scope();
+
+    self.context.pop();
+
+    let extern_ = HIRExtern::new(extern_.name.clone(), body, HIRMetadata::new(metadata, None));
+
+    let hir = HIRInstruction::Extern(extern_.clone());
+
+    self.edit_symbol(
+      extern_.name.lexeme.clone(),
+      SymbolInfo::new(
+        extern_.name.clone(),
+        DataType::Null,
+        vec![],
+        SymbolKind::Extern,
+        Some(hir.clone()),
+      ),
+    );
+
+    Ok(hir)
   }
 
   fn visit_include_statement(
     &mut self,
     include: &ignis_token::token::Token,
   ) -> AnalyzerResult {
-    todo!()
+    Ok(HIRInstruction::Include(HIRInclude::new(include.clone())))
   }
 
   fn visit_source_statement(
     &mut self,
     source: &ignis_token::token::Token,
   ) -> AnalyzerResult {
-    todo!()
+    Ok(HIRInstruction::Source(HIRSource::new(source.clone())))
   }
 
   fn visit_namespace_statement(
     &mut self,
     namespace: &ignis_ast::statements::namespace::ASTNamespace,
   ) -> AnalyzerResult {
-    todo!()
+    if self.is_declared(&namespace.name.lexeme) {
+      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
+        namespace.name.lexeme.clone(),
+        namespace.name.clone(),
+      )));
+    }
+
+    self.context.push(AnalyzerContext::Namespace);
+
+    self.declare(
+      namespace.name.lexeme.clone(),
+      SymbolInfo::new(namespace.name.clone(), DataType::Pending, vec![], SymbolKind::Namespace, None),
+    );
+
+    self.begin_scope();
+    let mut body: Vec<HIRInstruction> = vec![];
+
+    for statement in &namespace.members {
+      let hir = self.analyze_statement(statement)?;
+      self.current_block.push(hir.clone());
+
+      body.push(hir);
+    }
+
+    self.end_scope();
+
+    self.context.pop();
+
+    let metadata = HIRMetadata::new(namespace.metadata.get().iter().map(|m| m.into()).collect(), None);
+    let hir = HIRInstruction::Namespace(HIRNamespace::new(namespace.name.clone(), body, metadata));
+
+    self.edit_symbol(
+      namespace.name.lexeme.clone(),
+      SymbolInfo::new(
+        namespace.name.clone(),
+        DataType::Pending,
+        vec![],
+        SymbolKind::Namespace,
+        Some(hir.clone()),
+      ),
+    );
+
+    Ok(hir)
   }
 
   fn visit_type_alias_statement(
@@ -1790,9 +2033,6 @@ impl IgnisAnalyzer {
       HIRInstruction::Vector(array) => array.data_type.clone(),
       //   HIRInstruction::Class(c) => DataType::ClassType(c.name.span.literal.clone()),
       //   HIRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.span.literal.clone()),
-      //   HIRInstruction::MethodCall(m) => m.return_type.clone(),
-      //   HIRInstruction::Get(g) => g.data_type.clone(),
-      //   HIRInstruction::Set(s) => s.data_type.clone(),
       //   HIRInstruction::Enum(e) => DataType::Enum(e.name.span.literal.clone()),
       HIRInstruction::Record(r) => {
         let name = r.name.lexeme.clone();
@@ -1809,7 +2049,17 @@ impl IgnisAnalyzer {
 
           if let HIRInstruction::Method(method) = property {
             let return_type = method.return_type.clone();
-            let params: Vec<DataType> = method.parameters.iter().map(|p| self.extract_data_type(p)).collect();
+            let params: Vec<(Token, DataType)> = method
+              .parameters
+              .iter()
+              .map(|p| {
+                if let HIRInstruction::Variable(v) = p {
+                  (v.name.clone(), self.extract_data_type(p))
+                } else {
+                  unreachable!()
+                }
+              })
+              .collect();
             let type_ = DataType::Function(params, Box::new(return_type));
 
             if method.metadata.is(HIRMetadataFlags::Optional) {
@@ -1836,7 +2086,17 @@ impl IgnisAnalyzer {
 
         for method in &object.methods {
           let return_type = method.return_type.clone();
-          let params: Vec<DataType> = method.parameters.iter().map(|p| self.extract_data_type(p)).collect();
+          let params: Vec<(Token, DataType)> = method
+            .parameters
+            .iter()
+            .map(|p| {
+              if let HIRInstruction::Variable(v) = p {
+                (v.name.clone(), self.extract_data_type(p))
+              } else {
+                unreachable!()
+              }
+            })
+            .collect();
           let type_ = DataType::Function(params, Box::new(return_type));
 
           if method.metadata.is(HIRMetadataFlags::Optional) {
@@ -1855,6 +2115,10 @@ impl IgnisAnalyzer {
       },
       HIRInstruction::This(this) => this.data_type.clone(),
       //   HIRInstruction::Type(t) => t.value.as_ref().clone(),
+      HIRInstruction::Extern(_) => DataType::Null,
+      HIRInstruction::Include(_) => DataType::Null,
+      HIRInstruction::Source(_) => DataType::Null,
+      HIRInstruction::Namespace(_) => DataType::Null,
       _ => DataType::Unknown,
     }
   }
@@ -2280,31 +2544,13 @@ impl IgnisAnalyzer {
     right: &HIRInstruction,
     operator: &HIRInstructionType,
   ) -> bool {
-    let left = if let HIRInstruction::Literal(l) = left {
-      l
-    } else {
-      return false;
-    };
-    let right = if let HIRInstruction::Literal(r) = right {
-      r
-    } else {
-      return false;
-    };
+    let left = self.extract_data_type(left);
+    let right = self.extract_data_type(right);
 
     match operator {
-      HIRInstructionType::And | HIRInstructionType::Or => matches!(
-        (left, right),
-        (
-          HIRLiteral {
-            value: IgnisLiteralValue::Boolean(_),
-            ..
-          },
-          HIRLiteral {
-            value: IgnisLiteralValue::Boolean(_),
-            ..
-          }
-        )
-      ),
+      HIRInstructionType::And | HIRInstructionType::Or => {
+        matches!((left, right), (DataType::Boolean, DataType::Boolean,))
+      },
       _ => false,
     }
   }
@@ -2591,10 +2837,10 @@ impl IgnisAnalyzer {
             }
 
             for (left, right) in left_param.iter().zip(right_param) {
-              if left != &right {
+              if left.1 != right.1 {
                 return Err(Box::new(DiagnosticMessage::TypeMismatch(
-                  left.clone(),
-                  right.clone(),
+                  left.1.clone(),
+                  right.1.clone(),
                   token.clone(),
                 )));
               }
@@ -2951,68 +3197,6 @@ impl IgnisAnalyzer {
     }
 
     (result_std, result_scopes_variables)
-  }
-
-  fn resolve_callback(
-    &mut self,
-    call: &ASTCall,
-    variable: &HIRVariable,
-  ) -> AnalyzerResult {
-    let mut current_ir = self.hir.get_mut(&self.current_file).unwrap().clone();
-    let mut parameters = vec![];
-
-    let mut return_type = variable.data_type.clone();
-
-    if let DataType::Function(params, f_return_type) = &variable.data_type {
-      if call.arguments.len() < params.len() || call.arguments.len() > params.len() {
-        return Err(Box::new(DiagnosticMessage::InvalidNumberOfArguments(
-          call.arguments.len(),
-          params.len(),
-          call.name.clone(),
-        )));
-      }
-
-      for (i, param) in call.arguments.iter().enumerate() {
-        let ir_parameter = self.analyzer(param)?;
-        let param_type: DataType = self.extract_data_type(&ir_parameter);
-
-        if param_type != params[i] && param_type != DataType::Unknown && params[i] != DataType::Unknown {
-          return Err(Box::new(DiagnosticMessage::ArgumentTypeMismatch(
-            param_type.clone(),
-            params[i].clone(),
-            call.name.clone(),
-          )));
-        }
-
-        parameters.push(ir_parameter);
-      }
-
-      return_type = (**f_return_type).clone();
-    }
-
-    let function_instance = HIRFunctionInstance::new(
-      Box::new(call.name.clone()),
-      Box::new(call.name.clone()),
-      vec![],
-      parameters.to_owned(),
-      return_type.clone(),
-      None,
-      HIRMetadata::new(vec![], None),
-    );
-
-    let instruction = HIRInstruction::FunctionInstance(function_instance.clone());
-
-    current_ir.push(instruction.clone());
-
-    self.hir.insert(self.current_file.clone(), current_ir);
-
-    Ok(HIRInstruction::Call(HIRCall::new(
-      call.name.clone(),
-      parameters,
-      return_type,
-      vec![],
-      HIRMetadata::new(vec![], None),
-    )))
   }
 
   fn resolve_generic_params(

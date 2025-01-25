@@ -133,6 +133,9 @@ pub enum DiagnosticMessage {
   UnexpectedReference(DataType, Token),
   BorrowedValueHasMoved(Token),
   InvalidPropertyType(Token),
+  InvalidSpreadExpression(Token),
+  InvalidParameterAfterVariadic(Token),
+  InvalidParameterAfterOptional(Token),
   // #endregion Analyzer
 }
 
@@ -516,6 +519,15 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::InvalidPropertyType(token) => {
         write!(f, "Invalid property type '{}'", token.lexeme)
       },
+      DiagnosticMessage::InvalidSpreadExpression(token) => {
+        write!(f, "Invalid spread expression '{}'", token.lexeme)
+      },
+      DiagnosticMessage::InvalidParameterAfterVariadic(token) => {
+        write!(f, "Invalid parameter after variadic '{}'", token.lexeme)
+      },
+      DiagnosticMessage::InvalidParameterAfterOptional(token) => {
+        write!(f, "Invalid parameter after optional '{}'", token.lexeme)
+      },
     }
   }
 }
@@ -643,7 +655,10 @@ impl From<&DiagnosticMessage> for Token {
       | DiagnosticMessage::UnexpectedReference(_, token)
       | DiagnosticMessage::BorrowedValueHasMoved(token)
       | DiagnosticMessage::UndefinedImport(token)
-      | DiagnosticMessage::InvalidPropertyType(token) => token.clone(),
+      | DiagnosticMessage::InvalidPropertyType(token)
+      | DiagnosticMessage::InvalidSpreadExpression(token)
+      | DiagnosticMessage::InvalidParameterAfterVariadic(token)
+      | DiagnosticMessage::InvalidParameterAfterOptional(token) => token.clone(),
     }
   }
 }
@@ -772,6 +787,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::PotentialTypeMismatch(_, _, _) => "I0118".to_string(),
       DiagnosticMessage::InvalidTypeArgument(_, _, _) => "I0119".to_string(),
       DiagnosticMessage::InvalidPropertyType(_) => "I0120".to_string(),
+      DiagnosticMessage::InvalidSpreadExpression(_) => "I0121".to_string(),
+      DiagnosticMessage::InvalidParameterAfterVariadic(_) => "I0122".to_string(),
+      DiagnosticMessage::InvalidParameterAfterOptional(_) => "I0123".to_string(),
     }
   }
 

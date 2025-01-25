@@ -15,15 +15,19 @@ pub mod hir_function_instance;
 pub mod hir_get;
 pub mod hir_if;
 pub mod hir_import;
+pub mod hir_include;
 pub mod hir_literal;
 pub mod hir_logical;
 pub mod hir_member_access;
 pub mod hir_method;
 pub mod hir_method_call;
+pub mod hir_namespace;
 pub mod hir_object;
 pub mod hir_record;
 pub mod hir_return;
 pub mod hir_set;
+pub mod hir_source;
+pub mod hir_spread;
 pub mod hir_ternary;
 pub mod hir_this;
 pub mod hir_unary;
@@ -32,6 +36,7 @@ pub mod hir_variable;
 pub mod hir_vector;
 pub mod hir_vector_access;
 pub mod hir_while;
+pub mod hir_grouping;
 
 use std::fmt::{self, Display, Formatter};
 
@@ -41,19 +46,25 @@ use hir_call::HIRCall;
 use hir_cast::HIRCast;
 use hir_comment::HIRComment;
 use hir_const::HIRConstant;
+use hir_extern::HIRExtern;
 use hir_for::HIRFor;
 use hir_for_of::HIRForOf;
 use hir_function::HIRFunction;
 use hir_function_instance::HIRFunctionInstance;
+use hir_grouping::HIRGrouping;
 use hir_if::HIRIf;
+use hir_include::HIRInclude;
 use hir_literal::HIRLiteral;
 use hir_binary::HIRBinary;
 use hir_logical::HIRLogical;
 use hir_member_access::HIRMemberAccess;
 use hir_method::HIRMethod;
+use hir_namespace::HIRNamespace;
 use hir_object::HIRObjectLiteral;
 use hir_record::HIRRecord;
 use hir_return::HIRReturn;
+use hir_source::HIRSource;
+use hir_spread::HIRSpread;
 use hir_ternary::HIRTernary;
 use hir_this::HIRThis;
 use hir_variable::HIRVariable;
@@ -89,12 +100,38 @@ pub enum HIRInstructionType {
   Decrement,
 }
 
+impl HIRInstructionType {
+  pub fn from_token_kind(kind: &TokenType) -> Self {
+    match kind {
+      TokenType::Plus => HIRInstructionType::Add,
+      TokenType::Minus => HIRInstructionType::Sub,
+      TokenType::Asterisk => HIRInstructionType::Mul,
+      TokenType::Slash => HIRInstructionType::Div,
+      TokenType::GreaterEqual => HIRInstructionType::GreaterEqual,
+      TokenType::Greater => HIRInstructionType::Greater,
+      TokenType::LessEqual => HIRInstructionType::LessEqual,
+      TokenType::Less => HIRInstructionType::Less,
+      TokenType::Mod => HIRInstructionType::Mod,
+      TokenType::EqualEqual => HIRInstructionType::Equal,
+      TokenType::BangEqual => HIRInstructionType::NotEqual,
+      TokenType::And => HIRInstructionType::And,
+      TokenType::Or => HIRInstructionType::Or,
+      TokenType::Bang => HIRInstructionType::Not,
+      TokenType::Equal => HIRInstructionType::Assign,
+      TokenType::Increment => HIRInstructionType::Increment,
+      TokenType::Decrement => HIRInstructionType::Decrement,
+      _ => unreachable!(),
+    }
+  }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub enum HIRInstruction {
   Literal(HIRLiteral),
   Binary(HIRBinary),
   Logical(HIRLogical),
   Unary(HIRUnary),
+  Grouping(HIRGrouping),
   Function(HIRFunction),
   Block(HIRBlock),
   Variable(HIRVariable),
@@ -117,29 +154,19 @@ pub enum HIRInstruction {
   This(HIRThis),
   MemberAccess(HIRMemberAccess),
   Assign(HIRAssign),
+  Extern(HIRExtern),
+  Namespace(HIRNamespace),
+  Include(HIRInclude),
+  Source(HIRSource),
+  Spread(HIRSpread),
 }
 
-impl HIRInstructionType {
-  pub fn from_token_kind(kind: &TokenType) -> Self {
-    match kind {
-      TokenType::Plus => HIRInstructionType::Add,
-      TokenType::Minus => HIRInstructionType::Sub,
-      TokenType::Asterisk => HIRInstructionType::Mul,
-      TokenType::Slash => HIRInstructionType::Div,
-      TokenType::GreaterEqual => HIRInstructionType::GreaterEqual,
-      TokenType::Greater => HIRInstructionType::Greater,
-      TokenType::LessEqual => HIRInstructionType::LessEqual,
-      TokenType::Less => HIRInstructionType::Less,
-      TokenType::Mod => HIRInstructionType::Mod,
-      TokenType::EqualEqual => HIRInstructionType::Equal,
-      TokenType::BangEqual => HIRInstructionType::NotEqual,
-      TokenType::And => HIRInstructionType::And,
-      TokenType::Or => HIRInstructionType::Or,
-      TokenType::Bang => HIRInstructionType::Not,
-      TokenType::Equal => HIRInstructionType::Assign,
-      TokenType::Increment => HIRInstructionType::Increment,
-      TokenType::Decrement => HIRInstructionType::Decrement,
-      _ => unreachable!(),
+impl HIRInstruction {
+  pub fn get_metadata(&self) -> &HIRMetadata {
+    match self {
+      HIRInstruction::Variable(v) => &v.metadata,
+      HIRInstruction::Function(f) => &f.metadata,
+      _ => todo!(),
     }
   }
 }

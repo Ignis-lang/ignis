@@ -1,19 +1,20 @@
+use ignis_token::token::Token;
 use serde::Serialize;
 
-use crate::{expressions::ASTExpression, metadata::ASTMetadata};
+use crate::metadata::ASTMetadata;
 
 use super::ASTStatement;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ASTNamespace {
-  pub name: Box<ASTExpression>,
+  pub name: Token,
   pub members: Vec<ASTStatement>,
   pub metadata: ASTMetadata,
 }
 
 impl ASTNamespace {
   pub fn new(
-    name: Box<ASTExpression>,
+    name: Token,
     members: Vec<ASTStatement>,
     metadata: ASTMetadata,
   ) -> Self {

@@ -4,18 +4,22 @@ use serde::Serialize;
 use crate::{HIRInstruction, HIRMetadata};
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HIRExtern {
+pub struct HIRNamespace {
   pub name: Token,
-  pub body: Vec<HIRInstruction>,
+  pub members: Vec<HIRInstruction>,
   pub metadata: HIRMetadata,
 }
 
-impl HIRExtern {
+impl HIRNamespace {
   pub fn new(
     name: Token,
-    body: Vec<HIRInstruction>,
+    members: Vec<HIRInstruction>,
     metadata: HIRMetadata,
   ) -> Self {
-    Self { name, body, metadata }
+    Self {
+      name,
+      members,
+      metadata,
+    }
   }
 }
