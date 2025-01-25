@@ -922,12 +922,63 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       for (i, arg) in expression.arguments.iter().enumerate() {
         let arg_hir = self.analyzer(arg)?;
 
-        let param_instruction = &parameters[i];
-        let param_type = self.extract_data_type(param_instruction);
+        let param_instruction: &HIRInstruction = if i > parameters.len() {
+          &parameters.last().unwrap()
+        } else {
+          &parameters[i]
+        };
+
+        let param_type = self.extract_data_type(&param_instruction);
+
+        let param_var = if let HIRInstruction::Variable(v) = param_instruction {
+          v
+        } else {
+          unreachable!()
+        };
 
         let arg_type = self.extract_data_type(&arg_hir);
 
-        if arg_type != param_type && arg_type != DataType::Unknown && param_type != DataType::Unknown {
+        if let HIRInstruction::Variable(v) = &arg_hir {
+          if !(v.metadata.is(HIRMetadataFlags::Reference) || v.metadata.is(HIRMetadataFlags::ExplicitReference))
+            && param_var.metadata.is(HIRMetadataFlags::Reference)
+          {
+            return Err(Box::new(DiagnosticMessage::ExpectedReference(
+              v.data_type.clone(),
+              param_type.clone(),
+              v.name.clone(),
+            )));
+          }
+
+          if (v.metadata.is(HIRMetadataFlags::Reference) || v.metadata.is(HIRMetadataFlags::ExplicitReference))
+            && !param_var.metadata.is(HIRMetadataFlags::Reference)
+          {
+            return Err(Box::new(DiagnosticMessage::UnexpectedReference(
+              v.data_type.clone(),
+              v.name.clone(),
+            )));
+          }
+
+          if !v.metadata.is(HIRMetadataFlags::Mutable) && param_var.metadata.is(HIRMetadataFlags::Mutable) {
+            return Err(Box::new(DiagnosticMessage::ImmutableVariableAsMutableParameter(
+              param_var.name.clone(),
+              v.name.clone(),
+              expression.name.clone(),
+            )));
+          }
+        }
+
+        if param_var.metadata.is(HIRMetadataFlags::Variadic) {
+          let variac_data_type = param_var.data_type.clone();
+          if let DataType::Vector(dt, _) = variac_data_type {
+            if &arg_type != dt.as_ref() && arg_type != DataType::Unknown && dt.as_ref() != &DataType::Unknown {
+              return Err(Box::new(DiagnosticMessage::ArgumentTypeMismatch(
+                dt.as_ref().clone(),
+                arg_type,
+                arg.into(),
+              )));
+            }
+          }
+        } else if arg_type != param_type && arg_type != DataType::Unknown && param_type != DataType::Unknown {
           return Err(Box::new(DiagnosticMessage::ArgumentTypeMismatch(
             param_type,
             arg_type,
