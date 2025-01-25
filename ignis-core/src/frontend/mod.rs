@@ -6,7 +6,7 @@ use std::io::Read;
 
 use ignis_config::{DebugPrint, IgnisConfig};
 use ignis_token::token::Token;
-use lexer::Lexer;
+use lexer::IgnisLexer;
 
 use crate::diagnostics::{diagnostic_report::DiagnosticReport, Diagnostic};
 
@@ -45,7 +45,7 @@ impl IgnisFrontend {
 
     let source = get_file_content(&file);
 
-    let mut lexer = Lexer::new(self.config.clone(), source.as_str(), file.clone());
+    let mut lexer = IgnisLexer::new(self.config.clone(), source.as_str(), file.clone());
     lexer.scan_tokens(false);
 
     for diagnostic in lexer.diagnostics {
@@ -70,7 +70,8 @@ impl IgnisFrontend {
 
     let std = analyzer::IgnisAnalyzer::load_primitive_std(&self.config);
 
-    let mut analyzer = analyzer::IgnisAnalyzer::new(file, statements, std.0.clone(), std.1.clone());
+    let mut analyzer =
+      analyzer::IgnisAnalyzer::new(self.config.clone(), file, statements, std.0.clone(), std.1.clone());
     let analyzer_result = analyzer.process(true);
 
     if analyzer_result.is_err() {

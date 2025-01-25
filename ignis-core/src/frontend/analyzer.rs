@@ -1,10 +1,11 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, fs, ops::{Deref, DerefMut}, path::Path};
 
+use super::{lexer::IgnisLexer, parser::IgnisParser};
 use colored::*;
 use ignis_ast::{
   expressions::{call::ASTCall, ASTExpression},
   metadata::ASTMetadataFlags,
-  statements::ASTStatement,
+  statements::{import::ASTImport, ASTStatement},
   visitor::ASTVisitor,
 };
 use ignis_config::IgnisConfig;
@@ -13,17 +14,15 @@ use ignis_hir::{
   hir_assign::HIRAssign, hir_binary::HIRBinary, hir_block::HIRBlock, hir_call::HIRCall, hir_cast::HIRCast,
   hir_comment::HIRComment, hir_const::HIRConstant, hir_extern::HIRExtern, hir_for::HIRFor, hir_for_of::HIRForOf,
   hir_function::HIRFunction, hir_function_instance::HIRFunctionInstance, hir_grouping::HIRGrouping, hir_if::HIRIf,
-  hir_include::HIRInclude, hir_literal::HIRLiteral, hir_logical::HIRLogical, hir_method::HIRMethod,
-  hir_namespace::HIRNamespace, hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn,
-  hir_source::HIRSource, hir_spread::HIRSpread, hir_ternary::HIRTernary, hir_this::HIRThis, hir_unary::HIRUnary,
-  hir_variable::HIRVariable, hir_vector::HIRVector, hir_vector_access::HIRVectorAccess, hir_while::HIRWhile,
-  HIRInstruction, HIRInstructionType, HIRMetadata, HIRMetadataFlags,
+  hir_import::HIRImport, hir_include::HIRInclude, hir_literal::HIRLiteral, hir_logical::HIRLogical,
+  hir_method::HIRMethod, hir_namespace::HIRNamespace, hir_object::HIRObjectLiteral, hir_record::HIRRecord,
+  hir_return::HIRReturn, hir_source::HIRSource, hir_spread::HIRSpread, hir_ternary::HIRTernary, hir_this::HIRThis,
+  hir_unary::HIRUnary, hir_variable::HIRVariable, hir_vector::HIRVector, hir_vector_access::HIRVectorAccess,
+  hir_while::HIRWhile, HIRInstruction, HIRInstructionType, HIRMetadata, HIRMetadataFlags,
 };
 use ignis_token::{token::Token, token_types::TokenType};
 
 use crate::diagnostics::{diagnostic_report::DiagnosticReport, message::DiagnosticMessage};
-
-use super::{lexer::Lexer, parser::IgnisParser};
 
 pub type AnalyzerResult = Result<HIRInstruction, Box<DiagnosticMessage>>;
 type CheckCompatibility<T> = (bool, T);
@@ -98,6 +97,7 @@ impl SymbolInfo {
 }
 
 pub struct IgnisAnalyzer {
+  config: Box<IgnisConfig>,
   programs: HashMap<String, Vec<ASTStatement>>,
   diagnostics: Vec<DiagnosticMessage>,
   hir: HashMap<String, Vec<HIRInstruction>>,
@@ -1650,7 +1650,29 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     import: &ignis_ast::statements::import::ASTImport,
   ) -> AnalyzerResult {
-    todo!()
+    let mut block_stack: HashMap<String, SymbolInfo> = self.symbol_stack.last_mut().unwrap().clone();
+    let mut path = import.module_path.lexeme.clone();
+
+    if !import.is_std {
+      todo!()
+      // self.resolve_module_import(statement, &mut block_stack)?;
+    } else {
+      path = format!("std/{}/mod.ign", path.split("::").last().unwrap());
+      self.resolve_std_import(import, &mut block_stack)?;
+    }
+
+    self.symbol_stack.pop();
+    self.symbol_stack.push(block_stack);
+
+    Ok(HIRInstruction::Import(HIRImport::new(
+      import
+        .symbols
+        .clone()
+        .into_iter()
+        .map(|i| (i.name, i.alias))
+        .collect::<Vec<(Token, Option<Token>)>>(),
+      path,
+    )))
   }
 
   fn visit_record_statement(
@@ -1970,6 +1992,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
 impl IgnisAnalyzer {
   pub fn new(
+    config: Box<IgnisConfig>,
     current_file: String,
     program: Vec<ASTStatement>,
     primitives_std: HashMap<String, Vec<HIRInstruction>>,
@@ -1979,6 +2002,7 @@ impl IgnisAnalyzer {
     let hir = HashMap::from([(current_file.clone(), vec![])]);
 
     Self {
+      config,
       current_type: None,
       context: Vec::new(),
       current_block: vec![],
@@ -3231,16 +3255,22 @@ impl IgnisAnalyzer {
 
       let file_row = file_row.unwrap();
       let source = String::from_utf8(file_row).unwrap();
+      let config = Box::new(config.clone());
 
-      let mut lexer = Lexer::new(Box::new(config.clone()), &source, lib.clone());
+      let mut lexer = IgnisLexer::new(config, &source, lib.clone());
       lexer.scan_tokens(true);
 
-      let mut parser = IgnisParser::new(Box::new(config.clone()), lexer.tokens.clone());
+      let mut parser = IgnisParser::new(config, lexer.tokens.clone());
       let result = parser.parse(true);
 
       let statements = result.0;
-      let mut analyzer =
-        IgnisAnalyzer::new(lib.clone(), statements, result_std.clone(), result_scopes_variables.clone());
+      let mut analyzer = Self::new(
+        config,
+        lib.clone(),
+        statements,
+        result_std.clone(),
+        result_scopes_variables.clone(),
+      );
       let _ = analyzer.process(true);
 
       result_std.insert(lib.clone(), analyzer.hir.get(&lib).unwrap().clone());
@@ -3442,5 +3472,153 @@ impl IgnisAnalyzer {
       },
       _ => false,
     }
+  }
+
+  fn resolve_std_import(
+    &mut self,
+    statement: &ASTImport,
+    block_stack: &mut HashMap<String, SymbolInfo>,
+  ) -> Result<(), Box<DiagnosticMessage>> {
+    let lib_path_str = statement.module_path.lexeme.split("::").collect::<Vec<&str>>()[1].to_owned() + "/mod.ign";
+    let lib = "std/".to_owned() + &lib_path_str;
+
+    if self.primitives_std.contains_key(&lib) {
+      let irs = self.primitives_std.get(&lib).unwrap().clone();
+      let import_scope_variables = self.primitives_symbol_stack.get(&lib).unwrap().clone();
+
+      for ir in &irs {
+        self.define_import(statement, ir, block_stack, &import_scope_variables)?;
+      }
+
+      return Ok(());
+    }
+
+    let mut env = std::env::var("IGNIS_HOME");
+
+    if env.is_err() {
+      env = std::env::var("PWD");
+    }
+
+    let std_path = Path::new(&env.unwrap()).join("std");
+    let lib_path = std_path.join(&lib_path_str);
+    let file_row = fs::read(lib_path);
+
+    if file_row.is_err() {
+      println!("{:?}", file_row);
+      return Ok(());
+    }
+
+    let file = file_row.unwrap();
+
+    let source = String::from_utf8(file).unwrap();
+    let mut lexer = IgnisLexer::new(self.config.clone(), &source, lib.clone());
+    lexer.scan_tokens(true);
+
+    let mut parser = IgnisParser::new(self.config.clone(), lexer.tokens.clone());
+    let result = parser.parse(true);
+    let statements = result.0;
+
+    let mut analyzer = Self::new(
+      self.config.clone(),
+      lib.clone(),
+      statements,
+      self.primitives_std.clone(),
+      self.primitives_symbol_stack.clone(),
+    );
+    let _ = analyzer.process(true);
+
+    analyzer.diagnostics.iter().for_each(|d| {
+      self.diagnostics.push(d.clone());
+    });
+
+    let import_scope_variables = analyzer.symbol_stack.clone();
+
+    for ir in analyzer.hir.get(&lib).unwrap() {
+      self.define_import(statement, ir, block_stack, &import_scope_variables)?;
+    }
+
+    for ir in analyzer.hir {
+      self.hir.insert(ir.0.clone(), ir.1.clone());
+    }
+
+    Ok(())
+  }
+
+  fn define_import(
+    &mut self,
+    statement: &ASTImport,
+    ir: &HIRInstruction,
+    block_stack: &mut HashMap<String, SymbolInfo>,
+    import_scope_variables: &Vec<HashMap<String, SymbolInfo>>,
+  ) -> Result<(), Box<DiagnosticMessage>> {
+    let mut current_ir = self.hir.get(&self.current_file).unwrap().clone();
+
+    match ir {
+      HIRInstruction::Namespace(namespace) => {
+        for symbol in &statement.symbols {
+          if symbol.name.lexeme == namespace.name.lexeme && !namespace.metadata.is(HIRMetadataFlags::Exported) {
+            return Err(Box::new(DiagnosticMessage::ImportedNamespaceIsNotExported(symbol.name.clone())));
+          }
+
+          let mut variable = import_scope_variables
+            .iter()
+            .find(|v| v.get(&symbol.name.lexeme).is_some())
+            .unwrap()
+            .clone();
+          let variable = variable.get_mut(&symbol.name.lexeme).unwrap();
+
+          let mut metadata = namespace.metadata.clone();
+          metadata.remove_flag(HIRMetadataFlags::Exported);
+          metadata.push(HIRMetadataFlags::Imported);
+
+          if symbol.alias.is_some() {
+            block_stack.insert(
+              symbol.alias.as_ref().unwrap().lexeme.clone(),
+              SymbolInfo::new(
+                symbol.alias.as_ref().unwrap().clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::Namespace,
+                None,
+              ),
+            );
+
+            variable.name = symbol.alias.as_ref().unwrap().clone();
+
+            current_ir.push(HIRInstruction::Namespace(HIRNamespace::new(
+              symbol.alias.as_ref().unwrap().clone(),
+              namespace.members.clone(),
+              metadata,
+            )));
+
+            self.declare(symbol.alias.as_ref().unwrap().lexeme.clone(), variable.clone());
+          } else {
+            block_stack.insert(
+              symbol.name.lexeme.clone(),
+              SymbolInfo::new(
+                symbol.name.clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::Namespace,
+                None,
+              ),
+            );
+
+            current_ir.push(HIRInstruction::Namespace(HIRNamespace::new(
+              symbol.name.clone(),
+              namespace.members.clone(),
+              metadata,
+            )));
+
+            self.declare(symbol.name.lexeme.clone(), variable.clone());
+          }
+        }
+      },
+      _ => (),
+    }
+
+    self.hir.get_mut(&self.current_file).unwrap().clone_from(&current_ir);
+
+    Ok(())
   }
 }

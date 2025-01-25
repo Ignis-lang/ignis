@@ -19,7 +19,7 @@ in
 
     CARGO_HOME = "${homeDir}/.cargo";
     RUSTUP_HOME = "${homeDir}/.rustup";
-    IGNIS_HOME = "${homeDir}/.ignis";
+    IGNIS_HOME = ".";
     RUST_BACKTRACE = 1;
   };
 }

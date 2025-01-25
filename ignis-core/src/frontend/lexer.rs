@@ -13,7 +13,7 @@ use crate::diagnostics::message::DiagnosticMessage;
  * - current: points to the character currently being checked.
  * - line: traces the source line of `current` to know the location of the **tokens**.
  */
-pub struct Lexer<'a> {
+pub struct IgnisLexer<'a> {
   config: Box<IgnisConfig>,
   source: &'a str,
   chars: std::str::Chars<'a>,
@@ -25,7 +25,7 @@ pub struct Lexer<'a> {
   pub diagnostics: Vec<DiagnosticMessage>,
 }
 
-impl<'a> Lexer<'a> {
+impl<'a> IgnisLexer<'a> {
   pub fn new(
     config: Box<IgnisConfig>,
     source: &'a str,

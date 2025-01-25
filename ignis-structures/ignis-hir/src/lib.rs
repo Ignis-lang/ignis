@@ -53,6 +53,7 @@ use hir_function::HIRFunction;
 use hir_function_instance::HIRFunctionInstance;
 use hir_grouping::HIRGrouping;
 use hir_if::HIRIf;
+use hir_import::HIRImport;
 use hir_include::HIRInclude;
 use hir_literal::HIRLiteral;
 use hir_binary::HIRBinary;
@@ -159,6 +160,7 @@ pub enum HIRInstruction {
   Include(HIRInclude),
   Source(HIRSource),
   Spread(HIRSpread),
+  Import(HIRImport)
 }
 
 impl HIRInstruction {

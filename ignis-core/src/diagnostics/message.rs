@@ -136,6 +136,7 @@ pub enum DiagnosticMessage {
   InvalidSpreadExpression(Token),
   InvalidParameterAfterVariadic(Token),
   InvalidParameterAfterOptional(Token),
+  ImportedNamespaceIsNotExported(Token),
   // #endregion Analyzer
 }
 
@@ -528,6 +529,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::InvalidParameterAfterOptional(token) => {
         write!(f, "Invalid parameter after optional '{}'", token.lexeme)
       },
+      DiagnosticMessage::ImportedNamespaceIsNotExported(token) => {
+        write!(f, "Imported namespace '{}' is not exported", token.lexeme)
+      },
     }
   }
 }
@@ -658,7 +662,8 @@ impl From<&DiagnosticMessage> for Token {
       | DiagnosticMessage::InvalidPropertyType(token)
       | DiagnosticMessage::InvalidSpreadExpression(token)
       | DiagnosticMessage::InvalidParameterAfterVariadic(token)
-      | DiagnosticMessage::InvalidParameterAfterOptional(token) => token.clone(),
+      | DiagnosticMessage::InvalidParameterAfterOptional(token) 
+      | DiagnosticMessage::ImportedNamespaceIsNotExported(token) => token.clone(),
     }
   }
 }
@@ -790,6 +795,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::InvalidSpreadExpression(_) => "I0121".to_string(),
       DiagnosticMessage::InvalidParameterAfterVariadic(_) => "I0122".to_string(),
       DiagnosticMessage::InvalidParameterAfterOptional(_) => "I0123".to_string(),
+      DiagnosticMessage::ImportedNamespaceIsNotExported(_) => "I0124".to_string(),
     }
   }
 
