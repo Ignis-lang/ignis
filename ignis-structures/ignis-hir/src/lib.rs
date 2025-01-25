@@ -48,6 +48,7 @@ use hir_call::HIRCall;
 use hir_cast::HIRCast;
 use hir_comment::HIRComment;
 use hir_const::HIRConstant;
+use hir_enum::HIREnum;
 use hir_extern::HIRExtern;
 use hir_for::HIRFor;
 use hir_for_of::HIRForOf;
@@ -167,6 +168,7 @@ pub enum HIRInstruction {
   Import(HIRImport),
   Meta(HIRMeta),
   Type(HIRType),
+  Enum(HIREnum),
 }
 
 impl HIRInstruction {

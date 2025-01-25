@@ -16,15 +16,42 @@ use ignis_ast::{
 use ignis_config::IgnisConfig;
 use ignis_data_type::{value::IgnisLiteralValue, DataType, GenericType};
 use ignis_hir::{
-  hir_assign::HIRAssign, hir_binary::HIRBinary, hir_block::HIRBlock, hir_call::HIRCall, hir_cast::HIRCast,
-  hir_comment::HIRComment, hir_const::HIRConstant, hir_extern::HIRExtern, hir_for::HIRFor, hir_for_of::HIRForOf,
-  hir_function::HIRFunction, hir_function_instance::HIRFunctionInstance, hir_grouping::HIRGrouping, hir_if::HIRIf,
-  hir_import::HIRImport, hir_include::HIRInclude, hir_literal::HIRLiteral, hir_logical::HIRLogical, hir_meta::HIRMeta,
-  hir_method::HIRMethod, hir_namespace::HIRNamespace, hir_object::HIRObjectLiteral, hir_record::HIRRecord,
-  hir_return::HIRReturn, hir_source::HIRSource, hir_spread::HIRSpread, hir_ternary::HIRTernary, hir_this::HIRThis,
-  hir_type::HIRType, hir_unary::HIRUnary, hir_variable::HIRVariable, hir_vector::HIRVector,
-  hir_vector_access::HIRVectorAccess, hir_while::HIRWhile, HIRInstruction, HIRInstructionType, HIRMetadata,
-  HIRMetadataFlags,
+  hir_assign::HIRAssign,
+  hir_binary::HIRBinary,
+  hir_block::HIRBlock,
+  hir_call::HIRCall,
+  hir_cast::HIRCast,
+  hir_comment::HIRComment,
+  hir_const::HIRConstant,
+  hir_enum::{HIREnum, HIREnumItem},
+  hir_extern::HIRExtern,
+  hir_for::HIRFor,
+  hir_for_of::HIRForOf,
+  hir_function::HIRFunction,
+  hir_function_instance::HIRFunctionInstance,
+  hir_grouping::HIRGrouping,
+  hir_if::HIRIf,
+  hir_import::HIRImport,
+  hir_include::HIRInclude,
+  hir_literal::HIRLiteral,
+  hir_logical::HIRLogical,
+  hir_meta::HIRMeta,
+  hir_method::HIRMethod,
+  hir_namespace::HIRNamespace,
+  hir_object::HIRObjectLiteral,
+  hir_record::HIRRecord,
+  hir_return::HIRReturn,
+  hir_source::HIRSource,
+  hir_spread::HIRSpread,
+  hir_ternary::HIRTernary,
+  hir_this::HIRThis,
+  hir_type::HIRType,
+  hir_unary::HIRUnary,
+  hir_variable::HIRVariable,
+  hir_vector::HIRVector,
+  hir_vector_access::HIRVectorAccess,
+  hir_while::HIRWhile,
+  HIRInstruction, HIRInstructionType, HIRMetadata, HIRMetadataFlags,
 };
 use ignis_token::{token::Token, token_types::TokenType};
 
@@ -1863,10 +1890,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
   ) -> AnalyzerResult {
     self.context.push(AnalyzerContext::Extern);
     if self.is_declared(&extern_.name.lexeme) {
-      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
-        extern_.name.lexeme.clone(),
-        extern_.name.clone(),
-      )));
+      return Err(Box::new(DiagnosticMessage::ExternAlreadyDefined(extern_.name.clone())));
     }
 
     self.declare(
@@ -1931,10 +1955,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     namespace: &ignis_ast::statements::namespace::ASTNamespace,
   ) -> AnalyzerResult {
     if self.is_declared(&namespace.name.lexeme) {
-      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
-        namespace.name.lexeme.clone(),
-        namespace.name.clone(),
-      )));
+      return Err(Box::new(DiagnosticMessage::NamespaceAlreadyDefined(namespace.name.clone())));
     }
 
     self.context.push(AnalyzerContext::Namespace);
@@ -1980,10 +2001,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     type_alias: &ignis_ast::statements::type_alias::ASTTypeAlias,
   ) -> AnalyzerResult {
     if self.is_declared(&type_alias.name.lexeme) {
-      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
-        type_alias.name.lexeme.clone(),
-        type_alias.name.clone(),
-      )));
+      return Err(Box::new(DiagnosticMessage::TypeAlreadyDefined(type_alias.name.clone())));
     }
 
     let mut metadata: Vec<HIRMetadataFlags> = vec![];
@@ -2025,7 +2043,119 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     enum_: &ignis_ast::statements::enum_statement::ASTEnum,
   ) -> AnalyzerResult {
-    todo!()
+    if self.is_declared(&enum_.name.lexeme) {
+      return Err(Box::new(DiagnosticMessage::EnumAlreadyDefined(enum_.name.clone())));
+    }
+
+    self.declare(
+      enum_.name.lexeme.clone(),
+      SymbolInfo::new(
+        enum_.name.clone(),
+        DataType::Enum(enum_.name.lexeme.clone()),
+        vec![],
+        SymbolKind::Enum,
+        None,
+      ),
+    );
+    self.begin_scope();
+
+    let mut members = Vec::<HIREnumItem>::new();
+    let mut data_type = DataType::Pending;
+
+    for member in &enum_.members {
+      if members.iter().any(|m| m.name == member.name) {
+        return Err(Box::new(DiagnosticMessage::EnumMemberAlreadyDefined(member.name.clone())));
+      }
+
+      let mut value = None;
+      if member.value.is_some() {
+        value = Some(self.analyzer(&member.value.as_ref().unwrap())?);
+      }
+
+      if let Some(value) = &value {
+        if data_type == DataType::Pending {
+          data_type = self.extract_data_type(value);
+        } else if self.extract_data_type(value) != data_type {
+          let value_data_type = self.extract_data_type(value);
+
+          return Err(Box::new(DiagnosticMessage::EnumMemberTypeMismatch(
+            member.name.clone(),
+            data_type,
+            value_data_type,
+          )));
+        }
+      }
+
+      members.push(HIREnumItem::new(
+        member.name.clone(),
+        value,
+        data_type.clone(),
+        HIRMetadata::new(vec![], None),
+      ));
+    }
+
+    self.end_scope();
+
+    let mut no_initializers = false;
+
+    if matches!(
+      data_type,
+      DataType::Pending | DataType::Null | DataType::Unknown | DataType::Void
+    ) {
+      data_type = DataType::Int32;
+      no_initializers = true;
+    }
+
+    let members_cloned = members.clone();
+
+    for member in &mut members {
+      member.data_type = data_type.clone();
+
+      if data_type == DataType::Int32 && no_initializers {
+        let position: i32 = members_cloned.iter().position(|m| m.name == member.name).unwrap() as i32;
+
+        member.value = Some(HIRInstruction::Literal(HIRLiteral::new(
+          IgnisLiteralValue::Int32(position),
+          member.name.clone(),
+        )));
+      }
+    }
+    //
+    let mut flags: Vec<HIRMetadataFlags> = vec![];
+
+    for value in enum_.metadata.get().iter() {
+      flags.push(value.into());
+    }
+
+    let _enum = HIRInstruction::Enum(HIREnum::new(
+      Box::new(enum_.name.clone()),
+      members,
+      HIRMetadata::new(flags.clone(), None),
+      enum_
+        .generics
+        .iter()
+        .map(|g| {
+          DataType::GenericType(GenericType::new(
+            Box::new(DataType::Variable(g.name.lexeme.clone(), Box::new(DataType::Unknown))),
+            g.constraints.clone(),
+          ))
+        })
+        .collect(),
+      data_type.clone(),
+    ));
+
+    self.edit_symbol(
+      enum_.name.lexeme.clone(),
+      SymbolInfo::new(
+        enum_.name.clone(),
+        data_type,
+        flags.clone(),
+        SymbolKind::Enum,
+        Some(_enum.clone()),
+      ),
+    );
+
+    Ok(_enum)
   }
 
   fn visit_meta_statement(
@@ -2033,10 +2163,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     meta: &ignis_ast::statements::meta::ASTMetaStatement,
   ) -> AnalyzerResult {
     if self.is_declared(&meta.name.lexeme) {
-      return Err(Box::new(DiagnosticMessage::VariableAlreadyDefined(
-        meta.name.lexeme.clone(),
-        meta.name.clone(),
-      )));
+      return Err(Box::new(DiagnosticMessage::MethodAlreadyDefined(meta.name.clone())));
     }
 
     let mut metadata = vec![];

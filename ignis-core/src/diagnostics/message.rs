@@ -137,6 +137,9 @@ pub enum DiagnosticMessage {
   InvalidParameterAfterVariadic(Token),
   InvalidParameterAfterOptional(Token),
   ImportedNamespaceIsNotExported(Token),
+  NamespaceAlreadyDefined(Token),
+  ExternAlreadyDefined(Token),
+  EnumMemberAlreadyDefined(Token),
   // #endregion Analyzer
 }
 
@@ -532,6 +535,15 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::ImportedNamespaceIsNotExported(token) => {
         write!(f, "Imported namespace '{}' is not exported", token.lexeme)
       },
+      DiagnosticMessage::ExternAlreadyDefined(token) => {
+        write!(f, "Extern '{}' already defined", token.lexeme)
+      },
+      DiagnosticMessage::NamespaceAlreadyDefined(token) => {
+        write!(f, "Namespace '{}' already defined", token.lexeme)
+      },
+      DiagnosticMessage::EnumMemberAlreadyDefined(token) => {
+        write!(f, "Enum member '{}' already defined", token.lexeme)
+      },
     }
   }
 }
@@ -662,8 +674,11 @@ impl From<&DiagnosticMessage> for Token {
       | DiagnosticMessage::InvalidPropertyType(token)
       | DiagnosticMessage::InvalidSpreadExpression(token)
       | DiagnosticMessage::InvalidParameterAfterVariadic(token)
-      | DiagnosticMessage::InvalidParameterAfterOptional(token) 
-      | DiagnosticMessage::ImportedNamespaceIsNotExported(token) => token.clone(),
+      | DiagnosticMessage::InvalidParameterAfterOptional(token)
+      | DiagnosticMessage::ImportedNamespaceIsNotExported(token)
+      | DiagnosticMessage::ExternAlreadyDefined(token)
+      | DiagnosticMessage::NamespaceAlreadyDefined(token)
+      | DiagnosticMessage::EnumMemberAlreadyDefined(token) => token.clone(),
     }
   }
 }
@@ -796,6 +811,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::InvalidParameterAfterVariadic(_) => "I0122".to_string(),
       DiagnosticMessage::InvalidParameterAfterOptional(_) => "I0123".to_string(),
       DiagnosticMessage::ImportedNamespaceIsNotExported(_) => "I0124".to_string(),
+      DiagnosticMessage::ExternAlreadyDefined(_) => "I0125".to_string(),
+      DiagnosticMessage::NamespaceAlreadyDefined(_) => "I0126".to_string(),
+      DiagnosticMessage::EnumMemberAlreadyDefined(_) => "I0127".to_string(),
     }
   }
 
