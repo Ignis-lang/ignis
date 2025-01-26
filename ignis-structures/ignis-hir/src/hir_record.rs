@@ -10,6 +10,7 @@ pub struct HIRRecord {
   pub items: Vec<HIRInstruction>,
   pub generic_parameters: Vec<DataType>,
   pub metadata: HIRMetadata,
+  pub data_type: DataType,
 }
 
 impl HIRRecord {
@@ -18,12 +19,14 @@ impl HIRRecord {
     items: Vec<HIRInstruction>,
     generic_parameters: Vec<DataType>,
     metadata: HIRMetadata,
+    data_type: DataType,
   ) -> Self {
     Self {
       name,
       items,
       generic_parameters,
       metadata,
+      data_type,
     }
   }
 }

@@ -1,9 +1,4 @@
-use std::{
-  collections::HashMap,
-  fs,
-  ops::{Deref, DerefMut},
-  path::Path,
-};
+use std::{collections::HashMap, fs, path::Path};
 
 use super::{lexer::IgnisLexer, parser::IgnisParser};
 use colored::*;
@@ -55,7 +50,7 @@ use ignis_hir::{
 };
 use ignis_token::{token::Token, token_types::TokenType};
 
-use crate::diagnostics::{self, diagnostic_report::DiagnosticReport, message::DiagnosticMessage, Diagnostic};
+use crate::diagnostics::{diagnostic_report::DiagnosticReport, message::DiagnosticMessage, Diagnostic};
 
 pub type AnalyzerResult = Result<HIRInstruction, Box<DiagnosticMessage>>;
 type CheckCompatibility<T> = (bool, T);
@@ -833,7 +828,6 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         }
       },
       HIRInstruction::Method(m) => {
-        // lógica para métodos
         todo!();
       },
       _ => {
@@ -1220,6 +1214,8 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         expression.name.clone(),
       )));
     }
+
+    self.context.push(AnalyzerContext::Function);
 
     self.declare(
       expression.name.lexeme.clone(),
@@ -1648,8 +1644,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let mut path = import.module_path.lexeme.clone();
 
     if !import.is_std {
-      todo!()
-      // self.resolve_module_import(statement, &mut block_stack)?;
+      self.resolve_module_import(import, &mut block_stack)?;
     } else {
       path = format!("std/{}/mod.ign", path.split("::").last().unwrap());
       self.resolve_std_import(import, &mut block_stack)?;
@@ -1711,7 +1706,13 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       })
       .collect();
 
-    let mut hir_record = HIRRecord::new(record.name.clone(), vec![], generic_parameters, metadata);
+    let mut hir_record = HIRRecord::new(
+      record.name.clone(),
+      vec![],
+      generic_parameters,
+      metadata,
+      DataType::Record(record.name.lexeme.clone(), vec![]),
+    );
 
     for property in &record.items {
       let result = self.analyze_statement(property)?;
@@ -1730,6 +1731,8 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       } else {
         unreachable!()
       };
+
+      hir_record.data_type.clone_from(&data_type);
 
       self.edit_symbol(
         record.name.lexeme.clone(),
@@ -2080,7 +2083,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         )));
       }
     }
-    //
+
     let mut flags: Vec<HIRMetadataFlags> = vec![];
 
     for value in enum_.metadata.get().iter() {
@@ -2293,67 +2296,14 @@ impl IgnisAnalyzer {
       //   HIRInstruction::Class(c) => DataType::ClassType(c.name.span.literal.clone()),
       //   HIRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.span.literal.clone()),
       //   HIRInstruction::Enum(e) => DataType::Enum(e.name.span.literal.clone()),
-      HIRInstruction::Record(r) => {
-        let name = r.name.lexeme.clone();
-        if r.items.is_empty() {
-          return DataType::Record(name, vec![]);
-        }
-
-        let mut properties = Vec::<(String, DataType)>::new();
-
-        for property in &r.items {
-          if let HIRInstruction::Variable(property) = property {
-            properties.push((property.name.lexeme.clone(), property.data_type.clone()));
-          }
-
-          if let HIRInstruction::Method(method) = property {
-            let return_type = method.return_type.clone();
-            let params: Vec<DataType> = method.parameters.iter().map(|p| self.extract_data_type(p)).collect();
-            let type_ = DataType::Function(params, Box::new(return_type));
-
-            if method.metadata.is(HIRMetadataFlags::Optional) {
-              properties.push((method.name.lexeme.clone(), DataType::Optional(Box::new(type_))));
-              continue;
-            }
-
-            properties.push((method.name.lexeme.clone(), type_));
-          }
-        }
-
-        DataType::Record(name, properties)
-      },
-      HIRInstruction::Object(object) => {
-        if object.properties.is_empty() {
-          return DataType::Object(vec![]);
-        }
-
-        let mut properties = Vec::<(String, DataType)>::new();
-
-        for (name, value) in &object.properties {
-          properties.push((name.lexeme.clone(), self.extract_data_type(value)));
-        }
-
-        for method in &object.methods {
-          let return_type = method.return_type.clone();
-          let params: Vec<DataType> = method.parameters.iter().map(|p| self.extract_data_type(p)).collect();
-          let type_ = DataType::Function(params, Box::new(return_type));
-
-          if method.metadata.is(HIRMetadataFlags::Optional) {
-            properties.push((method.name.lexeme.clone(), DataType::Optional(Box::new(type_))));
-            continue;
-          }
-
-          properties.push((method.name.lexeme.clone(), type_));
-        }
-
-        DataType::Object(properties)
-      },
+      HIRInstruction::Record(r) => r.data_type.clone(),
+      HIRInstruction::Object(object) => object.data_type.clone(),
       HIRInstruction::VectorAccess(array) => match &array.data_type {
         DataType::Vector(t, ..) => *t.clone(),
         _ => DataType::Unknown,
       },
       HIRInstruction::This(this) => this.data_type.clone(),
-      //   HIRInstruction::Type(t) => t.value.as_ref().clone(),
+      HIRInstruction::Type(t) => t.value.as_ref().clone(),
       HIRInstruction::Extern(_) => DataType::Null,
       HIRInstruction::Include(_) => DataType::Null,
       HIRInstruction::Source(_) => DataType::Null,
@@ -2803,6 +2753,33 @@ impl IgnisAnalyzer {
     let mut value = HIRInstruction::Literal(HIRLiteral::new(IgnisLiteralValue::Null, variable.clone()));
     let mut complex_type = None;
 
+    if let DataType::PendingImport(_) = data_type {
+      let import = self.resolve_pedding_import(variable, data_type)?;
+
+      match import {
+        // HIRInstruction::Class(class) => {
+        //   *data_type = DataType::ClassType(class.name.span.literal.clone());
+        //
+        //   complex_type = Some(Box::new(HIRInstruction::ClassInstance(HIRClassInstance::new(
+        //     Box::new(class),
+        //     variable.clone(),
+        //     Vec::new(),
+        //   ))));
+        // },
+        // HIRInstruction::Interface(i) => {
+        //   *data_type = DataType::Interface(i.name.span.literal.clone());
+        //   complex_type = Some(Box::new(HIRInstruction::Interface(i)));
+        // },
+        HIRInstruction::Enum(_enum) => {
+          *data_type = DataType::Enum(_enum.name.lexeme.clone());
+        },
+        HIRInstruction::Record(_record) => {
+          *data_type = _record.data_type.clone();
+        },
+        _ => (),
+      }
+    }
+
     if let Some(initializer) = initializer {
       let expression = self.analyzer(initializer)?;
 
@@ -2853,10 +2830,14 @@ impl IgnisAnalyzer {
         //   self.check_type_mismatch(&call.return_type, data_type, variable)?;
         //   HIRInstruction::MethodCall(call)
         // },
-        // HIRInstruction::Enum(_enum) => {
-        //   self.check_type_mismatch(&DataType::Enum(_enum.name.span.literal.clone()), data_type, variable)?;
-        //   HIRInstruction::Enum(_enum)
-        // },
+        HIRInstruction::Enum(_enum) => {
+          self.check_type_mismatch(&DataType::Enum(_enum.name.lexeme.clone()), data_type, variable)?;
+          HIRInstruction::Enum(_enum)
+        },
+        HIRInstruction::Record(record) => {
+          self.check_type_mismatch(&record.data_type, data_type, variable)?;
+          HIRInstruction::Record(record)
+        },
         // HIRInstruction::Get(get) => {
         //   self.check_type_mismatch(&get.data_type, data_type, variable)?;
         //   HIRInstruction::Get(get)
@@ -2882,30 +2863,6 @@ impl IgnisAnalyzer {
         },
       };
     }
-
-    // if let DataType::PendingImport(_) = data_type {
-    //   let import = self.resolve_pedding_import(variable, data_type)?;
-    //
-    //   match import {
-    //     HIRInstruction::Class(class) => {
-    //       *data_type = DataType::ClassType(class.name.span.literal.clone());
-    //
-    //       complex_type = Some(Box::new(HIRInstruction::ClassInstance(HIRClassInstance::new(
-    //         Box::new(class),
-    //         variable.clone(),
-    //         Vec::new(),
-    //       ))));
-    //     },
-    //     HIRInstruction::Interface(i) => {
-    //       *data_type = DataType::Interface(i.name.span.literal.clone());
-    //       complex_type = Some(Box::new(HIRInstruction::Interface(i)));
-    //     },
-    //     HIRInstruction::Enum(_enum) => {
-    //       *data_type = DataType::Enum(_enum.name.span.literal.clone());
-    //     },
-    //     _ => (),
-    //   }
-    // }
 
     // TODO: Ignis v0.3.0
     // if let DataType::ClassType(name) = &data_type {
@@ -3109,6 +3066,8 @@ impl IgnisAnalyzer {
       | (DataType::PendingImport(import), DataType::Enum(name))
       | (DataType::Enum(name), DataType::PendingImport(import))
       | (DataType::PendingImport(import), DataType::AliasType(name))
+      | (DataType::PendingImport(import), DataType::Record(name, _))
+      | (DataType::Record(import, _), DataType::PendingImport(name))
       | (DataType::AliasType(name), DataType::PendingImport(import)) => {
         if import != name {
           return Err(Box::new(DiagnosticMessage::TypeMismatch(
@@ -3202,9 +3161,9 @@ impl IgnisAnalyzer {
       .find(|ir| match ir {
         // HIRInstruction::Class(c) => &c.name.span.literal == name,
         // HIRInstruction::Interface(i) => &i.name.span.literal == name,
-        // HIRInstruction::Enum(e) => &e.name.span.literal == name,
+        HIRInstruction::Enum(e) => &e.name.lexeme == name,
         HIRInstruction::Record(r) => &r.name.lexeme == name,
-        // HIRInstruction::Type(t) => &t.name.span.literal == name,
+        HIRInstruction::Type(t) => &t.name.lexeme == name,
         _ => false,
       })
       .cloned();
@@ -3216,9 +3175,9 @@ impl IgnisAnalyzer {
     let type_in_std = type_ir.iter().find(|ir| match ir {
       // HIRInstruction::Class(c) => &c.name.span.literal == name,
       // HIRInstruction::Interface(i) => &i.name.span.literal == name,
-      // HIRInstruction::Enum(e) => &e.name.span.literal == name,
-      // HIRInstruction::Record(r) => &r.name.span.literal == name,
-      // HIRInstruction::Type(t) => &t.name.span.literal == name,
+      HIRInstruction::Enum(e) => &e.name.lexeme == name,
+      HIRInstruction::Record(r) => &r.name.lexeme == name,
+      HIRInstruction::Type(t) => &t.name.lexeme == name,
       _ => false,
     });
 
@@ -3330,36 +3289,30 @@ impl IgnisAnalyzer {
     }
   }
 
-  // fn resolve_pedding_import(
-  //   &mut self,
-  //   token: &Token,
-  //   import: &DataType,
-  // ) -> AnalyzerResult {
-  //   if let DataType::PendingImport(name) = import {
-  //     if let Some(function) = self.find_function_instance(name) {
-  //       Ok(HIRInstruction::FunctionInstance(function))
-  //     } else if let Some(class) = self.find_class_in_ir(name) {
-  //       Ok(HIRInstruction::Class(class))
-  //     } else if let Some(enum_) = self.find_enum_in_ir(name) {
-  //       Ok(HIRInstruction::Enum(enum_))
-  //     } else if let Some(record) = self.find_record_in_ir(name) {
-  //       Ok(HIRInstruction::Record(record))
-  //     } else if let Some(interface) = self.find_interface_in_ir(name) {
-  //       Ok(HIRInstruction::Interface(interface))
-  //     } else {
-  //       Err(Box::new(
-  //         DiagnosticMessage::UndefinedImport(name.to_string()),
-  //         self.find_token_line(&token.span.line),
-  //       )))
-  //     }
-  //   } else {
-  //     Err(Box::new(
-  //       DiagnosticMessage::UndefinedImport(import.to_string()),
-  //       self.find_token_line(&token.span.line),
-  //     )))
-  //   }
-  // }
-  //
+  fn resolve_pedding_import(
+    &mut self,
+    token: &Token,
+    import: &DataType,
+  ) -> AnalyzerResult {
+    if let DataType::PendingImport(name) = import {
+      if let Some(function) = self.find_function_instance(name) {
+        Ok(HIRInstruction::FunctionInstance(function))
+      // } else if let Some(class) = self.find_class_in_ir(name) {
+      //   Ok(HIRInstruction::Class(class))
+      // } else if let Some(interface) = self.find_interface_in_ir(name) {
+      //   Ok(HIRInstruction::Interface(interface))
+      } else if let Some(enum_) = self.find_enum_in_ir(name) {
+        Ok(HIRInstruction::Enum(enum_))
+      } else if let Some(record) = self.find_record_in_ir(name) {
+        Ok(HIRInstruction::Record(record))
+      } else {
+        Err(Box::new(DiagnosticMessage::UndefinedImport(token.clone())))
+      }
+    } else {
+      Err(Box::new(DiagnosticMessage::UndefinedImport(token.clone())))
+    }
+  }
+
   // fn find_function_instance(
   //   &self,
   //   instance_name: &String,
@@ -3381,12 +3334,67 @@ impl IgnisAnalyzer {
   //   None
   // }
 
+  fn find_enum_in_ir(
+    &self,
+    name: &String,
+  ) -> Option<HIREnum> {
+    let irs = self.hir.get(&self.current_file).unwrap();
+
+    let enum_ = irs.iter().find(|ir| match ir {
+      HIRInstruction::Enum(e) => &e.name.lexeme == name,
+      _ => false,
+    });
+
+    match enum_ {
+      Some(HIRInstruction::Enum(e)) => Some(e.clone()),
+      _ => None,
+    }
+  }
+
+  fn find_record_in_ir(
+    &self,
+    name: &str,
+  ) -> Option<HIRRecord> {
+    let irs = self.hir.get(&self.current_file).unwrap();
+
+    let record = irs.iter().find(|ir| match ir {
+      HIRInstruction::Record(r) => r.name.lexeme == name,
+      _ => false,
+    });
+
+    match record {
+      Some(HIRInstruction::Record(r)) => Some(r.clone()),
+      _ => None,
+    }
+  }
+
+  fn _find_alias_in_ir(
+    &self,
+    name: &str,
+  ) -> Option<HIRType> {
+    let irs = self.hir.get(&self.current_file).unwrap();
+    let alias = irs.iter().find(|ir| match ir {
+      HIRInstruction::Type(a) => a.name.lexeme == name,
+      _ => false,
+    });
+    match alias {
+      Some(HIRInstruction::Type(a)) => Some(a.clone()),
+      _ => None,
+    }
+  }
+
   pub fn load_primitive_std(
     config: &IgnisConfig
   ) -> (
     HashMap<String, Vec<HIRInstruction>>,
     HashMap<String, Vec<HashMap<String, SymbolInfo>>>,
   ) {
+    if !config.auto_load_std || !config.std {
+      return (HashMap::new(), HashMap::new());
+    }
+
+    println!("{:indent$}Loading STD...", "-->".green().bold(), indent = 4);
+
     let mut diagnostics: Vec<DiagnosticReport> = Vec::new();
     let names = [
       "meta".to_string(),
@@ -3737,6 +3745,71 @@ impl IgnisAnalyzer {
     let mut current_ir = self.hir.get(&self.current_file).unwrap().clone();
 
     match ir {
+      HIRInstruction::Function(function) => {
+        for symbol in &statement.symbols {
+          if symbol.name.lexeme == function.name.lexeme && !function.metadata.is(HIRMetadataFlags::Exported) {
+            return Err(Box::new(DiagnosticMessage::ImportedFunctionIsNotExported(symbol.name.clone())));
+          }
+
+          let mut variable = import_scope_variables
+            .iter()
+            .find(|v| v.get(&symbol.name.lexeme).is_some())
+            .unwrap()
+            .clone();
+          let variable = variable.get_mut(&symbol.name.lexeme).unwrap();
+
+          let mut metadata = function.metadata.clone();
+
+          metadata.remove_flag(HIRMetadataFlags::Exported);
+          metadata.push(HIRMetadataFlags::Imported);
+
+          if symbol.name.lexeme == function.name.lexeme && function.metadata.is(HIRMetadataFlags::Exported) {
+            block_stack.insert(
+              symbol.name.lexeme.clone(),
+              SymbolInfo::new(
+                symbol.name.clone(),
+                function.return_type.clone(),
+                metadata.flags.clone(),
+                SymbolKind::Function,
+                None,
+              ),
+            );
+
+            current_ir.push(HIRInstruction::Function(HIRFunction::new(
+              symbol.name.clone(),
+              function.parameters.clone(),
+              function.return_type.clone(),
+              None,
+              HIRMetadata::new(metadata.flags.clone(), None),
+              function.generic_parameters.clone(),
+            )));
+
+            self.declare(symbol.name.lexeme.clone(), variable.clone());
+          } else {
+            block_stack.insert(
+              symbol.name.lexeme.clone(),
+              SymbolInfo::new(
+                symbol.name.clone(),
+                function.return_type.clone(),
+                metadata.flags.clone(),
+                SymbolKind::Function,
+                None,
+              ),
+            );
+
+            current_ir.push(HIRInstruction::Function(HIRFunction::new(
+              symbol.name.clone(),
+              function.parameters.clone(),
+              function.return_type.clone(),
+              None,
+              HIRMetadata::new(metadata.flags.clone(), None),
+              function.generic_parameters.clone(),
+            )));
+
+            self.declare(symbol.name.lexeme.clone(), variable.clone());
+          }
+        }
+      },
       HIRInstruction::Namespace(namespace) => {
         for symbol in &statement.symbols {
           if symbol.name.lexeme == namespace.name.lexeme && !namespace.metadata.is(HIRMetadataFlags::Exported) {
@@ -3797,10 +3870,133 @@ impl IgnisAnalyzer {
           }
         }
       },
+      HIRInstruction::Record(record) => {
+        for symbol in &statement.symbols {
+          if symbol.name.lexeme == record.name.lexeme && !record.metadata.is(HIRMetadataFlags::Exported) {
+            return Err(Box::new(DiagnosticMessage::ImportedRecordIsNotExported(symbol.name.clone())));
+          }
+
+          let mut variable = import_scope_variables
+            .iter()
+            .find(|v| v.get(&symbol.name.lexeme).is_some())
+            .unwrap()
+            .clone();
+
+          let variable = variable.get_mut(&symbol.name.lexeme).unwrap();
+
+          let mut metadata = record.metadata.clone();
+          metadata.remove_flag(HIRMetadataFlags::Exported);
+          metadata.push(HIRMetadataFlags::Imported);
+
+          if symbol.alias.is_some() {
+            block_stack.insert(
+              symbol.alias.as_ref().unwrap().lexeme.clone(),
+              SymbolInfo::new(
+                symbol.alias.as_ref().unwrap().clone(),
+                record.data_type.clone(),
+                metadata.flags.clone(),
+                SymbolKind::Record,
+                Some(HIRInstruction::Record(record.clone())),
+              ),
+            );
+
+            variable.name = symbol.alias.as_ref().unwrap().clone();
+
+            current_ir.push(HIRInstruction::Record(HIRRecord::new(
+              record.name.clone(),
+              record.items.clone(),
+              record.generic_parameters.clone(),
+              metadata,
+              record.data_type.clone(),
+            )));
+
+            self.declare(symbol.alias.as_ref().unwrap().lexeme.clone(), variable.clone());
+          } else {
+            block_stack.insert(
+              symbol.name.lexeme.clone(),
+              SymbolInfo::new(
+                symbol.name.clone(),
+                record.data_type.clone(),
+                metadata.flags.clone(),
+                SymbolKind::Record,
+                Some(HIRInstruction::Record(record.clone())),
+              ),
+            );
+
+            current_ir.push(HIRInstruction::Record(HIRRecord::new(
+              record.name.clone(),
+              record.items.clone(),
+              record.generic_parameters.clone(),
+              metadata,
+              record.data_type.clone(),
+            )));
+
+            self.declare(symbol.name.lexeme.clone(), variable.clone());
+          }
+        }
+      },
+      HIRInstruction::Enum(enum_) => {
+        todo!()
+      },
+      HIRInstruction::Type(type_) => {
+        todo!()
+      },
+      HIRInstruction::Extern(extern_) => {
+        todo!()
+      },
       _ => (),
     }
 
     self.hir.get_mut(&self.current_file).unwrap().clone_from(&current_ir);
+
+    Ok(())
+  }
+
+  fn resolve_module_import(
+    &mut self,
+    statement: &ASTImport,
+    block_stack: &mut HashMap<String, SymbolInfo>,
+  ) -> Result<(), Box<DiagnosticMessage>> {
+    let mut diagnostics: Vec<DiagnosticMessage> = vec![];
+
+    let _ = match fs::read_to_string(format!("{}.{}", statement.module_path.lexeme, "ign")) {
+      Ok(source) => {
+        let mut lexer: IgnisLexer<'_> =
+          IgnisLexer::new(self.config.clone(), &source, statement.module_path.lexeme.clone() + ".ign");
+        lexer.scan_tokens(false);
+
+        diagnostics.append(&mut lexer.diagnostics);
+
+        let mut parser: IgnisParser = IgnisParser::new(self.config.clone(), lexer.tokens);
+        let statements = parser.parse(false);
+
+        diagnostics.append(&mut parser.diagnostics);
+
+        let mut analyzer = Self::new(
+          self.config.clone(),
+          statement.module_path.lexeme.clone(),
+          statements.0,
+          self.primitives_std.clone(),
+          self.primitives_symbol_stack.clone(),
+        );
+
+        let _ = analyzer.process(false);
+
+        diagnostics.append(&mut analyzer.diagnostics);
+
+        let current_ir = analyzer.hir.get(&statement.module_path.lexeme).unwrap().clone();
+        self.diagnostics.append(&mut diagnostics);
+
+        for ir in &current_ir {
+          self.define_import(statement, ir, block_stack, &analyzer.symbol_stack)?;
+        }
+
+        for ir in analyzer.hir {
+          self.hir.insert(ir.0.clone(), ir.1.clone());
+        }
+      },
+      Err(_) => return Err(Box::new(DiagnosticMessage::ModuleNotFound(statement.module_path.clone()))),
+    };
 
     Ok(())
   }

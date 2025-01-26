@@ -129,8 +129,25 @@ impl Display for DataType {
       DataType::Void => write!(f, "void"),
       DataType::Pending => write!(f, "pending"),
       DataType::PendingImport(name) => write!(f, "pending_import({})", name),
-      DataType::Record(name, _) => write!(f, "record({})", name),
-      DataType::Object(object) => write!(f, "object<{:?}>", object),
+      DataType::Record(name, items) => write!(
+        f,
+        "record({}<{}>)",
+        name,
+        items
+          .iter()
+          .map(|(name, data_type)| format!("{}: {}", name, data_type))
+          .collect::<Vec<String>>()
+          .join(", ")
+      ),
+      DataType::Object(object) => write!(
+        f,
+        "object<{}>",
+        object
+          .iter()
+          .map(|(name, data_type)| format!("{}: {}", name, data_type))
+          .collect::<Vec<String>>()
+          .join(", ")
+      ),
       DataType::Reference(data_type) => write!(f, "reference({})", data_type),
       DataType::Pointer(data_type) => write!(f, "pointer({})", data_type),
       DataType::Variable(name, data_type) => write!(f, "variable({}, {})", name, data_type),

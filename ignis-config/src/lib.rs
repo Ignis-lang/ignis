@@ -163,6 +163,8 @@ pub struct IgnisConfig {
   pub test: bool,
   pub init: bool,
   pub std_path: String,
+  pub std: bool,
+  pub auto_load_std: bool,
 }
 
 impl IgnisConfig {
@@ -177,6 +179,8 @@ impl IgnisConfig {
     test: bool,
     init: bool,
     std_path: String,
+    std: bool,
+    auto_load_std: bool,
   ) -> Self {
     Self {
       project_config,
@@ -189,6 +193,8 @@ impl IgnisConfig {
       test,
       init,
       std_path,
+      std,
+      auto_load_std,
     }
   }
 
@@ -196,7 +202,6 @@ impl IgnisConfig {
     debug: Vec<DebugPrint>,
     quiet: bool,
     verbose: u8,
-    std_path: String,
   ) -> Self {
     Self {
       debug,

@@ -52,12 +52,11 @@ fn check_if_project() -> bool {
 }
 
 fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
-  let mut config = ignis_config::IgnisConfig::new_basic(
-    cli.debug.iter().map(|x| x.into()).collect(),
-    cli.quiet,
-    cli.verbose,
-    cli.std_path.clone(),
-  );
+  let mut config =
+    ignis_config::IgnisConfig::new_basic(cli.debug.iter().map(|x| x.into()).collect(), cli.quiet, cli.verbose);
+
+  config.std = !cli.std;
+  config.auto_load_std = !cli.auto_load_std;
 
   if config.std_path == "IGNIS_STD_PATH" {
     if let Ok(v) = std::env::var("IGNIS_STD_PATH") {

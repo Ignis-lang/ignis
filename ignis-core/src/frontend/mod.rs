@@ -72,7 +72,7 @@ impl IgnisFrontend {
 
     let mut analyzer =
       analyzer::IgnisAnalyzer::new(self.config.clone(), file, statements, std.0.clone(), std.1.clone());
-    let analyzer_result = analyzer.process(true);
+    let analyzer_result = analyzer.process(false);
 
     if analyzer_result.is_err() {
       self.diagnostics.append(&mut analyzer_result.unwrap_err());

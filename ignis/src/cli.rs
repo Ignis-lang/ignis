@@ -166,6 +166,15 @@ pub struct Cli {
   #[arg(long, short, action = clap::ArgAction::Count, global = true)]
   pub verbose: u8,
 
+  /// Path to the standard library
   #[arg(short, long, default_value = "IGNIS_STD_PATH")]
   pub std_path: String,
+
+  /// Use standard library
+  #[arg(long, default_value = "false")]
+  pub std: bool,
+
+  /// Automatically load standard library
+  #[arg(short, long, default_value = "false")]
+  pub auto_load_std: bool,
 }

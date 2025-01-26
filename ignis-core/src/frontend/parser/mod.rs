@@ -362,7 +362,7 @@ pub struct IgnisParser {
   declarations: StructDeclaration,
   tokens: Vec<Token>,
   current: usize,
-  diagnostics: Vec<DiagnosticMessage>,
+  pub diagnostics: Vec<DiagnosticMessage>,
 }
 
 impl IgnisParser {
@@ -606,7 +606,21 @@ impl IgnisParser {
     let name = self.consume(TokenType::Identifier)?;
 
     if self.match_token(&[TokenType::As]) {
-      alias = Some(self.consume(TokenType::Identifier)?);
+      let value = self.consume(TokenType::Identifier)?;
+
+      self
+        .declarations
+        .get_mut(&ParserDeclaration::Import)
+        .unwrap()
+        .push(ParserDeclarationList::Name(value.lexeme.clone()));
+
+      alias = Some(value);
+    } else {
+      self
+        .declarations
+        .get_mut(&ParserDeclaration::Import)
+        .unwrap()
+        .push(ParserDeclarationList::Name(name.lexeme.clone()));
     }
 
     Ok(ASTImportSymbol::new(name, alias))
@@ -682,9 +696,11 @@ impl IgnisParser {
         if self.match_token(&[TokenType::As]) {
           let token = self.advance();
           let mut kind = DataType::from(&token.type_);
+
           if matches!(kind, DataType::Pending) {
             kind = self.resolve_pending_type(&token, &generic_parameters);
           }
+
           constraints.push(kind);
         }
 
@@ -2829,21 +2845,8 @@ impl IgnisParser {
         let mut constraints: Vec<DataType> = Vec::new();
 
         if self.match_token(&[TokenType::As]) {
-          loop {
-            if self.check(TokenType::Identifier) {
-              constraints.push(DataType::Variable(self.peek().lexeme.clone(), Box::new(DataType::Unknown)));
-            } else {
-              constraints.push(DataType::from(&self.peek().type_));
-            }
-
-            if !self.match_token(&[TokenType::Pipe]) {
-              break;
-            }
-
-            self.advance();
-          }
-
-          self.advance();
+          let data_type = self.resolve_type(&[])?;
+          constraints.push(data_type);
         }
 
         generic_parameters.push(ASTGenericParameter::new(name, constraints));
