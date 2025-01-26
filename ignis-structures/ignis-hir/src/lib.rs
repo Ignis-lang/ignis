@@ -1,7 +1,6 @@
 pub mod hir_assign;
 pub mod hir_binary;
 pub mod hir_block;
-pub mod hir_break;
 pub mod hir_call;
 pub mod hir_cast;
 pub mod hir_comment;
@@ -78,7 +77,7 @@ use hir_vector::HIRVector;
 use hir_vector_access::HIRVectorAccess;
 use hir_while::HIRWhile;
 use ignis_ast::metadata::{ASTMetadataFlags, IgnisCompilerMeta};
-use ignis_token::token_types::TokenType;
+use ignis_token::{token::Token, token_types::TokenType};
 use serde::Serialize;
 use hir_unary::HIRUnary;
 
@@ -169,6 +168,8 @@ pub enum HIRInstruction {
   Meta(HIRMeta),
   Type(HIRType),
   Enum(HIREnum),
+  Break(Token),
+  Continue(Token),
 }
 
 impl HIRInstruction {

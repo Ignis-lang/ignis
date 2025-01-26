@@ -1508,14 +1508,22 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     &mut self,
     token: &ignis_token::token::Token,
   ) -> AnalyzerResult {
-    todo!()
+    if !self.context.iter().any(|c| matches!(c, AnalyzerContext::Loop)) {
+      return Err(Box::new(DiagnosticMessage::BreakOutsideLoop(token.clone())));
+    }
+
+    Ok(HIRInstruction::Break(token.clone()))
   }
 
   fn visit_continue_statement(
     &mut self,
     token: &ignis_token::token::Token,
   ) -> AnalyzerResult {
-    todo!()
+    if !self.context.iter().any(|c| matches!(c, AnalyzerContext::Loop)) {
+      return Err(Box::new(DiagnosticMessage::ContinueOutsideLoop(token.clone())));
+    }
+
+    Ok(HIRInstruction::Continue(token.clone()))
   }
 
   fn visit_return_statement(
