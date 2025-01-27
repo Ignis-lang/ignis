@@ -356,19 +356,19 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 ///   | "source"
 /// ```
 #[derive(Debug, Clone)]
-pub struct IgnisParser {
-  config: Box<IgnisConfig>,
+pub struct IgnisParser<'a> {
+  config: &'a IgnisConfig,
   context: Vec<IgnisParserContext>,
   declarations: StructDeclaration,
-  tokens: Vec<Token>,
+  tokens: &'a Vec<Token>,
   current: usize,
   pub diagnostics: Vec<DiagnosticMessage>,
 }
 
-impl IgnisParser {
+impl<'a> IgnisParser<'a> {
   pub fn new(
-    config: Box<IgnisConfig>,
-    tokens: Vec<Token>,
+    config: &'a IgnisConfig,
+    tokens: &'a Vec<Token>,
   ) -> Self {
     let declarations: StructDeclaration = HashMap::from([
       (ParserDeclaration::Import, vec![]),

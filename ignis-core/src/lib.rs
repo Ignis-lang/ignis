@@ -28,7 +28,7 @@ impl IgnisCore {
   }
 
   pub fn build(&mut self) {
-    let mut frontend = IgnisFrontend::new(self.config.clone());
+    let mut frontend = IgnisFrontend::new(&self.config);
     frontend.process();
   }
 

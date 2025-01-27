@@ -25,13 +25,13 @@ fn get_file_content(path: &String) -> String {
   return content;
 }
 
-pub struct IgnisFrontend {
-  config: Box<IgnisConfig>,
+pub struct IgnisFrontend<'a> {
+  config: &'a IgnisConfig,
   diagnostics: Vec<DiagnosticReport>,
 }
 
-impl IgnisFrontend {
-  pub fn new(config: Box<IgnisConfig>) -> Self {
+impl<'a> IgnisFrontend<'a> {
+  pub fn new(config: &'a IgnisConfig) -> Self {
     Self {
       config,
       diagnostics: Vec::new(),
@@ -45,7 +45,7 @@ impl IgnisFrontend {
 
     let source = get_file_content(&file);
 
-    let mut lexer = IgnisLexer::new(self.config.clone(), source.as_str(), file.clone());
+    let mut lexer = IgnisLexer::new(&self.config, source.as_str(), &file);
     lexer.scan_tokens(false);
 
     for diagnostic in lexer.diagnostics {
@@ -62,16 +62,21 @@ impl IgnisFrontend {
       }
     }
 
-    let mut parser = parser::IgnisParser::new(self.config.clone(), tokens);
+    let mut parser = parser::IgnisParser::new(&self.config, &tokens);
 
     let (statements, diagnostics) = parser.parse(false);
 
     self.diagnostics.append(&mut diagnostics.clone());
 
-    let std = analyzer::IgnisAnalyzer::load_primitive_std(&self.config);
+    let std = analyzer::IgnisAnalyzer::load_primitive_std(self.config.clone().into());
 
-    let mut analyzer =
-      analyzer::IgnisAnalyzer::new(self.config.clone(), file, statements, std.0.clone(), std.1.clone());
+    let mut analyzer = analyzer::IgnisAnalyzer::new(
+      self.config.clone().into(),
+      file,
+      statements,
+      std.0.clone().into(),
+      std.1.clone().into(),
+    );
     let analyzer_result = analyzer.process(false);
 
     if analyzer_result.is_err() {

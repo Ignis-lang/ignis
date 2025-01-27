@@ -14,7 +14,7 @@ use crate::diagnostics::message::DiagnosticMessage;
  * - line: traces the source line of `current` to know the location of the **tokens**.
  */
 pub struct IgnisLexer<'a> {
-  config: Box<IgnisConfig>,
+  config: &'a IgnisConfig,
   source: &'a str,
   chars: std::str::Chars<'a>,
   pub tokens: Vec<Token>,
@@ -27,9 +27,9 @@ pub struct IgnisLexer<'a> {
 
 impl<'a> IgnisLexer<'a> {
   pub fn new(
-    config: Box<IgnisConfig>,
+    config: &'a IgnisConfig,
     source: &'a str,
-    file: String,
+    file:&'a str,
   ) -> Self {
     Self {
       config,
@@ -39,7 +39,7 @@ impl<'a> IgnisLexer<'a> {
       start: 0,
       line: 0,
       current: 0,
-      module_path: file,
+      module_path: file.to_string(),
       diagnostics: vec![],
     }
   }

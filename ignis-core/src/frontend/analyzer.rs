@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
 use super::{lexer::IgnisLexer, parser::IgnisParser};
 use colored::*;
@@ -126,12 +126,12 @@ impl SymbolInfo {
 }
 
 pub struct IgnisAnalyzer {
-  config: Box<IgnisConfig>,
+  config: Arc<IgnisConfig>,
   programs: HashMap<String, Vec<ASTStatement>>,
   diagnostics: Vec<DiagnosticMessage>,
   hir: HashMap<String, Vec<HIRInstruction>>,
-  pub primitives_std: HashMap<String, Vec<HIRInstruction>>,
-  pub primitives_symbol_stack: HashMap<String, Vec<HashMap<String, SymbolInfo>>>,
+  pub primitives_std: Arc<HashMap<String, Vec<HIRInstruction>>>,
+  pub primitives_symbol_stack: Arc<HashMap<String, Vec<HashMap<String, SymbolInfo>>>>,
   context: Vec<AnalyzerContext>,
   current_file: String,
   current_type: Option<DataType>,
@@ -1069,12 +1069,10 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
     let last_context = last_context.unwrap();
 
-    let mut data_type = DataType::Null;
-
-    match last_context {
+    let data_type = match last_context {
       AnalyzerContext::Object => {
         if let Some(object) = &self.current_object {
-          data_type = object.data_type.clone();
+          object.data_type.clone()
         } else {
           return Err(Box::new(DiagnosticMessage::InvalidThis(expression.token.clone())));
         }
@@ -1087,7 +1085,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           if let CalleableDeclaration::Method(method) = current {
             if method.metadata.is(HIRMetadataFlags::ObjectMember) {
               if let Some(object) = &self.current_object {
-                data_type = object.data_type.clone();
+                object.data_type.clone()
               } else {
                 return Err(Box::new(DiagnosticMessage::InvalidThis(expression.token.clone())));
               }
@@ -1101,7 +1099,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           return Err(Box::new(DiagnosticMessage::InvalidThis(expression.token.clone())));
         }
       },
-      _ => unreachable!(),
+      _ => DataType::Null,
     };
 
     Ok(HIRInstruction::This(HIRThis::new(expression.token.clone(), data_type)))
@@ -1652,10 +1650,10 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let mut path = import.module_path.lexeme.clone();
 
     if !import.is_std {
-      self.resolve_module_import(import, &mut block_stack)?;
+      self.resolve_module_import(&import, &mut block_stack)?;
     } else {
       path = format!("std/{}/mod.ign", path.split("::").last().unwrap());
-      self.resolve_std_import(import, &mut block_stack)?;
+      self.resolve_std_import(&import, &mut block_stack)?;
     }
 
     self.symbol_stack.pop();
@@ -2187,14 +2185,14 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
 impl IgnisAnalyzer {
   pub fn new(
-    config: Box<IgnisConfig>,
+    config: Arc<IgnisConfig>,
     current_file: String,
     program: Vec<ASTStatement>,
-    primitives_std: HashMap<String, Vec<HIRInstruction>>,
-    primitives_symbol_stack: HashMap<String, Vec<HashMap<String, SymbolInfo>>>,
+    primitives_std: Arc<HashMap<String, Vec<HIRInstruction>>>,
+    primitives_symbol_stack: Arc<HashMap<String, Vec<HashMap<String, SymbolInfo>>>>,
   ) -> Self {
-    let programs = HashMap::from([(current_file.clone(), program)]);
-    let hir = HashMap::from([(current_file.clone(), vec![])]);
+    let programs = HashMap::from([(current_file.to_string(), program)]);
+    let hir = HashMap::from([(current_file.to_string(), vec![])]);
 
     Self {
       config,
@@ -2696,8 +2694,8 @@ impl IgnisAnalyzer {
     &self,
     name: &str,
   ) -> Option<&HIRInstruction> {
-    let current_file = self.current_file.clone();
-    let hir = self.hir.get(&current_file).unwrap();
+    let current_file = &self.current_file;
+    let hir = self.hir.get(current_file).unwrap();
 
     for instruction in hir.iter() {
       match instruction {
@@ -2759,7 +2757,7 @@ impl IgnisAnalyzer {
     data_type: &mut DataType,
   ) -> Result<(HIRInstruction, Option<Box<HIRInstruction>>), Box<DiagnosticMessage>> {
     let mut value = HIRInstruction::Literal(HIRLiteral::new(IgnisLiteralValue::Null, variable.clone()));
-    let mut complex_type = None;
+    let complex_type = None;
 
     if let DataType::PendingImport(_) = data_type {
       let import = self.resolve_pedding_import(variable, data_type)?;
@@ -3392,7 +3390,7 @@ impl IgnisAnalyzer {
   }
 
   pub fn load_primitive_std(
-    config: &IgnisConfig
+    config: Arc<IgnisConfig>
   ) -> (
     HashMap<String, Vec<HIRInstruction>>,
     HashMap<String, Vec<HashMap<String, SymbolInfo>>>,
@@ -3434,15 +3432,14 @@ impl IgnisAnalyzer {
 
       let file_row = file_row.unwrap();
       let source = String::from_utf8(file_row).unwrap();
-      let config = Box::new(config.clone());
 
-      let mut lexer = IgnisLexer::new(config.clone(), &source, lib.clone());
+      let mut lexer = IgnisLexer::new(&config, &source, &lib);
       lexer.scan_tokens(true);
       for diagnostic in &lexer.diagnostics {
         diagnostics.push(diagnostic.report());
       }
 
-      let mut parser = IgnisParser::new(config.clone(), lexer.tokens.clone());
+      let mut parser = IgnisParser::new(&config, &lexer.tokens);
       let result = parser.parse(true);
 
       for diagnostic in &result.1 {
@@ -3454,8 +3451,8 @@ impl IgnisAnalyzer {
         config.clone(),
         lib.clone(),
         statements,
-        result_std.clone(),
-        result_scopes_variables.clone(),
+        result_std.clone().into(),
+        result_scopes_variables.clone().into(),
       );
 
       let analyzer_report = analyzer.process(true);
@@ -3679,14 +3676,14 @@ impl IgnisAnalyzer {
     block_stack: &mut HashMap<String, SymbolInfo>,
   ) -> Result<(), Box<DiagnosticMessage>> {
     let lib_path_str = statement.module_path.lexeme.split("::").collect::<Vec<&str>>()[1].to_owned() + "/mod.ign";
-    let lib = "std/".to_owned() + &lib_path_str;
+    let lib: String = format!("std/{}", lib_path_str);
 
     if self.primitives_std.contains_key(&lib) {
       let irs = self.primitives_std.get(&lib).unwrap().clone();
       let import_scope_variables = self.primitives_symbol_stack.get(&lib).unwrap().clone();
 
       for ir in &irs {
-        self.define_import(statement, ir, block_stack, &import_scope_variables)?;
+        self.define_import(&statement, ir, block_stack, &import_scope_variables)?;
       }
 
       return Ok(());
@@ -3710,10 +3707,10 @@ impl IgnisAnalyzer {
     let file = file_row.unwrap();
 
     let source = String::from_utf8(file).unwrap();
-    let mut lexer = IgnisLexer::new(self.config.clone(), &source, lib.clone());
+    let mut lexer = IgnisLexer::new(&self.config, &source, &lib);
     lexer.scan_tokens(true);
 
-    let mut parser = IgnisParser::new(self.config.clone(), lexer.tokens.clone());
+    let mut parser = IgnisParser::new(&self.config, &lexer.tokens);
     let result = parser.parse(true);
     let statements = result.0;
 
@@ -3967,15 +3964,15 @@ impl IgnisAnalyzer {
   ) -> Result<(), Box<DiagnosticMessage>> {
     let mut diagnostics: Vec<DiagnosticMessage> = vec![];
 
-    let _ = match fs::read_to_string(format!("{}.{}", statement.module_path.lexeme, "ign")) {
+    let path = format!("{}.{}", statement.module_path.lexeme, "ign");
+    let _ = match fs::read_to_string(&path) {
       Ok(source) => {
-        let mut lexer: IgnisLexer<'_> =
-          IgnisLexer::new(self.config.clone(), &source, statement.module_path.lexeme.clone() + ".ign");
+        let mut lexer: IgnisLexer<'_> = IgnisLexer::new(&self.config, &source, &path);
         lexer.scan_tokens(false);
 
         diagnostics.append(&mut lexer.diagnostics);
 
-        let mut parser: IgnisParser = IgnisParser::new(self.config.clone(), lexer.tokens);
+        let mut parser: IgnisParser = IgnisParser::new(&self.config, &lexer.tokens);
         let statements = parser.parse(false);
 
         diagnostics.append(&mut parser.diagnostics);
