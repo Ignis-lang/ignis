@@ -3470,7 +3470,7 @@ impl IgnisAnalyzer {
     if !config.quiet {
       let diagnostic: Diagnostic = Diagnostic::default();
 
-      diagnostic.report(diagnostics.clone());
+      diagnostic.report(&diagnostics);
     }
 
     (result_std, result_scopes_variables)
@@ -3941,13 +3941,190 @@ impl IgnisAnalyzer {
         }
       },
       HIRInstruction::Enum(enum_) => {
-        todo!()
+        for symbol in &statement.symbols {
+          if symbol.name.lexeme == enum_.name.lexeme && !enum_.metadata.is(HIRMetadataFlags::Exported) {
+            return Err(Box::new(DiagnosticMessage::ImportedEnumIsNotExported(symbol.name.clone())));
+          }
+
+          let mut variable = import_scope_variables
+            .iter()
+            .find(|v| v.get(&symbol.name.lexeme).is_some())
+            .unwrap()
+            .clone();
+          let variable = variable.get_mut(&symbol.name.lexeme).unwrap();
+
+          let mut metadata = enum_.metadata.clone();
+          metadata.remove_flag(HIRMetadataFlags::Exported);
+          metadata.push(HIRMetadataFlags::Imported);
+
+          if symbol.alias.is_some() {
+            block_stack.insert(
+              symbol.alias.as_ref().unwrap().lexeme.clone(),
+              SymbolInfo::new(
+                symbol.alias.as_ref().unwrap().clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::Enum,
+                None,
+              ),
+            );
+
+            variable.name = symbol.alias.as_ref().unwrap().clone();
+
+            current_ir.push(HIRInstruction::Enum(HIREnum::new(
+              Box::new(symbol.alias.as_ref().unwrap().clone()),
+              enum_.members.clone(),
+              metadata,
+              enum_.generic.clone(),
+              enum_.data_type.clone(),
+            )));
+
+            self.declare(symbol.alias.as_ref().unwrap().lexeme.clone(), variable.clone());
+          } else {
+            block_stack.insert(
+              symbol.name.lexeme.clone(),
+              SymbolInfo::new(
+                symbol.name.clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::Enum,
+                None,
+              ),
+            );
+
+            current_ir.push(HIRInstruction::Enum(HIREnum::new(
+              Box::new(symbol.name.clone()),
+              enum_.members.clone(),
+              metadata,
+              enum_.generic.clone(),
+              enum_.data_type.clone(),
+            )));
+
+            self.declare(symbol.name.lexeme.clone(), variable.clone());
+          }
+        }
       },
       HIRInstruction::Type(type_) => {
-        todo!()
+        for symbol in &statement.symbols {
+          if symbol.name.lexeme == type_.name.lexeme && !type_.metadata.is(HIRMetadataFlags::Exported) {
+            return Err(Box::new(DiagnosticMessage::ImportedTypeIsNotExported(symbol.name.clone())));
+          }
+
+          let mut variable = import_scope_variables
+            .iter()
+            .find(|v| v.get(&symbol.name.lexeme).is_some())
+            .unwrap()
+            .clone();
+          let variable = variable.get_mut(&symbol.name.lexeme).unwrap();
+
+          let mut metadata = type_.metadata.clone();
+          metadata.remove_flag(HIRMetadataFlags::Exported);
+          metadata.push(HIRMetadataFlags::Imported);
+
+          if symbol.alias.is_some() {
+            block_stack.insert(
+              symbol.alias.as_ref().unwrap().lexeme.clone(),
+              SymbolInfo::new(
+                symbol.alias.as_ref().unwrap().clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::TypeAlias,
+                None,
+              ),
+            );
+
+            variable.name = symbol.alias.as_ref().unwrap().clone();
+
+            current_ir.push(HIRInstruction::Type(HIRType::new(
+              symbol.alias.as_ref().unwrap().clone(),
+              type_.value.clone(),
+              HIRMetadata::new(metadata.flags.clone(), None),
+              type_.generics.clone(),
+            )));
+
+            self.declare(symbol.alias.as_ref().unwrap().lexeme.clone(), variable.clone());
+          } else {
+            block_stack.insert(
+              symbol.name.lexeme.clone(),
+              SymbolInfo::new(
+                symbol.name.clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::TypeAlias,
+                None,
+              ),
+            );
+
+            current_ir.push(HIRInstruction::Type(HIRType::new(
+              symbol.name.clone(),
+              type_.value.clone(),
+              HIRMetadata::new(metadata.flags.clone(), None),
+              type_.generics.clone(),
+            )));
+
+            self.declare(symbol.name.lexeme.clone(), variable.clone());
+          }
+        }
       },
       HIRInstruction::Extern(extern_) => {
-        todo!()
+        for symbol in &statement.symbols {
+          if symbol.name.lexeme == extern_.name.lexeme && !extern_.metadata.is(HIRMetadataFlags::Exported) {
+            return Err(Box::new(DiagnosticMessage::ImportedExternIsNotExported(symbol.name.clone())));
+          }
+
+          let mut variable = import_scope_variables
+            .iter()
+            .find(|v| v.get(&symbol.name.lexeme).is_some())
+            .unwrap()
+            .clone();
+          let variable = variable.get_mut(&symbol.name.lexeme).unwrap();
+
+          let mut metadata = extern_.metadata.clone();
+          metadata.remove_flag(HIRMetadataFlags::Exported);
+          metadata.push(HIRMetadataFlags::Imported);
+
+          if symbol.alias.is_some() {
+            block_stack.insert(
+              symbol.alias.as_ref().unwrap().lexeme.clone(),
+              SymbolInfo::new(
+                symbol.alias.as_ref().unwrap().clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::Extern,
+                None,
+              ),
+            );
+
+            variable.name = symbol.alias.as_ref().unwrap().clone();
+
+            current_ir.push(HIRInstruction::Extern(HIRExtern::new(
+              symbol.alias.as_ref().unwrap().clone(),
+              extern_.body.clone(),
+              HIRMetadata::new(metadata.flags.clone(), None),
+            )));
+
+            self.declare(symbol.alias.as_ref().unwrap().lexeme.clone(), variable.clone());
+          } else {
+            block_stack.insert(
+              symbol.name.lexeme.clone(),
+              SymbolInfo::new(
+                symbol.name.clone(),
+                DataType::Null,
+                metadata.flags.clone(),
+                SymbolKind::Extern,
+                None,
+              ),
+            );
+
+            current_ir.push(HIRInstruction::Extern(HIRExtern::new(
+              symbol.name.clone(),
+              extern_.body.clone(),
+              HIRMetadata::new(metadata.flags.clone(), None),
+            )));
+
+            self.declare(symbol.name.lexeme.clone(), variable.clone());
+          }
+        }
       },
       _ => (),
     }

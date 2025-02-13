@@ -131,7 +131,7 @@ impl Display for DataType {
       DataType::PendingImport(name) => write!(f, "pending_import({})", name),
       DataType::Record(name, items) => write!(
         f,
-        "record({}<{}>)",
+        "{}<{{{}}}>",
         name,
         items
           .iter()
@@ -141,18 +141,26 @@ impl Display for DataType {
       ),
       DataType::Object(object) => write!(
         f,
-        "object<{}>",
+        "{{{}}}",
         object
           .iter()
           .map(|(name, data_type)| format!("{}: {}", name, data_type))
           .collect::<Vec<String>>()
           .join(", ")
       ),
-      DataType::Reference(data_type) => write!(f, "reference({})", data_type),
-      DataType::Pointer(data_type) => write!(f, "pointer({})", data_type),
+      DataType::Reference(data_type) => write!(f, "&{}", data_type),
+      DataType::Pointer(data_type) => write!(f, "*{}", data_type),
       DataType::Variable(name, data_type) => write!(f, "variable({}, {})", name, data_type),
       DataType::Vector(data_type, size) => {
-        write!(f, "vector<{}, {}>", data_type, size.as_ref().map(|s| s.clone()).unwrap_or(1024))
+        write!(
+          f,
+          "{}[{}]",
+          data_type,
+          size
+            .as_ref()
+            .map(|s| -> String { s.clone().to_string() })
+            .unwrap_or(String::new())
+        )
       },
       DataType::Callable(parameters, return_type) => write!(
         f,
@@ -166,7 +174,7 @@ impl Display for DataType {
       ),
       DataType::Function(parameters, return_type) => write!(
         f,
-        "function<{}, {}>",
+        "({}) -> {}",
         parameters
           .iter()
           .map(|p| p.to_string())

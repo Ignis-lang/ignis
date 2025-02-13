@@ -2,9 +2,10 @@ pub mod analyzer;
 pub mod lexer;
 pub mod parser;
 
-use std::io::Read;
+use std::{collections::HashMap, io::Read};
 
 use ignis_config::{DebugPrint, IgnisConfig};
+use ignis_hir::HIRInstruction;
 use ignis_token::token::Token;
 use lexer::IgnisLexer;
 
@@ -28,6 +29,8 @@ fn get_file_content(path: &String) -> String {
 pub struct IgnisFrontend<'a> {
   config: &'a IgnisConfig,
   diagnostics: Vec<DiagnosticReport>,
+  pub hir_ffi_std: HashMap<String, Vec<HIRInstruction>>,
+  pub hirs: HashMap<String, Vec<HIRInstruction>>,
 }
 
 impl<'a> IgnisFrontend<'a> {
@@ -35,6 +38,8 @@ impl<'a> IgnisFrontend<'a> {
     Self {
       config,
       diagnostics: Vec::new(),
+      hir_ffi_std: HashMap::new(),
+      hirs: HashMap::new(),
     }
   }
 
@@ -69,6 +74,7 @@ impl<'a> IgnisFrontend<'a> {
     self.diagnostics.append(&mut diagnostics.clone());
 
     let std = analyzer::IgnisAnalyzer::load_primitive_std(self.config.clone().into());
+    self.hir_ffi_std.clone_from(&std.0);
 
     let mut analyzer = analyzer::IgnisAnalyzer::new(
       self.config.clone().into(),
@@ -87,11 +93,14 @@ impl<'a> IgnisFrontend<'a> {
       println!("HIR: {:#?}", analyzer.get_hir());
     }
 
-    if !self.config.quiet {
+    if !self.config.quiet && !self.diagnostics.is_empty() {
       let diagnostics: Diagnostic = Diagnostic::default();
 
-      diagnostics.report(self.diagnostics.clone());
+      diagnostics.report(&self.diagnostics);
+
       std::process::exit(1);
     }
+
+    self.hirs.clone_from(&analyzer.get_hir());
   }
 }

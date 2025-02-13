@@ -22,7 +22,7 @@ impl Diagnostic {
 
   pub fn report(
     &self,
-    diagnostic: Vec<DiagnosticReport>,
+    diagnostic: &Vec<DiagnosticReport>,
   ) {
     for report in diagnostic {
       self.print(&report);
