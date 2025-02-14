@@ -661,6 +661,36 @@ impl IRGenerator {
       HIRInstruction::Binary(binary) => self.process_hir_binary(binary),
       HIRInstruction::Ternary(ternary) => self.process_hir_ternary(ternary),
       HIRInstruction::Return(_return) => self.process_hir_return(_return),
+      HIRInstruction::MethodCall(call) => {
+        let mut arguments: Vec<IROperationValue> = vec![];
+        for argument in &call.arguments {
+          arguments.push(self.process_hir_expression_value(argument));
+        }
+
+        let flags: IRFlags = vec![IRFlag::Call, IRFlag::Method];
+
+        // let mut ffi_data = vec![];
+        //
+        // if call.metadata.is_ffi {
+        //   set_flag!(&mut flags, IRFlags::EXTERN);
+        //   ffi_data.clone_from(&self.current_ffi_data);
+        // }
+
+        IRInstruction {
+          op: IROperation::MethodCall,
+          dest: String::new(),
+          type_: call.return_type.clone(),
+          left: IROperationValue::FieldAccess {
+            base: call.calle.get_name().lexeme.clone(),
+            field: call.name.lexeme.clone(),
+            type_: call.return_type.clone(),
+            flags: vec![IRFlag::Function],
+            base_type: call.calle.extract_data_type(),
+          },
+          right: IROperationValue::Arguments { values: arguments },
+          flags,
+        }
+      },
       _ => {
         todo!("Expression TODO: {ir:#?}")
       },
@@ -960,6 +990,51 @@ impl IRGenerator {
       HIRInstruction::Ternary(ternary) => self.process_hir_ternary_expression(ternary),
       HIRInstruction::Object(object) => self.process_hir_object(object),
       HIRInstruction::MemberAccess(member) => self.process_hir_member_access(member),
+      HIRInstruction::MethodCall(call) => {
+        let mut arguments: Vec<IROperationValue> = vec![];
+
+        for argument in &call.arguments {
+          arguments.push(self.process_hir_expression_value(argument));
+        }
+
+        let return_tmp = self.new_return();
+
+        let mut flags = vec![IRFlag::Call, IRFlag::Method];
+
+        for flag in &call.metadata.flags {
+          flags.push(IRFlag::from(flag));
+        }
+
+        // let mut ffi_data = vec![];
+        //
+        // if call.metadata.is_ffi {
+        //   set_flag!(&mut flags, IRFlags::EXTERN);
+        //   ffi_data.clone_from(&self.current_ffi_data);
+        // }
+
+        self.current_block.push(IRInstruction {
+          op: IROperation::MethodCall,
+          dest: return_tmp.clone(),
+          type_: call.return_type.clone(),
+          left: IROperationValue::FieldAccess {
+            base: call.calle.get_name().lexeme.clone(),
+            field: call.name.lexeme.clone(),
+            type_: call.return_type.clone(),
+            flags: vec![IRFlag::Function],
+            base_type: call.calle.extract_data_type(),
+          },
+          right: IROperationValue::Arguments { values: arguments },
+          flags,
+        });
+
+        let flags: IRFlags = vec![IRFlag::Temporary, IRFlag::Call];
+
+        IROperationValue::Register {
+          name: return_tmp,
+          type_: DataType::Unknown,
+          flags,
+        }
+      },
       _ => {
         println!("Expression value TODO: {:#?}", ir);
         todo!()
@@ -1403,10 +1478,16 @@ impl IRGenerator {
       },
       IROperation::MethodCall => {
         if let IROperationValue::FieldAccess { base, field, .. } = &instruction.left {
-          if instruction.dest.is_empty() {
-            format!("{}->{}({})", base, field, instruction.right)
+          let operator = if instruction.flags.contains(&IRFlag::ObjectMember) {
+            "."
           } else {
-            format!("{} = {}->{}({})", instruction.dest, base, field, instruction.right)
+            "->"
+          };
+
+          if instruction.dest.is_empty() {
+            format!("{}{}{}({})", base, operator, field, instruction.right)
+          } else {
+            format!("{} = {}{}{}({})", instruction.dest, base, operator, field, instruction.right)
           }
         } else {
           String::new()

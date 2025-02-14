@@ -63,6 +63,7 @@ use hir_logical::HIRLogical;
 use hir_member_access::HIRMemberAccess;
 use hir_meta::HIRMeta;
 use hir_method::HIRMethod;
+use hir_method_call::HIRMethodCall;
 use hir_namespace::HIRNamespace;
 use hir_object::HIRObjectLiteral;
 use hir_record::HIRRecord;
@@ -145,6 +146,7 @@ pub enum HIRInstruction {
   If(HIRIf),
   Constant(HIRConstant),
   Call(HIRCall),
+  MethodCall(HIRMethodCall),
   FunctionInstance(HIRFunctionInstance),
   While(HIRWhile),
   Vector(HIRVector),

@@ -5,7 +5,7 @@ use colored::*;
 use ignis_ast::{
   expressions::{call::ASTCall, ASTExpression},
   metadata::ASTMetadataFlags,
-  statements::{import::ASTImport, ASTStatement},
+  statements::{import::ASTImport, property, ASTStatement},
   visitor::ASTVisitor,
 };
 use ignis_config::IgnisConfig;
@@ -33,6 +33,7 @@ use ignis_hir::{
   hir_member_access::HIRMemberAccess,
   hir_meta::HIRMeta,
   hir_method::HIRMethod,
+  hir_method_call::HIRMethodCall,
   hir_namespace::HIRNamespace,
   hir_object::HIRObjectLiteral,
   hir_record::HIRRecord,
@@ -666,7 +667,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       // return self.type_methods(method_call);
     }
 
-    let mut object_instance: Option<HIRVariable> = None;
+    let mut object_instance: Option<HIRInstruction> = None;
 
     match &instance {
       HIRInstruction::This(_) => {
@@ -678,16 +679,16 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         for (name, value) in object.properties.iter() {
           if name.lexeme == expression.member.lexeme {
             if let HIRInstruction::Variable(v) = value {
-              object_instance = Some(v.clone());
+              object_instance = Some(HIRInstruction::Variable(v.clone()));
               break;
             }
             if let HIRInstruction::Literal(literal) = &value {
-              object_instance = Some(HIRVariable::new(
+              object_instance = Some(HIRInstruction::Variable(HIRVariable::new(
                 expression.member.as_ref().clone(),
                 literal.value.clone().into(),
                 Some(Box::new(value.clone())),
                 HIRMetadata::new(vec![], None),
-              ));
+              )));
               break;
             } else {
               return Err(Box::new(DiagnosticMessage::InvalidPropertyType(
@@ -706,12 +707,12 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           let member_instance = self.find_hir_in_block(&v.name.lexeme);
 
           if let Some(member) = member_instance {
-            object_instance = Some(HIRVariable::new(
+            object_instance = Some(HIRInstruction::Variable(HIRVariable::new(
               v.name.clone(),
               member.extract_data_type(),
               v.value.clone(),
               v.metadata.clone(),
-            ));
+            )));
           } else {
             return Err(Box::new(DiagnosticMessage::UndefinedProperty(
               expression.member.as_ref().clone(),
@@ -722,12 +723,18 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
             if let HIRInstruction::Object(object) = value.as_ref() {
               for property in &object.properties {
                 if property.0.lexeme == expression.member.as_ref().lexeme {
-                  object_instance = Some(HIRVariable::new(
+                  object_instance = Some(HIRInstruction::Variable(HIRVariable::new(
                     property.0.clone(),
                     property.1.extract_data_type(),
                     None,
                     HIRMetadata::new(vec![], Some(Box::new(value.as_ref().clone()))),
-                  ));
+                  )));
+                }
+              }
+
+              for method in &object.methods {
+                if method.name.lexeme == expression.member.as_ref().lexeme {
+                  object_instance = Some(HIRInstruction::Method(method.clone()));
                 }
               }
             } else {
@@ -747,15 +754,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           match &statement {
             HIRInstruction::Function(fun) => {
               if fun.name.lexeme == expression.member.as_ref().lexeme {
-                object_instance = Some(HIRVariable::new(
-                  fun.name.clone(),
-                  DataType::Function(
-                    fun.parameters.iter().map(|p| p.extract_data_type()).collect(),
-                    Box::new(fun.return_type.clone()),
-                  ),
-                  None,
-                  HIRMetadata::new(fun.metadata.flags.clone(), Some(Box::new(statement.clone()))),
-                ))
+                object_instance = Some(HIRInstruction::Function(fun.clone()));
               }
             },
             _ => (),
@@ -767,15 +766,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           match &statement {
             HIRInstruction::Function(fun) => {
               if fun.name.lexeme == expression.member.as_ref().lexeme {
-                object_instance = Some(HIRVariable::new(
-                  fun.name.clone(),
-                  DataType::Function(
-                    fun.parameters.iter().map(|p| p.extract_data_type()).collect(),
-                    Box::new(fun.return_type.clone()),
-                  ),
-                  None,
-                  HIRMetadata::new(fun.metadata.flags.clone(), Some(Box::new(statement.clone()))),
-                ))
+                object_instance = Some(HIRInstruction::Function(fun.clone()));
               }
             },
             _ => (),
@@ -792,7 +783,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     if let Some(v) = object_instance {
       let ir = HIRInstruction::MemberAccess(HIRMemberAccess::new(
         Box::new(instance),
-        Box::new(HIRInstruction::Variable(v)),
+        Box::new(v),
         HIRMetadata::new(vec![], None),
       ));
 
@@ -835,7 +826,9 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     self.context.push(AnalyzerContext::Call);
     let callee = self.analyzer(&expression.callee)?;
 
-    let (parameters, return_type, metadata, body, function_name, generic_parameters) = match callee {
+    let mut object: Option<HIRInstruction> = None;
+
+    let (parameters, return_type, metadata, body, function_name, generic_parameters) = match &callee {
       HIRInstruction::Function(f) => (
         f.parameters.clone(),
         f.return_type.clone(),
@@ -864,8 +857,20 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           return Err(Box::new(DiagnosticMessage::NotCallable(expression.name.clone())));
         }
       },
-      HIRInstruction::Method(m) => {
-        todo!();
+      HIRInstruction::MemberAccess(member) => {
+        if let HIRInstruction::Method(m) = member.member.as_ref() {
+          object = Some(member.object.as_ref().clone());
+          (
+            m.parameters.clone(),
+            m.return_type.clone(),
+            m.metadata.clone(),
+            m.body.clone(),
+            m.name.clone(),
+            vec![],
+          )
+        } else {
+          return Err(Box::new(DiagnosticMessage::NotCallable(expression.name.clone())));
+        }
       },
       _ => {
         return Err(Box::new(DiagnosticMessage::NotCallable(expression.name.clone())));
@@ -1015,15 +1020,30 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       }
     }
 
-    let instruction = HIRInstruction::Call(HIRCall::new(
+    if let Some(object) = object {
+      if let HIRInstruction::MemberAccess(member) = &callee {
+        if matches!(member.object.as_ref(), HIRInstruction::Object(_)) {
+          metadata.push(HIRMetadataFlags::ObjectMember);
+        }
+
+        return Ok(HIRInstruction::MethodCall(HIRMethodCall::new(
+          Box::new(function_name),
+          member.object.clone(),
+          arguments,
+          return_type,
+          object.into(),
+          metadata,
+        )));
+      }
+    }
+
+    Ok(HIRInstruction::Call(HIRCall::new(
       function_name,
       arguments,
       return_type,
       generic_parameters,
       metadata,
-    ));
-
-    Ok(instruction)
+    )))
   }
 
   fn visit_match_expression(
