@@ -77,6 +77,7 @@ use hir_vector::HIRVector;
 use hir_vector_access::HIRVectorAccess;
 use hir_while::HIRWhile;
 use ignis_ast::metadata::{ASTMetadataFlags, IgnisCompilerMeta};
+use ignis_data_type::DataType;
 use ignis_token::{token::Token, token_types::TokenType};
 use serde::Serialize;
 use hir_unary::HIRUnary;
@@ -177,7 +178,55 @@ impl HIRInstruction {
     match self {
       HIRInstruction::Variable(v) => &v.metadata,
       HIRInstruction::Function(f) => &f.metadata,
-      _ => todo!(),
+      HIRInstruction::Record(r) => &r.metadata,
+      HIRInstruction::Method(m) => &m.metadata,
+      HIRInstruction::Enum(e) => &e.metadata,
+      _ => todo!("{self:#?}"),
+    }
+  }
+
+  pub fn get_name(&self) -> &Token {
+    match self {
+      HIRInstruction::Variable(v) => &v.name,
+      HIRInstruction::Function(f) => &f.name,
+      HIRInstruction::Record(r) => &r.name,
+      HIRInstruction::Method(m) => &m.name,
+      HIRInstruction::Enum(e) => &e.name,
+      HIRInstruction::This(t) => &t.token,
+      _ => todo!("{self:#?}"),
+    }
+  }
+
+  pub fn extract_data_type(&self) -> DataType {
+    match self {
+      HIRInstruction::Literal(l) => l.value.clone().into(),
+      HIRInstruction::Constant(c) => c.data_type.clone(),
+      HIRInstruction::Variable(v) => v.data_type.clone(),
+      HIRInstruction::Function(f) => f.return_type.clone(),
+      HIRInstruction::Binary(b) => b.data_type.clone(),
+      HIRInstruction::Unary(u) => u.data_type.clone(),
+      HIRInstruction::Logical(_) => DataType::Boolean,
+      HIRInstruction::Cast(cast) => cast.target_type.clone(),
+      HIRInstruction::Call(c) => c.return_type.clone(),
+      HIRInstruction::Return(r) => r.data_type.clone(),
+      HIRInstruction::Vector(array) => array.data_type.clone(),
+      //   HIRInstruction::Class(c) => DataType::ClassType(c.name.span.literal.clone()),
+      //   HIRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.span.literal.clone()),
+      //   HIRInstruction::Enum(e) => DataType::Enum(e.name.span.literal.clone()),
+      HIRInstruction::Record(r) => r.data_type.clone(),
+      HIRInstruction::Object(object) => object.data_type.clone(),
+      HIRInstruction::VectorAccess(array) => match &array.data_type {
+        DataType::Vector(t, ..) => *t.clone(),
+        _ => DataType::Unknown,
+      },
+      HIRInstruction::This(this) => this.data_type.clone(),
+      HIRInstruction::Type(t) => t.value.as_ref().clone(),
+      HIRInstruction::MemberAccess(member) => member.member.extract_data_type(),
+      HIRInstruction::Extern(_) => DataType::Null,
+      HIRInstruction::Include(_) => DataType::Null,
+      HIRInstruction::Source(_) => DataType::Null,
+      HIRInstruction::Namespace(_) => DataType::Null,
+      _ => DataType::Unknown,
     }
   }
 }
@@ -287,7 +336,7 @@ impl From<&ASTMetadataFlags> for HIRMetadataFlags {
   }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct HIRMetadata {
   pub flags: Vec<HIRMetadataFlags>,
   pub complex_type: Option<Box<HIRInstruction>>,

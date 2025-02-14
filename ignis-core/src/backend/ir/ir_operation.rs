@@ -6,7 +6,7 @@ use ignis_hir::HIRInstructionType;
 
 use crate::backend::ir::ir_flags::IRFlag;
 
-use super::ir_flags::IRFlags;
+use super::{ir::IRInstruction, ir_flags::IRFlags};
 
 #[derive(Debug, Clone)]
 pub enum IROperationValue {
@@ -38,8 +38,18 @@ pub enum IROperationValue {
   Label(String),
   Function {
     name: String,
-    parameters: Vec<IROperationValue>,
+    parameters: Vec<DataType>,
     return_type: DataType,
+    flags: IRFlags,
+  },
+  Field {
+    name: String,
+    type_: DataType,
+    value: Box<IROperationValue>,
+  },
+  ObjectLiteral {
+    type_: DataType,
+    properties: Vec<(String, IROperationValue)>,
     flags: IRFlags,
   },
   None,
@@ -131,19 +141,20 @@ impl Display for IROperationValue {
       IROperationValue::FieldAccess { base, field, .. } => {
         write!(f, "{}->{}", base, field)
       },
-      IROperationValue::Function {
-        name,
-        parameters,
-        return_type,
-        ..
-      } => {
-        let parameters = parameters
+      IROperationValue::Function { name, .. } => {
+        write!(f, "*{}", name)
+      },
+      IROperationValue::ObjectLiteral { properties, .. } => {
+        let properties = properties
           .iter()
-          .map(|value| format!("{}", value))
+          .map(|(name, value)| format!("{}: {}", name, value))
           .collect::<Vec<String>>()
           .join(", ");
 
-        write!(f, "{}({}) -> {}", name, parameters, return_type)
+        write!(f, "{{ {} }}", properties)
+      },
+      IROperationValue::Field { name, value, .. } => {
+        write!(f, "{}: {}", name, value)
       },
     }
   }
@@ -164,6 +175,8 @@ impl Into<DataType> for IROperationValue {
         return_type,
         ..
       } => DataType::Function(parameters.into_iter().map(|x| x.into()).collect(), return_type.into()),
+      IROperationValue::ObjectLiteral { type_, .. } => type_,
+      IROperationValue::Field { type_, .. } => type_,
     }
   }
 }

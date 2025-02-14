@@ -55,6 +55,7 @@ pub enum DataType {
   AliasType(String),
   UnionType(Vec<DataType>),
   IntersectionType(Vec<DataType>),
+  StructType(String),
   // TODO: Ignis v0.3.0
   Interface(String),
   ClassType(String),
@@ -73,6 +74,63 @@ impl DataType {
       DataType::UnsignedInt32 => format!("0 to {}", u32::MAX),
       DataType::UnsignedInt64 => format!("0 to {}", u64::MAX),
       _ => String::new(),
+    }
+  }
+
+  pub fn to_ir_format(&self) -> String {
+    match self {
+      DataType::Hex => String::from("hex"),
+      DataType::Binary => String::from("binary"),
+      DataType::String => String::from("string"),
+      DataType::Int8 => String::from("i8"),
+      DataType::Int16 => String::from("i16"),
+      DataType::Int32 => String::from("i32"),
+      DataType::Int64 => String::from("i64"),
+      DataType::UnsignedInt8 => String::from("u8"),
+      DataType::UnsignedInt16 => String::from("u16"),
+      DataType::UnsignedInt32 => String::from("u32"),
+      DataType::UnsignedInt64 => String::from("u64"),
+      DataType::Float32 => String::from("f32"),
+      DataType::Float64 => String::from("f64"),
+      DataType::Boolean => String::from("boolean"),
+      DataType::Char => String::from("char"),
+      DataType::Null => String::from("null"),
+      DataType::Unknown => String::from("unknown"),
+      DataType::Void => String::from("void"),
+      DataType::Pending => unreachable!(),
+      DataType::PendingImport(_) => unreachable!(),
+      DataType::Object(_) => unreachable!(),
+      DataType::Record(name, _) => format!("{}", name,),
+      DataType::Reference(data_type) => format!("&{}", data_type,),
+      DataType::Pointer(data_type) => format!("*{}", data_type,),
+      DataType::Variable(name, _) => format!("{}", name,),
+      DataType::Vector(data_type, size) => format!(
+        "{}[{}]",
+        data_type,
+        size
+          .as_ref()
+          .map(|s| -> String { s.clone().to_string() })
+          .unwrap_or(String::new())
+      ),
+      DataType::Callable(parameters, return_type) | DataType::Function(parameters, return_type) => format!(
+        "{} (*)({})",
+        return_type,
+        parameters
+          .iter()
+          .map(|p| p.to_string())
+          .collect::<Vec<String>>()
+          .join(", "),
+      ),
+      DataType::Optional(data_type) => todo!(),
+      DataType::GenericType(generic_type) => todo!(),
+      DataType::Enum(name) => todo!(),
+      DataType::AliasType(name) => todo!(),
+      DataType::UnionType(types) => todo!(),
+      DataType::IntersectionType(types) => todo!(),
+      DataType::StructType(name) => format!("struct {}", name),
+      DataType::Interface(name) => todo!(),
+      DataType::ClassType(name) => todo!(),
+      DataType::TupleType(types) => todo!(),
     }
   }
 }
@@ -213,6 +271,7 @@ impl Display for DataType {
         "tuple<{}>",
         types.iter().map(|t| t.to_string()).collect::<Vec<String>>().join(", ")
       ),
+      DataType::StructType(name) => write!(f, "struct({})", name),
     }
   }
 }

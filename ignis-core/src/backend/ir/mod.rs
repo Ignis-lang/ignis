@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use ignis_data_type::{value::IgnisLiteralValue, DataType};
 use ignis_hir::{
-  hir_binary::HIRBinary, hir_call::HIRCall, hir_for::HIRFor, hir_for_of::HIRForOf, hir_function::HIRFunction, hir_if::HIRIf, hir_ternary::HIRTernary, hir_while::HIRWhile, HIRInstruction, HIRMetadataFlags
+  hir_binary::HIRBinary, hir_call::HIRCall, hir_for::HIRFor, hir_for_of::HIRForOf, hir_function::HIRFunction,
+  hir_if::HIRIf, hir_literal::HIRLiteral, hir_member_access::HIRMemberAccess, hir_method::HIRMethod,
+  hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn, hir_ternary::HIRTernary,
+  hir_while::HIRWhile, HIRInstruction, HIRMetadataFlags,
 };
 use ir::{IRFunction, IRImport, IRInstruction, IRProgramInstruction, IRStruct, IRTypeDefinition};
 use ir_flags::{IRFlag, IRFlags};
@@ -24,6 +27,7 @@ pub struct IRGenerator {
   temp_count: u32,
   label_count: u32,
   return_count: u32,
+  object_count: u32,
   current_block: Vec<IRInstruction>,
   // current_ffi_data: Vec<IgnisFFIOptions>,
   context: Vec<IRContext>,
@@ -37,6 +41,7 @@ impl IRGenerator {
       temp_count: 0,
       label_count: 0,
       return_count: 0,
+      object_count: 0,
       current_block: vec![],
       context: vec![],
     }
@@ -112,13 +117,99 @@ impl IRGenerator {
         self.current_block.push(ir);
       },
       HIRInstruction::Call(call) => self.process_hir_call(call),
-
+      HIRInstruction::Record(record) => self.process_hir_record(record),
       HIRInstruction::While(while_) => self.process_while(while_),
       _ => {
         let ir = self.process_hir_expression(hir);
         self.current_block.push(ir);
       },
     };
+  }
+
+  fn process_hir_record(
+    &mut self,
+    record: &HIRRecord,
+  ) {
+    if record.metadata.is(HIRMetadataFlags::Imported) {
+      return;
+    }
+
+    let generics = record.generic_parameters.clone();
+
+    let mut fields = vec![];
+
+    for field in &record.items {
+      if let HIRInstruction::Variable(var) = field {
+        let mut flags: IRFlags = vec![];
+
+        for flag in &var.metadata.flags {
+          flags.push(IRFlag::from(flag));
+        }
+
+        let ir = IRInstruction {
+          op: IROperation::Assign,
+          dest: var.name.lexeme.clone(),
+          type_: var.data_type.clone(),
+          left: IROperationValue::None,
+          right: IROperationValue::None,
+          flags,
+        };
+
+        fields.push(ir);
+      }
+
+      if let HIRInstruction::Method(m) = field {
+        let mut flags: IRFlags = vec![IRFlag::Pointer];
+
+        for flag in &m.metadata.flags {
+          flags.push(IRFlag::from(flag));
+        }
+
+        let mut parameters: Vec<IROperationValue> = vec![];
+
+        let this_flag: IRFlags = vec![IRFlag::Mutable, IRFlag::Pointer];
+
+        parameters.push(IROperationValue::Register {
+          name: "this".to_string(),
+          type_: record.data_type.clone(),
+          flags: this_flag,
+        });
+
+        for parameter in &m.parameters {
+          if let HIRInstruction::Variable(parameter) = parameter {
+            let flags: IRFlags = parameter.metadata.flags.iter().map(IRFlag::from).collect();
+
+            parameters.push(IROperationValue::Register {
+              name: parameter.name.lexeme.clone(),
+              type_: parameter.data_type.clone(),
+              flags,
+            });
+          }
+        }
+
+        let ir = IRInstruction {
+          op: IROperation::Callable,
+          dest: m.name.lexeme.clone(),
+          type_: m.return_type.clone(),
+          left: IROperationValue::Arguments { values: parameters },
+          right: IROperationValue::None,
+          flags,
+        };
+
+        fields.push(ir)
+      }
+    }
+
+    let flags: IRFlags = record.metadata.flags.iter().map(IRFlag::from).collect();
+
+    let struct_ = IRStruct {
+      name: record.name.lexeme.clone(),
+      fields,
+      generics,
+      flags,
+    };
+
+    self.programs.push(IRProgramInstruction::Struct(struct_));
   }
 
   fn process_while(
@@ -144,7 +235,7 @@ impl IRGenerator {
     let condition: IROperationValue = self.process_hir_expression_value(&while_.condition);
     self.context.pop();
 
-    let mut flags: IRFlags = vec![IRFlag::Temporary];
+    let flags: IRFlags = vec![IRFlag::Temporary];
 
     self.current_block.push(IRInstruction {
       op: IROperation::Assign,
@@ -412,7 +503,7 @@ impl IRGenerator {
     let condition: IROperationValue = self.process_hir_expression_value(&for_.condition);
     self.context.pop();
 
-    let mut flags: IRFlags = vec![IRFlag::Temporary, IRFlag::Negate];
+    let flags: IRFlags = vec![IRFlag::Temporary, IRFlag::Negate];
 
     self.current_block.push(IRInstruction {
       op: IROperation::Assign,
@@ -569,9 +660,156 @@ impl IRGenerator {
       },
       HIRInstruction::Binary(binary) => self.process_hir_binary(binary),
       HIRInstruction::Ternary(ternary) => self.process_hir_ternary(ternary),
+      HIRInstruction::Return(_return) => self.process_hir_return(_return),
       _ => {
         todo!("Expression TODO: {ir:#?}")
       },
+    }
+  }
+
+  fn process_hir_member_access(
+    &mut self,
+    member: &HIRMemberAccess,
+  ) -> IROperationValue {
+    IROperationValue::FieldAccess {
+      base: member.object.get_name().lexeme.clone(),
+      field: member.member.get_name().lexeme.clone(),
+      type_: member.member.extract_data_type(),
+      flags: vec![IRFlag::Field],
+      base_type: member.object.extract_data_type(),
+    }
+  }
+
+  fn process_literal(
+    &mut self,
+    literal: &HIRLiteral,
+  ) -> IROperationValue {
+    let value = literal.value.clone();
+    let type_ = literal.value.clone().into();
+    let mut flags: IRFlags = vec![];
+
+    if self.context.contains(&IRContext::Condition) {
+      flags.push(IRFlag::Condition);
+    }
+
+    IROperationValue::Constant { value, type_, flags }
+  }
+
+  fn process_hir_return(
+    &mut self,
+    _return: &HIRReturn,
+  ) -> IRInstruction {
+    let value = self.process_hir_expression_value(&_return.value);
+
+    IRInstruction {
+      op: IROperation::Return,
+      dest: "".to_string(),
+      type_: _return.data_type.clone(),
+      left: value,
+      right: IROperationValue::None,
+      flags: vec![],
+    }
+  }
+
+  fn process_hir_object(
+    &mut self,
+    object: &HIRObjectLiteral,
+  ) -> IROperationValue {
+    let mut properties = Vec::<(String, IROperationValue)>::new();
+
+    for (name, value) in &object.properties {
+      let value = self.process_hir_expression_value(value);
+
+      properties.push((name.lexeme.clone(), value));
+    }
+
+    for method in &object.methods {
+      let result = self.process_hir_method(method);
+
+      properties.push((method.name.lexeme.clone(), result));
+    }
+
+    IROperationValue::ObjectLiteral {
+      properties,
+      type_: object.data_type.clone(),
+      flags: vec![],
+    }
+  }
+
+  fn process_hir_method(
+    &mut self,
+    method: &HIRMethod,
+  ) -> IROperationValue {
+    let mut flags: IRFlags = vec![];
+
+    for flag in &method.metadata.flags {
+      flags.push(IRFlag::from(flag));
+    }
+
+    let name = if method.name.lexeme == method.object.lexeme {
+      format!("__object{}_{}", self.object_count, method.name.lexeme)
+    } else {
+      format!("{}_{}", method.object.lexeme, method.name.lexeme)
+    };
+
+    let mut ir_function = IRFunction {
+      name,
+      body: vec![],
+      return_type: method.return_type.clone(),
+      flags,
+      parameters: vec![],
+      // ffi_data: self.current_ffi_data.clone(),
+    };
+
+    self.current_block.clone_from(&Vec::new());
+    let mut parameters: Vec<IRInstruction> = vec![];
+    let mut parameters_data_type = vec![];
+
+    parameters.push(IRInstruction {
+      op: IROperation::Parameter,
+      dest: String::from("this"),
+      type_: DataType::StructType(method.object.lexeme.clone()),
+      left: IROperationValue::None,
+      right: IROperationValue::None,
+      flags: vec![IRFlag::Pointer, IRFlag::Mutable],
+    });
+
+    for parameter in &method.parameters {
+      if let HIRInstruction::Variable(parameter) = parameter {
+        let mut flags: IRFlags = vec![];
+
+        for flag in &parameter.metadata.flags {
+          flags.push(IRFlag::from(flag));
+        }
+        parameters_data_type.push(parameter.data_type.clone());
+
+        parameters.push(IRInstruction {
+          op: IROperation::Parameter,
+          dest: parameter.name.lexeme.clone(),
+          type_: parameter.data_type.clone(),
+          left: IROperationValue::None,
+          right: IROperationValue::None,
+          flags,
+        });
+      }
+    }
+
+    if let Some(body) = &method.body {
+      for instruction in &body.instructions {
+        self.process_hir(instruction);
+      }
+    }
+
+    ir_function.body.clone_from(&self.current_block);
+    ir_function.parameters.clone_from(&parameters);
+
+    self.programs.push(IRProgramInstruction::Function(ir_function.clone()));
+
+    IROperationValue::Function {
+      name: ir_function.name.clone(),
+      parameters: parameters_data_type,
+      return_type: method.return_type.clone(),
+      flags: vec![],
     }
   }
 
@@ -658,19 +896,7 @@ impl IRGenerator {
     ir: &HIRInstruction,
   ) -> IROperationValue {
     match ir {
-      HIRInstruction::Literal(literal) => {
-        let mut flags = vec![];
-
-        if self.context.contains(&IRContext::Condition) {
-          flags.push(IRFlag::Condition);
-        }
-
-        IROperationValue::Constant {
-          value: literal.value.clone(),
-          type_: literal.value.clone().into(),
-          flags,
-        }
-      },
+      HIRInstruction::Literal(literal) => self.process_literal(literal),
       HIRInstruction::Variable(var) => {
         let mut flags: IRFlags = vec![];
 
@@ -732,6 +958,8 @@ impl IRGenerator {
         }
       },
       HIRInstruction::Ternary(ternary) => self.process_hir_ternary_expression(ternary),
+      HIRInstruction::Object(object) => self.process_hir_object(object),
+      HIRInstruction::MemberAccess(member) => self.process_hir_member_access(member),
       _ => {
         println!("Expression value TODO: {:#?}", ir);
         todo!()
@@ -931,7 +1159,12 @@ impl IRGenerator {
     type_: &IRTypeDefinition,
   ) -> String {
     let metadata = format!(" flags: {:?}", type_.flags);
-    format!("{{{{\n{}\n}}}}\ntype {} = {};", metadata, type_.name, type_.type_)
+    format!(
+      "{{{{\n{}\n}}}}\ntype {} = {};",
+      metadata,
+      type_.name,
+      type_.type_.to_ir_format()
+    )
   }
 
   fn print_type(
@@ -1020,7 +1253,11 @@ impl IRGenerator {
       .collect::<Vec<String>>()
       .join(", ");
 
-    let mut metadata = format!("\n flags: {:?},\n return_type: {}", function.flags, function.return_type);
+    let mut metadata = format!(
+      "\n flags: {:?},\n return_type: {}",
+      function.flags,
+      function.return_type.to_ir_format()
+    );
 
     // if !function.ffi_data.is_empty() {
     //   metadata.push_str(&format!(
@@ -1036,10 +1273,7 @@ impl IRGenerator {
     metadata.push('\n');
     // }
 
-    let header = format!(
-      "# function: {}\n# signature: {} {}({})\n{{{{{}}}}}",
-      function.name, function.return_type, function.name, parameters, metadata
-    );
+    let header = format!("# {{{{{}}}}}", metadata);
 
     let mut body = "".to_string();
 
@@ -1050,7 +1284,11 @@ impl IRGenerator {
 
     format!(
       "{}\n{} {}({}) {{\n{}}}",
-      header, function.return_type, function.name, parameters, body
+      header,
+      function.return_type.to_ir_format(),
+      function.name,
+      parameters,
+      body
     )
   }
 
@@ -1083,79 +1321,44 @@ impl IRGenerator {
   ) -> String {
     let mut indent = indent;
 
+    let type_ = instruction.type_.to_ir_format();
+
     let expression = match &instruction.op {
-      IROperation::Add => format!(
-        "{} {} = {} + {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Subtract => format!(
-        "{} {} = {} - {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Multiply => format!(
-        "{} {} = {} * {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Divide => format!(
-        "{} {} = {} / {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Mod => format!(
-        "{} {} = {} % {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::And => format!(
-        "{} {} = {} && {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Or => format!(
-        "{} {} = {} || {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Not => format!("{} {} = !{}", instruction.type_, instruction.dest, instruction.left),
-      IROperation::Equal => format!(
-        "{} {} = {} == {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::NotEqual => format!(
-        "{} {} = {} != {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Greater => format!(
-        "{} {} = {} > {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::GreaterEqual => format!(
-        "{} {} = {} >= {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Less => format!(
-        "{} {} = {} < {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::LessEqual => format!(
-        "{} {} = {} <= {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Cast => format!(
-        "{} {} = {} as {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.type_
-      ),
+      IROperation::Add => format!("{} {} = {} + {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::Subtract => format!("{} {} = {} - {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::Multiply => format!("{} {} = {} * {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::Divide => format!("{} {} = {} / {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::Mod => format!("{} {} = {} % {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::And => format!("{} {} = {} && {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::Or => format!("{} {} = {} || {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::Not => format!("{} {} = !{}", type_, instruction.dest, instruction.left),
+      IROperation::Equal => format!("{} {} = {} == {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::NotEqual => {
+        format!("{} {} = {} != {}", type_, instruction.dest, instruction.left, instruction.right)
+      },
+      IROperation::Greater => format!("{} {} = {} > {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::GreaterEqual => {
+        format!("{} {} = {} >= {}", type_, instruction.dest, instruction.left, instruction.right)
+      },
+      IROperation::Less => format!("{} {} = {} < {}", type_, instruction.dest, instruction.left, instruction.right),
+      IROperation::LessEqual => {
+        format!("{} {} = {} <= {}", type_, instruction.dest, instruction.left, instruction.right)
+      },
+      IROperation::Cast => format!("{} {} = {} as {}", type_, instruction.dest, instruction.left, type_),
       IROperation::Call => {
         if instruction.dest.is_empty() {
           format!("call {}({})", instruction.left, instruction.right)
         } else {
           format!(
             "{} {} = call {}({})",
-            instruction.type_, instruction.dest, instruction.left, instruction.right
+            type_, instruction.dest, instruction.left, instruction.right
           )
         }
       },
       IROperation::Return => format!("return {}", instruction.left),
-      IROperation::VectorAccess => format!(
-        "{} {} = {}[{}]",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
+      IROperation::VectorAccess => {
+        format!("{} {} = {}[{}]", type_, instruction.dest, instruction.left, instruction.right)
+      },
       IROperation::Label => {
         indent = 0;
         format!("{}:", instruction.dest)
@@ -1165,24 +1368,20 @@ impl IRGenerator {
       },
       IROperation::If => format!("if {} goto {}", instruction.left, instruction.dest),
       IROperation::Assign => self.format_assignment(instruction),
-      IROperation::Allocate => format!("{} {} = alloc {}", instruction.type_, instruction.dest, instruction.left),
+      IROperation::Allocate => format!("{} {} = alloc {}", type_, instruction.dest, instruction.left),
       IROperation::Declare => todo!(),
       IROperation::Constant => {
         let metadata = format!(" {:?}", instruction.flags);
 
-        format!(
-          "{} {} = {} {{{{{}}}}}",
-          instruction.type_, instruction.dest, instruction.left, metadata
-        )
+        format!("{} {} = {} {{{{{}}}}}", type_, instruction.dest, instruction.left, metadata)
       },
-      IROperation::AssignAdd => format!("{} {} += {}", instruction.type_, instruction.dest, instruction.right),
-      IROperation::AssignSub => format!("{} {} -= {}", instruction.type_, instruction.dest, instruction.right),
-      IROperation::Concatenate => format!(
-        "{} {} = {} + {}",
-        instruction.type_, instruction.dest, instruction.left, instruction.right
-      ),
-      IROperation::Increment => format!("{} {} = {} + 1", instruction.type_, instruction.dest, instruction.left),
-      IROperation::Decrement => format!("{} {} = {} - 1", instruction.type_, instruction.dest, instruction.left),
+      IROperation::AssignAdd => format!("{} {} += {}", type_, instruction.dest, instruction.right),
+      IROperation::AssignSub => format!("{} {} -= {}", type_, instruction.dest, instruction.right),
+      IROperation::Concatenate => {
+        format!("{} {} = {} + {}", type_, instruction.dest, instruction.left, instruction.right)
+      },
+      IROperation::Increment => format!("{} {} = {} + 1", type_, instruction.dest, instruction.left),
+      IROperation::Decrement => format!("{} {} = {} - 1", type_, instruction.dest, instruction.left),
       IROperation::Goto => format!("goto {}", instruction.dest),
       IROperation::StartBlock => "# Start Block".to_string(),
       IROperation::EndBlock => "# End Block".to_string(),
@@ -1197,7 +1396,7 @@ impl IRGenerator {
       },
       IROperation::Callable => {
         if instruction.flags.contains(&IRFlag::Pointer) {
-          format!("{} (*{})({})", instruction.type_, instruction.dest, instruction.left)
+          format!("{} (*{})({})", type_, instruction.dest, instruction.left)
         } else {
           String::new()
         }
@@ -1215,7 +1414,7 @@ impl IRGenerator {
       },
     };
 
-    let mut metadata = format!(" flags: {:?}, type: {} ", instruction.flags, instruction.type_);
+    let mut metadata = format!(" flags: {:?}, type: {} ", instruction.flags, type_);
 
     // if !instruction.ffi_data.is_empty() {
     //   metadata.push_str(&format!(
@@ -1254,7 +1453,7 @@ impl IRGenerator {
       modifier.push_str("mut ");
     }
 
-    modifier.push_str(&param.type_.to_string());
+    modifier.push_str(&param.type_.to_ir_format());
 
     if param.flags.contains(&IRFlag::Pointer) {
       modifier.push('*');
@@ -1277,7 +1476,7 @@ impl IRGenerator {
     &self,
     assignment: &IRInstruction,
   ) -> String {
-    if assignment.flags.contains(&IRFlag::Field) {
+    if assignment.flags.contains(&IRFlag::Property) {
       return self.format_field(assignment);
     }
 
@@ -1294,7 +1493,13 @@ impl IRGenerator {
       modifier.push('*');
     }
 
-    format!("{} {}{} = {}", assignment.type_, modifier, assignment.dest, assignment.left)
+    format!(
+      "{} {}{} = {}",
+      assignment.type_.to_ir_format(),
+      modifier,
+      assignment.dest,
+      assignment.left
+    )
   }
 
   fn format_field(
@@ -1319,6 +1524,6 @@ impl IRGenerator {
       metadata.push('*');
     }
 
-    format!("{}{} {};", metadata, field.type_, field.dest)
+    format!("{}{} {};", metadata, field.type_.to_ir_format(), field.dest)
   }
 }

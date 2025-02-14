@@ -30,6 +30,7 @@ use ignis_hir::{
   hir_include::HIRInclude,
   hir_literal::HIRLiteral,
   hir_logical::HIRLogical,
+  hir_member_access::HIRMemberAccess,
   hir_meta::HIRMeta,
   hir_method::HIRMethod,
   hir_namespace::HIRNamespace,
@@ -147,12 +148,12 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     expression: &ignis_ast::expressions::binary::ASTBinary,
   ) -> AnalyzerResult {
     let left = self.analyzer(&expression.left)?;
-    let left_type = self.extract_data_type(&left);
+    let left_type = left.extract_data_type();
 
     self.current_type = Some(left_type.clone());
 
     let right = self.analyzer(&expression.right)?;
-    let right_type = self.extract_data_type(&right);
+    let right_type = right.extract_data_type();
     self.current_type = None;
 
     let operator = expression.operator.clone();
@@ -243,8 +244,8 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let left = self.analyzer(&expression.left)?;
     let right = self.analyzer(&expression.right)?;
     let instruction_type = HIRInstructionType::from_token_kind(&expression.operator.type_);
-    let left_type = self.extract_data_type(&left);
-    let right_type = self.extract_data_type(&right);
+    let left_type = left.extract_data_type();
+    let right_type = right.extract_data_type();
 
     match instruction_type {
       HIRInstructionType::And | HIRInstructionType::Or => {
@@ -272,12 +273,12 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let then_branch = self.analyzer(&expression.then_branch)?;
     let else_branch = self.analyzer(&expression.else_branch)?;
 
-    if self.extract_data_type(&condition) != DataType::Boolean {
+    if condition.extract_data_type() != DataType::Boolean {
       return Err(Box::new(DiagnosticMessage::InvalidCondition(*expression.token.clone())));
     }
 
-    let then_type = self.extract_data_type(&then_branch);
-    let else_type = self.extract_data_type(&else_branch);
+    let then_type = then_branch.extract_data_type();
+    let else_type = else_branch.extract_data_type();
 
     if then_type != else_type {
       return Err(Box::new(DiagnosticMessage::TypeMismatch(
@@ -301,7 +302,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
   ) -> AnalyzerResult {
     let value = self.analyzer(&cast.operand)?;
 
-    let data_type = self.extract_data_type(&value);
+    let data_type = value.extract_data_type();
 
     if !self.is_valid_cast(&data_type, &cast.target_type) {
       return Err(Box::new(DiagnosticMessage::InvalidCast(
@@ -324,7 +325,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
   ) -> AnalyzerResult {
     let right = self.analyzer(&expression.right)?;
     let instruction_type = HIRInstructionType::from_token_kind(&expression.operator.type_);
-    let right_type = self.extract_data_type(&right);
+    let right_type = right.extract_data_type();
 
     if !self.are_types_unary_compatible(&right, &instruction_type) {
       return Err(Box::new(DiagnosticMessage::TypeMismatchUnary(
@@ -557,7 +558,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let var = self.analyzer(&vector.variable)?;
     let index = self.analyzer(&vector.index)?;
 
-    let var_type = self.extract_data_type(&var);
+    let var_type = var.extract_data_type();
 
     if !matches!(var_type, DataType::Vector(_, _)) {
       return Err(Box::new(DiagnosticMessage::NotAnVector(*vector.name.clone())));
@@ -577,7 +578,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         }
       },
       _ => {
-        let kind = self.extract_data_type(&index);
+        let kind = index.extract_data_type();
 
         if kind != DataType::UnsignedInt32 {
           return Err(Box::new(DiagnosticMessage::InvalidVectorIndex(*vector.name.clone())));
@@ -600,7 +601,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
     for elem in &expression.elements {
       let analyzed_elem = self.analyzer(elem)?;
-      let elem_type = self.extract_data_type(&analyzed_elem);
+      let elem_type = analyzed_elem.extract_data_type();
 
       elements.push(analyzed_elem);
       element_types.push(elem_type);
@@ -640,7 +641,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     expression: &ignis_ast::expressions::member_access::ASTMemberAccess,
   ) -> AnalyzerResult {
     let instance: HIRInstruction = self.analyzer(expression.object.as_ref())?;
-    let instance_type = self.extract_data_type(&instance);
+    let instance_type = instance.extract_data_type();
 
     if matches!(
       instance_type,
@@ -667,7 +668,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
     let mut object_instance: Option<HIRVariable> = None;
 
-    match instance {
+    match &instance {
       HIRInstruction::This(_) => {
         let object = self
           .current_object
@@ -678,6 +679,15 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           if name.lexeme == expression.member.lexeme {
             if let HIRInstruction::Variable(v) = value {
               object_instance = Some(v.clone());
+              break;
+            }
+            if let HIRInstruction::Literal(literal) = &value {
+              object_instance = Some(HIRVariable::new(
+                expression.member.as_ref().clone(),
+                literal.value.clone().into(),
+                Some(Box::new(value.clone())),
+                HIRMetadata::new(vec![], None),
+              ));
               break;
             } else {
               return Err(Box::new(DiagnosticMessage::InvalidPropertyType(
@@ -698,7 +708,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           if let Some(member) = member_instance {
             object_instance = Some(HIRVariable::new(
               v.name.clone(),
-              self.extract_data_type(&member),
+              member.extract_data_type(),
               v.value.clone(),
               v.metadata.clone(),
             ));
@@ -708,7 +718,28 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
             )));
           }
         } else {
-          object_instance = Some(v);
+          if let Some(value) = &v.value {
+            if let HIRInstruction::Object(object) = value.as_ref() {
+              for property in &object.properties {
+                if property.0.lexeme == expression.member.as_ref().lexeme {
+                  object_instance = Some(HIRVariable::new(
+                    property.0.clone(),
+                    property.1.extract_data_type(),
+                    None,
+                    HIRMetadata::new(vec![], Some(Box::new(value.as_ref().clone()))),
+                  ));
+                }
+              }
+            } else {
+              return Err(Box::new(DiagnosticMessage::UndefinedProperty(
+                expression.member.as_ref().clone(),
+              )));
+            }
+          } else {
+            return Err(Box::new(DiagnosticMessage::UndefinedProperty(
+              expression.member.as_ref().clone(),
+            )));
+          }
         }
       },
       HIRInstruction::Extern(extern_) => {
@@ -719,7 +750,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
                 object_instance = Some(HIRVariable::new(
                   fun.name.clone(),
                   DataType::Function(
-                    fun.parameters.iter().map(|p| self.extract_data_type(p)).collect(),
+                    fun.parameters.iter().map(|p| p.extract_data_type()).collect(),
                     Box::new(fun.return_type.clone()),
                   ),
                   None,
@@ -739,7 +770,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
                 object_instance = Some(HIRVariable::new(
                   fun.name.clone(),
                   DataType::Function(
-                    fun.parameters.iter().map(|p| self.extract_data_type(p)).collect(),
+                    fun.parameters.iter().map(|p| p.extract_data_type()).collect(),
                     Box::new(fun.return_type.clone()),
                   ),
                   None,
@@ -759,7 +790,13 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     };
 
     if let Some(v) = object_instance {
-      Ok(HIRInstruction::Variable(v))
+      let ir = HIRInstruction::MemberAccess(HIRMemberAccess::new(
+        Box::new(instance),
+        Box::new(HIRInstruction::Variable(v)),
+        HIRMetadata::new(vec![], None),
+      ));
+
+      Ok(ir)
     } else {
       Err(Box::new(DiagnosticMessage::UndefinedProperty(
         expression.member.as_ref().clone(),
@@ -773,8 +810,8 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
   ) -> AnalyzerResult {
     let left = self.analyzer(&expression.left)?;
     let right = self.analyzer(&expression.right)?;
-    let left_type = self.extract_data_type(&left);
-    let right_type = self.extract_data_type(&right);
+    let left_type = left.extract_data_type();
+    let right_type = right.extract_data_type();
 
     if left_type != right_type {
       return Err(Box::new(DiagnosticMessage::TypeMismatch(
@@ -916,7 +953,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           &parameters[i]
         };
 
-        let param_type = self.extract_data_type(&param_instruction);
+        let param_type = param_instruction.extract_data_type();
 
         let param_var = if let HIRInstruction::Variable(v) = param_instruction {
           v
@@ -924,7 +961,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           unreachable!()
         };
 
-        let arg_type = self.extract_data_type(&arg_hir);
+        let arg_type = arg_hir.extract_data_type();
 
         if let HIRInstruction::Variable(v) = &arg_hir {
           if !(v.metadata.is(HIRMetadataFlags::Reference) || v.metadata.is(HIRMetadataFlags::ExplicitReference))
@@ -1014,7 +1051,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
     for (name, expression) in &object.properties {
       let value = self.analyzer(expression)?;
-      let data_type = self.extract_data_type(&value);
+      let data_type = value.extract_data_type();
 
       properties.push((name.clone(), value));
       properties_data_types.push((name.lexeme.clone(), data_type));
@@ -1124,7 +1161,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     expression: &ignis_ast::expressions::spread::ASTSpread,
   ) -> AnalyzerResult {
     let var = self.analyzer(expression.expression.as_ref())?;
-    let var_type = self.extract_data_type(&var);
+    let var_type = var.extract_data_type();
 
     match var_type {
       DataType::Vector(_, _) | DataType::Object(_) | DataType::Record(_, _) | DataType::String => (),
@@ -1188,7 +1225,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let value = self.analyzer(&statement.value)?;
 
     let left = type_annotation.clone();
-    let right = self.extract_data_type(&value);
+    let right = value.extract_data_type();
 
     self.check_type_mismatch(&left, &right, &statement.name)?;
 
@@ -1461,7 +1498,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     statement: &ignis_ast::statements::for_of_statement::ASTForOf,
   ) -> AnalyzerResult {
     let iterable = self.analyzer(&statement.iterable)?;
-    let data_type = self.extract_data_type(&iterable);
+    let data_type = iterable.extract_data_type();
 
     if !matches!(data_type, DataType::Vector(_, _)) {
       return Err(Box::new(DiagnosticMessage::NotIterable(statement.token.clone())));
@@ -1540,6 +1577,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
     let mut return_value = HIRInstruction::Literal(HIRLiteral::new(IgnisLiteralValue::Null, return_.token.clone()));
     let mut data_type = DataType::Null;
+    let mut return_type = DataType::Null;
 
     match self.current_function.clone().unwrap() {
       CalleableDeclaration::Function(function) => {
@@ -1565,28 +1603,8 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         return_value = self.analyzer(value.as_ref().unwrap())?;
 
         self.current_type.clone_from(&last_type);
-        data_type = self.extract_data_type(&return_value);
-
-        match &function.return_type {
-          DataType::UnionType(types) | DataType::IntersectionType(types) => {
-            if !types.contains(&data_type) {
-              return Err(Box::new(DiagnosticMessage::ReturnTypeMismatch(
-                function.return_type.clone(),
-                data_type,
-                return_.token.clone(),
-              )));
-            }
-          },
-          _ => {
-            if function.return_type != data_type {
-              return Err(Box::new(DiagnosticMessage::ReturnTypeMismatch(
-                function.return_type.clone(),
-                data_type,
-                return_.token.clone(),
-              )));
-            }
-          },
-        };
+        data_type = return_value.extract_data_type();
+        return_type = function.return_type.clone();
       },
       CalleableDeclaration::Method(function) => {
         if function.return_type == DataType::Void && return_.value != None {
@@ -1611,30 +1629,31 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         return_value = self.analyzer(value.as_ref().unwrap())?;
 
         self.current_type.clone_from(&last_type);
-        data_type = self.extract_data_type(&return_value);
-
-        match &function.return_type {
-          DataType::UnionType(types) | DataType::IntersectionType(types) => {
-            if !types.contains(&data_type) {
-              return Err(Box::new(DiagnosticMessage::ReturnTypeMismatch(
-                function.return_type.clone(),
-                data_type,
-                return_.token.clone(),
-              )));
-            }
-          },
-          _ => {
-            if function.return_type != data_type {
-              return Err(Box::new(DiagnosticMessage::ReturnTypeMismatch(
-                function.return_type.clone(),
-                data_type,
-                return_.token.clone(),
-              )));
-            }
-          },
-        };
+        data_type = return_value.extract_data_type();
+        return_type = function.return_type.clone();
       },
       CalleableDeclaration::Lambda => todo!(),
+    };
+
+    match &return_type {
+      DataType::UnionType(types) | DataType::IntersectionType(types) => {
+        if !types.contains(&data_type) {
+          return Err(Box::new(DiagnosticMessage::ReturnTypeMismatch(
+            return_type.clone(),
+            data_type,
+            return_.token.clone(),
+          )));
+        }
+      },
+      _ => {
+        if return_type != data_type {
+          return Err(Box::new(DiagnosticMessage::ReturnTypeMismatch(
+            return_type.clone(),
+            data_type,
+            return_.token.clone(),
+          )));
+        }
+      },
     };
 
     let instruction = HIRInstruction::Return(HIRReturn::new(Box::new(return_value), data_type));
@@ -2043,9 +2062,9 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
       if let Some(value) = &value {
         if data_type == DataType::Pending {
-          data_type = self.extract_data_type(value);
-        } else if self.extract_data_type(value) != data_type {
-          let value_data_type = self.extract_data_type(value);
+          data_type = value.extract_data_type();
+        } else if value.extract_data_type() != data_type {
+          let value_data_type = value.extract_data_type();
 
           return Err(Box::new(DiagnosticMessage::EnumMemberTypeMismatch(
             member.name.clone(),
@@ -2283,49 +2302,14 @@ impl IgnisAnalyzer {
     &self.hir
   }
 
-  fn extract_data_type(
-    &self,
-    instruction: &HIRInstruction,
-  ) -> DataType {
-    match instruction {
-      HIRInstruction::Literal(l) => l.value.clone().into(),
-      HIRInstruction::Constant(c) => c.data_type.clone(),
-      HIRInstruction::Variable(v) => v.data_type.clone(),
-      HIRInstruction::Function(f) => f.return_type.clone(),
-      HIRInstruction::Binary(b) => b.data_type.clone(),
-      HIRInstruction::Unary(u) => u.data_type.clone(),
-      HIRInstruction::Logical(_) => DataType::Boolean,
-      HIRInstruction::Cast(cast) => cast.target_type.clone(),
-      HIRInstruction::Call(c) => c.return_type.clone(),
-      HIRInstruction::Return(r) => r.data_type.clone(),
-      HIRInstruction::Vector(array) => array.data_type.clone(),
-      //   HIRInstruction::Class(c) => DataType::ClassType(c.name.span.literal.clone()),
-      //   HIRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.span.literal.clone()),
-      //   HIRInstruction::Enum(e) => DataType::Enum(e.name.span.literal.clone()),
-      HIRInstruction::Record(r) => r.data_type.clone(),
-      HIRInstruction::Object(object) => object.data_type.clone(),
-      HIRInstruction::VectorAccess(array) => match &array.data_type {
-        DataType::Vector(t, ..) => *t.clone(),
-        _ => DataType::Unknown,
-      },
-      HIRInstruction::This(this) => this.data_type.clone(),
-      HIRInstruction::Type(t) => t.value.as_ref().clone(),
-      HIRInstruction::Extern(_) => DataType::Null,
-      HIRInstruction::Include(_) => DataType::Null,
-      HIRInstruction::Source(_) => DataType::Null,
-      HIRInstruction::Namespace(_) => DataType::Null,
-      _ => DataType::Unknown,
-    }
-  }
-
   fn are_types_compatible(
     &self,
     left: &HIRInstruction,
     right: &HIRInstruction,
     operator: &HIRInstructionType,
   ) -> CheckCompatibility<DataType> {
-    let left_type = self.extract_data_type(left);
-    let right_type = self.extract_data_type(right);
+    let left_type = left.extract_data_type();
+    let right_type = right.extract_data_type();
 
     match operator {
       HIRInstructionType::Concatenate => {
@@ -2739,8 +2723,8 @@ impl IgnisAnalyzer {
     right: &HIRInstruction,
     operator: &HIRInstructionType,
   ) -> bool {
-    let left = self.extract_data_type(left);
-    let right = self.extract_data_type(right);
+    let left = left.extract_data_type();
+    let right = right.extract_data_type();
 
     match operator {
       HIRInstructionType::And | HIRInstructionType::Or => {
@@ -3102,7 +3086,7 @@ impl IgnisAnalyzer {
             }
 
             let ir = t.as_ref().unwrap();
-            let kind = self.extract_data_type(ir);
+            let kind = ir.extract_data_type();
 
             if let DataType::IntersectionType(inter) = &kind {
               if inter.contains(left) || inter.contains(right) {
