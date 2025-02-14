@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use ignis_data_type::DataType;
+use ignis_data_type::{value::IgnisLiteralValue, DataType};
 use ignis_hir::{
   hir_binary::HIRBinary, hir_call::HIRCall, hir_for::HIRFor, hir_for_of::HIRForOf, hir_function::HIRFunction,
-  hir_if::HIRIf, HIRInstruction, HIRMetadataFlags,
+  hir_if::HIRIf, hir_ternary::HIRTernary, HIRInstruction, HIRMetadataFlags,
 };
 use ir::{IRFunction, IRImport, IRInstruction, IRProgramInstruction, IRStruct, IRTypeDefinition};
 use ir_flags::{IRFlag, IRFlags};
@@ -505,9 +505,62 @@ impl IRGenerator {
         ir
       },
       HIRInstruction::Binary(binary) => self.process_hir_binary(binary),
+      HIRInstruction::Ternary(ternary) => self.process_hir_ternary(ternary),
       _ => {
         todo!("Expression TODO: {ir:#?}")
       },
+    }
+  }
+
+  fn process_hir_ternary(
+    &mut self,
+    ternary: &HIRTernary,
+  ) -> IRInstruction {
+    self.context.push(IRContext::If);
+    let condition = self.process_hir_expression_value(&ternary.condition);
+    self.context.pop();
+
+    let then_label = self.new_label();
+    let end_label = self.new_label();
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::If,
+      dest: then_label.clone(),
+      type_: DataType::Boolean,
+      left: condition.clone(),
+      right: IROperationValue::None,
+      flags: vec![],
+    });
+
+    self.process_hir(&ternary.else_branch);
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Goto,
+      dest: end_label.clone(),
+      type_: DataType::Unknown,
+      left: IROperationValue::None,
+      right: IROperationValue::None,
+      flags: vec![],
+    });
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Label,
+      dest: then_label.clone(),
+      type_: DataType::Unknown,
+      left: IROperationValue::None,
+      right: IROperationValue::None,
+      flags: vec![IRFlag::Label],
+    });
+
+    self.process_hir(&ternary.then_branch);
+
+    IRInstruction {
+      op: IROperation::Label,
+      dest: end_label.clone(),
+      type_: DataType::Unknown,
+      left: IROperationValue::None,
+      right: IROperationValue::None,
+      flags: vec![IRFlag::Label],
     }
   }
 
@@ -615,11 +668,99 @@ impl IRGenerator {
           flags: vec![IRFlag::Temporary, IRFlag::Call],
         }
       },
+      HIRInstruction::Ternary(ternary) => self.process_hir_ternary_expression(ternary),
       _ => {
         println!("Expression value TODO: {:#?}", ir);
         todo!()
       },
     }
+  }
+
+  fn process_hir_ternary_expression(
+    &mut self,
+    hir: &HIRTernary,
+  ) -> IROperationValue {
+    self.context.push(IRContext::If);
+    let condition = self.process_hir_expression_value(&hir.condition);
+    self.context.pop();
+
+    let then_label = self.new_label();
+    let end_label = self.new_label();
+
+    let result = self.new_temp();
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Assign,
+      dest: result.1.clone(),
+      type_: hir.data_type.clone(),
+      left: IROperationValue::Constant {
+        value: IgnisLiteralValue::Null,
+        type_: hir.data_type.clone(),
+        flags: vec![],
+      },
+      right: IROperationValue::None,
+      flags: vec![IRFlag::Temporary],
+    });
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::If,
+      dest: then_label.clone(),
+      type_: DataType::Boolean,
+      left: condition.clone(),
+      right: IROperationValue::None,
+      flags: vec![],
+    });
+
+    let else_branch = self.process_hir_expression_value(&hir.else_branch);
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Assign,
+      dest: result.1.clone(),
+      type_: hir.data_type.clone(),
+      left: else_branch,
+      right: IROperationValue::None,
+      flags: vec![],
+    });
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Goto,
+      dest: end_label.clone(),
+      type_: DataType::Unknown,
+      left: IROperationValue::None,
+      right: IROperationValue::None,
+      flags: vec![],
+    });
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Label,
+      dest: then_label.clone(),
+      type_: DataType::Unknown,
+      left: IROperationValue::None,
+      right: IROperationValue::None,
+      flags: vec![IRFlag::Label]
+    });
+
+    let then_branch = self.process_hir_expression_value(&hir.then_branch);
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Assign,
+      dest: result.1.clone(),
+      type_: hir.data_type.clone(),
+      left: then_branch,
+      right: IROperationValue::None,
+      flags: vec![],
+    });
+
+    self.current_block.push(IRInstruction {
+      op: IROperation::Label,
+      dest: end_label.clone(),
+      type_: DataType::Unknown,
+      left: IROperationValue::None,
+      right: IROperationValue::None,
+      flags: vec![IRFlag::Label],
+    });
+
+    result.0
   }
 
   fn process_hir_binary_value(
@@ -845,7 +986,7 @@ impl IRGenerator {
     }
 
     format!(
-      "{}\n{} {}({}):\n{}",
+      "{}\n{} {}({}) {{\n{}}}",
       header, function.return_type, function.name, parameters, body
     )
   }
@@ -1036,6 +1177,10 @@ impl IRGenerator {
 
     if param.flags.contains(&IRFlag::Field) {
       return self.format_field(param);
+    }
+
+    if param.flags.contains(&IRFlag::Variadic) {
+      modifier.push_str("...");
     }
 
     if param.flags.contains(&IRFlag::Reference) {
