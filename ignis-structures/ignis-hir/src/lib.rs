@@ -212,9 +212,7 @@ impl HIRInstruction {
       HIRInstruction::Call(c) => c.return_type.clone(),
       HIRInstruction::Return(r) => r.data_type.clone(),
       HIRInstruction::Vector(array) => array.data_type.clone(),
-      //   HIRInstruction::Class(c) => DataType::ClassType(c.name.span.literal.clone()),
-      //   HIRInstruction::ClassInstance(c) => DataType::ClassType(c.class.name.span.literal.clone()),
-      //   HIRInstruction::Enum(e) => DataType::Enum(e.name.span.literal.clone()),
+      HIRInstruction::Enum(e) => e.data_type.clone(),
       HIRInstruction::Record(r) => r.data_type.clone(),
       HIRInstruction::Object(object) => object.data_type.clone(),
       HIRInstruction::VectorAccess(array) => match &array.data_type {
@@ -229,6 +227,13 @@ impl HIRInstruction {
       HIRInstruction::Source(_) => DataType::Null,
       HIRInstruction::Namespace(_) => DataType::Null,
       _ => DataType::Unknown,
+    }
+  }
+
+  pub fn as_literal(&self) -> Option<&HIRLiteral> {
+    match self {
+      HIRInstruction::Literal(literal) => Some(literal),
+      _ => None,
     }
   }
 }
@@ -264,6 +269,7 @@ pub enum HIRMetadataFlags {
   Static,
   Variable,
   Variadic,
+  Complex,
 }
 
 impl Display for HIRMetadataFlags {
@@ -304,6 +310,7 @@ impl Display for HIRMetadataFlags {
         HIRMetadataFlags::ExplicitReference => "explicit_reference",
         HIRMetadataFlags::ObjectMember => "object_member",
         HIRMetadataFlags::Abstract => "abstract",
+        HIRMetadataFlags::Complex => "complex",
       }
     )
   }

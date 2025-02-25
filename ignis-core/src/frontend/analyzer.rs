@@ -499,7 +499,21 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         }
       },
       SymbolKind::Record => todo!(),
-      SymbolKind::Enum => todo!(),
+      SymbolKind::Enum => {
+        let is_enum = irs.iter().find(|ir| match ir {
+          HIRInstruction::Enum(e) => e.name.lexeme == expression.name.lexeme,
+          _ => false,
+        });
+
+        if let Some(HIRInstruction::Enum(e)) = is_enum {
+          let mut enum_ = e.clone();
+          enum_.metadata.push(HIRMetadataFlags::Declaration);
+
+          return Ok(HIRInstruction::Enum(enum_));
+        }
+
+        unreachable!()
+      },
       SymbolKind::Interface => todo!(),
       SymbolKind::TypeAlias => todo!(),
       SymbolKind::Decorator => todo!(),
@@ -661,7 +675,6 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         | DataType::String
         | DataType::Unknown
         | DataType::Vector(_, _)
-        | DataType::Enum(_)
     ) {
       todo!()
       // return self.type_methods(method_call);
@@ -770,6 +783,18 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
               }
             },
             _ => (),
+          }
+        }
+      },
+      HIRInstruction::Enum(enum_) => {
+        for member in &enum_.members {
+          if member.name.lexeme == expression.member.as_ref().lexeme {
+            object_instance = Some(HIRInstruction::Variable(HIRVariable::new(
+              member.name.clone(),
+              enum_.data_type.clone(),
+              member.value.clone(),
+              HIRMetadata::new(vec![HIRMetadataFlags::EnumMember], Some(Box::new(instance.clone()))),
+            )));
           }
         }
       },
@@ -1392,6 +1417,14 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     }
 
     let mut data_type = expression.type_annotation.clone();
+
+    if let DataType::Enum(enum_name, _) = data_type {
+      let enum_type = self.find_enum_in_ir(&enum_name);
+
+      // TODO: Removed this unwrap
+      data_type = enum_type.unwrap().data_type;
+    }
+
     self.current_type = Some(data_type.clone());
 
     let values = self.assign_value_and_complex_data(&expression.name, &expression.initializer, &mut data_type)?;
@@ -2059,7 +2092,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       enum_.name.lexeme.clone(),
       SymbolInfo::new(
         enum_.name.clone(),
-        DataType::Enum(enum_.name.lexeme.clone()),
+        DataType::Enum(enum_.name.lexeme.clone(), Box::new(DataType::Pending)),
         vec![],
         SymbolKind::Enum,
         None,
@@ -2077,7 +2110,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
       let mut value = None;
       if member.value.is_some() {
-        value = Some(self.analyzer(&member.value.as_ref().unwrap())?);
+        value = Some(Box::new(self.analyzer(&member.value.as_ref().unwrap())?));
       }
 
       if let Some(value) = &value {
@@ -2122,10 +2155,10 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
       if data_type == DataType::Int32 && no_initializers {
         let position: i32 = members_cloned.iter().position(|m| m.name == member.name).unwrap() as i32;
 
-        member.value = Some(HIRInstruction::Literal(HIRLiteral::new(
+        member.value = Some(Box::new(HIRInstruction::Literal(HIRLiteral::new(
           IgnisLiteralValue::Int32(position),
           member.name.clone(),
-        )));
+        ))));
       }
     }
 
@@ -2149,7 +2182,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
           ))
         })
         .collect(),
-      data_type.clone(),
+      DataType::Enum(enum_.name.lexeme.clone(), Box::new(data_type.clone())),
     ));
 
     self.edit_symbol(
@@ -2767,21 +2800,8 @@ impl IgnisAnalyzer {
       let import = self.resolve_pedding_import(variable, data_type)?;
 
       match import {
-        // HIRInstruction::Class(class) => {
-        //   *data_type = DataType::ClassType(class.name.span.literal.clone());
-        //
-        //   complex_type = Some(Box::new(HIRInstruction::ClassInstance(HIRClassInstance::new(
-        //     Box::new(class),
-        //     variable.clone(),
-        //     Vec::new(),
-        //   ))));
-        // },
-        // HIRInstruction::Interface(i) => {
-        //   *data_type = DataType::Interface(i.name.span.literal.clone());
-        //   complex_type = Some(Box::new(HIRInstruction::Interface(i)));
-        // },
         HIRInstruction::Enum(_enum) => {
-          *data_type = DataType::Enum(_enum.name.lexeme.clone());
+          *data_type = _enum.data_type.clone();
         },
         HIRInstruction::Record(_record) => {
           *data_type = _record.data_type.clone();
@@ -2818,14 +2838,6 @@ impl IgnisAnalyzer {
           self.check_type_mismatch(&call.return_type, data_type, variable)?;
           HIRInstruction::Call(call)
         },
-        // HIRInstruction::Class(class) => {
-        //   self.check_type_mismatch(&DataType::ClassType(class.name.span.literal.clone()), data_type, variable)?;
-        //   HIRInstruction::Class(class)
-        // },
-        // HIRInstruction::ClassInstance(class) => {
-        //   self.check_type_mismatch(&DataType::ClassType(class.class.name.span.literal.clone()), data_type, variable)?;
-        //   HIRInstruction::ClassInstance(HIRClassInstance::new(class.class, variable.clone(), class.constructor_args))
-        // },
         HIRInstruction::Logical(logical) => {
           self.check_type_mismatch(&DataType::Boolean, data_type, variable)?;
           HIRInstruction::Logical(logical)
@@ -2836,22 +2848,18 @@ impl IgnisAnalyzer {
           vector_mut.data_type = data_type.clone();
           HIRInstruction::Vector(vector_mut)
         },
-        // HIRInstruction::MethodCall(call) => {
-        //   self.check_type_mismatch(&call.return_type, data_type, variable)?;
-        //   HIRInstruction::MethodCall(call)
-        // },
         HIRInstruction::Enum(_enum) => {
-          self.check_type_mismatch(&DataType::Enum(_enum.name.lexeme.clone()), data_type, variable)?;
+          self.check_type_mismatch(&_enum.data_type, data_type, variable)?;
           HIRInstruction::Enum(_enum)
         },
         HIRInstruction::Record(record) => {
           self.check_type_mismatch(&record.data_type, data_type, variable)?;
           HIRInstruction::Record(record)
         },
-        // HIRInstruction::Get(get) => {
-        //   self.check_type_mismatch(&get.data_type, data_type, variable)?;
-        //   HIRInstruction::Get(get)
-        // },
+        HIRInstruction::MemberAccess(member) => {
+          self.check_type_mismatch(&member.member.extract_data_type(), data_type, variable)?;
+          HIRInstruction::MemberAccess(member)
+        },
         HIRInstruction::Cast(cast) => {
           self.check_type_mismatch(&cast.target_type, data_type, variable)?;
           HIRInstruction::Cast(cast)
@@ -2873,28 +2881,6 @@ impl IgnisAnalyzer {
         },
       };
     }
-
-    // TODO: Ignis v0.3.0
-    // if let DataType::ClassType(name) = &data_type {
-    //   if matches!(value, HIRInstruction::Literal(_)) && complex_type.is_none() {
-    //     let class = self.find_class_in_ir(name);
-    //
-    //     if class.is_none() {
-    //       return Err(Box::new(
-    //         DiagnosticMessage::UndefinedClass(variable.clone(), variable.clone()),
-    //         self.find_token_line(&variable.span.line),
-    //       )));
-    //     }
-    //
-    //     let class = class.unwrap();
-    //
-    //     complex_type = Some(Box::new(HIRInstruction::ClassInstance(HIRClassInstance::new(
-    //       Box::new(class),
-    //       variable.clone(),
-    //       Vec::new(),
-    //     ))));
-    //   }
-    // }
 
     Ok((value, complex_type))
   }
@@ -2936,28 +2922,6 @@ impl IgnisAnalyzer {
           )));
         }
       },
-      // (DataType::ClassType(c), DataType::Interface(interface))
-      // | (DataType::Interface(interface), DataType::ClassType(c)) => {
-      //   let class = self.find_class_in_ir(c);
-      //
-      //   if class.is_none() {
-      //     return Err(Box::new(
-      //       DiagnosticMessage::UndefinedClass(token.clone(), token.clone()),
-      //     )));
-      //   }
-      //
-      //   let class = class.unwrap();
-      //
-      //   let implemement = class.interfaces.iter().find(|i| &i.name.span.literal == interface);
-      //
-      //   if implemement.is_none() {
-      //     return Err(Box::new(
-      //       DiagnosticMessage::TypeMismatch(left.clone(), right.clone(), token.clone()),
-      //     )));
-      //   }
-      //
-      //   return Ok(());
-      // },
       (DataType::IntersectionType(types), _)
       | (_, DataType::IntersectionType(types))
       | (DataType::UnionType(types), _)
@@ -3073,8 +3037,8 @@ impl IgnisAnalyzer {
       | (DataType::ClassType(name), DataType::PendingImport(import))
       | (DataType::PendingImport(import), DataType::Interface(name))
       | (DataType::Interface(name), DataType::PendingImport(import))
-      | (DataType::PendingImport(import), DataType::Enum(name))
-      | (DataType::Enum(name), DataType::PendingImport(import))
+      | (DataType::PendingImport(import), DataType::Enum(name, _))
+      | (DataType::Enum(name, _), DataType::PendingImport(import))
       | (DataType::PendingImport(import), DataType::AliasType(name))
       | (DataType::PendingImport(import), DataType::Record(name, _))
       | (DataType::Record(import, _), DataType::PendingImport(name))
@@ -3142,6 +3106,11 @@ impl IgnisAnalyzer {
       },
       (DataType::Reference(left_value), DataType::Reference(right_value)) => {
         return self.check_type_mismatch(left_value.as_ref(), right_value.as_ref(), token);
+      },
+      (DataType::Enum(_, enum_type), _) | (_, DataType::Enum(_, enum_type)) => {
+        if enum_type.as_ref() == right || enum_type.as_ref() == left {
+          return Ok(());
+        }
       },
       _ => (),
     };
@@ -3229,7 +3198,7 @@ impl IgnisAnalyzer {
   ) -> Result<(), Box<DiagnosticMessage>> {
     for t in types {
       match t {
-        DataType::Enum(name)
+        DataType::Enum(name, _)
         | DataType::ClassType(name)
         | DataType::Interface(name)
         | DataType::AliasType(name)
@@ -3252,7 +3221,7 @@ impl IgnisAnalyzer {
   ) -> Result<(), Box<DiagnosticMessage>> {
     for t in types {
       match t {
-        DataType::Enum(name) | DataType::ClassType(name) | DataType::Interface(name) | DataType::AliasType(name) => {
+        DataType::Enum(name, _) | DataType::ClassType(name) | DataType::Interface(name) | DataType::AliasType(name) => {
           if !self.is_declared(name) {
             return Err(Box::new(DiagnosticMessage::UndefinedType(name.clone(), token.clone())));
           }

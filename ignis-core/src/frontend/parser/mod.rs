@@ -78,6 +78,7 @@ enum ParserDeclaration {
 enum ParserDeclarationList {
   Name(String),
   Record(String, Vec<(String, DataType)>),
+  Enum(String),
 }
 
 type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
@@ -491,6 +492,7 @@ impl<'a> IgnisParser<'a> {
       TokenType::Meta => self.meta(false),
       TokenType::Namespace => self.namespace(false),
       TokenType::Type => self.type_alias(false),
+      TokenType::Enum => self.enum_statement(false),
       _ => match self.statement() {
         Ok(statement) => Ok(statement),
         Err(error) => {
@@ -639,6 +641,7 @@ impl<'a> IgnisParser<'a> {
       TokenType::Meta => self.meta(true),
       TokenType::Namespace => self.namespace(true),
       TokenType::Type => self.type_alias(true),
+      TokenType::Enum => self.enum_statement(true),
       _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
     }
   }
@@ -1075,6 +1078,12 @@ impl<'a> IgnisParser<'a> {
     if is_exported {
       metadata.push(ASTMetadataFlags::Export);
     }
+
+    self
+      .declarations
+      .get_mut(&ParserDeclaration::Enum)
+      .unwrap()
+      .push(ParserDeclarationList::Enum(name.lexeme.clone()));
 
     Ok(ASTStatement::Enum(Box::new(ASTEnum::new(
       name,
@@ -2622,7 +2631,7 @@ impl<'a> IgnisParser<'a> {
     // } else if self.is_declared(ParserDeclaration::Interface, token) {
     //   DataType::Interface(token.lexeme.clone())
     if self.is_declared(ParserDeclaration::Enum, token) {
-      DataType::Enum(token.lexeme.clone())
+      DataType::Enum(token.lexeme.clone(), Box::new(DataType::Pending))
     } else if self.is_declared(ParserDeclaration::Import, token) {
       DataType::PendingImport(token.lexeme.clone())
     } else if self.is_declared(ParserDeclaration::Record, token) {
@@ -2830,7 +2839,9 @@ impl<'a> IgnisParser<'a> {
     token: &Token,
   ) -> bool {
     self.declarations.get(&declaration).unwrap().iter().any(|d| match d {
-      ParserDeclarationList::Name(name) | ParserDeclarationList::Record(name, _) => name == &token.lexeme,
+      ParserDeclarationList::Name(name)
+      | ParserDeclarationList::Record(name, _)
+      | ParserDeclarationList::Enum(name) => name == &token.lexeme,
     })
   }
 

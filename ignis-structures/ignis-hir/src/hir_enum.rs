@@ -7,7 +7,7 @@ use crate::{HIRInstruction, HIRMetadata};
 #[derive(Debug, Clone, Serialize)]
 pub struct HIREnumItem {
   pub name: Token,
-  pub value: Option<HIRInstruction>,
+  pub value: Option<Box<HIRInstruction>>,
   pub data_type: DataType,
   pub metadata: HIRMetadata,
 }
@@ -15,7 +15,7 @@ pub struct HIREnumItem {
 impl HIREnumItem {
   pub fn new(
     name: Token,
-    value: Option<HIRInstruction>,
+    value: Option<Box<HIRInstruction>>,
     data_type: DataType,
     metadata: HIRMetadata,
   ) -> Self {
@@ -25,6 +25,19 @@ impl HIREnumItem {
       data_type,
       metadata,
     }
+  }
+
+  pub fn simple(&self) -> i32 {
+    self
+      .value
+      .as_ref()
+      .unwrap()
+      .as_literal()
+      .unwrap()
+      .value
+      .to_string()
+      .parse()
+      .unwrap()
   }
 }
 

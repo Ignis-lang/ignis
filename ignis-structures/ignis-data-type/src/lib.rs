@@ -51,7 +51,7 @@ pub enum DataType {
   Pointer(Box<DataType>),
   Optional(Box<DataType>),
   GenericType(GenericType),
-  Enum(String),
+  Enum(String, Box<DataType>),
   AliasType(String),
   UnionType(Vec<DataType>),
   IntersectionType(Vec<DataType>),
@@ -123,7 +123,7 @@ impl DataType {
       ),
       DataType::Optional(data_type) => todo!(),
       DataType::GenericType(generic_type) => todo!(),
-      DataType::Enum(name) => todo!(),
+      DataType::Enum(name, _) => format!("enum {}", name),
       DataType::AliasType(name) => todo!(),
       DataType::UnionType(types) => todo!(),
       DataType::IntersectionType(types) => todo!(),
@@ -252,7 +252,7 @@ impl Display for DataType {
           .collect::<Vec<String>>()
           .join(", ")
       ),
-      DataType::Enum(name) => write!(f, "enum({})", name),
+      DataType::Enum(name, type_) => write!(f, "enum({}, {})", name, type_),
       DataType::AliasType(name) => write!(f, "alias({})", name),
       DataType::UnionType(types) => write!(
         f,

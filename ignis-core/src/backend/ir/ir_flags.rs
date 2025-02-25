@@ -48,6 +48,7 @@ pub enum IRFlag {
   ObjectMember,
   Private,
   EnumMember,
+  ComplexType,
 }
 
 pub type IRFlags = Vec<IRFlag>;
@@ -84,6 +85,7 @@ impl From<&HIRMetadataFlags> for IRFlag {
       HIRMetadataFlags::Spread => IRFlag::Spread,
       HIRMetadataFlags::Variable => IRFlag::Variable,
       HIRMetadataFlags::Variadic => IRFlag::Variadic,
+      HIRMetadataFlags::Complex => IRFlag::ComplexType,
     }
   }
 }

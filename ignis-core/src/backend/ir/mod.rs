@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use ignis_data_type::{value::IgnisLiteralValue, DataType};
 use ignis_hir::{
-  hir_binary::HIRBinary, hir_call::HIRCall, hir_for::HIRFor, hir_for_of::HIRForOf, hir_function::HIRFunction,
-  hir_if::HIRIf, hir_literal::HIRLiteral, hir_member_access::HIRMemberAccess, hir_method::HIRMethod,
-  hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn, hir_ternary::HIRTernary,
-  hir_while::HIRWhile, HIRInstruction, HIRMetadataFlags,
+  hir_binary::HIRBinary, hir_call::HIRCall, hir_enum::HIREnum, hir_for::HIRFor, hir_for_of::HIRForOf,
+  hir_function::HIRFunction, hir_if::HIRIf, hir_literal::HIRLiteral, hir_member_access::HIRMemberAccess,
+  hir_method::HIRMethod, hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn,
+  hir_ternary::HIRTernary, hir_while::HIRWhile, HIRInstruction, HIRMetadataFlags,
 };
-use ir::{IRFunction, IRImport, IRInstruction, IRProgramInstruction, IRStruct, IRTypeDefinition};
+use ir::{IREnum, IREnumValue, IRFunction, IRImport, IRInstruction, IRProgramInstruction, IRStruct, IRTypeDefinition};
 use ir_flags::{IRFlag, IRFlags};
 use ir_operation::{IROperation, IROperationValue};
 
@@ -119,11 +119,43 @@ impl IRGenerator {
       HIRInstruction::Call(call) => self.process_hir_call(call),
       HIRInstruction::Record(record) => self.process_hir_record(record),
       HIRInstruction::While(while_) => self.process_while(while_),
+      HIRInstruction::Enum(enum_) => {
+        if enum_.metadata.is(HIRMetadataFlags::Imported) {
+          return;
+        }
+
+        self.process_enum(enum_);
+      },
       _ => {
         let ir = self.process_hir_expression(hir);
         self.current_block.push(ir);
       },
     };
+  }
+
+  fn process_enum(
+    &mut self,
+    _enum: &HIREnum,
+  ) {
+    let name = _enum.name.lexeme.to_uppercase();
+    let mut enum_members: Vec<IREnumValue> = vec![];
+
+    for var in &_enum.members {
+      if var.metadata.is(HIRMetadataFlags::Complex) {
+        todo!()
+      }
+
+      enum_members.push(IREnumValue::Simple {
+        name: var.name.lexeme.clone(),
+        discriminant: var.simple(),
+      });
+    }
+
+    self.programs.push(IRProgramInstruction::Enum(IREnum {
+      name,
+      values: enum_members,
+      flags: _enum.metadata.flags.iter().map(IRFlag::from).collect(),
+    }));
   }
 
   fn process_hir_record(
@@ -435,7 +467,7 @@ impl IRGenerator {
     });
 
     let loop_label = self.new_label();
-    let exit_label = self.new_label();
+    let _exit_label = self.new_label();
 
     self.current_block.push(IRInstruction {
       op: IROperation::Label,
@@ -1201,6 +1233,7 @@ impl IRGenerator {
           IRProgramInstruction::Import(import) => self.print_import(import),
           IRProgramInstruction::Struct(s) => self.print_struct(s),
           IRProgramInstruction::Type(t) => self.print_type(t),
+          IRProgramInstruction::Enum(e) => self.print_enum(e),
         }
       }
     }
@@ -1220,6 +1253,7 @@ impl IRGenerator {
           IRProgramInstruction::Import(import) => program_string.push_str(&self.import_to_string(import)),
           IRProgramInstruction::Struct(st) => program_string.push_str(&self.struct_to_string(st)),
           IRProgramInstruction::Type(t) => program_string.push_str(&self.ir_type_to_string(t)),
+          IRProgramInstruction::Enum(e) => program_string.push_str(&self.enum_to_string(e)),
         }
         program_string.push('\n');
       }
@@ -1227,6 +1261,36 @@ impl IRGenerator {
     }
 
     programs
+  }
+
+  fn enum_to_string(
+    &self,
+    _enum_: &IREnum,
+  ) -> String {
+    let mut metadata = format!(" flags: {:?}", _enum_.flags);
+
+    if !_enum_.values.is_empty() {
+      metadata.push_str("\n");
+    }
+
+    let mut values = String::new();
+
+    for (index, value) in _enum_.values.iter().enumerate() {
+      match value {
+        IREnumValue::Simple { name, discriminant } => {
+          values.push_str(&format!("{}{} = {},n", "  ".repeat(2), name, discriminant))
+        },
+        IREnumValue::Complex { .. } => {
+          todo!()
+        },
+      }
+
+      if index != _enum_.values.len() - 1 {
+        values.push('\n');
+      }
+    }
+
+    format!("{{{{\n{}\n}}}}\nenum {} {{\n{}\n}};\n", metadata, _enum_.name, values)
   }
 
   fn ir_type_to_string(
@@ -1240,6 +1304,13 @@ impl IRGenerator {
       type_.name,
       type_.type_.to_ir_format()
     )
+  }
+
+  pub fn print_enum(
+    &self,
+    enum_: &IREnum,
+  ) {
+    println!("{}", self.enum_to_string(enum_));
   }
 
   fn print_type(
@@ -1448,7 +1519,10 @@ impl IRGenerator {
       IROperation::Constant => {
         let metadata = format!(" {:?}", instruction.flags);
 
-        format!("{} {} = {} {{{{{}}}}}", type_, instruction.dest, instruction.left, metadata)
+        format!(
+          "const {} {} = {} {{{{{}}}}}",
+          type_, instruction.dest, instruction.left, metadata
+        )
       },
       IROperation::AssignAdd => format!("{} {} += {}", type_, instruction.dest, instruction.right),
       IROperation::AssignSub => format!("{} {} -= {}", type_, instruction.dest, instruction.right),
@@ -1495,7 +1569,7 @@ impl IRGenerator {
       },
     };
 
-    let mut metadata = format!(" flags: {:?}, type: {} ", instruction.flags, type_);
+    let metadata = format!(" flags: {:?}, type: {} ", instruction.flags, type_);
 
     // if !instruction.ffi_data.is_empty() {
     //   metadata.push_str(&format!(

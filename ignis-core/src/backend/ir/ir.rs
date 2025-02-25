@@ -13,6 +13,7 @@ pub enum IRProgramInstruction {
   Struct(IRStruct),
   Method(IRFunction),
   Type(IRTypeDefinition),
+  Enum(IREnum),
 }
 
 #[derive(Debug, Clone)]
@@ -56,5 +57,25 @@ pub struct IRImport {
 pub struct IRTypeDefinition {
   pub name: String,
   pub type_: DataType,
+  pub flags: IRFlags,
+}
+
+#[derive(Debug, Clone)]
+pub enum IREnumValue {
+  Simple {
+    name: String,
+    discriminant: i32,
+  },
+  Complex {
+    name: String,
+    discriminant: i32,
+    payload: Vec<DataType>,
+  },
+}
+
+#[derive(Debug, Clone)]
+pub struct IREnum {
+  pub name: String,
+  pub values: Vec<IREnumValue>,
   pub flags: IRFlags,
 }
