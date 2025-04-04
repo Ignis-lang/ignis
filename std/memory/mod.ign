@@ -1,9 +1,6 @@
 import { FFILink } from "std::meta";
 
 extern __memory {
-  include "std/memory/memory.h";
-  source "std/memory/memory.c";
-
   function allocate(u64: u32): *void;
   function deallocate(address: unknown): void;
   function reallocate(address: unknown, size: u64): *void;
@@ -27,8 +24,9 @@ export namespace memory {
    * @note Provides an abstraction over low-level memory operations.
    *
    */
-  #FFILink("__memory::allocate")
-  function allocate<T>(size: u64): T;
+  function allocate<T>(size: u64): T {
+    return __memory::allocate(size) as T;
+  }
 
   /**
    * @brief Memory deallocation function.
@@ -43,8 +41,9 @@ export namespace memory {
    *
    * @note Proper use is critical to avoid memory leaks in dynamic memory.
    */
-  #FFILink("__memory::deallocate")
-  function free(address: string): void;
+  function free(address: string): void {
+    __memory::deallocate(address);
+  }
 
   /**
    * @brief Zero-initialized memory allocation function.
@@ -63,8 +62,9 @@ export namespace memory {
    * @note Useful for arrays or buffers that require zero-initialization.
    *
    */
-  #FFILink("__memory::allocateZeroed")
-  function allocateZeroed<T>(size: u64, count: u64): T;
+  function allocateZeroed<T>(size: u64, count: u64): T {
+    return __memory::allocateZeroed(size, count) as T;
+  }
 
   /**
    * @brief Memory reallocation function.
@@ -84,6 +84,7 @@ export namespace memory {
    * @note Reallocation may move the memory block. The original block is not
    *       freed if reallocation fails, so handle this case properly.
    */
-  #FFILink("__memory::reallocate")
-  function reallocate<T>(address: string, size: u64): T;
+  function reallocate<T>(address: string, size: u64): T {
+    return __memory::reallocate(address, size) as T;
+  }
 }
