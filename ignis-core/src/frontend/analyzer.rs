@@ -27,7 +27,6 @@ use ignis_hir::{
   hir_grouping::HIRGrouping,
   hir_if::HIRIf,
   hir_import::HIRImport,
-  hir_include::HIRInclude,
   hir_literal::HIRLiteral,
   hir_logical::HIRLogical,
   hir_member_access::HIRMemberAccess,
@@ -38,7 +37,6 @@ use ignis_hir::{
   hir_object::HIRObjectLiteral,
   hir_record::HIRRecord,
   hir_return::HIRReturn,
-  hir_source::HIRSource,
   hir_spread::HIRSpread,
   hir_ternary::HIRTernary,
   hir_this::HIRThis,
@@ -1975,20 +1973,6 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     );
 
     Ok(hir)
-  }
-
-  fn visit_include_statement(
-    &mut self,
-    include: &ignis_token::token::Token,
-  ) -> AnalyzerResult {
-    Ok(HIRInstruction::Include(HIRInclude::new(include.clone())))
-  }
-
-  fn visit_source_statement(
-    &mut self,
-    source: &ignis_token::token::Token,
-  ) -> AnalyzerResult {
-    Ok(HIRInstruction::Source(HIRSource::new(source.clone())))
   }
 
   fn visit_namespace_statement(

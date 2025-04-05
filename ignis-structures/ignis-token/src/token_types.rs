@@ -133,8 +133,6 @@ pub enum TokenType {
   Match,
   When,
   Declare,
-  Include,
-  Source,
 
   Bad,
   Identifier,
@@ -207,8 +205,6 @@ impl TokenType {
       "void" => Some(TokenType::Void),
       "when" => Some(TokenType::When),
       "while" => Some(TokenType::While),
-      "include" => Some(TokenType::Include),
-      "source" => Some(TokenType::Source),
       _ => None,
     }
   }
@@ -341,7 +337,6 @@ impl Display for TokenType {
       TokenType::Implements => write!(f, "Implements"),
       TokenType::Import => write!(f, "Import"),
       TokenType::In => write!(f, "In"),
-      TokenType::Include => write!(f, "Include"),
       TokenType::Increment => write!(f, "Increment"),
       TokenType::Int => write!(f, "Int"),
       TokenType::Int16Type => write!(f, "Int16Type"),
@@ -390,7 +385,6 @@ impl Display for TokenType {
       TokenType::RightShiftAssign => write!(f, "RightShiftAssign"),
       TokenType::SemiColon => write!(f, "SemiColon"),
       TokenType::Slash => write!(f, "Slash"),
-      TokenType::Source => write!(f, "Source"),
       TokenType::Static => write!(f, "Static"),
       TokenType::String => write!(f, "String"),
       TokenType::StringType => write!(f, "StringType"),

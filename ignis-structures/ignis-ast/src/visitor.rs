@@ -159,14 +159,6 @@ pub trait ASTVisitor<R> {
     &mut self,
     extern_: &crate::statements::r#extern::ASTExtern,
   ) -> R;
-  fn visit_include_statement(
-    &mut self,
-    include: &Token,
-  ) -> R;
-  fn visit_source_statement(
-    &mut self,
-    source: &Token,
-  ) -> R;
   fn visit_namespace_statement(
     &mut self,
     namespace: &crate::statements::namespace::ASTNamespace,

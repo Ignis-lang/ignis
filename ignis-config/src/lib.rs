@@ -1,4 +1,11 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IgnisSTDManifest {
+  pub stdobjects: HashMap<String, String>,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DebugPrint {
@@ -165,6 +172,7 @@ pub struct IgnisConfig {
   pub std_path: String,
   pub std: bool,
   pub auto_load_std: bool,
+  pub manifest: IgnisSTDManifest,
 }
 
 impl IgnisConfig {
@@ -181,6 +189,7 @@ impl IgnisConfig {
     std_path: String,
     std: bool,
     auto_load_std: bool,
+    manifest: IgnisSTDManifest,
   ) -> Self {
     Self {
       project_config,
@@ -195,6 +204,7 @@ impl IgnisConfig {
       std_path,
       std,
       auto_load_std,
+      manifest,
     }
   }
 

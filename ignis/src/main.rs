@@ -51,6 +51,29 @@ fn check_if_project() -> bool {
   return false;
 }
 
+fn load_manifest(std_path: &str) -> ignis_config::IgnisSTDManifest {
+  let file_path = Path::new(std_path).join("std/manifest.toml");
+
+  if file_path.exists() {
+    let file = File::open(file_path);
+    if file.is_err() {
+      println!("Failed to open file");
+      std::process::exit(1);
+    }
+
+    let mut file = file.unwrap();
+    let mut content = String::new();
+
+    let _ = file.read_to_string(&mut content);
+
+    let config: ignis_config::IgnisSTDManifest = toml::from_str(&content).unwrap();
+
+    return config;
+  }
+
+  return ignis_config::IgnisSTDManifest::default();
+}
+
 fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
   let mut config =
     ignis_config::IgnisConfig::new_basic(cli.debug.iter().map(|x| x.into()).collect(), cli.quiet, cli.verbose);
@@ -66,6 +89,11 @@ fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
       std::process::exit(1);
     }
   }
+
+  let manifest = load_manifest(&config.std_path);
+  println!("{:#?}", manifest);
+  config.manifest = manifest;
+
 
   match &cli.subcommand {
     SubCommand::Build(build) => {

@@ -15,7 +15,6 @@ pub mod hir_get;
 pub mod hir_grouping;
 pub mod hir_if;
 pub mod hir_import;
-pub mod hir_include;
 pub mod hir_literal;
 pub mod hir_logical;
 pub mod hir_member_access;
@@ -27,7 +26,6 @@ pub mod hir_object;
 pub mod hir_record;
 pub mod hir_return;
 pub mod hir_set;
-pub mod hir_source;
 pub mod hir_spread;
 pub mod hir_ternary;
 pub mod hir_this;
@@ -56,7 +54,6 @@ use hir_function_instance::HIRFunctionInstance;
 use hir_grouping::HIRGrouping;
 use hir_if::HIRIf;
 use hir_import::HIRImport;
-use hir_include::HIRInclude;
 use hir_literal::HIRLiteral;
 use hir_binary::HIRBinary;
 use hir_logical::HIRLogical;
@@ -68,7 +65,6 @@ use hir_namespace::HIRNamespace;
 use hir_object::HIRObjectLiteral;
 use hir_record::HIRRecord;
 use hir_return::HIRReturn;
-use hir_source::HIRSource;
 use hir_spread::HIRSpread;
 use hir_ternary::HIRTernary;
 use hir_this::HIRThis;
@@ -164,8 +160,6 @@ pub enum HIRInstruction {
   Assign(HIRAssign),
   Extern(HIRExtern),
   Namespace(HIRNamespace),
-  Include(HIRInclude),
-  Source(HIRSource),
   Spread(HIRSpread),
   Import(HIRImport),
   Meta(HIRMeta),
@@ -223,8 +217,6 @@ impl HIRInstruction {
       HIRInstruction::Type(t) => t.value.as_ref().clone(),
       HIRInstruction::MemberAccess(member) => member.member.extract_data_type(),
       HIRInstruction::Extern(_) => DataType::Null,
-      HIRInstruction::Include(_) => DataType::Null,
-      HIRInstruction::Source(_) => DataType::Null,
       HIRInstruction::Namespace(_) => DataType::Null,
       _ => DataType::Unknown,
     }

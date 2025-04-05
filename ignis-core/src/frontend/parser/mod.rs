@@ -164,7 +164,7 @@ type StructDeclaration = HashMap<ParserDeclaration, Vec<ParserDeclarationList>>;
 ///
 /// # Extern syntax
 /// <extern> ::= "extern" (<qualified-identifier>) "{" <extern-item>* "}"
-/// <extern-item> ::= <declaration> | "include" <string> ";" | "source" <string> ";"
+/// <extern-item> ::= <declaration>
 ///
 /// # Namespace syntax
 /// <namespace> ::= "namespace" <qualified-identifier> "{" <namespace-item>* "}"
@@ -897,7 +897,7 @@ impl<'a> IgnisParser<'a> {
     Ok(ASTStatement::Extern(Box::new(ASTExtern::new(name, items, metadata))))
   }
 
-  /// <extern-item> ::= <declaration> | "include" <string> ";" | "source" <string> ";"
+  /// <extern-item> ::= <declaration>
   fn extern_item(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
 
@@ -907,22 +907,6 @@ impl<'a> IgnisParser<'a> {
       TokenType::Record => self.record(false),
       TokenType::Declare => self.declare(false),
       TokenType::Hash | TokenType::At => self.statement(),
-      TokenType::Include => {
-        self.consume(TokenType::Include)?;
-        let path = self.consume(TokenType::String)?;
-
-        self.consume(TokenType::SemiColon)?;
-
-        Ok(ASTStatement::Include(Box::new(path)))
-      },
-      TokenType::Source => {
-        self.consume(TokenType::Source)?;
-        let path = self.consume(TokenType::String)?;
-
-        self.consume(TokenType::SemiColon)?;
-
-        Ok(ASTStatement::Source(Box::new(path)))
-      },
       TokenType::Type => self.type_alias(false),
       TokenType::Enum => self.enum_statement(false),
       _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),

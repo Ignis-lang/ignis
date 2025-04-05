@@ -646,20 +646,6 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
     ))))
   }
 
-  fn visit_include_statement(
-    &mut self,
-    include: &Token,
-  ) -> IgnisMetaResult {
-    return Ok(ASTStatement::Include(Box::new(include.clone())));
-  }
-
-  fn visit_source_statement(
-    &mut self,
-    source: &Token,
-  ) -> IgnisMetaResult {
-    return Ok(ASTStatement::Source(Box::new(source.clone())));
-  }
-
   fn visit_namespace_statement(
     &mut self,
     namespace: &ASTNamespace,
