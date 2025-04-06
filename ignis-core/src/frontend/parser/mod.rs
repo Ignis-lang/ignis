@@ -482,7 +482,7 @@ impl<'a> IgnisParser<'a> {
     let token = self.peek();
 
     match token.type_ {
-      TokenType::Function => self.function(false),
+      TokenType::Function => self.function(false, false, false),
       TokenType::Import => self.import(),
       TokenType::Export => self.export(),
       TokenType::Const => self.const_(false),
@@ -507,6 +507,8 @@ impl<'a> IgnisParser<'a> {
   fn function(
     &mut self,
     is_exported: bool,
+    is_in_namespace: bool,
+    is_in_extern: bool,
   ) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Function)?;
 
@@ -532,6 +534,14 @@ impl<'a> IgnisParser<'a> {
 
     if is_exported {
       metadata.push(ASTMetadataFlags::Export);
+    }
+
+    if is_in_namespace {
+      metadata.push(ASTMetadataFlags::NamespaceMember);
+    }
+
+    if is_in_extern {
+      metadata.push(ASTMetadataFlags::ExternMember);
     }
 
     Ok(ASTStatement::Function(Box::new(ASTFunction::new(
@@ -633,7 +643,7 @@ impl<'a> IgnisParser<'a> {
     self.consume(TokenType::Export)?;
 
     match self.peek().type_ {
-      TokenType::Function => self.function(true),
+      TokenType::Function => self.function(true, false, false),
       TokenType::Const => self.const_(true),
       TokenType::Record => self.record(true),
       TokenType::Extern => self.extern_(true),
@@ -902,7 +912,7 @@ impl<'a> IgnisParser<'a> {
     let token = self.peek();
 
     match token.type_ {
-      TokenType::Function => self.function(false),
+      TokenType::Function => self.function(false, false, true),
       TokenType::Const => self.const_(false),
       TokenType::Record => self.record(false),
       TokenType::Declare => self.declare(false),
@@ -985,7 +995,7 @@ impl<'a> IgnisParser<'a> {
     let token = self.peek();
 
     match token.type_ {
-      TokenType::Function => self.function(false),
+      TokenType::Function => self.function(false, true, false),
       TokenType::Const => self.const_(false),
       TokenType::Record => self.record(false),
       TokenType::Declare => self.declare(false),
@@ -2287,7 +2297,7 @@ impl<'a> IgnisParser<'a> {
     let token = self.peek();
 
     match token.type_ {
-      TokenType::Function => self.function(false),
+      TokenType::Function => self.function(false, false, false),
       TokenType::Type => self.type_alias(false),
       TokenType::Namespace => self.namespace(false),
       TokenType::Const => self.const_(false),

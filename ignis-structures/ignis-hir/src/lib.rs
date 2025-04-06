@@ -189,6 +189,8 @@ impl HIRInstruction {
       HIRInstruction::Method(m) => &m.name,
       HIRInstruction::Enum(e) => &e.name,
       HIRInstruction::This(t) => &t.token,
+      HIRInstruction::Namespace(n) => &n.name,
+      HIRInstruction::Extern(e) => &e.name,
       _ => todo!("{self:#?}"),
     }
   }
@@ -249,6 +251,7 @@ pub enum HIRMetadataFlags {
   Moved,
   Mutable,
   NamespaceMember,
+  ExternMember,
   None,
   ObjectMember,
   Optional,
@@ -295,6 +298,7 @@ impl Display for HIRMetadataFlags {
         HIRMetadataFlags::Meta(_) => "meta",
         HIRMetadataFlags::EnumMember => "enum_member",
         HIRMetadataFlags::NamespaceMember => "namespace_member",
+        HIRMetadataFlags::ExternMember => "extern_member",
         HIRMetadataFlags::None => "none",
         HIRMetadataFlags::Variable => "variable",
         HIRMetadataFlags::Variadic => "variadic",
@@ -320,6 +324,7 @@ impl From<&ASTMetadataFlags> for HIRMetadataFlags {
       ASTMetadataFlags::Method => HIRMetadataFlags::Method,
       ASTMetadataFlags::Mutable => HIRMetadataFlags::Mutable,
       ASTMetadataFlags::NamespaceMember => HIRMetadataFlags::NamespaceMember,
+      ASTMetadataFlags::ExternMember => HIRMetadataFlags::ExternMember,
       ASTMetadataFlags::Optional => HIRMetadataFlags::Optional,
       ASTMetadataFlags::Parameter => HIRMetadataFlags::Parameter,
       ASTMetadataFlags::Pointer => HIRMetadataFlags::Pointer,

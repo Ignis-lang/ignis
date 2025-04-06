@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::DataType;
 
+fn escape_special_characters(value: &String) -> String {
+  value
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+    .replace("\n", "\\n")
+    .replace("\r", "\\r")
+    .replace("\t", "\\t")
+    .replace("\0", "\\0")
+}
+
+
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum IgnisLiteralValue {
   Int8(i8),
@@ -65,7 +77,7 @@ impl Display for IgnisLiteralValue {
       IgnisLiteralValue::Float32(x) => write!(f, "{}", x),
       IgnisLiteralValue::Float64(x) => write!(f, "{}", x),
       IgnisLiteralValue::Char(x) => write!(f, "'{}'", x),
-      IgnisLiteralValue::String(x) => write!(f, "\"{}\"", x),
+      IgnisLiteralValue::String(x) => write!(f, "\"{}\"", escape_special_characters(x)),
       IgnisLiteralValue::Hex(x) => write!(f, "0x{}", x),
       IgnisLiteralValue::Binary(x) => write!(f, "0b{}", x),
       IgnisLiteralValue::Boolean(x) => write!(f, "{}", x),

@@ -111,8 +111,8 @@ impl Display for IROperationValue {
 
         write!(f, "{}{}", modified, name)
       },
-      IROperationValue::Constant { value, type_, .. } => {
-        write!(f, "{}({})", type_, value)
+      IROperationValue::Constant { value, .. } => {
+        write!(f, "{}", value)
       },
       IROperationValue::Label(name) => {
         write!(f, "{}", name)

@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::format};
 
 use ignis_data_type::{value::IgnisLiteralValue, DataType};
 use ignis_hir::{
-  hir_binary::HIRBinary, hir_call::HIRCall, hir_enum::HIREnum, hir_for::HIRFor, hir_for_of::HIRForOf,
-  hir_function::HIRFunction, hir_if::HIRIf, hir_literal::HIRLiteral, hir_member_access::HIRMemberAccess,
-  hir_method::HIRMethod, hir_object::HIRObjectLiteral, hir_record::HIRRecord, hir_return::HIRReturn,
-  hir_ternary::HIRTernary, hir_while::HIRWhile, HIRInstruction, HIRMetadataFlags,
+  hir_binary::HIRBinary, hir_call::HIRCall, hir_enum::HIREnum, hir_extern::HIRExtern, hir_for::HIRFor,
+  hir_for_of::HIRForOf, hir_function::HIRFunction, hir_if::HIRIf, hir_import::HIRImport, hir_literal::HIRLiteral,
+  hir_member_access::HIRMemberAccess, hir_method::HIRMethod, hir_namespace::HIRNamespace, hir_object::HIRObjectLiteral,
+  hir_record::HIRRecord, hir_return::HIRReturn, hir_ternary::HIRTernary, hir_while::HIRWhile, HIRInstruction,
+  HIRMetadataFlags,
 };
 use ir::{IREnum, IREnumValue, IRFunction, IRImport, IRInstruction, IRProgramInstruction, IRStruct, IRTypeDefinition};
 use ir_flags::{IRFlag, IRFlags};
@@ -31,6 +32,7 @@ pub struct IRGenerator {
   current_block: Vec<IRInstruction>,
   // current_ffi_data: Vec<IgnisFFIOptions>,
   context: Vec<IRContext>,
+  rename_map: HashMap<String, String>,
 }
 
 impl IRGenerator {
@@ -44,6 +46,7 @@ impl IRGenerator {
       object_count: 0,
       current_block: vec![],
       context: vec![],
+      rename_map: HashMap::new(),
     }
   }
 
@@ -126,11 +129,54 @@ impl IRGenerator {
 
         self.process_enum(enum_);
       },
+      HIRInstruction::Extern(extern_) => self.process_extern(extern_),
+      HIRInstruction::Namespace(namespace) => self.process_hir_namespace(namespace),
+      HIRInstruction::Import(import) => self.process_import(import),
       _ => {
         let ir = self.process_hir_expression(hir);
         self.current_block.push(ir);
       },
     };
+  }
+
+  fn process_hir_namespace(
+    &mut self,
+    namespace: &HIRNamespace,
+  ) {
+    for statement in &namespace.members {
+      self.process_hir(statement);
+    }
+  }
+
+  fn process_extern(
+    &mut self,
+    extern_: &HIRExtern,
+  ) {
+    for statement in &extern_.body {
+      self.process_hir(statement);
+    }
+  }
+
+  fn process_import(
+    &mut self,
+    import: &HIRImport,
+  ) {
+    self.programs.push(IRProgramInstruction::Import(IRImport {
+      modules: import
+        .name
+        .iter()
+        .map(|(name, alias)| {
+          if let Some(alias) = alias {
+            (name.lexeme.clone(), Some(alias.lexeme.clone()))
+          } else {
+            (name.lexeme.clone(), None)
+          }
+        })
+        .collect(),
+      path: import.path.clone(),
+      flags: vec![],
+      extra_path: None,
+    }));
   }
 
   fn process_enum(
@@ -699,14 +745,28 @@ impl IRGenerator {
           arguments.push(self.process_hir_expression_value(argument));
         }
 
-        let flags: IRFlags = vec![IRFlag::Call, IRFlag::Method];
+        let mut flags: IRFlags = vec![IRFlag::Call, IRFlag::Method];
 
-        // let mut ffi_data = vec![];
-        //
-        // if call.metadata.is_ffi {
-        //   set_flag!(&mut flags, IRFlags::EXTERN);
-        //   ffi_data.clone_from(&self.current_ffi_data);
-        // }
+        if call.metadata.is(HIRMetadataFlags::ExternMember) {
+          flags.push(IRFlag::ExternMember);
+
+          return IRInstruction {
+            op: IROperation::Call,
+            dest: String::new(),
+            type_: call.return_type.clone(),
+            left: IROperationValue::Register {
+              name: call.name.lexeme.clone(),
+              type_: call.return_type.clone(),
+              flags: vec![IRFlag::Function],
+            },
+            right: IROperationValue::Arguments { values: arguments },
+            flags,
+          };
+        }
+
+        if call.metadata.is(HIRMetadataFlags::NamespaceMember) {
+          flags.push(IRFlag::NamespaceMember);
+        }
 
         IRInstruction {
           op: IROperation::MethodCall,
@@ -1037,27 +1097,35 @@ impl IRGenerator {
           flags.push(IRFlag::from(flag));
         }
 
-        // let mut ffi_data = vec![];
-        //
-        // if call.metadata.is_ffi {
-        //   set_flag!(&mut flags, IRFlags::EXTERN);
-        //   ffi_data.clone_from(&self.current_ffi_data);
-        // }
-
-        self.current_block.push(IRInstruction {
-          op: IROperation::MethodCall,
-          dest: return_tmp.clone(),
-          type_: call.return_type.clone(),
-          left: IROperationValue::FieldAccess {
-            base: call.calle.get_name().lexeme.clone(),
-            field: call.name.lexeme.clone(),
+        if flags.contains(&IRFlag::ExternMember) {
+          self.current_block.push(IRInstruction {
+            op: IROperation::Call,
+            dest: return_tmp.clone(),
             type_: call.return_type.clone(),
-            flags: vec![IRFlag::Function],
-            base_type: call.calle.extract_data_type(),
-          },
-          right: IROperationValue::Arguments { values: arguments },
-          flags,
-        });
+            left: IROperationValue::Register {
+              name: call.name.lexeme.clone(),
+              type_: call.return_type.clone(),
+              flags: vec![IRFlag::Function],
+            },
+            right: IROperationValue::Arguments { values: arguments },
+            flags,
+          });
+        } else {
+          self.current_block.push(IRInstruction {
+            op: IROperation::MethodCall,
+            dest: return_tmp.clone(),
+            type_: call.return_type.clone(),
+            left: IROperationValue::FieldAccess {
+              base: call.calle.get_name().lexeme.clone(),
+              field: call.name.lexeme.clone(),
+              type_: call.return_type.clone(),
+              flags: vec![IRFlag::Function],
+              base_type: call.calle.extract_data_type(),
+            },
+            right: IROperationValue::Arguments { values: arguments },
+            flags,
+          });
+        }
 
         let flags: IRFlags = vec![IRFlag::Temporary, IRFlag::Call];
 
@@ -1066,6 +1134,9 @@ impl IRGenerator {
           type_: DataType::Unknown,
           flags,
         }
+      },
+      HIRInstruction::Spread(spread) => {
+        unimplemented!()
       },
       _ => {
         println!("Expression value TODO: {:#?}", ir);
@@ -1405,19 +1476,7 @@ impl IRGenerator {
       function.return_type.to_ir_format()
     );
 
-    // if !function.ffi_data.is_empty() {
-    //   metadata.push_str(&format!(
-    //     ",\n ffi_data: [\n{}\n ]",
-    //     function
-    //       .ffi_data
-    //       .iter()
-    //       .map(|data| data.to_string())
-    //       .collect::<Vec<String>>()
-    //       .join(", ")
-    //   ));
-    // } else {
     metadata.push('\n');
-    // }
 
     let header = format!("# {{{{{}}}}}", metadata);
 
@@ -1428,13 +1487,24 @@ impl IRGenerator {
       body.push('\n');
     }
 
+    let mut str_body = if function.flags.contains(&IRFlag::ExternMember) {
+      ";\n".to_string()
+    } else {
+      format!(" {{\n{}}}", body)
+    };
+
     format!(
-      "{}\n{} {}({}) {{\n{}}}",
+      "{}\n{}{} {}({}){}",
       header,
+      if function.flags.contains(&IRFlag::ExternMember) {
+        "extern "
+      } else {
+        ""
+      },
       function.return_type.to_ir_format(),
       function.name,
       parameters,
-      body
+      str_body
     )
   }
 
@@ -1554,6 +1624,8 @@ impl IRGenerator {
         if let IROperationValue::FieldAccess { base, field, .. } = &instruction.left {
           let operator = if instruction.flags.contains(&IRFlag::ObjectMember) {
             "."
+          } else if instruction.flags.contains(&IRFlag::NamespaceMember) {
+            "::"
           } else {
             "->"
           };
@@ -1570,18 +1642,6 @@ impl IRGenerator {
     };
 
     let metadata = format!(" flags: {:?}, type: {} ", instruction.flags, type_);
-
-    // if !instruction.ffi_data.is_empty() {
-    //   metadata.push_str(&format!(
-    //     ", ffi_data: [\n{}\n ]",
-    //     instruction
-    //       .ffi_data
-    //       .iter()
-    //       .map(|data| data.to_string())
-    //       .collect::<Vec<String>>()
-    //       .join(", ")
-    //   ));
-    // }
 
     format!("{:indent$}{} {{{{{}}}}}", "", expression, metadata, indent = indent)
   }

@@ -16,6 +16,12 @@ pub enum IRProgramInstruction {
   Enum(IREnum),
 }
 
+pub struct IRNamespace {
+  pub name: String,
+  pub members: Vec<IRProgramInstruction>,
+  pub flags: IRFlags,
+}
+
 #[derive(Debug, Clone)]
 pub struct IRInstruction {
   pub op: IROperation,
