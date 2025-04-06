@@ -91,9 +91,7 @@ fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
   }
 
   let manifest = load_manifest(&config.std_path);
-  println!("{:#?}", manifest);
   config.manifest = manifest;
-
 
   match &cli.subcommand {
     SubCommand::Build(build) => {

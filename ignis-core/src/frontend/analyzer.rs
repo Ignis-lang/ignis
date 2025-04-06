@@ -80,7 +80,7 @@ enum CalleableDeclaration {
   Lambda,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SymbolKind {
   Variable,
   Function,
@@ -891,6 +891,16 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
             m.name.clone(),
             vec![],
           )
+        } else if let HIRInstruction::Function(f) = member.member.as_ref() {
+          object = Some(member.object.as_ref().clone());
+          (
+            f.parameters.clone(),
+            f.return_type.clone(),
+            f.metadata.clone(),
+            f.body.clone(),
+            f.name.clone(),
+            vec![],
+          )
         } else {
           return Err(Box::new(DiagnosticMessage::NotCallable(expression.name.clone())));
         }
@@ -1417,10 +1427,25 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let mut data_type = expression.type_annotation.clone();
 
     if let DataType::Enum(enum_name, _) = data_type {
-      let enum_type = self.find_enum_in_ir(&enum_name);
+      let enum_type = self.find_enum_in_scope(&enum_name);
 
-      // TODO: Removed this unwrap
-      data_type = enum_type.unwrap().data_type;
+      match enum_type {
+        Some(enum_type) => {
+          data_type = enum_type.data_type.clone();
+        },
+        None => {
+          let enum_type = self.find_enum_in_ir(&enum_name);
+
+          match enum_type {
+            Some(enum_type) => {
+              data_type = enum_type.data_type.clone();
+            },
+            None => {
+              unreachable!("Why is this enum not in scope?")
+            },
+          }
+        },
+      }
     }
 
     self.current_type = Some(data_type.clone());
@@ -1652,8 +1677,8 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         self.current_type = Some(function.return_type.clone());
 
         return_value = self.analyzer(value.as_ref().unwrap())?;
-
         self.current_type.clone_from(&last_type);
+
         data_type = return_value.extract_data_type();
         return_type = function.return_type.clone();
       },
@@ -3122,8 +3147,6 @@ impl IgnisAnalyzer {
     let current_ir = irs
       .iter()
       .find(|ir| match ir {
-        // HIRInstruction::Class(c) => &c.name.span.literal == name,
-        // HIRInstruction::Interface(i) => &i.name.span.literal == name,
         HIRInstruction::Enum(e) => &e.name.lexeme == name,
         HIRInstruction::Record(r) => &r.name.lexeme == name,
         HIRInstruction::Type(t) => &t.name.lexeme == name,
@@ -3136,8 +3159,6 @@ impl IgnisAnalyzer {
     }
 
     let type_in_std = type_ir.iter().find(|ir| match ir {
-      // HIRInstruction::Class(c) => &c.name.span.literal == name,
-      // HIRInstruction::Interface(i) => &i.name.span.literal == name,
       HIRInstruction::Enum(e) => &e.name.lexeme == name,
       HIRInstruction::Record(r) => &r.name.lexeme == name,
       HIRInstruction::Type(t) => &t.name.lexeme == name,
@@ -3260,10 +3281,6 @@ impl IgnisAnalyzer {
     if let DataType::PendingImport(name) = import {
       if let Some(function) = self.find_function_instance(name) {
         Ok(HIRInstruction::FunctionInstance(function))
-      // } else if let Some(class) = self.find_class_in_ir(name) {
-      //   Ok(HIRInstruction::Class(class))
-      // } else if let Some(interface) = self.find_interface_in_ir(name) {
-      //   Ok(HIRInstruction::Interface(interface))
       } else if let Some(enum_) = self.find_enum_in_ir(name) {
         Ok(HIRInstruction::Enum(enum_))
       } else if let Some(record) = self.find_record_in_ir(name) {
@@ -3305,13 +3322,61 @@ impl IgnisAnalyzer {
 
     let enum_ = irs.iter().find(|ir| match ir {
       HIRInstruction::Enum(e) => &e.name.lexeme == name,
+      HIRInstruction::Namespace(n) => n.members.iter().any(|m| match m {
+        HIRInstruction::Enum(e) => &e.name.lexeme == name,
+        _ => false,
+      }),
+      HIRInstruction::Extern(e) => e.body.iter().any(|m| match m {
+        HIRInstruction::Enum(e) => &e.name.lexeme == name,
+        _ => false,
+      }),
       _ => false,
     });
 
+    let mut enum_finded = None;
+
     match enum_ {
-      Some(HIRInstruction::Enum(e)) => Some(e.clone()),
-      _ => None,
+      Some(HIRInstruction::Enum(e)) => enum_finded = Some(e.clone()),
+      Some(HIRInstruction::Namespace(n)) => {
+        n.members.iter().map(|m| match m {
+          HIRInstruction::Enum(e) if &e.name.lexeme == name => enum_finded = Some(e.clone()),
+          _ => (),
+        });
+      },
+      Some(HIRInstruction::Extern(e)) => {
+        e.body.iter().map(|m| match m {
+          HIRInstruction::Enum(e) if &e.name.lexeme == name => enum_finded = Some(e.clone()),
+          _ => (),
+        });
+      },
+      _ => (),
+    };
+
+    enum_finded
+  }
+
+  fn find_enum_in_scope(
+    &self,
+    name: &str,
+  ) -> Option<HIREnum> {
+    if self.symbol_stack.len() < 2 {
+      return None;
     }
+
+    let irs = self.symbol_stack[self.symbol_stack.len() - 2].clone();
+
+    for (name2, symbol) in irs {
+      if symbol.kind == SymbolKind::Enum {
+        if &symbol.name.lexeme == name {
+          match symbol.hir_ref.as_ref().unwrap().clone() {
+            HIRInstruction::Enum(e) => return Some(e.clone()),
+            _ => unreachable!("Never should reach this. If it does, I did something wrong."),
+          }
+        }
+      }
+    }
+
+    None
   }
 
   fn find_record_in_ir(

@@ -216,6 +216,8 @@ impl HIRInstruction {
       HIRInstruction::This(this) => this.data_type.clone(),
       HIRInstruction::Type(t) => t.value.as_ref().clone(),
       HIRInstruction::MemberAccess(member) => member.member.extract_data_type(),
+      HIRInstruction::Enum(enum_) => enum_.data_type.clone(),
+      HIRInstruction::MethodCall(call) => call.return_type.clone(),
       HIRInstruction::Extern(_) => DataType::Null,
       HIRInstruction::Namespace(_) => DataType::Null,
       _ => DataType::Unknown,
