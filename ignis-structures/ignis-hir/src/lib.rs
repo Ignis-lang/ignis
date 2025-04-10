@@ -245,6 +245,7 @@ pub enum HIRMetadataFlags {
   Exported,
   Extern,
   Function,
+  Inline,
   Imported,
   Meta(IgnisCompilerMeta),
   Method,
@@ -283,6 +284,7 @@ impl Display for HIRMetadataFlags {
         HIRMetadataFlags::Calleable => "callable",
         HIRMetadataFlags::Recursive => "recursive",
         HIRMetadataFlags::Exported => "exported",
+        HIRMetadataFlags::Inline => "inline",
         HIRMetadataFlags::Imported => "imported",
         HIRMetadataFlags::Extern => "extern",
         HIRMetadataFlags::Static => "static",
@@ -317,14 +319,19 @@ impl Display for HIRMetadataFlags {
 impl From<&ASTMetadataFlags> for HIRMetadataFlags {
   fn from(value: &ASTMetadataFlags) -> Self {
     match value {
-      ASTMetadataFlags::Declaration => HIRMetadataFlags::Declaration,
       ASTMetadataFlags::Constructor => HIRMetadataFlags::Constructor,
+      ASTMetadataFlags::Declaration => HIRMetadataFlags::Declaration,
       ASTMetadataFlags::EnumMember => HIRMetadataFlags::EnumMember,
+      ASTMetadataFlags::ExplicitReference => HIRMetadataFlags::ExplicitReference,
       ASTMetadataFlags::Export => HIRMetadataFlags::Exported,
+      ASTMetadataFlags::ExternMember => HIRMetadataFlags::ExternMember,
+      ASTMetadataFlags::Inline => HIRMetadataFlags::Inline,
+      ASTMetadataFlags::Meta(meta) => HIRMetadataFlags::Meta(meta.clone()),
       ASTMetadataFlags::Method => HIRMetadataFlags::Method,
       ASTMetadataFlags::Mutable => HIRMetadataFlags::Mutable,
       ASTMetadataFlags::NamespaceMember => HIRMetadataFlags::NamespaceMember,
-      ASTMetadataFlags::ExternMember => HIRMetadataFlags::ExternMember,
+      ASTMetadataFlags::None => HIRMetadataFlags::None,
+      ASTMetadataFlags::ObjectMember => HIRMetadataFlags::ObjectMember,
       ASTMetadataFlags::Optional => HIRMetadataFlags::Optional,
       ASTMetadataFlags::Parameter => HIRMetadataFlags::Parameter,
       ASTMetadataFlags::Pointer => HIRMetadataFlags::Pointer,
@@ -332,14 +339,10 @@ impl From<&ASTMetadataFlags> for HIRMetadataFlags {
       ASTMetadataFlags::Property => HIRMetadataFlags::Property,
       ASTMetadataFlags::Public => HIRMetadataFlags::Public,
       ASTMetadataFlags::Reference => HIRMetadataFlags::Reference,
+      ASTMetadataFlags::Spread => HIRMetadataFlags::Spread,
       ASTMetadataFlags::Static => HIRMetadataFlags::Static,
       ASTMetadataFlags::Variable => HIRMetadataFlags::Variable,
       ASTMetadataFlags::Variadic => HIRMetadataFlags::Variadic,
-      ASTMetadataFlags::Meta(meta) => HIRMetadataFlags::Meta(meta.clone()),
-      ASTMetadataFlags::None => HIRMetadataFlags::None,
-      ASTMetadataFlags::Spread => HIRMetadataFlags::Spread,
-      ASTMetadataFlags::ExplicitReference => HIRMetadataFlags::ExplicitReference,
-      ASTMetadataFlags::ObjectMember => HIRMetadataFlags::ObjectMember,
     }
   }
 }

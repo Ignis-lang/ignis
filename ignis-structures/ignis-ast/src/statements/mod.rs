@@ -41,7 +41,11 @@ use type_alias::ASTTypeAlias;
 use variable::ASTVariable;
 use while_statement::ASTWhile;
 
-use crate::{expressions::ASTExpression, visitor::ASTVisitor};
+use crate::{
+  expressions::ASTExpression,
+  metadata::{ASTMetadata, ASTMetadataFlags},
+  visitor::ASTVisitor,
+};
 use constant::ASTConstant;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -105,6 +109,36 @@ impl ASTStatement {
       ASTStatement::TypeAlias(type_alias) => visitor.visit_type_alias_statement(type_alias),
       ASTStatement::Enum(enum_) => visitor.visitor_enum_statement(enum_),
       ASTStatement::Meta(meta) => visitor.visit_meta_statement(meta),
+    }
+  }
+
+  pub fn push_flag(
+    &mut self,
+    flag: ASTMetadataFlags,
+  ) {
+    match self {
+      ASTStatement::Constant(statement) => statement.metadata.push(flag),
+      ASTStatement::Function(statement) => statement.metadata.push(flag),
+      ASTStatement::Record(statement) => statement.metadata.push(flag),
+      ASTStatement::Method(statement) => statement.metadata.push(flag),
+      ASTStatement::Property(statement) => statement.metadata.push(flag),
+      ASTStatement::Extern(statement) => statement.metadata.push(flag),
+      ASTStatement::Namespace(statement) => statement.metadata.push(flag),
+      ASTStatement::TypeAlias(statement) => statement.metadata.push(flag),
+      ASTStatement::Enum(statement) => statement.metadata.push(flag),
+      ASTStatement::Variable(statement) => statement.metadata.push(flag),
+      ASTStatement::Meta(statement) => statement.metadata.push(flag),
+      ASTStatement::Block(_)
+      | ASTStatement::If(_)
+      | ASTStatement::For(_)
+      | ASTStatement::ForOf(_)
+      | ASTStatement::While(_)
+      | ASTStatement::Return(_)
+      | ASTStatement::Import(_)
+      | ASTStatement::Comment(_)
+      | ASTStatement::Break { .. }
+      | ASTStatement::Continue { .. }
+      | ASTStatement::Expression(_) => unreachable!(),
     }
   }
 }

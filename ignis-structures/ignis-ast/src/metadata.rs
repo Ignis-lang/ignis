@@ -3,14 +3,19 @@ use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ASTMetadataFlags {
-  Declaration,
   Constructor,
+  Declaration,
   EnumMember,
+  ExplicitReference,
   Export,
+  ExternMember,
+  Inline,
+  Meta(IgnisCompilerMeta),
   Method,
   Mutable,
   NamespaceMember,
-  ExternMember,
+  None,
+  ObjectMember,
   Optional,
   Parameter,
   Pointer,
@@ -18,14 +23,10 @@ pub enum ASTMetadataFlags {
   Property,
   Public,
   Reference,
+  Spread,
   Static,
   Variable,
   Variadic,
-  Spread,
-  Meta(IgnisCompilerMeta),
-  ObjectMember,
-  ExplicitReference,
-  None,
 }
 
 impl std::fmt::Display for ASTMetadataFlags {
@@ -34,14 +35,19 @@ impl std::fmt::Display for ASTMetadataFlags {
     f: &mut std::fmt::Formatter<'_>,
   ) -> std::fmt::Result {
     match self {
-      ASTMetadataFlags::Declaration => write!(f, "Declaration"),
       ASTMetadataFlags::Constructor => write!(f, "Constructor"),
+      ASTMetadataFlags::Declaration => write!(f, "Declaration"),
       ASTMetadataFlags::EnumMember => write!(f, "EnumMember"),
+      ASTMetadataFlags::ExplicitReference => write!(f, "ExplicitReference"),
       ASTMetadataFlags::Export => write!(f, "Export"),
+      ASTMetadataFlags::ExternMember => write!(f, "ExternMember"),
+      ASTMetadataFlags::Inline => write!(f, "Inline"),
+      ASTMetadataFlags::Meta(meta) => write!(f, "{:?}", meta),
       ASTMetadataFlags::Method => write!(f, "Method"),
       ASTMetadataFlags::Mutable => write!(f, "Mutable"),
       ASTMetadataFlags::NamespaceMember => write!(f, "NamespaceMember"),
-      ASTMetadataFlags::ExternMember => write!(f, "ExternMember"),
+      ASTMetadataFlags::None => write!(f, "None"),
+      ASTMetadataFlags::ObjectMember => write!(f, "ObjectMember"),
       ASTMetadataFlags::Optional => write!(f, "Optional"),
       ASTMetadataFlags::Parameter => write!(f, "Parameter"),
       ASTMetadataFlags::Pointer => write!(f, "Pointer"),
@@ -49,14 +55,10 @@ impl std::fmt::Display for ASTMetadataFlags {
       ASTMetadataFlags::Property => write!(f, "Property"),
       ASTMetadataFlags::Public => write!(f, "Public"),
       ASTMetadataFlags::Reference => write!(f, "Reference"),
+      ASTMetadataFlags::Spread => write!(f, "Spread"),
       ASTMetadataFlags::Static => write!(f, "Static"),
       ASTMetadataFlags::Variable => write!(f, "Variable"),
       ASTMetadataFlags::Variadic => write!(f, "Variadic"),
-      ASTMetadataFlags::Meta(meta) => write!(f, "{:?}", meta),
-      ASTMetadataFlags::None => write!(f, "None"),
-      ASTMetadataFlags::Spread => write!(f, "Spread"),
-      ASTMetadataFlags::ExplicitReference => write!(f, "ExplicitReference"),
-      ASTMetadataFlags::ObjectMember => write!(f, "ObjectMember"),
     }
   }
 }

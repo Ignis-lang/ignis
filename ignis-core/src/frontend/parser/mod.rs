@@ -462,6 +462,7 @@ impl<'a> IgnisParser<'a> {
         | TokenType::Declare
         | TokenType::Enum
         | TokenType::Export
+        | TokenType::Inline
         | TokenType::Extern
         | TokenType::For
         | TokenType::Function
@@ -477,22 +478,23 @@ impl<'a> IgnisParser<'a> {
     }
   }
 
-  /// <declaration> ::= <function> | <import> | <export> | <const> | <record> | <extern> | <declare> | <meta> | <namespace> | <type-alias>
+  /// <declaration> ::= <function> | <import> | <export> | <inline> | <const> | <record> | <extern> | <declare> | <meta> | <namespace> | <type-alias>
   fn declaration(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
 
     match token.type_ {
-      TokenType::Function => self.function(false, false, false),
+      TokenType::Function => self.function(),
       TokenType::Import => self.import(),
       TokenType::Export => self.export(),
-      TokenType::Const => self.const_(false),
-      TokenType::Record => self.record(false),
-      TokenType::Extern => self.extern_(false),
-      TokenType::Declare => self.declare(false),
-      TokenType::Meta => self.meta(false),
-      TokenType::Namespace => self.namespace(false),
-      TokenType::Type => self.type_alias(false),
-      TokenType::Enum => self.enum_statement(false),
+      TokenType::Inline => self.inline(),
+      TokenType::Const => self.const_(),
+      TokenType::Record => self.record(),
+      TokenType::Extern => self.extern_(),
+      TokenType::Declare => self.declare(),
+      TokenType::Meta => self.meta(),
+      TokenType::Namespace => self.namespace(),
+      TokenType::Type => self.type_alias(),
+      TokenType::Enum => self.enum_statement(),
       _ => match self.statement() {
         Ok(statement) => Ok(statement),
         Err(error) => {
@@ -503,13 +505,24 @@ impl<'a> IgnisParser<'a> {
     }
   }
 
+  fn inline(&mut self) -> IgnisParserResult<ASTStatement> {
+    self.consume(TokenType::Inline)?;
+
+    let mut result = match self.peek().type_ {
+      TokenType::Function => self.function(),
+      TokenType::Const => self.const_(),
+      _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
+    };
+
+    if let Ok(ok) = &mut result {
+      ok.push_flag(ASTMetadataFlags::Inline);
+    }
+
+    result
+  }
+
   /// <function> ::= "function" <identifier> <generic-type>? "(" <parameters>? ")" ":" <type> (<block> | ";")
-  fn function(
-    &mut self,
-    is_exported: bool,
-    is_in_namespace: bool,
-    is_in_extern: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn function(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Function)?;
 
     let name: Token = self.consume(TokenType::Identifier)?;
@@ -531,18 +544,6 @@ impl<'a> IgnisParser<'a> {
     }
 
     let mut metadata = ASTMetadata::default();
-
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Export);
-    }
-
-    if is_in_namespace {
-      metadata.push(ASTMetadataFlags::NamespaceMember);
-    }
-
-    if is_in_extern {
-      metadata.push(ASTMetadataFlags::ExternMember);
-    }
 
     Ok(ASTStatement::Function(Box::new(ASTFunction::new(
       name,
@@ -642,25 +643,28 @@ impl<'a> IgnisParser<'a> {
   fn export(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Export)?;
 
-    match self.peek().type_ {
-      TokenType::Function => self.function(true, false, false),
-      TokenType::Const => self.const_(true),
-      TokenType::Record => self.record(true),
-      TokenType::Extern => self.extern_(true),
-      TokenType::Declare => self.declare(true),
-      TokenType::Meta => self.meta(true),
-      TokenType::Namespace => self.namespace(true),
-      TokenType::Type => self.type_alias(true),
-      TokenType::Enum => self.enum_statement(true),
+    let mut result = match self.peek().type_ {
+      TokenType::Function => self.function(),
+      TokenType::Const => self.const_(),
+      TokenType::Record => self.record(),
+      TokenType::Extern => self.extern_(),
+      TokenType::Declare => self.declare(),
+      TokenType::Meta => self.meta(),
+      TokenType::Namespace => self.namespace(),
+      TokenType::Type => self.type_alias(),
+      TokenType::Enum => self.enum_statement(),
       _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
+    };
+
+    if let Ok(ok) = &mut result {
+      ok.push_flag(ASTMetadataFlags::Export);
     }
+
+    result
   }
 
   /// <const> ::= "const" <identifier> ":" <type> "=" <expression> ";"
-  fn const_(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn const_(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Const)?;
 
     self.context.push(IgnisParserContext::Const);
@@ -681,10 +685,6 @@ impl<'a> IgnisParser<'a> {
 
     let mut metadata = ASTMetadata::new(vec![]);
 
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Public);
-    }
-
     Ok(ASTStatement::Constant(Box::new(ASTConstant::new(
       name,
       Box::new(value),
@@ -694,10 +694,7 @@ impl<'a> IgnisParser<'a> {
   }
 
   /// <record> ::= "record" <identifier> "{" <record-item>* "}"
-  fn record(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn record(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Record)?;
     let mut generic_parameters: Vec<ASTGenericParameter> = Vec::new();
 
@@ -764,11 +761,7 @@ impl<'a> IgnisParser<'a> {
 
     self.consume(TokenType::RightBrace)?;
 
-    let mut metadata: ASTMetadata = ASTMetadata::new(vec![]);
-
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Export);
-    }
+    let mut metadata: ASTMetadata = ASTMetadata::default();
 
     self
       .declarations
@@ -876,10 +869,7 @@ impl<'a> IgnisParser<'a> {
   }
 
   /// <extern> ::= "extern" (<qualified-identifier>) "{" <extern-item>* "}"
-  fn extern_(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn extern_(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Extern)?;
 
     self.context.push(IgnisParserContext::Extern);
@@ -898,10 +888,6 @@ impl<'a> IgnisParser<'a> {
 
     let mut metadata = ASTMetadata::new(vec![]);
 
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Export);
-    }
-
     self.context.pop();
 
     Ok(ASTStatement::Extern(Box::new(ASTExtern::new(name, items, metadata))))
@@ -911,31 +897,31 @@ impl<'a> IgnisParser<'a> {
   fn extern_item(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
 
-    match token.type_ {
-      TokenType::Function => self.function(false, false, true),
-      TokenType::Const => self.const_(false),
-      TokenType::Record => self.record(false),
-      TokenType::Declare => self.declare(false),
+    let mut result = match token.type_ {
+      TokenType::Function => self.function(),
+      TokenType::Const => self.const_(),
+      TokenType::Record => self.record(),
+      TokenType::Declare => self.declare(),
       TokenType::Hash | TokenType::At => self.statement(),
-      TokenType::Type => self.type_alias(false),
-      TokenType::Enum => self.enum_statement(false),
+      TokenType::Type => self.type_alias(),
+      TokenType::Enum => self.enum_statement(),
       _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
+    };
+
+    if let Ok(ok) = &mut result {
+      ok.push_flag(ASTMetadataFlags::Export);
     }
+
+    result
   }
 
   /// <declare> ::= "declare" <identifier> ":" <type>
-  fn declare(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn declare(&mut self) -> IgnisParserResult<ASTStatement> {
     todo!()
   }
 
   /// <meta> ::= "meta" <identifier> ("(" <parameters> ")")? ";"
-  fn meta(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn meta(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Meta)?;
     let meta = self.consume(TokenType::Identifier)?;
 
@@ -949,25 +935,18 @@ impl<'a> IgnisParser<'a> {
 
     self.consume(TokenType::SemiColon)?;
 
-    let mut metadata = vec![];
-
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Export);
-    }
+    let metadata = ASTMetadata::default();
 
     Ok(ASTStatement::Meta(Box::new(ASTMetaStatement::new(
       meta,
       parameters,
-      ASTMetadata::new(metadata),
+      metadata,
       generic_parameters,
     ))))
   }
 
   /// <namespace> ::= "namespace" <qualified-identifier> "{" <namespace-item>* "}"
-  fn namespace(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn namespace(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Namespace)?;
 
     let name = self.consume(TokenType::Identifier)?;
@@ -981,11 +960,8 @@ impl<'a> IgnisParser<'a> {
     }
 
     self.consume(TokenType::RightBrace)?;
-    let mut metadata = ASTMetadata::new(vec![]);
 
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Export);
-    }
+    let metadata = ASTMetadata::default();
 
     Ok(ASTStatement::Namespace(Box::new(ASTNamespace::new(name, members, metadata))))
   }
@@ -994,11 +970,11 @@ impl<'a> IgnisParser<'a> {
   fn namespace_item(&mut self) -> IgnisParserResult<ASTStatement> {
     let token = self.peek();
 
-    match token.type_ {
-      TokenType::Function => self.function(false, true, false),
-      TokenType::Const => self.const_(false),
-      TokenType::Record => self.record(false),
-      TokenType::Declare => self.declare(false),
+    let mut result = match token.type_ {
+      TokenType::Function => self.function(),
+      TokenType::Const => self.const_(),
+      TokenType::Record => self.record(),
+      TokenType::Declare => self.declare(),
       TokenType::Identifier => {
         if TokenType::get_keyword_from_string(token.lexeme.as_str()).is_some() {
           return Err(Box::new(DiagnosticMessage::UnexpectedKeyword(token.clone())));
@@ -1006,16 +982,19 @@ impl<'a> IgnisParser<'a> {
 
         self.statement()
       },
-      TokenType::Enum => self.enum_statement(false),
+      TokenType::Enum => self.enum_statement(),
       _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
+    };
+
+    if let Ok(ok) = &mut result {
+      ok.push_flag(ASTMetadataFlags::NamespaceMember);
     }
+
+    result
   }
 
   // <type-alias> ::= "type" <identifier> <generic-type>? "=" <type> ";"
-  fn type_alias(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn type_alias(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Type)?;
 
     let name = self.consume(TokenType::Identifier)?;
@@ -1030,10 +1009,6 @@ impl<'a> IgnisParser<'a> {
 
     let mut metadata = ASTMetadata::new(vec![]);
 
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Export);
-    }
-
     Ok(ASTStatement::TypeAlias(Box::new(ASTTypeAlias::new(
       name,
       Box::new(value),
@@ -1043,10 +1018,7 @@ impl<'a> IgnisParser<'a> {
   }
 
   /// <enum> ::= "enum" <identifier> <generic-type>? "{" (<enum-item> ","?)* "}"
-  fn enum_statement(
-    &mut self,
-    is_exported: bool,
-  ) -> IgnisParserResult<ASTStatement> {
+  fn enum_statement(&mut self) -> IgnisParserResult<ASTStatement> {
     self.consume(TokenType::Enum)?;
 
     let name = self.consume(TokenType::Identifier)?;
@@ -1067,11 +1039,7 @@ impl<'a> IgnisParser<'a> {
 
     self.consume(TokenType::RightBrace)?;
 
-    let mut metadata = ASTMetadata::new(vec![]);
-
-    if is_exported {
-      metadata.push(ASTMetadataFlags::Export);
-    }
+    let metadata = ASTMetadata::new(vec![]);
 
     self
       .declarations
@@ -2297,12 +2265,12 @@ impl<'a> IgnisParser<'a> {
     let token = self.peek();
 
     match token.type_ {
-      TokenType::Function => self.function(false, false, false),
-      TokenType::Type => self.type_alias(false),
-      TokenType::Namespace => self.namespace(false),
-      TokenType::Const => self.const_(false),
-      TokenType::Record => self.record(false),
-      TokenType::Declare => self.declare(false),
+      TokenType::Function => self.function(),
+      TokenType::Type => self.type_alias(),
+      TokenType::Namespace => self.namespace(),
+      TokenType::Const => self.const_(),
+      TokenType::Record => self.record(),
+      TokenType::Declare => self.declare(),
       TokenType::Identifier => {
         if TokenType::get_keyword_from_string(token.lexeme.as_str()).is_some() {
           return Err(Box::new(DiagnosticMessage::UnexpectedKeyword(token.clone())));
