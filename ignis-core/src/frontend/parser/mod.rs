@@ -909,7 +909,7 @@ impl<'a> IgnisParser<'a> {
     };
 
     if let Ok(ok) = &mut result {
-      ok.push_flag(ASTMetadataFlags::Export);
+      ok.push_flag(ASTMetadataFlags::ExternMember);
     }
 
     result
