@@ -31,7 +31,6 @@ pub struct IRGenerator {
   return_count: u32,
   object_count: u32,
   current_block: Vec<IRInstruction>,
-  // current_ffi_data: Vec<IgnisFFIOptions>,
   context: Vec<IRContext>,
   rename_map: HashMap<String, String>,
 }
@@ -256,15 +255,27 @@ impl IRGenerator {
 
     for field in &record.items {
       if let HIRInstruction::Variable(var) = field {
+        let name = var.name.lexeme.clone();
         let mut flags: IRFlags = vec![];
 
         for flag in &var.metadata.flags {
+          if let HIRMetadataFlags::Meta(meta) = flag {
+            match meta {
+              ignis_ast::metadata::IgnisCompilerMeta::FFILink(link) => {
+                self.rename_map.insert(name.clone(), link.clone().replace("::", "__"));
+              },
+              _ => {},
+            };
+
+            continue;
+          }
+
           flags.push(IRFlag::from(flag));
         }
 
         let ir = IRInstruction {
           op: IROperation::Assign,
-          dest: var.name.lexeme.clone(),
+          dest: name,
           type_: var.data_type.clone(),
           left: IROperationValue::None,
           right: IROperationValue::None,
@@ -278,6 +289,17 @@ impl IRGenerator {
         let mut flags: IRFlags = vec![IRFlag::Pointer];
 
         for flag in &m.metadata.flags {
+          if let HIRMetadataFlags::Meta(meta) = flag {
+            match meta {
+              ignis_ast::metadata::IgnisCompilerMeta::FFILink(link) => {
+                self.rename_map.insert(m.name.lexeme.clone(), link.clone().replace("::", "__"));
+              },
+              _ => {},
+            };
+
+            continue;
+          }
+
           flags.push(IRFlag::from(flag));
         }
 
