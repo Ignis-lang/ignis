@@ -5,8 +5,8 @@ use ignis_hir::{
   hir_binary::HIRBinary, hir_call::HIRCall, hir_enum::HIREnum, hir_extern::HIRExtern, hir_for::HIRFor,
   hir_for_of::HIRForOf, hir_function::HIRFunction, hir_if::HIRIf, hir_import::HIRImport, hir_literal::HIRLiteral,
   hir_member_access::HIRMemberAccess, hir_method::HIRMethod, hir_namespace::HIRNamespace, hir_object::HIRObjectLiteral,
-  hir_record::HIRRecord, hir_return::HIRReturn, hir_ternary::HIRTernary, hir_while::HIRWhile, HIRInstruction,
-  HIRMetadataFlags,
+  hir_record::HIRRecord, hir_return::HIRReturn, hir_ternary::HIRTernary, hir_type::HIRType, hir_while::HIRWhile,
+  HIRInstruction, HIRMetadataFlags,
 };
 use ir::{IREnum, IREnumValue, IRFunction, IRImport, IRInstruction, IRProgramInstruction, IRStruct, IRTypeDefinition};
 use ir_flags::{IRFlag, IRFlags};
@@ -20,6 +20,7 @@ pub mod ir_operation;
 enum IRContext {
   If,
   Condition,
+  Namespace(String),
 }
 
 pub struct IRGenerator {
@@ -132,6 +133,8 @@ impl IRGenerator {
       HIRInstruction::Extern(extern_) => self.process_extern(extern_),
       HIRInstruction::Namespace(namespace) => self.process_hir_namespace(namespace),
       HIRInstruction::Import(import) => self.process_import(import),
+      HIRInstruction::Type(type_) => self.process_hir_type(type_),
+      HIRInstruction::Meta(_) => {},
       _ => {
         let ir = self.process_hir_expression(hir);
         self.current_block.push(ir);
@@ -139,10 +142,33 @@ impl IRGenerator {
     };
   }
 
+  fn process_hir_type(
+    &mut self,
+    type_: &HIRType,
+  ) {
+    if type_.metadata.is(HIRMetadataFlags::Imported) {
+      return;
+    }
+
+    if let DataType::UnionType(values) = type_.value.as_ref() {}
+
+    // The statement `type` is a type alias, so when we process it we don't need
+    // make any changes to the IR.
+    // TODO: Implement remplacement of type aliases
+
+    return;
+  }
+
   fn process_hir_namespace(
     &mut self,
     namespace: &HIRNamespace,
   ) {
+    if namespace.metadata.is(HIRMetadataFlags::Imported) {
+      return;
+    }
+
+    self.context.push(IRContext::Namespace(namespace.name.lexeme.clone()));
+
     for statement in &namespace.members {
       self.process_hir(statement);
     }
@@ -152,6 +178,10 @@ impl IRGenerator {
     &mut self,
     extern_: &HIRExtern,
   ) {
+    if extern_.metadata.is(HIRMetadataFlags::Imported) {
+      return;
+    }
+
     for statement in &extern_.body {
       self.process_hir(statement);
     }
@@ -210,6 +240,14 @@ impl IRGenerator {
   ) {
     if record.metadata.is(HIRMetadataFlags::Imported) {
       return;
+    }
+
+    let mut name = record.name.lexeme.clone();
+
+    if record.metadata.is(HIRMetadataFlags::NamespaceMember) {
+      if let IRContext::Namespace(namespace) = self.context.last().unwrap() {
+        name = format!("{}__{}", namespace, name);
+      }
     }
 
     let generics = record.generic_parameters.clone();
@@ -281,7 +319,7 @@ impl IRGenerator {
     let flags: IRFlags = record.metadata.flags.iter().map(IRFlag::from).collect();
 
     let struct_ = IRStruct {
-      name: record.name.lexeme.clone(),
+      name,
       fields,
       generics,
       flags,
@@ -661,13 +699,20 @@ impl IRGenerator {
       flags.push(IRFlag::from(flag));
     }
 
+    let mut name = function.name.lexeme.clone();
+
+    if function.metadata.is(HIRMetadataFlags::NamespaceMember) {
+      if let IRContext::Namespace(namespace) = self.context.last().unwrap() {
+        name = format!("{}__{}", namespace, name);
+      }
+    }
+
     let mut ir_function = IRFunction {
-      name: function.name.lexeme.clone(),
+      name,
       body: vec![],
       return_type: function.return_type,
       flags,
       parameters: vec![],
-      // ffi_data: self.current_ffi_data.clone(),
     };
 
     self.current_block.clone_from(&Vec::new());
@@ -880,7 +925,6 @@ impl IRGenerator {
       return_type: method.return_type.clone(),
       flags,
       parameters: vec![],
-      // ffi_data: self.current_ffi_data.clone(),
     };
 
     self.current_block.clone_from(&Vec::new());
@@ -1625,7 +1669,7 @@ impl IRGenerator {
           let operator = if instruction.flags.contains(&IRFlag::ObjectMember) {
             "."
           } else if instruction.flags.contains(&IRFlag::NamespaceMember) {
-            "::"
+            "__"
           } else {
             "->"
           };
