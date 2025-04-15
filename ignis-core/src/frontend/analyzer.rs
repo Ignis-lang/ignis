@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, path::Path, sync::Arc};
 use super::{lexer::IgnisLexer, parser::IgnisParser};
 use colored::*;
 use ignis_ast::{
-  expressions::{call::ASTCall, ASTExpression},
+  expressions::{call::ASTCall, member_access::ASTMemberAccess, ASTExpression},
   metadata::ASTMetadataFlags,
   statements::{import::ASTImport, property, ASTStatement},
   visitor::ASTVisitor,
@@ -651,7 +651,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
 
   fn visit_member_access_expression(
     &mut self,
-    expression: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    expression: &ASTMemberAccess,
   ) -> AnalyzerResult {
     let instance: HIRInstruction = self.analyzer(expression.object.as_ref())?;
     let instance_type = instance.extract_data_type();
@@ -674,8 +674,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
         | DataType::Unknown
         | DataType::Vector(_, _)
     ) {
-      todo!()
-      // return self.type_methods(method_call);
+      return self.type_methods(&expression);
     }
 
     let mut object_instance: Option<HIRInstruction> = None;
@@ -1780,6 +1779,7 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     for flag in &record.metadata.get() {
       flags.push(flag.into());
     }
+
     let metadata = HIRMetadata::new(flags.clone(), None);
 
     self.declare(
@@ -3430,7 +3430,7 @@ impl IgnisAnalyzer {
       "string".to_string(),
       "number".to_string(),
       "char".to_string(),
-      "array".to_string(),
+      // "array".to_string(),
     ]
     .to_vec();
     let mut result_std = HashMap::new();
@@ -4203,5 +4203,75 @@ impl IgnisAnalyzer {
     };
 
     Ok(())
+  }
+
+  fn type_methods(
+    &mut self,
+    expression: &ASTMemberAccess,
+  ) -> AnalyzerResult {
+    let object = self.analyzer(&expression.object)?;
+    let data_type = object.extract_data_type();
+
+    match data_type {
+      DataType::Int8
+      | DataType::Int16
+      | DataType::Int32
+      | DataType::Int64
+      | DataType::UnsignedInt8
+      | DataType::UnsignedInt16
+      | DataType::UnsignedInt32
+      | DataType::UnsignedInt64
+      | DataType::Float32
+      | DataType::Float64 => self.number_methods(expression, &object),
+      DataType::String => todo!(),
+      DataType::Boolean => todo!(),
+      DataType::Vector(_, _) => todo!(),
+      DataType::Unknown => todo!(),
+      _ => todo!(),
+    }
+  }
+
+  fn number_methods(
+    &self,
+    expression: &ASTMemberAccess,
+    object: &HIRInstruction,
+  ) -> Result<HIRInstruction, Box<DiagnosticMessage>> {
+    if !self.config.std {
+      return Err(Box::new(DiagnosticMessage::STDNotLoaded(expression.member.as_ref().clone())));
+    }
+
+    let std_ir = self.primitives_std.get("std/number/mod.ign");
+
+    if std_ir.is_none() {
+      return Err(Box::new(DiagnosticMessage::STDNotLoaded(expression.member.as_ref().clone())));
+    }
+
+    let std_ir = std_ir.unwrap();
+
+    for statement in std_ir.iter() {
+      match statement {
+        HIRInstruction::Record(record) => {
+          if record.name.lexeme.eq("Numbers") {
+            for method in &record.items {
+              if let HIRInstruction::Method(_method) = method {
+                if _method.name.lexeme == expression.member.as_ref().lexeme {
+                  let ir = HIRInstruction::MemberAccess(HIRMemberAccess::new(
+                    Box::new(object.clone()),
+                    Box::new(method.clone()),
+                    HIRMetadata::new(_method.metadata.flags.clone(), None),
+                  ));
+
+                  return Ok(ir);
+                }
+              }
+            }
+          } else if record.name.lexeme.eq("Floats") {
+          }
+        },
+        _ => (),
+      };
+    }
+
+    todo!()
   }
 }

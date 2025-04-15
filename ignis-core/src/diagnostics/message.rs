@@ -140,6 +140,7 @@ pub enum DiagnosticMessage {
   NamespaceAlreadyDefined(Token),
   ExternAlreadyDefined(Token),
   EnumMemberAlreadyDefined(Token),
+  STDNotLoaded(Token),
   // #endregion Analyzer
 }
 
@@ -544,6 +545,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::EnumMemberAlreadyDefined(token) => {
         write!(f, "Enum member '{}' already defined", token.lexeme)
       },
+      DiagnosticMessage::STDNotLoaded(token) => {
+        write!(f, "STD not loaded for '{}'", token.lexeme)
+      },
     }
   }
 }
@@ -678,7 +682,8 @@ impl From<&DiagnosticMessage> for Token {
       | DiagnosticMessage::ImportedNamespaceIsNotExported(token)
       | DiagnosticMessage::ExternAlreadyDefined(token)
       | DiagnosticMessage::NamespaceAlreadyDefined(token)
-      | DiagnosticMessage::EnumMemberAlreadyDefined(token) => token.clone(),
+      | DiagnosticMessage::EnumMemberAlreadyDefined(token)
+      | DiagnosticMessage::STDNotLoaded(token) => token.clone(),
     }
   }
 }
@@ -814,6 +819,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ExternAlreadyDefined(_) => "I0125".to_string(),
       DiagnosticMessage::NamespaceAlreadyDefined(_) => "I0126".to_string(),
       DiagnosticMessage::EnumMemberAlreadyDefined(_) => "I0127".to_string(),
+      DiagnosticMessage::STDNotLoaded(_) => "I0128".to_string(),
     }
   }
 
@@ -892,6 +898,17 @@ impl DiagnosticMessage {
           DiagnosticLevel::Hint,
           message,
           "IH0020".to_string(),
+          token.clone(),
+          None,
+        ))
+      },
+      DiagnosticMessage::STDNotLoaded(token) => {
+        let message = format!("Try remove the '-a|--auto-load-std' or '--std' flag");
+
+        Some(DiagnosticReport::new(
+          DiagnosticLevel::Hint,
+          message,
+          "IH0021".to_string(),
           token.clone(),
           None,
         ))

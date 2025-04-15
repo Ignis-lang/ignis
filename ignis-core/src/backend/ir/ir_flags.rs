@@ -1,3 +1,4 @@
+use ignis_ast::metadata::IgnisCompilerMeta;
 use ignis_hir::HIRMetadataFlags;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +75,26 @@ impl From<&HIRMetadataFlags> for IRFlag {
       HIRMetadataFlags::Declaration => IRFlag::Declaration,
       HIRMetadataFlags::EnumMember => IRFlag::EnumMember,
       HIRMetadataFlags::ExplicitReference => IRFlag::ExplicitReference,
-      HIRMetadataFlags::Meta(_) => todo!(),
+      HIRMetadataFlags::Meta(meta) => match meta {
+        IgnisCompilerMeta::MutOnly => IRFlag::Mutable,
+        IgnisCompilerMeta::ToDo(_) => todo!(),
+        IgnisCompilerMeta::Ignore => todo!(),
+        IgnisCompilerMeta::NotTranspile => IRFlag::NoTranspile,
+        IgnisCompilerMeta::Feature(_, _) => todo!(),
+        IgnisCompilerMeta::Deprecated(_, _) => todo!(),
+        IgnisCompilerMeta::PlatformSpecific(_, _) => todo!(),
+        IgnisCompilerMeta::Experimental(_, _) => todo!(),
+        IgnisCompilerMeta::Internal(_) => todo!(),
+        IgnisCompilerMeta::Global(_) => todo!(),
+        IgnisCompilerMeta::DisableLint => todo!(),
+        IgnisCompilerMeta::EnableLint => todo!(),
+        IgnisCompilerMeta::MainFunction => todo!(),
+        IgnisCompilerMeta::Optimize(_) => todo!(),
+        IgnisCompilerMeta::Panic(_) => todo!(),
+        IgnisCompilerMeta::Copy => todo!(),
+        IgnisCompilerMeta::Clone => todo!(),
+        IgnisCompilerMeta::FFILink(_) => todo!(),
+      },
       HIRMetadataFlags::Moved => IRFlag::Moved,
       HIRMetadataFlags::Mutable => IRFlag::Mutable,
       HIRMetadataFlags::NamespaceMember => IRFlag::NamespaceMember,

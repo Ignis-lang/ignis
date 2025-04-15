@@ -15,7 +15,7 @@ pub struct IgnisMetaProcessor {
   ast: Vec<ASTStatement>,
   pub new_ast: Vec<ASTStatement>,
   pub diagnostics: Vec<DiagnosticMessage>,
-  pub current_metadata: Vec<ASTMetadataFlags>,
+  current_metadata: Vec<Vec<ASTMetadataFlags>>,
 }
 
 type IgnisMetaResult = Result<ASTStatement, Box<DiagnosticMessage>>;
@@ -310,11 +310,11 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
     match expression.expression.as_ref() {
       ASTExpression::Variable(variable) => {
         let meta = self.process_variable_meta_expression(variable)?;
-        self.current_metadata.push(meta);
+        self.current_metadata.last_mut().unwrap().push(meta);
       },
       ASTExpression::Call(call) => {
         let meta = self.process_call_meta_expression(call)?;
-        self.current_metadata.push(meta);
+        self.current_metadata.last_mut().unwrap().push(meta);
       },
       _ => unreachable!(),
     };
@@ -328,6 +328,8 @@ impl ASTVisitor<IgnisMetaResult> for IgnisMetaProcessor {
     &mut self,
     expression: &ignis_ast::expressions::meta::ASTMetaEntity,
   ) -> IgnisMetaResult {
+    self.current_metadata.push(vec![]);
+
     for meta in expression.metas.iter() {
       ASTExpression::Meta(Box::new(meta.clone())).accept(self)?;
     }
@@ -768,8 +770,7 @@ impl IgnisMetaProcessor {
     entity: &ASTStatement,
   ) -> IgnisMetaResult {
     let mut statement = entity.accept(self)?;
-
-    let metadata = self.current_metadata.clone();
+    let metadata = self.current_metadata.last().unwrap().clone();
 
     match &mut statement {
       ASTStatement::Function(function) => {
@@ -800,7 +801,7 @@ impl IgnisMetaProcessor {
       },
     };
 
-    self.current_metadata.clear();
+    self.current_metadata.pop();
 
     return Ok(statement);
   }

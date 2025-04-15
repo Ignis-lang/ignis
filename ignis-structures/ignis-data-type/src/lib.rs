@@ -98,12 +98,12 @@ impl DataType {
       DataType::Unknown => String::from("unknown"),
       DataType::Void => String::from("void"),
       DataType::Pending => unreachable!(),
-      DataType::PendingImport(_) => unreachable!(),
+      DataType::PendingImport(name) => format!("{}", name),
       DataType::Object(_) => unreachable!(),
       DataType::Record(name, _) => format!("{}", name,),
       DataType::Reference(data_type) => format!("&{}", data_type,),
       DataType::Pointer(data_type) => format!("*{}", data_type,),
-      DataType::Variable(name, _) => format!("{}", name,),
+      DataType::Variable(name, _) => format!("{}", name),
       DataType::Vector(data_type, size) => format!(
         "{}[{}]",
         data_type,
@@ -122,15 +122,77 @@ impl DataType {
           .join(", "),
       ),
       DataType::Optional(data_type) => todo!(),
-      DataType::GenericType(generic_type) => todo!(),
+      DataType::GenericType(generic_type) => {
+        let constraints = generic_type
+          .constraints
+          .iter()
+          .map(|c| c.to_string())
+          .collect::<Vec<String>>()
+          .join(", ");
+
+        if constraints.is_empty() {
+          return generic_type.base.to_string();
+        }
+
+        format!("{}, {}", generic_type.base, constraints)
+      },
       DataType::Enum(name, _) => format!("enum {}", name),
       DataType::AliasType(name) => todo!(),
-      DataType::UnionType(types) => todo!(),
+      DataType::UnionType(types) => format!(
+        "union<{}>",
+        types.iter().map(|t| t.to_string()).collect::<Vec<String>>().join(", ")
+      ),
       DataType::IntersectionType(types) => todo!(),
       DataType::StructType(name) => format!("struct {}", name),
       DataType::Interface(name) => todo!(),
       DataType::ClassType(name) => todo!(),
       DataType::TupleType(types) => todo!(),
+    }
+  }
+
+  pub fn to_ignis_type_enum(&self) -> String {
+    match self {
+      DataType::Hex => String::from("TYPE_HEX"),
+      DataType::Binary => String::from("TYPE_BINARY"),
+      DataType::String => String::from("TYPE_STRING"),
+      DataType::Int8 => String::from("TYPE_I8"),
+      DataType::Int16 => String::from("TYPE_I16"),
+      DataType::Int32 => String::from("TYPE_I32"),
+      DataType::Int64 => String::from("TYPE_I64"),
+      DataType::UnsignedInt8 => String::from("TYPE_U8"),
+      DataType::UnsignedInt16 => String::from("TYPE_U16"),
+      DataType::UnsignedInt32 => String::from("TYPE_U32"),
+      DataType::UnsignedInt64 => String::from("TYPE_U64"),
+      DataType::Float32 => String::from("TYPE_F32"),
+      DataType::Float64 => String::from("TYPE_F64"),
+      DataType::Boolean => String::from("TYPE_BOOL"),
+      DataType::Char => String::from("TYPE_CHAR"),
+      DataType::Null => String::from("TYPE_NULL"),
+      DataType::Unknown => String::from("TYPE_UNKNOWN"),
+      DataType::Pending => String::from("TYPE_PENDING"),
+      DataType::Void => String::from("TYPE_VOID"),
+      DataType::Variable(_, data_type) => data_type.to_ignis_type_enum(),
+      DataType::Vector(data_type, _) => data_type.to_ignis_type_enum(),
+      DataType::Callable(data_types, data_type) => todo!(),
+      DataType::Variable(_, data_type) => todo!(),
+      DataType::Vector(data_type, _) => todo!(),
+      DataType::Callable(data_types, data_type) => todo!(),
+      DataType::Function(data_types, data_type) => todo!(),
+      DataType::PendingImport(_) => todo!(),
+      DataType::Record(_, items) => todo!(),
+      DataType::Object(items) => todo!(),
+      DataType::Reference(data_type) => todo!(),
+      DataType::Pointer(data_type) => todo!(),
+      DataType::Optional(data_type) => todo!(),
+      DataType::GenericType(generic_type) => todo!(),
+      DataType::Enum(_, data_type) => todo!(),
+      DataType::AliasType(_) => todo!(),
+      DataType::UnionType(data_types) => todo!(),
+      DataType::IntersectionType(data_types) => todo!(),
+      DataType::StructType(_) => todo!(),
+      DataType::Interface(_) => todo!(),
+      DataType::ClassType(_) => todo!(),
+      DataType::TupleType(data_types) => todo!(),
     }
   }
 }

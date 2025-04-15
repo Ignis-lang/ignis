@@ -30,21 +30,19 @@ impl<'a> IgnisBackend<'a> {
   }
 
   pub fn process(&mut self) {
-    let mut ir_std_generator = IRGenerator::new();
+    let mut ir_generator = IRGenerator::new();
 
     if !self.hir_ffi_std.is_empty() {
-      ir_std_generator.process(&self.hir_ffi_std);
-      self.ir_std.clone_from(&ir_std_generator.programs_by_file);
+      ir_generator.process(&self.hir_ffi_std);
+      self.ir_std.clone_from(&ir_generator.programs_by_file);
     }
 
-    let mut ir_generator = IRGenerator::new();
     ir_generator.process(&self.hirs);
 
     self.irs.clone_from(&ir_generator.programs_by_file);
 
     if self.config.debug.contains(&DebugPrint::Ir) {
       if self.config.verbose == 0 {
-        ir_std_generator.print();
         ir_generator.print();
       }
 
