@@ -40,7 +40,6 @@ pub struct IRFunction {
   pub return_type: DataType,
   pub flags: IRFlags,
   pub parameters: Vec<IRInstruction>,
-  // pub ffi_data: Vec<IgnisFFIOptions>,
 }
 
 #[derive(Debug, Clone)]

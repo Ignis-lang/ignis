@@ -2279,6 +2279,7 @@ impl<'a> IgnisParser<'a> {
         self.statement()
       },
       TokenType::Export => self.export(),
+      TokenType::Extern => self.extern_(),
       _ => Err(Box::new(DiagnosticMessage::ExpectedToken(TokenType::Function, self.peek()))),
     }
   }

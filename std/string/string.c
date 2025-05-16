@@ -8,7 +8,7 @@
 #include <string/strings.h>
 #else
 #include "../memory/memory.h"
-#include "./strings.h"
+#include "./string.h"
 #endif
 
 #include <memory.h>
@@ -290,9 +290,9 @@ char stringPop(string *value) {
   return last;
 }
 
-void stringConcat(string *value, string str) {
+string stringConcat(string *value, string str) {
   if (*value == NULL || str == NULL) {
-    return;
+    return "";
   }
 
   u64 valueLength = strlen(*value);
@@ -301,14 +301,15 @@ void stringConcat(string *value, string str) {
   string newValue = (string) allocate(newSize);
 
   if (newValue == NULL) {
-    return;
+    return "";
   }
 
   strcpy(newValue, *value);
   strcat(newValue, str);
-  deallocate(*value);
 
   *value = newValue;
+
+  return newValue;
 }
 
 void stringClear(string *value) {

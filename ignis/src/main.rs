@@ -52,7 +52,7 @@ fn check_if_project() -> bool {
 }
 
 fn load_manifest(std_path: &str) -> ignis_config::IgnisSTDManifest {
-  let file_path = Path::new(std_path).join("std/manifest.toml");
+  let file_path = Path::new(std_path).join("manifest.toml");
 
   if file_path.exists() {
     let file = File::open(file_path);
@@ -81,7 +81,7 @@ fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
   config.std = !cli.std;
   config.auto_load_std = !cli.auto_load_std;
 
-  if config.std_path == "IGNIS_STD_PATH" {
+  if cli.std_path.eq("IGNIS_STD_PATH") {
     if let Ok(v) = std::env::var("IGNIS_STD_PATH") {
       config.std_path = v;
     } else {

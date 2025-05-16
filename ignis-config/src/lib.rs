@@ -3,8 +3,15 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IgnisSTDObject {
+  pub header: String,
+  pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IgnisSTDManifest {
-  pub stdobjects: HashMap<String, String>,
+  pub std_objects: HashMap<String, String>,
+  pub std_headers: HashMap<String, IgnisSTDObject>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]

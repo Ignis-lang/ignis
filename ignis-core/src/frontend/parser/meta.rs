@@ -794,6 +794,9 @@ impl IgnisMetaProcessor {
       ASTStatement::Method(method) => {
         method.metadata.push_all(metadata);
       },
+      ASTStatement::Extern(extern_) => {
+        extern_.metadata.push_all(metadata);
+      },
       _ => {
         let kind = entity.into();
 

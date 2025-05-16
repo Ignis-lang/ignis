@@ -35,7 +35,7 @@ string stringClone(const string value);
 
 void stringPush(string *value, string str);
 char stringPop(string *value);
-void stringConcat(string *value, string str);
+string stringConcat(string *value, string str);
 void stringClear(string *value);
 void stringReplace(string *value, const string search, const string replace);
 

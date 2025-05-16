@@ -232,6 +232,26 @@ impl HIRInstruction {
       _ => None,
     }
   }
+
+  pub fn push_flag(
+    &mut self,
+    flag: HIRMetadataFlags,
+  ) {
+    match self {
+      HIRInstruction::Function(function) => function.metadata.push(flag),
+      HIRInstruction::Record(record) => record.metadata.push(flag),
+      HIRInstruction::Method(method) => method.metadata.push(flag),
+      HIRInstruction::Enum(enum_) => enum_.metadata.push(flag),
+      HIRInstruction::Variable(variable) => variable.metadata.push(flag),
+      HIRInstruction::Extern(extern_) => extern_.metadata.push(flag),
+      HIRInstruction::Namespace(namespace) => namespace.metadata.push(flag),
+      HIRInstruction::Type(type_) => type_.metadata.push(flag),
+      HIRInstruction::MemberAccess(member_access) => member_access.metadata.push(flag),
+      HIRInstruction::MethodCall(method_call) => method_call.metadata.push(flag),
+      HIRInstruction::Constant(constant) => constant.metadata.push(flag),
+      _ => todo!("{self:#?}"),
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::format};
 
 use ignis_ast::metadata::IgnisCompilerMeta;
+use ignis_config::IgnisConfig;
 use ignis_data_type::{value::IgnisLiteralValue, DataType};
 use ignis_hir::{
   hir_binary::HIRBinary, hir_call::HIRCall, hir_enum::HIREnum, hir_extern::HIRExtern, hir_for::HIRFor,
@@ -25,8 +26,10 @@ enum IRContext {
   Extern(String),
 }
 
-pub struct IRGenerator {
+pub struct IRGenerator<'a> {
   pub programs_by_file: HashMap<String, Vec<IRProgramInstruction>>,
+  current_file: String,
+  config: &'a IgnisConfig,
   programs: Vec<IRProgramInstruction>,
   temp_count: u32,
   label_count: u32,
@@ -35,13 +38,17 @@ pub struct IRGenerator {
   current_block: Vec<IRInstruction>,
   context: Vec<IRContext>,
   replace_map: HashMap<String, IRInstruction>,
+  replace_name_mpa: HashMap<String, String>,
   external_map: HashMap<String, IRProgramInstruction>,
+  pub header_map: HashMap<String, Vec<String>>,
 }
 
-impl IRGenerator {
-  pub fn new() -> Self {
+impl<'a> IRGenerator<'a> {
+  pub fn new(config: &'a IgnisConfig) -> Self {
     Self {
+      config,
       programs_by_file: HashMap::new(),
+      current_file: String::new(),
       programs: vec![],
       temp_count: 0,
       label_count: 0,
@@ -50,7 +57,9 @@ impl IRGenerator {
       current_block: vec![],
       context: vec![],
       replace_map: HashMap::new(),
+      replace_name_mpa: HashMap::new(),
       external_map: HashMap::new(),
+      header_map: HashMap::from([("*".to_string(), vec!["__types".to_string()])]),
     }
   }
 
@@ -59,7 +68,10 @@ impl IRGenerator {
     input: &HashMap<String, Vec<HIRInstruction>>,
   ) {
     for (file, ir) in input {
+      self.current_file = file.clone();
+
       self.generate_tac(ir);
+
       let program = self.programs.clone();
 
       self.programs_by_file.insert(file.clone(), program);
@@ -185,6 +197,21 @@ impl IRGenerator {
   ) {
     if extern_.metadata.is(HIRMetadataFlags::Imported) {
       return;
+    }
+
+    if self.config.manifest.std_headers.contains_key(&extern_.name.lexeme) {
+      let mut current_file = self.header_map.get_mut(&self.current_file);
+
+      if current_file.is_none() {
+        self.header_map.insert(self.current_file.clone(), vec![]);
+        current_file = self.header_map.get_mut(&self.current_file);
+      }
+
+      let mut current_file = current_file.unwrap();
+
+      if !current_file.contains(&extern_.name.lexeme) {
+        current_file.push(extern_.name.lexeme.clone());
+      }
     }
 
     self.context.push(IRContext::Extern(extern_.name.lexeme.clone()));
@@ -780,6 +807,8 @@ impl IRGenerator {
         self
           .external_map
           .insert(format!("{}::{}", extern_, function.name.lexeme.clone()), instructions.clone());
+      } else if let IRContext::Namespace(name) = self.context.last().unwrap() {
+        self.replace_name_mpa.insert(name.clone(), function.name.lexeme.clone());
       }
     }
 
@@ -868,7 +897,18 @@ impl IRGenerator {
         }
 
         if call.metadata.is(HIRMetadataFlags::NamespaceMember) {
-          flags.push(IRFlag::NamespaceMember);
+          return IRInstruction {
+            op: IROperation::Call,
+            dest: String::new(),
+            type_: call.return_type.clone(),
+            left: IROperationValue::Register {
+              name: format!("{}__{}", call.calle.get_name().lexeme.clone(), call.name.lexeme.clone()),
+              type_: call.return_type.clone(),
+              flags: vec![IRFlag::Function],
+            },
+            right: IROperationValue::Arguments { values: arguments },
+            flags,
+          };
         }
 
         IRInstruction {
@@ -1185,7 +1225,7 @@ impl IRGenerator {
       HIRInstruction::Object(object) => self.process_hir_object(object),
       HIRInstruction::MemberAccess(member) => self.process_hir_member_access(member),
       HIRInstruction::MethodCall(call) => {
-        let name = call.name.lexeme.clone();
+        let mut name = call.name.lexeme.clone();
 
         let mut arguments: Vec<IROperationValue> = vec![];
 
@@ -1219,7 +1259,7 @@ impl IRGenerator {
           self.current_block.push(IRInstruction {
             op: instruction.op,
             dest: return_tmp.clone(),
-            type_: instruction.type_,
+            type_: instruction.type_.clone(),
             left: instruction.left,
             right: IROperationValue::Arguments { values: new_arguments },
             flags: instruction.flags,
@@ -1227,12 +1267,31 @@ impl IRGenerator {
 
           return IROperationValue::Register {
             name: return_tmp,
-            type_: DataType::Unknown,
+            type_: instruction.type_,
             flags: return_tmp_flags,
           };
         }
 
         if flags.contains(&IRFlag::ExternMember) {
+          self.current_block.push(IRInstruction {
+            op: IROperation::Call,
+            dest: return_tmp.clone(),
+            type_: call.return_type.clone(),
+            left: IROperationValue::Register {
+              name,
+              type_: call.return_type.clone(),
+              flags: vec![IRFlag::Function],
+            },
+            right: IROperationValue::Arguments { values: arguments },
+            flags,
+          });
+        } else if flags.contains(&IRFlag::NamespaceMember) {
+          let name = self
+            .replace_name_mpa
+            .get(&call.calle.get_name().lexeme)
+            .unwrap()
+            .clone();
+
           self.current_block.push(IRInstruction {
             op: IROperation::Call,
             dest: return_tmp.clone(),
@@ -1757,8 +1816,6 @@ impl IRGenerator {
         if let IROperationValue::FieldAccess { base, field, .. } = &instruction.left {
           let operator = if instruction.flags.contains(&IRFlag::ObjectMember) {
             "."
-          } else if instruction.flags.contains(&IRFlag::NamespaceMember) {
-            "__"
           } else {
             "->"
           };
@@ -1932,7 +1989,7 @@ impl IRGenerator {
                     })
                     .collect(),
                 },
-                flags: vec![],
+                flags: vec![IRFlag::Extern],
               },
             );
           },
@@ -1954,17 +2011,20 @@ impl IRGenerator {
     call: &HIRMethodCall,
   ) -> Vec<IROperationValue> {
     let mut new_arguments: Vec<IROperationValue> = vec![];
-    for value in value {
+    let mut position = 0;
+    for (index, value) in value.iter().enumerate() {
       if value.get_name().eq("self") {
         new_arguments.push(IROperationValue::Register {
           name: call.calle.get_name().lexeme.clone(),
           type_: call.return_type.clone(),
           flags: vec![IRFlag::Function],
         });
+        position += 1;
       } else if value.get_name().eq("type_") {
         new_arguments.push(self.map_argument_type(&call.return_type));
+        position += 1;
       } else {
-        new_arguments.push(value.clone());
+        new_arguments.push(arguments[position - index].clone());
       }
     }
 

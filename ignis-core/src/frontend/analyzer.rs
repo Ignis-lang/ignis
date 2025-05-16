@@ -2019,7 +2019,12 @@ impl ASTVisitor<AnalyzerResult> for IgnisAnalyzer {
     let mut body: Vec<HIRInstruction> = vec![];
 
     for statement in &namespace.members {
-      let hir = self.analyze_statement(statement)?;
+      let mut hir = self.analyze_statement(statement)?;
+
+      if namespace.metadata.is(ASTMetadataFlags::Export) {
+        hir.push_flag(HIRMetadataFlags::Exported);
+      }
+
       self.current_block.push(hir.clone());
 
       body.push(hir);
@@ -3428,8 +3433,8 @@ impl IgnisAnalyzer {
       "meta".to_string(),
       "types".to_string(),
       "string".to_string(),
-      "number".to_string(),
-      "char".to_string(),
+      // "number".to_string(),
+      // "char".to_string(),
       // "array".to_string(),
     ]
     .to_vec();
@@ -3443,7 +3448,7 @@ impl IgnisAnalyzer {
         continue;
       }
 
-      let std_path = Path::new(&config.std_path).join("std");
+      let std_path = Path::new(&config.std_path);
       let lib_path_str = format!("{}/{}", name, "mod.ign");
       let lib_path = std_path.join(&lib_path_str);
       let file_row = fs::read(lib_path);
@@ -4223,7 +4228,8 @@ impl IgnisAnalyzer {
       | DataType::UnsignedInt64
       | DataType::Float32
       | DataType::Float64 => self.number_methods(expression, &object),
-      DataType::String => todo!(),
+      DataType::String => self.string_methods(expression, &object),
+      DataType::Char => todo!(),
       DataType::Boolean => todo!(),
       DataType::Vector(_, _) => todo!(),
       DataType::Unknown => todo!(),
@@ -4231,43 +4237,82 @@ impl IgnisAnalyzer {
     }
   }
 
+  fn get_std_ir(
+    &self,
+    name: &str,
+    token: &Token,
+  ) -> Result<Vec<HIRInstruction>, Box<DiagnosticMessage>> {
+    if !self.config.std {
+      return Err(Box::new(DiagnosticMessage::STDNotLoaded(token.clone())));
+    }
+
+    let std_ir = self.primitives_std.get(name);
+
+    if std_ir.is_none() {
+      return Err(Box::new(DiagnosticMessage::STDNotLoaded(token.clone())));
+    }
+
+    let std_ir = std_ir.unwrap();
+
+    Ok(std_ir.to_vec())
+  }
+
+  fn string_methods(
+    &self,
+    expression: &ASTMemberAccess,
+    object: &HIRInstruction,
+  ) -> Result<HIRInstruction, Box<DiagnosticMessage>> {
+    let std_ir = self.get_std_ir("std/string/mod.ign", &expression.member.as_ref())?;
+
+    for statement in std_ir.iter() {
+      match statement {
+        HIRInstruction::Record(record) if record.name.lexeme.eq("string") => {
+          for method in &record.items {
+            if let HIRInstruction::Method(_method) = method {
+              if _method.name.lexeme.eq(&expression.member.lexeme) {
+                let ir = HIRInstruction::MemberAccess(HIRMemberAccess::new(
+                  Box::new(object.clone()),
+                  Box::new(method.clone()),
+                  HIRMetadata::new(_method.metadata.flags.clone(), None),
+                ));
+
+                return Ok(ir);
+              }
+            }
+          }
+        },
+        _ => (),
+      };
+    }
+
+    unreachable!()
+  }
+
   fn number_methods(
     &self,
     expression: &ASTMemberAccess,
     object: &HIRInstruction,
   ) -> Result<HIRInstruction, Box<DiagnosticMessage>> {
-    if !self.config.std {
-      return Err(Box::new(DiagnosticMessage::STDNotLoaded(expression.member.as_ref().clone())));
-    }
-
-    let std_ir = self.primitives_std.get("std/number/mod.ign");
-
-    if std_ir.is_none() {
-      return Err(Box::new(DiagnosticMessage::STDNotLoaded(expression.member.as_ref().clone())));
-    }
-
-    let std_ir = std_ir.unwrap();
+    let std_ir = self.get_std_ir("std/number/mod.ign", &expression.member.as_ref())?;
 
     for statement in std_ir.iter() {
       match statement {
-        HIRInstruction::Record(record) => {
-          if record.name.lexeme.eq("Numbers") {
-            for method in &record.items {
-              if let HIRInstruction::Method(_method) = method {
-                if _method.name.lexeme == expression.member.as_ref().lexeme {
-                  let ir = HIRInstruction::MemberAccess(HIRMemberAccess::new(
-                    Box::new(object.clone()),
-                    Box::new(method.clone()),
-                    HIRMetadata::new(_method.metadata.flags.clone(), None),
-                  ));
+        HIRInstruction::Record(record) if record.name.lexeme.eq("Numbers") => {
+          for method in &record.items {
+            if let HIRInstruction::Method(_method) = method {
+              if _method.name.lexeme == expression.member.as_ref().lexeme {
+                let ir = HIRInstruction::MemberAccess(HIRMemberAccess::new(
+                  Box::new(object.clone()),
+                  Box::new(method.clone()),
+                  HIRMetadata::new(_method.metadata.flags.clone(), None),
+                ));
 
-                  return Ok(ir);
-                }
+                return Ok(ir);
               }
             }
-          } else if record.name.lexeme.eq("Floats") {
           }
         },
+        HIRInstruction::Record(record) if record.name.lexeme.eq("Floats") => todo!(),
         _ => (),
       };
     }

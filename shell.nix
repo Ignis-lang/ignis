@@ -1,25 +1,27 @@
 {
   pkgs ? import <nixpkgs> { },
 }:
-let
-  homeDir = builtins.getEnv "HOME";
-in
-{
-  default = pkgs.mkShell {
-    nativeBuildInputs = with pkgs; [
-      git
-      cargo
-      rustc
-      gcc
-      tinycc
-      valgrind
-      gdb
-      lldb
-    ];
+pkgs.mkShell {
+  name = "ignis-dev-shell";
 
-    CARGO_HOME = "${homeDir}/.cargo";
-    RUSTUP_HOME = "${homeDir}/.rustup";
-    IGNIS_HOME = ".";
-    RUST_BACKTRACE = 1;
-  };
+  nativeBuildInputs = with pkgs; [
+    git
+    cargo
+    rustc
+    gcc
+    tinycc
+    valgrind
+    gdb
+    lldb
+    pkg-config
+  ];
+
+  shellHook = ''
+    export CARGO_HOME="$HOME/.cargo"
+    export RUSTUP_HOME="$HOME/.rustup"
+    export IGNIS_HOME="."
+    export IGNIS_STD_PATH="$IGNIS_HOME/std"
+    export RUST_BACKTRACE=1
+    export PKG_CONFIG_PATH="${pkgs.libffi.dev}/lib/pkgconfig"
+  '';
 }
