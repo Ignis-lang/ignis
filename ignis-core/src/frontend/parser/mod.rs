@@ -961,6 +961,11 @@ impl<'a> IgnisParser<'a> {
     let mut members: Vec<ASTStatement> = vec![];
 
     while !self.check(TokenType::RightBrace) {
+      if self.check(TokenType::Comment) || self.check(TokenType::MultiLineComment) || self.check(TokenType::DocComment) {
+        self.consume(TokenType::Comment)?;
+        continue;
+      }
+
       members.push(self.namespace_item()?);
     }
 
