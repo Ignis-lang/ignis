@@ -15,12 +15,11 @@ languages, especially Lua and Python, that would be ideal.
 ### Requirements
 
 - Rust/Cargo version 1.74 or higher
-- Lua >= 5.2.4 (for running transpiled scripts) 
 
 ```bash
-cargo install --git https://github.com/Ignis/ignis.git --branch dev
+cargo install --git https://gitlab.com/Ignis/ignis.git --branch dev
 # or
-git clone https://github.com/Ignis/ignis.git
+git clone https://gitlab.com/Ignis/ignis.git
 cd ignis
 cargo install --path . ignis
 # Or
@@ -33,20 +32,13 @@ cargo build --release
 > The only backend that is currently running is the Lua backend.
 
 ```bash
-# Transpile an Ignis file to Lua and execute it
 ignis build main.ign
-
-lua ./build/main.lua
 ```
 
 ## Example Code
 
-> [!Note]
-> The Typescript code block is used, because as the syntax is the same as TS, we take advantage of
-> it to have syntax highlighting 
-
 ```ignis
-import { println } from "std:io";
+import { io } from "std::io";
 
 function sum(nums: i64[]): i64 {
   let mut total: i64 = 0;
@@ -61,23 +53,11 @@ function sum(nums: i64[]): i64 {
 function main(): void {
   let array: i64[] = [1, 2, 3, 4, 5];
 
-  println("Lenght: " + array.length.toString());
+  io::println("Lenght: " + array.length.toString());
 
-  println(sum(array));
+  io::println(sum(array));
 }
 ```
-
-## Roadmap
-
-> [!NOTE]
-> A brief roadmap
-
-- [ ] Development of a basic standard library (File/IO, String tools, Array tools).
-- [ ] NeoVim API to allow writing configurations and plugins in Ignis, with direct transpilation to Lua.
-- [ ] Binary compilation using C and GCC as a backend (in development, basic structure present).
-- [ ] Binary compilation using LLVM (planned).
-- [ ] Implementation of a memory management system inspired by Rust, seeking a balance between safety and flexibility.
-- [ ] Compilation to bytecode and development of the IVM (Ignis Virtual Machine).
 
 ## Contributions
 
