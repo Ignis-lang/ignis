@@ -47,8 +47,6 @@ impl Into<DebugPrint> for &DebugPrintCli {
 pub enum Target {
   /// Transpile to C an compile to native code
   C,
-  /// Transpile to bytecode for the IVM (TODO)
-  Bytecode,
   /// Export Intermediate Representation
   Iir,
   /// No target
@@ -59,7 +57,6 @@ impl Into<TargetBackend> for Target {
   fn into(self) -> TargetBackend {
     match self {
       Target::C => TargetBackend::C,
-      Target::Bytecode => TargetBackend::Bytecode,
       Target::Iir => TargetBackend::Iir,
       Target::None => TargetBackend::None,
     }

@@ -4,7 +4,6 @@ use clap::Parser as ClapParser;
 use std::{fs::File, io::Read, path::Path};
 
 use cli::{Cli, SubCommand};
-// use ignis_core::IgnisCore;
 use ignis_config;
 
 fn load_project_config() -> Option<ignis_config::IgnisProjectConfig> {

@@ -28,7 +28,6 @@ pub enum DebugPrint {
 pub enum TargetBackend {
   #[default]
   C,
-  Bytecode,
   Iir,
   None,
 }
