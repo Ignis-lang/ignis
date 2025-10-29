@@ -131,6 +131,7 @@ pub enum TokenType {
   Comment,
   MultiLineComment,
   DocComment,
+  Whitespace,
   Eof,
 }
 
@@ -376,6 +377,7 @@ impl Display for TokenType {
       TokenType::Void => write!(f, "Void"),
       TokenType::When => write!(f, "When"),
       TokenType::While => write!(f, "While"),
+      TokenType::Whitespace => write!(f, "Whitespace"),
       TokenType::XorAssign => write!(f, "XorAssign"),
     }
   }

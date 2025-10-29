@@ -16,6 +16,10 @@ pub enum DiagnosticMessage {
   InvalidCharacterEscapeSequence(Token),
   InvalidCharacter(Token),
   UnterminatedString(Token),
+  ExpectedInteger(Token),
+  ExpectedFloat(Token),
+  ExpectedHex(Token),
+  ExpectedBinary(Token),
   // #endregion Lexer
   // #region Parser
   ExpectedExpression(Token),
@@ -151,6 +155,18 @@ impl fmt::Display for DiagnosticMessage {
       },
       DiagnosticMessage::UnterminatedString(token) => {
         write!(f, "Unterminated string '{}'", token.lexeme)
+      },
+      DiagnosticMessage::ExpectedInteger(token) => {
+        write!(f, "Expected integer after '{}'", token.lexeme)
+      },
+      DiagnosticMessage::ExpectedFloat(token) => {
+        write!(f, "Expected float after '{}'", token.lexeme)
+      },
+      DiagnosticMessage::ExpectedHex(token) => {
+        write!(f, "Expected hex after '{}'", token.lexeme)
+      },
+      DiagnosticMessage::ExpectedBinary(token) => {
+        write!(f, "Expected binary after '{}'", token.lexeme)
       },
       DiagnosticMessage::ExpectedToken(expected_token, token) => {
         write!(f, "Expected '{}' after '{}'", expected_token, token.lexeme)
@@ -614,6 +630,10 @@ impl From<&DiagnosticMessage> for Token {
       | DiagnosticMessage::ExternAlreadyDefined(token)
       | DiagnosticMessage::NamespaceAlreadyDefined(token)
       | DiagnosticMessage::EnumMemberAlreadyDefined(token)
+      | DiagnosticMessage::ExpectedInteger(token)
+      | DiagnosticMessage::ExpectedFloat(token)
+      | DiagnosticMessage::ExpectedHex(token)
+      | DiagnosticMessage::ExpectedBinary(token)
       | DiagnosticMessage::STDNotLoaded(token) => token.clone(),
     }
   }
@@ -738,6 +758,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::NamespaceAlreadyDefined(_) => "I0114".to_string(),
       DiagnosticMessage::EnumMemberAlreadyDefined(_) => "I0115".to_string(),
       DiagnosticMessage::STDNotLoaded(_) => "I0116".to_string(),
+      DiagnosticMessage::ExpectedInteger(_) => "I0117".to_string(),
+      DiagnosticMessage::ExpectedFloat(_) => "I0118".to_string(),
+      DiagnosticMessage::ExpectedHex(_) => "I0119".to_string(),
+      DiagnosticMessage::ExpectedBinary(_) => "I0120".to_string(),
     }
   }
 
@@ -762,7 +786,8 @@ impl DiagnosticMessage {
         ))
       },
       DiagnosticMessage::PotentialTypeMismatch(left, right, op) => {
-        let message= format!("You are attempting to perform, {} between a generic type '{}' and a non-generic type '{}'. This might lead to unexpected behavior or runtime errors if '{}' and '{}' are not compatible. Please verify that this operation is intentional and consider enforcing type compatibility or explicit type conversion where applicable.",
+        let message = format!(
+          "You are attempting to perform, {} between a generic type '{}' and a non-generic type '{}'. This might lead to unexpected behavior or runtime errors if '{}' and '{}' are not compatible. Please verify that this operation is intentional and consider enforcing type compatibility or explicit type conversion where applicable.",
           op.lexeme, left, right, left, right
         );
 
