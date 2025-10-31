@@ -1,10 +1,12 @@
 mod cli;
 
 use clap::Parser as ClapParser;
-use std::{fs::File, io::Read, path::Path};
+use ignis_parser::new_paser_from_source;
+use std::{sync::Arc, fs::File, io::Read, path::Path};
 
 use cli::{Cli, SubCommand};
-use ignis_config;
+use ignis_config::{self, IgnisConfig};
+use ignis_token::source::IgnisSourceFile;
 
 fn load_project_config() -> Option<ignis_config::IgnisProjectConfig> {
   let binding = std::env::current_dir().unwrap();
@@ -47,7 +49,7 @@ fn check_if_project() -> bool {
     return true;
   }
 
-  return false;
+  false
 }
 
 fn load_manifest(std_path: &str) -> ignis_config::IgnisSTDManifest {
@@ -73,7 +75,7 @@ fn load_manifest(std_path: &str) -> ignis_config::IgnisSTDManifest {
   return ignis_config::IgnisSTDManifest::default();
 }
 
-fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
+fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
   let mut config =
     ignis_config::IgnisConfig::new_basic(cli.debug.iter().map(|x| x.into()).collect(), cli.quiet, cli.verbose);
 
@@ -84,8 +86,8 @@ fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
     if let Ok(v) = std::env::var("IGNIS_STD_PATH") {
       config.std_path = v;
     } else {
-      println!("Failed to load std path from environment variable");
-      std::process::exit(1);
+      // println!("Failed to load std path from environment variable");
+      // std::process::exit(1);
     }
   }
 
@@ -149,7 +151,34 @@ fn parse_cli_to_config(cli: &Cli) -> ignis_config::IgnisConfig {
     },
   };
 
-  return config;
+  return Arc::new(config);
+}
+
+fn get_file_content(path: &String) -> String {
+  let file = std::fs::File::open(path);
+
+  if file.is_err() {
+    return String::new();
+  }
+
+  let mut file = file.unwrap();
+  let mut content = String::new();
+
+  let _ = file.read_to_string(&mut content);
+
+  content
+}
+
+fn make_source_file(config: &IgnisConfig) -> Arc<IgnisSourceFile> {
+  let build_config = config.build_config.clone().unwrap();
+
+  let file = build_config.file.unwrap();
+
+  let source_str = get_file_content(&file);
+
+  let source_file = IgnisSourceFile::new(file.clone(), Arc::new(source_str));
+
+  Arc::new(source_file)
 }
 
 fn main() {
@@ -157,7 +186,7 @@ fn main() {
 
   let config = parse_cli_to_config(&cli);
 
-  // let mut core = IgnisCore::new(&config);
+  let source_file = make_source_file(&config);
 
-  // core.run();
+  new_paser_from_source(config, source_file);
 }

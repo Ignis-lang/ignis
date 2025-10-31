@@ -2,11 +2,12 @@ use ignis_diagnostics::{message::DiagnosticMessage};
 use ignis_token::{token::Token, token_types::TokenType};
 use colored::*;
 use ignis_config::IgnisConfig;
+use std::sync::Arc;
 
 type LexerResult = Result<TokenType, Box<DiagnosticMessage>>;
 
 pub struct IgnisLexer<'a> {
-  config: &'a IgnisConfig,
+  config: Arc<IgnisConfig>,
   source: &'a str,
   chars: std::str::Chars<'a>,
   pub tokens: Vec<Token>,
@@ -19,7 +20,7 @@ pub struct IgnisLexer<'a> {
 
 impl<'a> IgnisLexer<'a> {
   pub fn new(
-    config: &'a IgnisConfig,
+    config: Arc<IgnisConfig>,
     source: &'a str,
     file: &'a str,
   ) -> Self {
@@ -441,7 +442,7 @@ mod tests {
     let mut config = IgnisConfig::default();
     config.quiet = true;
 
-    let mut lexer = IgnisLexer::new(&config, source, "test.ign");
+    let mut lexer = IgnisLexer::new(Arc::new(config), source, "test.ign");
     lexer.scan_tokens(false);
 
     LexResult {
