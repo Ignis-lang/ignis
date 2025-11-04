@@ -1,12 +1,13 @@
 use crate::token_types::TokenType;
+use ignis_type::Span;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
   pub type_: TokenType,
   pub lexeme: String,
   pub line: usize,
-  pub start: usize,
   pub column: usize,
+  pub span: Span,
   pub file_name: String,
 }
 
@@ -17,7 +18,7 @@ impl Default for Token {
       lexeme: String::new(),
       line: 0,
       column: 0,
-      start: 0,
+      span: Span::default(),
       file_name: String::new(),
     }
   }
@@ -29,6 +30,7 @@ impl Token {
     lexeme: String,
     line: usize,
     start: usize,
+    end: usize,
     column: usize,
     file_name: String,
   ) -> Self {
@@ -36,22 +38,22 @@ impl Token {
       type_,
       lexeme,
       line,
-      start,
       column,
+      span: Span { start, end },
       file_name,
     }
   }
+}
 
-  pub fn vec_to_lisp(tokens: &Vec<Token>) -> Vec<String> {
-    let mut result: Vec<String> = vec![];
-
-    tokens.into_iter().for_each(|token: &Token| {
-      result.push(format!(
-        "(token type: {} lexeme: {} file: {} line: {} start: {} column: {})",
-        token.type_, token.lexeme, token.file_name, token.line, token.start, token.start,
-      ))
-    });
-
-    result
+impl std::fmt::Display for Token {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    write!(
+      f,
+      "(token type: {} lexeme: {} file: {} line: {} column: {} span: {})",
+      self.type_, self.lexeme, self.file_name, self.line, self.column, self.span,
+    )
   }
 }

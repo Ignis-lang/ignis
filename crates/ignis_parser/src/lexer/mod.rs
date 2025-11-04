@@ -80,6 +80,7 @@ impl<'a> IgnisLexer<'a> {
       String::new(),
       self.line,
       self.start,
+      self.current,
       0,
       self.module_path.clone(),
     ));
@@ -157,6 +158,7 @@ impl<'a> IgnisLexer<'a> {
         c.to_string(),
         self.line,
         self.start,
+        self.current,
         self.current - self.start,
         self.module_path.clone(),
       )))),
@@ -231,6 +233,7 @@ impl<'a> IgnisLexer<'a> {
         result.clone(),
         self.line + 1,
         self.start,
+        self.current,
         self.current - self.start,
         self.module_path.clone(),
       ))));
@@ -253,6 +256,7 @@ impl<'a> IgnisLexer<'a> {
             literal,
             self.line + 1,
             self.start,
+            self.current,
             self.current - self.start,
             self.module_path.clone(),
           ),
@@ -275,6 +279,7 @@ impl<'a> IgnisLexer<'a> {
               literal,
               self.line + 1,
               self.start,
+              self.current,
               self.current - self.start,
               self.module_path.clone(),
             ),
@@ -310,6 +315,7 @@ impl<'a> IgnisLexer<'a> {
         literal,
         self.line + 1,
         self.start,
+        self.current,
         self.current - self.start,
         self.module_path.clone(),
       ))));
@@ -334,6 +340,7 @@ impl<'a> IgnisLexer<'a> {
         literal,
         self.line + 1,
         self.start,
+        self.current,
         self.current - self.start,
         self.module_path.clone(),
       ))));
@@ -383,6 +390,7 @@ impl<'a> IgnisLexer<'a> {
       self.source[self.start..self.current].to_string(),
       self.line,
       self.start,
+      self.current,
       self.current - self.start,
       self.module_path.clone(),
     ))))
@@ -420,6 +428,7 @@ impl<'a> IgnisLexer<'a> {
       literal,
       self.line + 1,
       self.start,
+      self.current,
       self.current - self.start,
       self.module_path.clone(),
     ));

@@ -15,6 +15,6 @@ pub fn new_paser_from_source(
   lexer.scan_tokens(false);
 
   for token in lexer.tokens {
-    println!("{:?}", token);
+    println!("{}", token);
   }
 }
