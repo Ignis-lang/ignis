@@ -1,52 +1,54 @@
-use std::fmt::{Display, Formatter};
+use core::marker::PhantomData;
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Span {
-  pub start: usize,
-  pub end: usize,
-}
+pub mod file;
+pub mod span;
+pub mod symbol;
 
-impl Display for Span {
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
+pub struct Id<T>(pub u32, PhantomData<*const T>);
+
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BytePosition(pub u32);
+
+impl std::fmt::Display for BytePosition {
   fn fmt(
     &self,
-    f: &mut Formatter<'_>,
+    f: &mut std::fmt::Formatter<'_>,
   ) -> std::fmt::Result {
-    write!(f, "(span start: {} end: {})", self.start, self.end)
+    write!(f, "{}", self.0)
   }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct NodeId(u32);
-
-impl Display for NodeId {
-  fn fmt(
-    &self,
-    f: &mut Formatter<'_>,
-  ) -> std::fmt::Result {
-    write!(f, "(node id: {})", self.0)
-  }
+pub struct Store<T> {
+  data: Vec<T>,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct TypeId(u32);
-
-impl Display for TypeId {
-  fn fmt(
-    &self,
-    f: &mut Formatter<'_>,
-  ) -> std::fmt::Result {
-    write!(f, "(type id: {})", self.0)
+impl<T> Store<T> {
+  pub fn new() -> Self {
+    Self { data: Vec::new() }
   }
-}
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct FileId(u32);
+  pub fn alloc(
+    &mut self,
+    v: T,
+  ) -> Id<T> {
+    let id = Id(self.data.len() as u32, PhantomData);
+    self.data.push(v);
+    id
+  }
 
-impl Display for FileId {
-  fn fmt(
+  pub fn get(
     &self,
-    f: &mut Formatter<'_>,
-  ) -> std::fmt::Result {
-    write!(f, "(file id: {})", self.0)
+    id: &Id<T>,
+  ) -> &T {
+    &self.data[id.0 as usize]
+  }
+
+  pub fn get_mut(
+    &mut self,
+    id: Id<T>,
+  ) -> &mut T {
+    &mut self.data[id.0 as usize]
   }
 }

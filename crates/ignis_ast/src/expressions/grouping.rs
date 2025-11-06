@@ -1,0 +1,18 @@
+use ignis_type::span::Span;
+
+use crate::NodeId;
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct ASTGrouping {
+  pub expression: NodeId,
+  pub span: Span,
+}
+
+impl ASTGrouping {
+  pub fn new(
+    expression: NodeId,
+    span: Span,
+  ) -> Self {
+    Self { expression, span }
+  }
+}

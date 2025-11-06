@@ -1,63 +1,50 @@
 use ignis_diagnostics::{message::DiagnosticMessage};
 use ignis_token::{token::Token, token_types::TokenType};
-use colored::*;
-use ignis_config::IgnisConfig;
-use std::sync::Arc;
+use ignis_type::{BytePosition, file::FileId, span::Span};
 
 type LexerResult = Result<TokenType, Box<DiagnosticMessage>>;
 
 pub struct IgnisLexer<'a> {
-  config: Arc<IgnisConfig>,
+  file: FileId,
   source: &'a str,
   chars: std::str::Chars<'a>,
   pub tokens: Vec<Token>,
   start: usize,
   line: usize,
   current: usize,
-  module_path: String,
   pub diagnostics: Vec<DiagnosticMessage>,
 }
 
 impl<'a> IgnisLexer<'a> {
   pub fn new(
-    config: Arc<IgnisConfig>,
+    file: FileId,
     source: &'a str,
-    file: &'a str,
   ) -> Self {
     Self {
-      config,
+      file,
       chars: source.chars(),
       source,
       tokens: vec![],
       start: 0,
       line: 0,
       current: 0,
-      module_path: file.to_string(),
       diagnostics: vec![],
     }
   }
 
-  pub fn scan_tokens(
-    &mut self,
-    std: bool,
-  ) {
-    if std && !self.config.quiet {
-      println!(
-        "{:indent$}{} Scanning... {}",
-        " ",
-        "-->".bright_yellow().bold(),
-        self.module_path,
-        indent = 6
-      )
-    } else if !self.config.quiet {
-      println!(
-        "{:indent$}Scanning... {}",
-        "-->".bright_green().bold(),
-        self.module_path,
-        indent = 4
-      );
+  fn mk_span(
+    &self,
+    start: usize,
+    end: usize,
+  ) -> Span {
+    Span {
+      file: self.file.clone(),
+      start: BytePosition(start as u32),
+      end: BytePosition(end as u32),
     }
+  }
 
+  pub fn scan_tokens(&mut self) {
     loop {
       self.start = self.current;
 
@@ -66,7 +53,9 @@ impl<'a> IgnisLexer<'a> {
         Ok(token_type) => self.add_token(token_type),
         Err(err) => {
           self.diagnostics.push(*err);
-          continue;
+          if self.current == self.start && !self.is_at_end() {
+            self.advance();
+          }
         },
       }
 
@@ -78,11 +67,7 @@ impl<'a> IgnisLexer<'a> {
     self.tokens.push(Token::new(
       TokenType::Eof,
       String::new(),
-      self.line,
-      self.start,
-      self.current,
-      0,
-      self.module_path.clone(),
+      self.mk_span(self.current, self.current),
     ));
   }
 
@@ -153,15 +138,9 @@ impl<'a> IgnisLexer<'a> {
         Ok(TokenType::Whitespace)
       },
       n if n.is_ascii_alphabetic() || n == '_' => self.identifier(),
-      _ => Err(Box::new(DiagnosticMessage::InvalidToken(Token::new(
-        TokenType::Bad,
-        c.to_string(),
-        self.line,
-        self.start,
-        self.current,
-        self.current - self.start,
-        self.module_path.clone(),
-      )))),
+      _ => Err(Box::new(DiagnosticMessage::InvalidToken(
+        self.mk_span(self.start, self.current),
+      ))),
     }
   }
 
@@ -206,6 +185,7 @@ impl<'a> IgnisLexer<'a> {
 
   fn string(&mut self) -> LexerResult {
     let mut result: String = String::new();
+    let string_start = self.start;
 
     while self.peek() != '\"' && !self.is_at_end() {
       if self.peek() == '\\' {
@@ -228,15 +208,10 @@ impl<'a> IgnisLexer<'a> {
     }
 
     if self.is_at_end() {
-      return Err(Box::new(DiagnosticMessage::UnterminatedString(Token::new(
-        TokenType::String,
-        result.clone(),
-        self.line + 1,
-        self.start,
-        self.current,
-        self.current - self.start,
-        self.module_path.clone(),
-      ))));
+      let string_end = self.current;
+      return Err(Box::new(DiagnosticMessage::UnterminatedString(
+        self.mk_span(string_start, string_end),
+      )));
     }
 
     self.advance();
@@ -248,18 +223,8 @@ impl<'a> IgnisLexer<'a> {
     let mut is_float: bool = false;
     while self.peek().is_ascii_digit() || self.peek() == '_' {
       if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
-        let literal = self.source[self.start..self.current].to_string();
-        return Err(Box::new(DiagnosticMessage::ExpectedToken(
-          TokenType::Int,
-          Token::new(
-            TokenType::Bad,
-            literal,
-            self.line + 1,
-            self.start,
-            self.current,
-            self.current - self.start,
-            self.module_path.clone(),
-          ),
+        return Err(Box::new(DiagnosticMessage::ExpectedInteger(
+          self.mk_span(self.start, self.current),
         )));
       }
 
@@ -271,18 +236,8 @@ impl<'a> IgnisLexer<'a> {
 
       while self.peek().is_ascii_digit() || self.peek() == '_' {
         if self.peek() == '_' && (!self.peek_next().is_ascii_digit() || !self.peek_prev().is_ascii_digit()) {
-          let literal = self.source[self.start..self.current].to_string();
-          return Err(Box::new(DiagnosticMessage::ExpectedToken(
-            TokenType::Float,
-            Token::new(
-              TokenType::Bad,
-              literal,
-              self.line + 1,
-              self.start,
-              self.current,
-              self.current - self.start,
-              self.module_path.clone(),
-            ),
+          return Err(Box::new(DiagnosticMessage::ExpectedFloat(
+            self.mk_span(self.start, self.current),
           )));
         }
 
@@ -309,16 +264,9 @@ impl<'a> IgnisLexer<'a> {
     }
 
     if !saw_digit || self.peek().is_ascii_alphanumeric() || self.peek() == '_' {
-      let literal = self.source[self.start..self.current].to_string();
-      return Err(Box::new(DiagnosticMessage::ExpectedBinary(Token::new(
-        TokenType::Bad,
-        literal,
-        self.line + 1,
-        self.start,
-        self.current,
-        self.current - self.start,
-        self.module_path.clone(),
-      ))));
+      return Err(Box::new(DiagnosticMessage::ExpectedBinary(
+        self.mk_span(self.start, self.current),
+      )));
     }
 
     Ok(TokenType::Binary)
@@ -334,16 +282,9 @@ impl<'a> IgnisLexer<'a> {
     }
 
     if !saw_digit || self.peek().is_ascii_alphanumeric() || self.peek() == '_' {
-      let literal = self.source[self.start..self.current].to_string();
-      return Err(Box::new(DiagnosticMessage::ExpectedHex(Token::new(
-        TokenType::Bad,
-        literal,
-        self.line + 1,
-        self.start,
-        self.current,
-        self.current - self.start,
-        self.module_path.clone(),
-      ))));
+      return Err(Box::new(DiagnosticMessage::ExpectedHex(
+        self.mk_span(self.start, self.current),
+      )));
     }
 
     Ok(TokenType::Hex)
@@ -385,15 +326,9 @@ impl<'a> IgnisLexer<'a> {
       });
     }
 
-    Err(Box::new(DiagnosticMessage::UntermintedComment(Token::new(
-      TokenType::Comment,
-      self.source[self.start..self.current].to_string(),
-      self.line,
-      self.start,
-      self.current,
-      self.current - self.start,
-      self.module_path.clone(),
-    ))))
+    Err(Box::new(DiagnosticMessage::UnterminatedComment(
+      self.mk_span(self.start, self.current),
+    )))
   }
 
   fn is_identifier_letter(&self) -> bool {
@@ -426,11 +361,7 @@ impl<'a> IgnisLexer<'a> {
     self.tokens.push(Token::new(
       kind.clone(),
       literal,
-      self.line + 1,
-      self.start,
-      self.current,
-      self.current - self.start,
-      self.module_path.clone(),
+      self.mk_span(self.start, self.current),
     ));
   }
 }
@@ -438,9 +369,9 @@ impl<'a> IgnisLexer<'a> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use ignis_config::IgnisConfig;
   use ignis_diagnostics::message::DiagnosticMessage;
   use ignis_token::{token::Token, token_types::TokenType};
+  use ignis_type::file::SourceMap;
 
   struct LexResult {
     tokens: Vec<Token>,
@@ -448,11 +379,11 @@ mod tests {
   }
 
   fn lex(source: &str) -> LexResult {
-    let mut config = IgnisConfig::default();
-    config.quiet = true;
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", source.to_string());
 
-    let mut lexer = IgnisLexer::new(Arc::new(config), source, "test.ign");
-    lexer.scan_tokens(false);
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
 
     LexResult {
       tokens: lexer.tokens.clone(),
@@ -569,10 +500,7 @@ mod tests {
 
     assert_eq!(diagnostics.len(), 1, "expected a single diagnostic for invalid separator usage");
     match &diagnostics[0] {
-      DiagnosticMessage::ExpectedToken(expected_type, token) => {
-        assert_eq!(*expected_type, TokenType::Int);
-        assert_eq!(token.lexeme, "1");
-      },
+      DiagnosticMessage::ExpectedInteger(_) => {},
       other => panic!("unexpected diagnostic: {:?}", other),
     }
 
@@ -600,7 +528,7 @@ mod tests {
 
     assert_eq!(diagnostics.len(), 1, "expected diagnostic for binary literal without digits");
     match &diagnostics[0] {
-      DiagnosticMessage::ExpectedBinary(token) => assert_eq!(token.lexeme, "0b"),
+      DiagnosticMessage::ExpectedBinary(_) => {},
       other => panic!("unexpected diagnostic: {:?}", other),
     }
 
@@ -627,7 +555,7 @@ mod tests {
 
     assert_eq!(diagnostics.len(), 1, "expected diagnostic for hex literal without digits");
     match &diagnostics[0] {
-      DiagnosticMessage::ExpectedHex(token) => assert_eq!(token.lexeme, "0x"),
+      DiagnosticMessage::ExpectedHex(_) => {},
       other => panic!("unexpected diagnostic: {:?}", other),
     }
 
