@@ -1,5 +1,4 @@
-use ignis_data_type::value::IgnisLiteralValue;
-use ignis_type::span::Span;
+use ignis_type::{span::Span, value::IgnisLiteralValue};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct ASTLiteral {

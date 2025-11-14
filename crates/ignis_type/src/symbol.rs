@@ -13,6 +13,13 @@ pub struct SymbolTable {
 }
 
 impl SymbolTable {
+  pub fn new() -> Self {
+    SymbolTable {
+      symbols: Store::new(),
+      map: std::collections::HashMap::new(),
+    }
+  }
+
   pub fn intern(
     &mut self,
     name: &str,

@@ -1,4 +1,3 @@
-pub mod value;
 use std::fmt::Display;
 
 use ignis_token::token_types::TokenType;

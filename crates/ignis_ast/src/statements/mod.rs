@@ -40,7 +40,7 @@ pub enum ASTStatement {
 }
 
 impl ASTStatement {
-  pub fn span(&self) -> Span {
+  pub fn span(&self) -> &Span {
     match self {
       ASTStatement::Expression(expr) => expr.span(),
       _ => todo!(),

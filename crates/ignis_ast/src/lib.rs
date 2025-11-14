@@ -1,3 +1,4 @@
+pub mod display;
 pub mod expressions;
 pub mod metadata;
 pub mod statements;
@@ -18,7 +19,7 @@ pub enum ASTNode {
 }
 
 impl ASTNode {
-  pub fn span(&self) -> Span {
+  pub fn span(&self) -> &Span {
     match self {
       ASTNode::Expression(expr) => expr.span(),
       ASTNode::Statement(stmt) => stmt.span(),

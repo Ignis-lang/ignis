@@ -3,12 +3,12 @@ use ignis_type::span::Span;
 use crate::NodeId;
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct ASTGrouping {
+pub struct ASTGrouped {
   pub expression: NodeId,
   pub span: Span,
 }
 
-impl ASTGrouping {
+impl ASTGrouped {
   pub fn new(
     expression: NodeId,
     span: Span,

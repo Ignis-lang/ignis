@@ -3,6 +3,7 @@ use core::marker::PhantomData;
 pub mod file;
 pub mod span;
 pub mod symbol;
+pub mod value;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
@@ -20,6 +21,7 @@ impl std::fmt::Display for BytePosition {
   }
 }
 
+#[derive(Debug, Clone)]
 pub struct Store<T> {
   data: Vec<T>,
 }
@@ -50,5 +52,9 @@ impl<T> Store<T> {
     id: Id<T>,
   ) -> &mut T {
     &mut self.data[id.0 as usize]
+  }
+
+  pub fn get_all(&self) -> &[T] {
+    &self.data
   }
 }

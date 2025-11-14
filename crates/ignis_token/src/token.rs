@@ -1,5 +1,5 @@
 use crate::token_types::TokenType;
-use ignis_type::span::Span;
+use ignis_type::{span::Span, value::IgnisLiteralValue};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -24,11 +24,7 @@ impl Token {
     lexeme: String,
     span: Span,
   ) -> Self {
-    Self {
-      type_,
-      lexeme,
-      span,
-    }
+    Self { type_, lexeme, span }
   }
 }
 
@@ -37,10 +33,21 @@ impl std::fmt::Display for Token {
     &self,
     f: &mut std::fmt::Formatter<'_>,
   ) -> std::fmt::Result {
-    write!(
-      f,
-      "(token type: {} lexeme: {} span: {})",
-      self.type_, self.lexeme, self.span,
-    )
+    write!(f, "(token type: {} lexeme: {} span: {})", self.type_, self.lexeme, self.span,)
+  }
+}
+
+impl Into<IgnisLiteralValue> for &Token {
+  fn into(self) -> IgnisLiteralValue {
+    match self.type_ {
+      TokenType::Int => IgnisLiteralValue::Int64(self.lexeme.parse().unwrap_or(0)),
+      TokenType::Float => IgnisLiteralValue::Float64(self.lexeme.parse().unwrap_or(0.0)),
+      TokenType::Char => IgnisLiteralValue::Char(self.lexeme.parse().unwrap_or('\0')),
+      TokenType::String => IgnisLiteralValue::String(self.lexeme.clone()),
+      TokenType::False | TokenType::True => IgnisLiteralValue::Boolean(self.lexeme.parse().unwrap_or(false)),
+      TokenType::Hex => IgnisLiteralValue::Hex(self.lexeme.clone()),
+      TokenType::Binary => IgnisLiteralValue::Binary(self.lexeme.clone()),
+      _ => IgnisLiteralValue::Null,
+    }
   }
 }

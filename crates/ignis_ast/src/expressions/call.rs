@@ -1,24 +1,21 @@
-use ignis_type::{span::Span, symbol::SymbolId};
+use ignis_type::span::Span;
 
 use crate::NodeId;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ASTFunctionCall {
-  pub name: SymbolId,
-  pub span: Span,
+pub struct ASTCallExpression {
   pub callee: NodeId,
+  pub span: Span,
   pub arguments: Vec<NodeId>,
 }
 
-impl ASTFunctionCall {
+impl ASTCallExpression {
   pub fn new(
-    name: SymbolId,
-    span: Span,
     callee: NodeId,
+    span: Span,
     arguments: Vec<NodeId>,
   ) -> Self {
-    ASTFunctionCall {
-      name,
+    ASTCallExpression {
       span,
       callee,
       arguments,
