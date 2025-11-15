@@ -4,8 +4,10 @@ use ignis_ast::{
     ASTExpression,
     binary::{ASTBinary, ASTBinaryOperator},
     call::ASTCallExpression,
+    dereference::ASTDereference,
     grouped::ASTGrouped,
     literal::ASTLiteral,
+    reference::ASTReference,
     unary::{ASTUnary, UnaryOperator},
     variable::ASTVariableExpression,
     vector::ASTVector,
@@ -19,17 +21,15 @@ use ignis_type::{span::Span, value::IgnisLiteralValue};
 use super::{IgnisParser, ParserResult};
 
 impl IgnisParser {
-  pub fn parse_expression(
+  pub(crate) fn parse_expression(
     &mut self,
     min_bp: u16,
   ) -> ParserResult<NodeId> {
     let mut left: NodeId = self.parse_prefix()?;
 
     loop {
-      // Postfix primero
       if self.at(TokenType::LeftParen) {
         if self.is_literal(&left) {
-          // multiplicación implícita: lit ( ... )
           let right = self.parse_prefix()?;
           let span = Span::merge(self.get_span(&left), self.get_span(&right));
           left = self.allocate_expression(ASTExpression::Binary(ASTBinary::new(
@@ -55,9 +55,10 @@ impl IgnisParser {
         continue;
       }
 
-      // Binarios / 'as' / asignación
       let op = self.peek().type_.clone();
-      let Some((lbp, rbp)) = self.binding_powers(&op) else { break; };
+      let Some((lbp, rbp)) = self.binding_powers(&op) else {
+        break;
+      };
       if lbp < min_bp {
         break;
       }
@@ -90,21 +91,18 @@ impl IgnisParser {
   }
 
   fn parse_arguments(&mut self) -> ParserResult<Vec<NodeId>> {
-    let mut arguments: Vec<NodeId> = Vec::new();
-
-    if self.peek().type_ == TokenType::RightParen {
-      return Ok(arguments);
+    if self.at(TokenType::RightParen) {
+      return Ok(Vec::new());
     }
 
-    loop {
-      let argument = self.parse_expression(0)?;
-      arguments.push(argument);
+    let mut arguments = Vec::new();
+    arguments.push(self.parse_expression(0)?);
 
-      if self.peek().type_ == TokenType::RightParen {
+    while self.eat(TokenType::Comma) {
+      if self.at(TokenType::RightParen) {
         break;
       }
-
-      self.expect(TokenType::Comma)?;
+      arguments.push(self.parse_expression(0)?);
     }
 
     Ok(arguments)
@@ -133,8 +131,8 @@ impl IgnisParser {
     let span = Span::merge(&left_span, &operator.span);
 
     Ok(self.allocate_expression(match operator.type_ {
-      TokenType::Increment => ASTExpression::PostfixInc { expr: left, span },
-      TokenType::Decrement => ASTExpression::PostfixDec { expr: left, span },
+      TokenType::Increment => ASTExpression::PostfixIncrement { expr: left, span },
+      TokenType::Decrement => ASTExpression::PostfixDecrement { expr: left, span },
       _ => unreachable!(),
     }))
   }
@@ -167,21 +165,43 @@ impl IgnisParser {
       },
       TokenType::LeftBrack => {
         let lb_span = token.span.clone();
-        let mut items: Vec<NodeId> = Vec::new();
-        
-        if !self.at(TokenType::RightBrack) {
-          loop {
-            items.push(self.parse_expression(0)?);
-            if !self.eat(TokenType::Comma) {
+
+        let items = if self.at(TokenType::RightBrack) {
+          Vec::new()
+        } else {
+          let mut items = Vec::new();
+          items.push(self.parse_expression(0)?);
+
+          while self.eat(TokenType::Comma) {
+            if self.at(TokenType::RightBrack) {
               break;
             }
+            items.push(self.parse_expression(0)?);
           }
-        }
+          items
+        };
 
         let rb = self.expect(TokenType::RightBrack)?.clone();
         let span = Span::merge(&lb_span, &rb.span);
 
         Ok(self.allocate_expression(ASTExpression::Vector(ASTVector::new(span, items))))
+      },
+      TokenType::Ampersand => {
+        let ampersand_span = token.span.clone();
+        let is_mutable = self.eat(TokenType::Mut);
+
+        let (_, binding_power_right) = self.binding_powers(&TokenType::Ampersand).unwrap();
+        let inner = self.parse_expression(binding_power_right)?;
+        let span = Span::merge(&ampersand_span, self.get_span(&inner));
+
+        Ok(self.allocate_expression(ASTExpression::Reference(ASTReference::new(inner, is_mutable, span))))
+      },
+      TokenType::Asterisk => {
+        let (_, binding_power_right) = self.binding_powers(&TokenType::Asterisk).unwrap();
+        let inner = self.parse_expression(binding_power_right)?;
+        let span = Span::merge(&token.span, self.get_span(&inner));
+
+        Ok(self.allocate_expression(ASTExpression::Dereference(ASTDereference::new(inner, span))))
       },
       TokenType::Increment | TokenType::Decrement | TokenType::Minus | TokenType::Bang | TokenType::Tilde => {
         let (_, binding_power_right) = self.binding_powers(&token.type_).unwrap();

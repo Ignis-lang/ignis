@@ -1,15 +1,19 @@
-use ignis_type::symbol::SymbolId;
+use ignis_type::span::Span;
 
-use crate::statements::function::ASTFunctionSignature;
+use crate::NodeId;
 
+/// extern <function|const>
 #[derive(Debug, Clone, PartialEq)]
-pub struct ASTExternModule {
-  pub name: SymbolId,
-  pub items: Vec<ASTExternItem>,
+pub struct ASTExtern {
+  pub item: NodeId,
+  pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ASTExternItem {
-  Function(ASTFunctionSignature),
-  // Type(SymbolId),
+impl ASTExtern {
+  pub fn new(
+    item: NodeId,
+    span: Span,
+  ) -> Self {
+    Self { item, span }
+  }
 }

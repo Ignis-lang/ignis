@@ -33,7 +33,7 @@ impl From<&TokenType> for ASTBinaryOperator {
       TokenType::Asterisk => ASTBinaryOperator::Multiply,
       TokenType::Slash => ASTBinaryOperator::Divide,
       TokenType::Mod => ASTBinaryOperator::Modulo,
-      TokenType::Equal => ASTBinaryOperator::Equal,
+      TokenType::EqualEqual => ASTBinaryOperator::Equal,
       TokenType::BangEqual => ASTBinaryOperator::NotEqual,
       TokenType::Greater => ASTBinaryOperator::GreaterThan,
       TokenType::GreaterEqual => ASTBinaryOperator::GreaterThanOrEqual,

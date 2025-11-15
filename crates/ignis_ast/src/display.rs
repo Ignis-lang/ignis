@@ -43,7 +43,10 @@
 //!       (Return (* (Var "n") (Call (Var "factorial") (- (Var "n") 1)))))))
 //! ```
 
-use std::{cell::RefCell, rc::Rc};
+use std::{
+  cell::{Cell, RefCell},
+  rc::Rc,
+};
 
 use ignis_type::{Store, symbol::SymbolTable};
 
@@ -68,8 +71,10 @@ use crate::{
     block::ASTBlock,
     break_statement::ASTBreak,
     comment_statement::ASTComment,
+    const_statement::ASTConstant,
     continue_statement::ASTContinue,
-    extern_statement::{ASTExternItem, ASTExternModule},
+    export_statement::ASTExport,
+    extern_statement::ASTExtern,
     for_statement::ASTFor,
     function::{ASTFunction, ASTFunctionSignature, ASTParameter},
     if_statement::ASTIf,
@@ -95,7 +100,7 @@ pub trait DisplayLisp {
 pub struct ASTFormatter {
   nodes: Store<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
-  indent_level: usize,
+  indent_level: Cell<usize>,
 }
 
 impl ASTFormatter {
@@ -106,7 +111,7 @@ impl ASTFormatter {
     Self {
       nodes,
       symbols,
-      indent_level: 0,
+      indent_level: Cell::new(0),
     }
   }
 
@@ -128,18 +133,19 @@ impl ASTFormatter {
 
   /// Get current indentation string
   pub fn indent(&self) -> String {
-    "  ".repeat(self.indent_level)
+    "  ".repeat(self.indent_level.get())
   }
 
   /// Increase indentation level
-  pub fn increase_indent(&mut self) {
-    self.indent_level += 1;
+  pub fn increase_indent(&self) {
+    self.indent_level.set(self.indent_level.get() + 1);
   }
 
   /// Decrease indentation level
-  pub fn decrease_indent(&mut self) {
-    if self.indent_level > 0 {
-      self.indent_level -= 1;
+  pub fn decrease_indent(&self) {
+    let current = self.indent_level.get();
+    if current > 0 {
+      self.indent_level.set(current - 1);
     }
   }
 
@@ -170,13 +176,17 @@ pub fn format_ast_nodes(
   roots: &[NodeId],
 ) -> String {
   let formatter = ASTFormatter::new(nodes, symbols);
+
+  if roots.is_empty() {
+    return "(Program)".to_string();
+  }
+
+  formatter.increase_indent();
   let formatted: Vec<String> = roots
     .iter()
-    .map(|node_id| {
-      let node_str = formatter.format_node(node_id);
-      format!("  {}", node_str)
-    })
+    .map(|node_id| format!("{}{}", formatter.indent(), formatter.format_node(node_id)))
     .collect();
+  formatter.decrease_indent();
 
   format!("(Program\n{})", formatted.join("\n"))
 }
@@ -193,10 +203,14 @@ pub fn format_all_nodes(
     return "(Program)".to_string();
   }
 
-  // Format each node directly without using NodeId
-  let formatted: Vec<String> = all_nodes.iter().map(|node| node.to_lisp(&formatter)).collect();
+  formatter.increase_indent();
+  let formatted: Vec<String> = all_nodes
+    .iter()
+    .map(|node| format!("{}{}", formatter.indent(), node.to_lisp(&formatter)))
+    .collect();
+  formatter.decrease_indent();
 
-  format!("(Program\n  {})", formatted.join("\n  "))
+  format!("(Program\n{})", formatted.join("\n"))
 }
 
 // Implementation for ASTNode
@@ -206,8 +220,8 @@ impl DisplayLisp for ASTNode {
     formatter: &ASTFormatter,
   ) -> String {
     match self {
-      ASTNode::Expression(expr) => expr.to_lisp(formatter),
-      ASTNode::Statement(stmt) => stmt.to_lisp(formatter),
+      ASTNode::Expression(expression) => expression.to_lisp(formatter),
+      ASTNode::Statement(statement) => statement.to_lisp(formatter),
     }
   }
 }
@@ -223,20 +237,32 @@ impl DisplayLisp for ASTExpression {
       ASTExpression::Binary(expr) => expr.to_lisp(formatter),
       ASTExpression::Cast(expr) => expr.to_lisp(formatter),
       ASTExpression::Call(expr) => expr.to_lisp(formatter),
+      ASTExpression::Dereference(expr) => {
+        let inner = formatter.format_node(&expr.inner);
+        format!("(*{})", inner)
+      },
       ASTExpression::Grouped(expr) => expr.to_lisp(formatter),
+      ASTExpression::Reference(expr) => {
+        let inner = formatter.format_node(&expr.inner);
+        if expr.mutable {
+          format!("(&mut {})", inner)
+        } else {
+          format!("(&{})", inner)
+        }
+      },
       ASTExpression::Unary(expr) => expr.to_lisp(formatter),
       ASTExpression::Literal(expr) => expr.to_lisp(formatter),
       ASTExpression::Variable(expr) => expr.to_lisp(formatter),
       ASTExpression::Vector(expr) => expr.to_lisp(formatter),
       ASTExpression::VectorAccess(expr) => expr.to_lisp(formatter),
       ASTExpression::Path(expr) => expr.to_lisp(formatter),
-      ASTExpression::PostfixInc { expr, .. } => {
+      ASTExpression::PostfixIncrement { expr, .. } => {
         let operand = formatter.format_node(expr);
-        format!("(Postfix++ {})", operand)
+        format!("(PostfixIncrement {})", operand)
       },
-      ASTExpression::PostfixDec { expr, .. } => {
+      ASTExpression::PostfixDecrement { expr, .. } => {
         let operand = formatter.format_node(expr);
-        format!("(Postfix-- {})", operand)
+        format!("(PostfixDecrement {})", operand)
       },
     }
   }
@@ -249,19 +275,21 @@ impl DisplayLisp for ASTStatement {
     formatter: &ASTFormatter,
   ) -> String {
     match self {
-      ASTStatement::Expression(expr) => expr.to_lisp(formatter),
-      ASTStatement::Variable(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Function(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Block(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::If(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::While(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::For(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Return(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Continue(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Break(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Import(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Extern(stmt) => stmt.to_lisp(formatter),
-      ASTStatement::Comment(stmt) => stmt.to_lisp(formatter),
+      ASTStatement::Expression(expression) => expression.to_lisp(formatter),
+      ASTStatement::Variable(statement) => statement.to_lisp(formatter),
+      ASTStatement::Function(statement) => statement.to_lisp(formatter),
+      ASTStatement::Block(statement) => statement.to_lisp(formatter),
+      ASTStatement::If(statement) => statement.to_lisp(formatter),
+      ASTStatement::While(statement) => statement.to_lisp(formatter),
+      ASTStatement::For(statement) => statement.to_lisp(formatter),
+      ASTStatement::Return(statement) => statement.to_lisp(formatter),
+      ASTStatement::Continue(statement) => statement.to_lisp(formatter),
+      ASTStatement::Break(statement) => statement.to_lisp(formatter),
+      ASTStatement::Import(statement) => statement.to_lisp(formatter),
+      ASTStatement::Extern(statement) => statement.to_lisp(formatter),
+      ASTStatement::Constant(statement) => statement.to_lisp(formatter),
+      ASTStatement::Export(statement) => statement.to_lisp(formatter),
+      ASTStatement::Comment(statement) => statement.to_lisp(formatter),
     }
   }
 }
@@ -340,7 +368,7 @@ impl DisplayLisp for ASTVariableExpression {
     formatter: &ASTFormatter,
   ) -> String {
     let name = formatter.resolve_symbol(&self.name);
-    format!("(Variable \"{}\")", name)
+    format!("(VariableExpression \"{}\")", name)
   }
 }
 
@@ -465,20 +493,19 @@ impl DisplayLisp for ASTBlock {
     &self,
     formatter: &ASTFormatter,
   ) -> String {
+    if self.statements.is_empty() {
+      return "(Block)".to_string();
+    }
+
+    formatter.increase_indent();
     let statements: Vec<String> = self
       .statements
       .iter()
-      .map(|stmt| {
-        let indent = formatter.indent();
-        format!("{}{}", indent, formatter.format_node(stmt))
-      })
+      .map(|statement_id| format!("{}{}", formatter.indent(), formatter.format_node(statement_id)))
       .collect();
+    formatter.decrease_indent();
 
-    if statements.is_empty() {
-      "(Block)".to_string()
-    } else {
-      format!("(Block\n{})", statements.join("\n"))
-    }
+    format!("(Block\n{})", statements.join("\n"))
   }
 }
 
@@ -495,10 +522,10 @@ impl DisplayLisp for ASTVariable {
     match &self.value {
       Some(value_id) => {
         let value = formatter.format_node(value_id);
-        format!("(Var \"{}\" {} {} {})", name, type_str, metadata_str, value)
+        format!("(Variable \"{}\" {} {} {})", name, type_str, metadata_str, value)
       },
       None => {
-        format!("(Var \"{}\" {} {})", name, type_str, metadata_str)
+        format!("(Variable \"{}\" {} {})", name, type_str, metadata_str)
       },
     }
   }
@@ -526,8 +553,13 @@ impl DisplayLisp for ASTFunction {
       Some(body_id) => {
         let body = formatter.format_node(body_id);
         format!(
-          "(Function \"{}\" {} {} {}\n  {})",
-          name, params_str, return_type, metadata_str, body
+          "(Function \"{}\" {} {} {}\n{}{})",
+          name,
+          params_str,
+          return_type,
+          metadata_str,
+          formatter.indent(),
+          body
         )
       },
       None => {
@@ -627,8 +659,13 @@ impl DisplayLisp for ASTReturn {
     &self,
     formatter: &ASTFormatter,
   ) -> String {
-    let expr = formatter.format_node(&self.expression);
-    format!("(Return {})", expr)
+    match &self.expression {
+      Some(expr) => {
+        let expr_str = formatter.format_node(expr);
+        format!("(Return {})", expr_str)
+      },
+      None => "(Return)".to_string(),
+    }
   }
 }
 
@@ -658,45 +695,52 @@ impl DisplayLisp for ASTImport {
     &self,
     formatter: &ASTFormatter,
   ) -> String {
-    let module = formatter.resolve_symbol(&self.module);
-
-    match &self.alias {
-      Some(alias_id) => {
-        let alias = formatter.resolve_symbol(alias_id);
-        format!("(Import \"{}\" as \"{}\")", module, alias)
-      },
-      None => {
-        format!("(Import \"{}\")", module)
-      },
-    }
+    let items: Vec<String> = self.items.iter().map(|id| formatter.resolve_symbol(id)).collect();
+    // Remove surrounding quotes from the path string if present
+    let path = self.from.trim_matches('"');
+    format!("(Import [{}] from \"{}\")", items.join(", "), path)
   }
 }
 
 // Extern Statement
-impl DisplayLisp for ASTExternModule {
+impl DisplayLisp for ASTExtern {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let item_display = formatter.format_node(&self.item);
+    format!("(Extern {})", item_display)
+  }
+}
+
+// Constant Statement
+impl DisplayLisp for ASTConstant {
   fn to_lisp(
     &self,
     formatter: &ASTFormatter,
   ) -> String {
     let name = formatter.resolve_symbol(&self.name);
-    let items: Vec<String> = self.items.iter().map(|item| item.to_lisp(formatter)).collect();
-
-    if items.is_empty() {
-      format!("(Extern \"{}\")", name)
-    } else {
-      format!("(Extern \"{}\" {})", name, items.join(" "))
-    }
+    let type_display = self.ty.to_lisp(formatter);
+    let value_display = formatter.format_node(&self.value);
+    format!("(Constant {} : {} = {})", name, type_display, value_display)
   }
 }
 
-// Extern Item
-impl DisplayLisp for ASTExternItem {
+// Export Statement
+impl DisplayLisp for ASTExport {
   fn to_lisp(
     &self,
     formatter: &ASTFormatter,
   ) -> String {
     match self {
-      ASTExternItem::Function(sig) => sig.to_lisp(formatter),
+      ASTExport::Declaration { decl, .. } => {
+        let declaration_display = formatter.format_node(decl);
+        format!("(Export {})", declaration_display)
+      },
+      ASTExport::Name { name, .. } => {
+        let name_string = formatter.resolve_symbol(name);
+        format!("(Export \"{}\")", name_string)
+      },
     }
   }
 }
@@ -738,13 +782,13 @@ impl DisplayLisp for IgnisTypeSyntax {
       IgnisTypeSyntax::Char => "Char".to_string(),
 
       IgnisTypeSyntax::Vector(inner, size) => match size {
-        Some(s) => format!("(Vector {} {})", inner.to_lisp(formatter), s),
-        None => format!("(Vector {})", inner.to_lisp(formatter)),
+        Some(s) => format!("({}[{}])", inner.to_lisp(formatter), s),
+        None => format!("({}[])", inner.to_lisp(formatter)),
       },
 
       IgnisTypeSyntax::Tuple(types) => {
         let types_str: Vec<String> = types.iter().map(|t| t.to_lisp(formatter)).collect();
-        format!("(Tuple {})", types_str.join(" "))
+        format!("({})", types_str.join(" "))
       },
 
       IgnisTypeSyntax::Callable(params, return_type) => {
@@ -759,11 +803,16 @@ impl DisplayLisp for IgnisTypeSyntax {
       },
 
       IgnisTypeSyntax::Pointer(inner) => {
-        format!("(Ptr {})", inner.to_lisp(formatter))
+        format!("(*{})", inner.to_lisp(formatter))
       },
 
-      IgnisTypeSyntax::Reference(inner) => {
-        format!("(Ref {})", inner.to_lisp(formatter))
+      IgnisTypeSyntax::Reference { inner, mutable } => {
+        let inner_str = inner.to_lisp(formatter);
+        if *mutable {
+          format!("(&mut {})", inner_str)
+        } else {
+          format!("(&{})", inner_str)
+        }
       },
 
       IgnisTypeSyntax::Named(symbol_id) => {
@@ -797,12 +846,12 @@ impl DisplayLisp for IgnisTypeSyntax {
 
       IgnisTypeSyntax::Union(types) => {
         let types_str: Vec<String> = types.iter().map(|t| t.to_lisp(formatter)).collect();
-        format!("(Union {})", types_str.join(" "))
+        format!("({})", types_str.join("&"))
       },
 
       IgnisTypeSyntax::Intersection(types) => {
         let types_str: Vec<String> = types.iter().map(|t| t.to_lisp(formatter)).collect();
-        format!("(Intersection {})", types_str.join(" "))
+        format!("({})", types_str.join("|"))
       },
     }
   }
@@ -817,16 +866,16 @@ fn format_metadata(metadata: &ASTMetadata) -> String {
   let mut flags = Vec::new();
 
   if metadata.contains(ASTMetadata::CONSTANT) {
-    flags.push("const");
+    flags.push("constant");
   }
   if metadata.contains(ASTMetadata::MUTABLE) {
-    flags.push("mut");
+    flags.push("mutable");
   }
   if metadata.contains(ASTMetadata::PUBLIC) {
-    flags.push("pub");
+    flags.push("public");
   }
   if metadata.contains(ASTMetadata::PRIVATE) {
-    flags.push("priv");
+    flags.push("private");
   }
   if metadata.contains(ASTMetadata::STATIC) {
     flags.push("static");
@@ -841,13 +890,13 @@ fn format_metadata(metadata: &ASTMetadata) -> String {
     flags.push("extern");
   }
   if metadata.contains(ASTMetadata::REFERENCE) {
-    flags.push("ref");
+    flags.push("reference");
   }
   if metadata.contains(ASTMetadata::POINTER) {
-    flags.push("ptr");
+    flags.push("pointer");
   }
   if metadata.contains(ASTMetadata::OPTIONAL) {
-    flags.push("opt");
+    flags.push("optional");
   }
   if metadata.contains(ASTMetadata::VARIADIC) {
     flags.push("variadic");

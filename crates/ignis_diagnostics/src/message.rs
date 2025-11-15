@@ -14,7 +14,10 @@ pub enum Expected {
 }
 
 impl fmt::Display for Expected {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut fmt::Formatter<'_>,
+  ) -> fmt::Result {
     match self {
       Expected::Token(t) => write!(f, "{:?}", t),
       Expected::Keyword(k) => write!(f, "keyword '{}'", k),
@@ -26,8 +29,13 @@ impl fmt::Display for Expected {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiagnosticMessage {
   // #region Lexer
-  ExpectedToken { expected: Expected, at: Span },
-  UnexpectedToken { expected: Expected, at: Span },
+  ExpectedToken {
+    expected: Expected,
+    at: Span,
+  },
+  UnexpectedToken {
+    at: Span,
+  },
   InvalidToken(Span),
   UnterminatedComment(Span),
   UnterminatedCharacter(Span),
@@ -39,15 +47,22 @@ pub enum DiagnosticMessage {
   ExpectedHex(Span),
   ExpectedBinary(Span),
   // #endregion Lexer
-  // #region Parser  
+  // #region Parser
   ExpectedExpression(Span),
   ExpectedVariableName(Span),
   ExpectedReturnTypeAfterFunction(Span),
-  ExpectedAfterExpression { expected: Expected, at: Span },
+  ExpectedAfterExpression {
+    expected: Expected,
+    at: Span,
+  },
   ExpectedExpressionAfter(Span),
   InvalidAssignmentTarget(Span),
   ExpectedTypeAfterVariable(Span),
-  InvalidNumberOfArguments { expected: usize, got: usize, at: Span },
+  InvalidNumberOfArguments {
+    expected: usize,
+    got: usize,
+    at: Span,
+  },
   ExpectedSemicolonAfterExpression(Span),
   InvalidEnumMember(Span),
   ExpectedTypeAfterPipe(Span),
@@ -59,22 +74,47 @@ pub enum DiagnosticMessage {
   ExpectedPattern(Span),
   UnexpectedGenerics(Span),
   UndefinedMeta(Span),
-  InvalidMetaEntity { expected: Expected, at: Span },
+  InvalidMetaEntity {
+    expected: Expected,
+    at: Span,
+  },
   MissingArgument(Span),
-  InvalidArgumentType { expected: DataType, at: Span },
-  TypeMismatch { expected: DataType, got: DataType, at: Span },
+  InvalidArgumentType {
+    expected: DataType,
+    at: Span,
+  },
+  TypeMismatch {
+    expected: DataType,
+    got: DataType,
+    at: Span,
+  },
   InvalidProperty(Span),
   // #endregion Parser
   // #region Analyzer
-  UndeclaredVariable { name: String, span: Span },
-  VariableAlreadyDefined { name: String, span: Span },
-  FunctionAlreadyDefined { name: String, span: Span },
-  UndefinedType { name: String, span: Span },
+  UndeclaredVariable {
+    name: String,
+    span: Span,
+  },
+  VariableAlreadyDefined {
+    name: String,
+    span: Span,
+  },
+  FunctionAlreadyDefined {
+    name: String,
+    span: Span,
+  },
+  UndefinedType {
+    name: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
 impl fmt::Display for DiagnosticMessage {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  fn fmt(
+    &self,
+    f: &mut fmt::Formatter<'_>,
+  ) -> fmt::Result {
     match self {
       // Lexer
       DiagnosticMessage::UnterminatedComment(_) => write!(f, "Unterminated comment"),
@@ -87,9 +127,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::ExpectedHex(_) => write!(f, "Expected hexadecimal literal"),
       DiagnosticMessage::ExpectedBinary(_) => write!(f, "Expected binary literal"),
       DiagnosticMessage::ExpectedToken { expected, .. } => write!(f, "Expected {}", expected),
-      DiagnosticMessage::UnexpectedToken { expected, .. } => write!(f, "Unexpected token, expected {}", expected),
+      DiagnosticMessage::UnexpectedToken { .. } => write!(f, "Unexpected token"),
       DiagnosticMessage::InvalidToken(_) => write!(f, "Invalid token"),
-      
+
       // Parser
       DiagnosticMessage::ExpectedExpression(_) => write!(f, "Expected expression"),
       DiagnosticMessage::ExpectedVariableName(_) => write!(f, "Expected variable name"),
@@ -114,12 +154,14 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UndefinedMeta(_) => write!(f, "Undefined meta"),
       DiagnosticMessage::InvalidMetaEntity { expected, .. } => write!(f, "Invalid meta entity, expected {}", expected),
       DiagnosticMessage::MissingArgument(_) => write!(f, "Missing argument for meta"),
-      DiagnosticMessage::InvalidArgumentType { expected, .. } => write!(f, "Invalid argument type, expected '{}'", expected),
+      DiagnosticMessage::InvalidArgumentType { expected, .. } => {
+        write!(f, "Invalid argument type, expected '{}'", expected)
+      },
       DiagnosticMessage::TypeMismatch { expected, got, .. } => {
         write!(f, "Type mismatch. Expected '{}', but got '{}'", expected, got)
       },
       DiagnosticMessage::InvalidProperty(_) => write!(f, "Invalid property"),
-      
+
       // Analyzer
       DiagnosticMessage::UndeclaredVariable { name, .. } => write!(f, "Undeclared variable '{}'", name),
       DiagnosticMessage::VariableAlreadyDefined { name, .. } => write!(f, "Variable '{}' is already defined", name),
@@ -168,7 +210,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::InvalidArgumentType { at, .. }
       | DiagnosticMessage::TypeMismatch { at, .. }
       | DiagnosticMessage::InvalidProperty(at) => at.clone(),
-      
+
       DiagnosticMessage::UndeclaredVariable { span, .. }
       | DiagnosticMessage::VariableAlreadyDefined { span, .. }
       | DiagnosticMessage::FunctionAlreadyDefined { span, .. }
@@ -218,7 +260,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::ExpectedFloat(_) => "I0045",
       DiagnosticMessage::ExpectedHex(_) => "I0046",
       DiagnosticMessage::ExpectedBinary(_) => "I0047",
-    }.to_string()
+    }
+    .to_string()
   }
 
   fn level(&self) -> Severity {
@@ -226,11 +269,6 @@ impl DiagnosticMessage {
   }
 
   pub fn report(&self) -> Diagnostic {
-    Diagnostic::new(
-      self.level(),
-      self.to_string(),
-      self.code(),
-      self.primary_span(),
-    )
+    Diagnostic::new(self.level(), self.to_string(), self.code(), self.primary_span())
   }
 }

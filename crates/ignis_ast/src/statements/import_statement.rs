@@ -1,18 +1,15 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
+/// import a, b, c from "path";
 #[derive(Debug, Clone, PartialEq)]
 pub struct ASTImport {
-  pub path: Span,
-  pub module: SymbolId,
-  pub alias: Option<SymbolId>,
+  pub items: Vec<SymbolId>,
+  pub from: String,
+  pub span: Span,
 }
 
 impl ASTImport {
-  pub fn new(
-    path: Span,
-    module: SymbolId,
-    alias: Option<SymbolId>,
-  ) -> Self {
-    Self { path, module, alias }
+  pub fn new(items: Vec<SymbolId>, from: String, span: Span) -> Self {
+    Self { items, from, span }
   }
 }

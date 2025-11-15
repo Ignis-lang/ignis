@@ -1,6 +1,9 @@
 use std::{cell::RefCell, rc::Rc};
 
 mod expression;
+mod recovery;
+mod statement;
+mod type_syntax;
 
 use ignis_diagnostics::message::{DiagnosticMessage, Expected};
 use ignis_token::{token::Token, token_types::TokenType};
@@ -22,6 +25,8 @@ pub struct IgnisParser {
 
   nodes: Store<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
+
+  recovery: bool,
 }
 
 impl IgnisParser {
@@ -29,36 +34,101 @@ impl IgnisParser {
     tokens: Vec<Token>,
     symbols: Rc<RefCell<SymbolTable>>,
   ) -> Self {
-    Self {
+    let mut parser = IgnisParser {
       tokens,
-      diagnostics: Vec::new(),
       cursor: 0,
       nodes: Store::new(),
+      diagnostics: Vec::new(),
       symbols,
+      recovery: true,
+    };
+
+    parser.skip_comments();
+    parser
+  }
+
+  /// Parse a comma-separated list between delimiters
+  /// Generic helper for parsing lists like: (item, item, item)
+  ///
+  /// # Usage Examples
+  /// ```ignore
+  /// // Function parameters: (x: int, y: int)
+  /// let params = self.parse_delimited_list(
+  ///   TokenType::LeftParen,
+  ///   TokenType::RightParen,
+  ///   TokenType::Comma,
+  ///   |parser| parser.parse_param(),
+  /// )?;
+  ///
+  /// // Function arguments: foo(1, 2, 3)
+  /// let args = self.parse_delimited_list(
+  ///   TokenType::LeftParen,
+  ///   TokenType::RightParen,
+  ///   TokenType::Comma,
+  ///   |parser| parser.parse_expression(0),
+  /// )?;
+  ///
+  /// // Vector elements: [1, 2, 3]
+  /// let elements = self.parse_delimited_list(
+  ///   TokenType::LeftBrack,
+  ///   TokenType::RightBrack,
+  ///   TokenType::Comma,
+  ///   |parser| parser.parse_expression(0),
+  /// )?;
+  ///
+  /// // Tuple elements: (1, "hello", true)
+  /// let tuple = self.parse_delimited_list(
+  ///   TokenType::LeftParen,
+  ///   TokenType::RightParen,
+  ///   TokenType::Comma,
+  ///   |parser| parser.parse_expression(0),
+  /// )?;
+  /// ```
+  pub(crate) fn parse_delimited_list<T, F>(
+    &mut self,
+    opening: TokenType,
+    closing: TokenType,
+    separator: TokenType,
+    mut parse_item: F,
+  ) -> ParserResult<Vec<T>>
+  where
+    F: FnMut(&mut Self) -> ParserResult<T>,
+  {
+    self.expect(opening)?;
+    let mut items = Vec::new();
+
+    if self.at(closing) {
+      self.expect(closing)?;
+      return Ok(items);
     }
+
+    items.push(parse_item(self)?);
+
+    while self.eat(separator) {
+      if self.at(closing) {
+        break;
+      }
+      items.push(parse_item(self)?);
+    }
+
+    self.expect(closing)?;
+    Ok(items)
   }
 
   pub fn parse(&mut self) -> Result<(Store<ASTNode>, Vec<NodeId>), Vec<DiagnosticMessage>> {
-    let roots = self.parse_program().map_err(|e| vec![e])?;
-
-    Ok((self.nodes.clone(), roots))
-  }
-
-  fn parse_program(&mut self) -> ParserResult<Vec<NodeId>> {
-    let mut statements = Vec::new();
-
-    while !self.at(TokenType::Eof) {
-      let stmt = self.parse_statement()?;
-      statements.push(stmt);
-
-      self.eat(TokenType::SemiColon);
+    match self.parse_program() {
+      Ok(statements) => {
+        if self.diagnostics.is_empty() {
+          Ok((self.nodes.clone(), statements))
+        } else {
+          Err(self.diagnostics.clone())
+        }
+      },
+      Err(diagnostic) => {
+        self.diagnostics.push(diagnostic);
+        Err(self.diagnostics.clone())
+      },
     }
-
-    Ok(statements)
-  }
-
-  fn parse_statement(&mut self) -> ParserResult<NodeId> {
-    self.parse_expression(0)
   }
 
   fn peek(&self) -> &Token {
@@ -102,11 +172,31 @@ impl IgnisParser {
     })
   }
 
-  /// Advances the cursor to the next token.
+  /// Advances the cursor to the next token, skipping comments.
   fn bump(&mut self) -> &Token {
-    let token = self.tokens.get(self.cursor).unwrap();
+    let cursor = self.cursor;
     self.cursor += 1;
+
+    self.skip_comments();
+
+    let token = self.tokens.get(cursor).unwrap();
+
     token
+  }
+
+  /// Skip over comment tokens
+  fn skip_comments(&mut self) {
+    while self.cursor < self.tokens.len() {
+      let token_type = self.tokens.get(self.cursor).unwrap().type_;
+      if matches!(
+        token_type,
+        TokenType::Comment | TokenType::MultiLineComment | TokenType::DocComment
+      ) {
+        self.cursor += 1;
+      } else {
+        break;
+      }
+    }
   }
 
   fn allocate_statement(
@@ -152,7 +242,7 @@ impl IgnisParser {
   /// Returns the binding power of an infix operator token.
   /// If the left value is higher than the right value, the operator is left-associative.
   /// If the left value is lower than the right value, the operator is right-associative.
-  pub fn binding_powers(
+  pub(crate) fn binding_powers(
     &self,
     op: &TokenType,
   ) -> Option<BindingPower> {

@@ -31,6 +31,7 @@ pub struct ASTFunctionSignature {
   pub name: SymbolId,
   pub parameters: Vec<ASTParameter>,
   pub return_type: IgnisTypeSyntax,
+  pub span: Span,
   pub metadata: ASTMetadata,
 }
 
@@ -39,12 +40,14 @@ impl ASTFunctionSignature {
     name: SymbolId,
     parameters: Vec<ASTParameter>,
     return_type: IgnisTypeSyntax,
+    span: Span,
     metadata: ASTMetadata,
   ) -> Self {
     Self {
       name,
       parameters,
       return_type,
+      span,
       metadata,
     }
   }

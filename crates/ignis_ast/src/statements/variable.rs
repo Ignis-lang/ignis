@@ -1,4 +1,4 @@
-use ignis_type::symbol::SymbolId;
+use ignis_type::{span::Span, symbol::SymbolId};
 
 use crate::{NodeId, metadata::ASTMetadata, type_::IgnisTypeSyntax};
 
@@ -7,6 +7,7 @@ pub struct ASTVariable {
   pub name: SymbolId,
   pub value: Option<NodeId>,
   pub type_: IgnisTypeSyntax,
+  pub span: Span,
   pub metadata: ASTMetadata,
 }
 
@@ -15,12 +16,14 @@ impl ASTVariable {
     name: SymbolId,
     value: Option<NodeId>,
     type_: IgnisTypeSyntax,
+    span: Span,
     metadata: ASTMetadata,
   ) -> Self {
     Self {
       name,
       value,
       type_,
+      span,
       metadata,
     }
   }
