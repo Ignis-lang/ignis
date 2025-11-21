@@ -1,5 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
+mod declarations;
 mod expression;
 mod recovery;
 mod statement;
