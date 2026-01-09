@@ -721,8 +721,13 @@ impl DisplayLisp for ASTConstant {
   ) -> String {
     let name = formatter.resolve_symbol(&self.name);
     let type_display = self.ty.to_lisp(formatter);
-    let value_display = formatter.format_node(&self.value);
-    format!("(Constant {} : {} = {})", name, type_display, value_display)
+
+    if let Some(value_id) = &self.value {
+      let value_display = formatter.format_node(value_id);
+      format!("(Constant {} : {} = {})", name, type_display, value_display)
+    } else {
+      format!("(Constant {} : {})", name, type_display)
+    }
   }
 }
 
@@ -780,6 +785,7 @@ impl DisplayLisp for IgnisTypeSyntax {
       IgnisTypeSyntax::Void => "Void".to_string(),
       IgnisTypeSyntax::Null => "Null".to_string(),
       IgnisTypeSyntax::Char => "Char".to_string(),
+      IgnisTypeSyntax::Unknown => "Unknown".to_string(),
 
       IgnisTypeSyntax::Vector(inner, size) => match size {
         Some(s) => format!("({}[{}])", inner.to_lisp(formatter), s),

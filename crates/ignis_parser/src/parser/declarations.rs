@@ -105,7 +105,7 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&keyword.span, &semicolon.span);
 
-    let constant_statement = ASTConstant::new(name, type_annotation, value, span);
+    let constant_statement = ASTConstant::new(name, type_annotation, Some(value), span);
 
     Ok(self.allocate_statement(ASTStatement::Constant(constant_statement)))
   }
@@ -199,14 +199,7 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&keyword.span, &semicolon.span);
 
-    // Create a dummy value node for extern constants (will be resolved by linker)
-    let dummy_value = self
-      .nodes
-      .alloc(ignis_ast::ASTNode::Expression(ignis_ast::expressions::ASTExpression::Literal(
-        ignis_ast::expressions::literal::ASTLiteral::new(ignis_type::value::IgnisLiteralValue::Int64(0), span.clone()),
-      )));
-
-    let constant_statement = ASTConstant::new(name, type_annotation, dummy_value, span);
+    let constant_statement = ASTConstant::new(name, type_annotation, None, span);
 
     Ok(self.allocate_statement(ASTStatement::Constant(constant_statement)))
   }
@@ -235,8 +228,7 @@ impl super::IgnisParser {
       ignis_ast::metadata::ASTMetadata::EXTERN_MEMBER,
     );
 
-    let empty_body = self.allocate_statement(ASTStatement::Block(ASTBlock::new(vec![], semicolon.span.clone())));
-    let function = ASTFunction::new(signature, Some(empty_body));
+    let function = ASTFunction::new(signature, None);
 
     Ok(self.allocate_statement(ASTStatement::Function(function)))
   }
