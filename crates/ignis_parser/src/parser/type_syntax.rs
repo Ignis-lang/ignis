@@ -182,3 +182,181 @@ impl super::IgnisParser {
     )
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::{cell::RefCell, rc::Rc};
+
+  use ignis_ast::{ASTNode, statements::ASTStatement, type_::IgnisTypeSyntax};
+  use ignis_type::{file::SourceMap, symbol::SymbolTable};
+
+  use crate::{lexer::IgnisLexer, parser::IgnisParser};
+
+  fn parse_type(type_str: &str) -> IgnisTypeSyntax {
+    let program = format!("function test(): {} {{ }}", type_str);
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", program.clone());
+
+    let mut lexer = IgnisLexer::new(file_id, &program);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    let root = nodes.get(&roots[0]);
+    match root {
+      ASTNode::Statement(ASTStatement::Function(func)) => func.signature.return_type.clone(),
+      _ => panic!("expected function"),
+    }
+  }
+
+  #[test]
+  fn parses_primitive_i32() {
+    let ty = parse_type("i32");
+    assert_eq!(ty, IgnisTypeSyntax::I32);
+  }
+
+  #[test]
+  fn parses_primitive_i64() {
+    let ty = parse_type("i64");
+    assert_eq!(ty, IgnisTypeSyntax::I64);
+  }
+
+  #[test]
+  fn parses_primitive_f32() {
+    let ty = parse_type("f32");
+    assert_eq!(ty, IgnisTypeSyntax::F32);
+  }
+
+  #[test]
+  fn parses_primitive_f64() {
+    let ty = parse_type("f64");
+    assert_eq!(ty, IgnisTypeSyntax::F64);
+  }
+
+  #[test]
+  fn parses_primitive_bool() {
+    let ty = parse_type("boolean");
+    assert_eq!(ty, IgnisTypeSyntax::Boolean);
+  }
+
+  #[test]
+  fn parses_primitive_string() {
+    let ty = parse_type("string");
+    assert_eq!(ty, IgnisTypeSyntax::String);
+  }
+
+  #[test]
+  fn parses_primitive_void() {
+    let ty = parse_type("void");
+    assert_eq!(ty, IgnisTypeSyntax::Void);
+  }
+
+  #[test]
+  fn parses_vector_type() {
+    let ty = parse_type("i32[]");
+    match ty {
+      IgnisTypeSyntax::Vector(inner, size) => {
+        assert_eq!(*inner, IgnisTypeSyntax::I32);
+        assert!(size.is_none());
+      },
+      other => panic!("expected vector, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_sized_vector_type() {
+    let ty = parse_type("i32[10]");
+    match ty {
+      IgnisTypeSyntax::Vector(inner, size) => {
+        assert_eq!(*inner, IgnisTypeSyntax::I32);
+        assert_eq!(size, Some(10));
+      },
+      other => panic!("expected vector, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_nested_vector_type() {
+    let ty = parse_type("i32[][]");
+    match ty {
+      IgnisTypeSyntax::Vector(inner, _) => match *inner {
+        IgnisTypeSyntax::Vector(inner_inner, _) => {
+          assert_eq!(*inner_inner, IgnisTypeSyntax::I32);
+        },
+        other => panic!("expected nested vector, got {:?}", other),
+      },
+      other => panic!("expected vector, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_reference_type() {
+    let ty = parse_type("&i32");
+    match ty {
+      IgnisTypeSyntax::Reference { inner, mutable } => {
+        assert_eq!(*inner, IgnisTypeSyntax::I32);
+        assert!(!mutable);
+      },
+      other => panic!("expected reference, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_mutable_reference_type() {
+    let ty = parse_type("&mut i32");
+    match ty {
+      IgnisTypeSyntax::Reference { inner, mutable } => {
+        assert_eq!(*inner, IgnisTypeSyntax::I32);
+        assert!(mutable);
+      },
+      other => panic!("expected mutable reference, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pointer_type() {
+    let ty = parse_type("*i32");
+    match ty {
+      IgnisTypeSyntax::Pointer(inner) => {
+        assert_eq!(*inner, IgnisTypeSyntax::I32);
+      },
+      other => panic!("expected pointer, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_function_type() {
+    let ty = parse_type("(i32, i32) -> i32");
+    match ty {
+      IgnisTypeSyntax::Callable(params, ret) => {
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], IgnisTypeSyntax::I32);
+        assert_eq!(params[1], IgnisTypeSyntax::I32);
+        assert_eq!(*ret, IgnisTypeSyntax::I32);
+      },
+      other => panic!("expected callable, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_named_type() {
+    let ty = parse_type("MyType");
+    match ty {
+      IgnisTypeSyntax::Named(_) => {},
+      other => panic!("expected named type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_path_type() {
+    let ty = parse_type("io::Writer");
+    match ty {
+      IgnisTypeSyntax::Path { segments, .. } => {
+        assert_eq!(segments.len(), 2);
+      },
+      other => panic!("expected path type, got {:?}", other),
+    }
+  }
+}

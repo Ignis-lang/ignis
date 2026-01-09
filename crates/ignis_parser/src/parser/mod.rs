@@ -297,3 +297,139 @@ impl IgnisParser {
     Some(p)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::lexer::IgnisLexer;
+  use ignis_ast::statements::{function::ASTFunction, ASTStatement};
+  use ignis_diagnostics::message::DiagnosticMessage;
+  use ignis_type::file::SourceMap;
+
+  struct ParseResult {
+    nodes: Store<ASTNode>,
+    roots: Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
+    diagnostics: Vec<DiagnosticMessage>,
+  }
+
+  fn parse(source: &str) -> ParseResult {
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+
+    match parser.parse() {
+      Ok((nodes, roots)) => ParseResult {
+        nodes,
+        roots,
+        symbols,
+        diagnostics: Vec::new(),
+      },
+      Err(diagnostics) => ParseResult {
+        nodes: parser.nodes.clone(),
+        roots: Vec::new(),
+        symbols,
+        diagnostics,
+      },
+    }
+  }
+
+  fn first_root(result: &ParseResult) -> &ASTNode {
+    result.nodes.get(&result.roots[0])
+  }
+
+  fn symbol_name(
+    result: &ParseResult,
+    id: &SymbolId,
+  ) -> String {
+    result.symbols.borrow().get(id).to_string()
+  }
+
+  fn get_function<'a>(node: &'a ASTNode) -> &'a ASTFunction {
+    match node {
+      ASTNode::Statement(ASTStatement::Function(func)) => func,
+      _ => panic!("expected function, got {:?}", node),
+    }
+  }
+
+  #[test]
+  fn parses_empty_function() {
+    let result = parse("function foo(): void { }");
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+    assert_eq!(result.roots.len(), 1);
+
+    let func = get_function(first_root(&result));
+    let name = symbol_name(&result, &func.signature.name);
+    assert_eq!(name, "foo");
+    assert!(func.body.is_some());
+  }
+
+  #[test]
+  fn parses_function_with_parameters() {
+    let result = parse("function add(a: i32, b: i32): i32 { return a; }");
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+    assert_eq!(result.roots.len(), 1);
+
+    let func = get_function(first_root(&result));
+    let name = symbol_name(&result, &func.signature.name);
+    assert_eq!(name, "add");
+    assert_eq!(func.signature.parameters.len(), 2);
+
+    let param_a = &func.signature.parameters[0];
+    let param_b = &func.signature.parameters[1];
+    assert_eq!(symbol_name(&result, &param_a.name), "a");
+    assert_eq!(symbol_name(&result, &param_b.name), "b");
+  }
+
+  #[test]
+  fn parses_multiple_declarations() {
+    let result = parse(
+      r#"
+        function foo(): void { }
+        function bar(): void { }
+      "#,
+    );
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+    assert_eq!(result.roots.len(), 2);
+
+    let func1 = get_function(result.nodes.get(&result.roots[0]));
+    let func2 = get_function(result.nodes.get(&result.roots[1]));
+
+    assert_eq!(symbol_name(&result, &func1.signature.name), "foo");
+    assert_eq!(symbol_name(&result, &func2.signature.name), "bar");
+  }
+
+  #[test]
+  fn reports_missing_function_name() {
+    let result = parse("function (): void { }");
+
+    assert!(!result.diagnostics.is_empty(), "expected diagnostic for missing function name");
+  }
+
+  #[test]
+  fn reports_missing_return_type() {
+    let result = parse("function foo() { }");
+
+    assert!(!result.diagnostics.is_empty(), "expected diagnostic for missing return type");
+  }
+}

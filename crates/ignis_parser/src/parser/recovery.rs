@@ -108,18 +108,24 @@ impl IgnisParser {
     loop {
       let current_token = self.peek().type_;
 
-      if current_token == TokenType::SemiColon
-        || current_token == TokenType::RightBrace
-        || self.is_declaration_start(current_token)
-        || current_token == TokenType::Eof
-      {
+      if current_token == TokenType::Eof {
         break;
       }
 
-      self.bump();
-    }
+      if current_token == TokenType::SemiColon {
+        self.bump();
+        break;
+      }
 
-    if self.at(TokenType::SemiColon) {
+      if current_token == TokenType::RightBrace {
+        self.bump();
+        break;
+      }
+
+      if self.is_declaration_start(current_token) {
+        break;
+      }
+
       self.bump();
     }
   }
@@ -130,18 +136,23 @@ impl IgnisParser {
     loop {
       let current_token = self.peek().type_;
 
-      if current_token == TokenType::SemiColon
-        || current_token == TokenType::RightBrace
-        || self.is_statement_start(current_token)
-        || current_token == TokenType::Eof
-      {
+      if current_token == TokenType::Eof {
         break;
       }
 
-      self.bump();
-    }
+      if current_token == TokenType::SemiColon {
+        self.bump();
+        break;
+      }
 
-    if self.at(TokenType::SemiColon) {
+      if current_token == TokenType::RightBrace {
+        break;
+      }
+
+      if self.is_statement_start(current_token) {
+        break;
+      }
+
       self.bump();
     }
   }

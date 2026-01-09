@@ -233,3 +233,478 @@ impl IgnisParser {
     self.nodes.alloc(ASTNode::Expression(expression))
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::{cell::RefCell, rc::Rc};
+
+  use ignis_ast::{
+    ASTNode, NodeId,
+    expressions::{
+      ASTExpression,
+      binary::ASTBinaryOperator,
+      unary::UnaryOperator,
+    },
+    statements::ASTStatement,
+  };
+  use ignis_type::{Store, file::SourceMap, symbol::SymbolTable, value::IgnisLiteralValue};
+
+  use crate::{lexer::IgnisLexer, parser::IgnisParser};
+
+  struct ParseResult {
+    nodes: Store<ASTNode>,
+    roots: Vec<NodeId>,
+  }
+
+  fn parse_expr(source: &str) -> ParseResult {
+    let program = format!("function test(): void {{ {}; }}", source);
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", program.clone());
+
+    let mut lexer = IgnisLexer::new(file_id, &program);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    ParseResult { nodes, roots }
+  }
+
+  fn get_expr<'a>(result: &'a ParseResult) -> &'a ASTExpression {
+    let root = result.nodes.get(&result.roots[0]);
+    let func = match root {
+      ASTNode::Statement(ASTStatement::Function(f)) => f,
+      _ => panic!("expected function"),
+    };
+    let body = func.body.as_ref().expect("no body");
+    let block = match result.nodes.get(body) {
+      ASTNode::Statement(ASTStatement::Block(b)) => b,
+      _ => panic!("expected block"),
+    };
+    let stmt = result.nodes.get(&block.statements[0]);
+    match stmt {
+      ASTNode::Statement(ASTStatement::Expression(e)) => e,
+      _ => panic!("expected expression statement"),
+    }
+  }
+
+  #[test]
+  fn parses_integer_literal() {
+    let result = parse_expr("42");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Literal(lit) => match &lit.value {
+        IgnisLiteralValue::Int32(v) => assert_eq!(*v, 42),
+        other => panic!("expected Int32, got {:?}", other),
+      },
+      other => panic!("expected literal, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_float_literal() {
+    let result = parse_expr("3.14");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Literal(lit) => match &lit.value {
+        IgnisLiteralValue::Float64(v) => assert!((v.into_inner() - 3.14).abs() < 0.001),
+        other => panic!("expected Float64, got {:?}", other),
+      },
+      other => panic!("expected literal, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_string_literal() {
+    let result = parse_expr("\"hello\"");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Literal(lit) => match &lit.value {
+        IgnisLiteralValue::String(s) => assert_eq!(s, "\"hello\""),
+        other => panic!("expected String, got {:?}", other),
+      },
+      other => panic!("expected literal, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_boolean_literals() {
+    let result = parse_expr("true");
+    let expr = get_expr(&result);
+    match expr {
+      ASTExpression::Literal(lit) => match &lit.value {
+        IgnisLiteralValue::Boolean(v) => assert!(*v),
+        other => panic!("expected Boolean, got {:?}", other),
+      },
+      other => panic!("expected literal, got {:?}", other),
+    }
+
+    let result = parse_expr("false");
+    let expr = get_expr(&result);
+    match expr {
+      ASTExpression::Literal(lit) => match &lit.value {
+        IgnisLiteralValue::Boolean(v) => assert!(!*v),
+        other => panic!("expected Boolean, got {:?}", other),
+      },
+      other => panic!("expected literal, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_null_literal() {
+    let result = parse_expr("null");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Literal(lit) => match &lit.value {
+        IgnisLiteralValue::Null => {},
+        other => panic!("expected Null, got {:?}", other),
+      },
+      other => panic!("expected literal, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_binary_addition() {
+    let result = parse_expr("1 + 2");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => {
+        assert_eq!(bin.operator, ASTBinaryOperator::Add);
+
+        let left = result.nodes.get(&bin.left);
+        match left {
+          ASTNode::Expression(ASTExpression::Literal(lit)) => match &lit.value {
+            IgnisLiteralValue::Int32(v) => assert_eq!(*v, 1),
+            _ => panic!("expected Int32"),
+          },
+          _ => panic!("expected literal"),
+        }
+
+        let right = result.nodes.get(&bin.right);
+        match right {
+          ASTNode::Expression(ASTExpression::Literal(lit)) => match &lit.value {
+            IgnisLiteralValue::Int32(v) => assert_eq!(*v, 2),
+            _ => panic!("expected Int32"),
+          },
+          _ => panic!("expected literal"),
+        }
+      },
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_binary_subtraction() {
+    let result = parse_expr("5 - 3");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => assert_eq!(bin.operator, ASTBinaryOperator::Subtract),
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_binary_multiplication() {
+    let result = parse_expr("4 * 2");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => assert_eq!(bin.operator, ASTBinaryOperator::Multiply),
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_binary_division() {
+    let result = parse_expr("10 / 2");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => assert_eq!(bin.operator, ASTBinaryOperator::Divide),
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_comparison_operators() {
+    let cases = [
+      ("a < b", ASTBinaryOperator::LessThan),
+      ("a > b", ASTBinaryOperator::GreaterThan),
+      ("a <= b", ASTBinaryOperator::LessThanOrEqual),
+      ("a >= b", ASTBinaryOperator::GreaterThanOrEqual),
+      ("a == b", ASTBinaryOperator::Equal),
+      ("a != b", ASTBinaryOperator::NotEqual),
+    ];
+
+    for (source, expected_op) in cases {
+      let result = parse_expr(source);
+      let expr = get_expr(&result);
+
+      match expr {
+        ASTExpression::Binary(bin) => assert_eq!(bin.operator, expected_op, "failed for: {}", source),
+        other => panic!("expected binary for {}, got {:?}", source, other),
+      }
+    }
+  }
+
+  #[test]
+  fn parses_logical_operators() {
+    let result = parse_expr("a && b");
+    let expr = get_expr(&result);
+    match expr {
+      ASTExpression::Binary(bin) => assert_eq!(bin.operator, ASTBinaryOperator::And),
+      other => panic!("expected binary, got {:?}", other),
+    }
+
+    let result = parse_expr("a || b");
+    let expr = get_expr(&result);
+    match expr {
+      ASTExpression::Binary(bin) => assert_eq!(bin.operator, ASTBinaryOperator::Or),
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_unary_negation() {
+    let result = parse_expr("-x");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Unary(un) => assert_eq!(un.operator, UnaryOperator::Negate),
+      other => panic!("expected unary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_unary_not() {
+    let result = parse_expr("!flag");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Unary(un) => assert_eq!(un.operator, UnaryOperator::Not),
+      other => panic!("expected unary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_grouped_expression() {
+    let result = parse_expr("(1 + 2)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Grouped(g) => {
+        let inner = result.nodes.get(&g.expression);
+        match inner {
+          ASTNode::Expression(ASTExpression::Binary(bin)) => {
+            assert_eq!(bin.operator, ASTBinaryOperator::Add);
+          },
+          other => panic!("expected binary inside grouped, got {:?}", other),
+        }
+      },
+      other => panic!("expected grouped, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn precedence_multiplication_over_addition() {
+    // 1 + 2 * 3 should parse as 1 + (2 * 3)
+    let result = parse_expr("1 + 2 * 3");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => {
+        assert_eq!(bin.operator, ASTBinaryOperator::Add);
+        // Right should be multiplication
+        let right = result.nodes.get(&bin.right);
+        match right {
+          ASTNode::Expression(ASTExpression::Binary(inner)) => {
+            assert_eq!(inner.operator, ASTBinaryOperator::Multiply);
+          },
+          other => panic!("expected multiplication on right, got {:?}", other),
+        }
+      },
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn precedence_parentheses_override() {
+    // (1 + 2) * 3 should parse with addition first
+    let result = parse_expr("(1 + 2) * 3");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => {
+        assert_eq!(bin.operator, ASTBinaryOperator::Multiply);
+        // Left should be grouped containing addition
+        let left = result.nodes.get(&bin.left);
+        match left {
+          ASTNode::Expression(ASTExpression::Grouped(g)) => {
+            let inner = result.nodes.get(&g.expression);
+            match inner {
+              ASTNode::Expression(ASTExpression::Binary(inner_bin)) => {
+                assert_eq!(inner_bin.operator, ASTBinaryOperator::Add);
+              },
+              other => panic!("expected addition inside grouped, got {:?}", other),
+            }
+          },
+          other => panic!("expected grouped on left, got {:?}", other),
+        }
+      },
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn left_associativity_addition() {
+    // 1 + 2 + 3 should parse as (1 + 2) + 3
+    let result = parse_expr("1 + 2 + 3");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => {
+        assert_eq!(bin.operator, ASTBinaryOperator::Add);
+        // Left should be another addition
+        let left = result.nodes.get(&bin.left);
+        match left {
+          ASTNode::Expression(ASTExpression::Binary(inner)) => {
+            assert_eq!(inner.operator, ASTBinaryOperator::Add);
+          },
+          other => panic!("expected addition on left, got {:?}", other),
+        }
+      },
+      other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_function_call_no_args() {
+    let result = parse_expr("foo()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        assert_eq!(call.arguments.len(), 0);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_function_call_with_args() {
+    let result = parse_expr("foo(1, 2, 3)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        assert_eq!(call.arguments.len(), 3);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_empty_vector() {
+    let result = parse_expr("[]");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Vector(vec) => {
+        assert_eq!(vec.items.len(), 0);
+      },
+      other => panic!("expected vector, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_vector_with_elements() {
+    let result = parse_expr("[1, 2, 3]");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Vector(vec) => {
+        assert_eq!(vec.items.len(), 3);
+      },
+      other => panic!("expected vector, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_vector_access() {
+    let result = parse_expr("arr[0]");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::VectorAccess(_) => {},
+      other => panic!("expected vector access, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_reference() {
+    let result = parse_expr("&x");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Reference(r) => {
+        assert!(!r.mutable);
+      },
+      other => panic!("expected reference, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_mutable_reference() {
+    let result = parse_expr("&mut x");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Reference(r) => {
+        assert!(r.mutable);
+      },
+      other => panic!("expected mutable reference, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_dereference() {
+    let result = parse_expr("*ptr");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Dereference(_) => {},
+      other => panic!("expected dereference, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_prefix_increment() {
+    let result = parse_expr("++x");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Unary(un) => {
+        assert_eq!(un.operator, UnaryOperator::Increment);
+      },
+      other => panic!("expected unary increment, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_postfix_increment() {
+    let result = parse_expr("x++");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::PostfixIncrement { .. } => {},
+      other => panic!("expected postfix increment, got {:?}", other),
+    }
+  }
+}

@@ -223,3 +223,221 @@ impl super::IgnisParser {
     Ok(self.allocate_statement(ASTStatement::Return(return_statement)))
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::{cell::RefCell, rc::Rc};
+
+  use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
+  use ignis_type::{Store, file::SourceMap, symbol::SymbolTable};
+
+  use crate::{lexer::IgnisLexer, parser::IgnisParser};
+
+  struct ParseResult {
+    nodes: Store<ASTNode>,
+    roots: Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
+  }
+
+  fn parse_stmt(source: &str) -> ParseResult {
+    let program = format!("function test(): void {{ {} }}", source);
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", program.clone());
+
+    let mut lexer = IgnisLexer::new(file_id, &program);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    ParseResult { nodes, roots, symbols }
+  }
+
+  fn get_stmt<'a>(result: &'a ParseResult, index: usize) -> &'a ASTStatement {
+    let root = result.nodes.get(&result.roots[0]);
+    let func = match root {
+      ASTNode::Statement(ASTStatement::Function(f)) => f,
+      _ => panic!("expected function"),
+    };
+    let body = func.body.as_ref().expect("no body");
+    let block = match result.nodes.get(body) {
+      ASTNode::Statement(ASTStatement::Block(b)) => b,
+      _ => panic!("expected block"),
+    };
+    let stmt = result.nodes.get(&block.statements[index]);
+    match stmt {
+      ASTNode::Statement(s) => s,
+      _ => panic!("expected statement"),
+    }
+  }
+
+  fn symbol_name(result: &ParseResult, id: &ignis_type::symbol::SymbolId) -> String {
+    result.symbols.borrow().get(id).to_string()
+  }
+
+  #[test]
+  fn parses_let_without_initializer() {
+    let result = parse_stmt("let x: i32;");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Variable(var) => {
+        assert_eq!(symbol_name(&result, &var.name), "x");
+        assert!(var.value.is_none());
+      },
+      other => panic!("expected variable, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_let_with_initializer() {
+    let result = parse_stmt("let x: i32 = 42;");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Variable(var) => {
+        assert_eq!(symbol_name(&result, &var.name), "x");
+        assert!(var.value.is_some());
+      },
+      other => panic!("expected variable, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_let_mut() {
+    let result = parse_stmt("let mut x: i32 = 0;");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Variable(var) => {
+        assert!(var.metadata.is_mutable());
+      },
+      other => panic!("expected variable, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_if_statement() {
+    let result = parse_stmt("if true { }");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::If(if_stmt) => {
+        assert!(if_stmt.else_block.is_none());
+      },
+      other => panic!("expected if, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_if_else_statement() {
+    let result = parse_stmt("if true { } else { }");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::If(if_stmt) => {
+        assert!(if_stmt.else_block.is_some());
+      },
+      other => panic!("expected if, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_while_statement() {
+    let result = parse_stmt("while true { }");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::While(_) => {},
+      other => panic!("expected while, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_for_statement() {
+    let result = parse_stmt("for (let i = 0; i < 10; i++) { }");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::For(_) => {},
+      other => panic!("expected for, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_return_void() {
+    let result = parse_stmt("return;");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Return(ret) => {
+        assert!(ret.expression.is_none());
+      },
+      other => panic!("expected return, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_return_with_expression() {
+    let result = parse_stmt("return 42;");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Return(ret) => {
+        assert!(ret.expression.is_some());
+      },
+      other => panic!("expected return, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_break_statement() {
+    let result = parse_stmt("break;");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Break(_) => {},
+      other => panic!("expected break, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_continue_statement() {
+    let result = parse_stmt("continue;");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Continue(_) => {},
+      other => panic!("expected continue, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_nested_block() {
+    let result = parse_stmt("{ let x: i32 = 1; }");
+    let stmt = get_stmt(&result, 0);
+
+    match stmt {
+      ASTStatement::Block(block) => {
+        assert_eq!(block.statements.len(), 1);
+      },
+      other => panic!("expected block, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_multiple_statements() {
+    let result = parse_stmt("let x: i32 = 1; let y: i32 = 2;");
+    let stmt1 = get_stmt(&result, 0);
+    let stmt2 = get_stmt(&result, 1);
+
+    match (stmt1, stmt2) {
+      (ASTStatement::Variable(v1), ASTStatement::Variable(v2)) => {
+        assert_eq!(symbol_name(&result, &v1.name), "x");
+        assert_eq!(symbol_name(&result, &v2.name), "y");
+      },
+      _ => panic!("expected two variables"),
+    }
+  }
+}

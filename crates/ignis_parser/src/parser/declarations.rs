@@ -2,7 +2,6 @@ use ignis_ast::{
   NodeId,
   statements::{
     ASTStatement,
-    block::ASTBlock,
     const_statement::ASTConstant,
     export_statement::ASTExport,
     extern_statement::ASTExtern,
@@ -231,5 +230,169 @@ impl super::IgnisParser {
     let function = ASTFunction::new(signature, None);
 
     Ok(self.allocate_statement(ASTStatement::Function(function)))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{cell::RefCell, rc::Rc};
+
+  use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
+  use ignis_type::{Store, file::SourceMap, symbol::SymbolTable};
+
+  use crate::{lexer::IgnisLexer, parser::IgnisParser};
+
+  struct ParseResult {
+    nodes: Store<ASTNode>,
+    roots: Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
+  }
+
+  fn parse(source: &str) -> ParseResult {
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    ParseResult { nodes, roots, symbols }
+  }
+
+  fn first_root(result: &ParseResult) -> &ASTStatement {
+    match result.nodes.get(&result.roots[0]) {
+      ASTNode::Statement(s) => s,
+      _ => panic!("expected statement"),
+    }
+  }
+
+  fn symbol_name(result: &ParseResult, id: &ignis_type::symbol::SymbolId) -> String {
+    result.symbols.borrow().get(id).to_string()
+  }
+
+  #[test]
+  fn parses_import_single() {
+    let result = parse("import foo from \"module\";");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Import(imp) => {
+        assert_eq!(imp.items.len(), 1);
+        assert_eq!(symbol_name(&result, &imp.items[0]), "foo");
+      },
+      other => panic!("expected import, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_import_multiple() {
+    let result = parse("import foo, bar, baz from \"module\";");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Import(imp) => {
+        assert_eq!(imp.items.len(), 3);
+        assert_eq!(symbol_name(&result, &imp.items[0]), "foo");
+        assert_eq!(symbol_name(&result, &imp.items[1]), "bar");
+        assert_eq!(symbol_name(&result, &imp.items[2]), "baz");
+      },
+      other => panic!("expected import, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_export_function() {
+    use ignis_ast::statements::ASTExport;
+    let result = parse("export function foo(): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Export(ASTExport::Declaration { .. }) => {},
+      other => panic!("expected export declaration, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_export_identifier() {
+    use ignis_ast::statements::ASTExport;
+    let result = parse("export foo;");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Export(ASTExport::Name { name, .. }) => {
+        assert_eq!(symbol_name(&result, name), "foo");
+      },
+      other => panic!("expected export name, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_extern_function() {
+    let result = parse("extern function printf(fmt: string): void;");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Extern(ext) => {
+        let inner = result.nodes.get(&ext.item);
+        match inner {
+          ASTNode::Statement(ASTStatement::Function(func)) => {
+            assert_eq!(symbol_name(&result, &func.signature.name), "printf");
+            assert!(func.body.is_none());
+          },
+          other => panic!("expected function inside extern, got {:?}", other),
+        }
+      },
+      other => panic!("expected extern, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_extern_const() {
+    let result = parse("extern const BUFFER_SIZE: i32;");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Extern(ext) => {
+        let inner = result.nodes.get(&ext.item);
+        match inner {
+          ASTNode::Statement(ASTStatement::Constant(c)) => {
+            assert_eq!(symbol_name(&result, &c.name), "BUFFER_SIZE");
+            assert!(c.value.is_none());
+          },
+          other => panic!("expected constant inside extern, got {:?}", other),
+        }
+      },
+      other => panic!("expected extern, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_const_declaration() {
+    let result = parse("const PI: f64 = 3.14;");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Constant(c) => {
+        assert_eq!(symbol_name(&result, &c.name), "PI");
+        assert!(c.value.is_some());
+      },
+      other => panic!("expected constant, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_function_trailing_param_comma() {
+    let result = parse("function foo(a: i32,): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(func.signature.parameters.len(), 1);
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
   }
 }
