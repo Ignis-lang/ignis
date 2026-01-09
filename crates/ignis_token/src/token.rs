@@ -1,5 +1,6 @@
 use crate::token_types::TokenType;
 use ignis_type::{span::Span, value::IgnisLiteralValue};
+use ordered_float::OrderedFloat;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -40,8 +41,8 @@ impl std::fmt::Display for Token {
 impl Into<IgnisLiteralValue> for &Token {
   fn into(self) -> IgnisLiteralValue {
     match self.type_ {
-      TokenType::Int => IgnisLiteralValue::Int64(self.lexeme.parse().unwrap_or(0)),
-      TokenType::Float => IgnisLiteralValue::Float64(self.lexeme.parse().unwrap_or(0.0)),
+      TokenType::Int => IgnisLiteralValue::Int32(self.lexeme.parse().unwrap_or(0)),
+      TokenType::Float => IgnisLiteralValue::Float64(self.lexeme.parse().unwrap_or(OrderedFloat::default())),
       TokenType::Char => IgnisLiteralValue::Char(self.lexeme.parse().unwrap_or('\0')),
       TokenType::String => IgnisLiteralValue::String(self.lexeme.clone()),
       TokenType::False | TokenType::True => IgnisLiteralValue::Boolean(self.lexeme.parse().unwrap_or(false)),
