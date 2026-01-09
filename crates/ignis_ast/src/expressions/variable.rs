@@ -1,6 +1,6 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTVariableExpression {
   pub name: SymbolId,
   pub span: Span,

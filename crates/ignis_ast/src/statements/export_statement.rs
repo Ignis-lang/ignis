@@ -2,7 +2,7 @@ use ignis_type::{span::Span, symbol::SymbolId};
 
 use crate::NodeId;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum ASTExport {
   /// export <declaration>
   Declaration { decl: NodeId, span: Span },

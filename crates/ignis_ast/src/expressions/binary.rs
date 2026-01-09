@@ -3,7 +3,7 @@ use ignis_type::span::Span;
 
 use crate::NodeId;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub enum ASTBinaryOperator {
   Add,
   And,
@@ -51,7 +51,7 @@ impl From<&TokenType> for ASTBinaryOperator {
   }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub struct ASTBinary {
   pub left: NodeId,
   pub right: NodeId,

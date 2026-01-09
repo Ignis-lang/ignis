@@ -2,7 +2,7 @@ use ignis_type::span::Span;
 
 use crate::NodeId;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub struct ASTVectorAccess {
   pub name: NodeId,
   pub span: Span,

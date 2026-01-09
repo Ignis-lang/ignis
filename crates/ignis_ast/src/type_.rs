@@ -1,6 +1,6 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum IgnisTypeSyntax {
   I8,
   I16,
@@ -12,6 +12,7 @@ pub enum IgnisTypeSyntax {
   U64,
   F32,
   F64,
+  Unknown,
   String,
   Boolean,
   Void,

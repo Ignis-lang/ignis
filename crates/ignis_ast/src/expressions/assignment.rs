@@ -2,7 +2,7 @@ use ignis_type::span::Span;
 
 use crate::NodeId;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub enum ASTAssignmentOperator {
   Assign,
   AddAssign,
@@ -20,7 +20,7 @@ pub enum ASTAssignmentOperator {
   OrAssign,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub struct ASTAssignment {
   pub target: NodeId,
   pub value: NodeId,

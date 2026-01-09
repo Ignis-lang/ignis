@@ -2,7 +2,7 @@ use ignis_type::span::Span;
 
 use crate::NodeId;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTIf {
   pub condition: NodeId,
   pub then_block: NodeId,

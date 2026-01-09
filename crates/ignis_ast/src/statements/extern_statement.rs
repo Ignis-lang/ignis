@@ -3,7 +3,7 @@ use ignis_type::span::Span;
 use crate::NodeId;
 
 /// extern <function|const>
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTExtern {
   pub item: NodeId,
   pub span: Span,

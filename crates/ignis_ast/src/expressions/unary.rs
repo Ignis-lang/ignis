@@ -3,7 +3,7 @@ use ignis_type::span::Span;
 
 use crate::NodeId;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum UnaryOperator {
   Not,
   Negate,
@@ -25,7 +25,7 @@ impl From<&TokenType> for UnaryOperator {
   }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTUnary {
   pub operator: UnaryOperator,
   pub operand: NodeId,

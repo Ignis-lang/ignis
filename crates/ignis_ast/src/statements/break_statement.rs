@@ -1,6 +1,6 @@
 use ignis_type::span::Span;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTBreak {
   pub span: Span,
 }

@@ -1,12 +1,5 @@
 use ignis_type::span::Span;
 
-use crate::expressions::{
-  assignment::ASTAssignment, binary::ASTBinary, call::ASTCallExpression, cast::ASTCast,
-  dereference::ASTDereference, grouped::ASTGrouped, literal::ASTLiteral, path::ASTPath,
-  reference::ASTReference, unary::ASTUnary, variable::ASTVariableExpression, vector::ASTVector,
-  vector_access::ASTVectorAccess,
-};
-
 pub mod assignment;
 pub mod binary;
 pub mod call;
@@ -21,7 +14,21 @@ pub mod variable;
 pub mod vector;
 pub mod vector_access;
 
-#[derive(Debug, PartialEq, Clone)]
+pub use assignment::ASTAssignment;
+pub use binary::ASTBinary;
+pub use call::ASTCallExpression;
+pub use cast::ASTCast;
+pub use dereference::ASTDereference;
+pub use grouped::ASTGrouped;
+pub use literal::ASTLiteral;
+pub use path::ASTPath;
+pub use reference::ASTReference;
+pub use unary::ASTUnary;
+pub use variable::ASTVariableExpression;
+pub use vector::ASTVector;
+pub use vector_access::ASTVectorAccess;
+
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub enum ASTExpression {
   Assignment(ASTAssignment),
   Binary(ASTBinary),

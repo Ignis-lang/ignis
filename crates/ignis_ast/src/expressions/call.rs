@@ -2,7 +2,7 @@ use ignis_type::span::Span;
 
 use crate::NodeId;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ASTCallExpression {
   pub callee: NodeId,
   pub span: Span,

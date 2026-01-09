@@ -1,15 +1,6 @@
 use ignis_type::span::Span;
 
-use crate::{
-  expressions::ASTExpression,
-  statements::{
-    block::ASTBlock, break_statement::ASTBreak, comment_statement::ASTComment, 
-    const_statement::ASTConstant, continue_statement::ASTContinue,
-    export_statement::ASTExport, extern_statement::ASTExtern, for_statement::ASTFor, 
-    function::ASTFunction, if_statement::ASTIf, import_statement::ASTImport, 
-    return_statement::ASTReturn, variable::ASTVariable, while_statement::ASTWhile,
-  },
-};
+use crate::expressions::ASTExpression;
 
 pub mod block;
 pub mod break_statement;
@@ -26,7 +17,22 @@ pub mod return_statement;
 pub mod variable;
 pub mod while_statement;
 
-#[derive(Debug, PartialEq, Clone)]
+pub use block::ASTBlock;
+pub use break_statement::ASTBreak;
+pub use comment_statement::ASTComment;
+pub use const_statement::ASTConstant;
+pub use continue_statement::ASTContinue;
+pub use export_statement::ASTExport;
+pub use extern_statement::ASTExtern;
+pub use for_statement::ASTFor;
+pub use function::ASTFunction;
+pub use if_statement::ASTIf;
+pub use import_statement::ASTImport;
+pub use return_statement::ASTReturn;
+pub use variable::ASTVariable;
+pub use while_statement::ASTWhile;
+
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub enum ASTStatement {
   Expression(ASTExpression),
   Variable(ASTVariable),

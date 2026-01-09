@@ -1,6 +1,6 @@
 use ignis_type::{span::Span, value::IgnisLiteralValue};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub struct ASTLiteral {
   pub value: IgnisLiteralValue,
   pub span: Span,

@@ -50,3 +50,17 @@ macro_rules! remove_flag {
     *$metadata &= !$flag.bits();
   };
 }
+
+impl ASTMetadata {
+  pub fn is_public(&self) -> bool {
+    self.contains(ASTMetadata::PUBLIC)
+  }
+
+  pub fn is_private(&self) -> bool {
+    self.contains(ASTMetadata::PRIVATE)
+  }
+
+  pub fn is_mutable(&self) -> bool {
+    self.contains(ASTMetadata::MUTABLE)
+  }
+}

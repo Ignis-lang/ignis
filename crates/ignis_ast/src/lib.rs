@@ -12,7 +12,7 @@ use crate::statements::ASTStatement;
 
 pub type NodeId = Id<ASTNode>;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub enum ASTNode {
   Expression(ASTExpression),
   Statement(ASTStatement),

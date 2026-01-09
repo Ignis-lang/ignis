@@ -1,6 +1,6 @@
 use ignis_type::span::Span;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTComment {
   pub span: Span,
   pub content: String,

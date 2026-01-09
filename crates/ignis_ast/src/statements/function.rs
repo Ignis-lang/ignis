@@ -2,7 +2,7 @@ use ignis_type::{span::Span, symbol::SymbolId};
 
 use crate::{metadata::ASTMetadata, NodeId, type_::IgnisTypeSyntax};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTParameter {
   pub name: SymbolId,
   pub type_: IgnisTypeSyntax,
@@ -26,7 +26,7 @@ impl ASTParameter {
   }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTFunctionSignature {
   pub name: SymbolId,
   pub parameters: Vec<ASTParameter>,
@@ -53,7 +53,7 @@ impl ASTFunctionSignature {
   }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTFunction {
   pub signature: ASTFunctionSignature,
   pub body: Option<NodeId>,

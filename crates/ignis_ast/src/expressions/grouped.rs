@@ -2,7 +2,7 @@ use ignis_type::span::Span;
 
 use crate::NodeId;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Eq, Hash)]
 pub struct ASTGrouped {
   pub expression: NodeId,
   pub span: Span,

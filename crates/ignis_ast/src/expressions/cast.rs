@@ -2,7 +2,7 @@ use ignis_type::span::Span;
 
 use crate::{NodeId, type_::IgnisTypeSyntax};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTCast {
   pub span: Span,
   pub target_type: IgnisTypeSyntax,
