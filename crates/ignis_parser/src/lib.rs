@@ -1,12 +1,14 @@
 mod lexer;
 mod parser;
 
+pub use lexer::IgnisLexer;
+pub use parser::IgnisParser;
+
 use ignis_config::IgnisConfig;
 use ignis_type::{file::SourceMap, symbol::SymbolTable};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 use colored::*;
 
-use crate::lexer::IgnisLexer;
 use ignis_ast::display::format_ast_nodes;
 
 pub fn compile_file(

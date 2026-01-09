@@ -2,8 +2,10 @@ use ignis_ast::{
   ASTNode, NodeId,
   expressions::{
     ASTExpression,
+    assignment::{ASTAssignment, ASTAssignmentOperator},
     binary::{ASTBinary, ASTBinaryOperator},
     call::ASTCallExpression,
+    cast::ASTCast,
     dereference::ASTDereference,
     grouped::ASTGrouped,
     literal::ASTLiteral,
@@ -64,14 +66,37 @@ impl IgnisParser {
       }
 
       self.bump();
+
+      if op == TokenType::As {
+        let type_start = self.peek().span.clone();
+        let target_type = self.parse_type_syntax()?;
+        let span = Span::merge(self.get_span(&left), &type_start);
+        left = self.allocate_expression(ASTExpression::Cast(ASTCast::new(
+          span,
+          target_type,
+          left,
+        )));
+        continue;
+      }
+
       let right = self.parse_expression(rbp)?;
       let span = Span::merge(self.get_span(&left), self.get_span(&right));
-      left = self.allocate_expression(ASTExpression::Binary(ASTBinary::new(
-        left,
-        ASTBinaryOperator::from(&op),
-        right,
-        span,
-      )));
+
+      if let Some(assign_op) = Self::to_assignment_operator(&op) {
+        left = self.allocate_expression(ASTExpression::Assignment(ASTAssignment::new(
+          left,
+          right,
+          assign_op,
+          span,
+        )));
+      } else {
+        left = self.allocate_expression(ASTExpression::Binary(ASTBinary::new(
+          left,
+          ASTBinaryOperator::from(&op),
+          right,
+          span,
+        )));
+      }
     }
 
     Ok(left)
@@ -224,6 +249,24 @@ impl IgnisParser {
   ) -> ParserResult<NodeId> {
     let value: IgnisLiteralValue = token.into();
     Ok(self.allocate_expression(ASTExpression::Literal(ASTLiteral::new(value, token.span.clone()))))
+  }
+
+  fn to_assignment_operator(token: &TokenType) -> Option<ASTAssignmentOperator> {
+    match token {
+      TokenType::Equal => Some(ASTAssignmentOperator::Assign),
+      TokenType::AddAssign => Some(ASTAssignmentOperator::AddAssign),
+      TokenType::SubtractAssign => Some(ASTAssignmentOperator::SubAssign),
+      TokenType::MulAssign => Some(ASTAssignmentOperator::MulAssign),
+      TokenType::DivAssign => Some(ASTAssignmentOperator::DivAssign),
+      TokenType::ModAssign => Some(ASTAssignmentOperator::ModAssign),
+      TokenType::AndAssign => Some(ASTAssignmentOperator::BitAndAssign),
+      TokenType::OrAssign => Some(ASTAssignmentOperator::BitOrAssign),
+      TokenType::XorAssign => Some(ASTAssignmentOperator::BitXorAssign),
+      TokenType::NotAssign => Some(ASTAssignmentOperator::NotAssign),
+      TokenType::LeftShiftAssign => Some(ASTAssignmentOperator::ShiftLeftAssign),
+      TokenType::RightShiftAssign => Some(ASTAssignmentOperator::ShiftRightAssign),
+      _ => None,
+    }
   }
 
   fn allocate_expression(

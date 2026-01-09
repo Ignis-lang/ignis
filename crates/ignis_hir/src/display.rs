@@ -122,7 +122,13 @@ impl<'a> HIRPrinter<'a> {
     writeln!(self.output).unwrap();
     writeln!(self.output, "--- Definitions ---").unwrap();
 
-    for (def_id, body_id) in &self.hir.function_bodies {
+    let mut bodies: Vec<_> = self.hir.function_bodies.iter().collect();
+    bodies.sort_by_key(|(def_id, _)| {
+      let def = self.defs.get(def_id);
+      self.symbols.get(&def.name).to_string()
+    });
+
+    for (def_id, body_id) in bodies {
       let def = self.defs.get(def_id);
       let name = self.symbols.get(&def.name);
 
@@ -166,7 +172,13 @@ impl<'a> HIRPrinter<'a> {
     writeln!(self.output, "--- Variable Initializers ---").unwrap();
     writeln!(self.output).unwrap();
 
-    for (def_id, init_id) in &self.hir.variables_inits {
+    let mut inits: Vec<_> = self.hir.variables_inits.iter().collect();
+    inits.sort_by_key(|(def_id, _)| {
+      let def = self.defs.get(def_id);
+      self.symbols.get(&def.name).to_string()
+    });
+
+    for (def_id, init_id) in inits {
       let def = self.defs.get(def_id);
       let name = self.symbols.get(&def.name);
 

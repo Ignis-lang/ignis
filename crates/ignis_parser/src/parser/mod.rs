@@ -267,7 +267,7 @@ impl IgnisParser {
       TokenType::Less | TokenType::Greater | TokenType::LessEqual | TokenType::GreaterEqual => (40, 41),
 
       // equality (left)
-      TokenType::Equal | TokenType::BangEqual => (39, 40),
+      TokenType::EqualEqual | TokenType::BangEqual => (39, 40),
 
       // bitwise and/xor/or (left)
       TokenType::Ampersand => (35, 36),
@@ -279,7 +279,7 @@ impl IgnisParser {
       TokenType::Or => (29, 30),
 
       // assignment (right-assoc)
-      TokenType::EqualEqual
+      TokenType::Equal
       | TokenType::AddAssign
       | TokenType::SubtractAssign
       | TokenType::MulAssign

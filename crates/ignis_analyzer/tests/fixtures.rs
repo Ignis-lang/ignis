@@ -1,0 +1,92 @@
+mod common;
+
+use insta::assert_snapshot;
+use std::fs;
+use std::path::Path;
+
+/// Test a fixture file from the test_cases directory
+fn test_fixture(path: &str) {
+  let full_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .parent()
+    .unwrap()
+    .parent()
+    .unwrap()
+    .join(path);
+
+  let src = fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+
+  let result = common::analyze(&src);
+
+  let name = Path::new(path)
+    .file_stem()
+    .unwrap()
+    .to_str()
+    .unwrap()
+    .replace('-', "_");
+
+  assert_snapshot!(format!("fixture_{}_diags", name), common::format_diagnostics(&result.output.diagnostics));
+}
+
+// --- Mutability Tests ---
+
+#[test]
+fn fixture_immutable_assign() {
+  test_fixture("test_cases/analyzer/mutability/immutable_assign.ign");
+}
+
+#[test]
+fn fixture_mut_ref_to_immutable() {
+  test_fixture("test_cases/analyzer/mutability/mut_ref_to_immutable.ign");
+}
+
+// --- Borrow Tests ---
+
+#[test]
+fn fixture_borrow_conflict_mut() {
+  test_fixture("test_cases/analyzer/borrows/borrow_conflict_mut.ign");
+}
+
+#[test]
+fn fixture_valid_borrows() {
+  test_fixture("test_cases/analyzer/borrows/valid_borrows.ign");
+}
+
+// --- Cast Tests ---
+
+#[test]
+fn fixture_invalid_cast() {
+  test_fixture("test_cases/analyzer/casts/invalid_cast.ign");
+}
+
+#[test]
+fn fixture_numeric_cast() {
+  test_fixture("test_cases/analyzer/casts/numeric_cast.ign");
+}
+
+// --- Type Error Tests ---
+
+#[test]
+fn fixture_assignment_mismatch() {
+  test_fixture("test_cases/analyzer/type_errors/assignment_mismatch.ign");
+}
+
+// --- Unreachable Code Tests ---
+
+#[test]
+fn fixture_unreachable_after_return() {
+  test_fixture("test_cases/analyzer/unreachable/unreachable_after_return.ign");
+}
+
+// --- Missing Return Tests ---
+
+#[test]
+fn fixture_missing_return() {
+  test_fixture("test_cases/analyzer/missing_return/missing_return.ign");
+}
+
+// --- Extern Tests ---
+
+#[test]
+fn fixture_valid_extern() {
+  test_fixture("test_cases/analyzer/extern/valid_extern.ign");
+}
