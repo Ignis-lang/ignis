@@ -1,6 +1,6 @@
 use crate::{BytePosition, file::FileId};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Span {
   pub start: BytePosition,
   pub end: BytePosition,
