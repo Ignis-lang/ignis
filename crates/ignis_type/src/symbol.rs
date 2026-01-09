@@ -39,4 +39,17 @@ impl SymbolTable {
   ) -> &str {
     &self.symbols.get(id).name
   }
+
+  pub fn get_or_intern(
+    &mut self,
+    name: &str,
+  ) -> SymbolId {
+    if let Some(id) = self.map.get(name) {
+      id.clone()
+    } else {
+      let id = self.symbols.alloc(Symbol { name: name.to_string() });
+      self.map.insert(name.to_string(), id.clone());
+      id.clone()
+    }
+  }
 }
