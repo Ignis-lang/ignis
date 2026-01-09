@@ -2,6 +2,7 @@ use core::marker::PhantomData;
 
 pub mod definition;
 pub mod file;
+pub mod module;
 pub mod span;
 pub mod symbol;
 pub mod types;

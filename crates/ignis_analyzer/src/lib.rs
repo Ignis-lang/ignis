@@ -3,7 +3,9 @@ mod borrowck;
 mod checks;
 mod const_eval;
 pub mod dump;
+pub mod imports;
 mod lowering;
+pub mod modules;
 mod resolver;
 mod scope;
 mod typeck;
@@ -15,9 +17,12 @@ use std::cell::RefCell;
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_type::{symbol::SymbolTable, Store as ASTStore};
 use ignis_type::types::{TypeId, TypeStore};
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
+use ignis_type::module::ModuleId;
 use ignis_hir::HIR;
 use ignis_diagnostics::diagnostic_report::Diagnostic;
+
+use imports::ExportTable;
 
 pub use scope::{ScopeTree, ScopeId, ScopeKind};
 
@@ -31,6 +36,8 @@ pub struct Analyzer<'a> {
   node_types: HashMap<NodeId, TypeId>,
   diagnostics: Vec<Diagnostic>,
   current_function_return_type: Option<TypeId>,
+  export_table: ExportTable,
+  module_for_path: HashMap<String, ModuleId>,
 }
 
 pub struct AnalyzerOutput {
@@ -39,6 +46,26 @@ pub struct AnalyzerOutput {
   pub hir: HIR,
   pub diagnostics: Vec<Diagnostic>,
   pub symbols: Rc<RefCell<SymbolTable>>,
+}
+
+impl AnalyzerOutput {
+  /// Collect exported symbols from this analysis result
+  pub fn collect_exports(&self) -> imports::ModuleExportData {
+    let mut exports = HashMap::new();
+    let all_defs = self.defs.get_all();
+
+    for def in all_defs.iter() {
+      if def.visibility == Visibility::Public {
+        exports.insert(def.name.clone(), def.clone());
+      }
+    }
+
+    imports::ModuleExportData {
+      exports,
+      types: self.types.clone(),
+      defs: self.defs.clone(),
+    }
+  }
 }
 
 impl<'a> Analyzer<'a> {
@@ -56,6 +83,8 @@ impl<'a> Analyzer<'a> {
       node_types: HashMap::new(),
       diagnostics: Vec::new(),
       current_function_return_type: None,
+      export_table: HashMap::new(),
+      module_for_path: HashMap::new(),
     }
   }
 
@@ -64,8 +93,21 @@ impl<'a> Analyzer<'a> {
     roots: &Vec<NodeId>,
     symbols: Rc<RefCell<SymbolTable>>,
   ) -> AnalyzerOutput {
+    Self::analyze_with_imports(ast, roots, symbols, &HashMap::new(), &HashMap::new())
+  }
+
+  /// Analyze with imports from other modules
+  pub fn analyze_with_imports(
+    ast: &ASTStore<ASTNode>,
+    roots: &Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
+    export_table: &ExportTable,
+    module_for_path: &HashMap<String, ModuleId>,
+  ) -> AnalyzerOutput {
     let symbols_clone = symbols.clone();
     let mut analyzer = Analyzer::new(ast, symbols);
+    analyzer.export_table = export_table.clone();
+    analyzer.module_for_path = module_for_path.clone();
 
     analyzer.bind_phase(roots);
     analyzer.resolve_phase(roots);
@@ -177,6 +219,17 @@ impl<'a> Analyzer<'a> {
     for root in roots {
       self.define_root(root);
     }
+
+    self.process_imports(roots);
+  }
+
+  fn process_imports(
+    &mut self,
+    roots: &[NodeId],
+  ) {
+    let export_table = self.export_table.clone();
+    let module_for_path = self.module_for_path.clone();
+    self.import_phase(roots, &export_table, &module_for_path);
   }
 
   fn define_root(

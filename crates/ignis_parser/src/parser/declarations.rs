@@ -127,7 +127,8 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&keyword.span, &semicolon.span);
 
-    let import_statement = ASTImport::new(items, path_token.lexeme.clone(), span);
+    let import_path = path_token.lexeme.trim_matches('"').to_string();
+    let import_statement = ASTImport::new(items, import_path, span);
     Ok(self.allocate_statement(ASTStatement::Import(import_statement)))
   }
 

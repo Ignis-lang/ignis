@@ -295,7 +295,9 @@ impl<'a> Analyzer<'a> {
       ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
         self.bind_node(decl, scope_kind);
 
-        if let Some(def_id) = self.lookup_def(decl).cloned() {
+        let def_node_id = self.find_def_node_id(decl);
+
+        if let Some(def_id) = self.lookup_def(&def_node_id).cloned() {
           self.defs.get_mut(&def_id).visibility = Visibility::Public;
         }
       },
@@ -304,6 +306,19 @@ impl<'a> Analyzer<'a> {
           self.defs.get_mut(&def_id).visibility = Visibility::Public;
         }
       },
+    }
+  }
+
+  /// Unwrap extern wrapper to get the inner definition node
+  fn find_def_node_id(
+    &self,
+    node_id: &NodeId,
+  ) -> NodeId {
+    let node = self.ast.get(node_id);
+
+    match node {
+      ASTNode::Statement(ASTStatement::Extern(extern_stmt)) => extern_stmt.item.clone(),
+      _ => node_id.clone(),
     }
   }
 

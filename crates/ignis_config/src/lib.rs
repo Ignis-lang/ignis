@@ -2,16 +2,76 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Linking information for a std module (header and object file)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IgnisSTDObject {
-  pub header: String,
-  pub path: String,
+pub struct StdLinkingInfo {
+  /// Path to the C header file (optional)
+  pub header: Option<String>,
+  /// Path to the object file for linking (optional)
+  pub object: Option<String>,
 }
 
+/// Configuration for auto-loading modules
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StdAutoLoad {
+  /// List of module names to auto-load (e.g., ["prelude"])
+  pub modules: Vec<String>,
+}
+
+/// Manifest for the Ignis standard library
+///
+/// Expected format in manifest.toml:
+/// ```toml
+/// [modules]
+/// io = "io/mod.ign"
+/// math = "math/mod.ign"
+///
+/// [linking.io]
+/// header = "runtime/io.h"
+/// object = "runtime/libio.o"
+///
+/// [auto_load]
+/// modules = ["prelude"]
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IgnisSTDManifest {
-  pub std_objects: HashMap<String, String>,
-  pub std_headers: HashMap<String, IgnisSTDObject>,
+  /// Module name -> relative path to .ign file
+  #[serde(default)]
+  pub modules: HashMap<String, String>,
+  /// Module name -> linking info (header and object file)
+  #[serde(default)]
+  pub linking: HashMap<String, StdLinkingInfo>,
+  /// Modules to auto-load
+  #[serde(default)]
+  pub auto_load: Option<StdAutoLoad>,
+}
+
+impl IgnisSTDManifest {
+  /// Get the relative path to a module's .ign file
+  pub fn get_module_path(&self, name: &str) -> Option<&String> {
+    self.modules.get(name)
+  }
+
+  /// Get linking info for a module
+  pub fn get_linking_info(&self, name: &str) -> Option<&StdLinkingInfo> {
+    self.linking.get(name)
+  }
+
+  /// Check if a module should be auto-loaded
+  pub fn is_auto_load(&self, name: &str) -> bool {
+    self.auto_load
+      .as_ref()
+      .map(|a| a.modules.contains(&name.to_string()))
+      .unwrap_or(false)
+  }
+
+  /// Get all auto-load module names
+  pub fn get_auto_load_modules(&self) -> Vec<&str> {
+    self.auto_load
+      .as_ref()
+      .map(|a| a.modules.iter().map(|s| s.as_str()).collect())
+      .unwrap_or_default()
+  }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]

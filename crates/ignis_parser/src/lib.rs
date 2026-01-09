@@ -1,6 +1,9 @@
+mod compile;
 mod lexer;
 mod parser;
 
+pub use compile::compile_project;
+pub use compile::CompilationContext;
 pub use lexer::IgnisLexer;
 pub use parser::IgnisParser;
 

@@ -255,6 +255,25 @@ pub enum DiagnosticMessage {
     got: String,
     span: Span,
   },
+  // Import/Module errors
+  ModuleNotFound {
+    path: String,
+    at: Span,
+  },
+  SymbolNotExported {
+    symbol: String,
+    module: String,
+    at: Span,
+  },
+  ImportShadowsLocal {
+    name: String,
+    at: Span,
+    previous_span: Span,
+  },
+  CircularDependency {
+    cycle: Vec<String>,
+    at: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -457,6 +476,20 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::AssignmentTypeMismatch { expected, got, .. } => {
         write!(f, "Type mismatch: expected '{}', found '{}'", expected, got)
       },
+
+      // Import/Module errors
+      DiagnosticMessage::ModuleNotFound { path, .. } => {
+        write!(f, "Module '{}' not found", path)
+      },
+      DiagnosticMessage::SymbolNotExported { symbol, module, .. } => {
+        write!(f, "Symbol '{}' is not exported from module '{}'", symbol, module)
+      },
+      DiagnosticMessage::ImportShadowsLocal { name, .. } => {
+        write!(f, "Import '{}' shadows a local definition", name)
+      },
+      DiagnosticMessage::CircularDependency { cycle, .. } => {
+        write!(f, "Circular dependency detected: {}", cycle.join(" -> "))
+      },
     }
   }
 }
@@ -538,6 +571,11 @@ impl DiagnosticMessage {
       | DiagnosticMessage::CannotReturnLocalReference { span, .. }
       | DiagnosticMessage::UndefinedIdentifier { span, .. }
       | DiagnosticMessage::AssignmentTypeMismatch { span, .. } => span.clone(),
+
+      DiagnosticMessage::ModuleNotFound { at, .. }
+      | DiagnosticMessage::SymbolNotExported { at, .. }
+      | DiagnosticMessage::ImportShadowsLocal { at, .. }
+      | DiagnosticMessage::CircularDependency { at, .. } => at.clone(),
     }
   }
 
@@ -630,6 +668,12 @@ impl DiagnosticMessage {
 
       // Type checker errors
       DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
+
+      // Import/Module errors
+      DiagnosticMessage::ModuleNotFound { .. } => "M0001",
+      DiagnosticMessage::SymbolNotExported { .. } => "M0002",
+      DiagnosticMessage::ImportShadowsLocal { .. } => "M0003",
+      DiagnosticMessage::CircularDependency { .. } => "M0004",
     }
     .to_string()
   }
@@ -648,7 +692,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::VariableAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::FunctionAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::ParameterAlreadyDefined { previous_span, .. }
-      | DiagnosticMessage::ConstantAlreadyDefined { previous_span, .. } => {
+      | DiagnosticMessage::ConstantAlreadyDefined { previous_span, .. }
+      | DiagnosticMessage::ImportShadowsLocal { previous_span, .. } => {
         vec![(previous_span.clone(), "Previous definition here".to_string())]
       },
       DiagnosticMessage::MissingReturnStatement { span, .. } => {

@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::Parser as ClapParser;
-use ignis_parser::compile_file;
+use ignis_parser::compile_project;
 use std::{sync::Arc, fs::File, io::Read, path::Path};
 
 use cli::{Cli, SubCommand};
@@ -84,14 +84,8 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
   if cli.std_path.eq("IGNIS_STD_PATH") {
     if let Ok(v) = std::env::var("IGNIS_STD_PATH") {
       config.std_path = v;
-    } else {
-      // println!("Failed to load std path from environment variable");
-      // std::process::exit(1);
     }
   }
-
-  let manifest = load_manifest(&config.std_path);
-  config.manifest = manifest;
 
   match &cli.subcommand {
     SubCommand::Build(build) => {
@@ -105,6 +99,10 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
 
       if is_project {
         let mut project_config = load_project_config().unwrap();
+
+        if config.std_path.is_empty() {
+          config.std_path = project_config.ignis.std_path.clone();
+        }
 
         project_config.build.target = build.target.clone().into();
 
@@ -154,7 +152,9 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
     },
   };
 
-  return Arc::new(config);
+  config.manifest = load_manifest(&config.std_path);
+
+  Arc::new(config)
 }
 
 fn main() {
@@ -165,5 +165,5 @@ fn main() {
   let build_config = config.build_config.clone().unwrap();
   let file_path = build_config.file.unwrap();
 
-  compile_file(config, &file_path);
+  let _ = compile_project(config, &file_path);
 }
