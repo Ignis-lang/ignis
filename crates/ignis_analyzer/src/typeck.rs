@@ -1,4 +1,4 @@
-use crate::{Analyzer, ScopeKind};
+use crate::{Analyzer, ScopeKind, TypecheckContext};
 use ignis_ast::{
   expressions::{ASTCallExpression, ASTExpression, ASTLiteral},
   statements::ASTStatement,
@@ -17,8 +17,9 @@ impl<'a> Analyzer<'a> {
     roots: &[NodeId],
   ) {
     self.reset_scopes(roots);
+    let ctx = TypecheckContext::new();
     for root in roots {
-      self.typecheck_node(root, ScopeKind::Global);
+      self.typecheck_node(root, ScopeKind::Global, &ctx);
     }
   }
 
@@ -26,6 +27,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     node_id: &NodeId,
     scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
   ) -> TypeId {
     if let Some(ty) = self.lookup_type(&node_id) {
       return ty.clone();
@@ -33,8 +35,8 @@ impl<'a> Analyzer<'a> {
 
     let node = self.ast.get(&node_id);
     let ty = match node {
-      ASTNode::Statement(stmt) => self.typecheck_statement(node_id, stmt, scope_kind),
-      ASTNode::Expression(expr) => self.typecheck_expression(expr, scope_kind),
+      ASTNode::Statement(stmt) => self.typecheck_statement(node_id, stmt, scope_kind, ctx),
+      ASTNode::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx),
     }
     .clone();
 
@@ -48,6 +50,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     stmt: &ASTStatement,
     scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
   ) -> TypeId {
     match stmt {
       ASTStatement::Variable(var) => {
@@ -65,7 +68,7 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(value_id) = &var.value {
-          let value_type = self.typecheck_node(value_id, scope_kind);
+          let value_type = self.typecheck_node(value_id, scope_kind, ctx);
           self.typecheck_assignment(&var_type, &value_type, &var.span);
         }
 
@@ -105,14 +108,11 @@ impl<'a> Analyzer<'a> {
           self.define_function_params_in_scope(def_id);
         }
 
-        let prev_return_type = self.current_function_return_type.clone();
-        self.current_function_return_type = Some(return_type.clone());
+        let func_ctx = TypecheckContext::with_return(return_type.clone());
 
         if let Some(body_id) = &func.body {
-          self.typecheck_node(body_id, ScopeKind::Function);
+          self.typecheck_node(body_id, ScopeKind::Function, &func_ctx);
         }
-
-        self.current_function_return_type = prev_return_type;
 
         self.scopes.pop();
 
@@ -129,7 +129,7 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(value_id) = &const_.value {
-          let value_type = self.typecheck_node(value_id, scope_kind);
+          let value_type = self.typecheck_node(value_id, scope_kind, ctx);
           self.typecheck_assignment(&const_type, &value_type, &const_.span);
         }
 
@@ -142,7 +142,7 @@ impl<'a> Analyzer<'a> {
         let mut last_type = self.types.void();
 
         for stmt_id in &block.statements {
-          last_type = self.typecheck_node(stmt_id, ScopeKind::Block);
+          last_type = self.typecheck_node(stmt_id, ScopeKind::Block, ctx);
         }
 
         self.scopes.pop();
@@ -150,15 +150,15 @@ impl<'a> Analyzer<'a> {
         last_type
       },
       ASTStatement::If(if_stmt) => {
-        let cond_type = self.typecheck_node(&if_stmt.condition, scope_kind);
+        let cond_type = self.typecheck_node(&if_stmt.condition, scope_kind, ctx);
         let boolean_type = self.types.boolean();
         let conditional_span = self.node_span(&if_stmt.condition).clone();
 
         self.typecheck_assignment(&boolean_type, &cond_type, &conditional_span);
 
-        let then_type = self.typecheck_node(&if_stmt.then_block, ScopeKind::Block);
+        let then_type = self.typecheck_node(&if_stmt.then_block, ScopeKind::Block, ctx);
         let else_type = if let Some(else_branch) = &if_stmt.else_block {
-          self.typecheck_node(else_branch, ScopeKind::Block)
+          self.typecheck_node(else_branch, ScopeKind::Block, ctx)
         } else {
           self.types.void()
         };
@@ -167,12 +167,12 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::While(while_stmt) => {
         self.scopes.push(ScopeKind::Loop);
-        let cond_type = self.typecheck_node(&while_stmt.condition, ScopeKind::Loop);
+        let cond_type = self.typecheck_node(&while_stmt.condition, ScopeKind::Loop, ctx);
         let boolean_type = self.types.boolean();
         let conditional_span = self.node_span(&while_stmt.condition).clone();
 
         self.typecheck_assignment(&boolean_type, &cond_type, &conditional_span);
-        self.typecheck_node(&while_stmt.body, ScopeKind::Loop);
+        self.typecheck_node(&while_stmt.body, ScopeKind::Loop, ctx);
 
         self.scopes.pop();
 
@@ -180,25 +180,25 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::For(for_stmt) => {
         self.scopes.push(ScopeKind::Loop);
-        self.typecheck_node(&for_stmt.initializer, ScopeKind::Loop);
+        self.typecheck_node(&for_stmt.initializer, ScopeKind::Loop, ctx);
 
-        let cond_type = self.typecheck_node(&for_stmt.condition, ScopeKind::Loop);
+        let cond_type = self.typecheck_node(&for_stmt.condition, ScopeKind::Loop, ctx);
         let boolean_type = self.types.boolean();
         let conditional_span = self.node_span(&for_stmt.condition).clone();
 
         self.typecheck_assignment(&boolean_type, &cond_type, &conditional_span);
 
-        self.typecheck_node(&for_stmt.increment, ScopeKind::Loop);
-        self.typecheck_node(&for_stmt.body, ScopeKind::Loop);
+        self.typecheck_node(&for_stmt.increment, ScopeKind::Loop, ctx);
+        self.typecheck_node(&for_stmt.body, ScopeKind::Loop, ctx);
 
         self.scopes.pop();
 
         self.types.void()
       },
       ASTStatement::Return(ret) => {
-        if let Some(expected_return_type) = self.current_function_return_type.clone() {
+        if let Some(expected_return_type) = ctx.expected_return.clone() {
           if let Some(value) = &ret.expression {
-            let value_type = self.typecheck_node(&value, scope_kind);
+            let value_type = self.typecheck_node(&value, scope_kind, ctx);
 
             if !self.types.types_equal(&expected_return_type, &value_type) {
               let expected = self.format_type_for_error(&expected_return_type);
@@ -231,16 +231,16 @@ impl<'a> Analyzer<'a> {
 
         self.types.never()
       },
-      ASTStatement::Expression(expr) => self.typecheck_expression(expr, scope_kind),
+      ASTStatement::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx),
       ASTStatement::Break(_) | ASTStatement::Continue(_) => self.types.never(),
       ASTStatement::Extern(extern_stmt) => {
-        self.typecheck_node(&extern_stmt.item, scope_kind);
+        self.typecheck_node(&extern_stmt.item, scope_kind, ctx);
 
         self.types.void()
       },
       ASTStatement::Export(export_stmt) => {
         if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
-          self.typecheck_node(&decl, scope_kind);
+          self.typecheck_node(&decl, scope_kind, ctx);
         }
 
         self.types.void()
@@ -253,6 +253,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     expr: &ASTExpression,
     scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
   ) -> TypeId {
     match expr {
       ASTExpression::Literal(lit) => self.typecheck_literal(lit),
@@ -263,17 +264,17 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
-      ASTExpression::Call(call) => self.typecheck_call(call, scope_kind),
-      ASTExpression::Binary(binary) => self.typecheck_binary(binary, scope_kind),
-      ASTExpression::Unary(unary) => self.typecheck_unary(unary, scope_kind),
-      ASTExpression::Assignment(assign) => self.typecheck_assignment_expr(assign, scope_kind),
+      ASTExpression::Call(call) => self.typecheck_call(call, scope_kind, ctx),
+      ASTExpression::Binary(binary) => self.typecheck_binary(binary, scope_kind, ctx),
+      ASTExpression::Unary(unary) => self.typecheck_unary(unary, scope_kind, ctx),
+      ASTExpression::Assignment(assign) => self.typecheck_assignment_expr(assign, scope_kind, ctx),
       ASTExpression::Cast(cast) => {
-        let expr_type = self.typecheck_node(&cast.expression, scope_kind);
+        let expr_type = self.typecheck_node(&cast.expression, scope_kind, ctx);
         self.typecheck_cast(expr_type, &cast.target_type, &cast.span);
         self.resolve_type_syntax(&cast.target_type)
       },
       ASTExpression::Reference(ref_) => {
-        let expr_type = self.typecheck_node(&ref_.inner, scope_kind);
+        let expr_type = self.typecheck_node(&ref_.inner, scope_kind, ctx);
 
         let inner_node = self.ast.get(&ref_.inner);
         if let ASTNode::Expression(inner_expr) = inner_node {
@@ -301,7 +302,7 @@ impl<'a> Analyzer<'a> {
         self.types.reference(expr_type, ref_.mutable)
       },
       ASTExpression::Dereference(deref) => {
-        let expr_type = self.typecheck_node(&deref.inner, scope_kind);
+        let expr_type = self.typecheck_node(&deref.inner, scope_kind, ctx);
         match self.types.get(&expr_type).clone() {
           ignis_type::types::Type::Pointer(inner) => inner,
           ignis_type::types::Type::Reference { inner, .. } => inner,
@@ -319,8 +320,8 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::VectorAccess(access) => {
-        let base_type = self.typecheck_node(&access.name, scope_kind);
-        self.typecheck_node(&access.index, scope_kind);
+        let base_type = self.typecheck_node(&access.name, scope_kind, ctx);
+        self.typecheck_node(&access.index, scope_kind, ctx);
 
         if let ignis_type::types::Type::Vector { element, .. } = self.types.get(&base_type).clone() {
           element
@@ -328,10 +329,10 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
-      ASTExpression::Grouped(grouped) => self.typecheck_node(&grouped.expression, scope_kind),
+      ASTExpression::Grouped(grouped) => self.typecheck_node(&grouped.expression, scope_kind, ctx),
       ASTExpression::Vector(vector) => {
         for elem in &vector.items {
-          self.typecheck_node(elem, scope_kind);
+          self.typecheck_node(elem, scope_kind, ctx);
         }
 
         let elem_type = vector
@@ -354,7 +355,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::PostfixIncrement { expr, span } => {
-        let expr_type = self.typecheck_node(&expr, scope_kind);
+        let expr_type = self.typecheck_node(&expr, scope_kind, ctx);
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node {
@@ -377,7 +378,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::PostfixDecrement { expr, span } => {
-        let expr_type = self.typecheck_node(&expr, scope_kind);
+        let expr_type = self.typecheck_node(&expr, scope_kind, ctx);
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node {
@@ -430,13 +431,14 @@ impl<'a> Analyzer<'a> {
     &mut self,
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
   ) -> TypeId {
-    let callee_type = self.typecheck_node(&call.callee, scope_kind);
+    let callee_type = self.typecheck_node(&call.callee, scope_kind, ctx);
 
     let arg_types: Vec<TypeId> = call
       .arguments
       .iter()
-      .map(|arg| self.typecheck_node(arg, scope_kind))
+      .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
       .collect();
 
     if let ignis_type::types::Type::Function {
@@ -511,9 +513,10 @@ impl<'a> Analyzer<'a> {
     &mut self,
     binary: &ignis_ast::expressions::ASTBinary,
     scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
   ) -> TypeId {
-    let left_type = self.typecheck_node(&binary.left, scope_kind);
-    let right_type = self.typecheck_node(&binary.right, scope_kind);
+    let left_type = self.typecheck_node(&binary.left, scope_kind, ctx);
+    let right_type = self.typecheck_node(&binary.right, scope_kind, ctx);
 
     match binary.operator {
       ASTBinaryOperator::Add
@@ -604,8 +607,9 @@ impl<'a> Analyzer<'a> {
     &mut self,
     unary: &ignis_ast::expressions::ASTUnary,
     scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
   ) -> TypeId {
-    let operand_type = self.typecheck_node(&unary.operand, scope_kind);
+    let operand_type = self.typecheck_node(&unary.operand, scope_kind, ctx);
 
     match unary.operator {
       UnaryOperator::Negate => {
@@ -686,9 +690,10 @@ impl<'a> Analyzer<'a> {
     &mut self,
     assign: &ignis_ast::expressions::ASTAssignment,
     scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
   ) -> TypeId {
-    let target_type = self.typecheck_node(&assign.target, scope_kind);
-    let value_type = self.typecheck_node(&assign.value, scope_kind);
+    let target_type = self.typecheck_node(&assign.target, scope_kind, ctx);
+    let value_type = self.typecheck_node(&assign.value, scope_kind, ctx);
 
     let target_node = self.ast.get(&assign.target);
     if let ASTNode::Expression(target_expr) = target_node {

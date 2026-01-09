@@ -2,6 +2,30 @@ use crate::{Analyzer, ScopeKind};
 use ignis_ast::{expressions::ASTExpression, statements::ASTStatement, ASTNode, NodeId};
 use ignis_diagnostics::message::DiagnosticMessage;
 
+/// Control flow termination status.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Termination {
+  Always,
+  Sometimes,
+}
+
+impl Termination {
+  /// Both branches must terminate for parallel merge to terminate.
+  fn merge_parallel(self, other: Self) -> Self {
+    match (self, other) {
+      (Termination::Always, Termination::Always) => Termination::Always,
+      _ => Termination::Sometimes,
+    }
+  }
+
+  fn merge_sequential(self, other: Self) -> Self {
+    match self {
+      Termination::Always => self,
+      Termination::Sometimes => other,
+    }
+  }
+}
+
 impl<'a> Analyzer<'a> {
   pub fn extra_checks_phase(
     &mut self,
@@ -41,9 +65,10 @@ impl<'a> Analyzer<'a> {
         let def_id = self.define_decl_in_current_scope(node_id);
         if let Some(body_id) = &func.body {
           if let Some(def_id) = &def_id {
-            if self.types.get(self.type_of(&def_id)) != &ignis_type::types::Type::Void
-              && !self.node_has_return(*body_id)
-            {
+            let return_type = self.types.get(self.type_of(&def_id));
+            let is_void = return_type == &ignis_type::types::Type::Void;
+
+            if !is_void && self.check_termination(*body_id) != Termination::Always {
               self.add_diagnostic(
                 DiagnosticMessage::MissingReturnStatement {
                   span: func.signature.span.clone(),
@@ -299,34 +324,46 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  fn node_has_return(
+  fn check_termination(
     &self,
     node_id: NodeId,
-  ) -> bool {
+  ) -> Termination {
     match self.ast.get(&node_id) {
-      ASTNode::Statement(stmt) => self.statement_has_return(stmt),
-      ASTNode::Expression(_) => false,
+      ASTNode::Statement(stmt) => self.statement_termination(stmt),
+      ASTNode::Expression(_) => Termination::Sometimes,
     }
   }
 
-  fn statement_has_return(
+  fn statement_termination(
     &self,
     stmt: &ASTStatement,
-  ) -> bool {
+  ) -> Termination {
     match stmt {
-      ASTStatement::Return(_) => true,
-      ASTStatement::Block(block) => block.statements.iter().any(|stmt_id| self.node_has_return(*stmt_id)),
-      ASTStatement::If(if_stmt) => {
-        self.node_has_return(if_stmt.then_block)
-          || if_stmt
-            .else_block
-            .as_ref()
-            .map(|&else_id| self.node_has_return(else_id))
-            .unwrap_or(false)
+      ASTStatement::Return(_) | ASTStatement::Break(_) | ASTStatement::Continue(_) => Termination::Always,
+
+      ASTStatement::Block(block) => {
+        let mut result = Termination::Sometimes;
+        for stmt_id in &block.statements {
+          let term = self.check_termination(*stmt_id);
+          result = result.merge_sequential(term);
+          if result == Termination::Always {
+            break;
+          }
+        }
+        result
       },
-      ASTStatement::While(while_stmt) => self.node_has_return(while_stmt.body),
-      ASTStatement::For(for_stmt) => self.node_has_return(for_stmt.body),
-      _ => false,
+
+      ASTStatement::If(if_stmt) => {
+        let then_term = self.check_termination(if_stmt.then_block);
+        match &if_stmt.else_block {
+          Some(else_id) => then_term.merge_parallel(self.check_termination(*else_id)),
+          None => Termination::Sometimes,
+        }
+      },
+
+      ASTStatement::While(_) | ASTStatement::For(_) => Termination::Sometimes,
+
+      _ => Termination::Sometimes,
     }
   }
 

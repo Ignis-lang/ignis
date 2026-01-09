@@ -26,6 +26,22 @@ use imports::ExportTable;
 
 pub use scope::{ScopeTree, ScopeId, ScopeKind};
 
+/// Context passed through type checking for function-scoped information
+#[derive(Clone, Default)]
+pub struct TypecheckContext {
+  pub expected_return: Option<TypeId>,
+}
+
+impl TypecheckContext {
+  pub fn new() -> Self {
+    Self { expected_return: None }
+  }
+
+  pub fn with_return(ret: TypeId) -> Self {
+    Self { expected_return: Some(ret) }
+  }
+}
+
 pub struct Analyzer<'a> {
   ast: &'a ASTStore<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
@@ -35,7 +51,6 @@ pub struct Analyzer<'a> {
   node_defs: HashMap<NodeId, DefinitionId>,
   node_types: HashMap<NodeId, TypeId>,
   diagnostics: Vec<Diagnostic>,
-  current_function_return_type: Option<TypeId>,
   export_table: ExportTable,
   module_for_path: HashMap<String, ModuleId>,
 }
@@ -82,7 +97,6 @@ impl<'a> Analyzer<'a> {
       node_defs: HashMap::new(),
       node_types: HashMap::new(),
       diagnostics: Vec::new(),
-      current_function_return_type: None,
       export_table: HashMap::new(),
       module_for_path: HashMap::new(),
     }
@@ -210,6 +224,8 @@ impl<'a> Analyzer<'a> {
     self.ast.get(node_id).span()
   }
 
+  /// Reinitializes the scope tree for a new analysis phase.
+  /// Must call `process_imports()` at the end to re-inject imported symbols.
   fn reset_scopes(
     &mut self,
     roots: &[NodeId],

@@ -84,6 +84,31 @@ fn fixture_missing_return() {
   test_fixture("test_cases/analyzer/missing_return/missing_return.ign");
 }
 
+#[test]
+fn fixture_if_without_else() {
+  test_fixture("test_cases/analyzer/missing_return/if_without_else.ign");
+}
+
+#[test]
+fn fixture_if_else_both_return() {
+  test_fixture("test_cases/analyzer/missing_return/if_else_both_return.ign");
+}
+
+#[test]
+fn fixture_if_else_only_then_returns() {
+  test_fixture("test_cases/analyzer/missing_return/if_else_only_then_returns.ign");
+}
+
+#[test]
+fn fixture_if_else_only_else_returns() {
+  test_fixture("test_cases/analyzer/missing_return/if_else_only_else_returns.ign");
+}
+
+#[test]
+fn fixture_nested_if_all_paths_return() {
+  test_fixture("test_cases/analyzer/missing_return/nested_if_all_paths_return.ign");
+}
+
 // --- Extern Tests ---
 
 #[test]
