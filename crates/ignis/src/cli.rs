@@ -79,6 +79,22 @@ pub struct BuildCommand {
   /// Output directory
   #[arg(short = 'o', long, default_value = "build")]
   pub output_dir: String,
+
+  /// Dump type store
+  #[arg(long)]
+  pub dump_types: bool,
+
+  /// Dump definitions
+  #[arg(long)]
+  pub dump_defs: bool,
+
+  /// Dump HIR for a specific function
+  #[arg(long)]
+  pub dump_hir: Option<String>,
+
+  /// Dump HIR summary
+  #[arg(long)]
+  pub dump_hir_summary: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]

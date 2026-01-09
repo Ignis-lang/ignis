@@ -67,19 +67,29 @@ impl super::IgnisParser {
   }
 
   /// Parse qualified path
-  /// Example: io::Writer
+  /// Example: io::Writer or just Writer
   fn parse_type_path(&mut self) -> ParserResult<IgnisTypeSyntax> {
     let first = self.expect(TokenType::Identifier)?.clone();
-    let mut segments = vec![self.insert_symbol(&first)];
+    let first_span = first.span.clone();
+    let mut segments = vec![(self.insert_symbol(&first), first.span.clone())];
+    let mut end_span = first_span.clone();
 
     while self.eat(TokenType::DoubleColon) {
       let identifier = self.expect(TokenType::Identifier)?.clone();
-      segments.push(self.insert_symbol(&identifier));
+      end_span = identifier.span.clone();
+      segments.push((self.insert_symbol(&identifier), identifier.span.clone()));
     }
 
-    // For now, use the last segment as the type name
-    // TODO: Implement proper path resolution
-    Ok(IgnisTypeSyntax::Named(segments.last().unwrap().clone()))
+    if segments.len() == 1 {
+      Ok(IgnisTypeSyntax::Named(segments[0].0))
+    } else {
+      let span = ignis_type::span::Span::merge(&first_span, &end_span);
+      Ok(IgnisTypeSyntax::Path {
+        segments,
+        args: Vec::new(),
+        span,
+      })
+    }
   }
 
   /// Parse vector suffix: T[size?]
@@ -142,6 +152,7 @@ impl super::IgnisParser {
       TokenType::StringType => IgnisTypeSyntax::String,
       TokenType::CharType => IgnisTypeSyntax::Char,
       TokenType::Void => IgnisTypeSyntax::Void,
+      TokenType::Unknown => IgnisTypeSyntax::Unknown,
       _ => IgnisTypeSyntax::Void,
     })
   }
@@ -167,7 +178,7 @@ impl super::IgnisParser {
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void
+        | TokenType::Unknown
     )
   }
-
 }

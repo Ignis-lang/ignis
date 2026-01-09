@@ -132,6 +132,10 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
           is_project,
           build.optimize.clone(),
           build.output_dir.clone(),
+          build.dump_types,
+          build.dump_defs,
+          build.dump_hir.clone(),
+          build.dump_hir_summary,
         )));
     },
     SubCommand::Init(init) => {

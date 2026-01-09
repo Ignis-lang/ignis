@@ -105,6 +105,10 @@ pub struct IgnisBuildConfig {
   pub target: TargetBackend,
   pub optimize: bool,
   pub output_dir: String,
+  pub dump_types: bool,
+  pub dump_defs: bool,
+  pub dump_hir: Option<String>,
+  pub dump_hir_summary: bool,
 }
 
 impl IgnisBuildConfig {
@@ -114,6 +118,10 @@ impl IgnisBuildConfig {
     is_project: bool,
     optimize: bool,
     output_dir: String,
+    dump_types: bool,
+    dump_defs: bool,
+    dump_hir: Option<String>,
+    dump_hir_summary: bool,
   ) -> Self {
     Self {
       file,
@@ -121,6 +129,10 @@ impl IgnisBuildConfig {
       target,
       optimize,
       output_dir,
+      dump_types,
+      dump_defs,
+      dump_hir,
+      dump_hir_summary,
     }
   }
 }

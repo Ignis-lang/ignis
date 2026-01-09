@@ -68,6 +68,7 @@ impl super::IgnisParser {
   pub(crate) fn parse_statement(&mut self) -> ParserResult<NodeId> {
     match self.peek().type_ {
       TokenType::Let => self.parse_let_statement(),
+      TokenType::Const => self.parse_constant_declaration(),
       TokenType::If => self.parse_if_statement(),
       TokenType::While => self.parse_while_statement(),
       TokenType::Return => self.parse_return_statement(),

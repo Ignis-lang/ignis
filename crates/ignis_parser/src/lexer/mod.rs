@@ -282,9 +282,7 @@ impl<'a> IgnisLexer<'a> {
     }
 
     if !saw_digit || self.peek().is_ascii_alphanumeric() || self.peek() == '_' {
-      return Err(Box::new(DiagnosticMessage::ExpectedHex(
-        self.mk_span(self.start, self.current),
-      )));
+      return Err(Box::new(DiagnosticMessage::ExpectedHex(self.mk_span(self.start, self.current))));
     }
 
     Ok(TokenType::Hex)
@@ -358,11 +356,9 @@ impl<'a> IgnisLexer<'a> {
       literal = literal.replace('_', "");
     }
 
-    self.tokens.push(Token::new(
-      kind.clone(),
-      literal,
-      self.mk_span(self.start, self.current),
-    ));
+    self
+      .tokens
+      .push(Token::new(kind.clone(), literal, self.mk_span(self.start, self.current)));
   }
 }
 
