@@ -68,7 +68,7 @@ fn print_body(
   let pipe = "|".blue().bold();
   let lines: Vec<&str> = file.text.lines().collect();
   let line_idx = (line as usize).saturating_sub(1);
-  
+
   // Mostrar línea anterior si existe
   if line > 1 && line_idx > 0 {
     println!("{:3}{:3}", "", pipe);
@@ -83,12 +83,7 @@ fn print_body(
   // Línea con el error
   println!("{:3}{:3}", "", pipe);
   if let Some(error_line) = lines.get(line_idx) {
-    println!(
-      "{:3}{:3}{}",
-      line.to_string().blue().bold(),
-      pipe,
-      error_line
-    );
+    println!("{:3}{:3}{}", line.to_string().blue().bold(), pipe, error_line);
 
     // Caret apuntando al error
     let span_len = if line == end_line {
@@ -96,15 +91,9 @@ fn print_body(
     } else {
       error_line.len().saturating_sub(col as usize).max(1)
     };
-    
+
     let caret = "^".repeat(span_len).red().bold();
-    println!(
-      "{:3}{:3}{}{}",
-      "",
-      pipe,
-      " ".repeat(col as usize),
-      caret
-    );
+    println!("{:3}{:3}{}{}", "", pipe, " ".repeat(col as usize), caret);
   }
 
   // Mostrar línea siguiente si existe
@@ -123,24 +112,12 @@ fn print_body(
     println!();
     let (label_line, label_col): (u32, u32) = sm.line_col(&label.span.file, label.span.start);
     println!("  {} {}", "label:".yellow().bold(), label.message);
-    
+
     if let Some(label_line_text) = lines.get((label_line as usize).saturating_sub(1)) {
-      println!(
-        "{:3}{:3}{}",
-        label_line.to_string().blue().bold(),
-        pipe,
-        label_line_text
-      );
-      
+      println!("{:3}{:3}{}", label_line.to_string().blue().bold(), pipe, label_line_text);
+
       let label_caret = "^".repeat(1).yellow().bold();
-      println!(
-        "{:3}{:3}{}{}",
-        "",
-        pipe,
-        " ".repeat(label_col as usize),
-        label_caret
-      );
+      println!("{:3}{:3}{}{}", "", pipe, " ".repeat(label_col as usize), label_caret);
     }
   }
 }
-

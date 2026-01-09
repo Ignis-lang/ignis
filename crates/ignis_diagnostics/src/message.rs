@@ -98,13 +98,161 @@ pub enum DiagnosticMessage {
   VariableAlreadyDefined {
     name: String,
     span: Span,
+    previous_span: Span,
   },
   FunctionAlreadyDefined {
     name: String,
     span: Span,
+    previous_span: Span,
   },
   UndefinedType {
     name: String,
+    span: Span,
+  },
+  // Type System Errors
+  ImmutableAssignment {
+    var_name: String,
+    span: Span,
+  },
+  MutableReferenceToImmutable {
+    var_name: String,
+    span: Span,
+  },
+  InvalidCast {
+    from: String,
+    to: String,
+    span: Span,
+  },
+  PrecisionLossCast {
+    from: String,
+    to: String,
+    span: Span,
+  },
+  ArgumentCountMismatch {
+    expected: usize,
+    got: usize,
+    func_name: String,
+    span: Span,
+  },
+  ArgumentTypeMismatch {
+    param_idx: usize,
+    expected: String,
+    got: String,
+    span: Span,
+  },
+  InvalidBinaryOperandType {
+    operator: String,
+    left_type: String,
+    right_type: String,
+    span: Span,
+  },
+  InvalidUnaryOperandType {
+    operator: String,
+    operand_type: String,
+    span: Span,
+  },
+  DereferenceNonPointer {
+    type_name: String,
+    span: Span,
+  },
+  VectorIndexNonInteger {
+    index_type: String,
+    span: Span,
+  },
+  AccessNonVector {
+    type_name: String,
+    span: Span,
+  },
+  NotCallable {
+    type_name: String,
+    span: Span,
+  },
+  // Control Flow & Semantic Errors
+  UnreachableCode {
+    span: Span,
+  },
+  ExternWithBody {
+    name: String,
+    span: Span,
+  },
+  ExternConstWithInitializer {
+    name: String,
+    span: Span,
+  },
+  UninitializedVariableUse {
+    var_name: String,
+    span: Span,
+  },
+  InvalidReferenceTarget {
+    span: Span,
+  },
+  CompoundAssignmentNonNumeric {
+    operator: String,
+    type_name: String,
+    span: Span,
+  },
+  ReturnTypeMismatch {
+    expected: String,
+    got: String,
+    span: Span,
+  },
+  MissingReturnValue {
+    expected: String,
+    span: Span,
+  },
+  // Binder errors
+  ParameterAlreadyDefined {
+    name: String,
+    span: Span,
+    previous_span: Span,
+  },
+  ConstantAlreadyDefined {
+    name: String,
+    span: Span,
+    previous_span: Span,
+  },
+  // Resolver errors
+  UndeclaredIdentifier {
+    name: String,
+    span: Span,
+  },
+  // Borrow checker errors
+  BorrowConflictImmWhileMutable {
+    var_name: String,
+    span: Span,
+  },
+  BorrowConflictMutWhileImmutable {
+    var_name: String,
+    span: Span,
+  },
+  BorrowConflictMutWhileMutable {
+    var_name: String,
+    span: Span,
+  },
+  // Control flow errors
+  MissingReturnStatement {
+    span: Span,
+  },
+  BreakOutsideLoop {
+    span: Span,
+  },
+  ContinueOutsideLoop {
+    span: Span,
+  },
+  ReturnOutsideFunction {
+    span: Span,
+  },
+  CannotReturnLocalReference {
+    span: Span,
+  },
+  UndefinedIdentifier {
+    name: String,
+    span: Span,
+  },
+  // Type checker errors
+  AssignmentTypeMismatch {
+    expected: String,
+    got: String,
     span: Span,
   },
   // #endregion Analyzer
@@ -167,6 +315,148 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::VariableAlreadyDefined { name, .. } => write!(f, "Variable '{}' is already defined", name),
       DiagnosticMessage::FunctionAlreadyDefined { name, .. } => write!(f, "Function '{}' is already defined", name),
       DiagnosticMessage::UndefinedType { name, .. } => write!(f, "Undefined type '{}'", name),
+
+      // Type System Errors
+      DiagnosticMessage::ImmutableAssignment { var_name, .. } => {
+        write!(f, "Cannot assign to immutable variable '{}'", var_name)
+      },
+      DiagnosticMessage::MutableReferenceToImmutable { var_name, .. } => {
+        write!(f, "Cannot create mutable reference to immutable variable '{}'", var_name)
+      },
+      DiagnosticMessage::InvalidCast { from, to, .. } => {
+        write!(f, "Cannot cast from '{}' to '{}'", from, to)
+      },
+      DiagnosticMessage::PrecisionLossCast { from, to, .. } => {
+        write!(f, "Cast from '{}' to '{}' may lose precision", from, to)
+      },
+      DiagnosticMessage::ArgumentCountMismatch {
+        expected,
+        got,
+        func_name,
+        ..
+      } => {
+        write!(f, "Function '{}' expects {} arguments, got {}", func_name, expected, got)
+      },
+      DiagnosticMessage::ArgumentTypeMismatch {
+        param_idx,
+        expected,
+        got,
+        ..
+      } => {
+        write!(
+          f,
+          "Argument {} type mismatch: expected '{}', got '{}'",
+          param_idx, expected, got
+        )
+      },
+      DiagnosticMessage::InvalidBinaryOperandType {
+        operator,
+        left_type,
+        right_type,
+        ..
+      } => {
+        write!(
+          f,
+          "Binary operator '{}' cannot be applied to types '{}' and '{}'",
+          operator, left_type, right_type
+        )
+      },
+      DiagnosticMessage::InvalidUnaryOperandType {
+        operator, operand_type, ..
+      } => {
+        write!(f, "Unary operator '{}' cannot be applied to type '{}'", operator, operand_type)
+      },
+      DiagnosticMessage::DereferenceNonPointer { type_name, .. } => {
+        write!(f, "Cannot dereference non-pointer type '{}'", type_name)
+      },
+      DiagnosticMessage::VectorIndexNonInteger { index_type, .. } => {
+        write!(f, "Vector index must be integer type, got '{}'", index_type)
+      },
+      DiagnosticMessage::AccessNonVector { type_name, .. } => {
+        write!(f, "Cannot index non-vector type '{}'", type_name)
+      },
+      DiagnosticMessage::NotCallable { type_name, .. } => {
+        write!(f, "Cannot call non-function type '{}'", type_name)
+      },
+
+      // Control Flow & Semantic Errors
+      DiagnosticMessage::UnreachableCode { .. } => write!(f, "Unreachable code detected"),
+      DiagnosticMessage::ExternWithBody { name, .. } => {
+        write!(f, "Extern function '{}' cannot have a body", name)
+      },
+      DiagnosticMessage::ExternConstWithInitializer { name, .. } => {
+        write!(f, "Extern constant '{}' cannot have an initializer", name)
+      },
+      DiagnosticMessage::UninitializedVariableUse { var_name, .. } => {
+        write!(f, "Variable '{}' used before initialization", var_name)
+      },
+      DiagnosticMessage::InvalidReferenceTarget { .. } => {
+        write!(f, "Cannot take reference of non-lvalue expression")
+      },
+      DiagnosticMessage::CompoundAssignmentNonNumeric {
+        operator, type_name, ..
+      } => {
+        write!(
+          f,
+          "Compound assignment operator '{}' cannot be applied to type '{}'",
+          operator, type_name
+        )
+      },
+      DiagnosticMessage::ReturnTypeMismatch { expected, got, .. } => {
+        write!(f, "Return type mismatch: expected '{}', got '{}'", expected, got)
+      },
+      DiagnosticMessage::MissingReturnValue { expected, .. } => {
+        write!(f, "Missing return value: expected '{}', got void", expected)
+      },
+
+      // Binder errors
+      DiagnosticMessage::ParameterAlreadyDefined { name, .. } => {
+        write!(f, "Parameter '{}' is already defined", name)
+      },
+      DiagnosticMessage::ConstantAlreadyDefined { name, .. } => {
+        write!(f, "Constant '{}' is already defined", name)
+      },
+
+      // Resolver errors
+      DiagnosticMessage::UndeclaredIdentifier { name, .. } => {
+        write!(f, "Undeclared identifier '{}'", name)
+      },
+
+      // Borrow checker errors
+      DiagnosticMessage::BorrowConflictImmWhileMutable { var_name, .. } => {
+        write!(f, "Cannot borrow '{}' as immutable because it is already borrowed as mutable", var_name)
+      },
+      DiagnosticMessage::BorrowConflictMutWhileImmutable { var_name, .. } => {
+        write!(f, "Cannot borrow '{}' as mutable because it is already borrowed as immutable", var_name)
+      },
+      DiagnosticMessage::BorrowConflictMutWhileMutable { var_name, .. } => {
+        write!(f, "Cannot borrow '{}' as mutable because it is already borrowed as mutable", var_name)
+      },
+
+      // Control flow errors
+      DiagnosticMessage::MissingReturnStatement { .. } => {
+        write!(f, "Missing return statement")
+      },
+      DiagnosticMessage::BreakOutsideLoop { .. } => {
+        write!(f, "Break statement outside of loop")
+      },
+      DiagnosticMessage::ContinueOutsideLoop { .. } => {
+        write!(f, "Continue statement outside of loop")
+      },
+      DiagnosticMessage::ReturnOutsideFunction { .. } => {
+        write!(f, "Return statement outside of function")
+      },
+      DiagnosticMessage::CannotReturnLocalReference { .. } => {
+        write!(f, "Cannot return reference to local variable")
+      },
+      DiagnosticMessage::UndefinedIdentifier { name, .. } => {
+        write!(f, "Undefined identifier '{}'", name)
+      },
+
+      // Type checker errors
+      DiagnosticMessage::AssignmentTypeMismatch { expected, got, .. } => {
+        write!(f, "Type mismatch: expected '{}', found '{}'", expected, got)
+      },
     }
   }
 }
@@ -214,7 +504,40 @@ impl DiagnosticMessage {
       DiagnosticMessage::UndeclaredVariable { span, .. }
       | DiagnosticMessage::VariableAlreadyDefined { span, .. }
       | DiagnosticMessage::FunctionAlreadyDefined { span, .. }
-      | DiagnosticMessage::UndefinedType { span, .. } => span.clone(),
+      | DiagnosticMessage::UndefinedType { span, .. }
+      | DiagnosticMessage::ImmutableAssignment { span, .. }
+      | DiagnosticMessage::MutableReferenceToImmutable { span, .. }
+      | DiagnosticMessage::InvalidCast { span, .. }
+      | DiagnosticMessage::PrecisionLossCast { span, .. }
+      | DiagnosticMessage::ArgumentCountMismatch { span, .. }
+      | DiagnosticMessage::ArgumentTypeMismatch { span, .. }
+      | DiagnosticMessage::InvalidBinaryOperandType { span, .. }
+      | DiagnosticMessage::InvalidUnaryOperandType { span, .. }
+      | DiagnosticMessage::DereferenceNonPointer { span, .. }
+      | DiagnosticMessage::VectorIndexNonInteger { span, .. }
+      | DiagnosticMessage::AccessNonVector { span, .. }
+      | DiagnosticMessage::NotCallable { span, .. }
+      | DiagnosticMessage::UnreachableCode { span, .. }
+      | DiagnosticMessage::ExternWithBody { span, .. }
+      | DiagnosticMessage::ExternConstWithInitializer { span, .. }
+      | DiagnosticMessage::UninitializedVariableUse { span, .. }
+      | DiagnosticMessage::InvalidReferenceTarget { span, .. }
+      | DiagnosticMessage::CompoundAssignmentNonNumeric { span, .. }
+      | DiagnosticMessage::ReturnTypeMismatch { span, .. }
+      | DiagnosticMessage::MissingReturnValue { span, .. }
+      | DiagnosticMessage::ParameterAlreadyDefined { span, .. }
+      | DiagnosticMessage::ConstantAlreadyDefined { span, .. }
+      | DiagnosticMessage::UndeclaredIdentifier { span, .. }
+      | DiagnosticMessage::BorrowConflictImmWhileMutable { span, .. }
+      | DiagnosticMessage::BorrowConflictMutWhileImmutable { span, .. }
+      | DiagnosticMessage::BorrowConflictMutWhileMutable { span, .. }
+      | DiagnosticMessage::MissingReturnStatement { span, .. }
+      | DiagnosticMessage::BreakOutsideLoop { span, .. }
+      | DiagnosticMessage::ContinueOutsideLoop { span, .. }
+      | DiagnosticMessage::ReturnOutsideFunction { span, .. }
+      | DiagnosticMessage::CannotReturnLocalReference { span, .. }
+      | DiagnosticMessage::UndefinedIdentifier { span, .. }
+      | DiagnosticMessage::AssignmentTypeMismatch { span, .. } => span.clone(),
     }
   }
 
@@ -260,15 +583,86 @@ impl DiagnosticMessage {
       DiagnosticMessage::ExpectedFloat(_) => "I0045",
       DiagnosticMessage::ExpectedHex(_) => "I0046",
       DiagnosticMessage::ExpectedBinary(_) => "I0047",
+
+      // Analyzer Type System Errors
+      DiagnosticMessage::ImmutableAssignment { .. } => "A0013",
+      DiagnosticMessage::MutableReferenceToImmutable { .. } => "A0014",
+      DiagnosticMessage::InvalidCast { .. } => "A0015",
+      DiagnosticMessage::PrecisionLossCast { .. } => "A0016",
+      DiagnosticMessage::ArgumentCountMismatch { .. } => "A0017",
+      DiagnosticMessage::ArgumentTypeMismatch { .. } => "A0018",
+      DiagnosticMessage::InvalidBinaryOperandType { .. } => "A0019",
+      DiagnosticMessage::InvalidUnaryOperandType { .. } => "A0020",
+      DiagnosticMessage::DereferenceNonPointer { .. } => "A0021",
+      DiagnosticMessage::VectorIndexNonInteger { .. } => "A0022",
+      DiagnosticMessage::AccessNonVector { .. } => "A0023",
+      DiagnosticMessage::NotCallable { .. } => "A0024",
+
+      // Analyzer Control Flow & Semantic Errors
+      DiagnosticMessage::UnreachableCode { .. } => "A0025",
+      DiagnosticMessage::ExternWithBody { .. } => "A0026",
+      DiagnosticMessage::ExternConstWithInitializer { .. } => "A0027",
+      DiagnosticMessage::UninitializedVariableUse { .. } => "A0028",
+      DiagnosticMessage::InvalidReferenceTarget { .. } => "A0029",
+      DiagnosticMessage::CompoundAssignmentNonNumeric { .. } => "A0030",
+      DiagnosticMessage::ReturnTypeMismatch { .. } => "A0031",
+      DiagnosticMessage::MissingReturnValue { .. } => "A0032",
+
+      // Binder errors
+      DiagnosticMessage::ParameterAlreadyDefined { .. } => "A0033",
+      DiagnosticMessage::ConstantAlreadyDefined { .. } => "A0034",
+
+      // Resolver errors
+      DiagnosticMessage::UndeclaredIdentifier { .. } => "A0035",
+
+      // Borrow checker errors
+      DiagnosticMessage::BorrowConflictImmWhileMutable { .. } => "A0036",
+      DiagnosticMessage::BorrowConflictMutWhileImmutable { .. } => "A0037",
+      DiagnosticMessage::BorrowConflictMutWhileMutable { .. } => "A0038",
+
+      // Control flow errors
+      DiagnosticMessage::MissingReturnStatement { .. } => "A0039",
+      DiagnosticMessage::BreakOutsideLoop { .. } => "A0040",
+      DiagnosticMessage::ContinueOutsideLoop { .. } => "A0041",
+      DiagnosticMessage::ReturnOutsideFunction { .. } => "A0042",
+      DiagnosticMessage::CannotReturnLocalReference { .. } => "A0043",
+      DiagnosticMessage::UndefinedIdentifier { .. } => "A0044",
+
+      // Type checker errors
+      DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
     }
     .to_string()
   }
 
   fn level(&self) -> Severity {
-    Severity::Error
+    match self {
+      DiagnosticMessage::PrecisionLossCast { .. }
+      | DiagnosticMessage::UnreachableCode { .. }
+      | DiagnosticMessage::MissingReturnStatement { .. } => Severity::Warning,
+      _ => Severity::Error,
+    }
+  }
+
+  fn secondary_labels(&self) -> Vec<(Span, String)> {
+    match self {
+      DiagnosticMessage::VariableAlreadyDefined { previous_span, .. }
+      | DiagnosticMessage::FunctionAlreadyDefined { previous_span, .. }
+      | DiagnosticMessage::ParameterAlreadyDefined { previous_span, .. }
+      | DiagnosticMessage::ConstantAlreadyDefined { previous_span, .. } => {
+        vec![(previous_span.clone(), "Previous definition here".to_string())]
+      },
+      DiagnosticMessage::MissingReturnStatement { span, .. } => {
+        vec![(span.clone(), "Function should return a value".to_string())]
+      },
+      _ => vec![],
+    }
   }
 
   pub fn report(&self) -> Diagnostic {
-    Diagnostic::new(self.level(), self.to_string(), self.code(), self.primary_span())
+    let mut diagnostic = Diagnostic::new(self.level(), self.to_string(), self.code(), self.primary_span());
+    for (span, message) in self.secondary_labels() {
+      diagnostic = diagnostic.with_label(span, message);
+    }
+    diagnostic
   }
 }
