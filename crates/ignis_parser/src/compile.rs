@@ -75,12 +75,7 @@ impl CompilationContext {
       match self.module_graph.resolve_import_path(path, current_file.unwrap()) {
         Ok(p) => p,
         Err(e) => {
-          eprintln!(
-            "{} Failed to resolve import path '{}': {:?}",
-            "Error:".red().bold(),
-            path,
-            e
-          );
+          eprintln!("{} Failed to resolve import path '{}': {:?}", "Error:".red().bold(), path, e);
           return Err(());
         },
       }
@@ -92,7 +87,9 @@ impl CompilationContext {
       return Ok(id);
     }
 
-    self.module_for_path.insert(path.to_string(), ModuleId::new(self.module_graph.modules.iter().count() as u32));
+    self
+      .module_for_path
+      .insert(path.to_string(), ModuleId::new(self.module_graph.modules.iter().count() as u32));
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
     let parsed = self.parse_file(&fs_path, config)?;
@@ -120,12 +117,7 @@ impl CompilationContext {
     let text = match std::fs::read_to_string(path) {
       Ok(content) => content,
       Err(e) => {
-        eprintln!(
-          "{} Failed to read file '{}': {}",
-          "Error:".red().bold(),
-          path.display(),
-          e
-        );
+        eprintln!("{} Failed to read file '{}': {}", "Error:".red().bold(), path.display(), e);
         return Err(());
       },
     };
@@ -269,10 +261,7 @@ pub fn compile_project(
       println!("\n{}", ignis_analyzer::dump::dump_types(&output.types));
     }
     if bc.dump_defs {
-      println!(
-        "\n{}",
-        ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table)
-      );
+      println!("\n{}", ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table));
     }
     if bc.dump_hir_summary {
       println!(
@@ -291,10 +280,7 @@ pub fn compile_project(
   if config.debug.contains(&ignis_config::DebugPrint::Analyzer) {
     println!("\n{}", "Type Store & Definitions:".bright_cyan().bold());
     println!("{}", ignis_analyzer::dump::dump_types(&output.types));
-    println!(
-      "{}",
-      ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table)
-    );
+    println!("{}", ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table));
   }
 
   if config.debug.contains(&ignis_config::DebugPrint::Hir) {

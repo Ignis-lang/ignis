@@ -452,13 +452,25 @@ impl fmt::Display for DiagnosticMessage {
 
       // Borrow checker errors
       DiagnosticMessage::BorrowConflictImmWhileMutable { var_name, .. } => {
-        write!(f, "Cannot borrow '{}' as immutable because it is already borrowed as mutable", var_name)
+        write!(
+          f,
+          "Cannot borrow '{}' as immutable because it is already borrowed as mutable",
+          var_name
+        )
       },
       DiagnosticMessage::BorrowConflictMutWhileImmutable { var_name, .. } => {
-        write!(f, "Cannot borrow '{}' as mutable because it is already borrowed as immutable", var_name)
+        write!(
+          f,
+          "Cannot borrow '{}' as mutable because it is already borrowed as immutable",
+          var_name
+        )
       },
       DiagnosticMessage::BorrowConflictMutWhileMutable { var_name, .. } => {
-        write!(f, "Cannot borrow '{}' as mutable because it is already borrowed as mutable", var_name)
+        write!(
+          f,
+          "Cannot borrow '{}' as mutable because it is already borrowed as mutable",
+          var_name
+        )
       },
       DiagnosticMessage::MutatedWhileBorrowed { var_name, .. } => {
         write!(f, "Cannot assign to '{}' because it is borrowed", var_name)

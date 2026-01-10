@@ -24,10 +24,7 @@ function main(): void {
     &["I0033"],
   );
 
-  assert_snapshot!(
-    "undeclared_identifier",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("undeclared_identifier", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -53,10 +50,7 @@ function main(): void {
     &["A0013"],
   );
 
-  assert_snapshot!(
-    "immutable_assignment",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("immutable_assignment", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -95,10 +89,7 @@ function main(): void {
     &["A0040"],
   );
 
-  assert_snapshot!(
-    "break_outside_loop",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("break_outside_loop", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -120,10 +111,7 @@ function main(): void {
     &["A0041"],
   );
 
-  assert_snapshot!(
-    "continue_outside_loop",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("continue_outside_loop", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -136,10 +124,7 @@ function main(): i32 {
 "#,
   );
 
-  assert_snapshot!(
-    "return_type_mismatch",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("return_type_mismatch", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -152,10 +137,7 @@ function getValue(): i32 {
 "#,
   );
 
-  assert_snapshot!(
-    "missing_return_value",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("missing_return_value", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -187,10 +169,7 @@ function main(): void {
 "#,
   );
 
-  assert_snapshot!(
-    "invalid_binary_operand",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("invalid_binary_operand", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -229,10 +208,7 @@ function main(): void {
 "#,
   );
 
-  assert_snapshot!(
-    "argument_type_mismatch",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("argument_type_mismatch", common::format_diagnostics(&result.output.diagnostics));
 }
 
 // NOTE: extern_with_body test removed - parser doesn't support extern function with body
@@ -266,10 +242,7 @@ function main(): void {
 "#,
   );
 
-  assert_snapshot!(
-    "unreachable_code",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("unreachable_code", common::format_diagnostics(&result.output.diagnostics));
 }
 
 #[test]
@@ -293,8 +266,5 @@ function main(): void {
     &["A0046"],
   );
 
-  assert_snapshot!(
-    "integer_overflow",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("integer_overflow", common::format_diagnostics(&result.output.diagnostics));
 }

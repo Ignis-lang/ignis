@@ -48,18 +48,28 @@ pub struct IgnisSTDManifest {
 
 impl IgnisSTDManifest {
   /// Get the relative path to a module's .ign file
-  pub fn get_module_path(&self, name: &str) -> Option<&String> {
+  pub fn get_module_path(
+    &self,
+    name: &str,
+  ) -> Option<&String> {
     self.modules.get(name)
   }
 
   /// Get linking info for a module
-  pub fn get_linking_info(&self, name: &str) -> Option<&StdLinkingInfo> {
+  pub fn get_linking_info(
+    &self,
+    name: &str,
+  ) -> Option<&StdLinkingInfo> {
     self.linking.get(name)
   }
 
   /// Check if a module should be auto-loaded
-  pub fn is_auto_load(&self, name: &str) -> bool {
-    self.auto_load
+  pub fn is_auto_load(
+    &self,
+    name: &str,
+  ) -> bool {
+    self
+      .auto_load
       .as_ref()
       .map(|a| a.modules.contains(&name.to_string()))
       .unwrap_or(false)
@@ -67,7 +77,8 @@ impl IgnisSTDManifest {
 
   /// Get all auto-load module names
   pub fn get_auto_load_modules(&self) -> Vec<&str> {
-    self.auto_load
+    self
+      .auto_load
       .as_ref()
       .map(|a| a.modules.iter().map(|s| s.as_str()).collect())
       .unwrap_or_default()

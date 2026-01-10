@@ -85,10 +85,7 @@ impl BorrowChecker {
     &self,
     def_id: &DefinitionId,
   ) -> bool {
-    matches!(
-      self.state.get(def_id),
-      Some(BorrowState::Imm(_)) | Some(BorrowState::Mut)
-    )
+    matches!(self.state.get(def_id), Some(BorrowState::Imm(_)) | Some(BorrowState::Mut))
   }
 }
 
@@ -186,9 +183,7 @@ impl<'a> Analyzer<'a> {
           if let Some(type_id) = self.lookup_type(value) {
             if let ignis_type::types::Type::Reference { .. } = self.types.get(type_id) {
               if self.is_reference_to_local(value) {
-                self.add_diagnostic(
-                  DiagnosticMessage::CannotReturnLocalReference { span: ret.span.clone() }.report(),
-                );
+                self.add_diagnostic(DiagnosticMessage::CannotReturnLocalReference { span: ret.span.clone() }.report());
               }
             }
           }
@@ -225,7 +220,7 @@ impl<'a> Analyzer<'a> {
 
   fn borrowcheck_expression(
     &mut self,
-    node_id: &NodeId,
+    _node_id: &NodeId,
     expr: &ASTExpression,
     checker: &mut BorrowChecker,
     scope_kind: ScopeKind,

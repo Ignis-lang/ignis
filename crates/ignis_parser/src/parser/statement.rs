@@ -254,7 +254,10 @@ mod tests {
     ParseResult { nodes, roots, symbols }
   }
 
-  fn get_stmt<'a>(result: &'a ParseResult, index: usize) -> &'a ASTStatement {
+  fn get_stmt<'a>(
+    result: &'a ParseResult,
+    index: usize,
+  ) -> &'a ASTStatement {
     let root = result.nodes.get(&result.roots[0]);
     let func = match root {
       ASTNode::Statement(ASTStatement::Function(f)) => f,
@@ -272,7 +275,10 @@ mod tests {
     }
   }
 
-  fn symbol_name(result: &ParseResult, id: &ignis_type::symbol::SymbolId) -> String {
+  fn symbol_name(
+    result: &ParseResult,
+    id: &ignis_type::symbol::SymbolId,
+  ) -> String {
     result.symbols.borrow().get(id).to_string()
   }
 

@@ -64,7 +64,7 @@ impl IgnisParser {
   }
 
   /// Check if token marks the end of a block
-  pub(crate) fn is_block_end(
+  pub(crate) fn _is_block_end(
     &self,
     token_type: TokenType,
   ) -> bool {
@@ -159,7 +159,7 @@ impl IgnisParser {
 
   /// Synchronize to expression boundary
   /// Stop at: ; , ) ] } or start of statement
-  pub(crate) fn synchronize_after_expression(&mut self) {
+  pub(crate) fn _synchronize_after_expression(&mut self) {
     loop {
       let current_token = self.peek().type_;
 
@@ -182,7 +182,7 @@ impl IgnisParser {
 
   /// Synchronize within a delimited context (arguments, vector elements, etc.)
   /// Stop at: delimiter or closing bracket
-  pub(crate) fn synchronize_to_delimiter(
+  pub(crate) fn _synchronize_to_delimiter(
     &mut self,
     delimiter: TokenType,
     closing: TokenType,

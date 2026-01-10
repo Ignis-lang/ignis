@@ -34,7 +34,10 @@ impl<T> Clone for Id<T> {
 }
 
 impl<T> PartialEq for Id<T> {
-  fn eq(&self, other: &Self) -> bool {
+  fn eq(
+    &self,
+    other: &Self,
+  ) -> bool {
     self.index == other.index
   }
 }
@@ -42,7 +45,10 @@ impl<T> PartialEq for Id<T> {
 impl<T> Eq for Id<T> {}
 
 impl<T> Hash for Id<T> {
-  fn hash<H: Hasher>(&self, state: &mut H) {
+  fn hash<H: Hasher>(
+    &self,
+    state: &mut H,
+  ) {
     self.index.hash(state);
   }
 }

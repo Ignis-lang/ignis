@@ -380,18 +380,16 @@ impl<'a> Analyzer<'a> {
         // Get the callee def_id by looking up the variable name
         let callee_node = self.ast.get(&call.callee);
         let callee_def_id = match callee_node {
-          ASTNode::Expression(ASTExpression::Variable(var)) => {
-            match self.scopes.lookup(&var.name) {
-              Some(def_id) => def_id.clone(),
-              None => {
-                let span = self.node_span(&call.callee).clone();
-                return hir.alloc(HIRNode {
-                  kind: HIRKind::Error,
-                  span,
-                  type_id: self.types.error(),
-                });
-              },
-            }
+          ASTNode::Expression(ASTExpression::Variable(var)) => match self.scopes.lookup(&var.name) {
+            Some(def_id) => def_id.clone(),
+            None => {
+              let span = self.node_span(&call.callee).clone();
+              return hir.alloc(HIRNode {
+                kind: HIRKind::Error,
+                span,
+                type_id: self.types.error(),
+              });
+            },
           },
           ASTNode::Expression(ASTExpression::Path(path)) => {
             if let Some(last) = path.segments.last() {

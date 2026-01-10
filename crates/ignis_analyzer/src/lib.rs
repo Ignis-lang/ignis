@@ -38,7 +38,9 @@ impl TypecheckContext {
   }
 
   pub fn with_return(ret: TypeId) -> Self {
-    Self { expected_return: Some(ret) }
+    Self {
+      expected_return: Some(ret),
+    }
   }
 }
 

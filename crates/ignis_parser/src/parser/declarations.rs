@@ -270,7 +270,10 @@ mod tests {
     }
   }
 
-  fn symbol_name(result: &ParseResult, id: &ignis_type::symbol::SymbolId) -> String {
+  fn symbol_name(
+    result: &ParseResult,
+    id: &ignis_type::symbol::SymbolId,
+  ) -> String {
     result.symbols.borrow().get(id).to_string()
   }
 

@@ -37,9 +37,7 @@ impl ModulePath {
 
     // 2. Relative path (./ or ../)
     if import_from.starts_with("./") || import_from.starts_with("../") {
-      let current_dir = current_file
-        .parent()
-        .ok_or(ModulePathError::InvalidCurrentFile)?;
+      let current_dir = current_file.parent().ok_or(ModulePathError::InvalidCurrentFile)?;
 
       let resolved = current_dir.join(import_from);
       let with_ext = if resolved.extension().is_none() {
@@ -188,9 +186,7 @@ pub struct ModuleStore {
 
 impl ModuleStore {
   pub fn new() -> Self {
-    Self {
-      modules: Store::new(),
-    }
+    Self { modules: Store::new() }
   }
 
   pub fn alloc(
@@ -276,11 +272,8 @@ mod tests {
 
   #[test]
   fn absolute_path_with_project_root() {
-    let result = ModulePath::from_import_path(
-      "utils/math",
-      Path::new("/project/src/main.ign"),
-      Some(Path::new("/project")),
-    );
+    let result =
+      ModulePath::from_import_path("utils/math", Path::new("/project/src/main.ign"), Some(Path::new("/project")));
     assert!(result.is_ok());
     match result.unwrap() {
       ModulePath::Project(path) => {
@@ -295,10 +288,7 @@ mod tests {
   fn absolute_path_without_project_root_fails() {
     let result = ModulePath::from_import_path("utils/math", Path::new("/project/src/main.ign"), None);
     assert!(result.is_err());
-    assert_eq!(
-      result.unwrap_err(),
-      ModulePathError::NoProjectRoot("utils/math".to_string())
-    );
+    assert_eq!(result.unwrap_err(), ModulePathError::NoProjectRoot("utils/math".to_string()));
   }
 
   #[test]
@@ -376,10 +366,7 @@ mod tests {
   #[test]
   fn to_fs_path_with_manifest_uses_manifest_path() {
     let path = ModulePath::Std("io".to_string());
-    let fs_path = path.to_fs_path_with_manifest_path(
-      Path::new("/usr/lib/ignis/std"),
-      Some("io/mod.ign"),
-    );
+    let fs_path = path.to_fs_path_with_manifest_path(Path::new("/usr/lib/ignis/std"), Some("io/mod.ign"));
     assert_eq!(fs_path, PathBuf::from("/usr/lib/ignis/std/io/mod.ign"));
   }
 
@@ -394,10 +381,7 @@ mod tests {
   #[test]
   fn to_fs_path_with_manifest_project_ignores_manifest() {
     let path = ModulePath::Project(PathBuf::from("/project/utils.ign"));
-    let fs_path = path.to_fs_path_with_manifest_path(
-      Path::new("/usr/lib/ignis/std"),
-      Some("should/be/ignored.ign"),
-    );
+    let fs_path = path.to_fs_path_with_manifest_path(Path::new("/usr/lib/ignis/std"), Some("should/be/ignored.ign"));
     // Project paths ignore manifest
     assert_eq!(fs_path, PathBuf::from("/project/utils.ign"));
   }
@@ -405,13 +389,7 @@ mod tests {
   #[test]
   fn to_fs_path_with_manifest_nested_std_module() {
     let path = ModulePath::Std("collections::vec".to_string());
-    let fs_path = path.to_fs_path_with_manifest_path(
-      Path::new("/usr/lib/ignis/std"),
-      Some("collections/vec/mod.ign"),
-    );
-    assert_eq!(
-      fs_path,
-      PathBuf::from("/usr/lib/ignis/std/collections/vec/mod.ign")
-    );
+    let fs_path = path.to_fs_path_with_manifest_path(Path::new("/usr/lib/ignis/std"), Some("collections/vec/mod.ign"));
+    assert_eq!(fs_path, PathBuf::from("/usr/lib/ignis/std/collections/vec/mod.ign"));
   }
 }

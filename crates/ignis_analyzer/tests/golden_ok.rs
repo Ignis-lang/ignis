@@ -41,10 +41,7 @@ extern function puts(s: string): i32;
 "#,
   );
 
-  assert_snapshot!(
-    "extern_function_diags",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("extern_function_diags", common::format_diagnostics(&result.output.diagnostics));
   assert_snapshot!("extern_function_hir", common::format_hir(&result));
 }
 
@@ -60,10 +57,7 @@ function main(): void {
 "#,
   );
 
-  assert_snapshot!(
-    "mutable_variable_diags",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("mutable_variable_diags", common::format_diagnostics(&result.output.diagnostics));
   assert_snapshot!("mutable_variable_hir", common::format_hir(&result));
 }
 
@@ -201,10 +195,7 @@ export function add(a: i32, b: i32): i32 {
 "#,
   );
 
-  assert_snapshot!(
-    "export_function_diags",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("export_function_diags", common::format_diagnostics(&result.output.diagnostics));
   assert_snapshot!("export_function_hir", common::format_hir(&result));
 }
 
@@ -221,10 +212,7 @@ function test(): i8 {
 "#,
   );
 
-  assert_snapshot!(
-    "literal_adapts_diags",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("literal_adapts_diags", common::format_diagnostics(&result.output.diagnostics));
   assert_snapshot!("literal_adapts_hir", common::format_hir(&result));
 }
 
@@ -240,9 +228,6 @@ function get_second(): i32 {
 "#,
   );
 
-  assert_snapshot!(
-    "const_array_diags",
-    common::format_diagnostics(&result.output.diagnostics)
-  );
+  assert_snapshot!("const_array_diags", common::format_diagnostics(&result.output.diagnostics));
   assert_snapshot!("const_array_hir", common::format_hir(&result));
 }

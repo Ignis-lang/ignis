@@ -19,11 +19,7 @@ pub fn analyze(src: &str) -> AnalysisResult {
 
   let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
-  assert!(
-    lexer.diagnostics.is_empty(),
-    "Lexer errors: {:?}",
-    lexer.diagnostics
-  );
+  assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
   let symbols = Rc::new(RefCell::new(SymbolTable::new()));
   let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
@@ -53,7 +49,7 @@ pub fn analyze_with_errors(src: &str) -> Option<AnalysisResult> {
     Ok((nodes, roots)) => {
       let output = Analyzer::analyze(&nodes, &roots, symbols);
       Some(AnalysisResult { output, source_map: sm })
-    }
+    },
     Err(_) => None,
   }
 }
@@ -73,14 +69,12 @@ pub fn assert_ok(src: &str) {
 
 /// Assert source produces specific error codes
 #[allow(dead_code)]
-pub fn assert_err(src: &str, expected_codes: &[&str]) {
+pub fn assert_err(
+  src: &str,
+  expected_codes: &[&str],
+) {
   let result = analyze(src);
-  let actual_codes: Vec<String> = result
-    .output
-    .diagnostics
-    .iter()
-    .map(|d| d.error_code.clone())
-    .collect();
+  let actual_codes: Vec<String> = result.output.diagnostics.iter().map(|d| d.error_code.clone()).collect();
 
   for code in expected_codes {
     assert!(
@@ -139,17 +133,15 @@ pub fn format_diagnostics(diags: &[Diagnostic]) -> String {
 /// Format HIR for stable snapshot comparison (uses sorted iteration)
 pub fn format_hir(result: &AnalysisResult) -> String {
   let symbols = result.output.symbols.borrow();
-  print_hir(
-    &result.output.hir,
-    &result.output.types,
-    &result.output.defs,
-    &symbols,
-  )
+  print_hir(&result.output.hir, &result.output.types, &result.output.defs, &symbols)
 }
 
 /// Get line number for a diagnostic (1-indexed)
 #[allow(dead_code)]
-pub fn diagnostic_line(result: &AnalysisResult, diag: &Diagnostic) -> u32 {
+pub fn diagnostic_line(
+  result: &AnalysisResult,
+  diag: &Diagnostic,
+) -> u32 {
   let (line, _col) = result
     .source_map
     .line_col(&diag.primary_span.file, diag.primary_span.start);
@@ -158,14 +150,14 @@ pub fn diagnostic_line(result: &AnalysisResult, diag: &Diagnostic) -> u32 {
 
 /// Assert a specific error code appears at a specific line
 #[allow(dead_code)]
-pub fn assert_diagnostic_at_line(src: &str, code: &str, expected_line: u32) {
+pub fn assert_diagnostic_at_line(
+  src: &str,
+  code: &str,
+  expected_line: u32,
+) {
   let result = analyze(src);
 
-  let matching = result
-    .output
-    .diagnostics
-    .iter()
-    .find(|d| d.error_code == code);
+  let matching = result.output.diagnostics.iter().find(|d| d.error_code == code);
 
   assert!(matching.is_some(), "Expected error {} not found", code);
 

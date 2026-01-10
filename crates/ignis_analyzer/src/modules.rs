@@ -110,7 +110,10 @@ impl ModuleGraph {
   ) -> PathBuf {
     // For std modules, try to get path from manifest first
     let manifest_path = path.std_module_name().and_then(|name| {
-      self.manifest.as_ref().and_then(|m| m.get_module_path(name).map(|s| s.as_str()))
+      self
+        .manifest
+        .as_ref()
+        .and_then(|m| m.get_module_path(name).map(|s| s.as_str()))
     });
 
     path.to_fs_path_with_manifest_path(&self.std_path, manifest_path)
@@ -533,7 +536,7 @@ mod tests {
 
   #[test]
   fn test_to_fs_path_with_manifest() {
-    use ignis_config::{IgnisSTDManifest, StdLinkingInfo};
+    use ignis_config::IgnisSTDManifest;
     use std::collections::HashMap;
 
     let mut modules = HashMap::new();

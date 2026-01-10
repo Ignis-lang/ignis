@@ -23,11 +23,7 @@ fn analyze_with_imports(
 
   let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
-  assert!(
-    lexer.diagnostics.is_empty(),
-    "Lexer errors: {:?}",
-    lexer.diagnostics
-  );
+  assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
   let symbols = Rc::new(RefCell::new(SymbolTable::new()));
   let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
@@ -43,11 +39,7 @@ fn analyze_library(src: &str) -> (AnalyzerOutput, Rc<RefCell<SymbolTable>>) {
 
   let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
-  assert!(
-    lexer.diagnostics.is_empty(),
-    "Lexer errors: {:?}",
-    lexer.diagnostics
-  );
+  assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
   let symbols = Rc::new(RefCell::new(SymbolTable::new()));
   let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
@@ -57,7 +49,10 @@ fn analyze_library(src: &str) -> (AnalyzerOutput, Rc<RefCell<SymbolTable>>) {
   (output, symbols)
 }
 
-fn has_error_code(output: &AnalyzerOutput, code: &str) -> bool {
+fn has_error_code(
+  output: &AnalyzerOutput,
+  code: &str,
+) -> bool {
   output.diagnostics.iter().any(|d| d.error_code == code)
 }
 
@@ -288,7 +283,10 @@ fn private_items_not_exported() {
 
   assert!(names.contains(&"public_fn".to_string()), "Should export 'public_fn'");
   assert!(!names.contains(&"private_fn".to_string()), "Should not export 'private_fn'");
-  assert!(!names.contains(&"PRIVATE_CONST".to_string()), "Should not export 'PRIVATE_CONST'");
+  assert!(
+    !names.contains(&"PRIVATE_CONST".to_string()),
+    "Should not export 'PRIVATE_CONST'"
+  );
 }
 
 // ============================================================================
@@ -399,7 +397,10 @@ mod std_imports {
       .join("std")
   }
 
-  fn create_test_config(std_path: PathBuf, quiet: bool) -> IgnisConfig {
+  fn create_test_config(
+    std_path: PathBuf,
+    quiet: bool,
+  ) -> IgnisConfig {
     // Load manifest from std
     let manifest_path = std_path.join("manifest.toml");
     let manifest = if manifest_path.exists() {
@@ -417,7 +418,11 @@ mod std_imports {
     }
   }
 
-  fn write_test_file(dir: &TempDir, name: &str, content: &str) -> PathBuf {
+  fn write_test_file(
+    dir: &TempDir,
+    name: &str,
+    content: &str,
+  ) -> PathBuf {
     let path = dir.path().join(name);
     let mut file = std::fs::File::create(&path).expect("Failed to create test file");
     file.write_all(content.as_bytes()).expect("Failed to write test file");
@@ -450,9 +455,11 @@ mod std_imports {
     assert!(result.is_ok(), "Module discovery should succeed");
 
     // Verify std::io was discovered
-    let has_io = ctx.module_graph.by_path.keys().any(|p| {
-      matches!(p, ignis_type::module::ModulePath::Std(name) if name == "io")
-    });
+    let has_io = ctx
+      .module_graph
+      .by_path
+      .keys()
+      .any(|p| matches!(p, ignis_type::module::ModulePath::Std(name) if name == "io"));
     assert!(has_io, "std::io module should be discovered");
   }
 
@@ -480,9 +487,11 @@ mod std_imports {
     let result = ctx.discover_modules(test_path.to_str().unwrap(), &config);
     assert!(result.is_ok(), "Module discovery should succeed");
 
-    let has_math = ctx.module_graph.by_path.keys().any(|p| {
-      matches!(p, ignis_type::module::ModulePath::Std(name) if name == "math")
-    });
+    let has_math = ctx
+      .module_graph
+      .by_path
+      .keys()
+      .any(|p| matches!(p, ignis_type::module::ModulePath::Std(name) if name == "math"));
     assert!(has_math, "std::math module should be discovered");
   }
 
@@ -512,12 +521,16 @@ mod std_imports {
     assert!(result.is_ok(), "Module discovery should succeed");
 
     // Verify both modules were discovered
-    let has_io = ctx.module_graph.by_path.keys().any(|p| {
-      matches!(p, ignis_type::module::ModulePath::Std(name) if name == "io")
-    });
-    let has_math = ctx.module_graph.by_path.keys().any(|p| {
-      matches!(p, ignis_type::module::ModulePath::Std(name) if name == "math")
-    });
+    let has_io = ctx
+      .module_graph
+      .by_path
+      .keys()
+      .any(|p| matches!(p, ignis_type::module::ModulePath::Std(name) if name == "io"));
+    let has_math = ctx
+      .module_graph
+      .by_path
+      .keys()
+      .any(|p| matches!(p, ignis_type::module::ModulePath::Std(name) if name == "math"));
     assert!(has_io, "std::io module should be discovered");
     assert!(has_math, "std::math module should be discovered");
   }

@@ -71,11 +71,7 @@ impl IgnisParser {
         let type_start = self.peek().span.clone();
         let target_type = self.parse_type_syntax()?;
         let span = Span::merge(self.get_span(&left), &type_start);
-        left = self.allocate_expression(ASTExpression::Cast(ASTCast::new(
-          span,
-          target_type,
-          left,
-        )));
+        left = self.allocate_expression(ASTExpression::Cast(ASTCast::new(span, target_type, left)));
         continue;
       }
 
@@ -83,12 +79,7 @@ impl IgnisParser {
       let span = Span::merge(self.get_span(&left), self.get_span(&right));
 
       if let Some(assign_op) = Self::to_assignment_operator(&op) {
-        left = self.allocate_expression(ASTExpression::Assignment(ASTAssignment::new(
-          left,
-          right,
-          assign_op,
-          span,
-        )));
+        left = self.allocate_expression(ASTExpression::Assignment(ASTAssignment::new(left, right, assign_op, span)));
       } else {
         left = self.allocate_expression(ASTExpression::Binary(ASTBinary::new(
           left,
@@ -283,11 +274,7 @@ mod tests {
 
   use ignis_ast::{
     ASTNode, NodeId,
-    expressions::{
-      ASTExpression,
-      binary::ASTBinaryOperator,
-      unary::UnaryOperator,
-    },
+    expressions::{ASTExpression, binary::ASTBinaryOperator, unary::UnaryOperator},
     statements::ASTStatement,
   };
   use ignis_type::{Store, file::SourceMap, symbol::SymbolTable, value::IgnisLiteralValue};

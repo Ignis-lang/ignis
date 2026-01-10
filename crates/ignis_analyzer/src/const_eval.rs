@@ -172,9 +172,7 @@ impl<'a> Analyzer<'a> {
             _ => None,
           }
         },
-        ASTExpression::Grouped(grouped) => {
-          self.const_eval_expression_node(&grouped.expression, scope_kind)
-        },
+        ASTExpression::Grouped(grouped) => self.const_eval_expression_node(&grouped.expression, scope_kind),
         _ => None,
       },
       ASTNode::Statement(_) => None,
@@ -234,8 +232,14 @@ fn const_eval_binary(
       ASTBinaryOperator::BitAnd => Some(ConstValue::Int(l & r)),
       ASTBinaryOperator::BitOr => Some(ConstValue::Int(l | r)),
       ASTBinaryOperator::BitXor => Some(ConstValue::Int(l ^ r)),
-      ASTBinaryOperator::ShiftLeft => u32::try_from(r).ok().and_then(|shift| l.checked_shl(shift)).map(ConstValue::Int),
-      ASTBinaryOperator::ShiftRight => u32::try_from(r).ok().and_then(|shift| l.checked_shr(shift)).map(ConstValue::Int),
+      ASTBinaryOperator::ShiftLeft => u32::try_from(r)
+        .ok()
+        .and_then(|shift| l.checked_shl(shift))
+        .map(ConstValue::Int),
+      ASTBinaryOperator::ShiftRight => u32::try_from(r)
+        .ok()
+        .and_then(|shift| l.checked_shr(shift))
+        .map(ConstValue::Int),
       _ => None,
     },
     (Some(ConstValue::Float(l)), Some(ConstValue::Float(r))) => {

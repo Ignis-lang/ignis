@@ -205,17 +205,15 @@ impl<'a> Analyzer<'a> {
         self.types.vector(local_element, *size)
       },
       Type::Tuple(elements) => {
-        let local_elements: Vec<TypeId> = elements
-          .iter()
-          .map(|e| self.translate_type(e, source_types))
-          .collect();
+        let local_elements: Vec<TypeId> = elements.iter().map(|e| self.translate_type(e, source_types)).collect();
         self.types.tuple(local_elements)
       },
-      Type::Function { params, ret, is_variadic } => {
-        let local_params: Vec<TypeId> = params
-          .iter()
-          .map(|p| self.translate_type(p, source_types))
-          .collect();
+      Type::Function {
+        params,
+        ret,
+        is_variadic,
+      } => {
+        let local_params: Vec<TypeId> = params.iter().map(|p| self.translate_type(p, source_types)).collect();
         let local_return = self.translate_type(ret, source_types);
         self.types.function(local_params, local_return, *is_variadic)
       },

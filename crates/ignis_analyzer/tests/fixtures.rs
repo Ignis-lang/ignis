@@ -17,14 +17,12 @@ fn test_fixture(path: &str) {
 
   let result = common::analyze(&src);
 
-  let name = Path::new(path)
-    .file_stem()
-    .unwrap()
-    .to_str()
-    .unwrap()
-    .replace('-', "_");
+  let name = Path::new(path).file_stem().unwrap().to_str().unwrap().replace('-', "_");
 
-  assert_snapshot!(format!("fixture_{}_diags", name), common::format_diagnostics(&result.output.diagnostics));
+  assert_snapshot!(
+    format!("fixture_{}_diags", name),
+    common::format_diagnostics(&result.output.diagnostics)
+  );
 }
 
 // --- Mutability Tests ---

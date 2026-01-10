@@ -11,14 +11,20 @@ pub enum Termination {
 
 impl Termination {
   /// Both branches must terminate for parallel merge to terminate.
-  fn merge_parallel(self, other: Self) -> Self {
+  fn merge_parallel(
+    self,
+    other: Self,
+  ) -> Self {
     match (self, other) {
       (Termination::Always, Termination::Always) => Termination::Always,
       _ => Termination::Sometimes,
     }
   }
 
-  fn merge_sequential(self, other: Self) -> Self {
+  fn merge_sequential(
+    self,
+    other: Self,
+  ) -> Self {
     match self {
       Termination::Always => self,
       Termination::Sometimes => other,
@@ -152,12 +158,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Break(brk) => {
         if !in_loop {
-          self.add_diagnostic(
-            DiagnosticMessage::BreakOutsideLoop {
-              span: brk.span.clone(),
-            }
-            .report(),
-          );
+          self.add_diagnostic(DiagnosticMessage::BreakOutsideLoop { span: brk.span.clone() }.report());
         }
       },
       ASTStatement::Continue(cont) => {
@@ -172,12 +173,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Return(ret) => {
         if !in_function {
-          self.add_diagnostic(
-            DiagnosticMessage::ReturnOutsideFunction {
-              span: ret.span.clone(),
-            }
-            .report(),
-          );
+          self.add_diagnostic(DiagnosticMessage::ReturnOutsideFunction { span: ret.span.clone() }.report());
         }
         if let Some(value) = &ret.expression {
           self.extra_checks_node(value, scope_kind, in_loop, in_function);
