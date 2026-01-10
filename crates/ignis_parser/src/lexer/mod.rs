@@ -110,24 +110,47 @@ impl<'a> IgnisLexer<'a> {
       '+' if self.match_char('+') => Ok(TokenType::Increment),
       '+' if self.peek().is_ascii_digit() => self.number(),
       '+' => Ok(TokenType::Plus),
+      '*' if self.match_char('=') => Ok(TokenType::MulAssign),
       '*' => Ok(TokenType::Asterisk),
       ':' if self.match_char(':') => Ok(TokenType::DoubleColon),
       ':' => Ok(TokenType::Colon),
+      '%' if self.match_char('=') => Ok(TokenType::ModAssign),
       '%' => Ok(TokenType::Mod),
       '!' if self.match_char('=') => Ok(TokenType::BangEqual),
       '!' => Ok(TokenType::Bang),
       '=' if self.match_char('=') => Ok(TokenType::EqualEqual),
       '=' => Ok(TokenType::Equal),
+      '<' if self.match_char('<') => {
+        if self.match_char('=') {
+          Ok(TokenType::LeftShiftAssign)
+        } else {
+          Ok(TokenType::LeftShift)
+        }
+      },
       '<' if self.match_char('=') => Ok(TokenType::LessEqual),
       '<' => Ok(TokenType::Less),
+      '>' if self.match_char('>') => {
+        if self.match_char('=') {
+          Ok(TokenType::RightShiftAssign)
+        } else {
+          Ok(TokenType::RightShift)
+        }
+      },
       '>' if self.match_char('=') => Ok(TokenType::GreaterEqual),
       '>' => Ok(TokenType::Greater),
       '|' if self.match_char('|') => Ok(TokenType::Or),
+      '|' if self.match_char('=') => Ok(TokenType::OrAssign),
       '|' => Ok(TokenType::Pipe),
       '&' if self.match_char('&') => Ok(TokenType::And),
+      '&' if self.match_char('=') => Ok(TokenType::AndAssign),
       '&' => Ok(TokenType::Ampersand),
+      '^' if self.match_char('=') => Ok(TokenType::XorAssign),
+      '^' => Ok(TokenType::Caret),
+      '~' if self.match_char('=') => Ok(TokenType::NotAssign),
+      '~' => Ok(TokenType::Tilde),
       '#' => Ok(TokenType::Hash),
       '?' => Ok(TokenType::QuestionMark),
+      '/' if self.match_char('=') => Ok(TokenType::DivAssign),
       '/' if self.peek() == '/' || self.peek() == '*' => self.comments(),
       '/' => Ok(TokenType::Slash),
       '"' => self.string(),

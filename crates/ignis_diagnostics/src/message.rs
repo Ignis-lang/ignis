@@ -163,6 +163,11 @@ pub enum DiagnosticMessage {
     type_name: String,
     span: Span,
   },
+  IndexOutOfBounds {
+    index: i64,
+    size: usize,
+    span: Span,
+  },
   NotCallable {
     type_name: String,
     span: Span,
@@ -403,6 +408,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::AccessNonVector { type_name, .. } => {
         write!(f, "Cannot index non-vector type '{}'", type_name)
       },
+      DiagnosticMessage::IndexOutOfBounds { index, size, .. } => {
+        write!(f, "Index {} is out of bounds for array of size {}", index, size)
+      },
       DiagnosticMessage::NotCallable { type_name, .. } => {
         write!(f, "Cannot call non-function type '{}'", type_name)
       },
@@ -576,6 +584,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::DereferenceNonPointer { span, .. }
       | DiagnosticMessage::VectorIndexNonInteger { span, .. }
       | DiagnosticMessage::AccessNonVector { span, .. }
+      | DiagnosticMessage::IndexOutOfBounds { span, .. }
       | DiagnosticMessage::NotCallable { span, .. }
       | DiagnosticMessage::UnreachableCode { span, .. }
       | DiagnosticMessage::ExternWithBody { span, .. }
@@ -663,6 +672,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::DereferenceNonPointer { .. } => "A0021",
       DiagnosticMessage::VectorIndexNonInteger { .. } => "A0022",
       DiagnosticMessage::AccessNonVector { .. } => "A0023",
+      DiagnosticMessage::IndexOutOfBounds { .. } => "A0048",
       DiagnosticMessage::NotCallable { .. } => "A0024",
 
       // Analyzer Control Flow & Semantic Errors

@@ -110,7 +110,7 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  fn const_eval_expression_node(
+  pub(crate) fn const_eval_expression_node(
     &self,
     node_id: &NodeId,
     scope_kind: ScopeKind,

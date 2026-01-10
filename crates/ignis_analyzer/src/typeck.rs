@@ -9,7 +9,12 @@ use ignis_diagnostics::{
   diagnostic_report::{Diagnostic, Severity},
   message::DiagnosticMessage,
 };
-use ignis_type::{definition::DefinitionKind, span::Span, types::TypeId, value::IgnisLiteralValue};
+use ignis_type::{
+  definition::{ConstValue, DefinitionKind},
+  span::Span,
+  types::TypeId,
+  value::IgnisLiteralValue,
+};
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
 use ignis_ast::expressions::binary::ASTBinaryOperator;
 use ignis_ast::expressions::unary::UnaryOperator;
@@ -350,11 +355,45 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::VectorAccess(access) => {
         let base_type = self.typecheck_node(&access.name, scope_kind, ctx);
-        self.typecheck_node(&access.index, scope_kind, ctx);
+        let index_type = self.typecheck_node(&access.index, scope_kind, ctx);
 
-        if let ignis_type::types::Type::Vector { element, .. } = self.types.get(&base_type).clone() {
+        if !self.is_integer_type(&index_type) {
+          self.add_diagnostic(
+            DiagnosticMessage::VectorIndexNonInteger {
+              index_type: self.format_type_for_error(&index_type),
+              span: access.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        if let ignis_type::types::Type::Vector { element, size } = self.types.get(&base_type).clone() {
+          // Compile-time bounds checking for constant indices
+          if let Some(array_size) = size {
+            if let Some(ConstValue::Int(index_val)) = self.const_eval_expression_node(&access.index, scope_kind) {
+              if index_val < 0 || (index_val as usize) >= array_size {
+                self.add_diagnostic(
+                  DiagnosticMessage::IndexOutOfBounds {
+                    index: index_val,
+                    size: array_size,
+                    span: access.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+            }
+          }
           element
         } else {
+          if !self.types.is_error(&base_type) {
+            self.add_diagnostic(
+              DiagnosticMessage::AccessNonVector {
+                type_name: self.format_type_for_error(&base_type),
+                span: access.span.clone(),
+              }
+              .report(),
+            );
+          }
           self.types.error()
         }
       },

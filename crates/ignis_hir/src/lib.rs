@@ -130,7 +130,11 @@ impl HIRKind {
           *expr = HIRId::new(expr.index() + offset);
         }
       },
-      HIRKind::If { condition, then_branch, else_branch } => {
+      HIRKind::If {
+        condition,
+        then_branch,
+        else_branch,
+      } => {
         *condition = HIRId::new(condition.index() + offset);
         *then_branch = HIRId::new(then_branch.index() + offset);
         if let Some(eb) = else_branch {

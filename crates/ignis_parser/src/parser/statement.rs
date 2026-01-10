@@ -198,6 +198,12 @@ impl super::IgnisParser {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
 
+    let type_annotation = if self.eat(TokenType::Colon) {
+      self.parse_type_syntax()?
+    } else {
+      ignis_ast::type_::IgnisTypeSyntax::Unknown
+    };
+
     self.expect(TokenType::Equal)?;
     let initializer = self.parse_expression(0)?;
 
@@ -205,13 +211,7 @@ impl super::IgnisParser {
 
     let metadata = ignis_ast::metadata::ASTMetadata::VARIABLE | ignis_ast::metadata::ASTMetadata::MUTABLE;
 
-    let variable = ASTVariable::new(
-      name,
-      Some(initializer),
-      ignis_ast::type_::IgnisTypeSyntax::Unknown,
-      span,
-      metadata,
-    );
+    let variable = ASTVariable::new(name, Some(initializer), type_annotation, span, metadata);
 
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
   }

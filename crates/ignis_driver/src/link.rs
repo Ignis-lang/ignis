@@ -172,6 +172,20 @@ impl LinkPlan {
   }
 }
 
+pub fn format_tool_error(
+  tool: &str,
+  action: &str,
+  stderr: &str,
+) -> String {
+  format!(
+    "{} {} {} failed:\n{}",
+    "Error:".red().bold(),
+    tool.yellow(),
+    action,
+    stderr.trim()
+  )
+}
+
 /// Compile a C file to an object file using gcc.
 pub fn compile_to_object(
   c_path: &Path,
@@ -199,7 +213,7 @@ pub fn compile_to_object(
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("gcc compilation failed:\n{}", stderr));
+    return Err(format_tool_error("gcc", "compilation", &stderr));
   }
 
   Ok(())
@@ -243,7 +257,7 @@ pub fn link_executable(
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("gcc linking failed:\n{}", stderr));
+    return Err(format_tool_error("gcc", "linking", &stderr));
   }
 
   Ok(())
@@ -273,7 +287,7 @@ pub fn rebuild_std_runtime(
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("make failed:\n{}", stderr));
+    return Err(format_tool_error("make", "rebuild", &stderr));
   }
 
   Ok(())
@@ -402,11 +416,20 @@ mod tests {
     assert_eq!(plan.headers.len(), 3);
     assert_eq!(plan.headers[0].path, "runtime/types/types.h");
     assert!(plan.headers.iter().any(|h| h.path == "runtime/io/io.h" && h.quoted));
-    assert!(plan.headers.iter().any(|h| h.path == "runtime/string/string.h" && h.quoted));
+    assert!(
+      plan
+        .headers
+        .iter()
+        .any(|h| h.path == "runtime/string/string.h" && h.quoted)
+    );
 
     assert_eq!(plan.objects.len(), 2);
     assert!(plan.objects.contains(&PathBuf::from("/std/runtime/io/libignis_io.o")));
-    assert!(plan.objects.contains(&PathBuf::from("/std/runtime/string/libignis_string.o")));
+    assert!(
+      plan
+        .objects
+        .contains(&PathBuf::from("/std/runtime/string/libignis_string.o"))
+    );
   }
 
   #[test]

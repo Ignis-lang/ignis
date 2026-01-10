@@ -10,7 +10,7 @@ use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
 
 use crate::context::CompilationContext;
-use crate::link::{compile_to_object, link_executable, rebuild_std_runtime, LinkPlan};
+use crate::link::{compile_to_object, format_tool_error, link_executable, rebuild_std_runtime, LinkPlan};
 
 /// Compile a single file (used for simple single-file compilation without imports)
 pub fn compile_file(
@@ -188,8 +188,7 @@ pub fn compile_project(
       } else {
         Some(&config.manifest)
       };
-      let link_plan =
-        LinkPlan::from_modules(&used_modules, &ctx.module_graph, Path::new(&config.std_path), manifest);
+      let link_plan = LinkPlan::from_modules(&used_modules, &ctx.module_graph, Path::new(&config.std_path), manifest);
 
       if bc.rebuild_std {
         if let Err(e) = rebuild_std_runtime(Path::new(&config.std_path), config.quiet) {
@@ -207,8 +206,13 @@ pub fn compile_project(
         .copied()
         .collect();
 
-      let (lir_program, verify_result) =
-        ignis_lir::lowering::lower_and_verify(&output.hir, &mut types, &output.defs, &sym_table, Some(&project_modules));
+      let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
+        &output.hir,
+        &mut types,
+        &output.defs,
+        &sym_table,
+        Some(&project_modules),
+      );
 
       if bc.dump_lir {
         let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &output.defs, &sym_table);
@@ -244,7 +248,12 @@ pub fn compile_project(
           let output_dir = Path::new(&bc.output_dir);
           if !output_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(output_dir) {
-              eprintln!("{} Failed to create output directory '{}': {}", "Error:".red().bold(), bc.output_dir, e);
+              eprintln!(
+                "{} Failed to create output directory '{}': {}",
+                "Error:".red().bold(),
+                bc.output_dir,
+                e
+              );
               return Err(());
             }
           }
@@ -309,7 +318,10 @@ pub fn build_std(
   use ignis_type::module::ModuleId;
 
   if config.std_path.is_empty() {
-    eprintln!("{} std_path not set. Use --std-path or set IGNIS_STD_PATH env var", "Error:".red().bold());
+    eprintln!(
+      "{} std_path not set. Use --std-path or set IGNIS_STD_PATH env var",
+      "Error:".red().bold()
+    );
     return Err(());
   }
 
@@ -321,7 +333,11 @@ pub fn build_std(
   }
 
   if config.manifest.modules.is_empty() {
-    eprintln!("{} No modules found in std manifest at '{}/manifest.toml'", "Error:".red().bold(), std_path.display());
+    eprintln!(
+      "{} No modules found in std manifest at '{}/manifest.toml'",
+      "Error:".red().bold(),
+      std_path.display()
+    );
     return Err(());
   }
 
@@ -332,7 +348,12 @@ pub fn build_std(
   let output_path = Path::new(output_dir);
   if !output_path.exists() {
     if let Err(e) = std::fs::create_dir_all(output_path) {
-      eprintln!("{} Failed to create output directory '{}': {}", "Error:".red().bold(), output_path.display(), e);
+      eprintln!(
+        "{} Failed to create output directory '{}': {}",
+        "Error:".red().bold(),
+        output_path.display(),
+        e
+      );
       return Err(());
     }
   }
@@ -353,7 +374,12 @@ pub fn build_std(
   let header_content = ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table);
   let header_path = output_path.join("ignis_std.h");
   if let Err(e) = std::fs::write(&header_path, &header_content) {
-    eprintln!("{} Failed to write header file '{}': {}", "Error:".red().bold(), header_path.display(), e);
+    eprintln!(
+      "{} Failed to write header file '{}': {}",
+      "Error:".red().bold(),
+      header_path.display(),
+      e
+    );
     return Err(());
   }
 
@@ -376,11 +402,20 @@ pub fn build_std(
 
     let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
     let mut types = output.types.clone();
-    let (lir_program, verify_result) =
-      ignis_lir::lowering::lower_and_verify(&output.hir, &mut types, &output.defs, &sym_table, Some(&single_module_set));
+    let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
+      &output.hir,
+      &mut types,
+      &output.defs,
+      &sym_table,
+      Some(&single_module_set),
+    );
 
     if let Err(errors) = &verify_result {
-      eprintln!("{} LIR verification errors for module '{}':", "Warning:".yellow().bold(), module_name);
+      eprintln!(
+        "{} LIR verification errors for module '{}':",
+        "Warning:".yellow().bold(),
+        module_name
+      );
       for err in errors {
         eprintln!("  {:?}", err);
       }
@@ -430,9 +465,7 @@ fn ensure_std_built(
   module_graph: &ignis_analyzer::modules::ModuleGraph,
   config: &Arc<IgnisConfig>,
 ) -> Result<(), ()> {
-  let uses_std = used_modules.iter().any(|id| {
-    module_graph.modules.get(id).path.is_std()
-  });
+  let uses_std = used_modules.iter().any(|id| module_graph.modules.get(id).path.is_std());
 
   if !uses_std {
     return Ok(());
@@ -479,7 +512,7 @@ fn create_static_archive_multi(
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("ar failed:\n{}", stderr));
+    return Err(format_tool_error("ar", "archive creation", &stderr));
   }
 
   Ok(())

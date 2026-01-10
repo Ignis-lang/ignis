@@ -24,7 +24,11 @@ impl LoopKind {
       LoopKind::While { condition } => {
         *condition = HIRId::new(condition.index() + offset);
       },
-      LoopKind::For { init, condition, update } => {
+      LoopKind::For {
+        init,
+        condition,
+        update,
+      } => {
         if let Some(id) = init {
           *id = HIRId::new(id.index() + offset);
         }

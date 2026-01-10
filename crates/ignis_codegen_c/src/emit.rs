@@ -341,9 +341,9 @@ impl<'a> CEmitter<'a> {
           writeln!(self.output, "return {};", val).unwrap();
         } else {
           // C main must return int - if we're in main with void return, emit return 0
-          let is_main = self.current_fn_id.map_or(false, |id| {
-            Some(id) == self.program.entry_point && self.def_name(id) == "main"
-          });
+          let is_main = self
+            .current_fn_id
+            .map_or(false, |id| Some(id) == self.program.entry_point && self.def_name(id) == "main");
           if is_main {
             writeln!(self.output, "return 0;").unwrap();
           } else {
@@ -395,14 +395,12 @@ impl<'a> CEmitter<'a> {
     func: &FunctionLir,
     op: &Operand,
   ) -> bool {
-    self.operand_type(func, op).map_or(false, |t| {
-      match self.types.get(&t) {
-        Type::Unknown => true,
-        Type::Reference { inner, .. } | Type::Pointer(inner) => {
-          matches!(self.types.get(inner), Type::Unknown)
-        },
-        _ => false,
-      }
+    self.operand_type(func, op).map_or(false, |t| match self.types.get(&t) {
+      Type::Unknown => true,
+      Type::Reference { inner, .. } | Type::Pointer(inner) => {
+        matches!(self.types.get(inner), Type::Unknown)
+      },
+      _ => false,
     })
   }
 
@@ -569,7 +567,10 @@ pub fn emit_c(
 }
 
 /// Format a type as C type string using runtime type aliases.
-pub fn format_c_type(ty: &Type, types: &TypeStore) -> String {
+pub fn format_c_type(
+  ty: &Type,
+  types: &TypeStore,
+) -> String {
   match ty {
     Type::I8 => "i8".to_string(),
     Type::I16 => "i16".to_string(),

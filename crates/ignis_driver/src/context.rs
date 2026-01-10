@@ -284,9 +284,10 @@ impl CompilationContext {
     let mut all_diagnostics = Vec::new();
 
     for &module_id in order {
-      let parsed = self.parsed_modules.get(&module_id).unwrap_or_else(|| {
-        panic!("internal error: module {:?} not found in parsed_modules", module_id)
-      });
+      let parsed = self
+        .parsed_modules
+        .get(&module_id)
+        .unwrap_or_else(|| panic!("internal error: module {:?} not found in parsed_modules", module_id));
 
       let output = ignis_analyzer::Analyzer::analyze_with_shared_stores(
         &parsed.nodes,
