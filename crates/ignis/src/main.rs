@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::Parser as ClapParser;
-use ignis_parser::compile_project;
+use ignis_driver::compile_project;
 use std::{sync::Arc, fs::File, io::Read, path::Path};
 
 use cli::{Cli, SubCommand};
@@ -134,6 +134,7 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
           build.dump_defs,
           build.dump_hir.clone(),
           build.dump_hir_summary,
+          build.dump_lir,
         )));
     },
     SubCommand::Init(init) => {

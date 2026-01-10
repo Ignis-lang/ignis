@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
 
 use colored::*;
@@ -8,19 +7,18 @@ use ignis_analyzer::imports::ExportTable;
 use ignis_analyzer::modules::{ModuleError, ModuleGraph};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_config::IgnisConfig;
+use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::file::{FileId, SourceMap};
 use ignis_type::module::{Module, ModuleId, ModulePath};
 use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::Store;
 
-use crate::{IgnisLexer, parser::IgnisParser};
-
 /// Parsed module data
-struct ParsedModule {
-  file_id: FileId,
-  nodes: Store<ASTNode>,
-  roots: Vec<NodeId>,
-  import_paths: Vec<(Vec<SymbolId>, String, ignis_type::span::Span)>,
+pub(crate) struct ParsedModule {
+  pub file_id: FileId,
+  pub nodes: Store<ASTNode>,
+  pub roots: Vec<NodeId>,
+  pub import_paths: Vec<(Vec<SymbolId>, String, ignis_type::span::Span)>,
 }
 
 /// Discovery and compilation context
@@ -28,7 +26,7 @@ pub struct CompilationContext {
   pub source_map: SourceMap,
   pub symbol_table: Rc<RefCell<SymbolTable>>,
   pub module_graph: ModuleGraph,
-  parsed_modules: HashMap<ModuleId, ParsedModule>,
+  pub(crate) parsed_modules: HashMap<ModuleId, ParsedModule>,
   module_for_path: HashMap<String, ModuleId>,
 }
 
@@ -245,51 +243,4 @@ impl CompilationContext {
 
     last_output.ok_or(())
   }
-}
-
-pub fn compile_project(
-  config: Arc<IgnisConfig>,
-  entry_path: &str,
-) -> Result<(), ()> {
-  let mut ctx = CompilationContext::new(&config);
-  let root_id = ctx.discover_modules(entry_path, &config)?;
-  let output = ctx.compile(root_id, &config)?;
-
-  let sym_table = output.symbols.borrow();
-  if let Some(bc) = config.build_config.as_ref() {
-    if bc.dump_types {
-      println!("\n{}", ignis_analyzer::dump::dump_types(&output.types));
-    }
-    if bc.dump_defs {
-      println!("\n{}", ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table));
-    }
-    if bc.dump_hir_summary {
-      println!(
-        "\n{}",
-        ignis_analyzer::dump::dump_hir_summary(&output.hir, &output.defs, &sym_table)
-      );
-    }
-    if let Some(func_name) = &bc.dump_hir {
-      match ignis_analyzer::dump::dump_hir_function(&output.hir, &output.defs, &sym_table, func_name) {
-        Ok(out) => println!("\n{}", out),
-        Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
-      }
-    }
-  }
-
-  if config.debug.contains(&ignis_config::DebugPrint::Analyzer) {
-    println!("\n{}", "Type Store & Definitions:".bright_cyan().bold());
-    println!("{}", ignis_analyzer::dump::dump_types(&output.types));
-    println!("{}", ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table));
-  }
-
-  if config.debug.contains(&ignis_config::DebugPrint::Hir) {
-    println!("\n{}", "HIR:".bright_cyan().bold());
-    println!(
-      "{}",
-      ignis_analyzer::dump::dump_hir_complete(&output.hir, &output.types, &output.defs, &sym_table)
-    );
-  }
-
-  Ok(())
 }

@@ -95,6 +95,10 @@ pub struct BuildCommand {
   /// Dump HIR summary
   #[arg(long)]
   pub dump_hir_summary: bool,
+
+  /// Dump LIR (Low-level IR)
+  #[arg(long)]
+  pub dump_lir: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]

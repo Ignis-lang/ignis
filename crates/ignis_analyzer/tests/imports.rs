@@ -383,7 +383,7 @@ mod std_imports {
   use std::path::PathBuf;
 
   use ignis_config::{IgnisConfig, IgnisSTDManifest};
-  use ignis_parser::CompilationContext;
+  use ignis_driver::CompilationContext;
   use tempfile::TempDir;
 
   fn get_std_path() -> PathBuf {
