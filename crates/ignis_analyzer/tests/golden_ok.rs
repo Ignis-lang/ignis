@@ -207,3 +207,42 @@ export function add(a: i32, b: i32): i32 {
   );
   assert_snapshot!("export_function_hir", common::format_hir(&result));
 }
+
+#[test]
+fn literal_adapts_to_expected_type() {
+  let result = common::analyze(
+    r#"
+function test(): i8 {
+    let x: i8 = 42;
+    let y: i16 = 1000;
+    let z: f32 = 3.14;
+    return x;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "literal_adapts_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("literal_adapts_hir", common::format_hir(&result));
+}
+
+#[test]
+fn const_array() {
+  let result = common::analyze(
+    r#"
+const PRIMES: i32[4] = [2, 3, 5, 7];
+
+function get_second(): i32 {
+    return PRIMES[1];
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "const_array_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("const_array_hir", common::format_hir(&result));
+}

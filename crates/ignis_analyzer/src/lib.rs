@@ -26,7 +26,7 @@ use imports::ExportTable;
 
 pub use scope::{ScopeTree, ScopeId, ScopeKind};
 
-/// Context passed through type checking for function-scoped information
+/// Context passed through type checking for function-scoped information.
 #[derive(Clone, Default)]
 pub struct TypecheckContext {
   pub expected_return: Option<TypeId>,
@@ -39,6 +39,22 @@ impl TypecheckContext {
 
   pub fn with_return(ret: TypeId) -> Self {
     Self { expected_return: Some(ret) }
+  }
+}
+
+/// Context for bidirectional type inference.
+#[derive(Clone, Default)]
+pub struct InferContext {
+  pub expected: Option<TypeId>,
+}
+
+impl InferContext {
+  pub fn none() -> Self {
+    Self { expected: None }
+  }
+
+  pub fn expecting(ty: TypeId) -> Self {
+    Self { expected: Some(ty) }
   }
 }
 

@@ -1,4 +1,5 @@
 use core::marker::PhantomData;
+use std::hash::{Hash, Hasher};
 
 pub mod definition;
 pub mod file;
@@ -9,10 +10,41 @@ pub mod types;
 pub mod value;
 
 #[repr(transparent)]
-#[derive(Eq, PartialEq, Hash, Debug, Default)]
+#[derive(Debug)]
 pub struct Id<T> {
   index: u32,
   _phantom: PhantomData<fn() -> T>,
+}
+
+impl<T> Default for Id<T> {
+  fn default() -> Self {
+    Self {
+      index: 0,
+      _phantom: PhantomData,
+    }
+  }
+}
+
+impl<T> Copy for Id<T> {}
+
+impl<T> Clone for Id<T> {
+  fn clone(&self) -> Self {
+    *self
+  }
+}
+
+impl<T> PartialEq for Id<T> {
+  fn eq(&self, other: &Self) -> bool {
+    self.index == other.index
+  }
+}
+
+impl<T> Eq for Id<T> {}
+
+impl<T> Hash for Id<T> {
+  fn hash<H: Hasher>(&self, state: &mut H) {
+    self.index.hash(state);
+  }
 }
 
 impl<T> Id<T> {
@@ -28,15 +60,6 @@ impl<T> Id<T> {
   }
 }
 
-impl<T> Copy for Id<T> {}
-
-impl<T> Clone for Id<T> {
-  fn clone(&self) -> Self {
-    *self
-  }
-}
-
-// Manually impl Send/Sync for Id
 unsafe impl<T> Send for Id<T> {}
 unsafe impl<T> Sync for Id<T> {}
 
@@ -52,7 +75,7 @@ impl std::fmt::Display for BytePosition {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Store<T> {
   data: Vec<T>,
 }

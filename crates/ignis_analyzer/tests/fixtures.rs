@@ -51,6 +51,11 @@ fn fixture_valid_borrows() {
   test_fixture("test_cases/analyzer/borrows/valid_borrows.ign");
 }
 
+#[test]
+fn fixture_mutate_while_borrowed() {
+  test_fixture("test_cases/analyzer/borrows/mutate_while_borrowed.ign");
+}
+
 // --- Cast Tests ---
 
 #[test]

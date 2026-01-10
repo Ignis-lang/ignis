@@ -1,4 +1,4 @@
-use crate::{Analyzer, ScopeKind, TypecheckContext};
+use crate::{Analyzer, InferContext, ScopeKind, TypecheckContext};
 use ignis_ast::{
   expressions::{ASTCallExpression, ASTExpression, ASTLiteral},
   statements::ASTStatement,
@@ -29,6 +29,16 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
   ) -> TypeId {
+    self.typecheck_node_with_infer(node_id, scope_kind, ctx, &InferContext::none())
+  }
+
+  fn typecheck_node_with_infer(
+    &mut self,
+    node_id: &NodeId,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+    infer: &InferContext,
+  ) -> TypeId {
     if let Some(ty) = self.lookup_type(&node_id) {
       return ty.clone();
     }
@@ -36,7 +46,7 @@ impl<'a> Analyzer<'a> {
     let node = self.ast.get(&node_id);
     let ty = match node {
       ASTNode::Statement(stmt) => self.typecheck_statement(node_id, stmt, scope_kind, ctx),
-      ASTNode::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx),
+      ASTNode::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx, infer),
     }
     .clone();
 
@@ -68,7 +78,8 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(value_id) = &var.value {
-          let value_type = self.typecheck_node(value_id, scope_kind, ctx);
+          let infer = InferContext::expecting(var_type.clone());
+          let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
           self.typecheck_assignment(&var_type, &value_type, &var.span);
         }
 
@@ -129,7 +140,8 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(value_id) = &const_.value {
-          let value_type = self.typecheck_node(value_id, scope_kind, ctx);
+          let infer = InferContext::expecting(const_type.clone());
+          let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
           self.typecheck_assignment(&const_type, &value_type, &const_.span);
         }
 
@@ -198,7 +210,8 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Return(ret) => {
         if let Some(expected_return_type) = ctx.expected_return.clone() {
           if let Some(value) = &ret.expression {
-            let value_type = self.typecheck_node(&value, scope_kind, ctx);
+            let infer = InferContext::expecting(expected_return_type.clone());
+            let value_type = self.typecheck_node_with_infer(&value, scope_kind, ctx, &infer);
 
             if !self.types.types_equal(&expected_return_type, &value_type) {
               let expected = self.format_type_for_error(&expected_return_type);
@@ -231,7 +244,7 @@ impl<'a> Analyzer<'a> {
 
         self.types.never()
       },
-      ASTStatement::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx),
+      ASTStatement::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx, &InferContext::none()),
       ASTStatement::Break(_) | ASTStatement::Continue(_) => self.types.never(),
       ASTStatement::Extern(extern_stmt) => {
         self.typecheck_node(&extern_stmt.item, scope_kind, ctx);
@@ -254,9 +267,10 @@ impl<'a> Analyzer<'a> {
     expr: &ASTExpression,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> TypeId {
     match expr {
-      ASTExpression::Literal(lit) => self.typecheck_literal(lit),
+      ASTExpression::Literal(lit) => self.typecheck_literal(lit, infer),
       ASTExpression::Variable(var) => {
         if let Some(def_id) = self.scopes.lookup(&var.name).cloned() {
           self.get_definition_type(&def_id)
@@ -404,26 +418,122 @@ impl<'a> Analyzer<'a> {
   }
 
   fn typecheck_literal(
-    &self,
+    &mut self,
     lit: &ASTLiteral,
+    infer: &InferContext,
   ) -> TypeId {
     match &lit.value {
+      IgnisLiteralValue::Int32(v) => {
+        if let Some(expected) = &infer.expected {
+          if self.is_integer_type(expected) {
+            let v64 = *v as i64;
+            if self.int_fits_in_type(v64, expected) {
+              return expected.clone();
+            } else {
+              self.add_diagnostic(
+                DiagnosticMessage::IntegerOverflow {
+                  value: v64,
+                  target_type: self.format_type_for_error(expected),
+                  span: lit.span.clone(),
+                }
+                .report(),
+              );
+              return self.types.error();
+            }
+          }
+        }
+        self.types.i32()
+      },
+      IgnisLiteralValue::Int64(v) => {
+        if let Some(expected) = &infer.expected {
+          if self.is_integer_type(expected) {
+            if self.int_fits_in_type(*v, expected) {
+              return expected.clone();
+            } else {
+              self.add_diagnostic(
+                DiagnosticMessage::IntegerOverflow {
+                  value: *v,
+                  target_type: self.format_type_for_error(expected),
+                  span: lit.span.clone(),
+                }
+                .report(),
+              );
+              return self.types.error();
+            }
+          }
+        }
+        self.types.i64()
+      },
+      IgnisLiteralValue::Float64(_) => {
+        if let Some(expected) = &infer.expected {
+          if self.is_float_type(expected) {
+            return expected.clone();
+          }
+        }
+        self.types.f64()
+      },
+      IgnisLiteralValue::Float32(_) => {
+        if let Some(expected) = &infer.expected {
+          if self.is_float_type(expected) {
+            return expected.clone();
+          }
+        }
+        self.types.f32()
+      },
       IgnisLiteralValue::Int8(_) => self.types.i8(),
       IgnisLiteralValue::Int16(_) => self.types.i16(),
-      IgnisLiteralValue::Int32(_) => self.types.i32(),
-      IgnisLiteralValue::Int64(_) => self.types.i64(),
       IgnisLiteralValue::UnsignedInt8(_) => self.types.u8(),
       IgnisLiteralValue::UnsignedInt16(_) => self.types.u16(),
       IgnisLiteralValue::UnsignedInt32(_) => self.types.u32(),
       IgnisLiteralValue::UnsignedInt64(_) => self.types.u64(),
-      IgnisLiteralValue::Float32(_) => self.types.f32(),
-      IgnisLiteralValue::Float64(_) => self.types.f64(),
       IgnisLiteralValue::Boolean(_) => self.types.boolean(),
       IgnisLiteralValue::Char(_) => self.types.char(),
       IgnisLiteralValue::String(_) => self.types.string(),
       IgnisLiteralValue::Hex(_) => self.types.u32(),
       IgnisLiteralValue::Binary(_) => self.types.u8(),
       IgnisLiteralValue::Null => self.types.error(),
+    }
+  }
+
+  fn is_integer_type(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(
+      self.types.get(ty),
+      ignis_type::types::Type::I8
+        | ignis_type::types::Type::I16
+        | ignis_type::types::Type::I32
+        | ignis_type::types::Type::I64
+        | ignis_type::types::Type::U8
+        | ignis_type::types::Type::U16
+        | ignis_type::types::Type::U32
+        | ignis_type::types::Type::U64
+    )
+  }
+
+  fn is_float_type(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(self.types.get(ty), ignis_type::types::Type::F32 | ignis_type::types::Type::F64)
+  }
+
+  fn int_fits_in_type(
+    &self,
+    value: i64,
+    ty: &TypeId,
+  ) -> bool {
+    match self.types.get(ty) {
+      ignis_type::types::Type::I8 => value >= i8::MIN as i64 && value <= i8::MAX as i64,
+      ignis_type::types::Type::I16 => value >= i16::MIN as i64 && value <= i16::MAX as i64,
+      ignis_type::types::Type::I32 => value >= i32::MIN as i64 && value <= i32::MAX as i64,
+      ignis_type::types::Type::I64 => true,
+      ignis_type::types::Type::U8 => value >= 0 && value <= u8::MAX as i64,
+      ignis_type::types::Type::U16 => value >= 0 && value <= u16::MAX as i64,
+      ignis_type::types::Type::U32 => value >= 0 && value <= u32::MAX as i64,
+      ignis_type::types::Type::U64 => value >= 0,
+      _ => false,
     }
   }
 

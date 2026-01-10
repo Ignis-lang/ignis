@@ -80,6 +80,16 @@ impl BorrowChecker {
       BorrowState::Mut => Err(BorrowError::MutWhileMutable),
     }
   }
+
+  fn is_borrowed(
+    &self,
+    def_id: &DefinitionId,
+  ) -> bool {
+    matches!(
+      self.state.get(def_id),
+      Some(BorrowState::Imm(_)) | Some(BorrowState::Mut)
+    )
+  }
 }
 
 impl<'a> Analyzer<'a> {
@@ -254,6 +264,19 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Assignment(assign) => {
         self.borrowcheck_node(&assign.target, checker, scope_kind);
         self.borrowcheck_node(&assign.value, checker, scope_kind);
+
+        if let Some(def_id) = self.get_def_id_from_expr(&assign.target) {
+          if checker.is_borrowed(&def_id) {
+            let var_name = self.get_var_name_from_def(&def_id);
+            self.add_diagnostic(
+              DiagnosticMessage::MutatedWhileBorrowed {
+                var_name,
+                span: assign.span.clone(),
+              }
+              .report(),
+            );
+          }
+        }
       },
       ASTExpression::Binary(binary) => {
         self.borrowcheck_node(&binary.left, checker, scope_kind);
@@ -294,6 +317,11 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Extracts the DefinitionId from an expression if it is a simple variable or path.
+  ///
+  /// LIMITATION: Does not extract the root variable from compound expressions like
+  /// `arr[i]`, `*ptr`, or field access. This means mutations through these expressions
+  /// are not detected as borrow conflicts.
   fn get_def_id_from_expr(
     &self,
     node_id: &NodeId,

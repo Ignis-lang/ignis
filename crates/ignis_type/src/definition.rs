@@ -7,6 +7,8 @@ pub enum ConstValue {
   Bool(bool),
   Char(char),
   String(String),
+  Array(Vec<ConstValue>),
+  Tuple(Vec<ConstValue>),
   Null,
 }
 
@@ -60,7 +62,7 @@ pub struct ParameterDefinition {
   pub mutable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionStore {
   definitions: Store<Definition>,
 }

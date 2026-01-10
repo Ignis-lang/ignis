@@ -148,6 +148,33 @@ impl<'a> Analyzer<'a> {
           let operand = self.const_eval_expression_node(&unary.operand, scope_kind);
           const_eval_unary(&unary.operator, operand)
         },
+        ASTExpression::Vector(vector) => {
+          let values: Option<Vec<ConstValue>> = vector
+            .items
+            .iter()
+            .map(|item| self.const_eval_expression_node(item, scope_kind))
+            .collect();
+          values.map(ConstValue::Array)
+        },
+        ASTExpression::VectorAccess(access) => {
+          let array = self.const_eval_expression_node(&access.name, scope_kind)?;
+          let index = self.const_eval_expression_node(&access.index, scope_kind)?;
+
+          match (array, index) {
+            (ConstValue::Array(arr), ConstValue::Int(i)) => {
+              if i < 0 {
+                None
+              } else {
+                let idx = i as usize;
+                arr.get(idx).cloned()
+              }
+            },
+            _ => None,
+          }
+        },
+        ASTExpression::Grouped(grouped) => {
+          self.const_eval_expression_node(&grouped.expression, scope_kind)
+        },
         _ => None,
       },
       ASTNode::Statement(_) => None,

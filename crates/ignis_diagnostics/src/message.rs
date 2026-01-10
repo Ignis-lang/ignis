@@ -229,6 +229,10 @@ pub enum DiagnosticMessage {
     var_name: String,
     span: Span,
   },
+  MutatedWhileBorrowed {
+    var_name: String,
+    span: Span,
+  },
   // Control flow errors
   MissingReturnStatement {
     span: Span,
@@ -253,6 +257,11 @@ pub enum DiagnosticMessage {
   AssignmentTypeMismatch {
     expected: String,
     got: String,
+    span: Span,
+  },
+  IntegerOverflow {
+    value: i64,
+    target_type: String,
     span: Span,
   },
   // Import/Module errors
@@ -451,6 +460,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::BorrowConflictMutWhileMutable { var_name, .. } => {
         write!(f, "Cannot borrow '{}' as mutable because it is already borrowed as mutable", var_name)
       },
+      DiagnosticMessage::MutatedWhileBorrowed { var_name, .. } => {
+        write!(f, "Cannot assign to '{}' because it is borrowed", var_name)
+      },
 
       // Control flow errors
       DiagnosticMessage::MissingReturnStatement { .. } => {
@@ -475,6 +487,9 @@ impl fmt::Display for DiagnosticMessage {
       // Type checker errors
       DiagnosticMessage::AssignmentTypeMismatch { expected, got, .. } => {
         write!(f, "Type mismatch: expected '{}', found '{}'", expected, got)
+      },
+      DiagnosticMessage::IntegerOverflow { value, target_type, .. } => {
+        write!(f, "Integer literal {} overflows type '{}'", value, target_type)
       },
 
       // Import/Module errors
@@ -564,13 +579,15 @@ impl DiagnosticMessage {
       | DiagnosticMessage::BorrowConflictImmWhileMutable { span, .. }
       | DiagnosticMessage::BorrowConflictMutWhileImmutable { span, .. }
       | DiagnosticMessage::BorrowConflictMutWhileMutable { span, .. }
+      | DiagnosticMessage::MutatedWhileBorrowed { span, .. }
       | DiagnosticMessage::MissingReturnStatement { span, .. }
       | DiagnosticMessage::BreakOutsideLoop { span, .. }
       | DiagnosticMessage::ContinueOutsideLoop { span, .. }
       | DiagnosticMessage::ReturnOutsideFunction { span, .. }
       | DiagnosticMessage::CannotReturnLocalReference { span, .. }
       | DiagnosticMessage::UndefinedIdentifier { span, .. }
-      | DiagnosticMessage::AssignmentTypeMismatch { span, .. } => span.clone(),
+      | DiagnosticMessage::AssignmentTypeMismatch { span, .. }
+      | DiagnosticMessage::IntegerOverflow { span, .. } => span.clone(),
 
       DiagnosticMessage::ModuleNotFound { at, .. }
       | DiagnosticMessage::SymbolNotExported { at, .. }
@@ -657,6 +674,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::BorrowConflictImmWhileMutable { .. } => "A0036",
       DiagnosticMessage::BorrowConflictMutWhileImmutable { .. } => "A0037",
       DiagnosticMessage::BorrowConflictMutWhileMutable { .. } => "A0038",
+      DiagnosticMessage::MutatedWhileBorrowed { .. } => "A0047",
 
       // Control flow errors
       DiagnosticMessage::MissingReturnStatement { .. } => "A0039",
@@ -668,6 +686,7 @@ impl DiagnosticMessage {
 
       // Type checker errors
       DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
+      DiagnosticMessage::IntegerOverflow { .. } => "A0046",
 
       // Import/Module errors
       DiagnosticMessage::ModuleNotFound { .. } => "M0001",

@@ -271,3 +271,30 @@ function main(): void {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+#[test]
+fn integer_overflow() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let x: i8 = 256;
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+function main(): void {
+    let x: i8 = 256;
+    return;
+}
+"#,
+    &["A0046"],
+  );
+
+  assert_snapshot!(
+    "integer_overflow",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
