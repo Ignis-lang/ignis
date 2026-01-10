@@ -1,16 +1,18 @@
 #pragma once
 
+#include <stdint.h>
+
 // Unsigned types
-typedef unsigned char u8;
-typedef unsigned short u16;
-typedef unsigned int u32;
-typedef unsigned long u64;
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
 
 // Signed types
-typedef signed char i8;
-typedef signed short i16;
-typedef signed int i32;
-typedef signed long i64;
+typedef int8_t i8;
+typedef int16_t i16;
+typedef int32_t i32;
+typedef int64_t i64;
 
 // Floating point types
 typedef float f32;
@@ -25,9 +27,24 @@ typedef char *string;
 // Null pointer type
 typedef void *null;
 
-typedef u16 hex;
+#define TRUE 1
+#define FALSE 0
 
-#define NULL ((void*)0)
+// Type IDs for runtime type checking
+extern const u32 TYPE_I8_ID;
+extern const u32 TYPE_I16_ID;
+extern const u32 TYPE_I32_ID;
+extern const u32 TYPE_I64_ID;
+extern const u32 TYPE_U8_ID;
+extern const u32 TYPE_U16_ID;
+extern const u32 TYPE_U32_ID;
+extern const u32 TYPE_U64_ID;
+extern const u32 TYPE_F32_ID;
+extern const u32 TYPE_F64_ID;
+extern const u32 TYPE_BOOL_ID;
+extern const u32 TYPE_CHAR_ID;
+extern const u32 TYPE_STRING_ID;
+extern const u32 TYPE_UNKNOWN_ID;
 
-#define TRUE 0
-#define FALSE 1
+// Runtime type checking (stub - requires RTTI)
+u32 typeOf(void *value);
