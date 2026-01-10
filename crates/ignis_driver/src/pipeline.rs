@@ -174,18 +174,38 @@ pub fn compile_project(
         Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
       }
     }
-    if bc.dump_lir {
+    if bc.dump_lir || bc.emit_c.is_some() {
       let mut types = output.types.clone();
       let (lir_program, verify_result) =
         ignis_lir::lowering::lower_and_verify(&output.hir, &mut types, &output.defs, &sym_table);
 
-      let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &output.defs, &sym_table);
-      println!("\n{}", lir_output);
+      if bc.dump_lir {
+        let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &output.defs, &sym_table);
+        println!("\n{}", lir_output);
+      }
 
-      if let Err(errors) = verify_result {
+      if let Err(errors) = &verify_result {
         eprintln!("{} LIR verification errors:", "Warning:".yellow().bold());
         for err in errors {
           eprintln!("  {:?}", err);
+        }
+      }
+
+      if let Some(c_path) = &bc.emit_c {
+        if verify_result.is_err() {
+          eprintln!("{} Cannot emit C: LIR verification failed", "Error:".red().bold());
+          return Err(());
+        }
+
+        let c_code = ignis_codegen_c::emit_c(&lir_program, &types, &output.defs, &sym_table);
+
+        if let Err(e) = std::fs::write(c_path, &c_code) {
+          eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path, e);
+          return Err(());
+        }
+
+        if !config.quiet {
+          println!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path);
         }
       }
     }

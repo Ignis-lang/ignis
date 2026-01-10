@@ -59,12 +59,7 @@ pub fn lower_to_lir(src: &str) -> LirResult {
 /// Format LIR for stable snapshot comparison
 pub fn format_lir(result: &LirResult) -> String {
   let symbols = result.analyzer_output.symbols.borrow();
-  print_lir(
-    &result.program,
-    &result.types,
-    &result.analyzer_output.defs,
-    &symbols,
-  )
+  print_lir(&result.program, &result.types, &result.analyzer_output.defs, &symbols)
 }
 
 /// Assert LIR verifies without errors

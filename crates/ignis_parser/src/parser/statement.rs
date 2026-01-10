@@ -201,7 +201,13 @@ impl super::IgnisParser {
 
     let metadata = ignis_ast::metadata::ASTMetadata::VARIABLE | ignis_ast::metadata::ASTMetadata::MUTABLE;
 
-    let variable = ASTVariable::new(name, Some(initializer), ignis_ast::type_::IgnisTypeSyntax::Void, span, metadata);
+    let variable = ASTVariable::new(
+      name,
+      Some(initializer),
+      ignis_ast::type_::IgnisTypeSyntax::Unknown,
+      span,
+      metadata,
+    );
 
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
   }

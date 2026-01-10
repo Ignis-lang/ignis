@@ -64,7 +64,17 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     match stmt {
       ASTStatement::Variable(var) => {
-        let var_type = self.resolve_type_syntax(&var.type_);
+        let declared_type = self.resolve_type_syntax(&var.type_);
+
+        let var_type = if self.types.is_unknown(&declared_type) {
+          if let Some(value_id) = &var.value {
+            self.typecheck_node(value_id, scope_kind, ctx)
+          } else {
+            self.types.error()
+          }
+        } else {
+          declared_type.clone()
+        };
 
         let lookedup_def = self.lookup_def(node_id);
 
@@ -78,9 +88,11 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(value_id) = &var.value {
-          let infer = InferContext::expecting(var_type.clone());
-          let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
-          self.typecheck_assignment(&var_type, &value_type, &var.span);
+          if !self.types.is_unknown(&declared_type) {
+            let infer = InferContext::expecting(var_type.clone());
+            let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
+            self.typecheck_assignment(&var_type, &value_type, &var.span);
+          }
         }
 
         self.define_decl_in_current_scope(node_id);

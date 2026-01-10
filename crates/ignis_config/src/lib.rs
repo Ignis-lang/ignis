@@ -181,6 +181,7 @@ pub struct IgnisBuildConfig {
   pub dump_hir: Option<String>,
   pub dump_hir_summary: bool,
   pub dump_lir: bool,
+  pub emit_c: Option<String>,
 }
 
 impl IgnisBuildConfig {
@@ -195,6 +196,7 @@ impl IgnisBuildConfig {
     dump_hir: Option<String>,
     dump_hir_summary: bool,
     dump_lir: bool,
+    emit_c: Option<String>,
   ) -> Self {
     Self {
       file,
@@ -207,6 +209,7 @@ impl IgnisBuildConfig {
       dump_hir,
       dump_hir_summary,
       dump_lir,
+      emit_c,
     }
   }
 }

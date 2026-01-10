@@ -8,10 +8,7 @@ use crate::{BlockId, FunctionLir, Instr, LirProgram, LocalId, Operand, TempId, T
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
   /// A block has no terminator set (still Unreachable when it shouldn't be).
-  MissingTerminator {
-    function: String,
-    block: String,
-  },
+  MissingTerminator { function: String, block: String },
 
   /// Reference to a non-existent block.
   InvalidBlockRef {
@@ -64,10 +61,7 @@ pub enum VerifyError {
   },
 
   /// Unexpected return value when function returns void.
-  UnexpectedReturnValue {
-    function: String,
-    block: String,
-  },
+  UnexpectedReturnValue { function: String, block: String },
 }
 
 /// LIR verification result.
@@ -157,34 +151,32 @@ impl<'a> LirVerifier<'a> {
       Instr::Load { dest, source } => {
         self.check_local_exists(func, func_name, block_name, *source);
         defined_temps.insert(*dest);
-      }
+      },
       Instr::Store { dest, value } => {
         self.check_local_exists(func, func_name, block_name, *dest);
         self.check_operand(func, func_name, block_name, value, defined_temps);
-      }
+      },
       Instr::LoadPtr { dest, ptr } => {
         self.check_operand(func, func_name, block_name, ptr, defined_temps);
         defined_temps.insert(*dest);
-      }
+      },
       Instr::StorePtr { ptr, value } => {
         self.check_operand(func, func_name, block_name, ptr, defined_temps);
         self.check_operand(func, func_name, block_name, value, defined_temps);
-      }
+      },
       Instr::Copy { dest, source } => {
         self.check_operand(func, func_name, block_name, source, defined_temps);
         defined_temps.insert(*dest);
-      }
-      Instr::BinOp {
-        dest, left, right, ..
-      } => {
+      },
+      Instr::BinOp { dest, left, right, .. } => {
         self.check_operand(func, func_name, block_name, left, defined_temps);
         self.check_operand(func, func_name, block_name, right, defined_temps);
         defined_temps.insert(*dest);
-      }
+      },
       Instr::UnaryOp { dest, operand, .. } => {
         self.check_operand(func, func_name, block_name, operand, defined_temps);
         defined_temps.insert(*dest);
-      }
+      },
       Instr::Call { dest, args, .. } => {
         for arg in args {
           self.check_operand(func, func_name, block_name, arg, defined_temps);
@@ -192,31 +184,27 @@ impl<'a> LirVerifier<'a> {
         if let Some(d) = dest {
           defined_temps.insert(*d);
         }
-      }
+      },
       Instr::Cast { dest, source, .. } => {
         self.check_operand(func, func_name, block_name, source, defined_temps);
         defined_temps.insert(*dest);
-      }
+      },
       Instr::AddrOfLocal { dest, local, .. } => {
         self.check_local_exists(func, func_name, block_name, *local);
         defined_temps.insert(*dest);
-      }
-      Instr::GetElementPtr {
-        dest, base, index, ..
-      } => {
+      },
+      Instr::GetElementPtr { dest, base, index, .. } => {
         self.check_operand(func, func_name, block_name, base, defined_temps);
         self.check_operand(func, func_name, block_name, index, defined_temps);
         defined_temps.insert(*dest);
-      }
-      Instr::InitVector {
-        dest_ptr, elements, ..
-      } => {
+      },
+      Instr::InitVector { dest_ptr, elements, .. } => {
         self.check_operand(func, func_name, block_name, dest_ptr, defined_temps);
         for elem in elements {
           self.check_operand(func, func_name, block_name, elem, defined_temps);
         }
-      }
-      Instr::Nop => {}
+      },
+      Instr::Nop => {},
     }
   }
 
@@ -231,7 +219,7 @@ impl<'a> LirVerifier<'a> {
     match term {
       Terminator::Goto(target) => {
         self.check_block_exists(func, func_name, block_name, *target);
-      }
+      },
       Terminator::Branch {
         condition,
         then_block,
@@ -252,7 +240,7 @@ impl<'a> LirVerifier<'a> {
             });
           }
         }
-      }
+      },
       Terminator::Return(value) => {
         let ret_ty = func.return_type;
         let is_void = matches!(self.types.get(&ret_ty), Type::Void);
@@ -276,7 +264,7 @@ impl<'a> LirVerifier<'a> {
                 });
               }
             }
-          }
+          },
           None => {
             if !is_void {
               self.errors.push(VerifyError::MissingReturnValue {
@@ -285,12 +273,12 @@ impl<'a> LirVerifier<'a> {
                 expected: ret_ty,
               });
             }
-          }
+          },
         }
-      }
+      },
       Terminator::Unreachable => {
         // Unreachable is valid for diverging code paths
-      }
+      },
     }
   }
 
@@ -312,10 +300,10 @@ impl<'a> LirVerifier<'a> {
             temp: *temp,
           });
         }
-      }
+      },
       Operand::Const(_) | Operand::FuncRef(_) | Operand::GlobalRef(_) => {
         // These are always valid
-      }
+      },
     }
   }
 
@@ -379,12 +367,12 @@ impl<'a> LirVerifier<'a> {
         } else {
           None
         }
-      }
+      },
       Operand::Const(c) => Some(self.const_type(c)),
       Operand::FuncRef(_) | Operand::GlobalRef(_) => {
         // Would need definition store to get types; skip for now
         None
-      }
+      },
     }
   }
 

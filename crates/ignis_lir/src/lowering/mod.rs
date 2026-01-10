@@ -494,7 +494,7 @@ impl<'a> LoweringContext<'a> {
         } else {
           None
         }
-      }
+      },
 
       // Index expression: &arr[i] → GEP
       HIRKind::Index { base, index } => {
@@ -521,13 +521,13 @@ impl<'a> LoweringContext<'a> {
         });
 
         Some(Operand::Temp(dest))
-      }
+      },
 
       // Dereference: &(*ptr) → ptr (the pointer itself is the address)
       HIRKind::Dereference(inner) => {
         let inner = *inner;
         self.lower_hir_node(inner)
-      }
+      },
 
       // Other expressions not supported as lvalues
       _ => None,

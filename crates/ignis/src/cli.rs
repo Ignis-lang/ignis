@@ -99,6 +99,10 @@ pub struct BuildCommand {
   /// Dump LIR (Low-level IR)
   #[arg(long)]
   pub dump_lir: bool,
+
+  /// Emit C code to file
+  #[arg(long)]
+  pub emit_c: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
