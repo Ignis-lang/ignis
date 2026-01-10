@@ -1,4 +1,4 @@
-use crate::{Id, Store, span::Span, symbol::SymbolId, types::TypeId};
+use crate::{Id, Store, module::ModuleId, span::Span, symbol::SymbolId, types::TypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
@@ -26,6 +26,7 @@ pub struct Definition {
   pub name: SymbolId,
   pub span: Span,
   pub visibility: Visibility,
+  pub owner_module: ModuleId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

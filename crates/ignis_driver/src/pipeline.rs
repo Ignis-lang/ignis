@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
 
@@ -9,6 +10,7 @@ use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
 
 use crate::context::CompilationContext;
+use crate::link::{compile_to_object, link_executable, rebuild_std_runtime, LinkPlan};
 
 /// Compile a single file (used for simple single-file compilation without imports)
 pub fn compile_file(
@@ -174,10 +176,39 @@ pub fn compile_project(
         Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
       }
     }
-    if bc.dump_lir || bc.emit_c.is_some() {
+    let needs_codegen = bc.dump_lir || bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
+
+    if needs_codegen {
+      let used_modules = ctx.module_graph.topological_sort();
+
+      ensure_std_built(&used_modules, &ctx.module_graph, &config)?;
+
+      let manifest = if config.manifest.modules.is_empty() {
+        None
+      } else {
+        Some(&config.manifest)
+      };
+      let link_plan =
+        LinkPlan::from_modules(&used_modules, &ctx.module_graph, Path::new(&config.std_path), manifest);
+
+      if bc.rebuild_std {
+        if let Err(e) = rebuild_std_runtime(Path::new(&config.std_path), config.quiet) {
+          eprintln!("{} {}", "Error:".red().bold(), e);
+          return Err(());
+        }
+      }
+
       let mut types = output.types.clone();
+
+      // Only emit project modules; std functions become extern declarations
+      let project_modules: std::collections::HashSet<ignis_type::module::ModuleId> = used_modules
+        .iter()
+        .filter(|id| ctx.module_graph.modules.get(id).path.is_project())
+        .copied()
+        .collect();
+
       let (lir_program, verify_result) =
-        ignis_lir::lowering::lower_and_verify(&output.hir, &mut types, &output.defs, &sym_table);
+        ignis_lir::lowering::lower_and_verify(&output.hir, &mut types, &output.defs, &sym_table, Some(&project_modules));
 
       if bc.dump_lir {
         let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &output.defs, &sym_table);
@@ -191,21 +222,62 @@ pub fn compile_project(
         }
       }
 
-      if let Some(c_path) = &bc.emit_c {
+      let needs_emit = bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
+      if needs_emit {
         if verify_result.is_err() {
           eprintln!("{} Cannot emit C: LIR verification failed", "Error:".red().bold());
           return Err(());
         }
 
-        let c_code = ignis_codegen_c::emit_c(&lir_program, &types, &output.defs, &sym_table);
+        let c_code = ignis_codegen_c::emit_c(&lir_program, &types, &output.defs, &sym_table, &link_plan.headers);
 
-        if let Err(e) = std::fs::write(c_path, &c_code) {
+        let base_name = bc
+          .file
+          .as_ref()
+          .and_then(|f| Path::new(f).file_stem())
+          .and_then(|s| s.to_str())
+          .unwrap_or("out");
+
+        let c_path = if let Some(path) = &bc.emit_c {
+          path.clone()
+        } else {
+          let output_dir = Path::new(&bc.output_dir);
+          if !output_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(output_dir) {
+              eprintln!("{} Failed to create output directory '{}': {}", "Error:".red().bold(), bc.output_dir, e);
+              return Err(());
+            }
+          }
+          format!("{}/{}.c", bc.output_dir, base_name)
+        };
+
+        if let Err(e) = std::fs::write(&c_path, &c_code) {
           eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path, e);
           return Err(());
         }
 
-        if !config.quiet {
+        if bc.emit_c.is_some() && !config.quiet {
           println!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path);
+        }
+
+        if bc.emit_obj.is_some() || bc.emit_bin.is_some() {
+          let obj_path = if let Some(path) = &bc.emit_obj {
+            path.clone()
+          } else {
+            format!("{}/{}.o", bc.output_dir, base_name)
+          };
+
+          if let Err(e) = compile_to_object(Path::new(&c_path), Path::new(&obj_path), &link_plan, config.quiet) {
+            eprintln!("{} {}", "Error:".red().bold(), e);
+            return Err(());
+          }
+
+          if let Some(bin_path) = &bc.emit_bin {
+            if let Err(e) = link_executable(Path::new(&obj_path), Path::new(bin_path), &link_plan, config.quiet) {
+              eprintln!("{} {}", "Error:".red().bold(), e);
+              return Err(());
+            }
+          }
         }
       }
     }
@@ -223,6 +295,191 @@ pub fn compile_project(
       "{}",
       ignis_analyzer::dump::dump_hir_complete(&output.hir, &output.types, &output.defs, &sym_table)
     );
+  }
+
+  Ok(())
+}
+
+/// Build the standard library into a static archive
+pub fn build_std(
+  config: Arc<IgnisConfig>,
+  output_dir: &str,
+) -> Result<(), ()> {
+  use std::collections::HashSet;
+  use ignis_type::module::ModuleId;
+
+  if config.std_path.is_empty() {
+    eprintln!("{} std_path not set. Use --std-path or set IGNIS_STD_PATH env var", "Error:".red().bold());
+    return Err(());
+  }
+
+  let std_path = Path::new(&config.std_path);
+
+  if !std_path.exists() {
+    eprintln!("{} std_path '{}' does not exist", "Error:".red().bold(), std_path.display());
+    return Err(());
+  }
+
+  if config.manifest.modules.is_empty() {
+    eprintln!("{} No modules found in std manifest at '{}/manifest.toml'", "Error:".red().bold(), std_path.display());
+    return Err(());
+  }
+
+  if !config.quiet {
+    println!("{} Building standard library...", "-->".bright_cyan().bold());
+  }
+
+  let output_path = Path::new(output_dir);
+  if !output_path.exists() {
+    if let Err(e) = std::fs::create_dir_all(output_path) {
+      eprintln!("{} Failed to create output directory '{}': {}", "Error:".red().bold(), output_path.display(), e);
+      return Err(());
+    }
+  }
+
+  let mut ctx = CompilationContext::new(&config);
+
+  for (module_name, _) in &config.manifest.modules {
+    if let Err(()) = ctx.discover_std_module(module_name, &config) {
+      eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
+      return Err(());
+    }
+  }
+
+  let output = ctx.compile_all(&config)?;
+  let sym_table = output.symbols.borrow();
+  let link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+
+  let header_content = ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table);
+  let header_path = output_path.join("ignis_std.h");
+  if let Err(e) = std::fs::write(&header_path, &header_content) {
+    eprintln!("{} Failed to write header file '{}': {}", "Error:".red().bold(), header_path.display(), e);
+    return Err(());
+  }
+
+  if !config.quiet {
+    println!("{} Generated header {}", "-->".bright_green().bold(), header_path.display());
+  }
+
+  let all_module_ids = ctx.module_graph.all_modules_topological();
+  let mut object_files: Vec<std::path::PathBuf> = Vec::new();
+  let mut processed_modules: HashSet<String> = HashSet::new();
+
+  for module_id in &all_module_ids {
+    let module = ctx.module_graph.modules.get(module_id);
+    let module_name = module.path.module_name();
+
+    if processed_modules.contains(&module_name) {
+      continue;
+    }
+    processed_modules.insert(module_name.clone());
+
+    let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
+    let mut types = output.types.clone();
+    let (lir_program, verify_result) =
+      ignis_lir::lowering::lower_and_verify(&output.hir, &mut types, &output.defs, &sym_table, Some(&single_module_set));
+
+    if let Err(errors) = &verify_result {
+      eprintln!("{} LIR verification errors for module '{}':", "Warning:".yellow().bold(), module_name);
+      for err in errors {
+        eprintln!("  {:?}", err);
+      }
+    }
+
+    if lir_program.functions.is_empty() {
+      continue;
+    }
+
+    let c_code = ignis_codegen_c::emit_c(&lir_program, &types, &output.defs, &sym_table, &link_plan.headers);
+
+    let c_path = output_path.join(format!("{}.c", module_name));
+    if let Err(e) = std::fs::write(&c_path, &c_code) {
+      eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
+      return Err(());
+    }
+
+    let obj_path = output_path.join(format!("{}.o", module_name));
+    if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, config.quiet) {
+      eprintln!("{} {}", "Error:".red().bold(), e);
+      return Err(());
+    }
+
+    object_files.push(obj_path);
+  }
+
+  if object_files.is_empty() {
+    eprintln!("{} No object files generated", "Error:".red().bold());
+    return Err(());
+  }
+
+  let archive_path = output_path.join("libignis_std.a");
+  if let Err(e) = create_static_archive_multi(&object_files, &archive_path, config.quiet) {
+    eprintln!("{} {}", "Error:".red().bold(), e);
+    return Err(());
+  }
+
+  if !config.quiet {
+    println!("{} Build complete: {}", "-->".bright_green().bold(), archive_path.display());
+  }
+
+  Ok(())
+}
+
+fn ensure_std_built(
+  used_modules: &[ignis_type::module::ModuleId],
+  module_graph: &ignis_analyzer::modules::ModuleGraph,
+  config: &Arc<IgnisConfig>,
+) -> Result<(), ()> {
+  let uses_std = used_modules.iter().any(|id| {
+    module_graph.modules.get(id).path.is_std()
+  });
+
+  if !uses_std {
+    return Ok(());
+  }
+
+  let std_path = Path::new(&config.std_path);
+  let archive_path = std_path.join("build/libignis_std.a");
+
+  if archive_path.exists() {
+    return Ok(());
+  }
+
+  if !config.quiet {
+    println!("{} std library not found, building...", "-->".bright_yellow().bold());
+  }
+
+  build_std(config.clone(), &std_path.join("build").to_string_lossy())
+}
+
+/// Create a static archive (.a) from multiple object files
+fn create_static_archive_multi(
+  objects: &[std::path::PathBuf],
+  archive_path: &Path,
+  quiet: bool,
+) -> Result<(), String> {
+  use std::process::Command;
+
+  if !quiet {
+    let obj_names: Vec<_> = objects.iter().filter_map(|p| p.file_name()).collect();
+    println!(
+      "{} Creating archive {} <- {:?}",
+      "-->".bright_green().bold(),
+      archive_path.display(),
+      obj_names
+    );
+  }
+
+  let output = Command::new("ar")
+    .arg("rcs")
+    .arg(archive_path)
+    .args(objects)
+    .output()
+    .map_err(|e| format!("Failed to run ar: {}", e))?;
+
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(format!("ar failed:\n{}", stderr));
   }
 
   Ok(())

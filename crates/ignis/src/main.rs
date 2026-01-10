@@ -85,6 +85,8 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
     if let Ok(v) = std::env::var("IGNIS_STD_PATH") {
       config.std_path = v;
     }
+  } else {
+    config.std_path = cli.std_path.clone();
   }
 
   match &cli.subcommand {
@@ -96,6 +98,22 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
         println!("For more information, run `ignis --help`");
         std::process::exit(1);
       }
+
+      // Determine binary output path (default behavior: always produce a binary)
+      let emit_bin = if build.emit_bin.is_some() {
+        build.emit_bin.clone()
+      } else if let Some(ref file_path) = build.file_path {
+        // User specified a file explicitly - use file name without extension
+        let path = Path::new(file_path);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+        Some(format!("{}/{}", build.output_dir, stem))
+      } else if is_project {
+        // Building project without explicit file - use project name
+        let project_config = load_project_config().unwrap();
+        Some(format!("{}/{}", build.output_dir, project_config.name))
+      } else {
+        Some(format!("{}/out", build.output_dir))
+      };
 
       if is_project {
         let mut project_config = load_project_config().unwrap();
@@ -136,6 +154,9 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
           build.dump_hir_summary,
           build.dump_lir,
           build.emit_c.clone(),
+          build.emit_obj.clone(),
+          emit_bin,
+          build.rebuild_std,
         )));
     },
     SubCommand::Init(init) => {
@@ -152,6 +173,10 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
         init.target.clone().into(),
       )));
     },
+    SubCommand::BuildStd(build_std) => {
+      config.build_std = true;
+      config.build_std_output_dir = Some(build_std.output_dir.clone());
+    },
   };
 
   config.manifest = load_manifest(&config.std_path);
@@ -164,8 +189,29 @@ fn main() {
 
   let config = parse_cli_to_config(&cli);
 
-  let build_config = config.build_config.clone().unwrap();
-  let file_path = build_config.file.unwrap();
+  if config.build_std {
+    let output_dir = config.build_std_output_dir.as_ref().unwrap();
+    match ignis_driver::build_std(config.clone(), output_dir) {
+      Ok(()) => {},
+      Err(()) => std::process::exit(1),
+    }
+    return;
+  }
 
-  let _ = compile_project(config, &file_path);
+  if config.build {
+    let build_config = config.build_config.clone().unwrap();
+    let file_path = build_config.file.unwrap();
+
+    match compile_project(config, &file_path) {
+      Ok(()) => {},
+      Err(()) => std::process::exit(1),
+    }
+    return;
+  }
+
+  if config.init {
+    // TODO: Implement init command
+    println!("Init command not yet implemented");
+    return;
+  }
 }

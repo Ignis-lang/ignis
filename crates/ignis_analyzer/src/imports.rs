@@ -163,6 +163,7 @@ impl<'a> Analyzer<'a> {
       name: def.name.clone(),
       span: def.span.clone(),
       visibility: def.visibility.clone(),
+      owner_module: def.owner_module,
     }
   }
 

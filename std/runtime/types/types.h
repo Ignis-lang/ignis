@@ -1,6 +1,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
 
 // Unsigned types
 typedef uint8_t u8;

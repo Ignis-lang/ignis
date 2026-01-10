@@ -111,6 +111,33 @@ impl ModulePath {
       ModulePath::Project(_) => None,
     }
   }
+
+  pub fn is_std(&self) -> bool {
+    matches!(self, ModulePath::Std(_))
+  }
+
+  pub fn is_project(&self) -> bool {
+    matches!(self, ModulePath::Project(_))
+  }
+
+  /// Returns a clean module name for file naming.
+  /// For "mod.ign" files, uses the parent directory name.
+  pub fn module_name(&self) -> String {
+    match self {
+      ModulePath::Std(name) => name.replace("::", "_"),
+      ModulePath::Project(path) => {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("module");
+        if stem == "mod" {
+          if let Some(parent) = path.parent() {
+            if let Some(dir_name) = parent.file_name().and_then(|s| s.to_str()) {
+              return dir_name.to_string();
+            }
+          }
+        }
+        stem.to_string()
+      },
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

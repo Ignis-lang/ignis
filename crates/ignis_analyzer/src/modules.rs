@@ -221,6 +221,20 @@ impl ModuleGraph {
     result
   }
 
+  /// Return all modules in topological order, regardless of reachability from root.
+  pub fn all_modules_topological(&self) -> Vec<ModuleId> {
+    let mut result = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+
+    for (module_id, _) in self.modules.iter() {
+      if !visited.contains(&module_id) {
+        self.topo_visit(module_id, &mut visited, &mut result);
+      }
+    }
+
+    result
+  }
+
   fn topo_visit(
     &self,
     module_id: ModuleId,
@@ -515,11 +529,14 @@ mod tests {
       "io".to_string(),
       StdLinkingInfo {
         header: Some("runtime/io.h".to_string()),
+        header_quoted: Some(true),
         object: Some("runtime/libignis_io.o".to_string()),
+        lib: None,
       },
     );
 
     let manifest = IgnisSTDManifest {
+      toolchain: Default::default(),
       modules,
       linking,
       auto_load: None,
@@ -544,6 +561,7 @@ mod tests {
     modules.insert("math".to_string(), "math/mod.ign".to_string());
 
     let manifest = IgnisSTDManifest {
+      toolchain: Default::default(),
       modules,
       linking: HashMap::new(),
       auto_load: None,
@@ -582,18 +600,23 @@ mod tests {
       "io".to_string(),
       StdLinkingInfo {
         header: Some("runtime/io.h".to_string()),
+        header_quoted: Some(true),
         object: Some("runtime/libignis_io.o".to_string()),
+        lib: None,
       },
     );
     linking.insert(
       "math".to_string(),
       StdLinkingInfo {
         header: Some("math.h".to_string()),
-        object: None, // math uses libc
+        header_quoted: Some(false),
+        object: None,
+        lib: Some("m".to_string()),
       },
     );
 
     let manifest = IgnisSTDManifest {
+      toolchain: Default::default(),
       modules: HashMap::new(),
       linking,
       auto_load: None,

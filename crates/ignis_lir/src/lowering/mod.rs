@@ -1,10 +1,11 @@
 mod builder;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ignis_hir::{HIR, HIRId, HIRKind, statement::LoopKind};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  module::ModuleId,
   span::Span,
   symbol::SymbolTable,
   types::{Type, TypeId, TypeStore},
@@ -46,6 +47,11 @@ pub struct LoweringContext<'a> {
 
   /// Loop context stack for break/continue.
   loop_stack: Vec<LoopContext>,
+
+  /// Optional set of modules to emit. If None, emit all.
+  /// If Some, only emit functions from modules in the set;
+  /// functions from other modules are created as extern declarations.
+  emit_modules: Option<&'a HashSet<ModuleId>>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -54,6 +60,7 @@ impl<'a> LoweringContext<'a> {
     types: &'a mut TypeStore,
     defs: &'a DefinitionStore,
     symbols: &'a SymbolTable,
+    emit_modules: Option<&'a HashSet<ModuleId>>,
   ) -> Self {
     Self {
       hir,
@@ -64,6 +71,7 @@ impl<'a> LoweringContext<'a> {
       current_fn: None,
       def_to_local: HashMap::new(),
       loop_stack: Vec::new(),
+      emit_modules,
     }
   }
 
@@ -73,6 +81,18 @@ impl<'a> LoweringContext<'a> {
 
     for &def_id in &self.hir.items {
       let def = self.defs.get(&def_id);
+
+      // Filter by module if emit_modules is specified
+      if let Some(emit_set) = &self.emit_modules {
+        if !emit_set.contains(&def.owner_module) {
+          // Not in emit set: register as extern if it's a function
+          if let DefinitionKind::Function(_) = &def.kind {
+            self.create_extern_function(def_id);
+          }
+          continue;
+        }
+      }
+
       if let DefinitionKind::Function(func_def) = &def.kind {
         if let Some(&body_id) = self.hir.function_bodies.get(&def_id) {
           self.lower_function(def_id, body_id);
@@ -1092,24 +1112,28 @@ impl<'a> LoweringContext<'a> {
 }
 
 /// Lower HIR to LIR.
+///
+/// If `emit_modules` is Some, only emit function bodies for those modules;
+/// other functions become extern declarations.
 pub fn lower_hir(
   hir: &HIR,
   types: &mut TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  emit_modules: Option<&HashSet<ModuleId>>,
 ) -> LirProgram {
-  LoweringContext::new(hir, types, defs, symbols).lower()
+  LoweringContext::new(hir, types, defs, symbols, emit_modules).lower()
 }
 
 /// Lower HIR to LIR and verify the result.
-/// Returns the program and any verification errors.
 pub fn lower_and_verify(
   hir: &HIR,
   types: &mut TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  emit_modules: Option<&HashSet<ModuleId>>,
 ) -> (LirProgram, Result<(), Vec<crate::VerifyError>>) {
-  let program = lower_hir(hir, types, defs, symbols);
+  let program = lower_hir(hir, types, defs, symbols, emit_modules);
   let verify_result = crate::verify::verify_lir(&program, types);
   (program, verify_result)
 }

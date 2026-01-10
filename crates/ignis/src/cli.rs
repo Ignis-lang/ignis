@@ -103,6 +103,18 @@ pub struct BuildCommand {
   /// Emit C code to file
   #[arg(long)]
   pub emit_c: Option<String>,
+
+  /// Compile C to object file
+  #[arg(long)]
+  pub emit_obj: Option<String>,
+
+  /// Link and produce executable
+  #[arg(long)]
+  pub emit_bin: Option<String>,
+
+  /// Rebuild std runtime before linking
+  #[arg(long)]
+  pub rebuild_std: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -159,12 +171,21 @@ pub struct InitCommand {
   pub keywords: Vec<String>,
 }
 
+#[derive(Parser, Debug, Clone, PartialEq)]
+pub struct BuildStdCommand {
+  /// Output directory for compiled std artifacts
+  #[arg(short = 'o', long, default_value = "build")]
+  pub output_dir: String,
+}
+
 #[derive(Subcommand, Clone, PartialEq)]
 pub enum SubCommand {
   /// Build file or project
   Build(BuildCommand),
   /// Initialize a new Ignis project
   Init(InitCommand),
+  /// Build the standard library
+  BuildStd(BuildStdCommand),
 }
 
 #[derive(Parser)]

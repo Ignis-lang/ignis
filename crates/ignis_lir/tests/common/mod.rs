@@ -39,7 +39,7 @@ pub fn lower_to_lir(src: &str) -> LirResult {
   let mut types = output.types.clone();
   let (program, verify_result) = {
     let symbols = output.symbols.borrow();
-    lower_and_verify(&output.hir, &mut types, &output.defs, &symbols)
+    lower_and_verify(&output.hir, &mut types, &output.defs, &symbols, None)
   };
 
   let verify_errors = match verify_result {

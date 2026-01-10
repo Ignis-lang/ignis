@@ -71,6 +71,7 @@ pub struct Analyzer<'a> {
   diagnostics: Vec<Diagnostic>,
   export_table: ExportTable,
   module_for_path: HashMap<String, ModuleId>,
+  current_module: ModuleId,
 }
 
 pub struct AnalyzerOutput {
@@ -105,6 +106,7 @@ impl<'a> Analyzer<'a> {
   pub fn new(
     ast: &'a ASTStore<ASTNode>,
     symbols: Rc<RefCell<SymbolTable>>,
+    current_module: ModuleId,
   ) -> Self {
     Self {
       ast,
@@ -117,6 +119,7 @@ impl<'a> Analyzer<'a> {
       diagnostics: Vec::new(),
       export_table: HashMap::new(),
       module_for_path: HashMap::new(),
+      current_module,
     }
   }
 
@@ -137,7 +140,8 @@ impl<'a> Analyzer<'a> {
     module_for_path: &HashMap<String, ModuleId>,
   ) -> AnalyzerOutput {
     let symbols_clone = symbols.clone();
-    let mut analyzer = Analyzer::new(ast, symbols);
+    // Use a dummy ModuleId for standalone analysis
+    let mut analyzer = Analyzer::new(ast, symbols, ModuleId::new(0));
     analyzer.export_table = export_table.clone();
     analyzer.module_for_path = module_for_path.clone();
 
@@ -152,6 +156,53 @@ impl<'a> Analyzer<'a> {
     AnalyzerOutput {
       types: analyzer.types,
       defs: analyzer.defs,
+      hir,
+      diagnostics: analyzer.diagnostics,
+      symbols: symbols_clone,
+    }
+  }
+
+  /// Analyze with shared stores, enabling cross-module compilation.
+  pub fn analyze_with_shared_stores(
+    ast: &ASTStore<ASTNode>,
+    roots: &Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
+    export_table: &ExportTable,
+    module_for_path: &HashMap<String, ModuleId>,
+    shared_types: &mut TypeStore,
+    shared_defs: &mut DefinitionStore,
+    current_module: ModuleId,
+  ) -> AnalyzerOutput {
+    let symbols_clone = symbols.clone();
+
+    let mut analyzer = Analyzer {
+      ast,
+      symbols,
+      types: std::mem::replace(shared_types, TypeStore::new()),
+      defs: std::mem::replace(shared_defs, DefinitionStore::new()),
+      scopes: ScopeTree::new(),
+      node_defs: HashMap::new(),
+      node_types: HashMap::new(),
+      diagnostics: Vec::new(),
+      export_table: export_table.clone(),
+      module_for_path: module_for_path.clone(),
+      current_module,
+    };
+
+    analyzer.bind_phase(roots);
+    analyzer.resolve_phase(roots);
+    analyzer.typecheck_phase(roots);
+    analyzer.borrowcheck_phase(roots);
+    analyzer.const_eval_phase(roots);
+    analyzer.extra_checks_phase(roots);
+    let hir = analyzer.lower_to_hir(roots);
+
+    *shared_types = std::mem::replace(&mut analyzer.types, TypeStore::new());
+    *shared_defs = std::mem::replace(&mut analyzer.defs, DefinitionStore::new());
+
+    AnalyzerOutput {
+      types: shared_types.clone(),
+      defs: shared_defs.clone(),
       hir,
       diagnostics: analyzer.diagnostics,
       symbols: symbols_clone,

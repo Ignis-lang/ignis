@@ -9,10 +9,13 @@ fn gcc_compiles(source: &str) {
   let temp_dir = tempdir().expect("Failed to create temp dir");
   let c_path = temp_dir.path().join("out.c");
   let o_path = temp_dir.path().join("out.o");
+  let fixtures_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
   std::fs::write(&c_path, &c_code).expect("Failed to write C file");
 
   let output = Command::new("gcc")
+    .arg("-I")
+    .arg(fixtures_dir)
     .args(["-c", c_path.to_str().unwrap(), "-o", o_path.to_str().unwrap()])
     .output()
     .expect("Failed to execute gcc");

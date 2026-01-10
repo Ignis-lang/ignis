@@ -117,4 +117,16 @@ impl<T> Store<T> {
   pub fn get_all(&self) -> &[T] {
     &self.data
   }
+
+  pub fn len(&self) -> usize {
+    self.data.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.data.is_empty()
+  }
+
+  pub fn into_iter(self) -> impl Iterator<Item = T> {
+    self.data.into_iter()
+  }
 }

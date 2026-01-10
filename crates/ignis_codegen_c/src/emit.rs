@@ -1,10 +1,10 @@
-use std::collections::HashSet;
 use std::fmt::Write;
 
+use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, Terminator};
 use ignis_type::{
-  definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  definition::{DefinitionId, DefinitionStore},
   symbol::SymbolTable,
   types::{Type, TypeId, TypeStore},
 };
@@ -15,7 +15,9 @@ pub struct CEmitter<'a> {
   types: &'a TypeStore,
   defs: &'a DefinitionStore,
   symbols: &'a SymbolTable,
+  headers: &'a [CHeader],
   output: String,
+  current_fn_id: Option<DefinitionId>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -24,13 +26,16 @@ impl<'a> CEmitter<'a> {
     types: &'a TypeStore,
     defs: &'a DefinitionStore,
     symbols: &'a SymbolTable,
+    headers: &'a [CHeader],
   ) -> Self {
     Self {
       program,
       types,
       defs,
       symbols,
+      headers,
       output: String::new(),
+      current_fn_id: None,
     }
   }
 
@@ -42,82 +47,34 @@ impl<'a> CEmitter<'a> {
   }
 
   fn emit_headers(&mut self) {
-    writeln!(self.output, "#include <stdint.h>").unwrap();
-    writeln!(self.output, "#include <stdbool.h>").unwrap();
-    writeln!(self.output, "#include <string.h>").unwrap();
-    writeln!(self.output, "#include <math.h>").unwrap();
-    writeln!(self.output).unwrap();
+    for header in self.headers {
+      if header.quoted {
+        writeln!(self.output, "#include \"{}\"", header.path).unwrap();
+      } else {
+        writeln!(self.output, "#include <{}>", header.path).unwrap();
+      }
+    }
+
+    if !self.headers.is_empty() {
+      writeln!(self.output).unwrap();
+    }
   }
 
   fn emit_forward_declarations(&mut self) {
-    let undeclared_externs = self.collect_undeclared_extern_calls();
-
-    if !undeclared_externs.is_empty() {
-      let mut extern_list: Vec<_> = undeclared_externs.iter().collect();
-      extern_list.sort_by_key(|def_id| def_id.index());
-
-      for def_id in extern_list {
-        self.emit_extern_prototype(*def_id);
-      }
-      writeln!(self.output).unwrap();
-    }
-
     let mut funcs: Vec<_> = self.program.functions.iter().collect();
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
+    // Only emit forward declarations for non-extern functions.
+    // Extern functions are already declared in the included headers.
     for (def_id, func) in &funcs {
       if func.is_extern {
-        write!(self.output, "extern ").unwrap();
+        continue;
       }
       self.emit_function_signature(**def_id, func);
       writeln!(self.output, ";").unwrap();
     }
 
     writeln!(self.output).unwrap();
-  }
-
-  fn collect_undeclared_extern_calls(&self) -> HashSet<DefinitionId> {
-    let mut externs = HashSet::new();
-    for func in self.program.functions.values() {
-      for block in func.blocks.get_all() {
-        for instr in &block.instructions {
-          if let Instr::Call { callee, .. } = instr {
-            if !self.program.functions.contains_key(callee) {
-              externs.insert(*callee);
-            }
-          }
-        }
-      }
-    }
-    externs
-  }
-
-  fn emit_extern_prototype(
-    &mut self,
-    def_id: DefinitionId,
-  ) {
-    let def = self.defs.get(&def_id);
-    let name = self.def_name(def_id);
-
-    if let DefinitionKind::Function(func_def) = &def.kind {
-      let ret_ty = self.format_type(func_def.return_type);
-
-      let params: Vec<_> = func_def
-        .params
-        .iter()
-        .map(|&p| self.format_type(*self.defs.type_of(&p)))
-        .collect();
-
-      let params_str = if params.is_empty() {
-        "void".to_string()
-      } else if func_def.is_variadic {
-        format!("{}, ...", params.join(", "))
-      } else {
-        params.join(", ")
-      };
-
-      writeln!(self.output, "extern {} {}({});", ret_ty, name, params_str).unwrap();
-    }
   }
 
   fn emit_functions(&mut self) {
@@ -137,7 +94,14 @@ impl<'a> CEmitter<'a> {
     func: &FunctionLir,
   ) {
     let name = self.def_name(def_id);
-    let ret_ty = self.format_type(func.return_type);
+
+    // C requires int main(void) for the entry point
+    let is_entry_main = Some(def_id) == self.program.entry_point && name == "main";
+    let ret_ty = if is_entry_main {
+      "int".to_string()
+    } else {
+      self.format_type(func.return_type)
+    };
 
     let params: Vec<_> = func
       .params
@@ -165,6 +129,7 @@ impl<'a> CEmitter<'a> {
     def_id: DefinitionId,
     func: &FunctionLir,
   ) {
+    self.current_fn_id = Some(def_id);
     self.emit_function_signature(def_id, func);
     writeln!(self.output, " {{").unwrap();
 
@@ -179,6 +144,7 @@ impl<'a> CEmitter<'a> {
     }
 
     writeln!(self.output, "}}\n").unwrap();
+    self.current_fn_id = None;
   }
 
   fn emit_locals(
@@ -311,7 +277,13 @@ impl<'a> CEmitter<'a> {
       } => {
         let s = self.format_operand(func, source);
         let ty = self.format_type(*target_type);
-        writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
+
+        // Unboxing from `any` requires dereference since C can't cast pointer to float
+        if self.is_any_type(func, source) {
+          writeln!(self.output, "t{} = *({}*)({});", dest.index(), ty, s).unwrap();
+        } else {
+          writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
+        }
       },
       Instr::AddrOfLocal { dest, local, .. } => {
         // For array locals, the name already decays to a pointer in C
@@ -368,7 +340,15 @@ impl<'a> CEmitter<'a> {
           let val = self.format_operand(func, v);
           writeln!(self.output, "return {};", val).unwrap();
         } else {
-          writeln!(self.output, "return;").unwrap();
+          // C main must return int - if we're in main with void return, emit return 0
+          let is_main = self.current_fn_id.map_or(false, |id| {
+            Some(id) == self.program.entry_point && self.def_name(id) == "main"
+          });
+          if is_main {
+            writeln!(self.output, "return 0;").unwrap();
+          } else {
+            writeln!(self.output, "return;").unwrap();
+          }
         }
       },
       Terminator::Unreachable => {
@@ -396,6 +376,34 @@ impl<'a> CEmitter<'a> {
       Operand::FuncRef(def) => self.def_name(*def),
       Operand::GlobalRef(def) => self.def_name(*def),
     }
+  }
+
+  fn operand_type(
+    &self,
+    func: &FunctionLir,
+    op: &Operand,
+  ) -> Option<TypeId> {
+    match op {
+      Operand::Temp(t) => Some(func.temp_type(*t)),
+      Operand::Const(c) => Some(c.type_id()),
+      Operand::FuncRef(_) | Operand::GlobalRef(_) => None,
+    }
+  }
+
+  fn is_any_type(
+    &self,
+    func: &FunctionLir,
+    op: &Operand,
+  ) -> bool {
+    self.operand_type(func, op).map_or(false, |t| {
+      match self.types.get(&t) {
+        Type::Unknown => true,
+        Type::Reference { inner, .. } | Type::Pointer(inner) => {
+          matches!(self.types.get(inner), Type::Unknown)
+        },
+        _ => false,
+      }
+    })
   }
 
   fn format_const(
@@ -505,20 +513,21 @@ impl<'a> CEmitter<'a> {
     &self,
     ty: TypeId,
   ) -> String {
+    // Use runtime type aliases from types.h for compatibility
     match self.types.get(&ty) {
-      Type::I8 => "int8_t".to_string(),
-      Type::I16 => "int16_t".to_string(),
-      Type::I32 => "int32_t".to_string(),
-      Type::I64 => "int64_t".to_string(),
-      Type::U8 => "uint8_t".to_string(),
-      Type::U16 => "uint16_t".to_string(),
-      Type::U32 => "uint32_t".to_string(),
-      Type::U64 => "uint64_t".to_string(),
-      Type::F32 => "float".to_string(),
-      Type::F64 => "double".to_string(),
-      Type::Boolean => "bool".to_string(),
+      Type::I8 => "i8".to_string(),
+      Type::I16 => "i16".to_string(),
+      Type::I32 => "i32".to_string(),
+      Type::I64 => "i64".to_string(),
+      Type::U8 => "u8".to_string(),
+      Type::U16 => "u16".to_string(),
+      Type::U32 => "u32".to_string(),
+      Type::U64 => "u64".to_string(),
+      Type::F32 => "f32".to_string(),
+      Type::F64 => "f64".to_string(),
+      Type::Boolean => "boolean".to_string(),
       Type::Char => "char".to_string(),
-      Type::String => "const char*".to_string(),
+      Type::String => "string".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "void".to_string(),
       Type::Unknown | Type::Error => "/* unknown */ void*".to_string(),
@@ -554,6 +563,182 @@ pub fn emit_c(
   types: &TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  headers: &[CHeader],
 ) -> String {
-  CEmitter::new(program, types, defs, symbols).emit()
+  CEmitter::new(program, types, defs, symbols, headers).emit()
+}
+
+/// Format a type as C type string using runtime type aliases.
+pub fn format_c_type(ty: &Type, types: &TypeStore) -> String {
+  match ty {
+    Type::I8 => "i8".to_string(),
+    Type::I16 => "i16".to_string(),
+    Type::I32 => "i32".to_string(),
+    Type::I64 => "i64".to_string(),
+    Type::U8 => "u8".to_string(),
+    Type::U16 => "u16".to_string(),
+    Type::U32 => "u32".to_string(),
+    Type::U64 => "u64".to_string(),
+    Type::F32 => "f32".to_string(),
+    Type::F64 => "f64".to_string(),
+    Type::Boolean => "boolean".to_string(),
+    Type::Char => "char".to_string(),
+    Type::String => "string".to_string(),
+    Type::Void => "void".to_string(),
+    Type::Never => "void".to_string(),
+    Type::Unknown | Type::Error => "void*".to_string(),
+    Type::Pointer(inner) => format!("{}*", format_c_type(types.get(inner), types)),
+    Type::Reference { inner, .. } => format!("{}*", format_c_type(types.get(inner), types)),
+    Type::Vector { element, .. } => format!("{}*", format_c_type(types.get(element), types)),
+    Type::Tuple(_) => "void*".to_string(),
+    Type::Function { .. } => "void*".to_string(),
+  }
+}
+
+/// Emit a C header file with function prototypes for public definitions.
+pub fn emit_std_header(
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+) -> String {
+  use ignis_type::definition::{DefinitionKind, Visibility};
+  use std::collections::HashSet;
+
+  let mut output = String::new();
+  let mut emitted_names: HashSet<String> = HashSet::new();
+
+  writeln!(output, "#ifndef IGNIS_STD_H").unwrap();
+  writeln!(output, "#define IGNIS_STD_H").unwrap();
+  writeln!(output).unwrap();
+  writeln!(output, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(output).unwrap();
+  writeln!(output, "// Auto-generated standard library prototypes").unwrap();
+  writeln!(output).unwrap();
+
+  for def in defs.get_all() {
+    if def.visibility != Visibility::Public {
+      continue;
+    }
+
+    if let DefinitionKind::Function(func_def) = &def.kind {
+      // Skip extern functions - they're declared in runtime headers
+      if func_def.is_extern {
+        continue;
+      }
+
+      let name = symbols.get(&def.name);
+
+      // Skip duplicates (imported functions may appear multiple times)
+      if emitted_names.contains(name) {
+        continue;
+      }
+      emitted_names.insert(name.to_string());
+
+      let return_ty = format_c_type(types.get(&func_def.return_type), types);
+
+      let mut param_strs = Vec::new();
+      for param_id in &func_def.params {
+        let param_def = defs.get(param_id);
+        if let DefinitionKind::Parameter(param) = &param_def.kind {
+          let param_name = symbols.get(&param_def.name);
+          let param_ty = format_c_type(types.get(&param.type_id), types);
+          param_strs.push(format!("{} {}", param_ty, param_name));
+        }
+      }
+
+      if func_def.is_variadic {
+        param_strs.push("...".to_string());
+      }
+
+      let params = if param_strs.is_empty() {
+        "void".to_string()
+      } else {
+        param_strs.join(", ")
+      };
+
+      writeln!(output, "{} {}({});", return_ty, name, params).unwrap();
+    }
+  }
+
+  writeln!(output).unwrap();
+  writeln!(output, "#endif // IGNIS_STD_H").unwrap();
+
+  output
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ignis_type::symbol::SymbolTable;
+  use std::cell::RefCell;
+  use std::rc::Rc;
+
+  fn empty_program() -> (LirProgram, TypeStore, DefinitionStore, Rc<RefCell<SymbolTable>>) {
+    let program = LirProgram::new();
+    let types = TypeStore::new();
+    let defs = DefinitionStore::new();
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    (program, types, defs, symbols)
+  }
+
+  #[test]
+  fn test_emit_headers_no_includes() {
+    let (program, types, defs, symbols) = empty_program();
+    let sym = symbols.borrow();
+    let output = emit_c(&program, &types, &defs, &sym, &[]);
+
+    // No hardcoded headers - emitter outputs only what it's given
+    assert!(!output.contains("#include"));
+  }
+
+  #[test]
+  fn test_emit_headers_with_quoted_include() {
+    let (program, types, defs, symbols) = empty_program();
+    let sym = symbols.borrow();
+    let headers = vec![CHeader {
+      path: "runtime/io/io.h".to_string(),
+      quoted: true,
+    }];
+    let output = emit_c(&program, &types, &defs, &sym, &headers);
+
+    assert!(output.contains("#include \"runtime/io/io.h\""));
+  }
+
+  #[test]
+  fn test_emit_headers_with_system_include() {
+    let (program, types, defs, symbols) = empty_program();
+    let sym = symbols.borrow();
+    let headers = vec![CHeader {
+      path: "math.h".to_string(),
+      quoted: false,
+    }];
+    let output = emit_c(&program, &types, &defs, &sym, &headers);
+
+    assert!(output.contains("#include <math.h>"));
+  }
+
+  #[test]
+  fn test_emit_headers_mixed_includes() {
+    let (program, types, defs, symbols) = empty_program();
+    let sym = symbols.borrow();
+    let headers = vec![
+      CHeader {
+        path: "runtime/types/types.h".to_string(),
+        quoted: true,
+      },
+      CHeader {
+        path: "runtime/io/io.h".to_string(),
+        quoted: true,
+      },
+      CHeader {
+        path: "math.h".to_string(),
+        quoted: false,
+      },
+    ];
+    let output = emit_c(&program, &types, &defs, &sym, &headers);
+
+    assert!(output.contains("#include \"runtime/types/types.h\""));
+    assert!(output.contains("#include \"runtime/io/io.h\""));
+    assert!(output.contains("#include <math.h>"));
+  }
 }

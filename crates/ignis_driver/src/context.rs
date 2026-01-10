@@ -8,9 +8,12 @@ use ignis_analyzer::modules::{ModuleError, ModuleGraph};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_config::IgnisConfig;
 use ignis_parser::{IgnisLexer, IgnisParser};
+use ignis_hir::HIR;
+use ignis_type::definition::DefinitionStore;
 use ignis_type::file::{FileId, SourceMap};
 use ignis_type::module::{Module, ModuleId, ModulePath};
 use ignis_type::symbol::{SymbolId, SymbolTable};
+use ignis_type::types::TypeStore;
 use ignis_type::Store;
 
 /// Parsed module data
@@ -61,6 +64,37 @@ impl CompilationContext {
     config: &IgnisConfig,
   ) -> Result<ModuleId, ()> {
     self.discover_recursive(entry_path, None, config)
+  }
+
+  /// Discover a std module by name (e.g., "io", "string").
+  /// Creates `ModulePath::Std` entries for proper std/project distinction.
+  pub fn discover_std_module(
+    &mut self,
+    module_name: &str,
+    config: &IgnisConfig,
+  ) -> Result<ModuleId, ()> {
+    let module_path = ModulePath::Std(module_name.to_string());
+
+    if let Some(id) = self.module_graph.get_by_path(&module_path) {
+      return Ok(id);
+    }
+
+    let fs_path = self.module_graph.to_fs_path(&module_path);
+    let parsed = self.parse_file(&fs_path, config)?;
+    let file_id = parsed.file_id;
+    let import_paths = parsed.import_paths.clone();
+
+    let module = Module::new(file_id, module_path.clone());
+    let module_id = self.module_graph.register(module);
+    self.module_for_path.insert(format!("std::{}", module_name), module_id);
+    self.parsed_modules.insert(module_id, parsed);
+
+    for (items, import_from, span) in import_paths {
+      let dep_id = self.discover_recursive(&import_from, Some(&fs_path), config)?;
+      self.module_graph.add_import(module_id, items, dep_id, span);
+    }
+
+    Ok(module_id)
   }
 
   fn discover_recursive(
@@ -204,22 +238,65 @@ impl CompilationContext {
     self.module_graph.root = Some(root_id);
     let order = self.module_graph.topological_sort();
 
+    let mut output = self.analyze_modules(&order, config)?;
+
+    let entry_point = if order.contains(&root_id) {
+      output.hir.entry_point
+    } else {
+      None
+    };
+    output.hir.entry_point = entry_point;
+
+    Ok(output)
+  }
+
+  /// Compile all modules in the graph (used for std library build).
+  pub fn compile_all(
+    &mut self,
+    config: &IgnisConfig,
+  ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
+    let order = self.module_graph.all_modules_topological();
+
+    if order.is_empty() {
+      eprintln!("{} No modules to compile", "Error:".red().bold());
+      return Err(());
+    }
+
+    let mut output = self.analyze_modules(&order, config)?;
+    output.hir.entry_point = None;
+
+    Ok(output)
+  }
+
+  fn analyze_modules(
+    &self,
+    order: &[ModuleId],
+    config: &IgnisConfig,
+  ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
     if !config.quiet {
       println!("\n{}", "Analyzing modules...".bright_cyan().bold());
     }
 
     let mut export_table: ExportTable = HashMap::new();
-    let mut last_output: Option<ignis_analyzer::AnalyzerOutput> = None;
+    let mut shared_types = TypeStore::new();
+    let mut shared_defs = DefinitionStore::new();
+    let mut combined_hir = HIR::new();
+    let mut all_diagnostics = Vec::new();
 
-    for module_id in order {
-      let parsed = self.parsed_modules.get(&module_id).unwrap();
+    for &module_id in order {
+      let parsed = self.parsed_modules.get(&module_id).unwrap_or_else(|| {
+        panic!("internal error: module {:?} not found in parsed_modules", module_id)
+      });
 
-      let output = ignis_analyzer::Analyzer::analyze_with_imports(
+      let output = ignis_analyzer::Analyzer::analyze_with_shared_stores(
         &parsed.nodes,
         &parsed.roots,
         self.symbol_table.clone(),
         &export_table,
         &self.module_for_path,
+        &mut shared_types,
+        &mut shared_defs,
+        module_id,
       );
 
       if !config.quiet {
@@ -237,10 +314,18 @@ impl CompilationContext {
         return Err(());
       }
 
-      export_table.insert(module_id, output.collect_exports());
-      last_output = Some(output);
+      let exports = output.collect_exports();
+      combined_hir.merge(output.hir);
+      all_diagnostics.extend(output.diagnostics);
+      export_table.insert(module_id, exports);
     }
 
-    last_output.ok_or(())
+    Ok(ignis_analyzer::AnalyzerOutput {
+      types: shared_types,
+      defs: shared_defs,
+      hir: combined_hir,
+      diagnostics: all_diagnostics,
+      symbols: self.symbol_table.clone(),
+    })
   }
 }

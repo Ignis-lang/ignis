@@ -28,3 +28,19 @@ pub enum ConstValue {
   /// Undefined/uninitialized.
   Undef(TypeId),
 }
+
+impl ConstValue {
+  /// Returns the TypeId of this constant value.
+  pub fn type_id(&self) -> TypeId {
+    match self {
+      ConstValue::Int(_, ty) => *ty,
+      ConstValue::UInt(_, ty) => *ty,
+      ConstValue::Float(_, ty) => *ty,
+      ConstValue::Bool(_, ty) => *ty,
+      ConstValue::Char(_, ty) => *ty,
+      ConstValue::String(_, ty) => *ty,
+      ConstValue::Null(ty) => *ty,
+      ConstValue::Undef(ty) => *ty,
+    }
+  }
+}

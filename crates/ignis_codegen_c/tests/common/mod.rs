@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ignis_analyzer::Analyzer;
+use ignis_config::CHeader;
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
@@ -30,11 +31,16 @@ pub fn compile_to_c(source: &str) -> String {
   let mut types = result.types.clone();
   let sym_table = result.symbols.borrow();
   let (lir_program, verify_result) =
-    ignis_lir::lowering::lower_and_verify(&result.hir, &mut types, &result.defs, &sym_table);
+    ignis_lir::lowering::lower_and_verify(&result.hir, &mut types, &result.defs, &sym_table, None);
 
   if let Err(errors) = &verify_result {
     panic!("LIR verification errors: {:?}", errors);
   }
 
-  ignis_codegen_c::emit_c(&lir_program, &types, &result.defs, &sym_table)
+  let headers = vec![CHeader {
+    path: "types.h".to_string(),
+    quoted: true,
+  }];
+
+  ignis_codegen_c::emit_c(&lir_program, &types, &result.defs, &sym_table, &headers)
 }

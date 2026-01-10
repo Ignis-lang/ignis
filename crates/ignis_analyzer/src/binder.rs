@@ -82,6 +82,7 @@ impl<'a> Analyzer<'a> {
         name: param.name.clone(),
         span: param.span.clone(),
         visibility: Visibility::Private,
+        owner_module: self.current_module,
       };
       let def_id = self.defs.alloc(def);
       param_defs.push(def_id);
@@ -103,6 +104,7 @@ impl<'a> Analyzer<'a> {
       } else {
         Visibility::Private
       },
+      owner_module: self.current_module,
     };
 
     let def_id = &self.defs.alloc(def);
@@ -170,6 +172,7 @@ impl<'a> Analyzer<'a> {
       } else {
         Visibility::Private
       },
+      owner_module: self.current_module,
     };
 
     let def_id = &self.defs.alloc(def);
@@ -211,6 +214,7 @@ impl<'a> Analyzer<'a> {
       name: const_.name.clone(),
       span: span.clone(),
       visibility: Visibility::Private,
+      owner_module: self.current_module,
     };
 
     let def_id = self.defs.alloc(def);

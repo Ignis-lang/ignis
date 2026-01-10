@@ -2,13 +2,38 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Header to include in generated C code with style info
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CHeader {
+  /// The path/name of the header
+  pub path: String,
+  /// true = #include "...", false = #include <...>
+  pub quoted: bool,
+}
+
+/// Toolchain configuration for the standard library
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StdToolchainConfig {
+  /// Base header providing fundamental types (e.g., "runtime/types/types.h")
+  pub base_header: Option<String>,
+  /// Whether base_header uses quoted includes (default: true)
+  pub base_header_quoted: Option<bool>,
+  /// Include directories relative to std_root (default: ["."])
+  #[serde(default)]
+  pub include_dirs: Vec<String>,
+}
+
 /// Linking information for a std module (header and object file)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StdLinkingInfo {
   /// Path to the C header file (optional)
   pub header: Option<String>,
+  /// Whether header uses quoted includes (default: false for system headers)
+  pub header_quoted: Option<bool>,
   /// Path to the object file for linking (optional)
   pub object: Option<String>,
+  /// External library to link (e.g., "m" for -lm)
+  pub lib: Option<String>,
 }
 
 /// Configuration for auto-loading modules
@@ -35,6 +60,9 @@ pub struct StdAutoLoad {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IgnisSTDManifest {
+  /// Toolchain configuration
+  #[serde(default)]
+  pub toolchain: StdToolchainConfig,
   /// Module name -> relative path to .ign file
   #[serde(default)]
   pub modules: HashMap<String, String>,
@@ -47,6 +75,23 @@ pub struct IgnisSTDManifest {
 }
 
 impl IgnisSTDManifest {
+  /// Get the base header as a CHeader if configured
+  pub fn get_base_header(&self) -> Option<CHeader> {
+    self.toolchain.base_header.as_ref().map(|path| CHeader {
+      path: path.clone(),
+      quoted: self.toolchain.base_header_quoted.unwrap_or(true),
+    })
+  }
+
+  /// Get include directories (defaults to ["."] if empty)
+  pub fn get_include_dirs(&self) -> Vec<&str> {
+    if self.toolchain.include_dirs.is_empty() {
+      vec!["."]
+    } else {
+      self.toolchain.include_dirs.iter().map(|s| s.as_str()).collect()
+    }
+  }
+
   /// Get the relative path to a module's .ign file
   pub fn get_module_path(
     &self,
@@ -182,6 +227,9 @@ pub struct IgnisBuildConfig {
   pub dump_hir_summary: bool,
   pub dump_lir: bool,
   pub emit_c: Option<String>,
+  pub emit_obj: Option<String>,
+  pub emit_bin: Option<String>,
+  pub rebuild_std: bool,
 }
 
 impl IgnisBuildConfig {
@@ -197,6 +245,9 @@ impl IgnisBuildConfig {
     dump_hir_summary: bool,
     dump_lir: bool,
     emit_c: Option<String>,
+    emit_obj: Option<String>,
+    emit_bin: Option<String>,
+    rebuild_std: bool,
   ) -> Self {
     Self {
       file,
@@ -210,6 +261,9 @@ impl IgnisBuildConfig {
       dump_hir_summary,
       dump_lir,
       emit_c,
+      emit_obj,
+      emit_bin,
+      rebuild_std,
     }
   }
 }
@@ -264,6 +318,8 @@ pub struct IgnisConfig {
   pub build: bool,
   pub test: bool,
   pub init: bool,
+  pub build_std: bool,
+  pub build_std_output_dir: Option<String>,
   pub std_path: String,
   pub std: bool,
   pub auto_load_std: bool,
@@ -281,6 +337,8 @@ impl IgnisConfig {
     build: bool,
     test: bool,
     init: bool,
+    build_std: bool,
+    build_std_output_dir: Option<String>,
     std_path: String,
     std: bool,
     auto_load_std: bool,
@@ -296,6 +354,8 @@ impl IgnisConfig {
       build,
       test,
       init,
+      build_std,
+      build_std_output_dir,
       std_path,
       std,
       auto_load_std,
