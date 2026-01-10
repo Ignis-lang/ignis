@@ -269,8 +269,8 @@ impl<'a> LirPrinter<'a> {
       ConstValue::UInt(v, _) => format!("{}u", v),
       ConstValue::Float(v, _) => format!("{}", v),
       ConstValue::Bool(v, _) => format!("{}", v),
-      ConstValue::Char(v, _) => format!("'{}'", v),
-      ConstValue::String(v, _) => format!("\"{}\"", v),
+      ConstValue::Char(v, _) => format!("'{}'", escape_char(*v)),
+      ConstValue::String(v, _) => format!("\"{}\"", escape_string(v)),
       ConstValue::Null(_) => "null".to_string(),
       ConstValue::Undef(_) => "undef".to_string(),
     }
@@ -358,4 +358,26 @@ pub fn print_function(
   let mut program = LirProgram::new();
   program.functions.insert(func.def_id, func.clone());
   LirPrinter::new(&program, types, defs, symbols).print()
+}
+
+fn escape_char(c: char) -> String {
+  match c {
+    '\n' => "\\n".to_string(),
+    '\r' => "\\r".to_string(),
+    '\t' => "\\t".to_string(),
+    '\0' => "\\0".to_string(),
+    '\\' => "\\\\".to_string(),
+    '\'' => "\\'".to_string(),
+    '"' => "\\\"".to_string(),
+    c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+    c => format!("\\x{:02x}", c as u32),
+  }
+}
+
+fn escape_string(s: &str) -> String {
+  let mut result = String::with_capacity(s.len());
+  for c in s.chars() {
+    result.push_str(&escape_char(c));
+  }
+  result
 }

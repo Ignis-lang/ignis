@@ -120,6 +120,9 @@ impl super::IgnisParser {
       if !self.eat(TokenType::Comma) {
         break;
       }
+      if self.at(TokenType::From) {
+        break;
+      }
     }
 
     self.expect(TokenType::From)?;
@@ -302,6 +305,21 @@ mod tests {
         assert_eq!(symbol_name(&result, &imp.items[0]), "foo");
         assert_eq!(symbol_name(&result, &imp.items[1]), "bar");
         assert_eq!(symbol_name(&result, &imp.items[2]), "baz");
+      },
+      other => panic!("expected import, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_import_trailing_comma() {
+    let result = parse("import foo, bar, from \"module\";");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Import(imp) => {
+        assert_eq!(imp.items.len(), 2);
+        assert_eq!(symbol_name(&result, &imp.items[0]), "foo");
+        assert_eq!(symbol_name(&result, &imp.items[1]), "bar");
       },
       other => panic!("expected import, got {:?}", other),
     }

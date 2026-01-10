@@ -354,7 +354,7 @@ mod tests {
 
     match expr {
       ASTExpression::Literal(lit) => match &lit.value {
-        IgnisLiteralValue::String(s) => assert_eq!(s, "\"hello\""),
+        IgnisLiteralValue::String(s) => assert_eq!(s, "hello"),
         other => panic!("expected String, got {:?}", other),
       },
       other => panic!("expected literal, got {:?}", other),

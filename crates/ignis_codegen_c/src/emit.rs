@@ -44,15 +44,16 @@ impl<'a> CEmitter<'a> {
   fn emit_headers(&mut self) {
     writeln!(self.output, "#include <stdint.h>").unwrap();
     writeln!(self.output, "#include <stdbool.h>").unwrap();
+    writeln!(self.output, "#include <string.h>").unwrap();
     writeln!(self.output, "#include <math.h>").unwrap();
     writeln!(self.output).unwrap();
   }
 
   fn emit_forward_declarations(&mut self) {
-    let extern_calls = self.collect_extern_calls();
-    if !extern_calls.is_empty() {
-      writeln!(self.output, "// Extern functions").unwrap();
-      let mut extern_list: Vec<_> = extern_calls.iter().collect();
+    let undeclared_externs = self.collect_undeclared_extern_calls();
+
+    if !undeclared_externs.is_empty() {
+      let mut extern_list: Vec<_> = undeclared_externs.iter().collect();
       extern_list.sort_by_key(|def_id| def_id.index());
 
       for def_id in extern_list {
@@ -65,6 +66,9 @@ impl<'a> CEmitter<'a> {
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
     for (def_id, func) in &funcs {
+      if func.is_extern {
+        write!(self.output, "extern ").unwrap();
+      }
       self.emit_function_signature(**def_id, func);
       writeln!(self.output, ";").unwrap();
     }
@@ -72,7 +76,7 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output).unwrap();
   }
 
-  fn collect_extern_calls(&self) -> HashSet<DefinitionId> {
+  fn collect_undeclared_extern_calls(&self) -> HashSet<DefinitionId> {
     let mut externs = HashSet::new();
     for func in self.program.functions.values() {
       for block in func.blocks.get_all() {
@@ -112,7 +116,7 @@ impl<'a> CEmitter<'a> {
         params.join(", ")
       };
 
-      writeln!(self.output, "{} {}({});", ret_ty, name, params_str).unwrap();
+      writeln!(self.output, "extern {} {}({});", ret_ty, name, params_str).unwrap();
     }
   }
 
@@ -188,9 +192,14 @@ impl<'a> CEmitter<'a> {
 
     writeln!(self.output, "    // Locals").unwrap();
     for (idx, local) in locals.iter().enumerate() {
-      let ty = self.format_var_type(local.ty);
       let name = local.name.as_deref().unwrap_or("_");
-      writeln!(self.output, "    {} l{}; // {}", ty, idx, name).unwrap();
+      if let Type::Vector { element, size: Some(n) } = self.types.get(&local.ty) {
+        let elem_ty = self.format_type(*element);
+        writeln!(self.output, "    {} l{}[{}]; // {}", elem_ty, idx, n, name).unwrap();
+      } else {
+        let ty = self.format_var_type(local.ty);
+        writeln!(self.output, "    {} l{}; // {}", ty, idx, name).unwrap();
+      }
     }
     writeln!(self.output).unwrap();
   }
@@ -231,7 +240,7 @@ impl<'a> CEmitter<'a> {
 
     for instr in &block.instructions {
       write!(self.output, "    ").unwrap();
-      self.emit_instr(instr);
+      self.emit_instr(func, instr);
     }
 
     write!(self.output, "    ").unwrap();
@@ -240,6 +249,7 @@ impl<'a> CEmitter<'a> {
 
   fn emit_instr(
     &mut self,
+    func: &FunctionLir,
     instr: &Instr,
   ) {
     match instr {
@@ -247,25 +257,31 @@ impl<'a> CEmitter<'a> {
         writeln!(self.output, "t{} = l{};", dest.index(), source.index()).unwrap();
       },
       Instr::Store { dest, value } => {
-        let val = self.format_operand(value);
-        writeln!(self.output, "l{} = {};", dest.index(), val).unwrap();
+        let local_info = func.locals.get(dest);
+        let val = self.format_operand(func, value);
+        if let Type::Vector { size: Some(n), element } = self.types.get(&local_info.ty) {
+          let elem_size = self.sizeof_type(*element);
+          writeln!(self.output, "memcpy(l{}, {}, {} * {});", dest.index(), val, n, elem_size).unwrap();
+        } else {
+          writeln!(self.output, "l{} = {};", dest.index(), val).unwrap();
+        }
       },
       Instr::LoadPtr { dest, ptr } => {
-        let p = self.format_operand(ptr);
+        let p = self.format_operand(func, ptr);
         writeln!(self.output, "t{} = *{};", dest.index(), p).unwrap();
       },
       Instr::StorePtr { ptr, value } => {
-        let p = self.format_operand(ptr);
-        let v = self.format_operand(value);
+        let p = self.format_operand(func, ptr);
+        let v = self.format_operand(func, value);
         writeln!(self.output, "*{} = {};", p, v).unwrap();
       },
       Instr::Copy { dest, source } => {
-        let s = self.format_operand(source);
+        let s = self.format_operand(func, source);
         writeln!(self.output, "t{} = {};", dest.index(), s).unwrap();
       },
       Instr::BinOp { dest, op, left, right } => {
-        let l = self.format_operand(left);
-        let r = self.format_operand(right);
+        let l = self.format_operand(func, left);
+        let r = self.format_operand(func, right);
         if matches!(op, BinaryOperation::Pow) {
           writeln!(self.output, "t{} = pow({}, {});", dest.index(), l, r).unwrap();
         } else {
@@ -274,13 +290,13 @@ impl<'a> CEmitter<'a> {
         }
       },
       Instr::UnaryOp { dest, op, operand } => {
-        let o = self.format_operand(operand);
+        let o = self.format_operand(func, operand);
         let op_str = self.format_unaryop(op);
         writeln!(self.output, "t{} = {}{};", dest.index(), op_str, o).unwrap();
       },
       Instr::Call { dest, callee, args } => {
         let name = self.def_name(*callee);
-        let args_str: Vec<_> = args.iter().map(|a| self.format_operand(a)).collect();
+        let args_str: Vec<_> = args.iter().map(|a| self.format_operand(func, a)).collect();
 
         if let Some(d) = dest {
           writeln!(self.output, "t{} = {}({});", d.index(), name, args_str.join(", ")).unwrap();
@@ -293,25 +309,31 @@ impl<'a> CEmitter<'a> {
         source,
         target_type,
       } => {
-        let s = self.format_operand(source);
+        let s = self.format_operand(func, source);
         let ty = self.format_type(*target_type);
         writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
       },
       Instr::AddrOfLocal { dest, local, .. } => {
-        writeln!(self.output, "t{} = &l{};", dest.index(), local.index()).unwrap();
+        // For array locals, the name already decays to a pointer in C
+        let local_info = func.locals.get(local);
+        if matches!(self.types.get(&local_info.ty), Type::Vector { size: Some(_), .. }) {
+          writeln!(self.output, "t{} = l{};", dest.index(), local.index()).unwrap();
+        } else {
+          writeln!(self.output, "t{} = &l{};", dest.index(), local.index()).unwrap();
+        }
       },
       Instr::GetElementPtr { dest, base, index, .. } => {
-        let b = self.format_operand(base);
-        let i = self.format_operand(index);
+        let b = self.format_operand(func, base);
+        let i = self.format_operand(func, index);
         writeln!(self.output, "t{} = &{}[{}];", dest.index(), b, i).unwrap();
       },
       Instr::InitVector { dest_ptr, elements, .. } => {
-        let p = self.format_operand(dest_ptr);
+        let p = self.format_operand(func, dest_ptr);
         for (i, elem) in elements.iter().enumerate() {
           if i > 0 {
             write!(self.output, "    ").unwrap();
           }
-          let e = self.format_operand(elem);
+          let e = self.format_operand(func, elem);
           writeln!(self.output, "{}[{}] = {};", p, i, e).unwrap();
         }
       },
@@ -336,14 +358,14 @@ impl<'a> CEmitter<'a> {
         then_block,
         else_block,
       } => {
-        let c = self.format_operand(condition);
+        let c = self.format_operand(func, condition);
         let then_label = &func.blocks.get(then_block).label;
         let else_label = &func.blocks.get(else_block).label;
         writeln!(self.output, "if ({}) goto {}; else goto {};", c, then_label, else_label).unwrap();
       },
       Terminator::Return(value) => {
         if let Some(v) = value {
-          let val = self.format_operand(v);
+          let val = self.format_operand(func, v);
           writeln!(self.output, "return {};", val).unwrap();
         } else {
           writeln!(self.output, "return;").unwrap();
@@ -357,10 +379,19 @@ impl<'a> CEmitter<'a> {
 
   fn format_operand(
     &self,
+    func: &FunctionLir,
     op: &Operand,
   ) -> String {
     match op {
-      Operand::Temp(t) => format!("t{}", t.index()),
+      Operand::Temp(t) => {
+        let idx = t.index() as usize;
+        // First N temps are function parameters
+        if idx < func.params.len() {
+          self.def_name(func.params[idx])
+        } else {
+          format!("t{}", idx)
+        }
+      },
       Operand::Const(c) => self.format_const(c),
       Operand::FuncRef(def) => self.def_name(*def),
       Operand::GlobalRef(def) => self.def_name(*def),
@@ -395,11 +426,41 @@ impl<'a> CEmitter<'a> {
         format!("{}{}", v, suffix)
       },
       ConstValue::Bool(v, _) => format!("{}", v),
-      ConstValue::Char(v, _) => format!("'{}'", v.escape_default()),
-      ConstValue::String(v, _) => format!("\"{}\"", v.escape_default()),
+      ConstValue::Char(v, _) => format!("'{}'", Self::escape_char(*v)),
+      ConstValue::String(v, _) => format!("\"{}\"", Self::escape_string(v)),
       ConstValue::Null(_) => "NULL".to_string(),
       ConstValue::Undef(_) => "/* undef */ 0".to_string(),
     }
+  }
+
+  fn escape_char(c: char) -> String {
+    match c {
+      '\n' => "\\n".to_string(),
+      '\r' => "\\r".to_string(),
+      '\t' => "\\t".to_string(),
+      '\0' => "\\0".to_string(),
+      '\\' => "\\\\".to_string(),
+      '\'' => "\\'".to_string(),
+      c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+      c => format!("\\x{:02x}", c as u32),
+    }
+  }
+
+  fn escape_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+      match c {
+        '\n' => result.push_str("\\n"),
+        '\r' => result.push_str("\\r"),
+        '\t' => result.push_str("\\t"),
+        '\0' => result.push_str("\\0"),
+        '\\' => result.push_str("\\\\"),
+        '"' => result.push_str("\\\""),
+        c if c.is_ascii_graphic() || c == ' ' => result.push(c),
+        c => result.push_str(&format!("\\x{:02x}", c as u32)),
+      }
+    }
+    result
   }
 
   fn format_binop(
@@ -467,6 +528,14 @@ impl<'a> CEmitter<'a> {
       Type::Tuple(_) => "/* tuple */ void*".to_string(),
       Type::Function { .. } => "/* fn */ void*".to_string(),
     }
+  }
+
+  fn sizeof_type(
+    &self,
+    ty: TypeId,
+  ) -> String {
+    let ty_str = self.format_type(ty);
+    format!("sizeof({})", ty_str)
   }
 
   fn def_name(

@@ -640,13 +640,13 @@ impl<'a> Analyzer<'a> {
         });
 
         let hir_node = HIRNode {
-          kind: HIRKind::Binary {
-            operation: BinaryOperation::Add,
-            left: expr_id,
-            right: one_lit,
+          kind: HIRKind::Assign {
+            target: expr_id,
+            value: one_lit,
+            operation: Some(BinaryOperation::Add),
           },
           span: span.clone(),
-          type_id: expr_type,
+          type_id: self.types.void(),
         };
 
         hir.alloc(hir_node)
@@ -662,13 +662,13 @@ impl<'a> Analyzer<'a> {
         });
 
         let hir_node = HIRNode {
-          kind: HIRKind::Binary {
-            operation: BinaryOperation::Sub,
-            left: expr_id,
-            right: one_lit,
+          kind: HIRKind::Assign {
+            target: expr_id,
+            value: one_lit,
+            operation: Some(BinaryOperation::Sub),
           },
           span: span.clone(),
-          type_id: expr_type,
+          type_id: self.types.void(),
         };
 
         hir.alloc(hir_node)

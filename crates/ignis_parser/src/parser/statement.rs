@@ -144,7 +144,11 @@ impl super::IgnisParser {
     let mut end_span = self.get_span(&then_block).clone();
 
     if self.eat(TokenType::Else) {
-      let else_block_node = self.parse_block()?;
+      let else_block_node = if self.at(TokenType::If) {
+        self.parse_if_statement()?
+      } else {
+        self.parse_block()?
+      };
       end_span = self.get_span(&else_block_node).clone();
       else_block = Some(else_block_node);
     }

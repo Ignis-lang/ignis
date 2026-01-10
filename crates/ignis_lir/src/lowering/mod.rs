@@ -599,11 +599,10 @@ impl<'a> LoweringContext<'a> {
       _ => return None,
     };
 
-    // Lower all elements
     let elem_ops: Vec<_> = elements.iter().filter_map(|&e| self.lower_hir_node(e)).collect();
 
-    // Get address of local
-    let ptr_ty = self.types.pointer(vec_ty);
+    // C array decay: array name becomes pointer to first element
+    let ptr_ty = self.types.pointer(elem_ty);
     let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
     self.fn_builder().emit(Instr::AddrOfLocal {
       dest: ptr,

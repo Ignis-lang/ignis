@@ -13,6 +13,8 @@ pub struct IgnisLexer<'a> {
   line: usize,
   current: usize,
   pub diagnostics: Vec<DiagnosticMessage>,
+  /// Holds the processed lexeme for string literals (with escapes resolved).
+  pending_string: Option<String>,
 }
 
 impl<'a> IgnisLexer<'a> {
@@ -29,6 +31,7 @@ impl<'a> IgnisLexer<'a> {
       line: 0,
       current: 0,
       diagnostics: vec![],
+      pending_string: None,
     }
   }
 
@@ -216,6 +219,7 @@ impl<'a> IgnisLexer<'a> {
 
     self.advance();
 
+    self.pending_string = Some(result);
     Ok(TokenType::String)
   }
 
@@ -350,11 +354,15 @@ impl<'a> IgnisLexer<'a> {
     &mut self,
     kind: TokenType,
   ) {
-    let mut literal = self.source[self.start..self.current].to_string();
-
-    if (kind == TokenType::Int || kind == TokenType::Float) && literal.contains('_') {
-      literal = literal.replace('_', "");
-    }
+    let literal = if let Some(s) = self.pending_string.take() {
+      s
+    } else {
+      let mut lit = self.source[self.start..self.current].to_string();
+      if (kind == TokenType::Int || kind == TokenType::Float) && lit.contains('_') {
+        lit = lit.replace('_', "");
+      }
+      lit
+    };
 
     self
       .tokens
@@ -587,7 +595,7 @@ mod tests {
     assert_tokens(
       &tokens,
       &[
-        (TokenType::String, "\"hello\""),
+        (TokenType::String, "hello"),
         (TokenType::Comment, "// comment"),
         (TokenType::MultiLineComment, "/* block */"),
         (TokenType::Eof, ""),

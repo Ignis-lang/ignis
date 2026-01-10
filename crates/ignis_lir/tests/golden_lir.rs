@@ -190,7 +190,7 @@ function negate(x: i32): i32 {
     return -x;
 }
 
-function invert(b: bool): bool {
+function invert(b: boolean): boolean {
     return !b;
 }
 "#,
@@ -203,13 +203,13 @@ function invert(b: bool): bool {
 fn lir_comparison_operators() {
   let result = common::lower_to_lir(
     r#"
-function compare(a: i32, b: i32): bool {
-    let lt: bool = a < b;
-    let le: bool = a <= b;
-    let gt: bool = a > b;
-    let ge: bool = a >= b;
-    let eq: bool = a == b;
-    let ne: bool = a != b;
+function compare(a: i32, b: i32): boolean {
+    let lt: boolean = a < b;
+    let le: boolean = a <= b;
+    let gt: boolean = a > b;
+    let ge: boolean = a >= b;
+    let eq: boolean = a == b;
+    let ne: boolean = a != b;
     return eq;
 }
 "#,
@@ -222,7 +222,7 @@ function compare(a: i32, b: i32): bool {
 fn lir_logical_and() {
   let result = common::lower_to_lir(
     r#"
-function both(a: bool, b: bool): bool {
+function both(a: boolean, b: boolean): boolean {
     return a && b;
 }
 "#,
@@ -235,7 +235,7 @@ function both(a: bool, b: bool): bool {
 fn lir_logical_or() {
   let result = common::lower_to_lir(
     r#"
-function either(a: bool, b: bool): bool {
+function either(a: boolean, b: boolean): boolean {
     return a || b;
 }
 "#,

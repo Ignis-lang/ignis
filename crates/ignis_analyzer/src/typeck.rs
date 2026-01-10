@@ -5,7 +5,10 @@ use ignis_ast::{
   type_::IgnisTypeSyntax,
   ASTNode, NodeId,
 };
-use ignis_diagnostics::message::DiagnosticMessage;
+use ignis_diagnostics::{
+  diagnostic_report::{Diagnostic, Severity},
+  message::DiagnosticMessage,
+};
 use ignis_type::{definition::DefinitionKind, span::Span, types::TypeId, value::IgnisLiteralValue};
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
 use ignis_ast::expressions::binary::ASTBinaryOperator;
@@ -64,7 +67,7 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     match stmt {
       ASTStatement::Variable(var) => {
-        let declared_type = self.resolve_type_syntax(&var.type_);
+        let declared_type = self.resolve_type_syntax_with_span(&var.type_, &var.span);
 
         let var_type = if self.types.is_unknown(&declared_type) {
           if let Some(value_id) = &var.value {
@@ -101,7 +104,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Function(func) => {
         let def_id = self.define_decl_in_current_scope(node_id);
-        let return_type = self.resolve_type_syntax(&func.signature.return_type);
+        let return_type = self.resolve_type_syntax_with_span(&func.signature.return_type, &func.signature.span);
 
         let param_ids = def_id
           .as_ref()
@@ -112,7 +115,7 @@ impl<'a> Analyzer<'a> {
           .unwrap_or_default();
 
         for (param, param_id) in func.signature.parameters.iter().zip(param_ids.iter()) {
-          let param_type = self.resolve_type_syntax(&param.type_);
+          let param_type = self.resolve_type_syntax_with_span(&param.type_, &param.span);
 
           if let DefinitionKind::Parameter(param_def) = &mut self.defs.get_mut(&param_id).kind {
             param_def.type_id = param_type.clone();
@@ -142,7 +145,7 @@ impl<'a> Analyzer<'a> {
         return_type
       },
       ASTStatement::Constant(const_) => {
-        let const_type = self.resolve_type_syntax(&const_.ty);
+        let const_type = self.resolve_type_syntax_with_span(&const_.ty, &const_.span);
 
         if let Some(def_id) = self.lookup_def(node_id).cloned() {
           self.defs.get_mut(&def_id).kind = DefinitionKind::Constant(ignis_type::definition::ConstantDefinition {
@@ -297,7 +300,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Cast(cast) => {
         let expr_type = self.typecheck_node(&cast.expression, scope_kind, ctx);
         self.typecheck_cast(expr_type, &cast.target_type, &cast.span);
-        self.resolve_type_syntax(&cast.target_type)
+        self.resolve_type_syntax_with_span(&cast.target_type, &cast.span)
       },
       ASTExpression::Reference(ref_) => {
         let expr_type = self.typecheck_node(&ref_.inner, scope_kind, ctx);
@@ -899,6 +902,8 @@ impl<'a> Analyzer<'a> {
       (Type::Reference { .. }, Type::Pointer(_)) => true,
       (Type::Pointer(_), Type::Pointer(_)) => true,
       (Type::Reference { .. }, Type::Reference { .. }) => true,
+      (Type::Unknown, _) => true,
+      (Type::Reference { inner, .. }, _) if self.types.is_unknown(inner) => true,
       (_, _) if self.types.types_equal(&expr_type, &target_type) => true,
       _ => false,
     };
@@ -949,6 +954,22 @@ impl<'a> Analyzer<'a> {
     &mut self,
     ty: &IgnisTypeSyntax,
   ) -> TypeId {
+    self.resolve_type_syntax_impl(ty, None)
+  }
+
+  pub fn resolve_type_syntax_with_span(
+    &mut self,
+    ty: &IgnisTypeSyntax,
+    span: &Span,
+  ) -> TypeId {
+    self.resolve_type_syntax_impl(ty, Some(span))
+  }
+
+  fn resolve_type_syntax_impl(
+    &mut self,
+    ty: &IgnisTypeSyntax,
+    span: Option<&Span>,
+  ) -> TypeId {
     match ty {
       IgnisTypeSyntax::I8 => self.types.i8(),
       IgnisTypeSyntax::I16 => self.types.i16(),
@@ -967,30 +988,42 @@ impl<'a> Analyzer<'a> {
       IgnisTypeSyntax::Unknown => self.types.unknown(),
       IgnisTypeSyntax::Null => self.types.error(),
       IgnisTypeSyntax::Vector(inner, size) => {
-        let inner_type = self.resolve_type_syntax(inner);
+        let inner_type = self.resolve_type_syntax_impl(inner, span);
         self.types.vector(inner_type, *size)
       },
       IgnisTypeSyntax::Tuple(elements) => {
-        let element_types: Vec<_> = elements.iter().map(|e| self.resolve_type_syntax(e)).collect();
+        let element_types: Vec<_> = elements
+          .iter()
+          .map(|e| self.resolve_type_syntax_impl(e, span))
+          .collect();
         self.types.tuple(element_types)
       },
       IgnisTypeSyntax::Callable(params, ret) => {
-        let param_types: Vec<_> = params.iter().map(|p| self.resolve_type_syntax(p)).collect();
-        let ret_type = self.resolve_type_syntax(ret);
+        let param_types: Vec<_> = params.iter().map(|p| self.resolve_type_syntax_impl(p, span)).collect();
+        let ret_type = self.resolve_type_syntax_impl(ret, span);
         self.types.function(param_types, ret_type, false)
       },
       IgnisTypeSyntax::Pointer(inner) => {
-        let inner_type = self.resolve_type_syntax(inner);
+        let inner_type = self.resolve_type_syntax_impl(inner, span);
         self.types.pointer(inner_type)
       },
       IgnisTypeSyntax::Reference { inner, mutable } => {
-        let inner_type = self.resolve_type_syntax(inner);
+        let inner_type = self.resolve_type_syntax_impl(inner, span);
         self.types.reference(inner_type, *mutable)
       },
       IgnisTypeSyntax::Named(symbol_id) => {
         if let Some(def_id) = self.scopes.lookup(&symbol_id) {
           self.type_of(def_id).clone()
         } else {
+          let name = self.symbols.borrow().get(&symbol_id).to_string();
+          if let Some(s) = span {
+            self.add_diagnostic(Diagnostic::new(
+              Severity::Error,
+              format!("Undefined type '{}'", name),
+              "I0043".to_string(),
+              s.clone(),
+            ));
+          }
           self.types.error()
         }
       },
@@ -999,6 +1032,15 @@ impl<'a> Analyzer<'a> {
           if let Some(def_id) = self.scopes.lookup(&last.0) {
             self.type_of(def_id).clone()
           } else {
+            let name = self.symbols.borrow().get(&last.0).to_string();
+            if let Some(s) = span {
+              self.add_diagnostic(Diagnostic::new(
+                Severity::Error,
+                format!("Undefined type '{}'", name),
+                "I0043".to_string(),
+                s.clone(),
+              ));
+            }
             self.types.error()
           }
         } else {

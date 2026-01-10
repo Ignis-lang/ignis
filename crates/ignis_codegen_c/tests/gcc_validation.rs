@@ -127,3 +127,22 @@ function main(): void {
 "#,
   );
 }
+
+#[test]
+fn gcc_array_literal() {
+  gcc_compiles(
+    r#"
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): void {
+    let values: i32[5] = [1, 2, 3, 4, 5];
+    for (let i = 0; i < 5; i++) {
+        let result: i32 = add(values[i], values[i]);
+    }
+    return;
+}
+"#,
+  );
+}
