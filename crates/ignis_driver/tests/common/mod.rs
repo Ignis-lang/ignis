@@ -42,7 +42,14 @@ fn compile_to_c(source: &str) -> Result<String, String> {
 
   let mut types = result.types.clone();
   let sym_table = result.symbols.borrow();
-  let (lir, verify) = ignis_lir::lowering::lower_and_verify(&result.hir, &mut types, &result.defs, &sym_table, None);
+
+  // Run ownership analysis to produce drop schedules
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&result.hir, &result.types, &result.defs, &sym_table);
+  let (drop_schedules, _) = ownership_checker.check();
+
+  let (lir, verify) =
+    ignis_lir::lowering::lower_and_verify(&result.hir, &mut types, &result.defs, &sym_table, &drop_schedules, None);
   if let Err(e) = verify {
     return Err(format!("LIR verification errors: {:?}", e));
   }

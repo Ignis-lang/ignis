@@ -1,7 +1,11 @@
 #pragma once
 
-#include "../types/types.h"
+#include "../ignis_rt.h"
 
-// void print(string format, ...);
-void print(string format);
-void eprint(string format);
+// =============================================================================
+// I/O functions
+// =============================================================================
+// These functions accept IgnisString* (the new heap-managed string type).
+
+void print(string s);
+void eprint(string s);

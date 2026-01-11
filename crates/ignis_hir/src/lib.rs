@@ -1,6 +1,9 @@
 pub mod display;
+pub mod drop_schedule;
 pub mod operation;
 pub mod statement;
+
+pub use drop_schedule::{DropSchedules, ExitKey};
 
 use std::collections::HashMap;
 
@@ -43,6 +46,9 @@ pub enum HIRKind {
     elements: Vec<HIRId>,
   },
 
+  TypeOf(HIRId),
+  SizeOf(TypeId),
+
   // Statement
   Let {
     name: DefinitionId,
@@ -82,7 +88,15 @@ impl HIRKind {
     offset: u32,
   ) {
     match self {
-      HIRKind::Literal(_) | HIRKind::Variable(_) | HIRKind::Break | HIRKind::Continue | HIRKind::Error => {},
+      HIRKind::Literal(_)
+      | HIRKind::Variable(_)
+      | HIRKind::Break
+      | HIRKind::Continue
+      | HIRKind::Error
+      | HIRKind::SizeOf(_) => {},
+      HIRKind::TypeOf(id) => {
+        *id = HIRId::new(id.index() + offset);
+      },
       HIRKind::Binary { left, right, .. } => {
         *left = HIRId::new(left.index() + offset);
         *right = HIRId::new(right.index() + offset);

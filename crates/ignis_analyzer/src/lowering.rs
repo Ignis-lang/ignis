@@ -377,8 +377,20 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Call(call) => {
-        // Get the callee def_id by looking up the variable name
+        // Check for builtin typeOf/sizeOf BEFORE normal scope lookup
         let callee_node = self.ast.get(&call.callee);
+        if let ASTNode::Expression(ASTExpression::Variable(var)) = callee_node {
+          let name = self.symbols.borrow().get(&var.name).to_string();
+
+          if name == "typeOf" {
+            return self.lower_typeof_builtin(call, hir, scope_kind);
+          }
+          if name == "sizeOf" {
+            return self.lower_sizeof_builtin(call, hir, scope_kind);
+          }
+        }
+
+        // Get the callee def_id by looking up the variable name
         let callee_def_id = match callee_node {
           ASTNode::Expression(ASTExpression::Variable(var)) => match self.scopes.lookup(&var.name) {
             Some(def_id) => def_id.clone(),
@@ -674,6 +686,61 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
     }
+  }
+
+  fn lower_typeof_builtin(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    if call.arguments.len() != 1 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let arg = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
+    hir.alloc(HIRNode {
+      kind: HIRKind::TypeOf(arg),
+      span: call.span.clone(),
+      type_id: self.types.u32(),
+    })
+  }
+
+  fn lower_sizeof_builtin(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    if call.arguments.len() != 1 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let arg = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
+    let arg_type = hir.get(arg).type_id;
+    let base_type = self.unwrap_reference_type(&arg_type);
+
+    if matches!(self.types.get(&base_type), ignis_type::types::Type::Unknown) {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::SizeOf(base_type),
+      span: call.span.clone(),
+      type_id: self.types.u64(),
+    })
   }
 }
 

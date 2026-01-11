@@ -1,14 +1,24 @@
-#include "./io.h"
-#include <stdarg.h>
+#include "io.h"
 #include <stdio.h>
 
-// void print(string format, ...) {
-//   va_list args;
-//
-//   va_start(args, format);
-//   vfprintf(stdout, format, args);
-//   va_end(args);
-// }
-void print(string format) { printf("%s", format); }
+// =============================================================================
+// I/O functions
+// =============================================================================
 
-void eprint(string format) { fprintf(stderr, "%s", format); }
+void print(string s) {
+    if (s != NULL) {
+        const char* cstr = ignis_string_cstr(s);
+        if (cstr != NULL) {
+            printf("%s", cstr);
+        }
+    }
+}
+
+void eprint(string s) {
+    if (s != NULL) {
+        const char* cstr = ignis_string_cstr(s);
+        if (cstr != NULL) {
+            fprintf(stderr, "%s", cstr);
+        }
+    }
+}

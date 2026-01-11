@@ -62,6 +62,14 @@ pub enum VerifyError {
 
   /// Unexpected return value when function returns void.
   UnexpectedReturnValue { function: String, block: String },
+
+  /// Drop instruction on a non-droppable type.
+  DropNonDroppable {
+    function: String,
+    block: String,
+    local: LocalId,
+    actual_type: TypeId,
+  },
 }
 
 /// LIR verification result.
@@ -205,6 +213,36 @@ impl<'a> LirVerifier<'a> {
         }
       },
       Instr::Nop => {},
+      Instr::RuntimeCall { args, .. } => {
+        for arg in args {
+          self.check_operand(func, func_name, block_name, arg, defined_temps);
+        }
+      },
+      Instr::TypeIdOf { dest, source } => {
+        self.check_operand(func, func_name, block_name, source, defined_temps);
+        defined_temps.insert(*dest);
+      },
+      Instr::SizeOf { dest, .. } => {
+        // ty is a TypeId, no operand to check
+        defined_temps.insert(*dest);
+      },
+      Instr::Drop { local } => {
+        self.check_local_exists(func, func_name, block_name, *local);
+
+        // Verify the local has a droppable type
+        if local.index() < func.locals.get_all().len() as u32 {
+          let local_data = func.locals.get(local);
+          let ty = local_data.ty;
+          if !is_droppable(self.types, ty) {
+            self.errors.push(VerifyError::DropNonDroppable {
+              function: func_name.to_string(),
+              block: block_name.to_string(),
+              local: *local,
+              actual_type: ty,
+            });
+          }
+        }
+      },
     }
   }
 
@@ -399,4 +437,13 @@ pub fn verify_lir(
   types: &TypeStore,
 ) -> VerifyResult {
   LirVerifier::new(program, types).verify()
+}
+
+/// Check if a type requires a drop call.
+/// Droppable types: string, dynamic vector (size: None), unknown.
+pub fn is_droppable(
+  types: &TypeStore,
+  ty: TypeId,
+) -> bool {
+  matches!(types.get(&ty), Type::String | Type::Vector { size: None, .. } | Type::Unknown)
 }

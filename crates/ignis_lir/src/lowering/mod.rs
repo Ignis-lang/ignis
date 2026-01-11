@@ -2,7 +2,7 @@ mod builder;
 
 use std::collections::{HashMap, HashSet};
 
-use ignis_hir::{HIR, HIRId, HIRKind, statement::LoopKind};
+use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore},
   module::ModuleId,
@@ -42,11 +42,17 @@ pub struct LoweringContext<'a> {
   /// Current function being lowered.
   current_fn: Option<FunctionBuilder>,
 
+  /// Current function definition ID (for FnEnd drops).
+  current_fn_def_id: Option<DefinitionId>,
+
   /// Mapping from HIR definitions to LIR locals.
   def_to_local: HashMap<DefinitionId, LocalId>,
 
   /// Loop context stack for break/continue.
   loop_stack: Vec<LoopContext>,
+
+  /// Drop schedules from ownership analysis.
+  drop_schedules: &'a DropSchedules,
 
   /// Optional set of modules to emit. If None, emit all.
   /// If Some, only emit functions from modules in the set;
@@ -60,6 +66,7 @@ impl<'a> LoweringContext<'a> {
     types: &'a mut TypeStore,
     defs: &'a DefinitionStore,
     symbols: &'a SymbolTable,
+    drop_schedules: &'a DropSchedules,
     emit_modules: Option<&'a HashSet<ModuleId>>,
   ) -> Self {
     Self {
@@ -69,8 +76,10 @@ impl<'a> LoweringContext<'a> {
       symbols,
       program: LirProgram::new(),
       current_fn: None,
+      current_fn_def_id: None,
       def_to_local: HashMap::new(),
       loop_stack: Vec::new(),
+      drop_schedules,
       emit_modules,
     }
   }
@@ -126,6 +135,7 @@ impl<'a> LoweringContext<'a> {
     );
 
     self.current_fn = Some(builder);
+    self.current_fn_def_id = Some(def_id);
     self.def_to_local.clear();
     self.loop_stack.clear();
 
@@ -232,10 +242,10 @@ impl<'a> LoweringContext<'a> {
         value,
         operation,
       } => {
-        self.lower_assign(*target, *value, operation.clone());
+        self.lower_assign(hir_id, *target, *value, operation.clone());
         None
       },
-      HIRKind::Block { statements, expression } => self.lower_block(statements, expression.as_ref().copied()),
+      HIRKind::Block { statements, expression } => self.lower_block(hir_id, statements, expression.as_ref().copied()),
       HIRKind::If {
         condition,
         then_branch,
@@ -246,15 +256,15 @@ impl<'a> LoweringContext<'a> {
         None
       },
       HIRKind::Break => {
-        self.lower_break();
+        self.lower_break(hir_id);
         None
       },
       HIRKind::Continue => {
-        self.lower_continue();
+        self.lower_continue(hir_id);
         None
       },
       HIRKind::Return(value) => {
-        self.lower_return(value.as_ref().copied());
+        self.lower_return(hir_id, value.as_ref().copied());
         None
       },
       HIRKind::ExpressionStatement(expr) => {
@@ -262,6 +272,8 @@ impl<'a> LoweringContext<'a> {
         None
       },
       HIRKind::Error => None,
+      HIRKind::TypeOf(operand_hir) => self.lower_typeof(*operand_hir, node.type_id, node.span),
+      HIRKind::SizeOf(ty) => self.lower_sizeof(*ty, node.type_id, node.span),
     }
   }
 
@@ -490,6 +502,82 @@ impl<'a> LoweringContext<'a> {
     Some(Operand::Temp(dest))
   }
 
+  fn lower_typeof(
+    &mut self,
+    operand_hir: HIRId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let operand_node = self.hir.get(operand_hir);
+    let base_type = self.unwrap_reference_type(operand_node.type_id);
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    if matches!(self.types.get(&base_type), Type::Unknown) {
+      let operand_val = self.lower_hir_node(operand_hir)?;
+      self.fn_builder().emit(Instr::TypeIdOf {
+        dest,
+        source: operand_val,
+      });
+    } else {
+      let type_id = self.type_to_runtime_id(base_type);
+      self.fn_builder().emit(Instr::Copy {
+        dest,
+        source: Operand::Const(ConstValue::UInt(type_id, result_ty)),
+      });
+    }
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_sizeof(
+    &mut self,
+    ty: TypeId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    self.fn_builder().emit(Instr::SizeOf { dest, ty });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn unwrap_reference_type(
+    &self,
+    ty: TypeId,
+  ) -> TypeId {
+    match self.types.get(&ty) {
+      Type::Reference { inner, .. } => self.unwrap_reference_type(*inner),
+      _ => ty,
+    }
+  }
+
+  /// Map compile-time type to runtime type ID (matches IGNIS_TYPE_*_ID in ignis_rt.h).
+  fn type_to_runtime_id(
+    &self,
+    ty: TypeId,
+  ) -> u64 {
+    match self.types.get(&ty) {
+      Type::I8 => 0,
+      Type::I16 => 1,
+      Type::I32 => 2,
+      Type::I64 => 3,
+      Type::U8 => 4,
+      Type::U16 => 5,
+      Type::U32 => 6,
+      Type::U64 => 7,
+      Type::F32 => 8,
+      Type::F64 => 9,
+      Type::Boolean => 10,
+      Type::Char => 11,
+      Type::String => 12,
+      Type::Unknown => 13,
+      Type::Vector { size: None, .. } => 100,
+      Type::Pointer(_) => 200,
+      _ => 0xFFFFFFFF,
+    }
+  }
+
   fn lower_reference(
     &mut self,
     expr: HIRId,
@@ -685,11 +773,13 @@ impl<'a> LoweringContext<'a> {
 
   fn lower_assign(
     &mut self,
+    hir_id: HIRId,
     target: HIRId,
     value: HIRId,
     operation: Option<ignis_hir::operation::BinaryOperation>,
   ) {
-    // Try to get the local for direct assignment
+    self.emit_overwrite_drops(hir_id);
+
     if let Some(local) = self.lower_to_local(target) {
       if let Some(op) = operation {
         // Compound assignment: target op= value
@@ -828,6 +918,7 @@ impl<'a> LoweringContext<'a> {
 
   fn lower_block(
     &mut self,
+    block_hir_id: HIRId,
     statements: &[HIRId],
     expression: Option<HIRId>,
   ) -> Option<Operand> {
@@ -840,7 +931,13 @@ impl<'a> LoweringContext<'a> {
       }
     }
 
-    expression.and_then(|expr| self.lower_hir_node(expr))
+    let result = expression.and_then(|expr| self.lower_hir_node(expr));
+
+    if !self.fn_builder().is_terminated() {
+      self.emit_scope_end_drops(block_hir_id);
+    }
+
+    result
   }
 
   fn lower_if(
@@ -1058,41 +1155,88 @@ impl<'a> LoweringContext<'a> {
     self.fn_builder().switch_to_block(exit_block);
   }
 
-  fn lower_break(&mut self) {
-    let loop_ctx = self
-      .loop_stack
-      .last()
-      .expect("break outside of loop - should have been caught by analyzer");
-    let break_block = loop_ctx.break_block;
+  fn lower_break(
+    &mut self,
+    hir_id: HIRId,
+  ) {
+    self.emit_exit_drops(ExitKey::Break(hir_id));
+    let break_block = self.loop_stack.last().expect("break outside of loop").break_block;
     self.fn_builder().terminate(Terminator::Goto(break_block));
   }
 
-  fn lower_continue(&mut self) {
-    let loop_ctx = self
-      .loop_stack
-      .last()
-      .expect("continue outside of loop - should have been caught by analyzer");
-    let continue_block = loop_ctx.continue_block;
+  fn lower_continue(
+    &mut self,
+    hir_id: HIRId,
+  ) {
+    self.emit_exit_drops(ExitKey::Continue(hir_id));
+    let continue_block = self.loop_stack.last().expect("continue outside of loop").continue_block;
     self.fn_builder().terminate(Terminator::Goto(continue_block));
   }
 
   fn lower_return(
     &mut self,
+    hir_id: HIRId,
     value: Option<HIRId>,
   ) {
     let val = value.and_then(|v| self.lower_hir_node(v));
+    self.emit_exit_drops(ExitKey::Return(hir_id));
     self.fn_builder().terminate(Terminator::Return(val));
   }
 
   fn ensure_return(&mut self) {
     if !self.fn_builder().is_terminated() {
+      if let Some(fn_def_id) = self.current_fn_def_id {
+        self.emit_exit_drops(ExitKey::FnEnd(fn_def_id));
+      }
+
       let ret_ty = self.current_fn.as_ref().unwrap().return_type();
       if matches!(self.types.get(&ret_ty), Type::Void) {
         self.fn_builder().terminate(Terminator::Return(None));
       } else {
-        // Missing return - should have been caught by type checking
         self.fn_builder().terminate(Terminator::Unreachable);
       }
+    }
+  }
+
+  fn emit_scope_end_drops(
+    &mut self,
+    block_hir_id: HIRId,
+  ) {
+    if let Some(drops) = self.drop_schedules.on_scope_end.get(&block_hir_id) {
+      for def_id in drops {
+        self.emit_drop_for_def(*def_id);
+      }
+    }
+  }
+
+  fn emit_exit_drops(
+    &mut self,
+    key: ExitKey,
+  ) {
+    if let Some(drops) = self.drop_schedules.on_exit.get(&key) {
+      for def_id in drops {
+        self.emit_drop_for_def(*def_id);
+      }
+    }
+  }
+
+  fn emit_overwrite_drops(
+    &mut self,
+    assign_hir_id: HIRId,
+  ) {
+    if let Some(drops) = self.drop_schedules.on_overwrite.get(&assign_hir_id) {
+      for def_id in drops {
+        self.emit_drop_for_def(*def_id);
+      }
+    }
+  }
+
+  fn emit_drop_for_def(
+    &mut self,
+    def_id: DefinitionId,
+  ) {
+    if let Some(&local) = self.def_to_local.get(&def_id) {
+      self.fn_builder().emit(Instr::Drop { local });
     }
   }
 
@@ -1120,9 +1264,10 @@ pub fn lower_hir(
   types: &mut TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  drop_schedules: &DropSchedules,
   emit_modules: Option<&HashSet<ModuleId>>,
 ) -> LirProgram {
-  LoweringContext::new(hir, types, defs, symbols, emit_modules).lower()
+  LoweringContext::new(hir, types, defs, symbols, drop_schedules, emit_modules).lower()
 }
 
 /// Lower HIR to LIR and verify the result.
@@ -1131,9 +1276,10 @@ pub fn lower_and_verify(
   types: &mut TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  drop_schedules: &DropSchedules,
   emit_modules: Option<&HashSet<ModuleId>>,
 ) -> (LirProgram, Result<(), Vec<crate::VerifyError>>) {
-  let program = lower_hir(hir, types, defs, symbols, emit_modules);
+  let program = lower_hir(hir, types, defs, symbols, drop_schedules, emit_modules);
   let verify_result = crate::verify::verify_lir(&program, types);
   (program, verify_result)
 }

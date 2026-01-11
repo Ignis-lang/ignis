@@ -30,8 +30,14 @@ pub fn compile_to_c(source: &str) -> String {
 
   let mut types = result.types.clone();
   let sym_table = result.symbols.borrow();
+
+  // Run ownership analysis to produce drop schedules
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&result.hir, &result.types, &result.defs, &sym_table);
+  let (drop_schedules, _) = ownership_checker.check();
+
   let (lir_program, verify_result) =
-    ignis_lir::lowering::lower_and_verify(&result.hir, &mut types, &result.defs, &sym_table, None);
+    ignis_lir::lowering::lower_and_verify(&result.hir, &mut types, &result.defs, &sym_table, &drop_schedules, None);
 
   if let Err(errors) = &verify_result {
     panic!("LIR verification errors: {:?}", errors);

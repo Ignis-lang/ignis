@@ -1,111 +1,93 @@
 #include "number.h"
 #include <stdio.h>
-#include <stdlib.h>
 
 #define INT_BUF_SIZE 24
 #define FLOAT_BUF_SIZE 32
 
+// =============================================================================
+// Integer to string conversions
+// =============================================================================
+
 string i8ToString(i8 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%d", (int)value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%d", (int)value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string i16ToString(i16 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%d", (int)value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%d", (int)value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string i32ToString(i32 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%d", value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%d", value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string i64ToString(i64 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%ld", value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%ld", value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string u8ToString(u8 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%u", (unsigned int)value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%u", (unsigned int)value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string u16ToString(u16 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%u", (unsigned int)value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%u", (unsigned int)value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string u32ToString(u32 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%u", value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%u", value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string u64ToString(u64 value) {
-  string buf = (string)malloc(INT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, INT_BUF_SIZE, "%lu", value);
-  return buf;
+    char buf[INT_BUF_SIZE];
+    int len = snprintf(buf, INT_BUF_SIZE, "%lu", value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
+// =============================================================================
+// Float to string conversions
+// =============================================================================
+
 string f32ToString(f32 value) {
-  string buf = (string)malloc(FLOAT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, FLOAT_BUF_SIZE, "%g", (double)value);
-  return buf;
+    char buf[FLOAT_BUF_SIZE];
+    int len = snprintf(buf, FLOAT_BUF_SIZE, "%g", (double)value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
 string f64ToString(f64 value) {
-  string buf = (string)malloc(FLOAT_BUF_SIZE);
-  if (buf == NULL)
-    return NULL;
-  snprintf(buf, FLOAT_BUF_SIZE, "%g", value);
-  return buf;
+    char buf[FLOAT_BUF_SIZE];
+    int len = snprintf(buf, FLOAT_BUF_SIZE, "%g", value);
+    return ignis_string_from_len(buf, (size_t)len);
 }
 
+// =============================================================================
+// Boolean to string
+// =============================================================================
+
 string booleanToString(boolean value) {
-  if (value) {
-    string buf = (string)malloc(5);
-    if (buf == NULL)
-      return NULL;
-    buf[0] = 't';
-    buf[1] = 'r';
-    buf[2] = 'u';
-    buf[3] = 'e';
-    buf[4] = '\0';
-    return buf;
-  } else {
-    string buf = (string)malloc(6);
-    if (buf == NULL)
-      return NULL;
-    buf[0] = 'f';
-    buf[1] = 'a';
-    buf[2] = 'l';
-    buf[3] = 's';
-    buf[4] = 'e';
-    buf[5] = '\0';
-    return buf;
-  }
+    if (value) {
+        return ignis_string_from_cstr("true");
+    } else {
+        return ignis_string_from_cstr("false");
+    }
+}
+
+// =============================================================================
+// Empty string
+// =============================================================================
+
+string stringEmpty(void) {
+    return ignis_string_new();
 }

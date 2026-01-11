@@ -6,6 +6,7 @@ pub mod dump;
 pub mod imports;
 mod lowering;
 pub mod modules;
+pub mod ownership_hir;
 mod resolver;
 mod scope;
 mod typeck;
@@ -24,6 +25,8 @@ use ignis_diagnostics::diagnostic_report::Diagnostic;
 
 use imports::ExportTable;
 
+pub use ignis_hir::{DropSchedules, ExitKey};
+pub use ownership_hir::HirOwnershipChecker;
 pub use scope::{ScopeTree, ScopeId, ScopeKind};
 
 /// Context passed through type checking for function-scoped information.
@@ -284,6 +287,15 @@ impl<'a> Analyzer<'a> {
     symbol_id: &ignis_type::symbol::SymbolId,
   ) -> String {
     self.symbols.borrow().get(symbol_id).to_string()
+  }
+
+  fn is_builtin_name(
+    &self,
+    symbol_id: &ignis_type::symbol::SymbolId,
+  ) -> bool {
+    let symbols = self.symbols.borrow();
+    let name = symbols.get(symbol_id);
+    name == "typeOf" || name == "sizeOf"
   }
 
   fn node_span(

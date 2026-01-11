@@ -70,6 +70,17 @@ impl LinkPlan {
       // When using precompiled std, we need ALL runtime objects because
       // libignis_std.a depends on them. Add all objects/libs from manifest.
       if let Some(m) = manifest {
+        // First add ignis_rt (core runtime) - it's not a module but always needed
+        if let Some(info) = m.get_linking_info("ignis_rt") {
+          if let Some(o) = &info.object {
+            let obj_path = std_path.join(o);
+            if !plan.objects.contains(&obj_path) {
+              plan.objects.push(obj_path);
+            }
+          }
+        }
+
+        // Then add all module objects/libs
         for module_name in m.modules.keys() {
           if let Some(info) = m.get_linking_info(module_name) {
             if let Some(o) = &info.object {

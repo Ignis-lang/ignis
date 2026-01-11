@@ -360,4 +360,53 @@ impl TypeStore {
   ) -> bool {
     matches!(self.get(ty), Type::Unknown)
   }
+
+  /// Returns true if the type has Copy semantics (no ownership transfer on assignment).
+  pub fn is_copy(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    match self.get(ty) {
+      Type::I8
+      | Type::I16
+      | Type::I32
+      | Type::I64
+      | Type::U8
+      | Type::U16
+      | Type::U32
+      | Type::U64
+      | Type::F32
+      | Type::F64
+      | Type::Boolean
+      | Type::Char
+      | Type::Void
+      | Type::Never
+      | Type::Error => true,
+
+      Type::Pointer(_) | Type::Reference { .. } | Type::Function { .. } => true,
+
+      Type::Vector { element, size: Some(_) } => self.is_copy(element),
+      Type::Vector { size: None, .. } => false,
+
+      Type::String | Type::Unknown => false,
+
+      Type::Tuple(elems) => elems.iter().all(|e| self.is_copy(e)),
+    }
+  }
+
+  /// Returns true if the type owns heap resources that need dropping.
+  pub fn is_owned(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(self.get(ty), Type::String | Type::Vector { size: None, .. } | Type::Unknown)
+  }
+
+  #[inline]
+  pub fn needs_drop(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    self.is_owned(ty)
+  }
 }

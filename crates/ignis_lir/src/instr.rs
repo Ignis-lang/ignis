@@ -8,23 +8,38 @@ use crate::{LocalId, Operand, TempId};
 pub enum Instr {
   /// Load a value from a local slot into a temporary.
   /// `dest = *local`
-  Load { dest: TempId, source: LocalId },
+  Load {
+    dest: TempId,
+    source: LocalId,
+  },
 
   /// Store a value into a local slot.
   /// `*local = value`
-  Store { dest: LocalId, value: Operand },
+  Store {
+    dest: LocalId,
+    value: Operand,
+  },
 
   /// Load from a pointer/reference operand (indirect load).
   /// `dest = *ptr`
-  LoadPtr { dest: TempId, ptr: Operand },
+  LoadPtr {
+    dest: TempId,
+    ptr: Operand,
+  },
 
   /// Store to a pointer/reference operand (indirect store).
   /// `*ptr = value`
-  StorePtr { ptr: Operand, value: Operand },
+  StorePtr {
+    ptr: Operand,
+    value: Operand,
+  },
 
   /// Copy/move a value to a new temporary.
   /// `dest = source`
-  Copy { dest: TempId, source: Operand },
+  Copy {
+    dest: TempId,
+    source: Operand,
+  },
 
   /// Binary operation: `dest = left op right`
   BinOp {
@@ -78,6 +93,29 @@ pub enum Instr {
     element_type: TypeId,
   },
 
-  /// No-operation (placeholder).
   Nop,
+
+  /// Call to a runtime function by name (e.g., drop functions).
+  RuntimeCall {
+    name: String,
+    args: Vec<Operand>,
+  },
+
+  /// Extract type_id from IgnisUnknown: `dest = source.type_id`
+  TypeIdOf {
+    dest: TempId,
+    source: Operand,
+  },
+
+  /// Get byte size of type: `dest = sizeof(ty)`
+  SizeOf {
+    dest: TempId,
+    ty: TypeId,
+  },
+
+  /// Drop an owned value's resources.
+  /// The local must have a droppable type (string, dynamic vector, unknown).
+  Drop {
+    local: LocalId,
+  },
 }

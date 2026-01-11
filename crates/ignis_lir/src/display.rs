@@ -210,6 +210,21 @@ impl<'a> LirPrinter<'a> {
       Instr::Nop => {
         writeln!(self.output, "nop").unwrap();
       },
+      Instr::RuntimeCall { name, args } => {
+        let args_str: Vec<_> = args.iter().map(|a| self.format_operand(func, a)).collect();
+        writeln!(self.output, "runtime_call {}({})", name, args_str.join(", ")).unwrap();
+      },
+      Instr::TypeIdOf { dest, source } => {
+        let s = self.format_operand(func, source);
+        writeln!(self.output, "t{} = type_id_of {} : u32", dest.index(), s).unwrap();
+      },
+      Instr::SizeOf { dest, ty } => {
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "t{} = sizeof({}) : u64", dest.index(), ty_str).unwrap();
+      },
+      Instr::Drop { local } => {
+        writeln!(self.output, "drop l{}", local.index()).unwrap();
+      },
     }
   }
 

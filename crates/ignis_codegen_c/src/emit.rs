@@ -283,9 +283,15 @@ impl<'a> CEmitter<'a> {
       } => {
         let s = self.format_operand(func, source);
         let ty = self.format_type(*target_type);
+        let target = self.types.get(target_type);
 
+        // Boxing to `unknown` requires calling runtime boxing function
+        if matches!(target, Type::Unknown) {
+          let source_type = self.operand_type(func, source);
+          let boxing_fn = self.unknown_boxing_function(&source_type);
+          writeln!(self.output, "t{} = {}({});", dest.index(), boxing_fn, s).unwrap();
         // Unboxing from `any` requires dereference since C can't cast pointer to float
-        if self.is_any_type(func, source) {
+        } else if self.is_any_type(func, source) {
           writeln!(self.output, "t{} = *({}*)({});", dest.index(), ty, s).unwrap();
         } else {
           writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
@@ -321,6 +327,38 @@ impl<'a> CEmitter<'a> {
       },
       Instr::Nop => {
         writeln!(self.output, "/* nop */").unwrap();
+      },
+      Instr::RuntimeCall { name, args } => {
+        let args_str: Vec<_> = args.iter().map(|a| self.format_operand(func, a)).collect();
+        writeln!(self.output, "{}({});", name, args_str.join(", ")).unwrap();
+      },
+      Instr::TypeIdOf { dest, source } => {
+        let s = self.format_operand(func, source);
+        writeln!(self.output, "t{} = ({}).type_id;", dest.index(), s).unwrap();
+      },
+      Instr::SizeOf { dest, ty } => {
+        let c_type = self.format_type(*ty);
+        writeln!(self.output, "t{} = sizeof({});", dest.index(), c_type).unwrap();
+      },
+      Instr::Drop { local } => {
+        let local_data = func.locals.get(local);
+        let ty = local_data.ty;
+
+        match self.types.get(&ty) {
+          Type::String => {
+            writeln!(self.output, "ignis_string_drop(l{});", local.index()).unwrap();
+          },
+          Type::Vector { size: None, .. } => {
+            writeln!(self.output, "ignis_buf_drop(l{});", local.index()).unwrap();
+          },
+          Type::Unknown => {
+            writeln!(self.output, "ignis_drop_unknown(l{});", local.index()).unwrap();
+          },
+          _ => {
+            // Should not happen if LIR verification passed
+            writeln!(self.output, "/* drop l{}: non-droppable type */", local.index()).unwrap();
+          },
+        }
       },
     }
   }
@@ -415,6 +453,31 @@ impl<'a> CEmitter<'a> {
     })
   }
 
+  fn unknown_boxing_function(
+    &self,
+    source_type: &Option<TypeId>,
+  ) -> &'static str {
+    match source_type {
+      Some(ty) => match self.types.get(ty) {
+        Type::I8 => "ignis_unknown_i8",
+        Type::I16 => "ignis_unknown_i16",
+        Type::I32 => "ignis_unknown_i32",
+        Type::I64 => "ignis_unknown_i64",
+        Type::U8 => "ignis_unknown_u8",
+        Type::U16 => "ignis_unknown_u16",
+        Type::U32 => "ignis_unknown_u32",
+        Type::U64 => "ignis_unknown_u64",
+        Type::F32 => "ignis_unknown_f32",
+        Type::F64 => "ignis_unknown_f64",
+        Type::Boolean => "ignis_unknown_bool",
+        Type::String => "ignis_unknown_obj",
+        Type::Pointer(_) | Type::Reference { .. } => "ignis_unknown_rawptr",
+        _ => "ignis_unknown_obj",
+      },
+      None => "ignis_unknown_obj",
+    }
+  }
+
   fn format_const(
     &self,
     c: &ConstValue,
@@ -444,7 +507,7 @@ impl<'a> CEmitter<'a> {
       },
       ConstValue::Bool(v, _) => format!("{}", v),
       ConstValue::Char(v, _) => format!("{}", *v as u32),
-      ConstValue::String(v, _) => format!("\"{}\"", Self::escape_string(v)),
+      ConstValue::String(v, _) => format!("ignis_string_from_cstr(\"{}\")", Self::escape_string(v)),
       ConstValue::Null(_) => "NULL".to_string(),
       ConstValue::Undef(_) => "/* undef */ 0".to_string(),
     }
@@ -526,10 +589,19 @@ impl<'a> CEmitter<'a> {
       Type::String => "string".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "void".to_string(),
-      Type::Unknown | Type::Error => "/* unknown */ void*".to_string(),
+      Type::Unknown => "IgnisUnknown".to_string(),
+      Type::Error => "/* error */ void*".to_string(),
       Type::Pointer(inner) => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
-      Type::Vector { element, .. } => format!("{}*", self.format_type(*element)),
+      Type::Vector { element, size } => {
+        if size.is_some() {
+          // Fixed-size array decays to pointer in most contexts
+          format!("{}*", self.format_type(*element))
+        } else {
+          // Dynamic buffer
+          "IgnisBuffer*".to_string()
+        }
+      },
       Type::Tuple(_) => "/* tuple */ void*".to_string(),
       Type::Function { .. } => "/* fn */ void*".to_string(),
     }
@@ -585,10 +657,17 @@ pub fn format_c_type(
     Type::String => "string".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "void".to_string(),
-    Type::Unknown | Type::Error => "void*".to_string(),
+    Type::Unknown => "IgnisUnknown".to_string(),
+    Type::Error => "void*".to_string(),
     Type::Pointer(inner) => format!("{}*", format_c_type(types.get(inner), types)),
     Type::Reference { inner, .. } => format!("{}*", format_c_type(types.get(inner), types)),
-    Type::Vector { element, .. } => format!("{}*", format_c_type(types.get(element), types)),
+    Type::Vector { element, size } => {
+      if size.is_some() {
+        format!("{}*", format_c_type(types.get(element), types))
+      } else {
+        "IgnisBuffer*".to_string()
+      }
+    },
     Type::Tuple(_) => "void*".to_string(),
     Type::Function { .. } => "void*".to_string(),
   }

@@ -37,9 +37,16 @@ pub fn lower_to_lir(src: &str) -> LirResult {
   assert!(!has_errors, "Analyzer errors: {:?}", output.diagnostics);
 
   let mut types = output.types.clone();
-  let (program, verify_result) = {
+
+  // Run ownership analysis to produce drop schedules
+  let (drop_schedules, program, verify_result) = {
     let symbols = output.symbols.borrow();
-    lower_and_verify(&output.hir, &mut types, &output.defs, &symbols, None)
+    let ownership_checker =
+      ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols);
+    let (drop_schedules, _) = ownership_checker.check();
+    let (program, verify_result) =
+      lower_and_verify(&output.hir, &mut types, &output.defs, &symbols, &drop_schedules, None);
+    (drop_schedules, program, verify_result)
   };
 
   let verify_errors = match verify_result {

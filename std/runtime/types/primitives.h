@@ -1,7 +1,7 @@
 #pragma once
 
-#include <types/types.h>
-#include <string/string.h>
-//#include <char/char.h>
-//#include <number/number.h>
-//#include <vector/vector.h>
+// Legacy header - includes all primitive type support
+// New code should include ignis_rt.h directly
+
+#include "../ignis_rt.h"
+#include "../string/string.h"

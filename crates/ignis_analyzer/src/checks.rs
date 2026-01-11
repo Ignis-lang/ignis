@@ -299,11 +299,14 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Variable(var) => {
+        if self.is_builtin_name(&var.name) {
+          return;
+        }
+
         if self.scopes.lookup(&var.name).is_none() {
-          let symbol = self.get_symbol_name(&var.name);
           self.add_diagnostic(
             DiagnosticMessage::UndeclaredVariable {
-              name: symbol,
+              name: self.get_symbol_name(&var.name),
               span: var.span.clone(),
             }
             .report(),

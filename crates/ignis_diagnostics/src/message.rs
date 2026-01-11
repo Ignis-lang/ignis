@@ -288,6 +288,32 @@ pub enum DiagnosticMessage {
     cycle: Vec<String>,
     at: Span,
   },
+  // Ownership checker errors
+  UseAfterMove {
+    var_name: String,
+    span: Span,
+  },
+  UseAfterFree {
+    var_name: String,
+    span: Span,
+  },
+  InconsistentMoveInBranches {
+    var_name: String,
+    span: Span,
+  },
+  // Ownership checker warnings
+  PossibleLeakToFFI {
+    var_name: String,
+    span: Span,
+  },
+  OwnershipEscapeToGlobal {
+    var_name: String,
+    span: Span,
+  },
+  // Builtin errors
+  InvalidSizeOfOperand {
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -525,6 +551,28 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::CircularDependency { cycle, .. } => {
         write!(f, "Circular dependency detected: {}", cycle.join(" -> "))
       },
+
+      // Ownership checker errors
+      DiagnosticMessage::UseAfterMove { var_name, .. } => {
+        write!(f, "Use of moved value '{}'", var_name)
+      },
+      DiagnosticMessage::UseAfterFree { var_name, .. } => {
+        write!(f, "Use of freed value '{}'", var_name)
+      },
+      DiagnosticMessage::InconsistentMoveInBranches { var_name, .. } => {
+        write!(f, "Variable '{}' is moved in one branch but not the other", var_name)
+      },
+      DiagnosticMessage::PossibleLeakToFFI { var_name, .. } => {
+        write!(f, "Possible memory leak: ownership of '{}' escapes to FFI", var_name)
+      },
+      DiagnosticMessage::OwnershipEscapeToGlobal { var_name, .. } => {
+        write!(f, "Ownership of '{}' escapes to global scope", var_name)
+      },
+
+      // Builtin errors
+      DiagnosticMessage::InvalidSizeOfOperand { .. } => {
+        write!(f, "sizeOf(unknown) requires explicit type cast")
+      },
     }
   }
 }
@@ -614,6 +662,13 @@ impl DiagnosticMessage {
       | DiagnosticMessage::SymbolNotExported { at, .. }
       | DiagnosticMessage::ImportShadowsLocal { at, .. }
       | DiagnosticMessage::CircularDependency { at, .. } => at.clone(),
+
+      DiagnosticMessage::UseAfterMove { span, .. }
+      | DiagnosticMessage::UseAfterFree { span, .. }
+      | DiagnosticMessage::InconsistentMoveInBranches { span, .. }
+      | DiagnosticMessage::PossibleLeakToFFI { span, .. }
+      | DiagnosticMessage::OwnershipEscapeToGlobal { span, .. }
+      | DiagnosticMessage::InvalidSizeOfOperand { span, .. } => span.clone(),
     }
   }
 
@@ -659,8 +714,6 @@ impl DiagnosticMessage {
       DiagnosticMessage::ExpectedFloat(_) => "I0045",
       DiagnosticMessage::ExpectedHex(_) => "I0046",
       DiagnosticMessage::ExpectedBinary(_) => "I0047",
-
-      // Analyzer Type System Errors
       DiagnosticMessage::ImmutableAssignment { .. } => "A0013",
       DiagnosticMessage::MutableReferenceToImmutable { .. } => "A0014",
       DiagnosticMessage::InvalidCast { .. } => "A0015",
@@ -674,8 +727,6 @@ impl DiagnosticMessage {
       DiagnosticMessage::AccessNonVector { .. } => "A0023",
       DiagnosticMessage::IndexOutOfBounds { .. } => "A0048",
       DiagnosticMessage::NotCallable { .. } => "A0024",
-
-      // Analyzer Control Flow & Semantic Errors
       DiagnosticMessage::UnreachableCode { .. } => "A0025",
       DiagnosticMessage::ExternWithBody { .. } => "A0026",
       DiagnosticMessage::ExternConstWithInitializer { .. } => "A0027",
@@ -684,37 +735,31 @@ impl DiagnosticMessage {
       DiagnosticMessage::CompoundAssignmentNonNumeric { .. } => "A0030",
       DiagnosticMessage::ReturnTypeMismatch { .. } => "A0031",
       DiagnosticMessage::MissingReturnValue { .. } => "A0032",
-
-      // Binder errors
       DiagnosticMessage::ParameterAlreadyDefined { .. } => "A0033",
       DiagnosticMessage::ConstantAlreadyDefined { .. } => "A0034",
-
-      // Resolver errors
       DiagnosticMessage::UndeclaredIdentifier { .. } => "A0035",
-
-      // Borrow checker errors
       DiagnosticMessage::BorrowConflictImmWhileMutable { .. } => "A0036",
       DiagnosticMessage::BorrowConflictMutWhileImmutable { .. } => "A0037",
       DiagnosticMessage::BorrowConflictMutWhileMutable { .. } => "A0038",
       DiagnosticMessage::MutatedWhileBorrowed { .. } => "A0047",
-
-      // Control flow errors
       DiagnosticMessage::MissingReturnStatement { .. } => "A0039",
       DiagnosticMessage::BreakOutsideLoop { .. } => "A0040",
       DiagnosticMessage::ContinueOutsideLoop { .. } => "A0041",
       DiagnosticMessage::ReturnOutsideFunction { .. } => "A0042",
       DiagnosticMessage::CannotReturnLocalReference { .. } => "A0043",
       DiagnosticMessage::UndefinedIdentifier { .. } => "A0044",
-
-      // Type checker errors
       DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
       DiagnosticMessage::IntegerOverflow { .. } => "A0046",
-
-      // Import/Module errors
+      DiagnosticMessage::InvalidSizeOfOperand { .. } => "A0049",
       DiagnosticMessage::ModuleNotFound { .. } => "M0001",
       DiagnosticMessage::SymbolNotExported { .. } => "M0002",
       DiagnosticMessage::ImportShadowsLocal { .. } => "M0003",
       DiagnosticMessage::CircularDependency { .. } => "M0004",
+      DiagnosticMessage::UseAfterMove { .. } => "O0001",
+      DiagnosticMessage::UseAfterFree { .. } => "O0002",
+      DiagnosticMessage::InconsistentMoveInBranches { .. } => "O0003",
+      DiagnosticMessage::PossibleLeakToFFI { .. } => "O0004",
+      DiagnosticMessage::OwnershipEscapeToGlobal { .. } => "O0005",
     }
     .to_string()
   }
@@ -723,7 +768,9 @@ impl DiagnosticMessage {
     match self {
       DiagnosticMessage::PrecisionLossCast { .. }
       | DiagnosticMessage::UnreachableCode { .. }
-      | DiagnosticMessage::MissingReturnStatement { .. } => Severity::Warning,
+      | DiagnosticMessage::MissingReturnStatement { .. }
+      | DiagnosticMessage::PossibleLeakToFFI { .. }
+      | DiagnosticMessage::OwnershipEscapeToGlobal { .. } => Severity::Warning,
       _ => Severity::Error,
     }
   }

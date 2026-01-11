@@ -317,7 +317,7 @@ impl<'a> Analyzer<'a> {
   /// LIMITATION: Does not extract the root variable from compound expressions like
   /// `arr[i]`, `*ptr`, or field access. This means mutations through these expressions
   /// are not detected as borrow conflicts.
-  fn get_def_id_from_expr(
+  pub(crate) fn get_def_id_from_expr(
     &self,
     node_id: &NodeId,
   ) -> Option<DefinitionId> {
@@ -343,7 +343,7 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  fn get_var_name_from_def(
+  pub(crate) fn get_var_name_from_def(
     &self,
     def_id: &DefinitionId,
   ) -> String {

@@ -309,3 +309,117 @@ function do_nothing(): void {
 
   assert_snapshot!("lir_void_function", common::format_lir(&result));
 }
+
+#[test]
+fn lir_drop_string_at_scope_end() {
+  let result = common::lower_to_lir(
+    r#"
+function with_string(): i32 {
+    let s: string = "hello";
+    return 0;
+}
+"#,
+  );
+
+  assert_snapshot!("lir_drop_string_at_scope_end", common::format_lir(&result));
+}
+
+#[test]
+fn lir_drop_on_early_return() {
+  let result = common::lower_to_lir(
+    r#"
+function early_exit(flag: boolean): i32 {
+    let s: string = "hello";
+    if flag {
+        return 1;
+    }
+    return 0;
+}
+"#,
+  );
+
+  assert_snapshot!("lir_drop_on_early_return", common::format_lir(&result));
+}
+
+#[test]
+fn lir_no_drop_if_returned() {
+  let result = common::lower_to_lir(
+    r#"
+function return_string(): string {
+    let s: string = "hello";
+    return s;
+}
+"#,
+  );
+
+  assert_snapshot!("lir_no_drop_if_returned", common::format_lir(&result));
+}
+
+#[test]
+fn lir_drop_before_overwrite() {
+  let result = common::lower_to_lir(
+    r#"
+function overwrite_string(): i32 {
+    let mut s: string = "hello";
+    s = "world";
+    return 0;
+}
+"#,
+  );
+
+  assert_snapshot!("lir_drop_before_overwrite", common::format_lir(&result));
+}
+
+#[test]
+fn lir_drop_on_break() {
+  let result = common::lower_to_lir(
+    r#"
+function break_with_string(): i32 {
+    while true {
+        let s: string = "hello";
+        break;
+    }
+    return 0;
+}
+"#,
+  );
+
+  assert_snapshot!("lir_drop_on_break", common::format_lir(&result));
+}
+
+#[test]
+fn lir_drop_on_continue() {
+  let result = common::lower_to_lir(
+    r#"
+function continue_with_string(): i32 {
+    let mut i: i32 = 0;
+    while i < 10 {
+        let s: string = "hello";
+        i = i + 1;
+        continue;
+    }
+    return 0;
+}
+"#,
+  );
+
+  assert_snapshot!("lir_drop_on_continue", common::format_lir(&result));
+}
+
+#[test]
+fn lir_drop_in_loop_scope_end() {
+  let result = common::lower_to_lir(
+    r#"
+function loop_with_string(): i32 {
+    let mut i: i32 = 0;
+    while i < 3 {
+        let s: string = "hello";
+        i = i + 1;
+    }
+    return 0;
+}
+"#,
+  );
+
+  assert_snapshot!("lir_drop_in_loop_scope_end", common::format_lir(&result));
+}

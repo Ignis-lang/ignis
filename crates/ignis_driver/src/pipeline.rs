@@ -199,6 +199,16 @@ pub fn compile_project(
 
       let mut types = output.types.clone();
 
+      // Run ownership analysis on HIR to produce drop schedules
+      let ownership_checker =
+        ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table);
+      let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
+
+      // Report ownership diagnostics
+      for diag in ownership_diagnostics {
+        eprintln!("{:?}", diag);
+      }
+
       // Only emit project modules; std functions become extern declarations
       let project_modules: std::collections::HashSet<ignis_type::module::ModuleId> = used_modules
         .iter()
@@ -211,6 +221,7 @@ pub fn compile_project(
         &mut types,
         &output.defs,
         &sym_table,
+        &drop_schedules,
         Some(&project_modules),
       );
 
@@ -402,11 +413,19 @@ pub fn build_std(
 
     let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
     let mut types = output.types.clone();
+
+    // Run ownership analysis on HIR to produce drop schedules
+    let ownership_checker =
+      ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table);
+    let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
+    // Note: ownership diagnostics already reported in the first pass
+
     let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
       &output.hir,
       &mut types,
       &output.defs,
       &sym_table,
+      &drop_schedules,
       Some(&single_module_set),
     );
 

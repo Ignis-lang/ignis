@@ -268,3 +268,170 @@ function main(): void {
 
   assert_snapshot!("integer_overflow", common::format_diagnostics(&result.output.diagnostics));
 }
+
+// =============================================================================
+// Ownership errors
+// =============================================================================
+
+#[test]
+fn use_after_move() {
+  // Assigning an owned type (string) to another variable moves it.
+  // Using the original variable after the move is an error.
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let a: string = "hello";
+    let b: string = a;
+    let c: string = a;
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+function main(): void {
+    let a: string = "hello";
+    let b: string = a;
+    let c: string = a;
+    return;
+}
+"#,
+    &["O0001"],
+  );
+
+  assert_snapshot!("use_after_move", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn move_in_function_call() {
+  // Passing an owned type to a function moves it.
+  // Using the variable after the call is an error.
+  let result = common::analyze(
+    r#"
+function consume(s: string): void {
+    return;
+}
+
+function main(): void {
+    let a: string = "hello";
+    consume(a);
+    consume(a);
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+function consume(s: string): void {
+    return;
+}
+
+function main(): void {
+    let a: string = "hello";
+    consume(a);
+    consume(a);
+    return;
+}
+"#,
+    &["O0001"],
+  );
+
+  assert_snapshot!("move_in_function_call", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn inconsistent_move_in_branches() {
+  // Moving in one branch but not the other is an error.
+  // This requires an if-else where the variable is moved in one branch only.
+  let result = common::analyze(
+    r#"
+function consume(s: string): void {
+    return;
+}
+
+function main(): void {
+    let a: string = "hello";
+    let cond: boolean = true;
+
+    if cond {
+        consume(a);
+    } else {
+        let x: i32 = 1;
+    }
+
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+function consume(s: string): void {
+    return;
+}
+
+function main(): void {
+    let a: string = "hello";
+    let cond: boolean = true;
+
+    if cond {
+        consume(a);
+    } else {
+        let x: i32 = 1;
+    }
+
+    return;
+}
+"#,
+    &["O0003"],
+  );
+
+  assert_snapshot!(
+    "inconsistent_move_in_branches",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn ffi_leak_warning() {
+  // Passing an owned type to an extern function produces a warning.
+  let result = common::analyze(
+    r#"
+extern function ffiConsume(s: string): void;
+
+function main(): void {
+    let a: string = "hello";
+    ffiConsume(a);
+    return;
+}
+"#,
+  );
+
+  // O0004 is a warning, not an error - but it should be in diagnostics
+  let codes: Vec<_> = result
+    .output
+    .diagnostics
+    .iter()
+    .map(|d| d.error_code.as_str())
+    .collect();
+  assert!(codes.contains(&"O0004"), "Expected O0004 warning, got: {:?}", codes);
+
+  assert_snapshot!("ffi_leak_warning", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn copy_type_no_move() {
+  // Copy types (primitives) don't move - this should NOT produce an error
+  common::assert_ok(
+    r#"
+function main(): void {
+    let a: i32 = 42;
+    let b: i32 = a;
+    let c: i32 = a;
+    return;
+}
+"#,
+  );
+}

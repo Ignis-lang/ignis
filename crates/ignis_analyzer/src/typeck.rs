@@ -597,6 +597,17 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
   ) -> TypeId {
+    // Check for builtin typeOf/sizeOf - they are handled specially
+    if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
+      let name = self.get_symbol_name(&var.name);
+      if name == "typeOf" {
+        return self.typecheck_typeof_builtin(call, scope_kind, ctx);
+      }
+      if name == "sizeOf" {
+        return self.typecheck_sizeof_builtin(call, scope_kind, ctx);
+      }
+    }
+
     let callee_type = self.typecheck_node(&call.callee, scope_kind, ctx);
 
     let arg_types: Vec<TypeId> = call
@@ -670,6 +681,74 @@ impl<'a> Analyzer<'a> {
         .report(),
       );
       self.types.error()
+    }
+  }
+
+  fn typecheck_typeof_builtin(
+    &mut self,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    if call.arguments.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 1,
+          got: call.arguments.len(),
+          func_name: "typeOf".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.typecheck_node(&call.arguments[0], scope_kind, ctx);
+    self.types.u32()
+  }
+
+  fn typecheck_sizeof_builtin(
+    &mut self,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    if call.arguments.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 1,
+          got: call.arguments.len(),
+          func_name: "sizeOf".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let arg_type = self.typecheck_node(&call.arguments[0], scope_kind, ctx);
+    let base_type = self.unwrap_reference_type(&arg_type);
+
+    if matches!(self.types.get(&base_type), ignis_type::types::Type::Unknown) {
+      self.add_diagnostic(
+        DiagnosticMessage::InvalidSizeOfOperand {
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.types.u64()
+  }
+
+  pub(crate) fn unwrap_reference_type(
+    &self,
+    ty: &TypeId,
+  ) -> TypeId {
+    match self.types.get(ty) {
+      ignis_type::types::Type::Reference { inner, .. } => self.unwrap_reference_type(inner),
+      _ => ty.clone(),
     }
   }
 

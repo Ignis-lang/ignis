@@ -130,13 +130,16 @@ impl<'a> Analyzer<'a> {
   ) {
     match expr {
       ASTExpression::Variable(var_expr) => {
+        if self.is_builtin_name(&var_expr.name) {
+          return;
+        }
+
         if let Some(def_id) = self.scopes.lookup(&var_expr.name).cloned() {
           self.set_def(node_id, &def_id);
         } else {
-          let symbol = self.get_symbol_name(&var_expr.name);
           self.add_diagnostic(
             DiagnosticMessage::UndeclaredVariable {
-              name: symbol,
+              name: self.get_symbol_name(&var_expr.name),
               span: var_expr.span.clone(),
             }
             .report(),
@@ -214,11 +217,14 @@ impl<'a> Analyzer<'a> {
   ) {
     match expr {
       ASTExpression::Variable(var_expr) => {
+        if self.is_builtin_name(&var_expr.name) {
+          return;
+        }
+
         if self.scopes.lookup(&var_expr.name).is_none() {
-          let symbol = self.get_symbol_name(&var_expr.name);
           self.add_diagnostic(
             DiagnosticMessage::UndeclaredVariable {
-              name: symbol,
+              name: self.get_symbol_name(&var_expr.name),
               span: var_expr.span.clone(),
             }
             .report(),

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ignis_analyzer::{Analyzer, AnalyzerOutput};
+use ignis_analyzer::{Analyzer, AnalyzerOutput, HirOwnershipChecker};
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
 use ignis_hir::display::print_hir;
 use ignis_parser::{IgnisLexer, IgnisParser};
@@ -12,7 +12,7 @@ pub struct AnalysisResult {
   pub source_map: SourceMap,
 }
 
-/// Run the full pipeline: lexer -> parser -> analyzer
+/// Run the full pipeline: lexer -> parser -> analyzer -> ownership check
 pub fn analyze(src: &str) -> AnalysisResult {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
@@ -25,7 +25,12 @@ pub fn analyze(src: &str) -> AnalysisResult {
   let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
   let (nodes, roots) = parser.parse().expect("Parse failed");
 
-  let output = Analyzer::analyze(&nodes, &roots, symbols);
+  let mut output = Analyzer::analyze(&nodes, &roots, symbols.clone());
+
+  let symbols_ref = symbols.borrow();
+  let checker = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+  let (_, ownership_diags) = checker.check();
+  output.diagnostics.extend(ownership_diags);
 
   AnalysisResult { output, source_map: sm }
 }
@@ -47,7 +52,13 @@ pub fn analyze_with_errors(src: &str) -> Option<AnalysisResult> {
 
   match parser.parse() {
     Ok((nodes, roots)) => {
-      let output = Analyzer::analyze(&nodes, &roots, symbols);
+      let mut output = Analyzer::analyze(&nodes, &roots, symbols.clone());
+
+      let symbols_ref = symbols.borrow();
+      let checker = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+      let (_, ownership_diags) = checker.check();
+      output.diagnostics.extend(ownership_diags);
+
       Some(AnalysisResult { output, source_map: sm })
     },
     Err(_) => None,

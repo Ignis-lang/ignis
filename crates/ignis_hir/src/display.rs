@@ -236,6 +236,14 @@ impl<'a> HIRPrinter<'a> {
         let target_str = self.format_type(target);
         format!("Cast({} as {})", expr_str, target_str)
       },
+      HIRKind::TypeOf(expr) => {
+        let expr_str = self.format_node_compact(*expr);
+        format!("typeOf({})", expr_str)
+      },
+      HIRKind::SizeOf(ty) => {
+        let ty_str = self.format_type(ty);
+        format!("sizeOf({})", ty_str)
+      },
       _ => format!("<complex: {}>", type_str),
     }
   }
@@ -573,6 +581,16 @@ impl<'a> HIRPrinter<'a> {
       },
       HIRKind::Error => {
         writeln!(self.output, "Error : {}", type_str).unwrap();
+      },
+      HIRKind::TypeOf(expr) => {
+        writeln!(self.output, "TypeOf : {}", type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*expr);
+        self.indent -= 1;
+      },
+      HIRKind::SizeOf(ty) => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "SizeOf({}) : {}", ty_str, type_str).unwrap();
       },
     }
   }
