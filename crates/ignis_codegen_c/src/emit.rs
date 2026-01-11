@@ -225,6 +225,7 @@ impl<'a> CEmitter<'a> {
       Instr::Store { dest, value } => {
         let local_info = func.locals.get(dest);
         let val = self.format_operand(func, value);
+
         if let Type::Vector { size: Some(n), element } = self.types.get(&local_info.ty) {
           let elem_size = self.sizeof_type(*element);
           writeln!(self.output, "memcpy(l{}, {}, {} * {});", dest.index(), val, n, elem_size).unwrap();
@@ -234,20 +235,24 @@ impl<'a> CEmitter<'a> {
       },
       Instr::LoadPtr { dest, ptr } => {
         let p = self.format_operand(func, ptr);
+
         writeln!(self.output, "t{} = *{};", dest.index(), p).unwrap();
       },
       Instr::StorePtr { ptr, value } => {
         let p = self.format_operand(func, ptr);
         let v = self.format_operand(func, value);
+
         writeln!(self.output, "*{} = {};", p, v).unwrap();
       },
       Instr::Copy { dest, source } => {
         let s = self.format_operand(func, source);
+
         writeln!(self.output, "t{} = {};", dest.index(), s).unwrap();
       },
       Instr::BinOp { dest, op, left, right } => {
         let l = self.format_operand(func, left);
         let r = self.format_operand(func, right);
+
         if matches!(op, BinaryOperation::Pow) {
           writeln!(self.output, "t{} = pow({}, {});", dest.index(), l, r).unwrap();
         } else {
@@ -258,6 +263,7 @@ impl<'a> CEmitter<'a> {
       Instr::UnaryOp { dest, op, operand } => {
         let o = self.format_operand(func, operand);
         let op_str = self.format_unaryop(op);
+
         writeln!(self.output, "t{} = {}{};", dest.index(), op_str, o).unwrap();
       },
       Instr::Call { dest, callee, args } => {
@@ -297,15 +303,19 @@ impl<'a> CEmitter<'a> {
       Instr::GetElementPtr { dest, base, index, .. } => {
         let b = self.format_operand(func, base);
         let i = self.format_operand(func, index);
+
         writeln!(self.output, "t{} = &{}[{}];", dest.index(), b, i).unwrap();
       },
       Instr::InitVector { dest_ptr, elements, .. } => {
         let p = self.format_operand(func, dest_ptr);
+
         for (i, elem) in elements.iter().enumerate() {
           if i > 0 {
             write!(self.output, "    ").unwrap();
           }
+
           let e = self.format_operand(func, elem);
+
           writeln!(self.output, "{}[{}] = {};", p, i, e).unwrap();
         }
       },
@@ -333,6 +343,7 @@ impl<'a> CEmitter<'a> {
         let c = self.format_operand(func, condition);
         let then_label = &func.blocks.get(then_block).label;
         let else_label = &func.blocks.get(else_block).label;
+
         writeln!(self.output, "if ({}) goto {}; else goto {};", c, then_label, else_label).unwrap();
       },
       Terminator::Return(value) => {
@@ -432,23 +443,10 @@ impl<'a> CEmitter<'a> {
         format!("{}{}", v, suffix)
       },
       ConstValue::Bool(v, _) => format!("{}", v),
-      ConstValue::Char(v, _) => format!("'{}'", Self::escape_char(*v)),
+      ConstValue::Char(v, _) => format!("{}", *v as u32),
       ConstValue::String(v, _) => format!("\"{}\"", Self::escape_string(v)),
       ConstValue::Null(_) => "NULL".to_string(),
       ConstValue::Undef(_) => "/* undef */ 0".to_string(),
-    }
-  }
-
-  fn escape_char(c: char) -> String {
-    match c {
-      '\n' => "\\n".to_string(),
-      '\r' => "\\r".to_string(),
-      '\t' => "\\t".to_string(),
-      '\0' => "\\0".to_string(),
-      '\\' => "\\\\".to_string(),
-      '\'' => "\\'".to_string(),
-      c if c.is_ascii_graphic() || c == ' ' => c.to_string(),
-      c => format!("\\x{:02x}", c as u32),
     }
   }
 
@@ -583,7 +581,7 @@ pub fn format_c_type(
     Type::F32 => "f32".to_string(),
     Type::F64 => "f64".to_string(),
     Type::Boolean => "boolean".to_string(),
-    Type::Char => "char".to_string(),
+    Type::Char => "u32".to_string(),
     Type::String => "string".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "void".to_string(),

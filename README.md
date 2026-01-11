@@ -42,7 +42,7 @@ cargo build --release
 Create a file `hello.ign`:
 
 ```ignis
-import { println } from "io";
+import println from "std::io";
 
 function main(): void {
     println("Hello, Ignis!");
@@ -82,7 +82,7 @@ ignis build main.ign -O                # Enable optimizations
 ## Example
 
 ```ignis
-import { println } from "io";
+import println from "std::io";
 
 function factorial(n: i32): i32 {
     if n <= 1 {

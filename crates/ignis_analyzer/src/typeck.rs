@@ -937,6 +937,8 @@ impl<'a> Analyzer<'a> {
       (_, _) if self.types.is_numeric(&expr_type) && self.types.is_numeric(&target_type) => true,
       (Type::Boolean, _) if self.types.is_integer(&target_type) => true,
       (_, Type::Boolean) if self.types.is_integer(&expr_type) => true,
+      (Type::Char, _) if self.types.is_integer(&target_type) => true,
+      (_, Type::Char) if self.types.is_integer(&expr_type) => true,
       (Type::Pointer(_), Type::Reference { .. }) => true,
       (Type::Reference { .. }, Type::Pointer(_)) => true,
       (Type::Pointer(_), Type::Pointer(_)) => true,

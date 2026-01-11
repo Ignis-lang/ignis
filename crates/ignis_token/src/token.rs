@@ -43,7 +43,7 @@ impl Into<IgnisLiteralValue> for &Token {
     match self.type_ {
       TokenType::Int => IgnisLiteralValue::Int32(self.lexeme.parse().unwrap_or(0)),
       TokenType::Float => IgnisLiteralValue::Float64(self.lexeme.parse().unwrap_or(OrderedFloat::default())),
-      TokenType::Char => IgnisLiteralValue::Char(self.lexeme.parse().unwrap_or('\0')),
+      TokenType::Char => IgnisLiteralValue::Char(self.lexeme.chars().next().unwrap_or('\0')),
       TokenType::String => IgnisLiteralValue::String(self.lexeme.clone()),
       TokenType::False | TokenType::True => IgnisLiteralValue::Boolean(self.lexeme.parse().unwrap_or(false)),
       TokenType::Hex => IgnisLiteralValue::Hex(self.lexeme.clone()),

@@ -538,3 +538,42 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_char_literal() {
+  e2e_test(
+    "char_literal",
+    r#"
+function main(): i32 {
+    let c: char = 'A';
+    return c as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_char_escape() {
+  e2e_test(
+    "char_escape",
+    r#"
+function main(): i32 {
+    let newline: char = '\n';
+    return newline as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_char_unicode() {
+  e2e_test(
+    "char_unicode",
+    r#"
+function main(): i32 {
+    let heart: char = '\u{2764}';
+    return (heart as i32) % 256;
+}
+"#,
+  );
+}

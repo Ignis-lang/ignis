@@ -13,8 +13,8 @@ pub struct IgnisLexer<'a> {
   line: usize,
   current: usize,
   pub diagnostics: Vec<DiagnosticMessage>,
-  /// Holds the processed lexeme for string literals (with escapes resolved).
   pending_string: Option<String>,
+  pending_char: Option<char>,
 }
 
 impl<'a> IgnisLexer<'a> {
@@ -32,6 +32,7 @@ impl<'a> IgnisLexer<'a> {
       current: 0,
       diagnostics: vec![],
       pending_string: None,
+      pending_char: None,
     }
   }
 
@@ -153,6 +154,7 @@ impl<'a> IgnisLexer<'a> {
       '/' if self.match_char('=') => Ok(TokenType::DivAssign),
       '/' if self.peek() == '/' || self.peek() == '*' => self.comments(),
       '/' => Ok(TokenType::Slash),
+      '\'' => self.char_literal(),
       '"' => self.string(),
       '0' if self.peek() == 'x' || self.peek() == 'X' => self.hex_number(),
       '0' if self.peek() == 'b' || self.peek() == 'B' => self.binary_number(),
@@ -244,6 +246,80 @@ impl<'a> IgnisLexer<'a> {
 
     self.pending_string = Some(result);
     Ok(TokenType::String)
+  }
+
+  fn char_literal(&mut self) -> LexerResult {
+    let char_start = self.start;
+
+    if self.is_at_end() || self.peek() == '\'' {
+      return Err(Box::new(DiagnosticMessage::InvalidCharacter(
+        self.mk_span(char_start, self.current),
+      )));
+    }
+
+    let c = if self.peek() == '\\' {
+      self.advance();
+      match self.peek() {
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        '0' => '\0',
+        '\\' => '\\',
+        '\'' => '\'',
+        'u' => {
+          self.advance();
+
+          if self.peek() != '{' {
+            return Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
+              self.mk_span(char_start, self.current),
+            )));
+          }
+
+          self.advance();
+
+          let hex_start = self.current;
+          while self.peek().is_ascii_hexdigit() {
+            self.advance();
+          }
+
+          if self.peek() != '}' {
+            return Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
+              self.mk_span(char_start, self.current),
+            )));
+          }
+
+          let hex_str = &self.source[hex_start..self.current];
+          let code_point = u32::from_str_radix(hex_str, 16).map_err(|_| {
+            Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
+              self.mk_span(char_start, self.current),
+            ))
+          })?;
+
+          char::from_u32(code_point)
+            .ok_or_else(|| Box::new(DiagnosticMessage::InvalidCharacter(self.mk_span(char_start, self.current))))?
+        },
+        _ => {
+          return Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
+            self.mk_span(char_start, self.current),
+          )));
+        },
+      }
+    } else {
+      self.peek()
+    };
+
+    self.advance();
+
+    if self.is_at_end() || self.peek() != '\'' {
+      return Err(Box::new(DiagnosticMessage::UnterminatedCharacter(
+        self.mk_span(char_start, self.current),
+      )));
+    }
+
+    self.advance();
+
+    self.pending_char = Some(c);
+    Ok(TokenType::Char)
   }
 
   fn number(&mut self) -> LexerResult {
@@ -379,6 +455,8 @@ impl<'a> IgnisLexer<'a> {
   ) {
     let literal = if let Some(s) = self.pending_string.take() {
       s
+    } else if let Some(c) = self.pending_char.take() {
+      c.to_string()
     } else {
       let mut lit = self.source[self.start..self.current].to_string();
       if (kind == TokenType::Int || kind == TokenType::Float) && lit.contains('_') {

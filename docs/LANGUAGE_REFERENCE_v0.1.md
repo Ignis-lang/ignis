@@ -45,7 +45,7 @@ The following features are planned for future versions and are not available in 
 | `f32` | 32-bit floating point | 4 bytes |
 | `f64` | 64-bit floating point | 8 bytes |
 | `boolean` | Boolean value (`true`/`false`) | 1 byte |
-| `char` | Single character | 1 byte |
+| `char` | Unicode code point | 4 bytes |
 | `string` | String (null-terminated) | pointer |
 | `void` | No value | 0 bytes |
 
@@ -144,14 +144,16 @@ extern const errno: i32;
 ### Literals
 
 ```ignis
-42          // i32
-3.14        // f64
-true        // boolean
-false       // boolean
-'a'         // char
-"hello"     // string
-0xFF        // hex integer
-0b1010      // binary integer
+42              // i32
+3.14            // f64
+true            // boolean
+false           // boolean
+'a'             // char (ASCII)
+'\n'            // char (escape sequence)
+'\u{1F600}'     // char (Unicode code point)
+"hello"         // string
+0xFF            // hex integer
+0b1010          // binary integer
 ```
 
 ### Operators
@@ -348,8 +350,8 @@ while true {
 ### Importing
 
 ```ignis
-import { println, print } from "io";
-import { sqrt, PI } from "math";
+import println from "std::io";
+import sqrt, PI from "std::math";
 ```
 
 ### Exporting
@@ -367,29 +369,27 @@ export const PUBLIC_CONSTANT: i32 = 42;
 ### io
 
 ```ignis
-import { print, println, eprint, eprintln } from "io";
+import print, println from "std::io";
 
 println("Hello, World!");     // Print with newline
 print("No newline");          // Print without newline
-eprintln("Error message");    // Print to stderr
 ```
 
 ### string
 
 ```ignis
-import { stringLength, stringConcat, stringCompare } from "string";
+import stringLength, stringConcat from "std::string";
 
 let len: u64 = stringLength("hello");
 let combined: string = stringConcat("Hello, ", "World!");
-let cmp: i32 = stringCompare("a", "b");
 ```
 
 ### math
 
 ```ignis
-import { sin, cos, sqrt, pow, PI, E } from "math";
+import sin, cos, sqrt, pow from "std::math";
 
-let x: f64 = sin(PI / 2.0);
+let x: f64 = sin(3.14159 / 2.0);
 let y: f64 = sqrt(2.0);
 let z: f64 = pow(2.0, 10.0);
 ```
@@ -411,6 +411,8 @@ let mut y: i32 = 10;
 let mr: &mut i32 = &mut y;
 // let r: &i32 = &y;    // ERROR: cannot borrow while mutably borrowed
 ```
+
+**Limitation:** The borrow checker does not track mutations through compound expressions like `arr[i]`, `*ptr`, or field access. Mutations through these expressions are not detected as borrow conflicts.
 
 ## Known Limitations
 

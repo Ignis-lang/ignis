@@ -23,7 +23,7 @@ Ignis types map to C types as defined in `std/runtime/types/types.h`:
 | `f32` | `f32` | `float` |
 | `f64` | `f64` | `double` |
 | `boolean` | `boolean` | `uint8_t` |
-| `char` | `i8` | `int8_t` |
+| `char` | `u32` | `uint32_t` |
 | `string` | `string` | `char*` |
 | `void` | `void` | `void` |
 
