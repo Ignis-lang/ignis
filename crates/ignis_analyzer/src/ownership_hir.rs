@@ -242,11 +242,17 @@ impl<'a> HirOwnershipChecker<'a> {
 
       HIRKind::Dereference(inner) => {
         self.check_node(inner);
+        self.check_use_after_free(inner, span);
       },
 
       HIRKind::Index { base, index } => {
         self.check_node(base);
         self.check_node(index);
+
+        let base_node = self.hir.get(base);
+        if matches!(self.types.get(&base_node.type_id), ignis_type::types::Type::Pointer(_)) {
+          self.check_use_after_free(base, span);
+        }
       },
 
       HIRKind::VectorLiteral { elements } => {
@@ -298,6 +304,9 @@ impl<'a> HirOwnershipChecker<'a> {
     // Check value first (may move source)
     self.check_node(value);
 
+    // Check use-after-free on assign target (e.g., *freed_ptr = value)
+    self.check_assign_target_use_after_free(target, span.clone());
+
     // Check if target is a simple owned variable that needs drop-before-overwrite
     if let Some(target_def) = self.get_assign_target_def(target) {
       let target_ty = self.defs.type_of(&target_def);
@@ -311,6 +320,26 @@ impl<'a> HirOwnershipChecker<'a> {
     // If assigning from an owned variable, mark source as moved
     if let Some(source_def) = self.get_moved_var(value) {
       self.try_consume(source_def, span);
+    }
+  }
+
+  fn check_assign_target_use_after_free(
+    &mut self,
+    target: HIRId,
+    span: Span,
+  ) {
+    let node = self.hir.get(target);
+    match &node.kind {
+      HIRKind::Dereference(inner) => {
+        self.check_use_after_free(*inner, span);
+      },
+      HIRKind::Index { base, .. } => {
+        let base_node = self.hir.get(*base);
+        if matches!(self.types.get(&base_node.type_id), ignis_type::types::Type::Pointer(_)) {
+          self.check_use_after_free(*base, span);
+        }
+      },
+      _ => {},
     }
   }
 
@@ -452,18 +481,23 @@ impl<'a> HirOwnershipChecker<'a> {
     span: Span,
   ) {
     let callee_def = self.defs.get(&callee);
+    let callee_name = self.symbols.get(&callee_def.name);
     let is_extern = matches!(&callee_def.kind, DefinitionKind::Function(f) if f.is_extern);
 
-    // Check each argument
+    // Track deallocate arg to mark as Freed after processing
+    let deallocate_ptr = if callee_name == "deallocate" && !args.is_empty() {
+      self.extract_pointer_variable(args[0])
+    } else {
+      None
+    };
+
     for &arg_id in args {
       self.check_node(arg_id);
 
-      // If argument is an owned variable, it's consumed by the call
       if let Some(arg_def) = self.get_moved_var(arg_id) {
         let arg_ty = self.defs.type_of(&arg_def);
 
         if self.types.is_owned(arg_ty) && !self.types.is_copy(arg_ty) {
-          // Warn about FFI leak if calling extern function
           if is_extern {
             let var_name = self.get_var_name(&arg_def);
             self.diagnostics.push(
@@ -477,6 +511,44 @@ impl<'a> HirOwnershipChecker<'a> {
 
           self.try_consume(arg_def, span.clone());
         }
+      }
+    }
+
+    if let Some(ptr_def) = deallocate_ptr {
+      self.states.insert(ptr_def, OwnershipState::Freed);
+    }
+  }
+
+  fn extract_pointer_variable(
+    &self,
+    hir_id: HIRId,
+  ) -> Option<DefinitionId> {
+    let node = self.hir.get(hir_id);
+    match &node.kind {
+      HIRKind::Variable(def_id) => {
+        let ty = self.defs.type_of(def_id);
+        if matches!(self.types.get(ty), ignis_type::types::Type::Pointer(_)) {
+          Some(*def_id)
+        } else {
+          None
+        }
+      },
+      HIRKind::Cast { expression, .. } => self.extract_pointer_variable(*expression),
+      _ => None,
+    }
+  }
+
+  fn check_use_after_free(
+    &mut self,
+    ptr_hir: HIRId,
+    span: Span,
+  ) {
+    if let Some(ptr_def) = self.extract_pointer_variable(ptr_hir) {
+      if self.states.get(&ptr_def) == Some(&OwnershipState::Freed) {
+        let var_name = self.get_var_name(&ptr_def);
+        self
+          .diagnostics
+          .push(DiagnosticMessage::UseAfterFree { var_name, span }.report());
       }
     }
   }
@@ -556,20 +628,12 @@ impl<'a> HirOwnershipChecker<'a> {
     def_id: DefinitionId,
     span: Span,
   ) {
-    match self.states.get(&def_id) {
-      Some(OwnershipState::Moved) => {
-        let var_name = self.get_var_name(&def_id);
-        self
-          .diagnostics
-          .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
-      },
-      Some(OwnershipState::Freed) => {
-        let var_name = self.get_var_name(&def_id);
-        self
-          .diagnostics
-          .push(DiagnosticMessage::UseAfterFree { var_name, span }.report());
-      },
-      _ => {},
+    // Use-after-free is checked at dereference/index, not here
+    if let Some(OwnershipState::Moved) = self.states.get(&def_id) {
+      let var_name = self.get_var_name(&def_id);
+      self
+        .diagnostics
+        .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
     }
   }
 
@@ -578,7 +642,6 @@ impl<'a> HirOwnershipChecker<'a> {
     def_id: DefinitionId,
     span: Span,
   ) {
-    // Check if already consumed
     match self.states.get(&def_id) {
       Some(OwnershipState::Moved) => {
         let var_name = self.get_var_name(&def_id);
@@ -586,14 +649,8 @@ impl<'a> HirOwnershipChecker<'a> {
           .diagnostics
           .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
       },
-      Some(OwnershipState::Freed) => {
-        let var_name = self.get_var_name(&def_id);
-        self
-          .diagnostics
-          .push(DiagnosticMessage::UseAfterFree { var_name, span }.report());
-      },
+      Some(OwnershipState::Freed) => {},
       _ => {
-        // Mark as moved
         self.states.insert(def_id, OwnershipState::Moved);
       },
     }

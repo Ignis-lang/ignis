@@ -12,7 +12,7 @@ use ignis_diagnostics::{
 use ignis_type::{
   definition::{ConstValue, DefinitionKind},
   span::Span,
-  types::TypeId,
+  types::{Type, TypeId},
   value::IgnisLiteralValue,
 };
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
@@ -477,76 +477,106 @@ impl<'a> Analyzer<'a> {
     infer: &InferContext,
   ) -> TypeId {
     match &lit.value {
-      IgnisLiteralValue::Int32(v) => {
-        if let Some(expected) = &infer.expected {
-          if self.is_integer_type(expected) {
-            let v64 = *v as i64;
-            if self.int_fits_in_type(v64, expected) {
-              return expected.clone();
-            } else {
-              self.add_diagnostic(
-                DiagnosticMessage::IntegerOverflow {
-                  value: v64,
-                  target_type: self.format_type_for_error(expected),
-                  span: lit.span.clone(),
-                }
-                .report(),
-              );
-              return self.types.error();
-            }
-          }
-        }
-        self.types.i32()
+      IgnisLiteralValue::Int8(v) => self.coerce_signed_literal(*v as i64, self.types.i8(), infer, &lit.span),
+      IgnisLiteralValue::Int16(v) => self.coerce_signed_literal(*v as i64, self.types.i16(), infer, &lit.span),
+      IgnisLiteralValue::Int32(v) => self.coerce_signed_literal(*v as i64, self.types.i32(), infer, &lit.span),
+      IgnisLiteralValue::Int64(v) => self.coerce_signed_literal(*v, self.types.i64(), infer, &lit.span),
+
+      IgnisLiteralValue::UnsignedInt8(v) => self.coerce_unsigned_literal(*v as u64, self.types.u8(), infer, &lit.span),
+      IgnisLiteralValue::UnsignedInt16(v) => {
+        self.coerce_unsigned_literal(*v as u64, self.types.u16(), infer, &lit.span)
       },
-      IgnisLiteralValue::Int64(v) => {
-        if let Some(expected) = &infer.expected {
-          if self.is_integer_type(expected) {
-            if self.int_fits_in_type(*v, expected) {
-              return expected.clone();
-            } else {
-              self.add_diagnostic(
-                DiagnosticMessage::IntegerOverflow {
-                  value: *v,
-                  target_type: self.format_type_for_error(expected),
-                  span: lit.span.clone(),
-                }
-                .report(),
-              );
-              return self.types.error();
-            }
-          }
-        }
-        self.types.i64()
+      IgnisLiteralValue::UnsignedInt32(v) => {
+        self.coerce_unsigned_literal(*v as u64, self.types.u32(), infer, &lit.span)
       },
-      IgnisLiteralValue::Float64(_) => {
-        if let Some(expected) = &infer.expected {
-          if self.is_float_type(expected) {
-            return expected.clone();
-          }
-        }
-        self.types.f64()
+      IgnisLiteralValue::UnsignedInt64(v) => self.coerce_unsigned_literal(*v, self.types.u64(), infer, &lit.span),
+
+      IgnisLiteralValue::Hex(s) => {
+        let digits = s.trim_start_matches("0x").trim_start_matches("0X");
+        let v = u64::from_str_radix(digits, 16).unwrap_or(0);
+        self.coerce_unsigned_literal(v, self.types.u32(), infer, &lit.span)
       },
-      IgnisLiteralValue::Float32(_) => {
-        if let Some(expected) = &infer.expected {
-          if self.is_float_type(expected) {
-            return expected.clone();
-          }
-        }
-        self.types.f32()
+      IgnisLiteralValue::Binary(s) => {
+        let digits = s.trim_start_matches("0b").trim_start_matches("0B");
+        let v = u64::from_str_radix(digits, 2).unwrap_or(0);
+        self.coerce_unsigned_literal(v, self.types.u8(), infer, &lit.span)
       },
-      IgnisLiteralValue::Int8(_) => self.types.i8(),
-      IgnisLiteralValue::Int16(_) => self.types.i16(),
-      IgnisLiteralValue::UnsignedInt8(_) => self.types.u8(),
-      IgnisLiteralValue::UnsignedInt16(_) => self.types.u16(),
-      IgnisLiteralValue::UnsignedInt32(_) => self.types.u32(),
-      IgnisLiteralValue::UnsignedInt64(_) => self.types.u64(),
+
+      IgnisLiteralValue::Float32(_) => self.coerce_float_literal(self.types.f32(), infer),
+      IgnisLiteralValue::Float64(_) => self.coerce_float_literal(self.types.f64(), infer),
+
       IgnisLiteralValue::Boolean(_) => self.types.boolean(),
       IgnisLiteralValue::Char(_) => self.types.char(),
       IgnisLiteralValue::String(_) => self.types.string(),
-      IgnisLiteralValue::Hex(_) => self.types.u32(),
-      IgnisLiteralValue::Binary(_) => self.types.u8(),
       IgnisLiteralValue::Null => self.types.error(),
     }
+  }
+
+  fn coerce_signed_literal(
+    &mut self,
+    value: i64,
+    default: TypeId,
+    infer: &InferContext,
+    span: &Span,
+  ) -> TypeId {
+    if let Some(expected) = &infer.expected {
+      if self.is_integer_type(expected) {
+        if self.signed_fits_in_type(value, expected) {
+          return expected.clone();
+        } else {
+          self.add_diagnostic(
+            DiagnosticMessage::IntegerOverflow {
+              value,
+              target_type: self.format_type_for_error(expected),
+              span: span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
+      }
+    }
+    default
+  }
+
+  fn coerce_unsigned_literal(
+    &mut self,
+    value: u64,
+    default: TypeId,
+    infer: &InferContext,
+    span: &Span,
+  ) -> TypeId {
+    if let Some(expected) = &infer.expected {
+      if self.is_integer_type(expected) {
+        if self.unsigned_fits_in_type(value, expected) {
+          return expected.clone();
+        } else {
+          self.add_diagnostic(
+            DiagnosticMessage::IntegerOverflow {
+              value: value as i64,
+              target_type: self.format_type_for_error(expected),
+              span: span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
+      }
+    }
+    default
+  }
+
+  fn coerce_float_literal(
+    &self,
+    default: TypeId,
+    infer: &InferContext,
+  ) -> TypeId {
+    if let Some(expected) = &infer.expected {
+      if self.is_float_type(expected) {
+        return expected.clone();
+      }
+    }
+    default
   }
 
   fn is_integer_type(
@@ -573,22 +603,48 @@ impl<'a> Analyzer<'a> {
     matches!(self.types.get(ty), ignis_type::types::Type::F32 | ignis_type::types::Type::F64)
   }
 
-  fn int_fits_in_type(
+  fn signed_fits_in_type(
     &self,
     value: i64,
     ty: &TypeId,
   ) -> bool {
     match self.types.get(ty) {
-      ignis_type::types::Type::I8 => value >= i8::MIN as i64 && value <= i8::MAX as i64,
-      ignis_type::types::Type::I16 => value >= i16::MIN as i64 && value <= i16::MAX as i64,
-      ignis_type::types::Type::I32 => value >= i32::MIN as i64 && value <= i32::MAX as i64,
-      ignis_type::types::Type::I64 => true,
-      ignis_type::types::Type::U8 => value >= 0 && value <= u8::MAX as i64,
-      ignis_type::types::Type::U16 => value >= 0 && value <= u16::MAX as i64,
-      ignis_type::types::Type::U32 => value >= 0 && value <= u32::MAX as i64,
-      ignis_type::types::Type::U64 => value >= 0,
+      Type::I8 => value >= i8::MIN as i64 && value <= i8::MAX as i64,
+      Type::I16 => value >= i16::MIN as i64 && value <= i16::MAX as i64,
+      Type::I32 => value >= i32::MIN as i64 && value <= i32::MAX as i64,
+      Type::I64 => true,
+      Type::U8 => value >= 0 && value <= u8::MAX as i64,
+      Type::U16 => value >= 0 && value <= u16::MAX as i64,
+      Type::U32 => value >= 0 && value <= u32::MAX as i64,
+      Type::U64 => value >= 0,
       _ => false,
     }
+  }
+
+  fn unsigned_fits_in_type(
+    &self,
+    value: u64,
+    ty: &TypeId,
+  ) -> bool {
+    match self.types.get(ty) {
+      Type::I8 => value <= i8::MAX as u64,
+      Type::I16 => value <= i16::MAX as u64,
+      Type::I32 => value <= i32::MAX as u64,
+      Type::I64 => value <= i64::MAX as u64,
+      Type::U8 => value <= u8::MAX as u64,
+      Type::U16 => value <= u16::MAX as u64,
+      Type::U32 => value <= u32::MAX as u64,
+      Type::U64 => true,
+      _ => false,
+    }
+  }
+
+  fn is_ptr_coercion(
+    &self,
+    from: &TypeId,
+    to: &TypeId,
+  ) -> bool {
+    matches!((self.types.get(from), self.types.get(to)), (Type::Pointer(_), Type::Pointer(_)))
   }
 
   fn typecheck_call(
@@ -610,13 +666,27 @@ impl<'a> Analyzer<'a> {
 
     let callee_type = self.typecheck_node(&call.callee, scope_kind, ctx);
 
+    let param_types: Vec<TypeId> = if let Type::Function { params, .. } = self.types.get(&callee_type).clone() {
+      params
+    } else {
+      vec![]
+    };
+
     let arg_types: Vec<TypeId> = call
       .arguments
       .iter()
-      .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+      .enumerate()
+      .map(|(i, arg)| {
+        if let Some(param_type) = param_types.get(i) {
+          let infer = InferContext::expecting(param_type.clone());
+          self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+        } else {
+          self.typecheck_node(arg, scope_kind, ctx)
+        }
+      })
       .collect();
 
-    if let ignis_type::types::Type::Function {
+    if let Type::Function {
       params,
       ret,
       is_variadic,
@@ -634,7 +704,7 @@ impl<'a> Analyzer<'a> {
             DiagnosticMessage::ArgumentCountMismatch {
               expected: params.len(),
               got: arg_types.len(),
-              func_name,
+              func_name: func_name.clone(),
               span: call.span.clone(),
             }
             .report(),
@@ -645,7 +715,7 @@ impl<'a> Analyzer<'a> {
           DiagnosticMessage::ArgumentCountMismatch {
             expected: params.len(),
             got: arg_types.len(),
-            func_name,
+            func_name: func_name.clone(),
             span: call.span.clone(),
           }
           .report(),
@@ -655,6 +725,13 @@ impl<'a> Analyzer<'a> {
       let check_count = std::cmp::min(arg_types.len(), params.len());
       for i in 0..check_count {
         if !self.types.types_equal(&params[i], &arg_types[i]) {
+          // Special case: deallocate accepts any *mut T, coercing to *mut u8
+          if func_name == "deallocate" && i == 0 {
+            if self.is_ptr_coercion(&arg_types[i], &params[i]) {
+              continue;
+            }
+          }
+
           let expected = self.format_type_for_error(&params[i]);
           let got = self.format_type_for_error(&arg_types[i]);
 
@@ -759,7 +836,13 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
   ) -> TypeId {
     let left_type = self.typecheck_node(&binary.left, scope_kind, ctx);
-    let right_type = self.typecheck_node(&binary.right, scope_kind, ctx);
+
+    let right_type = if self.types.is_numeric(&left_type) {
+      let infer = InferContext::expecting(left_type.clone());
+      self.typecheck_node_with_infer(&binary.right, scope_kind, ctx, &infer)
+    } else {
+      self.typecheck_node(&binary.right, scope_kind, ctx)
+    };
 
     match binary.operator {
       ASTBinaryOperator::Add
@@ -936,7 +1019,8 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
   ) -> TypeId {
     let target_type = self.typecheck_node(&assign.target, scope_kind, ctx);
-    let value_type = self.typecheck_node(&assign.value, scope_kind, ctx);
+    let infer = InferContext::expecting(target_type.clone());
+    let value_type = self.typecheck_node_with_infer(&assign.value, scope_kind, ctx, &infer);
 
     let target_node = self.ast.get(&assign.target);
     if let ASTNode::Expression(target_expr) = target_node {

@@ -436,12 +436,21 @@ impl<'a> Analyzer<'a> {
         };
 
         let callee_type = self.get_definition_type(&callee_def_id);
+        let callee_name = self
+          .symbols
+          .borrow()
+          .get(&self.defs.get(&callee_def_id).name)
+          .to_string();
 
-        let args_hir: Vec<_> = call
-          .arguments
-          .iter()
-          .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
-          .collect();
+        let args_hir: Vec<_> = if callee_name == "deallocate" {
+          self.lower_deallocate_args(call, hir, scope_kind)
+        } else {
+          call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect()
+        };
 
         let return_type = if let ignis_type::types::Type::Function { ret, .. } = self.types.get(&callee_type).clone() {
           ret
@@ -741,6 +750,44 @@ impl<'a> Analyzer<'a> {
       span: call.span.clone(),
       type_id: self.types.u64(),
     })
+  }
+
+  /// Insert implicit cast from *T to *u8 for deallocate's pointer argument.
+  fn lower_deallocate_args(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> Vec<HIRId> {
+    call
+      .arguments
+      .iter()
+      .enumerate()
+      .map(|(i, arg)| {
+        let arg_hir = self.lower_node_to_hir(arg, hir, scope_kind);
+
+        if i == 0 {
+          let arg_type = hir.get(arg_hir).type_id;
+          let ptr_u8 = self.types.pointer(self.types.u8());
+
+          if !self.types.types_equal(&arg_type, &ptr_u8) {
+            if let ignis_type::types::Type::Pointer(_) = self.types.get(&arg_type) {
+              let cast_node = HIRNode {
+                kind: HIRKind::Cast {
+                  expression: arg_hir,
+                  target: ptr_u8,
+                },
+                span: hir.get(arg_hir).span.clone(),
+                type_id: ptr_u8,
+              };
+              return hir.alloc(cast_node);
+            }
+          }
+        }
+
+        arg_hir
+      })
+      .collect()
   }
 }
 

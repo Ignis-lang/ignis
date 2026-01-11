@@ -435,3 +435,287 @@ function main(): void {
 "#,
   );
 }
+
+// =============================================================================
+// Literal coercion tests
+// =============================================================================
+
+#[test]
+fn literal_coercion_signed_to_unsigned() {
+  common::assert_ok(
+    r#"
+function main(): void {
+    let x: u32 = 42;
+    let y: u8 = 100;
+    let z: u64 = 0;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_widening() {
+  common::assert_ok(
+    r#"
+function main(): void {
+    let x: i64 = 100;
+    let y: u64 = 255;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_negative_boundary() {
+  common::assert_ok(
+    r#"
+function main(): void {
+    let a: i8 = -128;
+    let b: i16 = -32768;
+    let c: i32 = -2147483648;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_negative_to_unsigned_error() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let x: u32 = -1;
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "A0046"),
+    "Expected overflow error A0046"
+  );
+
+  assert_snapshot!(
+    "literal_coercion_negative_to_unsigned",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn literal_coercion_overflow_error() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let x: i8 = 200;
+    let y: u8 = 300;
+    return;
+}
+"#,
+  );
+
+  let overflow_count = result
+    .output
+    .diagnostics
+    .iter()
+    .filter(|d| d.error_code == "A0046")
+    .count();
+  assert_eq!(overflow_count, 2, "Expected 2 overflow errors, got {}", overflow_count);
+
+  assert_snapshot!(
+    "literal_coercion_overflow",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn literal_coercion_float() {
+  common::assert_ok(
+    r#"
+function main(): void {
+    let x: f32 = 3.14;
+    let y: f64 = 2.5;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_in_call() {
+  common::assert_ok(
+    r#"
+function takeU32(x: u32): void {
+    return;
+}
+
+function main(): void {
+    takeU32(42);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_in_assignment() {
+  common::assert_ok(
+    r#"
+function main(): void {
+    let mut x: i64 = 0;
+    x = 42;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_in_binary() {
+  common::assert_ok(
+    r#"
+function main(): void {
+    let x: i64 = 100;
+    let y: i64 = x + 1;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_hex() {
+  common::assert_ok(
+    r#"
+function main(): void {
+    let x: u8 = 0xFF;
+    let y: u16 = 0xABCD;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn literal_coercion_hex_overflow() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let x: u8 = 0x100;
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "A0046"),
+    "Expected overflow error A0046"
+  );
+
+  assert_snapshot!(
+    "literal_coercion_hex_overflow",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+// =============================================================================
+// allocate/deallocate tests
+// =============================================================================
+
+#[test]
+fn deallocate_pointer_coercion() {
+  common::assert_ok(
+    r#"
+extern function allocate(size: u32): *mut u8;
+extern function deallocate(ptr: *mut u8): void;
+
+function main(): void {
+    let mut p: *mut i32 = allocate(16) as *mut i32;
+    deallocate(p);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn use_after_free_write() {
+  let result = common::analyze(
+    r#"
+extern function allocate(size: u32): *mut u8;
+extern function deallocate(ptr: *mut u8): void;
+
+function main(): void {
+    let mut p: *mut i32 = allocate(16) as *mut i32;
+    deallocate(p);
+    *p = 42;
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "O0002"),
+    "Expected use-after-free error O0002"
+  );
+
+  assert_snapshot!("use_after_free_write", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn use_after_free_read() {
+  let result = common::analyze(
+    r#"
+extern function allocate(size: u32): *mut u8;
+extern function deallocate(ptr: *mut u8): void;
+
+function main(): void {
+    let mut p: *mut i32 = allocate(16) as *mut i32;
+    *p = 42;
+    deallocate(p);
+    let x: i32 = *p;
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "O0002"),
+    "Expected use-after-free error O0002"
+  );
+
+  assert_snapshot!("use_after_free_read", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn no_use_after_free_before_deallocate() {
+  common::assert_ok(
+    r#"
+extern function allocate(size: u32): *mut u8;
+extern function deallocate(ptr: *mut u8): void;
+
+function main(): void {
+    let mut p: *mut i32 = allocate(16) as *mut i32;
+    *p = 42;
+    let x: i32 = *p;
+    deallocate(p);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn allocate_literal_coercion() {
+  common::assert_ok(
+    r#"
+extern function allocate(size: u32): *mut u8;
+
+function main(): void {
+    let p: *mut u8 = allocate(16);
+    return;
+}
+"#,
+  );
+}

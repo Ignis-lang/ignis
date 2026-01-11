@@ -199,14 +199,22 @@ pub fn compile_project(
 
       let mut types = output.types.clone();
 
-      // Run ownership analysis on HIR to produce drop schedules
       let ownership_checker =
         ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table);
       let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
 
-      // Report ownership diagnostics
-      for diag in ownership_diagnostics {
-        eprintln!("{:?}", diag);
+      if !config.quiet {
+        for diag in &ownership_diagnostics {
+          ignis_diagnostics::render(diag, &ctx.source_map);
+        }
+      }
+
+      let has_errors = ownership_diagnostics
+        .iter()
+        .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
+
+      if has_errors {
+        return Err(());
       }
 
       // Only emit project modules; std functions become extern declarations
