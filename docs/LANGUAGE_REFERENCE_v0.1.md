@@ -152,8 +152,38 @@ false           // boolean
 '\n'            // char (escape sequence)
 '\u{1F600}'     // char (Unicode code point)
 "hello"         // string
-0xFF            // hex integer
-0b1010          // binary integer
+0xFF            // hex integer (u32 default)
+0b1010          // binary integer (u8 default)
+```
+
+### Literal Type Inference
+
+Numeric literals are coerced to the expected type based on context. The compiler propagates type expectations through:
+
+- Variable declarations: `let x: u64 = 42;`
+- Assignments: `x = 100;`
+- Function arguments: `takeU32(42);`
+- Binary operations: `x + 1` (where `x: i64`)
+
+```ignis
+let a: u8 = 255;      // OK: 255 fits in u8
+let b: i64 = 42;      // OK: 42 coerced to i64
+let c: u32 = -1;      // ERROR: negative value cannot be unsigned
+let d: i8 = 200;      // ERROR: 200 overflows i8 (max 127)
+```
+
+**Rules:**
+- Signed literals can coerce to unsigned types if the value is non-negative and fits
+- Unsigned literals can coerce to signed types if the value fits in the positive range
+- Float literals (`f32`, `f64`) coerce between float types only
+- No implicit coercion between integers and floats (requires explicit cast)
+
+Hex and binary literals follow the same rules:
+
+```ignis
+let x: u8 = 0xFF;     // OK: 255 fits in u8
+let y: u8 = 0x100;    // ERROR: 256 overflows u8
+let z: u16 = 0b1111111111111111;  // OK: fits in u16
 ```
 
 ### Operators
@@ -394,6 +424,64 @@ let y: f64 = sqrt(2.0);
 let z: f64 = pow(2.0, 10.0);
 ```
 
+### memory
+
+Raw memory allocation and dynamic buffers:
+
+```ignis
+import allocate, deallocate, reallocate, allocateZeroed from "std::memory";
+
+// Allocate 16 bytes
+let p: *mut u8 = allocate(16);
+
+// Use the memory...
+
+// Free when done
+deallocate(p);
+```
+
+#### Allocation Functions
+
+| Function | Description |
+|----------|-------------|
+| `allocate(size: u32): *mut u8` | Allocate `size` bytes |
+| `deallocate(ptr: *mut u8): void` | Free allocated memory |
+| `reallocate(ptr: *mut u8, size: u32): *mut u8` | Resize allocation |
+| `allocateZeroed(size: u32, count: u32): *mut u8` | Allocate `size * count` zeroed bytes |
+
+#### Pointer Coercion
+
+`deallocate` accepts any pointer type. The compiler implicitly casts `*mut T` to `*mut u8`:
+
+```ignis
+let p: *mut i32 = allocate(16) as *mut i32;
+deallocate(p);  // OK: implicit cast to *mut u8
+```
+
+#### Dynamic Buffers
+
+Low-level dynamic array operations (for advanced use):
+
+```ignis
+import bufNew, bufPush, bufAt, bufLen, bufDrop from "std::memory";
+
+// Create buffer for i32 elements (size=4, type_id=2)
+let buf: *mut void = bufNew(4, 2);
+
+// Push elements
+let val: i32 = 42;
+bufPush(buf, &val as *void);
+
+// Access element
+let elem: *mut i32 = bufAt(buf, 0) as *mut i32;
+
+// Get length
+let len: u64 = bufLen(buf);
+
+// Free buffer
+bufDrop(buf);
+```
+
 ## Borrow Checking
 
 Ignis implements basic borrow checking similar to Rust:
@@ -413,6 +501,87 @@ let mr: &mut i32 = &mut y;
 ```
 
 **Limitation:** The borrow checker does not track mutations through compound expressions like `arr[i]`, `*ptr`, or field access. Mutations through these expressions are not detected as borrow conflicts.
+
+## Ownership and Move Semantics
+
+Ignis tracks ownership for "owned" types: `string`, dynamic buffers, and `unknown`. When an owned value is passed to a function or assigned to another variable, ownership is transferred (moved).
+
+### Use-After-Move
+
+Using a variable after its ownership has been transferred is a compile-time error:
+
+```ignis
+function consume(s: string): void {
+    return;
+}
+
+function example(): void {
+    let s: string = "hello";
+    consume(s);       // ownership moved to consume()
+    println(s);       // ERROR: use of moved value 's'
+    return;
+}
+```
+
+### Automatic Drop Insertion
+
+The compiler automatically inserts destructor calls for owned values at scope exits:
+
+```ignis
+function example(): void {
+    let s: string = "hello";
+    // ... use s ...
+    return;  // s is automatically dropped here
+}
+```
+
+Drops are also inserted:
+- Before `break` and `continue` (for variables in enclosing scopes up to the loop)
+- Before `return` (for all owned variables still in scope)
+- Before reassigning an owned variable (drops the old value)
+
+### Ownership States
+
+Variables are tracked in one of four states:
+
+| State | Description |
+|-------|-------------|
+| Valid | Variable holds a live, usable value |
+| Moved | Ownership transferred to another function or variable |
+| Freed | Explicitly deallocated via `deallocate()` |
+| Returned | Returned from function (ownership transferred to caller) |
+
+### FFI and Ownership
+
+When passing owned values to `extern` functions, the compiler emits a warning because it cannot track whether the C code will free the memory:
+
+```ignis
+extern function c_function(s: string): void;
+
+function example(): void {
+    let s: string = "hello";
+    c_function(s);  // WARNING: possible memory leak, ownership escapes to FFI
+    return;
+}
+```
+
+### Use-After-Free Detection
+
+When a pointer is passed to `deallocate()`, it is marked as freed. Subsequent dereference or indexing through that pointer is a compile-time error:
+
+```ignis
+import allocate, deallocate from "std::memory";
+
+function example(): void {
+    let p: *mut i32 = allocate(16) as *mut i32;
+    *p = 42;
+    deallocate(p);
+    let x: i32 = *p;  // ERROR: use of freed pointer 'p'
+    return;
+}
+```
+
+**Note:** Using the pointer value itself (e.g., comparing addresses) is allowed. Only dereference (`*p`), indexing (`p[i]`), and assignment through the pointer (`*p = value`) are errors.
 
 ## Known Limitations
 
@@ -440,7 +609,20 @@ Strings are represented as null-terminated `char*` pointers. There is no length 
 
 ### No Garbage Collection
 
-Memory management is manual. The standard library functions that allocate (like `stringConcat`) allocate with `malloc` and the caller is responsible for freeing.
+Memory management is manual. The standard library functions that allocate (like `stringConcat`) allocate with `malloc` and the caller is responsible for freeing. However, the compiler automatically inserts drop calls for owned types at scope exits.
+
+### Ownership Tracking Limitations
+
+The ownership checker has the following limitations:
+
+- **Compound expressions**: Mutations through `arr[i]`, `*ptr`, or field access are not fully tracked for borrow conflicts.
+- **Control flow**: The checker tracks ownership per-variable but does not fully analyze all possible control flow paths (e.g., loops with conditional moves).
+- **Nested pointers**: Use-after-free detection works for direct pointer variables but may not catch all cases involving nested pointer casts.
+
+### Literal Coercion Limitations
+
+- No coercion between integer and float types (requires explicit `as` cast)
+- Coercion only applies when type context is available (e.g., `let x = 42` defaults to `i32`)
 
 ## Entry Point
 

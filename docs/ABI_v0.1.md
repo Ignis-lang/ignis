@@ -247,6 +247,118 @@ When linking, the order is:
 3. Runtime objects
 4. System libraries (`-lm` for math, etc.)
 
+## Owned Types and Drop Semantics
+
+Ignis tracks ownership for certain types and automatically inserts destructor calls ("drops") when values go out of scope.
+
+### Owned Types
+
+The following types are considered "owned" and require cleanup:
+
+| Type | Drop Function | Description |
+|------|---------------|-------------|
+| `string` | `ignis_string_drop` | Heap-allocated strings |
+| `IgnisBuffer*` | `ignis_buf_drop` | Dynamic arrays/vectors |
+| `unknown` | `ignis_drop_any` | Type-erased values |
+
+### Drop Emission
+
+The compiler emits drop calls at the following points:
+
+1. **Scope exit**: When a block ends, owned variables declared in that scope are dropped in reverse declaration order.
+
+2. **Early return**: Before a `return` statement, all owned variables in enclosing scopes are dropped.
+
+3. **Break/Continue**: Before `break` or `continue`, owned variables in scopes up to the target loop are dropped.
+
+4. **Variable overwrite**: Before reassigning an owned variable, the old value is dropped.
+
+Example:
+
+```ignis
+function example(): void {
+    let s1: string = "hello";
+    let s2: string = "world";
+    return;  // drops s2, then s1
+}
+```
+
+Compiles to:
+
+```c
+void example(void) {
+    string s1 = "hello";
+    string s2 = "world";
+    ignis_string_drop(s2);
+    ignis_string_drop(s1);
+    return;
+}
+```
+
+### Ownership States
+
+Variables are tracked with the following states:
+
+| State | Meaning |
+|-------|---------|
+| `Valid` | Variable holds a live value |
+| `Moved` | Ownership transferred (e.g., passed to function) |
+| `Freed` | Explicitly deallocated via `deallocate()` |
+| `Returned` | Returned from function (ownership transferred to caller) |
+
+Using a variable after it has been moved or freed produces a compile-time error.
+
+## Memory Management
+
+### Allocation Functions
+
+The runtime provides memory allocation functions exposed through `std::memory`:
+
+| Ignis Function | C Function | Description |
+|----------------|------------|-------------|
+| `allocate(size: u32): *mut u8` | `memoryAllocate` | Allocate `size` bytes |
+| `deallocate(ptr: *mut u8): void` | `memoryDeallocate` | Free allocated memory |
+| `reallocate(ptr: *mut u8, size: u32): *mut u8` | `memoryReallocate` | Resize allocation |
+| `allocateZeroed(size: u32, count: u32): *mut u8` | `memoryAllocateZeroed` | Allocate zeroed memory |
+
+### Pointer Coercion for deallocate
+
+The `deallocate` function accepts `*mut u8`, but the compiler allows passing any pointer type `*mut T`. An implicit cast is inserted:
+
+```ignis
+let p: *mut i32 = allocate(16) as *mut i32;
+deallocate(p);  // implicit cast: p as *mut u8
+```
+
+### Dynamic Buffers
+
+Dynamic arrays use `IgnisBuffer*` internally:
+
+```c
+typedef struct {
+    void*  data;       // Pointer to element storage
+    u64    len;        // Current length
+    u64    cap;        // Allocated capacity
+    u64    elem_size;  // Size of each element
+    u32    elem_type;  // Type ID for RTTI
+} IgnisBuffer;
+```
+
+Buffer operations are exposed through `std::memory`:
+
+| Function | Description |
+|----------|-------------|
+| `bufNew(elemSize, elemTypeId)` | Create empty buffer |
+| `bufWithCapacity(elemSize, elemTypeId, cap)` | Create with capacity |
+| `bufPush(buf, elem)` | Append element |
+| `bufAt(buf, idx)` | Get element pointer |
+| `bufLen(buf)` | Get length |
+| `bufCap(buf)` | Get capacity |
+| `bufResize(buf, newLen)` | Resize buffer |
+| `bufReserve(buf, additional)` | Reserve additional capacity |
+| `bufClear(buf)` | Clear without deallocating |
+| `bufDrop(buf)` | Free buffer and contents |
+
 ## Stability Guarantees
 
 For v0.1, the following are considered stable:
@@ -254,9 +366,12 @@ For v0.1, the following are considered stable:
 - Type mappings in `types.h`
 - Calling convention (C ABI)
 - Entry point signature (`int main(void)`)
+- Memory allocation interface (`allocate`, `deallocate`, etc.)
+- Drop function signatures for owned types
 
 The following may change in future versions:
 
 - String representation
 - RTTI type IDs
 - Internal codegen details (temporary naming, etc.)
+- Buffer internal layout
