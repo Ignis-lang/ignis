@@ -1,5 +1,13 @@
 use crate::{Analyzer, ScopeKind};
-use ignis_ast::{expressions::ASTExpression, statements::ASTStatement, ASTNode, NodeId};
+use ignis_ast::{
+  expressions::ASTExpression,
+  statements::{
+    enum_::{ASTEnum, ASTEnumItem},
+    record::{ASTRecord, ASTRecordItem},
+    ASTStatement,
+  },
+  ASTNode, NodeId,
+};
 use ignis_diagnostics::message::DiagnosticMessage;
 
 /// Control flow termination status.
@@ -241,6 +249,12 @@ impl<'a> Analyzer<'a> {
           self.extra_checks_node(decl, scope_kind, in_loop, in_function);
         }
       },
+      ASTStatement::Record(rec) => {
+        self.check_static_fields_init(rec);
+      },
+      ASTStatement::Enum(enum_) => {
+        self.check_enum_fields_init(enum_);
+      },
       _ => {},
     }
   }
@@ -314,6 +328,14 @@ impl<'a> Analyzer<'a> {
       ASTExpression::PostfixDecrement { expr, .. } => {
         self.extra_checks_node(expr, scope_kind, in_loop, in_function);
       },
+      ASTExpression::MemberAccess(ma) => {
+        self.extra_checks_node(&ma.object, scope_kind, in_loop, in_function);
+      },
+      ASTExpression::RecordInit(ri) => {
+        for field in &ri.fields {
+          self.extra_checks_node(&field.value, scope_kind, in_loop, in_function);
+        }
+      },
     }
   }
 
@@ -371,6 +393,54 @@ impl<'a> Analyzer<'a> {
         ASTStatement::Return(_) | ASTStatement::Break(_) | ASTStatement::Continue(_)
       ),
       _ => false,
+    }
+  }
+
+  /// Check that static fields in a record have initializers.
+  fn check_static_fields_init(
+    &mut self,
+    rec: &ASTRecord,
+  ) {
+    let type_name = self.get_symbol_name(&rec.name);
+
+    for item in &rec.items {
+      if let ASTRecordItem::Field(field) = item {
+        if field.is_static() && field.value.is_none() {
+          let field_name = self.get_symbol_name(&field.name);
+          self.add_diagnostic(
+            DiagnosticMessage::StaticFieldRequiresInit {
+              field: field_name,
+              type_name: type_name.clone(),
+              span: field.span.clone(),
+            }
+            .report(),
+          );
+        }
+      }
+    }
+  }
+
+  /// Check that enum fields have initializers (all enum fields are implicitly static).
+  fn check_enum_fields_init(
+    &mut self,
+    enum_: &ASTEnum,
+  ) {
+    let type_name = self.get_symbol_name(&enum_.name);
+
+    for item in &enum_.items {
+      if let ASTEnumItem::Field(field) = item {
+        if field.value.is_none() {
+          let field_name = self.get_symbol_name(&field.name);
+          self.add_diagnostic(
+            DiagnosticMessage::StaticFieldRequiresInit {
+              field: field_name,
+              type_name: type_name.clone(),
+              span: field.span.clone(),
+            }
+            .report(),
+          );
+        }
+      }
     }
   }
 }

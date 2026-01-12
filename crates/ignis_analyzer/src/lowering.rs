@@ -1,14 +1,19 @@
-use crate::{Analyzer, ScopeKind};
+use crate::{Analyzer, ResolvedPath, ScopeKind};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, expressions::ASTExpression};
 use ignis_ast::expressions::binary::ASTBinaryOperator;
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
+use ignis_ast::expressions::member_access::ASTAccessOp;
 use ignis_ast::expressions::unary::UnaryOperator;
+use ignis_ast::statements::record::{ASTRecord, ASTRecordItem};
+use ignis_ast::statements::enum_::{ASTEnum, ASTEnumItem};
 use ignis_hir::{
   HIR, HIRNode, HIRKind, HIRId,
   operation::{BinaryOperation, UnaryOperation},
   statement::LoopKind,
 };
+use ignis_type::definition::DefinitionKind;
 use ignis_type::span::Span;
+use ignis_type::types::{Type, TypeId};
 
 impl<'a> Analyzer<'a> {
   pub fn lower_to_hir(
@@ -338,6 +343,14 @@ impl<'a> Analyzer<'a> {
           type_id: self.types.void(),
         }),
       },
+      ASTStatement::Record(record) => {
+        // Lower record methods to HIR
+        self.lower_record_methods(record, hir, scope_kind)
+      },
+      ASTStatement::Enum(enum_) => {
+        // Lower enum methods to HIR
+        self.lower_enum_methods(enum_, hir, scope_kind)
+      },
       _ => hir.alloc(HIRNode {
         kind: HIRKind::Block {
           statements: Vec::new(),
@@ -347,6 +360,120 @@ impl<'a> Analyzer<'a> {
         type_id: self.types.void(),
       }),
     }
+  }
+
+  /// Lower record methods to HIR.
+  /// Iterates through all methods in the record and lowers their bodies.
+  fn lower_record_methods(
+    &mut self,
+    record: &ASTRecord,
+    hir: &mut HIR,
+    _scope_kind: ScopeKind,
+  ) -> HIRId {
+    for item in &record.items {
+      if let ASTRecordItem::Method(method) = item {
+        // Find the method's DefinitionId by looking it up in the record definition
+        let record_def_id = self.scopes.lookup(&record.name).cloned();
+
+        let Some(record_def_id) = record_def_id else {
+          continue;
+        };
+
+        let method_def_id = {
+          let def = self.defs.get(&record_def_id);
+          let DefinitionKind::Record(rd) = &def.kind else {
+            continue;
+          };
+
+          // Look up method in instance_methods or static_methods
+          if method.is_static() {
+            rd.static_methods.get(&method.name).cloned()
+          } else {
+            rd.instance_methods.get(&method.name).cloned()
+          }
+        };
+
+        let Some(method_def_id) = method_def_id else {
+          continue;
+        };
+
+        // Lower the method body
+        self.scopes.push(ScopeKind::Function);
+        self.define_function_params_in_scope(&method_def_id);
+
+        let body_hir_id = self.lower_node_to_hir(&method.body, hir, ScopeKind::Function);
+        self.scopes.pop();
+
+        // Register the method body
+        hir.function_bodies.insert(method_def_id, body_hir_id);
+        hir.items.push(method_def_id);
+      }
+    }
+
+    // Return an empty block as the record statement result
+    hir.alloc(HIRNode {
+      kind: HIRKind::Block {
+        statements: Vec::new(),
+        expression: None,
+      },
+      span: record.span.clone(),
+      type_id: self.types.void(),
+    })
+  }
+
+  /// Lower enum methods to HIR.
+  /// Iterates through all methods in the enum and lowers their bodies.
+  fn lower_enum_methods(
+    &mut self,
+    enum_: &ASTEnum,
+    hir: &mut HIR,
+    _scope_kind: ScopeKind,
+  ) -> HIRId {
+    for item in &enum_.items {
+      if let ASTEnumItem::Method(method) = item {
+        // Find the method's DefinitionId by looking it up in the enum definition
+        let enum_def_id = self.scopes.lookup(&enum_.name).cloned();
+
+        let Some(enum_def_id) = enum_def_id else {
+          continue;
+        };
+
+        let method_def_id = {
+          let def = self.defs.get(&enum_def_id);
+          let DefinitionKind::Enum(ed) = &def.kind else {
+            continue;
+          };
+
+          // Enum methods are always static
+          ed.static_methods.get(&method.name).cloned()
+        };
+
+        let Some(method_def_id) = method_def_id else {
+          continue;
+        };
+
+        // Lower the method body
+        self.scopes.push(ScopeKind::Function);
+        self.define_function_params_in_scope(&method_def_id);
+
+        let body_hir_id = self.lower_node_to_hir(&method.body, hir, ScopeKind::Function);
+        self.scopes.pop();
+
+        // Register the method body
+        hir.function_bodies.insert(method_def_id, body_hir_id);
+        hir.items.push(method_def_id);
+      }
+    }
+
+    // Return an empty block as the enum statement result
+    hir.alloc(HIRNode {
+      kind: HIRKind::Block {
+        statements: Vec::new(),
+        expression: None,
+      },
+      span: enum_.span.clone(),
+      type_id: self.types.void(),
+    })
   }
 
   fn lower_expression_to_hir(
@@ -420,6 +547,16 @@ impl<'a> Analyzer<'a> {
           }
         }
 
+        if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = callee_node {
+          return self.lower_method_call(node_id, ma, call, hir, scope_kind);
+        }
+
+        if let ASTNode::Expression(ASTExpression::Path(path)) = callee_node {
+          if let Some(result) = self.try_lower_path_call(node_id, path, call, hir, scope_kind) {
+            return result;
+          }
+        }
+
         // Get the callee def_id by looking up the variable name
         let callee_def_id = match callee_node {
           ASTNode::Expression(ASTExpression::Variable(var)) => match self.scopes.lookup(&var.name) {
@@ -434,7 +571,16 @@ impl<'a> Analyzer<'a> {
             },
           },
           ASTNode::Expression(ASTExpression::Path(path)) => match self.resolve_qualified_path(&path.segments) {
-            Some(def_id) => def_id,
+            Some(ResolvedPath::Def(def_id)) => def_id,
+            Some(ResolvedPath::EnumVariant { .. }) => {
+              // Handled by try_lower_path_call above
+              let span = self.node_span(&call.callee).clone();
+              return hir.alloc(HIRNode {
+                kind: HIRKind::Error,
+                span,
+                type_id: self.types.error(),
+              });
+            },
             None => {
               let span = self.node_span(&call.callee).clone();
               return hir.alloc(HIRNode {
@@ -649,25 +795,53 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Path(path) => {
-        let def_id = match self.resolve_qualified_path(&path.segments) {
-          Some(id) => id,
+        match self.resolve_qualified_path(&path.segments) {
+          Some(ResolvedPath::Def(def_id)) => {
+            let path_type = self.type_of(&def_id).clone();
+
+            hir.alloc(HIRNode {
+              kind: HIRKind::Variable(def_id),
+              span: path.span.clone(),
+              type_id: path_type,
+            })
+          },
+
+          Some(ResolvedPath::EnumVariant { enum_def, variant_index }) => {
+            let ed = match &self.defs.get(&enum_def).kind {
+              DefinitionKind::Enum(ed) => ed.clone(),
+              _ => unreachable!("ResolvedPath::EnumVariant should reference an enum"),
+            };
+
+            let variant = &ed.variants[variant_index as usize];
+
+            if !variant.payload.is_empty() {
+              // Error emitted in typeck
+              return hir.alloc(HIRNode {
+                kind: HIRKind::Error,
+                span: path.span.clone(),
+                type_id: self.types.error(),
+              });
+            }
+
+            hir.alloc(HIRNode {
+              kind: HIRKind::EnumVariant {
+                enum_def,
+                variant_tag: variant_index,
+                payload: vec![],
+              },
+              span: path.span.clone(),
+              type_id: ed.type_id,
+            })
+          },
+
           None => {
-            return hir.alloc(HIRNode {
+            hir.alloc(HIRNode {
               kind: HIRKind::Error,
               span: path.span.clone(),
               type_id: self.types.error(),
-            });
+            })
           },
-        };
-        let path_type = self.type_of(&def_id).clone();
-
-        let hir_node = HIRNode {
-          kind: HIRKind::Variable(def_id),
-          span: path.span.clone(),
-          type_id: path_type,
-        };
-
-        hir.alloc(hir_node)
+        }
       },
       ASTExpression::PostfixIncrement { expr, span } => {
         let expr_id = self.lower_node_to_hir(expr, hir, scope_kind);
@@ -713,7 +887,277 @@ impl<'a> Analyzer<'a> {
 
         hir.alloc(hir_node)
       },
+      ASTExpression::MemberAccess(ma) => self.lower_member_access(node_id, ma, hir, scope_kind),
+      ASTExpression::RecordInit(ri) => self.lower_record_init(node_id, ri, hir, scope_kind),
     }
+  }
+
+  fn lower_member_access(
+    &mut self,
+    node_id: &NodeId,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let stored_type = self.lookup_type(node_id).cloned();
+
+    match ma.op {
+      ASTAccessOp::Dot => {
+        let base = self.lower_node_to_hir(&ma.object, hir, scope_kind);
+        let base_type = hir.get(base).type_id;
+        let (derefed_base, derefed_type) = self.auto_deref_for_lowering(base, base_type, hir, &ma.span);
+
+        match self.types.get(&derefed_type).clone() {
+          Type::Record(def_id) => {
+            if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
+              if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
+                let field_type = stored_type.unwrap_or_else(|| field.type_id);
+                return hir.alloc(HIRNode {
+                  kind: HIRKind::FieldAccess {
+                    base: derefed_base,
+                    field_index: field.index,
+                  },
+                  span: ma.span.clone(),
+                  type_id: field_type,
+                });
+              }
+            }
+          },
+          _ => {},
+        }
+
+        // Error fallback
+        hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: ma.span.clone(),
+          type_id: self.types.error(),
+        })
+      },
+      ASTAccessOp::DoubleColon => {
+        // Static access: Type::member
+        // Resolve the type expression to get the definition
+        let def_id = self.resolve_type_expression_for_lowering(&ma.object);
+
+        let Some(def_id) = def_id else {
+          return hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: ma.span.clone(),
+            type_id: self.types.error(),
+          });
+        };
+
+        match &self.defs.get(&def_id).kind.clone() {
+          DefinitionKind::Record(rd) => {
+            // Static field or method
+            if let Some(&field_id) = rd.static_fields.get(&ma.member) {
+              let field_type = stored_type.unwrap_or_else(|| self.get_definition_type(&field_id));
+              return hir.alloc(HIRNode {
+                kind: HIRKind::StaticAccess { def: field_id },
+                span: ma.span.clone(),
+                type_id: field_type,
+              });
+            }
+            // Static method - will be handled in call lowering
+            if let Some(&method_id) = rd.static_methods.get(&ma.member) {
+              let method_type = stored_type.unwrap_or_else(|| self.get_definition_type(&method_id));
+              return hir.alloc(HIRNode {
+                kind: HIRKind::StaticAccess { def: method_id },
+                span: ma.span.clone(),
+                type_id: method_type,
+              });
+            }
+          },
+          DefinitionKind::Enum(ed) => {
+            // Enum variant without payload
+            if let Some(&tag) = ed.variants_by_name.get(&ma.member) {
+              let variant = &ed.variants[tag as usize];
+              if variant.payload.is_empty() {
+                // Unit variant
+                return hir.alloc(HIRNode {
+                  kind: HIRKind::EnumVariant {
+                    enum_def: def_id,
+                    variant_tag: tag,
+                    payload: vec![],
+                  },
+                  span: ma.span.clone(),
+                  type_id: ed.type_id,
+                });
+              }
+              // Variant with payload - handled in call lowering
+            }
+            // Static field
+            if let Some(&field_id) = ed.static_fields.get(&ma.member) {
+              let field_type = stored_type.unwrap_or_else(|| self.get_definition_type(&field_id));
+              return hir.alloc(HIRNode {
+                kind: HIRKind::StaticAccess { def: field_id },
+                span: ma.span.clone(),
+                type_id: field_type,
+              });
+            }
+            // Static method
+            if let Some(&method_id) = ed.static_methods.get(&ma.member) {
+              let method_type = stored_type.unwrap_or_else(|| self.get_definition_type(&method_id));
+              return hir.alloc(HIRNode {
+                kind: HIRKind::StaticAccess { def: method_id },
+                span: ma.span.clone(),
+                type_id: method_type,
+              });
+            }
+          },
+          DefinitionKind::Namespace(ns_def) => {
+            // Namespace member
+            if let Some(member_def_id) = self.namespaces.lookup_def(ns_def.namespace_id, &ma.member) {
+              let member_type = stored_type.unwrap_or_else(|| self.get_definition_type(&member_def_id));
+              return hir.alloc(HIRNode {
+                kind: HIRKind::StaticAccess { def: member_def_id },
+                span: ma.span.clone(),
+                type_id: member_type,
+              });
+            }
+          },
+          _ => {},
+        }
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: ma.span.clone(),
+          type_id: self.types.error(),
+        })
+      },
+    }
+  }
+
+  fn lower_record_init(
+    &mut self,
+    node_id: &NodeId,
+    ri: &ignis_ast::expressions::record_init::ASTRecordInit,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+
+    // Resolve the record type
+    let def_id = self.resolve_record_path_for_lowering(&ri.path);
+
+    let Some(def_id) = def_id else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: ri.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    // Get the record definition to map field names to indices
+    let rd = match &self.defs.get(&def_id).kind {
+      DefinitionKind::Record(rd) => rd.clone(),
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: ri.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    // Lower each field value and map to field index
+    let mut fields: Vec<(u32, HIRId)> = Vec::new();
+    for init_field in &ri.fields {
+      if let Some(field_def) = rd.fields.iter().find(|f| f.name == init_field.name) {
+        let value = self.lower_node_to_hir(&init_field.value, hir, scope_kind);
+        fields.push((field_def.index, value));
+      }
+    }
+
+    // Sort by field index for consistent ordering
+    fields.sort_by_key(|(idx, _)| *idx);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::RecordInit {
+        record_def: def_id,
+        fields,
+      },
+      span: ri.span.clone(),
+      type_id: result_type,
+    })
+  }
+
+  fn auto_deref_for_lowering(
+    &self,
+    base: HIRId,
+    base_type: ignis_type::types::TypeId,
+    hir: &mut HIR,
+    span: &Span,
+  ) -> (HIRId, ignis_type::types::TypeId) {
+    match self.types.get(&base_type) {
+      Type::Reference { inner, .. } => {
+        let deref_node = hir.alloc(HIRNode {
+          kind: HIRKind::Dereference(base),
+          span: span.clone(),
+          type_id: *inner,
+        });
+        (deref_node, *inner)
+      },
+      _ => (base, base_type),
+    }
+  }
+
+  fn resolve_type_expression_for_lowering(
+    &self,
+    node_id: &NodeId,
+  ) -> Option<ignis_type::definition::DefinitionId> {
+    let node = self.ast.get(node_id);
+
+    match node {
+      ASTNode::Expression(ASTExpression::Variable(var)) => self.scopes.lookup(&var.name).cloned(),
+      ASTNode::Expression(ASTExpression::Path(path)) => {
+        if path.segments.is_empty() {
+          return None;
+        }
+        let first_segment = &path.segments[0];
+        let mut current_def = self.scopes.lookup(first_segment).cloned()?;
+
+        for segment in path.segments.iter().skip(1) {
+          match &self.defs.get(&current_def).kind {
+            DefinitionKind::Namespace(ns_def) => {
+              current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment)?;
+            },
+            _ => return None,
+          }
+        }
+        Some(current_def)
+      },
+      ASTNode::Expression(ASTExpression::MemberAccess(ma)) => {
+        let base_def = self.resolve_type_expression_for_lowering(&ma.object)?;
+        match &self.defs.get(&base_def).kind {
+          DefinitionKind::Namespace(ns_def) => self.namespaces.lookup_def(ns_def.namespace_id, &ma.member),
+          _ => None,
+        }
+      },
+      _ => None,
+    }
+  }
+
+  fn resolve_record_path_for_lowering(
+    &self,
+    path: &[(ignis_type::symbol::SymbolId, Span)],
+  ) -> Option<ignis_type::definition::DefinitionId> {
+    if path.is_empty() {
+      return None;
+    }
+
+    let (first_sym, _) = &path[0];
+    let mut current_def = self.scopes.lookup(first_sym).cloned()?;
+
+    for (segment_sym, _) in path.iter().skip(1) {
+      match &self.defs.get(&current_def).kind {
+        DefinitionKind::Namespace(ns_def) => {
+          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym)?;
+        },
+        _ => return None,
+      }
+    }
+
+    Some(current_def)
   }
 
   fn lower_typeof_builtin(
@@ -769,6 +1213,301 @@ impl<'a> Analyzer<'a> {
       span: call.span.clone(),
       type_id: self.types.u64(),
     })
+  }
+
+  /// Lower a method call: obj.method(args) or Type::method(args)
+  fn lower_method_call(
+    &mut self,
+    node_id: &NodeId,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    use ignis_ast::expressions::member_access::ASTAccessOp;
+
+    let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+
+    match ma.op {
+      ASTAccessOp::Dot => {
+        // Instance method call: obj.method(args)
+        self.lower_instance_method_call(ma, call, hir, scope_kind, result_type)
+      },
+      ASTAccessOp::DoubleColon => {
+        // Static method call or enum variant: Type::method(args) or Enum::Variant(args)
+        self.lower_static_call(ma, call, hir, scope_kind, result_type)
+      },
+    }
+  }
+
+  /// Lower an instance method call: obj.method(args)
+  fn lower_instance_method_call(
+    &mut self,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+    result_type: TypeId,
+  ) -> HIRId {
+    let base = self.lower_node_to_hir(&ma.object, hir, scope_kind);
+    let base_type = hir.get(base).type_id;
+
+    // For instance methods, self is passed by reference.
+    // If base is already a reference, use it directly.
+    // If base is a value, take a reference to it.
+    let (receiver_hir, receiver_record_type) = if let Type::Reference { inner, .. } = self.types.get(&base_type).clone()
+    {
+      // Already a reference, use as-is
+      (base, inner)
+    } else {
+      // Value type - we need to take a reference to it
+      // Create a reference node
+      let ref_type = self.types.reference(base_type, false);
+      let ref_node = hir.alloc(HIRNode {
+        kind: HIRKind::Reference {
+          expression: base,
+          mutable: false,
+        },
+        span: ma.span.clone(),
+        type_id: ref_type,
+      });
+      (ref_node, base_type)
+    };
+
+    match self.types.get(&receiver_record_type).clone() {
+      Type::Record(def_id) => {
+        let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
+          rd.clone()
+        } else {
+          return hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: call.span.clone(),
+            type_id: self.types.error(),
+          });
+        };
+
+        // Look up instance method
+        if let Some(&method_id) = rd.instance_methods.get(&ma.member) {
+          let args_hir: Vec<HIRId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          return hir.alloc(HIRNode {
+            kind: HIRKind::MethodCall {
+              receiver: Some(receiver_hir),
+              method: method_id,
+              args: args_hir,
+            },
+            span: call.span.clone(),
+            type_id: result_type,
+          });
+        }
+
+        // Method not found - error
+        hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        })
+      },
+      _ => {
+        // Not a record - error
+        hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        })
+      },
+    }
+  }
+
+  /// Lower a static method call or enum variant: Type::method(args) or Enum::Variant(args)
+  fn lower_static_call(
+    &mut self,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+    result_type: TypeId,
+  ) -> HIRId {
+    let def_id = self.resolve_type_expression_for_lowering(&ma.object);
+
+    let Some(def_id) = def_id else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    match &self.defs.get(&def_id).kind.clone() {
+      DefinitionKind::Record(rd) => {
+        // Static method call
+        if let Some(&method_id) = rd.static_methods.get(&ma.member) {
+          let args_hir: Vec<HIRId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          return hir.alloc(HIRNode {
+            kind: HIRKind::MethodCall {
+              receiver: None,
+              method: method_id,
+              args: args_hir,
+            },
+            span: call.span.clone(),
+            type_id: result_type,
+          });
+        }
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        })
+      },
+      DefinitionKind::Enum(ed) => {
+        // Enum variant with payload
+        if let Some(&tag) = ed.variants_by_name.get(&ma.member) {
+          let payload_hir: Vec<HIRId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          return hir.alloc(HIRNode {
+            kind: HIRKind::EnumVariant {
+              enum_def: def_id,
+              variant_tag: tag,
+              payload: payload_hir,
+            },
+            span: call.span.clone(),
+            type_id: ed.type_id,
+          });
+        }
+
+        // Static method call on enum
+        if let Some(&method_id) = ed.static_methods.get(&ma.member) {
+          let args_hir: Vec<HIRId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          return hir.alloc(HIRNode {
+            kind: HIRKind::MethodCall {
+              receiver: None,
+              method: method_id,
+              args: args_hir,
+            },
+            span: call.span.clone(),
+            type_id: result_type,
+          });
+        }
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        })
+      },
+      _ => hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      }),
+    }
+  }
+
+  /// Try to lower a path-based call as an enum variant constructor.
+  /// Returns None if not an enum variant, so caller can fall through to normal call.
+  fn try_lower_path_call(
+    &mut self,
+    node_id: &NodeId,
+    path: &ignis_ast::expressions::path::ASTPath,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> Option<HIRId> {
+    if path.segments.len() != 2 {
+      return None;
+    }
+
+    let first_segment = &path.segments[0];
+    let second_segment = &path.segments[1];
+
+    let type_def_id = self.scopes.lookup(first_segment)?.clone();
+    let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+
+    match &self.defs.get(&type_def_id).kind.clone() {
+      DefinitionKind::Enum(ed) => {
+        // Enum variant with payload
+        if let Some(&tag) = ed.variants_by_name.get(second_segment) {
+          let payload_hir: Vec<HIRId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          return Some(hir.alloc(HIRNode {
+            kind: HIRKind::EnumVariant {
+              enum_def: type_def_id,
+              variant_tag: tag,
+              payload: payload_hir,
+            },
+            span: call.span.clone(),
+            type_id: ed.type_id,
+          }));
+        }
+
+        // Static method call on enum
+        if let Some(&method_id) = ed.static_methods.get(second_segment) {
+          let args_hir: Vec<HIRId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          return Some(hir.alloc(HIRNode {
+            kind: HIRKind::MethodCall {
+              receiver: None,
+              method: method_id,
+              args: args_hir,
+            },
+            span: call.span.clone(),
+            type_id: result_type,
+          }));
+        }
+
+        None
+      },
+      DefinitionKind::Record(rd) => {
+        // Static method call on record
+        if let Some(&method_id) = rd.static_methods.get(second_segment) {
+          let args_hir: Vec<HIRId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          return Some(hir.alloc(HIRNode {
+            kind: HIRKind::MethodCall {
+              receiver: None,
+              method: method_id,
+              args: args_hir,
+            },
+            span: call.span.clone(),
+            type_id: result_type,
+          }));
+        }
+
+        None
+      },
+      _ => None,
+    }
   }
 
   /// Insert implicit cast from *T to *u8 for deallocate's pointer argument.

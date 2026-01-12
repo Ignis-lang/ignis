@@ -235,3 +235,191 @@ function get_second(): i32 {
   assert_snapshot!("const_array_diags", common::format_diagnostics(&result.output.diagnostics));
   assert_snapshot!("const_array_hir", common::format_hir(&result));
 }
+
+// ============================================================================
+// Type Alias Tests
+// ============================================================================
+
+#[test]
+fn type_alias_basic() {
+  let result = common::analyze(
+    r#"
+type Int = i32;
+
+function main(): void {
+    let x: Int = 42;
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("type_alias_basic_diags", common::format_diagnostics(&result.output.diagnostics));
+  assert_snapshot!("type_alias_basic_hir", common::format_hir(&result));
+}
+
+#[test]
+fn type_alias_in_function() {
+  let result = common::analyze(
+    r#"
+type Number = i32;
+
+function add(a: Number, b: Number): Number {
+    return a + b;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "type_alias_in_function_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("type_alias_in_function_hir", common::format_hir(&result));
+}
+
+// ============================================================================
+// Record Tests
+// ============================================================================
+
+#[test]
+fn record_basic() {
+  let result = common::analyze(
+    r#"
+record Point {
+    x: i32;
+    y: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("record_basic_diags", common::format_diagnostics(&result.output.diagnostics));
+  assert_snapshot!("record_basic_hir", common::format_hir(&result));
+}
+
+#[test]
+fn record_field_access() {
+  let result = common::analyze(
+    r#"
+record Point {
+    x: i32;
+    y: i32;
+}
+
+function main(): i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.x + p.y;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "record_field_access_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("record_field_access_hir", common::format_hir(&result));
+}
+
+#[test]
+fn record_instance_method() {
+  let result = common::analyze(
+    r#"
+record Counter {
+    value: i32;
+
+    get(): i32 {
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let c: Counter = Counter { value: 42 };
+    return c.get();
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "record_instance_method_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("record_instance_method_hir", common::format_hir(&result));
+}
+
+#[test]
+fn record_static_method() {
+  let result = common::analyze(
+    r#"
+record Point {
+    x: i32;
+    y: i32;
+
+    static origin(): Point {
+        return Point { x: 0, y: 0 };
+    }
+}
+
+function main(): i32 {
+    let p: Point = Point::origin();
+    return p.x;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "record_static_method_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("record_static_method_hir", common::format_hir(&result));
+}
+
+// ============================================================================
+// Enum Tests
+// ============================================================================
+
+#[test]
+fn enum_unit_variants() {
+  let result = common::analyze(
+    r#"
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+function main(): Color {
+    return Color::Red;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "enum_unit_variants_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("enum_unit_variants_hir", common::format_hir(&result));
+}
+
+#[test]
+fn enum_with_payload() {
+  let result = common::analyze(
+    r#"
+enum Option {
+    Some(i32),
+    None,
+}
+
+function main(): Option {
+    return Option::Some(42);
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "enum_with_payload_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("enum_with_payload_hir", common::format_hir(&result));
+}

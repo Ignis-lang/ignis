@@ -225,6 +225,48 @@ impl<'a> LirPrinter<'a> {
       Instr::Drop { local } => {
         writeln!(self.output, "drop l{}", local.index()).unwrap();
       },
+      Instr::GetFieldPtr {
+        dest,
+        base,
+        field_index,
+        field_type,
+      } => {
+        let b = self.format_operand(func, base);
+        let ty = self.format_type(*field_type);
+        writeln!(self.output, "t{} = get_field_ptr {}.{} : *{}", dest.index(), b, field_index, ty).unwrap();
+      },
+      Instr::InitRecord {
+        dest_ptr,
+        fields,
+        record_type,
+      } => {
+        let p = self.format_operand(func, dest_ptr);
+        let fields_str: Vec<_> = fields
+          .iter()
+          .map(|(idx, op)| format!("{}: {}", idx, self.format_operand(func, op)))
+          .collect();
+        let ty = self.format_type(*record_type);
+        writeln!(self.output, "init_record {}, {{ {} }} : {}", p, fields_str.join(", "), ty).unwrap();
+      },
+      Instr::InitEnumVariant {
+        dest_ptr,
+        enum_type,
+        variant_tag,
+        payload,
+      } => {
+        let p = self.format_operand(func, dest_ptr);
+        let payload_str: Vec<_> = payload.iter().map(|op| self.format_operand(func, op)).collect();
+        let ty = self.format_type(*enum_type);
+        writeln!(
+          self.output,
+          "init_enum_variant {}, tag={}, payload=[{}] : {}",
+          p,
+          variant_tag,
+          payload_str.join(", "),
+          ty
+        )
+        .unwrap();
+      },
     }
   }
 
@@ -340,6 +382,14 @@ impl<'a> LirPrinter<'a> {
         let parts: Vec<_> = params.iter().map(|p| self.format_type(*p)).collect();
         let var = if *is_variadic { ", ..." } else { "" };
         format!("({}{}): {}", parts.join(", "), var, self.format_type(*ret))
+      },
+      Type::Record(def_id) => {
+        // TODO: look up record name from definitions
+        format!("record#{}", def_id.index())
+      },
+      Type::Enum(def_id) => {
+        // TODO: look up enum name from definitions
+        format!("enum#{}", def_id.index())
       },
     }
   }

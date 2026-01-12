@@ -63,4 +63,8 @@ impl ASTMetadata {
   pub fn is_mutable(&self) -> bool {
     self.contains(ASTMetadata::MUTABLE)
   }
+
+  pub fn is_static(&self) -> bool {
+    self.contains(ASTMetadata::STATIC)
+  }
 }

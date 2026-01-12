@@ -118,4 +118,27 @@ pub enum Instr {
   Drop {
     local: LocalId,
   },
+
+  /// Get pointer to a record field: `dest = &base.field`
+  GetFieldPtr {
+    dest: TempId,
+    base: Operand,
+    field_index: u32,
+    field_type: TypeId,
+  },
+
+  /// Initialize a record in memory with field values.
+  InitRecord {
+    dest_ptr: Operand,
+    fields: Vec<(u32, Operand)>,
+    record_type: TypeId,
+  },
+
+  /// Create an enum variant value.
+  InitEnumVariant {
+    dest_ptr: Operand,
+    enum_type: TypeId,
+    variant_tag: u32,
+    payload: Vec<Operand>,
+  },
 }

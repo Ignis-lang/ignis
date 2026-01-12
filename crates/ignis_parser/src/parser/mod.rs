@@ -136,6 +136,13 @@ impl IgnisParser {
     self.tokens.get(self.cursor).unwrap()
   }
 
+  fn peek_nth(
+    &self,
+    n: usize,
+  ) -> &Token {
+    self.tokens.get(self.cursor + n).unwrap_or(self.tokens.last().unwrap())
+  }
+
   fn previous(&self) -> &Token {
     self.tokens.get(self.cursor - 1).unwrap()
   }

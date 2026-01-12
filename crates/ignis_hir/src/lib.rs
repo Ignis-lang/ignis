@@ -49,6 +49,29 @@ pub enum HIRKind {
   TypeOf(HIRId),
   SizeOf(TypeId),
 
+  // Record/Enum operations
+  FieldAccess {
+    base: HIRId,
+    field_index: u32,
+  },
+  RecordInit {
+    record_def: DefinitionId,
+    fields: Vec<(u32, HIRId)>, // (field_index, value)
+  },
+  MethodCall {
+    receiver: Option<HIRId>, // None for static methods
+    method: DefinitionId,
+    args: Vec<HIRId>,
+  },
+  EnumVariant {
+    enum_def: DefinitionId,
+    variant_tag: u32,
+    payload: Vec<HIRId>,
+  },
+  StaticAccess {
+    def: DefinitionId,
+  },
+
   // Statement
   Let {
     name: DefinitionId,
@@ -93,7 +116,8 @@ impl HIRKind {
       | HIRKind::Break
       | HIRKind::Continue
       | HIRKind::Error
-      | HIRKind::SizeOf(_) => {},
+      | HIRKind::SizeOf(_)
+      | HIRKind::StaticAccess { .. } => {},
       HIRKind::TypeOf(id) => {
         *id = HIRId::new(id.index() + offset);
       },
@@ -125,6 +149,27 @@ impl HIRKind {
       HIRKind::VectorLiteral { elements } => {
         for elem in elements {
           *elem = HIRId::new(elem.index() + offset);
+        }
+      },
+      HIRKind::FieldAccess { base, .. } => {
+        *base = HIRId::new(base.index() + offset);
+      },
+      HIRKind::RecordInit { fields, .. } => {
+        for (_, value) in fields {
+          *value = HIRId::new(value.index() + offset);
+        }
+      },
+      HIRKind::MethodCall { receiver, args, .. } => {
+        if let Some(recv) = receiver {
+          *recv = HIRId::new(recv.index() + offset);
+        }
+        for arg in args {
+          *arg = HIRId::new(arg.index() + offset);
+        }
+      },
+      HIRKind::EnumVariant { payload, .. } => {
+        for p in payload {
+          *p = HIRId::new(p.index() + offset);
         }
       },
       HIRKind::Let { value, .. } => {

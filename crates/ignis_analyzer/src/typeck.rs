@@ -1,7 +1,18 @@
-use crate::{Analyzer, InferContext, ScopeKind, TypecheckContext};
+use crate::{Analyzer, InferContext, ResolvedPath, ScopeKind, TypecheckContext};
+use std::collections::HashSet;
+
 use ignis_ast::{
-  expressions::{ASTCallExpression, ASTExpression, ASTLiteral},
-  statements::ASTStatement,
+  expressions::{
+    member_access::{ASTAccessOp, ASTMemberAccess},
+    record_init::ASTRecordInit,
+    ASTCallExpression, ASTExpression, ASTLiteral,
+  },
+  statements::{
+    enum_::{ASTEnum, ASTEnumItem},
+    record::{ASTRecord, ASTRecordItem},
+    type_alias::ASTTypeAlias,
+    ASTStatement,
+  },
   type_::IgnisTypeSyntax,
   ASTNode, NodeId,
 };
@@ -10,7 +21,7 @@ use ignis_diagnostics::{
   message::DiagnosticMessage,
 };
 use ignis_type::{
-  definition::{ConstValue, DefinitionKind},
+  definition::{ConstValue, DefinitionKind, RecordFieldDef},
   span::Span,
   types::{Type, TypeId},
   value::IgnisLiteralValue,
@@ -156,6 +167,7 @@ impl<'a> Analyzer<'a> {
           self.defs.get_mut(&def_id).kind = DefinitionKind::Constant(ignis_type::definition::ConstantDefinition {
             type_id: const_type.clone(),
             value: None,
+            owner_type: None,
           });
         }
 
@@ -283,6 +295,18 @@ impl<'a> Analyzer<'a> {
           self.typecheck_node(&decl, scope_kind, ctx);
         }
 
+        self.types.void()
+      },
+      ASTStatement::TypeAlias(ta) => {
+        self.typecheck_type_alias(node_id, ta);
+        self.types.void()
+      },
+      ASTStatement::Record(rec) => {
+        self.typecheck_record(node_id, rec, scope_kind, ctx);
+        self.types.void()
+      },
+      ASTStatement::Enum(en) => {
+        self.typecheck_enum(node_id, en, scope_kind, ctx);
         self.types.void()
       },
       _ => self.types.void(),
@@ -420,10 +444,33 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Path(path) => {
         // Resolve the path to get the definition type
-        if let Some(def_id) = self.resolve_qualified_path(&path.segments) {
-          self.get_definition_type(&def_id)
-        } else {
-          self.types.error()
+        match self.resolve_qualified_path(&path.segments) {
+          Some(ResolvedPath::Def(def_id)) => self.get_definition_type(&def_id),
+          Some(ResolvedPath::EnumVariant { enum_def, variant_index }) => {
+            // Get the enum definition to check if variant requires payload
+            if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def).kind {
+              let variant = &ed.variants[variant_index as usize];
+
+              if !variant.payload.is_empty() {
+                // Variant requires payload - emit error
+                let variant_name = self.get_symbol_name(&variant.name);
+                self.add_diagnostic(
+                  DiagnosticMessage::EnumVariantRequiresPayload {
+                    variant: variant_name,
+                    expected: variant.payload.len(),
+                    span: path.span.clone(),
+                  }
+                  .report(),
+                );
+                return self.types.error();
+              }
+
+              ed.type_id.clone()
+            } else {
+              self.types.error()
+            }
+          },
+          None => self.types.error(),
         }
       },
       ASTExpression::PostfixIncrement { expr, span } => {
@@ -472,7 +519,690 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
+      ASTExpression::MemberAccess(ma) => self.typecheck_member_access(ma, scope_kind, ctx),
+      ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx),
     }
+  }
+
+  // ========================================================================
+  // Type Alias Typechecking
+  // ========================================================================
+
+  fn typecheck_type_alias(
+    &mut self,
+    node_id: &NodeId,
+    ta: &ASTTypeAlias,
+  ) {
+    let Some(def_id) = self.lookup_def(node_id).cloned() else {
+      return;
+    };
+
+    // Cycle detection: track that we're resolving this alias.
+    self.resolving_type_aliases.insert(def_id.clone());
+
+    let target_type = self.resolve_type_syntax_with_span(&ta.target, &ta.span);
+
+    if let DefinitionKind::TypeAlias(alias_def) = &mut self.defs.get_mut(&def_id).kind {
+      alias_def.target = target_type;
+    }
+
+    // Remove from tracking sets after resolution completes.
+    self.resolving_type_aliases.remove(&def_id);
+    self.type_alias_syntax.remove(&def_id);
+
+    self.define_decl_in_current_scope(node_id);
+  }
+
+  // ========================================================================
+  // Record Typechecking
+  // ========================================================================
+
+  fn typecheck_record(
+    &mut self,
+    node_id: &NodeId,
+    rec: &ASTRecord,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) {
+    let Some(record_def_id) = self.lookup_def(node_id).cloned() else {
+      return;
+    };
+
+    // Collect resolved field types
+    let mut resolved_fields: Vec<RecordFieldDef> = Vec::new();
+    let mut field_index = 0u32;
+
+    // First pass: resolve field types (so methods can access them)
+    for item in &rec.items {
+      if let ASTRecordItem::Field(field) = item {
+        let field_type = self.resolve_type_syntax_with_span(&field.type_, &field.span);
+
+        if field.is_static() {
+          // Static field - update the constant definition
+          if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
+            if let Some(const_def_id) = rd.static_fields.get(&field.name).cloned() {
+              if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+                const_def.type_id = field_type.clone();
+              }
+
+              // Typecheck the initializer if present
+              if let Some(value_id) = &field.value {
+                let infer = InferContext::expecting(field_type.clone());
+                let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
+                self.typecheck_assignment(&field_type, &value_type, &field.span);
+              }
+            }
+          }
+        } else {
+          // Instance field
+          resolved_fields.push(RecordFieldDef {
+            name: field.name,
+            type_id: field_type,
+            index: field_index,
+          });
+          field_index += 1;
+        }
+      }
+    }
+
+    // Update record definition with resolved field types BEFORE typechecking methods
+    // so that method bodies can access field types correctly
+    if let DefinitionKind::Record(rd) = &mut self.defs.get_mut(&record_def_id).kind {
+      rd.fields = resolved_fields;
+    }
+
+    // Second pass: typecheck methods (after field types are resolved)
+    for item in &rec.items {
+      if let ASTRecordItem::Method(method) = item {
+        // Get method definition id from record
+        let method_def_id = if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
+          if method.is_static() {
+            rd.static_methods.get(&method.name).cloned()
+          } else {
+            rd.instance_methods.get(&method.name).cloned()
+          }
+        } else {
+          None
+        };
+
+        if let Some(method_def_id) = method_def_id {
+          self.typecheck_method(&method_def_id, method, record_def_id, scope_kind, ctx);
+        }
+      }
+    }
+
+    self.define_decl_in_current_scope(node_id);
+  }
+
+  // ========================================================================
+  // Enum Typechecking
+  // ========================================================================
+
+  fn typecheck_enum(
+    &mut self,
+    node_id: &NodeId,
+    en: &ASTEnum,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) {
+    let Some(enum_def_id) = self.lookup_def(node_id).cloned() else {
+      return;
+    };
+
+    // Clone variants to update payload types
+    let mut updated_variants = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
+      ed.variants.clone()
+    } else {
+      return;
+    };
+
+    let mut variant_idx = 0usize;
+
+    for item in &en.items {
+      match item {
+        ASTEnumItem::Variant(variant) => {
+          // Resolve payload types
+          let payload_types: Vec<TypeId> = variant
+            .payload
+            .iter()
+            .map(|ty| self.resolve_type_syntax_with_span(ty, &variant.span))
+            .collect();
+
+          if variant_idx < updated_variants.len() {
+            updated_variants[variant_idx].payload = payload_types;
+          }
+          variant_idx += 1;
+        },
+        ASTEnumItem::Method(method) => {
+          // Get method definition id from enum (all methods are static in enum)
+          let method_def_id = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
+            ed.static_methods.get(&method.name).cloned()
+          } else {
+            None
+          };
+
+          if let Some(method_def_id) = method_def_id {
+            self.typecheck_method(&method_def_id, method, enum_def_id, scope_kind, ctx);
+          }
+        },
+        ASTEnumItem::Field(field) => {
+          let field_type = self.resolve_type_syntax_with_span(&field.type_, &field.span);
+
+          // Update the constant definition
+          if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
+            if let Some(const_def_id) = ed.static_fields.get(&field.name).cloned() {
+              if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+                const_def.type_id = field_type.clone();
+              }
+
+              // Typecheck the initializer if present
+              if let Some(value_id) = &field.value {
+                let infer = InferContext::expecting(field_type.clone());
+                let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
+                self.typecheck_assignment(&field_type, &value_type, &field.span);
+              }
+            }
+          }
+        },
+      }
+    }
+
+    // Update enum definition with resolved variant payload types
+    if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
+      ed.variants = updated_variants;
+    }
+
+    self.define_decl_in_current_scope(node_id);
+  }
+
+  // ========================================================================
+  // Method Typechecking (shared by Record and Enum)
+  // ========================================================================
+
+  fn typecheck_method(
+    &mut self,
+    method_def_id: &ignis_type::definition::DefinitionId,
+    method: &ignis_ast::statements::record::ASTMethod,
+    owner_def_id: ignis_type::definition::DefinitionId,
+    scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) {
+    // Resolve return type
+    let return_type = self.resolve_type_syntax_with_span(&method.return_type, &method.span);
+
+    // Get parameter definition ids
+    let param_def_ids = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
+      md.params.clone()
+    } else {
+      return;
+    };
+
+    // Resolve parameter types
+    for (param, param_def_id) in method.parameters.iter().zip(param_def_ids.iter()) {
+      let param_type = self.resolve_type_syntax_with_span(&param.type_, &param.span);
+
+      if let DefinitionKind::Parameter(param_def) = &mut self.defs.get_mut(param_def_id).kind {
+        param_def.type_id = param_type;
+        param_def.mutable = param.metadata.is_mutable();
+      }
+    }
+
+    // Update method definition with resolved return type
+    if let DefinitionKind::Method(md) = &mut self.defs.get_mut(method_def_id).kind {
+      md.return_type = return_type.clone();
+    }
+
+    // Typecheck the method body
+    self.scopes.push(ScopeKind::Function);
+
+    // For instance methods, inject `self` parameter
+    let is_static = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
+      md.is_static
+    } else {
+      true
+    };
+
+    if !is_static {
+      // Get owner type (Type::Record or Type::Enum)
+      let owner_type_id = self.defs.type_of(&owner_def_id).clone();
+      let self_ref_type = self.types.reference(owner_type_id, false); // &Self
+
+      let self_symbol = self.symbols.borrow_mut().intern("self");
+      let self_def = ignis_type::definition::Definition {
+        kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
+          type_id: self_ref_type,
+          mutable: false,
+        }),
+        name: self_symbol,
+        span: method.span.clone(),
+        visibility: ignis_type::definition::Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: None,
+      };
+      let self_def_id = self.defs.alloc(self_def);
+      let _ = self.scopes.define(&self_symbol, &self_def_id);
+
+      // Add self to the method's params as the first parameter
+      if let DefinitionKind::Method(md) = &mut self.defs.get_mut(method_def_id).kind {
+        md.params.insert(0, self_def_id);
+      }
+    }
+
+    // Register explicit parameters in scope
+    for param_def_id in &param_def_ids {
+      let param_def = self.defs.get(param_def_id);
+      let _ = self.scopes.define(&param_def.name, param_def_id);
+    }
+
+    // Typecheck body with expected return type
+    let method_ctx = TypecheckContext::with_return(return_type);
+    self.typecheck_node(&method.body, scope_kind, &method_ctx);
+
+    self.scopes.pop();
+  }
+
+  // ========================================================================
+  // Member Access Typechecking
+  // ========================================================================
+
+  fn typecheck_member_access(
+    &mut self,
+    ma: &ASTMemberAccess,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    match ma.op {
+      ASTAccessOp::Dot => self.typecheck_dot_access(ma, scope_kind, ctx),
+      ASTAccessOp::DoubleColon => self.typecheck_static_access(ma, scope_kind, ctx),
+    }
+  }
+
+  fn typecheck_dot_access(
+    &mut self,
+    ma: &ASTMemberAccess,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let obj_type = self.typecheck_node(&ma.object, scope_kind, ctx);
+    let obj_type = self.auto_deref(obj_type);
+
+    match self.types.get(&obj_type).clone() {
+      Type::Record(def_id) => {
+        let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
+          rd.clone()
+        } else {
+          return self.types.error();
+        };
+
+        // Check instance fields first
+        if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
+          return field.type_id.clone();
+        }
+
+        // Check instance methods
+        if rd.instance_methods.contains_key(&ma.member) {
+          // Method access without call - this is an error (must be called)
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::MethodMustBeCalled {
+              method: member_name,
+              span: ma.span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
+
+        // Field not found
+        let type_name = self.format_type_for_error(&obj_type);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::FieldNotFound {
+            field: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+      Type::Enum(_) => {
+        // Enum values don't have instance access
+        self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
+        self.types.error()
+      },
+      _ => {
+        let type_name = self.format_type_for_error(&obj_type);
+        self.add_diagnostic(
+          DiagnosticMessage::DotAccessOnNonRecord {
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+    }
+  }
+
+  fn typecheck_static_access(
+    &mut self,
+    ma: &ASTMemberAccess,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    // The object should resolve to a type name (Record, Enum, or Namespace)
+    // First, try to resolve it as a path expression to a type
+    let def_id = self.resolve_type_expression(&ma.object, scope_kind, ctx);
+
+    let Some(def_id) = def_id else {
+      self.add_diagnostic(DiagnosticMessage::StaticAccessOnNonType { span: ma.span.clone() }.report());
+      return self.types.error();
+    };
+
+    match &self.defs.get(&def_id).kind.clone() {
+      DefinitionKind::Record(rd) => {
+        // Static method?
+        if let Some(method_id) = rd.static_methods.get(&ma.member).cloned() {
+          // Method access without call - this is an error (must be called)
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::MethodMustBeCalled {
+              method: member_name,
+              span: ma.span.clone(),
+            }
+            .report(),
+          );
+          return self.get_definition_type(&method_id);
+        }
+        // Static field?
+        if let Some(field_id) = rd.static_fields.get(&ma.member).cloned() {
+          return self.get_definition_type(&field_id);
+        }
+        // Not found
+        let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticMemberNotFound {
+            member: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+      DefinitionKind::Enum(ed) => {
+        // Enum variant?
+        if let Some(&tag) = ed.variants_by_name.get(&ma.member) {
+          let variant = &ed.variants[tag as usize];
+          if variant.payload.is_empty() {
+            // Unit variant - returns enum type
+            return ed.type_id.clone();
+          } else {
+            // Variant with payload - must be called
+            let variant_name = self.get_symbol_name(&ma.member);
+            self.add_diagnostic(
+              DiagnosticMessage::EnumVariantRequiresPayload {
+                variant: variant_name,
+                expected: variant.payload.len(),
+                span: ma.span.clone(),
+              }
+              .report(),
+            );
+            return self.types.error();
+          }
+        }
+        // Static method?
+        if let Some(method_id) = ed.static_methods.get(&ma.member).cloned() {
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::MethodMustBeCalled {
+              method: member_name,
+              span: ma.span.clone(),
+            }
+            .report(),
+          );
+          return self.get_definition_type(&method_id);
+        }
+        // Static field?
+        if let Some(field_id) = ed.static_fields.get(&ma.member).cloned() {
+          return self.get_definition_type(&field_id);
+        }
+        // Not found
+        let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticMemberNotFound {
+            member: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+      DefinitionKind::Namespace(ns_def) => {
+        // Look up member in namespace
+        if let Some(member_def_id) = self.namespaces.lookup_def(ns_def.namespace_id, &ma.member) {
+          return self.get_definition_type(&member_def_id);
+        }
+        let ns_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::MemberNotFoundInNamespace {
+            member: member_name,
+            namespace: ns_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+      _ => {
+        self.add_diagnostic(DiagnosticMessage::StaticAccessOnNonType { span: ma.span.clone() }.report());
+        self.types.error()
+      },
+    }
+  }
+
+  /// Try to resolve an expression as a type definition (Record, Enum, Namespace, TypeAlias)
+  fn resolve_type_expression(
+    &mut self,
+    node_id: &NodeId,
+    _scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) -> Option<ignis_type::definition::DefinitionId> {
+    let node = self.ast.get(node_id);
+
+    match node {
+      ASTNode::Expression(ASTExpression::Variable(var)) => {
+        // Simple identifier - look up in scope
+        self.scopes.lookup(&var.name).cloned()
+      },
+      ASTNode::Expression(ASTExpression::Path(path)) => {
+        // Qualified path - resolve through namespaces
+        self.resolve_qualified_path_to_def(path)
+      },
+      ASTNode::Expression(ASTExpression::MemberAccess(ma)) => {
+        // Nested access like Foo::Bar::Baz
+        let base_def = self.resolve_type_expression(&ma.object, _scope_kind, _ctx)?;
+
+        match &self.defs.get(&base_def).kind {
+          DefinitionKind::Namespace(ns_def) => self.namespaces.lookup_def(ns_def.namespace_id, &ma.member),
+          _ => None,
+        }
+      },
+      _ => None,
+    }
+  }
+
+  /// Resolve a qualified path to a definition ID
+  fn resolve_qualified_path_to_def(
+    &self,
+    path: &ignis_ast::expressions::path::ASTPath,
+  ) -> Option<ignis_type::definition::DefinitionId> {
+    if path.segments.is_empty() {
+      return None;
+    }
+
+    // Start with first segment in scope
+    let first_segment = &path.segments[0];
+    let mut current_def = self.scopes.lookup(first_segment).cloned()?;
+
+    // Walk through remaining segments
+    for segment in path.segments.iter().skip(1) {
+      match &self.defs.get(&current_def).kind {
+        DefinitionKind::Namespace(ns_def) => {
+          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment)?;
+        },
+        _ => return None,
+      }
+    }
+
+    Some(current_def)
+  }
+
+  /// Auto-dereference references to get the underlying type
+  fn auto_deref(
+    &self,
+    ty: TypeId,
+  ) -> TypeId {
+    match self.types.get(&ty) {
+      Type::Reference { inner, .. } => *inner,
+      _ => ty,
+    }
+  }
+
+  // ========================================================================
+  // Record Init Typechecking
+  // ========================================================================
+
+  fn typecheck_record_init(
+    &mut self,
+    ri: &ASTRecordInit,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    // Resolve the type path
+    let def_id = self.resolve_record_path(&ri.path);
+
+    let Some(def_id) = def_id else {
+      let path_str = ri
+        .path
+        .iter()
+        .map(|(sym, _)| self.get_symbol_name(sym))
+        .collect::<Vec<_>>()
+        .join("::");
+      self.add_diagnostic(
+        DiagnosticMessage::UndefinedType {
+          name: path_str,
+          span: ri.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    };
+
+    // Check it's a record
+    let rd = match &self.defs.get(&def_id).kind {
+      DefinitionKind::Record(rd) => rd.clone(),
+      _ => {
+        let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        self.add_diagnostic(
+          DiagnosticMessage::NotARecord {
+            name: type_name,
+            span: ri.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    let mut initialized: HashSet<ignis_type::symbol::SymbolId> = HashSet::new();
+
+    // Typecheck each field initializer
+    for init_field in &ri.fields {
+      // Find the field definition
+      let field_def = rd.fields.iter().find(|f| f.name == init_field.name);
+
+      let Some(field_def) = field_def else {
+        let field_name = self.get_symbol_name(&init_field.name);
+        let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownField {
+            field: field_name,
+            type_name,
+            span: init_field.span.clone(),
+          }
+          .report(),
+        );
+        continue;
+      };
+
+      // Check for duplicate
+      if !initialized.insert(init_field.name) {
+        let field_name = self.get_symbol_name(&init_field.name);
+        self.add_diagnostic(
+          DiagnosticMessage::DuplicateFieldInit {
+            field: field_name,
+            span: init_field.span.clone(),
+          }
+          .report(),
+        );
+        continue;
+      }
+
+      // Typecheck the value
+      let infer = InferContext::expecting(field_def.type_id.clone());
+      let value_type = self.typecheck_node_with_infer(&init_field.value, scope_kind, ctx, &infer);
+      self.typecheck_assignment(&field_def.type_id, &value_type, &init_field.span);
+    }
+
+    // Check all required fields are initialized
+    for field in &rd.fields {
+      if !initialized.contains(&field.name) {
+        let field_name = self.get_symbol_name(&field.name);
+        let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        self.add_diagnostic(
+          DiagnosticMessage::MissingFieldInit {
+            field: field_name,
+            type_name,
+            span: ri.span.clone(),
+          }
+          .report(),
+        );
+      }
+    }
+
+    rd.type_id
+  }
+
+  /// Resolve a path from record init to a definition
+  fn resolve_record_path(
+    &self,
+    path: &[(ignis_type::symbol::SymbolId, Span)],
+  ) -> Option<ignis_type::definition::DefinitionId> {
+    if path.is_empty() {
+      return None;
+    }
+
+    // Start with first segment in scope
+    let (first_sym, _) = &path[0];
+    let mut current_def = self.scopes.lookup(first_sym).cloned()?;
+
+    // Walk through remaining segments
+    for (segment_sym, _) in path.iter().skip(1) {
+      match &self.defs.get(&current_def).kind {
+        DefinitionKind::Namespace(ns_def) => {
+          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym)?;
+        },
+        _ => return None,
+      }
+    }
+
+    Some(current_def)
   }
 
   fn typecheck_literal(
@@ -668,6 +1398,19 @@ impl<'a> Analyzer<'a> {
       }
     }
 
+    // Check for method calls: obj.method() or Type::method()
+    if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = self.ast.get(&call.callee) {
+      return self.typecheck_method_call(ma, call, scope_kind, ctx);
+    }
+
+    // Check for path-based calls that might be static method or enum variant
+    if let ASTNode::Expression(ASTExpression::Path(path)) = self.ast.get(&call.callee) {
+      if let Some(result) = self.typecheck_path_call(path, call, scope_kind, ctx) {
+        return result;
+      }
+      // Fall through to normal call handling if path doesn't resolve to record/enum
+    }
+
     let callee_type = self.typecheck_node(&call.callee, scope_kind, ctx);
 
     let param_types: Vec<TypeId> = if let Type::Function { params, .. } = self.types.get(&callee_type).clone() {
@@ -763,6 +1506,491 @@ impl<'a> Analyzer<'a> {
       );
       self.types.error()
     }
+  }
+
+  /// Typecheck a method call: obj.method(args) or Type::method(args)
+  fn typecheck_method_call(
+    &mut self,
+    ma: &ASTMemberAccess,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    match ma.op {
+      ASTAccessOp::Dot => self.typecheck_instance_method_call(ma, call, scope_kind, ctx),
+      ASTAccessOp::DoubleColon => self.typecheck_static_method_call(ma, call, scope_kind, ctx),
+    }
+  }
+
+  /// Typecheck an instance method call: obj.method(args)
+  fn typecheck_instance_method_call(
+    &mut self,
+    ma: &ASTMemberAccess,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let obj_type = self.typecheck_node(&ma.object, scope_kind, ctx);
+    let obj_type = self.auto_deref(obj_type);
+
+    match self.types.get(&obj_type).clone() {
+      Type::Record(def_id) => {
+        let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
+          rd.clone()
+        } else {
+          return self.types.error();
+        };
+
+        // Check instance methods
+        if let Some(&method_id) = rd.instance_methods.get(&ma.member) {
+          let method = {
+            let method_def = self.defs.get(&method_id);
+            let DefinitionKind::Method(method) = &method_def.kind else {
+              return self.types.error();
+            };
+            method.clone()
+          };
+
+          // For instance methods, skip the first param (self) when checking explicit args
+          // The receiver is passed implicitly, not as an explicit argument
+          let explicit_params: Vec<_> = if method.is_static {
+            method.params.clone()
+          } else {
+            method.params.iter().skip(1).cloned().collect()
+          };
+
+          // Get param types for inference (before borrowing self mutably)
+          let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+
+          // Typecheck arguments
+          let arg_types: Vec<TypeId> = call
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+              if let Some(param_type) = param_types.get(i) {
+                let infer = InferContext::expecting(param_type.clone());
+                self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+              } else {
+                self.typecheck_node(arg, scope_kind, ctx)
+              }
+            })
+            .collect();
+
+          // Check argument count (excluding self for instance methods)
+          let method_name = self.get_symbol_name(&ma.member);
+          if arg_types.len() != explicit_params.len() {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentCountMismatch {
+                expected: explicit_params.len(),
+                got: arg_types.len(),
+                func_name: method_name.clone(),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+          }
+
+          // Check argument types
+          let check_count = std::cmp::min(arg_types.len(), param_types.len());
+          for i in 0..check_count {
+            if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+              let expected = self.format_type_for_error(&param_types[i]);
+              let got = self.format_type_for_error(&arg_types[i]);
+              self.add_diagnostic(
+                DiagnosticMessage::ArgumentTypeMismatch {
+                  param_idx: i + 1,
+                  expected,
+                  got,
+                  span: self.node_span(&call.arguments[i]).clone(),
+                }
+                .report(),
+              );
+            }
+          }
+
+          return method.return_type;
+        }
+
+        // Not a method - check if it's a field being called (error)
+        if rd.fields.iter().any(|f| f.name == ma.member) {
+          let type_name = self.format_type_for_error(&obj_type);
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::NotCallable {
+              type_name: format!("{}.{}", type_name, member_name),
+              span: call.span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
+
+        // Method not found
+        let type_name = self.format_type_for_error(&obj_type);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::FieldNotFound {
+            field: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+      Type::Enum(_) => {
+        self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
+        self.types.error()
+      },
+      _ => {
+        let type_name = self.format_type_for_error(&obj_type);
+        self.add_diagnostic(
+          DiagnosticMessage::DotAccessOnNonRecord {
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+    }
+  }
+
+  /// Typecheck a static method call: Type::method(args)
+  fn typecheck_static_method_call(
+    &mut self,
+    ma: &ASTMemberAccess,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let def_id = self.resolve_type_expression(&ma.object, scope_kind, ctx);
+
+    let Some(def_id) = def_id else {
+      self.add_diagnostic(DiagnosticMessage::StaticAccessOnNonType { span: ma.span.clone() }.report());
+      return self.types.error();
+    };
+
+    match &self.defs.get(&def_id).kind.clone() {
+      DefinitionKind::Record(rd) => {
+        // Static method call
+        if let Some(&method_id) = rd.static_methods.get(&ma.member) {
+          return self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx);
+        }
+
+        let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticMemberNotFound {
+            member: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+      DefinitionKind::Enum(ed) => {
+        // Enum variant with payload
+        if let Some(&tag) = ed.variants_by_name.get(&ma.member) {
+          let variant = &ed.variants[tag as usize];
+
+          if variant.payload.is_empty() {
+            // Unit variant being called - error
+            let variant_name = self.get_symbol_name(&ma.member);
+            self.add_diagnostic(
+              DiagnosticMessage::NotCallable {
+                type_name: variant_name,
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+            return self.types.error();
+          }
+
+          // Typecheck payload arguments
+          let arg_types: Vec<TypeId> = call
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+              if let Some(&payload_type) = variant.payload.get(i) {
+                let infer = InferContext::expecting(payload_type);
+                self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+              } else {
+                self.typecheck_node(arg, scope_kind, ctx)
+              }
+            })
+            .collect();
+
+          // Check argument count
+          let variant_name = self.get_symbol_name(&ma.member);
+          if arg_types.len() != variant.payload.len() {
+            self.add_diagnostic(
+              DiagnosticMessage::EnumVariantRequiresPayload {
+                variant: variant_name.clone(),
+                expected: variant.payload.len(),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+          }
+
+          // Check argument types
+          let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
+          for i in 0..check_count {
+            if !self.types.types_equal(&variant.payload[i], &arg_types[i]) {
+              let expected = self.format_type_for_error(&variant.payload[i]);
+              let got = self.format_type_for_error(&arg_types[i]);
+              self.add_diagnostic(
+                DiagnosticMessage::ArgumentTypeMismatch {
+                  param_idx: i + 1,
+                  expected,
+                  got,
+                  span: self.node_span(&call.arguments[i]).clone(),
+                }
+                .report(),
+              );
+            }
+          }
+
+          return ed.type_id;
+        }
+
+        // Static method call on enum
+        if let Some(&method_id) = ed.static_methods.get(&ma.member) {
+          return self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx);
+        }
+
+        let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticMemberNotFound {
+            member: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+      _ => {
+        self.add_diagnostic(DiagnosticMessage::StaticAccessOnNonType { span: ma.span.clone() }.report());
+        self.types.error()
+      },
+    }
+  }
+
+  /// Typecheck a call where the callee is a path (e.g., Type::method or Enum::Variant)
+  fn typecheck_path_call(
+    &mut self,
+    path: &ignis_ast::expressions::path::ASTPath,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> Option<TypeId> {
+    if path.segments.len() < 2 {
+      return None;
+    }
+
+    // Try to resolve the first segment as a type (Record or Enum)
+    let first_segment = &path.segments[0];
+    let Some(type_def_id) = self.scopes.lookup(first_segment).cloned() else {
+      return None;
+    };
+
+    match &self.defs.get(&type_def_id).kind.clone() {
+      DefinitionKind::Record(rd) if path.segments.len() == 2 => {
+        let member = &path.segments[1];
+
+        // Static method call
+        if let Some(&method_id) = rd.static_methods.get(member) {
+          return Some(self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx));
+        }
+
+        // Not a static method - report error
+        let type_name = self.get_symbol_name(&self.defs.get(&type_def_id).name);
+        let member_name = self.get_symbol_name(member);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticMemberNotFound {
+            member: member_name,
+            type_name,
+            span: path.span.clone(),
+          }
+          .report(),
+        );
+        Some(self.types.error())
+      },
+      DefinitionKind::Enum(ed) if path.segments.len() == 2 => {
+        let member = &path.segments[1];
+
+        // Enum variant with payload
+        if let Some(&tag) = ed.variants_by_name.get(member) {
+          let variant = &ed.variants[tag as usize];
+
+          if variant.payload.is_empty() {
+            // Unit variant being called - error
+            let variant_name = self.get_symbol_name(member);
+            self.add_diagnostic(
+              DiagnosticMessage::NotCallable {
+                type_name: variant_name,
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+            return Some(self.types.error());
+          }
+
+          // Typecheck payload arguments
+          let arg_types: Vec<TypeId> = call
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+              if let Some(&payload_type) = variant.payload.get(i) {
+                let infer = InferContext::expecting(payload_type);
+                self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+              } else {
+                self.typecheck_node(arg, scope_kind, ctx)
+              }
+            })
+            .collect();
+
+          // Check argument count
+          let variant_name = self.get_symbol_name(member);
+          if arg_types.len() != variant.payload.len() {
+            self.add_diagnostic(
+              DiagnosticMessage::EnumVariantRequiresPayload {
+                variant: variant_name.clone(),
+                expected: variant.payload.len(),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+          }
+
+          // Check argument types
+          let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
+          for i in 0..check_count {
+            if !self.types.types_equal(&variant.payload[i], &arg_types[i]) {
+              let expected = self.format_type_for_error(&variant.payload[i]);
+              let got = self.format_type_for_error(&arg_types[i]);
+              self.add_diagnostic(
+                DiagnosticMessage::ArgumentTypeMismatch {
+                  param_idx: i + 1,
+                  expected,
+                  got,
+                  span: self.node_span(&call.arguments[i]).clone(),
+                }
+                .report(),
+              );
+            }
+          }
+
+          return Some(ed.type_id);
+        }
+
+        // Static method call on enum
+        if let Some(&method_id) = ed.static_methods.get(member) {
+          return Some(self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx));
+        }
+
+        // Not found
+        let type_name = self.get_symbol_name(&self.defs.get(&type_def_id).name);
+        let member_name = self.get_symbol_name(member);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticMemberNotFound {
+            member: member_name,
+            type_name,
+            span: path.span.clone(),
+          }
+          .report(),
+        );
+        Some(self.types.error())
+      },
+      _ => None, // Not a Record or Enum, fall through to normal path resolution
+    }
+  }
+
+  /// Helper to typecheck a static method or function call given its definition ID
+  fn typecheck_static_method_or_function_call(
+    &mut self,
+    def_id: &ignis_type::definition::DefinitionId,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let def = self.defs.get(def_id);
+    let (params, return_type, is_variadic) = match &def.kind {
+      DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false),
+      DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic),
+      _ => return self.types.error(),
+    };
+    let func_name = self.get_symbol_name(&def.name);
+
+    // Get param types for inference
+    let param_types: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
+
+    // Typecheck arguments
+    let arg_types: Vec<TypeId> = call
+      .arguments
+      .iter()
+      .enumerate()
+      .map(|(i, arg)| {
+        if let Some(param_type) = param_types.get(i) {
+          let infer = InferContext::expecting(param_type.clone());
+          self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+        } else {
+          self.typecheck_node(arg, scope_kind, ctx)
+        }
+      })
+      .collect();
+
+    // Check argument count
+    if is_variadic {
+      if arg_types.len() < params.len() {
+        self.add_diagnostic(
+          DiagnosticMessage::ArgumentCountMismatch {
+            expected: params.len(),
+            got: arg_types.len(),
+            func_name: func_name.clone(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+      }
+    } else if arg_types.len() != params.len() {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: params.len(),
+          got: arg_types.len(),
+          func_name: func_name.clone(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    // Check argument types
+    let check_count = std::cmp::min(arg_types.len(), params.len());
+    for i in 0..check_count {
+      if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+        let expected = self.format_type_for_error(&param_types[i]);
+        let got = self.format_type_for_error(&arg_types[i]);
+        self.add_diagnostic(
+          DiagnosticMessage::ArgumentTypeMismatch {
+            param_idx: i + 1,
+            expected,
+            got,
+            span: self.node_span(&call.arguments[i]).clone(),
+          }
+          .report(),
+        );
+      }
+    }
+
+    return_type
   }
 
   fn typecheck_typeof_builtin(
@@ -1220,8 +2448,49 @@ impl<'a> Analyzer<'a> {
         self.types.reference(inner_type, *mutable)
       },
       IgnisTypeSyntax::Named(symbol_id) => {
-        if let Some(def_id) = self.scopes.lookup(&symbol_id) {
-          self.type_of(def_id).clone()
+        if let Some(def_id) = self.scopes.lookup(&symbol_id).cloned() {
+          // Check for type alias cycle
+          if self.resolving_type_aliases.contains(&def_id) {
+            let name = self.symbols.borrow().get(&symbol_id).to_string();
+            if let Some(s) = span {
+              self.add_diagnostic(
+                DiagnosticMessage::TypeAliasCycle {
+                  name,
+                  span: s.clone(),
+                }
+                .report(),
+              );
+            }
+            return self.types.error();
+          }
+
+          // Handle type aliases
+          if let DefinitionKind::TypeAlias(alias_def) = &self.defs.get(&def_id).kind.clone() {
+            // Already resolved - return the target type
+            if !self.types.is_error(&alias_def.target) {
+              return alias_def.target.clone();
+            }
+
+            // Not yet resolved - try to resolve inline using saved AST
+            if let Some(syntax) = self.type_alias_syntax.get(&def_id).cloned() {
+              self.resolving_type_aliases.insert(def_id.clone());
+              let resolved = self.resolve_type_syntax_impl(&syntax, span);
+
+              // Update the definition with resolved type
+              if let DefinitionKind::TypeAlias(ad) = &mut self.defs.get_mut(&def_id).kind {
+                ad.target = resolved.clone();
+              }
+
+              self.resolving_type_aliases.remove(&def_id);
+              self.type_alias_syntax.remove(&def_id);
+              return resolved;
+            }
+
+            // No AST available - shouldn't happen in normal flow
+            return self.types.error();
+          }
+
+          self.type_of(&def_id).clone()
         } else {
           let name = self.symbols.borrow().get(&symbol_id).to_string();
           if let Some(s) = span {
@@ -1237,8 +2506,49 @@ impl<'a> Analyzer<'a> {
       },
       IgnisTypeSyntax::Path { segments, .. } => {
         if let Some(last) = segments.last() {
-          if let Some(def_id) = self.scopes.lookup(&last.0) {
-            self.type_of(def_id).clone()
+          if let Some(def_id) = self.scopes.lookup(&last.0).cloned() {
+            // Check for type alias cycle
+            if self.resolving_type_aliases.contains(&def_id) {
+              let name = self.symbols.borrow().get(&last.0).to_string();
+              if let Some(s) = span {
+                self.add_diagnostic(
+                  DiagnosticMessage::TypeAliasCycle {
+                    name,
+                    span: s.clone(),
+                  }
+                  .report(),
+                );
+              }
+              return self.types.error();
+            }
+
+            // Handle type aliases
+            if let DefinitionKind::TypeAlias(alias_def) = &self.defs.get(&def_id).kind.clone() {
+              // Already resolved - return the target type
+              if !self.types.is_error(&alias_def.target) {
+                return alias_def.target.clone();
+              }
+
+              // Not yet resolved - try to resolve inline using saved AST
+              if let Some(syntax) = self.type_alias_syntax.get(&def_id).cloned() {
+                self.resolving_type_aliases.insert(def_id.clone());
+                let resolved = self.resolve_type_syntax_impl(&syntax, span);
+
+                // Update the definition with resolved type
+                if let DefinitionKind::TypeAlias(ad) = &mut self.defs.get_mut(&def_id).kind {
+                  ad.target = resolved.clone();
+                }
+
+                self.resolving_type_aliases.remove(&def_id);
+                self.type_alias_syntax.remove(&def_id);
+                return resolved;
+              }
+
+              // No AST available - shouldn't happen in normal flow
+              return self.types.error();
+            }
+
+            self.type_of(&def_id).clone()
           } else {
             let name = self.symbols.borrow().get(&last.0).to_string();
             if let Some(s) = span {
@@ -1404,6 +2714,14 @@ impl<'a> Analyzer<'a> {
           variadic,
           self.format_type_for_error(ret)
         )
+      },
+      Type::Record(def_id) => {
+        let def = self.defs.get(def_id);
+        self.symbols.borrow().get(&def.name).to_string()
+      },
+      Type::Enum(def_id) => {
+        let def = self.defs.get(def_id);
+        self.symbols.borrow().get(&def.name).to_string()
       },
     }
   }

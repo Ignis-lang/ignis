@@ -94,20 +94,31 @@ impl<'a> LoweringContext<'a> {
       // Filter by module if emit_modules is specified
       if let Some(emit_set) = &self.emit_modules {
         if !emit_set.contains(&def.owner_module) {
-          // Not in emit set: register as extern if it's a function
-          if let DefinitionKind::Function(_) = &def.kind {
-            self.create_extern_function(def_id);
+          // Not in emit set: register as extern if it's a function or method
+          match &def.kind {
+            DefinitionKind::Function(_) | DefinitionKind::Method(_) => {
+              self.create_extern_function(def_id);
+            },
+            _ => {},
           }
           continue;
         }
       }
 
-      if let DefinitionKind::Function(func_def) = &def.kind {
-        if let Some(&body_id) = self.hir.function_bodies.get(&def_id) {
-          self.lower_function(def_id, body_id);
-        } else if func_def.is_extern {
-          self.create_extern_function(def_id);
-        }
+      match &def.kind {
+        DefinitionKind::Function(func_def) => {
+          if let Some(&body_id) = self.hir.function_bodies.get(&def_id) {
+            self.lower_function(def_id, body_id);
+          } else if func_def.is_extern {
+            self.create_extern_function(def_id);
+          }
+        },
+        DefinitionKind::Method(_) => {
+          if let Some(&body_id) = self.hir.function_bodies.get(&def_id) {
+            self.lower_method(def_id, body_id);
+          }
+        },
+        _ => {},
       }
     }
 
@@ -181,22 +192,91 @@ impl<'a> LoweringContext<'a> {
     self.program.functions.insert(def_id, func);
   }
 
-  fn create_extern_function(
+  fn lower_method(
     &mut self,
     def_id: DefinitionId,
+    body_id: HIRId,
   ) {
     let def = self.defs.get(&def_id);
-    let func_def = match &def.kind {
-      DefinitionKind::Function(f) => f.clone(),
+    let method_def = match &def.kind {
+      DefinitionKind::Method(m) => m.clone(),
       _ => return,
     };
 
     let builder = FunctionBuilder::new(
       def_id,
-      func_def.params.clone(),
-      func_def.return_type,
+      method_def.params.clone(),
+      method_def.return_type,
+      false, // is_extern - methods are never extern
+      false, // is_variadic - methods are never variadic
+      def.span.clone(),
+    );
+
+    self.current_fn = Some(builder);
+    self.current_fn_def_id = Some(def_id);
+    self.def_to_local.clear();
+    self.loop_stack.clear();
+
+    // Allocate locals for parameters and store initial values
+    for (idx, &param_id) in method_def.params.iter().enumerate() {
+      let param_def = self.defs.get(&param_id);
+      let param_ty = *self.defs.type_of(&param_id);
+      let param_name = self.symbols.get(&param_def.name).to_string();
+
+      let is_mutable = match &param_def.kind {
+        DefinitionKind::Parameter(p) => p.mutable,
+        _ => false,
+      };
+
+      let local_id = self.fn_builder().alloc_local(LocalData {
+        def_id: Some(param_id),
+        ty: param_ty,
+        mutable: is_mutable,
+        name: Some(param_name),
+      });
+
+      self.def_to_local.insert(param_id, local_id);
+
+      // Parameters are passed as implicit temps t0, t1, ... that we store into locals
+      let param_temp = TempId::new(idx as u32);
+      // Register the param temp in the function
+      self.fn_builder().register_param_temp(param_ty, def.span.clone());
+
+      self.fn_builder().emit(Instr::Store {
+        dest: local_id,
+        value: Operand::Temp(param_temp),
+      });
+    }
+
+    // Lower the body
+    self.lower_hir_node(body_id);
+
+    // Ensure function ends with a return if needed
+    self.ensure_return();
+
+    // Finalize and store
+    let func = self.current_fn.take().unwrap().finish();
+    self.program.functions.insert(def_id, func);
+  }
+
+  fn create_extern_function(
+    &mut self,
+    def_id: DefinitionId,
+  ) {
+    let def = self.defs.get(&def_id);
+
+    let (params, return_type, is_variadic) = match &def.kind {
+      DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic),
+      DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false),
+      _ => return,
+    };
+
+    let builder = FunctionBuilder::new(
+      def_id,
+      params,
+      return_type,
       true, // is_extern
-      func_def.is_variadic,
+      is_variadic,
       def.span.clone(),
     );
 
@@ -274,6 +354,23 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Error => None,
       HIRKind::TypeOf(operand_hir) => self.lower_typeof(*operand_hir, node.type_id, node.span),
       HIRKind::SizeOf(ty) => self.lower_sizeof(*ty, node.type_id, node.span),
+
+      // Records and enums
+      HIRKind::FieldAccess { base, field_index } => {
+        self.lower_field_access(*base, *field_index, node.type_id, node.span)
+      },
+      HIRKind::RecordInit { record_def, fields } => {
+        self.lower_record_init(*record_def, fields, node.type_id, node.span)
+      },
+      HIRKind::MethodCall { receiver, method, args } => {
+        self.lower_method_call(receiver.as_ref().copied(), *method, args, node.type_id, node.span)
+      },
+      HIRKind::EnumVariant {
+        enum_def,
+        variant_tag,
+        payload,
+      } => self.lower_enum_variant(*enum_def, *variant_tag, payload, node.type_id, node.span),
+      HIRKind::StaticAccess { def } => self.lower_static_access(*def, node.type_id, node.span),
     }
   }
 
@@ -1237,6 +1334,217 @@ impl<'a> LoweringContext<'a> {
   ) {
     if let Some(&local) = self.def_to_local.get(&def_id) {
       self.fn_builder().emit(Instr::Drop { local });
+    }
+  }
+
+  // === Records and enums lowering ===
+
+  fn lower_field_access(
+    &mut self,
+    base: HIRId,
+    field_index: u32,
+    field_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let base_op = self.lower_hir_node(base)?;
+
+    // Get pointer to field
+    let ptr_ty = self.types.pointer(field_ty);
+    let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
+
+    self.fn_builder().emit(Instr::GetFieldPtr {
+      dest: ptr,
+      base: base_op,
+      field_index,
+      field_type: field_ty,
+    });
+
+    // Load the field value
+    let dest = self.fn_builder().alloc_temp(field_ty, span);
+    self.fn_builder().emit(Instr::LoadPtr {
+      dest,
+      ptr: Operand::Temp(ptr),
+    });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_record_init(
+    &mut self,
+    _record_def: DefinitionId,
+    fields: &[(u32, HIRId)],
+    record_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    // Allocate local for the record
+    let local = self.fn_builder().alloc_local(LocalData {
+      def_id: None,
+      ty: record_ty,
+      mutable: true,
+      name: None,
+    });
+
+    // Lower each field value
+    let field_ops: Vec<(u32, Operand)> = fields
+      .iter()
+      .filter_map(|(idx, hir_id)| {
+        let op = self.lower_hir_node(*hir_id)?;
+        Some((*idx, op))
+      })
+      .collect();
+
+    // Get pointer to local
+    let ptr_ty = self.types.pointer(record_ty);
+    let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
+    self.fn_builder().emit(Instr::AddrOfLocal {
+      dest: ptr,
+      local,
+      mutable: true,
+    });
+
+    // Initialize the record
+    self.fn_builder().emit(Instr::InitRecord {
+      dest_ptr: Operand::Temp(ptr),
+      fields: field_ops,
+      record_type: record_ty,
+    });
+
+    // Load the record value
+    let dest = self.fn_builder().alloc_temp(record_ty, span);
+    self.fn_builder().emit(Instr::Load { dest, source: local });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_method_call(
+    &mut self,
+    receiver: Option<HIRId>,
+    method: DefinitionId,
+    args: &[HIRId],
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    // Build argument list: receiver (if any) + args
+    let mut call_args = Vec::new();
+
+    if let Some(recv) = receiver {
+      if let Some(recv_op) = self.lower_hir_node(recv) {
+        call_args.push(recv_op);
+      }
+    }
+
+    for &arg in args {
+      if let Some(arg_op) = self.lower_hir_node(arg) {
+        call_args.push(arg_op);
+      }
+    }
+
+    // Emit the call
+    let is_void = matches!(self.types.get(&result_ty), Type::Void);
+    let dest = if is_void {
+      None
+    } else {
+      Some(self.fn_builder().alloc_temp(result_ty, span))
+    };
+
+    self.fn_builder().emit(Instr::Call {
+      dest,
+      callee: method,
+      args: call_args,
+    });
+
+    dest.map(Operand::Temp)
+  }
+
+  fn lower_enum_variant(
+    &mut self,
+    _enum_def: DefinitionId,
+    variant_tag: u32,
+    payload: &[HIRId],
+    enum_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    // Allocate local for the enum
+    let local = self.fn_builder().alloc_local(LocalData {
+      def_id: None,
+      ty: enum_ty,
+      mutable: true,
+      name: None,
+    });
+
+    // Lower payload values
+    let payload_ops: Vec<Operand> = payload
+      .iter()
+      .filter_map(|&hir_id| self.lower_hir_node(hir_id))
+      .collect();
+
+    // Get pointer to local
+    let ptr_ty = self.types.pointer(enum_ty);
+    let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
+    self.fn_builder().emit(Instr::AddrOfLocal {
+      dest: ptr,
+      local,
+      mutable: true,
+    });
+
+    // Initialize the enum variant
+    self.fn_builder().emit(Instr::InitEnumVariant {
+      dest_ptr: Operand::Temp(ptr),
+      enum_type: enum_ty,
+      variant_tag,
+      payload: payload_ops,
+    });
+
+    // Load the enum value
+    let dest = self.fn_builder().alloc_temp(enum_ty, span);
+    self.fn_builder().emit(Instr::Load { dest, source: local });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_static_access(
+    &mut self,
+    def: DefinitionId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    // Static access is like a variable lookup but for static members
+    // For now, treat it as a variable load if we have a local mapping
+    if let Some(&local) = self.def_to_local.get(&def) {
+      let dest = self.fn_builder().alloc_temp(result_ty, span);
+      self.fn_builder().emit(Instr::Load { dest, source: local });
+      Some(Operand::Temp(dest))
+    } else {
+      // Check if this is a constant with a known value
+      let def_data = self.defs.get(&def);
+      if let DefinitionKind::Constant(const_def) = &def_data.kind {
+        if let Some(value) = &const_def.value {
+          // Convert ConstValue from definition to LIR ConstValue
+          if let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty) {
+            return Some(Operand::Const(lir_const));
+          }
+        }
+      }
+      // Static field/method - for functions, just return None (call will handle it)
+      None
+    }
+  }
+
+  fn definition_const_to_lir_const(
+    &self,
+    value: &ignis_type::definition::ConstValue,
+    ty: TypeId,
+  ) -> Option<ConstValue> {
+    use ignis_type::definition::ConstValue as DefConstValue;
+    match value {
+      DefConstValue::Int(i) => Some(ConstValue::Int(*i, ty)),
+      DefConstValue::Float(f) => Some(ConstValue::Float(*f, ty)),
+      DefConstValue::Bool(b) => Some(ConstValue::Bool(*b, ty)),
+      DefConstValue::Char(c) => Some(ConstValue::Char(*c, ty)),
+      DefConstValue::String(s) => Some(ConstValue::String(s.clone(), ty)),
+      DefConstValue::Null => Some(ConstValue::Null(ty)),
+      // Arrays and tuples not yet supported in LIR constants
+      DefConstValue::Array(_) | DefConstValue::Tuple(_) => None,
     }
   }
 

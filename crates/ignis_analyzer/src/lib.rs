@@ -11,11 +11,11 @@ mod resolver;
 mod scope;
 mod typeck;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::cell::RefCell;
 
-use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
+use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
 use ignis_type::{symbol::SymbolTable, Store as ASTStore};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
@@ -28,6 +28,7 @@ use imports::ExportTable;
 
 pub use ignis_hir::{DropSchedules, ExitKey};
 pub use ownership_hir::HirOwnershipChecker;
+pub use resolver::ResolvedPath;
 pub use scope::{ScopeTree, ScopeId, ScopeKind};
 
 /// Context passed through type checking for function-scoped information.
@@ -79,6 +80,10 @@ pub struct Analyzer<'a> {
   current_module: ModuleId,
   current_namespace: Option<NamespaceId>,
   in_callee_context: bool,
+  /// Tracks which type aliases are currently being resolved to detect cycles.
+  resolving_type_aliases: HashSet<DefinitionId>,
+  /// Maps type alias definitions to their original AST syntax for lazy resolution.
+  type_alias_syntax: HashMap<DefinitionId, IgnisTypeSyntax>,
 }
 
 pub struct AnalyzerOutput {
@@ -125,6 +130,8 @@ impl<'a> Analyzer<'a> {
       current_module,
       current_namespace: None,
       in_callee_context: false,
+      resolving_type_aliases: HashSet::new(),
+      type_alias_syntax: HashMap::new(),
     }
   }
 
@@ -197,6 +204,8 @@ impl<'a> Analyzer<'a> {
       current_module,
       current_namespace: None,
       in_callee_context: false,
+      resolving_type_aliases: HashSet::new(),
+      type_alias_syntax: HashMap::new(),
     };
 
     analyzer.bind_phase(roots);
@@ -282,6 +291,7 @@ impl<'a> Analyzer<'a> {
   ) {
     let params = match &self.defs.get(&def_id).kind {
       DefinitionKind::Function(func_def) => func_def.params.clone(),
+      DefinitionKind::Method(method_def) => method_def.params.clone(),
       _ => Vec::new(),
     };
 
@@ -354,7 +364,12 @@ impl<'a> Analyzer<'a> {
     stmt: &ASTStatement,
   ) {
     match stmt {
-      ASTStatement::Function(_) | ASTStatement::Variable(_) | ASTStatement::Constant(_) => {
+      ASTStatement::Function(_)
+      | ASTStatement::Variable(_)
+      | ASTStatement::Constant(_)
+      | ASTStatement::TypeAlias(_)
+      | ASTStatement::Record(_)
+      | ASTStatement::Enum(_) => {
         self.define_decl_in_current_scope(node_id);
       },
       ASTStatement::Extern(extern_stmt) => {

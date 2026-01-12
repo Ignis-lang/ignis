@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{Id, Store, module::ModuleId, namespace::NamespaceId, span::Span, symbol::SymbolId, types::TypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -20,7 +22,7 @@ pub enum Visibility {
   Private,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Definition {
   pub kind: DefinitionKind,
   pub name: SymbolId,
@@ -30,13 +32,17 @@ pub struct Definition {
   pub owner_namespace: Option<NamespaceId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionKind {
   Function(FunctionDefinition),
   Variable(VariableDefinition),
   Constant(ConstantDefinition),
   Parameter(ParameterDefinition),
   Namespace(NamespaceDefinition),
+  TypeAlias(TypeAliasDefinition),
+  Record(RecordDefinition),
+  Enum(EnumDefinition),
+  Method(MethodDefinition),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -63,12 +69,60 @@ pub struct VariableDefinition {
 pub struct ConstantDefinition {
   pub type_id: TypeId,
   pub value: Option<ConstValue>,
+  /// For static fields, the owning record/enum definition
+  pub owner_type: Option<DefinitionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParameterDefinition {
   pub type_id: TypeId,
   pub mutable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeAliasDefinition {
+  pub target: TypeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordDefinition {
+  pub type_id: TypeId,
+  pub fields: Vec<RecordFieldDef>,
+  pub instance_methods: HashMap<SymbolId, DefinitionId>,
+  pub static_methods: HashMap<SymbolId, DefinitionId>,
+  pub static_fields: HashMap<SymbolId, DefinitionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordFieldDef {
+  pub name: SymbolId,
+  pub type_id: TypeId,
+  pub index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumDefinition {
+  pub type_id: TypeId,
+  pub variants: Vec<EnumVariantDef>,
+  pub variants_by_name: HashMap<SymbolId, u32>,
+  pub tag_type: TypeId,
+  pub static_methods: HashMap<SymbolId, DefinitionId>,
+  pub static_fields: HashMap<SymbolId, DefinitionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumVariantDef {
+  pub name: SymbolId,
+  pub payload: Vec<TypeId>,
+  pub tag_value: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MethodDefinition {
+  pub owner_type: DefinitionId,
+  pub params: Vec<DefinitionId>,
+  pub return_type: TypeId,
+  pub is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +168,10 @@ impl DefinitionStore {
       DefinitionKind::Constant(c) => &c.type_id,
       DefinitionKind::Parameter(p) => &p.type_id,
       DefinitionKind::Namespace(_) => panic!("namespaces do not have a type"),
+      DefinitionKind::TypeAlias(ta) => &ta.target,
+      DefinitionKind::Record(rd) => &rd.type_id,
+      DefinitionKind::Enum(ed) => &ed.type_id,
+      DefinitionKind::Method(md) => &md.return_type,
     }
   }
 

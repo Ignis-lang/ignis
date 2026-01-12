@@ -7,7 +7,9 @@ pub mod cast;
 pub mod dereference;
 pub mod grouped;
 pub mod literal;
+pub mod member_access;
 pub mod path;
+pub mod record_init;
 pub mod reference;
 pub mod unary;
 pub mod variable;
@@ -21,7 +23,9 @@ pub use cast::ASTCast;
 pub use dereference::ASTDereference;
 pub use grouped::ASTGrouped;
 pub use literal::ASTLiteral;
+pub use member_access::{ASTAccessOp, ASTMemberAccess};
 pub use path::ASTPath;
+pub use record_init::{ASTRecordInit, ASTRecordInitField};
 pub use reference::ASTReference;
 pub use unary::ASTUnary;
 pub use variable::ASTVariableExpression;
@@ -45,6 +49,8 @@ pub enum ASTExpression {
   Path(ASTPath),
   PostfixIncrement { expr: crate::NodeId, span: Span },
   PostfixDecrement { expr: crate::NodeId, span: Span },
+  MemberAccess(ASTMemberAccess),
+  RecordInit(ASTRecordInit),
 }
 
 impl ASTExpression {
@@ -65,6 +71,8 @@ impl ASTExpression {
       ASTExpression::Path(expr) => &expr.span,
       ASTExpression::PostfixIncrement { span, .. } => span,
       ASTExpression::PostfixDecrement { span, .. } => span,
+      ASTExpression::MemberAccess(expr) => &expr.span,
+      ASTExpression::RecordInit(expr) => &expr.span,
     }
   }
 }

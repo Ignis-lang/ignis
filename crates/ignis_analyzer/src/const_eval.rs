@@ -113,7 +113,109 @@ impl<'a> Analyzer<'a> {
           self.const_eval_node(decl, scope_kind);
         }
       },
+      ASTStatement::Record(rec) => {
+        self.const_eval_record_static_fields(node_id, rec, scope_kind);
+      },
+      ASTStatement::Enum(enum_) => {
+        self.const_eval_enum_static_fields(node_id, enum_, scope_kind);
+      },
       _ => {},
+    }
+  }
+
+  fn const_eval_record_static_fields(
+    &mut self,
+    node_id: &NodeId,
+    rec: &ignis_ast::statements::record::ASTRecord,
+    scope_kind: ScopeKind,
+  ) {
+    use ignis_ast::statements::record::ASTRecordItem;
+    use ignis_diagnostics::message::DiagnosticMessage;
+
+    let record_def_id = match self.lookup_def(node_id) {
+      Some(id) => id.clone(),
+      None => return,
+    };
+
+    let type_name = self.get_symbol_name(&rec.name);
+
+    for item in &rec.items {
+      if let ASTRecordItem::Field(field) = item {
+        if field.is_static() {
+          if let Some(value_id) = &field.value {
+            match self.const_eval_expression_node(value_id, scope_kind) {
+              Some(value) => {
+                // Get the static field's definition from the record
+                if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
+                  if let Some(const_def_id) = rd.static_fields.get(&field.name).cloned() {
+                    if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+                      const_def.value = Some(value);
+                    }
+                  }
+                }
+              },
+              None => {
+                let field_name = self.get_symbol_name(&field.name);
+                self.add_diagnostic(
+                  DiagnosticMessage::StaticFieldNotConst {
+                    field: field_name,
+                    type_name: type_name.clone(),
+                    span: field.span.clone(),
+                  }
+                  .report(),
+                );
+              },
+            }
+          }
+        }
+      }
+    }
+  }
+
+  fn const_eval_enum_static_fields(
+    &mut self,
+    node_id: &NodeId,
+    enum_: &ignis_ast::statements::enum_::ASTEnum,
+    scope_kind: ScopeKind,
+  ) {
+    use ignis_ast::statements::enum_::ASTEnumItem;
+    use ignis_diagnostics::message::DiagnosticMessage;
+
+    let enum_def_id = match self.lookup_def(node_id) {
+      Some(id) => id.clone(),
+      None => return,
+    };
+
+    let type_name = self.get_symbol_name(&enum_.name);
+
+    for item in &enum_.items {
+      if let ASTEnumItem::Field(field) = item {
+        if let Some(value_id) = &field.value {
+          match self.const_eval_expression_node(value_id, scope_kind) {
+            Some(value) => {
+              // Get the static field's definition from the enum
+              if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
+                if let Some(const_def_id) = ed.static_fields.get(&field.name).cloned() {
+                  if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+                    const_def.value = Some(value);
+                  }
+                }
+              }
+            },
+            None => {
+              let field_name = self.get_symbol_name(&field.name);
+              self.add_diagnostic(
+                DiagnosticMessage::StaticFieldNotConst {
+                  field: field_name,
+                  type_name: type_name.clone(),
+                  span: field.span.clone(),
+                }
+                .report(),
+              );
+            },
+          }
+        }
+      }
     }
   }
 

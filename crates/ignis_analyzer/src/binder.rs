@@ -1,26 +1,47 @@
+use std::collections::HashMap;
+
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
   metadata::ASTMetadata,
-  statements::{const_statement::ASTConstant, function::ASTFunction, variable::ASTVariable, ASTStatement},
+  statements::{
+    const_statement::ASTConstant,
+    enum_::{ASTEnum, ASTEnumItem},
+    function::ASTFunction,
+    record::{ASTMethod, ASTRecord, ASTRecordItem},
+    type_alias::ASTTypeAlias,
+    variable::ASTVariable,
+    ASTStatement,
+  },
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::definition::{
-  ConstantDefinition, Definition, DefinitionKind, FunctionDefinition, NamespaceDefinition, ParameterDefinition,
-  VariableDefinition, Visibility,
+  ConstantDefinition, Definition, DefinitionKind, EnumDefinition, EnumVariantDef, FunctionDefinition, MethodDefinition,
+  NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, TypeAliasDefinition, VariableDefinition,
+  Visibility,
 };
 
 impl<'a> Analyzer<'a> {
+  /// Two-pass binding phase:
+  /// - Pass 1: Predeclare type definitions (TypeAlias, Record, Enum) so they can reference each other
+  /// - Pass 2: Complete all bindings including type definition details
   pub fn bind_phase(
     &mut self,
     roots: &[NodeId],
   ) {
+    // Pass 1: Predeclare type definitions
     for root in roots {
-      self.bind_node(root, ScopeKind::Global);
+      self.bind_predecl(root, ScopeKind::Global);
+    }
+
+    // Pass 2: Complete bindings
+    for root in roots {
+      self.bind_complete(root, ScopeKind::Global);
     }
   }
 
-  fn bind_node(
+  /// Pass 1: Predeclare type definitions so they can be referenced before fully defined
+  fn bind_predecl(
     &mut self,
     node_id: &NodeId,
     scope_kind: ScopeKind,
@@ -28,12 +49,55 @@ impl<'a> Analyzer<'a> {
     let node = self.ast.get(node_id);
 
     match node {
-      ASTNode::Statement(stmt) => self.bind_statement(&node_id, stmt, scope_kind),
+      ASTNode::Statement(stmt) => self.bind_predecl_statement(node_id, stmt, scope_kind),
       ASTNode::Expression(_) => {},
     }
   }
 
-  fn bind_statement(
+  fn bind_predecl_statement(
+    &mut self,
+    node_id: &NodeId,
+    stmt: &ASTStatement,
+    scope_kind: ScopeKind,
+  ) {
+    match stmt {
+      ASTStatement::TypeAlias(ta) => self.bind_type_alias_predecl(node_id, ta),
+      ASTStatement::Record(rec) => self.bind_record_predecl(node_id, rec),
+      ASTStatement::Enum(en) => self.bind_enum_predecl(node_id, en),
+      ASTStatement::Namespace(ns_stmt) => {
+        // Recursively predeclare types in namespace
+        self.bind_namespace_predecl(node_id, ns_stmt);
+      },
+      ASTStatement::Extern(extern_stmt) => {
+        // Recursively predeclare types in extern block
+        for item in &extern_stmt.items {
+          self.bind_predecl(item, scope_kind);
+        }
+      },
+      ASTStatement::Export(export_stmt) => {
+        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
+          self.bind_predecl(decl, scope_kind);
+        }
+      },
+      _ => {},
+    }
+  }
+
+  /// Pass 2: Complete all bindings
+  fn bind_complete(
+    &mut self,
+    node_id: &NodeId,
+    scope_kind: ScopeKind,
+  ) {
+    let node = self.ast.get(node_id);
+
+    match node {
+      ASTNode::Statement(stmt) => self.bind_complete_statement(node_id, stmt, scope_kind),
+      ASTNode::Expression(_) => {},
+    }
+  }
+
+  fn bind_complete_statement(
     &mut self,
     node_id: &NodeId,
     stmt: &ASTStatement,
@@ -47,17 +111,436 @@ impl<'a> Analyzer<'a> {
       ASTStatement::If(if_stmt) => self.bind_if(if_stmt),
       ASTStatement::While(while_stmt) => self.bind_while(while_stmt),
       ASTStatement::For(for_stmt) => self.bind_for(for_stmt),
+      ASTStatement::TypeAlias(ta) => self.bind_type_alias_complete(node_id, ta),
+      ASTStatement::Record(rec) => self.bind_record_complete(node_id, rec),
+      ASTStatement::Enum(en) => self.bind_enum_complete(node_id, en),
       ASTStatement::Extern(extern_stmt) => {
         self.bind_extern(extern_stmt);
       },
       ASTStatement::Namespace(ns_stmt) => {
-        self.bind_namespace(node_id, ns_stmt);
+        self.bind_namespace_complete(node_id, ns_stmt);
       },
       ASTStatement::Export(export_stmt) => self.bind_export(export_stmt, scope_kind),
       ASTStatement::Expression(_) => {},
       _ => {},
     }
   }
+
+  // ========================================================================
+  // Type Alias Binding
+  // ========================================================================
+
+  fn bind_type_alias_predecl(
+    &mut self,
+    node_id: &NodeId,
+    ta: &ASTTypeAlias,
+  ) {
+    let def = Definition {
+      kind: DefinitionKind::TypeAlias(TypeAliasDefinition {
+        target: self.types.error(), // Placeholder until complete pass
+      }),
+      name: ta.name,
+      span: ta.span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+    };
+
+    let def_id = self.defs.alloc(def);
+    self.set_def(node_id, &def_id);
+    self.type_alias_syntax.insert(def_id.clone(), ta.target.clone());
+
+    if let Err(existing) = self.scopes.define(&ta.name, &def_id) {
+      let existing_def = self.defs.get(&existing);
+      let symbol = self.get_symbol_name(&existing_def.name);
+      self.add_diagnostic(
+        DiagnosticMessage::TypeAlreadyDefined {
+          name: symbol,
+          span: ta.span.clone(),
+          previous_span: existing_def.span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
+
+  fn bind_type_alias_complete(
+    &mut self,
+    _node_id: &NodeId,
+    _ta: &ASTTypeAlias,
+  ) {
+    // Target resolution done in typecheck phase
+  }
+
+  // ========================================================================
+  // Record Binding
+  // ========================================================================
+
+  fn bind_record_predecl(
+    &mut self,
+    node_id: &NodeId,
+    rec: &ASTRecord,
+  ) {
+    let def = Definition {
+      kind: DefinitionKind::Record(RecordDefinition {
+        type_id: self.types.error(), // Placeholder
+        fields: Vec::new(),
+        instance_methods: HashMap::new(),
+        static_methods: HashMap::new(),
+        static_fields: HashMap::new(),
+      }),
+      name: rec.name,
+      span: rec.span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+    };
+
+    let def_id = self.defs.alloc(def);
+    self.set_def(node_id, &def_id);
+
+    if let Err(existing) = self.scopes.define(&rec.name, &def_id) {
+      let existing_def = self.defs.get(&existing);
+      let symbol = self.get_symbol_name(&existing_def.name);
+      self.add_diagnostic(
+        DiagnosticMessage::TypeAlreadyDefined {
+          name: symbol,
+          span: rec.span.clone(),
+          previous_span: existing_def.span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
+
+  fn bind_record_complete(
+    &mut self,
+    node_id: &NodeId,
+    rec: &ASTRecord,
+  ) {
+    let Some(record_def_id) = self.lookup_def(node_id).cloned() else {
+      return;
+    };
+
+    // Create the Type::Record and update the definition's type_id
+    let type_id = self.types.record(record_def_id);
+
+    let mut fields = Vec::new();
+    let mut instance_methods = HashMap::new();
+    let mut static_methods = HashMap::new();
+    let mut static_fields = HashMap::new();
+    let mut field_index = 0u32;
+
+    for item in &rec.items {
+      match item {
+        ASTRecordItem::Field(field) => {
+          if field.is_static() {
+            // Static field - create as constant
+            // Static fields require initializer (checked in extra_checks)
+            let const_def = Definition {
+              kind: DefinitionKind::Constant(ConstantDefinition {
+                type_id: self.types.error(), // Resolved in typeck
+                value: None,
+                owner_type: Some(record_def_id),
+              }),
+              name: field.name,
+              span: field.span.clone(),
+              visibility: Visibility::Public,
+              owner_module: self.current_module,
+              owner_namespace: self.current_namespace,
+            };
+            let const_def_id = self.defs.alloc(const_def);
+            static_fields.insert(field.name, const_def_id);
+          } else {
+            // Instance field
+            fields.push(RecordFieldDef {
+              name: field.name,
+              type_id: self.types.error(), // Resolved in typeck
+              index: field_index,
+            });
+            field_index += 1;
+          }
+        },
+        ASTRecordItem::Method(method) => {
+          let is_static = method.is_static();
+          let method_def_id = self.bind_method(method, record_def_id, is_static);
+
+          if is_static {
+            static_methods.insert(method.name, method_def_id);
+          } else {
+            instance_methods.insert(method.name, method_def_id);
+          }
+        },
+      }
+    }
+
+    // Update the record definition
+    if let DefinitionKind::Record(rd) = &mut self.defs.get_mut(&record_def_id).kind {
+      rd.type_id = type_id;
+      rd.fields = fields;
+      rd.instance_methods = instance_methods;
+      rd.static_methods = static_methods;
+      rd.static_fields = static_fields;
+    }
+  }
+
+  // ========================================================================
+  // Enum Binding
+  // ========================================================================
+
+  fn bind_enum_predecl(
+    &mut self,
+    node_id: &NodeId,
+    en: &ASTEnum,
+  ) {
+    let def = Definition {
+      kind: DefinitionKind::Enum(EnumDefinition {
+        type_id: self.types.error(), // Placeholder
+        variants: Vec::new(),
+        variants_by_name: HashMap::new(),
+        tag_type: self.types.u32(),
+        static_methods: HashMap::new(),
+        static_fields: HashMap::new(),
+      }),
+      name: en.name,
+      span: en.span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+    };
+
+    let def_id = self.defs.alloc(def);
+    self.set_def(node_id, &def_id);
+
+    if let Err(existing) = self.scopes.define(&en.name, &def_id) {
+      let existing_def = self.defs.get(&existing);
+      let symbol = self.get_symbol_name(&existing_def.name);
+      self.add_diagnostic(
+        DiagnosticMessage::TypeAlreadyDefined {
+          name: symbol,
+          span: en.span.clone(),
+          previous_span: existing_def.span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
+
+  fn bind_enum_complete(
+    &mut self,
+    node_id: &NodeId,
+    en: &ASTEnum,
+  ) {
+    let Some(enum_def_id) = self.lookup_def(node_id).cloned() else {
+      return;
+    };
+
+    // Create the Type::Enum and update the definition's type_id
+    let type_id = self.types.enum_type(enum_def_id);
+
+    let mut variants = Vec::new();
+    let mut variants_by_name = HashMap::new();
+    let mut static_methods = HashMap::new();
+    let mut static_fields = HashMap::new();
+    let mut tag_value = 0u32;
+
+    for item in &en.items {
+      match item {
+        ASTEnumItem::Variant(variant) => {
+          // Payload types resolved in typeck phase
+          let payload: Vec<_> = variant.payload.iter().map(|_| self.types.error()).collect();
+
+          variants.push(EnumVariantDef {
+            name: variant.name,
+            payload,
+            tag_value,
+          });
+          variants_by_name.insert(variant.name, tag_value);
+          tag_value += 1;
+        },
+        ASTEnumItem::Method(method) => {
+          // In enum, all methods are implicitly static
+          let method_def_id = self.bind_method(method, enum_def_id, true);
+          static_methods.insert(method.name, method_def_id);
+        },
+        ASTEnumItem::Field(field) => {
+          // In enum, all fields are implicitly static
+          // Fields require initializer (checked in extra_checks)
+          let const_def = Definition {
+            kind: DefinitionKind::Constant(ConstantDefinition {
+              type_id: self.types.error(), // Resolved in typeck
+              value: None,
+              owner_type: Some(enum_def_id),
+            }),
+            name: field.name,
+            span: field.span.clone(),
+            visibility: Visibility::Public,
+            owner_module: self.current_module,
+            owner_namespace: self.current_namespace,
+          };
+          let const_def_id = self.defs.alloc(const_def);
+          static_fields.insert(field.name, const_def_id);
+        },
+      }
+    }
+
+    // Update the enum definition
+    if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
+      ed.type_id = type_id;
+      ed.variants = variants;
+      ed.variants_by_name = variants_by_name;
+      ed.static_methods = static_methods;
+      ed.static_fields = static_fields;
+    }
+  }
+
+  // ========================================================================
+  // Method Binding (shared by Record and Enum)
+  // ========================================================================
+
+  fn bind_method(
+    &mut self,
+    method: &ASTMethod,
+    owner: ignis_type::definition::DefinitionId,
+    is_static: bool,
+  ) -> ignis_type::definition::DefinitionId {
+    // Create parameter definitions
+    let mut param_defs = Vec::new();
+    for param in &method.parameters {
+      let param_def = Definition {
+        kind: DefinitionKind::Parameter(ParameterDefinition {
+          type_id: self.types.error(), // Resolved in typeck
+          mutable: param.metadata.is_mutable(),
+        }),
+        name: param.name,
+        span: param.span.clone(),
+        visibility: Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: None,
+      };
+      let param_def_id = self.defs.alloc(param_def);
+      param_defs.push(param_def_id);
+    }
+
+    let method_def = Definition {
+      kind: DefinitionKind::Method(MethodDefinition {
+        owner_type: owner,
+        params: param_defs.clone(),
+        return_type: self.types.error(), // Resolved in typeck
+        is_static,
+      }),
+      name: method.name,
+      span: method.span.clone(),
+      visibility: Visibility::Public,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+    };
+
+    let method_def_id = self.defs.alloc(method_def);
+
+    self.scopes.push(ScopeKind::Function);
+
+    for param_id in &param_defs {
+      let param_def = self.defs.get(param_id);
+      let _ = self.scopes.define(&param_def.name, param_id);
+    }
+
+    self.bind_complete(&method.body, ScopeKind::Function);
+
+    self.scopes.pop();
+
+    method_def_id
+  }
+
+  // ========================================================================
+  // Namespace Predecl/Complete (for recursive type support in namespaces)
+  // ========================================================================
+
+  fn bind_namespace_predecl(
+    &mut self,
+    node_id: &NodeId,
+    ns_stmt: &ignis_ast::statements::namespace_statement::ASTNamespace,
+  ) {
+    let ns_id = self.namespaces.get_or_create(&ns_stmt.path, false);
+    let ns_name = *ns_stmt.path.last().expect("namespace path cannot be empty");
+
+    // Check if namespace definition already exists (from a previous predecl)
+    if self.lookup_def(node_id).is_none() {
+      let ns_def = Definition {
+        kind: DefinitionKind::Namespace(NamespaceDefinition {
+          namespace_id: ns_id,
+          is_extern: false,
+        }),
+        name: ns_name,
+        span: ns_stmt.span.clone(),
+        visibility: Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: self.current_namespace,
+      };
+
+      let def_id = self.defs.alloc(ns_def);
+      self.set_def(node_id, &def_id);
+      let _ = self.scopes.define(&ns_name, &def_id);
+    }
+
+    let prev_ns = self.current_namespace;
+    self.current_namespace = Some(ns_id);
+
+    let scope_kind = ScopeKind::Namespace(ns_id);
+    self.scopes.push(scope_kind);
+
+    // Predeclare types in namespace
+    for item in &ns_stmt.items {
+      self.bind_predecl(item, scope_kind);
+
+      // Register in namespace for lookup
+      if let Some(def_id) = self.lookup_def(item).cloned() {
+        let def = self.defs.get(&def_id);
+        self.namespaces.define(ns_id, def.name, def_id);
+      }
+    }
+
+    self.scopes.pop();
+    self.current_namespace = prev_ns;
+  }
+
+  fn bind_namespace_complete(
+    &mut self,
+    _node_id: &NodeId,
+    ns_stmt: &ignis_ast::statements::namespace_statement::ASTNamespace,
+  ) {
+    let ns_id = self.namespaces.get_or_create(&ns_stmt.path, false);
+
+    let prev_ns = self.current_namespace;
+    self.current_namespace = Some(ns_id);
+
+    let scope_kind = ScopeKind::Namespace(ns_id);
+    self.scopes.push(scope_kind);
+
+    // Re-register predeclared definitions in scope
+    for item in &ns_stmt.items {
+      if let Some(def_id) = self.lookup_def(item).cloned() {
+        let def = self.defs.get(&def_id);
+        let _ = self.scopes.define(&def.name, &def_id);
+      }
+    }
+
+    for item in &ns_stmt.items {
+      self.bind_complete(item, scope_kind);
+
+      if let Some(def_id) = self.lookup_def(item).cloned() {
+        let def = self.defs.get(&def_id);
+        self.namespaces.define(ns_id, def.name, def_id);
+      }
+    }
+
+    self.scopes.pop();
+    self.current_namespace = prev_ns;
+  }
+
+  // ========================================================================
+  // Function Binding
+  // ========================================================================
 
   fn bind_function(
     &mut self,
@@ -150,7 +633,7 @@ impl<'a> Analyzer<'a> {
         }
       }
 
-      self.bind_node(&body_id, ScopeKind::Function);
+      self.bind_complete(&body_id, ScopeKind::Function);
       self.scopes.pop();
     }
   }
@@ -198,7 +681,7 @@ impl<'a> Analyzer<'a> {
     }
 
     if let Some(value_id) = &var.value {
-      self.bind_node(value_id, ScopeKind::Block);
+      self.bind_complete(value_id, ScopeKind::Block);
     }
   }
 
@@ -212,6 +695,7 @@ impl<'a> Analyzer<'a> {
     let const_def = ConstantDefinition {
       type_id: self.types.error(),
       value: None,
+      owner_type: None,
     };
 
     let def = Definition {
@@ -241,7 +725,7 @@ impl<'a> Analyzer<'a> {
 
     // Only bind value if it exists (not for extern const)
     if let Some(value_id) = &const_.value {
-      self.bind_node(value_id, ScopeKind::Block);
+      self.bind_complete(value_id, ScopeKind::Block);
     }
   }
 
@@ -252,7 +736,7 @@ impl<'a> Analyzer<'a> {
     self.scopes.push(ScopeKind::Block);
 
     for stmt_id in &block.statements {
-      self.bind_node(stmt_id, ScopeKind::Block);
+      self.bind_complete(stmt_id, ScopeKind::Block);
     }
 
     self.scopes.pop();
@@ -262,11 +746,11 @@ impl<'a> Analyzer<'a> {
     &mut self,
     if_stmt: &ignis_ast::statements::ASTIf,
   ) {
-    self.bind_node(&if_stmt.condition, ScopeKind::Block);
-    self.bind_node(&if_stmt.then_block, ScopeKind::Block);
+    self.bind_complete(&if_stmt.condition, ScopeKind::Block);
+    self.bind_complete(&if_stmt.then_block, ScopeKind::Block);
 
     if let Some(else_branch) = &if_stmt.else_block {
-      self.bind_node(else_branch, ScopeKind::Block);
+      self.bind_complete(else_branch, ScopeKind::Block);
     }
   }
 
@@ -276,8 +760,8 @@ impl<'a> Analyzer<'a> {
   ) {
     self.scopes.push(ScopeKind::Loop);
 
-    self.bind_node(&while_stmt.condition, ScopeKind::Loop);
-    self.bind_node(&while_stmt.body, ScopeKind::Loop);
+    self.bind_complete(&while_stmt.condition, ScopeKind::Loop);
+    self.bind_complete(&while_stmt.body, ScopeKind::Loop);
 
     self.scopes.pop();
   }
@@ -288,10 +772,10 @@ impl<'a> Analyzer<'a> {
   ) {
     self.scopes.push(ScopeKind::Loop);
 
-    self.bind_node(&for_stmt.initializer, ScopeKind::Loop);
-    self.bind_node(&for_stmt.condition, ScopeKind::Loop);
-    self.bind_node(&for_stmt.increment, ScopeKind::Loop);
-    self.bind_node(&for_stmt.body, ScopeKind::Loop);
+    self.bind_complete(&for_stmt.initializer, ScopeKind::Loop);
+    self.bind_complete(&for_stmt.condition, ScopeKind::Loop);
+    self.bind_complete(&for_stmt.increment, ScopeKind::Loop);
+    self.bind_complete(&for_stmt.body, ScopeKind::Loop);
 
     self.scopes.pop();
   }
@@ -303,7 +787,7 @@ impl<'a> Analyzer<'a> {
   ) {
     match export_stmt {
       ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
-        self.bind_node(decl, scope_kind);
+        self.bind_complete(decl, scope_kind);
 
         if let Some(def_id) = self.lookup_def(decl).cloned() {
           self.defs.get_mut(&def_id).visibility = Visibility::Public;
@@ -344,54 +828,12 @@ impl<'a> Analyzer<'a> {
     self.scopes.push(scope_kind);
 
     for item in &extern_stmt.items {
-      self.bind_node(item, scope_kind);
+      self.bind_complete(item, scope_kind);
       self.mark_extern(item);
 
       if let Some(def_id) = self.lookup_def(item).cloned() {
         let def = self.defs.get(&def_id);
-        self.namespaces.define(ns_id, def.name.clone(), def_id);
-      }
-    }
-
-    self.scopes.pop();
-    self.current_namespace = prev_ns;
-  }
-
-  fn bind_namespace(
-    &mut self,
-    node_id: &NodeId,
-    ns_stmt: &ignis_ast::statements::namespace_statement::ASTNamespace,
-  ) {
-    let ns_id = self.namespaces.get_or_create(&ns_stmt.path, false);
-    let ns_name = *ns_stmt.path.last().expect("namespace path cannot be empty");
-    let ns_def = Definition {
-      kind: DefinitionKind::Namespace(NamespaceDefinition {
-        namespace_id: ns_id,
-        is_extern: false,
-      }),
-      name: ns_name,
-      span: ns_stmt.span.clone(),
-      visibility: Visibility::Private,
-      owner_module: self.current_module,
-      owner_namespace: self.current_namespace,
-    };
-
-    let def_id = self.defs.alloc(ns_def);
-    self.set_def(node_id, &def_id);
-    let _ = self.scopes.define(&ns_name, &def_id);
-
-    let prev_ns = self.current_namespace;
-    self.current_namespace = Some(ns_id);
-
-    let scope_kind = ScopeKind::Namespace(ns_id);
-    self.scopes.push(scope_kind);
-
-    for item in &ns_stmt.items {
-      self.bind_node(item, scope_kind);
-
-      if let Some(def_id) = self.lookup_def(item).cloned() {
-        let def = self.defs.get(&def_id);
-        self.namespaces.define(ns_id, def.name.clone(), def_id);
+        self.namespaces.define(ns_id, def.name, def_id);
       }
     }
 

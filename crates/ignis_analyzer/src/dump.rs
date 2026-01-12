@@ -96,6 +96,47 @@ pub fn dump_defs(
         )
         .unwrap();
       },
+      DefinitionKind::TypeAlias(alias_def) => {
+        writeln!(
+          &mut output,
+          "  DefId({:?}): type alias {} = {:?}",
+          def_id, name, alias_def.target
+        )
+        .unwrap();
+      },
+      DefinitionKind::Record(record_def) => {
+        let method_count = record_def.instance_methods.len() + record_def.static_methods.len();
+        writeln!(
+          &mut output,
+          "  DefId({:?}): record {} ({} fields, {} methods)",
+          def_id,
+          name,
+          record_def.fields.len(),
+          method_count
+        )
+        .unwrap();
+      },
+      DefinitionKind::Enum(enum_def) => {
+        writeln!(
+          &mut output,
+          "  DefId({:?}): enum {} ({} variants, {} static methods)",
+          def_id,
+          name,
+          enum_def.variants.len(),
+          enum_def.static_methods.len()
+        )
+        .unwrap();
+      },
+      DefinitionKind::Method(method_def) => {
+        let type_id = defs.type_of(&def_id);
+        let type_kind = types.get(type_id);
+        writeln!(
+          &mut output,
+          "  DefId({:?}): method {} -> {:?} (static: {})",
+          def_id, name, type_kind, method_def.is_static
+        )
+        .unwrap();
+      },
     }
   }
 

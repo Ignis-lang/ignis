@@ -243,6 +243,22 @@ impl<'a> LirVerifier<'a> {
           }
         }
       },
+      Instr::GetFieldPtr { dest, base, .. } => {
+        self.check_operand(func, func_name, block_name, base, defined_temps);
+        defined_temps.insert(*dest);
+      },
+      Instr::InitRecord { dest_ptr, fields, .. } => {
+        self.check_operand(func, func_name, block_name, dest_ptr, defined_temps);
+        for (_, field_value) in fields {
+          self.check_operand(func, func_name, block_name, field_value, defined_temps);
+        }
+      },
+      Instr::InitEnumVariant { dest_ptr, payload, .. } => {
+        self.check_operand(func, func_name, block_name, dest_ptr, defined_temps);
+        for p in payload {
+          self.check_operand(func, func_name, block_name, p, defined_temps);
+        }
+      },
     }
   }
 

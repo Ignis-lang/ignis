@@ -53,7 +53,7 @@ use ignis_type::{Store, symbol::SymbolTable};
 use crate::{
   ASTNode, NodeId,
   expressions::{
-    ASTExpression,
+    ASTExpression, ASTAccessOp, ASTMemberAccess, ASTRecordInit,
     assignment::{ASTAssignment, ASTAssignmentOperator},
     binary::{ASTBinary, ASTBinaryOperator},
     call::ASTCallExpression,
@@ -67,7 +67,7 @@ use crate::{
     vector_access::ASTVectorAccess,
   },
   statements::{
-    ASTStatement,
+    ASTStatement, ASTEnum, ASTEnumItem, ASTMethod, ASTRecord, ASTRecordItem, ASTTypeAlias,
     block::ASTBlock,
     break_statement::ASTBreak,
     comment_statement::ASTComment,
@@ -265,6 +265,8 @@ impl DisplayLisp for ASTExpression {
         let operand = formatter.format_node(expr);
         format!("(PostfixDecrement {})", operand)
       },
+      ASTExpression::MemberAccess(expr) => expr.to_lisp(formatter),
+      ASTExpression::RecordInit(expr) => expr.to_lisp(formatter),
     }
   }
 }
@@ -292,6 +294,9 @@ impl DisplayLisp for ASTStatement {
       ASTStatement::Export(statement) => statement.to_lisp(formatter),
       ASTStatement::Comment(statement) => statement.to_lisp(formatter),
       ASTStatement::Namespace(statement) => statement.to_lisp(formatter),
+      ASTStatement::TypeAlias(statement) => statement.to_lisp(formatter),
+      ASTStatement::Record(statement) => statement.to_lisp(formatter),
+      ASTStatement::Enum(statement) => statement.to_lisp(formatter),
     }
   }
 }
@@ -772,6 +777,186 @@ impl DisplayLisp for ASTNamespace {
     let path_str: Vec<String> = self.path.iter().map(|s| formatter.resolve_symbol(s)).collect();
     let items_display: Vec<String> = self.items.iter().map(|i| formatter.format_node(i)).collect();
     format!("(Namespace {} [{}])", path_str.join("::"), items_display.join(" "))
+  }
+}
+
+// Type Alias Statement
+impl DisplayLisp for ASTTypeAlias {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let name = formatter.resolve_symbol(&self.name);
+    let target = self.target.to_lisp(formatter);
+    format!("(TypeAlias \"{}\" {})", name, target)
+  }
+}
+
+// Record Statement
+impl DisplayLisp for ASTRecord {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let name = formatter.resolve_symbol(&self.name);
+
+    if self.items.is_empty() {
+      return format!("(Record \"{}\")", name);
+    }
+
+    formatter.increase_indent();
+    let items: Vec<String> = self
+      .items
+      .iter()
+      .map(|item| {
+        let item_str = match item {
+          ASTRecordItem::Field(field) => {
+            let field_name = formatter.resolve_symbol(&field.name);
+            let type_str = field.type_.to_lisp(formatter);
+            let metadata_str = format_metadata(&field.metadata);
+            match &field.value {
+              Some(value_id) => {
+                let value = formatter.format_node(value_id);
+                format!("(Field \"{}\" {} {} {})", field_name, type_str, metadata_str, value)
+              },
+              None => {
+                format!("(Field \"{}\" {} {})", field_name, type_str, metadata_str)
+              },
+            }
+          },
+          ASTRecordItem::Method(method) => method.to_lisp(formatter),
+        };
+        format!("{}{}", formatter.indent(), item_str)
+      })
+      .collect();
+    formatter.decrease_indent();
+
+    format!("(Record \"{}\"\n{})", name, items.join("\n"))
+  }
+}
+
+// Method (used by Record and Enum)
+impl DisplayLisp for ASTMethod {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let name = formatter.resolve_symbol(&self.name);
+    let params: Vec<String> = self.parameters.iter().map(|p| p.to_lisp(formatter)).collect();
+    let return_type = self.return_type.to_lisp(formatter);
+    let metadata_str = format_metadata(&self.metadata);
+    let body = formatter.format_node(&self.body);
+
+    let params_str = if params.is_empty() {
+      "()".to_string()
+    } else {
+      format!("({})", params.join(" "))
+    };
+
+    format!(
+      "(Method \"{}\" {} {} {}\n{}{})",
+      name,
+      params_str,
+      return_type,
+      metadata_str,
+      formatter.indent(),
+      body
+    )
+  }
+}
+
+// Enum Statement
+impl DisplayLisp for ASTEnum {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let name = formatter.resolve_symbol(&self.name);
+
+    if self.items.is_empty() {
+      return format!("(Enum \"{}\")", name);
+    }
+
+    formatter.increase_indent();
+    let items: Vec<String> = self
+      .items
+      .iter()
+      .map(|item| {
+        let item_str = match item {
+          ASTEnumItem::Variant(variant) => {
+            let variant_name = formatter.resolve_symbol(&variant.name);
+            if variant.payload.is_empty() {
+              format!("(Variant \"{}\")", variant_name)
+            } else {
+              let payload: Vec<String> = variant.payload.iter().map(|t| t.to_lisp(formatter)).collect();
+              format!("(Variant \"{}\" ({}))", variant_name, payload.join(" "))
+            }
+          },
+          ASTEnumItem::Method(method) => method.to_lisp(formatter),
+          ASTEnumItem::Field(field) => {
+            let field_name = formatter.resolve_symbol(&field.name);
+            let type_str = field.type_.to_lisp(formatter);
+            let metadata_str = format_metadata(&field.metadata);
+            match &field.value {
+              Some(value_id) => {
+                let value = formatter.format_node(value_id);
+                format!("(Field \"{}\" {} {} {})", field_name, type_str, metadata_str, value)
+              },
+              None => {
+                format!("(Field \"{}\" {} {})", field_name, type_str, metadata_str)
+              },
+            }
+          },
+        };
+        format!("{}{}", formatter.indent(), item_str)
+      })
+      .collect();
+    formatter.decrease_indent();
+
+    format!("(Enum \"{}\"\n{})", name, items.join("\n"))
+  }
+}
+
+// Member Access Expression
+impl DisplayLisp for ASTMemberAccess {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let object = formatter.format_node(&self.object);
+    let member = formatter.resolve_symbol(&self.member);
+    let op_str = match self.op {
+      ASTAccessOp::Dot => ".",
+      ASTAccessOp::DoubleColon => "::",
+    };
+    format!("(MemberAccess {} \"{}\" \"{}\")", object, op_str, member)
+  }
+}
+
+// Record Init Expression
+impl DisplayLisp for ASTRecordInit {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let path: Vec<String> = self.path.iter().map(|(sym, _)| formatter.resolve_symbol(sym)).collect();
+    let path_str = path.join("::");
+
+    if self.fields.is_empty() {
+      return format!("(RecordInit \"{}\")", path_str);
+    }
+
+    let fields: Vec<String> = self
+      .fields
+      .iter()
+      .map(|field| {
+        let name = formatter.resolve_symbol(&field.name);
+        let value = formatter.format_node(&field.value);
+        format!("(\"{}\": {})", name, value)
+      })
+      .collect();
+
+    format!("(RecordInit \"{}\" {})", path_str, fields.join(" "))
   }
 }
 

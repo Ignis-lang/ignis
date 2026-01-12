@@ -3,9 +3,9 @@ use std::rc::Rc;
 
 use ignis_analyzer::{Analyzer, AnalyzerOutput, HirOwnershipChecker};
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
-use ignis_hir::display::print_hir;
+use ignis_hir::{display::print_hir, HIR};
 use ignis_parser::{IgnisLexer, IgnisParser};
-use ignis_type::{file::SourceMap, symbol::SymbolTable};
+use ignis_type::{definition::DefinitionStore, file::SourceMap, namespace::NamespaceStore, symbol::SymbolTable, types::TypeStore};
 
 pub struct AnalysisResult {
   pub output: AnalyzerOutput,
@@ -62,6 +62,51 @@ pub fn analyze_with_errors(src: &str) -> Option<AnalysisResult> {
       Some(AnalysisResult { output, source_map: sm })
     },
     Err(_) => None,
+  }
+}
+
+/// Run the pipeline allowing parse errors to be captured as diagnostics.
+/// This is useful for testing parser-level errors like StaticOnEnumVariant.
+pub fn analyze_allowing_parse_errors(src: &str) -> AnalysisResult {
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("test.ign", src.to_string());
+
+  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  lexer.scan_tokens();
+
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+  let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+
+  let mut diagnostics = Vec::new();
+
+  match parser.parse() {
+    Ok((nodes, roots)) => {
+      let mut output = Analyzer::analyze(&nodes, &roots, symbols.clone());
+
+      let symbols_ref = symbols.borrow();
+      let checker = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+      let (_, ownership_diags) = checker.check();
+      output.diagnostics.extend(ownership_diags);
+
+      AnalysisResult { output, source_map: sm }
+    },
+    Err(parse_errors) => {
+      // Convert parser errors to diagnostics
+      for err in parse_errors {
+        diagnostics.push(err.report());
+      }
+
+      // Return a minimal output with just the parser errors
+      let output = AnalyzerOutput {
+        diagnostics,
+        hir: HIR::new(),
+        types: TypeStore::new(),
+        defs: DefinitionStore::new(),
+        namespaces: NamespaceStore::new(),
+        symbols,
+      };
+      AnalysisResult { output, source_map: sm }
+    },
   }
 }
 

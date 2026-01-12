@@ -592,6 +592,80 @@ impl<'a> HIRPrinter<'a> {
         let ty_str = self.format_type(ty);
         writeln!(self.output, "SizeOf({}) : {}", ty_str, type_str).unwrap();
       },
+      HIRKind::FieldAccess { base, field_index } => {
+        writeln!(self.output, "FieldAccess(.{}) : {}", field_index, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*base);
+        self.indent -= 1;
+      },
+      HIRKind::RecordInit { record_def, fields } => {
+        let def = self.defs.get(record_def);
+        let name = self.symbols.get(&def.name);
+        writeln!(self.output, "RecordInit({}) : {}", name, type_str).unwrap();
+        if !fields.is_empty() {
+          self.indent += 1;
+          for (idx, value) in fields {
+            self.write_indent();
+            writeln!(self.output, "field[{}]:", idx).unwrap();
+            self.indent += 1;
+            self.print_node(*value);
+            self.indent -= 1;
+          }
+          self.indent -= 1;
+        }
+      },
+      HIRKind::MethodCall { receiver, method, args } => {
+        let def = self.defs.get(method);
+        let name = self.symbols.get(&def.name);
+        writeln!(self.output, "MethodCall({}) : {}", name, type_str).unwrap();
+        self.indent += 1;
+        if let Some(recv) = receiver {
+          self.write_indent();
+          writeln!(self.output, "receiver:").unwrap();
+          self.indent += 1;
+          self.print_node(*recv);
+          self.indent -= 1;
+        }
+        if !args.is_empty() {
+          self.write_indent();
+          writeln!(self.output, "args:").unwrap();
+          self.indent += 1;
+          for (i, arg) in args.iter().enumerate() {
+            self.write_indent();
+            writeln!(self.output, "[{}]:", i).unwrap();
+            self.indent += 1;
+            self.print_node(*arg);
+            self.indent -= 1;
+          }
+          self.indent -= 1;
+        }
+        self.indent -= 1;
+      },
+      HIRKind::EnumVariant {
+        enum_def,
+        variant_tag,
+        payload,
+      } => {
+        let def = self.defs.get(enum_def);
+        let name = self.symbols.get(&def.name);
+        writeln!(self.output, "EnumVariant({}::{}) : {}", name, variant_tag, type_str).unwrap();
+        if !payload.is_empty() {
+          self.indent += 1;
+          for (i, p) in payload.iter().enumerate() {
+            self.write_indent();
+            writeln!(self.output, "[{}]:", i).unwrap();
+            self.indent += 1;
+            self.print_node(*p);
+            self.indent -= 1;
+          }
+          self.indent -= 1;
+        }
+      },
+      HIRKind::StaticAccess { def: access_def } => {
+        let def = self.defs.get(access_def);
+        let name = self.symbols.get(&def.name);
+        writeln!(self.output, "StaticAccess({}) : {}", name, type_str).unwrap();
+      },
     }
   }
 
@@ -653,6 +727,14 @@ impl<'a> HIRPrinter<'a> {
         let param_strs: Vec<_> = params.iter().map(|p| self.format_type(p)).collect();
         let variadic = if *is_variadic { ", ..." } else { "" };
         format!("fn({}{}) -> {}", param_strs.join(", "), variadic, self.format_type(ret))
+      },
+      Type::Record(def_id) => {
+        let name = self.symbols.get(&self.defs.get(def_id).name);
+        format!("record {}", name)
+      },
+      Type::Enum(def_id) => {
+        let name = self.symbols.get(&self.defs.get(def_id).name);
+        format!("enum {}", name)
       },
     }
   }

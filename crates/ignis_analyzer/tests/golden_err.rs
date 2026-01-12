@@ -821,3 +821,249 @@ function main(): void {
 "#,
   );
 }
+
+#[test]
+fn type_alias_cycle() {
+  let result = common::analyze(
+    r#"
+type A = A;
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+type A = A;
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0066"],
+  );
+
+  assert_snapshot!("type_alias_cycle", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn type_alias_indirect_cycle() {
+  let result = common::analyze(
+    r#"
+type A = B;
+type B = A;
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+type A = B;
+type B = A;
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0066"],
+  );
+
+  assert_snapshot!("type_alias_indirect_cycle", common::format_diagnostics(&result.output.diagnostics));
+}
+
+// =============================================================================
+// Record/Enum static field tests
+// =============================================================================
+
+#[test]
+fn static_field_no_init() {
+  let result = common::analyze(
+    r#"
+record Config {
+    static MAX: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+record Config {
+    static MAX: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0065"],
+  );
+
+  assert_snapshot!("static_field_no_init", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn enum_field_no_init() {
+  let result = common::analyze(
+    r#"
+enum Color {
+    Red,
+    Green,
+
+    value: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+enum Color {
+    Red,
+    Green,
+
+    value: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0065"],
+  );
+
+  assert_snapshot!("enum_field_no_init", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn static_on_enum_variant() {
+  // Note: This error is detected at parse time, not analysis time.
+  // The parser returns StaticOnEnumVariant diagnostic.
+  // We use analyze_with_parse_errors to capture parser diagnostics.
+  let result = common::analyze_allowing_parse_errors(
+    r#"
+enum Color {
+    static Red,
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  let codes: Vec<_> = result.output.diagnostics.iter().map(|d| d.error_code.as_str()).collect();
+  assert!(codes.contains(&"A0067"), "Expected A0067 (StaticOnEnumVariant), got: {:?}", codes);
+
+  assert_snapshot!("static_on_enum_variant", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn dot_on_type() {
+  // Using . on a type should suggest using ::
+  let result = common::analyze(
+    r#"
+record User {
+    id: i32;
+
+    static create(): User {
+        return User { id: 0 };
+    }
+}
+
+function main(): void {
+    let u: User = User.create();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("dot_on_type", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn double_colon_on_value() {
+  // Using :: on a value should ideally error with A0063 (StaticAccessOnNonType)
+  // Currently the resolver treats `u::id` as a path and looks up `u` as a type,
+  // failing with A0058 (TypeNotFound) instead of detecting that `u` is a variable.
+  let result = common::analyze(
+    r#"
+record User {
+    id: i32;
+}
+
+function main(): void {
+    let u: User = User { id: 42 };
+    let x: i32 = u::id;
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+record User {
+    id: i32;
+}
+
+function main(): void {
+    let u: User = User { id: 42 };
+    let x: i32 = u::id;
+    return;
+}
+"#,
+    &["A0058"],
+  );
+
+  assert_snapshot!("double_colon_on_value", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn static_field_not_const() {
+  // Static field initialized with non-const expression should error (A0068)
+  let result = common::analyze(
+    r#"
+function getValue(): i32 {
+    return 42;
+}
+
+record Config {
+    static VALUE: i32 = getValue();
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+function getValue(): i32 {
+    return 42;
+}
+
+record Config {
+    static VALUE: i32 = getValue();
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0068"],
+  );
+
+  assert_snapshot!("static_field_not_const", common::format_diagnostics(&result.output.diagnostics));
+}

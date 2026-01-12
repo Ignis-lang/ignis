@@ -310,6 +310,37 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::TypeOf(inner) => {
         self.check_node(inner);
       },
+
+      // Records and enums
+      HIRKind::FieldAccess { base, .. } => {
+        self.check_node(base);
+      },
+
+      HIRKind::RecordInit { fields, .. } => {
+        for (_, field_value) in fields {
+          self.check_node(field_value);
+        }
+      },
+
+      HIRKind::MethodCall { receiver, args, .. } => {
+        if let Some(recv) = receiver {
+          self.check_node(recv);
+        }
+        for &arg in &args {
+          self.check_node(arg);
+        }
+      },
+
+      HIRKind::EnumVariant { payload, .. } => {
+        for &p in &payload {
+          self.check_node(p);
+        }
+      },
+
+      HIRKind::StaticAccess { def } => {
+        // Check if static variable is still valid
+        self.check_use(def, span);
+      },
     }
   }
 

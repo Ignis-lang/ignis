@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{Id, Store};
+use crate::{Id, Store, definition::DefinitionId};
 
 pub type TypeId = Id<Type>;
 
@@ -40,6 +40,12 @@ pub enum Type {
     is_variadic: bool,
   },
 
+  /// User-defined record type
+  Record(DefinitionId),
+
+  /// User-defined enum type
+  Enum(DefinitionId),
+
   // TODO: Implement Inferenced(InferenceVariable)
   // Inferenced(InferenceVariable),
   Error,
@@ -73,6 +79,8 @@ pub struct TypeStore {
   vectors: HashMap<VectorKey, TypeId>,
   tuples: HashMap<Vec<TypeId>, TypeId>,
   functions: HashMap<FunctionKey, TypeId>,
+  records: HashMap<DefinitionId, TypeId>,
+  enums: HashMap<DefinitionId, TypeId>,
 }
 
 impl TypeStore {
@@ -85,6 +93,8 @@ impl TypeStore {
       vectors: HashMap::new(),
       tuples: HashMap::new(),
       functions: HashMap::new(),
+      records: HashMap::new(),
+      enums: HashMap::new(),
     };
     store.init_primitives();
     store
@@ -189,6 +199,32 @@ impl TypeStore {
       is_variadic,
     });
     self.functions.insert(key, id);
+    id
+  }
+
+  /// Create or get a record type
+  pub fn record(
+    &mut self,
+    def_id: DefinitionId,
+  ) -> TypeId {
+    if let Some(&id) = self.records.get(&def_id) {
+      return id;
+    }
+    let id = self.types.alloc(Type::Record(def_id));
+    self.records.insert(def_id, id);
+    id
+  }
+
+  /// Create or get an enum type
+  pub fn enum_type(
+    &mut self,
+    def_id: DefinitionId,
+  ) -> TypeId {
+    if let Some(&id) = self.enums.get(&def_id) {
+      return id;
+    }
+    let id = self.types.alloc(Type::Enum(def_id));
+    self.enums.insert(def_id, id);
     id
   }
 
@@ -391,6 +427,9 @@ impl TypeStore {
       Type::String | Type::Unknown => false,
 
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy(e)),
+
+      // Records and enums are Copy by default (for v0.2, no heap fields)
+      Type::Record(_) | Type::Enum(_) => true,
     }
   }
 

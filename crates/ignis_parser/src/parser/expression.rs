@@ -1,7 +1,7 @@
 use ignis_ast::{
   ASTNode, NodeId,
   expressions::{
-    ASTExpression,
+    ASTExpression, ASTAccessOp, ASTMemberAccess, ASTRecordInit, ASTRecordInitField,
     assignment::{ASTAssignment, ASTAssignmentOperator},
     binary::{ASTBinary, ASTBinaryOperator},
     call::ASTCallExpression,
@@ -19,7 +19,7 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_token::{token::Token, token_types::TokenType};
-use ignis_type::{span::Span, value::IgnisLiteralValue};
+use ignis_type::{span::Span, symbol::SymbolId, value::IgnisLiteralValue};
 
 use super::{IgnisParser, ParserResult};
 
@@ -50,6 +50,12 @@ impl IgnisParser {
 
       if self.at(TokenType::LeftBrack) {
         left = self.parse_index(left)?;
+        continue;
+      }
+
+      // Member access with . (instance)
+      if self.at(TokenType::Dot) {
+        left = self.parse_member_access(left, ASTAccessOp::Dot)?;
         continue;
       }
 
@@ -170,20 +176,32 @@ impl IgnisParser {
       TokenType::Identifier => {
         let first = token.clone();
         let start = first.span.clone();
-        let mut segments = vec![self.insert_symbol(&first)];
+        let mut segments: Vec<(SymbolId, Span)> = vec![(self.insert_symbol(&first), first.span.clone())];
 
         while self.eat(TokenType::DoubleColon) {
           let ident = self.expect(TokenType::Identifier)?.clone();
-          segments.push(self.insert_symbol(&ident));
+          segments.push((self.insert_symbol(&ident), ident.span.clone()));
+        }
+
+        // Check for record init: Type { field: value, ... }
+        if self.lookahead_record_init() {
+          return self.parse_record_init(segments);
         }
 
         if segments.len() == 1 {
-          Ok(self.allocate_expression(ASTExpression::Variable(ASTVariableExpression::new(segments[0], start))))
+          Ok(self.allocate_expression(ASTExpression::Variable(ASTVariableExpression::new(segments[0].0, start))))
         } else {
           let end = self.previous().span.clone();
           let span = Span::merge(&start, &end);
-          Ok(self.allocate_expression(ASTExpression::Path(ASTPath::new(segments, span))))
+          let symbol_ids: Vec<SymbolId> = segments.into_iter().map(|(id, _)| id).collect();
+          Ok(self.allocate_expression(ASTExpression::Path(ASTPath::new(symbol_ids, span))))
         }
+      },
+      TokenType::Self_ => {
+        // `self` keyword as variable reference
+        let span = token.span.clone();
+        let sym = self.insert_symbol(&token);
+        Ok(self.allocate_expression(ASTExpression::Variable(ASTVariableExpression::new(sym, span))))
       },
       TokenType::LeftParen => {
         let expression = self.parse_expression(0)?;
@@ -279,6 +297,70 @@ impl IgnisParser {
     expression: ASTExpression,
   ) -> NodeId {
     self.nodes.alloc(ASTNode::Expression(expression))
+  }
+
+  /// Parse member access: object.member or Type::member
+  fn parse_member_access(
+    &mut self,
+    object: NodeId,
+    op: ASTAccessOp,
+  ) -> ParserResult<NodeId> {
+    self.bump(); // consume . or ::
+
+    let member_token = self.expect(TokenType::Identifier)?.clone();
+    let member = self.insert_symbol(&member_token);
+
+    let span = Span::merge(self.get_span(&object), &member_token.span);
+    Ok(self.allocate_expression(ASTExpression::MemberAccess(ASTMemberAccess::new(object, op, member, span))))
+  }
+
+  /// Check if current position looks like a record init: { } or { identifier :
+  fn lookahead_record_init(&self) -> bool {
+    if !self.at(TokenType::LeftBrace) {
+      return false;
+    }
+
+    let next = self.peek_nth(1);
+    if next.type_ == TokenType::RightBrace {
+      return true; // Empty: Foo {}
+    }
+    if next.type_ != TokenType::Identifier {
+      return false;
+    }
+    self.peek_nth(2).type_ == TokenType::Colon
+  }
+
+  /// Parse record init expression: Type { field: value, ... }
+  fn parse_record_init(
+    &mut self,
+    path: Vec<(SymbolId, Span)>,
+  ) -> ParserResult<NodeId> {
+    let start = path
+      .first()
+      .map(|p| p.1.clone())
+      .unwrap_or_else(|| self.peek().span.clone());
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut fields = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      let field_name_token = self.expect(TokenType::Identifier)?.clone();
+      let field_name = self.insert_symbol(&field_name_token);
+      self.expect(TokenType::Colon)?;
+      let value = self.parse_expression(0)?;
+
+      let field_span = Span::merge(&field_name_token.span, self.get_span(&value));
+      fields.push(ASTRecordInitField::new(field_name, value, field_span));
+
+      if !self.eat(TokenType::Comma) {
+        break;
+      }
+    }
+
+    let end = self.expect(TokenType::RightBrace)?.clone();
+    let span = Span::merge(&start, &end.span);
+
+    Ok(self.allocate_expression(ASTExpression::RecordInit(ASTRecordInit::new(path, fields, span))))
   }
 }
 

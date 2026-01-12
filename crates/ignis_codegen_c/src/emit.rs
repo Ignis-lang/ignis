@@ -4,7 +4,7 @@ use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, Terminator};
 use ignis_type::{
-  definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, RecordDefinition},
   namespace::NamespaceStore,
   symbol::SymbolTable,
   types::{Type, TypeId, TypeStore},
@@ -45,10 +45,137 @@ impl<'a> CEmitter<'a> {
 
   pub fn emit(mut self) -> String {
     self.emit_headers();
+    self.emit_type_forward_declarations();
+    self.emit_type_definitions();
+    self.emit_static_constants();
     self.emit_extern_declarations();
     self.emit_forward_declarations();
     self.emit_functions();
     self.output
+  }
+
+  /// Emit forward declarations for all record and enum types.
+  /// This allows structs to reference each other (e.g., for recursive types).
+  fn emit_type_forward_declarations(&mut self) {
+    let mut type_defs: Vec<_> = self
+      .defs
+      .iter()
+      .filter(|(_, def)| matches!(def.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_)))
+      .collect();
+
+    if type_defs.is_empty() {
+      return;
+    }
+
+    type_defs.sort_by_key(|(id, _)| id.index());
+
+    writeln!(self.output, "// Type forward declarations").unwrap();
+    for (def_id, _) in &type_defs {
+      let name = self.type_struct_name(*def_id);
+      writeln!(self.output, "typedef struct {} {};", name, name).unwrap();
+    }
+    writeln!(self.output).unwrap();
+  }
+
+  /// Emit struct definitions for all record and enum types.
+  fn emit_type_definitions(&mut self) {
+    let mut type_defs: Vec<_> = self
+      .defs
+      .iter()
+      .filter(|(_, def)| matches!(def.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_)))
+      .collect();
+
+    if type_defs.is_empty() {
+      return;
+    }
+
+    type_defs.sort_by_key(|(id, _)| id.index());
+
+    writeln!(self.output, "// Type definitions").unwrap();
+    for (def_id, def) in type_defs {
+      match &def.kind {
+        DefinitionKind::Record(rd) => self.emit_record_definition(def_id, rd),
+        DefinitionKind::Enum(ed) => self.emit_enum_definition(def_id, ed),
+        _ => {},
+      }
+    }
+    writeln!(self.output).unwrap();
+  }
+
+  /// Emit a struct definition for a record type.
+  fn emit_record_definition(
+    &mut self,
+    def_id: DefinitionId,
+    rd: &RecordDefinition,
+  ) {
+    let name = self.type_struct_name(def_id);
+
+    writeln!(self.output, "struct {} {{", name).unwrap();
+
+    if rd.fields.is_empty() {
+      // C doesn't allow empty structs, add a dummy field
+      writeln!(self.output, "    char _empty;").unwrap();
+    } else {
+      for field in &rd.fields {
+        let field_ty = self.format_type(field.type_id);
+        writeln!(self.output, "    {} field_{};", field_ty, field.index).unwrap();
+      }
+    }
+
+    writeln!(self.output, "}};").unwrap();
+  }
+
+  /// Emit a tagged union definition for an enum type.
+  fn emit_enum_definition(
+    &mut self,
+    def_id: DefinitionId,
+    ed: &EnumDefinition,
+  ) {
+    let name = self.type_struct_name(def_id);
+
+    writeln!(self.output, "struct {} {{", name).unwrap();
+
+    // Tag field
+    let tag_ty = self.format_type(ed.tag_type);
+    writeln!(self.output, "    {} tag;", tag_ty).unwrap();
+
+    // Check if any variant has payload
+    let has_payload = ed.variants.iter().any(|v| !v.payload.is_empty());
+
+    if has_payload {
+      writeln!(self.output, "    union {{").unwrap();
+
+      for variant in &ed.variants {
+        if variant.payload.is_empty() {
+          continue;
+        }
+
+        writeln!(self.output, "        struct {{").unwrap();
+        for (i, &payload_ty) in variant.payload.iter().enumerate() {
+          let ty = self.format_type(payload_ty);
+          writeln!(self.output, "            {} field_{};", ty, i).unwrap();
+        }
+        writeln!(self.output, "        }} variant_{};", variant.tag_value).unwrap();
+      }
+
+      writeln!(self.output, "    }} payload;").unwrap();
+    }
+
+    writeln!(self.output, "}};").unwrap();
+
+    // Emit tag constants as #defines
+    for variant in &ed.variants {
+      let variant_name = self.symbols.get(&variant.name);
+      writeln!(self.output, "#define {}_{} {}", name, variant_name, variant.tag_value).unwrap();
+    }
+  }
+
+  /// Get the C struct name for a type definition (record or enum).
+  fn type_struct_name(
+    &self,
+    def_id: DefinitionId,
+  ) -> String {
+    self.build_mangled_name(def_id)
   }
 
   fn emit_headers(&mut self) {
@@ -62,6 +189,87 @@ impl<'a> CEmitter<'a> {
 
     if !self.headers.is_empty() {
       writeln!(self.output).unwrap();
+    }
+  }
+
+  /// Emit static constants from records and enums.
+  fn emit_static_constants(&mut self) {
+    let mut constants: Vec<(DefinitionId, String, String)> = Vec::new();
+
+    // Collect static fields from records
+    for (def_id, def) in self.defs.iter() {
+      if let DefinitionKind::Record(rd) = &def.kind {
+        let type_name = self.build_mangled_name(def_id);
+        for (&field_name_sym, &const_def_id) in &rd.static_fields {
+          if let DefinitionKind::Constant(const_def) = &self.defs.get(&const_def_id).kind {
+            if let Some(value) = &const_def.value {
+              let field_name = self.symbols.get(&field_name_sym);
+              let c_type = self.format_type(const_def.type_id);
+              let c_value = self.const_value_to_c(value, &const_def.type_id);
+              let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
+              constants.push((
+                const_def_id,
+                format!("static const {} {} = {};", c_type, full_name, c_value),
+                full_name,
+              ));
+            }
+          }
+        }
+      }
+      if let DefinitionKind::Enum(ed) = &def.kind {
+        let type_name = self.build_mangled_name(def_id);
+        for (&field_name_sym, &const_def_id) in &ed.static_fields {
+          if let DefinitionKind::Constant(const_def) = &self.defs.get(&const_def_id).kind {
+            if let Some(value) = &const_def.value {
+              let field_name = self.symbols.get(&field_name_sym);
+              let c_type = self.format_type(const_def.type_id);
+              let c_value = self.const_value_to_c(value, &const_def.type_id);
+              let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
+              constants.push((
+                const_def_id,
+                format!("static const {} {} = {};", c_type, full_name, c_value),
+                full_name,
+              ));
+            }
+          }
+        }
+      }
+    }
+
+    if constants.is_empty() {
+      return;
+    }
+
+    constants.sort_by_key(|(id, _, _)| id.index());
+
+    writeln!(self.output, "// Static constants").unwrap();
+    for (_, decl, _) in &constants {
+      writeln!(self.output, "{}", decl).unwrap();
+    }
+    writeln!(self.output).unwrap();
+  }
+
+  fn const_value_to_c(
+    &self,
+    value: &ignis_type::definition::ConstValue,
+    _type_id: &TypeId,
+  ) -> String {
+    use ignis_type::definition::ConstValue;
+    match value {
+      ConstValue::Int(i) => i.to_string(),
+      ConstValue::Float(f) => format!("{:.}", f.into_inner()),
+      ConstValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+      ConstValue::Char(c) => format!("'{}'", c.escape_default()),
+      ConstValue::String(s) => format!("\"{}\"", s.escape_default()),
+      ConstValue::Null => "NULL".to_string(),
+      ConstValue::Array(arr) => {
+        let elements: Vec<String> = arr.iter().map(|v| self.const_value_to_c(v, _type_id)).collect();
+        format!("{{{}}}", elements.join(", "))
+      },
+      ConstValue::Tuple(elems) => {
+        let elements: Vec<String> = elems.iter().map(|v| self.const_value_to_c(v, _type_id)).collect();
+        format!("{{{}}}", elements.join(", "))
+      },
     }
   }
 
@@ -384,6 +592,46 @@ impl<'a> CEmitter<'a> {
           },
         }
       },
+      Instr::GetFieldPtr {
+        dest,
+        base,
+        field_index,
+        ..
+      } => {
+        let b = self.format_operand(func, base);
+        // In C, we access record field via pointer: &(base->field_N) or &(base.field_N)
+        // Since base could be a value or pointer, use -> for pointer semantics
+        writeln!(self.output, "t{} = &(({}).field_{});", dest.index(), b, field_index).unwrap();
+      },
+      Instr::InitRecord { dest_ptr, fields, .. } => {
+        let p = self.format_operand(func, dest_ptr);
+
+        for (field_idx, field_value) in fields {
+          if field_idx > &0 {
+            write!(self.output, "    ").unwrap();
+          }
+          let v = self.format_operand(func, field_value);
+          writeln!(self.output, "({})->field_{} = {};", p, field_idx, v).unwrap();
+        }
+      },
+      Instr::InitEnumVariant {
+        dest_ptr,
+        variant_tag,
+        payload,
+        ..
+      } => {
+        let p = self.format_operand(func, dest_ptr);
+
+        // Set the tag
+        writeln!(self.output, "({})->tag = {};", p, variant_tag).unwrap();
+
+        // Set payload fields
+        for (i, payload_value) in payload.iter().enumerate() {
+          write!(self.output, "    ").unwrap();
+          let v = self.format_operand(func, payload_value);
+          writeln!(self.output, "({})->payload.variant_{}.field_{} = {};", p, variant_tag, i, v).unwrap();
+        }
+      },
     }
   }
 
@@ -628,6 +876,16 @@ impl<'a> CEmitter<'a> {
       },
       Type::Tuple(_) => "/* tuple */ void*".to_string(),
       Type::Function { .. } => "/* fn */ void*".to_string(),
+      Type::Record(def_id) => {
+        let def = self.defs.get(def_id);
+        let name = self.symbols.get(&def.name);
+        format!("struct {}", name)
+      },
+      Type::Enum(def_id) => {
+        let def = self.defs.get(def_id);
+        let name = self.symbols.get(&def.name);
+        format!("struct {}", name)
+      },
     }
   }
 
@@ -674,6 +932,21 @@ impl<'a> CEmitter<'a> {
     let def = self.defs.get(&def_id);
     let raw_name = self.symbols.get(&def.name).to_string();
 
+    // For methods and static fields, include owner type in mangled name to avoid collisions.
+    // e.g., User.getName() -> User_getName, Admin.getName() -> Admin_getName
+    // e.g., Config::MAX_SIZE -> Config_MAX__SIZE
+    let owner_type_prefix = match &def.kind {
+      DefinitionKind::Method(md) => {
+        let owner_def = self.defs.get(&md.owner_type);
+        Some(Self::escape_ident(self.symbols.get(&owner_def.name)))
+      },
+      DefinitionKind::Constant(cd) => cd.owner_type.as_ref().map(|owner_id| {
+        let owner_def = self.defs.get(owner_id);
+        Self::escape_ident(self.symbols.get(&owner_def.name))
+      }),
+      _ => None,
+    };
+
     match def.owner_namespace {
       Some(ns_id) => {
         let ns_path = self.namespaces.full_path(ns_id);
@@ -681,10 +954,21 @@ impl<'a> CEmitter<'a> {
           .iter()
           .map(|s| Self::escape_ident(self.symbols.get(s)))
           .collect();
+
+        if let Some(type_prefix) = owner_type_prefix {
+          parts.push(type_prefix);
+        }
+
         parts.push(Self::escape_ident(&raw_name));
         parts.join("_")
       },
-      None => Self::escape_ident(&raw_name),
+      None => {
+        if let Some(type_prefix) = owner_type_prefix {
+          format!("{}_{}", type_prefix, Self::escape_ident(&raw_name))
+        } else {
+          Self::escape_ident(&raw_name)
+        }
+      },
     }
   }
 }
@@ -735,6 +1019,14 @@ pub fn format_c_type(
     },
     Type::Tuple(_) => "void*".to_string(),
     Type::Function { .. } => "void*".to_string(),
+    Type::Record(_) => {
+      // TODO: emit proper struct name (requires DefinitionStore)
+      "void*".to_string()
+    },
+    Type::Enum(_) => {
+      // TODO: emit proper tagged union name (requires DefinitionStore)
+      "void*".to_string()
+    },
   }
 }
 

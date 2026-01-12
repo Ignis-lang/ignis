@@ -105,8 +105,70 @@ pub enum DiagnosticMessage {
     span: Span,
     previous_span: Span,
   },
+  TypeAlreadyDefined {
+    name: String,
+    span: Span,
+    previous_span: Span,
+  },
+  TypeAliasCycle {
+    name: String,
+    span: Span,
+  },
   UndefinedType {
     name: String,
+    span: Span,
+  },
+  // Record/Enum Type Errors
+  FieldNotFound {
+    field: String,
+    type_name: String,
+    span: Span,
+  },
+  MethodMustBeCalled {
+    method: String,
+    span: Span,
+  },
+  DotAccessOnEnum {
+    span: Span,
+  },
+  DotAccessOnNonRecord {
+    type_name: String,
+    span: Span,
+  },
+  StaticAccessOnNonType {
+    span: Span,
+  },
+  StaticMemberNotFound {
+    member: String,
+    type_name: String,
+    span: Span,
+  },
+  EnumVariantRequiresPayload {
+    variant: String,
+    expected: usize,
+    span: Span,
+  },
+  MemberNotFoundInNamespace {
+    member: String,
+    namespace: String,
+    span: Span,
+  },
+  NotARecord {
+    name: String,
+    span: Span,
+  },
+  UnknownField {
+    field: String,
+    type_name: String,
+    span: Span,
+  },
+  DuplicateFieldInit {
+    field: String,
+    span: Span,
+  },
+  MissingFieldInit {
+    field: String,
+    type_name: String,
     span: Span,
   },
   // Type System Errors
@@ -229,6 +291,15 @@ pub enum DiagnosticMessage {
     name: String,
     span: Span,
   },
+  EnumNotFound {
+    name: String,
+    span: Span,
+  },
+  EnumVariantNotFound {
+    enum_name: String,
+    variant: String,
+    span: Span,
+  },
   // Borrow checker errors
   BorrowConflictImmWhileMutable {
     var_name: String,
@@ -322,6 +393,21 @@ pub enum DiagnosticMessage {
   InvalidSizeOfOperand {
     span: Span,
   },
+  // Static field errors
+  StaticFieldRequiresInit {
+    field: String,
+    type_name: String,
+    span: Span,
+  },
+  StaticOnEnumVariant {
+    variant: String,
+    span: Span,
+  },
+  StaticFieldNotConst {
+    field: String,
+    type_name: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -381,7 +467,47 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UndeclaredVariable { name, .. } => write!(f, "Undeclared variable '{}'", name),
       DiagnosticMessage::VariableAlreadyDefined { name, .. } => write!(f, "Variable '{}' is already defined", name),
       DiagnosticMessage::FunctionAlreadyDefined { name, .. } => write!(f, "Function '{}' is already defined", name),
+      DiagnosticMessage::TypeAlreadyDefined { name, .. } => write!(f, "Type '{}' is already defined", name),
+      DiagnosticMessage::TypeAliasCycle { name, .. } => write!(f, "Type alias '{}' creates a cycle", name),
       DiagnosticMessage::UndefinedType { name, .. } => write!(f, "Undefined type '{}'", name),
+
+      // Record/Enum Type Errors
+      DiagnosticMessage::FieldNotFound { field, type_name, .. } => {
+        write!(f, "Field '{}' not found in type '{}'", field, type_name)
+      },
+      DiagnosticMessage::MethodMustBeCalled { method, .. } => {
+        write!(f, "Method '{}' must be called", method)
+      },
+      DiagnosticMessage::DotAccessOnEnum { .. } => {
+        write!(f, "Cannot use '.' on enum value, use '::' for static members")
+      },
+      DiagnosticMessage::DotAccessOnNonRecord { type_name, .. } => {
+        write!(f, "Cannot access field of non-record type '{}'", type_name)
+      },
+      DiagnosticMessage::StaticAccessOnNonType { .. } => {
+        write!(f, "'::' can only be used on types, not values")
+      },
+      DiagnosticMessage::StaticMemberNotFound { member, type_name, .. } => {
+        write!(f, "No static member '{}' in type '{}'", member, type_name)
+      },
+      DiagnosticMessage::EnumVariantRequiresPayload { variant, expected, .. } => {
+        write!(f, "Enum variant '{}' requires {} argument(s)", variant, expected)
+      },
+      DiagnosticMessage::MemberNotFoundInNamespace { member, namespace, .. } => {
+        write!(f, "Member '{}' not found in namespace '{}'", member, namespace)
+      },
+      DiagnosticMessage::NotARecord { name, .. } => {
+        write!(f, "'{}' is not a record type", name)
+      },
+      DiagnosticMessage::UnknownField { field, type_name, .. } => {
+        write!(f, "Unknown field '{}' in record '{}'", field, type_name)
+      },
+      DiagnosticMessage::DuplicateFieldInit { field, .. } => {
+        write!(f, "Duplicate field '{}' in initializer", field)
+      },
+      DiagnosticMessage::MissingFieldInit { field, type_name, .. } => {
+        write!(f, "Missing field '{}' in record '{}' initializer", field, type_name)
+      },
 
       // Type System Errors
       DiagnosticMessage::ImmutableAssignment { var_name, .. } => {
@@ -505,6 +631,12 @@ impl fmt::Display for DiagnosticMessage {
           name
         )
       },
+      DiagnosticMessage::EnumNotFound { name, .. } => {
+        write!(f, "'{}' is not an enum", name)
+      },
+      DiagnosticMessage::EnumVariantNotFound { enum_name, variant, .. } => {
+        write!(f, "Enum '{}' has no variant named '{}'", enum_name, variant)
+      },
 
       // Borrow checker errors
       DiagnosticMessage::BorrowConflictImmWhileMutable { var_name, .. } => {
@@ -595,6 +727,19 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::InvalidSizeOfOperand { .. } => {
         write!(f, "sizeOf(unknown) requires explicit type cast")
       },
+
+      // Static field errors
+      DiagnosticMessage::StaticFieldRequiresInit { field, type_name, .. } => {
+        write!(f, "Static field '{}' in '{}' requires an initializer", field, type_name)
+      },
+
+      DiagnosticMessage::StaticOnEnumVariant { variant, .. } => {
+        write!(f, "Enum variant '{}' cannot be declared static", variant)
+      },
+
+      DiagnosticMessage::StaticFieldNotConst { field, type_name, .. } => {
+        write!(f, "Static field '{}' in '{}' must be initialized with a constant expression", field, type_name)
+      },
     }
   }
 }
@@ -642,7 +787,21 @@ impl DiagnosticMessage {
       DiagnosticMessage::UndeclaredVariable { span, .. }
       | DiagnosticMessage::VariableAlreadyDefined { span, .. }
       | DiagnosticMessage::FunctionAlreadyDefined { span, .. }
+      | DiagnosticMessage::TypeAlreadyDefined { span, .. }
+      | DiagnosticMessage::TypeAliasCycle { span, .. }
       | DiagnosticMessage::UndefinedType { span, .. }
+      | DiagnosticMessage::FieldNotFound { span, .. }
+      | DiagnosticMessage::MethodMustBeCalled { span, .. }
+      | DiagnosticMessage::DotAccessOnEnum { span, .. }
+      | DiagnosticMessage::DotAccessOnNonRecord { span, .. }
+      | DiagnosticMessage::StaticAccessOnNonType { span, .. }
+      | DiagnosticMessage::StaticMemberNotFound { span, .. }
+      | DiagnosticMessage::EnumVariantRequiresPayload { span, .. }
+      | DiagnosticMessage::MemberNotFoundInNamespace { span, .. }
+      | DiagnosticMessage::NotARecord { span, .. }
+      | DiagnosticMessage::UnknownField { span, .. }
+      | DiagnosticMessage::DuplicateFieldInit { span, .. }
+      | DiagnosticMessage::MissingFieldInit { span, .. }
       | DiagnosticMessage::ImmutableAssignment { span, .. }
       | DiagnosticMessage::MutableReferenceToImmutable { span, .. }
       | DiagnosticMessage::InvalidCast { span, .. }
@@ -669,6 +828,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UndeclaredIdentifier { span, .. }
       | DiagnosticMessage::FunctionPathNotAsCallee { span, .. }
       | DiagnosticMessage::UnsupportedPathExpression { span, .. }
+      | DiagnosticMessage::EnumNotFound { span, .. }
+      | DiagnosticMessage::EnumVariantNotFound { span, .. }
       | DiagnosticMessage::BorrowConflictImmWhileMutable { span, .. }
       | DiagnosticMessage::BorrowConflictMutWhileImmutable { span, .. }
       | DiagnosticMessage::BorrowConflictMutWhileMutable { span, .. }
@@ -692,7 +853,10 @@ impl DiagnosticMessage {
       | DiagnosticMessage::InconsistentMoveInBranches { span, .. }
       | DiagnosticMessage::PossibleLeakToFFI { span, .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { span, .. }
-      | DiagnosticMessage::InvalidSizeOfOperand { span, .. } => span.clone(),
+      | DiagnosticMessage::InvalidSizeOfOperand { span, .. }
+      | DiagnosticMessage::StaticFieldRequiresInit { span, .. }
+      | DiagnosticMessage::StaticOnEnumVariant { span, .. }
+      | DiagnosticMessage::StaticFieldNotConst { span, .. } => span.clone(),
     }
   }
 
@@ -733,7 +897,21 @@ impl DiagnosticMessage {
       DiagnosticMessage::UndeclaredVariable { .. } => "I0033",
       DiagnosticMessage::VariableAlreadyDefined { .. } => "I0041",
       DiagnosticMessage::FunctionAlreadyDefined { .. } => "I0042",
+      DiagnosticMessage::TypeAlreadyDefined { .. } => "A0052",
+      DiagnosticMessage::TypeAliasCycle { .. } => "A0066",
       DiagnosticMessage::UndefinedType { .. } => "I0043",
+      DiagnosticMessage::FieldNotFound { .. } => "A0054",
+      DiagnosticMessage::MethodMustBeCalled { .. } => "A0061",
+      DiagnosticMessage::DotAccessOnEnum { .. } => "A0060",
+      DiagnosticMessage::DotAccessOnNonRecord { .. } => "A0060",
+      DiagnosticMessage::StaticAccessOnNonType { .. } => "A0063",
+      DiagnosticMessage::StaticMemberNotFound { .. } => "A0062",
+      DiagnosticMessage::EnumVariantRequiresPayload { .. } => "A0057",
+      DiagnosticMessage::MemberNotFoundInNamespace { .. } => "A0062",
+      DiagnosticMessage::NotARecord { .. } => "A0053",
+      DiagnosticMessage::UnknownField { .. } => "A0056",
+      DiagnosticMessage::DuplicateFieldInit { .. } => "A0064",
+      DiagnosticMessage::MissingFieldInit { .. } => "A0055",
       DiagnosticMessage::ExpectedInteger(_) => "I0044",
       DiagnosticMessage::ExpectedFloat(_) => "I0045",
       DiagnosticMessage::ExpectedHex(_) => "I0046",
@@ -764,6 +942,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::UndeclaredIdentifier { .. } => "A0035",
       DiagnosticMessage::FunctionPathNotAsCallee { .. } => "A0050",
       DiagnosticMessage::UnsupportedPathExpression { .. } => "A0051",
+      DiagnosticMessage::EnumNotFound { .. } => "A0058",
+      DiagnosticMessage::EnumVariantNotFound { .. } => "A0059",
       DiagnosticMessage::BorrowConflictImmWhileMutable { .. } => "A0036",
       DiagnosticMessage::BorrowConflictMutWhileImmutable { .. } => "A0037",
       DiagnosticMessage::BorrowConflictMutWhileMutable { .. } => "A0038",
@@ -777,6 +957,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
       DiagnosticMessage::IntegerOverflow { .. } => "A0046",
       DiagnosticMessage::InvalidSizeOfOperand { .. } => "A0049",
+      DiagnosticMessage::StaticFieldRequiresInit { .. } => "A0065",
+      DiagnosticMessage::StaticOnEnumVariant { .. } => "A0067",
+      DiagnosticMessage::StaticFieldNotConst { .. } => "A0068",
       DiagnosticMessage::ModuleNotFound { .. } => "M0001",
       DiagnosticMessage::SymbolNotExported { .. } => "M0002",
       DiagnosticMessage::ImportShadowsLocal { .. } => "M0003",
@@ -805,6 +988,7 @@ impl DiagnosticMessage {
     match self {
       DiagnosticMessage::VariableAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::FunctionAlreadyDefined { previous_span, .. }
+      | DiagnosticMessage::TypeAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::ParameterAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::ConstantAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::ImportShadowsLocal { previous_span, .. } => {

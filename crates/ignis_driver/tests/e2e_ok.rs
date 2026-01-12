@@ -577,3 +577,243 @@ function main(): i32 {
 "#,
   );
 }
+
+// ============================================================================
+// Type Alias Tests
+// ============================================================================
+
+#[test]
+fn e2e_type_alias_basic() {
+  e2e_test(
+    "type_alias_basic",
+    r#"
+type Number = i32;
+
+function twice(x: Number): Number {
+    return x * 2;
+}
+
+function main(): i32 {
+    let n: Number = 21;
+    return twice(n);
+}
+"#,
+  );
+}
+
+// ============================================================================
+// Record Tests
+// ============================================================================
+
+#[test]
+fn e2e_record_create_access() {
+  e2e_test(
+    "record_create_access",
+    r#"
+record Point {
+    x: i32;
+    y: i32;
+}
+
+function main(): i32 {
+    let p: Point = Point { x: 10, y: 32 };
+    return p.x + p.y;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_record_instance_method() {
+  e2e_test(
+    "record_instance_method",
+    r#"
+record Counter {
+    value: i32;
+
+    get(): i32 {
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let c: Counter = Counter { value: 42 };
+    return c.get();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_record_static_method() {
+  e2e_test(
+    "record_static_method",
+    r#"
+record Point {
+    x: i32;
+    y: i32;
+
+    static origin(): Point {
+        return Point { x: 0, y: 0 };
+    }
+}
+
+function main(): i32 {
+    let p: Point = Point::origin();
+    return p.x + p.y;
+}
+"#,
+  );
+}
+
+// ============================================================================
+// Enum Tests
+// ============================================================================
+
+#[test]
+fn e2e_enum_unit_variant() {
+  e2e_test(
+    "enum_unit_variant",
+    r#"
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+function main(): i32 {
+    let c: Color = Color::Red;
+    return 42;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_enum_with_payload() {
+  e2e_test(
+    "enum_with_payload",
+    r#"
+enum Option {
+    Some(i32),
+    None,
+}
+
+function wrap(x: i32): Option {
+    return Option::Some(x);
+}
+
+function main(): i32 {
+    let opt: Option = wrap(42);
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_record_static_field() {
+  e2e_test(
+    "record_static_field",
+    r#"
+record Config {
+    static MAX_SIZE: i32 = 1024;
+}
+
+function main(): i32 {
+    return Config::MAX_SIZE;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_enum_static_method() {
+  e2e_test(
+    "enum_static_method",
+    r#"
+enum Result {
+    Ok(i32),
+    Err,
+
+    success(value: i32): Result {
+        return Result::Ok(value);
+    }
+}
+
+function main(): i32 {
+    let r: Result = Result::success(42);
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_enum_static_field() {
+  e2e_test(
+    "enum_static_field",
+    r#"
+enum Priority {
+    Low,
+    High,
+
+    DEFAULT_LEVEL: i32 = 1;
+}
+
+function main(): i32 {
+    return Priority::DEFAULT_LEVEL;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_modifiers_parsed() {
+  // public/private modifiers are parsed but ignored in v0.2
+  e2e_test(
+    "modifiers_parsed",
+    r#"
+record User {
+    public name: i32;
+    private age: i32;
+
+    public getValue(): i32 {
+        return self.name + self.age;
+    }
+
+    private static secret(): i32 {
+        return 42;
+    }
+}
+
+function main(): i32 {
+    let u: User = User { name: 10, age: 5 };
+    return u.getValue() + User::secret();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_enum_explicit_static() {
+  // explicit "static" on enum method is redundant but valid (ignored)
+  e2e_test(
+    "enum_explicit_static",
+    r#"
+enum Option {
+    Some(i32),
+    None,
+
+    static none(): Option {
+        return Option::None;
+    }
+}
+
+function main(): i32 {
+    let opt: Option = Option::none();
+    return 0;
+}
+"#,
+  );
+}

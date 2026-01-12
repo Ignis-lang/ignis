@@ -1,7 +1,9 @@
 use ignis_ast::{
   NodeId,
+  metadata::ASTMetadata,
   statements::{
-    ASTStatement,
+    ASTStatement, ASTEnum, ASTEnumField, ASTEnumItem, ASTEnumVariant, ASTMethod, ASTRecord, ASTRecordField,
+    ASTRecordItem, ASTTypeAlias,
     const_statement::ASTConstant,
     export_statement::ASTExport,
     extern_statement::ASTExtern,
@@ -9,6 +11,7 @@ use ignis_ast::{
     import_statement::ASTImport,
     namespace_statement::ASTNamespace,
   },
+  type_::IgnisTypeSyntax,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_token::token_types::TokenType;
@@ -51,6 +54,9 @@ impl super::IgnisParser {
       TokenType::Const => self.parse_constant_declaration(),
       TokenType::Extern => self.parse_extern_declaration(),
       TokenType::Namespace => self.parse_namespace_declaration(),
+      TokenType::Type => self.parse_type_alias_declaration(),
+      TokenType::Record => self.parse_record_declaration(),
+      TokenType::Enum => self.parse_enum_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -162,6 +168,9 @@ impl super::IgnisParser {
       || self.at(TokenType::Const)
       || self.at(TokenType::Extern)
       || self.at(TokenType::Namespace)
+      || self.at(TokenType::Type)
+      || self.at(TokenType::Record)
+      || self.at(TokenType::Enum)
     {
       let declaration = self.parse_declaration_inner_after_export()?;
       let span = Span::merge(&keyword.span, self.get_span(&declaration));
@@ -185,6 +194,9 @@ impl super::IgnisParser {
       TokenType::Const => self.parse_constant_declaration(),
       TokenType::Extern => self.parse_extern_declaration(),
       TokenType::Namespace => self.parse_namespace_declaration(),
+      TokenType::Type => self.parse_type_alias_declaration(),
+      TokenType::Record => self.parse_record_declaration(),
+      TokenType::Enum => self.parse_enum_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -243,6 +255,9 @@ impl super::IgnisParser {
       TokenType::Const => self.parse_constant_declaration(),
       TokenType::Namespace => self.parse_namespace_declaration(),
       TokenType::Extern => self.parse_extern_declaration(),
+      TokenType::Type => self.parse_type_alias_declaration(),
+      TokenType::Record => self.parse_record_declaration(),
+      TokenType::Enum => self.parse_enum_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -292,6 +307,285 @@ impl super::IgnisParser {
     let function = ASTFunction::new(signature, None);
 
     Ok(self.allocate_statement(ASTStatement::Function(function)))
+  }
+
+  // =========================================================================
+  // TYPE ALIAS, RECORD, ENUM DECLARATIONS
+  // =========================================================================
+
+  /// type Name = <type>;
+  fn parse_type_alias_declaration(&mut self) -> ParserResult<NodeId> {
+    let start = self.expect(TokenType::Type)?.span.clone();
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    self.expect(TokenType::Equal)?;
+
+    let target = self.parse_type_syntax()?;
+    let end = self.expect(TokenType::SemiColon)?.clone();
+
+    let span = Span::merge(&start, &end.span);
+    Ok(self.allocate_statement(ASTStatement::TypeAlias(ASTTypeAlias::new(name, target, span))))
+  }
+
+  /// Parse member modifiers: static, public, private
+  fn parse_member_modifiers(&mut self) -> ASTMetadata {
+    let mut meta = ASTMetadata::NONE;
+
+    loop {
+      match self.peek().type_ {
+        TokenType::Static => {
+          meta |= ASTMetadata::STATIC;
+          self.bump();
+        },
+        TokenType::Public => {
+          meta |= ASTMetadata::PUBLIC;
+          self.bump();
+        },
+        TokenType::Private => {
+          meta |= ASTMetadata::PRIVATE;
+          self.bump();
+        },
+        _ => break,
+      }
+    }
+
+    meta
+  }
+
+  /// record Name { fields, methods }
+  fn parse_record_declaration(&mut self) -> ParserResult<NodeId> {
+    let start = self.expect(TokenType::Record)?.span.clone();
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut items = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      let modifiers = self.parse_member_modifiers();
+
+      if !self.at(TokenType::Identifier) {
+        return Err(DiagnosticMessage::UnexpectedToken {
+          at: self.peek().span.clone(),
+        });
+      }
+
+      // Lookahead to distinguish method vs field:
+      // - identifier ( ... -> method
+      // - identifier : ... -> field
+      if self.peek_nth(1).type_ == TokenType::LeftParen {
+        let method = self.parse_method(modifiers)?;
+        items.push(ASTRecordItem::Method(method));
+      } else {
+        let field = self.parse_record_field(modifiers)?;
+        items.push(ASTRecordItem::Field(field));
+      }
+    }
+
+    let end = self.expect(TokenType::RightBrace)?.clone();
+    let span = Span::merge(&start, &end.span);
+
+    Ok(self.allocate_statement(ASTStatement::Record(ASTRecord::new(name, items, span))))
+  }
+
+  /// Method declaration (without 'function' keyword)
+  /// name(params): returnType { body }
+  fn parse_method(
+    &mut self,
+    modifiers: ASTMetadata,
+  ) -> ParserResult<ASTMethod> {
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    let parameters =
+      self.parse_delimited_list(TokenType::LeftParen, TokenType::RightParen, TokenType::Comma, |parser| {
+        parser.parse_parameter()
+      })?;
+
+    // Optional return type: : Type
+    let return_type = if self.eat(TokenType::Colon) {
+      self.parse_type_syntax()?
+    } else {
+      IgnisTypeSyntax::Void
+    };
+
+    let body = self.parse_block()?;
+
+    let span = Span::merge(&name_token.span, self.get_span(&body));
+
+    Ok(ASTMethod::new(name, parameters, return_type, body, modifiers, span))
+  }
+
+  /// Field declaration: name: type (= expr)?;
+  fn parse_record_field(
+    &mut self,
+    modifiers: ASTMetadata,
+  ) -> ParserResult<ASTRecordField> {
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    self.expect(TokenType::Colon)?;
+
+    let type_ = self.parse_type_syntax()?;
+
+    // Optional initializer (required for static fields)
+    let value = if self.eat(TokenType::Equal) {
+      Some(self.parse_expression(0)?)
+    } else {
+      None
+    };
+
+    let end = self.expect(TokenType::SemiColon)?.clone();
+    let span = Span::merge(&name_token.span, &end.span);
+
+    Ok(ASTRecordField::new(name, type_, value, modifiers, span))
+  }
+
+  /// enum Name { variants, methods, fields }
+  fn parse_enum_declaration(&mut self) -> ParserResult<NodeId> {
+    let start = self.expect(TokenType::Enum)?.span.clone();
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut items = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      let modifiers = self.parse_member_modifiers();
+
+      if !self.at(TokenType::Identifier) {
+        return Err(DiagnosticMessage::UnexpectedToken {
+          at: self.peek().span.clone(),
+        });
+      }
+
+      // Lookahead to distinguish variant vs method vs field:
+      // - identifier : ... -> field
+      // - identifier ( ... followed by : or { -> method
+      // - identifier or identifier ( types ) -> variant
+      let next = self.peek_nth(1).type_;
+
+      if next == TokenType::Colon {
+        // Field: name: type = expr;
+        let field = self.parse_enum_field(modifiers)?;
+        items.push(ASTEnumItem::Field(field));
+      } else if next == TokenType::LeftParen && self.is_method_ahead() {
+        // Method: name(...): type { }
+        let method = self.parse_method(modifiers)?;
+        items.push(ASTEnumItem::Method(method));
+      } else {
+        // Variant: Name or Name(Type, Type)
+        // Check for invalid static modifier on variant
+        if modifiers.contains(ASTMetadata::STATIC) {
+          let variant = self.parse_enum_variant()?;
+          self.diagnostics.push(DiagnosticMessage::StaticOnEnumVariant {
+            variant: self.symbols.borrow().get(&variant.name).to_string(),
+            span: variant.span.clone(),
+          });
+          items.push(ASTEnumItem::Variant(variant));
+        } else {
+          let variant = self.parse_enum_variant()?;
+          items.push(ASTEnumItem::Variant(variant));
+        }
+      }
+    }
+
+    let end = self.expect(TokenType::RightBrace)?.clone();
+    let span = Span::merge(&start, &end.span);
+
+    Ok(self.allocate_statement(ASTStatement::Enum(ASTEnum::new(name, items, span))))
+  }
+
+  /// Distinguish method from variant with payload:
+  /// - name(Type, Type) -> variant (types, no params with names)
+  /// - name(x: Type): Type { } -> method (params with names, has body)
+  ///
+  /// Heuristic: if after ) comes { or :, it's a method
+  fn is_method_ahead(&self) -> bool {
+    // We know peek_nth(1) is '(' - find its matching ')'
+    let mut depth = 1;
+    let mut i = 2; // start after the opening (
+
+    loop {
+      let tok = self.peek_nth(i).type_;
+
+      match tok {
+        TokenType::LeftParen => depth += 1,
+        TokenType::RightParen => {
+          depth -= 1;
+          if depth == 0 {
+            // Found the matching ) - see what follows
+            let after = self.peek_nth(i + 1).type_;
+            return after == TokenType::LeftBrace || after == TokenType::Colon;
+          }
+        },
+        TokenType::Eof => return false,
+        _ => {},
+      }
+
+      i += 1;
+      if i > 100 {
+        return false; // safety limit
+      }
+    }
+  }
+
+  /// Enum variant: Name or Name(Type, Type)
+  fn parse_enum_variant(&mut self) -> ParserResult<ASTEnumVariant> {
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+    let start_span = name_token.span.clone();
+
+    let mut payload = Vec::new();
+
+    let end_span = if self.eat(TokenType::LeftParen) {
+      // Payload types (no names, just types)
+      if !self.at(TokenType::RightParen) {
+        payload.push(self.parse_type_syntax()?);
+        while self.eat(TokenType::Comma) {
+          if self.at(TokenType::RightParen) {
+            break;
+          }
+          payload.push(self.parse_type_syntax()?);
+        }
+      }
+      self.expect(TokenType::RightParen)?.span.clone()
+    } else {
+      start_span.clone()
+    };
+
+    // Consume optional trailing comma
+    self.eat(TokenType::Comma);
+
+    let span = Span::merge(&start_span, &end_span);
+    Ok(ASTEnumVariant::new(name, payload, span))
+  }
+
+  /// Enum field: name: type = expr;
+  fn parse_enum_field(
+    &mut self,
+    modifiers: ASTMetadata,
+  ) -> ParserResult<ASTEnumField> {
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    self.expect(TokenType::Colon)?;
+
+    let type_ = self.parse_type_syntax()?;
+
+    let value = if self.eat(TokenType::Equal) {
+      Some(self.parse_expression(0)?)
+    } else {
+      None
+    };
+
+    let end = self.expect(TokenType::SemiColon)?.clone();
+    let span = Span::merge(&name_token.span, &end.span);
+
+    Ok(ASTEnumField::new(name, type_, value, modifiers, span))
   }
 }
 
