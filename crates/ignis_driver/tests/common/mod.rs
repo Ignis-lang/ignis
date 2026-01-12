@@ -59,7 +59,14 @@ fn compile_to_c(source: &str) -> Result<String, String> {
     quoted: true,
   }];
 
-  Ok(ignis_codegen_c::emit_c(&lir, &types, &result.defs, &sym_table, &headers))
+  Ok(ignis_codegen_c::emit_c(
+    &lir,
+    &types,
+    &result.defs,
+    &result.namespaces,
+    &sym_table,
+    &headers,
+  ))
 }
 
 pub fn compile_and_run(source: &str) -> Result<E2EResult, String> {

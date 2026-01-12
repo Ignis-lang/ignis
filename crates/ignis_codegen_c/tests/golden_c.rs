@@ -2,6 +2,112 @@ mod common;
 
 use insta::assert_snapshot;
 
+// =============================================================================
+// Namespace mangling tests
+// =============================================================================
+
+#[test]
+fn c_namespace_mangling() {
+  let c_code = common::compile_to_c(
+    r#"
+namespace Math {
+    function add(a: i32, b: i32): i32 {
+        return a + b;
+    }
+}
+
+function main(): void {
+    let x: i32 = Math::add(1, 2);
+    return;
+}
+"#,
+  );
+  assert_snapshot!("c_namespace_mangling", c_code);
+}
+
+#[test]
+fn c_underscore_escaping() {
+  // Test that underscores in names are escaped to avoid collisions.
+  // `a::b_c` should produce `a_b__c` (underscore escaped)
+  // `a_b::c` should produce `a__b_c` (underscore escaped)
+  // These MUST be different C names.
+  let c_code = common::compile_to_c(
+    r#"
+namespace a {
+    function b_c(): i32 {
+        return 1;
+    }
+}
+
+namespace a_b {
+    function c(): i32 {
+        return 2;
+    }
+}
+
+function main(): void {
+    let x: i32 = a::b_c();
+    let y: i32 = a_b::c();
+    return;
+}
+"#,
+  );
+
+  // Verify they produce different names
+  assert!(c_code.contains("a_b__c"), "Expected 'a_b__c' in output");
+  assert!(c_code.contains("a__b_c"), "Expected 'a__b_c' in output");
+
+  assert_snapshot!("c_underscore_escaping", c_code);
+}
+
+#[test]
+fn c_extern_declarations() {
+  let c_code = common::compile_to_c(
+    r#"
+extern libc {
+    function puts(s: string): i32;
+}
+
+function main(): void {
+    libc::puts("hello");
+    return;
+}
+"#,
+  );
+
+  // Verify extern declaration is emitted
+  assert!(c_code.contains("extern"), "Expected 'extern' declaration in output");
+
+  assert_snapshot!("c_extern_declarations", c_code);
+}
+
+// NOTE: Variadic syntax (...args: type[]) is not yet supported by the parser.
+// This test will be enabled once variadic parameter parsing is implemented.
+// #[test]
+// fn c_extern_variadic() {
+//   let c_code = common::compile_to_c(
+//     r#"
+// extern libc {
+//     function printf(format: string, ...args: unknown[]): i32;
+// }
+//
+// function main(): void {
+//     libc::printf("hello %d", 42);
+//     return;
+// }
+// "#,
+//   );
+//
+//   // Verify variadic is emitted as ...
+//   assert!(c_code.contains("..."), "Expected variadic '...' in output");
+//
+//   assert_snapshot!("c_extern_variadic", c_code);
+// }
+
+// =============================================================================
+// Basic tests
+// =============================================================================
+
 #[test]
 fn c_simple_add() {
   let c_code = common::compile_to_c(

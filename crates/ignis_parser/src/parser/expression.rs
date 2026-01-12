@@ -9,6 +9,7 @@ use ignis_ast::{
     dereference::ASTDereference,
     grouped::ASTGrouped,
     literal::ASTLiteral,
+    path::ASTPath,
     reference::ASTReference,
     unary::{ASTUnary, UnaryOperator},
     variable::ASTVariableExpression,
@@ -167,9 +168,22 @@ impl IgnisParser {
       | TokenType::False
       | TokenType::Null => self.parse_literal(&token),
       TokenType::Identifier => {
-        let symbol = self.insert_symbol(&token);
+        let first = token.clone();
+        let start = first.span.clone();
+        let mut segments = vec![self.insert_symbol(&first)];
 
-        Ok(self.allocate_expression(ASTExpression::Variable(ASTVariableExpression::new(symbol, token.span.clone()))))
+        while self.eat(TokenType::DoubleColon) {
+          let ident = self.expect(TokenType::Identifier)?.clone();
+          segments.push(self.insert_symbol(&ident));
+        }
+
+        if segments.len() == 1 {
+          Ok(self.allocate_expression(ASTExpression::Variable(ASTVariableExpression::new(segments[0], start))))
+        } else {
+          let end = self.previous().span.clone();
+          let span = Span::merge(&start, &end);
+          Ok(self.allocate_expression(ASTExpression::Path(ASTPath::new(segments, span))))
+        }
       },
       TokenType::LeftParen => {
         let expression = self.parse_expression(0)?;
@@ -735,6 +749,61 @@ mod tests {
     match expr {
       ASTExpression::PostfixIncrement { .. } => {},
       other => panic!("expected postfix increment, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_path_expression() {
+    let result = parse_expr("Math::add(1, 2)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let callee = result.nodes.get(&call.callee);
+        match callee {
+          ASTNode::Expression(ASTExpression::Path(path)) => {
+            assert_eq!(path.segments.len(), 2);
+          },
+          other => panic!("expected path as callee, got {:?}", other),
+        }
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_simple_identifier_not_path() {
+    let result = parse_expr("foo()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let callee = result.nodes.get(&call.callee);
+        match callee {
+          ASTNode::Expression(ASTExpression::Variable(_)) => {},
+          other => panic!("expected variable as callee (not path), got {:?}", other),
+        }
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_nested_path() {
+    let result = parse_expr("Std::Io::read()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let callee = result.nodes.get(&call.callee);
+        match callee {
+          ASTNode::Expression(ASTExpression::Path(path)) => {
+            assert_eq!(path.segments.len(), 3);
+          },
+          other => panic!("expected path as callee, got {:?}", other),
+        }
+      },
+      other => panic!("expected call, got {:?}", other),
     }
   }
 }

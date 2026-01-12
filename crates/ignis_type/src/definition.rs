@@ -1,4 +1,4 @@
-use crate::{Id, Store, module::ModuleId, span::Span, symbol::SymbolId, types::TypeId};
+use crate::{Id, Store, module::ModuleId, namespace::NamespaceId, span::Span, symbol::SymbolId, types::TypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
@@ -27,6 +27,7 @@ pub struct Definition {
   pub span: Span,
   pub visibility: Visibility,
   pub owner_module: ModuleId,
+  pub owner_namespace: Option<NamespaceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -35,6 +36,13 @@ pub enum DefinitionKind {
   Variable(VariableDefinition),
   Constant(ConstantDefinition),
   Parameter(ParameterDefinition),
+  Namespace(NamespaceDefinition),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamespaceDefinition {
+  pub namespace_id: NamespaceId,
+  pub is_extern: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -105,6 +113,7 @@ impl DefinitionStore {
       DefinitionKind::Variable(v) => &v.type_id,
       DefinitionKind::Constant(c) => &c.type_id,
       DefinitionKind::Parameter(p) => &p.type_id,
+      DefinitionKind::Namespace(_) => panic!("namespaces do not have a type"),
     }
   }
 
@@ -121,5 +130,9 @@ impl DefinitionStore {
 
   pub fn get_all(&self) -> &[Definition] {
     self.definitions.get_all()
+  }
+
+  pub fn iter(&self) -> impl Iterator<Item = (DefinitionId, &Definition)> {
+    self.definitions.iter()
   }
 }

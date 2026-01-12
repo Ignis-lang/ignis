@@ -221,6 +221,14 @@ pub enum DiagnosticMessage {
     name: String,
     span: Span,
   },
+  FunctionPathNotAsCallee {
+    name: String,
+    span: Span,
+  },
+  UnsupportedPathExpression {
+    name: String,
+    span: Span,
+  },
   // Borrow checker errors
   BorrowConflictImmWhileMutable {
     var_name: String,
@@ -483,6 +491,20 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UndeclaredIdentifier { name, .. } => {
         write!(f, "Undeclared identifier '{}'", name)
       },
+      DiagnosticMessage::FunctionPathNotAsCallee { name, .. } => {
+        write!(
+          f,
+          "Function path '{}' can only be used as a call target (e.g., {}(...))",
+          name, name
+        )
+      },
+      DiagnosticMessage::UnsupportedPathExpression { name, .. } => {
+        write!(
+          f,
+          "Path expression '{}' is not supported; only constants and function calls are allowed in v0.2",
+          name
+        )
+      },
 
       // Borrow checker errors
       DiagnosticMessage::BorrowConflictImmWhileMutable { var_name, .. } => {
@@ -645,6 +667,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::ParameterAlreadyDefined { span, .. }
       | DiagnosticMessage::ConstantAlreadyDefined { span, .. }
       | DiagnosticMessage::UndeclaredIdentifier { span, .. }
+      | DiagnosticMessage::FunctionPathNotAsCallee { span, .. }
+      | DiagnosticMessage::UnsupportedPathExpression { span, .. }
       | DiagnosticMessage::BorrowConflictImmWhileMutable { span, .. }
       | DiagnosticMessage::BorrowConflictMutWhileImmutable { span, .. }
       | DiagnosticMessage::BorrowConflictMutWhileMutable { span, .. }
@@ -738,6 +762,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::ParameterAlreadyDefined { .. } => "A0033",
       DiagnosticMessage::ConstantAlreadyDefined { .. } => "A0034",
       DiagnosticMessage::UndeclaredIdentifier { .. } => "A0035",
+      DiagnosticMessage::FunctionPathNotAsCallee { .. } => "A0050",
+      DiagnosticMessage::UnsupportedPathExpression { .. } => "A0051",
       DiagnosticMessage::BorrowConflictImmWhileMutable { .. } => "A0036",
       DiagnosticMessage::BorrowConflictMutWhileImmutable { .. } => "A0037",
       DiagnosticMessage::BorrowConflictMutWhileMutable { .. } => "A0038",

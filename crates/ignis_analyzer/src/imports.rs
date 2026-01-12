@@ -3,19 +3,18 @@ use std::collections::HashMap;
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::{
-  definition::{Definition, DefinitionKind, DefinitionStore, FunctionDefinition},
+  definition::{DefinitionId, DefinitionKind, NamespaceDefinition},
   module::ModuleId,
   symbol::SymbolId,
-  types::{Type, TypeId, TypeStore},
 };
 
 use crate::Analyzer;
 
 #[derive(Clone)]
 pub struct ModuleExportData {
-  pub exports: HashMap<SymbolId, Definition>,
-  pub types: TypeStore,
-  pub defs: DefinitionStore,
+  /// Map from symbol name to the original DefinitionId.
+  /// Since we use shared stores, the definition is already in the shared DefinitionStore.
+  pub exports: HashMap<SymbolId, DefinitionId>,
 }
 
 /// All exports indexed by module
@@ -91,10 +90,14 @@ impl<'a> Analyzer<'a> {
         }
 
         match export_data.exports.get(&item) {
-          Some(def) => {
-            let local_def = self.translate_definition(def, &export_data.types, &export_data.defs);
-            let local_def_id = self.defs.alloc(local_def);
-            let _ = self.scopes.define(&item, &local_def_id);
+          Some(&def_id) => {
+            let def_kind = self.defs.get(&def_id).kind.clone();
+
+            if let DefinitionKind::Namespace(ns_def) = &def_kind {
+              self.import_namespace(def_id, ns_def);
+            } else {
+              let _ = self.scopes.define(&item, &def_id);
+            }
           },
           None => {
             self.add_diagnostic(
@@ -111,113 +114,12 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  fn translate_definition(
+  fn import_namespace(
     &mut self,
-    def: &Definition,
-    source_types: &TypeStore,
-    source_defs: &DefinitionStore,
-  ) -> Definition {
-    let translated_kind = match &def.kind {
-      DefinitionKind::Function(func_def) => {
-        let translated_return = self.translate_type(&func_def.return_type, source_types);
-        let mut translated_params = Vec::new();
-        for param_id in &func_def.params {
-          let param_def = source_defs.get(param_id);
-          let translated_param = self.translate_definition(param_def, source_types, source_defs);
-          let local_param_id = self.defs.alloc(translated_param);
-          translated_params.push(local_param_id);
-        }
-
-        DefinitionKind::Function(FunctionDefinition {
-          params: translated_params,
-          return_type: translated_return,
-          is_extern: func_def.is_extern,
-          is_variadic: func_def.is_variadic,
-        })
-      },
-      DefinitionKind::Variable(var_def) => {
-        let translated_type = self.translate_type(&var_def.type_id, source_types);
-        DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
-          type_id: translated_type,
-          mutable: var_def.mutable,
-        })
-      },
-      DefinitionKind::Constant(const_def) => {
-        let translated_type = self.translate_type(&const_def.type_id, source_types);
-        DefinitionKind::Constant(ignis_type::definition::ConstantDefinition {
-          type_id: translated_type,
-          value: const_def.value.clone(),
-        })
-      },
-      DefinitionKind::Parameter(param_def) => {
-        let translated_type = self.translate_type(&param_def.type_id, source_types);
-        DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
-          type_id: translated_type,
-          mutable: param_def.mutable,
-        })
-      },
-    };
-
-    Definition {
-      kind: translated_kind,
-      name: def.name.clone(),
-      span: def.span.clone(),
-      visibility: def.visibility.clone(),
-      owner_module: def.owner_module,
-    }
-  }
-
-  fn translate_type(
-    &mut self,
-    source_type_id: &TypeId,
-    source_types: &TypeStore,
-  ) -> TypeId {
-    let source_type = source_types.get(source_type_id);
-
-    match source_type {
-      Type::I8 => self.types.i8(),
-      Type::I16 => self.types.i16(),
-      Type::I32 => self.types.i32(),
-      Type::I64 => self.types.i64(),
-      Type::U8 => self.types.u8(),
-      Type::U16 => self.types.u16(),
-      Type::U32 => self.types.u32(),
-      Type::U64 => self.types.u64(),
-      Type::F32 => self.types.f32(),
-      Type::F64 => self.types.f64(),
-      Type::Boolean => self.types.boolean(),
-      Type::Char => self.types.char(),
-      Type::String => self.types.string(),
-      Type::Void => self.types.void(),
-      Type::Never => self.types.never(),
-      Type::Unknown => self.types.unknown(),
-      Type::Error => self.types.error(),
-
-      Type::Pointer(inner) => {
-        let local_inner = self.translate_type(inner, source_types);
-        self.types.pointer(local_inner)
-      },
-      Type::Reference { inner, mutable } => {
-        let local_inner = self.translate_type(inner, source_types);
-        self.types.reference(local_inner, *mutable)
-      },
-      Type::Vector { element, size } => {
-        let local_element = self.translate_type(element, source_types);
-        self.types.vector(local_element, *size)
-      },
-      Type::Tuple(elements) => {
-        let local_elements: Vec<TypeId> = elements.iter().map(|e| self.translate_type(e, source_types)).collect();
-        self.types.tuple(local_elements)
-      },
-      Type::Function {
-        params,
-        ret,
-        is_variadic,
-      } => {
-        let local_params: Vec<TypeId> = params.iter().map(|p| self.translate_type(p, source_types)).collect();
-        let local_return = self.translate_type(ret, source_types);
-        self.types.function(local_params, local_return, *is_variadic)
-      },
-    }
+    ns_def_id: DefinitionId,
+    ns_def: &NamespaceDefinition,
+  ) {
+    let ns = self.namespaces.get(&ns_def.namespace_id);
+    let _ = self.scopes.define(&ns.name, &ns_def_id);
   }
 }

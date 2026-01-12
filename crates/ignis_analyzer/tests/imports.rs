@@ -8,15 +8,23 @@ use ignis_analyzer::{Analyzer, AnalyzerOutput};
 use ignis_analyzer::imports::ExportTable;
 use ignis_diagnostics::diagnostic_report::Severity;
 use ignis_parser::{IgnisLexer, IgnisParser};
+use ignis_type::definition::DefinitionStore;
 use ignis_type::file::SourceMap;
 use ignis_type::module::ModuleId;
+use ignis_type::namespace::NamespaceStore;
 use ignis_type::symbol::SymbolTable;
+use ignis_type::types::TypeStore;
 
-/// Analyze code with provided imports context
+/// Analyze code with provided imports context using shared stores.
+/// This mirrors how the real compiler works with cross-module compilation.
 fn analyze_with_imports(
   src: &str,
   export_table: &ExportTable,
   module_for_path: &HashMap<String, ModuleId>,
+  shared_types: &mut TypeStore,
+  shared_defs: &mut DefinitionStore,
+  shared_namespaces: &mut NamespaceStore,
+  symbols: Rc<RefCell<SymbolTable>>,
 ) -> AnalyzerOutput {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
@@ -25,14 +33,54 @@ fn analyze_with_imports(
   lexer.scan_tokens();
   assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
-  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
   let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
   let (nodes, roots) = parser.parse().expect("Parse failed");
 
-  Analyzer::analyze_with_imports(&nodes, &roots, symbols, export_table, module_for_path)
+  Analyzer::analyze_with_shared_stores(
+    &nodes,
+    &roots,
+    symbols,
+    export_table,
+    module_for_path,
+    shared_types,
+    shared_defs,
+    shared_namespaces,
+    ModuleId::new(1), // Different module ID from library
+  )
 }
 
-/// Helper to analyze a "library" module and collect its exports
+/// Helper to analyze a "library" module and collect its exports using shared stores.
+fn analyze_library_with_shared_stores(
+  src: &str,
+  shared_types: &mut TypeStore,
+  shared_defs: &mut DefinitionStore,
+  shared_namespaces: &mut NamespaceStore,
+  symbols: Rc<RefCell<SymbolTable>>,
+) -> AnalyzerOutput {
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("lib.ign", src.to_string());
+
+  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  lexer.scan_tokens();
+  assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
+
+  let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+  let (nodes, roots) = parser.parse().expect("Parse failed");
+
+  Analyzer::analyze_with_shared_stores(
+    &nodes,
+    &roots,
+    symbols,
+    &HashMap::new(), // No imports for library
+    &HashMap::new(),
+    shared_types,
+    shared_defs,
+    shared_namespaces,
+    ModuleId::new(0),
+  )
+}
+
+/// Helper to analyze a "library" module standalone (for export tests)
 fn analyze_library(src: &str) -> (AnalyzerOutput, Rc<RefCell<SymbolTable>>) {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("lib.ign", src.to_string());
@@ -70,6 +118,12 @@ fn error_count(output: &AnalyzerOutput) -> usize {
 
 #[test]
 fn import_exported_function() {
+  // Shared stores across both modules
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
   // Library with exported function
   let lib_src = r#"
     export function add(a: i32, b: i32): i32 {
@@ -77,7 +131,13 @@ fn import_exported_function() {
     }
   "#;
 
-  let (lib_output, _lib_symbols) = analyze_library(lib_src);
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
   assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
 
   // Get the exported 'add' symbol
@@ -93,7 +153,6 @@ fn import_exported_function() {
   module_for_path.insert("./lib".to_string(), lib_module_id);
 
   // Main module that imports add
-  // Note: We need to use the same symbol table to have consistent SymbolIds
   let main_src = r#"
     import add from "./lib";
 
@@ -102,18 +161,28 @@ fn import_exported_function() {
     }
   "#;
 
-  // For this test to work properly, we need consistent symbol IDs
-  // In a real scenario, the symbols would be shared across modules
-  // For now, we test that the import phase runs without crashing
-  let _output = analyze_with_imports(main_src, &export_table, &module_for_path);
+  // Use shared stores so the imported definition ID is valid
+  let _output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
 
-  // The import may not resolve the symbol correctly since we use different symbol tables
-  // but we verify the infrastructure works
-  // In a full integration test, we'd use the compile_project function
+  // Import should succeed since we use shared stores
 }
 
 #[test]
 fn import_non_exported_symbol_error() {
+  // Shared stores
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
   // Library with private function (not exported)
   let lib_src = r#"
     function private_fn(): i32 {
@@ -125,7 +194,13 @@ fn import_non_exported_symbol_error() {
     }
   "#;
 
-  let (lib_output, _) = analyze_library(lib_src);
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
   assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
 
   let lib_exports = lib_output.collect_exports();
@@ -147,7 +222,15 @@ fn import_non_exported_symbol_error() {
     }
   "#;
 
-  let output = analyze_with_imports(main_src, &export_table, &module_for_path);
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
 
   // Should have error M0002: SymbolNotExported
   assert!(
@@ -161,6 +244,10 @@ fn import_non_exported_symbol_error() {
 fn import_from_nonexistent_module_error() {
   let export_table: ExportTable = HashMap::new();
   let module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
 
   let main_src = r#"
     import foo from "./nonexistent";
@@ -170,7 +257,15 @@ fn import_from_nonexistent_module_error() {
     }
   "#;
 
-  let output = analyze_with_imports(main_src, &export_table, &module_for_path);
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
 
   // Should have error M0001: ModuleNotFound
   assert!(
@@ -295,6 +390,12 @@ fn private_items_not_exported() {
 
 #[test]
 fn import_shadows_local_definition() {
+  // Shared stores
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
   // Library with exported function
   let lib_src = r#"
     export function add(a: i32, b: i32): i32 {
@@ -302,7 +403,13 @@ fn import_shadows_local_definition() {
     }
   "#;
 
-  let (lib_output, _) = analyze_library(lib_src);
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
   let lib_exports = lib_output.collect_exports();
   let lib_module_id = ModuleId::new(0);
 
@@ -312,9 +419,7 @@ fn import_shadows_local_definition() {
   let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
   module_for_path.insert("./lib".to_string(), lib_module_id);
 
-  // Main module that defines 'add' locally AND tries to import it
-  // Note: Due to symbol table isolation in tests, we can't perfectly simulate this
-  // but we test that the infrastructure for shadow detection exists
+  // Main module that imports 'add'
   let main_src = r#"
     import add from "./lib";
 
@@ -323,12 +428,18 @@ fn import_shadows_local_definition() {
     }
   "#;
 
-  // This test verifies the import infrastructure works
-  // Full shadow detection would require shared symbol tables
-  let _output = analyze_with_imports(main_src, &export_table, &module_for_path);
+  // This test verifies the import infrastructure works with shared stores
+  let _output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
 
-  // Import should either succeed or fail gracefully
-  // The actual shadow test would be in a full integration test
+  // Import should succeed since we use shared stores
 }
 
 // ============================================================================
@@ -350,9 +461,10 @@ fn module_exports_are_definition_ids() {
   let (output, _) = analyze_library(src);
   let export_data = output.collect_exports();
 
-  // Verify exports map to valid Definitions
-  for (_, def) in &export_data.exports {
-    // Just verify we can access the definition name
+  // Verify exports map to valid DefinitionIds that can be resolved
+  for (_, def_id) in &export_data.exports {
+    // Verify we can access the definition through the shared store
+    let def = output.defs.get(def_id);
     let _name = &def.name;
   }
 }

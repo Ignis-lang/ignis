@@ -4,11 +4,13 @@
 //! producing `DropSchedules` that tell LIR lowering when to emit drop instructions.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
 use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  file::SourceMap,
   span::Span,
   symbol::SymbolTable,
   types::TypeStore,
@@ -46,6 +48,10 @@ pub struct HirOwnershipChecker<'a> {
   types: &'a TypeStore,
   defs: &'a DefinitionStore,
   symbols: &'a SymbolTable,
+  source_map: Option<&'a SourceMap>,
+
+  /// Paths to suppress FFI leak warnings for (e.g., std library paths)
+  suppress_ffi_warning_paths: Vec<PathBuf>,
 
   /// Current ownership state per variable
   states: HashMap<DefinitionId, OwnershipState>,
@@ -78,6 +84,8 @@ impl<'a> HirOwnershipChecker<'a> {
       types,
       defs,
       symbols,
+      source_map: None,
+      suppress_ffi_warning_paths: Vec::new(),
       states: HashMap::new(),
       scope_stack: Vec::new(),
       branch_snapshots: Vec::new(),
@@ -85,6 +93,44 @@ impl<'a> HirOwnershipChecker<'a> {
       current_fn: None,
       diagnostics: Vec::new(),
     }
+  }
+
+  pub fn with_source_map(
+    mut self,
+    source_map: &'a SourceMap,
+  ) -> Self {
+    self.source_map = Some(source_map);
+    self
+  }
+
+  pub fn suppress_ffi_warnings_for<P: Into<PathBuf>>(
+    mut self,
+    path: P,
+  ) -> Self {
+    let path = path.into();
+    let canonical = path.canonicalize().unwrap_or(path);
+    self.suppress_ffi_warning_paths.push(canonical);
+    self
+  }
+
+  fn should_suppress_ffi_warning(
+    &self,
+    span: &Span,
+  ) -> bool {
+    let Some(source_map) = self.source_map else {
+      return false;
+    };
+
+    let file = source_map.get(&span.file);
+    let file_path = &file.path;
+
+    for suppress_path in &self.suppress_ffi_warning_paths {
+      if file_path.starts_with(suppress_path) {
+        return true;
+      }
+    }
+
+    false
   }
 
   /// Run ownership check on all functions, returns schedules and diagnostics.
@@ -498,7 +544,7 @@ impl<'a> HirOwnershipChecker<'a> {
         let arg_ty = self.defs.type_of(&arg_def);
 
         if self.types.is_owned(arg_ty) && !self.types.is_copy(arg_ty) {
-          if is_extern {
+          if is_extern && !self.should_suppress_ffi_warning(&span) {
             let var_name = self.get_var_name(&arg_def);
             self.diagnostics.push(
               DiagnosticMessage::PossibleLeakToFFI {

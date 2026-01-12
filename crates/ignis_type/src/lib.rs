@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 pub mod definition;
 pub mod file;
 pub mod module;
+pub mod namespace;
 pub mod span;
 pub mod symbol;
 pub mod types;
@@ -81,7 +82,7 @@ impl std::fmt::Display for BytePosition {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Store<T> {
   data: Vec<T>,
 }
@@ -128,5 +129,9 @@ impl<T> Store<T> {
 
   pub fn into_iter(self) -> impl Iterator<Item = T> {
     self.data.into_iter()
+  }
+
+  pub fn iter(&self) -> impl Iterator<Item = (Id<T>, &T)> {
+    self.data.iter().enumerate().map(|(i, v)| (Id::new(i as u32), v))
   }
 }

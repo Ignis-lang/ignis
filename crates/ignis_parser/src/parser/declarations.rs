@@ -7,11 +7,12 @@ use ignis_ast::{
     extern_statement::ASTExtern,
     function::{ASTFunction, ASTFunctionSignature},
     import_statement::ASTImport,
+    namespace_statement::ASTNamespace,
   },
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_token::token_types::TokenType;
-use ignis_type::span::Span;
+use ignis_type::{span::Span, symbol::SymbolId};
 
 use crate::parser::ParserResult;
 
@@ -49,10 +50,28 @@ impl super::IgnisParser {
       TokenType::Export => self.parse_export_declaration(),
       TokenType::Const => self.parse_constant_declaration(),
       TokenType::Extern => self.parse_extern_declaration(),
+      TokenType::Namespace => self.parse_namespace_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
     }
+  }
+
+  /// Parsea `foo` o `foo::bar::baz` → (Vec<SymbolId>, Span)
+  fn parse_qualified_identifier(&mut self) -> ParserResult<(Vec<SymbolId>, Span)> {
+    let first = self.expect(TokenType::Identifier)?.clone();
+    let start = first.span.clone();
+    let mut segments = vec![self.insert_symbol(&first)];
+    let mut end = first.span.clone();
+
+    while self.eat(TokenType::DoubleColon) {
+      let ident = self.expect(TokenType::Identifier)?.clone();
+      end = ident.span.clone();
+      segments.push(self.insert_symbol(&ident));
+    }
+
+    let span = Span::merge(&start, &end);
+    Ok((segments, span))
   }
 
   /// function name(params): type block
@@ -139,7 +158,11 @@ impl super::IgnisParser {
   fn parse_export_declaration(&mut self) -> ParserResult<NodeId> {
     let keyword = self.expect(TokenType::Export)?.clone();
 
-    if self.at(TokenType::Function) || self.at(TokenType::Const) || self.at(TokenType::Extern) {
+    if self.at(TokenType::Function)
+      || self.at(TokenType::Const)
+      || self.at(TokenType::Extern)
+      || self.at(TokenType::Namespace)
+    {
       let declaration = self.parse_declaration_inner_after_export()?;
       let span = Span::merge(&keyword.span, self.get_span(&declaration));
       let export_statement = ASTExport::declaration(declaration, span);
@@ -161,30 +184,65 @@ impl super::IgnisParser {
       TokenType::Function => self.parse_function_declaration(),
       TokenType::Const => self.parse_constant_declaration(),
       TokenType::Extern => self.parse_extern_declaration(),
+      TokenType::Namespace => self.parse_namespace_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
     }
   }
 
-  /// extern <function|const>
+  /// extern path { function ...; const ...; }
   fn parse_extern_declaration(&mut self) -> ParserResult<NodeId> {
     let keyword = self.expect(TokenType::Extern)?.clone();
+    let (path, _) = self.parse_qualified_identifier()?;
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut items = Vec::new();
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      let item = match self.peek().type_ {
+        TokenType::Function => self.parse_function_signature_only()?,
+        TokenType::Const => self.parse_constant_signature_only()?,
+        _ => {
+          return Err(DiagnosticMessage::UnexpectedToken {
+            at: self.peek().span.clone(),
+          });
+        },
+      };
+      items.push(item);
+    }
+
+    let close = self.expect(TokenType::RightBrace)?.clone();
+    let span = Span::merge(&keyword.span, &close.span);
+
+    let extern_block = ASTExtern::new(path, items, span);
+    Ok(self.allocate_statement(ASTStatement::Extern(extern_block)))
+  }
+
+  /// namespace path { declarations... }
+  fn parse_namespace_declaration(&mut self) -> ParserResult<NodeId> {
+    let keyword = self.expect(TokenType::Namespace)?.clone();
+    let (path, _) = self.parse_qualified_identifier()?;
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut items = Vec::new();
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      let item = self.parse_namespace_item()?;
+      items.push(item);
+    }
+
+    let close = self.expect(TokenType::RightBrace)?.clone();
+    let span = Span::merge(&keyword.span, &close.span);
+
+    let ns = ASTNamespace::new(path, items, span);
+    Ok(self.allocate_statement(ASTStatement::Namespace(ns)))
+  }
+
+  fn parse_namespace_item(&mut self) -> ParserResult<NodeId> {
     match self.peek().type_ {
-      TokenType::Function => {
-        let node = self.parse_function_signature_only()?;
-        let span = Span::merge(&keyword.span, self.get_span(&node));
-        let extern_statement = ASTExtern::new(node, span);
-
-        Ok(self.allocate_statement(ASTStatement::Extern(extern_statement)))
-      },
-      TokenType::Const => {
-        let node = self.parse_constant_signature_only()?;
-        let span = Span::merge(&keyword.span, self.get_span(&node));
-        let extern_statement = ASTExtern::new(node, span);
-
-        Ok(self.allocate_statement(ASTStatement::Extern(extern_statement)))
-      },
+      TokenType::Function => self.parse_function_declaration(),
+      TokenType::Const => self.parse_constant_declaration(),
+      TokenType::Namespace => self.parse_namespace_declaration(),
+      TokenType::Extern => self.parse_extern_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -352,13 +410,17 @@ mod tests {
   }
 
   #[test]
-  fn parses_extern_function() {
-    let result = parse("extern function printf(fmt: string): void;");
+  fn parses_extern_block_with_function() {
+    let result = parse("extern libc { function printf(fmt: string): void; }");
     let stmt = first_root(&result);
 
     match stmt {
       ASTStatement::Extern(ext) => {
-        let inner = result.nodes.get(&ext.item);
+        assert_eq!(ext.path.len(), 1);
+        assert_eq!(symbol_name(&result, &ext.path[0]), "libc");
+        assert_eq!(ext.items.len(), 1);
+
+        let inner = result.nodes.get(&ext.items[0]);
         match inner {
           ASTNode::Statement(ASTStatement::Function(func)) => {
             assert_eq!(symbol_name(&result, &func.signature.name), "printf");
@@ -372,13 +434,17 @@ mod tests {
   }
 
   #[test]
-  fn parses_extern_const() {
-    let result = parse("extern const BUFFER_SIZE: i32;");
+  fn parses_extern_block_with_const() {
+    let result = parse("extern libc { const BUFFER_SIZE: i32; }");
     let stmt = first_root(&result);
 
     match stmt {
       ASTStatement::Extern(ext) => {
-        let inner = result.nodes.get(&ext.item);
+        assert_eq!(ext.path.len(), 1);
+        assert_eq!(symbol_name(&result, &ext.path[0]), "libc");
+        assert_eq!(ext.items.len(), 1);
+
+        let inner = result.nodes.get(&ext.items[0]);
         match inner {
           ASTNode::Statement(ASTStatement::Constant(c)) => {
             assert_eq!(symbol_name(&result, &c.name), "BUFFER_SIZE");
@@ -388,6 +454,87 @@ mod tests {
         }
       },
       other => panic!("expected extern, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_extern_block_multiple_items() {
+    let result = parse("extern libc { function printf(fmt: string): i32; const BUFSIZ: i32; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Extern(ext) => {
+        assert_eq!(ext.items.len(), 2);
+      },
+      other => panic!("expected extern, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_extern_qualified_path() {
+    let result = parse("extern std::io { function read(): i32; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Extern(ext) => {
+        assert_eq!(ext.path.len(), 2);
+        assert_eq!(symbol_name(&result, &ext.path[0]), "std");
+        assert_eq!(symbol_name(&result, &ext.path[1]), "io");
+      },
+      other => panic!("expected extern, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_namespace_basic() {
+    let result = parse("namespace Math { function add(a: i32, b: i32): i32 { return a + b; } }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Namespace(ns) => {
+        assert_eq!(ns.path.len(), 1);
+        assert_eq!(symbol_name(&result, &ns.path[0]), "Math");
+        assert_eq!(ns.items.len(), 1);
+      },
+      other => panic!("expected namespace, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_namespace_nested() {
+    let result = parse("namespace A { namespace B { function f(): void {} } }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Namespace(ns) => {
+        assert_eq!(ns.path.len(), 1);
+        assert_eq!(symbol_name(&result, &ns.path[0]), "A");
+        assert_eq!(ns.items.len(), 1);
+
+        let inner = result.nodes.get(&ns.items[0]);
+        match inner {
+          ASTNode::Statement(ASTStatement::Namespace(inner_ns)) => {
+            assert_eq!(symbol_name(&result, &inner_ns.path[0]), "B");
+          },
+          other => panic!("expected namespace inside namespace, got {:?}", other),
+        }
+      },
+      other => panic!("expected namespace, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_namespace_qualified_path() {
+    let result = parse("namespace Foo::Bar { function baz(): void {} }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Namespace(ns) => {
+        assert_eq!(ns.path.len(), 2);
+        assert_eq!(symbol_name(&result, &ns.path[0]), "Foo");
+        assert_eq!(symbol_name(&result, &ns.path[1]), "Bar");
+      },
+      other => panic!("expected namespace, got {:?}", other),
     }
   }
 

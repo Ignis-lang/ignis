@@ -200,7 +200,9 @@ pub fn compile_project(
       let mut types = output.types.clone();
 
       let ownership_checker =
-        ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table);
+        ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table)
+          .with_source_map(&ctx.source_map)
+          .suppress_ffi_warnings_for(&config.std_path);
       let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
 
       if !config.quiet {
@@ -217,20 +219,16 @@ pub fn compile_project(
         return Err(());
       }
 
-      // Only emit project modules; std functions become extern declarations
-      let project_modules: std::collections::HashSet<ignis_type::module::ModuleId> = used_modules
-        .iter()
-        .filter(|id| ctx.module_graph.modules.get(id).path.is_project())
-        .copied()
-        .collect();
-
+      // TODO: Filter to project_modules only when std is pre-compiled
+      let used_module_set: std::collections::HashSet<ignis_type::module::ModuleId> =
+        used_modules.iter().copied().collect();
       let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
         &output.hir,
         &mut types,
         &output.defs,
         &sym_table,
         &drop_schedules,
-        Some(&project_modules),
+        Some(&used_module_set),
       );
 
       if bc.dump_lir {
@@ -252,7 +250,14 @@ pub fn compile_project(
           return Err(());
         }
 
-        let c_code = ignis_codegen_c::emit_c(&lir_program, &types, &output.defs, &sym_table, &link_plan.headers);
+        let c_code = ignis_codegen_c::emit_c(
+          &lir_program,
+          &types,
+          &output.defs,
+          &output.namespaces,
+          &sym_table,
+          &link_plan.headers,
+        );
 
         let base_name = bc
           .file
@@ -424,7 +429,9 @@ pub fn build_std(
 
     // Run ownership analysis on HIR to produce drop schedules
     let ownership_checker =
-      ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table);
+      ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table)
+        .with_source_map(&ctx.source_map)
+        .suppress_ffi_warnings_for(&config.std_path);
     let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
     // Note: ownership diagnostics already reported in the first pass
 
@@ -452,7 +459,14 @@ pub fn build_std(
       continue;
     }
 
-    let c_code = ignis_codegen_c::emit_c(&lir_program, &types, &output.defs, &sym_table, &link_plan.headers);
+    let c_code = ignis_codegen_c::emit_c(
+      &lir_program,
+      &types,
+      &output.defs,
+      &output.namespaces,
+      &sym_table,
+      &link_plan.headers,
+    );
 
     let c_path = output_path.join(format!("{}.c", module_name));
     if let Err(e) = std::fs::write(&c_path, &c_code) {

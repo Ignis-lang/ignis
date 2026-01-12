@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use ignis_type::{Id, Store};
 use ignis_type::symbol::SymbolId;
 use ignis_type::definition::DefinitionId;
+use ignis_type::namespace::NamespaceId;
 
 pub type ScopeId = Id<Scope>;
 
@@ -11,6 +12,7 @@ pub enum ScopeKind {
   Function,
   Block,
   Loop,
+  Namespace(NamespaceId),
 }
 
 #[derive(Debug, Clone)]

@@ -131,7 +131,9 @@ function convert(x: i32): f64 {
 fn hir_multiple_declarations() {
   let result = common::analyze(
     r#"
-extern function print(s: string): void;
+extern io {
+    function print(s: string): void;
+}
 
 function helper(): i32 {
     return 42;

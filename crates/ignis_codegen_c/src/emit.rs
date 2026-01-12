@@ -4,7 +4,8 @@ use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, Terminator};
 use ignis_type::{
-  definition::{DefinitionId, DefinitionStore},
+  definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  namespace::NamespaceStore,
   symbol::SymbolTable,
   types::{Type, TypeId, TypeStore},
 };
@@ -14,6 +15,7 @@ pub struct CEmitter<'a> {
   program: &'a LirProgram,
   types: &'a TypeStore,
   defs: &'a DefinitionStore,
+  namespaces: &'a NamespaceStore,
   symbols: &'a SymbolTable,
   headers: &'a [CHeader],
   output: String,
@@ -25,6 +27,7 @@ impl<'a> CEmitter<'a> {
     program: &'a LirProgram,
     types: &'a TypeStore,
     defs: &'a DefinitionStore,
+    namespaces: &'a NamespaceStore,
     symbols: &'a SymbolTable,
     headers: &'a [CHeader],
   ) -> Self {
@@ -32,6 +35,7 @@ impl<'a> CEmitter<'a> {
       program,
       types,
       defs,
+      namespaces,
       symbols,
       headers,
       output: String::new(),
@@ -41,6 +45,7 @@ impl<'a> CEmitter<'a> {
 
   pub fn emit(mut self) -> String {
     self.emit_headers();
+    self.emit_extern_declarations();
     self.emit_forward_declarations();
     self.emit_functions();
     self.output
@@ -60,12 +65,31 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  fn emit_extern_declarations(&mut self) {
+    let mut funcs: Vec<_> = self.program.functions.iter().collect();
+    funcs.sort_by_key(|(def_id, _)| def_id.index());
+
+    let extern_funcs: Vec<_> = funcs.iter().filter(|(_, func)| func.is_extern).collect();
+
+    if extern_funcs.is_empty() {
+      return;
+    }
+
+    writeln!(self.output, "// Extern declarations").unwrap();
+    for (def_id, func) in extern_funcs {
+      write!(self.output, "extern ").unwrap();
+      self.emit_function_signature(**def_id, func);
+      writeln!(self.output, ";").unwrap();
+    }
+    writeln!(self.output).unwrap();
+  }
+
   fn emit_forward_declarations(&mut self) {
     let mut funcs: Vec<_> = self.program.functions.iter().collect();
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
     // Only emit forward declarations for non-extern functions.
-    // Extern functions are already declared in the included headers.
+    // Extern functions are declared separately via emit_extern_declarations().
     for (def_id, func) in &funcs {
       if func.is_extern {
         continue;
@@ -620,8 +644,48 @@ impl<'a> CEmitter<'a> {
     def_id: DefinitionId,
   ) -> String {
     let def = self.defs.get(&def_id);
-    let name = self.symbols.get(&def.name).to_string();
-    name.replace("::", "_")
+    let raw_name = self.symbols.get(&def.name).to_string();
+
+    let is_extern = match &def.kind {
+      DefinitionKind::Function(f) => f.is_extern,
+      DefinitionKind::Constant(c) => c.value.is_none(), // extern const has no value
+      _ => false,
+    };
+
+    if is_extern {
+      return Self::escape_ident(&raw_name);
+    }
+
+    if def.owner_namespace.is_none() && raw_name == "main" {
+      return raw_name;
+    }
+
+    self.build_mangled_name(def_id)
+  }
+
+  fn escape_ident(name: &str) -> String {
+    name.replace('_', "__")
+  }
+
+  fn build_mangled_name(
+    &self,
+    def_id: DefinitionId,
+  ) -> String {
+    let def = self.defs.get(&def_id);
+    let raw_name = self.symbols.get(&def.name).to_string();
+
+    match def.owner_namespace {
+      Some(ns_id) => {
+        let ns_path = self.namespaces.full_path(ns_id);
+        let mut parts: Vec<String> = ns_path
+          .iter()
+          .map(|s| Self::escape_ident(self.symbols.get(s)))
+          .collect();
+        parts.push(Self::escape_ident(&raw_name));
+        parts.join("_")
+      },
+      None => Self::escape_ident(&raw_name),
+    }
   }
 }
 
@@ -630,10 +694,11 @@ pub fn emit_c(
   program: &LirProgram,
   types: &TypeStore,
   defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
   symbols: &SymbolTable,
   headers: &[CHeader],
 ) -> String {
-  CEmitter::new(program, types, defs, symbols, headers).emit()
+  CEmitter::new(program, types, defs, namespaces, symbols, headers).emit()
 }
 
 /// Format a type as C type string using runtime type aliases.
@@ -751,19 +816,20 @@ mod tests {
   use std::cell::RefCell;
   use std::rc::Rc;
 
-  fn empty_program() -> (LirProgram, TypeStore, DefinitionStore, Rc<RefCell<SymbolTable>>) {
+  fn empty_program() -> (LirProgram, TypeStore, DefinitionStore, NamespaceStore, Rc<RefCell<SymbolTable>>) {
     let program = LirProgram::new();
     let types = TypeStore::new();
     let defs = DefinitionStore::new();
+    let namespaces = NamespaceStore::new();
     let symbols = Rc::new(RefCell::new(SymbolTable::new()));
-    (program, types, defs, symbols)
+    (program, types, defs, namespaces, symbols)
   }
 
   #[test]
   fn test_emit_headers_no_includes() {
-    let (program, types, defs, symbols) = empty_program();
+    let (program, types, defs, namespaces, symbols) = empty_program();
     let sym = symbols.borrow();
-    let output = emit_c(&program, &types, &defs, &sym, &[]);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &[]);
 
     // No hardcoded headers - emitter outputs only what it's given
     assert!(!output.contains("#include"));
@@ -771,33 +837,33 @@ mod tests {
 
   #[test]
   fn test_emit_headers_with_quoted_include() {
-    let (program, types, defs, symbols) = empty_program();
+    let (program, types, defs, namespaces, symbols) = empty_program();
     let sym = symbols.borrow();
     let headers = vec![CHeader {
       path: "runtime/io/io.h".to_string(),
       quoted: true,
     }];
-    let output = emit_c(&program, &types, &defs, &sym, &headers);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers);
 
     assert!(output.contains("#include \"runtime/io/io.h\""));
   }
 
   #[test]
   fn test_emit_headers_with_system_include() {
-    let (program, types, defs, symbols) = empty_program();
+    let (program, types, defs, namespaces, symbols) = empty_program();
     let sym = symbols.borrow();
     let headers = vec![CHeader {
       path: "math.h".to_string(),
       quoted: false,
     }];
-    let output = emit_c(&program, &types, &defs, &sym, &headers);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers);
 
     assert!(output.contains("#include <math.h>"));
   }
 
   #[test]
   fn test_emit_headers_mixed_includes() {
-    let (program, types, defs, symbols) = empty_program();
+    let (program, types, defs, namespaces, symbols) = empty_program();
     let sym = symbols.borrow();
     let headers = vec![
       CHeader {
@@ -813,7 +879,7 @@ mod tests {
         quoted: false,
       },
     ];
-    let output = emit_c(&program, &types, &defs, &sym, &headers);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers);
 
     assert!(output.contains("#include \"runtime/types/types.h\""));
     assert!(output.contains("#include \"runtime/io/io.h\""));

@@ -99,7 +99,14 @@ impl<'a> Analyzer<'a> {
         self.resolve_expression_inline(expr, scope_kind);
       },
       ASTStatement::Extern(extern_stmt) => {
-        self.resolve_node(&extern_stmt.item, scope_kind);
+        for item in &extern_stmt.items {
+          self.resolve_node(item, scope_kind);
+        }
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        for item in &ns_stmt.items {
+          self.resolve_node(item, scope_kind);
+        }
       },
       ASTStatement::Export(export_stmt) => match export_stmt {
         ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
@@ -147,7 +154,11 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Call(call_expr) => {
+        let prev = self.in_callee_context;
+        self.in_callee_context = true;
         self.resolve_node(&call_expr.callee, scope_kind);
+        self.in_callee_context = prev;
+
         for arg in &call_expr.arguments {
           self.resolve_node(&arg, scope_kind);
         }
@@ -185,19 +196,54 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Path(path) => {
-        if let Some(last) = path.segments.last() {
-          if let Some(def_id) = self.scopes.lookup(last).cloned() {
-            self.set_def(node_id, &def_id);
-          } else {
-            let symbol = self.get_symbol_name(&last);
-            self.add_diagnostic(
-              DiagnosticMessage::UndeclaredIdentifier {
-                name: symbol,
-                span: path.span.clone(),
+        let full_path = || {
+          path
+            .segments
+            .iter()
+            .map(|s| self.get_symbol_name(s))
+            .collect::<Vec<_>>()
+            .join("::")
+        };
+
+        if let Some(def_id) = self.resolve_qualified_path(&path.segments) {
+          use ignis_type::definition::DefinitionKind;
+
+          let def = self.defs.get(&def_id);
+          match &def.kind {
+            DefinitionKind::Constant(_) => {
+              self.set_def(node_id, &def_id);
+            },
+            DefinitionKind::Function(_) => {
+              if self.in_callee_context {
+                self.set_def(node_id, &def_id);
+              } else {
+                self.add_diagnostic(
+                  DiagnosticMessage::FunctionPathNotAsCallee {
+                    name: full_path(),
+                    span: path.span.clone(),
+                  }
+                  .report(),
+                );
               }
-              .report(),
-            );
+            },
+            _ => {
+              self.add_diagnostic(
+                DiagnosticMessage::UnsupportedPathExpression {
+                  name: full_path(),
+                  span: path.span.clone(),
+                }
+                .report(),
+              );
+            },
           }
+        } else {
+          self.add_diagnostic(
+            DiagnosticMessage::UndeclaredIdentifier {
+              name: full_path(),
+              span: path.span.clone(),
+            }
+            .report(),
+          );
         }
       },
       ASTExpression::Literal(_) => {},
@@ -232,7 +278,11 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Call(call_expr) => {
+        let prev = self.in_callee_context;
+        self.in_callee_context = true;
         self.resolve_node(&call_expr.callee, scope_kind);
+        self.in_callee_context = prev;
+
         for arg in &call_expr.arguments {
           self.resolve_node(arg, scope_kind);
         }
@@ -270,17 +320,20 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Path(path) => {
-        if let Some(last) = path.segments.last() {
-          if self.scopes.lookup(last).is_none() {
-            let symbol = self.get_symbol_name(&last);
-            self.add_diagnostic(
-              DiagnosticMessage::UndeclaredIdentifier {
-                name: symbol,
-                span: path.span.clone(),
-              }
-              .report(),
-            );
-          }
+        if self.resolve_qualified_path(&path.segments).is_none() {
+          let full_path = path
+            .segments
+            .iter()
+            .map(|s| self.get_symbol_name(s))
+            .collect::<Vec<_>>()
+            .join("::");
+          self.add_diagnostic(
+            DiagnosticMessage::UndeclaredIdentifier {
+              name: full_path,
+              span: path.span.clone(),
+            }
+            .report(),
+          );
         }
       },
       ASTExpression::Literal(_) => {},
@@ -291,5 +344,43 @@ impl<'a> Analyzer<'a> {
         self.resolve_node(expr, scope_kind);
       },
     }
+  }
+
+  /// Resolve a qualified path (`Math::add`) or simple name (`add`).
+  pub fn resolve_qualified_path(
+    &self,
+    segments: &[ignis_type::symbol::SymbolId],
+  ) -> Option<ignis_type::definition::DefinitionId> {
+    use ignis_type::definition::DefinitionKind;
+
+    if segments.is_empty() {
+      return None;
+    }
+
+    if segments.len() == 1 {
+      return self.scopes.lookup(&segments[0]).cloned();
+    }
+
+    let ns_path = &segments[..segments.len() - 1];
+    let def_name = &segments[segments.len() - 1];
+
+    // Check for imported namespace in scope
+    if let Some(def_id) = self.scopes.lookup(&ns_path[0]) {
+      let def = self.defs.get(def_id);
+
+      if let DefinitionKind::Namespace(ns_def) = &def.kind {
+        let mut current_ns = ns_def.namespace_id;
+
+        for &segment in &ns_path[1..] {
+          current_ns = self.namespaces.lookup_child(current_ns, &segment)?;
+        }
+
+        return self.namespaces.lookup_def(current_ns, def_name);
+      }
+    }
+
+    // Namespace defined in current module
+    let ns_id = self.namespaces.lookup(ns_path)?;
+    self.namespaces.lookup_def(ns_id, def_name)
   }
 }

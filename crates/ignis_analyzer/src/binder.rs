@@ -6,8 +6,8 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::definition::{
-  ConstantDefinition, Definition, DefinitionKind, FunctionDefinition, ParameterDefinition, VariableDefinition,
-  Visibility,
+  ConstantDefinition, Definition, DefinitionKind, FunctionDefinition, NamespaceDefinition, ParameterDefinition,
+  VariableDefinition, Visibility,
 };
 
 impl<'a> Analyzer<'a> {
@@ -48,8 +48,10 @@ impl<'a> Analyzer<'a> {
       ASTStatement::While(while_stmt) => self.bind_while(while_stmt),
       ASTStatement::For(for_stmt) => self.bind_for(for_stmt),
       ASTStatement::Extern(extern_stmt) => {
-        self.bind_node(&extern_stmt.item, scope_kind);
-        self.mark_extern(&extern_stmt.item);
+        self.bind_extern(extern_stmt);
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        self.bind_namespace(node_id, ns_stmt);
       },
       ASTStatement::Export(export_stmt) => self.bind_export(export_stmt, scope_kind),
       ASTStatement::Expression(_) => {},
@@ -83,6 +85,7 @@ impl<'a> Analyzer<'a> {
         span: param.span.clone(),
         visibility: Visibility::Private,
         owner_module: self.current_module,
+        owner_namespace: None,
       };
       let def_id = self.defs.alloc(def);
       param_defs.push(def_id);
@@ -105,6 +108,7 @@ impl<'a> Analyzer<'a> {
         Visibility::Private
       },
       owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
     };
 
     let def_id = &self.defs.alloc(def);
@@ -173,6 +177,7 @@ impl<'a> Analyzer<'a> {
         Visibility::Private
       },
       owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
     };
 
     let def_id = &self.defs.alloc(def);
@@ -215,6 +220,7 @@ impl<'a> Analyzer<'a> {
       span: span.clone(),
       visibility: Visibility::Private,
       owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
     };
 
     let def_id = self.defs.alloc(def);
@@ -299,9 +305,7 @@ impl<'a> Analyzer<'a> {
       ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
         self.bind_node(decl, scope_kind);
 
-        let def_node_id = self.find_def_node_id(decl);
-
-        if let Some(def_id) = self.lookup_def(&def_node_id).cloned() {
+        if let Some(def_id) = self.lookup_def(decl).cloned() {
           self.defs.get_mut(&def_id).visibility = Visibility::Public;
         }
       },
@@ -310,19 +314,6 @@ impl<'a> Analyzer<'a> {
           self.defs.get_mut(&def_id).visibility = Visibility::Public;
         }
       },
-    }
-  }
-
-  /// Unwrap extern wrapper to get the inner definition node
-  fn find_def_node_id(
-    &self,
-    node_id: &NodeId,
-  ) -> NodeId {
-    let node = self.ast.get(node_id);
-
-    match node {
-      ASTNode::Statement(ASTStatement::Extern(extern_stmt)) => extern_stmt.item.clone(),
-      _ => node_id.clone(),
     }
   }
 
@@ -339,5 +330,72 @@ impl<'a> Analyzer<'a> {
         }
       }
     }
+  }
+
+  fn bind_extern(
+    &mut self,
+    extern_stmt: &ignis_ast::statements::extern_statement::ASTExtern,
+  ) {
+    let ns_id = self.namespaces.get_or_create(&extern_stmt.path, true);
+    let prev_ns = self.current_namespace;
+    self.current_namespace = Some(ns_id);
+
+    let scope_kind = ScopeKind::Namespace(ns_id);
+    self.scopes.push(scope_kind);
+
+    for item in &extern_stmt.items {
+      self.bind_node(item, scope_kind);
+      self.mark_extern(item);
+
+      if let Some(def_id) = self.lookup_def(item).cloned() {
+        let def = self.defs.get(&def_id);
+        self.namespaces.define(ns_id, def.name.clone(), def_id);
+      }
+    }
+
+    self.scopes.pop();
+    self.current_namespace = prev_ns;
+  }
+
+  fn bind_namespace(
+    &mut self,
+    node_id: &NodeId,
+    ns_stmt: &ignis_ast::statements::namespace_statement::ASTNamespace,
+  ) {
+    let ns_id = self.namespaces.get_or_create(&ns_stmt.path, false);
+    let ns_name = *ns_stmt.path.last().expect("namespace path cannot be empty");
+    let ns_def = Definition {
+      kind: DefinitionKind::Namespace(NamespaceDefinition {
+        namespace_id: ns_id,
+        is_extern: false,
+      }),
+      name: ns_name,
+      span: ns_stmt.span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+    };
+
+    let def_id = self.defs.alloc(ns_def);
+    self.set_def(node_id, &def_id);
+    let _ = self.scopes.define(&ns_name, &def_id);
+
+    let prev_ns = self.current_namespace;
+    self.current_namespace = Some(ns_id);
+
+    let scope_kind = ScopeKind::Namespace(ns_id);
+    self.scopes.push(scope_kind);
+
+    for item in &ns_stmt.items {
+      self.bind_node(item, scope_kind);
+
+      if let Some(def_id) = self.lookup_def(item).cloned() {
+        let def = self.defs.get(&def_id);
+        self.namespaces.define(ns_id, def.name.clone(), def_id);
+      }
+    }
+
+    self.scopes.pop();
+    self.current_namespace = prev_ns;
   }
 }

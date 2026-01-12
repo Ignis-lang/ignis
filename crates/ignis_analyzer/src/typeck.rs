@@ -267,8 +267,15 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx, &InferContext::none()),
       ASTStatement::Break(_) | ASTStatement::Continue(_) => self.types.never(),
       ASTStatement::Extern(extern_stmt) => {
-        self.typecheck_node(&extern_stmt.item, scope_kind, ctx);
-
+        for item in &extern_stmt.items {
+          self.typecheck_node(item, scope_kind, ctx);
+        }
+        self.types.void()
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        for item in &ns_stmt.items {
+          self.typecheck_node(item, scope_kind, ctx);
+        }
         self.types.void()
       },
       ASTStatement::Export(export_stmt) => {
@@ -412,12 +419,9 @@ impl<'a> Analyzer<'a> {
         self.types.vector(elem_type, Some(vector.items.len()))
       },
       ASTExpression::Path(path) => {
-        if let Some(last) = path.segments.last() {
-          if let Some(def_id) = self.scopes.lookup(&last).cloned() {
-            self.get_definition_type(&def_id)
-          } else {
-            self.types.error()
-          }
+        // Resolve the path to get the definition type
+        if let Some(def_id) = self.resolve_qualified_path(&path.segments) {
+          self.get_definition_type(&def_id)
         } else {
           self.types.error()
         }

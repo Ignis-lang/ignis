@@ -13,6 +13,7 @@
   | <type-alias>
   | <extern>
   | <namespace>
+  | <use> 
 
 <function> ::= "function" <identifier> (<generic-type>)?
                "(" <parameters>? ")" ":" <type> <block>
@@ -34,13 +35,20 @@
 <qualified-identifier> ::= <identifier> ("::" <identifier>)*
 
 <namespace> ::= "namespace" <qualified-identifier> "{" <namespace-item>* "}"
-<namespace-item> ::= <function> | <const> | <record> | <enum> | <type-alias> | <extern>
+<namespace-item> ::= <function> | <const> | <record> | <enum> | <type-alias> | <extern> | <use> | <namespace>
 
 <extern> ::= "extern" <qualified-identifier> "{" <extern-item>* "}"
-<extern-item> ::= <extern-function> | <record> | <enum> | <type-alias>
+<extern-item> ::= <extern-function> | <extern-const>
 
 <extern-function> ::= "function" <identifier> (<generic-type>)?
                       "(" <parameters>? ")" ":" <type> ";"
+
+<extern-const> ::= "const" <identifier> ":" <type> ";"
+                      
+<use> ::= "use" <use-path> <use-alias>? ";"
+
+<use-path> ::= <qualified-identifier>
+<use-alias> ::= "as" <identifier>
 
 <record> ::= "record" <generic-type>? <identifier> "{" <record-item>* "}"
 
@@ -226,6 +234,7 @@
   | <namespace>
   | <directive-statement>
   | <directive>
+  | <use>
 
 <function> ::= <directive-attrs>? "function" <identifier> (<generic-type>)?
                "(" <parameters>? ")" ":" <type> <block>
@@ -291,7 +300,12 @@
                       "(" <parameters>? ")" ":" <type> ";"
 
 <namespace> ::= <directive-attrs>? "namespace" <qualified-identifier> "{" <namespace-item>* "}"
-<namespace-item> ::= <function> | <const> | <record> | <enum> | <type-alias> | <extern> | <directive-statement> | <directive>
+<namespace-item> ::= <function> | <const> | <record> | <enum> | <type-alias> | <extern> | <directive-statement> | <directive> | <use> | <namespace>
+
+<use> ::= "use" <use-path> <use-alias>? ";"
+
+<use-path> ::= <qualified-identifier>
+<use-alias> ::= "as" <identifier>
 
 <statement> ::= <declaration>
   | <if>

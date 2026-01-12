@@ -184,50 +184,57 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Extern(extern_stmt) => {
         // Validate extern rules: no body for functions, no init for constants
-        let item_node = self.ast.get(&extern_stmt.item);
+        for item in &extern_stmt.items {
+          let item_node = self.ast.get(item);
 
-        match item_node {
-          ASTNode::Statement(ASTStatement::Function(func)) => {
-            if func.body.is_some() {
-              let func_name = self.get_symbol_name(&func.signature.name);
-              self.add_diagnostic(
-                DiagnosticMessage::ExternWithBody {
-                  name: func_name,
-                  span: extern_stmt.span.clone(),
-                }
-                .report(),
-              );
-            }
-          },
-          ASTNode::Statement(ASTStatement::Constant(const_)) => {
-            // Extern constants should not have initializers
-            if const_.value.is_some() {
-              let const_name = self.get_symbol_name(&const_.name);
-              self.add_diagnostic(
-                DiagnosticMessage::ExternConstWithInitializer {
-                  name: const_name,
-                  span: extern_stmt.span.clone(),
-                }
-                .report(),
-              );
-            }
-          },
-          ASTNode::Statement(ASTStatement::Variable(var)) => {
-            if var.value.is_some() {
-              let var_name = self.get_symbol_name(&var.name);
-              self.add_diagnostic(
-                DiagnosticMessage::ExternConstWithInitializer {
-                  name: var_name,
-                  span: extern_stmt.span.clone(),
-                }
-                .report(),
-              );
-            }
-          },
-          _ => {},
+          match item_node {
+            ASTNode::Statement(ASTStatement::Function(func)) => {
+              if func.body.is_some() {
+                let func_name = self.get_symbol_name(&func.signature.name);
+                self.add_diagnostic(
+                  DiagnosticMessage::ExternWithBody {
+                    name: func_name,
+                    span: extern_stmt.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+            },
+            ASTNode::Statement(ASTStatement::Constant(const_)) => {
+              // Extern constants should not have initializers
+              if const_.value.is_some() {
+                let const_name = self.get_symbol_name(&const_.name);
+                self.add_diagnostic(
+                  DiagnosticMessage::ExternConstWithInitializer {
+                    name: const_name,
+                    span: extern_stmt.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+            },
+            ASTNode::Statement(ASTStatement::Variable(var)) => {
+              if var.value.is_some() {
+                let var_name = self.get_symbol_name(&var.name);
+                self.add_diagnostic(
+                  DiagnosticMessage::ExternConstWithInitializer {
+                    name: var_name,
+                    span: extern_stmt.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+            },
+            _ => {},
+          }
+
+          self.extra_checks_node(item, scope_kind, in_loop, in_function);
         }
-
-        self.extra_checks_node(&extern_stmt.item, scope_kind, in_loop, in_function);
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        for item in &ns_stmt.items {
+          self.extra_checks_node(item, scope_kind, in_loop, in_function);
+        }
       },
       ASTStatement::Export(export_stmt) => {
         if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
@@ -284,20 +291,7 @@ impl<'a> Analyzer<'a> {
           self.extra_checks_node(&elem, scope_kind, in_loop, in_function);
         }
       },
-      ASTExpression::Path(path) => {
-        if let Some(last) = path.segments.last() {
-          if self.scopes.lookup(last).is_none() {
-            let symbol = self.get_symbol_name(&last);
-            self.add_diagnostic(
-              DiagnosticMessage::UndefinedIdentifier {
-                name: symbol,
-                span: path.span.clone(),
-              }
-              .report(),
-            );
-          }
-        }
-      },
+      ASTExpression::Path(_) => {},
       ASTExpression::Variable(var) => {
         if self.is_builtin_name(&var.name) {
           return;

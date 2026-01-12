@@ -20,6 +20,7 @@ use ignis_type::{symbol::SymbolTable, Store as ASTStore};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
 use ignis_type::module::ModuleId;
+use ignis_type::namespace::{NamespaceId, NamespaceStore};
 use ignis_hir::HIR;
 use ignis_diagnostics::diagnostic_report::Diagnostic;
 
@@ -68,6 +69,7 @@ pub struct Analyzer<'a> {
   symbols: Rc<RefCell<SymbolTable>>,
   types: TypeStore,
   defs: DefinitionStore,
+  namespaces: NamespaceStore,
   scopes: ScopeTree,
   node_defs: HashMap<NodeId, DefinitionId>,
   node_types: HashMap<NodeId, TypeId>,
@@ -75,33 +77,30 @@ pub struct Analyzer<'a> {
   export_table: ExportTable,
   module_for_path: HashMap<String, ModuleId>,
   current_module: ModuleId,
+  current_namespace: Option<NamespaceId>,
+  in_callee_context: bool,
 }
 
 pub struct AnalyzerOutput {
   pub types: TypeStore,
   pub defs: DefinitionStore,
+  pub namespaces: NamespaceStore,
   pub hir: HIR,
   pub diagnostics: Vec<Diagnostic>,
   pub symbols: Rc<RefCell<SymbolTable>>,
 }
 
 impl AnalyzerOutput {
-  /// Collect exported symbols from this analysis result
   pub fn collect_exports(&self) -> imports::ModuleExportData {
     let mut exports = HashMap::new();
-    let all_defs = self.defs.get_all();
 
-    for def in all_defs.iter() {
+    for (def_id, def) in self.defs.iter() {
       if def.visibility == Visibility::Public {
-        exports.insert(def.name.clone(), def.clone());
+        exports.insert(def.name.clone(), def_id);
       }
     }
 
-    imports::ModuleExportData {
-      exports,
-      types: self.types.clone(),
-      defs: self.defs.clone(),
-    }
+    imports::ModuleExportData { exports }
   }
 }
 
@@ -116,6 +115,7 @@ impl<'a> Analyzer<'a> {
       symbols,
       types: TypeStore::new(),
       defs: DefinitionStore::new(),
+      namespaces: NamespaceStore::new(),
       scopes: ScopeTree::new(),
       node_defs: HashMap::new(),
       node_types: HashMap::new(),
@@ -123,6 +123,8 @@ impl<'a> Analyzer<'a> {
       export_table: HashMap::new(),
       module_for_path: HashMap::new(),
       current_module,
+      current_namespace: None,
+      in_callee_context: false,
     }
   }
 
@@ -159,6 +161,7 @@ impl<'a> Analyzer<'a> {
     AnalyzerOutput {
       types: analyzer.types,
       defs: analyzer.defs,
+      namespaces: analyzer.namespaces,
       hir,
       diagnostics: analyzer.diagnostics,
       symbols: symbols_clone,
@@ -174,6 +177,7 @@ impl<'a> Analyzer<'a> {
     module_for_path: &HashMap<String, ModuleId>,
     shared_types: &mut TypeStore,
     shared_defs: &mut DefinitionStore,
+    shared_namespaces: &mut NamespaceStore,
     current_module: ModuleId,
   ) -> AnalyzerOutput {
     let symbols_clone = symbols.clone();
@@ -183,6 +187,7 @@ impl<'a> Analyzer<'a> {
       symbols,
       types: std::mem::replace(shared_types, TypeStore::new()),
       defs: std::mem::replace(shared_defs, DefinitionStore::new()),
+      namespaces: std::mem::replace(shared_namespaces, NamespaceStore::new()),
       scopes: ScopeTree::new(),
       node_defs: HashMap::new(),
       node_types: HashMap::new(),
@@ -190,6 +195,8 @@ impl<'a> Analyzer<'a> {
       export_table: export_table.clone(),
       module_for_path: module_for_path.clone(),
       current_module,
+      current_namespace: None,
+      in_callee_context: false,
     };
 
     analyzer.bind_phase(roots);
@@ -202,10 +209,12 @@ impl<'a> Analyzer<'a> {
 
     *shared_types = std::mem::replace(&mut analyzer.types, TypeStore::new());
     *shared_defs = std::mem::replace(&mut analyzer.defs, DefinitionStore::new());
+    *shared_namespaces = std::mem::replace(&mut analyzer.namespaces, NamespaceStore::new());
 
     AnalyzerOutput {
       types: shared_types.clone(),
       defs: shared_defs.clone(),
+      namespaces: shared_namespaces.clone(),
       hir,
       diagnostics: analyzer.diagnostics,
       symbols: symbols_clone,
@@ -349,7 +358,13 @@ impl<'a> Analyzer<'a> {
         self.define_decl_in_current_scope(node_id);
       },
       ASTStatement::Extern(extern_stmt) => {
-        self.define_root(&extern_stmt.item);
+        for item in &extern_stmt.items {
+          self.define_root(item);
+        }
+      },
+      ASTStatement::Namespace(_) => {
+        // Register the namespace itself in scope (it has its own Definition now)
+        self.define_decl_in_current_scope(node_id);
       },
       ASTStatement::Export(export_stmt) => match export_stmt {
         ignis_ast::statements::ASTExport::Declaration { decl, .. } => {

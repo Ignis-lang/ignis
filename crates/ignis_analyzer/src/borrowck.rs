@@ -207,7 +207,14 @@ impl<'a> Analyzer<'a> {
         self.borrowcheck_expression(node_id, expr, checker, scope_kind);
       },
       ASTStatement::Extern(extern_stmt) => {
-        self.borrowcheck_node(&extern_stmt.item, checker, scope_kind);
+        for item in &extern_stmt.items {
+          self.borrowcheck_node(item, checker, scope_kind);
+        }
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        for item in &ns_stmt.items {
+          self.borrowcheck_node(item, checker, scope_kind);
+        }
       },
       ASTStatement::Export(export_stmt) => {
         if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {

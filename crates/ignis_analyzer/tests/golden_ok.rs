@@ -37,7 +37,9 @@ function add(a: i32, b: i32): i32 {
 fn extern_function() {
   let result = common::analyze(
     r#"
-extern function puts(s: string): i32;
+extern C {
+    function puts(s: string): i32;
+}
 "#,
   );
 
@@ -173,10 +175,12 @@ function main(): i32 {
 fn extern_const() {
   let result = common::analyze(
     r#"
-extern const PI: f64;
+extern C {
+    const PI: f64;
+}
 
 function area(radius: f64): f64 {
-    return PI * radius * radius;
+    return C::PI * radius * radius;
 }
 "#,
   );

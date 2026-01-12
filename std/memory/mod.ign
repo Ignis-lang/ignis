@@ -1,41 +1,75 @@
-// =============================================================================
-// Raw memory allocation
-// =============================================================================
+extern __memory {
+    function memoryAllocate(size: u32): *mut u8;
+    function memoryDeallocate(ptr: *mut u8): void;
+    function memoryReallocate(ptr: *mut u8, size: u32): *mut u8;
+    function memoryAllocateZeroed(size: u32, count: u32): *mut u8;
 
-extern function memoryAllocate(size: u32): *mut u8;
-extern function memoryDeallocate(ptr: *mut u8): void;
-extern function memoryReallocate(ptr: *mut u8, size: u32): *mut u8;
-extern function memoryAllocateZeroed(size: u32, count: u32): *mut u8;
-
-export function allocate(size: u32): *mut u8 {
-  return memoryAllocate(size);
+    function bufNew(elemSize: u64, elemTypeId: u32): *mut void;
+    function bufWithCapacity(elemSize: u64, elemTypeId: u32, cap: u64): *mut void;
+    function bufPush(buf: *mut void, elem: *void): void;
+    function bufAt(buf: *mut void, idx: u64): *mut void;
+    function bufLen(buf: *void): u64;
+    function bufCap(buf: *void): u64;
+    function bufResize(buf: *mut void, newLen: u64): void;
+    function bufReserve(buf: *mut void, additional: u64): void;
+    function bufClear(buf: *mut void): void;
+    function bufDrop(buf: *mut void): void;
 }
 
-export function allocateZeroed(size: u32, count: u32): *mut u8 {
-  return memoryAllocateZeroed(size, count);
+export namespace Memory {
+    function allocate(size: u32): *mut u8 {
+        return __memory::memoryAllocate(size);
+    }
+
+    function allocateZeroed(size: u32, count: u32): *mut u8 {
+        return __memory::memoryAllocateZeroed(size, count);
+    }
+
+    function reallocate(ptr: *mut u8, size: u32): *mut u8 {
+        return __memory::memoryReallocate(ptr, size);
+    }
+
+    function deallocate(ptr: *mut u8): void {
+        __memory::memoryDeallocate(ptr);
+    }
+
+    function bufNew(elemSize: u64, elemTypeId: u32): *mut void {
+        return __memory::bufNew(elemSize, elemTypeId);
+    }
+
+    function bufWithCapacity(elemSize: u64, elemTypeId: u32, cap: u64): *mut void {
+        return __memory::bufWithCapacity(elemSize, elemTypeId, cap);
+    }
+
+    function bufPush(buf: *mut void, elem: *void): void {
+        __memory::bufPush(buf, elem);
+    }
+
+    function bufAt(buf: *mut void, idx: u64): *mut void {
+        return __memory::bufAt(buf, idx);
+    }
+
+    function bufLen(buf: *void): u64 {
+        return __memory::bufLen(buf);
+    }
+
+    function bufCap(buf: *void): u64 {
+        return __memory::bufCap(buf);
+    }
+
+    function bufResize(buf: *mut void, newLen: u64): void {
+        __memory::bufResize(buf, newLen);
+    }
+
+    function bufReserve(buf: *mut void, additional: u64): void {
+        __memory::bufReserve(buf, additional);
+    }
+
+    function bufClear(buf: *mut void): void {
+        __memory::bufClear(buf);
+    }
+
+    function bufDrop(buf: *mut void): void {
+        __memory::bufDrop(buf);
+    }
 }
-
-export function reallocate(ptr: *mut u8, size: u32): *mut u8 {
-  return memoryReallocate(ptr, size);
-}
-
-export function deallocate(ptr: *mut u8): void {
-  memoryDeallocate(ptr);
-}
-
-// =============================================================================
-// Dynamic buffer operations
-// =============================================================================
-// These functions operate on IgnisBuffer* (dynamic arrays).
-// elemTypeId should be one of the TYPE_*_ID constants from types module.
-
-export extern function bufNew(elemSize: u64, elemTypeId: u32): *mut void;
-export extern function bufWithCapacity(elemSize: u64, elemTypeId: u32, cap: u64): *mut void;
-export extern function bufPush(buf: *mut void, elem: *void): void;
-export extern function bufAt(buf: *mut void, idx: u64): *mut void;
-export extern function bufLen(buf: *void): u64;
-export extern function bufCap(buf: *void): u64;
-export extern function bufResize(buf: *mut void, newLen: u64): void;
-export extern function bufReserve(buf: *mut void, additional: u64): void;
-export extern function bufClear(buf: *mut void): void;
-export extern function bufDrop(buf: *mut void): void;

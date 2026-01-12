@@ -265,10 +265,12 @@ function accumulate(): i32 {
 fn lir_extern_function() {
   let result = common::lower_to_lir(
     r#"
-extern function print(msg: string): void;
+extern io {
+    function print(msg: string): void;
+}
 
 function greet(): void {
-    print("hello");
+    io::print("hello");
     return;
 }
 "#,

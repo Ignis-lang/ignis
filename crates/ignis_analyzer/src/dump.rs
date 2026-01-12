@@ -49,18 +49,20 @@ pub fn dump_defs(
 
   for (idx, def) in all_defs.iter().enumerate() {
     let def_id = DefinitionId::new(idx as u32);
-    let type_id = defs.type_of(&def_id);
-    let type_kind = types.get(type_id);
     let name = symbols.get(&def.name).to_string();
 
     match &def.kind {
       DefinitionKind::Function(func_def) => {
+        let type_id = defs.type_of(&def_id);
+        let type_kind = types.get(type_id);
         writeln!(&mut output, "  DefId({:?}): function {} -> {:?}", def_id, name, type_kind).unwrap();
         writeln!(&mut output, "    params: {:?}", func_def.params).unwrap();
         writeln!(&mut output, "    return_type: {:?}", func_def.return_type).unwrap();
         writeln!(&mut output, "    is_extern: {}", func_def.is_extern).unwrap();
       },
       DefinitionKind::Variable(var_def) => {
+        let type_id = defs.type_of(&def_id);
+        let type_kind = types.get(type_id);
         writeln!(
           &mut output,
           "  DefId({:?}): variable {}: {:?} (mut: {})",
@@ -69,16 +71,28 @@ pub fn dump_defs(
         .unwrap();
       },
       DefinitionKind::Constant(const_def) => {
+        let type_id = defs.type_of(&def_id);
+        let type_kind = types.get(type_id);
         writeln!(&mut output, "  DefId({:?}): constant {}: {:?}", def_id, name, type_kind).unwrap();
         if let Some(value) = &const_def.value {
           writeln!(&mut output, "    value: {:?}", value).unwrap();
         }
       },
       DefinitionKind::Parameter(param_def) => {
+        let type_id = defs.type_of(&def_id);
+        let type_kind = types.get(type_id);
         writeln!(
           &mut output,
           "  DefId({:?}): parameter {}: {:?} (mut: {})",
           def_id, name, type_kind, param_def.mutable
+        )
+        .unwrap();
+      },
+      DefinitionKind::Namespace(ns_def) => {
+        writeln!(
+          &mut output,
+          "  DefId({:?}): namespace {} (ns_id: {:?}, is_extern: {})",
+          def_id, name, ns_def.namespace_id, ns_def.is_extern
         )
         .unwrap();
       },

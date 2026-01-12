@@ -280,6 +280,7 @@ impl CompilationContext {
     let mut export_table: ExportTable = HashMap::new();
     let mut shared_types = TypeStore::new();
     let mut shared_defs = DefinitionStore::new();
+    let mut shared_namespaces = ignis_type::namespace::NamespaceStore::new();
     let mut combined_hir = HIR::new();
     let mut all_diagnostics = Vec::new();
 
@@ -297,6 +298,7 @@ impl CompilationContext {
         &self.module_for_path,
         &mut shared_types,
         &mut shared_defs,
+        &mut shared_namespaces,
         module_id,
       );
 
@@ -324,6 +326,7 @@ impl CompilationContext {
     Ok(ignis_analyzer::AnalyzerOutput {
       types: shared_types,
       defs: shared_defs,
+      namespaces: shared_namespaces,
       hir: combined_hir,
       diagnostics: all_diagnostics,
       symbols: self.symbol_table.clone(),

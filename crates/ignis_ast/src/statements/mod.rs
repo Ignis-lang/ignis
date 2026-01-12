@@ -13,6 +13,7 @@ pub mod for_statement;
 pub mod function;
 pub mod if_statement;
 pub mod import_statement;
+pub mod namespace_statement;
 pub mod return_statement;
 pub mod variable;
 pub mod while_statement;
@@ -28,6 +29,7 @@ pub use for_statement::ASTFor;
 pub use function::ASTFunction;
 pub use if_statement::ASTIf;
 pub use import_statement::ASTImport;
+pub use namespace_statement::ASTNamespace;
 pub use return_statement::ASTReturn;
 pub use variable::ASTVariable;
 pub use while_statement::ASTWhile;
@@ -49,6 +51,7 @@ pub enum ASTStatement {
   Constant(ASTConstant),
   Export(ASTExport),
   Comment(ASTComment),
+  Namespace(ASTNamespace),
 }
 
 impl ASTStatement {
@@ -69,6 +72,7 @@ impl ASTStatement {
       ASTStatement::Constant(const_) => &const_.span,
       ASTStatement::Export(exp) => exp.span(),
       ASTStatement::Comment(comment) => &comment.span,
+      ASTStatement::Namespace(ns) => &ns.span,
     }
   }
 }

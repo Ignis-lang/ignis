@@ -399,11 +399,13 @@ fn ffi_leak_warning() {
   // Passing an owned type to an extern function produces a warning.
   let result = common::analyze(
     r#"
-extern function ffiConsume(s: string): void;
+extern ffi {
+    function ffiConsume(s: string): void;
+}
 
 function main(): void {
     let a: string = "hello";
-    ffiConsume(a);
+    ffi::ffiConsume(a);
     return;
 }
 "#,
@@ -627,12 +629,14 @@ function main(): void {
 fn deallocate_pointer_coercion() {
   common::assert_ok(
     r#"
-extern function allocate(size: u32): *mut u8;
-extern function deallocate(ptr: *mut u8): void;
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
 
 function main(): void {
-    let mut p: *mut i32 = allocate(16) as *mut i32;
-    deallocate(p);
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
+    mem::deallocate(p as *mut u8);
     return;
 }
 "#,
@@ -643,12 +647,14 @@ function main(): void {
 fn use_after_free_write() {
   let result = common::analyze(
     r#"
-extern function allocate(size: u32): *mut u8;
-extern function deallocate(ptr: *mut u8): void;
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
 
 function main(): void {
-    let mut p: *mut i32 = allocate(16) as *mut i32;
-    deallocate(p);
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
+    mem::deallocate(p as *mut u8);
     *p = 42;
     return;
 }
@@ -667,13 +673,15 @@ function main(): void {
 fn use_after_free_read() {
   let result = common::analyze(
     r#"
-extern function allocate(size: u32): *mut u8;
-extern function deallocate(ptr: *mut u8): void;
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
 
 function main(): void {
-    let mut p: *mut i32 = allocate(16) as *mut i32;
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
     *p = 42;
-    deallocate(p);
+    mem::deallocate(p as *mut u8);
     let x: i32 = *p;
     return;
 }
@@ -692,14 +700,16 @@ function main(): void {
 fn no_use_after_free_before_deallocate() {
   common::assert_ok(
     r#"
-extern function allocate(size: u32): *mut u8;
-extern function deallocate(ptr: *mut u8): void;
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
 
 function main(): void {
-    let mut p: *mut i32 = allocate(16) as *mut i32;
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
     *p = 42;
     let x: i32 = *p;
-    deallocate(p);
+    mem::deallocate(p as *mut u8);
     return;
 }
 "#,
@@ -710,10 +720,102 @@ function main(): void {
 fn allocate_literal_coercion() {
   common::assert_ok(
     r#"
-extern function allocate(size: u32): *mut u8;
+extern mem {
+    function allocate(size: u32): *mut u8;
+}
 
 function main(): void {
-    let p: *mut u8 = allocate(16);
+    let p: *mut u8 = mem::allocate(16);
+    return;
+}
+"#,
+  );
+}
+
+// =============================================================================
+// Path expression tests
+// =============================================================================
+
+#[test]
+fn path_function_as_callee_ok() {
+  // Function paths are allowed as call targets
+  common::assert_ok(
+    r#"
+namespace Math {
+    function add(a: i32, b: i32): i32 {
+        return a + b;
+    }
+}
+
+function main(): void {
+    let x: i32 = Math::add(1, 2);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn path_function_outside_callee_is_error() {
+  // Function paths outside of call position should produce an error
+  // Note: We need to use a context where the path is valid syntactically
+  // but semantically incorrect (e.g., as an argument to another function)
+  let result = common::analyze(
+    r#"
+namespace Math {
+    function add(a: i32, b: i32): i32 {
+        return a + b;
+    }
+}
+
+function takeFn(x: i32): void {
+    return;
+}
+
+function main(): void {
+    takeFn(Math::add);
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+namespace Math {
+    function add(a: i32, b: i32): i32 {
+        return a + b;
+    }
+}
+
+function takeFn(x: i32): void {
+    return;
+}
+
+function main(): void {
+    takeFn(Math::add);
+    return;
+}
+"#,
+    &["A0050"],
+  );
+
+  assert_snapshot!(
+    "path_function_outside_callee",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn path_const_in_expression_ok() {
+  // Constant paths are allowed in any expression position
+  common::assert_ok(
+    r#"
+extern libc {
+    const BUFSIZ: i32;
+}
+
+function main(): void {
+    let x: i32 = libc::BUFSIZ;
     return;
 }
 "#,

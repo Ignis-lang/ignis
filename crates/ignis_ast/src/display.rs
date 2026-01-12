@@ -79,6 +79,7 @@ use crate::{
     function::{ASTFunction, ASTFunctionSignature, ASTParameter},
     if_statement::ASTIf,
     import_statement::ASTImport,
+    namespace_statement::ASTNamespace,
     return_statement::ASTReturn,
     variable::ASTVariable,
     while_statement::ASTWhile,
@@ -290,6 +291,7 @@ impl DisplayLisp for ASTStatement {
       ASTStatement::Constant(statement) => statement.to_lisp(formatter),
       ASTStatement::Export(statement) => statement.to_lisp(formatter),
       ASTStatement::Comment(statement) => statement.to_lisp(formatter),
+      ASTStatement::Namespace(statement) => statement.to_lisp(formatter),
     }
   }
 }
@@ -708,8 +710,9 @@ impl DisplayLisp for ASTExtern {
     &self,
     formatter: &ASTFormatter,
   ) -> String {
-    let item_display = formatter.format_node(&self.item);
-    format!("(Extern {})", item_display)
+    let path_str: Vec<String> = self.path.iter().map(|s| formatter.resolve_symbol(s)).collect();
+    let items_display: Vec<String> = self.items.iter().map(|i| formatter.format_node(i)).collect();
+    format!("(Extern {} [{}])", path_str.join("::"), items_display.join(" "))
   }
 }
 
@@ -757,6 +760,18 @@ impl DisplayLisp for ASTComment {
     _formatter: &ASTFormatter,
   ) -> String {
     format!("(Comment \"{}\")", self.content.replace("\"", "\\\""))
+  }
+}
+
+// Namespace Statement
+impl DisplayLisp for ASTNamespace {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let path_str: Vec<String> = self.path.iter().map(|s| formatter.resolve_symbol(s)).collect();
+    let items_display: Vec<String> = self.items.iter().map(|i| formatter.format_node(i)).collect();
+    format!("(Namespace {} [{}])", path_str.join("::"), items_display.join(" "))
   }
 }
 

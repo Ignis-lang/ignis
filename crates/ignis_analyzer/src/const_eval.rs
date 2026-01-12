@@ -99,7 +99,14 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTStatement::Extern(extern_stmt) => {
-        self.const_eval_node(&extern_stmt.item, scope_kind);
+        for item in &extern_stmt.items {
+          self.const_eval_node(item, scope_kind);
+        }
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        for item in &ns_stmt.items {
+          self.const_eval_node(item, scope_kind);
+        }
       },
       ASTStatement::Export(export_stmt) => {
         if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {

@@ -48,5 +48,5 @@ pub fn compile_to_c(source: &str) -> String {
     quoted: true,
   }];
 
-  ignis_codegen_c::emit_c(&lir_program, &types, &result.defs, &sym_table, &headers)
+  ignis_codegen_c::emit_c(&lir_program, &types, &result.defs, &result.namespaces, &sym_table, &headers)
 }

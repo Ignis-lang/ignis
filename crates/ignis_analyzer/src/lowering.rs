@@ -296,7 +296,37 @@ impl<'a> Analyzer<'a> {
           type_id: expr_type,
         })
       },
-      ASTStatement::Extern(ext) => self.lower_node_to_hir(&ext.item, hir, scope_kind),
+      ASTStatement::Extern(ext) => {
+        // Lower all items in extern block
+        let mut hir_ids = Vec::new();
+        for item in &ext.items {
+          hir_ids.push(self.lower_node_to_hir(item, hir, scope_kind));
+        }
+        // Return a block containing all extern items
+        hir.alloc(HIRNode {
+          kind: HIRKind::Block {
+            statements: hir_ids,
+            expression: None,
+          },
+          span: ext.span.clone(),
+          type_id: self.types.void(),
+        })
+      },
+      ASTStatement::Namespace(ns) => {
+        // Lower all items in namespace block
+        let mut hir_ids = Vec::new();
+        for item in &ns.items {
+          hir_ids.push(self.lower_node_to_hir(item, hir, scope_kind));
+        }
+        hir.alloc(HIRNode {
+          kind: HIRKind::Block {
+            statements: hir_ids,
+            expression: None,
+          },
+          span: ns.span.clone(),
+          type_id: self.types.void(),
+        })
+      },
       ASTStatement::Export(exp) => match exp {
         ignis_ast::statements::ASTExport::Declaration { decl, .. } => self.lower_node_to_hir(decl, hir, scope_kind),
         ignis_ast::statements::ASTExport::Name { .. } => hir.alloc(HIRNode {
@@ -403,27 +433,16 @@ impl<'a> Analyzer<'a> {
               });
             },
           },
-          ASTNode::Expression(ASTExpression::Path(path)) => {
-            if let Some(last) = path.segments.last() {
-              match self.scopes.lookup(last) {
-                Some(def_id) => def_id.clone(),
-                None => {
-                  let span = self.node_span(&call.callee).clone();
-                  return hir.alloc(HIRNode {
-                    kind: HIRKind::Error,
-                    span,
-                    type_id: self.types.error(),
-                  });
-                },
-              }
-            } else {
+          ASTNode::Expression(ASTExpression::Path(path)) => match self.resolve_qualified_path(&path.segments) {
+            Some(def_id) => def_id,
+            None => {
               let span = self.node_span(&call.callee).clone();
               return hir.alloc(HIRNode {
                 kind: HIRKind::Error,
                 span,
                 type_id: self.types.error(),
               });
-            }
+            },
           },
           _ => {
             let span = self.node_span(&call.callee).clone();
@@ -630,8 +649,8 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Path(path) => {
-        let def_id = match path.segments.last().and_then(|name| self.scopes.lookup(name)) {
-          Some(id) => id.clone(),
+        let def_id = match self.resolve_qualified_path(&path.segments) {
+          Some(id) => id,
           None => {
             return hir.alloc(HIRNode {
               kind: HIRKind::Error,
