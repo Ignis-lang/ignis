@@ -6,14 +6,26 @@ use ignis_ast::expressions::member_access::ASTAccessOp;
 use ignis_ast::expressions::unary::UnaryOperator;
 use ignis_ast::statements::record::{ASTRecord, ASTRecordItem};
 use ignis_ast::statements::enum_::{ASTEnum, ASTEnumItem};
+use ignis_ast::statements::for_of::ASTForOf;
 use ignis_hir::{
   HIR, HIRNode, HIRKind, HIRId,
   operation::{BinaryOperation, UnaryOperation},
   statement::LoopKind,
 };
-use ignis_type::definition::DefinitionKind;
+use ignis_type::definition::{DefinitionId, DefinitionKind};
 use ignis_type::span::Span;
 use ignis_type::types::{Type, TypeId};
+
+struct ForOfContext<'a> {
+  for_of: &'a ASTForOf,
+  synth_id: u32,
+  element_type: TypeId,
+  iter_hir: HIRId,
+  is_by_ref: bool,
+  is_mut_ref: bool,
+  binding_def_id: DefinitionId,
+  span: &'a Span,
+}
 
 impl<'a> Analyzer<'a> {
   pub fn lower_to_hir(
@@ -351,6 +363,7 @@ impl<'a> Analyzer<'a> {
         // Lower enum methods to HIR
         self.lower_enum_methods(enum_, hir, scope_kind)
       },
+      ASTStatement::ForOf(for_of) => self.lower_for_of(node_id, for_of, hir),
       _ => hir.alloc(HIRNode {
         kind: HIRKind::Block {
           statements: Vec::new(),
@@ -806,7 +819,10 @@ impl<'a> Analyzer<'a> {
             })
           },
 
-          Some(ResolvedPath::EnumVariant { enum_def, variant_index }) => {
+          Some(ResolvedPath::EnumVariant {
+            enum_def,
+            variant_index,
+          }) => {
             let ed = match &self.defs.get(&enum_def).kind {
               DefinitionKind::Enum(ed) => ed.clone(),
               _ => unreachable!("ResolvedPath::EnumVariant should reference an enum"),
@@ -834,13 +850,11 @@ impl<'a> Analyzer<'a> {
             })
           },
 
-          None => {
-            hir.alloc(HIRNode {
-              kind: HIRKind::Error,
-              span: path.span.clone(),
-              type_id: self.types.error(),
-            })
-          },
+          None => hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: path.span.clone(),
+            type_id: self.types.error(),
+          }),
         }
       },
       ASTExpression::PostfixIncrement { expr, span } => {
@@ -1546,6 +1560,493 @@ impl<'a> Analyzer<'a> {
         arg_hir
       })
       .collect()
+  }
+
+  fn next_synthetic_id(&mut self) -> u32 {
+    let id = self.lowering_counter;
+    self.lowering_counter += 1;
+    id
+  }
+
+  fn lower_for_of(
+    &mut self,
+    node_id: &NodeId,
+    for_of: &ASTForOf,
+    hir: &mut HIR,
+  ) -> HIRId {
+    self.scopes.push(ScopeKind::Loop);
+    let synth_id = self.next_synthetic_id();
+    let span = &for_of.span;
+
+    let iter_type = self
+      .lookup_type(&for_of.iter)
+      .cloned()
+      .unwrap_or_else(|| self.types.error());
+
+    let (element_type, size) = match self.types.get(&iter_type).clone() {
+      Type::Vector { element, size } => (element, size),
+      _ => {
+        self.scopes.pop();
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let binding_def_id = match self.for_of_binding_defs.get(node_id).cloned() {
+      Some(id) => id,
+      None => {
+        self.scopes.pop();
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let binding_type = self.defs.type_of(&binding_def_id).clone();
+    let (is_by_ref, is_mut_ref) = match self.types.get(&binding_type).clone() {
+      Type::Reference { mutable, .. } => (true, mutable),
+      _ => (false, false),
+    };
+
+    let _ = self.scopes.define(&for_of.binding.name, &binding_def_id);
+
+    let (iter_hir, prefix_stmts) =
+      self.lower_iter_with_temp_if_needed(&for_of.iter, hir, ScopeKind::Loop, synth_id, span);
+
+    let ctx = ForOfContext {
+      for_of,
+      synth_id,
+      element_type,
+      iter_hir,
+      is_by_ref,
+      is_mut_ref,
+      binding_def_id,
+      span,
+    };
+
+    let loop_hir = match size {
+      Some(n) => self.lower_for_of_fixed(&ctx, hir, n),
+      None => self.lower_for_of_dynamic(&ctx, hir),
+    };
+
+    self.scopes.pop();
+
+    if prefix_stmts.is_empty() {
+      loop_hir
+    } else {
+      let mut stmts = prefix_stmts;
+      stmts.push(loop_hir);
+      hir.alloc(HIRNode {
+        kind: HIRKind::Block {
+          statements: stmts,
+          expression: None,
+        },
+        span: span.clone(),
+        type_id: self.types.void(),
+      })
+    }
+  }
+
+  fn lower_iter_with_temp_if_needed(
+    &mut self,
+    iter_node: &NodeId,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+    synth_id: u32,
+    span: &Span,
+  ) -> (HIRId, Vec<HIRId>) {
+    use ignis_ast::expressions::ASTExpression;
+
+    let node = self.ast.get(iter_node);
+
+    if let ASTNode::Expression(ASTExpression::Variable(_)) = node {
+      let iter_hir = self.lower_node_to_hir(iter_node, hir, scope_kind);
+      return (iter_hir, vec![]);
+    }
+
+    let tmp_name = self.symbols.borrow_mut().intern(&format!("__for_of_tmp_{}", synth_id));
+    let iter_type = self
+      .lookup_type(iter_node)
+      .cloned()
+      .unwrap_or_else(|| self.types.error());
+
+    let tmp_def = ignis_type::definition::Definition {
+      kind: ignis_type::definition::DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
+        type_id: iter_type,
+        mutable: false,
+      }),
+      name: tmp_name,
+      span: span.clone(),
+      visibility: ignis_type::definition::Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: None,
+    };
+    let tmp_def_id = self.defs.alloc(tmp_def);
+
+    let iter_value = self.lower_node_to_hir(iter_node, hir, scope_kind);
+    let let_tmp = hir.alloc(HIRNode {
+      kind: HIRKind::Let {
+        name: tmp_def_id,
+        value: Some(iter_value),
+      },
+      span: span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let tmp_ref = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(tmp_def_id),
+      span: span.clone(),
+      type_id: iter_type,
+    });
+
+    (tmp_ref, vec![let_tmp])
+  }
+
+  fn lower_for_of_fixed(
+    &mut self,
+    ctx: &ForOfContext<'_>,
+    hir: &mut HIR,
+    size: usize,
+  ) -> HIRId {
+    let u64_type = self.types.u64();
+
+    let idx_name = self
+      .symbols
+      .borrow_mut()
+      .intern(&format!("__for_of_i_{}", ctx.synth_id));
+
+    let idx_def = ignis_type::definition::Definition {
+      kind: ignis_type::definition::DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
+        type_id: u64_type,
+        mutable: true,
+      }),
+      name: idx_name,
+      span: ctx.span.clone(),
+      visibility: ignis_type::definition::Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: None,
+    };
+    let idx_def_id = self.defs.alloc(idx_def);
+    self.scopes.define(&idx_name, &idx_def_id).ok();
+
+    let zero_lit = hir.alloc(HIRNode {
+      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::UnsignedInt64(0)),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let init = hir.alloc(HIRNode {
+      kind: HIRKind::Let {
+        name: idx_def_id,
+        value: Some(zero_lit),
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let idx_var = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(idx_def_id),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let len_lit = hir.alloc(HIRNode {
+      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::UnsignedInt64(size as u64)),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let condition = hir.alloc(HIRNode {
+      kind: HIRKind::Binary {
+        operation: BinaryOperation::LessThan,
+        left: idx_var,
+        right: len_lit,
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.boolean(),
+    });
+
+    let idx_var_update = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(idx_def_id),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let one_lit = hir.alloc(HIRNode {
+      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::UnsignedInt64(1)),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let update = hir.alloc(HIRNode {
+      kind: HIRKind::Assign {
+        target: idx_var_update,
+        value: one_lit,
+        operation: Some(BinaryOperation::Add),
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let idx_var_access = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(idx_def_id),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let index_expr = hir.alloc(HIRNode {
+      kind: HIRKind::Index {
+        base: ctx.iter_hir,
+        index: idx_var_access,
+      },
+      span: ctx.span.clone(),
+      type_id: ctx.element_type,
+    });
+
+    let elem_value = if ctx.is_by_ref {
+      hir.alloc(HIRNode {
+        kind: HIRKind::Reference {
+          expression: index_expr,
+          mutable: ctx.is_mut_ref,
+        },
+        span: ctx.span.clone(),
+        type_id: self.types.reference(ctx.element_type, ctx.is_mut_ref),
+      })
+    } else {
+      index_expr
+    };
+
+    let binding_let = hir.alloc(HIRNode {
+      kind: HIRKind::Let {
+        name: ctx.binding_def_id,
+        value: Some(elem_value),
+      },
+      span: ctx.for_of.binding.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let original_body = self.lower_node_to_hir(&ctx.for_of.body, hir, ScopeKind::Loop);
+
+    let body_block = hir.alloc(HIRNode {
+      kind: HIRKind::Block {
+        statements: vec![binding_let, original_body],
+        expression: None,
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Loop {
+        condition: LoopKind::For {
+          init: Some(init),
+          condition: Some(condition),
+          update: Some(update),
+        },
+        body: body_block,
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    })
+  }
+
+  fn lower_for_of_dynamic(
+    &mut self,
+    ctx: &ForOfContext<'_>,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let runtime = self.runtime.as_ref().expect("runtime builtins not initialized");
+    let u64_type = self.types.u64();
+    let void_ptr_type = self.types.pointer(self.types.void());
+
+    let len_call = hir.alloc(HIRNode {
+      kind: HIRKind::Call {
+        callee: runtime.buf_len,
+        args: vec![ctx.iter_hir],
+      },
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+
+    let len_name = self
+      .symbols
+      .borrow_mut()
+      .intern(&format!("__for_of_len_{}", ctx.synth_id));
+    let len_def = ignis_type::definition::Definition {
+      kind: ignis_type::definition::DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
+        type_id: u64_type,
+        mutable: false,
+      }),
+      name: len_name,
+      span: ctx.span.clone(),
+      visibility: ignis_type::definition::Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: None,
+    };
+    let len_def_id = self.defs.alloc(len_def);
+
+    let len_let = hir.alloc(HIRNode {
+      kind: HIRKind::Let {
+        name: len_def_id,
+        value: Some(len_call),
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let idx_name = self
+      .symbols
+      .borrow_mut()
+      .intern(&format!("__for_of_i_{}", ctx.synth_id));
+    let idx_def = ignis_type::definition::Definition {
+      kind: ignis_type::definition::DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
+        type_id: u64_type,
+        mutable: true,
+      }),
+      name: idx_name,
+      span: ctx.span.clone(),
+      visibility: ignis_type::definition::Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: None,
+    };
+    let idx_def_id = self.defs.alloc(idx_def);
+    self.scopes.define(&idx_name, &idx_def_id).ok();
+
+    let zero_lit = hir.alloc(HIRNode {
+      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::UnsignedInt64(0)),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let init = hir.alloc(HIRNode {
+      kind: HIRKind::Let {
+        name: idx_def_id,
+        value: Some(zero_lit),
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let idx_var = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(idx_def_id),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let len_var = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(len_def_id),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let condition = hir.alloc(HIRNode {
+      kind: HIRKind::Binary {
+        operation: BinaryOperation::LessThan,
+        left: idx_var,
+        right: len_var,
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.boolean(),
+    });
+
+    let idx_var_update = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(idx_def_id),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let one_lit = hir.alloc(HIRNode {
+      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::UnsignedInt64(1)),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+    let update = hir.alloc(HIRNode {
+      kind: HIRKind::Assign {
+        target: idx_var_update,
+        value: one_lit,
+        operation: Some(BinaryOperation::Add),
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let buf_at_builtin = if ctx.is_mut_ref {
+      runtime.buf_at
+    } else {
+      runtime.buf_at_const
+    };
+
+    let idx_var_access = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(idx_def_id),
+      span: ctx.span.clone(),
+      type_id: u64_type,
+    });
+
+    let buf_at_call = hir.alloc(HIRNode {
+      kind: HIRKind::Call {
+        callee: buf_at_builtin,
+        args: vec![ctx.iter_hir, idx_var_access],
+      },
+      span: ctx.span.clone(),
+      type_id: void_ptr_type,
+    });
+
+    let ref_type = self.types.reference(ctx.element_type, ctx.is_mut_ref);
+    let casted = hir.alloc(HIRNode {
+      kind: HIRKind::Cast {
+        expression: buf_at_call,
+        target: ref_type,
+      },
+      span: ctx.span.clone(),
+      type_id: ref_type,
+    });
+
+    let elem_value = if ctx.is_by_ref {
+      casted
+    } else {
+      hir.alloc(HIRNode {
+        kind: HIRKind::Dereference(casted),
+        span: ctx.span.clone(),
+        type_id: ctx.element_type,
+      })
+    };
+
+    let binding_let = hir.alloc(HIRNode {
+      kind: HIRKind::Let {
+        name: ctx.binding_def_id,
+        value: Some(elem_value),
+      },
+      span: ctx.for_of.binding.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let original_body = self.lower_node_to_hir(&ctx.for_of.body, hir, ScopeKind::Loop);
+
+    let body_block = hir.alloc(HIRNode {
+      kind: HIRKind::Block {
+        statements: vec![binding_let, original_body],
+        expression: None,
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let loop_hir = hir.alloc(HIRNode {
+      kind: HIRKind::Loop {
+        condition: LoopKind::For {
+          init: Some(init),
+          condition: Some(condition),
+          update: Some(update),
+        },
+        body: body_block,
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Block {
+        statements: vec![len_let, loop_hir],
+        expression: None,
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    })
   }
 }
 

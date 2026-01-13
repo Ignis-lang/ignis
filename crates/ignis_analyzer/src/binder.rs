@@ -111,6 +111,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::If(if_stmt) => self.bind_if(if_stmt),
       ASTStatement::While(while_stmt) => self.bind_while(while_stmt),
       ASTStatement::For(for_stmt) => self.bind_for(for_stmt),
+      ASTStatement::ForOf(for_of_stmt) => self.bind_for_of(node_id, for_of_stmt),
       ASTStatement::TypeAlias(ta) => self.bind_type_alias_complete(node_id, ta),
       ASTStatement::Record(rec) => self.bind_record_complete(node_id, rec),
       ASTStatement::Enum(en) => self.bind_enum_complete(node_id, en),
@@ -776,6 +777,38 @@ impl<'a> Analyzer<'a> {
     self.bind_complete(&for_stmt.condition, ScopeKind::Loop);
     self.bind_complete(&for_stmt.increment, ScopeKind::Loop);
     self.bind_complete(&for_stmt.body, ScopeKind::Loop);
+
+    self.scopes.pop();
+  }
+
+  fn bind_for_of(
+    &mut self,
+    node_id: &NodeId,
+    for_of: &ignis_ast::statements::ASTForOf,
+  ) {
+    self.scopes.push(ScopeKind::Loop);
+
+    // Type is unknown here; typeck will resolve it based on the iterable's element type.
+    let var_def = VariableDefinition {
+      type_id: self.types.unknown(),
+      mutable: false,
+    };
+
+    let def = Definition {
+      kind: DefinitionKind::Variable(var_def),
+      name: for_of.binding.name.clone(),
+      span: for_of.binding.span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+    };
+
+    let def_id = self.defs.alloc(def);
+    let _ = self.scopes.define(&for_of.binding.name, &def_id);
+    self.for_of_binding_defs.insert(node_id.clone(), def_id);
+
+    self.bind_complete(&for_of.iter, ScopeKind::Loop);
+    self.bind_complete(&for_of.body, ScopeKind::Loop);
 
     self.scopes.pop();
   }

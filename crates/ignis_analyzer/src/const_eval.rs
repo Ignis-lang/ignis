@@ -86,6 +86,12 @@ impl<'a> Analyzer<'a> {
 
         self.scopes.pop();
       },
+      ASTStatement::ForOf(for_of) => {
+        with_for_of_scope!(self, node_id, for_of, {
+          self.const_eval_node(&for_of.iter, ScopeKind::Loop);
+          self.const_eval_node(&for_of.body, ScopeKind::Loop);
+        });
+      },
       ASTStatement::Variable(var) => {
         if let Some(value_id) = &var.value {
           self.const_eval_node(value_id, scope_kind);

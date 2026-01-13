@@ -817,3 +817,117 @@ function main(): i32 {
 "#,
   );
 }
+
+// ============================================================================
+// for-of loop tests
+// ============================================================================
+
+#[test]
+fn e2e_for_of_fixed_array_by_value() {
+  e2e_test(
+    "for_of_fixed_array_by_value",
+    r#"
+function main(): i32 {
+    let arr: i32[3] = [10, 20, 12];
+    let mut sum: i32 = 0;
+    for (let x of arr) {
+        sum = sum + x;
+    }
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_fixed_array_by_ref() {
+  e2e_test(
+    "for_of_fixed_array_by_ref",
+    r#"
+function main(): i32 {
+    let arr: i32[3] = [1, 2, 39];
+    let mut sum: i32 = 0;
+    for (let x: &i32 of arr) {
+        sum = sum + *x;
+    }
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_fixed_array_mut_ref() {
+  e2e_test(
+    "for_of_fixed_array_mut_ref",
+    r#"
+function main(): i32 {
+    let mut arr: i32[3] = [10, 20, 12];
+    for (let x: &mut i32 of arr) {
+        *x = *x + 1;
+    }
+    return arr[0] + arr[1] + arr[2];
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_nested() {
+  e2e_test(
+    "for_of_nested",
+    r#"
+function main(): i32 {
+    let a: i32[2] = [1, 2];
+    let b: i32[3] = [10, 20, 12];
+    let mut sum: i32 = 0;
+    for (let x of a) {
+        for (let y of b) {
+            sum = sum + x * y;
+        }
+    }
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_with_break() {
+  e2e_test(
+    "for_of_with_break",
+    r#"
+function main(): i32 {
+    let arr: i32[5] = [1, 2, 3, 4, 5];
+    let mut sum: i32 = 0;
+    for (let x of arr) {
+        if (x > 3) {
+            break;
+        }
+        sum = sum + x;
+    }
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_with_continue() {
+  e2e_test(
+    "for_of_with_continue",
+    r#"
+function main(): i32 {
+    let arr: i32[5] = [1, 2, 3, 4, 5];
+    let mut sum: i32 = 0;
+    for (let x of arr) {
+        if (x == 3) {
+            continue;
+        }
+        sum = sum + x;
+    }
+    return sum;
+}
+"#,
+  );
+}

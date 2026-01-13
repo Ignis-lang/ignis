@@ -176,6 +176,38 @@ impl<'a> Analyzer<'a> {
 
         self.scopes.pop();
       },
+      ASTStatement::ForOf(for_of) => {
+        self.scopes.push(ScopeKind::Loop);
+        checker.enter_block();
+
+        if let Some(def_id) = self.for_of_binding_defs.get(node_id).cloned() {
+          let _ = self.scopes.define(&for_of.binding.name, &def_id);
+        }
+
+        self.borrowcheck_node(&for_of.iter, checker, ScopeKind::Loop);
+
+        let is_mut_ref = self.is_for_of_mut_ref(for_of);
+        let is_ref = self.is_for_of_ref(for_of);
+
+        if is_ref || is_mut_ref {
+          if let Some(iter_def_id) = self.get_iter_def_id(&for_of.iter) {
+            let borrow_result = if is_mut_ref {
+              checker.borrow_mutable(&iter_def_id)
+            } else {
+              checker.borrow_immutable(&iter_def_id)
+            };
+
+            if let Err(err) = borrow_result {
+              self.emit_borrow_error(err, &iter_def_id, &for_of.span);
+            }
+          }
+        }
+
+        self.borrowcheck_node(&for_of.body, checker, ScopeKind::Loop);
+
+        checker.exit_block();
+        self.scopes.pop();
+      },
       ASTStatement::Return(ret) => {
         if let Some(value) = &ret.expression {
           self.borrowcheck_node(value, checker, scope_kind);
@@ -355,5 +387,63 @@ impl<'a> Analyzer<'a> {
     def_id: &DefinitionId,
   ) -> String {
     self.get_symbol_name(&self.defs.get(def_id).name)
+  }
+
+  fn is_for_of_mut_ref(
+    &self,
+    for_of: &ignis_ast::statements::ASTForOf,
+  ) -> bool {
+    matches!(
+      &for_of.binding.type_annotation,
+      Some(ignis_ast::type_::IgnisTypeSyntax::Reference { mutable: true, .. })
+    )
+  }
+
+  fn is_for_of_ref(
+    &self,
+    for_of: &ignis_ast::statements::ASTForOf,
+  ) -> bool {
+    matches!(
+      &for_of.binding.type_annotation,
+      Some(ignis_ast::type_::IgnisTypeSyntax::Reference { mutable: false, .. })
+    )
+  }
+
+  fn get_iter_def_id(
+    &self,
+    iter_node: &NodeId,
+  ) -> Option<DefinitionId> {
+    let node = self.ast.get(iter_node);
+    if let ASTNode::Expression(ASTExpression::Variable(var)) = node {
+      self.scopes.lookup(&var.name).cloned()
+    } else {
+      None
+    }
+  }
+
+  fn emit_borrow_error(
+    &mut self,
+    err: BorrowError,
+    def_id: &DefinitionId,
+    span: &ignis_type::span::Span,
+  ) {
+    let var_name = self.get_var_name_from_def(def_id);
+
+    let diagnostic = match err {
+      BorrowError::ImmWhileMutable => DiagnosticMessage::BorrowConflictImmWhileMutable {
+        var_name,
+        span: span.clone(),
+      },
+      BorrowError::MutWhileImmutable => DiagnosticMessage::BorrowConflictMutWhileImmutable {
+        var_name,
+        span: span.clone(),
+      },
+      BorrowError::MutWhileMutable => DiagnosticMessage::BorrowConflictMutWhileMutable {
+        var_name,
+        span: span.clone(),
+      },
+    };
+
+    self.add_diagnostic(diagnostic.report());
   }
 }

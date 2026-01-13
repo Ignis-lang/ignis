@@ -67,7 +67,7 @@ use crate::{
     vector_access::ASTVectorAccess,
   },
   statements::{
-    ASTStatement, ASTEnum, ASTEnumItem, ASTMethod, ASTRecord, ASTRecordItem, ASTTypeAlias,
+    ASTStatement, ASTEnum, ASTEnumItem, ASTForOf, ASTMethod, ASTRecord, ASTRecordItem, ASTTypeAlias,
     block::ASTBlock,
     break_statement::ASTBreak,
     comment_statement::ASTComment,
@@ -285,6 +285,7 @@ impl DisplayLisp for ASTStatement {
       ASTStatement::If(statement) => statement.to_lisp(formatter),
       ASTStatement::While(statement) => statement.to_lisp(formatter),
       ASTStatement::For(statement) => statement.to_lisp(formatter),
+      ASTStatement::ForOf(statement) => statement.to_lisp(formatter),
       ASTStatement::Return(statement) => statement.to_lisp(formatter),
       ASTStatement::Continue(statement) => statement.to_lisp(formatter),
       ASTStatement::Break(statement) => statement.to_lisp(formatter),
@@ -657,6 +658,24 @@ impl DisplayLisp for ASTFor {
     let body = formatter.format_node(&self.body);
 
     format!("(For {} {} {} {})", initializer, condition, increment, body)
+  }
+}
+
+// For-Of Statement
+impl DisplayLisp for ASTForOf {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let name = formatter.resolve_symbol(&self.binding.name);
+    let type_str = match &self.binding.type_annotation {
+      Some(ty) => ty.to_lisp(formatter),
+      None => "inferred".to_string(),
+    };
+    let iter = formatter.format_node(&self.iter);
+    let body = formatter.format_node(&self.body);
+
+    format!("(ForOf \"{}\" {} {} {})", name, type_str, iter, body)
   }
 }
 

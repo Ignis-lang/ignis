@@ -10,6 +10,7 @@ pub mod continue_statement;
 pub mod enum_;
 pub mod export_statement;
 pub mod extern_statement;
+pub mod for_of;
 pub mod for_statement;
 pub mod function;
 pub mod if_statement;
@@ -29,6 +30,7 @@ pub use continue_statement::ASTContinue;
 pub use enum_::{ASTEnum, ASTEnumField, ASTEnumItem, ASTEnumVariant};
 pub use export_statement::ASTExport;
 pub use extern_statement::ASTExtern;
+pub use for_of::{ASTForOf, ForOfBinding};
 pub use for_statement::ASTFor;
 pub use function::ASTFunction;
 pub use if_statement::ASTIf;
@@ -49,6 +51,7 @@ pub enum ASTStatement {
   If(ASTIf),
   While(ASTWhile),
   For(ASTFor),
+  ForOf(ASTForOf),
   Return(ASTReturn),
   Continue(ASTContinue),
   Break(ASTBreak),
@@ -73,6 +76,7 @@ impl ASTStatement {
       ASTStatement::If(if_stmt) => &if_stmt.span,
       ASTStatement::While(while_stmt) => &while_stmt.span,
       ASTStatement::For(for_stmt) => &for_stmt.span,
+      ASTStatement::ForOf(for_of_stmt) => &for_of_stmt.span,
       ASTStatement::Return(ret) => &ret.span,
       ASTStatement::Continue(cont) => &cont.span,
       ASTStatement::Break(brk) => &brk.span,

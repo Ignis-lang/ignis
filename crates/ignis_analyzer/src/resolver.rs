@@ -14,10 +14,7 @@ pub enum ResolvedPath {
   Def(DefinitionId),
 
   /// Path resolves to an enum variant.
-  EnumVariant {
-    enum_def: DefinitionId,
-    variant_index: u32,
-  },
+  EnumVariant { enum_def: DefinitionId, variant_index: u32 },
 }
 
 impl<'a> Analyzer<'a> {
@@ -107,6 +104,12 @@ impl<'a> Analyzer<'a> {
         self.resolve_node(&for_stmt.body, ScopeKind::Loop);
 
         self.scopes.pop();
+      },
+      ASTStatement::ForOf(for_of) => {
+        with_for_of_scope!(self, node_id, for_of, {
+          self.resolve_node(&for_of.iter, ScopeKind::Loop);
+          self.resolve_node(&for_of.body, ScopeKind::Loop);
+        });
       },
       ASTStatement::Return(ret) => {
         if let Some(value) = &ret.expression {

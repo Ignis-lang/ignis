@@ -164,6 +164,12 @@ impl<'a> Analyzer<'a> {
 
         self.scopes.pop();
       },
+      ASTStatement::ForOf(for_of) => {
+        with_for_of_scope!(self, node_id, for_of, {
+          self.extra_checks_node(&for_of.iter, ScopeKind::Loop, true, in_function);
+          self.extra_checks_node(&for_of.body, ScopeKind::Loop, true, in_function);
+        });
+      },
       ASTStatement::Break(brk) => {
         if !in_loop {
           self.add_diagnostic(DiagnosticMessage::BreakOutsideLoop { span: brk.span.clone() }.report());

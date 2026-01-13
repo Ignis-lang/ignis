@@ -50,7 +50,7 @@
 <use-path> ::= <qualified-identifier>
 <use-alias> ::= "as" <identifier>
 
-<record> ::= "record" <generic-type>? <identifier> "{" <record-item>* "}"
+<record> ::= "record" <identifier> <generic-type>? "{" <record-item>* "}"
 
 <record-item> ::= <record-property> | <record-method>
 
@@ -120,11 +120,18 @@
 
 <postfix> ::= <primary> ( ("++" | "--") | <call-suffix> )*
 
-<call-suffix> ::= <arguments> | "[" <expression> "]" | <member-access>
+<call-suffix> ::= <arguments>
+  | "[" <expression> "]"
+  | <member-call>
+  | <member-access>
+  
+<member-call> ::= "." <identifier> <generic-args>? <arguments>
+               | "::" <identifier> <generic-args>? <arguments>
 
 <arguments> ::= "(" (<expression> ("," <expression>)*)? ")"
 
-<member-access> ::= "." <identifier> | "::" <identifier>
+<member-access> ::= "." <identifier>
+                  | "::" <identifier>
 
 <primary> ::= <path>
   | <identifier>
@@ -163,7 +170,7 @@
 <type> ::= <type-modifier>? <type-core> <type-suffix>*
 
 <type-core> ::= <primitive>
-  | <qualified-identifier>
+  | <type-path>
   | <tuple-type>
   | <function-type>
 
@@ -392,13 +399,22 @@
 
 <member-access> ::= ("." | "::") <identifier> <generic-type>?
 
-<primary> ::= <identifier>
+<primary> ::= <record-init>
+  | <identifier>
   | <literal>
   | <group>
   | <this>
   | <self>
   | <directive-expression>
   | <lambda>
+  
+<record-init> ::= <type-path> "{" <record-init-fields>? "}"
+<record-init-fields> ::= <record-init-field> ("," <record-init-field>)* ","?
+<record-init-field> ::= <identifier> ":" <expression>
+
+<type-path> ::= <qualified-identifier> <generic-args>?
+
+<generic-args> ::= "<" <type-list> ">"
 
 <group> ::= "(" <expression> ")"
 <this> ::= "this"
@@ -464,7 +480,8 @@
 
 <vector-type> ::= <type-modifier>? <type-identifier> "[" <number>? "]"
 
-<generic-type> ::= "<" <type-parameter> ("," <type-parameter>)* ","? ">"
+<generic-type> ::= "<" <generic-param> ("," <generic-param>)* ">"
+<generic-param> ::= <identifier> ("as" <type>)?
 
 <primitive> ::= "void"
   | "boolean"

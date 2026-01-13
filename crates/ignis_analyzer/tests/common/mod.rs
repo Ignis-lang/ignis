@@ -5,7 +5,9 @@ use ignis_analyzer::{Analyzer, AnalyzerOutput, HirOwnershipChecker};
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
 use ignis_hir::{display::print_hir, HIR};
 use ignis_parser::{IgnisLexer, IgnisParser};
-use ignis_type::{definition::DefinitionStore, file::SourceMap, namespace::NamespaceStore, symbol::SymbolTable, types::TypeStore};
+use ignis_type::{
+  definition::DefinitionStore, file::SourceMap, namespace::NamespaceStore, symbol::SymbolTable, types::TypeStore,
+};
 
 pub struct AnalysisResult {
   pub output: AnalyzerOutput,

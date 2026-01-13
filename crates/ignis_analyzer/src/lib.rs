@@ -1,3 +1,17 @@
+macro_rules! with_for_of_scope {
+  ($self:expr, $node_id:expr, $for_of:expr, $body:block) => {{
+    $self.scopes.push(ScopeKind::Loop);
+
+    if let Some(def_id) = $self.for_of_binding_defs.get($node_id).cloned() {
+      let _ = $self.scopes.define(&$for_of.binding.name, &def_id);
+    }
+
+    $body
+
+    $self.scopes.pop();
+  }};
+}
+
 mod binder;
 mod borrowck;
 mod checks;
@@ -65,6 +79,13 @@ impl InferContext {
   }
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeBuiltins {
+  pub buf_len: DefinitionId,
+  pub buf_at: DefinitionId,
+  pub buf_at_const: DefinitionId,
+}
+
 pub struct Analyzer<'a> {
   ast: &'a ASTStore<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
@@ -80,10 +101,11 @@ pub struct Analyzer<'a> {
   current_module: ModuleId,
   current_namespace: Option<NamespaceId>,
   in_callee_context: bool,
-  /// Tracks which type aliases are currently being resolved to detect cycles.
   resolving_type_aliases: HashSet<DefinitionId>,
-  /// Maps type alias definitions to their original AST syntax for lazy resolution.
   type_alias_syntax: HashMap<DefinitionId, IgnisTypeSyntax>,
+  lowering_counter: u32,
+  for_of_binding_defs: HashMap<NodeId, DefinitionId>,
+  runtime: Option<RuntimeBuiltins>,
 }
 
 pub struct AnalyzerOutput {
@@ -115,7 +137,7 @@ impl<'a> Analyzer<'a> {
     symbols: Rc<RefCell<SymbolTable>>,
     current_module: ModuleId,
   ) -> Self {
-    Self {
+    let mut analyzer = Self {
       ast,
       symbols,
       types: TypeStore::new(),
@@ -132,7 +154,12 @@ impl<'a> Analyzer<'a> {
       in_callee_context: false,
       resolving_type_aliases: HashSet::new(),
       type_alias_syntax: HashMap::new(),
-    }
+      lowering_counter: 0,
+      for_of_binding_defs: HashMap::new(),
+      runtime: None,
+    };
+    analyzer.runtime = Some(analyzer.register_runtime_builtins());
+    analyzer
   }
 
   pub fn analyze(
@@ -206,7 +233,11 @@ impl<'a> Analyzer<'a> {
       in_callee_context: false,
       resolving_type_aliases: HashSet::new(),
       type_alias_syntax: HashMap::new(),
+      lowering_counter: 0,
+      for_of_binding_defs: HashMap::new(),
+      runtime: None,
     };
+    analyzer.runtime = Some(analyzer.register_runtime_builtins());
 
     analyzer.bind_phase(roots);
     analyzer.resolve_phase(roots);
@@ -389,5 +420,78 @@ impl<'a> Analyzer<'a> {
       },
       _ => {},
     }
+  }
+
+  fn register_runtime_builtins(&mut self) -> RuntimeBuiltins {
+    let span = ignis_type::span::Span::default();
+    let buffer_ptr_type = self.types.vector(self.types.unknown(), None);
+    let u64_type = self.types.u64();
+    let void_ptr_type = self.types.pointer(self.types.void());
+
+    let buf_len = self.create_extern_builtin("ignis_buf_len", vec![("buf", buffer_ptr_type)], u64_type, span.clone());
+    let buf_at = self.create_extern_builtin(
+      "ignis_buf_at",
+      vec![("buf", buffer_ptr_type), ("idx", u64_type)],
+      void_ptr_type,
+      span.clone(),
+    );
+    let buf_at_const = self.create_extern_builtin(
+      "ignis_buf_at_const",
+      vec![("buf", buffer_ptr_type), ("idx", u64_type)],
+      void_ptr_type,
+      span,
+    );
+
+    RuntimeBuiltins {
+      buf_len,
+      buf_at,
+      buf_at_const,
+    }
+  }
+
+  fn create_extern_builtin(
+    &mut self,
+    name: &str,
+    params: Vec<(&str, TypeId)>,
+    return_type: TypeId,
+    span: ignis_type::span::Span,
+  ) -> DefinitionId {
+    use ignis_type::definition::{Definition, FunctionDefinition, ParameterDefinition};
+
+    let fn_name = self.symbols.borrow_mut().intern(name);
+    let param_defs: Vec<DefinitionId> = params
+      .iter()
+      .map(|(pname, ptype)| {
+        let pname_sym = self.symbols.borrow_mut().intern(pname);
+        let def = Definition {
+          kind: DefinitionKind::Parameter(ParameterDefinition {
+            type_id: *ptype,
+            mutable: false,
+          }),
+          name: pname_sym,
+          span: span.clone(),
+          visibility: Visibility::Private,
+          owner_module: self.current_module,
+          owner_namespace: None,
+        };
+        self.defs.alloc(def)
+      })
+      .collect();
+
+    let def = Definition {
+      kind: DefinitionKind::Function(FunctionDefinition {
+        params: param_defs,
+        return_type,
+        is_extern: true,
+        is_variadic: false,
+      }),
+      name: fn_name,
+      span,
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: None,
+    };
+
+    self.defs.alloc(def)
   }
 }

@@ -408,6 +408,18 @@ pub enum DiagnosticMessage {
     type_name: String,
     span: Span,
   },
+  // For-of errors
+  ForOfExpectsVector {
+    got: String,
+    span: Span,
+  },
+  ForOfRequiresCopyOrRef {
+    element_type: String,
+    span: Span,
+  },
+  ForOfMutRequiresMutableIter {
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -738,7 +750,26 @@ impl fmt::Display for DiagnosticMessage {
       },
 
       DiagnosticMessage::StaticFieldNotConst { field, type_name, .. } => {
-        write!(f, "Static field '{}' in '{}' must be initialized with a constant expression", field, type_name)
+        write!(
+          f,
+          "Static field '{}' in '{}' must be initialized with a constant expression",
+          field, type_name
+        )
+      },
+
+      // For-of errors
+      DiagnosticMessage::ForOfExpectsVector { got, .. } => {
+        write!(f, "for-of expects vector type, got '{}'", got)
+      },
+      DiagnosticMessage::ForOfRequiresCopyOrRef { element_type, .. } => {
+        write!(
+          f,
+          "for-of by value requires Copy element type; '{}' is not Copy, use '&{}'",
+          element_type, element_type
+        )
+      },
+      DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => {
+        write!(f, "cannot take mutable reference in for-of over immutable vector")
       },
     }
   }
@@ -856,7 +887,10 @@ impl DiagnosticMessage {
       | DiagnosticMessage::InvalidSizeOfOperand { span, .. }
       | DiagnosticMessage::StaticFieldRequiresInit { span, .. }
       | DiagnosticMessage::StaticOnEnumVariant { span, .. }
-      | DiagnosticMessage::StaticFieldNotConst { span, .. } => span.clone(),
+      | DiagnosticMessage::StaticFieldNotConst { span, .. }
+      | DiagnosticMessage::ForOfExpectsVector { span, .. }
+      | DiagnosticMessage::ForOfRequiresCopyOrRef { span, .. }
+      | DiagnosticMessage::ForOfMutRequiresMutableIter { span, .. } => span.clone(),
     }
   }
 
@@ -969,6 +1003,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::InconsistentMoveInBranches { .. } => "O0003",
       DiagnosticMessage::PossibleLeakToFFI { .. } => "O0004",
       DiagnosticMessage::OwnershipEscapeToGlobal { .. } => "O0005",
+      DiagnosticMessage::ForOfExpectsVector { .. } => "A0069",
+      DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
+      DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",
     }
     .to_string()
   }

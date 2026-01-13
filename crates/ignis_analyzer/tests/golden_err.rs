@@ -873,7 +873,10 @@ function main(): void {
     &["A0066"],
   );
 
-  assert_snapshot!("type_alias_indirect_cycle", common::format_diagnostics(&result.output.diagnostics));
+  assert_snapshot!(
+    "type_alias_indirect_cycle",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
 }
 
 // =============================================================================
@@ -963,8 +966,17 @@ function main(): void {
 "#,
   );
 
-  let codes: Vec<_> = result.output.diagnostics.iter().map(|d| d.error_code.as_str()).collect();
-  assert!(codes.contains(&"A0067"), "Expected A0067 (StaticOnEnumVariant), got: {:?}", codes);
+  let codes: Vec<_> = result
+    .output
+    .diagnostics
+    .iter()
+    .map(|d| d.error_code.as_str())
+    .collect();
+  assert!(
+    codes.contains(&"A0067"),
+    "Expected A0067 (StaticOnEnumVariant), got: {:?}",
+    codes
+  );
 
   assert_snapshot!("static_on_enum_variant", common::format_diagnostics(&result.output.diagnostics));
 }
@@ -1066,4 +1078,43 @@ function main(): void {
   );
 
   assert_snapshot!("static_field_not_const", common::format_diagnostics(&result.output.diagnostics));
+}
+
+// ============================================================================
+// for-of loop error tests
+// ============================================================================
+
+#[test]
+fn for_of_non_iterable() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let x: i32 = 42;
+    for (let y of x) {
+        return;
+    }
+}
+"#,
+  );
+
+  assert_snapshot!("for_of_non_iterable", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn for_of_mut_ref_on_immutable_array() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let arr: i32[3] = [1, 2, 3];
+    for (let x: &mut i32 of arr) {
+        *x = 0;
+    }
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "for_of_mut_ref_on_immutable_array",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
 }

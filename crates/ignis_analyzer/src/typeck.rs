@@ -239,6 +239,41 @@ impl<'a> Analyzer<'a> {
 
         self.types.void()
       },
+      ASTStatement::ForOf(for_of) => {
+        self.scopes.push(ScopeKind::Loop);
+
+        let iter_type = self.typecheck_node(&for_of.iter, ScopeKind::Loop, ctx);
+
+        let (element_type, _size) = match self.types.get(&iter_type) {
+          Type::Vector { element, size } => (*element, *size),
+          _ => {
+            self.add_diagnostic(
+              DiagnosticMessage::ForOfExpectsVector {
+                got: self.format_type_for_error(&iter_type),
+                span: self.node_span(&for_of.iter).clone(),
+              }
+              .report(),
+            );
+            self.scopes.pop();
+            return self.types.void();
+          },
+        };
+
+        let binding_type = self.resolve_for_of_binding_type(&for_of.binding, element_type, &for_of.iter);
+
+        if let Some(def_id) = self.for_of_binding_defs.get(node_id).cloned() {
+          if let DefinitionKind::Variable(var_def) = &mut self.defs.get_mut(&def_id).kind {
+            var_def.type_id = binding_type;
+          }
+          let _ = self.scopes.define(&for_of.binding.name, &def_id);
+        }
+
+        self.typecheck_node(&for_of.body, ScopeKind::Loop, ctx);
+
+        self.scopes.pop();
+
+        self.types.void()
+      },
       ASTStatement::Return(ret) => {
         if let Some(expected_return_type) = ctx.expected_return.clone() {
           if let Some(value) = &ret.expression {
@@ -446,7 +481,10 @@ impl<'a> Analyzer<'a> {
         // Resolve the path to get the definition type
         match self.resolve_qualified_path(&path.segments) {
           Some(ResolvedPath::Def(def_id)) => self.get_definition_type(&def_id),
-          Some(ResolvedPath::EnumVariant { enum_def, variant_index }) => {
+          Some(ResolvedPath::EnumVariant {
+            enum_def,
+            variant_index,
+          }) => {
             // Get the enum definition to check if variant requires payload
             if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def).kind {
               let variant = &ed.variants[variant_index as usize];
@@ -2453,13 +2491,7 @@ impl<'a> Analyzer<'a> {
           if self.resolving_type_aliases.contains(&def_id) {
             let name = self.symbols.borrow().get(&symbol_id).to_string();
             if let Some(s) = span {
-              self.add_diagnostic(
-                DiagnosticMessage::TypeAliasCycle {
-                  name,
-                  span: s.clone(),
-                }
-                .report(),
-              );
+              self.add_diagnostic(DiagnosticMessage::TypeAliasCycle { name, span: s.clone() }.report());
             }
             return self.types.error();
           }
@@ -2511,13 +2543,7 @@ impl<'a> Analyzer<'a> {
             if self.resolving_type_aliases.contains(&def_id) {
               let name = self.symbols.borrow().get(&last.0).to_string();
               if let Some(s) = span {
-                self.add_diagnostic(
-                  DiagnosticMessage::TypeAliasCycle {
-                    name,
-                    span: s.clone(),
-                  }
-                  .report(),
-                );
+                self.add_diagnostic(DiagnosticMessage::TypeAliasCycle { name, span: s.clone() }.report());
               }
               return self.types.error();
             }
@@ -2743,6 +2769,90 @@ impl<'a> Analyzer<'a> {
           .function(param_types, func_def.return_type.clone(), func_def.is_variadic)
       },
       _ => self.type_of(def_id).clone(),
+    }
+  }
+
+  fn resolve_for_of_binding_type(
+    &mut self,
+    binding: &ignis_ast::statements::ForOfBinding,
+    element_type: TypeId,
+    iter_node: &NodeId,
+  ) -> TypeId {
+    match &binding.type_annotation {
+      None => {
+        if self.types.is_copy(&element_type) {
+          element_type
+        } else {
+          self.add_diagnostic(
+            DiagnosticMessage::ForOfRequiresCopyOrRef {
+              element_type: self.format_type_for_error(&element_type),
+              span: binding.span.clone(),
+            }
+            .report(),
+          );
+          self.types.error()
+        }
+      },
+      Some(IgnisTypeSyntax::Reference { inner, mutable }) => {
+        let inner_type = self.resolve_type_syntax(inner);
+
+        if !self.types.types_equal(&inner_type, &element_type) {
+          self.add_diagnostic(
+            DiagnosticMessage::AssignmentTypeMismatch {
+              expected: self.format_type_for_error(&element_type),
+              got: self.format_type_for_error(&inner_type),
+              span: binding.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        if *mutable {
+          self.validate_mutable_iter_for_mut_ref(iter_node, &binding.span);
+        }
+
+        self.types.reference(element_type, *mutable)
+      },
+      Some(type_syntax) => {
+        // Annotated by value: T
+        let annotated_type = self.resolve_type_syntax(type_syntax);
+
+        if !self.types.types_equal(&annotated_type, &element_type) {
+          self.add_diagnostic(
+            DiagnosticMessage::AssignmentTypeMismatch {
+              expected: self.format_type_for_error(&element_type),
+              got: self.format_type_for_error(&annotated_type),
+              span: binding.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        if !self.types.is_copy(&element_type) {
+          self.add_diagnostic(
+            DiagnosticMessage::ForOfRequiresCopyOrRef {
+              element_type: self.format_type_for_error(&element_type),
+              span: binding.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        element_type
+      },
+    }
+  }
+
+  fn validate_mutable_iter_for_mut_ref(
+    &mut self,
+    iter_node: &NodeId,
+    span: &Span,
+  ) {
+    let node = self.ast.get(iter_node);
+    if let ASTNode::Expression(expr) = node {
+      if !self.is_mutable_expression(expr) {
+        self.add_diagnostic(DiagnosticMessage::ForOfMutRequiresMutableIter { span: span.clone() }.report());
+      }
     }
   }
 }

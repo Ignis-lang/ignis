@@ -1,9 +1,9 @@
 use ignis_ast::{
   NodeId,
   statements::{
-    ASTStatement, block::ASTBlock, break_statement::ASTBreak, continue_statement::ASTContinue, for_statement::ASTFor,
-    function::ASTParameter, if_statement::ASTIf, return_statement::ASTReturn, variable::ASTVariable,
-    while_statement::ASTWhile,
+    ASTStatement, ASTForOf, ForOfBinding, block::ASTBlock, break_statement::ASTBreak, continue_statement::ASTContinue,
+    for_statement::ASTFor, function::ASTParameter, if_statement::ASTIf, return_statement::ASTReturn,
+    variable::ASTVariable, while_statement::ASTWhile,
   },
 };
 use ignis_token::token_types::TokenType;
@@ -171,11 +171,104 @@ impl super::IgnisParser {
     Ok(self.allocate_statement(ASTStatement::While(while_statement)))
   }
 
-  /// for (let name = expr; condition; increment) block
+  /// for (let name = expr; condition; increment) block     -- C-style
+  /// for (let name of expr) block                          -- for-of
+  /// for (let name: T of expr) block                       -- for-of with type annotation
   fn parse_for_statement(&mut self) -> ParserResult<NodeId> {
     let keyword = self.expect(TokenType::For)?.clone();
     self.expect(TokenType::LeftParen)?;
 
+    // Lookahead to detect for-of vs C-style:
+    // for (let ident = ...)     => C-style (no type annotation)
+    // for (let ident: T = ...)  => C-style (with type annotation)
+    // for (let ident of ...)    => for-of (no type annotation)
+    // for (let ident: T of ...) => for-of (with type annotation)
+    //
+    // Decision logic:
+    // - peek(2) = '=' => C-style without type
+    // - peek(2) = 'of' => for-of without type
+    // - peek(2) = ':' => need to scan ahead to find '=' or 'of' after the type
+    if self.at(TokenType::Let) && self.peek_nth(1).type_ == TokenType::Identifier {
+      let decision_token = self.peek_nth(2).type_;
+
+      match decision_token {
+        TokenType::Equal => {
+          // for C-style without type: for (let x = ...; ...; ...)
+          return self.parse_for_c_style(keyword);
+        },
+        TokenType::Of => {
+          // for-of without type: for (let x of ...)
+          return self.parse_for_of(keyword);
+        },
+        TokenType::Colon => {
+          // Has type annotation - need to scan ahead to find '=' or 'of'
+          // Skip past the type to find the deciding token
+          if self.is_for_of_with_type_annotation() {
+            return self.parse_for_of(keyword);
+          } else {
+            return self.parse_for_c_style(keyword);
+          }
+        },
+        _ => {
+          // Error: expected '=', ':' or 'of' after identifier
+          // Fall through to C-style parser which will give appropriate error
+          return self.parse_for_c_style(keyword);
+        },
+      }
+    }
+
+    // Fallback to C-style
+    self.parse_for_c_style(keyword)
+  }
+
+  /// Check if the current for statement with type annotation is for-of.
+  /// Scans ahead from position 3 (after ':') to find 'of' before '=' or ';'.
+  fn is_for_of_with_type_annotation(&self) -> bool {
+    // Start scanning after the colon (position 3)
+    let mut pos = 3;
+    let mut paren_depth = 0;
+    let mut bracket_depth = 0;
+
+    loop {
+      let token = self.peek_nth(pos);
+
+      match token.type_ {
+        TokenType::Of if paren_depth == 0 && bracket_depth == 0 => {
+          // Found 'of' at top level - this is for-of
+          return true;
+        },
+        TokenType::Equal if paren_depth == 0 && bracket_depth == 0 => {
+          // Found '=' at top level - this is C-style for
+          return false;
+        },
+        TokenType::SemiColon | TokenType::RightParen | TokenType::Eof => {
+          // Reached end of initializer without finding 'of' - assume C-style
+          return false;
+        },
+        TokenType::LeftParen => paren_depth += 1,
+        TokenType::LeftBrack => bracket_depth += 1,
+        TokenType::RightBrack => {
+          if bracket_depth > 0 {
+            bracket_depth -= 1;
+          }
+        },
+        _ => {},
+      }
+
+      pos += 1;
+
+      // Safety limit to avoid infinite loop
+      if pos > 100 {
+        return false;
+      }
+    }
+  }
+
+  /// Parse C-style for loop: for (let name = expr; condition; increment) block
+  fn parse_for_c_style(
+    &mut self,
+    keyword: ignis_token::token::Token,
+  ) -> ParserResult<NodeId> {
     let initializer = self.parse_for_initializer()?;
     self.expect(TokenType::SemiColon)?;
 
@@ -191,6 +284,35 @@ impl super::IgnisParser {
     let for_statement = ASTFor::new(initializer, condition, increment, body, span);
 
     Ok(self.allocate_statement(ASTStatement::For(for_statement)))
+  }
+
+  /// Parse for-of loop: for (let name of expr) block
+  fn parse_for_of(
+    &mut self,
+    keyword: ignis_token::token::Token,
+  ) -> ParserResult<NodeId> {
+    self.expect(TokenType::Let)?;
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    // Optional: type annotation
+    let type_ann = if self.eat(TokenType::Colon) {
+      Some(self.parse_type_syntax()?)
+    } else {
+      None
+    };
+
+    self.expect(TokenType::Of)?;
+    let iter = self.parse_expression(0)?;
+    self.expect(TokenType::RightParen)?;
+
+    let body = self.parse_block()?;
+    let span = Span::merge(&keyword.span, self.get_span(&body));
+
+    let binding = ForOfBinding::new(name, type_ann, name_token.span);
+    let for_of = ASTForOf::new(binding, iter, body, span);
+
+    Ok(self.allocate_statement(ASTStatement::ForOf(for_of)))
   }
 
   fn parse_for_initializer(&mut self) -> ParserResult<NodeId> {
