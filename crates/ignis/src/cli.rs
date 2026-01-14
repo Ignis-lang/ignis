@@ -1,44 +1,69 @@
 use clap::{Parser, ValueEnum, Subcommand, ColorChoice};
-use ignis_config::{DebugPrint, TargetBackend};
+use ignis_config::{DebugTrace, DumpKind, TargetBackend};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-pub enum DebugPrintCli {
-  /// Default value. Don't print anything
-  None,
-  /// Print the lexer output
+pub enum DumpKindCli {
+  /// Dump the lexer output
   Lexer,
-  /// Print the AST struct
+  /// Dump the AST struct
   Ast,
-  /// Print the analyzer output
-  Analyzer,
-  /// Print the HIR struct
+  /// Dump definitions
+  Defs,
+  /// Dump type store
+  Types,
+  /// Dump the full HIR
   Hir,
-  /// Print the IR struct
+  /// Dump a HIR summary
+  HirSummary,
+  /// Dump LIR (Low-level IR)
+  Lir,
+  /// Dump IR (not yet supported)
   Ir,
+  /// Dump generated C (not yet supported)
+  C,
 }
 
-impl Into<DebugPrint> for DebugPrintCli {
-  fn into(self) -> DebugPrint {
-    match self {
-      DebugPrintCli::None => DebugPrint::None,
-      DebugPrintCli::Lexer => DebugPrint::Lexer,
-      DebugPrintCli::Ast => DebugPrint::Ast,
-      DebugPrintCli::Analyzer => DebugPrint::Analyzer,
-      DebugPrintCli::Hir => DebugPrint::Hir,
-      DebugPrintCli::Ir => DebugPrint::Ir,
+impl From<DumpKindCli> for DumpKind {
+  fn from(value: DumpKindCli) -> DumpKind {
+    match value {
+      DumpKindCli::Lexer => DumpKind::Lexer,
+      DumpKindCli::Ast => DumpKind::Ast,
+      DumpKindCli::Defs => DumpKind::Defs,
+      DumpKindCli::Types => DumpKind::Types,
+      DumpKindCli::Hir => DumpKind::Hir,
+      DumpKindCli::HirSummary => DumpKind::HirSummary,
+      DumpKindCli::Lir => DumpKind::Lir,
+      DumpKindCli::Ir => DumpKind::Ir,
+      DumpKindCli::C => DumpKind::C,
     }
   }
 }
 
-impl Into<DebugPrint> for &DebugPrintCli {
-  fn into(self) -> DebugPrint {
-    match self {
-      DebugPrintCli::None => DebugPrint::None,
-      DebugPrintCli::Lexer => DebugPrint::Lexer,
-      DebugPrintCli::Ast => DebugPrint::Ast,
-      DebugPrintCli::Analyzer => DebugPrint::Analyzer,
-      DebugPrintCli::Hir => DebugPrint::Hir,
-      DebugPrintCli::Ir => DebugPrint::Ir,
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum DebugTraceCli {
+  Analyzer,
+  Parser,
+  Lexer,
+  Mono,
+  Ownership,
+  Lir,
+  Codegen,
+  Link,
+  Std,
+}
+
+impl From<DebugTraceCli> for DebugTrace {
+  fn from(value: DebugTraceCli) -> DebugTrace {
+    match value {
+      DebugTraceCli::Analyzer => DebugTrace::Analyzer,
+      DebugTraceCli::Parser => DebugTrace::Parser,
+      DebugTraceCli::Lexer => DebugTrace::Lexer,
+      DebugTraceCli::Mono => DebugTrace::Mono,
+      DebugTraceCli::Ownership => DebugTrace::Ownership,
+      DebugTraceCli::Lir => DebugTrace::Lir,
+      DebugTraceCli::Codegen => DebugTrace::Codegen,
+      DebugTraceCli::Link => DebugTrace::Link,
+      DebugTraceCli::Std => DebugTrace::Std,
     }
   }
 }
@@ -79,26 +104,6 @@ pub struct BuildCommand {
   /// Output directory
   #[arg(short = 'o', long, default_value = "build")]
   pub output_dir: String,
-
-  /// Dump type store
-  #[arg(long)]
-  pub dump_types: bool,
-
-  /// Dump definitions
-  #[arg(long)]
-  pub dump_defs: bool,
-
-  /// Dump HIR for a specific function
-  #[arg(long)]
-  pub dump_hir: Option<String>,
-
-  /// Dump HIR summary
-  #[arg(long)]
-  pub dump_hir_summary: bool,
-
-  /// Dump LIR (Low-level IR)
-  #[arg(long)]
-  pub dump_lir: bool,
 
   /// Emit C code to file
   #[arg(long)]
@@ -196,9 +201,25 @@ pub struct Cli {
   #[command(subcommand)]
   pub subcommand: SubCommand,
 
-  /// Print debug information
-  #[arg(short, long, value_enum, action = clap::ArgAction::Append)]
-  pub debug: Vec<DebugPrintCli>,
+  /// Dump internal compiler representations
+  #[arg(long, value_enum, action = clap::ArgAction::Append, global = true)]
+  pub dump: Vec<DumpKindCli>,
+
+  /// Write dumps to this directory (otherwise stdout)
+  #[arg(long, global = true)]
+  pub dump_dir: Option<String>,
+
+  /// Dump HIR for a specific function
+  #[arg(long, global = true)]
+  pub dump_hir: Option<String>,
+
+  /// Enable internal debug mode
+  #[arg(long, default_value = "false", global = true)]
+  pub debug: bool,
+
+  /// Enable debug tracing for subsystems
+  #[arg(long, value_enum, action = clap::ArgAction::Append, global = true)]
+  pub debug_trace: Vec<DebugTraceCli>,
 
   /// Don't print any output
   #[arg(long, default_value = "false")]

@@ -131,13 +131,29 @@ impl IgnisSTDManifest {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DebugPrint {
-  None,
+pub enum DumpKind {
   Lexer,
   Ast,
-  Analyzer,
+  Defs,
+  Types,
   Hir,
+  HirSummary,
+  Lir,
   Ir,
+  C,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DebugTrace {
+  Analyzer,
+  Parser,
+  Lexer,
+  Mono,
+  Ownership,
+  Lir,
+  Codegen,
+  Link,
+  Std,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
@@ -221,11 +237,9 @@ pub struct IgnisBuildConfig {
   pub target: TargetBackend,
   pub optimize: bool,
   pub output_dir: String,
-  pub dump_types: bool,
-  pub dump_defs: bool,
+  pub dump: Vec<DumpKind>,
+  pub dump_dir: Option<String>,
   pub dump_hir: Option<String>,
-  pub dump_hir_summary: bool,
-  pub dump_lir: bool,
   pub emit_c: Option<String>,
   pub emit_obj: Option<String>,
   pub emit_bin: Option<String>,
@@ -239,11 +253,9 @@ impl IgnisBuildConfig {
     is_project: bool,
     optimize: bool,
     output_dir: String,
-    dump_types: bool,
-    dump_defs: bool,
+    dump: Vec<DumpKind>,
+    dump_dir: Option<String>,
     dump_hir: Option<String>,
-    dump_hir_summary: bool,
-    dump_lir: bool,
     emit_c: Option<String>,
     emit_obj: Option<String>,
     emit_bin: Option<String>,
@@ -255,11 +267,9 @@ impl IgnisBuildConfig {
       target,
       optimize,
       output_dir,
-      dump_types,
-      dump_defs,
+      dump,
+      dump_dir,
       dump_hir,
-      dump_hir_summary,
-      dump_lir,
       emit_c,
       emit_obj,
       emit_bin,
@@ -312,7 +322,8 @@ pub struct IgnisConfig {
   pub project_config: Option<IgnisProjectConfig>,
   pub build_config: Option<IgnisBuildConfig>,
   pub init_config: Option<IgnisInitConfig>,
-  pub debug: Vec<DebugPrint>,
+  pub debug: bool,
+  pub debug_trace: Vec<DebugTrace>,
   pub quiet: bool,
   pub verbose: u8,
   pub build: bool,
@@ -331,7 +342,8 @@ impl IgnisConfig {
     project_config: Option<IgnisProjectConfig>,
     build_config: Option<IgnisBuildConfig>,
     init_config: Option<IgnisInitConfig>,
-    debug: Vec<DebugPrint>,
+    debug: bool,
+    debug_trace: Vec<DebugTrace>,
     quiet: bool,
     verbose: u8,
     build: bool,
@@ -349,6 +361,7 @@ impl IgnisConfig {
       build_config,
       init_config,
       debug,
+      debug_trace,
       quiet,
       verbose,
       build,
@@ -364,12 +377,14 @@ impl IgnisConfig {
   }
 
   pub fn new_basic(
-    debug: Vec<DebugPrint>,
+    debug: bool,
+    debug_trace: Vec<DebugTrace>,
     quiet: bool,
     verbose: u8,
   ) -> Self {
     Self {
       debug,
+      debug_trace,
       quiet,
       verbose,
       ..Self::default()

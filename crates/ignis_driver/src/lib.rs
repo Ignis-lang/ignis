@@ -1,5 +1,6 @@
 mod context;
 pub mod link;
+mod logging;
 mod pipeline;
 
 pub use context::CompilationContext;

@@ -74,9 +74,12 @@ ignis build
 ignis build-std
 
 # Additional options
-ignis build main.ign --emit-c out.c    # Output generated C code
-ignis build main.ign --dump-hir main   # Dump HIR for debugging
-ignis build main.ign -O                # Enable optimizations
+ignis build main.ign --emit-c out.c          # Output generated C code
+ignis build main.ign --dump hir              # Dump HIR for debugging
+ignis build main.ign --dump hir --dump-hir main  # Dump HIR for a specific function
+ignis build main.ign --debug --debug-trace analyzer
+ignis build main.ign --debug                 # Enables -vv logs + debug traces
+ignis build main.ign -O                      # Enable optimizations
 ```
 
 ## Example

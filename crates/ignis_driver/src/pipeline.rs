@@ -4,7 +4,9 @@ use std::{cell::RefCell, rc::Rc};
 
 use colored::*;
 use ignis_ast::display::format_ast_nodes;
-use ignis_config::IgnisConfig;
+use ignis_config::{DebugTrace, DumpKind, IgnisConfig};
+
+use crate::logging::{debug_trace_enabled, log_debug, log_info, log_phase, log_trace};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
 use ignis_type::file::SourceMap;
@@ -12,6 +14,77 @@ use ignis_type::symbol::SymbolTable;
 
 use crate::context::CompilationContext;
 use crate::link::{compile_to_object, format_tool_error, link_executable, rebuild_std_runtime, LinkPlan};
+
+fn dump_requested(
+  config: &IgnisConfig,
+  kind: DumpKind,
+) -> bool {
+  config
+    .build_config
+    .as_ref()
+    .map(|bc| bc.dump.contains(&kind))
+    .unwrap_or(false)
+}
+
+fn warn_unsupported_dumps(config: &IgnisConfig) {
+  if dump_requested(config, DumpKind::Ir) {
+    eprintln!("{} Dump kind 'ir' is not supported yet.", "Warning:".yellow().bold());
+  }
+
+  if dump_requested(config, DumpKind::C) {
+    eprintln!("{} Dump kind 'c' is not supported yet.", "Warning:".yellow().bold());
+  }
+}
+
+fn sanitize_dump_name(name: &str) -> String {
+  name
+    .chars()
+    .map(|ch| {
+      if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+        ch
+      } else {
+        '_'
+      }
+    })
+    .collect()
+}
+
+fn write_dump_output(
+  config: &IgnisConfig,
+  file_name: &str,
+  content: &str,
+) -> Result<(), ()> {
+  if let Some(build_config) = config.build_config.as_ref() {
+    if let Some(dump_dir) = &build_config.dump_dir {
+      let output_dir = Path::new(dump_dir);
+      if let Err(e) = std::fs::create_dir_all(output_dir) {
+        eprintln!(
+          "{} Failed to create dump directory '{}': {}",
+          "Error:".red().bold(),
+          output_dir.display(),
+          e
+        );
+        return Err(());
+      }
+
+      let output_path = output_dir.join(file_name);
+      if let Err(e) = std::fs::write(&output_path, content) {
+        eprintln!(
+          "{} Failed to write dump file '{}': {}",
+          "Error:".red().bold(),
+          output_path.display(),
+          e
+        );
+        return Err(());
+      }
+
+      return Ok(());
+    }
+  }
+
+  println!("\n{}", content);
+  Ok(())
+}
 
 /// Compile a single file (used for simple single-file compilation without imports)
 pub fn compile_file(
@@ -28,7 +101,9 @@ pub fn compile_file(
     },
   };
 
-  if !config.quiet {
+  warn_unsupported_dumps(&config);
+
+  if log_phase(&config) {
     println!("{:indent$}Scanning... {}", "-->".bright_green().bold(), file_path, indent = 4);
   }
 
@@ -46,14 +121,28 @@ pub fn compile_file(
     return Err(());
   }
 
-  if config.debug.contains(&ignis_config::DebugPrint::Lexer) {
-    println!("\n{}", "Tokens:".bright_cyan().bold());
+  if dump_requested(&config, DumpKind::Lexer) {
+    let mut output = String::new();
     for token in &lexer.tokens {
-      println!("{}", token);
+      output.push_str(&format!("{}\n", token));
     }
+
+    write_dump_output(&config, "dump-lexer.txt", &output)?;
+  }
+
+  if debug_trace_enabled(&config, DebugTrace::Lexer) {
+    println!("debug: lexer produced {} tokens", lexer.tokens.len());
   }
 
   let symbol_table = Rc::new(RefCell::new(SymbolTable::new()));
+
+  if log_phase(&config) {
+    println!("{:indent$}Parsing... {}", "-->".bright_green().bold(), file_path, indent = 4);
+  }
+
+  if log_debug(&config) {
+    println!("debug: parsing {}", file_path);
+  }
 
   let mut parser = IgnisParser::new(lexer.tokens, symbol_table.clone());
   let parse_result = parser.parse();
@@ -68,17 +157,24 @@ pub fn compile_file(
 
   let (nodes, roots) = parse_result.unwrap();
 
-  if config.debug.contains(&ignis_config::DebugPrint::Ast) {
-    println!("\n{}", "AST:".bright_cyan().bold());
+  if dump_requested(&config, DumpKind::Ast) {
     let ast_lisp = format_ast_nodes(nodes.clone(), symbol_table.clone(), &roots);
-    println!("{}", ast_lisp);
+    write_dump_output(&config, "dump-ast.txt", &ast_lisp)?;
   }
 
-  if !config.quiet {
+  if debug_trace_enabled(&config, DebugTrace::Parser) {
+    println!("debug: parser produced {} nodes", nodes.len());
+  }
+
+  if log_phase(&config) {
     println!("\n{}", "Running analyzer...".bright_cyan().bold());
   }
 
   let analyzer_result = ignis_analyzer::Analyzer::analyze(&nodes, &roots, symbol_table);
+
+  if debug_trace_enabled(&config, DebugTrace::Analyzer) {
+    println!("debug: analyzer emitted {} diagnostics", analyzer_result.diagnostics.len());
+  }
 
   if !config.quiet {
     for diag in &analyzer_result.diagnostics {
@@ -95,54 +191,44 @@ pub fn compile_file(
     return Err(());
   }
 
-  let build_config = config.build_config.as_ref();
-
   let sym_table = analyzer_result.symbols.borrow();
-  if let Some(bc) = build_config {
-    if bc.dump_types {
-      println!("\n{}", ignis_analyzer::dump::dump_types(&analyzer_result.types));
-    }
-    if bc.dump_defs {
-      println!(
-        "\n{}",
-        ignis_analyzer::dump::dump_defs(&analyzer_result.defs, &analyzer_result.types, &sym_table)
-      );
-    }
-    if bc.dump_hir_summary {
-      println!(
-        "\n{}",
-        ignis_analyzer::dump::dump_hir_summary(&analyzer_result.hir, &analyzer_result.defs, &sym_table)
-      );
-    }
-    if let Some(func_name) = &bc.dump_hir {
+
+  if dump_requested(&config, DumpKind::Types) {
+    let types_dump = ignis_analyzer::dump::dump_types(&analyzer_result.types);
+    write_dump_output(&config, "dump-types.txt", &types_dump)?;
+  }
+
+  if dump_requested(&config, DumpKind::Defs) {
+    let defs_dump = ignis_analyzer::dump::dump_defs(&analyzer_result.defs, &analyzer_result.types, &sym_table);
+    write_dump_output(&config, "dump-defs.txt", &defs_dump)?;
+  }
+
+  if dump_requested(&config, DumpKind::HirSummary) {
+    let summary_dump = ignis_analyzer::dump::dump_hir_summary(&analyzer_result.hir, &analyzer_result.defs, &sym_table);
+    write_dump_output(&config, "dump-hir-summary.txt", &summary_dump)?;
+  }
+
+  if let Some(build_config) = config.build_config.as_ref() {
+    if let Some(func_name) = &build_config.dump_hir {
       match ignis_analyzer::dump::dump_hir_function(&analyzer_result.hir, &analyzer_result.defs, &sym_table, func_name)
       {
-        Ok(output) => println!("\n{}", output),
+        Ok(output) => {
+          let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
+          write_dump_output(&config, &file_name, &output)?;
+        },
         Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
       }
     }
   }
 
-  if config.debug.contains(&ignis_config::DebugPrint::Analyzer) {
-    println!("\n{}", "Type Store & Definitions:".bright_cyan().bold());
-    println!("{}", ignis_analyzer::dump::dump_types(&analyzer_result.types));
-    println!(
-      "{}",
-      ignis_analyzer::dump::dump_defs(&analyzer_result.defs, &analyzer_result.types, &sym_table)
+  if dump_requested(&config, DumpKind::Hir) {
+    let hir_dump = ignis_analyzer::dump::dump_hir_complete(
+      &analyzer_result.hir,
+      &analyzer_result.types,
+      &analyzer_result.defs,
+      &sym_table,
     );
-  }
-
-  if config.debug.contains(&ignis_config::DebugPrint::Hir) {
-    println!("\n{}", "HIR:".bright_cyan().bold());
-    println!(
-      "{}",
-      ignis_analyzer::dump::dump_hir_complete(
-        &analyzer_result.hir,
-        &analyzer_result.types,
-        &analyzer_result.defs,
-        &sym_table
-      )
-    );
+    write_dump_output(&config, "dump-hir.txt", &hir_dump)?;
   }
 
   Ok(())
@@ -153,38 +239,84 @@ pub fn compile_project(
   config: Arc<IgnisConfig>,
   entry_path: &str,
 ) -> Result<(), ()> {
+  warn_unsupported_dumps(&config);
+
+  if log_phase(&config) {
+    println!("{} Discovering modules...", "-->".bright_cyan().bold());
+  }
+
   let mut ctx = CompilationContext::new(&config);
   let root_id = ctx.discover_modules(entry_path, &config)?;
+
+  if log_debug(&config) {
+    println!("debug: compiling project entry {}", entry_path);
+  }
+
   let output = ctx.compile(root_id, &config)?;
 
+  if debug_trace_enabled(&config, DebugTrace::Analyzer) {
+    println!("debug: compilation produced {} diagnostics", output.diagnostics.len());
+  }
+
   // Dump phase: use a scoped borrow that ends before monomorphization
-  if let Some(bc) = config.build_config.as_ref() {
+  {
     let sym_table = output.symbols.borrow();
-    if bc.dump_types {
-      println!("\n{}", ignis_analyzer::dump::dump_types(&output.types));
+
+    if dump_requested(&config, DumpKind::Types) {
+      let types_dump = ignis_analyzer::dump::dump_types(&output.types);
+      write_dump_output(&config, "dump-types.txt", &types_dump)?;
     }
-    if bc.dump_defs {
-      println!("\n{}", ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table));
+
+    if dump_requested(&config, DumpKind::Defs) {
+      let defs_dump = ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table);
+      write_dump_output(&config, "dump-defs.txt", &defs_dump)?;
     }
-    if bc.dump_hir_summary {
-      println!(
-        "\n{}",
-        ignis_analyzer::dump::dump_hir_summary(&output.hir, &output.defs, &sym_table)
-      );
+
+    if dump_requested(&config, DumpKind::HirSummary) {
+      let summary_dump = ignis_analyzer::dump::dump_hir_summary(&output.hir, &output.defs, &sym_table);
+      write_dump_output(&config, "dump-hir-summary.txt", &summary_dump)?;
     }
-    if let Some(func_name) = &bc.dump_hir {
-      match ignis_analyzer::dump::dump_hir_function(&output.hir, &output.defs, &sym_table, func_name) {
-        Ok(out) => println!("\n{}", out),
-        Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
+
+    if let Some(build_config) = config.build_config.as_ref() {
+      if let Some(func_name) = &build_config.dump_hir {
+        match ignis_analyzer::dump::dump_hir_function(&output.hir, &output.defs, &sym_table, func_name) {
+          Ok(out) => {
+            let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
+            write_dump_output(&config, &file_name, &out)?;
+          },
+          Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
+        }
       }
+    }
+
+    if dump_requested(&config, DumpKind::Hir) {
+      let hir_dump = ignis_analyzer::dump::dump_hir_complete(&output.hir, &output.types, &output.defs, &sym_table);
+      write_dump_output(&config, "dump-hir.txt", &hir_dump)?;
     }
   }
 
   if let Some(bc) = config.build_config.as_ref() {
-    let needs_codegen = bc.dump_lir || bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
+    let needs_codegen =
+      dump_requested(&config, DumpKind::Lir) || bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
 
     if needs_codegen {
       let used_modules = ctx.module_graph.topological_sort();
+
+      if log_phase(&config) {
+        println!("{} Lowering + codegen...", "-->".bright_cyan().bold());
+      }
+
+      if log_debug(&config) {
+        println!("debug: preparing codegen for {} modules", used_modules.len());
+      }
+
+      if log_trace(&config) {
+        println!("trace: codegen module order {:?}", used_modules);
+      }
+
+      if debug_trace_enabled(&config, DebugTrace::Std) {
+        println!("debug: ensuring standard library is built");
+      }
 
       ensure_std_built(&used_modules, &ctx.module_graph, &config)?;
 
@@ -196,6 +328,10 @@ pub fn compile_project(
       let link_plan = LinkPlan::from_modules(&used_modules, &ctx.module_graph, Path::new(&config.std_path), manifest);
 
       if bc.rebuild_std {
+        if debug_trace_enabled(&config, DebugTrace::Std) {
+          println!("debug: rebuilding standard library runtime");
+        }
+
         if let Err(e) = rebuild_std_runtime(Path::new(&config.std_path), config.quiet) {
           eprintln!("{} {}", "Error:".red().bold(), e);
           return Err(());
@@ -211,9 +347,17 @@ pub fn compile_project(
         ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
           .run(&mono_roots);
 
-      // In debug builds, verify no generic types remain
-      #[cfg(debug_assertions)]
-      mono_output.verify_no_generics(&types);
+      if debug_trace_enabled(&config, DebugTrace::Mono) {
+        println!("debug: monomorphization completed");
+      }
+
+      if config.debug {
+        mono_output.verify_no_generics(&types);
+      } else {
+        // In debug builds, verify no generic types remain
+        #[cfg(debug_assertions)]
+        mono_output.verify_no_generics(&types);
+      }
 
       // Re-borrow symbols for ownership checking and codegen
       let sym_table = output.symbols.borrow();
@@ -223,6 +367,10 @@ pub fn compile_project(
           .with_source_map(&ctx.source_map)
           .suppress_ffi_warnings_for(&config.std_path);
       let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
+
+      if debug_trace_enabled(&config, DebugTrace::Ownership) {
+        println!("debug: ownership check produced {} diagnostics", ownership_diagnostics.len());
+      }
 
       if !config.quiet {
         for diag in &ownership_diagnostics {
@@ -250,9 +398,13 @@ pub fn compile_project(
         Some(&used_module_set),
       );
 
-      if bc.dump_lir {
+      if debug_trace_enabled(&config, DebugTrace::Lir) {
+        println!("debug: LIR lowering completed");
+      }
+
+      if dump_requested(&config, DumpKind::Lir) {
         let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &mono_output.defs, &sym_table);
-        println!("\n{}", lir_output);
+        write_dump_output(&config, "dump-lir.txt", &lir_output)?;
       }
 
       if let Err(errors) = &verify_result {
@@ -260,10 +412,19 @@ pub fn compile_project(
         for err in errors {
           eprintln!("  {:?}", err);
         }
+
+        if config.debug {
+          eprintln!("{} LIR verification failed in debug mode", "Error:".red().bold());
+          return Err(());
+        }
       }
 
       let needs_emit = bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
       if needs_emit {
+        if debug_trace_enabled(&config, DebugTrace::Codegen) {
+          println!("debug: emitting C code");
+        }
+
         if verify_result.is_err() {
           eprintln!("{} Cannot emit C: LIR verification failed", "Error:".red().bold());
           return Err(());
@@ -308,7 +469,7 @@ pub fn compile_project(
           return Err(());
         }
 
-        if bc.emit_c.is_some() && !config.quiet {
+        if bc.emit_c.is_some() && log_info(&config) {
           println!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path);
         }
 
@@ -319,12 +480,20 @@ pub fn compile_project(
             format!("{}/{}.o", bc.output_dir, base_name)
           };
 
+          if debug_trace_enabled(&config, DebugTrace::Link) {
+            println!("debug: compiling object file");
+          }
+
           if let Err(e) = compile_to_object(Path::new(&c_path), Path::new(&obj_path), &link_plan, config.quiet) {
             eprintln!("{} {}", "Error:".red().bold(), e);
             return Err(());
           }
 
           if let Some(bin_path) = &bc.emit_bin {
+            if debug_trace_enabled(&config, DebugTrace::Link) {
+              println!("debug: linking executable");
+            }
+
             if let Err(e) = link_executable(Path::new(&obj_path), Path::new(bin_path), &link_plan, config.quiet) {
               eprintln!("{} {}", "Error:".red().bold(), e);
               return Err(());
@@ -333,22 +502,6 @@ pub fn compile_project(
         }
       }
     }
-  }
-
-  if config.debug.contains(&ignis_config::DebugPrint::Analyzer) {
-    let sym_table = output.symbols.borrow();
-    println!("\n{}", "Type Store & Definitions:".bright_cyan().bold());
-    println!("{}", ignis_analyzer::dump::dump_types(&output.types));
-    println!("{}", ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table));
-  }
-
-  if config.debug.contains(&ignis_config::DebugPrint::Hir) {
-    let sym_table = output.symbols.borrow();
-    println!("\n{}", "HIR:".bright_cyan().bold());
-    println!(
-      "{}",
-      ignis_analyzer::dump::dump_hir_complete(&output.hir, &output.types, &output.defs, &sym_table)
-    );
   }
 
   Ok(())
@@ -386,8 +539,16 @@ pub fn build_std(
     return Err(());
   }
 
-  if !config.quiet {
+  if debug_trace_enabled(&config, DebugTrace::Std) {
+    println!("debug: building standard library");
+  }
+
+  if log_phase(&config) {
     println!("{} Building standard library...", "-->".bright_cyan().bold());
+  }
+
+  if log_debug(&config) {
+    println!("debug: std manifest modules {}", config.manifest.modules.len());
   }
 
   let output_path = Path::new(output_dir);
@@ -431,7 +592,7 @@ pub fn build_std(
     return Err(());
   }
 
-  if !config.quiet {
+  if log_phase(&config) {
     println!("{} Generated header {}", "-->".bright_green().bold(), header_path.display());
   }
 
@@ -457,8 +618,16 @@ pub fn build_std(
       ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
         .run(&mono_roots);
 
-    #[cfg(debug_assertions)]
-    mono_output.verify_no_generics(&types);
+    if debug_trace_enabled(&config, DebugTrace::Mono) {
+      println!("debug: std monomorphization completed for module {}", module_name);
+    }
+
+    if config.debug {
+      mono_output.verify_no_generics(&types);
+    } else {
+      #[cfg(debug_assertions)]
+      mono_output.verify_no_generics(&types);
+    }
 
     // Re-borrow symbols for ownership checking and codegen
     let sym_table = output.symbols.borrow();
@@ -480,6 +649,10 @@ pub fn build_std(
       Some(&single_module_set),
     );
 
+    if debug_trace_enabled(&config, DebugTrace::Lir) {
+      println!("debug: std LIR lowering completed for module {}", module_name);
+    }
+
     if let Err(errors) = &verify_result {
       eprintln!(
         "{} LIR verification errors for module '{}':",
@@ -489,10 +662,19 @@ pub fn build_std(
       for err in errors {
         eprintln!("  {:?}", err);
       }
+
+      if config.debug {
+        eprintln!("{} LIR verification failed in debug mode", "Error:".red().bold());
+        return Err(());
+      }
     }
 
     if lir_program.functions.is_empty() {
       continue;
+    }
+
+    if debug_trace_enabled(&config, DebugTrace::Codegen) {
+      println!("debug: std emitting C for module {}", module_name);
     }
 
     let c_code = ignis_codegen_c::emit_c(
@@ -511,6 +693,10 @@ pub fn build_std(
     }
 
     let obj_path = output_path.join(format!("{}.o", module_name));
+    if debug_trace_enabled(&config, DebugTrace::Link) {
+      println!("debug: std compiling object for module {}", module_name);
+    }
+
     if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, config.quiet) {
       eprintln!("{} {}", "Error:".red().bold(), e);
       return Err(());
@@ -525,12 +711,16 @@ pub fn build_std(
   }
 
   let archive_path = output_path.join("libignis_std.a");
-  if let Err(e) = create_static_archive_multi(&object_files, &archive_path, config.quiet) {
+  if debug_trace_enabled(&config, DebugTrace::Link) {
+    println!("debug: archiving standard library objects");
+  }
+
+  if let Err(e) = create_static_archive_multi(&object_files, &archive_path, log_phase(&config)) {
     eprintln!("{} {}", "Error:".red().bold(), e);
     return Err(());
   }
 
-  if !config.quiet {
+  if log_phase(&config) {
     println!("{} Build complete: {}", "-->".bright_green().bold(), archive_path.display());
   }
 
@@ -555,7 +745,7 @@ fn ensure_std_built(
     return Ok(());
   }
 
-  if !config.quiet {
+  if log_phase(config) {
     println!("{} std library not found, building...", "-->".bright_yellow().bold());
   }
 
@@ -566,11 +756,11 @@ fn ensure_std_built(
 fn create_static_archive_multi(
   objects: &[std::path::PathBuf],
   archive_path: &Path,
-  quiet: bool,
+  log_info: bool,
 ) -> Result<(), String> {
   use std::process::Command;
 
-  if !quiet {
+  if log_info {
     let obj_names: Vec<_> = objects.iter().filter_map(|p| p.file_name()).collect();
     println!(
       "{} Creating archive {} <- {:?}",

@@ -75,8 +75,12 @@ fn load_manifest(std_path: &str) -> ignis_config::IgnisSTDManifest {
 }
 
 fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
-  let mut config =
-    ignis_config::IgnisConfig::new_basic(cli.debug.iter().map(|x| x.into()).collect(), cli.quiet, cli.verbose);
+  let mut config = ignis_config::IgnisConfig::new_basic(
+    cli.debug,
+    cli.debug_trace.iter().copied().map(Into::into).collect(),
+    cli.quiet,
+    cli.verbose,
+  );
 
   config.std = !cli.std;
   config.auto_load_std = !cli.auto_load_std;
@@ -148,11 +152,9 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
           is_project,
           build.optimize.clone(),
           build.output_dir.clone(),
-          build.dump_types,
-          build.dump_defs,
-          build.dump_hir.clone(),
-          build.dump_hir_summary,
-          build.dump_lir,
+          cli.dump.iter().copied().map(Into::into).collect(),
+          cli.dump_dir.clone(),
+          cli.dump_hir.clone(),
           build.emit_c.clone(),
           build.emit_obj.clone(),
           emit_bin,
