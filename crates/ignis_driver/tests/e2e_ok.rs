@@ -149,6 +149,22 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_ternary() {
+  e2e_test(
+    "ternary",
+    r#"
+function max(a: i32, b: i32): i32 {
+    return a > b ? a : b;
+}
+
+function main(): i32 {
+    return max(5, 10);
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_if_else_chain() {
   e2e_test(
     "if_else_chain",

@@ -190,6 +190,11 @@ impl<'a> Analyzer<'a> {
         self.resolve_node(&binary.left, scope_kind);
         self.resolve_node(&binary.right, scope_kind);
       },
+      ASTExpression::Ternary(ternary) => {
+        self.resolve_node(&ternary.condition, scope_kind);
+        self.resolve_node(&ternary.then_expr, scope_kind);
+        self.resolve_node(&ternary.else_expr, scope_kind);
+      },
       ASTExpression::Unary(unary) => {
         self.resolve_node(&unary.operand, scope_kind);
       },

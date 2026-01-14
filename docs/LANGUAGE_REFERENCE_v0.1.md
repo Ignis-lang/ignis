@@ -257,6 +257,14 @@ x += 5;   // x is now 15
 x *= 2;   // x is now 30
 ```
 
+#### Ternary
+
+Ternary expressions are sugar for `if`/`else` and follow the same rules:
+
+```ignis
+let value: i32 = flag ? 1 : 2;
+```
+
 ### Type Casts
 
 ```ignis

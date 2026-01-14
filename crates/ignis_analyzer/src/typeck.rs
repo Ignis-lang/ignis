@@ -377,6 +377,18 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Call(call) => self.typecheck_call(call, scope_kind, ctx, infer),
       ASTExpression::Binary(binary) => self.typecheck_binary(binary, scope_kind, ctx),
+      ASTExpression::Ternary(ternary) => {
+        let cond_type = self.typecheck_node(&ternary.condition, scope_kind, ctx);
+        let boolean_type = self.types.boolean();
+        let conditional_span = self.node_span(&ternary.condition).clone();
+
+        self.typecheck_assignment(&boolean_type, &cond_type, &conditional_span);
+
+        let then_type = self.typecheck_node(&ternary.then_expr, scope_kind, ctx);
+        let else_type = self.typecheck_node(&ternary.else_expr, scope_kind, ctx);
+
+        self.typecheck_common_type(&then_type, &else_type, &ternary.span)
+      },
       ASTExpression::Unary(unary) => self.typecheck_unary(unary, scope_kind, ctx),
       ASTExpression::Assignment(assign) => self.typecheck_assignment_expr(assign, scope_kind, ctx),
       ASTExpression::Cast(cast) => {

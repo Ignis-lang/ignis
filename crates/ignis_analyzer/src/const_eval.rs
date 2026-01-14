@@ -259,6 +259,15 @@ impl<'a> Analyzer<'a> {
           let right = self.const_eval_expression_node(&binary.right, scope_kind);
           const_eval_binary(&binary.operator, left, right)
         },
+        ASTExpression::Ternary(ternary) => {
+          let condition = self.const_eval_expression_node(&ternary.condition, scope_kind)?;
+
+          match condition {
+            ConstValue::Bool(true) => self.const_eval_expression_node(&ternary.then_expr, scope_kind),
+            ConstValue::Bool(false) => self.const_eval_expression_node(&ternary.else_expr, scope_kind),
+            _ => None,
+          }
+        },
         ASTExpression::Unary(unary) => {
           let operand = self.const_eval_expression_node(&unary.operand, scope_kind);
           const_eval_unary(&unary.operator, operand)

@@ -668,6 +668,24 @@ impl<'a> Analyzer<'a> {
 
         hir.alloc(hir_node)
       },
+      ASTExpression::Ternary(ternary) => {
+        let condition_id = self.lower_node_to_hir(&ternary.condition, hir, scope_kind);
+        let then_id = self.lower_node_to_hir(&ternary.then_expr, hir, scope_kind);
+        let else_id = self.lower_node_to_hir(&ternary.else_expr, hir, scope_kind);
+        let ternary_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+
+        let hir_node = HIRNode {
+          kind: HIRKind::If {
+            condition: condition_id,
+            then_branch: then_id,
+            else_branch: Some(else_id),
+          },
+          span: ternary.span.clone(),
+          type_id: ternary_type,
+        };
+
+        hir.alloc(hir_node)
+      },
       ASTExpression::Unary(unary) => {
         let operand_id = self.lower_node_to_hir(&unary.operand, hir, scope_kind);
         let unary_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());

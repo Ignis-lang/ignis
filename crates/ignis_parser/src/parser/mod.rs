@@ -285,6 +285,9 @@ impl IgnisParser {
       TokenType::And => (30, 31),
       TokenType::Or => (29, 30),
 
+      // ternary (right-assoc)
+      TokenType::QuestionMark => (20, 19),
+
       // assignment (right-assoc)
       TokenType::Equal
       | TokenType::AddAssign

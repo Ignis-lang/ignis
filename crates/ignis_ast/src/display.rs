@@ -61,6 +61,7 @@ use crate::{
     grouped::ASTGrouped,
     literal::ASTLiteral,
     path::ASTPath,
+    ternary::ASTTernary,
     unary::{ASTUnary, UnaryOperator},
     variable::ASTVariableExpression,
     vector::ASTVector,
@@ -236,6 +237,7 @@ impl DisplayLisp for ASTExpression {
     match self {
       ASTExpression::Assignment(expr) => expr.to_lisp(formatter),
       ASTExpression::Binary(expr) => expr.to_lisp(formatter),
+      ASTExpression::Ternary(expr) => expr.to_lisp(formatter),
       ASTExpression::Cast(expr) => expr.to_lisp(formatter),
       ASTExpression::Call(expr) => expr.to_lisp(formatter),
       ASTExpression::Dereference(expr) => {
@@ -337,6 +339,20 @@ impl DisplayLisp for ASTBinary {
     let right = formatter.format_node(&self.right);
 
     format!("({} {} {})", op, left, right)
+  }
+}
+
+// Ternary Expression
+impl DisplayLisp for ASTTernary {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let condition = formatter.format_node(&self.condition);
+    let then_expr = formatter.format_node(&self.then_expr);
+    let else_expr = formatter.format_node(&self.else_expr);
+
+    format!("(?: {} {} {})", condition, then_expr, else_expr)
   }
 }
 

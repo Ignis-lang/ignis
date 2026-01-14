@@ -11,6 +11,7 @@ use ignis_ast::{
     literal::ASTLiteral,
     path::ASTPath,
     reference::ASTReference,
+    ternary::ASTTernary,
     unary::{ASTUnary, UnaryOperator},
     variable::ASTVariableExpression,
     vector::ASTVector,
@@ -96,6 +97,16 @@ impl IgnisParser {
         let target_type = self.parse_type_syntax()?;
         let span = Span::merge(self.get_span(&left), &type_start);
         left = self.allocate_expression(ASTExpression::Cast(ASTCast::new(span, target_type, left)));
+        continue;
+      }
+
+      if op == TokenType::QuestionMark {
+        let then_expr = self.parse_expression(0)?;
+        let _ = self.expect(TokenType::Colon)?;
+        let else_expr = self.parse_expression(0)?;
+        let span = Span::merge(self.get_span(&left), self.get_span(&else_expr));
+
+        left = self.allocate_expression(ASTExpression::Ternary(ASTTernary::new(left, then_expr, else_expr, span)));
         continue;
       }
 
@@ -775,6 +786,41 @@ mod tests {
     match expr {
       ASTExpression::Binary(bin) => assert_eq!(bin.operator, ASTBinaryOperator::Or),
       other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_ternary_expression() {
+    let result = parse_expr("flag ? 1 : 2");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Ternary(ternary) => {
+        let condition = result.nodes.get(&ternary.condition);
+        match condition {
+          ASTNode::Expression(ASTExpression::Variable(_)) => {},
+          other => panic!("expected variable condition, got {:?}", other),
+        }
+
+        let then_expr = result.nodes.get(&ternary.then_expr);
+        match then_expr {
+          ASTNode::Expression(ASTExpression::Literal(lit)) => match &lit.value {
+            IgnisLiteralValue::Int32(v) => assert_eq!(*v, 1),
+            other => panic!("expected Int32, got {:?}", other),
+          },
+          other => panic!("expected literal then branch, got {:?}", other),
+        }
+
+        let else_expr = result.nodes.get(&ternary.else_expr);
+        match else_expr {
+          ASTNode::Expression(ASTExpression::Literal(lit)) => match &lit.value {
+            IgnisLiteralValue::Int32(v) => assert_eq!(*v, 2),
+            other => panic!("expected Int32, got {:?}", other),
+          },
+          other => panic!("expected literal else branch, got {:?}", other),
+        }
+      },
+      other => panic!("expected ternary, got {:?}", other),
     }
   }
 

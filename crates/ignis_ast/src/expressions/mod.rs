@@ -11,6 +11,7 @@ pub mod member_access;
 pub mod path;
 pub mod record_init;
 pub mod reference;
+pub mod ternary;
 pub mod unary;
 pub mod variable;
 pub mod vector;
@@ -27,6 +28,7 @@ pub use member_access::{ASTAccessOp, ASTMemberAccess};
 pub use path::ASTPath;
 pub use record_init::{ASTRecordInit, ASTRecordInitField};
 pub use reference::ASTReference;
+pub use ternary::ASTTernary;
 pub use unary::ASTUnary;
 pub use variable::ASTVariableExpression;
 pub use vector::ASTVector;
@@ -36,6 +38,7 @@ pub use vector_access::ASTVectorAccess;
 pub enum ASTExpression {
   Assignment(ASTAssignment),
   Binary(ASTBinary),
+  Ternary(ASTTernary),
   Cast(ASTCast),
   Call(ASTCallExpression),
   Dereference(ASTDereference),
@@ -58,6 +61,7 @@ impl ASTExpression {
     match self {
       ASTExpression::Assignment(expr) => &expr.span,
       ASTExpression::Binary(expr) => &expr.span,
+      ASTExpression::Ternary(expr) => &expr.span,
       ASTExpression::Cast(expr) => &expr.span,
       ASTExpression::Call(expr) => &expr.span,
       ASTExpression::Dereference(expr) => &expr.span,

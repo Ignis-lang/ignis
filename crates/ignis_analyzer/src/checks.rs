@@ -283,6 +283,11 @@ impl<'a> Analyzer<'a> {
         self.extra_checks_node(&binary.left, scope_kind, in_loop, in_function);
         self.extra_checks_node(&binary.right, scope_kind, in_loop, in_function);
       },
+      ASTExpression::Ternary(ternary) => {
+        self.extra_checks_node(&ternary.condition, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&ternary.then_expr, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&ternary.else_expr, scope_kind, in_loop, in_function);
+      },
       ASTExpression::Unary(unary) => {
         self.extra_checks_node(&unary.operand, scope_kind, in_loop, in_function);
       },
