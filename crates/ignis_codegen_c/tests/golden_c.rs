@@ -184,3 +184,82 @@ function main(): void {
   );
   assert_snapshot!("c_conditionals", c_code);
 }
+
+// =============================================================================
+// Generic type mangling tests
+// =============================================================================
+
+#[test]
+fn c_generic_box_mangling() {
+  let c_code = common::compile_to_c(
+    r#"
+record Box<T> {
+    value: T;
+}
+
+function main(): void {
+    let b: Box<i32> = Box { value: 42 };
+    return;
+}
+"#,
+  );
+  assert!(c_code.contains("Box____i32"));
+  assert_snapshot!("c_generic_box_mangling", c_code);
+}
+
+#[test]
+fn c_nested_generics_mangling() {
+  let c_code = common::compile_to_c(
+    r#"
+record Box<T> {
+    value: T;
+}
+
+function main(): void {
+    let outer: Box<Box<i32> > = Box { value: Box { value: 42 } };
+    return;
+}
+"#,
+  );
+  assert!(c_code.contains("Box____Box____i32"));
+  assert_snapshot!("c_nested_generics_mangling", c_code);
+}
+
+#[test]
+fn c_multi_param_mangling() {
+  let c_code = common::compile_to_c(
+    r#"
+record Pair<A, B> {
+    first: A;
+    second: B;
+}
+
+function main(): void {
+    let p: Pair<string, i32> = Pair { first: "hello", second: 42 };
+    return;
+}
+"#,
+  );
+  assert!(c_code.contains("Pair____string____i32"));
+  assert_snapshot!("c_multi_param_mangling", c_code);
+}
+
+#[test]
+fn c_generic_function_mangling() {
+  let c_code = common::compile_to_c(
+    r#"
+function identity<T>(x: T): T {
+    return x;
+}
+
+function main(): void {
+    let a: i32 = identity<i32>(42);
+    let b: string = identity<string>("hello");
+    return;
+}
+"#,
+  );
+  assert!(c_code.contains("identity____i32"));
+  assert!(c_code.contains("identity____string"));
+  assert_snapshot!("c_generic_function_mangling", c_code);
+}

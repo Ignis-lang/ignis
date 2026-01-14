@@ -1077,3 +1077,42 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_generic_nested_types() {
+  e2e_test(
+    "generic_nested_types",
+    r#"
+record Box<T> {
+    value: T;
+}
+
+function main(): i32 {
+    let inner: Box<i32> = Box { value: 42 };
+    let outer: Box<Box<i32> > = Box { value: inner };
+    return outer.value.value;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_multiple_instantiations() {
+  e2e_test(
+    "generic_multiple_instantiations",
+    r#"
+record Box<T> {
+    value: T;
+    get(): T {
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let a: Box<i32> = Box { value: 10 };
+    let b: Box<i32> = Box { value: 32 };
+    return a.get() + b.get();
+}
+"#,
+  );
+}

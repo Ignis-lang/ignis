@@ -118,3 +118,20 @@ fn fixture_nested_if_all_paths_return() {
 fn fixture_valid_extern() {
   test_fixture("test_cases/analyzer/extern/valid_extern.ign");
 }
+
+// --- Generics Error Tests ---
+
+#[test]
+fn fixture_wrong_number_type_args_record() {
+  test_fixture("test_cases/analyzer/generics/errors/wrong_number_type_args_record.ign");
+}
+
+#[test]
+fn fixture_wrong_number_type_args_function() {
+  test_fixture("test_cases/analyzer/generics/errors/wrong_number_type_args_function.ign");
+}
+
+#[test]
+fn fixture_type_param_with_args() {
+  test_fixture("test_cases/analyzer/generics/errors/type_param_with_args.ign");
+}
