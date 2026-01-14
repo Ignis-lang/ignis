@@ -240,6 +240,21 @@ pub enum DiagnosticMessage {
     operand_type: String,
     span: Span,
   },
+  InvalidNullLiteral {
+    span: Span,
+  },
+  CannotInferNullType {
+    span: Span,
+  },
+  NullDereference {
+    span: Span,
+  },
+  InvalidPointerArithmetic {
+    operator: String,
+    left_type: String,
+    right_type: String,
+    span: Span,
+  },
   DereferenceNonPointer {
     type_name: String,
     span: Span,
@@ -638,6 +653,27 @@ impl fmt::Display for DiagnosticMessage {
       } => {
         write!(f, "Unary operator '{}' cannot be applied to type '{}'", operator, operand_type)
       },
+      DiagnosticMessage::InvalidNullLiteral { .. } => {
+        write!(f, "Null literal can only be used with pointer types")
+      },
+      DiagnosticMessage::CannotInferNullType { .. } => {
+        write!(f, "Cannot infer pointer type for null literal")
+      },
+      DiagnosticMessage::NullDereference { .. } => {
+        write!(f, "Cannot dereference null pointer")
+      },
+      DiagnosticMessage::InvalidPointerArithmetic {
+        operator,
+        left_type,
+        right_type,
+        ..
+      } => {
+        write!(
+          f,
+          "Pointer operator '{}' cannot be applied to types '{}' and '{}'",
+          operator, left_type, right_type
+        )
+      },
       DiagnosticMessage::DereferenceNonPointer { type_name, .. } => {
         write!(f, "Cannot dereference non-pointer type '{}'", type_name)
       },
@@ -917,6 +953,10 @@ impl DiagnosticMessage {
       | DiagnosticMessage::ArgumentTypeMismatch { span, .. }
       | DiagnosticMessage::InvalidBinaryOperandType { span, .. }
       | DiagnosticMessage::InvalidUnaryOperandType { span, .. }
+      | DiagnosticMessage::InvalidNullLiteral { span, .. }
+      | DiagnosticMessage::CannotInferNullType { span, .. }
+      | DiagnosticMessage::NullDereference { span, .. }
+      | DiagnosticMessage::InvalidPointerArithmetic { span, .. }
       | DiagnosticMessage::DereferenceNonPointer { span, .. }
       | DiagnosticMessage::VectorIndexNonInteger { span, .. }
       | DiagnosticMessage::AccessNonVector { span, .. }
@@ -1040,6 +1080,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::ArgumentTypeMismatch { .. } => "A0018",
       DiagnosticMessage::InvalidBinaryOperandType { .. } => "A0019",
       DiagnosticMessage::InvalidUnaryOperandType { .. } => "A0020",
+      DiagnosticMessage::InvalidNullLiteral { .. } => "A0072",
+      DiagnosticMessage::CannotInferNullType { .. } => "A0073",
+      DiagnosticMessage::NullDereference { .. } => "A0074",
+      DiagnosticMessage::InvalidPointerArithmetic { .. } => "A0075",
       DiagnosticMessage::DereferenceNonPointer { .. } => "A0021",
       DiagnosticMessage::VectorIndexNonInteger { .. } => "A0022",
       DiagnosticMessage::AccessNonVector { .. } => "A0023",

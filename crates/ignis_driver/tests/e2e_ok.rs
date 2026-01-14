@@ -165,6 +165,53 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_null_pointer_ops() {
+  e2e_test(
+    "null_pointer_ops",
+    r#"
+function main(): i32 {
+    let mut values: i32[3] = [10, 20, 30];
+    let p0: *mut i32 = (&mut values[0]) as *mut i32;
+    let p1: *mut i32 = p0 + 1;
+    let p2: *mut i32 = p1 + 1;
+    let diff: i64 = p2 - p0;
+
+    let mut bytes: u8[2] = [0b1, 0b10];
+    let b0: *mut u8 = (&mut bytes[0]) as *mut u8;
+    let b1: *mut u8 = b0 + 1;
+    let bdiff: i64 = b1 - b0;
+
+    if (p0 == null) {
+        return 0;
+    }
+
+    if (p0 != null) {
+        return (diff + bdiff) as i32;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_builtin_read_write() {
+  e2e_test(
+    "builtin_read_write",
+    r#"
+function main(): i32 {
+    let mut value: i32 = 41;
+    let ptr: *mut i32 = (&mut value) as *mut i32;
+    __builtin_write<i32>(ptr, 42);
+    let out: i32 = __builtin_read<i32>(ptr);
+    return out;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_if_else_chain() {
   e2e_test(
     "if_else_chain",

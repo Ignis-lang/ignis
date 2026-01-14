@@ -563,6 +563,22 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
+      HIRKind::BuiltinLoad { ty, ptr } => {
+        let new_ptr = self.clone_hir_tree(*ptr);
+        (HIRKind::BuiltinLoad { ty: *ty, ptr: new_ptr }, None)
+      },
+      HIRKind::BuiltinStore { ty, ptr, value } => {
+        let new_ptr = self.clone_hir_tree(*ptr);
+        let new_value = self.clone_hir_tree(*value);
+        (
+          HIRKind::BuiltinStore {
+            ty: *ty,
+            ptr: new_ptr,
+            value: new_value,
+          },
+          None,
+        )
+      },
       HIRKind::Reference { expression, mutable } => {
         let new_expr = self.clone_hir_tree(*expression);
         (
@@ -954,6 +970,13 @@ impl<'a> Monomorphizer<'a> {
         for (_, val) in fields {
           self.scan_hir(*val);
         }
+      },
+      HIRKind::BuiltinLoad { ptr, .. } => {
+        self.scan_hir(*ptr);
+      },
+      HIRKind::BuiltinStore { ptr, value, .. } => {
+        self.scan_hir(*ptr);
+        self.scan_hir(*value);
       },
       HIRKind::MethodCall {
         receiver,
@@ -1593,6 +1616,24 @@ impl<'a> Monomorphizer<'a> {
         let new_expr = self.substitute_hir(*expr, subst);
         HIRKind::Dereference(new_expr)
       },
+      HIRKind::BuiltinLoad { ty, ptr } => {
+        let new_ptr = self.substitute_hir(*ptr, subst);
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::BuiltinLoad {
+          ty: new_ty,
+          ptr: new_ptr,
+        }
+      },
+      HIRKind::BuiltinStore { ty, ptr, value } => {
+        let new_ptr = self.substitute_hir(*ptr, subst);
+        let new_value = self.substitute_hir(*value, subst);
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::BuiltinStore {
+          ty: new_ty,
+          ptr: new_ptr,
+          value: new_value,
+        }
+      },
       HIRKind::Index { base, index } => {
         let new_base = self.substitute_hir(*base, subst);
         let new_index = self.substitute_hir(*index, subst);
@@ -1932,6 +1973,7 @@ impl<'a> Monomorphizer<'a> {
       },
       Type::Param { owner, index } => format!("T{}__{}", index, owner.index()),
       Type::Unknown => "unknown".into(),
+      Type::NullPtr => "null".into(),
       Type::Error => "error".into(),
     }
   }

@@ -34,6 +34,20 @@ pub enum Instr {
     value: Operand,
   },
 
+  /// Builtin load: `dest = *ptr` with explicit type.
+  BuiltinLoad {
+    dest: TempId,
+    ptr: Operand,
+    ty: TypeId,
+  },
+
+  /// Builtin store: `*ptr = value` with explicit type.
+  BuiltinStore {
+    ptr: Operand,
+    value: Operand,
+    ty: TypeId,
+  },
+
   /// Copy/move a value to a new temporary.
   /// `dest = source`
   Copy {

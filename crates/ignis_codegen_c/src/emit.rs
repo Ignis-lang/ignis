@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
-use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, Terminator};
+use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, RecordDefinition},
   namespace::NamespaceStore,
@@ -498,12 +498,29 @@ impl<'a> CEmitter<'a> {
 
         writeln!(self.output, "*{} = {};", p, v).unwrap();
       },
+      Instr::BuiltinLoad { dest, ptr, ty } => {
+        let p = self.format_operand(func, ptr);
+        let c_type = self.format_type(*ty);
+
+        writeln!(self.output, "t{} = *({}*)({});", dest.index(), c_type, p).unwrap();
+      },
+      Instr::BuiltinStore { ptr, value, ty } => {
+        let p = self.format_operand(func, ptr);
+        let v = self.format_operand(func, value);
+        let c_type = self.format_type(*ty);
+
+        writeln!(self.output, "*({}*)({}) = {};", c_type, p, v).unwrap();
+      },
       Instr::Copy { dest, source } => {
         let s = self.format_operand(func, source);
 
         writeln!(self.output, "t{} = {};", dest.index(), s).unwrap();
       },
       Instr::BinOp { dest, op, left, right } => {
+        if self.emit_pointer_binop(func, *dest, op, left, right) {
+          return;
+        }
+
         let l = self.format_operand(func, left);
         let r = self.format_operand(func, right);
 
@@ -775,7 +792,7 @@ impl<'a> CEmitter<'a> {
         Type::F64 => "ignis_unknown_f64",
         Type::Boolean => "ignis_unknown_bool",
         Type::String => "ignis_unknown_obj",
-        Type::Pointer(_) | Type::Reference { .. } => "ignis_unknown_rawptr",
+        Type::Pointer(_) | Type::Reference { .. } | Type::NullPtr => "ignis_unknown_rawptr",
         _ => "ignis_unknown_obj",
       },
       None => "ignis_unknown_obj",
@@ -812,7 +829,7 @@ impl<'a> CEmitter<'a> {
       ConstValue::Bool(v, _) => format!("{}", v),
       ConstValue::Char(v, _) => format!("{}", *v as u32),
       ConstValue::String(v, _) => format!("ignis_string_from_cstr(\"{}\")", Self::escape_string(v)),
-      ConstValue::Null(_) => "NULL".to_string(),
+      ConstValue::Null(ty) => format!("({})NULL", self.format_type(*ty)),
       ConstValue::Undef(_) => "/* undef */ 0".to_string(),
     }
   }
@@ -832,6 +849,39 @@ impl<'a> CEmitter<'a> {
       }
     }
     result
+  }
+
+  fn emit_pointer_binop(
+    &mut self,
+    func: &FunctionLir,
+    dest: TempId,
+    op: &BinaryOperation,
+    left: &Operand,
+    right: &Operand,
+  ) -> bool {
+    let left_ty = self.operand_type(func, left);
+    let right_ty = self.operand_type(func, right);
+    let dest_ty = func.temp_type(dest);
+
+    let is_left_ptr = left_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer(_)));
+    let is_right_ptr = right_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer(_)));
+    let is_right_i64 = right_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::I64));
+
+    let l = self.format_operand(func, left);
+    let r = self.format_operand(func, right);
+
+    match op {
+      BinaryOperation::Add | BinaryOperation::Sub if is_left_ptr && is_right_i64 => {
+        let op_str = self.format_binop(op);
+        writeln!(self.output, "t{} = {} {} {};", dest.index(), l, op_str, r).unwrap();
+        true
+      },
+      BinaryOperation::Sub if is_left_ptr && is_right_ptr && matches!(self.types.get(&dest_ty), Type::I64) => {
+        writeln!(self.output, "t{} = (i64)({} - {});", dest.index(), l, r).unwrap();
+        true
+      },
+      _ => false,
+    }
   }
 
   fn format_binop(
@@ -894,6 +944,7 @@ impl<'a> CEmitter<'a> {
       Type::Void => "void".to_string(),
       Type::Never => "void".to_string(),
       Type::Unknown => "IgnisUnknown".to_string(),
+      Type::NullPtr => "void*".to_string(),
       Type::Error => "/* error */ void*".to_string(),
       Type::Pointer(inner) => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
@@ -1055,6 +1106,7 @@ pub fn format_c_type(
     Type::Void => "void".to_string(),
     Type::Never => "void".to_string(),
     Type::Unknown => "IgnisUnknown".to_string(),
+    Type::NullPtr => "void*".to_string(),
     Type::Error => "void*".to_string(),
     Type::Pointer(inner) => format!("{}*", format_c_type(types.get(inner), types)),
     Type::Reference { inner, .. } => format!("{}*", format_c_type(types.get(inner), types)),

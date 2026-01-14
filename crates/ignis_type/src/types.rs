@@ -22,6 +22,7 @@ pub enum Type {
   Void,
   Never,
   Unknown,
+  NullPtr,
 
   Pointer(TypeId),
   Reference {
@@ -113,6 +114,7 @@ pub struct TypeStore {
   enums: HashMap<DefinitionId, TypeId>,
   instances: HashMap<InstanceKey, TypeId>,
   params: HashMap<ParamKey, TypeId>,
+  null_ptr: TypeId,
 }
 
 impl TypeStore {
@@ -129,8 +131,10 @@ impl TypeStore {
       enums: HashMap::new(),
       instances: HashMap::new(),
       params: HashMap::new(),
+      null_ptr: TypeId::new(0),
     };
     store.init_primitives();
+    store.null_ptr = store.primitives[&Type::NullPtr];
     store
   }
 
@@ -152,6 +156,7 @@ impl TypeStore {
       Type::Void,
       Type::Never,
       Type::Unknown,
+      Type::NullPtr,
       Type::Error,
     ];
 
@@ -375,6 +380,10 @@ impl TypeStore {
     self.primitives[&Type::Error]
   }
 
+  pub fn null_ptr(&self) -> TypeId {
+    self.null_ptr
+  }
+
   pub fn is_numeric(
     &self,
     ty: &TypeId,
@@ -464,6 +473,14 @@ impl TypeStore {
     matches!(self.get(ty), Type::Unknown)
   }
 
+  #[inline]
+  pub fn is_null_ptr(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(self.get(ty), Type::NullPtr)
+  }
+
   /// Returns true if the type has Copy semantics (no ownership transfer on assignment).
   pub fn is_copy(
     &self,
@@ -484,6 +501,7 @@ impl TypeStore {
       | Type::Char
       | Type::Void
       | Type::Never
+      | Type::NullPtr
       | Type::Error => true,
 
       Type::Pointer(_) | Type::Reference { .. } | Type::Function { .. } => true,

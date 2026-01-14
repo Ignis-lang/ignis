@@ -145,6 +145,17 @@ impl<'a> LirPrinter<'a> {
         let v = self.format_operand(func, value);
         writeln!(self.output, "store_ptr {}, {}", p, v).unwrap();
       },
+      Instr::BuiltinLoad { dest, ptr, ty } => {
+        let p = self.format_operand(func, ptr);
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "t{} = builtin_load {} : {}", dest.index(), p, ty_str).unwrap();
+      },
+      Instr::BuiltinStore { ptr, value, ty } => {
+        let p = self.format_operand(func, ptr);
+        let v = self.format_operand(func, value);
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "builtin_store {} <- {} : {}", p, v, ty_str).unwrap();
+      },
       Instr::Copy { dest, source } => {
         let s = self.format_operand(func, source);
         let ty = self.format_type(func.temp_type(*dest));
@@ -354,6 +365,7 @@ impl<'a> LirPrinter<'a> {
       Type::Void => "void".to_string(),
       Type::Never => "!".to_string(),
       Type::Unknown => "?".to_string(),
+      Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
       Type::Pointer(inner) => format!("*{}", self.format_type(*inner)),
       Type::Reference { inner, mutable } => {

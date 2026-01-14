@@ -248,6 +248,17 @@ impl<'a> HIRPrinter<'a> {
         let ty_str = self.format_type(ty);
         format!("sizeOf({})", ty_str)
       },
+      HIRKind::BuiltinLoad { ty, ptr } => {
+        let ty_str = self.format_type(ty);
+        let ptr_str = self.format_node_compact(*ptr);
+        format!("builtin_read<{}>({})", ty_str, ptr_str)
+      },
+      HIRKind::BuiltinStore { ty, ptr, value } => {
+        let ty_str = self.format_type(ty);
+        let ptr_str = self.format_node_compact(*ptr);
+        let value_str = self.format_node_compact(*value);
+        format!("builtin_write<{}>({}, {})", ty_str, ptr_str, value_str)
+      },
       _ => format!("<complex: {}>", type_str),
     }
   }
@@ -600,6 +611,21 @@ impl<'a> HIRPrinter<'a> {
         let ty_str = self.format_type(ty);
         writeln!(self.output, "SizeOf({}) : {}", ty_str, type_str).unwrap();
       },
+      HIRKind::BuiltinLoad { ty, ptr } => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "BuiltinLoad({}) : {}", ty_str, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*ptr);
+        self.indent -= 1;
+      },
+      HIRKind::BuiltinStore { ty, ptr, value } => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "BuiltinStore({}) : {}", ty_str, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*ptr);
+        self.print_node(*value);
+        self.indent -= 1;
+      },
       HIRKind::FieldAccess { base, field_index } => {
         writeln!(self.output, "FieldAccess(.{}) : {}", field_index, type_str).unwrap();
         self.indent += 1;
@@ -717,6 +743,7 @@ impl<'a> HIRPrinter<'a> {
       Type::Void => "void".to_string(),
       Type::Never => "never".to_string(),
       Type::Unknown => "unknown".to_string(),
+      Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
       Type::Pointer(inner) => format!("*{}", self.format_type(inner)),
       Type::Reference { inner, mutable } => {

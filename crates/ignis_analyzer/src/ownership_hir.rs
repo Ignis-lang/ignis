@@ -257,6 +257,15 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_call(callee, &args, span);
       },
 
+      HIRKind::BuiltinLoad { ptr, .. } => {
+        self.check_node(ptr);
+      },
+
+      HIRKind::BuiltinStore { ptr, value, .. } => {
+        self.check_node(ptr);
+        self.check_node(value);
+      },
+
       HIRKind::Variable(def_id) => {
         // Check if variable is still valid
         self.check_use(def_id, span);

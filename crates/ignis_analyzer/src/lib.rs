@@ -346,7 +346,7 @@ impl<'a> Analyzer<'a> {
   ) -> bool {
     let symbols = self.symbols.borrow();
     let name = symbols.get(symbol_id);
-    name == "typeOf" || name == "sizeOf"
+    name == "typeOf" || name == "sizeOf" || name == "__builtin_read" || name == "__builtin_write"
   }
 
   fn node_span(

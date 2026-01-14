@@ -49,6 +49,15 @@ pub enum HIRKind {
 
   TypeOf(HIRId),
   SizeOf(TypeId),
+  BuiltinLoad {
+    ty: TypeId,
+    ptr: HIRId,
+  },
+  BuiltinStore {
+    ty: TypeId,
+    ptr: HIRId,
+    value: HIRId,
+  },
 
   // Record/Enum operations
   FieldAccess {
@@ -124,6 +133,13 @@ impl HIRKind {
       | HIRKind::StaticAccess { .. } => {},
       HIRKind::TypeOf(id) => {
         *id = HIRId::new(id.index() + offset);
+      },
+      HIRKind::BuiltinLoad { ptr, .. } => {
+        *ptr = HIRId::new(ptr.index() + offset);
+      },
+      HIRKind::BuiltinStore { ptr, value, .. } => {
+        *ptr = HIRId::new(ptr.index() + offset);
+        *value = HIRId::new(value.index() + offset);
       },
       HIRKind::Binary { left, right, .. } => {
         *left = HIRId::new(left.index() + offset);

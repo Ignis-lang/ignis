@@ -172,6 +172,14 @@ impl<'a> LirVerifier<'a> {
         self.check_operand(func, func_name, block_name, ptr, defined_temps);
         self.check_operand(func, func_name, block_name, value, defined_temps);
       },
+      Instr::BuiltinLoad { dest, ptr, .. } => {
+        self.check_operand(func, func_name, block_name, ptr, defined_temps);
+        defined_temps.insert(*dest);
+      },
+      Instr::BuiltinStore { ptr, value, .. } => {
+        self.check_operand(func, func_name, block_name, ptr, defined_temps);
+        self.check_operand(func, func_name, block_name, value, defined_temps);
+      },
       Instr::Copy { dest, source } => {
         self.check_operand(func, func_name, block_name, source, defined_temps);
         defined_temps.insert(*dest);

@@ -49,3 +49,98 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_null_non_pointer() {
+  e2e_error_test(
+    "err_null_non_pointer",
+    r#"
+function main(): i32 {
+    let x: i32 = null;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_null_uninferred() {
+  e2e_error_test(
+    "err_null_uninferred",
+    r#"
+function main(): i32 {
+    null;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_null_deref() {
+  e2e_error_test(
+    "err_null_deref",
+    r#"
+function main(): i32 {
+    let x: i32 = *null;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pointer_diff_mismatch() {
+  e2e_error_test(
+    "err_pointer_diff_mismatch",
+    r#"
+function main(): i32 {
+    let mut a: i32 = 0;
+    let mut b: f64 = 0.0;
+    let pa: *mut i32 = &mut a as *mut i32;
+    let pb: *mut f64 = &mut b as *mut f64;
+    let d: i64 = pa - pb;
+    return d as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_null_ptr_diff() {
+  e2e_error_test(
+    "err_null_ptr_diff",
+    r#"
+function main(): i32 {
+    let d: i64 = null - null;
+    return d as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_builtin_read_null() {
+  e2e_error_test(
+    "err_builtin_read_null",
+    r#"
+function main(): i32 {
+    let value: i32 = __builtin_read<i32>(null);
+    return value;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_builtin_write_null() {
+  e2e_error_test(
+    "err_builtin_write_null",
+    r#"
+function main(): i32 {
+    __builtin_write<i32>(null, 10);
+    return 0;
+}
+"#,
+  );
+}

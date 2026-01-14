@@ -514,7 +514,7 @@ impl<'a> Analyzer<'a> {
           ignis_type::value::IgnisLiteralValue::String(_) => self.types.string(),
           ignis_type::value::IgnisLiteralValue::Hex(_) => self.types.u32(),
           ignis_type::value::IgnisLiteralValue::Binary(_) => self.types.u8(),
-          ignis_type::value::IgnisLiteralValue::Null => self.types.error(),
+          ignis_type::value::IgnisLiteralValue::Null => self.types.null_ptr(),
         });
 
         let hir_node = HIRNode {
@@ -547,7 +547,7 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Call(call) => {
-        // Check for builtin typeOf/sizeOf BEFORE normal scope lookup
+        // Check for builtins BEFORE normal scope lookup
         let callee_node = self.ast.get(&call.callee);
         if let ASTNode::Expression(ASTExpression::Variable(var)) = callee_node {
           let name = self.symbols.borrow().get(&var.name).to_string();
@@ -557,6 +557,12 @@ impl<'a> Analyzer<'a> {
           }
           if name == "sizeOf" {
             return self.lower_sizeof_builtin(call, hir, scope_kind);
+          }
+          if name == "__builtin_read" {
+            return self.lower_builtin_read(call, hir, scope_kind);
+          }
+          if name == "__builtin_write" {
+            return self.lower_builtin_write(call, hir, scope_kind);
           }
         }
 
@@ -1275,6 +1281,81 @@ impl<'a> Analyzer<'a> {
       kind: HIRKind::SizeOf(base_type),
       span: call.span.clone(),
       type_id: self.types.u64(),
+    })
+  }
+
+  fn lower_builtin_read(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    if call.arguments.len() != 1 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+    let ptr = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinLoad { ty: value_type, ptr },
+      span: call.span.clone(),
+      type_id: value_type,
+    })
+  }
+
+  fn lower_builtin_write(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    if call.arguments.len() != 2 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+    let ptr = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
+    let value = self.lower_node_to_hir(&call.arguments[1], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinStore {
+        ty: value_type,
+        ptr,
+        value,
+      },
+      span: call.span.clone(),
+      type_id: self.types.void(),
     })
   }
 

@@ -40,6 +40,8 @@ impl<'a> Analyzer<'a> {
     for root in roots {
       self.typecheck_node(root, ScopeKind::Global, &ctx);
     }
+
+    self.report_unresolved_nulls();
   }
 
   fn typecheck_node(
@@ -49,6 +51,25 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
   ) -> TypeId {
     self.typecheck_node_with_infer(node_id, scope_kind, ctx, &InferContext::none())
+  }
+
+  fn report_unresolved_nulls(&mut self) {
+    let null_ptr = self.types.null_ptr();
+    let error_type = self.types.error();
+
+    let unresolved: Vec<NodeId> = self
+      .node_types
+      .iter()
+      .filter_map(|(node_id, ty)| if *ty == null_ptr { Some(*node_id) } else { None })
+      .collect();
+
+    for node_id in unresolved {
+      let span = self.node_span(&node_id).clone();
+
+      self.add_diagnostic(DiagnosticMessage::CannotInferNullType { span }.report());
+
+      self.set_type(&node_id, &error_type);
+    }
   }
 
   fn typecheck_node_with_infer(
@@ -85,7 +106,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Variable(var) => {
         let declared_type = self.resolve_type_syntax_with_span(&var.type_, &var.span);
 
-        let var_type = if self.types.is_unknown(&declared_type) {
+        let mut var_type = if self.types.is_unknown(&declared_type) {
           if let Some(value_id) = &var.value {
             self.typecheck_node(value_id, scope_kind, ctx)
           } else {
@@ -94,6 +115,22 @@ impl<'a> Analyzer<'a> {
         } else {
           declared_type.clone()
         };
+
+        if self.types.is_null_ptr(&var_type) {
+          let span = var
+            .value
+            .as_ref()
+            .map(|value_id| self.node_span(value_id).clone())
+            .unwrap_or_else(|| var.span.clone());
+
+          self.add_diagnostic(DiagnosticMessage::CannotInferNullType { span }.report());
+
+          if let Some(value_id) = &var.value {
+            self.set_type(value_id, &self.types.error());
+          }
+
+          var_type = self.types.error();
+        }
 
         let lookedup_def = self.lookup_def(node_id);
 
@@ -426,6 +463,23 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Dereference(deref) => {
         let expr_type = self.typecheck_node(&deref.inner, scope_kind, ctx);
+        let const_value = self.const_eval_expression_node(&deref.inner, scope_kind);
+
+        if matches!(const_value, Some(ConstValue::Null)) {
+          self.add_diagnostic(
+            DiagnosticMessage::NullDereference {
+              span: deref.span.clone(),
+            }
+            .report(),
+          );
+
+          self.set_type(&deref.inner, &self.types.error());
+        }
+
+        if self.types.is_null_ptr(&expr_type) {
+          return self.types.error();
+        }
+
         match self.types.get(&expr_type).clone() {
           ignis_type::types::Type::Pointer(inner) => inner,
           ignis_type::types::Type::Reference { inner, .. } => inner,
@@ -1417,7 +1471,19 @@ impl<'a> Analyzer<'a> {
       IgnisLiteralValue::Boolean(_) => self.types.boolean(),
       IgnisLiteralValue::Char(_) => self.types.char(),
       IgnisLiteralValue::String(_) => self.types.string(),
-      IgnisLiteralValue::Null => self.types.error(),
+      IgnisLiteralValue::Null => {
+        if let Some(expected) = &infer.expected {
+          if self.is_pointer_type(expected) {
+            return expected.clone();
+          }
+
+          self.add_diagnostic(DiagnosticMessage::InvalidNullLiteral { span: lit.span.clone() }.report());
+
+          return self.types.error();
+        }
+
+        self.types.null_ptr()
+      },
     }
   }
 
@@ -1563,7 +1629,7 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
     infer: &InferContext,
   ) -> TypeId {
-    // Check for builtin typeOf/sizeOf - they are handled specially
+    // Check for builtins - they are handled specially
     if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
       let name = self.get_symbol_name(&var.name);
       if name == "typeOf" {
@@ -1571,6 +1637,12 @@ impl<'a> Analyzer<'a> {
       }
       if name == "sizeOf" {
         return self.typecheck_sizeof_builtin(call, scope_kind, ctx);
+      }
+      if name == "__builtin_read" {
+        return self.typecheck_builtin_read(call, scope_kind, ctx);
+      }
+      if name == "__builtin_write" {
+        return self.typecheck_builtin_write(call, scope_kind, ctx);
       }
     }
 
@@ -2492,6 +2564,220 @@ impl<'a> Analyzer<'a> {
     self.types.u64()
   }
 
+  fn typecheck_builtin_read(
+    &mut self,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let type_args = match &call.type_args {
+      Some(args) => args,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "__builtin_read".to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: "__builtin_read".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
+    if self.types.contains_type_param(&value_type) || self.types.is_unknown(&value_type) {
+      self.add_diagnostic(
+        DiagnosticMessage::CannotInferTypeParam {
+          param_name: "T".to_string(),
+          func_name: "__builtin_read".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if call.arguments.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 1,
+          got: call.arguments.len(),
+          func_name: "__builtin_read".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let pointer_type = self.types.pointer(value_type);
+    let infer = InferContext::expecting(pointer_type.clone());
+    let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &infer);
+
+    if !self.types.types_equal(&arg_type, &pointer_type) {
+      let expected = self.format_type_for_error(&pointer_type);
+      let got = self.format_type_for_error(&arg_type);
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentTypeMismatch {
+          param_idx: 1,
+          expected,
+          got,
+          span: self.node_span(&call.arguments[0]).clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if matches!(
+      self.const_eval_expression_node(&call.arguments[0], scope_kind),
+      Some(ConstValue::Null)
+    ) {
+      self.add_diagnostic(
+        DiagnosticMessage::NullDereference {
+          span: self.node_span(&call.arguments[0]).clone(),
+        }
+        .report(),
+      );
+
+      self.set_type(&call.arguments[0], &self.types.error());
+      return self.types.error();
+    }
+
+    value_type
+  }
+
+  fn typecheck_builtin_write(
+    &mut self,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let type_args = match &call.type_args {
+      Some(args) => args,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "__builtin_write".to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: "__builtin_write".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
+    if self.types.contains_type_param(&value_type) || self.types.is_unknown(&value_type) {
+      self.add_diagnostic(
+        DiagnosticMessage::CannotInferTypeParam {
+          param_name: "T".to_string(),
+          func_name: "__builtin_write".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if call.arguments.len() != 2 {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 2,
+          got: call.arguments.len(),
+          func_name: "__builtin_write".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let pointer_type = self.types.pointer(value_type);
+    let ptr_infer = InferContext::expecting(pointer_type.clone());
+    let ptr_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &ptr_infer);
+
+    if !self.types.types_equal(&ptr_type, &pointer_type) {
+      let expected = self.format_type_for_error(&pointer_type);
+      let got = self.format_type_for_error(&ptr_type);
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentTypeMismatch {
+          param_idx: 1,
+          expected,
+          got,
+          span: self.node_span(&call.arguments[0]).clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_infer = InferContext::expecting(value_type);
+    let arg_type = self.typecheck_node_with_infer(&call.arguments[1], scope_kind, ctx, &value_infer);
+
+    if !self.types.types_equal(&arg_type, &value_type) {
+      let expected = self.format_type_for_error(&value_type);
+      let got = self.format_type_for_error(&arg_type);
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentTypeMismatch {
+          param_idx: 2,
+          expected,
+          got,
+          span: self.node_span(&call.arguments[1]).clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if matches!(
+      self.const_eval_expression_node(&call.arguments[0], scope_kind),
+      Some(ConstValue::Null)
+    ) {
+      self.add_diagnostic(
+        DiagnosticMessage::NullDereference {
+          span: self.node_span(&call.arguments[0]).clone(),
+        }
+        .report(),
+      );
+
+      self.set_type(&call.arguments[0], &self.types.error());
+      return self.types.error();
+    }
+
+    self.types.void()
+  }
+
   pub(crate) fn unwrap_reference_type(
     &self,
     ty: &TypeId,
@@ -2499,6 +2785,38 @@ impl<'a> Analyzer<'a> {
     match self.types.get(ty) {
       ignis_type::types::Type::Reference { inner, .. } => self.unwrap_reference_type(inner),
       _ => ty.clone(),
+    }
+  }
+
+  fn is_pointer_type(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(self.types.get(ty), ignis_type::types::Type::Pointer(_))
+  }
+
+  fn pointer_inner_type(
+    &self,
+    ty: &TypeId,
+  ) -> Option<TypeId> {
+    match self.types.get(ty) {
+      ignis_type::types::Type::Pointer(inner) => Some(*inner),
+      _ => None,
+    }
+  }
+
+  fn coerce_null_literal(
+    &mut self,
+    node_id: &NodeId,
+    target: &TypeId,
+  ) -> bool {
+    let node = self.ast.get(node_id);
+    match node {
+      ASTNode::Expression(ASTExpression::Literal(lit)) if matches!(lit.value, IgnisLiteralValue::Null) => {
+        self.set_type(node_id, target);
+        true
+      },
+      _ => false,
     }
   }
 
@@ -2510,19 +2828,72 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     let left_type = self.typecheck_node(&binary.left, scope_kind, ctx);
 
-    let right_type = if self.types.is_numeric(&left_type) {
-      let infer = InferContext::expecting(left_type.clone());
-      self.typecheck_node_with_infer(&binary.right, scope_kind, ctx, &infer)
-    } else {
-      self.typecheck_node(&binary.right, scope_kind, ctx)
+    let right_type = match binary.operator {
+      ASTBinaryOperator::Add | ASTBinaryOperator::Subtract if self.is_pointer_type(&left_type) => {
+        let infer = InferContext::expecting(self.types.i64());
+        self.typecheck_node_with_infer(&binary.right, scope_kind, ctx, &infer)
+      },
+      _ if self.types.is_numeric(&left_type) => {
+        let infer = InferContext::expecting(left_type.clone());
+        self.typecheck_node_with_infer(&binary.right, scope_kind, ctx, &infer)
+      },
+      _ => self.typecheck_node(&binary.right, scope_kind, ctx),
     };
 
     match binary.operator {
-      ASTBinaryOperator::Add
-      | ASTBinaryOperator::Subtract
-      | ASTBinaryOperator::Multiply
-      | ASTBinaryOperator::Divide
-      | ASTBinaryOperator::Modulo => {
+      ASTBinaryOperator::Add | ASTBinaryOperator::Subtract => {
+        if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
+          return self.typecheck_common_type(&left_type, &right_type, &binary.span);
+        }
+
+        let is_pointer_pair = self.is_pointer_type(&left_type) || self.is_pointer_type(&right_type);
+
+        if self.is_pointer_type(&left_type) && self.types.types_equal(&right_type, &self.types.i64()) {
+          return left_type.clone();
+        }
+
+        if binary.operator == ASTBinaryOperator::Subtract {
+          if self.is_pointer_type(&left_type) && self.is_pointer_type(&right_type) {
+            let left_inner = self.pointer_inner_type(&left_type);
+            let right_inner = self.pointer_inner_type(&right_type);
+
+            if let (Some(left_base), Some(right_base)) = (left_inner, right_inner) {
+              if self.types.types_equal(&left_base, &right_base) {
+                return self.types.i64();
+              }
+
+              let u8_type = self.types.u8();
+              if self.types.types_equal(&left_base, &u8_type) && self.types.types_equal(&right_base, &u8_type) {
+                return self.types.i64();
+              }
+            }
+          }
+        }
+
+        let operator = format!("{:?}", binary.operator);
+        let left = self.format_type_for_error(&left_type);
+        let right = self.format_type_for_error(&right_type);
+
+        let diagnostic = if is_pointer_pair {
+          DiagnosticMessage::InvalidPointerArithmetic {
+            operator,
+            left_type: left,
+            right_type: right,
+            span: binary.span.clone(),
+          }
+        } else {
+          DiagnosticMessage::InvalidBinaryOperandType {
+            operator,
+            left_type: left,
+            right_type: right,
+            span: binary.span.clone(),
+          }
+        };
+
+        self.add_diagnostic(diagnostic.report());
+        self.types.error()
+      },
+      ASTBinaryOperator::Multiply | ASTBinaryOperator::Divide | ASTBinaryOperator::Modulo => {
         if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
           self.typecheck_common_type(&left_type, &right_type, &binary.span)
         } else {
@@ -2541,9 +2912,60 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
-      ASTBinaryOperator::Equal
-      | ASTBinaryOperator::NotEqual
-      | ASTBinaryOperator::LessThan
+      ASTBinaryOperator::Equal | ASTBinaryOperator::NotEqual => {
+        if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
+          return self.types.boolean();
+        }
+
+        let mut resolved_left = left_type.clone();
+        let mut resolved_right = right_type.clone();
+
+        if self.is_pointer_type(&left_type) && self.types.is_null_ptr(&right_type) {
+          if self.coerce_null_literal(&binary.right, &left_type) {
+            resolved_right = left_type.clone();
+          }
+        } else if self.is_pointer_type(&right_type) && self.types.is_null_ptr(&left_type) {
+          if self.coerce_null_literal(&binary.left, &right_type) {
+            resolved_left = right_type.clone();
+          }
+        } else if self.types.is_null_ptr(&left_type) && self.types.is_null_ptr(&right_type) {
+          let void_ptr = self.types.pointer(self.types.void());
+          if self.coerce_null_literal(&binary.left, &void_ptr) {
+            resolved_left = void_ptr.clone();
+          }
+          if self.coerce_null_literal(&binary.right, &void_ptr) {
+            resolved_right = void_ptr.clone();
+          }
+        }
+
+        if self.is_pointer_type(&resolved_left) && self.is_pointer_type(&resolved_right) {
+          return self.types.boolean();
+        }
+
+        let operator = format!("{:?}", binary.operator);
+        let left = self.format_type_for_error(&left_type);
+        let right = self.format_type_for_error(&right_type);
+
+        let diagnostic = if self.is_pointer_type(&left_type) || self.is_pointer_type(&right_type) {
+          DiagnosticMessage::InvalidPointerArithmetic {
+            operator,
+            left_type: left,
+            right_type: right,
+            span: binary.span.clone(),
+          }
+        } else {
+          DiagnosticMessage::InvalidBinaryOperandType {
+            operator,
+            left_type: left,
+            right_type: right,
+            span: binary.span.clone(),
+          }
+        };
+
+        self.add_diagnostic(diagnostic.report());
+        self.types.error()
+      },
+      ASTBinaryOperator::LessThan
       | ASTBinaryOperator::LessThanOrEqual
       | ASTBinaryOperator::GreaterThan
       | ASTBinaryOperator::GreaterThanOrEqual => {
@@ -2745,6 +3167,15 @@ impl<'a> Analyzer<'a> {
     // Type inference for generic calls happens during lowering, so we can't
     // verify the types at this stage.
     if self.types.contains_type_param(target_type) || self.types.contains_type_param(value_type) {
+      return;
+    }
+
+    if self.types.is_null_ptr(value_type) {
+      if self.is_pointer_type(target_type) {
+        return;
+      }
+
+      self.add_diagnostic(DiagnosticMessage::InvalidNullLiteral { span: span.clone() }.report());
       return;
     }
 
@@ -3177,6 +3608,7 @@ impl<'a> Analyzer<'a> {
       Type::Void => "void".to_string(),
       Type::Never => "never".to_string(),
       Type::Unknown => "unknown".to_string(),
+      Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
       Type::Pointer(inner) => format!("*{}", self.format_type_for_error(inner)),
       Type::Reference { inner, mutable } => {

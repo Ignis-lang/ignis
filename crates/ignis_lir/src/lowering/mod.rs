@@ -358,6 +358,11 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Error => None,
       HIRKind::TypeOf(operand_hir) => self.lower_typeof(*operand_hir, node.type_id, node.span),
       HIRKind::SizeOf(ty) => self.lower_sizeof(*ty, node.type_id, node.span),
+      HIRKind::BuiltinLoad { ty, ptr } => self.lower_builtin_load(*ty, *ptr, node.type_id, node.span),
+      HIRKind::BuiltinStore { ty, ptr, value } => {
+        self.lower_builtin_store(*ty, *ptr, *value, node.span);
+        None
+      },
 
       // Records and enums
       HIRKind::FieldAccess { base, field_index } => {
@@ -647,6 +652,47 @@ impl<'a> LoweringContext<'a> {
     self.fn_builder().emit(Instr::SizeOf { dest, ty });
 
     Some(Operand::Temp(dest))
+  }
+
+  fn lower_builtin_load(
+    &mut self,
+    ty: TypeId,
+    ptr: HIRId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let ptr_op = self.lower_hir_node(ptr)?;
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    self.fn_builder().emit(Instr::BuiltinLoad { dest, ptr: ptr_op, ty });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_builtin_store(
+    &mut self,
+    ty: TypeId,
+    ptr: HIRId,
+    value: HIRId,
+    span: Span,
+  ) {
+    let ptr_op = match self.lower_hir_node(ptr) {
+      Some(op) => op,
+      None => return,
+    };
+
+    let value_op = match self.lower_hir_node(value) {
+      Some(op) => op,
+      None => return,
+    };
+
+    let _ = span;
+
+    self.fn_builder().emit(Instr::BuiltinStore {
+      ptr: ptr_op,
+      value: value_op,
+      ty,
+    });
   }
 
   fn unwrap_reference_type(
