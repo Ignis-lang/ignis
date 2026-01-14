@@ -207,7 +207,11 @@ impl<'a> HIRPrinter<'a> {
         let name = self.symbols.get(&def.name);
         format!("Variable({})", name)
       },
-      HIRKind::Call { callee, args } => {
+      HIRKind::Call {
+        callee,
+        args,
+        type_args: _,
+      } => {
         let def = self.defs.get(callee);
         let name = self.symbols.get(&def.name);
         let args_str: Vec<_> = args.iter().map(|a| self.format_node_compact(*a)).collect();
@@ -331,7 +335,11 @@ impl<'a> HIRPrinter<'a> {
         self.print_node(*operand);
         self.indent -= 1;
       },
-      HIRKind::Call { callee, args } => {
+      HIRKind::Call {
+        callee,
+        args,
+        type_args: _,
+      } => {
         let def = self.defs.get(callee);
         let name = self.symbols.get(&def.name);
 
@@ -598,7 +606,11 @@ impl<'a> HIRPrinter<'a> {
         self.print_node(*base);
         self.indent -= 1;
       },
-      HIRKind::RecordInit { record_def, fields } => {
+      HIRKind::RecordInit {
+        record_def,
+        fields,
+        type_args: _,
+      } => {
         let def = self.defs.get(record_def);
         let name = self.symbols.get(&def.name);
         writeln!(self.output, "RecordInit({}) : {}", name, type_str).unwrap();
@@ -614,7 +626,12 @@ impl<'a> HIRPrinter<'a> {
           self.indent -= 1;
         }
       },
-      HIRKind::MethodCall { receiver, method, args } => {
+      HIRKind::MethodCall {
+        receiver,
+        method,
+        args,
+        type_args: _,
+      } => {
         let def = self.defs.get(method);
         let name = self.symbols.get(&def.name);
         writeln!(self.output, "MethodCall({}) : {}", name, type_str).unwrap();
@@ -645,6 +662,7 @@ impl<'a> HIRPrinter<'a> {
         enum_def,
         variant_tag,
         payload,
+        type_args: _,
       } => {
         let def = self.defs.get(enum_def);
         let name = self.symbols.get(&def.name);
@@ -735,6 +753,28 @@ impl<'a> HIRPrinter<'a> {
       Type::Enum(def_id) => {
         let name = self.symbols.get(&self.defs.get(def_id).name);
         format!("enum {}", name)
+      },
+      Type::Param { owner, index } => {
+        // Try to get the type param name from the owner's definition
+        let owner_def = self.defs.get(owner);
+        let type_params = match &owner_def.kind {
+          ignis_type::definition::DefinitionKind::Function(fd) => &fd.type_params,
+          ignis_type::definition::DefinitionKind::Record(rd) => &rd.type_params,
+          ignis_type::definition::DefinitionKind::Method(md) => &md.type_params,
+          ignis_type::definition::DefinitionKind::Enum(ed) => &ed.type_params,
+          _ => return format!("T{}", index),
+        };
+        if let Some(param_def_id) = type_params.get(*index as usize) {
+          let param_name = self.symbols.get(&self.defs.get(param_def_id).name);
+          param_name.to_string()
+        } else {
+          format!("T{}", index)
+        }
+      },
+      Type::Instance { generic, args } => {
+        let name = self.symbols.get(&self.defs.get(generic).name);
+        let arg_strs: Vec<_> = args.iter().map(|a| self.format_type(a)).collect();
+        format!("{}<{}>", name, arg_strs.join(", "))
       },
     }
   }

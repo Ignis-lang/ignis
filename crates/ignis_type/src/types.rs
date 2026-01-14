@@ -46,6 +46,24 @@ pub enum Type {
   /// User-defined enum type
   Enum(DefinitionId),
 
+  /// Type parameter (T, U, etc.) - only exists pre-monomorphization
+  Param {
+    /// The function/record/method that declares this type param
+    owner: DefinitionId,
+    /// Position in the type parameter list
+    index: u32,
+  },
+
+  /// Instance of a generic type with concrete type arguments.
+  /// Example: Vec<i32> = Instance { generic: Vec_def, args: [i32] }
+  /// NOTE: Does not exist post-monomorphization (Invariant D)
+  Instance {
+    /// The generic record/enum definition
+    generic: DefinitionId,
+    /// Concrete type arguments
+    args: Vec<TypeId>,
+  },
+
   // TODO: Implement Inferenced(InferenceVariable)
   // Inferenced(InferenceVariable),
   Error,
@@ -70,6 +88,18 @@ struct FunctionKey {
   is_variadic: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InstanceKey {
+  generic: DefinitionId,
+  args: Vec<TypeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ParamKey {
+  owner: DefinitionId,
+  index: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct TypeStore {
   types: Store<Type>,
@@ -81,6 +111,8 @@ pub struct TypeStore {
   functions: HashMap<FunctionKey, TypeId>,
   records: HashMap<DefinitionId, TypeId>,
   enums: HashMap<DefinitionId, TypeId>,
+  instances: HashMap<InstanceKey, TypeId>,
+  params: HashMap<ParamKey, TypeId>,
 }
 
 impl TypeStore {
@@ -95,6 +127,8 @@ impl TypeStore {
       functions: HashMap::new(),
       records: HashMap::new(),
       enums: HashMap::new(),
+      instances: HashMap::new(),
+      params: HashMap::new(),
     };
     store.init_primitives();
     store
@@ -225,6 +259,39 @@ impl TypeStore {
     }
     let id = self.types.alloc(Type::Enum(def_id));
     self.enums.insert(def_id, id);
+    id
+  }
+
+  /// Create or get a type parameter
+  pub fn param(
+    &mut self,
+    owner: DefinitionId,
+    index: u32,
+  ) -> TypeId {
+    let key = ParamKey { owner, index };
+    if let Some(&id) = self.params.get(&key) {
+      return id;
+    }
+    let id = self.types.alloc(Type::Param { owner, index });
+    self.params.insert(key, id);
+    id
+  }
+
+  /// Create or get a generic type instance (e.g., Vec<i32>)
+  pub fn instance(
+    &mut self,
+    generic: DefinitionId,
+    args: Vec<TypeId>,
+  ) -> TypeId {
+    let key = InstanceKey {
+      generic,
+      args: args.clone(),
+    };
+    if let Some(&id) = self.instances.get(&key) {
+      return id;
+    }
+    let id = self.types.alloc(Type::Instance { generic, args });
+    self.instances.insert(key, id);
     id
   }
 
@@ -430,6 +497,12 @@ impl TypeStore {
 
       // Records and enums are Copy by default (for v0.2, no heap fields)
       Type::Record(_) | Type::Enum(_) => true,
+
+      // Type parameters are conservatively non-Copy (resolved at monomorphization)
+      Type::Param { .. } => false,
+
+      // Generic instances need to check their concrete arguments
+      Type::Instance { args, .. } => args.iter().all(|a| self.is_copy(a)),
     }
   }
 
@@ -447,5 +520,268 @@ impl TypeStore {
     ty: &TypeId,
   ) -> bool {
     self.is_owned(ty)
+  }
+
+  /// Returns true if the type contains any type parameters.
+  ///
+  /// This recursively checks compound types (pointers, references, vectors, tuples,
+  /// functions, instances) for type parameters.
+  pub fn contains_type_param(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    match self.get(ty) {
+      Type::Param { .. } => true,
+      Type::Pointer(inner) | Type::Reference { inner, .. } | Type::Vector { element: inner, .. } => {
+        self.contains_type_param(inner)
+      },
+      Type::Tuple(elems) => elems.iter().any(|e| self.contains_type_param(e)),
+      Type::Function { params, ret, .. } => {
+        params.iter().any(|p| self.contains_type_param(p)) || self.contains_type_param(ret)
+      },
+      Type::Instance { args, .. } => args.iter().any(|a| self.contains_type_param(a)),
+      _ => false,
+    }
+  }
+
+  /// Substitute type parameters with concrete types according to the substitution map.
+  ///
+  /// This recursively traverses the type, replacing any `Type::Param` with its
+  /// corresponding concrete type from the substitution. Compound types (pointers,
+  /// references, vectors, tuples, functions, instances) are reconstructed with
+  /// substituted inner types.
+  pub fn substitute(
+    &mut self,
+    ty: TypeId,
+    subst: &Substitution,
+  ) -> TypeId {
+    match self.get(&ty).clone() {
+      Type::Param { owner, index } => subst.get(owner, index).unwrap_or(ty),
+
+      Type::Instance { generic, args } => {
+        let new_args: Vec<_> = args.iter().map(|a| self.substitute(*a, subst)).collect();
+        self.instance(generic, new_args)
+      },
+
+      Type::Pointer(inner) => {
+        let new_inner = self.substitute(inner, subst);
+        self.pointer(new_inner)
+      },
+
+      Type::Reference { inner, mutable } => {
+        let new_inner = self.substitute(inner, subst);
+        self.reference(new_inner, mutable)
+      },
+
+      Type::Vector { element, size } => {
+        let new_elem = self.substitute(element, subst);
+        self.vector(new_elem, size)
+      },
+
+      Type::Tuple(elems) => {
+        let new_elems: Vec<_> = elems.iter().map(|e| self.substitute(*e, subst)).collect();
+        self.tuple(new_elems)
+      },
+
+      Type::Function {
+        params,
+        ret,
+        is_variadic,
+      } => {
+        let new_params: Vec<_> = params.iter().map(|p| self.substitute(*p, subst)).collect();
+        let new_ret = self.substitute(ret, subst);
+        self.function(new_params, new_ret, is_variadic)
+      },
+
+      // Nominal types (Record, Enum) and primitives don't need substitution
+      _ => ty,
+    }
+  }
+
+  /// Unify a pattern type against a concrete type for type inference.
+  ///
+  /// This walks both types in parallel, and when it finds a `Type::Param` in the
+  /// pattern, it binds that parameter to the corresponding concrete type.
+  /// Returns `true` if unification succeeded, `false` if the types are incompatible.
+  ///
+  /// Unlike full unification, this is asymmetric: only the pattern can contain
+  /// type parameters, and they are bound to whatever is in the concrete type.
+  pub fn unify_for_inference(
+    &self,
+    pattern: TypeId,
+    concrete: TypeId,
+    subst: &mut Substitution,
+  ) -> bool {
+    // Same type - trivially unifies
+    if pattern == concrete {
+      return true;
+    }
+
+    match (self.get(&pattern).clone(), self.get(&concrete).clone()) {
+      // Type parameter: bind it to the concrete type
+      (Type::Param { owner, index }, _) => {
+        if let Some(existing) = subst.get(owner, index) {
+          // Already bound - check consistency
+          self.types_equal(&existing, &concrete)
+        } else {
+          // Bind the parameter
+          subst.bind(owner, index, concrete);
+          true
+        }
+      },
+
+      // Instance types: must match generic def and unify args
+      (Type::Instance { generic: g1, args: a1 }, Type::Instance { generic: g2, args: a2 }) => {
+        if g1 != g2 || a1.len() != a2.len() {
+          return false;
+        }
+        for (p, c) in a1.iter().zip(a2.iter()) {
+          if !self.unify_for_inference(*p, *c, subst) {
+            return false;
+          }
+        }
+        true
+      },
+
+      // Pointer types
+      (Type::Pointer(p1), Type::Pointer(p2)) => self.unify_for_inference(p1, p2, subst),
+
+      // Reference types
+      (Type::Reference { inner: i1, mutable: m1 }, Type::Reference { inner: i2, mutable: m2 }) => {
+        if m1 != m2 {
+          return false;
+        }
+        self.unify_for_inference(i1, i2, subst)
+      },
+
+      // Vector types
+      (Type::Vector { element: e1, size: s1 }, Type::Vector { element: e2, size: s2 }) => {
+        if s1 != s2 {
+          return false;
+        }
+        self.unify_for_inference(e1, e2, subst)
+      },
+
+      // Tuple types
+      (Type::Tuple(t1), Type::Tuple(t2)) => {
+        if t1.len() != t2.len() {
+          return false;
+        }
+        for (p, c) in t1.iter().zip(t2.iter()) {
+          if !self.unify_for_inference(*p, *c, subst) {
+            return false;
+          }
+        }
+        true
+      },
+
+      // Function types
+      (
+        Type::Function {
+          params: p1,
+          ret: r1,
+          is_variadic: v1,
+        },
+        Type::Function {
+          params: p2,
+          ret: r2,
+          is_variadic: v2,
+        },
+      ) => {
+        if v1 != v2 || p1.len() != p2.len() {
+          return false;
+        }
+        for (p, c) in p1.iter().zip(p2.iter()) {
+          if !self.unify_for_inference(*p, *c, subst) {
+            return false;
+          }
+        }
+        self.unify_for_inference(r1, r2, subst)
+      },
+
+      // Record/Enum: must match exactly (they're nominal)
+      (Type::Record(d1), Type::Record(d2)) => d1 == d2,
+      (Type::Enum(d1), Type::Enum(d2)) => d1 == d2,
+
+      // Primitives: must match exactly
+      _ => self.types_equal(&pattern, &concrete),
+    }
+  }
+}
+
+/// Mapping of type parameters to concrete types for monomorphization.
+///
+/// Type parameters are identified by their owner (the definition that declares them)
+/// and their index in the type parameter list. This allows handling methods that
+/// have both owner type parameters (from the containing record/enum) and their
+/// own type parameters.
+#[derive(Debug, Clone, Default)]
+pub struct Substitution {
+  bindings: HashMap<(DefinitionId, u32), TypeId>,
+}
+
+impl Substitution {
+  pub fn new() -> Self {
+    Self {
+      bindings: HashMap::new(),
+    }
+  }
+
+  /// Bind a type parameter to a concrete type.
+  pub fn bind(
+    &mut self,
+    owner: DefinitionId,
+    index: u32,
+    ty: TypeId,
+  ) {
+    self.bindings.insert((owner, index), ty);
+  }
+
+  /// Get the concrete type bound to a type parameter, if any.
+  pub fn get(
+    &self,
+    owner: DefinitionId,
+    index: u32,
+  ) -> Option<TypeId> {
+    self.bindings.get(&(owner, index)).copied()
+  }
+
+  /// Create a substitution for a generic function, record, or enum.
+  ///
+  /// Maps each type parameter (by index) to the corresponding concrete type argument.
+  pub fn for_generic(
+    owner: DefinitionId,
+    args: &[TypeId],
+  ) -> Self {
+    let mut s = Self::new();
+    for (i, ty) in args.iter().enumerate() {
+      s.bind(owner, i as u32, *ty);
+    }
+    s
+  }
+
+  /// Create a substitution for a method call on a generic type.
+  ///
+  /// This binds both the owner's type parameters (from the record/enum)
+  /// and the method's own type parameters.
+  pub fn for_method(
+    owner_def: DefinitionId,
+    owner_args: &[TypeId],
+    method_def: DefinitionId,
+    method_args: &[TypeId],
+  ) -> Self {
+    let mut s = Self::new();
+    for (i, ty) in owner_args.iter().enumerate() {
+      s.bind(owner_def, i as u32, *ty);
+    }
+    for (i, ty) in method_args.iter().enumerate() {
+      s.bind(method_def, i as u32, *ty);
+    }
+    s
+  }
+
+  /// Check if this substitution is empty (no bindings).
+  pub fn is_empty(&self) -> bool {
+    self.bindings.is_empty()
   }
 }

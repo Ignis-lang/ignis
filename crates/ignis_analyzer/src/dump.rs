@@ -137,6 +137,17 @@ pub fn dump_defs(
         )
         .unwrap();
       },
+      DefinitionKind::TypeParam(type_param_def) => {
+        writeln!(
+          &mut output,
+          "  DefId({:?}): type param {} (index: {}, owner: {:?})",
+          def_id, name, type_param_def.index, type_param_def.owner
+        )
+        .unwrap();
+      },
+      DefinitionKind::Placeholder => {
+        writeln!(&mut output, "  DefId({:?}): <placeholder>", def_id).unwrap();
+      },
     }
   }
 

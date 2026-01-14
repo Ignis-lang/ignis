@@ -253,7 +253,7 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_loop(condition, body);
       },
 
-      HIRKind::Call { callee, args } => {
+      HIRKind::Call { callee, args, .. } => {
         self.check_call(callee, &args, span);
       },
 

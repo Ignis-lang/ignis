@@ -1,6 +1,6 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
-use crate::{metadata::ASTMetadata, NodeId, type_::IgnisTypeSyntax};
+use crate::{generics::ASTGenericParams, metadata::ASTMetadata, NodeId, type_::IgnisTypeSyntax};
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTParameter {
@@ -29,6 +29,7 @@ impl ASTParameter {
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTFunctionSignature {
   pub name: SymbolId,
+  pub type_params: Option<ASTGenericParams>,
   pub parameters: Vec<ASTParameter>,
   pub return_type: IgnisTypeSyntax,
   pub span: Span,
@@ -38,6 +39,7 @@ pub struct ASTFunctionSignature {
 impl ASTFunctionSignature {
   pub fn new(
     name: SymbolId,
+    type_params: Option<ASTGenericParams>,
     parameters: Vec<ASTParameter>,
     return_type: IgnisTypeSyntax,
     span: Span,
@@ -45,6 +47,7 @@ impl ASTFunctionSignature {
   ) -> Self {
     Self {
       name,
+      type_params,
       parameters,
       return_type,
       span,

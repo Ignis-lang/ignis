@@ -1,5 +1,6 @@
 pub mod display;
 pub mod expressions;
+pub mod generics;
 pub mod metadata;
 pub mod statements;
 pub mod type_;

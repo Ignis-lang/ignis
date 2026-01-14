@@ -21,9 +21,9 @@ use ignis_diagnostics::{
   message::DiagnosticMessage,
 };
 use ignis_type::{
-  definition::{ConstValue, DefinitionKind, RecordFieldDef},
+  definition::{ConstValue, DefinitionId, DefinitionKind, RecordFieldDef},
   span::Span,
-  types::{Type, TypeId},
+  types::{Substitution, Type, TypeId},
   value::IgnisLiteralValue,
 };
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
@@ -120,6 +120,12 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Function(func) => {
         let def_id = self.define_decl_in_current_scope(node_id);
+
+        // Push generic scope BEFORE resolving types so type params are visible
+        if let Some(def_id) = &def_id {
+          self.enter_type_params_scope(def_id);
+        }
+
         let return_type = self.resolve_type_syntax_with_span(&func.signature.return_type, &func.signature.span);
 
         let param_ids = def_id
@@ -156,7 +162,12 @@ impl<'a> Analyzer<'a> {
           self.typecheck_node(body_id, ScopeKind::Function, &func_ctx);
         }
 
-        self.scopes.pop();
+        self.scopes.pop(); // Pop function scope
+
+        // Pop generic scope if it was pushed
+        if let Some(def_id) = &def_id {
+          self.exit_type_params_scope(def_id);
+        }
 
         return_type
       },
@@ -364,7 +375,7 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
-      ASTExpression::Call(call) => self.typecheck_call(call, scope_kind, ctx),
+      ASTExpression::Call(call) => self.typecheck_call(call, scope_kind, ctx, infer),
       ASTExpression::Binary(binary) => self.typecheck_binary(binary, scope_kind, ctx),
       ASTExpression::Unary(unary) => self.typecheck_unary(unary, scope_kind, ctx),
       ASTExpression::Assignment(assign) => self.typecheck_assignment_expr(assign, scope_kind, ctx),
@@ -558,7 +569,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::MemberAccess(ma) => self.typecheck_member_access(ma, scope_kind, ctx),
-      ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx),
+      ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx, infer),
     }
   }
 
@@ -605,6 +616,9 @@ impl<'a> Analyzer<'a> {
     let Some(record_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    // Push generic scope BEFORE resolving types so type params are visible
+    self.enter_type_params_scope(&record_def_id);
 
     // Collect resolved field types
     let mut resolved_fields: Vec<RecordFieldDef> = Vec::new();
@@ -669,6 +683,9 @@ impl<'a> Analyzer<'a> {
       }
     }
 
+    // Pop generic scope if it was pushed
+    self.exit_type_params_scope(&record_def_id);
+
     self.define_decl_in_current_scope(node_id);
   }
 
@@ -686,6 +703,9 @@ impl<'a> Analyzer<'a> {
     let Some(enum_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    // Push generic scope BEFORE resolving types so type params are visible
+    self.enter_type_params_scope(&enum_def_id);
 
     // Clone variants to update payload types
     let mut updated_variants = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
@@ -750,6 +770,9 @@ impl<'a> Analyzer<'a> {
       ed.variants = updated_variants;
     }
 
+    // Pop generic scope if it was pushed
+    self.exit_type_params_scope(&enum_def_id);
+
     self.define_decl_in_current_scope(node_id);
   }
 
@@ -801,9 +824,44 @@ impl<'a> Analyzer<'a> {
     };
 
     if !is_static {
-      // Get owner type (Type::Record or Type::Enum)
-      let owner_type_id = self.defs.type_of(&owner_def_id).clone();
-      let self_ref_type = self.types.reference(owner_type_id, false); // &Self
+      let owner_def = self.defs.get(&owner_def_id);
+
+      // For generic owners, self should be Type::Instance so it gets substituted during monomorphization
+      let self_type = match &owner_def.kind {
+        DefinitionKind::Record(rd) if !rd.type_params.is_empty() => {
+          let type_params: Vec<TypeId> = rd
+            .type_params
+            .iter()
+            .map(|&tp_def| {
+              let tp_def_kind = &self.defs.get(&tp_def).kind;
+              if let DefinitionKind::TypeParam(tp) = tp_def_kind {
+                self.types.param(tp.owner, tp.index)
+              } else {
+                panic!("expected TypeParam in record type_params");
+              }
+            })
+            .collect();
+          self.types.instance(owner_def_id, type_params)
+        },
+        DefinitionKind::Enum(ed) if !ed.type_params.is_empty() => {
+          let type_params: Vec<TypeId> = ed
+            .type_params
+            .iter()
+            .map(|&tp_def| {
+              let tp_def_kind = &self.defs.get(&tp_def).kind;
+              if let DefinitionKind::TypeParam(tp) = tp_def_kind {
+                self.types.param(tp.owner, tp.index)
+              } else {
+                panic!("expected TypeParam in enum type_params");
+              }
+            })
+            .collect();
+          self.types.instance(owner_def_id, type_params)
+        },
+        _ => *self.defs.type_of(&owner_def_id),
+      };
+
+      let self_ref_type = self.types.reference(self_type, false); // &Self
 
       let self_symbol = self.symbols.borrow_mut().intern("self");
       let self_def = ignis_type::definition::Definition {
@@ -864,50 +922,14 @@ impl<'a> Analyzer<'a> {
     let obj_type = self.typecheck_node(&ma.object, scope_kind, ctx);
     let obj_type = self.auto_deref(obj_type);
 
-    match self.types.get(&obj_type).clone() {
-      Type::Record(def_id) => {
-        let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
-          rd.clone()
-        } else {
-          return self.types.error();
-        };
-
-        // Check instance fields first
-        if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
-          return field.type_id.clone();
-        }
-
-        // Check instance methods
-        if rd.instance_methods.contains_key(&ma.member) {
-          // Method access without call - this is an error (must be called)
-          let member_name = self.get_symbol_name(&ma.member);
-          self.add_diagnostic(
-            DiagnosticMessage::MethodMustBeCalled {
-              method: member_name,
-              span: ma.span.clone(),
-            }
-            .report(),
-          );
-          return self.types.error();
-        }
-
-        // Field not found
-        let type_name = self.format_type_for_error(&obj_type);
-        let member_name = self.get_symbol_name(&ma.member);
-        self.add_diagnostic(
-          DiagnosticMessage::FieldNotFound {
-            field: member_name,
-            type_name,
-            span: ma.span.clone(),
-          }
-          .report(),
-        );
-        self.types.error()
-      },
+    // Extract definition and optional type args for records and instances
+    let (def_id, type_args) = match self.types.get(&obj_type).clone() {
+      Type::Record(def_id) => (def_id, vec![]),
+      Type::Instance { generic, args } => (generic, args),
       Type::Enum(_) => {
         // Enum values don't have instance access
         self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
-        self.types.error()
+        return self.types.error();
       },
       _ => {
         let type_name = self.format_type_for_error(&obj_type);
@@ -918,9 +940,70 @@ impl<'a> Analyzer<'a> {
           }
           .report(),
         );
-        self.types.error()
+        return self.types.error();
       },
+    };
+
+    // Check if it's a record definition
+    let rd = match &self.defs.get(&def_id).kind {
+      DefinitionKind::Record(rd) => rd.clone(),
+      DefinitionKind::Enum(_) => {
+        // Enum values don't have instance access
+        self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
+        return self.types.error();
+      },
+      _ => {
+        let type_name = self.format_type_for_error(&obj_type);
+        self.add_diagnostic(
+          DiagnosticMessage::DotAccessOnNonRecord {
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    // Build substitution for generic instances
+    let subst = if !type_args.is_empty() && type_args.len() == rd.type_params.len() {
+      Substitution::for_generic(def_id, &type_args)
+    } else {
+      Substitution::new()
+    };
+
+    // Check instance fields first
+    if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
+      // Substitute type params in field type
+      return self.types.substitute(field.type_id, &subst);
     }
+
+    // Check instance methods
+    if rd.instance_methods.contains_key(&ma.member) {
+      // Method access without call - this is an error (must be called)
+      let member_name = self.get_symbol_name(&ma.member);
+      self.add_diagnostic(
+        DiagnosticMessage::MethodMustBeCalled {
+          method: member_name,
+          span: ma.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    // Field not found
+    let type_name = self.format_type_for_error(&obj_type);
+    let member_name = self.get_symbol_name(&ma.member);
+    self.add_diagnostic(
+      DiagnosticMessage::FieldNotFound {
+        field: member_name,
+        type_name,
+        span: ma.span.clone(),
+      }
+      .report(),
+    );
+    self.types.error()
   }
 
   fn typecheck_static_access(
@@ -1121,6 +1204,7 @@ impl<'a> Analyzer<'a> {
     ri: &ASTRecordInit,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> TypeId {
     // Resolve the type path
     let def_id = self.resolve_record_path(&ri.path);
@@ -1158,6 +1242,39 @@ impl<'a> Analyzer<'a> {
       },
     };
 
+    // Determine type args: from explicit syntax, infer context, or none for non-generic
+    let type_args: Vec<TypeId> = if let Some(ref explicit_args) = ri.type_args {
+      // Explicit type args on record init: Box<i32> { ... }
+      explicit_args
+        .iter()
+        .map(|ts| self.resolve_type_syntax_with_span(ts, &ri.span))
+        .collect()
+    } else if !rd.type_params.is_empty() {
+      // Generic record - try to infer from expected type
+      if let Some(expected) = &infer.expected {
+        match self.types.get(expected).clone() {
+          Type::Instance { generic, args } if generic == def_id => args,
+          _ => {
+            // Expected type doesn't match - will be caught later
+            vec![]
+          },
+        }
+      } else {
+        // No expected type and no explicit args - can't infer
+        vec![]
+      }
+    } else {
+      // Non-generic record
+      vec![]
+    };
+
+    // Build substitution for generic records
+    let subst = if !rd.type_params.is_empty() && type_args.len() == rd.type_params.len() {
+      Substitution::for_generic(def_id, &type_args)
+    } else {
+      Substitution::new()
+    };
+
     let mut initialized: HashSet<ignis_type::symbol::SymbolId> = HashSet::new();
 
     // Typecheck each field initializer
@@ -1192,10 +1309,13 @@ impl<'a> Analyzer<'a> {
         continue;
       }
 
+      // Substitute type params in field type
+      let field_type = self.types.substitute(field_def.type_id, &subst);
+
       // Typecheck the value
-      let infer = InferContext::expecting(field_def.type_id.clone());
-      let value_type = self.typecheck_node_with_infer(&init_field.value, scope_kind, ctx, &infer);
-      self.typecheck_assignment(&field_def.type_id, &value_type, &init_field.span);
+      let field_infer = InferContext::expecting(field_type);
+      let value_type = self.typecheck_node_with_infer(&init_field.value, scope_kind, ctx, &field_infer);
+      self.typecheck_assignment(&field_type, &value_type, &init_field.span);
     }
 
     // Check all required fields are initialized
@@ -1214,7 +1334,12 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    rd.type_id
+    // Return the concrete type (with type args) or generic type
+    if !type_args.is_empty() {
+      self.types.instance(def_id, type_args)
+    } else {
+      rd.type_id
+    }
   }
 
   /// Resolve a path from record init to a definition
@@ -1424,6 +1549,7 @@ impl<'a> Analyzer<'a> {
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> TypeId {
     // Check for builtin typeOf/sizeOf - they are handled specially
     if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
@@ -1438,23 +1564,62 @@ impl<'a> Analyzer<'a> {
 
     // Check for method calls: obj.method() or Type::method()
     if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = self.ast.get(&call.callee) {
-      return self.typecheck_method_call(ma, call, scope_kind, ctx);
+      return self.typecheck_method_call(ma, call, scope_kind, ctx, infer);
     }
 
     // Check for path-based calls that might be static method or enum variant
     if let ASTNode::Expression(ASTExpression::Path(path)) = self.ast.get(&call.callee) {
-      if let Some(result) = self.typecheck_path_call(path, call, scope_kind, ctx) {
+      if let Some(result) = self.typecheck_path_call(path, call, scope_kind, ctx, infer) {
         return result;
       }
       // Fall through to normal call handling if path doesn't resolve to record/enum
     }
 
+    // Get the function definition ID if the callee is a variable (for generic handling)
+    let func_def_id: Option<DefinitionId> =
+      if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
+        self.scopes.lookup(&var.name).cloned()
+      } else {
+        None
+      };
+
     let callee_type = self.typecheck_node(&call.callee, scope_kind, ctx);
 
-    let param_types: Vec<TypeId> = if let Type::Function { params, .. } = self.types.get(&callee_type).clone() {
-      params
+    // Check if this is a generic function (has type params)
+    let is_generic_func = func_def_id
+      .as_ref()
+      .map(|def_id| {
+        if let DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind {
+          !func_def.type_params.is_empty()
+        } else {
+          false
+        }
+      })
+      .unwrap_or(false);
+
+    // Build substitution for generic function calls with explicit type arguments
+    let substitution = self.build_call_substitution(&func_def_id, call);
+
+    // For generic functions without explicit type args, skip strict type checking
+    // (type inference happens during lowering)
+    let skip_type_checking = is_generic_func && substitution.is_none();
+
+    // Get param/return types, applying substitution if we have one
+    let (param_types, ret_type, is_variadic) = if let Type::Function {
+      params,
+      ret,
+      is_variadic,
+    } = self.types.get(&callee_type).clone()
+    {
+      if let Some(ref subst) = substitution {
+        let subst_params: Vec<TypeId> = params.iter().map(|p| self.types.substitute(*p, subst)).collect();
+        let subst_ret = self.types.substitute(ret, subst);
+        (subst_params, subst_ret, is_variadic)
+      } else {
+        (params, ret, is_variadic)
+      }
     } else {
-      vec![]
+      (vec![], self.types.error(), false)
     };
 
     let arg_types: Vec<TypeId> = call
@@ -1471,12 +1636,8 @@ impl<'a> Analyzer<'a> {
       })
       .collect();
 
-    if let Type::Function {
-      params,
-      ret,
-      is_variadic,
-    } = self.types.get(&callee_type).clone()
-    {
+    // Only do detailed type checking if we have a function type
+    if let Type::Function { .. } = self.types.get(&callee_type) {
       let func_name = if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
         self.get_symbol_name(&var.name)
       } else {
@@ -1484,10 +1645,10 @@ impl<'a> Analyzer<'a> {
       };
 
       if is_variadic {
-        if arg_types.len() < params.len() {
+        if arg_types.len() < param_types.len() {
           self.add_diagnostic(
             DiagnosticMessage::ArgumentCountMismatch {
-              expected: params.len(),
+              expected: param_types.len(),
               got: arg_types.len(),
               func_name: func_name.clone(),
               span: call.span.clone(),
@@ -1495,10 +1656,10 @@ impl<'a> Analyzer<'a> {
             .report(),
           );
         }
-      } else if arg_types.len() != params.len() {
+      } else if arg_types.len() != param_types.len() {
         self.add_diagnostic(
           DiagnosticMessage::ArgumentCountMismatch {
-            expected: params.len(),
+            expected: param_types.len(),
             got: arg_types.len(),
             func_name: func_name.clone(),
             span: call.span.clone(),
@@ -1507,32 +1668,36 @@ impl<'a> Analyzer<'a> {
         );
       }
 
-      let check_count = std::cmp::min(arg_types.len(), params.len());
-      for i in 0..check_count {
-        if !self.types.types_equal(&params[i], &arg_types[i]) {
-          // Special case: deallocate accepts any *mut T, coercing to *mut u8
-          if func_name == "deallocate" && i == 0 {
-            if self.is_ptr_coercion(&arg_types[i], &params[i]) {
-              continue;
+      // Skip argument type checking for generic functions without explicit type args
+      // (type inference happens during lowering)
+      if !skip_type_checking {
+        let check_count = std::cmp::min(arg_types.len(), param_types.len());
+        for i in 0..check_count {
+          if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+            // Special case: deallocate accepts any *mut T, coercing to *mut u8
+            if func_name == "deallocate" && i == 0 {
+              if self.is_ptr_coercion(&arg_types[i], &param_types[i]) {
+                continue;
+              }
             }
+
+            let expected = self.format_type_for_error(&param_types[i]);
+            let got = self.format_type_for_error(&arg_types[i]);
+
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 1,
+                expected,
+                got,
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
           }
-
-          let expected = self.format_type_for_error(&params[i]);
-          let got = self.format_type_for_error(&arg_types[i]);
-
-          self.add_diagnostic(
-            DiagnosticMessage::ArgumentTypeMismatch {
-              param_idx: i + 1,
-              expected,
-              got,
-              span: self.node_span(&call.arguments[i]).clone(),
-            }
-            .report(),
-          );
         }
       }
 
-      ret
+      ret_type
     } else {
       let type_name = self.format_type_for_error(&callee_type);
       self.add_diagnostic(
@@ -1546,6 +1711,56 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Build a type substitution for a generic function call.
+  ///
+  /// If the function has type parameters and explicit type arguments are provided,
+  /// creates a Substitution mapping each type param to its concrete type.
+  /// Returns None if the function is not generic or no type args are provided.
+  fn build_call_substitution(
+    &mut self,
+    func_def_id: &Option<DefinitionId>,
+    call: &ASTCallExpression,
+  ) -> Option<Substitution> {
+    let func_def_id = (*func_def_id)?;
+    let type_args_syntax = call.type_args.as_ref()?;
+
+    // Get the function's type parameters
+    let type_params = if let DefinitionKind::Function(func_def) = &self.defs.get(&func_def_id).kind {
+      if func_def.type_params.is_empty() {
+        return None;
+      }
+      func_def.type_params.clone()
+    } else {
+      return None;
+    };
+
+    // Resolve the explicit type arguments
+    let resolved_type_args: Vec<TypeId> = type_args_syntax
+      .iter()
+      .map(|ty| self.resolve_type_syntax_with_span(ty, &call.span))
+      .collect();
+
+    // Check that the number of type arguments matches the number of type parameters
+    if resolved_type_args.len() != type_params.len() {
+      self.add_diagnostic(Diagnostic {
+        severity: Severity::Error,
+        message: format!(
+          "Expected {} type argument(s), got {}",
+          type_params.len(),
+          resolved_type_args.len()
+        ),
+        error_code: "A0050".to_string(),
+        primary_span: call.span.clone(),
+        labels: vec![],
+        notes: vec![],
+      });
+      return None;
+    }
+
+    // Build the substitution: map each type param's (owner, index) to the resolved type arg
+    Some(Substitution::for_generic(func_def_id, &resolved_type_args))
+  }
+
   /// Typecheck a method call: obj.method(args) or Type::method(args)
   fn typecheck_method_call(
     &mut self,
@@ -1553,10 +1768,11 @@ impl<'a> Analyzer<'a> {
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> TypeId {
     match ma.op {
       ASTAccessOp::Dot => self.typecheck_instance_method_call(ma, call, scope_kind, ctx),
-      ASTAccessOp::DoubleColon => self.typecheck_static_method_call(ma, call, scope_kind, ctx),
+      ASTAccessOp::DoubleColon => self.typecheck_static_method_call(ma, call, scope_kind, ctx, infer),
     }
   }
 
@@ -1677,6 +1893,125 @@ impl<'a> Analyzer<'a> {
         );
         self.types.error()
       },
+      Type::Instance { generic, args } => {
+        // Instance of a generic record - look up method and substitute types
+        let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&generic).kind {
+          rd.clone()
+        } else {
+          return self.types.error();
+        };
+
+        // Build substitution for type args
+        let subst = if !rd.type_params.is_empty() && args.len() == rd.type_params.len() {
+          Substitution::for_generic(generic, &args)
+        } else {
+          Substitution::new()
+        };
+
+        // Check instance methods
+        if let Some(&method_id) = rd.instance_methods.get(&ma.member) {
+          let method = {
+            let method_def = self.defs.get(&method_id);
+            let DefinitionKind::Method(method) = &method_def.kind else {
+              return self.types.error();
+            };
+            method.clone()
+          };
+
+          // For instance methods, skip the first param (self) when checking explicit args
+          let explicit_params: Vec<_> = if method.is_static {
+            method.params.clone()
+          } else {
+            method.params.iter().skip(1).cloned().collect()
+          };
+
+          // Get param types and substitute type params
+          let param_types: Vec<TypeId> = explicit_params
+            .iter()
+            .map(|p| {
+              let raw_type = self.get_definition_type(p);
+              self.types.substitute(raw_type, &subst)
+            })
+            .collect();
+
+          // Typecheck arguments
+          let arg_types: Vec<TypeId> = call
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+              if let Some(param_type) = param_types.get(i) {
+                let infer = InferContext::expecting(param_type.clone());
+                self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+              } else {
+                self.typecheck_node(arg, scope_kind, ctx)
+              }
+            })
+            .collect();
+
+          // Check argument count
+          let method_name = self.get_symbol_name(&ma.member);
+          if arg_types.len() != explicit_params.len() {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentCountMismatch {
+                expected: explicit_params.len(),
+                got: arg_types.len(),
+                func_name: method_name.clone(),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+          }
+
+          // Check argument types
+          let check_count = std::cmp::min(arg_types.len(), param_types.len());
+          for i in 0..check_count {
+            if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+              let expected = self.format_type_for_error(&param_types[i]);
+              let got = self.format_type_for_error(&arg_types[i]);
+              self.add_diagnostic(
+                DiagnosticMessage::ArgumentTypeMismatch {
+                  param_idx: i + 1,
+                  expected,
+                  got,
+                  span: self.node_span(&call.arguments[i]).clone(),
+                }
+                .report(),
+              );
+            }
+          }
+
+          // Substitute return type
+          return self.types.substitute(method.return_type, &subst);
+        }
+
+        // Not a method - check if it's a field being called (error)
+        if rd.fields.iter().any(|f| f.name == ma.member) {
+          let type_name = self.format_type_for_error(&obj_type);
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::NotCallable {
+              type_name: format!("{}.{}", type_name, member_name),
+              span: call.span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
+
+        // Method not found
+        let type_name = self.format_type_for_error(&obj_type);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::FieldNotFound {
+            field: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
       Type::Enum(_) => {
         self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
         self.types.error()
@@ -1702,6 +2037,7 @@ impl<'a> Analyzer<'a> {
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> TypeId {
     let def_id = self.resolve_type_expression(&ma.object, scope_kind, ctx);
 
@@ -1747,14 +2083,36 @@ impl<'a> Analyzer<'a> {
             return self.types.error();
           }
 
-          // Typecheck payload arguments
+          // Infer type args for generic enums from expected type
+          let type_args: Vec<TypeId> = if !ed.type_params.is_empty() {
+            if let Some(expected) = &infer.expected {
+              match self.types.get(expected).clone() {
+                Type::Instance { generic, args } if generic == def_id => args,
+                _ => vec![],
+              }
+            } else {
+              vec![]
+            }
+          } else {
+            vec![]
+          };
+
+          // Build substitution for generic enums
+          let subst = if !ed.type_params.is_empty() && type_args.len() == ed.type_params.len() {
+            Substitution::for_generic(def_id, &type_args)
+          } else {
+            Substitution::new()
+          };
+
+          // Typecheck payload arguments with substituted types
           let arg_types: Vec<TypeId> = call
             .arguments
             .iter()
             .enumerate()
             .map(|(i, arg)| {
               if let Some(&payload_type) = variant.payload.get(i) {
-                let infer = InferContext::expecting(payload_type);
+                let substituted_type = self.types.substitute(payload_type, &subst);
+                let infer = InferContext::expecting(substituted_type);
                 self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
               } else {
                 self.typecheck_node(arg, scope_kind, ctx)
@@ -1775,11 +2133,12 @@ impl<'a> Analyzer<'a> {
             );
           }
 
-          // Check argument types
+          // Check argument types against substituted payload types
           let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
           for i in 0..check_count {
-            if !self.types.types_equal(&variant.payload[i], &arg_types[i]) {
-              let expected = self.format_type_for_error(&variant.payload[i]);
+            let expected_type = self.types.substitute(variant.payload[i], &subst);
+            if !self.types.types_equal(&expected_type, &arg_types[i]) {
+              let expected = self.format_type_for_error(&expected_type);
               let got = self.format_type_for_error(&arg_types[i]);
               self.add_diagnostic(
                 DiagnosticMessage::ArgumentTypeMismatch {
@@ -1793,6 +2152,10 @@ impl<'a> Analyzer<'a> {
             }
           }
 
+          // Return Type::Instance for generic enums, otherwise the base type
+          if !type_args.is_empty() {
+            return self.types.instance(def_id, type_args);
+          }
           return ed.type_id;
         }
 
@@ -1827,6 +2190,7 @@ impl<'a> Analyzer<'a> {
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> Option<TypeId> {
     if path.segments.len() < 2 {
       return None;
@@ -1880,14 +2244,36 @@ impl<'a> Analyzer<'a> {
             return Some(self.types.error());
           }
 
-          // Typecheck payload arguments
+          // Infer type args for generic enums from expected type
+          let type_args: Vec<TypeId> = if !ed.type_params.is_empty() {
+            if let Some(expected) = &infer.expected {
+              match self.types.get(expected).clone() {
+                Type::Instance { generic, args } if generic == type_def_id => args,
+                _ => vec![],
+              }
+            } else {
+              vec![]
+            }
+          } else {
+            vec![]
+          };
+
+          // Build substitution for generic enums
+          let subst = if !ed.type_params.is_empty() && type_args.len() == ed.type_params.len() {
+            Substitution::for_generic(type_def_id, &type_args)
+          } else {
+            Substitution::new()
+          };
+
+          // Typecheck payload arguments with substituted types
           let arg_types: Vec<TypeId> = call
             .arguments
             .iter()
             .enumerate()
             .map(|(i, arg)| {
               if let Some(&payload_type) = variant.payload.get(i) {
-                let infer = InferContext::expecting(payload_type);
+                let substituted_type = self.types.substitute(payload_type, &subst);
+                let infer = InferContext::expecting(substituted_type);
                 self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
               } else {
                 self.typecheck_node(arg, scope_kind, ctx)
@@ -1908,11 +2294,12 @@ impl<'a> Analyzer<'a> {
             );
           }
 
-          // Check argument types
+          // Check argument types against substituted payload types
           let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
           for i in 0..check_count {
-            if !self.types.types_equal(&variant.payload[i], &arg_types[i]) {
-              let expected = self.format_type_for_error(&variant.payload[i]);
+            let expected_type = self.types.substitute(variant.payload[i], &subst);
+            if !self.types.types_equal(&expected_type, &arg_types[i]) {
+              let expected = self.format_type_for_error(&expected_type);
               let got = self.format_type_for_error(&arg_types[i]);
               self.add_diagnostic(
                 DiagnosticMessage::ArgumentTypeMismatch {
@@ -1926,6 +2313,10 @@ impl<'a> Analyzer<'a> {
             }
           }
 
+          // Return Type::Instance for generic enums, otherwise the base type
+          if !type_args.is_empty() {
+            return Some(self.types.instance(type_def_id, type_args));
+          }
           return Some(ed.type_id);
         }
 
@@ -2338,6 +2729,13 @@ impl<'a> Analyzer<'a> {
     value_type: &TypeId,
     span: &Span,
   ) {
+    // Skip type checking if either type contains unsubstituted type parameters.
+    // Type inference for generic calls happens during lowering, so we can't
+    // verify the types at this stage.
+    if self.types.contains_type_param(target_type) || self.types.contains_type_param(value_type) {
+      return;
+    }
+
     if !self.types.types_equal(target_type, value_type) {
       let target_name = self.format_type_for_error(target_type);
       let value_name = self.format_type_for_error(value_type);
@@ -2496,6 +2894,11 @@ impl<'a> Analyzer<'a> {
             return self.types.error();
           }
 
+          // Handle type parameter definitions - return Type::Param
+          if let DefinitionKind::TypeParam(tp) = &self.defs.get(&def_id).kind.clone() {
+            return self.types.param(tp.owner, tp.index);
+          }
+
           // Handle type aliases
           if let DefinitionKind::TypeAlias(alias_def) = &self.defs.get(&def_id).kind.clone() {
             // Already resolved - return the target type
@@ -2536,59 +2939,114 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
-      IgnisTypeSyntax::Path { segments, .. } => {
-        if let Some(last) = segments.last() {
-          if let Some(def_id) = self.scopes.lookup(&last.0).cloned() {
-            // Check for type alias cycle
-            if self.resolving_type_aliases.contains(&def_id) {
-              let name = self.symbols.borrow().get(&last.0).to_string();
-              if let Some(s) = span {
-                self.add_diagnostic(DiagnosticMessage::TypeAliasCycle { name, span: s.clone() }.report());
-              }
-              return self.types.error();
-            }
+      IgnisTypeSyntax::Path { segments, args, .. } => {
+        if segments.is_empty() {
+          return self.types.error();
+        }
 
-            // Handle type aliases
-            if let DefinitionKind::TypeAlias(alias_def) = &self.defs.get(&def_id).kind.clone() {
-              // Already resolved - return the target type
-              if !self.types.is_error(&alias_def.target) {
-                return alias_def.target.clone();
-              }
+        // Resolve the path to a definition
+        let def_id = self.resolve_type_path_to_def(segments);
+        let Some(def_id) = def_id else {
+          let name = segments
+            .iter()
+            .map(|(sym, _)| self.symbols.borrow().get(sym).to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+          if let Some(s) = span {
+            self.add_diagnostic(Diagnostic::new(
+              Severity::Error,
+              format!("Undefined type '{}'", name),
+              "I0043".to_string(),
+              s.clone(),
+            ));
+          }
+          return self.types.error();
+        };
 
-              // Not yet resolved - try to resolve inline using saved AST
-              if let Some(syntax) = self.type_alias_syntax.get(&def_id).cloned() {
-                self.resolving_type_aliases.insert(def_id.clone());
-                let resolved = self.resolve_type_syntax_impl(&syntax, span);
+        // Check for type alias cycle
+        if self.resolving_type_aliases.contains(&def_id) {
+          let name = segments
+            .iter()
+            .map(|(sym, _)| self.symbols.borrow().get(sym).to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+          if let Some(s) = span {
+            self.add_diagnostic(DiagnosticMessage::TypeAliasCycle { name, span: s.clone() }.report());
+          }
+          return self.types.error();
+        }
 
-                // Update the definition with resolved type
-                if let DefinitionKind::TypeAlias(ad) = &mut self.defs.get_mut(&def_id).kind {
-                  ad.target = resolved.clone();
-                }
-
-                self.resolving_type_aliases.remove(&def_id);
-                self.type_alias_syntax.remove(&def_id);
-                return resolved;
-              }
-
-              // No AST available - shouldn't happen in normal flow
-              return self.types.error();
-            }
-
-            self.type_of(&def_id).clone()
-          } else {
-            let name = self.symbols.borrow().get(&last.0).to_string();
+        // Handle type parameter definitions
+        if let DefinitionKind::TypeParam(tp) = &self.defs.get(&def_id).kind.clone() {
+          // Type params cannot have type arguments
+          if !args.is_empty() {
             if let Some(s) = span {
-              self.add_diagnostic(Diagnostic::new(
-                Severity::Error,
-                format!("Undefined type '{}'", name),
-                "I0043".to_string(),
-                s.clone(),
-              ));
+              let name = self.symbols.borrow().get(&self.defs.get(&def_id).name).to_string();
+              self.add_diagnostic(DiagnosticMessage::TypeParamCannotHaveArgs { name, span: s.clone() }.report());
+            }
+            return self.types.error();
+          }
+          return self.types.param(tp.owner, tp.index);
+        }
+
+        // Handle type aliases
+        if let DefinitionKind::TypeAlias(alias_def) = &self.defs.get(&def_id).kind.clone() {
+          // Type aliases cannot currently have type arguments in Ignis
+          if !args.is_empty() {
+            if let Some(s) = span {
+              let name = self.symbols.borrow().get(&self.defs.get(&def_id).name).to_string();
+              self.add_diagnostic(DiagnosticMessage::TypeAliasCannotHaveArgs { name, span: s.clone() }.report());
+            }
+            return self.types.error();
+          }
+
+          // Already resolved - return the target type
+          if !self.types.is_error(&alias_def.target) {
+            return alias_def.target.clone();
+          }
+
+          // Not yet resolved - try to resolve inline using saved AST
+          if let Some(syntax) = self.type_alias_syntax.get(&def_id).cloned() {
+            self.resolving_type_aliases.insert(def_id.clone());
+            let resolved = self.resolve_type_syntax_impl(&syntax, span);
+
+            // Update the definition with resolved type
+            if let DefinitionKind::TypeAlias(ad) = &mut self.defs.get_mut(&def_id).kind {
+              ad.target = resolved.clone();
+            }
+
+            self.resolving_type_aliases.remove(&def_id);
+            self.type_alias_syntax.remove(&def_id);
+            return resolved;
+          }
+
+          // No AST available - shouldn't happen in normal flow
+          return self.types.error();
+        }
+
+        // Handle generic record/enum types with type arguments
+        self.resolve_generic_type_with_args(def_id, args, span)
+      },
+      IgnisTypeSyntax::Applied { base, args } => {
+        // Resolve the base type first
+        let base_type = self.resolve_type_syntax_impl(base, span);
+
+        // The base must resolve to a Record or Enum type
+        match self.types.get(&base_type).clone() {
+          Type::Record(def_id) => self.resolve_generic_type_with_args(def_id, args, span),
+          Type::Enum(def_id) => self.resolve_generic_type_with_args(def_id, args, span),
+          _ => {
+            if let Some(s) = span {
+              self.add_diagnostic(
+                DiagnosticMessage::TypeCannotBeParameterized {
+                  type_name: self.format_type_for_error(&base_type),
+                  span: s.clone(),
+                }
+                .report(),
+              );
             }
             self.types.error()
-          }
-        } else {
-          self.types.error()
+          },
         }
       },
       _ => self.types.error(),
@@ -2749,6 +3207,28 @@ impl<'a> Analyzer<'a> {
         let def = self.defs.get(def_id);
         self.symbols.borrow().get(&def.name).to_string()
       },
+      Type::Param { owner, index } => {
+        // Try to get the type param name from the owner's definition
+        let owner_def = self.defs.get(owner);
+        let type_params = match &owner_def.kind {
+          DefinitionKind::Function(fd) => &fd.type_params,
+          DefinitionKind::Record(rd) => &rd.type_params,
+          DefinitionKind::Method(md) => &md.type_params,
+          DefinitionKind::Enum(ed) => &ed.type_params,
+          _ => return format!("T{}", index),
+        };
+        if let Some(param_def_id) = type_params.get(*index as usize) {
+          let param_name = self.symbols.borrow().get(&self.defs.get(param_def_id).name).to_string();
+          param_name
+        } else {
+          format!("T{}", index)
+        }
+      },
+      Type::Instance { generic, args } => {
+        let name = self.symbols.borrow().get(&self.defs.get(generic).name).to_string();
+        let arg_strs: Vec<_> = args.iter().map(|a| self.format_type_for_error(a)).collect();
+        format!("{}<{}>", name, arg_strs.join(", "))
+      },
     }
   }
 
@@ -2853,6 +3333,171 @@ impl<'a> Analyzer<'a> {
       if !self.is_mutable_expression(expr) {
         self.add_diagnostic(DiagnosticMessage::ForOfMutRequiresMutableIter { span: span.clone() }.report());
       }
+    }
+  }
+
+  // ========================================================================
+  // Generic Type Resolution Helpers
+  // ========================================================================
+
+  /// Resolve a type path (list of segments) to a definition ID.
+  fn resolve_type_path_to_def(
+    &self,
+    segments: &[(ignis_type::symbol::SymbolId, Span)],
+  ) -> Option<ignis_type::definition::DefinitionId> {
+    if segments.is_empty() {
+      return None;
+    }
+
+    // Start with first segment in scope
+    let (first_sym, _) = &segments[0];
+    let mut current_def = self.scopes.lookup(first_sym).cloned()?;
+
+    // Walk through remaining segments
+    for (segment_sym, _) in segments.iter().skip(1) {
+      match &self.defs.get(&current_def).kind {
+        DefinitionKind::Namespace(ns_def) => {
+          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym)?;
+        },
+        _ => return None,
+      }
+    }
+
+    Some(current_def)
+  }
+
+  /// Resolve a generic type (record or enum) with type arguments to produce Type::Instance.
+  /// If the definition is not generic, returns the plain Type::Record or Type::Enum.
+  fn resolve_generic_type_with_args(
+    &mut self,
+    def_id: ignis_type::definition::DefinitionId,
+    args: &[IgnisTypeSyntax],
+    span: Option<&Span>,
+  ) -> TypeId {
+    let def = self.defs.get(&def_id);
+    let type_name = self.symbols.borrow().get(&def.name).to_string();
+
+    // Get the expected type params
+    let type_params_len = match &def.kind {
+      DefinitionKind::Record(rd) => rd.type_params.len(),
+      DefinitionKind::Enum(ed) => ed.type_params.len(),
+      _ => {
+        // Not a generic-capable type
+        if !args.is_empty() {
+          if let Some(s) = span {
+            self.add_diagnostic(
+              DiagnosticMessage::TypeCannotBeParameterized {
+                type_name,
+                span: s.clone(),
+              }
+              .report(),
+            );
+          }
+          return self.types.error();
+        }
+        return self.type_of(&def_id).clone();
+      },
+    };
+
+    // Check if type arguments are needed
+    if type_params_len == 0 {
+      // Non-generic type
+      if !args.is_empty() {
+        if let Some(s) = span {
+          self.add_diagnostic(
+            DiagnosticMessage::WrongNumberOfTypeArgs {
+              expected: 0,
+              got: args.len(),
+              type_name,
+              span: s.clone(),
+            }
+            .report(),
+          );
+        }
+        return self.types.error();
+      }
+      return self.type_of(&def_id).clone();
+    }
+
+    // Generic type - resolve arguments
+    if args.is_empty() {
+      // Generic type used without type arguments
+      // This might be valid in some contexts (e.g., within the generic definition itself)
+      // For now, return the base type - monomorphization will catch unresolved instances
+      return self.type_of(&def_id).clone();
+    }
+
+    // Check arity
+    if args.len() != type_params_len {
+      if let Some(s) = span {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: type_params_len,
+            got: args.len(),
+            type_name,
+            span: s.clone(),
+          }
+          .report(),
+        );
+      }
+      return self.types.error();
+    }
+
+    // Resolve each type argument
+    let resolved_args: Vec<TypeId> = args
+      .iter()
+      .map(|arg| self.resolve_type_syntax_impl(arg, span))
+      .collect();
+
+    // Return Type::Instance
+    self.types.instance(def_id, resolved_args)
+  }
+
+  // ========================================================================
+  // Type Parameter Scope Management (Typeck)
+  // ========================================================================
+
+  /// Pushes a generic scope and registers type params for an owner definition.
+  /// Used when typechecking function bodies to make type params visible.
+  fn enter_type_params_scope(
+    &mut self,
+    owner_def_id: &ignis_type::definition::DefinitionId,
+  ) {
+    let type_params = match &self.defs.get(owner_def_id).kind {
+      DefinitionKind::Record(rd) => rd.type_params.clone(),
+      DefinitionKind::Enum(ed) => ed.type_params.clone(),
+      DefinitionKind::Function(fd) => fd.type_params.clone(),
+      DefinitionKind::Method(md) => md.type_params.clone(),
+      _ => Vec::new(),
+    };
+
+    if type_params.is_empty() {
+      return;
+    }
+
+    self.scopes.push(ScopeKind::Generic);
+
+    for param_id in &type_params {
+      let name = self.defs.get(param_id).name;
+      let _ = self.scopes.define(&name, param_id);
+    }
+  }
+
+  /// Pops the generic scope if the owner definition has type params.
+  fn exit_type_params_scope(
+    &mut self,
+    owner_def_id: &ignis_type::definition::DefinitionId,
+  ) {
+    let has_type_params = match &self.defs.get(owner_def_id).kind {
+      DefinitionKind::Record(rd) => !rd.type_params.is_empty(),
+      DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
+      DefinitionKind::Function(fd) => !fd.type_params.is_empty(),
+      DefinitionKind::Method(md) => !md.type_params.is_empty(),
+      _ => false,
+    };
+
+    if has_type_params {
+      self.scopes.pop();
     }
   }
 }

@@ -1,13 +1,14 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
-use crate::{metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
+use crate::{generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
 
 use super::function::ASTParameter;
 
-/// Record declaration: `record Name { fields, methods }`
+/// Record declaration: `record Name<T, U> { fields, methods }`
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTRecord {
   pub name: SymbolId,
+  pub type_params: Option<ASTGenericParams>,
   pub items: Vec<ASTRecordItem>,
   pub span: Span,
 }
@@ -15,10 +16,16 @@ pub struct ASTRecord {
 impl ASTRecord {
   pub fn new(
     name: SymbolId,
+    type_params: Option<ASTGenericParams>,
     items: Vec<ASTRecordItem>,
     span: Span,
   ) -> Self {
-    Self { name, items, span }
+    Self {
+      name,
+      type_params,
+      items,
+      span,
+    }
   }
 }
 
@@ -66,11 +73,12 @@ impl ASTRecordField {
 
 /// Method declaration (without `function` keyword)
 ///
-/// Syntax: `name(params): returnType { body }`
-/// Static: `static name(params): returnType { body }`
+/// Syntax: `name<U>(params): returnType { body }`
+/// Static: `static name<U>(params): returnType { body }`
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTMethod {
   pub name: SymbolId,
+  pub type_params: Option<ASTGenericParams>,
   pub parameters: Vec<ASTParameter>,
   pub return_type: IgnisTypeSyntax,
   pub body: NodeId,
@@ -81,6 +89,7 @@ pub struct ASTMethod {
 impl ASTMethod {
   pub fn new(
     name: SymbolId,
+    type_params: Option<ASTGenericParams>,
     parameters: Vec<ASTParameter>,
     return_type: IgnisTypeSyntax,
     body: NodeId,
@@ -89,6 +98,7 @@ impl ASTMethod {
   ) -> Self {
     Self {
       name,
+      type_params,
       parameters,
       return_type,
       body,

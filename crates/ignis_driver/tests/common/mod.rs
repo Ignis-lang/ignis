@@ -6,6 +6,7 @@ use std::rc::Rc;
 use ignis_analyzer::Analyzer;
 use ignis_config::CHeader;
 use ignis_parser::{IgnisLexer, IgnisParser};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
 use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
 use tempfile::TempDir;
@@ -41,15 +42,34 @@ fn compile_to_c(source: &str) -> Result<String, String> {
   }
 
   let mut types = result.types.clone();
+
+  // Run monomorphization: transform generic HIR into concrete HIR
+  // Note: We need to drop the sym_table borrow before running monomorphization
+  // because the monomorphizer needs to borrow_mut() to intern new names.
+  let mono_roots = {
+    let sym_table = result.symbols.borrow();
+    collect_mono_roots(&result.defs, &sym_table)
+  };
+  let mono_output =
+    ignis_analyzer::mono::Monomorphizer::new(&result.hir, &result.defs, &mut types, result.symbols.clone())
+      .run(&mono_roots);
+
+  // Re-borrow for downstream passes
   let sym_table = result.symbols.borrow();
 
   // Run ownership analysis to produce drop schedules
   let ownership_checker =
-    ignis_analyzer::HirOwnershipChecker::new(&result.hir, &result.types, &result.defs, &sym_table);
+    ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
   let (drop_schedules, _) = ownership_checker.check();
 
-  let (lir, verify) =
-    ignis_lir::lowering::lower_and_verify(&result.hir, &mut types, &result.defs, &sym_table, &drop_schedules, None);
+  let (lir, verify) = ignis_lir::lowering::lower_and_verify(
+    &mono_output.hir,
+    &mut types,
+    &mono_output.defs,
+    &sym_table,
+    &drop_schedules,
+    None,
+  );
   if let Err(e) = verify {
     return Err(format!("LIR verification errors: {:?}", e));
   }
@@ -62,7 +82,7 @@ fn compile_to_c(source: &str) -> Result<String, String> {
   Ok(ignis_codegen_c::emit_c(
     &lir,
     &types,
-    &result.defs,
+    &mono_output.defs,
     &result.namespaces,
     &sym_table,
     &headers,
@@ -150,4 +170,50 @@ pub fn compile_diagnostics(source: &str) -> Result<Vec<String>, String> {
     .collect();
 
   Ok(messages)
+}
+
+/// Collect root definitions for monomorphization.
+fn collect_mono_roots(
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+) -> Vec<DefinitionId> {
+  let mut roots = Vec::new();
+
+  for (def_id, def) in defs.iter() {
+    match &def.kind {
+      // Include main function
+      DefinitionKind::Function(fd) if !fd.is_extern => {
+        let name = symbols.get(&def.name);
+        if name == "main" {
+          roots.push(def_id);
+        }
+      },
+
+      // Include all public functions
+      DefinitionKind::Function(fd) if def.visibility == Visibility::Public && !fd.is_extern => {
+        roots.push(def_id);
+      },
+
+      // Include non-generic records and their methods
+      DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
+        for method_id in rd.instance_methods.values() {
+          roots.push(*method_id);
+        }
+        for method_id in rd.static_methods.values() {
+          roots.push(*method_id);
+        }
+      },
+
+      // Include non-generic enums and their methods
+      DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+        for method_id in ed.static_methods.values() {
+          roots.push(*method_id);
+        }
+      },
+
+      _ => {},
+    }
+  }
+
+  roots
 }

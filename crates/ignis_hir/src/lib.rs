@@ -27,6 +27,7 @@ pub enum HIRKind {
   },
   Call {
     callee: DefinitionId,
+    type_args: Vec<TypeId>,
     args: Vec<HIRId>,
   },
   Cast {
@@ -56,15 +57,18 @@ pub enum HIRKind {
   },
   RecordInit {
     record_def: DefinitionId,
+    type_args: Vec<TypeId>,
     fields: Vec<(u32, HIRId)>, // (field_index, value)
   },
   MethodCall {
     receiver: Option<HIRId>, // None for static methods
     method: DefinitionId,
+    type_args: Vec<TypeId>,
     args: Vec<HIRId>,
   },
   EnumVariant {
     enum_def: DefinitionId,
+    type_args: Vec<TypeId>,
     variant_tag: u32,
     payload: Vec<HIRId>,
   },
@@ -128,7 +132,7 @@ impl HIRKind {
       HIRKind::Unary { operand, .. } => {
         *operand = HIRId::new(operand.index() + offset);
       },
-      HIRKind::Call { args, .. } => {
+      HIRKind::Call { args, type_args: _, .. } => {
         for arg in args {
           *arg = HIRId::new(arg.index() + offset);
         }
@@ -154,12 +158,19 @@ impl HIRKind {
       HIRKind::FieldAccess { base, .. } => {
         *base = HIRId::new(base.index() + offset);
       },
-      HIRKind::RecordInit { fields, .. } => {
+      HIRKind::RecordInit {
+        fields, type_args: _, ..
+      } => {
         for (_, value) in fields {
           *value = HIRId::new(value.index() + offset);
         }
       },
-      HIRKind::MethodCall { receiver, args, .. } => {
+      HIRKind::MethodCall {
+        receiver,
+        args,
+        type_args: _,
+        ..
+      } => {
         if let Some(recv) = receiver {
           *recv = HIRId::new(recv.index() + offset);
         }
@@ -167,7 +178,9 @@ impl HIRKind {
           *arg = HIRId::new(arg.index() + offset);
         }
       },
-      HIRKind::EnumVariant { payload, .. } => {
+      HIRKind::EnumVariant {
+        payload, type_args: _, ..
+      } => {
         for p in payload {
           *p = HIRId::new(p.index() + offset);
         }

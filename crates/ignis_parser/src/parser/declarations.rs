@@ -1,5 +1,6 @@
 use ignis_ast::{
   NodeId,
+  generics::{ASTGenericParam, ASTGenericParams},
   metadata::ASTMetadata,
   statements::{
     ASTStatement, ASTEnum, ASTEnumField, ASTEnumItem, ASTEnumVariant, ASTMethod, ASTRecord, ASTRecordField,
@@ -80,11 +81,87 @@ impl super::IgnisParser {
     Ok((segments, span))
   }
 
-  /// function name(params): type block
+  // =========================================================================
+  // GENERIC PARAMETERS PARSING
+  // =========================================================================
+
+  /// Parse optional generic parameters: `<T, U, V>`
+  ///
+  /// Returns `None` if no `<` is found.
+  /// Returns `Some(ASTGenericParams)` if generic params are present.
+  ///
+  /// Grammar: `<` identifier (`,` identifier)* `>`
+  fn parse_optional_generic_params(&mut self) -> ParserResult<Option<ASTGenericParams>> {
+    if !self.at(TokenType::Less) {
+      return Ok(None);
+    }
+
+    let start = self.expect(TokenType::Less)?.span.clone();
+    let mut params = Vec::new();
+
+    // Parse first parameter (required if < was consumed)
+    let first_token = self.expect(TokenType::Identifier)?.clone();
+    params.push(ASTGenericParam::new(self.insert_symbol(&first_token), first_token.span.clone()));
+
+    // Parse remaining parameters
+    while self.eat(TokenType::Comma) {
+      // Allow trailing comma
+      if self.at(TokenType::Greater) {
+        break;
+      }
+      let param_token = self.expect(TokenType::Identifier)?.clone();
+      params.push(ASTGenericParam::new(self.insert_symbol(&param_token), param_token.span.clone()));
+    }
+
+    let end = self.expect(TokenType::Greater)?.span.clone();
+    let span = Span::merge(&start, &end);
+
+    Ok(Some(ASTGenericParams::new(params, span)))
+  }
+
+  /// Parse optional type arguments for calls and type instantiation: `<i32, bool>`
+  ///
+  /// Returns `None` if no `<` is found.
+  /// Returns `Some(Vec<IgnisTypeSyntax>)` if type args are present.
+  ///
+  /// Grammar: `<` type (`,` type)* `>`
+  pub(crate) fn parse_optional_type_args(&mut self) -> ParserResult<Option<Vec<IgnisTypeSyntax>>> {
+    if !self.at(TokenType::Less) {
+      return Ok(None);
+    }
+
+    let _start = self.expect(TokenType::Less)?.span.clone();
+    let mut args = Vec::new();
+
+    // Parse first type argument (required if < was consumed)
+    args.push(self.parse_type_syntax()?);
+
+    // Parse remaining type arguments
+    while self.eat(TokenType::Comma) {
+      // Allow trailing comma
+      if self.at(TokenType::Greater) {
+        break;
+      }
+      args.push(self.parse_type_syntax()?);
+    }
+
+    self.expect(TokenType::Greater)?;
+
+    Ok(Some(args))
+  }
+
+  // =========================================================================
+  // FUNCTION DECLARATIONS
+  // =========================================================================
+
+  /// function name<T, U>(params): type block
   fn parse_function_declaration(&mut self) -> ParserResult<NodeId> {
     let keyword = self.expect(TokenType::Function)?.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
+
+    // Parse optional generic parameters: <T, U>
+    let type_params = self.parse_optional_generic_params()?;
 
     let parameters =
       self.parse_delimited_list(TokenType::LeftParen, TokenType::RightParen, TokenType::Comma, |parser| {
@@ -102,6 +179,7 @@ impl super::IgnisParser {
     let signature_span = Span::merge(&name_token.span, &right_paren.span);
     let signature = ASTFunctionSignature::new(
       name,
+      type_params,
       parameters,
       return_type,
       signature_span,
@@ -298,6 +376,7 @@ impl super::IgnisParser {
 
     let signature = ASTFunctionSignature::new(
       name,
+      None, // TODO: parse type_params
       parameters,
       return_type,
       span.clone(),
@@ -353,11 +432,14 @@ impl super::IgnisParser {
     meta
   }
 
-  /// record Name { fields, methods }
+  /// record Name<T, U> { fields, methods }
   fn parse_record_declaration(&mut self) -> ParserResult<NodeId> {
     let start = self.expect(TokenType::Record)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
+
+    // Parse optional generic parameters: <T, U>
+    let type_params = self.parse_optional_generic_params()?;
 
     self.expect(TokenType::LeftBrace)?;
 
@@ -374,8 +456,10 @@ impl super::IgnisParser {
 
       // Lookahead to distinguish method vs field:
       // - identifier ( ... -> method
+      // - identifier < ... -> method with generics
       // - identifier : ... -> field
-      if self.peek_nth(1).type_ == TokenType::LeftParen {
+      let next = self.peek_nth(1).type_;
+      if next == TokenType::LeftParen || next == TokenType::Less {
         let method = self.parse_method(modifiers)?;
         items.push(ASTRecordItem::Method(method));
       } else {
@@ -387,17 +471,20 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&start, &end.span);
 
-    Ok(self.allocate_statement(ASTStatement::Record(ASTRecord::new(name, items, span))))
+    Ok(self.allocate_statement(ASTStatement::Record(ASTRecord::new(name, type_params, items, span))))
   }
 
   /// Method declaration (without 'function' keyword)
-  /// name(params): returnType { body }
+  /// name<U>(params): returnType { body }
   fn parse_method(
     &mut self,
     modifiers: ASTMetadata,
   ) -> ParserResult<ASTMethod> {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
+
+    // Parse optional generic parameters: <U, V>
+    let type_params = self.parse_optional_generic_params()?;
 
     let parameters =
       self.parse_delimited_list(TokenType::LeftParen, TokenType::RightParen, TokenType::Comma, |parser| {
@@ -415,7 +502,15 @@ impl super::IgnisParser {
 
     let span = Span::merge(&name_token.span, self.get_span(&body));
 
-    Ok(ASTMethod::new(name, parameters, return_type, body, modifiers, span))
+    Ok(ASTMethod::new(
+      name,
+      type_params,
+      parameters,
+      return_type,
+      body,
+      modifiers,
+      span,
+    ))
   }
 
   /// Field declaration: name: type (= expr)?;
@@ -443,11 +538,14 @@ impl super::IgnisParser {
     Ok(ASTRecordField::new(name, type_, value, modifiers, span))
   }
 
-  /// enum Name { variants, methods, fields }
+  /// enum Name<T> { variants, methods, fields }
   fn parse_enum_declaration(&mut self) -> ParserResult<NodeId> {
     let start = self.expect(TokenType::Enum)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
+
+    // Parse optional generic parameters: <T>
+    let type_params = self.parse_optional_generic_params()?;
 
     self.expect(TokenType::LeftBrace)?;
 
@@ -465,6 +563,7 @@ impl super::IgnisParser {
       // Lookahead to distinguish variant vs method vs field:
       // - identifier : ... -> field
       // - identifier ( ... followed by : or { -> method
+      // - identifier < ... ( ... -> generic method
       // - identifier or identifier ( types ) -> variant
       let next = self.peek_nth(1).type_;
 
@@ -472,6 +571,10 @@ impl super::IgnisParser {
         // Field: name: type = expr;
         let field = self.parse_enum_field(modifiers)?;
         items.push(ASTEnumItem::Field(field));
+      } else if next == TokenType::Less && self.is_generic_method_ahead() {
+        // Generic method: name<T>(...): type { }
+        let method = self.parse_method(modifiers)?;
+        items.push(ASTEnumItem::Method(method));
       } else if next == TokenType::LeftParen && self.is_method_ahead() {
         // Method: name(...): type { }
         let method = self.parse_method(modifiers)?;
@@ -496,7 +599,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&start, &end.span);
 
-    Ok(self.allocate_statement(ASTStatement::Enum(ASTEnum::new(name, items, span))))
+    Ok(self.allocate_statement(ASTStatement::Enum(ASTEnum::new(name, type_params, items, span))))
   }
 
   /// Distinguish method from variant with payload:
@@ -529,6 +632,72 @@ impl super::IgnisParser {
       i += 1;
       if i > 100 {
         return false; // safety limit
+      }
+    }
+  }
+
+  /// Check if we have a generic method: name<...>(...): ... { }
+  /// We know peek_nth(1) is '<'
+  fn is_generic_method_ahead(&self) -> bool {
+    // Skip past the generic parameters <...>
+    let mut depth = 1;
+    let mut i = 2; // start after <
+
+    loop {
+      let tok = self.peek_nth(i).type_;
+
+      match tok {
+        TokenType::Less => depth += 1,
+        TokenType::Greater => {
+          depth -= 1;
+          if depth == 0 {
+            // Found the matching > - next should be (
+            let after = self.peek_nth(i + 1).type_;
+            if after == TokenType::LeftParen {
+              // Now scan from ( to see if it looks like a method
+              return self.is_method_ahead_from(i + 1);
+            }
+            return false;
+          }
+        },
+        TokenType::Eof => return false,
+        _ => {},
+      }
+
+      i += 1;
+      if i > 100 {
+        return false;
+      }
+    }
+  }
+
+  /// Helper: check if we have a method starting from a specific position where ( is located
+  fn is_method_ahead_from(
+    &self,
+    paren_pos: usize,
+  ) -> bool {
+    let mut depth = 1;
+    let mut i = paren_pos + 1; // start after (
+
+    loop {
+      let tok = self.peek_nth(i).type_;
+
+      match tok {
+        TokenType::LeftParen => depth += 1,
+        TokenType::RightParen => {
+          depth -= 1;
+          if depth == 0 {
+            let after = self.peek_nth(i + 1).type_;
+            return after == TokenType::LeftBrace || after == TokenType::Colon;
+          }
+        },
+        TokenType::Eof => return false,
+        _ => {},
+      }
+
+      i += 1;
+      if i > 100 {
+        return false;
       }
     }
   }
@@ -856,6 +1025,315 @@ mod tests {
         assert_eq!(func.signature.parameters.len(), 1);
       },
       other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  // =========================================================================
+  // GENERIC SYNTAX TESTS
+  // =========================================================================
+
+  #[test]
+  fn parses_generic_function_single_param() {
+    let result = parse("function identity<T>(x: T): T { return x; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(symbol_name(&result, &func.signature.name), "identity");
+
+        let type_params = func.signature.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+
+        assert_eq!(func.signature.parameters.len(), 1);
+        assert_eq!(symbol_name(&result, &func.signature.parameters[0].name), "x");
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_function_multiple_params() {
+    let result = parse("function map<T, U, V>(a: T, b: U): V { return a; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(symbol_name(&result, &func.signature.name), "map");
+
+        let type_params = func.signature.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 3);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+        assert_eq!(symbol_name(&result, &type_params.params[1].name), "U");
+        assert_eq!(symbol_name(&result, &type_params.params[2].name), "V");
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_function_trailing_comma() {
+    let result = parse("function foo<T,>(x: T): T { return x; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        let type_params = func.signature.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_non_generic_function_has_no_type_params() {
+    let result = parse("function foo(x: i32): i32 { return x; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert!(func.signature.type_params.is_none());
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_record_single_param() {
+    let result = parse("record Box<T> { value: T; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(symbol_name(&result, &rec.name), "Box");
+
+        let type_params = rec.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+
+        assert_eq!(rec.items.len(), 1);
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_record_multiple_params() {
+    let result = parse("record Pair<K, V> { key: K; value: V; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(symbol_name(&result, &rec.name), "Pair");
+
+        let type_params = rec.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 2);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "K");
+        assert_eq!(symbol_name(&result, &type_params.params[1].name), "V");
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_non_generic_record_has_no_type_params() {
+    let result = parse("record Point { x: i32; y: i32; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert!(rec.type_params.is_none());
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_record_with_method() {
+    use ignis_ast::statements::ASTRecordItem;
+
+    let result = parse(
+      r#"record Container<T> {
+        data: *T;
+        get(index: i32): T { return *data; }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(symbol_name(&result, &rec.name), "Container");
+
+        let type_params = rec.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+
+        assert_eq!(rec.items.len(), 2);
+        match &rec.items[1] {
+          ASTRecordItem::Method(method) => {
+            assert_eq!(symbol_name(&result, &method.name), "get");
+            assert!(method.type_params.is_none());
+          },
+          other => panic!("expected method, got {:?}", other),
+        }
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_method_on_record() {
+    use ignis_ast::statements::ASTRecordItem;
+
+    let result = parse(
+      r#"record Container<T> {
+        data: *T;
+        map<U>(f: (T) -> U): U { return f(*data); }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(rec.items.len(), 2);
+        match &rec.items[1] {
+          ASTRecordItem::Method(method) => {
+            assert_eq!(symbol_name(&result, &method.name), "map");
+
+            let method_type_params = method.type_params.as_ref().expect("method should have type params");
+            assert_eq!(method_type_params.len(), 1);
+            assert_eq!(symbol_name(&result, &method_type_params.params[0].name), "U");
+          },
+          other => panic!("expected method, got {:?}", other),
+        }
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_method_multiple_params() {
+    use ignis_ast::statements::ASTRecordItem;
+
+    let result = parse(
+      r#"record Container<T> {
+        transform<U, V>(f: (T) -> U, g: (U) -> V): V { return g(f(*data)); }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => match &rec.items[0] {
+        ASTRecordItem::Method(method) => {
+          assert_eq!(symbol_name(&result, &method.name), "transform");
+
+          let method_type_params = method.type_params.as_ref().expect("method should have type params");
+          assert_eq!(method_type_params.len(), 2);
+          assert_eq!(symbol_name(&result, &method_type_params.params[0].name), "U");
+          assert_eq!(symbol_name(&result, &method_type_params.params[1].name), "V");
+        },
+        other => panic!("expected method, got {:?}", other),
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_enum_single_param() {
+    let result = parse(
+      r#"enum Option<T> {
+        Some(T),
+        None
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Enum(en) => {
+        assert_eq!(symbol_name(&result, &en.name), "Option");
+
+        let type_params = en.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+
+        assert_eq!(en.items.len(), 2);
+      },
+      other => panic!("expected enum, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_enum_multiple_params() {
+    let result = parse(
+      r#"enum Result<T, E> {
+        Ok(T),
+        Err(E)
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Enum(en) => {
+        assert_eq!(symbol_name(&result, &en.name), "Result");
+
+        let type_params = en.type_params.as_ref().expect("should have type params");
+        assert_eq!(type_params.len(), 2);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+        assert_eq!(symbol_name(&result, &type_params.params[1].name), "E");
+      },
+      other => panic!("expected enum, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_non_generic_enum_has_no_type_params() {
+    let result = parse(
+      r#"enum Direction {
+        North,
+        South,
+        East,
+        West
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Enum(en) => {
+        assert!(en.type_params.is_none());
+      },
+      other => panic!("expected enum, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_enum_with_method() {
+    use ignis_ast::statements::ASTEnumItem;
+
+    let result = parse(
+      r#"enum Option<T> {
+        Some(T),
+        None,
+        map<U>(f: (T) -> U): U { return f(self); }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Enum(en) => {
+        assert_eq!(en.items.len(), 3);
+        match &en.items[2] {
+          ASTEnumItem::Method(method) => {
+            assert_eq!(symbol_name(&result, &method.name), "map");
+
+            let method_type_params = method.type_params.as_ref().expect("method should have type params");
+            assert_eq!(method_type_params.len(), 1);
+            assert_eq!(symbol_name(&result, &method_type_params.params[0].name), "U");
+          },
+          other => panic!("expected method, got {:?}", other),
+        }
+      },
+      other => panic!("expected enum, got {:?}", other),
     }
   }
 }

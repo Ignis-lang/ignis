@@ -14,7 +14,7 @@ use ignis_hir::{
 };
 use ignis_type::definition::{DefinitionId, DefinitionKind};
 use ignis_type::span::Span;
-use ignis_type::types::{Type, TypeId};
+use ignis_type::types::{Substitution, Type, TypeId};
 
 struct ForOfContext<'a> {
   for_of: &'a ASTForOf,
@@ -636,9 +636,13 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         };
 
+        // Resolve type arguments: explicit first, then infer if needed
+        let type_args = self.resolve_or_infer_call_type_args(&callee_def_id, call, &args_hir, hir);
+
         let hir_node = HIRNode {
           kind: HIRKind::Call {
             callee: callee_def_id,
+            type_args,
             args: args_hir,
           },
           span: call.span.clone(),
@@ -839,14 +843,22 @@ impl<'a> Analyzer<'a> {
               });
             }
 
+            // Extract type_args from result type if it's a generic instance
+            let result_type = self.lookup_type(node_id).cloned().unwrap_or(ed.type_id);
+            let type_args = match self.types.get(&result_type).clone() {
+              Type::Instance { args, .. } => args,
+              _ => vec![],
+            };
+
             hir.alloc(HIRNode {
               kind: HIRKind::EnumVariant {
                 enum_def,
+                type_args,
                 variant_tag: variant_index,
                 payload: vec![],
               },
               span: path.span.clone(),
-              type_id: ed.type_id,
+              type_id: result_type,
             })
           },
 
@@ -921,23 +933,27 @@ impl<'a> Analyzer<'a> {
         let base_type = hir.get(base).type_id;
         let (derefed_base, derefed_type) = self.auto_deref_for_lowering(base, base_type, hir, &ma.span);
 
-        match self.types.get(&derefed_type).clone() {
-          Type::Record(def_id) => {
-            if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
-              if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
-                let field_type = stored_type.unwrap_or_else(|| field.type_id);
-                return hir.alloc(HIRNode {
-                  kind: HIRKind::FieldAccess {
-                    base: derefed_base,
-                    field_index: field.index,
-                  },
-                  span: ma.span.clone(),
-                  type_id: field_type,
-                });
-              }
+        // Extract record definition from Type::Record or Type::Instance
+        let def_id = match self.types.get(&derefed_type).clone() {
+          Type::Record(def_id) => Some(def_id),
+          Type::Instance { generic, .. } => Some(generic),
+          _ => None,
+        };
+
+        if let Some(def_id) = def_id {
+          if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
+            if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
+              let field_type = stored_type.unwrap_or_else(|| field.type_id);
+              return hir.alloc(HIRNode {
+                kind: HIRKind::FieldAccess {
+                  base: derefed_base,
+                  field_index: field.index,
+                },
+                span: ma.span.clone(),
+                type_id: field_type,
+              });
             }
-          },
-          _ => {},
+          }
         }
 
         // Error fallback
@@ -986,15 +1002,23 @@ impl<'a> Analyzer<'a> {
             if let Some(&tag) = ed.variants_by_name.get(&ma.member) {
               let variant = &ed.variants[tag as usize];
               if variant.payload.is_empty() {
+                // Extract type_args from stored type if it's a generic instance
+                let result_type = stored_type.unwrap_or(ed.type_id);
+                let type_args = match self.types.get(&result_type).clone() {
+                  Type::Instance { args, .. } => args,
+                  _ => vec![],
+                };
+
                 // Unit variant
                 return hir.alloc(HIRNode {
                   kind: HIRKind::EnumVariant {
                     enum_def: def_id,
+                    type_args,
                     variant_tag: tag,
                     payload: vec![],
                   },
                   span: ma.span.clone(),
-                  type_id: ed.type_id,
+                  type_id: result_type,
                 });
               }
               // Variant with payload - handled in call lowering
@@ -1085,9 +1109,16 @@ impl<'a> Analyzer<'a> {
     // Sort by field index for consistent ordering
     fields.sort_by_key(|(idx, _)| *idx);
 
+    // Extract type_args from result type if it's a generic instance
+    let type_args = match self.types.get(&result_type).clone() {
+      Type::Instance { args, .. } => args,
+      _ => vec![],
+    };
+
     hir.alloc(HIRNode {
       kind: HIRKind::RecordInit {
         record_def: def_id,
+        type_args,
         fields,
       },
       span: ri.span.clone(),
@@ -1289,7 +1320,7 @@ impl<'a> Analyzer<'a> {
     };
 
     match self.types.get(&receiver_record_type).clone() {
-      Type::Record(def_id) => {
+      Type::Record(def_id) | Type::Instance { generic: def_id, .. } => {
         let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
           rd.clone()
         } else {
@@ -1308,10 +1339,14 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
+          // Resolve type arguments: explicit first, then infer if needed
+          let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
+
           return hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
               receiver: Some(receiver_hir),
               method: method_id,
+              type_args,
               args: args_hir,
             },
             span: call.span.clone(),
@@ -1366,10 +1401,14 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
+          // Resolve type arguments: explicit first, then infer if needed
+          let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
+
           return hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
               receiver: None,
               method: method_id,
+              type_args,
               args: args_hir,
             },
             span: call.span.clone(),
@@ -1392,14 +1431,21 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
+          // Extract type_args from result type if it's a generic instance
+          let type_args = match self.types.get(&result_type).clone() {
+            Type::Instance { args, .. } => args,
+            _ => vec![],
+          };
+
           return hir.alloc(HIRNode {
             kind: HIRKind::EnumVariant {
               enum_def: def_id,
+              type_args,
               variant_tag: tag,
               payload: payload_hir,
             },
             span: call.span.clone(),
-            type_id: ed.type_id,
+            type_id: result_type,
           });
         }
 
@@ -1411,10 +1457,14 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
+          // Resolve type arguments: explicit first, then infer if needed
+          let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
+
           return hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
               receiver: None,
               method: method_id,
+              type_args,
               args: args_hir,
             },
             span: call.span.clone(),
@@ -1466,14 +1516,21 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
+          // Extract type_args from result type if it's a generic instance
+          let type_args = match self.types.get(&result_type).clone() {
+            Type::Instance { args, .. } => args,
+            _ => vec![],
+          };
+
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::EnumVariant {
               enum_def: type_def_id,
+              type_args,
               variant_tag: tag,
               payload: payload_hir,
             },
             span: call.span.clone(),
-            type_id: ed.type_id,
+            type_id: result_type,
           }));
         }
 
@@ -1485,10 +1542,18 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
+          // Resolve explicit type arguments for the method if present
+          let type_args = call
+            .type_args
+            .as_ref()
+            .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
+            .unwrap_or_else(Vec::new);
+
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
               receiver: None,
               method: method_id,
+              type_args,
               args: args_hir,
             },
             span: call.span.clone(),
@@ -1507,10 +1572,18 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
+          // Resolve explicit type arguments for the method if present
+          let type_args = call
+            .type_args
+            .as_ref()
+            .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
+            .unwrap_or_else(Vec::new);
+
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
               receiver: None,
               method: method_id,
+              type_args,
               args: args_hir,
             },
             span: call.span.clone(),
@@ -1861,6 +1934,7 @@ impl<'a> Analyzer<'a> {
     let len_call = hir.alloc(HIRNode {
       kind: HIRKind::Call {
         callee: runtime.buf_len,
+        type_args: vec![],
         args: vec![ctx.iter_hir],
       },
       span: ctx.span.clone(),
@@ -1980,6 +2054,7 @@ impl<'a> Analyzer<'a> {
     let buf_at_call = hir.alloc(HIRNode {
       kind: HIRKind::Call {
         callee: buf_at_builtin,
+        type_args: vec![],
         args: vec![ctx.iter_hir, idx_var_access],
       },
       span: ctx.span.clone(),
@@ -2047,6 +2122,137 @@ impl<'a> Analyzer<'a> {
       span: ctx.span.clone(),
       type_id: self.types.void(),
     })
+  }
+
+  /// Resolve or infer type arguments for a function call.
+  ///
+  /// If explicit type arguments are provided, uses those directly.
+  /// Otherwise, attempts to infer type arguments by unifying parameter types
+  /// with argument types.
+  fn resolve_or_infer_call_type_args(
+    &mut self,
+    callee_def_id: &DefinitionId,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    args_hir: &[HIRId],
+    hir: &HIR,
+  ) -> Vec<TypeId> {
+    // Get type parameters from definition
+    let type_params = match &self.defs.get(callee_def_id).kind {
+      DefinitionKind::Function(fd) => fd.type_params.clone(),
+      DefinitionKind::Method(md) => md.type_params.clone(),
+      _ => return vec![],
+    };
+
+    // Not generic - return empty
+    if type_params.is_empty() {
+      return vec![];
+    }
+
+    // If explicit type args provided, use them
+    if let Some(explicit_args) = &call.type_args {
+      return explicit_args.iter().map(|t| self.resolve_type_syntax(t)).collect();
+    }
+
+    // Infer from argument types
+    let arg_types: Vec<TypeId> = args_hir.iter().map(|id| hir.get(*id).type_id).collect();
+
+    // Get parameter definitions
+    let param_defs = match &self.defs.get(callee_def_id).kind {
+      DefinitionKind::Function(fd) => fd.params.clone(),
+      DefinitionKind::Method(md) => {
+        if md.is_static {
+          md.params.clone()
+        } else {
+          // Skip `self` parameter for instance methods
+          md.params.iter().skip(1).cloned().collect()
+        }
+      },
+      _ => return vec![],
+    };
+
+    let mut subst = Substitution::new();
+
+    for (i, &arg_ty) in arg_types.iter().enumerate() {
+      if let Some(&param_def_id) = param_defs.get(i) {
+        let param_ty = *self.defs.type_of(&param_def_id);
+        self.types.unify_for_inference(param_ty, arg_ty, &mut subst);
+      }
+    }
+
+    // Extract inferred types in order
+    type_params
+      .iter()
+      .enumerate()
+      .map(|(i, _)| {
+        subst
+          .get(*callee_def_id, i as u32)
+          .unwrap_or_else(|| self.types.error())
+      })
+      .collect()
+  }
+
+  /// Resolve or infer type arguments for a method call.
+  ///
+  /// If explicit type arguments are provided, uses those directly.
+  /// Otherwise, attempts to infer type arguments by unifying parameter types
+  /// with argument types.
+  fn resolve_or_infer_method_type_args(
+    &mut self,
+    method_def_id: &DefinitionId,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    args_hir: &[HIRId],
+    hir: &HIR,
+  ) -> Vec<TypeId> {
+    // Get type parameters from method definition
+    let type_params = match &self.defs.get(method_def_id).kind {
+      DefinitionKind::Method(md) => md.type_params.clone(),
+      _ => return vec![],
+    };
+
+    // Not generic - return empty
+    if type_params.is_empty() {
+      return vec![];
+    }
+
+    // If explicit type args provided, use them
+    if let Some(explicit_args) = &call.type_args {
+      return explicit_args.iter().map(|t| self.resolve_type_syntax(t)).collect();
+    }
+
+    // Infer from argument types
+    let arg_types: Vec<TypeId> = args_hir.iter().map(|id| hir.get(*id).type_id).collect();
+
+    // Get parameter definitions (skip `self` for instance methods)
+    let param_defs = match &self.defs.get(method_def_id).kind {
+      DefinitionKind::Method(md) => {
+        if md.is_static {
+          md.params.clone()
+        } else {
+          md.params.iter().skip(1).cloned().collect()
+        }
+      },
+      _ => return vec![],
+    };
+
+    let mut subst = Substitution::new();
+
+    for (i, &arg_ty) in arg_types.iter().enumerate() {
+      if let Some(&param_def_id) = param_defs.get(i) {
+        let param_ty = *self.defs.type_of(&param_def_id);
+        self.types.unify_for_inference(param_ty, arg_ty, &mut subst);
+      }
+    }
+
+    // Extract inferred types in order
+    type_params
+      .iter()
+      .enumerate()
+      .map(|(i, _)| {
+        subst
+          .get(*method_def_id, i as u32)
+          .unwrap_or_else(|| self.types.error())
+      })
+      .collect()
   }
 }
 

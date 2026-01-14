@@ -931,3 +931,149 @@ function main(): i32 {
 "#,
   );
 }
+
+// =============================================================================
+// Generics Tests
+// =============================================================================
+
+#[test]
+fn e2e_generic_function_explicit() {
+  e2e_test(
+    "generic_function_explicit",
+    r#"
+function identity<T>(x: T): T {
+    return x;
+}
+
+function main(): i32 {
+    return identity<i32>(42);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_function_inferred() {
+  e2e_test(
+    "generic_function_inferred",
+    r#"
+function identity<T>(x: T): T {
+    return x;
+}
+
+function main(): i32 {
+    let a: i32 = identity(42);
+    return a;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_function_multiple_params() {
+  e2e_test(
+    "generic_function_multiple_params",
+    r#"
+function first<T, U>(a: T, b: U): T {
+    return a;
+}
+
+function main(): i32 {
+    return first<i32, i32>(42, 0);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_record_box() {
+  e2e_test(
+    "generic_record_box",
+    r#"
+record Box<T> {
+    value: T;
+}
+
+function main(): i32 {
+    let b: Box<i32> = Box { value: 42 };
+    return b.value;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_record_with_method() {
+  e2e_test(
+    "generic_record_with_method",
+    r#"
+record Box<T> {
+    value: T;
+
+    get(): T {
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let b: Box<i32> = Box { value: 42 };
+    return b.get();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_enum_option() {
+  e2e_test(
+    "generic_enum_option",
+    r#"
+enum Option<T> {
+    Some(T),
+    None
+}
+
+function main(): i32 {
+    let x: Option<i32> = Option::Some(42);
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_enum_result() {
+  e2e_test(
+    "generic_enum_result",
+    r#"
+enum Result<T, E> {
+    Ok(T),
+    Err(E)
+}
+
+function main(): i32 {
+    let x: Result<i32, i32> = Result::Ok(42);
+    let y: Result<i32, i32> = Result::Err(1);
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_record_pair() {
+  e2e_test(
+    "generic_record_pair",
+    r#"
+record Pair<A, B> {
+    first: A;
+    second: B;
+}
+
+function main(): i32 {
+    let p: Pair<i32, i32> = Pair { first: 10, second: 32 };
+    return p.first + p.second;
+}
+"#,
+  );
+}

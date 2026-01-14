@@ -303,7 +303,11 @@ impl<'a> LoweringContext<'a> {
         self.lower_binary(operation.clone(), *left, *right, node.type_id, node.span)
       },
       HIRKind::Unary { operation, operand } => self.lower_unary(operation.clone(), *operand, node.type_id, node.span),
-      HIRKind::Call { callee, args } => self.lower_call(*callee, args, node.type_id, node.span),
+      HIRKind::Call {
+        callee,
+        args,
+        type_args: _,
+      } => self.lower_call(*callee, args, node.type_id, node.span),
       HIRKind::Cast { expression, target } => self.lower_cast(*expression, *target, node.span),
       HIRKind::Reference { expression, mutable } => {
         self.lower_reference(*expression, *mutable, node.type_id, node.span)
@@ -359,16 +363,22 @@ impl<'a> LoweringContext<'a> {
       HIRKind::FieldAccess { base, field_index } => {
         self.lower_field_access(*base, *field_index, node.type_id, node.span)
       },
-      HIRKind::RecordInit { record_def, fields } => {
-        self.lower_record_init(*record_def, fields, node.type_id, node.span)
-      },
-      HIRKind::MethodCall { receiver, method, args } => {
-        self.lower_method_call(receiver.as_ref().copied(), *method, args, node.type_id, node.span)
-      },
+      HIRKind::RecordInit {
+        record_def,
+        fields,
+        type_args: _,
+      } => self.lower_record_init(*record_def, fields, node.type_id, node.span),
+      HIRKind::MethodCall {
+        receiver,
+        method,
+        args,
+        type_args: _,
+      } => self.lower_method_call(receiver.as_ref().copied(), *method, args, node.type_id, node.span),
       HIRKind::EnumVariant {
         enum_def,
         variant_tag,
         payload,
+        type_args: _,
       } => self.lower_enum_variant(*enum_def, *variant_tag, payload, node.type_id, node.span),
       HIRKind::StaticAccess { def } => self.lower_static_access(*def, node.type_id, node.span),
     }
@@ -859,6 +869,40 @@ impl<'a> LoweringContext<'a> {
 
     // Initialize if there's a value
     if let Some(value_id) = value {
+      // Check for init-in-place opportunity
+      let value_node = self.hir.get(value_id);
+      if let HIRKind::RecordInit {
+        record_def: _,
+        fields,
+        type_args: _,
+      } = &value_node.kind
+      {
+        // Init record directly into the local
+        let field_ops: Vec<(u32, Operand)> = fields
+          .iter()
+          .filter_map(|(idx, hir_id)| {
+            let op = self.lower_hir_node(*hir_id)?;
+            Some((*idx, op))
+          })
+          .collect();
+
+        let ptr_ty = self.types.pointer(ty);
+        let ptr = self.fn_builder().alloc_temp(ptr_ty, value_node.span.clone());
+        self.fn_builder().emit(Instr::AddrOfLocal {
+          dest: ptr,
+          local,
+          mutable: true,
+        });
+
+        self.fn_builder().emit(Instr::InitRecord {
+          dest_ptr: Operand::Temp(ptr),
+          fields: field_ops,
+          record_type: ty,
+        });
+        return;
+      }
+
+      // General case
       if let Some(val) = self.lower_hir_node(value_id) {
         self.fn_builder().emit(Instr::Store {
           dest: local,
@@ -1346,15 +1390,49 @@ impl<'a> LoweringContext<'a> {
     field_ty: TypeId,
     span: Span,
   ) -> Option<Operand> {
-    let base_op = self.lower_hir_node(base)?;
+    let base_node = self.hir.get(base);
+    let base_ty = base_node.type_id;
+
+    // Check if base is already a pointer/reference type
+    let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer(_) | Type::Reference { .. });
+
+    let base_ptr = if base_is_ptr {
+      // Base is already a pointer - lower and use directly
+      self.lower_hir_node(base)?
+    } else {
+      // Base is a value - spill to local to get addressable storage
+      let base_val = self.lower_hir_node(base)?;
+
+      let temp_local = self.fn_builder().alloc_local(LocalData {
+        def_id: None,
+        ty: base_ty,
+        mutable: false,
+        name: None,
+      });
+
+      self.fn_builder().emit(Instr::Store {
+        dest: temp_local,
+        value: base_val,
+      });
+
+      let base_ptr_ty = self.types.pointer(base_ty);
+      let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
+      self.fn_builder().emit(Instr::AddrOfLocal {
+        dest: base_ptr_temp,
+        local: temp_local,
+        mutable: false,
+      });
+
+      Operand::Temp(base_ptr_temp)
+    };
 
     // Get pointer to field
-    let ptr_ty = self.types.pointer(field_ty);
-    let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
+    let field_ptr_ty = self.types.pointer(field_ty);
+    let field_ptr = self.fn_builder().alloc_temp(field_ptr_ty, span.clone());
 
     self.fn_builder().emit(Instr::GetFieldPtr {
-      dest: ptr,
-      base: base_op,
+      dest: field_ptr,
+      base: base_ptr,
       field_index,
       field_type: field_ty,
     });
@@ -1363,7 +1441,7 @@ impl<'a> LoweringContext<'a> {
     let dest = self.fn_builder().alloc_temp(field_ty, span);
     self.fn_builder().emit(Instr::LoadPtr {
       dest,
-      ptr: Operand::Temp(ptr),
+      ptr: Operand::Temp(field_ptr),
     });
 
     Some(Operand::Temp(dest))

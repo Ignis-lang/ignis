@@ -43,6 +43,9 @@ pub enum DefinitionKind {
   Record(RecordDefinition),
   Enum(EnumDefinition),
   Method(MethodDefinition),
+  TypeParam(TypeParamDefinition),
+  /// Placeholder for forward references during monomorphization
+  Placeholder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,6 +56,7 @@ pub struct NamespaceDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionDefinition {
+  pub type_params: Vec<DefinitionId>,
   pub params: Vec<DefinitionId>,
   pub return_type: TypeId,
   pub is_extern: bool,
@@ -86,6 +90,7 @@ pub struct TypeAliasDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordDefinition {
+  pub type_params: Vec<DefinitionId>,
   pub type_id: TypeId,
   pub fields: Vec<RecordFieldDef>,
   pub instance_methods: HashMap<SymbolId, DefinitionId>,
@@ -102,6 +107,7 @@ pub struct RecordFieldDef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumDefinition {
+  pub type_params: Vec<DefinitionId>,
   pub type_id: TypeId,
   pub variants: Vec<EnumVariantDef>,
   pub variants_by_name: HashMap<SymbolId, u32>,
@@ -120,9 +126,19 @@ pub struct EnumVariantDef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MethodDefinition {
   pub owner_type: DefinitionId,
+  pub type_params: Vec<DefinitionId>,
   pub params: Vec<DefinitionId>,
   pub return_type: TypeId,
   pub is_static: bool,
+}
+
+/// Definition of a type parameter (T, U, etc.)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeParamDefinition {
+  /// Index in the owner's type parameter list
+  pub index: u32,
+  /// The function/record/method that declares this type param
+  pub owner: DefinitionId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +188,8 @@ impl DefinitionStore {
       DefinitionKind::Record(rd) => &rd.type_id,
       DefinitionKind::Enum(ed) => &ed.type_id,
       DefinitionKind::Method(md) => &md.return_type,
+      DefinitionKind::TypeParam(_) => panic!("type params do not have a type in this sense"),
+      DefinitionKind::Placeholder => panic!("placeholder definitions have no type"),
     }
   }
 
@@ -192,5 +210,40 @@ impl DefinitionStore {
 
   pub fn iter(&self) -> impl Iterator<Item = (DefinitionId, &Definition)> {
     self.definitions.iter()
+  }
+
+  /// Allocate a placeholder definition that will be filled in later.
+  /// Used during monomorphization to reserve an ID before the full definition is ready.
+  pub fn alloc_placeholder(
+    &mut self,
+    name: SymbolId,
+    span: Span,
+    visibility: Visibility,
+    owner_module: ModuleId,
+    owner_namespace: Option<NamespaceId>,
+  ) -> DefinitionId {
+    self.definitions.alloc(Definition {
+      kind: DefinitionKind::Placeholder,
+      name,
+      span,
+      visibility,
+      owner_module,
+      owner_namespace,
+    })
+  }
+
+  /// Update a placeholder definition with its real content.
+  /// Panics if the definition is not a placeholder.
+  pub fn update(
+    &mut self,
+    id: &DefinitionId,
+    kind: DefinitionKind,
+  ) {
+    let def = self.definitions.get_mut(id);
+    assert!(
+      matches!(def.kind, DefinitionKind::Placeholder),
+      "can only update placeholder definitions"
+    );
+    def.kind = kind;
   }
 }

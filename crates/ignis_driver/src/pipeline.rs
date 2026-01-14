@@ -6,6 +6,7 @@ use colored::*;
 use ignis_ast::display::format_ast_nodes;
 use ignis_config::IgnisConfig;
 use ignis_parser::{IgnisLexer, IgnisParser};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
 use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
 
@@ -156,8 +157,9 @@ pub fn compile_project(
   let root_id = ctx.discover_modules(entry_path, &config)?;
   let output = ctx.compile(root_id, &config)?;
 
-  let sym_table = output.symbols.borrow();
+  // Dump phase: use a scoped borrow that ends before monomorphization
   if let Some(bc) = config.build_config.as_ref() {
+    let sym_table = output.symbols.borrow();
     if bc.dump_types {
       println!("\n{}", ignis_analyzer::dump::dump_types(&output.types));
     }
@@ -176,6 +178,9 @@ pub fn compile_project(
         Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
       }
     }
+  }
+
+  if let Some(bc) = config.build_config.as_ref() {
     let needs_codegen = bc.dump_lir || bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
 
     if needs_codegen {
@@ -199,8 +204,22 @@ pub fn compile_project(
 
       let mut types = output.types.clone();
 
+      // Monomorphization: transform generic HIR into concrete HIR
+      // Use a temporary borrow for collect_mono_roots that drops before Monomorphizer::run()
+      let mono_roots = collect_mono_roots(&output.defs, &output.symbols.borrow());
+      let mono_output =
+        ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+          .run(&mono_roots);
+
+      // In debug builds, verify no generic types remain
+      #[cfg(debug_assertions)]
+      mono_output.verify_no_generics(&types);
+
+      // Re-borrow symbols for ownership checking and codegen
+      let sym_table = output.symbols.borrow();
+
       let ownership_checker =
-        ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table)
+        ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
           .with_source_map(&ctx.source_map)
           .suppress_ffi_warnings_for(&config.std_path);
       let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
@@ -223,16 +242,16 @@ pub fn compile_project(
       let used_module_set: std::collections::HashSet<ignis_type::module::ModuleId> =
         used_modules.iter().copied().collect();
       let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
-        &output.hir,
+        &mono_output.hir,
         &mut types,
-        &output.defs,
+        &mono_output.defs,
         &sym_table,
         &drop_schedules,
         Some(&used_module_set),
       );
 
       if bc.dump_lir {
-        let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &output.defs, &sym_table);
+        let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &mono_output.defs, &sym_table);
         println!("\n{}", lir_output);
       }
 
@@ -253,7 +272,7 @@ pub fn compile_project(
         let c_code = ignis_codegen_c::emit_c(
           &lir_program,
           &types,
-          &output.defs,
+          &mono_output.defs,
           &output.namespaces,
           &sym_table,
           &link_plan.headers,
@@ -317,12 +336,14 @@ pub fn compile_project(
   }
 
   if config.debug.contains(&ignis_config::DebugPrint::Analyzer) {
+    let sym_table = output.symbols.borrow();
     println!("\n{}", "Type Store & Definitions:".bright_cyan().bold());
     println!("{}", ignis_analyzer::dump::dump_types(&output.types));
     println!("{}", ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table));
   }
 
   if config.debug.contains(&ignis_config::DebugPrint::Hir) {
+    let sym_table = output.symbols.borrow();
     println!("\n{}", "HIR:".bright_cyan().bold());
     println!(
       "{}",
@@ -392,10 +413,13 @@ pub fn build_std(
   }
 
   let output = ctx.compile_all(&config)?;
-  let sym_table = output.symbols.borrow();
   let link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
 
-  let header_content = ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table);
+  // Use scoped borrow for header generation, drops before monomorphization
+  let header_content = {
+    let sym_table = output.symbols.borrow();
+    ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table)
+  };
   let header_path = output_path.join("ignis_std.h");
   if let Err(e) = std::fs::write(&header_path, &header_content) {
     eprintln!(
@@ -427,18 +451,30 @@ pub fn build_std(
     let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
     let mut types = output.types.clone();
 
+    // Monomorphization: use temporary borrow for collect_mono_roots
+    let mono_roots = collect_mono_roots(&output.defs, &output.symbols.borrow());
+    let mono_output =
+      ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+        .run(&mono_roots);
+
+    #[cfg(debug_assertions)]
+    mono_output.verify_no_generics(&types);
+
+    // Re-borrow symbols for ownership checking and codegen
+    let sym_table = output.symbols.borrow();
+
     // Run ownership analysis on HIR to produce drop schedules
     let ownership_checker =
-      ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &sym_table)
+      ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
         .with_source_map(&ctx.source_map)
         .suppress_ffi_warnings_for(&config.std_path);
     let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
     // Note: ownership diagnostics already reported in the first pass
 
     let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
-      &output.hir,
+      &mono_output.hir,
       &mut types,
-      &output.defs,
+      &mono_output.defs,
       &sym_table,
       &drop_schedules,
       Some(&single_module_set),
@@ -462,7 +498,7 @@ pub fn build_std(
     let c_code = ignis_codegen_c::emit_c(
       &lir_program,
       &types,
-      &output.defs,
+      &mono_output.defs,
       &output.namespaces,
       &sym_table,
       &link_plan.headers,
@@ -557,4 +593,53 @@ fn create_static_archive_multi(
   }
 
   Ok(())
+}
+
+/// Collect root definitions for monomorphization.
+///
+/// For executables: starts from main function.
+/// For libraries: includes all public exports.
+fn collect_mono_roots(
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+) -> Vec<DefinitionId> {
+  let mut roots = Vec::new();
+
+  for (def_id, def) in defs.iter() {
+    match &def.kind {
+      // Include main function
+      DefinitionKind::Function(fd) if !fd.is_extern => {
+        let name = symbols.get(&def.name);
+        if name == "main" {
+          roots.push(def_id);
+        }
+      },
+
+      // Include all public functions
+      DefinitionKind::Function(fd) if def.visibility == Visibility::Public && !fd.is_extern => {
+        roots.push(def_id);
+      },
+
+      // Include non-generic records and their methods
+      DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
+        for method_id in rd.instance_methods.values() {
+          roots.push(*method_id);
+        }
+        for method_id in rd.static_methods.values() {
+          roots.push(*method_id);
+        }
+      },
+
+      // Include non-generic enums and their methods
+      DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+        for method_id in ed.static_methods.values() {
+          roots.push(*method_id);
+        }
+      },
+
+      _ => {},
+    }
+  }
+
+  roots
 }

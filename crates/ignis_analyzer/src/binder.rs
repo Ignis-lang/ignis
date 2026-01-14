@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
+  generics::ASTGenericParams,
   metadata::ASTMetadata,
   statements::{
     const_statement::ASTConstant,
@@ -16,9 +17,9 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::definition::{
-  ConstantDefinition, Definition, DefinitionKind, EnumDefinition, EnumVariantDef, FunctionDefinition, MethodDefinition,
-  NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, TypeAliasDefinition, VariableDefinition,
-  Visibility,
+  ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FunctionDefinition,
+  MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, TypeAliasDefinition,
+  TypeParamDefinition, VariableDefinition, Visibility,
 };
 
 impl<'a> Analyzer<'a> {
@@ -182,8 +183,10 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     rec: &ASTRecord,
   ) {
+    // Allocate the definition first so we can use its ID as owner for type params
     let def = Definition {
       kind: DefinitionKind::Record(RecordDefinition {
+        type_params: Vec::new(),     // Will be populated after binding type params
         type_id: self.types.error(), // Placeholder
         fields: Vec::new(),
         instance_methods: HashMap::new(),
@@ -199,6 +202,15 @@ impl<'a> Analyzer<'a> {
 
     let def_id = self.defs.alloc(def);
     self.set_def(node_id, &def_id);
+
+    // Bind type params now that we have the owner def_id
+    let type_param_defs = self.bind_type_params(rec.type_params.as_ref(), def_id);
+    self.pop_type_params_scope(rec.type_params.as_ref());
+
+    // Update the record definition with type params
+    if let DefinitionKind::Record(rd) = &mut self.defs.get_mut(&def_id).kind {
+      rd.type_params = type_param_defs;
+    }
 
     if let Err(existing) = self.scopes.define(&rec.name, &def_id) {
       let existing_def = self.defs.get(&existing);
@@ -225,6 +237,10 @@ impl<'a> Analyzer<'a> {
 
     // Create the Type::Record and update the definition's type_id
     let type_id = self.types.record(record_def_id);
+
+    // Re-establish generic scope for type params visibility within methods/fields
+    // We need to register the type params in scope again for this pass
+    self.push_type_params_scope(record_def_id);
 
     let mut fields = Vec::new();
     let mut instance_methods = HashMap::new();
@@ -275,6 +291,9 @@ impl<'a> Analyzer<'a> {
       }
     }
 
+    // Pop the generic scope
+    self.pop_type_params_scope_if_generic(record_def_id);
+
     // Update the record definition
     if let DefinitionKind::Record(rd) = &mut self.defs.get_mut(&record_def_id).kind {
       rd.type_id = type_id;
@@ -294,8 +313,10 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     en: &ASTEnum,
   ) {
+    // Allocate the definition first so we can use its ID as owner for type params
     let def = Definition {
       kind: DefinitionKind::Enum(EnumDefinition {
+        type_params: Vec::new(),     // Will be populated after binding type params
         type_id: self.types.error(), // Placeholder
         variants: Vec::new(),
         variants_by_name: HashMap::new(),
@@ -312,6 +333,15 @@ impl<'a> Analyzer<'a> {
 
     let def_id = self.defs.alloc(def);
     self.set_def(node_id, &def_id);
+
+    // Bind type params now that we have the owner def_id
+    let type_param_defs = self.bind_type_params(en.type_params.as_ref(), def_id);
+    self.pop_type_params_scope(en.type_params.as_ref());
+
+    // Update the enum definition with type params
+    if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&def_id).kind {
+      ed.type_params = type_param_defs;
+    }
 
     if let Err(existing) = self.scopes.define(&en.name, &def_id) {
       let existing_def = self.defs.get(&existing);
@@ -338,6 +368,9 @@ impl<'a> Analyzer<'a> {
 
     // Create the Type::Enum and update the definition's type_id
     let type_id = self.types.enum_type(enum_def_id);
+
+    // Re-establish generic scope for type params visibility within variants/methods
+    self.push_type_params_scope(enum_def_id);
 
     let mut variants = Vec::new();
     let mut variants_by_name = HashMap::new();
@@ -385,6 +418,9 @@ impl<'a> Analyzer<'a> {
       }
     }
 
+    // Pop the generic scope
+    self.pop_type_params_scope_if_generic(enum_def_id);
+
     // Update the enum definition
     if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
       ed.type_id = type_id;
@@ -402,9 +438,9 @@ impl<'a> Analyzer<'a> {
   fn bind_method(
     &mut self,
     method: &ASTMethod,
-    owner: ignis_type::definition::DefinitionId,
+    owner: DefinitionId,
     is_static: bool,
-  ) -> ignis_type::definition::DefinitionId {
+  ) -> DefinitionId {
     // Create parameter definitions
     let mut param_defs = Vec::new();
     for param in &method.parameters {
@@ -426,6 +462,7 @@ impl<'a> Analyzer<'a> {
     let method_def = Definition {
       kind: DefinitionKind::Method(MethodDefinition {
         owner_type: owner,
+        type_params: Vec::new(), // Will be populated after binding type params
         params: param_defs.clone(),
         return_type: self.types.error(), // Resolved in typeck
         is_static,
@@ -439,6 +476,15 @@ impl<'a> Analyzer<'a> {
 
     let method_def_id = self.defs.alloc(method_def);
 
+    // Bind method's own type params (in addition to owner's type params already in scope)
+    let type_param_defs = self.bind_type_params(method.type_params.as_ref(), method_def_id);
+
+    // Update the method definition with type params
+    if let DefinitionKind::Method(md) = &mut self.defs.get_mut(&method_def_id).kind {
+      md.type_params = type_param_defs;
+    }
+
+    // Push function scope for parameters
     self.scopes.push(ScopeKind::Function);
 
     for param_id in &param_defs {
@@ -448,7 +494,10 @@ impl<'a> Analyzer<'a> {
 
     self.bind_complete(&method.body, ScopeKind::Function);
 
-    self.scopes.pop();
+    self.scopes.pop(); // Pop function scope
+
+    // Pop method's generic scope (does nothing if no type params)
+    self.pop_type_params_scope(method.type_params.as_ref());
 
     method_def_id
   }
@@ -575,7 +624,9 @@ impl<'a> Analyzer<'a> {
       param_defs.push(def_id);
     }
 
+    // Create function definition first (without type params)
     let func_def = FunctionDefinition {
+      type_params: Vec::new(), // Will be populated after binding type params
       params: param_defs.clone(),
       return_type: self.types.error(),
       is_extern,
@@ -595,8 +646,16 @@ impl<'a> Analyzer<'a> {
       owner_namespace: self.current_namespace,
     };
 
-    let def_id = &self.defs.alloc(def);
-    self.set_def(node_id, def_id);
+    let def_id = self.defs.alloc(def);
+    self.set_def(node_id, &def_id);
+
+    // Bind type params now that we have the owner def_id
+    let type_param_defs = self.bind_type_params(func.signature.type_params.as_ref(), def_id);
+
+    // Update the function definition with type params
+    if let DefinitionKind::Function(fd) = &mut self.defs.get_mut(&def_id).kind {
+      fd.type_params = type_param_defs;
+    }
 
     if let Err(existing) = self.scopes.define(&func.signature.name, &def_id) {
       let existing_def = self.defs.get(&existing);
@@ -613,6 +672,8 @@ impl<'a> Analyzer<'a> {
     }
 
     if let Some(body_id) = &func.body {
+      // Note: generic scope is already pushed by bind_type_params if there are type params
+      // We still need the function scope for parameters
       self.scopes.push(ScopeKind::Function);
 
       for param_id in &param_defs {
@@ -635,8 +696,11 @@ impl<'a> Analyzer<'a> {
       }
 
       self.bind_complete(&body_id, ScopeKind::Function);
-      self.scopes.pop();
+      self.scopes.pop(); // Pop function scope
     }
+
+    // Pop the generic scope (does nothing if no type params)
+    self.pop_type_params_scope(func.signature.type_params.as_ref());
   }
 
   fn bind_variable(
@@ -872,5 +936,125 @@ impl<'a> Analyzer<'a> {
 
     self.scopes.pop();
     self.current_namespace = prev_ns;
+  }
+
+  // ========================================================================
+  // Type Parameter Binding
+  // ========================================================================
+
+  /// Binds type parameters for a generic definition.
+  ///
+  /// Creates `DefinitionKind::TypeParam` definitions for each type parameter,
+  /// pushes a `ScopeKind::Generic` scope, and registers the type params in that scope.
+  ///
+  /// Returns the list of type param definition IDs. The caller is responsible
+  /// for popping the generic scope after processing the generic item's body.
+  fn bind_type_params(
+    &mut self,
+    type_params: Option<&ASTGenericParams>,
+    owner: DefinitionId,
+  ) -> Vec<DefinitionId> {
+    let Some(params) = type_params else {
+      return Vec::new();
+    };
+
+    if params.is_empty() {
+      return Vec::new();
+    }
+
+    // Push generic scope for type parameter visibility
+    self.scopes.push(ScopeKind::Generic);
+
+    let mut type_param_defs = Vec::with_capacity(params.len());
+
+    for (index, param) in params.params.iter().enumerate() {
+      let def = Definition {
+        kind: DefinitionKind::TypeParam(TypeParamDefinition {
+          index: index as u32,
+          owner,
+        }),
+        name: param.name,
+        span: param.span.clone(),
+        visibility: Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: self.current_namespace,
+      };
+
+      let def_id = self.defs.alloc(def);
+      type_param_defs.push(def_id);
+
+      // Register in generic scope so `T` resolves to this definition
+      if let Err(existing) = self.scopes.define(&param.name, &def_id) {
+        let existing_def = self.defs.get(&existing);
+        let symbol = self.get_symbol_name(&existing_def.name);
+        self.add_diagnostic(
+          DiagnosticMessage::TypeParamAlreadyDefined {
+            name: symbol,
+            span: param.span.clone(),
+            previous_span: existing_def.span.clone(),
+          }
+          .report(),
+        );
+      }
+    }
+
+    type_param_defs
+  }
+
+  /// Pops the generic scope if type params were bound.
+  /// Call this after processing the body of a generic item.
+  fn pop_type_params_scope(
+    &mut self,
+    type_params: Option<&ASTGenericParams>,
+  ) {
+    if let Some(params) = type_params {
+      if !params.is_empty() {
+        self.scopes.pop();
+      }
+    }
+  }
+
+  /// Pushes a generic scope and registers already-bound type params for an owner definition.
+  /// Used in the complete pass when we need to re-establish the type param scope.
+  fn push_type_params_scope(
+    &mut self,
+    owner_def_id: DefinitionId,
+  ) {
+    let type_params = match &self.defs.get(&owner_def_id).kind {
+      DefinitionKind::Record(rd) => rd.type_params.clone(),
+      DefinitionKind::Enum(ed) => ed.type_params.clone(),
+      DefinitionKind::Function(fd) => fd.type_params.clone(),
+      DefinitionKind::Method(md) => md.type_params.clone(),
+      _ => Vec::new(),
+    };
+
+    if type_params.is_empty() {
+      return;
+    }
+
+    self.scopes.push(ScopeKind::Generic);
+
+    for param_id in &type_params {
+      let name = self.defs.get(param_id).name;
+      let _ = self.scopes.define(&name, param_id);
+    }
+  }
+
+  /// Pops the generic scope if the owner definition has type params.
+  fn pop_type_params_scope_if_generic(
+    &mut self,
+    owner_def_id: DefinitionId,
+  ) {
+    let has_type_params = match &self.defs.get(&owner_def_id).kind {
+      DefinitionKind::Record(rd) => !rd.type_params.is_empty(),
+      DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
+      DefinitionKind::Function(fd) => !fd.type_params.is_empty(),
+      DefinitionKind::Method(md) => !md.type_params.is_empty(),
+      _ => false,
+    };
+
+    if has_type_params {
+      self.scopes.pop();
+    }
   }
 }

@@ -391,6 +391,15 @@ impl<'a> LirPrinter<'a> {
         // TODO: look up enum name from definitions
         format!("enum#{}", def_id.index())
       },
+      Type::Param { owner, index } => {
+        // Type::Param should not reach LIR (Invariant A)
+        format!("T{}@{}", index, owner.index())
+      },
+      Type::Instance { generic, args } => {
+        // Type::Instance should not reach LIR (Invariant D)
+        let arg_strs: Vec<_> = args.iter().map(|a| self.format_type(*a)).collect();
+        format!("{}#{}<{}>", "generic", generic.index(), arg_strs.join(", "))
+      },
     }
   }
 

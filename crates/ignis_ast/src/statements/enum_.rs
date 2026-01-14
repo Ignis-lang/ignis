@@ -1,13 +1,14 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
-use crate::{metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
+use crate::{generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
 
 use super::record::ASTMethod;
 
-/// Enum declaration: `enum Name { variants, methods, fields }`
+/// Enum declaration: `enum Name<T> { variants, methods, fields }`
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTEnum {
   pub name: SymbolId,
+  pub type_params: Option<ASTGenericParams>,
   pub items: Vec<ASTEnumItem>,
   pub span: Span,
 }
@@ -15,10 +16,16 @@ pub struct ASTEnum {
 impl ASTEnum {
   pub fn new(
     name: SymbolId,
+    type_params: Option<ASTGenericParams>,
     items: Vec<ASTEnumItem>,
     span: Span,
   ) -> Self {
-    Self { name, items, span }
+    Self {
+      name,
+      type_params,
+      items,
+      span,
+    }
   }
 }
 

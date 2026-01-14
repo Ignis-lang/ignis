@@ -66,8 +66,8 @@ impl super::IgnisParser {
     }
   }
 
-  /// Parse qualified path
-  /// Example: io::Writer or just Writer
+  /// Parse qualified path with optional type arguments
+  /// Examples: Writer, io::Writer, Vec<i32>, Map<string, i32>, io::Reader<T>
   fn parse_type_path(&mut self) -> ParserResult<IgnisTypeSyntax> {
     let first = self.expect(TokenType::Identifier)?.clone();
     let first_span = first.span.clone();
@@ -80,16 +80,46 @@ impl super::IgnisParser {
       segments.push((self.insert_symbol(&identifier), identifier.span.clone()));
     }
 
-    if segments.len() == 1 {
+    // Parse optional type arguments: <T, U, V>
+    let args = if self.at(TokenType::Less) {
+      self.parse_type_args()?
+    } else {
+      Vec::new()
+    };
+
+    if segments.len() == 1 && args.is_empty() {
       Ok(IgnisTypeSyntax::Named(segments[0].0))
+    } else if segments.len() == 1 {
+      // Simple name with type args: Vec<i32>
+      Ok(IgnisTypeSyntax::Applied {
+        base: Box::new(IgnisTypeSyntax::Named(segments[0].0)),
+        args,
+      })
     } else {
       let span = ignis_type::span::Span::merge(&first_span, &end_span);
-      Ok(IgnisTypeSyntax::Path {
-        segments,
-        args: Vec::new(),
-        span,
-      })
+      Ok(IgnisTypeSyntax::Path { segments, args, span })
     }
+  }
+
+  /// Parse type arguments: <T, U, V>
+  fn parse_type_args(&mut self) -> ParserResult<Vec<IgnisTypeSyntax>> {
+    self.expect(TokenType::Less)?;
+    let mut args = Vec::new();
+
+    // Parse first type argument (required if < was consumed)
+    args.push(self.parse_type_syntax()?);
+
+    // Parse remaining type arguments
+    while self.eat(TokenType::Comma) {
+      // Allow trailing comma
+      if self.at(TokenType::Greater) {
+        break;
+      }
+      args.push(self.parse_type_syntax()?);
+    }
+
+    self.expect(TokenType::Greater)?;
+    Ok(args)
   }
 
   /// Parse vector suffix: T[size?]
@@ -357,6 +387,210 @@ mod tests {
         assert_eq!(segments.len(), 2);
       },
       other => panic!("expected path type, got {:?}", other),
+    }
+  }
+
+  // =========================================================================
+  // GENERIC TYPE SYNTAX TESTS
+  // =========================================================================
+
+  #[test]
+  fn parses_applied_type_single_arg() {
+    // Box<i32> is a user-defined generic record, not built-in
+    let ty = parse_type("Box<i32>");
+    match ty {
+      IgnisTypeSyntax::Applied { args, .. } => {
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], IgnisTypeSyntax::I32);
+      },
+      other => panic!("expected applied type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_applied_type_multiple_args() {
+    // Map<K, V> is a user-defined generic record
+    let ty = parse_type("Map<string, i32>");
+    match ty {
+      IgnisTypeSyntax::Applied { args, .. } => {
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], IgnisTypeSyntax::String);
+        assert_eq!(args[1], IgnisTypeSyntax::I32);
+      },
+      other => panic!("expected applied type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_applied_type_with_pointer_arg() {
+    let ty = parse_type("Box<*i32>");
+    match ty {
+      IgnisTypeSyntax::Applied { args, .. } => {
+        assert_eq!(args.len(), 1);
+        match &args[0] {
+          IgnisTypeSyntax::Pointer(inner) => {
+            assert_eq!(**inner, IgnisTypeSyntax::I32);
+          },
+          other => panic!("expected pointer, got {:?}", other),
+        }
+      },
+      other => panic!("expected applied type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_applied_type_with_reference_arg() {
+    let ty = parse_type("Container<&mut i32>");
+    match ty {
+      IgnisTypeSyntax::Applied { args, .. } => {
+        assert_eq!(args.len(), 1);
+        match &args[0] {
+          IgnisTypeSyntax::Reference { mutable, .. } => {
+            assert!(*mutable);
+          },
+          other => panic!("expected reference, got {:?}", other),
+        }
+      },
+      other => panic!("expected applied type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_path_type_with_args() {
+    let ty = parse_type("io::Reader<i32>");
+    match ty {
+      IgnisTypeSyntax::Path { segments, args, .. } => {
+        assert_eq!(segments.len(), 2);
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], IgnisTypeSyntax::I32);
+      },
+      other => panic!("expected path type with args, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_applied_type_trailing_comma() {
+    let ty = parse_type("Box<i32,>");
+    match ty {
+      IgnisTypeSyntax::Applied { args, .. } => {
+        assert_eq!(args.len(), 1);
+      },
+      other => panic!("expected applied type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_named_type_param() {
+    // T without arguments is just Named (a type parameter)
+    let ty = parse_type("T");
+    match ty {
+      IgnisTypeSyntax::Named(_) => {},
+      other => panic!("expected named type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pointer_to_applied_type() {
+    let ty = parse_type("*Box<i32>");
+    match ty {
+      IgnisTypeSyntax::Pointer(inner) => match *inner {
+        IgnisTypeSyntax::Applied { args, .. } => {
+          assert_eq!(args.len(), 1);
+        },
+        other => panic!("expected applied type inside pointer, got {:?}", other),
+      },
+      other => panic!("expected pointer, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_reference_to_applied_type() {
+    let ty = parse_type("&Box<i32>");
+    match ty {
+      IgnisTypeSyntax::Reference { inner, mutable } => {
+        assert!(!mutable);
+        match *inner {
+          IgnisTypeSyntax::Applied { args, .. } => {
+            assert_eq!(args.len(), 1);
+          },
+          other => panic!("expected applied type inside reference, got {:?}", other),
+        }
+      },
+      other => panic!("expected reference, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_vector_of_applied_type() {
+    // Box<i32>[] is an array of Box<i32>
+    let ty = parse_type("Box<i32>[]");
+    match ty {
+      IgnisTypeSyntax::Vector(inner, size) => {
+        assert!(size.is_none());
+        match *inner {
+          IgnisTypeSyntax::Applied { args, .. } => {
+            assert_eq!(args.len(), 1);
+          },
+          other => panic!("expected applied type inside vector, got {:?}", other),
+        }
+      },
+      other => panic!("expected vector, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_function_type_with_generic_param() {
+    let ty = parse_type("(Box<i32>) -> boolean");
+    match ty {
+      IgnisTypeSyntax::Callable(params, ret) => {
+        assert_eq!(params.len(), 1);
+        match &params[0] {
+          IgnisTypeSyntax::Applied { args, .. } => {
+            assert_eq!(args.len(), 1);
+          },
+          other => panic!("expected applied type, got {:?}", other),
+        }
+        assert_eq!(*ret, IgnisTypeSyntax::Boolean);
+      },
+      other => panic!("expected callable, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_applied_type_with_array_arg() {
+    // Container<i32[]> - generic with array type argument
+    let ty = parse_type("Container<i32[]>");
+    match ty {
+      IgnisTypeSyntax::Applied { args, .. } => {
+        assert_eq!(args.len(), 1);
+        match &args[0] {
+          IgnisTypeSyntax::Vector(inner, size) => {
+            assert_eq!(**inner, IgnisTypeSyntax::I32);
+            assert!(size.is_none());
+          },
+          other => panic!("expected vector, got {:?}", other),
+        }
+      },
+      other => panic!("expected applied type, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_applied_type_with_sized_array_arg() {
+    // Container<i32[10]> - generic with fixed-size array
+    let ty = parse_type("Container<i32[10]>");
+    match ty {
+      IgnisTypeSyntax::Applied { args, .. } => {
+        assert_eq!(args.len(), 1);
+        match &args[0] {
+          IgnisTypeSyntax::Vector(inner, size) => {
+            assert_eq!(**inner, IgnisTypeSyntax::I32);
+            assert_eq!(*size, Some(10));
+          },
+          other => panic!("expected vector, got {:?}", other),
+        }
+      },
+      other => panic!("expected applied type, got {:?}", other),
     }
   }
 }

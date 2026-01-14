@@ -56,11 +56,17 @@ impl<'a> CEmitter<'a> {
 
   /// Emit forward declarations for all record and enum types.
   /// This allows structs to reference each other (e.g., for recursive types).
+  /// Skips generic definitions (those with non-empty type_params) since they
+  /// are only templates - concrete instantiations are emitted instead.
   fn emit_type_forward_declarations(&mut self) {
     let mut type_defs: Vec<_> = self
       .defs
       .iter()
-      .filter(|(_, def)| matches!(def.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_)))
+      .filter(|(_, def)| match &def.kind {
+        DefinitionKind::Record(rd) => rd.type_params.is_empty(),
+        DefinitionKind::Enum(ed) => ed.type_params.is_empty(),
+        _ => false,
+      })
       .collect();
 
     if type_defs.is_empty() {
@@ -78,11 +84,17 @@ impl<'a> CEmitter<'a> {
   }
 
   /// Emit struct definitions for all record and enum types.
+  /// Skips generic definitions (those with non-empty type_params) since they
+  /// are only templates - concrete instantiations are emitted instead.
   fn emit_type_definitions(&mut self) {
     let mut type_defs: Vec<_> = self
       .defs
       .iter()
-      .filter(|(_, def)| matches!(def.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_)))
+      .filter(|(_, def)| match &def.kind {
+        DefinitionKind::Record(rd) => rd.type_params.is_empty(),
+        DefinitionKind::Enum(ed) => ed.type_params.is_empty(),
+        _ => false,
+      })
       .collect();
 
     if type_defs.is_empty() {
@@ -94,8 +106,18 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output, "// Type definitions").unwrap();
     for (def_id, def) in type_defs {
       match &def.kind {
-        DefinitionKind::Record(rd) => self.emit_record_definition(def_id, rd),
-        DefinitionKind::Enum(ed) => self.emit_enum_definition(def_id, ed),
+        DefinitionKind::Record(rd) => {
+          // Skip generic records - they should have been monomorphized
+          if rd.type_params.is_empty() {
+            self.emit_record_definition(def_id, rd);
+          }
+        },
+        DefinitionKind::Enum(ed) => {
+          // Skip generic enums - they should have been monomorphized
+          if ed.type_params.is_empty() {
+            self.emit_enum_definition(def_id, ed);
+          }
+        },
         _ => {},
       }
     }
@@ -599,9 +621,19 @@ impl<'a> CEmitter<'a> {
         ..
       } => {
         let b = self.format_operand(func, base);
-        // In C, we access record field via pointer: &(base->field_N) or &(base.field_N)
-        // Since base could be a value or pointer, use -> for pointer semantics
-        writeln!(self.output, "t{} = &(({}).field_{});", dest.index(), b, field_index).unwrap();
+        // Check if base is a pointer type
+        let is_pointer = if let Some(base_ty) = self.operand_type(func, base) {
+          matches!(self.types.get(&base_ty), Type::Pointer(_) | Type::Reference { .. })
+        } else {
+          false
+        };
+
+        // Use -> for pointers, . for values
+        if is_pointer {
+          writeln!(self.output, "t{} = &(({})->field_{});", dest.index(), b, field_index).unwrap();
+        } else {
+          writeln!(self.output, "t{} = &(({}).field_{});", dest.index(), b, field_index).unwrap();
+        }
       },
       Instr::InitRecord { dest_ptr, fields, .. } => {
         let p = self.format_operand(func, dest_ptr);
@@ -877,14 +909,22 @@ impl<'a> CEmitter<'a> {
       Type::Tuple(_) => "/* tuple */ void*".to_string(),
       Type::Function { .. } => "/* fn */ void*".to_string(),
       Type::Record(def_id) => {
-        let def = self.defs.get(def_id);
-        let name = self.symbols.get(&def.name);
+        // Use build_mangled_name for consistency with type_struct_name
+        let name = self.build_mangled_name(*def_id);
         format!("struct {}", name)
       },
       Type::Enum(def_id) => {
-        let def = self.defs.get(def_id);
-        let name = self.symbols.get(&def.name);
+        // Use build_mangled_name for consistency with type_struct_name
+        let name = self.build_mangled_name(*def_id);
         format!("struct {}", name)
+      },
+      Type::Param { .. } => {
+        // Type::Param should never reach codegen (Invariant A)
+        panic!("ICE: Type::Param reached C codegen - monomorphization failed")
+      },
+      Type::Instance { .. } => {
+        // Type::Instance should never reach codegen (Invariant D)
+        panic!("ICE: Type::Instance reached C codegen - monomorphization failed")
       },
     }
   }
@@ -935,10 +975,18 @@ impl<'a> CEmitter<'a> {
     // For methods and static fields, include owner type in mangled name to avoid collisions.
     // e.g., User.getName() -> User_getName, Admin.getName() -> Admin_getName
     // e.g., Config::MAX_SIZE -> Config_MAX__SIZE
+    // For monomorphized methods, the name already includes the owner type (e.g., Box__i32__get),
+    // so we don't add the owner prefix to avoid duplication (e.g., Box__i32_Box__i32__get)
     let owner_type_prefix = match &def.kind {
       DefinitionKind::Method(md) => {
         let owner_def = self.defs.get(&md.owner_type);
-        Some(Self::escape_ident(self.symbols.get(&owner_def.name)))
+        let owner_name = self.symbols.get(&owner_def.name).to_string();
+        // Check if the method name already starts with the owner name (monomorphized method)
+        if raw_name.starts_with(&owner_name) {
+          None
+        } else {
+          Some(Self::escape_ident(&owner_name))
+        }
       },
       DefinitionKind::Constant(cd) => cd.owner_type.as_ref().map(|owner_id| {
         let owner_def = self.defs.get(owner_id);
@@ -1026,6 +1074,14 @@ pub fn format_c_type(
     Type::Enum(_) => {
       // TODO: emit proper tagged union name (requires DefinitionStore)
       "void*".to_string()
+    },
+    Type::Param { .. } => {
+      // Type::Param should never reach codegen (Invariant A)
+      panic!("ICE: Type::Param reached C codegen - monomorphization failed")
+    },
+    Type::Instance { .. } => {
+      // Type::Instance should never reach codegen (Invariant D)
+      panic!("ICE: Type::Instance reached C codegen - monomorphization failed")
     },
   }
 }

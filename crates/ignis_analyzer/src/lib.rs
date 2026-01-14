@@ -20,6 +20,7 @@ pub mod dump;
 pub mod imports;
 mod lowering;
 pub mod modules;
+pub mod mono;
 pub mod ownership_hir;
 mod resolver;
 mod scope;
@@ -480,6 +481,7 @@ impl<'a> Analyzer<'a> {
 
     let def = Definition {
       kind: DefinitionKind::Function(FunctionDefinition {
+        type_params: Vec::new(),
         params: param_defs,
         return_type,
         is_extern: true,

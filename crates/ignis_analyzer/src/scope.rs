@@ -13,6 +13,9 @@ pub enum ScopeKind {
   Block,
   Loop,
   Namespace(NamespaceId),
+  /// Scope for type parameters in generic functions/records/enums/methods.
+  /// Type parameter names (T, U, etc.) are visible within this scope.
+  Generic,
 }
 
 #[derive(Debug, Clone)]

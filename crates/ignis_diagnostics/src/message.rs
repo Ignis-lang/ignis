@@ -89,6 +89,9 @@ pub enum DiagnosticMessage {
     at: Span,
   },
   InvalidProperty(Span),
+  ExpectedCallAfterTypeArgs {
+    span: Span,
+  },
   // #endregion Parser
   // #region Analyzer
   UndeclaredVariable {
@@ -116,6 +119,30 @@ pub enum DiagnosticMessage {
   },
   UndefinedType {
     name: String,
+    span: Span,
+  },
+  // Generic type errors
+  WrongNumberOfTypeArgs {
+    expected: usize,
+    got: usize,
+    type_name: String,
+    span: Span,
+  },
+  TypeParamCannotHaveArgs {
+    name: String,
+    span: Span,
+  },
+  TypeAliasCannotHaveArgs {
+    name: String,
+    span: Span,
+  },
+  TypeCannotBeParameterized {
+    type_name: String,
+    span: Span,
+  },
+  CannotInferTypeParam {
+    param_name: String,
+    func_name: String,
     span: Span,
   },
   // Record/Enum Type Errors
@@ -269,6 +296,11 @@ pub enum DiagnosticMessage {
   },
   // Binder errors
   ParameterAlreadyDefined {
+    name: String,
+    span: Span,
+    previous_span: Span,
+  },
+  TypeParamAlreadyDefined {
     name: String,
     span: Span,
     previous_span: Span,
@@ -474,6 +506,9 @@ impl fmt::Display for DiagnosticMessage {
         write!(f, "Type mismatch. Expected '{}', but got '{}'", expected, got)
       },
       DiagnosticMessage::InvalidProperty(_) => write!(f, "Invalid property"),
+      DiagnosticMessage::ExpectedCallAfterTypeArgs { .. } => {
+        write!(f, "Expected '(' after type arguments")
+      },
 
       // Analyzer
       DiagnosticMessage::UndeclaredVariable { name, .. } => write!(f, "Undeclared variable '{}'", name),
@@ -482,6 +517,38 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::TypeAlreadyDefined { name, .. } => write!(f, "Type '{}' is already defined", name),
       DiagnosticMessage::TypeAliasCycle { name, .. } => write!(f, "Type alias '{}' creates a cycle", name),
       DiagnosticMessage::UndefinedType { name, .. } => write!(f, "Undefined type '{}'", name),
+
+      // Generic type errors
+      DiagnosticMessage::WrongNumberOfTypeArgs {
+        expected,
+        got,
+        type_name,
+        ..
+      } => {
+        write!(
+          f,
+          "Wrong number of type arguments for '{}': expected {}, got {}",
+          type_name, expected, got
+        )
+      },
+      DiagnosticMessage::TypeParamCannotHaveArgs { name, .. } => {
+        write!(f, "Type parameter '{}' cannot have type arguments", name)
+      },
+      DiagnosticMessage::TypeAliasCannotHaveArgs { name, .. } => {
+        write!(f, "Type alias '{}' cannot have type arguments", name)
+      },
+      DiagnosticMessage::TypeCannotBeParameterized { type_name, .. } => {
+        write!(f, "Type '{}' cannot be parameterized", type_name)
+      },
+      DiagnosticMessage::CannotInferTypeParam {
+        param_name, func_name, ..
+      } => {
+        write!(
+          f,
+          "Cannot infer type parameter '{}' for '{}'; specify it explicitly",
+          param_name, func_name
+        )
+      },
 
       // Record/Enum Type Errors
       DiagnosticMessage::FieldNotFound { field, type_name, .. } => {
@@ -620,6 +687,9 @@ impl fmt::Display for DiagnosticMessage {
       // Binder errors
       DiagnosticMessage::ParameterAlreadyDefined { name, .. } => {
         write!(f, "Parameter '{}' is already defined", name)
+      },
+      DiagnosticMessage::TypeParamAlreadyDefined { name, .. } => {
+        write!(f, "Type parameter '{}' is already defined", name)
       },
       DiagnosticMessage::ConstantAlreadyDefined { name, .. } => {
         write!(f, "Constant '{}' is already defined", name)
@@ -813,7 +883,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::MissingArgument(at)
       | DiagnosticMessage::InvalidArgumentType { at, .. }
       | DiagnosticMessage::TypeMismatch { at, .. }
-      | DiagnosticMessage::InvalidProperty(at) => at.clone(),
+      | DiagnosticMessage::InvalidProperty(at)
+      | DiagnosticMessage::ExpectedCallAfterTypeArgs { span: at } => at.clone(),
 
       DiagnosticMessage::UndeclaredVariable { span, .. }
       | DiagnosticMessage::VariableAlreadyDefined { span, .. }
@@ -821,6 +892,11 @@ impl DiagnosticMessage {
       | DiagnosticMessage::TypeAlreadyDefined { span, .. }
       | DiagnosticMessage::TypeAliasCycle { span, .. }
       | DiagnosticMessage::UndefinedType { span, .. }
+      | DiagnosticMessage::WrongNumberOfTypeArgs { span, .. }
+      | DiagnosticMessage::TypeParamCannotHaveArgs { span, .. }
+      | DiagnosticMessage::TypeAliasCannotHaveArgs { span, .. }
+      | DiagnosticMessage::TypeCannotBeParameterized { span, .. }
+      | DiagnosticMessage::CannotInferTypeParam { span, .. }
       | DiagnosticMessage::FieldNotFound { span, .. }
       | DiagnosticMessage::MethodMustBeCalled { span, .. }
       | DiagnosticMessage::DotAccessOnEnum { span, .. }
@@ -855,6 +931,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::ReturnTypeMismatch { span, .. }
       | DiagnosticMessage::MissingReturnValue { span, .. }
       | DiagnosticMessage::ParameterAlreadyDefined { span, .. }
+      | DiagnosticMessage::TypeParamAlreadyDefined { span, .. }
       | DiagnosticMessage::ConstantAlreadyDefined { span, .. }
       | DiagnosticMessage::UndeclaredIdentifier { span, .. }
       | DiagnosticMessage::FunctionPathNotAsCallee { span, .. }
@@ -934,6 +1011,11 @@ impl DiagnosticMessage {
       DiagnosticMessage::TypeAlreadyDefined { .. } => "A0052",
       DiagnosticMessage::TypeAliasCycle { .. } => "A0066",
       DiagnosticMessage::UndefinedType { .. } => "I0043",
+      DiagnosticMessage::WrongNumberOfTypeArgs { .. } => "A0070",
+      DiagnosticMessage::TypeParamCannotHaveArgs { .. } => "A0071",
+      DiagnosticMessage::TypeAliasCannotHaveArgs { .. } => "A0072",
+      DiagnosticMessage::TypeCannotBeParameterized { .. } => "A0073",
+      DiagnosticMessage::CannotInferTypeParam { .. } => "A0074",
       DiagnosticMessage::FieldNotFound { .. } => "A0054",
       DiagnosticMessage::MethodMustBeCalled { .. } => "A0061",
       DiagnosticMessage::DotAccessOnEnum { .. } => "A0060",
@@ -972,6 +1054,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ReturnTypeMismatch { .. } => "A0031",
       DiagnosticMessage::MissingReturnValue { .. } => "A0032",
       DiagnosticMessage::ParameterAlreadyDefined { .. } => "A0033",
+      DiagnosticMessage::TypeParamAlreadyDefined { .. } => "A0069",
       DiagnosticMessage::ConstantAlreadyDefined { .. } => "A0034",
       DiagnosticMessage::UndeclaredIdentifier { .. } => "A0035",
       DiagnosticMessage::FunctionPathNotAsCallee { .. } => "A0050",
@@ -1006,6 +1089,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ForOfExpectsVector { .. } => "A0069",
       DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",
+      DiagnosticMessage::ExpectedCallAfterTypeArgs { .. } => "I0048",
     }
     .to_string()
   }
@@ -1027,6 +1111,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::FunctionAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::TypeAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::ParameterAlreadyDefined { previous_span, .. }
+      | DiagnosticMessage::TypeParamAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::ConstantAlreadyDefined { previous_span, .. }
       | DiagnosticMessage::ImportShadowsLocal { previous_span, .. } => {
         vec![(previous_span.clone(), "Previous definition here".to_string())]

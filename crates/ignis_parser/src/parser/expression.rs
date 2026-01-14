@@ -31,6 +31,23 @@ impl IgnisParser {
     let mut left: NodeId = self.parse_prefix()?;
 
     loop {
+      // Handle calls with optional type arguments: foo<T, U>(args) or foo(args)
+      // Check for < only after identifiers/paths (not after literals)
+      if self.at(TokenType::Less) && !self.is_literal(&left) && self.looks_like_type_args() {
+        // This is a generic call: foo<i32>(x)
+        let type_args = self.parse_optional_type_args()?;
+        // Now expect the call
+        if self.at(TokenType::LeftParen) {
+          left = self.parse_call_with_type_args(left, type_args)?;
+          continue;
+        } else {
+          // Error: type args without call - could recover or error
+          return Err(DiagnosticMessage::ExpectedCallAfterTypeArgs {
+            span: self.peek().span.clone(),
+          });
+        }
+      }
+
       if self.at(TokenType::LeftParen) {
         if self.is_literal(&left) {
           let right = self.parse_prefix()?;
@@ -43,7 +60,7 @@ impl IgnisParser {
           )));
           continue;
         } else {
-          left = self.parse_call(left)?;
+          left = self.parse_call_with_type_args(left, None)?;
           continue;
         }
       }
@@ -100,9 +117,162 @@ impl IgnisParser {
     Ok(left)
   }
 
-  fn parse_call(
+  /// Heuristic to determine if `<` starts type arguments for record init or enum variant.
+  ///
+  /// We look ahead to see if the pattern matches: `< type (, type)* > {` or `< type (, type)* > ::`
+  /// This handles: `Box<i32> { ... }` and `Option<i32>::Some(...)`
+  fn looks_like_type_args_for_init(&self) -> bool {
+    // We're at '<'
+    // Look for pattern: < ... > { or < ... > ::
+    let mut depth = 1;
+    let mut i = 1;
+
+    loop {
+      let tok = self.peek_nth(i).type_;
+
+      match tok {
+        TokenType::Less => depth += 1,
+        TokenType::Greater => {
+          depth -= 1;
+          if depth == 0 {
+            // Found matching >, check if followed by { or ::
+            let next = self.peek_nth(i + 1).type_;
+            return next == TokenType::LeftBrace || next == TokenType::DoubleColon;
+          }
+        },
+        // These can appear in type arguments
+        TokenType::Identifier
+        | TokenType::Comma
+        | TokenType::Ampersand
+        | TokenType::Asterisk
+        | TokenType::Mut
+        | TokenType::DoubleColon
+        | TokenType::LeftBrack
+        | TokenType::RightBrack
+        | TokenType::Int
+        | TokenType::Arrow
+        | TokenType::LeftParen
+        | TokenType::RightParen => {},
+        // Primitive types
+        TokenType::Int8Type
+        | TokenType::Int16Type
+        | TokenType::Int32Type
+        | TokenType::Int64Type
+        | TokenType::UnsignedInt8Type
+        | TokenType::UnsignedInt16Type
+        | TokenType::UnsignedInt32Type
+        | TokenType::UnsignedInt64Type
+        | TokenType::Float32Type
+        | TokenType::Float64Type
+        | TokenType::BooleanType
+        | TokenType::StringType
+        | TokenType::CharType
+        | TokenType::Void => {},
+        // If we hit these, it's likely a comparison not type args
+        TokenType::Eof | TokenType::SemiColon | TokenType::RightBrace => return false,
+        // Operators that wouldn't appear in type args suggest comparison
+        TokenType::Plus
+        | TokenType::Minus
+        | TokenType::Slash
+        | TokenType::Mod
+        | TokenType::EqualEqual
+        | TokenType::BangEqual
+        | TokenType::LessEqual
+        | TokenType::GreaterEqual
+        | TokenType::And
+        | TokenType::Or
+        | TokenType::Equal => return false,
+        _ => {},
+      }
+
+      i += 1;
+      if i > 50 {
+        return false;
+      }
+    }
+  }
+
+  /// Heuristic to determine if `<` starts type arguments rather than a comparison.
+  ///
+  /// We look ahead to see if the pattern matches: `< type (, type)* > (`
+  /// This is a simplification - we check if after < we have identifier/primitive
+  /// followed eventually by > and (.
+  fn looks_like_type_args(&self) -> bool {
+    // We're at '<'
+    // Look for pattern: < ... > (
+    // Simple heuristic: scan for balanced <> and check if followed by (
+    let mut depth = 1;
+    let mut i = 1; // start after <
+
+    loop {
+      let tok = self.peek_nth(i).type_;
+
+      match tok {
+        TokenType::Less => depth += 1,
+        TokenType::Greater => {
+          depth -= 1;
+          if depth == 0 {
+            // Found matching >, check if followed by (
+            return self.peek_nth(i + 1).type_ == TokenType::LeftParen;
+          }
+        },
+        // These can appear in type arguments
+        TokenType::Identifier
+        | TokenType::Comma
+        | TokenType::Ampersand
+        | TokenType::Asterisk
+        | TokenType::Mut
+        | TokenType::DoubleColon
+        | TokenType::LeftBrack
+        | TokenType::RightBrack
+        | TokenType::Int
+        | TokenType::Arrow
+        | TokenType::LeftParen
+        | TokenType::RightParen => {},
+        // Primitive types
+        TokenType::Int8Type
+        | TokenType::Int16Type
+        | TokenType::Int32Type
+        | TokenType::Int64Type
+        | TokenType::UnsignedInt8Type
+        | TokenType::UnsignedInt16Type
+        | TokenType::UnsignedInt32Type
+        | TokenType::UnsignedInt64Type
+        | TokenType::Float32Type
+        | TokenType::Float64Type
+        | TokenType::BooleanType
+        | TokenType::StringType
+        | TokenType::CharType
+        | TokenType::Void => {},
+        // If we hit these, it's likely a comparison not type args
+        TokenType::Eof | TokenType::SemiColon | TokenType::RightBrace => return false,
+        // Operators that wouldn't appear in type args suggest comparison
+        TokenType::Plus
+        | TokenType::Minus
+        | TokenType::Slash
+        | TokenType::Mod
+        | TokenType::EqualEqual
+        | TokenType::BangEqual
+        | TokenType::LessEqual
+        | TokenType::GreaterEqual
+        | TokenType::And
+        | TokenType::Or
+        | TokenType::Equal => return false,
+        _ => {},
+      }
+
+      i += 1;
+      if i > 50 {
+        // Safety limit to avoid infinite scanning
+        return false;
+      }
+    }
+  }
+
+  fn parse_call_with_type_args(
     &mut self,
     callee: NodeId,
+    type_args: Option<Vec<ignis_ast::type_::IgnisTypeSyntax>>,
   ) -> ParserResult<NodeId> {
     let _ = self.expect(TokenType::LeftParen)?;
     let arguments = self.parse_arguments()?;
@@ -110,7 +280,7 @@ impl IgnisParser {
     let callee_span = self.get_span(&callee);
     let span = Span::merge(callee_span, &right_paren.span);
 
-    Ok(self.allocate_expression(ASTExpression::Call(ASTCallExpression::new(callee, span, arguments))))
+    Ok(self.allocate_expression(ASTExpression::Call(ASTCallExpression::new(callee, type_args, span, arguments))))
   }
 
   fn parse_arguments(&mut self) -> ParserResult<Vec<NodeId>> {
@@ -183,9 +353,19 @@ impl IgnisParser {
           segments.push((self.insert_symbol(&ident), ident.span.clone()));
         }
 
+        // Check for generic record init: Type<Args> { field: value, ... }
+        if self.at(TokenType::Less) && self.looks_like_type_args_for_init() {
+          let type_args = self.parse_optional_type_args()?;
+          if self.lookahead_record_init() {
+            return self.parse_record_init(segments, type_args);
+          }
+          // Could be Type<Args>::Variant - continue as path and let :: handling proceed
+          // For now, if no { follows, fall through to path handling
+        }
+
         // Check for record init: Type { field: value, ... }
         if self.lookahead_record_init() {
-          return self.parse_record_init(segments);
+          return self.parse_record_init(segments, None);
         }
 
         if segments.len() == 1 {
@@ -330,10 +510,11 @@ impl IgnisParser {
     self.peek_nth(2).type_ == TokenType::Colon
   }
 
-  /// Parse record init expression: Type { field: value, ... }
+  /// Parse record init expression: Type { field: value, ... } or Type<Args> { field: value, ... }
   fn parse_record_init(
     &mut self,
     path: Vec<(SymbolId, Span)>,
+    type_args: Option<Vec<ignis_ast::type_::IgnisTypeSyntax>>,
   ) -> ParserResult<NodeId> {
     let start = path
       .first()
@@ -360,7 +541,7 @@ impl IgnisParser {
     let end = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&start, &end.span);
 
-    Ok(self.allocate_expression(ASTExpression::RecordInit(ASTRecordInit::new(path, fields, span))))
+    Ok(self.allocate_expression(ASTExpression::RecordInit(ASTRecordInit::new(path, type_args, fields, span))))
   }
 }
 
@@ -884,6 +1065,204 @@ mod tests {
           },
           other => panic!("expected path as callee, got {:?}", other),
         }
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  // =========================================================================
+  // GENERIC CALL EXPRESSION TESTS
+  // =========================================================================
+
+  #[test]
+  fn parses_generic_call_single_type_arg() {
+    let result = parse_expr("identity<i32>(42)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+        assert_eq!(call.arguments.len(), 1);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_multiple_type_args() {
+    let result = parse_expr("map<i32, bool>(x, f)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 2);
+        assert_eq!(call.arguments.len(), 2);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_with_pointer_type_arg() {
+    let result = parse_expr("create<*i32>()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_with_reference_type_arg() {
+    let result = parse_expr("process<&mut i32>(x)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_with_function_type_arg() {
+    let result = parse_expr("transform<(i32) -> bool>(x, f)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_non_generic_call_has_no_type_args() {
+    let result = parse_expr("foo(1, 2)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        assert!(call.type_args.is_none());
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_comparison_not_as_type_args() {
+    // a < b should parse as comparison, not type args (b is followed by semicolon, not >)
+    let result = parse_expr("a < b");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => {
+        assert_eq!(bin.operator, ASTBinaryOperator::LessThan);
+      },
+      other => panic!("expected binary comparison, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_less_than_comparison_with_literal() {
+    // 1 < 2 should be comparison, not type args
+    let result = parse_expr("1 < 2");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => {
+        assert_eq!(bin.operator, ASTBinaryOperator::LessThan);
+      },
+      other => panic!("expected binary comparison, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_comparison_chain_not_as_type_args() {
+    // a < b should still be a comparison
+    let result = parse_expr("a < b");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Binary(bin) => {
+        assert_eq!(bin.operator, ASTBinaryOperator::LessThan);
+      },
+      other => panic!("expected binary comparison, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_on_path() {
+    let result = parse_expr("Container::new<i32>()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+
+        let callee = result.nodes.get(&call.callee);
+        match callee {
+          ASTNode::Expression(ASTExpression::Path(path)) => {
+            assert_eq!(path.segments.len(), 2);
+          },
+          other => panic!("expected path as callee, got {:?}", other),
+        }
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_with_trailing_comma() {
+    let result = parse_expr("foo<i32,>(x)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_with_nested_generic_type() {
+    // Note: nested generics like Box<Box<i32>> would require >> splitting in the lexer
+    // For now, we test with a single level of nesting that doesn't produce >>
+    let result = parse_expr("process<*Box>(x)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_with_array_type_arg() {
+    // Ignis uses T[10] syntax for fixed arrays, not [T; 10]
+    let result = parse_expr("foo<i32[10]>(arr)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
       },
       other => panic!("expected call, got {:?}", other),
     }
