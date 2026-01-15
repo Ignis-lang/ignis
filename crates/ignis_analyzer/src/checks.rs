@@ -92,6 +92,22 @@ impl<'a> Analyzer<'a> {
             }
           }
 
+          let mut pushed_generic = false;
+
+          if let Some(def_id) = &def_id {
+            if let ignis_type::definition::DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind {
+              if !func_def.type_params.is_empty() {
+                self.scopes.push(ScopeKind::Generic);
+                pushed_generic = true;
+
+                for param_id in &func_def.type_params {
+                  let name = self.defs.get(param_id).name;
+                  let _ = self.scopes.define(&name, param_id, false);
+                }
+              }
+            }
+          }
+
           self.scopes.push(ScopeKind::Function);
           if let Some(def_id) = &def_id {
             self.define_function_params_in_scope(def_id);
@@ -99,6 +115,10 @@ impl<'a> Analyzer<'a> {
 
           self.extra_checks_node(body_id, ScopeKind::Function, false, true);
           self.scopes.pop();
+
+          if pushed_generic {
+            self.scopes.pop();
+          }
         }
       },
       ASTStatement::Variable(var) => {

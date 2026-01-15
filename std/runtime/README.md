@@ -61,13 +61,19 @@ Wrappers used by `std/memory/mod.ign`.
   - `bufLen`, `bufCap`, `bufResize`, `bufReserve`, `bufClear`, `bufDrop`
 
 ### `std/runtime/number/number.h` and `std/runtime/number/number.c`
-Number-to-string helpers that return heap-allocated `string`.
+Numeric helpers and conversions used by `std/number` and `std/string`.
 
-- Integers: `i8ToString`, `i16ToString`, `i32ToString`, `i64ToString`
-- Unsigned: `u8ToString`, `u16ToString`, `u32ToString`, `u64ToString`
-- Floats: `f32ToString`, `f64ToString`
-- Boolean: `booleanToString`
+- Absolute value: `i8Abs`, `i16Abs`, `i32Abs`, `i64Abs`, `f32Abs`, `f64Abs`
+- Rounding: `f32Floor`, `f64Floor`, `f32Ceil`, `f64Ceil`, `f32Round`, `f64Round`
+- Fixed decimals: `f32ToFixed`, `f64ToFixed`
+- Integers to string: `i8ToString`, `i16ToString`, `i32ToString`, `i64ToString`
+- Unsigned to string: `u8ToString`, `u16ToString`, `u32ToString`, `u64ToString`
+- Floats to string: `f32ToString`, `f64ToString`
+- Boolean to string: `booleanToString`
 - Utility: `stringEmpty`
+
+All string conversion helpers return heap-allocated `string` and must be
+released with `ignis_string_drop`.
 
 ### `std/runtime/string/string.h` and `std/runtime/string/string.c`
 String operations built on `IgnisString`.

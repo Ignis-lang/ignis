@@ -1733,6 +1733,11 @@ impl<'a> Analyzer<'a> {
     };
 
     let mut arg_types_for_resolution: Option<Vec<TypeId>> = None;
+    let callee_is_name = matches!(
+      self.ast.get(&call.callee),
+      ASTNode::Expression(ASTExpression::Variable(_)) | ASTNode::Expression(ASTExpression::Path(_))
+    );
+    let callee_unresolved = callee_is_name && callee_entry.is_none();
 
     let resolved_def_id = match callee_entry.as_ref() {
       Some(SymbolEntry::Overload(candidates)) if candidates.len() > 1 => {
@@ -1806,6 +1811,10 @@ impl<'a> Analyzer<'a> {
             return self.types.error();
           }
         }
+      }
+
+      if callee_unresolved {
+        return self.types.error();
       }
 
       let type_name = if let Some(def_id) = &resolved_def_id {
@@ -2960,6 +2969,12 @@ impl<'a> Analyzer<'a> {
         .report(),
       );
       return self.types.error();
+    }
+
+    if let Some(def_id) = self.resolve_type_expression(&call.arguments[0], scope_kind, ctx) {
+      if matches!(self.defs.get(&def_id).kind, DefinitionKind::TypeParam(_)) {
+        return self.types.u64();
+      }
     }
 
     let arg_type = self.typecheck_node(&call.arguments[0], scope_kind, ctx);
@@ -4671,6 +4686,13 @@ impl<'a> Analyzer<'a> {
   ) {
     for (i, &def1) in group.iter().enumerate() {
       for &def2 in group.iter().skip(i + 1) {
+        let def1_ns = self.defs.get(&def1).owner_namespace;
+        let def2_ns = self.defs.get(&def2).owner_namespace;
+
+        if def1_ns != def2_ns {
+          continue;
+        }
+
         if self.signatures_are_identical(def1, def2) {
           let sig = self.format_signature(def1);
           let def2_span = self.defs.get(&def2).span.clone();

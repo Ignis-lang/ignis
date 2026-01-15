@@ -2,10 +2,19 @@
 
 #include "../ignis_rt.h"
 
-// =============================================================================
-// I/O functions
-// =============================================================================
-// These functions accept IgnisString* (the new heap-managed string type).
+/**
+ * I/O helpers for std/io.
+ */
 
+/**
+ * Writes the string to stdout.
+ *
+ * @param s String to print.
+ */
 void print(string s);
+/**
+ * Writes the string to stderr.
+ *
+ * @param s String to print.
+ */
 void eprint(string s);

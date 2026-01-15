@@ -642,7 +642,7 @@ pub fn build_std(
     let mut types = output.types.clone();
 
     // Monomorphization: use temporary borrow for collect_mono_roots
-    let mono_roots = collect_mono_roots(&output.defs, &output.symbols.borrow());
+    let mono_roots = collect_mono_roots_for_std(&output.defs);
     let mono_output =
       ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
         .run(&mono_roots);
@@ -865,6 +865,47 @@ fn collect_mono_roots(
         }
       },
 
+      _ => {},
+    }
+  }
+
+  roots
+}
+
+/// Collect monomorphization roots for std builds.
+/// Includes all non-extern functions regardless of visibility.
+fn collect_mono_roots_for_std(
+  defs: &DefinitionStore,
+) -> Vec<DefinitionId> {
+  let mut roots = Vec::new();
+
+  for (def_id, def) in defs.iter() {
+    match &def.kind {
+      DefinitionKind::Function(fd) if !fd.is_extern => {
+        roots.push(def_id);
+      },
+      DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
+        for entry in rd.instance_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
+        }
+        for entry in rd.static_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
+        }
+      },
+      DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+        for entry in ed.static_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
+        }
+      },
       _ => {},
     }
   }
