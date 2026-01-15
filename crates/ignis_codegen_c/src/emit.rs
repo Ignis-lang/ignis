@@ -5,8 +5,8 @@ use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, RecordDefinition},
-  namespace::NamespaceStore,
-  symbol::SymbolTable,
+  namespace::{NamespaceId, NamespaceStore},
+  symbol::{SymbolId, SymbolTable},
   types::{Type, TypeId, TypeStore},
 };
 
@@ -1023,6 +1023,14 @@ impl<'a> CEmitter<'a> {
     let def = self.defs.get(&def_id);
     let raw_name = self.symbols.get(&def.name).to_string();
 
+    let has_overloads = self.has_overloads(def_id);
+
+    let param_suffix = if has_overloads {
+      self.format_param_types_for_mangling(def_id)
+    } else {
+      String::new()
+    };
+
     // For methods and static fields, include owner type in mangled name to avoid collisions.
     // e.g., User.getName() -> User_getName, Admin.getName() -> Admin_getName
     // e.g., Config::MAX_SIZE -> Config_MAX__SIZE
@@ -1059,15 +1067,143 @@ impl<'a> CEmitter<'a> {
         }
 
         parts.push(Self::escape_ident(&raw_name));
+        if !param_suffix.is_empty() {
+          parts.push(param_suffix);
+        }
         parts.join("_")
       },
       None => {
-        if let Some(type_prefix) = owner_type_prefix {
+        let mut name = if let Some(type_prefix) = owner_type_prefix {
           format!("{}_{}", type_prefix, Self::escape_ident(&raw_name))
         } else {
           Self::escape_ident(&raw_name)
+        };
+        if !param_suffix.is_empty() {
+          name = format!("{}_{}", name, param_suffix);
+        }
+        name
+      },
+    }
+  }
+
+  fn has_overloads(
+    &self,
+    target_def_id: DefinitionId,
+  ) -> bool {
+    let target_def = self.defs.get(&target_def_id);
+    let target_name = target_def.name;
+    let target_ns = target_def.owner_namespace;
+    
+    // Only functions and methods can be overloaded
+    if !matches!(target_def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
+      return false;
+    }
+
+    let target_owner_type = match &target_def.kind {
+        DefinitionKind::Method(md) => Some(md.owner_type),
+        _ => None,
+    };
+
+    let mut count = 0;
+    for (_, def) in self.defs.iter() {
+      if def.name == target_name {
+          // Check if it's the right kind (Function/Method)
+          if !matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
+            continue;
+          }
+
+          let def_owner_type = match &def.kind {
+             DefinitionKind::Method(md) => Some(md.owner_type),
+             _ => None,
+          };
+          
+          if target_owner_type.is_some() {
+              // Target is a method: check if other is method of same type
+              if target_owner_type == def_owner_type {
+                  count += 1;
+              }
+          } else {
+              // Target is a function: check if other is function in same namespace
+              // AND ensure other is NOT a method (def_owner_type is None)
+              if def.owner_namespace == target_ns && def_owner_type.is_none() {
+                  count += 1;
+              }
+          }
+          
+          if count > 1 {
+            return true;
+          }
+      }
+    }
+    false
+  }
+
+  fn format_param_types_for_mangling(
+    &self,
+    def_id: DefinitionId,
+  ) -> String {
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Function(fd) => fd
+        .params
+        .iter()
+        .map(|p| self.format_type_for_mangling(self.defs.type_of(p)))
+        .collect::<Vec<_>>()
+        .join("_"),
+      DefinitionKind::Method(md) => {
+        let start = if md.is_static { 0 } else { 1 };
+        md.params[start..]
+          .iter()
+          .map(|p| self.format_type_for_mangling(self.defs.type_of(p)))
+          .collect::<Vec<_>>()
+          .join("_")
+      },
+      _ => String::new(),
+    }
+  }
+
+  fn format_type_for_mangling(
+    &self,
+    ty: &TypeId,
+  ) -> String {
+    match self.types.get(ty) {
+      Type::I8 => "i8".to_string(),
+      Type::I16 => "i16".to_string(),
+      Type::I32 => "i32".to_string(),
+      Type::I64 => "i64".to_string(),
+      Type::U8 => "u8".to_string(),
+      Type::U16 => "u16".to_string(),
+      Type::U32 => "u32".to_string(),
+      Type::U64 => "u64".to_string(),
+      Type::F32 => "f32".to_string(),
+      Type::F64 => "f64".to_string(),
+      Type::Boolean => "bool".to_string(),
+      Type::String => "str".to_string(),
+      Type::Pointer(inner) => format!("ptr_{}", self.format_type_for_mangling(inner)),
+      Type::Reference { inner, mutable: true } => format!("mutref_{}", self.format_type_for_mangling(inner)),
+      Type::Reference { inner, mutable: false } => format!("ref_{}", self.format_type_for_mangling(inner)),
+      Type::Record(def_id) => {
+        let def = self.defs.get(def_id);
+        self.symbols.get(&def.name).to_string()
+      },
+      Type::Enum(def_id) => {
+        let def = self.defs.get(def_id);
+        self.symbols.get(&def.name).to_string()
+      },
+      Type::Instance { generic, args } => {
+        let generic_def = self.defs.get(generic);
+        let base_name = self.symbols.get(&generic_def.name).to_string();
+        if args.is_empty() {
+          base_name
+        } else {
+          let args_str = args
+            .iter()
+            .map(|a| self.format_type_for_mangling(a))
+            .collect::<Vec<_>>()
+            .join("_");
+          format!("{}_{}", base_name, args_str)
         }
       },
+      _ => "unknown".to_string(),
     }
   }
 }

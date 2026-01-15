@@ -394,11 +394,15 @@ impl<'a> Monomorphizer<'a> {
       },
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
         // Non-generic record: copy method bodies
-        for method_id in rd.instance_methods.values() {
-          self.copy_if_nongeneric(*method_id);
+        for method_entry in rd.instance_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.copy_if_nongeneric(*method_id);
+          }
         }
-        for method_id in rd.static_methods.values() {
-          self.copy_if_nongeneric(*method_id);
+        for method_entry in rd.static_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.copy_if_nongeneric(*method_id);
+          }
         }
       },
       DefinitionKind::Method(md) if md.type_params.is_empty() => {
@@ -422,8 +426,10 @@ impl<'a> Monomorphizer<'a> {
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
         // Non-generic enum: copy static method bodies
-        for method_id in ed.static_methods.values() {
-          self.copy_if_nongeneric(*method_id);
+        for method_entry in ed.static_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.copy_if_nongeneric(*method_id);
+          }
         }
       },
       _ => {},
@@ -907,11 +913,15 @@ impl<'a> Monomorphizer<'a> {
       },
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
         // Non-generic record: scan methods
-        for method_id in rd.instance_methods.values() {
-          self.discover_from_root(*method_id);
+        for method_entry in rd.instance_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.discover_from_root(*method_id);
+          }
         }
-        for method_id in rd.static_methods.values() {
-          self.discover_from_root(*method_id);
+        for method_entry in rd.static_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.discover_from_root(*method_id);
+          }
         }
       },
       DefinitionKind::Method(md) if md.type_params.is_empty() => {
@@ -930,8 +940,10 @@ impl<'a> Monomorphizer<'a> {
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
         // Non-generic enum: scan static methods
-        for method_id in ed.static_methods.values() {
-          self.discover_from_root(*method_id);
+        for method_entry in ed.static_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.discover_from_root(*method_id);
+          }
         }
       },
       _ => {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{Id, Store, definition::DefinitionId, symbol::SymbolId};
+use crate::{Id, Store, definition::{DefinitionId, SymbolEntry}, symbol::SymbolId};
 
 pub type NamespaceId = Id<Namespace>;
 
@@ -10,7 +10,7 @@ pub struct Namespace {
   pub parent: Option<NamespaceId>,
   pub is_extern: bool,
   pub children: HashMap<SymbolId, NamespaceId>,
-  pub definitions: HashMap<SymbolId, DefinitionId>,
+  pub definitions: HashMap<SymbolId, SymbolEntry>,
 }
 
 impl Namespace {
@@ -109,16 +109,35 @@ impl NamespaceStore {
     ns: NamespaceId,
     name: SymbolId,
     def: DefinitionId,
+    is_overloadable: bool,
   ) {
-    self.namespaces.get_mut(&ns).definitions.insert(name, def);
+    let definitions = &mut self.namespaces.get_mut(&ns).definitions;
+    match definitions.get_mut(&name) {
+      None => {
+        definitions.insert(name, SymbolEntry::Single(def));
+      },
+      Some(entry) => match entry {
+        SymbolEntry::Single(existing) => {
+          if is_overloadable {
+            let existing = *existing;
+            *entry = SymbolEntry::Overload(vec![existing, def]);
+          }
+        },
+        SymbolEntry::Overload(group) => {
+          if is_overloadable {
+            group.push(def);
+          }
+        },
+      },
+    }
   }
 
   pub fn lookup_def(
     &self,
     ns: NamespaceId,
     name: &SymbolId,
-  ) -> Option<DefinitionId> {
-    self.namespaces.get(&ns).definitions.get(name).copied()
+  ) -> Option<&SymbolEntry> {
+    self.namespaces.get(&ns).definitions.get(name)
   }
 
   pub fn full_path(
@@ -258,11 +277,11 @@ mod tests {
     let ns_id = store.get_or_create(&[math], false);
 
     // Create a dummy definition ID
-    let def_id = DefinitionId::new(42);
-    store.define(ns_id, add, def_id);
+    let def_id = SymbolEntry::Single(DefinitionId::new(42));
+    store.define(ns_id, add, *def_id.as_single().unwrap(), false);
 
     let result = store.lookup_def(ns_id, &add);
-    assert_eq!(result, Some(def_id));
+    assert_eq!(result, Some(&def_id));
   }
 
   #[test]

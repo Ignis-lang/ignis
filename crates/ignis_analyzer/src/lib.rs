@@ -3,7 +3,7 @@ macro_rules! with_for_of_scope {
     $self.scopes.push(ScopeKind::Loop);
 
     if let Some(def_id) = $self.for_of_binding_defs.get($node_id).cloned() {
-      let _ = $self.scopes.define(&$for_of.binding.name, &def_id);
+      let _ = $self.scopes.define(&$for_of.binding.name, &def_id, false);
     }
 
     $body
@@ -33,7 +33,7 @@ use std::cell::RefCell;
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
 use ignis_type::{symbol::SymbolTable, Store as ASTStore};
 use ignis_type::types::{TypeId, TypeStore};
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
 use ignis_type::module::ModuleId;
 use ignis_type::namespace::{NamespaceId, NamespaceStore};
 use ignis_hir::HIR;
@@ -106,6 +106,7 @@ pub struct Analyzer<'a> {
   type_alias_syntax: HashMap<DefinitionId, IgnisTypeSyntax>,
   lowering_counter: u32,
   for_of_binding_defs: HashMap<NodeId, DefinitionId>,
+  resolved_calls: HashMap<NodeId, DefinitionId>,
   runtime: Option<RuntimeBuiltins>,
 }
 
@@ -157,6 +158,7 @@ impl<'a> Analyzer<'a> {
       type_alias_syntax: HashMap::new(),
       lowering_counter: 0,
       for_of_binding_defs: HashMap::new(),
+      resolved_calls: HashMap::new(),
       runtime: None,
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
@@ -236,6 +238,7 @@ impl<'a> Analyzer<'a> {
       type_alias_syntax: HashMap::new(),
       lowering_counter: 0,
       for_of_binding_defs: HashMap::new(),
+      resolved_calls: HashMap::new(),
       runtime: None,
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
@@ -306,13 +309,79 @@ impl<'a> Analyzer<'a> {
     self.node_defs.insert(node_id.clone(), def_id.clone());
   }
 
+  fn lookup_resolved_call(
+    &self,
+    node_id: &NodeId,
+  ) -> Option<&DefinitionId> {
+    self.resolved_calls.get(node_id)
+  }
+
+  fn set_resolved_call(
+    &mut self,
+    node_id: &NodeId,
+    def_id: DefinitionId,
+  ) {
+    self.resolved_calls.insert(node_id.clone(), def_id);
+  }
+
   fn define_decl_in_current_scope(
     &mut self,
     node_id: &NodeId,
   ) -> Option<DefinitionId> {
-    let def_id = self.lookup_def(node_id)?.clone();
+    let def_id = match self.lookup_def(node_id) {
+      Some(id) => id.clone(),
+      None => {
+        return None;
+      },
+    };
     let name = self.defs.get(&def_id).name.clone();
-    let _ = self.scopes.define(&name, &def_id);
+
+    // Only functions are overloadable - records, types, etc. are not
+    let is_overloadable = matches!(
+      self.defs.get(&def_id).kind,
+      DefinitionKind::Function(_) | DefinitionKind::Method(_)
+    );
+
+    let current_scope_id = self.scopes.current().clone();
+    let scope = self.scopes.get_scope(&current_scope_id);
+
+    if let Some(existing_entry) = scope.symbols.get(&name) {
+      match existing_entry {
+        SymbolEntry::Overload(group) => {
+          if group.contains(&def_id) {
+            return Some(def_id);
+          }
+          // Add this def_id to the existing overload group
+          let scope_mut = self.scopes.get_scope_mut(&current_scope_id);
+          if let Some(SymbolEntry::Overload(group)) = scope_mut.symbols.get_mut(&name) {
+            group.push(def_id);
+          }
+          return Some(def_id);
+        },
+        SymbolEntry::Single(existing_def_id) => {
+          if *existing_def_id == def_id {
+            return Some(def_id);
+          }
+          // If both are functions, convert single to overload group
+          if is_overloadable {
+            if let DefinitionKind::Function(_) = self.defs.get(&def_id).kind {
+              if let DefinitionKind::Function(_) = self.defs.get(existing_def_id).kind {
+                let old_id = *existing_def_id;
+                let scope_mut = self.scopes.get_scope_mut(&current_scope_id);
+                scope_mut
+                  .symbols
+                  .insert(name, SymbolEntry::Overload(vec![old_id, def_id]));
+                return Some(def_id);
+              }
+            }
+          }
+          // Otherwise, don't add duplicate
+          return Some(def_id);
+        },
+      }
+    }
+
+    let _ = self.scopes.define(&name, &def_id, is_overloadable);
 
     Some(def_id)
   }
@@ -329,7 +398,7 @@ impl<'a> Analyzer<'a> {
 
     for param_id in &params {
       let name = &self.defs.get(param_id).name;
-      let _ = self.scopes.define(name, param_id);
+      let _ = self.scopes.define(name, param_id, false);
     }
   }
 

@@ -104,7 +104,9 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
       }
 
       // Determine binary output path (default behavior: always produce a binary)
-      let emit_bin = if build.emit_bin.is_some() {
+      let emit_bin = if build.lib {
+        None
+      } else if build.emit_bin.is_some() {
         build.emit_bin.clone()
       } else if let Some(ref file_path) = build.file_path {
         // User specified a file explicitly - use file name without extension
@@ -159,6 +161,8 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
           build.emit_obj.clone(),
           emit_bin,
           build.rebuild_std,
+          build.bin,
+          build.lib,
         )));
     },
     SubCommand::Init(init) => {

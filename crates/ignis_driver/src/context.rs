@@ -11,7 +11,7 @@ use ignis_config::{DebugTrace, IgnisConfig};
 use crate::logging::{debug_trace_enabled, log_debug, log_phase, log_trace};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_hir::HIR;
-use ignis_type::definition::DefinitionStore;
+use ignis_type::definition::{DefinitionKind, DefinitionStore};
 use ignis_type::file::{FileId, SourceMap};
 use ignis_type::module::{Module, ModuleId, ModulePath};
 use ignis_type::symbol::{SymbolId, SymbolTable};
@@ -284,7 +284,30 @@ impl CompilationContext {
     let mut output = self.analyze_modules(&order, config)?;
 
     let entry_point = if order.contains(&root_id) {
-      output.hir.entry_point
+      let symbols = output.symbols.borrow();
+      output.defs.iter().find_map(|(def_id, def)| {
+        if def.owner_module != root_id {
+          return None;
+        }
+
+        if def.owner_namespace.is_some() {
+          return None;
+        }
+
+        let DefinitionKind::Function(func_def) = &def.kind else {
+          return None;
+        };
+
+        if func_def.is_extern {
+          return None;
+        }
+
+        if symbols.get(&def.name) == "main" {
+          Some(def_id)
+        } else {
+          None
+        }
+      })
     } else {
       None
     };

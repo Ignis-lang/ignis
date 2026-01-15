@@ -18,8 +18,8 @@ use ignis_ast::{
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::definition::{
   ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FunctionDefinition,
-  MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, TypeAliasDefinition,
-  TypeParamDefinition, VariableDefinition, Visibility,
+  MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, SymbolEntry,
+  TypeAliasDefinition, TypeParamDefinition, VariableDefinition, Visibility,
 };
 
 impl<'a> Analyzer<'a> {
@@ -152,7 +152,7 @@ impl<'a> Analyzer<'a> {
     self.set_def(node_id, &def_id);
     self.type_alias_syntax.insert(def_id.clone(), ta.target.clone());
 
-    if let Err(existing) = self.scopes.define(&ta.name, &def_id) {
+    if let Err(existing) = self.scopes.define(&ta.name, &def_id, false) {
       let existing_def = self.defs.get(&existing);
       let symbol = self.get_symbol_name(&existing_def.name);
       self.add_diagnostic(
@@ -212,7 +212,7 @@ impl<'a> Analyzer<'a> {
       rd.type_params = type_param_defs;
     }
 
-    if let Err(existing) = self.scopes.define(&rec.name, &def_id) {
+    if let Err(existing) = self.scopes.define(&rec.name, &def_id, false) {
       let existing_def = self.defs.get(&existing);
       let symbol = self.get_symbol_name(&existing_def.name);
       self.add_diagnostic(
@@ -282,10 +282,21 @@ impl<'a> Analyzer<'a> {
           let is_static = method.is_static();
           let method_def_id = self.bind_method(method, record_def_id, is_static);
 
-          if is_static {
-            static_methods.insert(method.name, method_def_id);
+          let target_map = if is_static {
+            &mut static_methods
           } else {
-            instance_methods.insert(method.name, method_def_id);
+            &mut instance_methods
+          };
+
+          match target_map.get_mut(&method.name) {
+            Some(SymbolEntry::Overload(group)) => group.push(method_def_id),
+            Some(SymbolEntry::Single(existing)) => {
+              let existing = *existing;
+              target_map.insert(method.name, SymbolEntry::Overload(vec![existing, method_def_id]));
+            },
+            None => {
+              target_map.insert(method.name, SymbolEntry::Single(method_def_id));
+            },
           }
         },
       }
@@ -343,7 +354,7 @@ impl<'a> Analyzer<'a> {
       ed.type_params = type_param_defs;
     }
 
-    if let Err(existing) = self.scopes.define(&en.name, &def_id) {
+    if let Err(existing) = self.scopes.define(&en.name, &def_id, false) {
       let existing_def = self.defs.get(&existing);
       let symbol = self.get_symbol_name(&existing_def.name);
       self.add_diagnostic(
@@ -395,7 +406,17 @@ impl<'a> Analyzer<'a> {
         ASTEnumItem::Method(method) => {
           // In enum, all methods are implicitly static
           let method_def_id = self.bind_method(method, enum_def_id, true);
-          static_methods.insert(method.name, method_def_id);
+
+          match static_methods.get_mut(&method.name) {
+            Some(SymbolEntry::Overload(group)) => group.push(method_def_id),
+            Some(SymbolEntry::Single(existing)) => {
+              let existing = *existing;
+              static_methods.insert(method.name, SymbolEntry::Overload(vec![existing, method_def_id]));
+            },
+            None => {
+              static_methods.insert(method.name, SymbolEntry::Single(method_def_id));
+            },
+          }
         },
         ASTEnumItem::Field(field) => {
           // In enum, all fields are implicitly static
@@ -489,7 +510,7 @@ impl<'a> Analyzer<'a> {
 
     for param_id in &param_defs {
       let param_def = self.defs.get(param_id);
-      let _ = self.scopes.define(&param_def.name, param_id);
+      let _ = self.scopes.define(&param_def.name, param_id, false);
     }
 
     self.bind_complete(&method.body, ScopeKind::Function);
@@ -530,7 +551,7 @@ impl<'a> Analyzer<'a> {
 
       let def_id = self.defs.alloc(ns_def);
       self.set_def(node_id, &def_id);
-      let _ = self.scopes.define(&ns_name, &def_id);
+      let _ = self.scopes.define(&ns_name, &def_id, false);
     }
 
     let prev_ns = self.current_namespace;
@@ -546,7 +567,8 @@ impl<'a> Analyzer<'a> {
       // Register in namespace for lookup
       if let Some(def_id) = self.lookup_def(item).cloned() {
         let def = self.defs.get(&def_id);
-        self.namespaces.define(ns_id, def.name, def_id);
+        let is_overloadable = matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_));
+        self.namespaces.define(ns_id, def.name, def_id, is_overloadable);
       }
     }
 
@@ -571,7 +593,8 @@ impl<'a> Analyzer<'a> {
     for item in &ns_stmt.items {
       if let Some(def_id) = self.lookup_def(item).cloned() {
         let def = self.defs.get(&def_id);
-        let _ = self.scopes.define(&def.name, &def_id);
+        let is_overloadable = matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_));
+        let _ = self.scopes.define(&def.name, &def_id, is_overloadable);
       }
     }
 
@@ -580,7 +603,8 @@ impl<'a> Analyzer<'a> {
 
       if let Some(def_id) = self.lookup_def(item).cloned() {
         let def = self.defs.get(&def_id);
-        self.namespaces.define(ns_id, def.name, def_id);
+        let is_overloadable = matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_));
+        self.namespaces.define(ns_id, def.name, def_id, is_overloadable);
       }
     }
 
@@ -657,18 +681,38 @@ impl<'a> Analyzer<'a> {
       fd.type_params = type_param_defs;
     }
 
-    if let Err(existing) = self.scopes.define(&func.signature.name, &def_id) {
-      let existing_def = self.defs.get(&existing);
-      let symbol = self.get_symbol_name(&existing_def.name);
+    let main_symbol = self.symbols.borrow_mut().intern("main");
+    let is_main = func.signature.name == main_symbol;
 
-      self.add_diagnostic(
-        DiagnosticMessage::FunctionAlreadyDefined {
-          name: symbol,
-          span: span.clone(),
-          previous_span: existing_def.span.clone(),
+    match self.scopes.define(&func.signature.name, &def_id, true) {
+      Ok(()) => {},
+      Err(existing) => {
+        let existing_def = self.defs.get(&existing);
+
+        if !matches!(existing_def.kind, DefinitionKind::Function(_)) {
+          let symbol = self.get_symbol_name(&existing_def.name);
+          self.add_diagnostic(
+            DiagnosticMessage::FunctionAlreadyDefined {
+              name: symbol,
+              span: span.clone(),
+              previous_span: existing_def.span.clone(),
+            }
+            .report(),
+          );
+        } else {
+          self.scopes.promote_to_overload(&func.signature.name, &def_id);
         }
-        .report(),
-      );
+      },
+    }
+
+    if is_main {
+      if let Some(SymbolEntry::Overload(group)) = self.scopes.lookup(&func.signature.name) {
+        if group.len() > 1 {
+          self.add_diagnostic(
+            DiagnosticMessage::MainFunctionCannotBeOverloaded { span: span.clone() }.report(),
+          );
+        }
+      }
     }
 
     if let Some(body_id) = &func.body {
@@ -680,7 +724,7 @@ impl<'a> Analyzer<'a> {
         let param_def = self.defs.get(param_id);
         let param_span = param_def.span.clone();
         let name = param_def.name.clone();
-        if let Err(existing) = self.scopes.define(&name, &param_id) {
+        if let Err(existing) = self.scopes.define(&name, &param_id, false) {
           let existing_def = self.defs.get(&existing);
           let symbol = self.get_symbol_name(&existing_def.name);
 
@@ -731,7 +775,7 @@ impl<'a> Analyzer<'a> {
     let def_id = &self.defs.alloc(def);
     self.set_def(node_id, def_id);
 
-    if let Err(existing) = &self.scopes.define(&var.name, def_id) {
+    if let Err(existing) = &self.scopes.define(&var.name, def_id, false) {
       let existing_def = self.defs.get(existing);
       let symbol = self.get_symbol_name(&existing_def.name);
 
@@ -775,7 +819,7 @@ impl<'a> Analyzer<'a> {
     let def_id = self.defs.alloc(def);
     self.set_def(node_id, &def_id);
 
-    if let Err(existing) = self.scopes.define(&const_.name, &def_id) {
+    if let Err(existing) = self.scopes.define(&const_.name, &def_id, false) {
       let existing_def = self.defs.get(&existing);
       let symbol = self.get_symbol_name(&existing_def.name);
       self.add_diagnostic(
@@ -868,7 +912,7 @@ impl<'a> Analyzer<'a> {
     };
 
     let def_id = self.defs.alloc(def);
-    let _ = self.scopes.define(&for_of.binding.name, &def_id);
+    let _ = self.scopes.define(&for_of.binding.name, &def_id, false);
     self.for_of_binding_defs.insert(node_id.clone(), def_id);
 
     self.bind_complete(&for_of.iter, ScopeKind::Loop);
@@ -891,8 +935,17 @@ impl<'a> Analyzer<'a> {
         }
       },
       ignis_ast::statements::ASTExport::Name { name, .. } => {
-        if let Some(def_id) = self.scopes.lookup(name).cloned() {
-          self.defs.get_mut(&def_id).visibility = Visibility::Public;
+        if let Some(entry) = self.scopes.lookup(name) {
+          match entry {
+            SymbolEntry::Single(def_id) => {
+              self.defs.get_mut(def_id).visibility = Visibility::Public;
+            },
+            SymbolEntry::Overload(group) => {
+              for def_id in group {
+                self.defs.get_mut(def_id).visibility = Visibility::Public;
+              }
+            },
+          }
         }
       },
     }
@@ -930,7 +983,8 @@ impl<'a> Analyzer<'a> {
 
       if let Some(def_id) = self.lookup_def(item).cloned() {
         let def = self.defs.get(&def_id);
-        self.namespaces.define(ns_id, def.name, def_id);
+        let is_overloadable = matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_));
+        self.namespaces.define(ns_id, def.name, def_id, is_overloadable);
       }
     }
 
@@ -984,7 +1038,7 @@ impl<'a> Analyzer<'a> {
       type_param_defs.push(def_id);
 
       // Register in generic scope so `T` resolves to this definition
-      if let Err(existing) = self.scopes.define(&param.name, &def_id) {
+      if let Err(existing) = self.scopes.define(&param.name, &def_id, false) {
         let existing_def = self.defs.get(&existing);
         let symbol = self.get_symbol_name(&existing_def.name);
         self.add_diagnostic(
@@ -1036,7 +1090,7 @@ impl<'a> Analyzer<'a> {
 
     for param_id in &type_params {
       let name = self.defs.get(param_id).name;
-      let _ = self.scopes.define(&name, param_id);
+      let _ = self.scopes.define(&name, param_id, false);
     }
   }
 

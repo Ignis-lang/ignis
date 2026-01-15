@@ -6,7 +6,7 @@ use std::rc::Rc;
 use ignis_analyzer::Analyzer;
 use ignis_config::CHeader;
 use ignis_parser::{IgnisLexer, IgnisParser};
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
 use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
 use tempfile::TempDir;
@@ -196,18 +196,27 @@ fn collect_mono_roots(
 
       // Include non-generic records and their methods
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
-        for method_id in rd.instance_methods.values() {
-          roots.push(*method_id);
+        for entry in rd.instance_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
         }
-        for method_id in rd.static_methods.values() {
-          roots.push(*method_id);
+        for entry in rd.static_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
         }
       },
 
       // Include non-generic enums and their methods
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
-        for method_id in ed.static_methods.values() {
-          roots.push(*method_id);
+        for entry in ed.static_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
         }
       },
 

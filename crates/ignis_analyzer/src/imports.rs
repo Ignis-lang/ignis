@@ -76,7 +76,7 @@ impl<'a> Analyzer<'a> {
       for item in items {
         let item_name = self.get_symbol_name(&item);
 
-        if let Some(existing_def_id) = self.scopes.lookup(&item) {
+        if let Some(existing_def_id) = self.scopes.lookup_def(&item) {
           let existing_def = self.defs.get(existing_def_id);
           self.add_diagnostic(
             DiagnosticMessage::ImportShadowsLocal {
@@ -96,7 +96,7 @@ impl<'a> Analyzer<'a> {
             if let DefinitionKind::Namespace(ns_def) = &def_kind {
               self.import_namespace(def_id, ns_def);
             } else {
-              let _ = self.scopes.define(&item, &def_id);
+              let _ = self.scopes.define(&item, &def_id, false);
             }
           },
           None => {
@@ -120,6 +120,6 @@ impl<'a> Analyzer<'a> {
     ns_def: &NamespaceDefinition,
   ) {
     let ns = self.namespaces.get(&ns_def.namespace_id);
-    let _ = self.scopes.define(&ns.name, &ns_def_id);
+    let _ = self.scopes.define(&ns.name, &ns_def_id, false);
   }
 }

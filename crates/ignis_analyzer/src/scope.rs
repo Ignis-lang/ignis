@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use ignis_type::{Id, Store};
 use ignis_type::symbol::SymbolId;
-use ignis_type::definition::DefinitionId;
+use ignis_type::definition::{DefinitionId, SymbolEntry};
 use ignis_type::namespace::NamespaceId;
 
 pub type ScopeId = Id<Scope>;
@@ -22,7 +22,7 @@ pub enum ScopeKind {
 pub struct Scope {
   pub parent: Option<ScopeId>,
   pub kind: ScopeKind,
-  pub symbols: HashMap<SymbolId, DefinitionId>,
+  pub symbols: HashMap<SymbolId, SymbolEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,21 +71,49 @@ impl ScopeTree {
     &mut self,
     name: &SymbolId,
     def: &DefinitionId,
+    is_overloadable: bool,
   ) -> Result<(), DefinitionId> {
     let scope = self.scopes.get_mut(&self.current);
 
-    if let Some(existing) = scope.symbols.get(&name) {
-      Err(existing.clone())
-    } else {
-      scope.symbols.insert(name.clone(), def.clone());
-      Ok(())
+    match scope.symbols.get_mut(name) {
+      None => {
+        scope.symbols.insert(name.clone(), SymbolEntry::Single(*def));
+        Ok(())
+      },
+      Some(SymbolEntry::Single(existing)) => Err(existing.clone()),
+      Some(SymbolEntry::Overload(group)) => {
+        if !is_overloadable {
+          Err(group[0].clone())
+        } else {
+          group.push(*def);
+          Ok(())
+        }
+      },
+    }
+  }
+
+  /// Promotes an existing Single definition to an Overload group containing both the existing
+  /// definition and the new definition.
+  /// This should be called only after checking that the existing definition is indeed overloadable (Function/Method).
+  pub fn promote_to_overload(
+    &mut self,
+    name: &SymbolId,
+    new_def: &DefinitionId,
+  ) {
+    let scope = self.scopes.get_mut(&self.current);
+    if let Some(entry) = scope.symbols.get_mut(name) {
+      if let SymbolEntry::Single(existing) = entry {
+        *entry = SymbolEntry::Overload(vec![*existing, *new_def]);
+      } else if let SymbolEntry::Overload(group) = entry {
+        group.push(*new_def);
+      }
     }
   }
 
   pub fn lookup(
     &self,
     name: &SymbolId,
-  ) -> Option<&DefinitionId> {
+  ) -> Option<&SymbolEntry> {
     let mut current = &self.current;
     loop {
       let scope = self.scopes.get(&current);
@@ -97,6 +125,13 @@ impl ScopeTree {
         None => return None,
       }
     }
+  }
+
+  pub fn lookup_def(
+    &self,
+    name: &SymbolId,
+  ) -> Option<&DefinitionId> {
+    self.lookup(name).and_then(|entry| entry.as_single())
   }
 
   pub fn find_loop_scope(&self) -> Option<ScopeId> {
@@ -131,5 +166,16 @@ impl ScopeTree {
     id: &ScopeId,
   ) -> &Scope {
     self.scopes.get(id)
+  }
+
+  pub fn get_scope_mut(
+    &mut self,
+    id: &ScopeId,
+  ) -> &mut Scope {
+    self.scopes.get_mut(id)
+  }
+
+  pub fn all_scopes(&self) -> impl Iterator<Item = &Scope> {
+    self.scopes.iter().map(|(_, scope)| scope)
   }
 }

@@ -16,6 +16,29 @@ pub enum ConstValue {
 
 pub type DefinitionId = Id<Definition>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SymbolEntry {
+  Single(DefinitionId),
+  Overload(Vec<DefinitionId>),
+}
+
+impl SymbolEntry {
+  pub fn as_single(&self) -> Option<&DefinitionId> {
+    match self {
+      SymbolEntry::Single(id) => Some(id),
+      SymbolEntry::Overload(_) => None,
+    }
+  }
+
+  pub fn is_single(&self) -> bool {
+    matches!(self, SymbolEntry::Single(_))
+  }
+
+  pub fn is_overload(&self) -> bool {
+    matches!(self, SymbolEntry::Overload(_))
+  }
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum Visibility {
   Public,
@@ -93,8 +116,8 @@ pub struct RecordDefinition {
   pub type_params: Vec<DefinitionId>,
   pub type_id: TypeId,
   pub fields: Vec<RecordFieldDef>,
-  pub instance_methods: HashMap<SymbolId, DefinitionId>,
-  pub static_methods: HashMap<SymbolId, DefinitionId>,
+  pub instance_methods: HashMap<SymbolId, SymbolEntry>,
+  pub static_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_fields: HashMap<SymbolId, DefinitionId>,
 }
 
@@ -112,7 +135,7 @@ pub struct EnumDefinition {
   pub variants: Vec<EnumVariantDef>,
   pub variants_by_name: HashMap<SymbolId, u32>,
   pub tag_type: TypeId,
-  pub static_methods: HashMap<SymbolId, DefinitionId>,
+  pub static_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_fields: HashMap<SymbolId, DefinitionId>,
 }
 

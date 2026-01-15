@@ -268,3 +268,108 @@ function main(): void {
     6,
   );
 }
+
+#[test]
+fn duplicate_overload_signature() {
+  // Line 3: Duplicate signature for foo
+  common::assert_diagnostic_at_line(
+    r#"
+function foo(x: i32): void { return; }
+function foo(x: i32): void { return; }
+
+function main(): void {
+    return;
+}"#,
+    "A0103", // DuplicateOverload
+    3,
+  );
+}
+
+#[test]
+fn no_overload_matches() {
+  // Line 6: No overload matches foo(true)
+  common::assert_diagnostic_at_line(
+    r#"
+function foo(x: i32): void { return; }
+function foo(x: string): void { return; }
+
+function main(): void {
+    foo(true);
+    return;
+}"#,
+    "A0100", // NoOverloadMatches
+    6,
+  );
+}
+
+#[test]
+fn ambiguous_overload() {
+  // Line 6: Ambiguous overload for foo(1)
+  common::assert_diagnostic_at_line(
+    r#"
+function foo<T>(x: T): void { return; }
+function foo<U>(x: U): void { return; }
+
+function main(): void {
+    foo(1);
+    return;
+}"#,
+    "A0101", // AmbiguousOverload
+    6,
+  );
+}
+
+#[test]
+fn overload_group_as_value() {
+  // Line 6: Overload group used as value
+  common::assert_diagnostic_at_line(
+    r#"
+function foo(x: i32): void { return; }
+function foo(x: string): void { return; }
+
+function main(): void {
+    let f: i32 = foo;
+    return;
+}"#,
+    "A0102", // OverloadGroupAsValue
+    6,
+  );
+}
+
+#[test]
+fn main_function_cannot_be_overloaded() {
+  // Line 3: Attempt to overload main
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): void { return; }
+function main(args: i32): void { return; }
+"#,
+    "A0104", // MainFunctionCannotBeOverloaded
+    3,
+  );
+}
+
+#[test]
+fn overloaded_instance_methods() {
+  common::assert_ok(
+    r#"
+record Box {
+    value: i32;
+
+    get(): i32 {
+        return self.value;
+    }
+
+    get(label: string): i32 {
+        return self.value;
+    }
+}
+
+function main(): void {
+    let b: Box = Box { value: 1 };
+    let a: i32 = b.get();
+    let c: i32 = b.get("x");
+    return;
+}"#,
+  );
+}

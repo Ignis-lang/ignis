@@ -467,6 +467,37 @@ pub enum DiagnosticMessage {
   ForOfMutRequiresMutableIter {
     span: Span,
   },
+  // Overload errors
+  NoOverloadMatches {
+    name: String,
+    available_signatures: Vec<String>,
+    arg_types: Vec<String>,
+    span: Span,
+  },
+  AmbiguousOverload {
+    name: String,
+    matching_signatures: Vec<String>,
+    arg_types: Vec<String>,
+    span: Span,
+  },
+  OverloadGroupAsValue {
+    name: String,
+    span: Span,
+  },
+  DuplicateOverload {
+    name: String,
+    signature: String,
+    span: Span,
+  },
+  MainFunctionCannotBeOverloaded {
+    span: Span,
+  },
+  LibraryCannotHaveMainFunction {
+    span: Span,
+  },
+  ExecutableMustHaveMainFunction {
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -877,6 +908,51 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => {
         write!(f, "cannot take mutable reference in for-of over immutable vector")
       },
+
+      // Overload errors
+      DiagnosticMessage::NoOverloadMatches {
+        name,
+        available_signatures,
+        arg_types,
+        ..
+      } => {
+        write!(
+          f,
+          "No overload matches call to '{}' with arguments ({})\n  Available signatures:\n    - {}",
+          name,
+          arg_types.join(", "),
+          available_signatures.join("\n    - ")
+        )
+      },
+      DiagnosticMessage::AmbiguousOverload {
+        name,
+        matching_signatures,
+        arg_types,
+        ..
+      } => {
+        write!(
+          f,
+          "Ambiguous overload call to '{}' with arguments ({})\n  Matching signatures:\n    - {}",
+          name,
+          arg_types.join(", "),
+          matching_signatures.join("\n    - ")
+        )
+      },
+      DiagnosticMessage::OverloadGroupAsValue { name, .. } => {
+        write!(f, "Cannot use overload group '{}' as a value; call it with arguments", name)
+      },
+      DiagnosticMessage::DuplicateOverload { name, signature, .. } => {
+        write!(f, "Duplicate overload signature for '{}': {}", name, signature)
+      },
+      DiagnosticMessage::MainFunctionCannotBeOverloaded { .. } => {
+        write!(f, "Function 'main' cannot be overloaded")
+      },
+      DiagnosticMessage::LibraryCannotHaveMainFunction { .. } => {
+        write!(f, "Library cannot have a 'main' function")
+      },
+      DiagnosticMessage::ExecutableMustHaveMainFunction { .. } => {
+        write!(f, "Executable must have a 'main' function")
+      },
     }
   }
 }
@@ -1007,7 +1083,14 @@ impl DiagnosticMessage {
       | DiagnosticMessage::StaticFieldNotConst { span, .. }
       | DiagnosticMessage::ForOfExpectsVector { span, .. }
       | DiagnosticMessage::ForOfRequiresCopyOrRef { span, .. }
-      | DiagnosticMessage::ForOfMutRequiresMutableIter { span, .. } => span.clone(),
+      | DiagnosticMessage::ForOfMutRequiresMutableIter { span, .. }
+      | DiagnosticMessage::NoOverloadMatches { span, .. }
+      | DiagnosticMessage::AmbiguousOverload { span, .. }
+      | DiagnosticMessage::OverloadGroupAsValue { span, .. }
+      | DiagnosticMessage::DuplicateOverload { span, .. }
+      | DiagnosticMessage::MainFunctionCannotBeOverloaded { span, .. }
+      | DiagnosticMessage::LibraryCannotHaveMainFunction { span, .. }
+      | DiagnosticMessage::ExecutableMustHaveMainFunction { span, .. } => span.clone(),
     }
   }
 
@@ -1134,6 +1217,13 @@ impl DiagnosticMessage {
       DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",
       DiagnosticMessage::ExpectedCallAfterTypeArgs { .. } => "I0048",
+      DiagnosticMessage::NoOverloadMatches { .. } => "A0100",
+      DiagnosticMessage::AmbiguousOverload { .. } => "A0101",
+      DiagnosticMessage::OverloadGroupAsValue { .. } => "A0102",
+      DiagnosticMessage::DuplicateOverload { .. } => "A0103",
+      DiagnosticMessage::MainFunctionCannotBeOverloaded { .. } => "A0104",
+      DiagnosticMessage::LibraryCannotHaveMainFunction { .. } => "L0101",
+      DiagnosticMessage::ExecutableMustHaveMainFunction { .. } => "L0102",
     }
     .to_string()
   }

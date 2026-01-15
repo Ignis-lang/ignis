@@ -236,7 +236,7 @@ impl<'a> Analyzer<'a> {
       ASTNode::Expression(expr) => match expr {
         ASTExpression::Literal(lit) => Some(const_value_from_literal(&lit.value)),
         ASTExpression::Variable(var) => {
-          if let Some(def_id) = self.scopes.lookup(&var.name) {
+          if let Some(def_id) = self.scopes.lookup_def(&var.name) {
             if let DefinitionKind::Constant(const_def) = &self.defs.get(def_id).kind {
               const_def.value.clone()
             } else {
@@ -249,7 +249,7 @@ impl<'a> Analyzer<'a> {
         ASTExpression::Path(path) => path
           .segments
           .last()
-          .and_then(|last| self.scopes.lookup(&last))
+          .and_then(|last| self.scopes.lookup_def(&last))
           .and_then(|def_id| match &self.defs.get(def_id).kind {
             DefinitionKind::Constant(const_def) => const_def.value.clone(),
             _ => None,

@@ -181,7 +181,7 @@ impl<'a> Analyzer<'a> {
         checker.enter_block();
 
         if let Some(def_id) = self.for_of_binding_defs.get(node_id).cloned() {
-          let _ = self.scopes.define(&for_of.binding.name, &def_id);
+          let _ = self.scopes.define(&for_of.binding.name, &def_id, false);
         }
 
         self.borrowcheck_node(&for_of.iter, checker, ScopeKind::Loop);
@@ -363,10 +363,11 @@ impl<'a> Analyzer<'a> {
     let node = self.ast.get(node_id);
 
     match node {
-      ASTNode::Expression(ASTExpression::Variable(var)) => self.scopes.lookup(&var.name).copied(),
-      ASTNode::Expression(ASTExpression::Path(path)) => {
-        path.segments.last().and_then(|seg| self.scopes.lookup(seg).copied())
-      },
+      ASTNode::Expression(ASTExpression::Variable(var)) => self.scopes.lookup_def(&var.name).copied(),
+      ASTNode::Expression(ASTExpression::Path(path)) => path
+        .segments
+        .last()
+        .and_then(|seg| self.scopes.lookup_def(seg).copied()),
       _ => None,
     }
   }
@@ -415,7 +416,7 @@ impl<'a> Analyzer<'a> {
   ) -> Option<DefinitionId> {
     let node = self.ast.get(iter_node);
     if let ASTNode::Expression(ASTExpression::Variable(var)) = node {
-      self.scopes.lookup(&var.name).cloned()
+      self.scopes.lookup_def(&var.name).cloned()
     } else {
       None
     }

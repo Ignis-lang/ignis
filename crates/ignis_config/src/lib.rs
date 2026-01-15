@@ -244,6 +244,8 @@ pub struct IgnisBuildConfig {
   pub emit_obj: Option<String>,
   pub emit_bin: Option<String>,
   pub rebuild_std: bool,
+  pub bin: bool,
+  pub lib: bool,
 }
 
 impl IgnisBuildConfig {
@@ -260,6 +262,8 @@ impl IgnisBuildConfig {
     emit_obj: Option<String>,
     emit_bin: Option<String>,
     rebuild_std: bool,
+    bin: bool,
+    lib: bool,
   ) -> Self {
     Self {
       file,
@@ -274,6 +278,8 @@ impl IgnisBuildConfig {
       emit_obj,
       emit_bin,
       rebuild_std,
+      bin,
+      lib,
     }
   }
 }

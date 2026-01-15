@@ -8,9 +8,10 @@ use ignis_config::{DebugTrace, DumpKind, IgnisConfig};
 
 use crate::logging::{debug_trace_enabled, log_debug, log_info, log_phase, log_trace};
 use ignis_parser::{IgnisLexer, IgnisParser};
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
 use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
+use ignis_diagnostics::message::DiagnosticMessage;
 
 use crate::context::CompilationContext;
 use crate::link::{compile_to_object, format_tool_error, link_executable, rebuild_std_runtime, LinkPlan};
@@ -296,8 +297,27 @@ pub fn compile_project(
   }
 
   if let Some(bc) = config.build_config.as_ref() {
+    let has_entry_point = output.hir.entry_point.is_some();
+    let is_lib = bc.lib;
+    let is_bin = !is_lib;
+
+    if is_bin && !has_entry_point {
+      let root_module = ctx.module_graph.modules.get(&root_id);
+      let file_id = root_module.file_id;
+      let span = ignis_type::span::Span::empty_at(file_id, ignis_type::BytePosition::default());
+      ignis_diagnostics::render(&DiagnosticMessage::ExecutableMustHaveMainFunction { span }.report(), &ctx.source_map);
+      return Err(());
+    }
+
+    if is_lib && has_entry_point {
+      let entry_def_id = output.hir.entry_point.unwrap();
+      let span = output.defs.get(&entry_def_id).span.clone();
+      ignis_diagnostics::render(&DiagnosticMessage::LibraryCannotHaveMainFunction { span }.report(), &ctx.source_map);
+      return Err(());
+    }
+
     let needs_codegen =
-      dump_requested(&config, DumpKind::Lir) || bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
+      dump_requested(&config, DumpKind::Lir) || bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
 
     if needs_codegen {
       let used_modules = ctx.module_graph.topological_sort();
@@ -419,7 +439,7 @@ pub fn compile_project(
         }
       }
 
-      let needs_emit = bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some();
+      let needs_emit = bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
       if needs_emit {
         if debug_trace_enabled(&config, DebugTrace::Codegen) {
           println!("debug: emitting C code");
@@ -473,7 +493,7 @@ pub fn compile_project(
           println!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path);
         }
 
-        if bc.emit_obj.is_some() || bc.emit_bin.is_some() {
+        if bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib {
           let obj_path = if let Some(path) = &bc.emit_obj {
             path.clone()
           } else {
@@ -812,18 +832,27 @@ fn collect_mono_roots(
 
       // Include non-generic records and their methods
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
-        for method_id in rd.instance_methods.values() {
-          roots.push(*method_id);
+        for entry in rd.instance_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
         }
-        for method_id in rd.static_methods.values() {
-          roots.push(*method_id);
+        for entry in rd.static_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
         }
       },
 
       // Include non-generic enums and their methods
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
-        for method_id in ed.static_methods.values() {
-          roots.push(*method_id);
+        for entry in ed.static_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
         }
       },
 

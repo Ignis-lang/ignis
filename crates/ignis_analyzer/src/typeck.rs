@@ -21,7 +21,7 @@ use ignis_diagnostics::{
   message::DiagnosticMessage,
 };
 use ignis_type::{
-  definition::{ConstValue, DefinitionId, DefinitionKind, RecordFieldDef},
+  definition::{ConstValue, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry},
   span::Span,
   types::{Substitution, Type, TypeId},
   value::IgnisLiteralValue,
@@ -40,6 +40,8 @@ impl<'a> Analyzer<'a> {
     for root in roots {
       self.typecheck_node(root, ScopeKind::Global, &ctx);
     }
+
+    self.check_duplicate_signatures();
 
     self.report_unresolved_nulls();
   }
@@ -86,7 +88,7 @@ impl<'a> Analyzer<'a> {
     let node = self.ast.get(&node_id);
     let ty = match node {
       ASTNode::Statement(stmt) => self.typecheck_statement(node_id, stmt, scope_kind, ctx),
-      ASTNode::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx, infer),
+      ASTNode::Expression(expr) => self.typecheck_expression(node_id, expr, scope_kind, ctx, infer),
     }
     .clone();
 
@@ -313,7 +315,7 @@ impl<'a> Analyzer<'a> {
           if let DefinitionKind::Variable(var_def) = &mut self.defs.get_mut(&def_id).kind {
             var_def.type_id = binding_type;
           }
-          let _ = self.scopes.define(&for_of.binding.name, &def_id);
+          let _ = self.scopes.define(&for_of.binding.name, &def_id, false);
         }
 
         self.typecheck_node(&for_of.body, ScopeKind::Loop, ctx);
@@ -359,7 +361,9 @@ impl<'a> Analyzer<'a> {
 
         self.types.never()
       },
-      ASTStatement::Expression(expr) => self.typecheck_expression(expr, scope_kind, ctx, &InferContext::none()),
+      ASTStatement::Expression(expr) => {
+        self.typecheck_expression(node_id, expr, scope_kind, ctx, &InferContext::none())
+      },
       ASTStatement::Break(_) | ASTStatement::Continue(_) => self.types.never(),
       ASTStatement::Extern(extern_stmt) => {
         for item in &extern_stmt.items {
@@ -398,6 +402,7 @@ impl<'a> Analyzer<'a> {
 
   fn typecheck_expression(
     &mut self,
+    node_id: &NodeId,
     expr: &ASTExpression,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
@@ -406,13 +411,23 @@ impl<'a> Analyzer<'a> {
     match expr {
       ASTExpression::Literal(lit) => self.typecheck_literal(lit, infer),
       ASTExpression::Variable(var) => {
-        if let Some(def_id) = self.scopes.lookup(&var.name).cloned() {
-          self.get_definition_type(&def_id)
-        } else {
-          self.types.error()
+        let entry = self.scopes.lookup(&var.name).cloned();
+        match entry {
+          Some(SymbolEntry::Single(def_id)) => self.get_definition_type(&def_id),
+          Some(SymbolEntry::Overload(_)) => {
+            self.add_diagnostic(
+              DiagnosticMessage::OverloadGroupAsValue {
+                name: self.get_symbol_name(&var.name),
+                span: var.span.clone(),
+              }
+              .report(),
+            );
+            self.types.error()
+          },
+          None => self.types.error(),
         }
       },
-      ASTExpression::Call(call) => self.typecheck_call(call, scope_kind, ctx, infer),
+      ASTExpression::Call(call) => self.typecheck_call(node_id, call, scope_kind, ctx, infer),
       ASTExpression::Binary(binary) => self.typecheck_binary(binary, scope_kind, ctx),
       ASTExpression::Ternary(ternary) => {
         let cond_type = self.typecheck_node(&ternary.condition, scope_kind, ctx);
@@ -557,7 +572,24 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Path(path) => {
         // Resolve the path to get the definition type
         match self.resolve_qualified_path(&path.segments) {
-          Some(ResolvedPath::Def(def_id)) => self.get_definition_type(&def_id),
+          Some(ResolvedPath::Entry(entry)) => match entry {
+            SymbolEntry::Single(def_id) => self.get_definition_type(&def_id),
+            SymbolEntry::Overload(_) => {
+              self.add_diagnostic(
+                DiagnosticMessage::OverloadGroupAsValue {
+                  name: path
+                    .segments
+                    .iter()
+                    .map(|s| self.get_symbol_name(s))
+                    .collect::<Vec<_>>()
+                    .join("::"),
+                  span: path.span.clone(),
+                }
+                .report(),
+              );
+              self.types.error()
+            },
+          },
           Some(ResolvedPath::EnumVariant {
             enum_def,
             variant_index,
@@ -734,10 +766,18 @@ impl<'a> Analyzer<'a> {
       if let ASTRecordItem::Method(method) = item {
         // Get method definition id from record
         let method_def_id = if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
-          if method.is_static() {
-            rd.static_methods.get(&method.name).cloned()
+          let entry = if method.is_static() {
+            rd.static_methods.get(&method.name)
           } else {
-            rd.instance_methods.get(&method.name).cloned()
+            rd.instance_methods.get(&method.name)
+          };
+          match entry {
+            Some(SymbolEntry::Single(def_id)) => Some(*def_id),
+            Some(SymbolEntry::Overload(group)) => group
+              .iter()
+              .copied()
+              .find(|id| self.defs.get(id).span == method.span),
+            None => None,
           }
         } else {
           None
@@ -800,7 +840,14 @@ impl<'a> Analyzer<'a> {
         ASTEnumItem::Method(method) => {
           // Get method definition id from enum (all methods are static in enum)
           let method_def_id = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
-            ed.static_methods.get(&method.name).cloned()
+            match ed.static_methods.get(&method.name) {
+              Some(SymbolEntry::Single(def_id)) => Some(*def_id),
+              Some(SymbolEntry::Overload(group)) => group
+                .iter()
+                .copied()
+                .find(|id| self.defs.get(id).span == method.span),
+              None => None,
+            }
           } else {
             None
           };
@@ -942,7 +989,7 @@ impl<'a> Analyzer<'a> {
         owner_namespace: None,
       };
       let self_def_id = self.defs.alloc(self_def);
-      let _ = self.scopes.define(&self_symbol, &self_def_id);
+      let _ = self.scopes.define(&self_symbol, &self_def_id, false);
 
       // Add self to the method's params as the first parameter
       if let DefinitionKind::Method(md) = &mut self.defs.get_mut(method_def_id).kind {
@@ -953,7 +1000,7 @@ impl<'a> Analyzer<'a> {
     // Register explicit parameters in scope
     for param_def_id in &param_def_ids {
       let param_def = self.defs.get(param_def_id);
-      let _ = self.scopes.define(&param_def.name, param_def_id);
+      let _ = self.scopes.define(&param_def.name, param_def_id, false);
     }
 
     // Typecheck body with expected return type
@@ -1090,7 +1137,7 @@ impl<'a> Analyzer<'a> {
     match &self.defs.get(&def_id).kind.clone() {
       DefinitionKind::Record(rd) => {
         // Static method?
-        if let Some(method_id) = rd.static_methods.get(&ma.member).cloned() {
+        if let Some(method_id) = rd.static_methods.get(&ma.member).and_then(|e| e.as_single()).cloned() {
           // Method access without call - this is an error (must be called)
           let member_name = self.get_symbol_name(&ma.member);
           self.add_diagnostic(
@@ -1141,7 +1188,7 @@ impl<'a> Analyzer<'a> {
           }
         }
         // Static method?
-        if let Some(method_id) = ed.static_methods.get(&ma.member).cloned() {
+        if let Some(method_id) = ed.static_methods.get(&ma.member).and_then(|e| e.as_single()).cloned() {
           let member_name = self.get_symbol_name(&ma.member);
           self.add_diagnostic(
             DiagnosticMessage::MethodMustBeCalled {
@@ -1171,7 +1218,12 @@ impl<'a> Analyzer<'a> {
       },
       DefinitionKind::Namespace(ns_def) => {
         // Look up member in namespace
-        if let Some(member_def_id) = self.namespaces.lookup_def(ns_def.namespace_id, &ma.member) {
+        if let Some(member_def_id) = self
+          .namespaces
+          .lookup_def(ns_def.namespace_id, &ma.member)
+          .and_then(|e| e.as_single())
+          .cloned()
+        {
           return self.get_definition_type(&member_def_id);
         }
         let ns_name = self.get_symbol_name(&self.defs.get(&def_id).name);
@@ -1205,7 +1257,7 @@ impl<'a> Analyzer<'a> {
     match node {
       ASTNode::Expression(ASTExpression::Variable(var)) => {
         // Simple identifier - look up in scope
-        self.scopes.lookup(&var.name).cloned()
+        self.scopes.lookup_def(&var.name).cloned()
       },
       ASTNode::Expression(ASTExpression::Path(path)) => {
         // Qualified path - resolve through namespaces
@@ -1216,7 +1268,11 @@ impl<'a> Analyzer<'a> {
         let base_def = self.resolve_type_expression(&ma.object, _scope_kind, _ctx)?;
 
         match &self.defs.get(&base_def).kind {
-          DefinitionKind::Namespace(ns_def) => self.namespaces.lookup_def(ns_def.namespace_id, &ma.member),
+          DefinitionKind::Namespace(ns_def) => self
+            .namespaces
+            .lookup_def(ns_def.namespace_id, &ma.member)
+            .and_then(|e| e.as_single())
+            .cloned(),
           _ => None,
         }
       },
@@ -1235,13 +1291,17 @@ impl<'a> Analyzer<'a> {
 
     // Start with first segment in scope
     let first_segment = &path.segments[0];
-    let mut current_def = self.scopes.lookup(first_segment).cloned()?;
+    let mut current_def = self.scopes.lookup_def(first_segment).cloned()?;
 
     // Walk through remaining segments
     for segment in path.segments.iter().skip(1) {
       match &self.defs.get(&current_def).kind {
         DefinitionKind::Namespace(ns_def) => {
-          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment)?;
+          current_def = self
+            .namespaces
+            .lookup_def(ns_def.namespace_id, segment)
+            .and_then(|e| e.as_single())
+            .cloned()?;
         },
         _ => return None,
       }
@@ -1419,13 +1479,17 @@ impl<'a> Analyzer<'a> {
 
     // Start with first segment in scope
     let (first_sym, _) = &path[0];
-    let mut current_def = self.scopes.lookup(first_sym).cloned()?;
+    let mut current_def = self.scopes.lookup_def(first_sym).cloned()?;
 
     // Walk through remaining segments
     for (segment_sym, _) in path.iter().skip(1) {
       match &self.defs.get(&current_def).kind {
         DefinitionKind::Namespace(ns_def) => {
-          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym)?;
+          current_def = self
+            .namespaces
+            .lookup_def(ns_def.namespace_id, segment_sym)
+            .and_then(|e| e.as_single())
+            .cloned()?;
         },
         _ => return None,
       }
@@ -1624,6 +1688,7 @@ impl<'a> Analyzer<'a> {
 
   fn typecheck_call(
     &mut self,
+    node_id: &NodeId,
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
@@ -1648,29 +1713,53 @@ impl<'a> Analyzer<'a> {
 
     // Check for method calls: obj.method() or Type::method()
     if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = self.ast.get(&call.callee) {
-      return self.typecheck_method_call(ma, call, scope_kind, ctx, infer);
+      return self.typecheck_method_call(node_id, ma, call, scope_kind, ctx, infer);
     }
 
     // Check for path-based calls that might be static method or enum variant
     if let ASTNode::Expression(ASTExpression::Path(path)) = self.ast.get(&call.callee) {
-      if let Some(result) = self.typecheck_path_call(path, call, scope_kind, ctx, infer) {
+      if let Some(result) = self.typecheck_path_call(node_id, path, call, scope_kind, ctx, infer) {
         return result;
       }
       // Fall through to normal call handling if path doesn't resolve to record/enum
     }
 
-    // Get the function definition ID if the callee is a variable (for generic handling)
-    let func_def_id: Option<DefinitionId> =
-      if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
-        self.scopes.lookup(&var.name).cloned()
-      } else {
-        None
-      };
+    // Get the callee entry from scope or resolve it if it's a path
+    let callee_entry = match self.ast.get(&call.callee) {
+      ASTNode::Expression(ASTExpression::Variable(var)) => self.scopes.lookup(&var.name).cloned(),
+      ASTNode::Expression(ASTExpression::Path(path)) => match self.resolve_qualified_path(&path.segments) {
+        Some(ResolvedPath::Entry(entry)) => Some(entry),
+        _ => None,
+      },
+      _ => None,
+    };
 
-    let callee_type = self.typecheck_node(&call.callee, scope_kind, ctx);
+    let mut arg_types_for_resolution: Option<Vec<TypeId>> = None;
+
+    let resolved_def_id = match callee_entry.as_ref() {
+      Some(SymbolEntry::Overload(candidates)) if candidates.len() > 1 => {
+        let arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+          .collect();
+        arg_types_for_resolution = Some(arg_types);
+
+        match self.resolve_overload(candidates, arg_types_for_resolution.as_ref().unwrap(), &call.span, None) {
+          Ok(def_id) => Some(def_id),
+          Err(()) => return self.types.error(),
+        }
+      },
+      Some(SymbolEntry::Overload(candidates)) => candidates.first().copied(),
+      _ => callee_entry.as_ref().and_then(|e| e.as_single().cloned()),
+    };
+
+    if let Some(def_id) = resolved_def_id {
+      self.set_resolved_call(node_id, def_id);
+    }
 
     // Check if this is a generic function (has type params)
-    let is_generic_func = func_def_id
+    let is_generic_func = resolved_def_id
       .as_ref()
       .map(|def_id| {
         if let DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind {
@@ -1682,65 +1771,97 @@ impl<'a> Analyzer<'a> {
       .unwrap_or(false);
 
     // Build substitution for generic function calls with explicit type arguments
-    let substitution = self.build_call_substitution(&func_def_id, call);
+    let substitution = self.build_call_substitution(&resolved_def_id, call);
 
     // For generic functions without explicit type args, skip strict type checking
     // (type inference happens during lowering)
     let skip_type_checking = is_generic_func && substitution.is_none();
 
-    // Get param/return types, applying substitution if we have one
-    let (param_types, ret_type, is_variadic) = if let Type::Function {
-      params,
-      ret,
-      is_variadic,
-    } = self.types.get(&callee_type).clone()
-    {
-      if let Some(ref subst) = substitution {
-        let subst_params: Vec<TypeId> = params.iter().map(|p| self.types.substitute(*p, subst)).collect();
-        let subst_ret = self.types.substitute(ret, subst);
-        (subst_params, subst_ret, is_variadic)
-      } else {
-        (params, ret, is_variadic)
+    // Get param/return types from resolved function definition
+    let (param_types, ret_type, is_variadic, is_function_def) = if let Some(def_id) = &resolved_def_id {
+      match &self.defs.get(def_id).kind {
+        DefinitionKind::Function(func_def) => {
+          let params: Vec<TypeId> = func_def.params.iter().map(|p| self.defs.type_of(p)).cloned().collect();
+          let ret = func_def.return_type;
+          if let Some(ref subst) = substitution {
+            let subst_params: Vec<TypeId> = params.iter().map(|p| self.types.substitute(*p, subst)).collect();
+            let subst_ret = self.types.substitute(ret, subst);
+            (subst_params, subst_ret, func_def.is_variadic, true)
+          } else {
+            (params, ret, func_def.is_variadic, true)
+          }
+        },
+        _ => (vec![], self.types.error(), false, false),
       }
     } else {
-      (vec![], self.types.error(), false)
+      (vec![], self.types.error(), false, false)
     };
 
-    let arg_types: Vec<TypeId> = call
-      .arguments
-      .iter()
-      .enumerate()
-      .map(|(i, arg)| {
-        if let Some(param_type) = param_types.get(i) {
-          let infer = InferContext::expecting(param_type.clone());
-          self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
-        } else {
-          self.typecheck_node(arg, scope_kind, ctx)
-        }
-      })
-      .collect();
+    if !is_function_def {
+      for arg in &call.arguments {
+        self.typecheck_node(arg, scope_kind, ctx);
+      }
 
-    // Only do detailed type checking if we have a function type
-    if let Type::Function { .. } = self.types.get(&callee_type) {
-      let func_name = if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
-        self.get_symbol_name(&var.name)
+      if resolved_def_id.is_none() {
+        if let Some(ty) = self.lookup_type(&call.callee) {
+          if self.types.is_error(ty) {
+            return self.types.error();
+          }
+        }
+      }
+
+      let type_name = if let Some(def_id) = &resolved_def_id {
+        self.format_type_for_error(self.defs.type_of(def_id))
       } else {
-        "<function>".to_string()
+        "<error>".to_string()
       };
-
-      if is_variadic {
-        if arg_types.len() < param_types.len() {
-          self.add_diagnostic(
-            DiagnosticMessage::ArgumentCountMismatch {
-              expected: param_types.len(),
-              got: arg_types.len(),
-              func_name: func_name.clone(),
-              span: call.span.clone(),
-            }
-            .report(),
-          );
+      self.add_diagnostic(
+        DiagnosticMessage::NotCallable {
+          type_name,
+          span: call.span.clone(),
         }
-      } else if arg_types.len() != param_types.len() {
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let arg_types: Vec<TypeId> = if let Some(arg_types) = arg_types_for_resolution {
+      arg_types
+    } else if skip_type_checking {
+      call
+        .arguments
+        .iter()
+        .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+        .collect()
+    } else {
+      call
+        .arguments
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+          if let Some(param_type) = param_types.get(i) {
+            let infer = InferContext::expecting(param_type.clone());
+            self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+          } else {
+            self.typecheck_node(arg, scope_kind, ctx)
+          }
+        })
+        .collect()
+    };
+
+    let func_name = match self.ast.get(&call.callee) {
+      ASTNode::Expression(ASTExpression::Variable(var)) => self.get_symbol_name(&var.name),
+      ASTNode::Expression(ASTExpression::Path(path)) => path
+        .segments
+        .iter()
+        .map(|s| self.get_symbol_name(s))
+        .collect::<Vec<_>>()
+        .join("::"),
+      _ => "<function>".to_string(),
+    };
+
+    if is_variadic {
+      if arg_types.len() < param_types.len() {
         self.add_diagnostic(
           DiagnosticMessage::ArgumentCountMismatch {
             expected: param_types.len(),
@@ -1751,48 +1872,48 @@ impl<'a> Analyzer<'a> {
           .report(),
         );
       }
-
-      // Skip argument type checking for generic functions without explicit type args
-      // (type inference happens during lowering)
-      if !skip_type_checking {
-        let check_count = std::cmp::min(arg_types.len(), param_types.len());
-        for i in 0..check_count {
-          if !self.types.types_equal(&param_types[i], &arg_types[i]) {
-            // Special case: deallocate accepts any *mut T, coercing to *mut u8
-            if func_name == "deallocate" && i == 0 {
-              if self.is_ptr_coercion(&arg_types[i], &param_types[i]) {
-                continue;
-              }
-            }
-
-            let expected = self.format_type_for_error(&param_types[i]);
-            let got = self.format_type_for_error(&arg_types[i]);
-
-            self.add_diagnostic(
-              DiagnosticMessage::ArgumentTypeMismatch {
-                param_idx: i + 1,
-                expected,
-                got,
-                span: self.node_span(&call.arguments[i]).clone(),
-              }
-              .report(),
-            );
-          }
-        }
-      }
-
-      ret_type
-    } else {
-      let type_name = self.format_type_for_error(&callee_type);
+    } else if arg_types.len() != param_types.len() {
       self.add_diagnostic(
-        DiagnosticMessage::NotCallable {
-          type_name,
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: param_types.len(),
+          got: arg_types.len(),
+          func_name: func_name.clone(),
           span: call.span.clone(),
         }
         .report(),
       );
-      self.types.error()
     }
+
+    // Skip argument type checking for generic functions without explicit type args
+    // (type inference happens during lowering)
+    if !skip_type_checking {
+      let check_count = std::cmp::min(arg_types.len(), param_types.len());
+      for i in 0..check_count {
+        if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+          // Special case: deallocate accepts any *mut T, coercing to *mut u8
+          if func_name == "deallocate" && i == 0 {
+            if self.is_ptr_coercion(&arg_types[i], &param_types[i]) {
+              continue;
+            }
+          }
+
+          let expected = self.format_type_for_error(&param_types[i]);
+          let got = self.format_type_for_error(&arg_types[i]);
+
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentTypeMismatch {
+              param_idx: i + 1,
+              expected,
+              got,
+              span: self.node_span(&call.arguments[i]).clone(),
+            }
+            .report(),
+          );
+        }
+      }
+    }
+
+    ret_type
   }
 
   /// Build a type substitution for a generic function call.
@@ -1848,6 +1969,7 @@ impl<'a> Analyzer<'a> {
   /// Typecheck a method call: obj.method(args) or Type::method(args)
   fn typecheck_method_call(
     &mut self,
+    node_id: &NodeId,
     ma: &ASTMemberAccess,
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
@@ -1855,14 +1977,15 @@ impl<'a> Analyzer<'a> {
     infer: &InferContext,
   ) -> TypeId {
     match ma.op {
-      ASTAccessOp::Dot => self.typecheck_instance_method_call(ma, call, scope_kind, ctx),
-      ASTAccessOp::DoubleColon => self.typecheck_static_method_call(ma, call, scope_kind, ctx, infer),
+      ASTAccessOp::Dot => self.typecheck_instance_method_call(node_id, ma, call, scope_kind, ctx),
+      ASTAccessOp::DoubleColon => self.typecheck_static_method_call(node_id, ma, call, scope_kind, ctx, infer),
     }
   }
 
   /// Typecheck an instance method call: obj.method(args)
   fn typecheck_instance_method_call(
     &mut self,
+    node_id: &NodeId,
     ma: &ASTMemberAccess,
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
@@ -1880,74 +2003,134 @@ impl<'a> Analyzer<'a> {
         };
 
         // Check instance methods
-        if let Some(&method_id) = rd.instance_methods.get(&ma.member) {
-          let method = {
-            let method_def = self.defs.get(&method_id);
-            let DefinitionKind::Method(method) = &method_def.kind else {
-              return self.types.error();
-            };
-            method.clone()
-          };
+        if let Some(entry) = rd.instance_methods.get(&ma.member) {
+          match entry {
+            SymbolEntry::Single(method_id) => {
+              let method = {
+                let method_def = self.defs.get(method_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
 
-          // For instance methods, skip the first param (self) when checking explicit args
-          // The receiver is passed implicitly, not as an explicit argument
-          let explicit_params: Vec<_> = if method.is_static {
-            method.params.clone()
-          } else {
-            method.params.iter().skip(1).cloned().collect()
-          };
+              // For instance methods, skip the first param (self) when checking explicit args
+              // The receiver is passed implicitly, not as an explicit argument
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-          // Get param types for inference (before borrowing self mutably)
-          let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+              // Get param types for inference (before borrowing self mutably)
+              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
 
-          // Typecheck arguments
-          let arg_types: Vec<TypeId> = call
-            .arguments
-            .iter()
-            .enumerate()
-            .map(|(i, arg)| {
-              if let Some(param_type) = param_types.get(i) {
-                let infer = InferContext::expecting(param_type.clone());
-                self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
-              } else {
-                self.typecheck_node(arg, scope_kind, ctx)
+              // Typecheck arguments
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                  if let Some(param_type) = param_types.get(i) {
+                    let infer = InferContext::expecting(param_type.clone());
+                    self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+                  } else {
+                    self.typecheck_node(arg, scope_kind, ctx)
+                  }
+                })
+                .collect();
+
+              // Check argument count (excluding self for instance methods)
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
               }
-            })
-            .collect();
 
-          // Check argument count (excluding self for instance methods)
-          let method_name = self.get_symbol_name(&ma.member);
-          if arg_types.len() != explicit_params.len() {
-            self.add_diagnostic(
-              DiagnosticMessage::ArgumentCountMismatch {
-                expected: explicit_params.len(),
-                got: arg_types.len(),
-                func_name: method_name.clone(),
-                span: call.span.clone(),
-              }
-              .report(),
-            );
-          }
-
-          // Check argument types
-          let check_count = std::cmp::min(arg_types.len(), param_types.len());
-          for i in 0..check_count {
-            if !self.types.types_equal(&param_types[i], &arg_types[i]) {
-              let expected = self.format_type_for_error(&param_types[i]);
-              let got = self.format_type_for_error(&arg_types[i]);
-              self.add_diagnostic(
-                DiagnosticMessage::ArgumentTypeMismatch {
-                  param_idx: i + 1,
-                  expected,
-                  got,
-                  span: self.node_span(&call.arguments[i]).clone(),
+              // Check argument types
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
                 }
-                .report(),
-              );
-            }
-          }
+              }
 
-          return method.return_type;
+              return method.return_type;
+            },
+            SymbolEntry::Overload(candidates) => {
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+                .collect();
+
+              let resolved_def_id = match self.resolve_overload(candidates, &arg_types, &call.span, None) {
+                Ok(def_id) => def_id,
+                Err(()) => return self.types.error(),
+              };
+
+              self.set_resolved_call(node_id, resolved_def_id);
+
+              let method = {
+                let method_def = self.defs.get(&resolved_def_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
+
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
+                }
+              }
+
+              return method.return_type;
+            },
+          }
         }
 
         // Not a method - check if it's a field being called (error)
@@ -1993,80 +2176,146 @@ impl<'a> Analyzer<'a> {
         };
 
         // Check instance methods
-        if let Some(&method_id) = rd.instance_methods.get(&ma.member) {
-          let method = {
-            let method_def = self.defs.get(&method_id);
-            let DefinitionKind::Method(method) = &method_def.kind else {
-              return self.types.error();
-            };
-            method.clone()
-          };
+        if let Some(entry) = rd.instance_methods.get(&ma.member) {
+          match entry {
+            SymbolEntry::Single(method_id) => {
+              let method = {
+                let method_def = self.defs.get(method_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
 
-          // For instance methods, skip the first param (self) when checking explicit args
-          let explicit_params: Vec<_> = if method.is_static {
-            method.params.clone()
-          } else {
-            method.params.iter().skip(1).cloned().collect()
-          };
+              // For instance methods, skip the first param (self) when checking explicit args
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-          // Get param types and substitute type params
-          let param_types: Vec<TypeId> = explicit_params
-            .iter()
-            .map(|p| {
-              let raw_type = self.get_definition_type(p);
-              self.types.substitute(raw_type, &subst)
-            })
-            .collect();
+              // Get param types and substitute type params
+              let param_types: Vec<TypeId> = explicit_params
+                .iter()
+                .map(|p| {
+                  let raw_type = self.get_definition_type(p);
+                  self.types.substitute(raw_type, &subst)
+                })
+                .collect();
 
-          // Typecheck arguments
-          let arg_types: Vec<TypeId> = call
-            .arguments
-            .iter()
-            .enumerate()
-            .map(|(i, arg)| {
-              if let Some(param_type) = param_types.get(i) {
-                let infer = InferContext::expecting(param_type.clone());
-                self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
-              } else {
-                self.typecheck_node(arg, scope_kind, ctx)
+              // Typecheck arguments
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                  if let Some(param_type) = param_types.get(i) {
+                    let infer = InferContext::expecting(param_type.clone());
+                    self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+                  } else {
+                    self.typecheck_node(arg, scope_kind, ctx)
+                  }
+                })
+                .collect();
+
+              // Check argument count
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
               }
-            })
-            .collect();
 
-          // Check argument count
-          let method_name = self.get_symbol_name(&ma.member);
-          if arg_types.len() != explicit_params.len() {
-            self.add_diagnostic(
-              DiagnosticMessage::ArgumentCountMismatch {
-                expected: explicit_params.len(),
-                got: arg_types.len(),
-                func_name: method_name.clone(),
-                span: call.span.clone(),
-              }
-              .report(),
-            );
-          }
-
-          // Check argument types
-          let check_count = std::cmp::min(arg_types.len(), param_types.len());
-          for i in 0..check_count {
-            if !self.types.types_equal(&param_types[i], &arg_types[i]) {
-              let expected = self.format_type_for_error(&param_types[i]);
-              let got = self.format_type_for_error(&arg_types[i]);
-              self.add_diagnostic(
-                DiagnosticMessage::ArgumentTypeMismatch {
-                  param_idx: i + 1,
-                  expected,
-                  got,
-                  span: self.node_span(&call.arguments[i]).clone(),
+              // Check argument types
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
                 }
-                .report(),
-              );
-            }
-          }
+              }
 
-          // Substitute return type
-          return self.types.substitute(method.return_type, &subst);
+              // Substitute return type
+              return self.types.substitute(method.return_type, &subst);
+            },
+            SymbolEntry::Overload(candidates) => {
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+                .collect();
+
+              let resolved_def_id = match self.resolve_overload(candidates, &arg_types, &call.span, Some(&subst)) {
+                Ok(def_id) => def_id,
+                Err(()) => return self.types.error(),
+              };
+
+              self.set_resolved_call(node_id, resolved_def_id);
+
+              let method = {
+                let method_def = self.defs.get(&resolved_def_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
+
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+              let param_types: Vec<TypeId> = explicit_params
+                .iter()
+                .map(|p| {
+                  let raw_type = self.get_definition_type(p);
+                  self.types.substitute(raw_type, &subst)
+                })
+                .collect();
+
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
+                }
+              }
+
+              return self.types.substitute(method.return_type, &subst);
+            },
+          }
         }
 
         // Not a method - check if it's a field being called (error)
@@ -2117,6 +2366,7 @@ impl<'a> Analyzer<'a> {
   /// Typecheck a static method call: Type::method(args)
   fn typecheck_static_method_call(
     &mut self,
+    node_id: &NodeId,
     ma: &ASTMemberAccess,
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
@@ -2133,8 +2383,71 @@ impl<'a> Analyzer<'a> {
     match &self.defs.get(&def_id).kind.clone() {
       DefinitionKind::Record(rd) => {
         // Static method call
-        if let Some(&method_id) = rd.static_methods.get(&ma.member) {
-          return self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx);
+        if let Some(entry) = rd.static_methods.get(&ma.member) {
+          match entry {
+            SymbolEntry::Single(method_id) => {
+              return self.typecheck_static_method_or_function_call(method_id, call, scope_kind, ctx);
+            },
+            SymbolEntry::Overload(candidates) => {
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+                .collect();
+
+              let resolved_def_id = match self.resolve_overload(candidates, &arg_types, &call.span, None) {
+                Ok(def_id) => def_id,
+                Err(()) => return self.types.error(),
+              };
+
+              self.set_resolved_call(node_id, resolved_def_id);
+
+              let method = {
+                let method_def = self.defs.get(&resolved_def_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
+
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
+                }
+              }
+
+              return method.return_type;
+            },
+          }
         }
 
         let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
@@ -2244,8 +2557,71 @@ impl<'a> Analyzer<'a> {
         }
 
         // Static method call on enum
-        if let Some(&method_id) = ed.static_methods.get(&ma.member) {
-          return self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx);
+        if let Some(entry) = ed.static_methods.get(&ma.member) {
+          match entry {
+            SymbolEntry::Single(method_id) => {
+              return self.typecheck_static_method_or_function_call(method_id, call, scope_kind, ctx);
+            },
+            SymbolEntry::Overload(candidates) => {
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+                .collect();
+
+              let resolved_def_id = match self.resolve_overload(candidates, &arg_types, &call.span, None) {
+                Ok(def_id) => def_id,
+                Err(()) => return self.types.error(),
+              };
+
+              self.set_resolved_call(node_id, resolved_def_id);
+
+              let method = {
+                let method_def = self.defs.get(&resolved_def_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
+
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
+                }
+              }
+
+              return method.return_type;
+            },
+          }
         }
 
         let type_name = self.get_symbol_name(&self.defs.get(&def_id).name);
@@ -2270,6 +2646,7 @@ impl<'a> Analyzer<'a> {
   /// Typecheck a call where the callee is a path (e.g., Type::method or Enum::Variant)
   fn typecheck_path_call(
     &mut self,
+    node_id: &NodeId,
     path: &ignis_ast::expressions::path::ASTPath,
     call: &ASTCallExpression,
     scope_kind: ScopeKind,
@@ -2280,149 +2657,190 @@ impl<'a> Analyzer<'a> {
       return None;
     }
 
-    // Try to resolve the first segment as a type (Record or Enum)
-    let first_segment = &path.segments[0];
-    let Some(type_def_id) = self.scopes.lookup(first_segment).cloned() else {
-      return None;
-    };
-
-    match &self.defs.get(&type_def_id).kind.clone() {
-      DefinitionKind::Record(rd) if path.segments.len() == 2 => {
-        let member = &path.segments[1];
-
-        // Static method call
-        if let Some(&method_id) = rd.static_methods.get(member) {
-          return Some(self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx));
-        }
-
-        // Not a static method - report error
-        let type_name = self.get_symbol_name(&self.defs.get(&type_def_id).name);
-        let member_name = self.get_symbol_name(member);
-        self.add_diagnostic(
-          DiagnosticMessage::StaticMemberNotFound {
-            member: member_name,
-            type_name,
-            span: path.span.clone(),
-          }
-          .report(),
-        );
-        Some(self.types.error())
-      },
-      DefinitionKind::Enum(ed) if path.segments.len() == 2 => {
-        let member = &path.segments[1];
-
-        // Enum variant with payload
-        if let Some(&tag) = ed.variants_by_name.get(member) {
-          let variant = &ed.variants[tag as usize];
-
-          if variant.payload.is_empty() {
-            // Unit variant being called - error
-            let variant_name = self.get_symbol_name(member);
-            self.add_diagnostic(
-              DiagnosticMessage::NotCallable {
-                type_name: variant_name,
-                span: call.span.clone(),
-              }
-              .report(),
-            );
-            return Some(self.types.error());
-          }
-
-          // Infer type args for generic enums from expected type
-          let type_args: Vec<TypeId> = if !ed.type_params.is_empty() {
-            if let Some(expected) = &infer.expected {
-              match self.types.get(expected).clone() {
-                Type::Instance { generic, args } if generic == type_def_id => args,
-                _ => vec![],
-              }
-            } else {
-              vec![]
+    match self.resolve_qualified_path(&path.segments) {
+      Some(ResolvedPath::Entry(entry)) => {
+        match entry {
+          SymbolEntry::Single(def_id) => {
+            self.set_resolved_call(node_id, def_id);
+            Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx))
+          },
+          SymbolEntry::Overload(candidates) => {
+            if candidates.len() == 1 {
+              let def_id = candidates[0];
+              self.set_resolved_call(node_id, def_id);
+              return Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx));
             }
-          } else {
-            vec![]
-          };
 
-          // Build substitution for generic enums
-          let subst = if !ed.type_params.is_empty() && type_args.len() == ed.type_params.len() {
-            Substitution::for_generic(type_def_id, &type_args)
-          } else {
-            Substitution::new()
-          };
+            let arg_types: Vec<TypeId> = call
+              .arguments
+              .iter()
+              .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+              .collect();
 
-          // Typecheck payload arguments with substituted types
-          let arg_types: Vec<TypeId> = call
-            .arguments
-            .iter()
-            .enumerate()
-            .map(|(i, arg)| {
-              if let Some(&payload_type) = variant.payload.get(i) {
-                let substituted_type = self.types.substitute(payload_type, &subst);
-                let infer = InferContext::expecting(substituted_type);
-                self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
-              } else {
-                self.typecheck_node(arg, scope_kind, ctx)
+            let resolved_def_id = match self.resolve_overload(&candidates, &arg_types, &call.span, None) {
+              Ok(def_id) => def_id,
+              Err(()) => return Some(self.types.error()),
+            };
+
+            self.set_resolved_call(node_id, resolved_def_id);
+
+            let def = self.defs.get(&resolved_def_id);
+            let (params, return_type, is_variadic) = match &def.kind {
+              DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false),
+              DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic),
+              _ => return Some(self.types.error()),
+            };
+            let func_name = self.get_symbol_name(&def.name);
+
+            let param_types: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
+
+            if is_variadic {
+              if arg_types.len() < params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: params.len(),
+                    got: arg_types.len(),
+                    func_name: func_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
               }
-            })
-            .collect();
-
-          // Check argument count
-          let variant_name = self.get_symbol_name(member);
-          if arg_types.len() != variant.payload.len() {
-            self.add_diagnostic(
-              DiagnosticMessage::EnumVariantRequiresPayload {
-                variant: variant_name.clone(),
-                expected: variant.payload.len(),
-                span: call.span.clone(),
-              }
-              .report(),
-            );
-          }
-
-          // Check argument types against substituted payload types
-          let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
-          for i in 0..check_count {
-            let expected_type = self.types.substitute(variant.payload[i], &subst);
-            if !self.types.types_equal(&expected_type, &arg_types[i]) {
-              let expected = self.format_type_for_error(&expected_type);
-              let got = self.format_type_for_error(&arg_types[i]);
+            } else if arg_types.len() != params.len() {
               self.add_diagnostic(
-                DiagnosticMessage::ArgumentTypeMismatch {
-                  param_idx: i + 1,
-                  expected,
-                  got,
-                  span: self.node_span(&call.arguments[i]).clone(),
+                DiagnosticMessage::ArgumentCountMismatch {
+                  expected: params.len(),
+                  got: arg_types.len(),
+                  func_name: func_name.clone(),
+                  span: call.span.clone(),
                 }
                 .report(),
               );
             }
-          }
 
-          // Return Type::Instance for generic enums, otherwise the base type
-          if !type_args.is_empty() {
-            return Some(self.types.instance(type_def_id, type_args));
-          }
-          return Some(ed.type_id);
+            let check_count = std::cmp::min(arg_types.len(), params.len());
+            for i in 0..check_count {
+              if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                let expected = self.format_type_for_error(&param_types[i]);
+                let got = self.format_type_for_error(&arg_types[i]);
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentTypeMismatch {
+                    param_idx: i + 1,
+                    expected,
+                    got,
+                    span: self.node_span(&call.arguments[i]).clone(),
+                  }
+                  .report(),
+                );
+              }
+            }
+
+            Some(return_type)
+          },
         }
-
-        // Static method call on enum
-        if let Some(&method_id) = ed.static_methods.get(member) {
-          return Some(self.typecheck_static_method_or_function_call(&method_id, call, scope_kind, ctx));
-        }
-
-        // Not found
-        let type_name = self.get_symbol_name(&self.defs.get(&type_def_id).name);
-        let member_name = self.get_symbol_name(member);
-        self.add_diagnostic(
-          DiagnosticMessage::StaticMemberNotFound {
-            member: member_name,
-            type_name,
-            span: path.span.clone(),
-          }
-          .report(),
-        );
-        Some(self.types.error())
       },
-      _ => None, // Not a Record or Enum, fall through to normal path resolution
+      Some(ResolvedPath::EnumVariant {
+        enum_def,
+        variant_index,
+      }) => {
+        // Handle Enum variant call (with payload)
+        let ed = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def).kind {
+          ed.clone()
+        } else {
+          return Some(self.types.error());
+        };
+
+        let variant = &ed.variants[variant_index as usize];
+
+        if variant.payload.is_empty() {
+          // Unit variant being called - error
+          let variant_name = self.get_symbol_name(&variant.name);
+          self.add_diagnostic(
+            DiagnosticMessage::NotCallable {
+              type_name: variant_name,
+              span: call.span.clone(),
+            }
+            .report(),
+          );
+          return Some(self.types.error());
+        }
+
+        // Infer type args for generic enums from expected type
+        let type_args: Vec<TypeId> = if !ed.type_params.is_empty() {
+          if let Some(expected) = &infer.expected {
+            match self.types.get(expected).clone() {
+              Type::Instance { generic, args } if generic == enum_def => args,
+              _ => vec![],
+            }
+          } else {
+            vec![]
+          }
+        } else {
+          vec![]
+        };
+
+        // Build substitution for generic enums
+        let subst = if !ed.type_params.is_empty() && type_args.len() == ed.type_params.len() {
+          Substitution::for_generic(enum_def, &type_args)
+        } else {
+          Substitution::new()
+        };
+
+        // Typecheck payload arguments with substituted types
+        let arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .enumerate()
+          .map(|(i, arg)| {
+            if let Some(&payload_type) = variant.payload.get(i) {
+              let substituted_type = self.types.substitute(payload_type, &subst);
+              let infer = InferContext::expecting(substituted_type);
+              self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+            } else {
+              self.typecheck_node(arg, scope_kind, ctx)
+            }
+          })
+          .collect();
+
+        // Check argument count
+        let variant_name = self.get_symbol_name(&variant.name);
+        if arg_types.len() != variant.payload.len() {
+          self.add_diagnostic(
+            DiagnosticMessage::EnumVariantRequiresPayload {
+              variant: variant_name.clone(),
+              expected: variant.payload.len(),
+              span: call.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        // Check argument types against substituted payload types
+        let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
+        for i in 0..check_count {
+          let expected_type = self.types.substitute(variant.payload[i], &subst);
+          if !self.types.types_equal(&expected_type, &arg_types[i]) {
+            let expected = self.format_type_for_error(&expected_type);
+            let got = self.format_type_for_error(&arg_types[i]);
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 1,
+                expected,
+                got,
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
+          }
+        }
+
+        // Return Type::Instance for generic enums, otherwise the base type
+        if !type_args.is_empty() {
+          return Some(self.types.instance(enum_def, type_args));
+        }
+        return Some(ed.type_id);
+      },
+      _ => None,
     }
   }
 
@@ -3327,7 +3745,7 @@ impl<'a> Analyzer<'a> {
         self.types.reference(inner_type, *mutable)
       },
       IgnisTypeSyntax::Named(symbol_id) => {
-        if let Some(def_id) = self.scopes.lookup(&symbol_id).cloned() {
+        if let Some(def_id) = self.scopes.lookup_def(&symbol_id).cloned() {
           // Check for type alias cycle
           if self.resolving_type_aliases.contains(&def_id) {
             let name = self.symbols.borrow().get(&symbol_id).to_string();
@@ -3502,7 +3920,7 @@ impl<'a> Analyzer<'a> {
   ) -> bool {
     match expr {
       ASTExpression::Variable(var) => {
-        if let Some(def_id) = self.scopes.lookup(&var.name) {
+        if let Some(def_id) = self.scopes.lookup_def(&var.name) {
           match &self.defs.get(def_id).kind {
             DefinitionKind::Variable(var_def) => var_def.mutable,
             DefinitionKind::Parameter(param_def) => param_def.mutable,
@@ -3536,7 +3954,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Path(path) => {
         if let Some(last) = path.segments.last() {
-          if let Some(def_id) = self.scopes.lookup(last) {
+          if let Some(def_id) = self.scopes.lookup_def(last) {
             match &self.defs.get(def_id).kind {
               DefinitionKind::Variable(var_def) => var_def.mutable,
               DefinitionKind::Parameter(param_def) => param_def.mutable,
@@ -3795,13 +4213,22 @@ impl<'a> Analyzer<'a> {
 
     // Start with first segment in scope
     let (first_sym, _) = &segments[0];
-    let mut current_def = self.scopes.lookup(first_sym).cloned()?;
+    let mut current_def = self.scopes.lookup_def(first_sym).cloned()?;
 
     // Walk through remaining segments
     for (segment_sym, _) in segments.iter().skip(1) {
       match &self.defs.get(&current_def).kind {
         DefinitionKind::Namespace(ns_def) => {
-          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym)?;
+          if let Some(entry) = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym) {
+            if let Some(def_id) = entry.as_single() {
+              current_def = *def_id;
+            } else {
+              // Overloaded functions cannot be used as types
+              return None;
+            }
+          } else {
+            return None;
+          }
         },
         _ => return None,
       }
@@ -3923,7 +4350,7 @@ impl<'a> Analyzer<'a> {
 
     for param_id in &type_params {
       let name = self.defs.get(param_id).name;
-      let _ = self.scopes.define(&name, param_id);
+      let _ = self.scopes.define(&name, param_id, false);
     }
   }
 
@@ -3943,5 +4370,362 @@ impl<'a> Analyzer<'a> {
     if has_type_params {
       self.scopes.pop();
     }
+  }
+
+  // ========================================================================
+  // Overload Resolution
+  // ========================================================================
+
+  fn resolve_overload(
+    &mut self,
+    candidates: &[DefinitionId],
+    arg_types: &[TypeId],
+    span: &Span,
+    subst: Option<&Substitution>,
+  ) -> Result<DefinitionId, ()> {
+    if candidates.is_empty() {
+      return Err(());
+    }
+
+    if candidates.len() == 1 {
+      return Ok(candidates[0]);
+    }
+
+    let arity = arg_types.len();
+
+    let arity_matches: Vec<_> = candidates
+      .iter()
+      .filter(|&&def_id| self.check_arity(def_id, arity))
+      .copied()
+      .collect();
+
+    let mut scored: Vec<(DefinitionId, u32)> = Vec::new();
+
+    for &def_id in &arity_matches {
+      if let Some(score) = self.try_match_signature(def_id, arg_types, subst) {
+        scored.push((def_id, score));
+      }
+    }
+
+    if scored.is_empty() {
+      self.emit_no_overload_error(candidates, arg_types, span);
+      return Err(());
+    }
+
+    scored.sort_by_key(|(_, score)| *score);
+
+    let best_score = scored[0].1;
+    let best_matches: Vec<_> = scored
+      .iter()
+      .filter(|(_, score)| *score == best_score)
+      .map(|(def_id, _)| *def_id)
+      .collect();
+
+    if best_matches.len() > 1 {
+      self.emit_ambiguous_overload_error(&best_matches, arg_types, span);
+      return Err(());
+    }
+
+    Ok(best_matches[0])
+  }
+
+  fn check_arity(
+    &self,
+    def_id: DefinitionId,
+    arg_count: usize,
+  ) -> bool {
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Function(fd) => fd.params.len() == arg_count,
+      DefinitionKind::Method(md) => {
+        let start = self.method_param_start(md);
+        let param_count = md.params.len().saturating_sub(start);
+        param_count == arg_count
+      },
+      _ => false,
+    }
+  }
+
+  fn try_match_signature(
+    &mut self,
+    def_id: DefinitionId,
+    arg_types: &[TypeId],
+    subst: Option<&Substitution>,
+  ) -> Option<u32> {
+    let param_types = self.get_param_types(def_id, subst);
+
+    let has_generics = self.has_type_params(def_id);
+    let mut inferred = Substitution::new();
+
+    for (param_ty, arg_ty) in param_types.iter().zip(arg_types.iter()) {
+      if !self.types.types_equal(param_ty, arg_ty) {
+        if has_generics {
+          if !self.try_infer_type_param(param_ty, arg_ty, &mut inferred) {
+            return None;
+          }
+        } else {
+          return None;
+        }
+      }
+    }
+
+    Some(if inferred.is_empty() { 0 } else { 1 })
+  }
+
+  fn get_param_types(
+    &mut self,
+    def_id: DefinitionId,
+    subst: Option<&Substitution>,
+  ) -> Vec<TypeId> {
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Function(fd) => fd
+        .params
+        .iter()
+        .map(|p| {
+          let ty = self.defs.type_of(p).clone();
+          subst.map_or(ty, |s| self.types.substitute(ty, s))
+        })
+        .collect(),
+      DefinitionKind::Method(md) => {
+        let start = self.method_param_start(md);
+        md.params[start..]
+          .iter()
+          .map(|p| {
+            let ty = self.defs.type_of(p).clone();
+            subst.map_or(ty, |s| self.types.substitute(ty, s))
+          })
+          .collect()
+      },
+      _ => Vec::new(),
+    }
+  }
+
+  fn has_type_params(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Function(fd) => !fd.type_params.is_empty(),
+      DefinitionKind::Method(md) => !md.type_params.is_empty(),
+      _ => false,
+    }
+  }
+
+  fn try_infer_type_param(
+    &self,
+    param_ty: &TypeId,
+    arg_ty: &TypeId,
+    subst: &mut Substitution,
+  ) -> bool {
+    self.types.unify_for_inference(*param_ty, *arg_ty, subst)
+  }
+
+  fn method_param_start(
+    &self,
+    md: &ignis_type::definition::MethodDefinition,
+  ) -> usize {
+    if md.is_static {
+      return 0;
+    }
+
+    let Some(first_param) = md.params.first() else {
+      return 0;
+    };
+
+    let symbols = self.symbols.borrow();
+    let first_name = symbols.get(&self.defs.get(first_param).name);
+    if first_name == "self" { 1 } else { 0 }
+  }
+
+  fn emit_no_overload_error(
+    &mut self,
+    candidates: &[DefinitionId],
+    arg_types: &[TypeId],
+    span: &Span,
+  ) {
+    let available_signatures: Vec<String> = candidates.iter().map(|&def_id| self.format_signature(def_id)).collect();
+
+    let arg_types_str: Vec<String> = arg_types.iter().map(|ty| self.format_type_for_error(ty)).collect();
+
+    let name = if let Some(first_def) = candidates.first() {
+      self.get_symbol_name(&self.defs.get(first_def).name)
+    } else {
+      "unknown".to_string()
+    };
+
+    self.add_diagnostic(
+      DiagnosticMessage::NoOverloadMatches {
+        name,
+        available_signatures,
+        arg_types: arg_types_str,
+        span: span.clone(),
+      }
+      .report(),
+    );
+  }
+
+  fn emit_ambiguous_overload_error(
+    &mut self,
+    matching: &[DefinitionId],
+    arg_types: &[TypeId],
+    span: &Span,
+  ) {
+    let matching_signatures: Vec<String> = matching.iter().map(|&def_id| self.format_signature(def_id)).collect();
+
+    let arg_types_str: Vec<String> = arg_types.iter().map(|ty| self.format_type_for_error(ty)).collect();
+
+    let name = if let Some(first_def) = matching.first() {
+      self.get_symbol_name(&self.defs.get(first_def).name)
+    } else {
+      "unknown".to_string()
+    };
+
+    self.add_diagnostic(
+      DiagnosticMessage::AmbiguousOverload {
+        name,
+        matching_signatures,
+        arg_types: arg_types_str,
+        span: span.clone(),
+      }
+      .report(),
+    );
+  }
+
+  fn format_signature(
+    &self,
+    def_id: DefinitionId,
+  ) -> String {
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Function(fd) => {
+        let param_types: Vec<String> = fd
+          .params
+          .iter()
+          .map(|p| self.format_type_for_error(self.defs.type_of(p)))
+          .collect();
+        let ret_type = self.format_type_for_error(&fd.return_type);
+        format!("({}): {}", param_types.join(", "), ret_type)
+      },
+      DefinitionKind::Method(md) => {
+        let start = self.method_param_start(md);
+        let param_types: Vec<String> = md.params[start..]
+          .iter()
+          .map(|p| self.format_type_for_error(self.defs.type_of(p)))
+          .collect();
+        let ret_type = self.format_type_for_error(&md.return_type);
+        format!("({}): {}", param_types.join(", "), ret_type)
+      },
+      _ => "<unknown>".to_string(),
+    }
+  }
+
+  fn check_duplicate_signatures(&mut self) {
+    let overload_groups: Vec<(ignis_type::symbol::SymbolId, Vec<DefinitionId>)> = self
+      .scopes
+      .all_scopes()
+      .flat_map(|scope| {
+        scope.symbols.iter().filter_map(|(name, entry)| {
+          if let SymbolEntry::Overload(group) = entry {
+            Some((name.clone(), group.clone()))
+          } else {
+            None
+          }
+        })
+      })
+      .collect();
+
+    for (name, group) in overload_groups {
+      self.check_overload_group(&name, &group);
+    }
+
+    let mut method_groups: Vec<(ignis_type::symbol::SymbolId, Vec<DefinitionId>)> = Vec::new();
+
+    for (_, def) in self.defs.iter() {
+      match &def.kind {
+        DefinitionKind::Record(rd) => {
+          for (name, entry) in &rd.instance_methods {
+            if let SymbolEntry::Overload(group) = entry {
+              method_groups.push((name.clone(), group.clone()));
+            }
+          }
+          for (name, entry) in &rd.static_methods {
+            if let SymbolEntry::Overload(group) = entry {
+              method_groups.push((name.clone(), group.clone()));
+            }
+          }
+        },
+        DefinitionKind::Enum(ed) => {
+          for (name, entry) in &ed.static_methods {
+            if let SymbolEntry::Overload(group) = entry {
+              method_groups.push((name.clone(), group.clone()));
+            }
+          }
+        },
+        _ => {},
+      }
+    }
+
+    for (name, group) in method_groups {
+      self.check_overload_group(&name, &group);
+    }
+  }
+
+  fn check_overload_group(
+    &mut self,
+    name: &ignis_type::symbol::SymbolId,
+    group: &[DefinitionId],
+  ) {
+    for (i, &def1) in group.iter().enumerate() {
+      for &def2 in group.iter().skip(i + 1) {
+        if self.signatures_are_identical(def1, def2) {
+          let sig = self.format_signature(def1);
+          let def2_span = self.defs.get(&def2).span.clone();
+          let symbol_name = self.get_symbol_name(name);
+
+          self.add_diagnostic(
+            DiagnosticMessage::DuplicateOverload {
+              name: symbol_name,
+              signature: sig,
+              span: def2_span,
+            }
+            .report(),
+          );
+        }
+      }
+    }
+  }
+
+  fn signatures_are_identical(
+    &self,
+    def1: DefinitionId,
+    def2: DefinitionId,
+  ) -> bool {
+    let (params1, ret1, start1) = match &self.defs.get(&def1).kind {
+      DefinitionKind::Function(f) => (&f.params, &f.return_type, 0),
+      DefinitionKind::Method(m) => (&m.params, &m.return_type, self.method_param_start(m)),
+      _ => return false,
+    };
+
+    let (params2, ret2, start2) = match &self.defs.get(&def2).kind {
+      DefinitionKind::Function(f) => (&f.params, &f.return_type, 0),
+      DefinitionKind::Method(m) => (&m.params, &m.return_type, self.method_param_start(m)),
+      _ => return false,
+    };
+
+    if params1.len().saturating_sub(start1) != params2.len().saturating_sub(start2) {
+      return false;
+    }
+
+    if !self.types.types_equal(ret1, ret2) {
+      return false;
+    }
+
+    for (p1, p2) in params1[start1..].iter().zip(params2[start2..].iter()) {
+      let t1 = self.defs.type_of(p1);
+      let t2 = self.defs.type_of(p2);
+      if !self.types.types_equal(t1, t2) {
+        return false;
+      }
+    }
+
+    true
   }
 }

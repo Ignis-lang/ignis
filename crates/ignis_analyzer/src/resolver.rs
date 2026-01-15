@@ -1,7 +1,7 @@
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{expressions::ASTExpression, statements::ASTStatement, ASTNode, NodeId};
 use ignis_diagnostics::message::DiagnosticMessage;
-use ignis_type::definition::DefinitionId;
+use ignis_type::definition::{DefinitionId, SymbolEntry};
 
 /// Result of resolving a qualified path expression.
 ///
@@ -11,7 +11,7 @@ use ignis_type::definition::DefinitionId;
 #[derive(Debug, Clone)]
 pub enum ResolvedPath {
   /// Path resolves to a definition (variable, function, constant, namespace, type).
-  Def(DefinitionId),
+  Entry(SymbolEntry),
 
   /// Path resolves to an enum variant.
   EnumVariant { enum_def: DefinitionId, variant_index: u32 },
@@ -134,7 +134,7 @@ impl<'a> Analyzer<'a> {
           self.resolve_node(&decl, scope_kind);
         },
         ignis_ast::statements::ASTExport::Name { name, span } => {
-          if self.scopes.lookup(&name).is_none() {
+          if self.scopes.lookup_def(&name).is_none() {
             let symbol = self.get_symbol_name(name);
             self.add_diagnostic(
               DiagnosticMessage::UndeclaredIdentifier {
@@ -162,18 +162,24 @@ impl<'a> Analyzer<'a> {
           return;
         }
 
-        if let Some(def_id) = self.scopes.lookup(&var_expr.name).cloned() {
-          if let Some(nid) = node_id {
-            self.set_def(nid, &def_id);
-          }
-        } else {
-          self.add_diagnostic(
-            DiagnosticMessage::UndeclaredVariable {
-              name: self.get_symbol_name(&var_expr.name),
-              span: var_expr.span.clone(),
+        let symbol_entry = self.scopes.lookup(&var_expr.name);
+        match symbol_entry {
+          Some(SymbolEntry::Single(def_id)) => {
+            if let Some(nid) = node_id {
+              let def_id = def_id.clone();
+              self.set_def(nid, &def_id);
             }
-            .report(),
-          );
+          },
+          Some(SymbolEntry::Overload(_)) => {},
+          None => {
+            self.add_diagnostic(
+              DiagnosticMessage::UndeclaredVariable {
+                name: self.get_symbol_name(&var_expr.name),
+                span: var_expr.span.clone(),
+              }
+              .report(),
+            );
+          },
         }
       },
       ASTExpression::Call(call_expr) => {
@@ -234,39 +240,56 @@ impl<'a> Analyzer<'a> {
         };
 
         match self.resolve_qualified_path(&path.segments) {
-          Some(ResolvedPath::Def(def_id)) => {
+          Some(ResolvedPath::Entry(entry)) => {
             use ignis_type::definition::DefinitionKind;
 
-            let def = self.defs.get(&def_id);
-            match &def.kind {
-              DefinitionKind::Constant(_) => {
-                if let Some(nid) = node_id {
-                  self.set_def(nid, &def_id);
+            match entry {
+              SymbolEntry::Single(def_id) => {
+                let def = self.defs.get(&def_id);
+                match &def.kind {
+                  DefinitionKind::Constant(_) => {
+                    if let Some(nid) = node_id {
+                      self.set_def(nid, &def_id);
+                    }
+                  },
+                  DefinitionKind::Function(_) | DefinitionKind::Method(_) => {
+                    if self.in_callee_context {
+                      if let Some(nid) = node_id {
+                        self.set_def(nid, &def_id);
+                      }
+                    } else {
+                      self.add_diagnostic(
+                        DiagnosticMessage::FunctionPathNotAsCallee {
+                          name: full_path(),
+                          span: path.span.clone(),
+                        }
+                        .report(),
+                      );
+                    }
+                  },
+                  _ => {
+                    self.add_diagnostic(
+                      DiagnosticMessage::UnsupportedPathExpression {
+                        name: full_path(),
+                        span: path.span.clone(),
+                      }
+                      .report(),
+                    );
+                  },
                 }
               },
-              DefinitionKind::Function(_) | DefinitionKind::Method(_) => {
-                if self.in_callee_context {
-                  if let Some(nid) = node_id {
-                    self.set_def(nid, &def_id);
-                  }
-                } else {
+              SymbolEntry::Overload(_) => {
+                if !self.in_callee_context {
                   self.add_diagnostic(
-                    DiagnosticMessage::FunctionPathNotAsCallee {
+                    DiagnosticMessage::OverloadGroupAsValue {
                       name: full_path(),
                       span: path.span.clone(),
                     }
                     .report(),
                   );
                 }
-              },
-              _ => {
-                self.add_diagnostic(
-                  DiagnosticMessage::UnsupportedPathExpression {
-                    name: full_path(),
-                    span: path.span.clone(),
-                  }
-                  .report(),
-                );
+                // For overloads, we don't set_def here as it's ambiguous.
+                // Typecheck will resolve it.
               },
             }
           },
@@ -313,14 +336,14 @@ impl<'a> Analyzer<'a> {
     }
 
     if segments.len() == 1 {
-      return self.scopes.lookup(&segments[0]).cloned().map(ResolvedPath::Def);
+      return self.scopes.lookup(&segments[0]).cloned().map(ResolvedPath::Entry);
     }
 
     let ns_path = &segments[..segments.len() - 1];
     let def_name = &segments[segments.len() - 1];
 
     // Check for imported namespace in scope
-    if let Some(def_id) = self.scopes.lookup(&ns_path[0]) {
+    if let Some(def_id) = self.scopes.lookup_def(&ns_path[0]) {
       let def = self.defs.get(def_id);
 
       match &def.kind {
@@ -331,16 +354,16 @@ impl<'a> Analyzer<'a> {
             current_ns = self.namespaces.lookup_child(current_ns, &segment)?;
           }
 
-          return self.namespaces.lookup_def(current_ns, def_name).map(ResolvedPath::Def);
+          return self.namespaces.lookup_def(current_ns, def_name).cloned().map(ResolvedPath::Entry);
         },
 
         // Handle Record::member (static methods/fields)
         DefinitionKind::Record(rd) if ns_path.len() == 1 => {
-          if let Some(&method_id) = rd.static_methods.get(def_name) {
-            return Some(ResolvedPath::Def(method_id));
+          if let Some(entry) = rd.static_methods.get(def_name) {
+            return Some(ResolvedPath::Entry(entry.clone()));
           }
           if let Some(&field_id) = rd.static_fields.get(def_name) {
-            return Some(ResolvedPath::Def(field_id));
+            return Some(ResolvedPath::Entry(SymbolEntry::Single(field_id)));
           }
           return None;
         },
@@ -348,12 +371,12 @@ impl<'a> Analyzer<'a> {
         // Handle Enum::Variant or Enum::member (static methods/fields)
         DefinitionKind::Enum(ed) if ns_path.len() == 1 => {
           // Check static methods first
-          if let Some(&method_id) = ed.static_methods.get(def_name) {
-            return Some(ResolvedPath::Def(method_id));
+          if let Some(entry) = ed.static_methods.get(def_name) {
+            return Some(ResolvedPath::Entry(entry.clone()));
           }
           // Check static fields
           if let Some(&field_id) = ed.static_fields.get(def_name) {
-            return Some(ResolvedPath::Def(field_id));
+            return Some(ResolvedPath::Entry(SymbolEntry::Single(field_id)));
           }
           // Check enum variants
           if let Some(&tag) = ed.variants_by_name.get(def_name) {
@@ -371,7 +394,7 @@ impl<'a> Analyzer<'a> {
 
     // Namespace defined in current module
     let ns_id = self.namespaces.lookup(ns_path)?;
-    self.namespaces.lookup_def(ns_id, def_name).map(ResolvedPath::Def)
+    self.namespaces.lookup_def(ns_id, def_name).cloned().map(ResolvedPath::Entry)
   }
 
   /// Diagnose why a path resolution failed and return a specific error.
@@ -385,7 +408,7 @@ impl<'a> Analyzer<'a> {
 
     // For 2-segment paths like Foo::Bar, check if first segment is an enum
     if segments.len() == 2 {
-      if let Some(def_id) = self.scopes.lookup(&segments[0]) {
+      if let Some(def_id) = self.scopes.lookup_def(&segments[0]) {
         let def = self.defs.get(def_id);
         let first_name = self.get_symbol_name(&segments[0]);
         let second_name = self.get_symbol_name(&segments[1]);
