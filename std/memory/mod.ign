@@ -1,75 +1,62 @@
 extern __memory {
-    function memoryAllocate(size: u32): *mut u8;
-    function memoryDeallocate(ptr: *mut u8): void;
-    function memoryReallocate(ptr: *mut u8, size: u32): *mut u8;
-    function memoryAllocateZeroed(size: u32, count: u32): *mut u8;
-
-    function bufNew(elemSize: u64, elemTypeId: u32): *mut void;
-    function bufWithCapacity(elemSize: u64, elemTypeId: u32, cap: u64): *mut void;
-    function bufPush(buf: *mut void, elem: *void): void;
-    function bufAt(buf: *mut void, idx: u64): *mut void;
-    function bufLen(buf: *void): u64;
-    function bufCap(buf: *void): u64;
-    function bufResize(buf: *mut void, newLen: u64): void;
-    function bufReserve(buf: *mut void, additional: u64): void;
-    function bufClear(buf: *mut void): void;
-    function bufDrop(buf: *mut void): void;
+  function allocate(sizeBytes: u64): *mut u8;
+  function deallocate(pointer: *mut u8): void;
+  function reallocate(pointer: *mut u8, newSizeBytes: u64): *mut u8;
+  function allocateZeroed(count: u64, elementSizeBytes: u64): *mut u8;
+  function copy(destination: *mut u8, source: *u8, sizeBytes: u64): void;
+  function move(destination: *mut u8, source: *u8, sizeBytes: u64): void;
 }
 
 export namespace Memory {
-    function allocate(size: u32): *mut u8 {
-        return __memory::memoryAllocate(size);
-    }
+  function allocate<T>(size: u64): *mut T {
+    return __memory::allocate(size) as *mut T;
+  }
 
-    function allocateZeroed(size: u32, count: u32): *mut u8 {
-        return __memory::memoryAllocateZeroed(size, count);
-    }
+  function allocateVector<T>(count: u64): *mut T {
+    return __memory::allocate(count * sizeOf(T)) as *mut T;
+  }
 
-    function reallocate(ptr: *mut u8, size: u32): *mut u8 {
-        return __memory::memoryReallocate(ptr, size);
-    }
+  function allocateZeroed<T>(count: u64, elementSizeBytes: u64): *mut T {
+    return __memory::allocateZeroed(count, elementSizeBytes) as *mut T;
+  }
 
-    function deallocate(ptr: *mut u8): void {
-        __memory::memoryDeallocate(ptr);
-    }
+  function allocateZeroedVector<T>(count: u64): *mut T {
+    return __memory::allocateZeroed(count, sizeOf(T)) as *mut T;
+  }
 
-    function bufNew(elemSize: u64, elemTypeId: u32): *mut void {
-        return __memory::bufNew(elemSize, elemTypeId);
-    }
+  function reallocate<T>(pointer: *mut u8, size: u64): *mut T {
+    return __memory::reallocate(pointer, size) as *mut T;
+  }
 
-    function bufWithCapacity(elemSize: u64, elemTypeId: u32, cap: u64): *mut void {
-        return __memory::bufWithCapacity(elemSize, elemTypeId, cap);
-    }
+  function reallocateVector<T>(pointer: *mut T, count: u64): *mut T {
+    return __memory::reallocate(pointer as *mut u8, count * sizeOf(T)) as *mut T;
+  }
 
-    function bufPush(buf: *mut void, elem: *void): void {
-        __memory::bufPush(buf, elem);
-    }
+  function free<T>(pointer: *mut T): void {
+    __memory::deallocate(pointer as *mut u8);
+  }
 
-    function bufAt(buf: *mut void, idx: u64): *mut void {
-        return __memory::bufAt(buf, idx);
-    }
+  function copyBytes(destination: *mut u8, source: *u8, sizeBytes: u64): void {
+    __memory::copy(destination, source, sizeBytes);
+  }
 
-    function bufLen(buf: *void): u64 {
-        return __memory::bufLen(buf);
-    }
+  function copy<T>(destination: *mut T, source: *T, count: u64): void {
+    __memory::copy(destination as *mut u8, source as *const u8, count * sizeOf(T));
+  }
 
-    function bufCap(buf: *void): u64 {
-        return __memory::bufCap(buf);
-    }
+  function moveBytes(destination: *mut u8, source: *u8, sizeBytes: u64): void {
+    __memory::move(destination, source, sizeBytes);
+  }
 
-    function bufResize(buf: *mut void, newLen: u64): void {
-        __memory::bufResize(buf, newLen);
-    }
+  function move<T>(destination: *mut T, source: *T, count: u64): void {
+    __memory::move(destination as *mut u8, source as *const u8, count * sizeOf(T));
+  }
 
-    function bufReserve(buf: *mut void, additional: u64): void {
-        __memory::bufReserve(buf, additional);
-    }
+  function read<T>(pointer: *T): T {
+    return __builin_load(pointer);
+  }
 
-    function bufClear(buf: *mut void): void {
-        __memory::bufClear(buf);
-    }
-
-    function bufDrop(buf: *mut void): void {
-        __memory::bufDrop(buf);
-    }
+  function write<T>(pointer: *mut T, value: T): void {
+    __builin_write(pointer, value);
+  }
 }
