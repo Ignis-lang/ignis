@@ -73,6 +73,7 @@ impl IgnisParser {
 
   /// Generic synchronization: consume tokens until stop_when returns true
   /// Safety limit to prevent infinite loops
+  #[allow(dead_code)]
   pub(crate) fn synchronize_until<F>(
     &mut self,
     stop_when: F,

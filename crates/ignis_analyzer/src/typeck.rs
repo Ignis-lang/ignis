@@ -773,10 +773,9 @@ impl<'a> Analyzer<'a> {
           };
           match entry {
             Some(SymbolEntry::Single(def_id)) => Some(*def_id),
-            Some(SymbolEntry::Overload(group)) => group
-              .iter()
-              .copied()
-              .find(|id| self.defs.get(id).span == method.span),
+            Some(SymbolEntry::Overload(group)) => {
+              group.iter().copied().find(|id| self.defs.get(id).span == method.span)
+            },
             None => None,
           }
         } else {
@@ -842,10 +841,9 @@ impl<'a> Analyzer<'a> {
           let method_def_id = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
             match ed.static_methods.get(&method.name) {
               Some(SymbolEntry::Single(def_id)) => Some(*def_id),
-              Some(SymbolEntry::Overload(group)) => group
-                .iter()
-                .copied()
-                .find(|id| self.defs.get(id).span == method.span),
+              Some(SymbolEntry::Overload(group)) => {
+                group.iter().copied().find(|id| self.defs.get(id).span == method.span)
+              },
               None => None,
             }
           } else {
@@ -2658,55 +2656,43 @@ impl<'a> Analyzer<'a> {
     }
 
     match self.resolve_qualified_path(&path.segments) {
-      Some(ResolvedPath::Entry(entry)) => {
-        match entry {
-          SymbolEntry::Single(def_id) => {
+      Some(ResolvedPath::Entry(entry)) => match entry {
+        SymbolEntry::Single(def_id) => {
+          self.set_resolved_call(node_id, def_id);
+          Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx))
+        },
+        SymbolEntry::Overload(candidates) => {
+          if candidates.len() == 1 {
+            let def_id = candidates[0];
             self.set_resolved_call(node_id, def_id);
-            Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx))
-          },
-          SymbolEntry::Overload(candidates) => {
-            if candidates.len() == 1 {
-              let def_id = candidates[0];
-              self.set_resolved_call(node_id, def_id);
-              return Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx));
-            }
+            return Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx));
+          }
 
-            let arg_types: Vec<TypeId> = call
-              .arguments
-              .iter()
-              .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
-              .collect();
+          let arg_types: Vec<TypeId> = call
+            .arguments
+            .iter()
+            .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+            .collect();
 
-            let resolved_def_id = match self.resolve_overload(&candidates, &arg_types, &call.span, None) {
-              Ok(def_id) => def_id,
-              Err(()) => return Some(self.types.error()),
-            };
+          let resolved_def_id = match self.resolve_overload(&candidates, &arg_types, &call.span, None) {
+            Ok(def_id) => def_id,
+            Err(()) => return Some(self.types.error()),
+          };
 
-            self.set_resolved_call(node_id, resolved_def_id);
+          self.set_resolved_call(node_id, resolved_def_id);
 
-            let def = self.defs.get(&resolved_def_id);
-            let (params, return_type, is_variadic) = match &def.kind {
-              DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false),
-              DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic),
-              _ => return Some(self.types.error()),
-            };
-            let func_name = self.get_symbol_name(&def.name);
+          let def = self.defs.get(&resolved_def_id);
+          let (params, return_type, is_variadic) = match &def.kind {
+            DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false),
+            DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic),
+            _ => return Some(self.types.error()),
+          };
+          let func_name = self.get_symbol_name(&def.name);
 
-            let param_types: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
+          let param_types: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
 
-            if is_variadic {
-              if arg_types.len() < params.len() {
-                self.add_diagnostic(
-                  DiagnosticMessage::ArgumentCountMismatch {
-                    expected: params.len(),
-                    got: arg_types.len(),
-                    func_name: func_name.clone(),
-                    span: call.span.clone(),
-                  }
-                  .report(),
-                );
-              }
-            } else if arg_types.len() != params.len() {
+          if is_variadic {
+            if arg_types.len() < params.len() {
               self.add_diagnostic(
                 DiagnosticMessage::ArgumentCountMismatch {
                   expected: params.len(),
@@ -2717,27 +2703,37 @@ impl<'a> Analyzer<'a> {
                 .report(),
               );
             }
-
-            let check_count = std::cmp::min(arg_types.len(), params.len());
-            for i in 0..check_count {
-              if !self.types.types_equal(&param_types[i], &arg_types[i]) {
-                let expected = self.format_type_for_error(&param_types[i]);
-                let got = self.format_type_for_error(&arg_types[i]);
-                self.add_diagnostic(
-                  DiagnosticMessage::ArgumentTypeMismatch {
-                    param_idx: i + 1,
-                    expected,
-                    got,
-                    span: self.node_span(&call.arguments[i]).clone(),
-                  }
-                  .report(),
-                );
+          } else if arg_types.len() != params.len() {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentCountMismatch {
+                expected: params.len(),
+                got: arg_types.len(),
+                func_name: func_name.clone(),
+                span: call.span.clone(),
               }
-            }
+              .report(),
+            );
+          }
 
-            Some(return_type)
-          },
-        }
+          let check_count = std::cmp::min(arg_types.len(), params.len());
+          for i in 0..check_count {
+            if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+              let expected = self.format_type_for_error(&param_types[i]);
+              let got = self.format_type_for_error(&arg_types[i]);
+              self.add_diagnostic(
+                DiagnosticMessage::ArgumentTypeMismatch {
+                  param_idx: i + 1,
+                  expected,
+                  got,
+                  span: self.node_span(&call.arguments[i]).clone(),
+                }
+                .report(),
+              );
+            }
+          }
+
+          Some(return_type)
+        },
       },
       Some(ResolvedPath::EnumVariant {
         enum_def,

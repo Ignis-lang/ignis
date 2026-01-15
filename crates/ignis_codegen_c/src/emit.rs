@@ -5,8 +5,8 @@ use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, RecordDefinition},
-  namespace::{NamespaceId, NamespaceStore},
-  symbol::{SymbolId, SymbolTable},
+  namespace::NamespaceStore,
+  symbol::SymbolTable,
   types::{Type, TypeId, TypeStore},
 };
 
@@ -773,7 +773,9 @@ impl<'a> CEmitter<'a> {
     func: &FunctionLir,
     op: &Operand,
   ) -> bool {
-    self.operand_type(func, op).map_or(false, |t| self.type_contains_infer(t))
+    self
+      .operand_type(func, op)
+      .map_or(false, |t| self.type_contains_infer(t))
   }
 
   fn format_const(
@@ -1072,46 +1074,46 @@ impl<'a> CEmitter<'a> {
     let target_def = self.defs.get(&target_def_id);
     let target_name = target_def.name;
     let target_ns = target_def.owner_namespace;
-    
+
     // Only functions and methods can be overloaded
     if !matches!(target_def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
       return false;
     }
 
     let target_owner_type = match &target_def.kind {
-        DefinitionKind::Method(md) => Some(md.owner_type),
-        _ => None,
+      DefinitionKind::Method(md) => Some(md.owner_type),
+      _ => None,
     };
 
     let mut count = 0;
     for (_, def) in self.defs.iter() {
       if def.name == target_name {
-          // Check if it's the right kind (Function/Method)
-          if !matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
-            continue;
-          }
+        // Check if it's the right kind (Function/Method)
+        if !matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
+          continue;
+        }
 
-          let def_owner_type = match &def.kind {
-             DefinitionKind::Method(md) => Some(md.owner_type),
-             _ => None,
-          };
-          
-          if target_owner_type.is_some() {
-              // Target is a method: check if other is method of same type
-              if target_owner_type == def_owner_type {
-                  count += 1;
-              }
-          } else {
-              // Target is a function: check if other is function in same namespace
-              // AND ensure other is NOT a method (def_owner_type is None)
-              if def.owner_namespace == target_ns && def_owner_type.is_none() {
-                  count += 1;
-              }
+        let def_owner_type = match &def.kind {
+          DefinitionKind::Method(md) => Some(md.owner_type),
+          _ => None,
+        };
+
+        if target_owner_type.is_some() {
+          // Target is a method: check if other is method of same type
+          if target_owner_type == def_owner_type {
+            count += 1;
           }
-          
-          if count > 1 {
-            return true;
+        } else {
+          // Target is a function: check if other is function in same namespace
+          // AND ensure other is NOT a method (def_owner_type is None)
+          if def.owner_namespace == target_ns && def_owner_type.is_none() {
+            count += 1;
           }
+        }
+
+        if count > 1 {
+          return true;
+        }
       }
     }
     false

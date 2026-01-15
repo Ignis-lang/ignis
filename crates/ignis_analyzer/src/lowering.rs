@@ -1110,7 +1110,12 @@ impl<'a> Analyzer<'a> {
           },
           DefinitionKind::Namespace(ns_def) => {
             // Namespace member
-            if let Some(member_def_id) = self.namespaces.lookup_def(ns_def.namespace_id, &ma.member).and_then(|e| e.as_single()).cloned() {
+            if let Some(member_def_id) = self
+              .namespaces
+              .lookup_def(ns_def.namespace_id, &ma.member)
+              .and_then(|e| e.as_single())
+              .cloned()
+            {
               let member_type = stored_type.unwrap_or_else(|| self.get_definition_type(&member_def_id));
               return hir.alloc(HIRNode {
                 kind: HIRKind::StaticAccess { def: member_def_id },
@@ -1230,7 +1235,11 @@ impl<'a> Analyzer<'a> {
         for segment in path.segments.iter().skip(1) {
           match &self.defs.get(&current_def).kind {
             DefinitionKind::Namespace(ns_def) => {
-              current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment).and_then(|e| e.as_single()).cloned()?;
+              current_def = self
+                .namespaces
+                .lookup_def(ns_def.namespace_id, segment)
+                .and_then(|e| e.as_single())
+                .cloned()?;
             },
             _ => return None,
           }
@@ -1240,7 +1249,11 @@ impl<'a> Analyzer<'a> {
       ASTNode::Expression(ASTExpression::MemberAccess(ma)) => {
         let base_def = self.resolve_type_expression_for_lowering(&ma.object)?;
         match &self.defs.get(&base_def).kind {
-          DefinitionKind::Namespace(ns_def) => self.namespaces.lookup_def(ns_def.namespace_id, &ma.member).and_then(|e| e.as_single()).cloned(),
+          DefinitionKind::Namespace(ns_def) => self
+            .namespaces
+            .lookup_def(ns_def.namespace_id, &ma.member)
+            .and_then(|e| e.as_single())
+            .cloned(),
           _ => None,
         }
       },
@@ -1262,7 +1275,11 @@ impl<'a> Analyzer<'a> {
     for (segment_sym, _) in path.iter().skip(1) {
       match &self.defs.get(&current_def).kind {
         DefinitionKind::Namespace(ns_def) => {
-          current_def = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym).and_then(|e| e.as_single()).cloned()?;
+          current_def = self
+            .namespaces
+            .lookup_def(ns_def.namespace_id, segment_sym)
+            .and_then(|e| e.as_single())
+            .cloned()?;
         },
         _ => return None,
       }

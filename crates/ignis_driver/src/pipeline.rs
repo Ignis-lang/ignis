@@ -305,19 +305,28 @@ pub fn compile_project(
       let root_module = ctx.module_graph.modules.get(&root_id);
       let file_id = root_module.file_id;
       let span = ignis_type::span::Span::empty_at(file_id, ignis_type::BytePosition::default());
-      ignis_diagnostics::render(&DiagnosticMessage::ExecutableMustHaveMainFunction { span }.report(), &ctx.source_map);
+      ignis_diagnostics::render(
+        &DiagnosticMessage::ExecutableMustHaveMainFunction { span }.report(),
+        &ctx.source_map,
+      );
       return Err(());
     }
 
     if is_lib && has_entry_point {
       let entry_def_id = output.hir.entry_point.unwrap();
       let span = output.defs.get(&entry_def_id).span.clone();
-      ignis_diagnostics::render(&DiagnosticMessage::LibraryCannotHaveMainFunction { span }.report(), &ctx.source_map);
+      ignis_diagnostics::render(
+        &DiagnosticMessage::LibraryCannotHaveMainFunction { span }.report(),
+        &ctx.source_map,
+      );
       return Err(());
     }
 
-    let needs_codegen =
-      dump_requested(&config, DumpKind::Lir) || bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
+    let needs_codegen = dump_requested(&config, DumpKind::Lir)
+      || bc.emit_c.is_some()
+      || bc.emit_obj.is_some()
+      || bc.emit_bin.is_some()
+      || bc.lib;
 
     if needs_codegen {
       let used_modules = ctx.module_graph.topological_sort();

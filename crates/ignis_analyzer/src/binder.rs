@@ -708,9 +708,7 @@ impl<'a> Analyzer<'a> {
     if is_main {
       if let Some(SymbolEntry::Overload(group)) = self.scopes.lookup(&func.signature.name) {
         if group.len() > 1 {
-          self.add_diagnostic(
-            DiagnosticMessage::MainFunctionCannotBeOverloaded { span: span.clone() }.report(),
-          );
+          self.add_diagnostic(DiagnosticMessage::MainFunctionCannotBeOverloaded { span: span.clone() }.report());
         }
       }
     }

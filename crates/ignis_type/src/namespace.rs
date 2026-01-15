@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
-use crate::{Id, Store, definition::{DefinitionId, SymbolEntry}, symbol::SymbolId};
+use crate::{
+  Id, Store,
+  definition::{DefinitionId, SymbolEntry},
+  symbol::SymbolId,
+};
 
 pub type NamespaceId = Id<Namespace>;
 

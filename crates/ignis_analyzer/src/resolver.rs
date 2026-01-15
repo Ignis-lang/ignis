@@ -354,7 +354,11 @@ impl<'a> Analyzer<'a> {
             current_ns = self.namespaces.lookup_child(current_ns, &segment)?;
           }
 
-          return self.namespaces.lookup_def(current_ns, def_name).cloned().map(ResolvedPath::Entry);
+          return self
+            .namespaces
+            .lookup_def(current_ns, def_name)
+            .cloned()
+            .map(ResolvedPath::Entry);
         },
 
         // Handle Record::member (static methods/fields)
@@ -394,7 +398,11 @@ impl<'a> Analyzer<'a> {
 
     // Namespace defined in current module
     let ns_id = self.namespaces.lookup(ns_path)?;
-    self.namespaces.lookup_def(ns_id, def_name).cloned().map(ResolvedPath::Entry)
+    self
+      .namespaces
+      .lookup_def(ns_id, def_name)
+      .cloned()
+      .map(ResolvedPath::Entry)
   }
 
   /// Diagnose why a path resolution failed and return a specific error.

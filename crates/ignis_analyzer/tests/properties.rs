@@ -51,7 +51,7 @@ proptest! {
     }
 }
 
-/// Property tests for error handling - these may produce errors but shouldn't panic
+// Property tests for error handling - these may produce errors but shouldn't panic
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
 
