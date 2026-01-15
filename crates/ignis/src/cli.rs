@@ -191,6 +191,42 @@ pub struct BuildStdCommand {
   pub output_dir: String,
 }
 
+#[derive(Parser, Debug, Clone, PartialEq)]
+pub struct CheckCommand {
+  /// The file to check or nothing to check the project
+  pub file_path: Option<String>,
+
+  /// The target to compile to
+  #[arg(short, long, value_enum, default_value = "c")]
+  pub target: Target,
+
+  /// Only run frontend/analyzer; skip lowering/codegen
+  #[arg(long, default_value = "false")]
+  pub analyze_only: bool,
+
+  /// Output directory (used when emitting C)
+  #[arg(short = 'o', long, default_value = "build")]
+  pub output_dir: String,
+
+  /// Emit C code to file (otherwise kept in memory)
+  #[arg(long)]
+  pub emit_c: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq)]
+pub struct CheckStdCommand {
+  /// Output directory for generated C (if persisted)
+  #[arg(short = 'o', long, default_value = "build")]
+  pub output_dir: String,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq)]
+pub struct CheckRuntimeCommand {
+  /// Optional override for runtime root (defaults to std_path/runtime)
+  #[arg(long)]
+  pub runtime_path: Option<String>,
+}
+
 #[derive(Subcommand, Clone, PartialEq)]
 pub enum SubCommand {
   /// Build file or project
@@ -199,6 +235,12 @@ pub enum SubCommand {
   Init(InitCommand),
   /// Build the standard library
   BuildStd(BuildStdCommand),
+  /// Check file or project up to C codegen without linking
+  Check(CheckCommand),
+  /// Check the standard library up to C codegen without archiving
+  CheckStd(CheckStdCommand),
+  /// Check the C runtime with syntax-only compilation
+  CheckRuntime(CheckRuntimeCommand),
 }
 
 #[derive(Parser)]

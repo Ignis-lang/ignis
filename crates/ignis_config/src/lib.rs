@@ -246,6 +246,8 @@ pub struct IgnisBuildConfig {
   pub rebuild_std: bool,
   pub bin: bool,
   pub lib: bool,
+  pub check_mode: bool,
+  pub analyze_only: bool,
 }
 
 impl IgnisBuildConfig {
@@ -264,6 +266,8 @@ impl IgnisBuildConfig {
     rebuild_std: bool,
     bin: bool,
     lib: bool,
+    check_mode: bool,
+    analyze_only: bool,
   ) -> Self {
     Self {
       file,
@@ -280,6 +284,8 @@ impl IgnisBuildConfig {
       rebuild_std,
       bin,
       lib,
+      check_mode,
+      analyze_only,
     }
   }
 }
@@ -341,6 +347,9 @@ pub struct IgnisConfig {
   pub std: bool,
   pub auto_load_std: bool,
   pub manifest: IgnisSTDManifest,
+  pub check_std: bool,
+  pub check_runtime: bool,
+  pub runtime_path_override: Option<String>,
 }
 
 impl IgnisConfig {
@@ -361,6 +370,9 @@ impl IgnisConfig {
     std: bool,
     auto_load_std: bool,
     manifest: IgnisSTDManifest,
+    check_std: bool,
+    check_runtime: bool,
+    runtime_path_override: Option<String>,
   ) -> Self {
     Self {
       project_config,
@@ -379,6 +391,9 @@ impl IgnisConfig {
       std,
       auto_load_std,
       manifest,
+      check_std,
+      check_runtime,
+      runtime_path_override,
     }
   }
 

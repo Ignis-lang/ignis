@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::Parser as ClapParser;
-use ignis_driver::compile_project;
+use ignis_driver::{build_std, check_runtime, check_std, compile_project};
 use std::{sync::Arc, fs::File, io::Read, path::Path};
 
 use cli::{Cli, SubCommand};
@@ -145,11 +145,19 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
         config.project_config = Some(project_config);
       }
 
+      let entry_file = if build.file_path.is_some() {
+        build.file_path.clone()
+      } else if let Some(project_config) = &config.project_config {
+        Some(project_config.build.main_file.clone())
+      } else {
+        None
+      };
+
       config.build = true;
       config
         .build_config
         .clone_from(&Some(ignis_config::IgnisBuildConfig::new(
-          build.file_path.clone(),
+          entry_file,
           build.target.clone().into(),
           is_project,
           build.optimize.clone(),
@@ -163,6 +171,67 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
           build.rebuild_std,
           build.bin,
           build.lib,
+          false,
+          false,
+        )));
+    },
+    SubCommand::Check(check) => {
+      let is_project = check_if_project();
+
+      if check.file_path.is_none() && !is_project {
+        println!("No file path provided. Please provide a file path or run `ignis init` to create a new project.");
+        println!("For more information, run `ignis --help`");
+        std::process::exit(1);
+      }
+
+      if is_project {
+        let mut project_config = load_project_config().unwrap();
+
+        if config.std_path.is_empty() {
+          config.std_path = project_config.ignis.std_path.clone();
+        }
+
+        project_config.build.target = check.target.clone().into();
+
+        if check.output_dir != "build" {
+          project_config.build.output_dir = check.output_dir.clone();
+        }
+
+        if check.file_path.is_some() {
+          project_config.build.main_file = check.file_path.as_ref().unwrap().to_string();
+        }
+
+        config.project_config = Some(project_config);
+      }
+
+      let entry_file = if check.file_path.is_some() {
+        check.file_path.clone()
+      } else if let Some(project_config) = &config.project_config {
+        Some(project_config.build.main_file.clone())
+      } else {
+        None
+      };
+
+      config.build = true;
+      config
+        .build_config
+        .clone_from(&Some(ignis_config::IgnisBuildConfig::new(
+          entry_file,
+          check.target.clone().into(),
+          is_project,
+          false,
+          check.output_dir.clone(),
+          cli.dump.iter().copied().map(Into::into).collect(),
+          cli.dump_dir.clone(),
+          cli.dump_hir.clone(),
+          check.emit_c.clone(),
+          None,
+          None,
+          false,
+          false,
+          false,
+          true,
+          check.analyze_only,
         )));
     },
     SubCommand::Init(init) => {
@@ -183,6 +252,14 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
       config.build_std = true;
       config.build_std_output_dir = Some(build_std.output_dir.clone());
     },
+    SubCommand::CheckStd(check_std) => {
+      config.check_std = true;
+      config.build_std_output_dir = Some(check_std.output_dir.clone());
+    },
+    SubCommand::CheckRuntime(check_runtime) => {
+      config.check_runtime = true;
+      config.runtime_path_override = check_runtime.runtime_path.clone();
+    },
   };
 
   config.manifest = load_manifest(&config.std_path);
@@ -195,9 +272,27 @@ fn main() {
 
   let config = parse_cli_to_config(&cli);
 
+  if config.check_std {
+    let output_dir = config.build_std_output_dir.as_deref().unwrap_or("build");
+    match check_std(config.clone(), output_dir) {
+      Ok(()) => {},
+      Err(()) => std::process::exit(1),
+    }
+    return;
+  }
+
+  if config.check_runtime {
+    let runtime_path = config.runtime_path_override.as_deref();
+    match check_runtime(config.clone(), runtime_path) {
+      Ok(()) => {},
+      Err(()) => std::process::exit(1),
+    }
+    return;
+  }
+
   if config.build_std {
     let output_dir = config.build_std_output_dir.as_ref().unwrap();
-    match ignis_driver::build_std(config.clone(), output_dir) {
+    match build_std(config.clone(), output_dir) {
       Ok(()) => {},
       Err(()) => std::process::exit(1),
     }

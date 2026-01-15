@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
 
@@ -30,10 +31,6 @@ fn dump_requested(
 fn warn_unsupported_dumps(config: &IgnisConfig) {
   if dump_requested(config, DumpKind::Ir) {
     eprintln!("{} Dump kind 'ir' is not supported yet.", "Warning:".yellow().bold());
-  }
-
-  if dump_requested(config, DumpKind::C) {
-    eprintln!("{} Dump kind 'c' is not supported yet.", "Warning:".yellow().bold());
   }
 }
 
@@ -300,6 +297,13 @@ pub fn compile_project(
     let has_entry_point = output.hir.entry_point.is_some();
     let is_lib = bc.lib;
     let is_bin = !is_lib;
+    let check_mode = bc.check_mode;
+    let analyze_only = bc.analyze_only;
+    let dump_c_requested = dump_requested(&config, DumpKind::C);
+
+    if analyze_only {
+      return Ok(());
+    }
 
     if is_bin && !has_entry_point {
       let root_module = ctx.module_graph.modules.get(&root_id);
@@ -322,7 +326,9 @@ pub fn compile_project(
       return Err(());
     }
 
-    let needs_codegen = dump_requested(&config, DumpKind::Lir)
+    let needs_codegen = check_mode
+      || dump_requested(&config, DumpKind::Lir)
+      || dump_c_requested
       || bc.emit_c.is_some()
       || bc.emit_obj.is_some()
       || bc.emit_bin.is_some()
@@ -448,7 +454,12 @@ pub fn compile_project(
         }
       }
 
-      let needs_emit = bc.emit_c.is_some() || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
+      let needs_emit = check_mode
+        || dump_c_requested
+        || bc.emit_c.is_some()
+        || bc.emit_obj.is_some()
+        || bc.emit_bin.is_some()
+        || bc.lib;
       if needs_emit {
         if debug_trace_enabled(&config, DebugTrace::Codegen) {
           println!("debug: emitting C code");
@@ -475,57 +486,46 @@ pub fn compile_project(
           .and_then(|s| s.to_str())
           .unwrap_or("out");
 
-        let c_path = if let Some(path) = &bc.emit_c {
-          path.clone()
-        } else {
-          let output_dir = Path::new(&bc.output_dir);
-          if !output_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(output_dir) {
-              eprintln!(
-                "{} Failed to create output directory '{}': {}",
-                "Error:".red().bold(),
-                bc.output_dir,
-                e
-              );
-              return Err(());
-            }
-          }
-          format!("{}/{}.c", bc.output_dir, base_name)
-        };
-
-        if let Err(e) = std::fs::write(&c_path, &c_code) {
-          eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path, e);
-          return Err(());
+        if dump_c_requested {
+          write_dump_output(&config, "dump-c.c", &c_code)?;
         }
 
-        if bc.emit_c.is_some() && log_info(&config) {
-          println!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path);
-        }
-
-        if bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib {
-          let obj_path = if let Some(path) = &bc.emit_obj {
-            path.clone()
-          } else {
-            format!("{}/{}.o", bc.output_dir, base_name)
-          };
-
-          if debug_trace_enabled(&config, DebugTrace::Link) {
-            println!("debug: compiling object file");
-          }
-
-          if let Err(e) = compile_to_object(Path::new(&c_path), Path::new(&obj_path), &link_plan, config.quiet) {
-            eprintln!("{} {}", "Error:".red().bold(), e);
+        if let Some(path) = &bc.emit_c {
+          let c_path = path.clone();
+          if let Err(e) = std::fs::write(&c_path, &c_code) {
+            eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path, e);
             return Err(());
           }
 
-          if let Some(bin_path) = &bc.emit_bin {
+          if log_info(&config) {
+            println!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path);
+          }
+
+          if (bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib) && !check_mode {
+            let obj_path = if let Some(path) = &bc.emit_obj {
+              path.clone()
+            } else {
+              format!("{}/{}.o", bc.output_dir, base_name)
+            };
+
             if debug_trace_enabled(&config, DebugTrace::Link) {
-              println!("debug: linking executable");
+              println!("debug: compiling object file");
             }
 
-            if let Err(e) = link_executable(Path::new(&obj_path), Path::new(bin_path), &link_plan, config.quiet) {
+            if let Err(e) = compile_to_object(Path::new(&c_path), Path::new(&obj_path), &link_plan, config.quiet) {
               eprintln!("{} {}", "Error:".red().bold(), e);
               return Err(());
+            }
+
+            if let Some(bin_path) = &bc.emit_bin {
+              if debug_trace_enabled(&config, DebugTrace::Link) {
+                println!("debug: linking executable");
+              }
+
+              if let Err(e) = link_executable(Path::new(&obj_path), Path::new(bin_path), &link_plan, config.quiet) {
+                eprintln!("{} {}", "Error:".red().bold(), e);
+                return Err(());
+              }
             }
           }
         }
@@ -756,6 +756,233 @@ pub fn build_std(
   Ok(())
 }
 
+pub fn check_std(
+  config: Arc<IgnisConfig>,
+  output_dir: &str,
+) -> Result<(), ()> {
+  use std::collections::HashSet;
+  use ignis_type::module::ModuleId;
+
+  if config.std_path.is_empty() {
+    eprintln!(
+      "{} std_path not set. Use --std-path or set IGNIS_STD_PATH env var",
+      "Error:".red().bold()
+    );
+    return Err(());
+  }
+
+  let std_path = Path::new(&config.std_path);
+
+  if !std_path.exists() {
+    eprintln!("{} std_path '{}' does not exist", "Error:".red().bold(), std_path.display());
+    return Err(());
+  }
+
+  if config.manifest.modules.is_empty() {
+    eprintln!(
+      "{} No modules found in std manifest at '{}/manifest.toml'",
+      "Error:".red().bold(),
+      std_path.display()
+    );
+    return Err(());
+  }
+
+  if log_phase(&config) {
+    println!("{} Checking standard library...", "-->".bright_cyan().bold());
+  }
+
+  let output_path = Path::new(output_dir);
+  if !output_path.exists() {
+    if let Err(e) = std::fs::create_dir_all(output_path) {
+      eprintln!(
+        "{} Failed to create output directory '{}': {}",
+        "Error:".red().bold(),
+        output_path.display(),
+        e
+      );
+      return Err(());
+    }
+  }
+
+  let mut ctx = CompilationContext::new(&config);
+
+  for (module_name, _) in &config.manifest.modules {
+    if let Err(()) = ctx.discover_std_module(module_name, &config) {
+      eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
+      return Err(());
+    }
+  }
+
+  let output = ctx.compile_all(&config)?;
+  let link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+
+  let header_content = {
+    let sym_table = output.symbols.borrow();
+    ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table)
+  };
+  let header_path = output_path.join("ignis_std.h");
+  if let Err(e) = std::fs::write(&header_path, &header_content) {
+    eprintln!(
+      "{} Failed to write header file '{}': {}",
+      "Error:".red().bold(),
+      header_path.display(),
+      e
+    );
+    return Err(());
+  }
+
+  let all_module_ids = ctx.module_graph.all_modules_topological();
+  let mut processed_modules: HashSet<String> = HashSet::new();
+
+  for module_id in &all_module_ids {
+    let module = ctx.module_graph.modules.get(module_id);
+    let module_name = module.path.module_name();
+
+    if processed_modules.contains(&module_name) {
+      continue;
+    }
+    processed_modules.insert(module_name.clone());
+
+    let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
+    let mut types = output.types.clone();
+
+    let mono_roots = collect_mono_roots_for_std(&output.defs);
+    let mono_output =
+      ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+        .run(&mono_roots);
+
+    if config.debug {
+      mono_output.verify_no_generics(&types);
+    } else {
+      #[cfg(debug_assertions)]
+      mono_output.verify_no_generics(&types);
+    }
+
+    let sym_table = output.symbols.borrow();
+
+    let ownership_checker =
+      ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+        .with_source_map(&ctx.source_map)
+        .suppress_ffi_warnings_for(&config.std_path);
+    let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
+
+    let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
+      &mono_output.hir,
+      &mut types,
+      &mono_output.defs,
+      &sym_table,
+      &drop_schedules,
+      Some(&single_module_set),
+    );
+
+    if let Err(errors) = &verify_result {
+      eprintln!(
+        "{} LIR verification errors for module '{}':",
+        "Warning:".yellow().bold(),
+        module_name
+      );
+      for err in errors {
+        eprintln!("  {:?}", err);
+      }
+
+      if config.debug {
+        eprintln!("{} LIR verification failed in debug mode", "Error:".red().bold());
+        return Err(());
+      }
+    }
+
+    if verify_result.is_err() {
+      continue;
+    }
+
+    let c_code = ignis_codegen_c::emit_c(
+      &lir_program,
+      &types,
+      &mono_output.defs,
+      &output.namespaces,
+      &sym_table,
+      &link_plan.headers,
+    );
+
+    let c_path = output_path.join(format!("{}.c", module_name));
+    if let Err(e) = std::fs::write(&c_path, &c_code) {
+      eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
+      return Err(());
+    }
+  }
+
+  if log_phase(&config) {
+    println!("{} Std check complete", "-->".bright_green().bold());
+  }
+
+  Ok(())
+}
+
+pub fn check_runtime(
+  config: Arc<IgnisConfig>,
+  runtime_path: Option<&str>,
+) -> Result<(), ()> {
+  let root = if let Some(path) = runtime_path {
+    PathBuf::from(path)
+  } else {
+    Path::new(&config.std_path).join("runtime")
+  };
+
+  if !root.exists() {
+    eprintln!("{} runtime path '{}' does not exist", "Error:".red().bold(), root.display());
+    return Err(());
+  }
+
+  let mut c_files = Vec::new();
+  collect_c_files(&root, &mut c_files);
+
+  if c_files.is_empty() {
+    eprintln!("{} No runtime C files found under '{}'", "Error:".red().bold(), root.display());
+    return Err(());
+  }
+
+  for file in &c_files {
+    let status = Command::new("cc").arg("-fsyntax-only").arg(file).status();
+
+    let status = match status {
+      Ok(s) => s,
+      Err(e) => {
+        eprintln!("{} Failed to run cc: {}", "Error:".red().bold(), e);
+        return Err(());
+      },
+    };
+
+    if !status.success() {
+      eprintln!("{} Runtime check failed for '{}'", "Error:".red().bold(), file.display());
+      return Err(());
+    }
+  }
+
+  if log_phase(&config) {
+    println!("{} Runtime check complete", "-->".bright_green().bold());
+  }
+
+  Ok(())
+}
+
+fn collect_c_files(
+  root: &Path,
+  out: &mut Vec<PathBuf>,
+) {
+  if let Ok(entries) = std::fs::read_dir(root) {
+    for entry in entries.flatten() {
+      let path = entry.path();
+      if path.is_dir() {
+        collect_c_files(&path, out);
+      } else if let Some(ext) = path.extension() {
+        if ext == "c" {
+          out.push(path);
+        }
+      }
+    }
+  }
+}
+
 fn ensure_std_built(
   used_modules: &[ignis_type::module::ModuleId],
   module_graph: &ignis_analyzer::modules::ModuleGraph,
@@ -874,9 +1101,7 @@ fn collect_mono_roots(
 
 /// Collect monomorphization roots for std builds.
 /// Includes all non-extern functions regardless of visibility.
-fn collect_mono_roots_for_std(
-  defs: &DefinitionStore,
-) -> Vec<DefinitionId> {
+fn collect_mono_roots_for_std(defs: &DefinitionStore) -> Vec<DefinitionId> {
   let mut roots = Vec::new();
 
   for (def_id, def) in defs.iter() {
