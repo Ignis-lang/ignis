@@ -159,21 +159,6 @@ string s = "Hello";
 
 This representation may change in future versions.
 
-## The `unknown` Type
-
-The `unknown` type (used internally for FFI and type inference) maps to `void*`:
-
-```c
-/* unknown */ void*
-```
-
-When casting from `unknown` to a concrete type, the codegen uses pointer dereferencing to handle cases where C cannot directly cast `void*` (e.g., to `float`):
-
-```c
-// Cast from unknown to f64
-t1 = *(f64*)(source);
-```
-
 ## Runtime Type Information
 
 Type IDs are defined for potential future RTTI support (currently unused):
@@ -192,7 +177,6 @@ Type IDs are defined for potential future RTTI support (currently unused):
 #define TYPE_BOOL_ID    10
 #define TYPE_STRING_ID  11
 #define TYPE_VOID_ID    12
-#define TYPE_UNKNOWN_ID 13
 ```
 
 ## Generated Code Structure
@@ -259,7 +243,6 @@ The following types are considered "owned" and require cleanup:
 |------|---------------|-------------|
 | `string` | `ignis_string_drop` | Heap-allocated strings |
 | `IgnisBuffer*` | `ignis_buf_drop` | Dynamic arrays/vectors |
-| `unknown` | `ignis_drop_any` | Type-erased values |
 
 ### Drop Emission
 

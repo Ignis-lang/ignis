@@ -464,10 +464,10 @@ pub fn verify_lir(
 }
 
 /// Check if a type requires a drop call.
-/// Droppable types: string, dynamic vector (size: None), unknown.
+/// Droppable types: string, dynamic vector (size: None), infer.
 pub fn is_droppable(
   types: &TypeStore,
   ty: TypeId,
 ) -> bool {
-  matches!(types.get(&ty), Type::String | Type::Vector { size: None, .. } | Type::Unknown)
+  matches!(types.get(&ty), Type::String | Type::Vector { size: None, .. } | Type::Infer)
 }

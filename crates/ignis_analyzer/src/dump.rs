@@ -28,7 +28,7 @@ pub fn dump_types(types: &TypeStore) -> String {
   writeln!(&mut output, "  string: {:?}", types.string()).unwrap();
   writeln!(&mut output, "  void: {:?}", types.void()).unwrap();
   writeln!(&mut output, "  never: {:?}", types.never()).unwrap();
-  writeln!(&mut output, "  unknown: {:?}", types.unknown()).unwrap();
+  writeln!(&mut output, "  infer: {:?}", types.infer()).unwrap();
   writeln!(&mut output, "  error: {:?}", types.error()).unwrap();
 
   output

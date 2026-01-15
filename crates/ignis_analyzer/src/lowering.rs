@@ -1311,7 +1311,7 @@ impl<'a> Analyzer<'a> {
     let arg_type = hir.get(arg).type_id;
     let base_type = self.unwrap_reference_type(&arg_type);
 
-    if matches!(self.types.get(&base_type), ignis_type::types::Type::Unknown) {
+    if matches!(self.types.get(&base_type), ignis_type::types::Type::Infer) {
       return hir.alloc(HIRNode {
         kind: HIRKind::Error,
         span: call.span.clone(),

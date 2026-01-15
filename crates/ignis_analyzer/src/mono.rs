@@ -1984,7 +1984,7 @@ impl<'a> Monomorphizer<'a> {
         format!("fn_{}_{}", params_str, ret_str)
       },
       Type::Param { owner, index } => format!("T{}__{}", index, owner.index()),
-      Type::Unknown => "unknown".into(),
+      Type::Infer => "infer".into(),
       Type::NullPtr => "null".into(),
       Type::Error => "error".into(),
     }

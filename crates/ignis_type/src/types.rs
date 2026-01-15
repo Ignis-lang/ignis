@@ -21,7 +21,7 @@ pub enum Type {
   String,
   Void,
   Never,
-  Unknown,
+  Infer,
   NullPtr,
 
   Pointer(TypeId),
@@ -155,7 +155,7 @@ impl TypeStore {
       Type::String,
       Type::Void,
       Type::Never,
-      Type::Unknown,
+      Type::Infer,
       Type::NullPtr,
       Type::Error,
     ];
@@ -372,8 +372,8 @@ impl TypeStore {
     self.primitives[&Type::Never]
   }
   #[inline]
-  pub fn unknown(&self) -> TypeId {
-    self.primitives[&Type::Unknown]
+  pub fn infer(&self) -> TypeId {
+    self.primitives[&Type::Infer]
   }
   #[inline]
   pub fn error(&self) -> TypeId {
@@ -450,7 +450,7 @@ impl TypeStore {
       return true;
     }
 
-    if self.is_unknown(&a) || self.is_unknown(&b) {
+    if self.is_infer(&a) || self.is_infer(&b) {
       return true;
     }
 
@@ -466,11 +466,11 @@ impl TypeStore {
   }
 
   #[inline]
-  pub fn is_unknown(
+  pub fn is_infer(
     &self,
     ty: &TypeId,
   ) -> bool {
-    matches!(self.get(ty), Type::Unknown)
+    matches!(self.get(ty), Type::Infer)
   }
 
   #[inline]
@@ -509,7 +509,7 @@ impl TypeStore {
       Type::Vector { element, size: Some(_) } => self.is_copy(element),
       Type::Vector { size: None, .. } => false,
 
-      Type::String | Type::Unknown => false,
+      Type::String | Type::Infer => false,
 
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy(e)),
 
@@ -529,7 +529,7 @@ impl TypeStore {
     &self,
     ty: &TypeId,
   ) -> bool {
-    matches!(self.get(ty), Type::String | Type::Vector { size: None, .. } | Type::Unknown)
+    matches!(self.get(ty), Type::String | Type::Vector { size: None, .. } | Type::Infer)
   }
 
   #[inline]

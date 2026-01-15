@@ -494,7 +494,7 @@ impl<'a> Analyzer<'a> {
 
   fn register_runtime_builtins(&mut self) -> RuntimeBuiltins {
     let span = ignis_type::span::Span::default();
-    let buffer_ptr_type = self.types.vector(self.types.unknown(), None);
+    let buffer_ptr_type = self.types.vector(self.types.infer(), None);
     let u64_type = self.types.u64();
     let void_ptr_type = self.types.pointer(self.types.void());
 

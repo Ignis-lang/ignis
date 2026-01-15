@@ -182,7 +182,6 @@ impl super::IgnisParser {
       TokenType::StringType => IgnisTypeSyntax::String,
       TokenType::CharType => IgnisTypeSyntax::Char,
       TokenType::Void => IgnisTypeSyntax::Void,
-      TokenType::Unknown => IgnisTypeSyntax::Unknown,
       _ => IgnisTypeSyntax::Void,
     })
   }
@@ -208,7 +207,6 @@ impl super::IgnisParser {
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void
-        | TokenType::Unknown
     )
   }
 }

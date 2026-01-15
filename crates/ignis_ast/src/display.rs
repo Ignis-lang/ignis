@@ -1020,7 +1020,7 @@ impl DisplayLisp for IgnisTypeSyntax {
       IgnisTypeSyntax::Void => "Void".to_string(),
       IgnisTypeSyntax::Null => "Null".to_string(),
       IgnisTypeSyntax::Char => "Char".to_string(),
-      IgnisTypeSyntax::Unknown => "Unknown".to_string(),
+      IgnisTypeSyntax::Implicit => "Implicit".to_string(),
 
       IgnisTypeSyntax::Vector(inner, size) => match size {
         Some(s) => format!("({}[{}])", inner.to_lisp(formatter), s),

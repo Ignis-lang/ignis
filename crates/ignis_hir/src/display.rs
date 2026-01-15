@@ -742,7 +742,7 @@ impl<'a> HIRPrinter<'a> {
       Type::String => "string".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "never".to_string(),
-      Type::Unknown => "unknown".to_string(),
+      Type::Infer => "infer".to_string(),
       Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
       Type::Pointer(inner) => format!("*{}", self.format_type(inner)),

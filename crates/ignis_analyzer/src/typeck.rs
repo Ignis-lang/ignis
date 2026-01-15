@@ -108,7 +108,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Variable(var) => {
         let declared_type = self.resolve_type_syntax_with_span(&var.type_, &var.span);
 
-        let mut var_type = if self.types.is_unknown(&declared_type) {
+        let mut var_type = if self.types.is_infer(&declared_type) {
           if let Some(value_id) = &var.value {
             self.typecheck_node(value_id, scope_kind, ctx)
           } else {
@@ -146,7 +146,7 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(value_id) = &var.value {
-          if !self.types.is_unknown(&declared_type) {
+          if !self.types.is_infer(&declared_type) {
             let infer = InferContext::expecting(var_type.clone());
             let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
             self.typecheck_assignment(&var_type, &value_type, &var.span);
@@ -2969,7 +2969,7 @@ impl<'a> Analyzer<'a> {
     let arg_type = self.typecheck_node(&call.arguments[0], scope_kind, ctx);
     let base_type = self.unwrap_reference_type(&arg_type);
 
-    if matches!(self.types.get(&base_type), ignis_type::types::Type::Unknown) {
+    if matches!(self.types.get(&base_type), ignis_type::types::Type::Infer) {
       self.add_diagnostic(
         DiagnosticMessage::InvalidSizeOfOperand {
           span: call.span.clone(),
@@ -3018,7 +3018,7 @@ impl<'a> Analyzer<'a> {
     }
 
     let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
-    if self.types.contains_type_param(&value_type) || self.types.is_unknown(&value_type) {
+    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
       self.add_diagnostic(
         DiagnosticMessage::CannotInferTypeParam {
           param_name: "T".to_string(),
@@ -3116,7 +3116,7 @@ impl<'a> Analyzer<'a> {
     }
 
     let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
-    if self.types.contains_type_param(&value_type) || self.types.is_unknown(&value_type) {
+    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
       self.add_diagnostic(
         DiagnosticMessage::CannotInferTypeParam {
           param_name: "T".to_string(),
@@ -3635,8 +3635,8 @@ impl<'a> Analyzer<'a> {
       (Type::Reference { .. }, Type::Pointer(_)) => true,
       (Type::Pointer(_), Type::Pointer(_)) => true,
       (Type::Reference { .. }, Type::Reference { .. }) => true,
-      (Type::Unknown, _) => true,
-      (Type::Reference { inner, .. }, _) if self.types.is_unknown(inner) => true,
+      (Type::Infer, _) => true,
+      (Type::Reference { inner, .. }, _) if self.types.is_infer(inner) => true,
       (_, _) if self.types.types_equal(&expr_type, &target_type) => true,
       _ => false,
     };
@@ -3718,7 +3718,7 @@ impl<'a> Analyzer<'a> {
       IgnisTypeSyntax::Boolean => self.types.boolean(),
       IgnisTypeSyntax::Void => self.types.void(),
       IgnisTypeSyntax::Char => self.types.char(),
-      IgnisTypeSyntax::Unknown => self.types.unknown(),
+      IgnisTypeSyntax::Implicit => self.types.infer(),
       IgnisTypeSyntax::Null => self.types.error(),
       IgnisTypeSyntax::Vector(inner, size) => {
         let inner_type = self.resolve_type_syntax_impl(inner, span);
@@ -4025,7 +4025,7 @@ impl<'a> Analyzer<'a> {
       Type::String => "string".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "never".to_string(),
-      Type::Unknown => "unknown".to_string(),
+      Type::Infer => "infer".to_string(),
       Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
       Type::Pointer(inner) => format!("*{}", self.format_type_for_error(inner)),

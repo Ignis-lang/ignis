@@ -24,30 +24,6 @@ void ignis_free(void* ptr) {
 }
 
 // =============================================================================
-// Drop generic
-// =============================================================================
-
-void ignis_drop_obj(void* obj) {
-    if (obj == NULL) {
-        return;
-    }
-
-    IgnisHeader* hdr = (IgnisHeader*)obj;
-
-    if (hdr->drop_fn != NULL) {
-        hdr->drop_fn(obj);
-    }
-}
-
-void ignis_drop_unknown(IgnisUnknown v) {
-    if ((v.flags & IGNIS_UF_OWNED) &&
-        (v.flags & IGNIS_UF_HEAP) &&
-        v.payload.ptr_val != NULL) {
-        ignis_drop_obj(v.payload.ptr_val);
-    }
-}
-
-// =============================================================================
 // String - internal helpers
 // =============================================================================
 
@@ -95,7 +71,6 @@ IgnisString* ignis_string_with_capacity(size_t cap) {
 
     s->hdr.type_id = IGNIS_TYPE_STRING_ID;
     s->hdr.refcnt = 1;
-    s->hdr.drop_fn = ignis_string_drop;
 
     s->data = (char*)ignis_alloc(cap);
     if (s->data == NULL) {
@@ -252,12 +227,10 @@ void ignis_string_reserve(IgnisString* s, size_t additional) {
     }
 }
 
-void ignis_string_drop(void* obj) {
-    if (obj == NULL) {
+void ignis_string_drop(IgnisString* s) {
+    if (s == NULL) {
         return;
     }
-
-    IgnisString* s = (IgnisString*)obj;
 
     if (s->data != NULL) {
         ignis_free(s->data);
@@ -317,7 +290,6 @@ IgnisBuffer* ignis_buf_with_capacity(size_t elem_size, IgnisTypeId elem_type_id,
 
     buf->hdr.type_id = IGNIS_TYPE_BUFFER_ID;
     buf->hdr.refcnt = 1;
-    buf->hdr.drop_fn = ignis_buf_drop;
 
     buf->elem_size = elem_size;
     buf->elem_type_id = elem_type_id;
@@ -422,12 +394,10 @@ void ignis_buf_clear(IgnisBuffer* buf) {
     buf->len = 0;
 }
 
-void ignis_buf_drop(void* obj) {
-    if (obj == NULL) {
+void ignis_buf_drop(IgnisBuffer* buf) {
+    if (buf == NULL) {
         return;
     }
-
-    IgnisBuffer* buf = (IgnisBuffer*)obj;
 
     if (buf->data != NULL) {
         ignis_free(buf->data);
@@ -438,162 +408,4 @@ void ignis_buf_drop(void* obj) {
     buf->cap = 0;
 
     ignis_free(buf);
-}
-
-// =============================================================================
-// Unknown constructors - primitives
-// =============================================================================
-
-IgnisUnknown ignis_unknown_i8(i8 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_I8_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.i64_val = (i64)v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_i16(i16 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_I16_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.i64_val = (i64)v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_i32(i32 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_I32_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.i64_val = (i64)v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_i64(i64 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_I64_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.i64_val = v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_u8(u8 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_U8_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.u64_val = (u64)v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_u16(u16 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_U16_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.u64_val = (u64)v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_u32(u32 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_U32_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.u64_val = (u64)v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_u64(u64 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_U64_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.u64_val = v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_f32(f32 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_F32_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.f32_val = v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_f64(f64 v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_F64_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.f64_val = v;
-    return u;
-}
-
-IgnisUnknown ignis_unknown_bool(boolean v) {
-    IgnisUnknown u;
-    u.type_id = IGNIS_TYPE_BOOL_ID;
-    u.flags = IGNIS_UF_NONE;
-    u.payload.u64_val = v ? 1 : 0;
-    return u;
-}
-
-// =============================================================================
-// Unknown constructors - pointers
-// =============================================================================
-
-IgnisUnknown ignis_unknown_obj(void* obj) {
-    IgnisUnknown u;
-
-    if (obj == NULL) {
-        u.type_id = IGNIS_TYPE_UNKNOWN_ID;
-        u.flags = IGNIS_UF_NONE;
-        u.payload.ptr_val = NULL;
-        return u;
-    }
-
-    IgnisHeader* hdr = (IgnisHeader*)obj;
-    u.type_id = hdr->type_id;
-    u.flags = IGNIS_UF_OWNED | IGNIS_UF_HEAP;
-    u.payload.ptr_val = obj;
-
-    return u;
-}
-
-IgnisUnknown ignis_unknown_rawptr(void* ptr, IgnisTypeId type_id) {
-    IgnisUnknown u;
-    u.type_id = type_id;
-    u.flags = IGNIS_UF_RAW;
-    u.payload.ptr_val = ptr;
-    return u;
-}
-
-// =============================================================================
-// Unknown accessors
-// =============================================================================
-
-IgnisTypeId ignis_typeof(IgnisUnknown v) {
-    return v.type_id;
-}
-
-i64 ignis_unknown_as_i64(IgnisUnknown v) {
-    return v.payload.i64_val;
-}
-
-u64 ignis_unknown_as_u64(IgnisUnknown v) {
-    return v.payload.u64_val;
-}
-
-f64 ignis_unknown_as_f64(IgnisUnknown v) {
-    return v.payload.f64_val;
-}
-
-f32 ignis_unknown_as_f32(IgnisUnknown v) {
-    return v.payload.f32_val;
-}
-
-void* ignis_unknown_as_ptr(IgnisUnknown v) {
-    return v.payload.ptr_val;
-}
-
-boolean ignis_unknown_is_null(IgnisUnknown v) {
-    // For pointer types, check if ptr is NULL
-    if ((v.flags & IGNIS_UF_HEAP) || (v.flags & IGNIS_UF_RAW)) {
-        return v.payload.ptr_val == NULL ? TRUE : FALSE;
-    }
-    return FALSE;
 }

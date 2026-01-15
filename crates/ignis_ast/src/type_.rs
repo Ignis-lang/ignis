@@ -12,7 +12,7 @@ pub enum IgnisTypeSyntax {
   U64,
   F32,
   F64,
-  Unknown,
+  Implicit,
   String,
   Boolean,
   Void,

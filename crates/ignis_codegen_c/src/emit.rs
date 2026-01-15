@@ -554,19 +554,16 @@ impl<'a> CEmitter<'a> {
       } => {
         let s = self.format_operand(func, source);
         let ty = self.format_type(*target_type);
-        let target = self.types.get(target_type);
 
-        // Boxing to `unknown` requires calling runtime boxing function
-        if matches!(target, Type::Unknown) {
-          let source_type = self.operand_type(func, source);
-          let boxing_fn = self.unknown_boxing_function(&source_type);
-          writeln!(self.output, "t{} = {}({});", dest.index(), boxing_fn, s).unwrap();
-        // Unboxing from `any` requires dereference since C can't cast pointer to float
-        } else if self.is_any_type(func, source) {
-          writeln!(self.output, "t{} = *({}*)({});", dest.index(), ty, s).unwrap();
-        } else {
-          writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
+        if self.type_contains_infer(*target_type) {
+          panic!("ICE: cast to inferred type reached C codegen after implicit type removal");
         }
+
+        if self.operand_contains_infer(func, source) {
+          panic!("ICE: cast from inferred type reached C codegen after implicit type removal");
+        }
+
+        writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
       },
       Instr::AddrOfLocal { dest, local, .. } => {
         // For array locals, the name already decays to a pointer in C
@@ -604,8 +601,8 @@ impl<'a> CEmitter<'a> {
         writeln!(self.output, "{}({});", name, args_str.join(", ")).unwrap();
       },
       Instr::TypeIdOf { dest, source } => {
-        let s = self.format_operand(func, source);
-        writeln!(self.output, "t{} = ({}).type_id;", dest.index(), s).unwrap();
+        let _ = (dest, source);
+        panic!("ICE: typeIdOf reached C codegen after implicit type removal");
       },
       Instr::SizeOf { dest, ty } => {
         let c_type = self.format_type(*ty);
@@ -622,8 +619,8 @@ impl<'a> CEmitter<'a> {
           Type::Vector { size: None, .. } => {
             writeln!(self.output, "ignis_buf_drop(l{});", local.index()).unwrap();
           },
-          Type::Unknown => {
-            writeln!(self.output, "ignis_drop_unknown(l{});", local.index()).unwrap();
+          Type::Infer => {
+            panic!("ICE: drop of inferred type reached C codegen after implicit type removal");
           },
           _ => {
             // Should not happen if LIR verification passed
@@ -760,43 +757,23 @@ impl<'a> CEmitter<'a> {
     }
   }
 
-  fn is_any_type(
+  fn type_contains_infer(
+    &self,
+    ty: TypeId,
+  ) -> bool {
+    match self.types.get(&ty) {
+      Type::Infer => true,
+      Type::Reference { inner, .. } | Type::Pointer(inner) => self.type_contains_infer(*inner),
+      _ => false,
+    }
+  }
+
+  fn operand_contains_infer(
     &self,
     func: &FunctionLir,
     op: &Operand,
   ) -> bool {
-    self.operand_type(func, op).map_or(false, |t| match self.types.get(&t) {
-      Type::Unknown => true,
-      Type::Reference { inner, .. } | Type::Pointer(inner) => {
-        matches!(self.types.get(inner), Type::Unknown)
-      },
-      _ => false,
-    })
-  }
-
-  fn unknown_boxing_function(
-    &self,
-    source_type: &Option<TypeId>,
-  ) -> &'static str {
-    match source_type {
-      Some(ty) => match self.types.get(ty) {
-        Type::I8 => "ignis_unknown_i8",
-        Type::I16 => "ignis_unknown_i16",
-        Type::I32 => "ignis_unknown_i32",
-        Type::I64 => "ignis_unknown_i64",
-        Type::U8 => "ignis_unknown_u8",
-        Type::U16 => "ignis_unknown_u16",
-        Type::U32 => "ignis_unknown_u32",
-        Type::U64 => "ignis_unknown_u64",
-        Type::F32 => "ignis_unknown_f32",
-        Type::F64 => "ignis_unknown_f64",
-        Type::Boolean => "ignis_unknown_bool",
-        Type::String => "ignis_unknown_obj",
-        Type::Pointer(_) | Type::Reference { .. } | Type::NullPtr => "ignis_unknown_rawptr",
-        _ => "ignis_unknown_obj",
-      },
-      None => "ignis_unknown_obj",
-    }
+    self.operand_type(func, op).map_or(false, |t| self.type_contains_infer(t))
   }
 
   fn format_const(
@@ -943,7 +920,6 @@ impl<'a> CEmitter<'a> {
       Type::String => "string".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "void".to_string(),
-      Type::Unknown => "IgnisUnknown".to_string(),
       Type::NullPtr => "void*".to_string(),
       Type::Error => "/* error */ void*".to_string(),
       Type::Pointer(inner) => format!("{}*", self.format_type(*inner)),
@@ -976,6 +952,9 @@ impl<'a> CEmitter<'a> {
       Type::Instance { .. } => {
         // Type::Instance should never reach codegen (Invariant D)
         panic!("ICE: Type::Instance reached C codegen - monomorphization failed")
+      },
+      Type::Infer => {
+        panic!("ICE: Type::Infer reached C codegen after implicit type removal")
       },
     }
   }
@@ -1203,7 +1182,10 @@ impl<'a> CEmitter<'a> {
           format!("{}_{}", base_name, args_str)
         }
       },
-      _ => "unknown".to_string(),
+      Type::Infer => {
+        panic!("ICE: Type::Infer reached C codegen after implicit type removal")
+      },
+      _ => "opaque".to_string(),
     }
   }
 }
@@ -1241,7 +1223,6 @@ pub fn format_c_type(
     Type::String => "string".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "void".to_string(),
-    Type::Unknown => "IgnisUnknown".to_string(),
     Type::NullPtr => "void*".to_string(),
     Type::Error => "void*".to_string(),
     Type::Pointer(inner) => format!("{}*", format_c_type(types.get(inner), types)),
@@ -1270,6 +1251,9 @@ pub fn format_c_type(
     Type::Instance { .. } => {
       // Type::Instance should never reach codegen (Invariant D)
       panic!("ICE: Type::Instance reached C codegen - monomorphization failed")
+    },
+    Type::Infer => {
+      panic!("ICE: Type::Infer reached C codegen after implicit type removal")
     },
   }
 }

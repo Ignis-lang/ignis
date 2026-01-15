@@ -874,7 +874,7 @@ impl fmt::Display for DiagnosticMessage {
 
       // Builtin errors
       DiagnosticMessage::InvalidSizeOfOperand { .. } => {
-        write!(f, "sizeOf(unknown) requires explicit type cast")
+        write!(f, "sizeOf requires an explicit cast to a concrete type")
       },
 
       // Static field errors

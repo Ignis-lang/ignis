@@ -323,7 +323,7 @@ impl super::IgnisParser {
     let type_annotation = if self.eat(TokenType::Colon) {
       self.parse_type_syntax()?
     } else {
-      ignis_ast::type_::IgnisTypeSyntax::Unknown
+      ignis_ast::type_::IgnisTypeSyntax::Implicit
     };
 
     self.expect(TokenType::Equal)?;

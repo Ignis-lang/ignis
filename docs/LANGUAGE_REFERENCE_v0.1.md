@@ -512,7 +512,7 @@ let mr: &mut i32 = &mut y;
 
 ## Ownership and Move Semantics
 
-Ignis tracks ownership for "owned" types: `string`, dynamic buffers, and `unknown`. When an owned value is passed to a function or assigned to another variable, ownership is transferred (moved).
+Ignis tracks ownership for "owned" types: `string` and dynamic buffers. When an owned value is passed to a function or assigned to another variable, ownership is transferred (moved).
 
 ### Use-After-Move
 

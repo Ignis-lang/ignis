@@ -46,7 +46,6 @@ typedef u32 IgnisTypeId;
 #define IGNIS_TYPE_BOOL_ID     10
 #define IGNIS_TYPE_CHAR_ID     11
 #define IGNIS_TYPE_STRING_ID   12
-#define IGNIS_TYPE_UNKNOWN_ID  13
 
 // Heap object type IDs
 #define IGNIS_TYPE_BUFFER_ID   100
@@ -55,38 +54,12 @@ typedef u32 IgnisTypeId;
 #define IGNIS_TYPE_PTR_ID      200
 
 // =============================================================================
-// Flags for IgnisUnknown
-// =============================================================================
-
-#define IGNIS_UF_NONE   0
-#define IGNIS_UF_OWNED  (1 << 0)  // ptr_val is owned, must be dropped
-#define IGNIS_UF_HEAP   (1 << 1)  // points to object with IgnisHeader
-#define IGNIS_UF_RAW    (1 << 2)  // raw pointer, never drop
-
-// =============================================================================
-// IgnisUnknown - tagged union for unknown/any
-// =============================================================================
-
-typedef struct {
-    IgnisTypeId type_id;
-    u32 flags;
-    union {
-        i64 i64_val;
-        u64 u64_val;
-        f64 f64_val;
-        f32 f32_val;
-        void* ptr_val;
-    } payload;
-} IgnisUnknown;
-
-// =============================================================================
 // IgnisHeader - header for heap-managed objects
 // =============================================================================
 
 typedef struct {
     IgnisTypeId type_id;
     u32 refcnt;              // reserved for future RC
-    void (*drop_fn)(void*);
 } IgnisHeader;
 
 // =============================================================================
@@ -134,13 +107,6 @@ void* ignis_calloc(size_t count, size_t size);
 void  ignis_free(void* ptr);
 
 // =============================================================================
-// Drop generic
-// =============================================================================
-
-void ignis_drop_unknown(IgnisUnknown v);
-void ignis_drop_obj(void* obj);
-
-// =============================================================================
 // String API
 // =============================================================================
 
@@ -162,7 +128,7 @@ char         ignis_string_char_at(const IgnisString* s, size_t idx);
 void         ignis_string_clear(IgnisString* s);
 void         ignis_string_reserve(IgnisString* s, size_t additional);
 
-void         ignis_string_drop(void* obj);
+void         ignis_string_drop(IgnisString* s);
 
 // =============================================================================
 // Buffer API
@@ -181,44 +147,4 @@ void         ignis_buf_resize(IgnisBuffer* buf, size_t new_len);
 void         ignis_buf_reserve(IgnisBuffer* buf, size_t additional);
 void         ignis_buf_clear(IgnisBuffer* buf);
 
-void         ignis_buf_drop(void* obj);
-
-// =============================================================================
-// Unknown constructors - primitives
-// =============================================================================
-
-IgnisUnknown ignis_unknown_i8(i8 v);
-IgnisUnknown ignis_unknown_i16(i16 v);
-IgnisUnknown ignis_unknown_i32(i32 v);
-IgnisUnknown ignis_unknown_i64(i64 v);
-IgnisUnknown ignis_unknown_u8(u8 v);
-IgnisUnknown ignis_unknown_u16(u16 v);
-IgnisUnknown ignis_unknown_u32(u32 v);
-IgnisUnknown ignis_unknown_u64(u64 v);
-IgnisUnknown ignis_unknown_f32(f32 v);
-IgnisUnknown ignis_unknown_f64(f64 v);
-IgnisUnknown ignis_unknown_bool(boolean v);
-
-// =============================================================================
-// Unknown constructors - pointers
-// =============================================================================
-
-// Heap-managed object (owned). Reads type_id from header.
-IgnisUnknown ignis_unknown_obj(void* obj);
-
-// Raw pointer (borrowed/unsafe). Never dropped.
-IgnisUnknown ignis_unknown_rawptr(void* ptr, IgnisTypeId type_id);
-
-// =============================================================================
-// Unknown accessors
-// =============================================================================
-
-IgnisTypeId ignis_typeof(IgnisUnknown v);
-
-// Extraction helpers (no type checking - caller responsible)
-i64      ignis_unknown_as_i64(IgnisUnknown v);
-u64      ignis_unknown_as_u64(IgnisUnknown v);
-f64      ignis_unknown_as_f64(IgnisUnknown v);
-f32      ignis_unknown_as_f32(IgnisUnknown v);
-void*    ignis_unknown_as_ptr(IgnisUnknown v);
-boolean  ignis_unknown_is_null(IgnisUnknown v);
+void         ignis_buf_drop(IgnisBuffer* buf);

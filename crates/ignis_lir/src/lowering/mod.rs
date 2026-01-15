@@ -624,19 +624,15 @@ impl<'a> LoweringContext<'a> {
     let base_type = self.unwrap_reference_type(operand_node.type_id);
     let dest = self.fn_builder().alloc_temp(result_ty, span);
 
-    if matches!(self.types.get(&base_type), Type::Unknown) {
-      let operand_val = self.lower_hir_node(operand_hir)?;
-      self.fn_builder().emit(Instr::TypeIdOf {
-        dest,
-        source: operand_val,
-      });
-    } else {
-      let type_id = self.type_to_runtime_id(base_type);
-      self.fn_builder().emit(Instr::Copy {
-        dest,
-        source: Operand::Const(ConstValue::UInt(type_id, result_ty)),
-      });
+    if matches!(self.types.get(&base_type), Type::Infer) {
+      panic!("ICE: typeOf on inferred type reached LIR lowering");
     }
+
+    let type_id = self.type_to_runtime_id(base_type);
+    self.fn_builder().emit(Instr::Copy {
+      dest,
+      source: Operand::Const(ConstValue::UInt(type_id, result_ty)),
+    });
 
     Some(Operand::Temp(dest))
   }
@@ -724,7 +720,6 @@ impl<'a> LoweringContext<'a> {
       Type::Boolean => 10,
       Type::Char => 11,
       Type::String => 12,
-      Type::Unknown => 13,
       Type::Vector { size: None, .. } => 100,
       Type::Pointer(_) => 200,
       _ => 0xFFFFFFFF,

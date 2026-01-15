@@ -115,7 +115,7 @@ pub enum Instr {
     args: Vec<Operand>,
   },
 
-  /// Extract type_id from IgnisUnknown: `dest = source.type_id`
+  /// Extract type_id from a runtime value: `dest = source.type_id`
   TypeIdOf {
     dest: TempId,
     source: Operand,
@@ -128,7 +128,7 @@ pub enum Instr {
   },
 
   /// Drop an owned value's resources.
-  /// The local must have a droppable type (string, dynamic vector, unknown).
+  /// The local must have a droppable type (string, dynamic vector, infer).
   Drop {
     local: LocalId,
   },

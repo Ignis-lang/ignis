@@ -896,9 +896,9 @@ impl<'a> Analyzer<'a> {
   ) {
     self.scopes.push(ScopeKind::Loop);
 
-    // Type is unknown here; typeck will resolve it based on the iterable's element type.
+    // Type is implicit here; typeck will resolve it based on the iterable's element type.
     let var_def = VariableDefinition {
-      type_id: self.types.unknown(),
+      type_id: self.types.infer(),
       mutable: false,
     };
 

@@ -88,7 +88,7 @@ function main(): void {
 //   let c_code = common::compile_to_c(
 //     r#"
 // extern libc {
-//     function printf(format: string, ...args: unknown[]): i32;
+//     function printf(format: string, ...args: u8[]): i32;
 // }
 //
 // function main(): void {

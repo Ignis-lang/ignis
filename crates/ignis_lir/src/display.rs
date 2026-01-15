@@ -364,7 +364,7 @@ impl<'a> LirPrinter<'a> {
       Type::String => "string".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "!".to_string(),
-      Type::Unknown => "?".to_string(),
+      Type::Infer => "?".to_string(),
       Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
       Type::Pointer(inner) => format!("*{}", self.format_type(*inner)),
