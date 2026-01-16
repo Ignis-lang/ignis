@@ -490,42 +490,65 @@ pub fn compile_project(
           write_dump_output(&config, "dump-c.c", &c_code)?;
         }
 
-        if let Some(path) = &bc.emit_c {
-          let c_path = path.clone();
+        if dump_c_requested {
+          write_dump_output(&config, "dump-c.c", &c_code)?;
+        }
+
+        let c_path = if let Some(path) = &bc.emit_c {
+          PathBuf::from(path)
+        } else {
+          let output_dir = Path::new(&bc.output_dir);
+          if !output_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(output_dir) {
+              eprintln!(
+                "{} Failed to create output directory '{}': {}",
+                "Error:".red().bold(),
+                bc.output_dir,
+                e
+              );
+              return Err(());
+            }
+          }
+          output_dir.join(format!("{}.c", base_name))
+        };
+
+        let should_write_c =
+          bc.emit_c.is_some() || !check_mode || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
+        if should_write_c {
           if let Err(e) = std::fs::write(&c_path, &c_code) {
-            eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path, e);
+            eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
             return Err(());
           }
 
-          if log_info(&config) {
-            println!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path);
+          if (bc.emit_c.is_some() || !check_mode) && log_info(&config) {
+            eprintln!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path.display());
+          }
+        }
+
+        if (bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib) && !check_mode {
+          let obj_path = if let Some(path) = &bc.emit_obj {
+            PathBuf::from(path)
+          } else {
+            PathBuf::from(format!("{}/{}.o", bc.output_dir, base_name))
+          };
+
+          if debug_trace_enabled(&config, DebugTrace::Link) {
+            eprintln!("debug: compiling object file");
           }
 
-          if (bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib) && !check_mode {
-            let obj_path = if let Some(path) = &bc.emit_obj {
-              path.clone()
-            } else {
-              format!("{}/{}.o", bc.output_dir, base_name)
-            };
+          if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, config.quiet) {
+            eprintln!("{} {}", "Error:".red().bold(), e);
+            return Err(());
+          }
 
+          if let Some(bin_path) = &bc.emit_bin {
             if debug_trace_enabled(&config, DebugTrace::Link) {
-              println!("debug: compiling object file");
+              eprintln!("debug: linking executable");
             }
 
-            if let Err(e) = compile_to_object(Path::new(&c_path), Path::new(&obj_path), &link_plan, config.quiet) {
+            if let Err(e) = link_executable(&obj_path, Path::new(bin_path), &link_plan, config.quiet) {
               eprintln!("{} {}", "Error:".red().bold(), e);
               return Err(());
-            }
-
-            if let Some(bin_path) = &bc.emit_bin {
-              if debug_trace_enabled(&config, DebugTrace::Link) {
-                println!("debug: linking executable");
-              }
-
-              if let Err(e) = link_executable(Path::new(&obj_path), Path::new(bin_path), &link_plan, config.quiet) {
-                eprintln!("{} {}", "Error:".red().bold(), e);
-                return Err(());
-              }
             }
           }
         }
@@ -569,15 +592,15 @@ pub fn build_std(
   }
 
   if debug_trace_enabled(&config, DebugTrace::Std) {
-    println!("debug: building standard library");
+    eprintln!("debug: building standard library");
   }
 
   if log_phase(&config) {
-    println!("{} Building standard library...", "-->".bright_cyan().bold());
+    eprintln!("{} Building standard library...", "-->".bright_cyan().bold());
   }
 
   if log_debug(&config) {
-    println!("debug: std manifest modules {}", config.manifest.modules.len());
+    eprintln!("debug: std manifest modules {}", config.manifest.modules.len());
   }
 
   let output_path = Path::new(output_dir);
