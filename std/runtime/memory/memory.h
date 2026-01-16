@@ -37,6 +37,26 @@ void *memoryReallocate(void *ptr, u32 size);
 void *memoryAllocateZeroed(u32 size, u32 count);
 
 /**
+ * Copies `sizeBytes` bytes from `source` to `destination`.
+ * Behavior is undefined if memory regions overlap.
+ *
+ * @param destination Destination buffer.
+ * @param source Source buffer.
+ * @param sizeBytes Number of bytes to copy.
+ */
+void copy(u8 *destination, const u8 *source, u64 sizeBytes);
+
+/**
+ * Moves `sizeBytes` bytes from `source` to `destination`.
+ * Handles overlapping memory regions correctly.
+ *
+ * @param destination Destination buffer.
+ * @param source Source buffer.
+ * @param sizeBytes Number of bytes to move.
+ */
+void move(u8 *destination, const u8 *source, u64 sizeBytes);
+
+/**
  * Creates a new buffer for elements of the given size and type ID.
  *
  * @param elemSize Size of each element in bytes.

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 
 use ignis_config::CHeader;
@@ -5,10 +6,13 @@ use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, RecordDefinition},
+  module::{ModuleId, ModulePath},
   namespace::NamespaceStore,
   symbol::SymbolTable,
   types::{Type, TypeId, TypeStore},
 };
+
+use crate::classify::{classify_def, DefKind, EmitTarget};
 
 /// C code emitter for LIR programs.
 pub struct CEmitter<'a> {
@@ -20,6 +24,10 @@ pub struct CEmitter<'a> {
   headers: &'a [CHeader],
   output: String,
   current_fn_id: Option<DefinitionId>,
+  /// Emit target for filtering definitions (None = emit all, legacy mode)
+  target: Option<EmitTarget>,
+  /// Module paths for classifying definitions (required when target is Some)
+  module_paths: Option<&'a HashMap<ModuleId, ModulePath>>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -40,6 +48,33 @@ impl<'a> CEmitter<'a> {
       headers,
       output: String::new(),
       current_fn_id: None,
+      target: None,
+      module_paths: None,
+    }
+  }
+
+  /// Create an emitter with a specific emit target for filtering.
+  pub fn with_target(
+    program: &'a LirProgram,
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+    namespaces: &'a NamespaceStore,
+    symbols: &'a SymbolTable,
+    headers: &'a [CHeader],
+    target: EmitTarget,
+    module_paths: &'a HashMap<ModuleId, ModulePath>,
+  ) -> Self {
+    Self {
+      program,
+      types,
+      defs,
+      namespaces,
+      symbols,
+      headers,
+      output: String::new(),
+      current_fn_id: None,
+      target: Some(target),
+      module_paths: Some(module_paths),
     }
   }
 
@@ -54,6 +89,64 @@ impl<'a> CEmitter<'a> {
     self.output
   }
 
+  /// Classify a definition based on its owner module.
+  fn classify(
+    &self,
+    def_id: DefinitionId,
+  ) -> DefKind {
+    let def = self.defs.get(&def_id);
+    if let Some(module_paths) = self.module_paths {
+      classify_def(def, module_paths)
+    } else {
+      // Legacy mode: no classification, treat everything as "should emit"
+      // For extern functions, return Runtime; otherwise User
+      let is_extern = match &def.kind {
+        DefinitionKind::Function(fd) => fd.is_extern,
+        DefinitionKind::Namespace(nd) => nd.is_extern,
+        _ => false,
+      };
+      if is_extern { DefKind::Runtime } else { DefKind::User }
+    }
+  }
+
+  /// Check if a definition should be emitted based on the current target.
+  fn should_emit(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    match &self.target {
+      Some(target) => {
+        let kind = self.classify(def_id);
+        if !target.should_emit_def(&kind) {
+          return false;
+        }
+
+        // For UserModule target, also check the owner_module matches
+        if let Some(target_module_id) = target.target_user_module() {
+          let def = self.defs.get(&def_id);
+          return def.owner_module == target_module_id;
+        }
+
+        true
+      },
+      None => true, // Legacy mode: emit everything
+    }
+  }
+
+  /// Check if an extern declaration should be emitted for a definition.
+  fn should_emit_extern(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    match &self.target {
+      Some(target) => {
+        let kind = self.classify(def_id);
+        target.should_emit_extern(&kind)
+      },
+      None => true, // Legacy mode: emit all externs
+    }
+  }
+
   /// Emit forward declarations for all record and enum types.
   /// This allows structs to reference each other (e.g., for recursive types).
   /// Skips generic definitions (those with non-empty type_params) since they
@@ -62,10 +155,16 @@ impl<'a> CEmitter<'a> {
     let mut type_defs: Vec<_> = self
       .defs
       .iter()
-      .filter(|(_, def)| match &def.kind {
-        DefinitionKind::Record(rd) => rd.type_params.is_empty(),
-        DefinitionKind::Enum(ed) => ed.type_params.is_empty(),
-        _ => false,
+      .filter(|(def_id, def)| {
+        // Filter by target if set
+        if !self.should_emit(*def_id) {
+          return false;
+        }
+        match &def.kind {
+          DefinitionKind::Record(rd) => rd.type_params.is_empty(),
+          DefinitionKind::Enum(ed) => ed.type_params.is_empty(),
+          _ => false,
+        }
       })
       .collect();
 
@@ -90,10 +189,16 @@ impl<'a> CEmitter<'a> {
     let mut type_defs: Vec<_> = self
       .defs
       .iter()
-      .filter(|(_, def)| match &def.kind {
-        DefinitionKind::Record(rd) => rd.type_params.is_empty(),
-        DefinitionKind::Enum(ed) => ed.type_params.is_empty(),
-        _ => false,
+      .filter(|(def_id, def)| {
+        // Filter by target if set
+        if !self.should_emit(*def_id) {
+          return false;
+        }
+        match &def.kind {
+          DefinitionKind::Record(rd) => rd.type_params.is_empty(),
+          DefinitionKind::Enum(ed) => ed.type_params.is_empty(),
+          _ => false,
+        }
       })
       .collect();
 
@@ -220,6 +325,11 @@ impl<'a> CEmitter<'a> {
 
     // Collect static fields from records
     for (def_id, def) in self.defs.iter() {
+      // Filter by target
+      if !self.should_emit(def_id) {
+        continue;
+      }
+
       if let DefinitionKind::Record(rd) = &def.kind {
         let type_name = self.build_mangled_name(def_id);
         for (&field_name_sym, &const_def_id) in &rd.static_fields {
@@ -299,7 +409,11 @@ impl<'a> CEmitter<'a> {
     let mut funcs: Vec<_> = self.program.functions.iter().collect();
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
-    let extern_funcs: Vec<_> = funcs.iter().filter(|(_, func)| func.is_extern).collect();
+    // Filter extern functions based on target's extern hygiene rules
+    let extern_funcs: Vec<_> = funcs
+      .iter()
+      .filter(|(def_id, func)| func.is_extern && self.should_emit_extern(**def_id))
+      .collect();
 
     if extern_funcs.is_empty() {
       return;
@@ -318,17 +432,25 @@ impl<'a> CEmitter<'a> {
     let mut funcs: Vec<_> = self.program.functions.iter().collect();
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
-    // Only emit forward declarations for non-extern functions.
+    // Only emit forward declarations for non-extern functions that match the target.
     // Extern functions are declared separately via emit_extern_declarations().
+    let mut emitted_any = false;
     for (def_id, func) in &funcs {
       if func.is_extern {
         continue;
       }
+      // Filter by target
+      if !self.should_emit(**def_id) {
+        continue;
+      }
       self.emit_function_signature(**def_id, func);
       writeln!(self.output, ";").unwrap();
+      emitted_any = true;
     }
 
-    writeln!(self.output).unwrap();
+    if emitted_any {
+      writeln!(self.output).unwrap();
+    }
   }
 
   fn emit_functions(&mut self) {
@@ -336,9 +458,14 @@ impl<'a> CEmitter<'a> {
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
     for (def_id, func) in funcs {
-      if !func.is_extern {
-        self.emit_function(*def_id, func);
+      if func.is_extern {
+        continue;
       }
+      // Filter by target
+      if !self.should_emit(*def_id) {
+        continue;
+      }
+      self.emit_function(*def_id, func);
     }
   }
 
@@ -1192,7 +1319,7 @@ impl<'a> CEmitter<'a> {
   }
 }
 
-/// Emit C code from a LIR program.
+/// Legacy: emits everything (all modules combined).
 pub fn emit_c(
   program: &LirProgram,
   types: &TypeStore,
@@ -1202,6 +1329,450 @@ pub fn emit_c(
   headers: &[CHeader],
 ) -> String {
   CEmitter::new(program, types, defs, namespaces, symbols, headers).emit()
+}
+
+/// Emit C for user definitions only (excludes std and runtime).
+pub fn emit_user_c(
+  program: &LirProgram,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+  module_paths: &HashMap<ModuleId, ModulePath>,
+) -> String {
+  CEmitter::with_target(
+    program,
+    types,
+    defs,
+    namespaces,
+    symbols,
+    headers,
+    EmitTarget::User,
+    module_paths,
+  )
+  .emit()
+}
+
+/// Emit C for a specific std module. Prepends umbrella header if provided.
+pub fn emit_std_module_c(
+  module_name: &str,
+  program: &LirProgram,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  umbrella_header_path: Option<&str>,
+) -> String {
+  let headers = prepend_umbrella_header(headers, umbrella_header_path);
+  CEmitter::with_target(
+    program,
+    types,
+    defs,
+    namespaces,
+    symbols,
+    &headers,
+    EmitTarget::StdModule(module_name.to_string()),
+    module_paths,
+  )
+  .emit()
+}
+
+/// Emit header for a std module (function prototypes).
+pub fn emit_std_module_h(
+  module_name: &str,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  module_paths: &HashMap<ModuleId, ModulePath>,
+) -> String {
+  let guard_name = format!("STD_{}_H", module_name.to_uppercase());
+  let comment = format!("std::{}", module_name);
+
+  let filter = |_def_id: DefinitionId, def: &ignis_type::definition::Definition| -> bool {
+    matches!(module_paths.get(&def.owner_module), Some(ModulePath::Std(name)) if name == module_name)
+  };
+
+  emit_module_header(&guard_name, &comment, defs, types, symbols, namespaces, filter)
+}
+
+/// Emit C for a specific user module. Prepends umbrella header if provided.
+pub fn emit_user_module_c(
+  module_id: ModuleId,
+  program: &LirProgram,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  umbrella_header_path: Option<&str>,
+) -> String {
+  let headers = prepend_umbrella_header(headers, umbrella_header_path);
+  CEmitter::with_target(
+    program,
+    types,
+    defs,
+    namespaces,
+    symbols,
+    &headers,
+    EmitTarget::UserModule(module_id),
+    module_paths,
+  )
+  .emit()
+}
+
+/// Emit header for a user module (function prototypes).
+pub fn emit_user_module_h(
+  module_id: ModuleId,
+  source_path: &std::path::Path,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> String {
+  let guard_name = source_path
+    .with_extension("")
+    .to_string_lossy()
+    .to_uppercase()
+    .replace(['/', '\\', '.', '-'], "_")
+    + "_H";
+  let comment = source_path.display().to_string();
+
+  let filter =
+    |_def_id: DefinitionId, def: &ignis_type::definition::Definition| -> bool { def.owner_module == module_id };
+
+  emit_module_header(&guard_name, &comment, defs, types, symbols, namespaces, filter)
+}
+
+fn prepend_umbrella_header(
+  headers: &[CHeader],
+  umbrella: Option<&str>,
+) -> Vec<CHeader> {
+  match umbrella {
+    Some(path) => {
+      let mut h = vec![CHeader {
+        path: path.to_string(),
+        quoted: true,
+      }];
+      h.extend(headers.iter().cloned());
+      h
+    },
+    None => headers.to_vec(),
+  }
+}
+
+/// Common header generation for both std and user modules.
+fn emit_module_header<F>(
+  guard_name: &str,
+  comment: &str,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  filter: F,
+) -> String
+where
+  F: Fn(DefinitionId, &ignis_type::definition::Definition) -> bool,
+{
+  use std::collections::HashSet;
+
+  let mut output = String::new();
+
+  writeln!(output, "#ifndef {}", guard_name).unwrap();
+  writeln!(output, "#define {}", guard_name).unwrap();
+  writeln!(output).unwrap();
+  writeln!(output, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(output).unwrap();
+  writeln!(output, "// Auto-generated header for {}", comment).unwrap();
+  writeln!(output).unwrap();
+
+  let mut emitted: HashSet<String> = HashSet::new();
+
+  for (def_id, def) in defs.iter() {
+    if !filter(def_id, def) {
+      continue;
+    }
+
+    if let Some(proto) = emit_func_prototype(def_id, def, defs, types, symbols, namespaces, &mut emitted) {
+      writeln!(output, "{}", proto).unwrap();
+    }
+  }
+
+  writeln!(output).unwrap();
+  writeln!(output, "#endif // {}", guard_name).unwrap();
+
+  output
+}
+
+/// Emit a function/method prototype if applicable. Returns None if skipped.
+fn emit_func_prototype(
+  def_id: DefinitionId,
+  def: &ignis_type::definition::Definition,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  emitted: &mut std::collections::HashSet<String>,
+) -> Option<String> {
+  let (params_ids, return_type, is_extern, is_variadic, type_params_empty) = match &def.kind {
+    DefinitionKind::Function(fd) => (
+      &fd.params,
+      &fd.return_type,
+      fd.is_extern,
+      fd.is_variadic,
+      fd.type_params.is_empty(),
+    ),
+    DefinitionKind::Method(md) => (&md.params, &md.return_type, false, false, true),
+    _ => return None,
+  };
+
+  if is_extern || !type_params_empty {
+    return None;
+  }
+
+  let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
+  if emitted.contains(&name) {
+    return None;
+  }
+  emitted.insert(name.clone());
+
+  let return_ty = format_c_type(types.get(return_type), types);
+
+  let mut param_strs: Vec<String> = params_ids
+    .iter()
+    .filter_map(|param_id| {
+      let param_def = defs.get(param_id);
+      if let DefinitionKind::Parameter(param) = &param_def.kind {
+        let pname = symbols.get(&param_def.name);
+        let pty = format_c_type(types.get(&param.type_id), types);
+        Some(format!("{} {}", pty, pname))
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  if is_variadic {
+    param_strs.push("...".to_string());
+  }
+
+  let params = if param_strs.is_empty() {
+    "void".to_string()
+  } else {
+    param_strs.join(", ")
+  };
+
+  Some(format!("{} {}({});", return_ty, name, params))
+}
+
+fn build_mangled_name_standalone(
+  def_id: DefinitionId,
+  defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  types: &TypeStore,
+) -> String {
+  let def = defs.get(&def_id);
+  let raw_name = symbols.get(&def.name).to_string();
+
+  let is_extern = match &def.kind {
+    DefinitionKind::Function(f) => f.is_extern,
+    // Methods are never extern in Ignis
+    DefinitionKind::Method(_) => false,
+    _ => false,
+  };
+
+  if is_extern {
+    return escape_ident(&raw_name);
+  }
+
+  // Check for overloads to determine if we need a parameter suffix
+  let has_overloads = has_overloads_standalone(def_id, defs);
+  let param_suffix = if has_overloads {
+    format_param_types_for_mangling_standalone(def_id, defs, types)
+  } else {
+    String::new()
+  };
+
+  // For methods, include owner type prefix
+  let owner_type_prefix = match &def.kind {
+    DefinitionKind::Method(md) => {
+      let owner_def = defs.get(&md.owner_type);
+      let owner_name = symbols.get(&owner_def.name).to_string();
+      if raw_name.starts_with(&owner_name) {
+        None
+      } else {
+        Some(escape_ident(&owner_name))
+      }
+    },
+    _ => None,
+  };
+
+  match def.owner_namespace {
+    Some(ns_id) => {
+      let ns_path = namespaces.full_path(ns_id);
+      let mut parts: Vec<String> = ns_path.iter().map(|s| escape_ident(symbols.get(s))).collect();
+
+      if let Some(type_prefix) = owner_type_prefix {
+        parts.push(type_prefix);
+      }
+
+      let name_with_suffix = if param_suffix.is_empty() {
+        escape_ident(&raw_name)
+      } else {
+        format!("{}_{}", escape_ident(&raw_name), param_suffix)
+      };
+      parts.push(name_with_suffix);
+      parts.join("_")
+    },
+    None => {
+      let name_with_suffix = if param_suffix.is_empty() {
+        escape_ident(&raw_name)
+      } else {
+        format!("{}_{}", escape_ident(&raw_name), param_suffix)
+      };
+      if let Some(type_prefix) = owner_type_prefix {
+        format!("{}_{}", type_prefix, name_with_suffix)
+      } else {
+        name_with_suffix
+      }
+    },
+  }
+}
+
+fn has_overloads_standalone(
+  target_def_id: DefinitionId,
+  defs: &DefinitionStore,
+) -> bool {
+  let target_def = defs.get(&target_def_id);
+  let target_name = target_def.name;
+  let target_ns = target_def.owner_namespace;
+
+  // Only functions and methods can be overloaded
+  if !matches!(target_def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
+    return false;
+  }
+
+  let target_owner_type = match &target_def.kind {
+    DefinitionKind::Method(md) => Some(md.owner_type),
+    _ => None,
+  };
+
+  let mut count = 0;
+  for (_, def) in defs.iter() {
+    if def.name == target_name {
+      if !matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
+        continue;
+      }
+
+      let def_owner_type = match &def.kind {
+        DefinitionKind::Method(md) => Some(md.owner_type),
+        _ => None,
+      };
+
+      if target_owner_type.is_some() {
+        if target_owner_type == def_owner_type {
+          count += 1;
+        }
+      } else {
+        if def.owner_namespace == target_ns && def_owner_type.is_none() {
+          count += 1;
+        }
+      }
+
+      if count > 1 {
+        return true;
+      }
+    }
+  }
+  false
+}
+
+fn format_param_types_for_mangling_standalone(
+  def_id: DefinitionId,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+) -> String {
+  match &defs.get(&def_id).kind {
+    DefinitionKind::Function(fd) => fd
+      .params
+      .iter()
+      .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types))
+      .collect::<Vec<_>>()
+      .join("_"),
+    DefinitionKind::Method(md) => {
+      let start = if md.is_static { 0 } else { 1 };
+      md.params[start..]
+        .iter()
+        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types))
+        .collect::<Vec<_>>()
+        .join("_")
+    },
+    _ => String::new(),
+  }
+}
+
+fn format_type_for_mangling_standalone(
+  ty: &TypeId,
+  types: &TypeStore,
+) -> String {
+  match types.get(ty) {
+    Type::I8 => "i8".to_string(),
+    Type::I16 => "i16".to_string(),
+    Type::I32 => "i32".to_string(),
+    Type::I64 => "i64".to_string(),
+    Type::U8 => "u8".to_string(),
+    Type::U16 => "u16".to_string(),
+    Type::U32 => "u32".to_string(),
+    Type::U64 => "u64".to_string(),
+    Type::F32 => "f32".to_string(),
+    Type::F64 => "f64".to_string(),
+    Type::Boolean => "bool".to_string(),
+    Type::Char => "char".to_string(),
+    Type::String => "str".to_string(),
+    Type::Void => "void".to_string(),
+    Type::Pointer(inner) => format!("ptr_{}", format_type_for_mangling_standalone(inner, types)),
+    Type::Reference { inner, mutable: true } => {
+      format!("mutref_{}", format_type_for_mangling_standalone(inner, types))
+    },
+    Type::Reference { inner, mutable: false } => {
+      format!("ref_{}", format_type_for_mangling_standalone(inner, types))
+    },
+    Type::Vector { element, .. } => format!("vec_{}", format_type_for_mangling_standalone(element, types)),
+    Type::Tuple(elems) => {
+      let parts: Vec<_> = elems
+        .iter()
+        .map(|e| format_type_for_mangling_standalone(e, types))
+        .collect();
+      format!("tup_{}", parts.join("_"))
+    },
+    Type::Record(def_id) | Type::Enum(def_id) => {
+      // Use def index since we don't have symbols here
+      format!("T{}", def_id.index())
+    },
+    Type::Instance { generic, args } => {
+      let base = format!("T{}", generic.index());
+      if args.is_empty() {
+        base
+      } else {
+        let args_str = args
+          .iter()
+          .map(|a| format_type_for_mangling_standalone(a, types))
+          .collect::<Vec<_>>()
+          .join("_");
+        format!("{}_{}", base, args_str)
+      }
+    },
+    _ => "unknown".to_string(),
+  }
+}
+
+fn escape_ident(name: &str) -> String {
+  name.replace('_', "__")
 }
 
 /// Format a type as C type string using runtime type aliases.
@@ -1221,7 +1792,7 @@ pub fn format_c_type(
     Type::F32 => "f32".to_string(),
     Type::F64 => "f64".to_string(),
     Type::Boolean => "boolean".to_string(),
-    Type::Char => "u32".to_string(),
+    Type::Char => "char".to_string(),
     Type::String => "string".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "void".to_string(),

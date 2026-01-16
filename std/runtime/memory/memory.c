@@ -1,5 +1,7 @@
 #include "memory.h"
 
+#include <string.h>
+
 // =============================================================================
 // Memory allocation wrappers
 // =============================================================================
@@ -14,6 +16,14 @@ void *memoryReallocate(void *ptr, u32 size) {
 
 void *memoryAllocateZeroed(u32 size, u32 count) {
   return ignis_calloc((size_t)count, (size_t)size);
+}
+
+void copy(u8 *destination, const u8 *source, u64 sizeBytes) {
+  memcpy(destination, source, (size_t)sizeBytes);
+}
+
+void move(u8 *destination, const u8 *source, u64 sizeBytes) {
+  memmove(destination, source, (size_t)sizeBytes);
 }
 
 // =============================================================================

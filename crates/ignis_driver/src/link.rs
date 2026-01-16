@@ -7,7 +7,7 @@ use ignis_config::{CHeader, IgnisSTDManifest};
 use ignis_type::module::ModuleId;
 
 /// Plan for linking the final executable.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LinkPlan {
   /// Headers to #include in the generated C (ordered, base first)
   pub headers: Vec<CHeader>,
@@ -22,11 +22,11 @@ pub struct LinkPlan {
 }
 
 impl LinkPlan {
-  /// Build a link plan from the used modules and manifest.
   pub fn from_modules(
     used_modules: &[ModuleId],
     module_graph: &ModuleGraph,
     std_path: &Path,
+    build_dir: &Path,
     manifest: Option<&IgnisSTDManifest>,
   ) -> Self {
     let mut plan = Self::default();
@@ -49,14 +49,15 @@ impl LinkPlan {
       plan.include_dirs.push(std_path.to_path_buf());
     }
 
-    // Check for precompiled std library
-    let std_build_dir = std_path.join("build");
-    let std_header = std_build_dir.join("ignis_std.h");
-    let std_archive = std_build_dir.join("libignis_std.a");
+    // Check for precompiled std library in new layout: build/std/
+    let std_build_dir = build_dir.join("std");
+    let std_include_dir = std_build_dir.join("include");
+    let std_header = std_include_dir.join("ignis_std.h");
+    let std_archive = std_build_dir.join("lib/libignis_std.a");
 
     if std_header.exists() {
-      if !plan.include_dirs.contains(&std_build_dir) {
-        plan.include_dirs.push(std_build_dir);
+      if !plan.include_dirs.contains(&std_include_dir) {
+        plan.include_dirs.push(std_include_dir);
       }
       plan.headers.push(CHeader {
         path: "ignis_std.h".to_string(),
@@ -274,6 +275,53 @@ pub fn link_executable(
   Ok(())
 }
 
+/// Link multiple object files into an executable using gcc.
+pub fn link_executable_multi(
+  obj_paths: &[PathBuf],
+  bin_path: &Path,
+  link_plan: &LinkPlan,
+  quiet: bool,
+) -> Result<(), String> {
+  let mut cmd = Command::new("gcc");
+
+  for obj in obj_paths {
+    cmd.arg(obj);
+  }
+
+  // Link std archive if present (libignis_std.a)
+  if let Some(std_archive) = &link_plan.std_archive {
+    cmd.arg(std_archive);
+  }
+
+  for obj in &link_plan.objects {
+    cmd.arg(obj);
+  }
+
+  cmd.arg("-o").arg(bin_path);
+
+  for lib in &link_plan.libs {
+    cmd.arg(format!("-l{}", lib));
+  }
+
+  if !quiet {
+    eprintln!(
+      "    {} Linking {} objects -> {}",
+      "-->".bright_green().bold(),
+      obj_paths.len(),
+      bin_path.display()
+    );
+  }
+
+  let output = cmd.output().map_err(|e| format!("Failed to run gcc: {}", e))?;
+
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(format_tool_error("gcc", "linking", &stderr));
+  }
+
+  Ok(())
+}
+
 /// Rebuild the std runtime by running make in std/runtime.
 pub fn rebuild_std_runtime(
   std_path: &Path,
@@ -369,7 +417,7 @@ mod tests {
   #[test]
   fn test_link_plan_empty_modules_no_manifest() {
     let graph = ModuleGraph::new(None, PathBuf::from("/std"));
-    let plan = LinkPlan::from_modules(&[], &graph, Path::new("/std"), None);
+    let plan = LinkPlan::from_modules(&[], &graph, Path::new("/std"), Path::new("/build"), None);
 
     assert!(plan.headers.is_empty());
     assert!(plan.objects.is_empty());
@@ -381,7 +429,7 @@ mod tests {
   fn test_link_plan_with_manifest_includes_base_header() {
     let manifest = create_test_manifest();
     let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone());
-    let plan = LinkPlan::from_modules(&[], &graph, Path::new("/std"), Some(&manifest));
+    let plan = LinkPlan::from_modules(&[], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
     // Base header should be included even with no modules
     assert_eq!(plan.headers.len(), 1);
@@ -398,7 +446,7 @@ mod tests {
     let io_module = Module::new(dummy_file_id(), ModulePath::Std("io".to_string()));
     let io_id = graph.register(io_module);
 
-    let plan = LinkPlan::from_modules(&[io_id], &graph, Path::new("/std"), Some(&manifest));
+    let plan = LinkPlan::from_modules(&[io_id], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
     // base header first, then io header
     assert_eq!(plan.headers.len(), 2);
@@ -421,7 +469,13 @@ mod tests {
     let string_module = Module::new(dummy_file_id(), ModulePath::Std("string".to_string()));
     let string_id = graph.register(string_module);
 
-    let plan = LinkPlan::from_modules(&[io_id, string_id], &graph, Path::new("/std"), Some(&manifest));
+    let plan = LinkPlan::from_modules(
+      &[io_id, string_id],
+      &graph,
+      Path::new("/std"),
+      Path::new("/build"),
+      Some(&manifest),
+    );
 
     // base header + 2 module headers
     assert_eq!(plan.headers.len(), 3);
@@ -451,7 +505,7 @@ mod tests {
     let math_module = Module::new(dummy_file_id(), ModulePath::Std("math".to_string()));
     let math_id = graph.register(math_module);
 
-    let plan = LinkPlan::from_modules(&[math_id], &graph, Path::new("/std"), Some(&manifest));
+    let plan = LinkPlan::from_modules(&[math_id], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
     // base header + math header
     assert_eq!(plan.headers.len(), 2);
@@ -471,7 +525,7 @@ mod tests {
     let project_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/project/utils.ign")));
     let project_id = graph.register(project_module);
 
-    let plan = LinkPlan::from_modules(&[project_id], &graph, Path::new("/std"), Some(&manifest));
+    let plan = LinkPlan::from_modules(&[project_id], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
     // Only base header, no module headers
     assert_eq!(plan.headers.len(), 1);
@@ -489,7 +543,7 @@ mod tests {
     let io_id = graph.register(io_module);
 
     // Same module twice should not duplicate entries
-    let plan = LinkPlan::from_modules(&[io_id, io_id], &graph, Path::new("/std"), Some(&manifest));
+    let plan = LinkPlan::from_modules(&[io_id, io_id], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
     // base header + 1 module header (no dupe)
     assert_eq!(plan.headers.len(), 2);

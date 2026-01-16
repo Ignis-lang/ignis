@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -15,11 +16,20 @@ use ignis_log::{
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
 use ignis_type::file::SourceMap;
+use ignis_type::module::{ModuleId, ModulePath};
 use ignis_type::symbol::SymbolTable;
 use ignis_diagnostics::message::DiagnosticMessage;
 
+use crate::build_layout::{
+  compute_std_stamp, compute_user_stamp, is_stamp_valid, is_user_stamp_valid, write_stamp, BuildLayout,
+};
 use crate::context::CompilationContext;
-use crate::link::{compile_to_object, format_tool_error, link_executable, rebuild_std_runtime, LinkPlan};
+use crate::link::{
+  compile_to_object, format_tool_error, link_executable, link_executable_multi, rebuild_std_runtime, LinkPlan,
+};
+
+/// Compiler version for stamp file invalidation.
+const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn dump_requested(
   config: &IgnisConfig,
@@ -423,7 +433,18 @@ pub fn compile_project(
       } else {
         Some(&config.manifest)
       };
-      let link_plan = LinkPlan::from_modules(&used_modules, &ctx.module_graph, Path::new(&config.std_path), manifest);
+      let build_dir = config
+        .build_config
+        .as_ref()
+        .map(|bc| bc.output_dir.clone())
+        .unwrap_or_else(|| "build".to_string());
+      let link_plan = LinkPlan::from_modules(
+        &used_modules,
+        &ctx.module_graph,
+        Path::new(&config.std_path),
+        Path::new(&build_dir),
+        manifest,
+      );
 
       if bc.rebuild_std {
         trace_dbg!(&config, DebugTrace::Std, "rebuilding standard library runtime");
@@ -546,15 +567,6 @@ pub fn compile_project(
           return Err(());
         }
 
-        let c_code = ignis_codegen_c::emit_c(
-          &lir_program,
-          &types,
-          &mono_output.defs,
-          &output.namespaces,
-          &sym_table,
-          &link_plan.headers,
-        );
-
         let base_name = bc
           .file
           .as_ref()
@@ -562,75 +574,270 @@ pub fn compile_project(
           .and_then(|s| s.to_str())
           .unwrap_or("out");
 
-        if dump_c_requested {
-          write_dump_output(&config, "dump-c.c", &c_code)?;
-        }
+        // Per-module compilation when precompiled std is available
+        if link_plan.std_archive.is_some() && bc.emit_bin.is_some() {
+          let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+          let layout = BuildLayout::new(base_name, Path::new(&bc.output_dir));
 
-        if dump_c_requested {
-          write_dump_output(&config, "dump-c.c", &c_code)?;
-        }
+          // Create user directories
+          if let Err(e) = layout.create_user_dirs() {
+            cmd_fail!(&config, "Build failed", start.elapsed());
+            eprintln!("{} Failed to create user directories: {}", "Error:".red().bold(), e);
+            return Err(());
+          }
 
-        let c_path = if let Some(path) = &bc.emit_c {
-          PathBuf::from(path)
-        } else {
-          let output_dir = Path::new(&bc.output_dir);
-          if !output_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(output_dir) {
+          // Collect user modules (non-std)
+          let user_modules: Vec<_> = used_modules
+            .iter()
+            .filter(|id| {
+              let module = ctx.module_graph.modules.get(id);
+              module.path.is_project()
+            })
+            .collect();
+
+          if user_modules.is_empty() {
+            cmd_fail!(&config, "Build failed", start.elapsed());
+            eprintln!("{} No user modules found", "Error:".red().bold());
+            return Err(());
+          }
+
+          // Collect source paths for all user modules
+          let source_paths: Vec<PathBuf> = user_modules
+            .iter()
+            .filter_map(|module_id| {
+              let module = ctx.module_graph.modules.get(module_id);
+              match &module.path {
+                ModulePath::Project(p) => Some(p.clone()),
+                _ => None,
+              }
+            })
+            .collect();
+
+          // Check if user stamp is valid (incremental compilation)
+          let stamp_path = layout.user_stamp_path();
+          let bin_path = bc.emit_bin.as_ref().unwrap();
+          let stamp_valid = is_user_stamp_valid(&stamp_path, &source_paths, COMPILER_VERSION);
+          let bin_exists = Path::new(bin_path).exists();
+          let all_objects_exist = source_paths.iter().all(|p| layout.user_module_obj(p).exists());
+
+          if stamp_valid && bin_exists && all_objects_exist {
+            // Stamp is valid and all artifacts exist - skip compilation
+            cmd_ok!(&config, "Compiled (cached)", start.elapsed());
+            cmd_artifact!(&config, "Binary", bin_path);
+            return Ok(());
+          }
+
+          // Phase 1: Generate headers for all user modules
+          for module_id in &user_modules {
+            let module = ctx.module_graph.modules.get(module_id);
+            let source_path = match &module.path {
+              ModulePath::Project(p) => p.clone(),
+              _ => continue,
+            };
+
+            // Create directories for this module
+            if let Err(e) = layout.ensure_user_module_dirs(&source_path) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
+              eprintln!("{} Failed to create module directories: {}", "Error:".red().bold(), e);
+              return Err(());
+            }
+
+            // Generate header
+            let header_content = ignis_codegen_c::emit_user_module_h(
+              **module_id,
+              &source_path,
+              &mono_output.defs,
+              &types,
+              &sym_table,
+              &output.namespaces,
+            );
+
+            let header_path = layout.user_module_header(&source_path);
+            if let Err(e) = std::fs::write(&header_path, &header_content) {
               cmd_fail!(&config, "Build failed", start.elapsed());
               eprintln!(
-                "{} Failed to create output directory '{}': {}",
+                "{} Failed to write header '{}': {}",
                 "Error:".red().bold(),
-                bc.output_dir,
+                header_path.display(),
                 e
               );
               return Err(());
             }
           }
-          output_dir.join(format!("{}.c", base_name))
-        };
 
-        let should_write_c =
-          bc.emit_c.is_some() || !check_mode || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
-        if should_write_c {
-          if let Err(e) = std::fs::write(&c_path, &c_code) {
+          // Phase 2: Generate umbrella header
+          let umbrella_content = generate_user_umbrella_header(&source_paths);
+          let umbrella_path = layout.user_umbrella_header();
+          if let Err(e) = std::fs::write(&umbrella_path, &umbrella_content) {
             cmd_fail!(&config, "Build failed", start.elapsed());
-            eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
+            eprintln!("{} Failed to write umbrella header: {}", "Error:".red().bold(), e);
             return Err(());
           }
 
-          if (bc.emit_c.is_some() || !check_mode) && ignis_log::show_verbose(&config) {
-            eprintln!("    {} Emitted C code to {}", "-->".bright_green().bold(), c_path.display());
-          }
-        }
+          // Phase 3: Generate C files and compile to objects
+          let mut object_files: Vec<PathBuf> = Vec::new();
+          let mut link_plan_with_user_includes = link_plan.clone();
+          link_plan_with_user_includes
+            .include_dirs
+            .push(layout.user_include_dir());
 
-        if (bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib) && !check_mode {
-          let obj_path = if let Some(path) = &bc.emit_obj {
-            PathBuf::from(path)
-          } else {
-            PathBuf::from(format!("{}/{}.o", bc.output_dir, base_name))
-          };
+          for module_id in &user_modules {
+            let module = ctx.module_graph.modules.get(module_id);
+            let source_path = match &module.path {
+              ModulePath::Project(p) => p.clone(),
+              _ => continue,
+            };
 
-          trace_dbg!(&config, DebugTrace::Link, "compiling object file");
+            // Generate C code for this module
+            let c_code = ignis_codegen_c::emit_user_module_c(
+              **module_id,
+              &lir_program,
+              &types,
+              &mono_output.defs,
+              &output.namespaces,
+              &sym_table,
+              &link_plan_with_user_includes.headers,
+              &module_paths,
+              Some("ignis_user.h"),
+            );
 
-          let suppress_link_logs = !ignis_log::show_verbose(&config);
-          if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, suppress_link_logs) {
-            cmd_fail!(&config, "Build failed", start.elapsed());
-            eprintln!("{} {}", "Error:".red().bold(), e);
-            return Err(());
-          }
+            let c_path = layout.user_module_src(&source_path);
+            if let Err(e) = std::fs::write(&c_path, &c_code) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
+              eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
+              return Err(());
+            }
 
-          if let Some(bin_path) = &bc.emit_bin {
-            trace_dbg!(&config, DebugTrace::Link, "linking executable");
-
-            if let Err(e) = link_executable(&obj_path, Path::new(bin_path), &link_plan, suppress_link_logs) {
+            // Compile to object
+            let obj_path = layout.user_module_obj(&source_path);
+            let suppress_link_logs = !ignis_log::show_verbose(&config);
+            if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan_with_user_includes, suppress_link_logs) {
               cmd_fail!(&config, "Build failed", start.elapsed());
               eprintln!("{} {}", "Error:".red().bold(), e);
               return Err(());
             }
 
+            object_files.push(obj_path);
+          }
+
+          // Phase 4: Link all objects
+          if let Some(bin_path) = &bc.emit_bin {
+            trace_dbg!(&config, DebugTrace::Link, "linking executable");
+
+            let suppress_link_logs = !ignis_log::show_verbose(&config);
+            if let Err(e) = link_executable_multi(
+              &object_files,
+              Path::new(bin_path),
+              &link_plan_with_user_includes,
+              suppress_link_logs,
+            ) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
+              eprintln!("{} {}", "Error:".red().bold(), e);
+              return Err(());
+            }
+
+            // Write user stamp after successful compilation
+            if let Ok(stamp) = compute_user_stamp(&source_paths, COMPILER_VERSION) {
+              if let Err(e) = write_stamp(&stamp_path, &stamp) {
+                // Non-fatal: warn but don't fail the build
+                eprintln!("{} Failed to write user stamp: {}", "Warning:".yellow().bold(), e);
+              }
+            }
+
             cmd_ok!(&config, "Compiled", start.elapsed());
             cmd_artifact!(&config, "Binary", bin_path);
             return Ok(());
+          }
+        } else {
+          // Legacy single-file compilation (no precompiled std or no binary output)
+          let c_code = if link_plan.std_archive.is_some() {
+            let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+            ignis_codegen_c::emit_user_c(
+              &lir_program,
+              &types,
+              &mono_output.defs,
+              &output.namespaces,
+              &sym_table,
+              &link_plan.headers,
+              &module_paths,
+            )
+          } else {
+            ignis_codegen_c::emit_c(
+              &lir_program,
+              &types,
+              &mono_output.defs,
+              &output.namespaces,
+              &sym_table,
+              &link_plan.headers,
+            )
+          };
+
+          if dump_c_requested {
+            write_dump_output(&config, "dump-c.c", &c_code)?;
+          }
+
+          let c_path = if let Some(path) = &bc.emit_c {
+            PathBuf::from(path)
+          } else {
+            let output_dir = Path::new(&bc.output_dir);
+            if !output_dir.exists() {
+              if let Err(e) = std::fs::create_dir_all(output_dir) {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!(
+                  "{} Failed to create output directory '{}': {}",
+                  "Error:".red().bold(),
+                  bc.output_dir,
+                  e
+                );
+                return Err(());
+              }
+            }
+            output_dir.join(format!("{}.c", base_name))
+          };
+
+          let should_write_c =
+            bc.emit_c.is_some() || !check_mode || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
+          if should_write_c {
+            if let Err(e) = std::fs::write(&c_path, &c_code) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
+              eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
+              return Err(());
+            }
+
+            if (bc.emit_c.is_some() || !check_mode) && ignis_log::show_verbose(&config) {
+              eprintln!("    {} Emitted C code to {}", "-->".bright_green().bold(), c_path.display());
+            }
+          }
+
+          if (bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib) && !check_mode {
+            let obj_path = if let Some(path) = &bc.emit_obj {
+              PathBuf::from(path)
+            } else {
+              PathBuf::from(format!("{}/{}.o", bc.output_dir, base_name))
+            };
+
+            trace_dbg!(&config, DebugTrace::Link, "compiling object file");
+
+            let suppress_link_logs = !ignis_log::show_verbose(&config);
+            if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, suppress_link_logs) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
+              eprintln!("{} {}", "Error:".red().bold(), e);
+              return Err(());
+            }
+
+            if let Some(bin_path) = &bc.emit_bin {
+              trace_dbg!(&config, DebugTrace::Link, "linking executable");
+
+              if let Err(e) = link_executable(&obj_path, Path::new(bin_path), &link_plan, suppress_link_logs) {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!("{} {}", "Error:".red().bold(), e);
+                return Err(());
+              }
+
+              cmd_ok!(&config, "Compiled", start.elapsed());
+              cmd_artifact!(&config, "Binary", bin_path);
+              return Ok(());
+            }
           }
         }
       }
@@ -652,7 +859,6 @@ pub fn build_std(
   output_dir: &str,
 ) -> Result<(), ()> {
   use std::collections::HashSet;
-  use ignis_type::module::ModuleId;
 
   let start = Instant::now();
 
@@ -687,23 +893,17 @@ pub fn build_std(
 
   trace_dbg!(&config, DebugTrace::Std, "building standard library");
 
+  // Create build layout with new directory structure
+  let layout = BuildLayout::new("std", Path::new(output_dir));
+  if let Err(e) = layout.create_std_dirs() {
+    cmd_fail!(&config, "Build failed", start.elapsed());
+    eprintln!("{} Failed to create output directories: {}", "Error:".red().bold(), e);
+    return Err(());
+  }
+
   section!(&config, "Scanning & parsing");
 
   log_dbg!(&config, "std manifest modules {}", config.manifest.modules.len());
-
-  let output_path = Path::new(output_dir);
-  if !output_path.exists() {
-    if let Err(e) = std::fs::create_dir_all(output_path) {
-      cmd_fail!(&config, "Build failed", start.elapsed());
-      eprintln!(
-        "{} Failed to create output directory '{}': {}",
-        "Error:".red().bold(),
-        output_path.display(),
-        e
-      );
-      return Err(());
-    }
-  }
 
   let mut ctx = CompilationContext::new(&config);
 
@@ -718,33 +918,24 @@ pub fn build_std(
   section!(&config, "Analyzing");
 
   let output = ctx.compile_all(&config)?;
-  let link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+  let mut link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+
+  // Add std include directory for std module inter-dependencies
+  // This allows std module C files to #include "ignis_std.h"
+  link_plan.include_dirs.push(layout.std_include_dir());
+
+  // Build module paths map for classification
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
 
   section!(&config, "Codegen & linking");
 
-  // Use scoped borrow for header generation, drops before monomorphization
-  let header_content = {
-    let sym_table = output.symbols.borrow();
-    ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table)
-  };
-  let header_path = output_path.join("ignis_std.h");
-  if let Err(e) = std::fs::write(&header_path, &header_content) {
-    cmd_fail!(&config, "Build failed", start.elapsed());
-    eprintln!(
-      "{} Failed to write header file '{}': {}",
-      "Error:".red().bold(),
-      header_path.display(),
-      e
-    );
-    return Err(());
-  }
-
-  phase_ok!(&config, "Generated header {}", header_path.display());
-
   let all_module_ids = ctx.module_graph.all_modules_topological();
-  let mut object_files: Vec<std::path::PathBuf> = Vec::new();
   let mut processed_modules: HashSet<String> = HashSet::new();
+  let mut generated_module_names: Vec<String> = Vec::new();
 
+  // Phase 1: Generate all module headers first
+  // We need to do a first pass to just generate headers, then umbrella,
+  // then C files. This is necessary because std modules can depend on each other.
   for module_id in &all_module_ids {
     let module = ctx.module_graph.modules.get(module_id);
     let module_name = module.path.module_name();
@@ -757,32 +948,117 @@ pub fn build_std(
     let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
     let mut types = output.types.clone();
 
-    // Monomorphization: use temporary borrow for collect_mono_roots
     let mono_roots = collect_mono_roots_for_std(&output.defs);
     let mono_output =
       ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
         .run(&mono_roots);
 
-    trace_dbg!(
-      &config,
-      DebugTrace::Mono,
-      "std monomorphization completed for module {}",
-      module_name
-    );
-
     #[cfg(debug_assertions)]
     mono_output.verify_no_generics(&types);
 
-    // Re-borrow symbols for ownership checking and codegen
     let sym_table = output.symbols.borrow();
 
-    // Run ownership analysis on HIR to produce drop schedules
     let ownership_checker =
       ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
         .with_source_map(&ctx.source_map)
         .suppress_ffi_warnings_for(&config.std_path);
     let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
-    // Note: ownership diagnostics already reported in the first pass
+
+    let (lir_program, _verify_result) = ignis_lir::lowering::lower_and_verify(
+      &mono_output.hir,
+      &mut types,
+      &mono_output.defs,
+      &sym_table,
+      &drop_schedules,
+      Some(&single_module_set),
+    );
+
+    if lir_program.functions.is_empty() {
+      continue;
+    }
+
+    // Generate module header
+    let header_content = ignis_codegen_c::emit_std_module_h(
+      &module_name,
+      &mono_output.defs,
+      &types,
+      &sym_table,
+      &output.namespaces,
+      &module_paths,
+    );
+
+    let header_path = layout.std_module_header(&module_name);
+    if let Err(e) = std::fs::write(&header_path, &header_content) {
+      cmd_fail!(&config, "Build failed", start.elapsed());
+      eprintln!(
+        "{} Failed to write header '{}': {}",
+        "Error:".red().bold(),
+        header_path.display(),
+        e
+      );
+      return Err(());
+    }
+
+    generated_module_names.push(module_name);
+  }
+
+  if generated_module_names.is_empty() {
+    cmd_fail!(&config, "Build failed", start.elapsed());
+    eprintln!("{} No modules generated headers", "Error:".red().bold());
+    return Err(());
+  }
+
+  // Phase 2: Generate umbrella header (before C files, so they can include it)
+  let module_names_ref: Vec<&str> = generated_module_names.iter().map(|s| s.as_str()).collect();
+  let umbrella_content = generate_std_umbrella_header(&module_names_ref);
+  let umbrella_path = layout.std_umbrella_header();
+  if let Err(e) = std::fs::write(&umbrella_path, &umbrella_content) {
+    cmd_fail!(&config, "Build failed", start.elapsed());
+    eprintln!(
+      "{} Failed to write umbrella header '{}': {}",
+      "Error:".red().bold(),
+      umbrella_path.display(),
+      e
+    );
+    return Err(());
+  }
+
+  phase_ok!(&config, "Generated {} module headers + umbrella", generated_module_names.len());
+
+  // Phase 3: Generate C files and compile objects
+  // We need to redo the processing because we can't easily store all the intermediate state
+  let mut object_files: Vec<std::path::PathBuf> = Vec::new();
+  processed_modules.clear();
+
+  for module_id in &all_module_ids {
+    let module = ctx.module_graph.modules.get(module_id);
+    let module_name = module.path.module_name();
+
+    if processed_modules.contains(&module_name) {
+      continue;
+    }
+    processed_modules.insert(module_name.clone());
+
+    // Skip modules that didn't generate headers (no functions)
+    if !generated_module_names.contains(&module_name) {
+      continue;
+    }
+
+    let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
+    let mut types = output.types.clone();
+
+    let mono_roots = collect_mono_roots_for_std(&output.defs);
+    let mono_output =
+      ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+        .run(&mono_roots);
+
+    let sym_table = output.symbols.borrow();
+
+    let ownership_checker =
+      ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+        .with_source_map(&ctx.source_map)
+        .suppress_ffi_warnings_for(&config.std_path);
+    let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
 
     let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
       &mono_output.hir,
@@ -812,29 +1088,31 @@ pub fn build_std(
       }
     }
 
-    if lir_program.functions.is_empty() {
-      continue;
-    }
-
     trace_dbg!(&config, DebugTrace::Codegen, "std emitting C for module {}", module_name);
 
-    let c_code = ignis_codegen_c::emit_c(
+    // Generate module C code with umbrella header for inter-module dependencies
+    let umbrella_header = "ignis_std.h";
+    let c_code = ignis_codegen_c::emit_std_module_c(
+      &module_name,
       &lir_program,
       &types,
       &mono_output.defs,
       &output.namespaces,
       &sym_table,
       &link_plan.headers,
+      &module_paths,
+      Some(umbrella_header),
     );
 
-    let c_path = output_path.join(format!("{}.c", module_name));
+    let c_path = layout.std_module_src(&module_name);
     if let Err(e) = std::fs::write(&c_path, &c_code) {
       cmd_fail!(&config, "Build failed", start.elapsed());
       eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
       return Err(());
     }
 
-    let obj_path = output_path.join(format!("{}.o", module_name));
+    // Compile to object file
+    let obj_path = layout.std_module_obj(&module_name);
     trace_dbg!(&config, DebugTrace::Link, "std compiling object for module {}", module_name);
 
     let suppress_link_logs = !ignis_log::show_verbose(&config);
@@ -853,13 +1131,33 @@ pub fn build_std(
     return Err(());
   }
 
-  let archive_path = output_path.join("libignis_std.a");
+  // Create static archive
+  let archive_path = layout.std_lib_path();
   trace_dbg!(&config, DebugTrace::Link, "archiving standard library objects");
 
   if let Err(e) = create_static_archive_multi(&object_files, &archive_path, log_phase(&config)) {
     cmd_fail!(&config, "Build failed", start.elapsed());
     eprintln!("{} {}", "Error:".red().bold(), e);
     return Err(());
+  }
+
+  // Write stamp file for cache invalidation
+  let stamp_path = layout.std_stamp_path();
+  match compute_std_stamp(std_path, COMPILER_VERSION) {
+    Ok(stamp) => {
+      if let Err(e) = write_stamp(&stamp_path, &stamp) {
+        // Non-fatal: warn but don't fail the build
+        eprintln!(
+          "{} Failed to write stamp file '{}': {}",
+          "Warning:".yellow().bold(),
+          stamp_path.display(),
+          e
+        );
+      }
+    },
+    Err(e) => {
+      eprintln!("{} Failed to compute stamp: {}", "Warning:".yellow().bold(), e);
+    },
   }
 
   cmd_ok!(&config, "Built standard library", start.elapsed());
@@ -1112,16 +1410,27 @@ fn ensure_std_built(
     return Ok(());
   }
 
+  let build_dir = config
+    .build_config
+    .as_ref()
+    .map(|bc| bc.output_dir.clone())
+    .unwrap_or_else(|| "build".to_string());
+  let layout = BuildLayout::new("std", Path::new(&build_dir));
+  let archive_path = layout.std_lib_path();
+  let stamp_path = layout.std_stamp_path();
   let std_path = Path::new(&config.std_path);
-  let archive_path = std_path.join("build/libignis_std.a");
 
+  // Check if archive exists AND stamp is valid
   if archive_path.exists() {
-    return Ok(());
+    if is_stamp_valid(&stamp_path, std_path, COMPILER_VERSION) {
+      return Ok(());
+    }
+    phase_warn!(config, "std library outdated, rebuilding...");
+  } else {
+    phase_warn!(config, "std library not found, building...");
   }
 
-  phase_warn!(config, "std library not found, building...");
-
-  build_std(config.clone(), &std_path.join("build").to_string_lossy())
+  build_std(config.clone(), &build_dir)
 }
 
 /// Create a static archive (.a) from multiple object files
@@ -1252,4 +1561,52 @@ fn collect_mono_roots_for_std(defs: &DefinitionStore) -> Vec<DefinitionId> {
   }
 
   roots
+}
+
+fn build_module_paths_from_graph(module_graph: &ignis_analyzer::modules::ModuleGraph) -> HashMap<ModuleId, ModulePath> {
+  module_graph
+    .by_path
+    .iter()
+    .map(|(path, id)| (*id, path.clone()))
+    .collect()
+}
+
+fn generate_std_umbrella_header(module_names: &[&str]) -> String {
+  use std::fmt::Write;
+
+  let mut out = String::new();
+  writeln!(out, "#ifndef IGNIS_STD_H").unwrap();
+  writeln!(out, "#define IGNIS_STD_H").unwrap();
+  writeln!(out).unwrap();
+  writeln!(out, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(out).unwrap();
+  for name in module_names {
+    writeln!(out, "#include \"std_{}.h\"", name).unwrap();
+  }
+  writeln!(out).unwrap();
+  writeln!(out, "#endif // IGNIS_STD_H").unwrap();
+  out
+}
+
+fn generate_user_umbrella_header(source_paths: &[PathBuf]) -> String {
+  use std::fmt::Write;
+
+  let mut out = String::new();
+  writeln!(out, "#ifndef IGNIS_USER_H").unwrap();
+  writeln!(out, "#define IGNIS_USER_H").unwrap();
+  writeln!(out).unwrap();
+  writeln!(out, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(out).unwrap();
+
+  for source_path in source_paths {
+    let normalized: PathBuf = source_path
+      .components()
+      .filter(|c| !matches!(c, std::path::Component::CurDir))
+      .collect();
+    writeln!(out, "#include \"{}\"", normalized.with_extension("h").display()).unwrap();
+  }
+
+  writeln!(out).unwrap();
+  writeln!(out, "#endif // IGNIS_USER_H").unwrap();
+  out
 }
