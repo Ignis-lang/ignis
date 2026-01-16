@@ -7,7 +7,7 @@ use colored::*;
 use ignis_ast::display::format_ast_nodes;
 use ignis_config::{DebugTrace, DumpKind, IgnisConfig};
 
-use crate::logging::{debug_trace_enabled, log_debug, log_info, log_phase, log_trace};
+use ignis_log::{log_dbg, log_info, log_phase, log_trc, phase_log, phase_ok, phase_warn, trace_dbg};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
 use ignis_type::file::SourceMap;
@@ -101,9 +101,7 @@ pub fn compile_file(
 
   warn_unsupported_dumps(&config);
 
-  if log_phase(&config) {
-    println!("{:indent$}Scanning... {}", "-->".bright_green().bold(), file_path, indent = 4);
-  }
+  phase_log!(&config, "Scanning... {}", file_path);
 
   let file_id = sm.add_file(file_path, text);
   let src = &sm.get(&file_id).text;
@@ -128,19 +126,13 @@ pub fn compile_file(
     write_dump_output(&config, "dump-lexer.txt", &output)?;
   }
 
-  if debug_trace_enabled(&config, DebugTrace::Lexer) {
-    println!("debug: lexer produced {} tokens", lexer.tokens.len());
-  }
+  trace_dbg!(&config, DebugTrace::Lexer, "produced {} tokens", lexer.tokens.len());
 
   let symbol_table = Rc::new(RefCell::new(SymbolTable::new()));
 
-  if log_phase(&config) {
-    println!("{:indent$}Parsing... {}", "-->".bright_green().bold(), file_path, indent = 4);
-  }
+  phase_log!(&config, "Parsing... {}", file_path);
 
-  if log_debug(&config) {
-    println!("debug: parsing {}", file_path);
-  }
+  log_dbg!(&config, "parsing {}", file_path);
 
   let mut parser = IgnisParser::new(lexer.tokens, symbol_table.clone());
   let parse_result = parser.parse();
@@ -160,19 +152,18 @@ pub fn compile_file(
     write_dump_output(&config, "dump-ast.txt", &ast_lisp)?;
   }
 
-  if debug_trace_enabled(&config, DebugTrace::Parser) {
-    println!("debug: parser produced {} nodes", nodes.len());
-  }
+  trace_dbg!(&config, DebugTrace::Parser, "produced {} nodes", nodes.len());
 
-  if log_phase(&config) {
-    println!("\n{}", "Running analyzer...".bright_cyan().bold());
-  }
+  phase_ok!(&config, "{}", "Running analyzer...".bright_cyan().bold());
 
   let analyzer_result = ignis_analyzer::Analyzer::analyze(&nodes, &roots, symbol_table);
 
-  if debug_trace_enabled(&config, DebugTrace::Analyzer) {
-    println!("debug: analyzer emitted {} diagnostics", analyzer_result.diagnostics.len());
-  }
+  trace_dbg!(
+    &config,
+    DebugTrace::Analyzer,
+    "emitted {} diagnostics",
+    analyzer_result.diagnostics.len()
+  );
 
   if !config.quiet {
     for diag in &analyzer_result.diagnostics {
@@ -239,22 +230,21 @@ pub fn compile_project(
 ) -> Result<(), ()> {
   warn_unsupported_dumps(&config);
 
-  if log_phase(&config) {
-    println!("{} Discovering modules...", "-->".bright_cyan().bold());
-  }
+  phase_ok!(&config, "{}", "Discovering modules...".bright_cyan().bold());
 
   let mut ctx = CompilationContext::new(&config);
   let root_id = ctx.discover_modules(entry_path, &config)?;
 
-  if log_debug(&config) {
-    println!("debug: compiling project entry {}", entry_path);
-  }
+  log_dbg!(&config, "compiling project entry {}", entry_path);
 
   let output = ctx.compile(root_id, &config)?;
 
-  if debug_trace_enabled(&config, DebugTrace::Analyzer) {
-    println!("debug: compilation produced {} diagnostics", output.diagnostics.len());
-  }
+  trace_dbg!(
+    &config,
+    DebugTrace::Analyzer,
+    "compilation produced {} diagnostics",
+    output.diagnostics.len()
+  );
 
   // Dump phase: use a scoped borrow that ends before monomorphization
   {
@@ -337,21 +327,12 @@ pub fn compile_project(
     if needs_codegen {
       let used_modules = ctx.module_graph.topological_sort();
 
-      if log_phase(&config) {
-        println!("{} Lowering + codegen...", "-->".bright_cyan().bold());
-      }
+      phase_ok!(&config, "{}", "Lowering + codegen...".bright_cyan().bold());
 
-      if log_debug(&config) {
-        println!("debug: preparing codegen for {} modules", used_modules.len());
-      }
+      log_dbg!(&config, "preparing codegen for {} modules", used_modules.len());
+      log_trc!(&config, "codegen module order {:?}", used_modules);
 
-      if log_trace(&config) {
-        println!("trace: codegen module order {:?}", used_modules);
-      }
-
-      if debug_trace_enabled(&config, DebugTrace::Std) {
-        println!("debug: ensuring standard library is built");
-      }
+      trace_dbg!(&config, DebugTrace::Std, "ensuring standard library is built");
 
       ensure_std_built(&used_modules, &ctx.module_graph, &config)?;
 
@@ -363,9 +344,7 @@ pub fn compile_project(
       let link_plan = LinkPlan::from_modules(&used_modules, &ctx.module_graph, Path::new(&config.std_path), manifest);
 
       if bc.rebuild_std {
-        if debug_trace_enabled(&config, DebugTrace::Std) {
-          println!("debug: rebuilding standard library runtime");
-        }
+        trace_dbg!(&config, DebugTrace::Std, "rebuilding standard library runtime");
 
         if let Err(e) = rebuild_std_runtime(Path::new(&config.std_path), config.quiet) {
           eprintln!("{} {}", "Error:".red().bold(), e);
@@ -382,9 +361,7 @@ pub fn compile_project(
         ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
           .run(&mono_roots);
 
-      if debug_trace_enabled(&config, DebugTrace::Mono) {
-        println!("debug: monomorphization completed");
-      }
+      trace_dbg!(&config, DebugTrace::Mono, "monomorphization completed");
 
       if config.debug {
         mono_output.verify_no_generics(&types);
@@ -403,9 +380,12 @@ pub fn compile_project(
           .suppress_ffi_warnings_for(&config.std_path);
       let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
 
-      if debug_trace_enabled(&config, DebugTrace::Ownership) {
-        println!("debug: ownership check produced {} diagnostics", ownership_diagnostics.len());
-      }
+      trace_dbg!(
+        &config,
+        DebugTrace::Ownership,
+        "check produced {} diagnostics",
+        ownership_diagnostics.len()
+      );
 
       if !config.quiet {
         for diag in &ownership_diagnostics {
@@ -433,9 +413,7 @@ pub fn compile_project(
         Some(&used_module_set),
       );
 
-      if debug_trace_enabled(&config, DebugTrace::Lir) {
-        println!("debug: LIR lowering completed");
-      }
+      trace_dbg!(&config, DebugTrace::Lir, "lowering completed");
 
       if dump_requested(&config, DumpKind::Lir) {
         let lir_output = ignis_lir::display::print_lir(&lir_program, &types, &mono_output.defs, &sym_table);
@@ -461,9 +439,7 @@ pub fn compile_project(
         || bc.emit_bin.is_some()
         || bc.lib;
       if needs_emit {
-        if debug_trace_enabled(&config, DebugTrace::Codegen) {
-          println!("debug: emitting C code");
-        }
+        trace_dbg!(&config, DebugTrace::Codegen, "emitting C code");
 
         if verify_result.is_err() {
           eprintln!("{} Cannot emit C: LIR verification failed", "Error:".red().bold());
@@ -532,9 +508,7 @@ pub fn compile_project(
             PathBuf::from(format!("{}/{}.o", bc.output_dir, base_name))
           };
 
-          if debug_trace_enabled(&config, DebugTrace::Link) {
-            eprintln!("debug: compiling object file");
-          }
+          trace_dbg!(&config, DebugTrace::Link, "compiling object file");
 
           if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, config.quiet) {
             eprintln!("{} {}", "Error:".red().bold(), e);
@@ -542,9 +516,7 @@ pub fn compile_project(
           }
 
           if let Some(bin_path) = &bc.emit_bin {
-            if debug_trace_enabled(&config, DebugTrace::Link) {
-              eprintln!("debug: linking executable");
-            }
+            trace_dbg!(&config, DebugTrace::Link, "linking executable");
 
             if let Err(e) = link_executable(&obj_path, Path::new(bin_path), &link_plan, config.quiet) {
               eprintln!("{} {}", "Error:".red().bold(), e);
@@ -591,17 +563,10 @@ pub fn build_std(
     return Err(());
   }
 
-  if debug_trace_enabled(&config, DebugTrace::Std) {
-    eprintln!("debug: building standard library");
-  }
+  trace_dbg!(&config, DebugTrace::Std, "building standard library");
+  phase_ok!(&config, "{}", "Building standard library...".bright_cyan().bold());
 
-  if log_phase(&config) {
-    eprintln!("{} Building standard library...", "-->".bright_cyan().bold());
-  }
-
-  if log_debug(&config) {
-    eprintln!("debug: std manifest modules {}", config.manifest.modules.len());
-  }
+  log_dbg!(&config, "std manifest modules {}", config.manifest.modules.len());
 
   let output_path = Path::new(output_dir);
   if !output_path.exists() {
@@ -644,9 +609,7 @@ pub fn build_std(
     return Err(());
   }
 
-  if log_phase(&config) {
-    println!("{} Generated header {}", "-->".bright_green().bold(), header_path.display());
-  }
+  phase_ok!(&config, "Generated header {}", header_path.display());
 
   let all_module_ids = ctx.module_graph.all_modules_topological();
   let mut object_files: Vec<std::path::PathBuf> = Vec::new();
@@ -670,9 +633,12 @@ pub fn build_std(
       ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
         .run(&mono_roots);
 
-    if debug_trace_enabled(&config, DebugTrace::Mono) {
-      println!("debug: std monomorphization completed for module {}", module_name);
-    }
+    trace_dbg!(
+      &config,
+      DebugTrace::Mono,
+      "std monomorphization completed for module {}",
+      module_name
+    );
 
     if config.debug {
       mono_output.verify_no_generics(&types);
@@ -701,9 +667,7 @@ pub fn build_std(
       Some(&single_module_set),
     );
 
-    if debug_trace_enabled(&config, DebugTrace::Lir) {
-      println!("debug: std LIR lowering completed for module {}", module_name);
-    }
+    trace_dbg!(&config, DebugTrace::Lir, "std lowering completed for module {}", module_name);
 
     if let Err(errors) = &verify_result {
       eprintln!(
@@ -725,9 +689,7 @@ pub fn build_std(
       continue;
     }
 
-    if debug_trace_enabled(&config, DebugTrace::Codegen) {
-      println!("debug: std emitting C for module {}", module_name);
-    }
+    trace_dbg!(&config, DebugTrace::Codegen, "std emitting C for module {}", module_name);
 
     let c_code = ignis_codegen_c::emit_c(
       &lir_program,
@@ -745,9 +707,7 @@ pub fn build_std(
     }
 
     let obj_path = output_path.join(format!("{}.o", module_name));
-    if debug_trace_enabled(&config, DebugTrace::Link) {
-      println!("debug: std compiling object for module {}", module_name);
-    }
+    trace_dbg!(&config, DebugTrace::Link, "std compiling object for module {}", module_name);
 
     if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, config.quiet) {
       eprintln!("{} {}", "Error:".red().bold(), e);
@@ -763,18 +723,14 @@ pub fn build_std(
   }
 
   let archive_path = output_path.join("libignis_std.a");
-  if debug_trace_enabled(&config, DebugTrace::Link) {
-    println!("debug: archiving standard library objects");
-  }
+  trace_dbg!(&config, DebugTrace::Link, "archiving standard library objects");
 
   if let Err(e) = create_static_archive_multi(&object_files, &archive_path, log_phase(&config)) {
     eprintln!("{} {}", "Error:".red().bold(), e);
     return Err(());
   }
 
-  if log_phase(&config) {
-    println!("{} Build complete: {}", "-->".bright_green().bold(), archive_path.display());
-  }
+  phase_ok!(&config, "Build complete: {}", archive_path.display());
 
   Ok(())
 }
@@ -810,9 +766,7 @@ pub fn check_std(
     return Err(());
   }
 
-  if log_phase(&config) {
-    println!("{} Checking standard library...", "-->".bright_cyan().bold());
-  }
+  phase_ok!(&config, "{}", "Checking standard library...".bright_cyan().bold());
 
   let output_path = Path::new(output_dir);
   if !output_path.exists() {
@@ -934,9 +888,7 @@ pub fn check_std(
     }
   }
 
-  if log_phase(&config) {
-    println!("{} Std check complete", "-->".bright_green().bold());
-  }
+  phase_ok!(&config, "Std check complete");
 
   Ok(())
 }
@@ -981,9 +933,7 @@ pub fn check_runtime(
     }
   }
 
-  if log_phase(&config) {
-    println!("{} Runtime check complete", "-->".bright_green().bold());
-  }
+  phase_ok!(&config, "Runtime check complete");
 
   Ok(())
 }
@@ -1024,9 +974,7 @@ fn ensure_std_built(
     return Ok(());
   }
 
-  if log_phase(config) {
-    println!("{} std library not found, building...", "-->".bright_yellow().bold());
-  }
+  phase_warn!(config, "std library not found, building...");
 
   build_std(config.clone(), &std_path.join("build").to_string_lossy())
 }
@@ -1041,7 +989,7 @@ fn create_static_archive_multi(
 
   if log_info {
     let obj_names: Vec<_> = objects.iter().filter_map(|p| p.file_name()).collect();
-    println!(
+    eprintln!(
       "{} Creating archive {} <- {:?}",
       "-->".bright_green().bold(),
       archive_path.display(),

@@ -8,7 +8,7 @@ use ignis_analyzer::modules::{ModuleError, ModuleGraph};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_config::{DebugTrace, IgnisConfig};
 
-use crate::logging::{debug_trace_enabled, log_debug, log_phase, log_trace};
+use ignis_log::{log_dbg, log_trc, phase_log, phase_ok, trace_dbg};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_hir::HIR;
 use ignis_type::definition::{DefinitionKind, DefinitionStore};
@@ -65,9 +65,7 @@ impl CompilationContext {
     entry_path: &str,
     config: &IgnisConfig,
   ) -> Result<ModuleId, ()> {
-    if log_debug(config) {
-      println!("debug: starting module discovery from {}", entry_path);
-    }
+    log_dbg!(config, "starting module discovery from {}", entry_path);
 
     self.discover_recursive(entry_path, None, config)
   }
@@ -85,9 +83,7 @@ impl CompilationContext {
       return Ok(id);
     }
 
-    if log_debug(config) {
-      println!("debug: discovering std module {:?}", module_path);
-    }
+    log_dbg!(config, "discovering std module {:?}", module_path);
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
     let parsed = self.parse_file(&fs_path, config)?;
@@ -129,9 +125,7 @@ impl CompilationContext {
       return Ok(id);
     }
 
-    if log_debug(config) {
-      println!("debug: discovering module {:?}", module_path);
-    }
+    log_dbg!(config, "discovering module {:?}", module_path);
 
     self
       .module_for_path
@@ -168,14 +162,7 @@ impl CompilationContext {
       },
     };
 
-    if log_phase(config) {
-      println!(
-        "{:indent$}Scanning... {}",
-        "-->".bright_green().bold(),
-        path.display(),
-        indent = 4
-      );
-    }
+    phase_log!(config, "Scanning... {}", path.display());
 
     let file_id = self.source_map.add_file(path, text);
     let src = &self.source_map.get(&file_id).text.clone();
@@ -183,9 +170,13 @@ impl CompilationContext {
     let mut lexer = IgnisLexer::new(file_id, &src);
     lexer.scan_tokens();
 
-    if debug_trace_enabled(config, DebugTrace::Lexer) {
-      println!("debug: lexer produced {} tokens for {}", lexer.tokens.len(), path.display());
-    }
+    trace_dbg!(
+      config,
+      DebugTrace::Lexer,
+      "produced {} tokens for {}",
+      lexer.tokens.len(),
+      path.display()
+    );
 
     if !lexer.diagnostics.is_empty() {
       for diag_msg in &lexer.diagnostics {
@@ -194,18 +185,9 @@ impl CompilationContext {
       return Err(());
     }
 
-    if log_phase(config) {
-      println!(
-        "{:indent$}Parsing... {}",
-        "-->".bright_green().bold(),
-        path.display(),
-        indent = 4
-      );
-    }
+    phase_log!(config, "Parsing... {}", path.display());
 
-    if log_debug(config) {
-      println!("debug: parsing {}", path.display());
-    }
+    log_dbg!(config, "parsing {}", path.display());
 
     let mut parser = IgnisParser::new(lexer.tokens, self.symbol_table.clone());
     let parse_result = parser.parse();
@@ -220,15 +202,17 @@ impl CompilationContext {
       },
     };
 
-    if debug_trace_enabled(config, DebugTrace::Parser) {
-      println!("debug: parsed {} nodes for {}", nodes.len(), path.display());
-    }
+    trace_dbg!(
+      config,
+      DebugTrace::Parser,
+      "parsed {} nodes for {}",
+      nodes.len(),
+      path.display()
+    );
 
     let import_paths = self.extract_imports(&nodes, &roots);
 
-    if log_trace(config) {
-      println!("trace: {} imports found in {}", import_paths.len(), path.display());
-    }
+    log_trc!(config, "{} imports found in {}", import_paths.len(), path.display());
 
     Ok(ParsedModule {
       file_id,
@@ -277,9 +261,7 @@ impl CompilationContext {
     self.module_graph.root = Some(root_id);
     let order = self.module_graph.topological_sort();
 
-    if log_debug(config) {
-      println!("debug: compile order has {} modules", order.len());
-    }
+    log_dbg!(config, "compile order has {} modules", order.len());
 
     let mut output = self.analyze_modules(&order, config)?;
 
@@ -328,9 +310,7 @@ impl CompilationContext {
       return Err(());
     }
 
-    if log_debug(config) {
-      println!("debug: compiling {} std modules", order.len());
-    }
+    log_dbg!(config, "compiling {} std modules", order.len());
 
     let mut output = self.analyze_modules(&order, config)?;
     output.hir.entry_point = None;
@@ -343,9 +323,7 @@ impl CompilationContext {
     order: &[ModuleId],
     config: &IgnisConfig,
   ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
-    if log_phase(config) {
-      println!("\n{}", "Analyzing modules...".bright_cyan().bold());
-    }
+    phase_ok!(config, "{}", "Analyzing modules...".bright_cyan().bold());
 
     let mut export_table: ExportTable = HashMap::new();
     let mut shared_types = TypeStore::new();
@@ -360,9 +338,10 @@ impl CompilationContext {
         .get(&module_id)
         .unwrap_or_else(|| panic!("internal error: module {:?} not found in parsed_modules", module_id));
 
-      if log_debug(config) {
+      {
+        // Scope para el borrow temporal de module_path
         let module_path = self.module_graph.modules.get(&module_id).path.clone();
-        println!("debug: analyzing module {:?}", module_path);
+        log_dbg!(config, "analyzing module {:?}", module_path);
       }
 
       let output = ignis_analyzer::Analyzer::analyze_with_shared_stores(
@@ -383,9 +362,13 @@ impl CompilationContext {
         }
       }
 
-      if debug_trace_enabled(config, DebugTrace::Analyzer) {
-        println!("debug: module {:?} emitted {} diagnostics", module_id, output.diagnostics.len());
-      }
+      trace_dbg!(
+        config,
+        DebugTrace::Analyzer,
+        "module {:?} emitted {} diagnostics",
+        module_id,
+        output.diagnostics.len()
+      );
 
       let has_errors = output
         .diagnostics
