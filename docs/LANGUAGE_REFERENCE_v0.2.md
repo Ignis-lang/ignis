@@ -6,12 +6,12 @@ This document describes the Ignis programming language as implemented in version
 
 ### New Features
 
-- **Generics**: Type parameters for functions, records, and enums
+- **Generics**: Type parameters for functions, records, enums, and type aliases
 - **Records**: User-defined struct types with fields and methods
 - **Enums**: Algebraic data types with variants
 - **Namespaces**: Module-level organization and scoping
 - **Extern blocks**: FFI declarations grouped by library
-- **Type aliases**: Named type abbreviations
+- **Type aliases**: Named type abbreviations with optional type parameters
 - **For-of loops**: Iteration over arrays and vectors
 - **Ternary expressions**: `condition ? then : else`
 - **Function overloading**: Multiple functions with the same name but different signatures
@@ -140,10 +140,35 @@ let value: i32 = *p;
 
 ### Type Aliases
 
+Simple type aliases give alternative names to existing types:
+
 ```ignis
 type Integer = i32;
 type StringList = string[];
-type Callback<T> = (T) -> void;
+```
+
+#### Generic Type Aliases
+
+Type aliases can have type parameters:
+
+```ignis
+type Identity<T> = T;
+type BoxAlias<T> = Box<T>;
+type First<A, B> = A;
+
+// Usage
+let x: Identity<i32> = 42;
+let box: BoxAlias<boolean> = Box { value: true };
+let f: First<i32, string> = 10;
+```
+
+When a generic type alias is instantiated, the type arguments are substituted into the target type:
+
+```ignis
+type IntBox = Box<i32>;  // Non-generic alias to a generic type
+
+let b1: IntBox = Box { value: 100 };
+let b2: BoxAlias<i32> = Box { value: 200 };  // Equivalent to IntBox
 ```
 
 ## Declarations

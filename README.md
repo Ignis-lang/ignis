@@ -7,18 +7,21 @@
 Ignis is a general-purpose programming language with strong, static typing, and immutability by default.
 Inspired by TypeScript and Rust, Ignis compiles to C and produces native executables via GCC.
 
-## Features (v0.1)
+## Features (v0.2)
 
 - **Strong static typing**: `i8`-`i64`, `u8`-`u64`, `f32`, `f64`, `boolean`, `char`, `string`
 - **Immutability by default**: `let` for immutable, `let mut` for mutable
+- **Generics**: Type parameters for functions, records, enums, and type aliases
+- **Records and enums**: User-defined types with fields, methods, and variants
+- **Namespaces**: Module-level organization with `::` access
 - **References and pointers**: `&T`, `&mut T`, `*T`
-- **Control flow**: `if`/`else`, `while`, `for`, `break`, `continue`
-- **Functions**: with type annotations and return types
+- **Control flow**: `if`/`else`, `while`, `for`, `for-of`, `break`, `continue`
+- **Function overloading**: Multiple functions with the same name, different signatures
 - **Modules**: `import`/`export` for multi-file projects
-- **FFI**: `extern` declarations for C interop
-- **Borrow checking**: Basic Rust-style borrow analysis
+- **FFI**: `extern` blocks for C interop
+- **Borrow checking**: Rust-style borrow analysis
 
-See [docs/LANGUAGE_REFERENCE_v0.1.md](docs/LANGUAGE_REFERENCE_v0.1.md) for full language documentation.
+See [docs/LANGUAGE_REFERENCE_v0.2.md](docs/LANGUAGE_REFERENCE_v0.2.md) for full language documentation.
 
 ## Installation
 
@@ -85,18 +88,21 @@ ignis build main.ign -O                      # Enable optimizations
 ## Example
 
 ```ignis
-import println from "std::io";
+import Io from "std::io";
+import String from "std::string";
 
-function factorial(n: i32): i32 {
-    if n <= 1 {
-        return 1;
-    }
-    return n * factorial(n - 1);
+record Box<T> {
+    value: T;
+}
+
+function identity<T>(x: T): T {
+    return x;
 }
 
 function main(): void {
-    let result: i32 = factorial(5);
-    println("5! = 120");
+    let box: Box<i32> = Box { value: 42 };
+    let result: i32 = identity<i32>(box.value);
+    Io::println(String::toString(result));
     return;
 }
 ```

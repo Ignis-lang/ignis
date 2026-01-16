@@ -5,6 +5,9 @@ The runtime is a small C library that defines core types and the C-facing API
 used by the Ignis standard library. It provides memory allocation, strings,
 dynamic buffers, and small I/O helpers.
 
+**Note**: v0.2 features (records, enums, generics, type aliases) compile to
+standard C constructs and do not require additional runtime support.
+
 ## Build
 The build is driven by `std/runtime/Makefile`. The `all` target produces:
 
