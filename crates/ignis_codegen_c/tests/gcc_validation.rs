@@ -115,16 +115,15 @@ function main(): void {
 }
 
 #[test]
-#[ignore = "LIR verification issue with boolean short-circuit - pre-existing bug"]
 fn gcc_boolean() {
   gcc_compiles(
     r#"
-function test_bool(a: bool, b: bool): bool {
+function test_bool(a: boolean, b: boolean): boolean {
     return a && b;
 }
 
 function main(): void {
-    let x: bool = test_bool(true, false);
+    let x: boolean = test_bool(true, false);
     return;
 }
 "#,
