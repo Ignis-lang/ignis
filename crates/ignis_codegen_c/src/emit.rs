@@ -1399,7 +1399,10 @@ pub fn emit_std_module_h(
   emit_module_header(&guard_name, &comment, defs, types, symbols, namespaces, filter)
 }
 
-/// Emit C for a specific user module. Prepends umbrella header if provided.
+/// Emit C for a specific user module.
+///
+/// `user_module_headers` should contain the module's own header plus headers of its
+/// transitive user module dependencies. These are prepended to the standard headers.
 pub fn emit_user_module_c(
   module_id: ModuleId,
   program: &LirProgram,
@@ -1409,16 +1412,18 @@ pub fn emit_user_module_c(
   symbols: &SymbolTable,
   headers: &[CHeader],
   module_paths: &HashMap<ModuleId, ModulePath>,
-  umbrella_header_path: Option<&str>,
+  user_module_headers: &[CHeader],
 ) -> String {
-  let headers = prepend_umbrella_header(headers, umbrella_header_path);
+  let mut all_headers = user_module_headers.to_vec();
+  all_headers.extend(headers.iter().cloned());
+
   CEmitter::with_target(
     program,
     types,
     defs,
     namespaces,
     symbols,
-    &headers,
+    &all_headers,
     EmitTarget::UserModule(module_id),
     module_paths,
   )

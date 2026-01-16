@@ -255,6 +255,33 @@ impl ModuleGraph {
     // Then add self
     result.push(module_id);
   }
+
+  /// Returns transitive dependencies of a module (not including itself).
+  pub fn transitive_deps(
+    &self,
+    module_id: ModuleId,
+  ) -> Vec<ModuleId> {
+    let mut result = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    self.collect_transitive_deps(module_id, &mut visited, &mut result);
+    result
+  }
+
+  fn collect_transitive_deps(
+    &self,
+    module_id: ModuleId,
+    visited: &mut std::collections::HashSet<ModuleId>,
+    result: &mut Vec<ModuleId>,
+  ) {
+    let module = self.modules.get(&module_id);
+    for import in &module.imports {
+      let dep_id = import.source_module();
+      if visited.insert(dep_id) {
+        self.collect_transitive_deps(dep_id, visited, result);
+        result.push(dep_id);
+      }
+    }
+  }
 }
 
 #[cfg(test)]

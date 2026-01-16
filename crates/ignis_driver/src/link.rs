@@ -15,6 +15,8 @@ pub struct LinkPlan {
   pub objects: Vec<PathBuf>,
   /// Path to the precompiled std archive (libignis_std.a)
   pub std_archive: Option<PathBuf>,
+  /// Path to the user code archive (libignis_user.a)
+  pub user_archive: Option<PathBuf>,
   /// External libraries to link (-l flags)
   pub libs: Vec<String>,
   /// Include directories (-I flags)
@@ -288,6 +290,11 @@ pub fn link_executable_multi(
     cmd.arg(obj);
   }
 
+  // Link user archive if present (libignis_user.a)
+  if let Some(user_archive) = &link_plan.user_archive {
+    cmd.arg(user_archive);
+  }
+
   // Link std archive if present (libignis_std.a)
   if let Some(std_archive) = &link_plan.std_archive {
     cmd.arg(std_archive);
@@ -304,10 +311,12 @@ pub fn link_executable_multi(
   }
 
   if !quiet {
+    let archive_count = link_plan.user_archive.is_some() as usize + link_plan.std_archive.is_some() as usize;
     eprintln!(
-      "    {} Linking {} objects -> {}",
+      "    {} Linking {} objects + {} archives -> {}",
       "-->".bright_green().bold(),
       obj_paths.len(),
+      archive_count,
       bin_path.display()
     );
   }

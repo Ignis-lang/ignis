@@ -21,7 +21,8 @@ use ignis_type::symbol::SymbolTable;
 use ignis_diagnostics::message::DiagnosticMessage;
 
 use crate::build_layout::{
-  compute_std_stamp, compute_user_stamp, is_stamp_valid, is_user_stamp_valid, write_stamp, BuildLayout,
+  hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp, write_std_stamp,
+  BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
 };
 use crate::context::CompilationContext;
 use crate::link::{
@@ -613,18 +614,26 @@ pub fn compile_project(
             })
             .collect();
 
-          // Check if user stamp is valid (incremental compilation)
-          let stamp_path = layout.user_stamp_path();
-          let bin_path = bc.emit_bin.as_ref().unwrap();
-          let stamp_valid = is_user_stamp_valid(&stamp_path, &source_paths, COMPILER_VERSION);
-          let bin_exists = Path::new(bin_path).exists();
-          let all_objects_exist = source_paths.iter().all(|p| layout.user_module_obj(p).exists());
+          // Create build fingerprint for stamp validation
+          let fingerprint = BuildFingerprint {
+            compiler_version: COMPILER_VERSION.to_string(),
+            codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
+            target: String::new(), // TODO: add target triple when cross-compilation is supported
+          };
 
-          if stamp_valid && bin_exists && all_objects_exist {
-            // Stamp is valid and all artifacts exist - skip compilation
-            cmd_ok!(&config, "Compiled (cached)", start.elapsed());
-            cmd_artifact!(&config, "Binary", bin_path);
-            return Ok(());
+          // Pre-compute hashes for all user modules
+          let mut module_hashes: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+          for source_path in &source_paths {
+            match hash_file(source_path) {
+              Ok(hash) => {
+                module_hashes.insert(source_path.clone(), hash);
+              },
+              Err(e) => {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!("{} Failed to hash '{}': {}", "Error:".red().bold(), source_path.display(), e);
+                return Err(());
+              },
+            }
           }
 
           // Phase 1: Generate headers for all user modules
@@ -674,8 +683,9 @@ pub fn compile_project(
             return Err(());
           }
 
-          // Phase 3: Generate C files and compile to objects
+          // Phase 3: Generate C files and compile to objects (with per-module caching)
           let mut object_files: Vec<PathBuf> = Vec::new();
+          let mut any_module_recompiled = false;
           let mut link_plan_with_user_includes = link_plan.clone();
           link_plan_with_user_includes
             .include_dirs
@@ -688,6 +698,65 @@ pub fn compile_project(
               _ => continue,
             };
 
+            let obj_path = layout.user_module_obj(&source_path);
+            object_files.push(obj_path.clone());
+
+            // Compute current module hash and dependency hashes
+            let self_hash = module_hashes.get(&source_path).cloned().unwrap_or_default();
+
+            // Get transitive dependencies (only user modules)
+            let dep_ids = ctx.module_graph.transitive_deps(**module_id);
+            let current_deps: Vec<FileEntry> = dep_ids
+              .iter()
+              .filter_map(|dep_id| {
+                let dep_module = ctx.module_graph.modules.get(dep_id);
+                match &dep_module.path {
+                  ModulePath::Project(dep_path) => {
+                    let hash = module_hashes.get(dep_path).cloned().unwrap_or_default();
+                    Some(FileEntry {
+                      path: dep_path.clone(),
+                      hash,
+                    })
+                  },
+                  _ => None, // Skip std modules for now (they have their own stamp)
+                }
+              })
+              .collect();
+
+            // Check if this module's stamp is still valid
+            let stamp_path = layout.user_module_stamp_path(&source_path);
+            let stamp_valid = is_module_stamp_valid(&stamp_path, &fingerprint, &self_hash, &current_deps);
+            let obj_exists = obj_path.exists();
+
+            if stamp_valid && obj_exists {
+              // Module is up-to-date, skip recompilation
+              continue;
+            }
+
+            any_module_recompiled = true;
+
+            // Build per-module headers: self header + transitive dependency headers
+            let mut user_module_headers: Vec<ignis_config::CHeader> = Vec::new();
+
+            // Add own header first
+            let self_header_path = source_path.with_extension("h");
+            user_module_headers.push(ignis_config::CHeader {
+              path: normalize_path_for_include(&self_header_path),
+              quoted: true,
+            });
+
+            // Add transitive dependency headers (user modules only)
+            for dep_id in &dep_ids {
+              let dep_module = ctx.module_graph.modules.get(dep_id);
+              if let ModulePath::Project(dep_path) = &dep_module.path {
+                let dep_header_path = dep_path.with_extension("h");
+                user_module_headers.push(ignis_config::CHeader {
+                  path: normalize_path_for_include(&dep_header_path),
+                  quoted: true,
+                });
+              }
+            }
+
             // Generate C code for this module
             let c_code = ignis_codegen_c::emit_user_module_c(
               **module_id,
@@ -698,18 +767,17 @@ pub fn compile_project(
               &sym_table,
               &link_plan_with_user_includes.headers,
               &module_paths,
-              Some("ignis_user.h"),
+              &user_module_headers,
             );
 
             let c_path = layout.user_module_src(&source_path);
-            if let Err(e) = std::fs::write(&c_path, &c_code) {
+            if let Err(e) = write_if_changed(&c_path, &c_code) {
               cmd_fail!(&config, "Build failed", start.elapsed());
               eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
               return Err(());
             }
 
             // Compile to object
-            let obj_path = layout.user_module_obj(&source_path);
             let suppress_link_logs = !ignis_log::show_verbose(&config);
             if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan_with_user_includes, suppress_link_logs) {
               cmd_fail!(&config, "Build failed", start.elapsed());
@@ -717,16 +785,42 @@ pub fn compile_project(
               return Err(());
             }
 
-            object_files.push(obj_path);
+            // Write per-module stamp after successful compilation
+            let stamp = ModuleStamp::new(fingerprint.clone(), source_path.clone(), self_hash, current_deps);
+            if let Err(e) = write_module_stamp(&stamp_path, &stamp) {
+              // Non-fatal: warn but don't fail the build
+              eprintln!("{} Failed to write module stamp: {}", "Warning:".yellow().bold(), e);
+            }
           }
 
-          // Phase 4: Link all objects
+          // Phase 4: Create user archive and link (only if any module changed or binary doesn't exist)
           if let Some(bin_path) = &bc.emit_bin {
+            let bin_exists = Path::new(bin_path).exists();
+            let user_archive_path = layout.user_lib_path();
+
+            if !any_module_recompiled && bin_exists && user_archive_path.exists() {
+              // Everything is up-to-date
+              cmd_ok!(&config, "Compiled (cached)", start.elapsed());
+              cmd_artifact!(&config, "Binary", bin_path);
+              return Ok(());
+            }
+
+            // Create user archive from all object files
+            trace_dbg!(&config, DebugTrace::Link, "creating user archive");
+            let log_archive = ignis_log::show_verbose(&config);
+            if let Err(e) = create_static_archive_multi(&object_files, &user_archive_path, log_archive) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
+              eprintln!("{} {}", "Error:".red().bold(), e);
+              return Err(());
+            }
+
+            // Link using the archive instead of individual objects
             trace_dbg!(&config, DebugTrace::Link, "linking executable");
+            link_plan_with_user_includes.user_archive = Some(user_archive_path);
 
             let suppress_link_logs = !ignis_log::show_verbose(&config);
             if let Err(e) = link_executable_multi(
-              &object_files,
+              &[], // No direct objects, using archive instead
               Path::new(bin_path),
               &link_plan_with_user_includes,
               suppress_link_logs,
@@ -734,14 +828,6 @@ pub fn compile_project(
               cmd_fail!(&config, "Build failed", start.elapsed());
               eprintln!("{} {}", "Error:".red().bold(), e);
               return Err(());
-            }
-
-            // Write user stamp after successful compilation
-            if let Ok(stamp) = compute_user_stamp(&source_paths, COMPILER_VERSION) {
-              if let Err(e) = write_stamp(&stamp_path, &stamp) {
-                // Non-fatal: warn but don't fail the build
-                eprintln!("{} Failed to write user stamp: {}", "Warning:".yellow().bold(), e);
-              }
             }
 
             cmd_ok!(&config, "Compiled", start.elapsed());
@@ -1143,9 +1229,15 @@ pub fn build_std(
 
   // Write stamp file for cache invalidation
   let stamp_path = layout.std_stamp_path();
-  match compute_std_stamp(std_path, COMPILER_VERSION) {
+  let fingerprint = BuildFingerprint {
+    compiler_version: COMPILER_VERSION.to_string(),
+    codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
+    target: String::new(),
+  };
+
+  match StdStamp::compute(std_path, fingerprint) {
     Ok(stamp) => {
-      if let Err(e) = write_stamp(&stamp_path, &stamp) {
+      if let Err(e) = write_std_stamp(&stamp_path, &stamp) {
         // Non-fatal: warn but don't fail the build
         eprintln!(
           "{} Failed to write stamp file '{}': {}",
@@ -1420,9 +1512,15 @@ fn ensure_std_built(
   let stamp_path = layout.std_stamp_path();
   let std_path = Path::new(&config.std_path);
 
+  let fingerprint = BuildFingerprint {
+    compiler_version: COMPILER_VERSION.to_string(),
+    codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
+    target: String::new(),
+  };
+
   // Check if archive exists AND stamp is valid
   if archive_path.exists() {
-    if is_stamp_valid(&stamp_path, std_path, COMPILER_VERSION) {
+    if is_std_stamp_valid(&stamp_path, std_path, &fingerprint) {
       return Ok(());
     }
     phase_warn!(config, "std library outdated, rebuilding...");
@@ -1609,4 +1707,14 @@ fn generate_user_umbrella_header(source_paths: &[PathBuf]) -> String {
   writeln!(out).unwrap();
   writeln!(out, "#endif // IGNIS_USER_H").unwrap();
   out
+}
+
+/// Normalize a path for use in #include directives.
+/// Removes `.` components and converts to forward slashes.
+fn normalize_path_for_include(path: &Path) -> String {
+  let normalized: PathBuf = path
+    .components()
+    .filter(|c| !matches!(c, std::path::Component::CurDir))
+    .collect();
+  normalized.display().to_string().replace('\\', "/")
 }
