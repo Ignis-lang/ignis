@@ -272,7 +272,7 @@ pub struct Cli {
   pub debug_trace: Vec<DebugTraceCli>,
 
   /// Don't print any output
-  #[arg(long, default_value = "false")]
+  #[arg(long, short = 'q', default_value = "false", global = true)]
   pub quiet: bool,
 
   /// Use verbose output

@@ -1,13 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 use std::{cell::RefCell, rc::Rc};
 
 use colored::*;
 use ignis_ast::display::format_ast_nodes;
 use ignis_config::{DebugTrace, DumpKind, IgnisConfig};
 
-use ignis_log::{log_dbg, log_info, log_phase, log_trc, phase_log, phase_ok, phase_warn, trace_dbg};
+use ignis_log::{
+  cmd_artifact, cmd_fail, cmd_header, cmd_ok, cmd_stats, log_dbg, log_phase, log_trc, phase_log, phase_ok, phase_warn,
+  section, section_item, trace_dbg,
+};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
 use ignis_type::file::SourceMap;
@@ -228,16 +232,79 @@ pub fn compile_project(
   config: Arc<IgnisConfig>,
   entry_path: &str,
 ) -> Result<(), ()> {
+  let start = Instant::now();
+  let is_check_mode = config.build_config.as_ref().map(|bc| bc.check_mode).unwrap_or(false);
+  let cmd_label = if is_check_mode { "Checking" } else { "Building" };
+
+  cmd_header!(&config, cmd_label, entry_path);
+
   warn_unsupported_dumps(&config);
 
-  phase_ok!(&config, "{}", "Discovering modules...".bright_cyan().bold());
+  section!(&config, "Scanning & parsing");
 
   let mut ctx = CompilationContext::new(&config);
-  let root_id = ctx.discover_modules(entry_path, &config)?;
+  let root_id = match ctx.discover_modules(entry_path, &config) {
+    Ok(id) => id,
+    Err(()) => {
+      cmd_fail!(
+        &config,
+        if is_check_mode { "Check failed" } else { "Build failed" },
+        start.elapsed()
+      );
+      return Err(());
+    },
+  };
+
+  let std_module_names: Vec<String> = ctx
+    .module_graph
+    .modules
+    .iter()
+    .filter(|(_, m)| m.path.is_std())
+    .map(|(_, m)| m.path.module_name())
+    .collect();
+  let user_module_names: Vec<String> = ctx
+    .module_graph
+    .modules
+    .iter()
+    .filter(|(_, m)| !m.path.is_std())
+    .map(|(_, m)| m.path.module_name())
+    .collect();
+
+  let std_count = std_module_names.len();
+  let user_count = user_module_names.len();
+
+  if user_count > 1 {
+    section_item!(&config, "{} (+{})", entry_path, user_count - 1);
+  } else {
+    section_item!(&config, "{}", entry_path);
+  }
+
+  if std_count > 0 {
+    section!(&config, "Loading standard library");
+    if ignis_log::show_verbose(&config) {
+      for name in &std_module_names {
+        phase_log!(&config, "{}", name);
+      }
+    } else {
+      section_item!(&config, "{} modules", std_count);
+    }
+  }
 
   log_dbg!(&config, "compiling project entry {}", entry_path);
 
-  let output = ctx.compile(root_id, &config)?;
+  section!(&config, "Analyzing");
+
+  let output = match ctx.compile(root_id, &config) {
+    Ok(o) => o,
+    Err(()) => {
+      cmd_fail!(
+        &config,
+        if is_check_mode { "Check failed" } else { "Build failed" },
+        start.elapsed()
+      );
+      return Err(());
+    },
+  };
 
   trace_dbg!(
     &config,
@@ -292,6 +359,7 @@ pub fn compile_project(
     let dump_c_requested = dump_requested(&config, DumpKind::C);
 
     if analyze_only {
+      cmd_ok!(&config, "No errors found", start.elapsed());
       return Ok(());
     }
 
@@ -299,6 +367,7 @@ pub fn compile_project(
       let root_module = ctx.module_graph.modules.get(&root_id);
       let file_id = root_module.file_id;
       let span = ignis_type::span::Span::empty_at(file_id, ignis_type::BytePosition::default());
+      cmd_fail!(&config, "Build failed", start.elapsed());
       ignis_diagnostics::render(
         &DiagnosticMessage::ExecutableMustHaveMainFunction { span }.report(),
         &ctx.source_map,
@@ -309,6 +378,7 @@ pub fn compile_project(
     if is_lib && has_entry_point {
       let entry_def_id = output.hir.entry_point.unwrap();
       let span = output.defs.get(&entry_def_id).span.clone();
+      cmd_fail!(&config, "Build failed", start.elapsed());
       ignis_diagnostics::render(
         &DiagnosticMessage::LibraryCannotHaveMainFunction { span }.report(),
         &ctx.source_map,
@@ -327,14 +397,26 @@ pub fn compile_project(
     if needs_codegen {
       let used_modules = ctx.module_graph.topological_sort();
 
-      phase_ok!(&config, "{}", "Lowering + codegen...".bright_cyan().bold());
+      section!(&config, "Codegen & linking");
+
+      if ignis_log::show_verbose(&config) {
+        for module_id in &used_modules {
+          let module = ctx.module_graph.modules.get(module_id);
+          if !module.path.is_std() {
+            phase_log!(&config, "codegen {}", module.path.module_name());
+          }
+        }
+      }
 
       log_dbg!(&config, "preparing codegen for {} modules", used_modules.len());
       log_trc!(&config, "codegen module order {:?}", used_modules);
 
       trace_dbg!(&config, DebugTrace::Std, "ensuring standard library is built");
 
-      ensure_std_built(&used_modules, &ctx.module_graph, &config)?;
+      if ensure_std_built(&used_modules, &ctx.module_graph, &config).is_err() {
+        cmd_fail!(&config, "Build failed", start.elapsed());
+        return Err(());
+      }
 
       let manifest = if config.manifest.modules.is_empty() {
         None
@@ -347,6 +429,7 @@ pub fn compile_project(
         trace_dbg!(&config, DebugTrace::Std, "rebuilding standard library runtime");
 
         if let Err(e) = rebuild_std_runtime(Path::new(&config.std_path), config.quiet) {
+          cmd_fail!(&config, "Build failed", start.elapsed());
           eprintln!("{} {}", "Error:".red().bold(), e);
           return Err(());
         }
@@ -363,13 +446,9 @@ pub fn compile_project(
 
       trace_dbg!(&config, DebugTrace::Mono, "monomorphization completed");
 
-      if config.debug {
-        mono_output.verify_no_generics(&types);
-      } else {
-        // In debug builds, verify no generic types remain
-        #[cfg(debug_assertions)]
-        mono_output.verify_no_generics(&types);
-      }
+      // In debug builds, verify no generic types remain
+      #[cfg(debug_assertions)]
+      mono_output.verify_no_generics(&types);
 
       // Re-borrow symbols for ownership checking and codegen
       let sym_table = output.symbols.borrow();
@@ -393,11 +472,22 @@ pub fn compile_project(
         }
       }
 
-      let has_errors = ownership_diagnostics
+      let error_count = ownership_diagnostics
         .iter()
-        .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
+        .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+        .count();
+      let warning_count = ownership_diagnostics
+        .iter()
+        .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Warning))
+        .count();
 
-      if has_errors {
+      if error_count > 0 {
+        cmd_fail!(
+          &config,
+          if check_mode { "Check failed" } else { "Build failed" },
+          start.elapsed()
+        );
+        cmd_stats!(&config, error_count, warning_count);
         return Err(());
       }
 
@@ -427,6 +517,11 @@ pub fn compile_project(
         }
 
         if config.debug {
+          cmd_fail!(
+            &config,
+            if check_mode { "Check failed" } else { "Build failed" },
+            start.elapsed()
+          );
           eprintln!("{} LIR verification failed in debug mode", "Error:".red().bold());
           return Err(());
         }
@@ -442,6 +537,11 @@ pub fn compile_project(
         trace_dbg!(&config, DebugTrace::Codegen, "emitting C code");
 
         if verify_result.is_err() {
+          cmd_fail!(
+            &config,
+            if check_mode { "Check failed" } else { "Build failed" },
+            start.elapsed()
+          );
           eprintln!("{} Cannot emit C: LIR verification failed", "Error:".red().bold());
           return Err(());
         }
@@ -476,6 +576,7 @@ pub fn compile_project(
           let output_dir = Path::new(&bc.output_dir);
           if !output_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(output_dir) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
               eprintln!(
                 "{} Failed to create output directory '{}': {}",
                 "Error:".red().bold(),
@@ -492,12 +593,13 @@ pub fn compile_project(
           bc.emit_c.is_some() || !check_mode || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
         if should_write_c {
           if let Err(e) = std::fs::write(&c_path, &c_code) {
+            cmd_fail!(&config, "Build failed", start.elapsed());
             eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
             return Err(());
           }
 
-          if (bc.emit_c.is_some() || !check_mode) && log_info(&config) {
-            eprintln!("{} Emitted C code to {}", "-->".bright_green().bold(), c_path.display());
+          if (bc.emit_c.is_some() || !check_mode) && ignis_log::show_verbose(&config) {
+            eprintln!("    {} Emitted C code to {}", "-->".bright_green().bold(), c_path.display());
           }
         }
 
@@ -510,7 +612,9 @@ pub fn compile_project(
 
           trace_dbg!(&config, DebugTrace::Link, "compiling object file");
 
-          if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, config.quiet) {
+          let suppress_link_logs = !ignis_log::show_verbose(&config);
+          if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, suppress_link_logs) {
+            cmd_fail!(&config, "Build failed", start.elapsed());
             eprintln!("{} {}", "Error:".red().bold(), e);
             return Err(());
           }
@@ -518,14 +622,25 @@ pub fn compile_project(
           if let Some(bin_path) = &bc.emit_bin {
             trace_dbg!(&config, DebugTrace::Link, "linking executable");
 
-            if let Err(e) = link_executable(&obj_path, Path::new(bin_path), &link_plan, config.quiet) {
+            if let Err(e) = link_executable(&obj_path, Path::new(bin_path), &link_plan, suppress_link_logs) {
+              cmd_fail!(&config, "Build failed", start.elapsed());
               eprintln!("{} {}", "Error:".red().bold(), e);
               return Err(());
             }
+
+            cmd_ok!(&config, "Compiled", start.elapsed());
+            cmd_artifact!(&config, "Binary", bin_path);
+            return Ok(());
           }
         }
       }
     }
+  }
+
+  if is_check_mode {
+    cmd_ok!(&config, "No errors found", start.elapsed());
+  } else {
+    cmd_ok!(&config, "Compiled", start.elapsed());
   }
 
   Ok(())
@@ -539,7 +654,12 @@ pub fn build_std(
   use std::collections::HashSet;
   use ignis_type::module::ModuleId;
 
+  let start = Instant::now();
+
+  cmd_header!(&config, "Building std", &config.std_path);
+
   if config.std_path.is_empty() {
+    cmd_fail!(&config, "Build failed", start.elapsed());
     eprintln!(
       "{} std_path not set. Use --std-path or set IGNIS_STD_PATH env var",
       "Error:".red().bold()
@@ -550,11 +670,13 @@ pub fn build_std(
   let std_path = Path::new(&config.std_path);
 
   if !std_path.exists() {
+    cmd_fail!(&config, "Build failed", start.elapsed());
     eprintln!("{} std_path '{}' does not exist", "Error:".red().bold(), std_path.display());
     return Err(());
   }
 
   if config.manifest.modules.is_empty() {
+    cmd_fail!(&config, "Build failed", start.elapsed());
     eprintln!(
       "{} No modules found in std manifest at '{}/manifest.toml'",
       "Error:".red().bold(),
@@ -564,13 +686,15 @@ pub fn build_std(
   }
 
   trace_dbg!(&config, DebugTrace::Std, "building standard library");
-  phase_ok!(&config, "{}", "Building standard library...".bright_cyan().bold());
+
+  section!(&config, "Scanning & parsing");
 
   log_dbg!(&config, "std manifest modules {}", config.manifest.modules.len());
 
   let output_path = Path::new(output_dir);
   if !output_path.exists() {
     if let Err(e) = std::fs::create_dir_all(output_path) {
+      cmd_fail!(&config, "Build failed", start.elapsed());
       eprintln!(
         "{} Failed to create output directory '{}': {}",
         "Error:".red().bold(),
@@ -585,13 +709,18 @@ pub fn build_std(
 
   for (module_name, _) in &config.manifest.modules {
     if let Err(()) = ctx.discover_std_module(module_name, &config) {
+      cmd_fail!(&config, "Build failed", start.elapsed());
       eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
       return Err(());
     }
   }
 
+  section!(&config, "Analyzing");
+
   let output = ctx.compile_all(&config)?;
   let link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+
+  section!(&config, "Codegen & linking");
 
   // Use scoped borrow for header generation, drops before monomorphization
   let header_content = {
@@ -600,6 +729,7 @@ pub fn build_std(
   };
   let header_path = output_path.join("ignis_std.h");
   if let Err(e) = std::fs::write(&header_path, &header_content) {
+    cmd_fail!(&config, "Build failed", start.elapsed());
     eprintln!(
       "{} Failed to write header file '{}': {}",
       "Error:".red().bold(),
@@ -640,12 +770,8 @@ pub fn build_std(
       module_name
     );
 
-    if config.debug {
-      mono_output.verify_no_generics(&types);
-    } else {
-      #[cfg(debug_assertions)]
-      mono_output.verify_no_generics(&types);
-    }
+    #[cfg(debug_assertions)]
+    mono_output.verify_no_generics(&types);
 
     // Re-borrow symbols for ownership checking and codegen
     let sym_table = output.symbols.borrow();
@@ -680,6 +806,7 @@ pub fn build_std(
       }
 
       if config.debug {
+        cmd_fail!(&config, "Build failed", start.elapsed());
         eprintln!("{} LIR verification failed in debug mode", "Error:".red().bold());
         return Err(());
       }
@@ -702,6 +829,7 @@ pub fn build_std(
 
     let c_path = output_path.join(format!("{}.c", module_name));
     if let Err(e) = std::fs::write(&c_path, &c_code) {
+      cmd_fail!(&config, "Build failed", start.elapsed());
       eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
       return Err(());
     }
@@ -709,7 +837,9 @@ pub fn build_std(
     let obj_path = output_path.join(format!("{}.o", module_name));
     trace_dbg!(&config, DebugTrace::Link, "std compiling object for module {}", module_name);
 
-    if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, config.quiet) {
+    let suppress_link_logs = !ignis_log::show_verbose(&config);
+    if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, suppress_link_logs) {
+      cmd_fail!(&config, "Build failed", start.elapsed());
       eprintln!("{} {}", "Error:".red().bold(), e);
       return Err(());
     }
@@ -718,6 +848,7 @@ pub fn build_std(
   }
 
   if object_files.is_empty() {
+    cmd_fail!(&config, "Build failed", start.elapsed());
     eprintln!("{} No object files generated", "Error:".red().bold());
     return Err(());
   }
@@ -726,11 +857,13 @@ pub fn build_std(
   trace_dbg!(&config, DebugTrace::Link, "archiving standard library objects");
 
   if let Err(e) = create_static_archive_multi(&object_files, &archive_path, log_phase(&config)) {
+    cmd_fail!(&config, "Build failed", start.elapsed());
     eprintln!("{} {}", "Error:".red().bold(), e);
     return Err(());
   }
 
-  phase_ok!(&config, "Build complete: {}", archive_path.display());
+  cmd_ok!(&config, "Built standard library", start.elapsed());
+  cmd_artifact!(&config, "Archive", archive_path.display());
 
   Ok(())
 }
@@ -742,7 +875,12 @@ pub fn check_std(
   use std::collections::HashSet;
   use ignis_type::module::ModuleId;
 
+  let start = Instant::now();
+
+  cmd_header!(&config, "Checking std", &config.std_path);
+
   if config.std_path.is_empty() {
+    cmd_fail!(&config, "Check failed", start.elapsed());
     eprintln!(
       "{} std_path not set. Use --std-path or set IGNIS_STD_PATH env var",
       "Error:".red().bold()
@@ -753,11 +891,13 @@ pub fn check_std(
   let std_path = Path::new(&config.std_path);
 
   if !std_path.exists() {
+    cmd_fail!(&config, "Check failed", start.elapsed());
     eprintln!("{} std_path '{}' does not exist", "Error:".red().bold(), std_path.display());
     return Err(());
   }
 
   if config.manifest.modules.is_empty() {
+    cmd_fail!(&config, "Check failed", start.elapsed());
     eprintln!(
       "{} No modules found in std manifest at '{}/manifest.toml'",
       "Error:".red().bold(),
@@ -766,11 +906,12 @@ pub fn check_std(
     return Err(());
   }
 
-  phase_ok!(&config, "{}", "Checking standard library...".bright_cyan().bold());
+  section!(&config, "Scanning & parsing");
 
   let output_path = Path::new(output_dir);
   if !output_path.exists() {
     if let Err(e) = std::fs::create_dir_all(output_path) {
+      cmd_fail!(&config, "Check failed", start.elapsed());
       eprintln!(
         "{} Failed to create output directory '{}': {}",
         "Error:".red().bold(),
@@ -785,13 +926,18 @@ pub fn check_std(
 
   for (module_name, _) in &config.manifest.modules {
     if let Err(()) = ctx.discover_std_module(module_name, &config) {
+      cmd_fail!(&config, "Check failed", start.elapsed());
       eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
       return Err(());
     }
   }
 
+  section!(&config, "Analyzing");
+
   let output = ctx.compile_all(&config)?;
   let link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+
+  section!(&config, "Codegen (check)");
 
   let header_content = {
     let sym_table = output.symbols.borrow();
@@ -799,6 +945,7 @@ pub fn check_std(
   };
   let header_path = output_path.join("ignis_std.h");
   if let Err(e) = std::fs::write(&header_path, &header_content) {
+    cmd_fail!(&config, "Check failed", start.elapsed());
     eprintln!(
       "{} Failed to write header file '{}': {}",
       "Error:".red().bold(),
@@ -828,12 +975,8 @@ pub fn check_std(
       ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
         .run(&mono_roots);
 
-    if config.debug {
-      mono_output.verify_no_generics(&types);
-    } else {
-      #[cfg(debug_assertions)]
-      mono_output.verify_no_generics(&types);
-    }
+    #[cfg(debug_assertions)]
+    mono_output.verify_no_generics(&types);
 
     let sym_table = output.symbols.borrow();
 
@@ -863,6 +1006,7 @@ pub fn check_std(
       }
 
       if config.debug {
+        cmd_fail!(&config, "Check failed", start.elapsed());
         eprintln!("{} LIR verification failed in debug mode", "Error:".red().bold());
         return Err(());
       }
@@ -883,12 +1027,13 @@ pub fn check_std(
 
     let c_path = output_path.join(format!("{}.c", module_name));
     if let Err(e) = std::fs::write(&c_path, &c_code) {
+      cmd_fail!(&config, "Check failed", start.elapsed());
       eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
       return Err(());
     }
   }
 
-  phase_ok!(&config, "Std check complete");
+  cmd_ok!(&config, "No errors found", start.elapsed());
 
   Ok(())
 }

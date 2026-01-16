@@ -8,7 +8,7 @@ use ignis_analyzer::modules::{ModuleError, ModuleGraph};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_config::{DebugTrace, IgnisConfig};
 
-use ignis_log::{log_dbg, log_trc, phase_log, phase_ok, trace_dbg};
+use ignis_log::{log_dbg, log_trc, phase_log, trace_dbg};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_hir::HIR;
 use ignis_type::definition::{DefinitionKind, DefinitionStore};
@@ -323,8 +323,6 @@ impl CompilationContext {
     order: &[ModuleId],
     config: &IgnisConfig,
   ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
-    phase_ok!(config, "{}", "Analyzing modules...".bright_cyan().bold());
-
     let mut export_table: ExportTable = HashMap::new();
     let mut shared_types = TypeStore::new();
     let mut shared_defs = DefinitionStore::new();

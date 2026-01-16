@@ -7,7 +7,9 @@
 //!
 //! All output goes to stderr to avoid mixing with dumps/stdout.
 
-use ignis_config::{DebugTrace, IgnisConfig};
+use std::time::Duration;
+
+use ignis_config::{DebugTrace, IgnisConfig, OutputLevel};
 
 pub fn effective_verbose(config: &IgnisConfig) -> u8 {
   if config.quiet {
@@ -23,6 +25,26 @@ pub fn effective_verbose(config: &IgnisConfig) -> u8 {
 
 pub fn log_phase(config: &IgnisConfig) -> bool {
   !config.quiet
+}
+
+/// Returns true if output should be shown (Detailed or Verbose mode).
+pub fn show_output(config: &IgnisConfig) -> bool {
+  !matches!(config.output_level, OutputLevel::Quiet)
+}
+
+/// Returns true if verbose output should be shown.
+pub fn show_verbose(config: &IgnisConfig) -> bool {
+  matches!(config.output_level, OutputLevel::Verbose)
+}
+
+/// Format a duration for display (e.g., "75ms", "1.2s").
+pub fn format_duration(d: Duration) -> String {
+  let millis = d.as_millis();
+  if millis < 1000 {
+    format!("{}ms", millis)
+  } else {
+    format!("{:.1}s", d.as_secs_f64())
+  }
 }
 
 pub fn log_info(config: &IgnisConfig) -> bool {
@@ -61,7 +83,7 @@ pub fn trace_name(trace: DebugTrace) -> &'static str {
 
 /// Log a compiler phase message with an arrow prefix.
 ///
-/// All output goes to stderr to avoid mixing with dumps/stdout.
+/// Only shown in Verbose mode. All output goes to stderr.
 ///
 /// # Examples
 ///
@@ -72,7 +94,7 @@ pub fn trace_name(trace: DebugTrace) -> &'static str {
 #[macro_export]
 macro_rules! phase_log {
   ($config:expr, indent = $indent:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {{
-    if $crate::log_phase($config) {
+    if $crate::show_verbose($config) {
       use colored::Colorize;
       eprintln!(
         "{:indent$}{} {}",
@@ -91,6 +113,8 @@ macro_rules! phase_log {
 
 /// Log a successful phase completion (green arrow, no indent).
 ///
+/// Only shown in Verbose mode.
+///
 /// # Examples
 ///
 /// ```ignore
@@ -99,7 +123,7 @@ macro_rules! phase_log {
 #[macro_export]
 macro_rules! phase_ok {
   ($config:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {{
-    if $crate::log_phase($config) {
+    if $crate::show_verbose($config) {
       use colored::Colorize;
       eprintln!("{} {}", "-->".bright_green().bold(), format!($fmt $(, $arg)*));
     }
@@ -107,6 +131,8 @@ macro_rules! phase_ok {
 }
 
 /// Log a warning during a phase (yellow arrow, no indent).
+///
+/// Only shown in Verbose mode.
 ///
 /// # Examples
 ///
@@ -116,7 +142,7 @@ macro_rules! phase_ok {
 #[macro_export]
 macro_rules! phase_warn {
   ($config:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {{
-    if $crate::log_phase($config) {
+    if $crate::show_verbose($config) {
       use colored::Colorize;
       eprintln!("{} {}", "-->".bright_yellow().bold(), format!($fmt $(, $arg)*));
     }
@@ -176,6 +202,100 @@ macro_rules! log_trc {
   ($config:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {{
     if $crate::log_trace($config) {
       eprintln!("trace: {}", format!($fmt $(, $arg)*));
+    }
+  }};
+}
+
+/// Print the command header (e.g., "Building example/main.ign").
+#[macro_export]
+macro_rules! cmd_header {
+  ($config:expr, $cmd:expr, $path:expr) => {{
+    if $crate::show_output($config) {
+      eprintln!("{} {}\n", $cmd, $path);
+    }
+  }};
+}
+
+/// Print a section header (e.g., "- Scanning & parsing").
+#[macro_export]
+macro_rules! section {
+  ($config:expr, $name:expr) => {{
+    if $crate::show_output($config) {
+      use colored::Colorize;
+      eprintln!("{} {}", "\u{2022}".bright_cyan().bold(), $name);
+    }
+  }};
+}
+
+/// Print a section item (indented detail line).
+#[macro_export]
+macro_rules! section_item {
+  ($config:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {{
+    if $crate::show_output($config) && !$crate::show_verbose($config) {
+      eprintln!("  - {}", format!($fmt $(, $arg)*));
+    }
+  }};
+}
+
+/// Print success footer with elapsed time.
+#[macro_export]
+macro_rules! cmd_ok {
+  ($config:expr, $msg:expr, $elapsed:expr) => {{
+    if $crate::show_output($config) {
+      use colored::Colorize;
+      eprintln!(
+        "\n{} {} ({})",
+        "\u{2713}".bright_green().bold(),
+        $msg,
+        $crate::format_duration($elapsed)
+      );
+    }
+  }};
+}
+
+/// Print failure footer with elapsed time.
+#[macro_export]
+macro_rules! cmd_fail {
+  ($config:expr, $msg:expr, $elapsed:expr) => {{
+    if $crate::show_output($config) {
+      use colored::Colorize;
+      eprintln!(
+        "\n{} {} ({})",
+        "\u{2717}".bright_red().bold(),
+        $msg,
+        $crate::format_duration($elapsed)
+      );
+    }
+  }};
+}
+
+/// Print an artifact line (e.g., "  Binary: build/main").
+#[macro_export]
+macro_rules! cmd_artifact {
+  ($config:expr, $label:expr, $path:expr) => {{
+    if $crate::show_output($config) {
+      eprintln!("  {}: {}", $label, $path);
+    }
+  }};
+}
+
+/// Print error/warning stats.
+#[macro_export]
+macro_rules! cmd_stats {
+  ($config:expr, $errors:expr, $warnings:expr) => {{
+    if $crate::show_output($config) {
+      use colored::Colorize;
+      if $errors > 0 && $warnings > 0 {
+        eprintln!(
+          "  {} error(s), {} warning(s)",
+          format!("{}", $errors).red(),
+          format!("{}", $warnings).yellow()
+        );
+      } else if $errors > 0 {
+        eprintln!("  {} error(s)", format!("{}", $errors).red());
+      } else if $warnings > 0 {
+        eprintln!("  {} warning(s)", format!("{}", $warnings).yellow());
+      }
     }
   }};
 }

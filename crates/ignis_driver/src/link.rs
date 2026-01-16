@@ -212,8 +212,8 @@ pub fn compile_to_object(
   }
 
   if !quiet {
-    println!(
-      "{} Compiling {} -> {}",
+    eprintln!(
+      "    {} Compiling {} -> {}",
       "-->".bright_green().bold(),
       c_path.display(),
       obj_path.display()
@@ -256,8 +256,8 @@ pub fn link_executable(
   }
 
   if !quiet {
-    println!(
-      "{} Linking {} -> {}",
+    eprintln!(
+      "    {} Linking {} -> {}",
       "-->".bright_green().bold(),
       obj_path.display(),
       bin_path.display()

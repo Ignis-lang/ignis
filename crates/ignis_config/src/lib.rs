@@ -156,6 +156,19 @@ pub enum DebugTrace {
   Std,
 }
 
+/// Controls the verbosity level of CLI output.
+///
+/// - `Quiet`: No output except errors
+/// - `Detailed`: Structured progress output (default)
+/// - `Verbose`: Detailed output with internal phases
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum OutputLevel {
+  Quiet,
+  #[default]
+  Detailed,
+  Verbose,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum TargetBackend {
   #[default]
@@ -338,6 +351,7 @@ pub struct IgnisConfig {
   pub debug_trace: Vec<DebugTrace>,
   pub quiet: bool,
   pub verbose: u8,
+  pub output_level: OutputLevel,
   pub build: bool,
   pub test: bool,
   pub init: bool,
@@ -361,6 +375,7 @@ impl IgnisConfig {
     debug_trace: Vec<DebugTrace>,
     quiet: bool,
     verbose: u8,
+    output_level: OutputLevel,
     build: bool,
     test: bool,
     init: bool,
@@ -382,6 +397,7 @@ impl IgnisConfig {
       debug_trace,
       quiet,
       verbose,
+      output_level,
       build,
       test,
       init,
@@ -403,11 +419,20 @@ impl IgnisConfig {
     quiet: bool,
     verbose: u8,
   ) -> Self {
+    let output_level = if quiet {
+      OutputLevel::Quiet
+    } else if verbose > 0 {
+      OutputLevel::Verbose
+    } else {
+      OutputLevel::Detailed
+    };
+
     Self {
       debug,
       debug_trace,
       quiet,
       verbose,
+      output_level,
       ..Self::default()
     }
   }
