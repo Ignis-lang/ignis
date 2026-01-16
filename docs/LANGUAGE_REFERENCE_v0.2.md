@@ -1,0 +1,537 @@
+# Ignis Language Reference v0.2
+
+This document describes the Ignis programming language as implemented in version 0.2.
+
+## Changes from v0.1
+
+### New Features
+
+- **Generics**: Type parameters for functions, records, and enums
+- **Records**: User-defined struct types with fields and methods
+- **Enums**: Algebraic data types with variants
+- **Namespaces**: Module-level organization and scoping
+- **Extern blocks**: FFI declarations grouped by library
+- **Type aliases**: Named type abbreviations
+- **For-of loops**: Iteration over arrays and vectors
+- **Ternary expressions**: `condition ? then : else`
+- **Function overloading**: Multiple functions with the same name but different signatures
+- **Null pointer type**: Explicit null pointer handling
+
+### Syntax Changes
+
+- `if`/`while` statements no longer require parentheses around the condition
+- Import syntax uses namespaced modules: `import Io from "std::io"`
+- Namespace access uses `::` operator: `Math::add(1, 2)`
+
+## Types
+
+### Primitive Types
+
+| Type | Description | Size |
+|------|-------------|------|
+| `i8` | Signed 8-bit integer | 1 byte |
+| `i16` | Signed 16-bit integer | 2 bytes |
+| `i32` | Signed 32-bit integer | 4 bytes |
+| `i64` | Signed 64-bit integer | 8 bytes |
+| `u8` | Unsigned 8-bit integer | 1 byte |
+| `u16` | Unsigned 16-bit integer | 2 bytes |
+| `u32` | Unsigned 32-bit integer | 4 bytes |
+| `u64` | Unsigned 64-bit integer | 8 bytes |
+| `f32` | 32-bit floating point | 4 bytes |
+| `f64` | 64-bit floating point | 8 bytes |
+| `boolean` | Boolean value (`true`/`false`) | 1 byte |
+| `char` | Unicode code point | 4 bytes |
+| `string` | String (null-terminated) | pointer |
+| `void` | No value | 0 bytes |
+
+### Records
+
+User-defined types with fields and optional methods:
+
+```ignis
+record Point {
+    x: i32;
+    y: i32;
+}
+
+record Person {
+    public name: string;
+    public age: i32;
+}
+```
+
+#### Record Instantiation
+
+```ignis
+let p: Point = Point { x: 10, y: 20 };
+let person: Person = Person { name: "Alice", age: 30 };
+```
+
+#### Field Access
+
+```ignis
+let x: i32 = p.x;
+let name: string = person.name;
+```
+
+#### Generic Records
+
+```ignis
+record Box<T> {
+    value: T;
+}
+
+let intBox: Box<i32> = Box { value: 42 };
+let strBox: Box<string> = Box { value: "hello" };
+```
+
+#### Multi-parameter Generics
+
+```ignis
+record Pair<A, B> {
+    first: A;
+    second: B;
+}
+
+let p: Pair<string, i32> = Pair { first: "age", second: 25 };
+```
+
+### Enums
+
+Algebraic data types with variants:
+
+```ignis
+enum Option<T> {
+    SOME(T),
+    NONE,
+}
+
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+```
+
+### Arrays/Vectors
+
+Fixed-size arrays:
+
+```ignis
+let arr: i32[5] = [1, 2, 3, 4, 5];
+let first: i32 = arr[0];
+```
+
+### References
+
+```ignis
+let x: i32 = 42;
+let r: &i32 = &x;           // Immutable reference
+let mut y: i32 = 10;
+let mr: &mut i32 = &mut y;  // Mutable reference
+```
+
+### Pointers
+
+```ignis
+let x: i32 = 42;
+let p: *i32 = &x as *i32;
+let value: i32 = *p;
+```
+
+### Type Aliases
+
+```ignis
+type Integer = i32;
+type StringList = string[];
+type Callback<T> = (T) -> void;
+```
+
+## Declarations
+
+### Functions
+
+```ignis
+function name(param1: Type1, param2: Type2): ReturnType {
+    return value;
+}
+```
+
+#### Generic Functions
+
+```ignis
+function identity<T>(value: T): T {
+    return value;
+}
+
+let x: i32 = identity<i32>(42);
+```
+
+### Function Overloading
+
+Multiple functions with the same name but different parameter types:
+
+```ignis
+function greet(name: string): string {
+    return name;
+}
+
+function greet(age: i32): i32 {
+    return age;
+}
+
+function main(): void {
+    let s: string = greet("Alice");  // Calls first overload
+    let n: i32 = greet(42);          // Calls second overload
+    return;
+}
+```
+
+### Variables
+
+```ignis
+let x: i32 = 42;              // Immutable
+let mut y: i32 = 10;          // Mutable
+y = 20;                       // OK
+```
+
+### Constants
+
+```ignis
+const MAX_SIZE: i32 = 100;
+const PI: f64 = 3.14159265359;
+```
+
+### Namespaces
+
+Group related declarations:
+
+```ignis
+namespace Math {
+    function add(a: i32, b: i32): i32 {
+        return a + b;
+    }
+
+    function multiply(a: i32, b: i32): i32 {
+        return a * b;
+    }
+}
+
+function main(): void {
+    let sum: i32 = Math::add(1, 2);
+    let product: i32 = Math::multiply(3, 4);
+    return;
+}
+```
+
+#### Nested Namespaces
+
+```ignis
+namespace Outer {
+    namespace Inner {
+        function foo(): i32 {
+            return 42;
+        }
+    }
+}
+
+let x: i32 = Outer::Inner::foo();
+```
+
+### Extern Blocks
+
+Group FFI declarations by library:
+
+```ignis
+extern libc {
+    function puts(s: string): i32;
+    function printf(format: string): i32;
+}
+
+function main(): void {
+    libc::puts("Hello, World!");
+    return;
+}
+```
+
+## Expressions
+
+### Literals
+
+```ignis
+42              // i32
+3.14            // f64
+true            // boolean
+false           // boolean
+'a'             // char
+"hello"         // string
+0xFF            // hex integer
+0b1010          // binary integer
+null            // null pointer
+```
+
+### Operators
+
+#### Arithmetic
+
+| Operator | Description |
+|----------|-------------|
+| `+` | Addition |
+| `-` | Subtraction |
+| `*` | Multiplication |
+| `/` | Division |
+| `%` | Modulo |
+
+#### Comparison
+
+| Operator | Description |
+|----------|-------------|
+| `==` | Equal |
+| `!=` | Not equal |
+| `<` | Less than |
+| `>` | Greater than |
+| `<=` | Less or equal |
+| `>=` | Greater or equal |
+
+#### Logical
+
+| Operator | Description |
+|----------|-------------|
+| `&&` | Logical AND (short-circuit) |
+| `\|\|` | Logical OR (short-circuit) |
+| `!` | Logical NOT |
+
+#### Bitwise
+
+| Operator | Description |
+|----------|-------------|
+| `&` | Bitwise AND |
+| `\|` | Bitwise OR |
+| `^` | Bitwise XOR |
+| `~` | Bitwise NOT |
+| `<<` | Left shift |
+| `>>` | Right shift |
+
+#### Ternary
+
+```ignis
+let max: i32 = a > b ? a : b;
+```
+
+#### Increment/Decrement
+
+```ignis
+let mut x: i32 = 5;
+x++;  // x is now 6
+x--;  // x is now 5
+```
+
+#### Compound Assignment
+
+```ignis
+let mut x: i32 = 10;
+x += 5;   // x = x + 5
+x *= 2;   // x = x * 2
+```
+
+### Type Casts
+
+```ignis
+let x: i32 = 42;
+let y: f64 = x as f64;
+```
+
+## Statements
+
+### If/Else
+
+No parentheses required around condition:
+
+```ignis
+if x > 0 {
+    // then branch
+} else {
+    // else branch
+}
+```
+
+Chained conditions:
+
+```ignis
+if x > 10 {
+    // ...
+} else if x > 5 {
+    // ...
+} else {
+    // ...
+}
+```
+
+### While Loop
+
+```ignis
+while condition {
+    // body
+}
+```
+
+Example:
+
+```ignis
+let mut i: i32 = 0;
+while i < 10 {
+    i = i + 1;
+}
+```
+
+### For Loop (C-style)
+
+```ignis
+for (let i = 0; i < 10; i++) {
+    // body
+}
+```
+
+With explicit type:
+
+```ignis
+for (let i: i64 = 0; i < 10; i++) {
+    // body
+}
+```
+
+### For-Of Loop
+
+Iterate over arrays and vectors:
+
+```ignis
+let arr: i32[3] = [1, 2, 3];
+
+// By value (for Copy types)
+for (let x of arr) {
+    // x is i32
+}
+
+// By reference
+for (let x: &i32 of arr) {
+    // x is &i32
+}
+```
+
+### Return
+
+```ignis
+function foo(): i32 {
+    return 42;
+}
+
+function bar(): void {
+    return;
+}
+```
+
+### Break and Continue
+
+```ignis
+while true {
+    if done {
+        break;
+    }
+    if skip {
+        continue;
+    }
+}
+```
+
+## Modules
+
+### Importing
+
+```ignis
+import println from "std::io";
+import sqrt, PI from "std::math";
+import MyFunc as Alias from "./local_module";
+```
+
+### Importing Namespaces
+
+```ignis
+import Io from "std::io";
+import String from "std::string";
+
+Io::println("Hello");
+let s: string = String::concat("a", "b");
+```
+
+### Exporting
+
+```ignis
+export function publicFunction(): void {
+    return;
+}
+
+export const PUBLIC_CONSTANT: i32 = 42;
+
+export record PublicRecord {
+    value: i32;
+}
+```
+
+## Standard Library
+
+### std::io
+
+```ignis
+import Io from "std::io";
+
+Io::println("Hello, World!");
+Io::print("No newline");
+```
+
+### std::string
+
+```ignis
+import String from "std::string";
+
+let len: u64 = String::length("hello");
+let combined: string = String::concat("Hello, ", "World!");
+let numStr: string = String::toString(42);
+```
+
+### std::memory
+
+```ignis
+import allocate, deallocate from "std::memory";
+
+let p: *mut u8 = allocate(16);
+// ... use memory ...
+deallocate(p);
+```
+
+## Known Limitations
+
+### Not Yet Implemented
+
+- Pattern matching (`match` expressions)
+- Closures / Lambdas
+- Traits / Interfaces
+- Enum methods
+- Associated types
+
+### Runtime Limitations
+
+- No runtime bounds checking for arrays
+- No garbage collection (manual memory management)
+- Strings are null-terminated C strings
+
+## Entry Point
+
+```ignis
+function main(): void {
+    return;
+}
+
+// Or with exit code:
+function main(): i32 {
+    return 0;
+}
+```
