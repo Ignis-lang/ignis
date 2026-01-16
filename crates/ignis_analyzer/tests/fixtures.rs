@@ -135,3 +135,10 @@ fn fixture_wrong_number_type_args_function() {
 fn fixture_type_param_with_args() {
   test_fixture("test_cases/analyzer/generics/errors/type_param_with_args.ign");
 }
+
+// --- Generic Type Alias Tests ---
+
+#[test]
+fn fixture_generic_type_alias() {
+  test_fixture("test_cases/analyzer/generics/type_alias/generic_type_alias.ign");
+}

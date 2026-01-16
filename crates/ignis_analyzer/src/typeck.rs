@@ -687,7 +687,9 @@ impl<'a> Analyzer<'a> {
     // Cycle detection: track that we're resolving this alias.
     self.resolving_type_aliases.insert(def_id.clone());
 
+    self.enter_type_params_scope(&def_id);
     let target_type = self.resolve_type_syntax_with_span(&ta.target, &ta.span);
+    self.exit_type_params_scope(&def_id);
 
     if let DefinitionKind::TypeAlias(alias_def) = &mut self.defs.get_mut(&def_id).kind {
       alias_def.target = target_type;
@@ -3900,7 +3902,18 @@ impl<'a> Analyzer<'a> {
         self.resolve_generic_type_with_args(def_id, args, span)
       },
       IgnisTypeSyntax::Applied { base, args } => {
-        // Resolve the base type first
+        // Handle Named base directly to avoid prematurely expanding type aliases
+        if let IgnisTypeSyntax::Named(symbol_id) = base.as_ref() {
+          if let Some(def_id) = self.scopes.lookup_def(symbol_id).cloned() {
+            match &self.defs.get(&def_id).kind {
+              DefinitionKind::TypeAlias(_) | DefinitionKind::Record(_) | DefinitionKind::Enum(_) => {
+                return self.resolve_generic_type_with_args(def_id, args, span);
+              },
+              _ => {},
+            }
+          }
+        }
+
         let base_type = self.resolve_type_syntax_impl(base, span);
 
         // The base must resolve to a Record or Enum type
@@ -4248,8 +4261,8 @@ impl<'a> Analyzer<'a> {
     Some(current_def)
   }
 
-  /// Resolve a generic type (record or enum) with type arguments to produce Type::Instance.
-  /// If the definition is not generic, returns the plain Type::Record or Type::Enum.
+  /// Resolve a generic type with type arguments.
+  /// Returns Type::Instance for records/enums, or substituted target for type aliases.
   fn resolve_generic_type_with_args(
     &mut self,
     def_id: ignis_type::definition::DefinitionId,
@@ -4259,10 +4272,10 @@ impl<'a> Analyzer<'a> {
     let def = self.defs.get(&def_id);
     let type_name = self.symbols.borrow().get(&def.name).to_string();
 
-    // Get the expected type params
-    let type_params_len = match &def.kind {
-      DefinitionKind::Record(rd) => rd.type_params.len(),
-      DefinitionKind::Enum(ed) => ed.type_params.len(),
+    let (type_params_len, is_type_alias) = match &def.kind {
+      DefinitionKind::Record(rd) => (rd.type_params.len(), false),
+      DefinitionKind::Enum(ed) => (ed.type_params.len(), false),
+      DefinitionKind::TypeAlias(ta) => (ta.type_params.len(), true),
       _ => {
         // Not a generic-capable type
         if !args.is_empty() {
@@ -4325,13 +4338,17 @@ impl<'a> Analyzer<'a> {
       return self.types.error();
     }
 
-    // Resolve each type argument
     let resolved_args: Vec<TypeId> = args
       .iter()
       .map(|arg| self.resolve_type_syntax_impl(arg, span))
       .collect();
 
-    // Return Type::Instance
+    if is_type_alias {
+      let target_type = self.type_of(&def_id).clone();
+      let subst = Substitution::for_generic(def_id, &resolved_args);
+      return self.types.substitute(target_type, &subst);
+    }
+
     self.types.instance(def_id, resolved_args)
   }
 
@@ -4350,6 +4367,7 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Enum(ed) => ed.type_params.clone(),
       DefinitionKind::Function(fd) => fd.type_params.clone(),
       DefinitionKind::Method(md) => md.type_params.clone(),
+      DefinitionKind::TypeAlias(ta) => ta.type_params.clone(),
       _ => Vec::new(),
     };
 
@@ -4375,6 +4393,7 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
       DefinitionKind::Function(fd) => !fd.type_params.is_empty(),
       DefinitionKind::Method(md) => !md.type_params.is_empty(),
+      DefinitionKind::TypeAlias(ta) => !ta.type_params.is_empty(),
       _ => false,
     };
 

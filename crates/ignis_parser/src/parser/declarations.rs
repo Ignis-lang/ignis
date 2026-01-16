@@ -392,11 +392,13 @@ impl super::IgnisParser {
   // TYPE ALIAS, RECORD, ENUM DECLARATIONS
   // =========================================================================
 
-  /// type Name = <type>;
+  /// type Name<T, U> = <type>;
   fn parse_type_alias_declaration(&mut self) -> ParserResult<NodeId> {
     let start = self.expect(TokenType::Type)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
+
+    let type_params = self.parse_optional_generic_params()?;
 
     self.expect(TokenType::Equal)?;
 
@@ -404,7 +406,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::SemiColon)?.clone();
 
     let span = Span::merge(&start, &end.span);
-    Ok(self.allocate_statement(ASTStatement::TypeAlias(ASTTypeAlias::new(name, target, span))))
+    Ok(self.allocate_statement(ASTStatement::TypeAlias(ASTTypeAlias::new(name, type_params, target, span))))
   }
 
   /// Parse member modifiers: static, public, private

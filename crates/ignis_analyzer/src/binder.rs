@@ -139,7 +139,8 @@ impl<'a> Analyzer<'a> {
   ) {
     let def = Definition {
       kind: DefinitionKind::TypeAlias(TypeAliasDefinition {
-        target: self.types.error(), // Placeholder until complete pass
+        type_params: Vec::new(),
+        target: self.types.error(),
       }),
       name: ta.name,
       span: ta.span.clone(),
@@ -151,6 +152,13 @@ impl<'a> Analyzer<'a> {
     let def_id = self.defs.alloc(def);
     self.set_def(node_id, &def_id);
     self.type_alias_syntax.insert(def_id.clone(), ta.target.clone());
+
+    let type_param_defs = self.bind_type_params(ta.type_params.as_ref(), def_id);
+    self.pop_type_params_scope(ta.type_params.as_ref());
+
+    if let DefinitionKind::TypeAlias(tad) = &mut self.defs.get_mut(&def_id).kind {
+      tad.type_params = type_param_defs;
+    }
 
     if let Err(existing) = self.scopes.define(&ta.name, &def_id, false) {
       let existing_def = self.defs.get(&existing);

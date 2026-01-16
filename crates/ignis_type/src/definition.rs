@@ -108,6 +108,7 @@ pub struct ParameterDefinition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeAliasDefinition {
+  pub type_params: Vec<DefinitionId>,
   pub target: TypeId,
 }
 
