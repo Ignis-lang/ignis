@@ -45,10 +45,10 @@ cargo build --release
 Create a file `hello.ign`:
 
 ```ignis
-import println from "std::io";
+import Io from "std::io";
 
 function main(): void {
-    println("Hello, Ignis!");
+    Io::println("Hello, Ignis!");
     return;
 }
 ```
@@ -102,7 +102,9 @@ function identity<T>(x: T): T {
 function main(): void {
     let box: Box<i32> = Box { value: 42 };
     let result: i32 = identity<i32>(box.value);
+    
     Io::println(String::toString(result));
+    
     return;
 }
 ```
