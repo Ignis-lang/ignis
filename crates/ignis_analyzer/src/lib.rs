@@ -117,6 +117,22 @@ pub struct AnalyzerOutput {
   pub hir: HIR,
   pub diagnostics: Vec<Diagnostic>,
   pub symbols: Rc<RefCell<SymbolTable>>,
+
+  /// Maps AST nodes to their resolved definitions.
+  /// Useful for "go to definition" in LSP.
+  pub node_defs: HashMap<NodeId, DefinitionId>,
+
+  /// Maps AST nodes to their inferred types.
+  /// Useful for "hover" in LSP.
+  pub node_types: HashMap<NodeId, TypeId>,
+
+  /// Maps AST nodes to their source spans.
+  /// Useful for finding which node is at a given cursor position.
+  pub node_spans: HashMap<NodeId, ignis_type::span::Span>,
+
+  /// Maps Call nodes to their resolved overload.
+  /// Used when hovering over an overloaded function call.
+  pub resolved_calls: HashMap<NodeId, DefinitionId>,
 }
 
 impl AnalyzerOutput {
@@ -195,6 +211,9 @@ impl<'a> Analyzer<'a> {
     analyzer.extra_checks_phase(roots);
     let hir = analyzer.lower_to_hir(roots);
 
+    // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
+    let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
+
     AnalyzerOutput {
       types: analyzer.types,
       defs: analyzer.defs,
@@ -202,6 +221,10 @@ impl<'a> Analyzer<'a> {
       hir,
       diagnostics: analyzer.diagnostics,
       symbols: symbols_clone,
+      node_defs: analyzer.node_defs,
+      node_types: analyzer.node_types,
+      node_spans,
+      resolved_calls: analyzer.resolved_calls,
     }
   }
 
@@ -255,6 +278,9 @@ impl<'a> Analyzer<'a> {
     *shared_defs = std::mem::replace(&mut analyzer.defs, DefinitionStore::new());
     *shared_namespaces = std::mem::replace(&mut analyzer.namespaces, NamespaceStore::new());
 
+    // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
+    let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
+
     AnalyzerOutput {
       types: shared_types.clone(),
       defs: shared_defs.clone(),
@@ -262,6 +288,10 @@ impl<'a> Analyzer<'a> {
       hir,
       diagnostics: analyzer.diagnostics,
       symbols: symbols_clone,
+      node_defs: analyzer.node_defs,
+      node_types: analyzer.node_types,
+      node_spans,
+      resolved_calls: analyzer.resolved_calls,
     }
   }
 
@@ -564,5 +594,47 @@ impl<'a> Analyzer<'a> {
     };
 
     self.defs.alloc(def)
+  }
+}
+
+/// Build a mapping from NodeId to Span for all nodes that have definitions or types.
+/// This is used by the LSP to find which node is at a given cursor position.
+fn build_node_spans(
+  ast: &ASTStore<ASTNode>,
+  node_defs: &HashMap<NodeId, DefinitionId>,
+  node_types: &HashMap<NodeId, TypeId>,
+) -> HashMap<NodeId, ignis_type::span::Span> {
+  let mut spans = HashMap::new();
+
+  // Add spans for all nodes with definitions
+  for node_id in node_defs.keys() {
+    if let Some(span) = get_node_span(ast, node_id) {
+      spans.insert(node_id.clone(), span);
+    }
+  }
+
+  // Add spans for all nodes with types (that aren't already added)
+  for node_id in node_types.keys() {
+    if !spans.contains_key(node_id) {
+      if let Some(span) = get_node_span(ast, node_id) {
+        spans.insert(node_id.clone(), span);
+      }
+    }
+  }
+
+  spans
+}
+
+/// Get the span of an AST node, if it exists in the store.
+fn get_node_span(
+  ast: &ASTStore<ASTNode>,
+  node_id: &NodeId,
+) -> Option<ignis_type::span::Span> {
+  // Try to get the node from the store
+  // The store might panic if the node_id is invalid, so we check first
+  if (node_id.index() as usize) < ast.len() {
+    Some(ast.get(node_id).span().clone())
+  } else {
+    None
   }
 }

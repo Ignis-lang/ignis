@@ -99,6 +99,20 @@ impl SourceMap {
     self.files.get(id)
   }
 
+  /// Look up a file by its path. Returns None if the file is not in the map.
+  pub fn lookup_by_path<P: AsRef<std::path::Path>>(
+    &self,
+    path: P,
+  ) -> Option<FileId> {
+    let normalized = normalize_path(path.as_ref().to_path_buf());
+    self.by_path.get(&normalized).cloned()
+  }
+
+  /// Iterate over all paths and their FileIds in the map.
+  pub fn iter_paths(&self) -> impl Iterator<Item = (&PathBuf, &FileId)> {
+    self.by_path.iter()
+  }
+
   pub fn line_col(
     &self,
     file: &FileId,

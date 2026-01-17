@@ -7,6 +7,7 @@ use ignis_analyzer::imports::ExportTable;
 use ignis_analyzer::modules::{ModuleError, ModuleGraph};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_config::{DebugTrace, IgnisConfig};
+use ignis_diagnostics::diagnostic_report::Diagnostic;
 
 use ignis_log::{log_dbg, log_trc, phase_log, trace_dbg};
 use ignis_parser::{IgnisLexer, IgnisParser};
@@ -33,6 +34,14 @@ pub struct CompilationContext {
   pub module_graph: ModuleGraph,
   pub(crate) parsed_modules: HashMap<ModuleId, ParsedModule>,
   module_for_path: HashMap<String, ModuleId>,
+
+  /// Diagnostics collected during module discovery (lex/parse errors).
+  /// Used by LSP mode to collect all errors without failing early.
+  pub discovery_diagnostics: Vec<Diagnostic>,
+
+  /// Pre-loaded file contents (path -> text).
+  /// Used by LSP to provide in-memory file content instead of reading from disk.
+  preloaded_files: HashMap<PathBuf, String>,
 }
 
 impl CompilationContext {
@@ -56,7 +65,20 @@ impl CompilationContext {
       module_graph,
       parsed_modules: HashMap::new(),
       module_for_path: HashMap::new(),
+      discovery_diagnostics: Vec::new(),
+      preloaded_files: HashMap::new(),
     }
+  }
+
+  /// Pre-load a file's content for LSP mode.
+  ///
+  /// When discovering modules, this content will be used instead of reading from disk.
+  pub fn preload_file(
+    &mut self,
+    path: PathBuf,
+    text: String,
+  ) {
+    self.preloaded_files.insert(path, text);
   }
 
   /// Discover and parse all modules starting from entry point
@@ -238,6 +260,211 @@ impl CompilationContext {
     imports
   }
 
+  /// Discover modules for LSP mode - collects all diagnostics without failing early.
+  ///
+  /// Unlike `discover_modules`, this method:
+  /// - Continues even when files have lex/parse errors
+  /// - Collects diagnostics in `self.discovery_diagnostics` instead of rendering
+  /// - Returns `Ok(root_id)` if the entry file was at least partially parsed
+  pub fn discover_modules_lsp(
+    &mut self,
+    entry_path: &str,
+    config: &IgnisConfig,
+  ) -> Result<ModuleId, ()> {
+    log_dbg!(config, "starting LSP module discovery from {}", entry_path);
+
+    self.discover_recursive_lsp(entry_path, None, config)
+  }
+
+  fn discover_recursive_lsp(
+    &mut self,
+    path: &str,
+    current_file: Option<&Path>,
+    config: &IgnisConfig,
+  ) -> Result<ModuleId, ()> {
+    let module_path = if current_file.is_some() {
+      match self.module_graph.resolve_import_path(path, current_file.unwrap()) {
+        Ok(p) => p,
+        Err(e) => {
+          log_dbg!(config, "failed to resolve import path '{}': {:?}", path, e);
+          return Err(());
+        },
+      }
+    } else {
+      ModulePath::Project(PathBuf::from(path))
+    };
+
+    if let Some(id) = self.module_graph.get_by_path(&module_path) {
+      return Ok(id);
+    }
+
+    log_dbg!(config, "discovering module {:?} (LSP mode)", module_path);
+
+    self
+      .module_for_path
+      .insert(path.to_string(), ModuleId::new(self.module_graph.modules.iter().count() as u32));
+
+    let fs_path = self.module_graph.to_fs_path(&module_path);
+
+    // Parse file, collecting diagnostics instead of rendering
+    let parsed = match self.parse_file_lsp(&fs_path, config) {
+      Ok(p) => p,
+      Err(()) => {
+        // File couldn't be read - already logged
+        return Err(());
+      },
+    };
+
+    let file_id = parsed.file_id;
+    let import_paths = parsed.import_paths.clone();
+
+    let module = Module::new(file_id, module_path.clone());
+    let module_id = self.module_graph.register(module);
+    self.module_for_path.insert(path.to_string(), module_id);
+    self.parsed_modules.insert(module_id, parsed);
+
+    // Continue discovering imports even if this file had errors
+    for (items, import_from, span) in import_paths {
+      if let Ok(dep_id) = self.discover_recursive_lsp(&import_from, Some(&fs_path), config) {
+        self.module_graph.add_import(module_id, items, dep_id, span);
+      }
+      // If import discovery fails, we continue with other imports
+    }
+
+    Ok(module_id)
+  }
+
+  /// Parse a file for LSP mode - collects diagnostics instead of rendering.
+  ///
+  /// Returns `Ok(ParsedModule)` even if there are lex/parse errors,
+  /// as long as the file could be read. Errors are stored in `self.discovery_diagnostics`.
+  fn parse_file_lsp(
+    &mut self,
+    path: &Path,
+    config: &IgnisConfig,
+  ) -> Result<ParsedModule, ()> {
+    // Check if we have preloaded content for this file
+    let text = if let Some(preloaded) = self.preloaded_files.remove(path) {
+      preloaded
+    } else {
+      match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) => {
+          log_dbg!(config, "failed to read file '{}': {}", path.display(), e);
+          return Err(());
+        },
+      }
+    };
+
+    let file_id = self.source_map.add_file(path, text);
+    let src = self.source_map.get(&file_id).text.clone();
+
+    // Lexer phase
+    let mut lexer = IgnisLexer::new(file_id, &src);
+    lexer.scan_tokens();
+
+    trace_dbg!(
+      config,
+      DebugTrace::Lexer,
+      "produced {} tokens for {} (LSP)",
+      lexer.tokens.len(),
+      path.display()
+    );
+
+    // Collect lexer diagnostics
+    for diag_msg in &lexer.diagnostics {
+      self.discovery_diagnostics.push(diag_msg.report());
+    }
+
+    if !lexer.diagnostics.is_empty() {
+      // Return a minimal ParsedModule so we can still show the errors
+      return Ok(ParsedModule {
+        file_id,
+        nodes: Store::new(),
+        roots: Vec::new(),
+        import_paths: Vec::new(),
+      });
+    }
+
+    // Parser phase
+    let mut parser = IgnisParser::new(lexer.tokens, self.symbol_table.clone());
+    let parse_result = parser.parse();
+
+    let (nodes, roots) = match parse_result {
+      Ok(r) => r,
+      Err(errs) => {
+        // Collect parser diagnostics
+        for diag_msg in &errs {
+          self.discovery_diagnostics.push(diag_msg.report());
+        }
+
+        // Return a minimal ParsedModule
+        return Ok(ParsedModule {
+          file_id,
+          nodes: Store::new(),
+          roots: Vec::new(),
+          import_paths: Vec::new(),
+        });
+      },
+    };
+
+    trace_dbg!(
+      config,
+      DebugTrace::Parser,
+      "parsed {} nodes for {} (LSP)",
+      nodes.len(),
+      path.display()
+    );
+
+    let import_paths = self.extract_imports(&nodes, &roots);
+
+    log_trc!(config, "{} imports found in {} (LSP)", import_paths.len(), path.display());
+
+    Ok(ParsedModule {
+      file_id,
+      nodes,
+      roots,
+      import_paths,
+    })
+  }
+
+  /// Discover a std module for LSP mode.
+  pub fn discover_std_module_lsp(
+    &mut self,
+    module_name: &str,
+    config: &IgnisConfig,
+  ) -> Result<ModuleId, ()> {
+    let module_path = ModulePath::Std(module_name.to_string());
+
+    if let Some(id) = self.module_graph.get_by_path(&module_path) {
+      return Ok(id);
+    }
+
+    log_dbg!(config, "discovering std module {:?} (LSP)", module_path);
+
+    let fs_path = self.module_graph.to_fs_path(&module_path);
+    let parsed = match self.parse_file_lsp(&fs_path, config) {
+      Ok(p) => p,
+      Err(()) => return Err(()),
+    };
+
+    let file_id = parsed.file_id;
+    let import_paths = parsed.import_paths.clone();
+
+    let module = Module::new(file_id, module_path.clone());
+    let module_id = self.module_graph.register(module);
+    self.module_for_path.insert(format!("std::{}", module_name), module_id);
+    self.parsed_modules.insert(module_id, parsed);
+
+    for (items, import_from, span) in import_paths {
+      if let Ok(dep_id) = self.discover_recursive_lsp(&import_from, Some(&fs_path), config) {
+        self.module_graph.add_import(module_id, items, dep_id, span);
+      }
+    }
+
+    Ok(module_id)
+  }
+
   pub fn compile(
     &mut self,
     root_id: ModuleId,
@@ -323,12 +550,49 @@ impl CompilationContext {
     order: &[ModuleId],
     config: &IgnisConfig,
   ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
+    let (output, has_errors) = self.analyze_modules_collect_all(order, config, true);
+
+    if has_errors {
+      return Err(());
+    }
+
+    Ok(output)
+  }
+
+  /// Analyze all modules in topological order, collecting ALL diagnostics.
+  ///
+  /// Unlike `analyze_modules`, this method does NOT fail early on errors.
+  /// It continues analyzing all modules and returns all diagnostics.
+  /// This is useful for LSP where we want to show all errors at once.
+  ///
+  /// Returns (output, has_errors).
+  ///
+  /// Note: node_defs, node_types, node_spans, and resolved_calls are only kept for
+  /// the ROOT module (last in topological order). This is because NodeIds are indices
+  /// into per-module AST stores and would collide if merged naively.
+  pub fn analyze_modules_collect_all(
+    &self,
+    order: &[ModuleId],
+    config: &IgnisConfig,
+    render_diagnostics: bool,
+  ) -> (ignis_analyzer::AnalyzerOutput, bool) {
     let mut export_table: ExportTable = HashMap::new();
     let mut shared_types = TypeStore::new();
     let mut shared_defs = DefinitionStore::new();
     let mut shared_namespaces = ignis_type::namespace::NamespaceStore::new();
     let mut combined_hir = HIR::new();
     let mut all_diagnostics = Vec::new();
+    let mut has_errors = false;
+
+    // These will only be populated for the root module (entry file)
+    // because NodeIds are not globally unique across modules
+    let mut root_node_defs = HashMap::new();
+    let mut root_node_types = HashMap::new();
+    let mut root_node_spans = HashMap::new();
+    let mut root_resolved_calls = HashMap::new();
+
+    // The root module is the last one in topological order
+    let root_module_id = self.module_graph.root;
 
     for &module_id in order {
       let parsed = self
@@ -354,7 +618,7 @@ impl CompilationContext {
         module_id,
       );
 
-      if !config.quiet {
+      if render_diagnostics && !config.quiet {
         for diag in &output.diagnostics {
           ignis_diagnostics::render(diag, &self.source_map);
         }
@@ -368,28 +632,43 @@ impl CompilationContext {
         output.diagnostics.len()
       );
 
-      let has_errors = output
+      let module_has_errors = output
         .diagnostics
         .iter()
         .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
 
-      if has_errors {
-        return Err(());
+      if module_has_errors {
+        has_errors = true;
       }
 
       let exports = output.collect_exports();
       combined_hir.merge(output.hir);
       all_diagnostics.extend(output.diagnostics);
+
+      // Only keep node_* data for the root module to avoid NodeId collisions
+      if root_module_id == Some(module_id) {
+        root_node_defs = output.node_defs;
+        root_node_types = output.node_types;
+        root_node_spans = output.node_spans;
+        root_resolved_calls = output.resolved_calls;
+      }
+
       export_table.insert(module_id, exports);
     }
 
-    Ok(ignis_analyzer::AnalyzerOutput {
+    let output = ignis_analyzer::AnalyzerOutput {
       types: shared_types,
       defs: shared_defs,
       namespaces: shared_namespaces,
       hir: combined_hir,
       diagnostics: all_diagnostics,
       symbols: self.symbol_table.clone(),
-    })
+      node_defs: root_node_defs,
+      node_types: root_node_types,
+      node_spans: root_node_spans,
+      resolved_calls: root_resolved_calls,
+    };
+
+    (output, has_errors)
   }
 }

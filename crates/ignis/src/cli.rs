@@ -227,6 +227,13 @@ pub struct CheckRuntimeCommand {
   pub runtime_path: Option<String>,
 }
 
+#[derive(Parser, Debug, Clone, PartialEq)]
+pub struct LspCommand {
+  /// Log file path for debug output
+  #[arg(long)]
+  pub log_file: Option<String>,
+}
+
 #[derive(Subcommand, Clone, PartialEq)]
 pub enum SubCommand {
   /// Build file or project
@@ -241,6 +248,8 @@ pub enum SubCommand {
   CheckStd(CheckStdCommand),
   /// Check the C runtime with syntax-only compilation
   CheckRuntime(CheckRuntimeCommand),
+  /// Start the Language Server Protocol server
+  Lsp(LspCommand),
 }
 
 #[derive(Parser)]

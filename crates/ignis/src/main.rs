@@ -7,6 +7,38 @@ use std::{sync::Arc, fs::File, io::Read, path::Path};
 use cli::{Cli, SubCommand};
 use ignis_config;
 
+/// Run the LSP server.
+fn run_lsp(cli: &Cli) {
+  // Build minimal config for LSP
+  let mut config = ignis_config::IgnisConfig::new_basic(
+    cli.debug,
+    cli.debug_trace.iter().copied().map(Into::into).collect(),
+    true, // Always quiet in LSP mode
+    0,    // No verbose output
+  );
+
+  // Set std_path from CLI or env
+  if cli.std_path.eq("IGNIS_STD_PATH") {
+    if let Ok(v) = std::env::var("IGNIS_STD_PATH") {
+      config.std_path = v;
+    }
+  } else {
+    config.std_path = cli.std_path.clone();
+  }
+
+  config.std = !cli.std;
+  config.auto_load_std = !cli.auto_load_std;
+  config.manifest = load_manifest(&config.std_path);
+
+  let config = Arc::new(config);
+
+  // Create a single-threaded Tokio runtime for the LSP
+  #[allow(clippy::disallowed_methods)]
+  let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
+  rt.block_on(ignis_lsp::run(config));
+}
+
 fn load_project_config() -> Option<ignis_config::IgnisProjectConfig> {
   let binding = std::env::current_dir().unwrap();
   let file_path = binding.to_str().unwrap();
@@ -260,6 +292,10 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
       config.check_runtime = true;
       config.runtime_path_override = check_runtime.runtime_path.clone();
     },
+    SubCommand::Lsp(_) => {
+      // LSP is handled before parse_cli_to_config is called
+      unreachable!("LSP subcommand should be handled separately");
+    },
   };
 
   config.manifest = load_manifest(&config.std_path);
@@ -269,6 +305,12 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
 
 fn main() {
   let cli = Cli::parse();
+
+  // Handle LSP subcommand specially (doesn't need full config parsing)
+  if matches!(cli.subcommand, SubCommand::Lsp(_)) {
+    run_lsp(&cli);
+    return;
+  }
 
   let config = parse_cli_to_config(&cli);
 

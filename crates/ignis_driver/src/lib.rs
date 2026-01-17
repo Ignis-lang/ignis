@@ -4,7 +4,7 @@ mod context;
 pub mod link;
 mod pipeline;
 
-pub use api::{analyze_text, AnalyzeTextOutput};
+pub use api::{analyze_project, analyze_project_with_text, analyze_text, AnalyzeProjectOutput, AnalyzeTextOutput};
 pub use build_layout::BuildLayout;
 pub use context::CompilationContext;
 pub use link::LinkPlan;
