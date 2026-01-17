@@ -1,8 +1,10 @@
+mod api;
 mod build_layout;
 mod context;
 pub mod link;
 mod pipeline;
 
+pub use api::{analyze_text, AnalyzeTextOutput};
 pub use build_layout::BuildLayout;
 pub use context::CompilationContext;
 pub use link::LinkPlan;

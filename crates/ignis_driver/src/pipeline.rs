@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{cell::RefCell, rc::Rc};
 
 use colored::*;
 use ignis_ast::display::format_ast_nodes;
@@ -13,13 +12,13 @@ use ignis_log::{
   cmd_artifact, cmd_fail, cmd_header, cmd_ok, cmd_stats, log_dbg, log_phase, log_trc, phase_log, phase_ok, phase_warn,
   section, section_item, trace_dbg,
 };
-use ignis_parser::{IgnisLexer, IgnisParser};
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
 use ignis_type::file::SourceMap;
 use ignis_type::module::{ModuleId, ModulePath};
 use ignis_type::symbol::SymbolTable;
 use ignis_diagnostics::message::DiagnosticMessage;
 
+use crate::api::analyze_text;
 use crate::build_layout::{
   hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp, write_std_stamp,
   BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
@@ -99,141 +98,129 @@ fn write_dump_output(
   Ok(())
 }
 
-/// Compile a single file (used for simple single-file compilation without imports)
-pub fn compile_file(
-  config: Arc<IgnisConfig>,
-  file_path: &str,
-) -> Result<(), ()> {
-  let mut sm = SourceMap::new();
-
-  let text = match std::fs::read_to_string(file_path) {
-    Ok(content) => content,
+/// Read a file from disk, reporting errors to stderr.
+fn read_file_or_report(file_path: &str) -> Result<String, ()> {
+  match std::fs::read_to_string(file_path) {
+    Ok(content) => Ok(content),
     Err(e) => {
       eprintln!("{} Failed to read file '{}': {}", "Error:".red().bold(), file_path, e);
-      return Err(());
+      Err(())
     },
-  };
+  }
+}
 
-  warn_unsupported_dumps(&config);
+/// Render all diagnostics to stderr.
+fn render_diagnostics(
+  diagnostics: &[ignis_diagnostics::diagnostic_report::Diagnostic],
+  source_map: &SourceMap,
+  quiet: bool,
+) {
+  if quiet {
+    return;
+  }
 
-  phase_log!(&config, "Scanning... {}", file_path);
+  for diag in diagnostics {
+    ignis_diagnostics::render(diag, source_map);
+  }
+}
 
-  let file_id = sm.add_file(file_path, text);
-  let src = &sm.get(&file_id).text;
-
-  let mut lexer = IgnisLexer::new(file_id, src);
-  lexer.scan_tokens();
-
-  if !lexer.diagnostics.is_empty() {
-    for diag_msg in &lexer.diagnostics {
-      let diag = diag_msg.report();
-      ignis_diagnostics::render(&diag, &sm);
+/// Write all requested dumps for compile_file.
+fn write_compile_file_dumps(
+  config: &IgnisConfig,
+  output: &crate::api::AnalyzeTextOutput,
+) -> Result<(), ()> {
+  if dump_requested(config, DumpKind::Lexer) {
+    let mut dump = String::new();
+    for token in &output.tokens {
+      dump.push_str(&format!("{}\n", token));
     }
-    return Err(());
+    write_dump_output(config, "dump-lexer.txt", &dump)?;
   }
 
-  if dump_requested(&config, DumpKind::Lexer) {
-    let mut output = String::new();
-    for token in &lexer.tokens {
-      output.push_str(&format!("{}\n", token));
-    }
-
-    write_dump_output(&config, "dump-lexer.txt", &output)?;
+  if dump_requested(config, DumpKind::Ast) {
+    let ast_lisp = format_ast_nodes(output.nodes.clone(), output.symbol_table.clone(), &output.roots);
+    write_dump_output(config, "dump-ast.txt", &ast_lisp)?;
   }
 
-  trace_dbg!(&config, DebugTrace::Lexer, "produced {} tokens", lexer.tokens.len());
+  let sym_table = output.analyzer.symbols.borrow();
 
-  let symbol_table = Rc::new(RefCell::new(SymbolTable::new()));
-
-  phase_log!(&config, "Parsing... {}", file_path);
-
-  log_dbg!(&config, "parsing {}", file_path);
-
-  let mut parser = IgnisParser::new(lexer.tokens, symbol_table.clone());
-  let parse_result = parser.parse();
-  if parse_result.is_err() {
-    let err = parse_result.unwrap_err();
-    for diag_msg in &err {
-      let diag = diag_msg.report();
-      ignis_diagnostics::render(&diag, &sm);
-    }
-    return Err(());
+  if dump_requested(config, DumpKind::Types) {
+    let types_dump = ignis_analyzer::dump::dump_types(&output.analyzer.types);
+    write_dump_output(config, "dump-types.txt", &types_dump)?;
   }
 
-  let (nodes, roots) = parse_result.unwrap();
-
-  if dump_requested(&config, DumpKind::Ast) {
-    let ast_lisp = format_ast_nodes(nodes.clone(), symbol_table.clone(), &roots);
-    write_dump_output(&config, "dump-ast.txt", &ast_lisp)?;
+  if dump_requested(config, DumpKind::Defs) {
+    let defs_dump = ignis_analyzer::dump::dump_defs(&output.analyzer.defs, &output.analyzer.types, &sym_table);
+    write_dump_output(config, "dump-defs.txt", &defs_dump)?;
   }
 
-  trace_dbg!(&config, DebugTrace::Parser, "produced {} nodes", nodes.len());
-
-  phase_ok!(&config, "{}", "Running analyzer...".bright_cyan().bold());
-
-  let analyzer_result = ignis_analyzer::Analyzer::analyze(&nodes, &roots, symbol_table);
-
-  trace_dbg!(
-    &config,
-    DebugTrace::Analyzer,
-    "emitted {} diagnostics",
-    analyzer_result.diagnostics.len()
-  );
-
-  if !config.quiet {
-    for diag in &analyzer_result.diagnostics {
-      ignis_diagnostics::render(diag, &sm);
-    }
-  }
-
-  let has_errors = analyzer_result
-    .diagnostics
-    .iter()
-    .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
-
-  if has_errors {
-    return Err(());
-  }
-
-  let sym_table = analyzer_result.symbols.borrow();
-
-  if dump_requested(&config, DumpKind::Types) {
-    let types_dump = ignis_analyzer::dump::dump_types(&analyzer_result.types);
-    write_dump_output(&config, "dump-types.txt", &types_dump)?;
-  }
-
-  if dump_requested(&config, DumpKind::Defs) {
-    let defs_dump = ignis_analyzer::dump::dump_defs(&analyzer_result.defs, &analyzer_result.types, &sym_table);
-    write_dump_output(&config, "dump-defs.txt", &defs_dump)?;
-  }
-
-  if dump_requested(&config, DumpKind::HirSummary) {
-    let summary_dump = ignis_analyzer::dump::dump_hir_summary(&analyzer_result.hir, &analyzer_result.defs, &sym_table);
-    write_dump_output(&config, "dump-hir-summary.txt", &summary_dump)?;
+  if dump_requested(config, DumpKind::HirSummary) {
+    let summary_dump = ignis_analyzer::dump::dump_hir_summary(&output.analyzer.hir, &output.analyzer.defs, &sym_table);
+    write_dump_output(config, "dump-hir-summary.txt", &summary_dump)?;
   }
 
   if let Some(build_config) = config.build_config.as_ref() {
     if let Some(func_name) = &build_config.dump_hir {
-      match ignis_analyzer::dump::dump_hir_function(&analyzer_result.hir, &analyzer_result.defs, &sym_table, func_name)
+      match ignis_analyzer::dump::dump_hir_function(&output.analyzer.hir, &output.analyzer.defs, &sym_table, func_name)
       {
-        Ok(output) => {
+        Ok(dump) => {
           let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
-          write_dump_output(&config, &file_name, &output)?;
+          write_dump_output(config, &file_name, &dump)?;
         },
         Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
       }
     }
   }
 
-  if dump_requested(&config, DumpKind::Hir) {
+  if dump_requested(config, DumpKind::Hir) {
     let hir_dump = ignis_analyzer::dump::dump_hir_complete(
-      &analyzer_result.hir,
-      &analyzer_result.types,
-      &analyzer_result.defs,
+      &output.analyzer.hir,
+      &output.analyzer.types,
+      &output.analyzer.defs,
       &sym_table,
     );
-    write_dump_output(&config, "dump-hir.txt", &hir_dump)?;
+    write_dump_output(config, "dump-hir.txt", &hir_dump)?;
   }
+
+  Ok(())
+}
+
+/// Compile a single file (used for simple single-file compilation without imports)
+pub fn compile_file(
+  config: Arc<IgnisConfig>,
+  file_path: &str,
+) -> Result<(), ()> {
+  warn_unsupported_dumps(&config);
+
+  let text = read_file_or_report(file_path)?;
+
+  phase_log!(&config, "Scanning... {}", file_path);
+
+  let output = analyze_text(file_path, text);
+
+  trace_dbg!(&config, DebugTrace::Lexer, "produced {} tokens", output.tokens.len());
+
+  phase_log!(&config, "Parsing... {}", file_path);
+  log_dbg!(&config, "parsing {}", file_path);
+
+  trace_dbg!(&config, DebugTrace::Parser, "produced {} nodes", output.nodes.len());
+
+  phase_ok!(&config, "{}", "Running analyzer...".bright_cyan().bold());
+
+  trace_dbg!(
+    &config,
+    DebugTrace::Analyzer,
+    "emitted {} diagnostics",
+    output.diagnostics.len()
+  );
+
+  render_diagnostics(&output.diagnostics, &output.source_map, config.quiet);
+
+  if output.has_errors {
+    return Err(());
+  }
+
+  write_compile_file_dumps(&config, &output)?;
 
   Ok(())
 }
