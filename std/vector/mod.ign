@@ -1,0 +1,108 @@
+import Option from "std::types";
+import Memory from "std::memory";
+
+export record Vector<T> {
+  data: *mut T;
+  length: u64;
+  capacity: u64;
+
+  public static init(): Vector<T> {
+    return Vector {
+      data: null,
+      length: 0,
+      capacity: 0,
+    };
+  }
+
+  public static init(capacity: u64): Vector<T> {
+    return Vector {
+      data: Memory::allocateVector<T>(capacity),
+      length: 0,
+      capacity: capacity,
+    };
+  }
+
+  public length(): u64 {
+    return self.length;
+  }
+
+  public capacity(): u64 {
+    return self.capacity;
+  }
+
+  public isEmpty(): boolean {
+    return self.length == 0;
+  }
+
+  public clear(&mut self): void {
+    self.length = 0;
+  }
+
+  private grow(&mut self): void {
+    let mut newCapacity: u64 = self.capacity * 2;
+    if (newCapacity == 0) {
+      newCapacity = 1;
+    }
+
+    if (self.data == null) {
+      self.data = Memory::allocateVector<T>(newCapacity);
+    } else {
+      self.data = Memory::reallocateVector<T>(self.data, newCapacity);
+    }
+
+    self.capacity = newCapacity;
+  }
+
+  public push(&mut self, value: T): void {
+    if (self.length == self.capacity) {
+      self.grow();
+    }
+
+    self.data[self.length] = value;
+
+    self.length += 1;
+  }
+
+  public pop(&mut self): Option<T> {
+    if (self.length == 0) {
+      return Option::NONE;
+    } else {
+      self.length -= 1;
+      return Option::SOME(self.data[self.length]);
+    }
+  }
+
+  public get(index: u64): Option<&T> {
+    if (index < self.length) {
+      return Option::SOME(&self.data[index]);
+    } else {
+      return Option::NONE;
+    }
+  }
+
+  public getMut(&mut self, index: u64): Option<&mut T> {
+    if (index < self.length) {
+      return Option::SOME(&mut self.data[index]);
+    } else {
+      return Option::NONE;
+    }
+  }
+
+  public asPtr(): *T {
+    return self.data as *T;
+  }
+
+  public asMutPtr(&mut self): *mut T {
+    return self.data;
+  }
+
+  public free(&mut self): void {
+    if (self.data != null) {
+      Memory::free(self.data);
+      self.data = null;
+    }
+
+    self.length = 0;
+    self.capacity = 0;
+  }
+}

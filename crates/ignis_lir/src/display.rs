@@ -322,6 +322,7 @@ impl<'a> LirPrinter<'a> {
   ) -> String {
     match op {
       Operand::Temp(t) => format!("t{}", t.index()),
+      Operand::Local(l) => format!("l{}", l.index()),
       Operand::Const(c) => self.format_const(c),
       Operand::FuncRef(def) => format!("@{}", self.def_name(*def)),
       Operand::GlobalRef(def) => format!("${}", self.def_name(*def)),
@@ -367,7 +368,13 @@ impl<'a> LirPrinter<'a> {
       Type::Infer => "?".to_string(),
       Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
-      Type::Pointer(inner) => format!("*{}", self.format_type(*inner)),
+      Type::Pointer { inner, mutable } => {
+        if *mutable {
+          format!("*mut {}", self.format_type(*inner))
+        } else {
+          format!("*{}", self.format_type(*inner))
+        }
+      },
       Type::Reference { inner, mutable } => {
         if *mutable {
           format!("&mut {}", self.format_type(*inner))

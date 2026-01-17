@@ -4,7 +4,6 @@
 //! producing `DropSchedules` that tell LIR lowering when to emit drop instructions.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
 use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
@@ -50,9 +49,6 @@ pub struct HirOwnershipChecker<'a> {
   symbols: &'a SymbolTable,
   source_map: Option<&'a SourceMap>,
 
-  /// Paths to suppress FFI leak warnings for (e.g., std library paths)
-  suppress_ffi_warning_paths: Vec<PathBuf>,
-
   /// Current ownership state per variable
   states: HashMap<DefinitionId, OwnershipState>,
 
@@ -85,7 +81,6 @@ impl<'a> HirOwnershipChecker<'a> {
       defs,
       symbols,
       source_map: None,
-      suppress_ffi_warning_paths: Vec::new(),
       states: HashMap::new(),
       scope_stack: Vec::new(),
       branch_snapshots: Vec::new(),
@@ -101,36 +96,6 @@ impl<'a> HirOwnershipChecker<'a> {
   ) -> Self {
     self.source_map = Some(source_map);
     self
-  }
-
-  pub fn suppress_ffi_warnings_for<P: Into<PathBuf>>(
-    mut self,
-    path: P,
-  ) -> Self {
-    let path = path.into();
-    let canonical = path.canonicalize().unwrap_or(path);
-    self.suppress_ffi_warning_paths.push(canonical);
-    self
-  }
-
-  fn should_suppress_ffi_warning(
-    &self,
-    span: &Span,
-  ) -> bool {
-    let Some(source_map) = self.source_map else {
-      return false;
-    };
-
-    let file = source_map.get(&span.file);
-    let file_path = &file.path;
-
-    for suppress_path in &self.suppress_ffi_warning_paths {
-      if file_path.starts_with(suppress_path) {
-        return true;
-      }
-    }
-
-    false
   }
 
   /// Run ownership check on all functions, returns schedules and diagnostics.
@@ -305,7 +270,7 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_node(index);
 
         let base_node = self.hir.get(base);
-        if matches!(self.types.get(&base_node.type_id), ignis_type::types::Type::Pointer(_)) {
+        if matches!(self.types.get(&base_node.type_id), ignis_type::types::Type::Pointer { .. }) {
           self.check_use_after_free(base, span);
         }
       },
@@ -421,7 +386,7 @@ impl<'a> HirOwnershipChecker<'a> {
       },
       HIRKind::Index { base, .. } => {
         let base_node = self.hir.get(*base);
-        if matches!(self.types.get(&base_node.type_id), ignis_type::types::Type::Pointer(_)) {
+        if matches!(self.types.get(&base_node.type_id), ignis_type::types::Type::Pointer { .. }) {
           self.check_use_after_free(*base, span);
         }
       },
@@ -584,18 +549,20 @@ impl<'a> HirOwnershipChecker<'a> {
         let arg_ty = self.defs.type_of(&arg_def);
 
         if self.types.is_owned(arg_ty) && !self.types.is_copy(arg_ty) {
-          if is_extern && !self.should_suppress_ffi_warning(&span) {
-            let var_name = self.get_var_name(&arg_def);
-            self.diagnostics.push(
-              DiagnosticMessage::PossibleLeakToFFI {
-                var_name,
-                span: span.clone(),
-              }
-              .report(),
-            );
+          // FFI Ownership Semantics:
+          // - Ignis functions: consume ownership (caller must not use value after call)
+          // - Extern functions: do NOT consume ownership (caller retains responsibility)
+          //
+          // This means when passing owned values to extern functions:
+          // 1. The Ignis caller must ensure proper cleanup if needed
+          // 2. The extern function should not free/deallocate the value
+          // 3. Standard library functions (std::*) typically handle this correctly
+          //
+          // Note: A future lint could warn about potential leaks when passing owned
+          // values to non-std extern functions, but this was removed to reduce noise.
+          if !is_extern {
+            self.try_consume(arg_def, span.clone());
           }
-
-          self.try_consume(arg_def, span.clone());
         }
       }
     }
@@ -613,7 +580,7 @@ impl<'a> HirOwnershipChecker<'a> {
     match &node.kind {
       HIRKind::Variable(def_id) => {
         let ty = self.defs.type_of(def_id);
-        if matches!(self.types.get(ty), ignis_type::types::Type::Pointer(_)) {
+        if matches!(self.types.get(ty), ignis_type::types::Type::Pointer { .. }) {
           Some(*def_id)
         } else {
           None

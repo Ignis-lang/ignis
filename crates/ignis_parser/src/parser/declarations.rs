@@ -478,6 +478,7 @@ impl super::IgnisParser {
 
   /// Method declaration (without 'function' keyword)
   /// name<U>(params): returnType { body }
+  /// Instance methods can have `&self` or `&mut self` as first parameter.
   fn parse_method(
     &mut self,
     modifiers: ASTMetadata,
@@ -488,10 +489,31 @@ impl super::IgnisParser {
     // Parse optional generic parameters: <U, V>
     let type_params = self.parse_optional_generic_params()?;
 
-    let parameters =
-      self.parse_delimited_list(TokenType::LeftParen, TokenType::RightParen, TokenType::Comma, |parser| {
-        parser.parse_parameter()
-      })?;
+    self.expect(TokenType::LeftParen)?;
+
+    let is_static = modifiers.contains(ASTMetadata::STATIC);
+
+    // Check for &self or &mut self as first parameter (only for instance methods)
+    // Note: We skip parsing self_param for static methods to prevent accepting
+    // invalid syntax like `static method(&self) {}`. This provides better error
+    // messages by failing earlier (during parse) rather than later (during analysis).
+    let self_param = if !is_static { self.try_parse_self_param() } else { None };
+
+    // If we parsed self and there are more params, consume the comma
+    if self_param.is_some() && self.at(TokenType::Comma) {
+      self.bump();
+    }
+
+    // Parse remaining parameters
+    let mut parameters = Vec::new();
+    while !self.at(TokenType::RightParen) && !self.at(TokenType::Eof) {
+      parameters.push(self.parse_parameter()?);
+      if !self.eat(TokenType::Comma) {
+        break;
+      }
+    }
+
+    self.expect(TokenType::RightParen)?;
 
     // Optional return type: : Type
     let return_type = if self.eat(TokenType::Colon) {
@@ -511,8 +533,41 @@ impl super::IgnisParser {
       return_type,
       body,
       modifiers,
+      self_param,
       span,
     ))
+  }
+
+  /// Try to parse `&self` or `&mut self` as first parameter of method.
+  /// Returns Some(true) for &mut self, Some(false) for &self, None otherwise.
+  fn try_parse_self_param(&mut self) -> Option<bool> {
+    // Check for & followed by (mut)? self
+    if !self.at(TokenType::Ampersand) {
+      return None;
+    }
+
+    // Peek ahead to check for self pattern
+    let mut lookahead = 1;
+    let mutable = if self.peek_nth(lookahead).type_ == TokenType::Mut {
+      lookahead += 1;
+      true
+    } else {
+      false
+    };
+
+    // Check if next token is 'self' keyword
+    let next = self.peek_nth(lookahead);
+    if next.type_ == TokenType::Self_ {
+      // Consume the tokens: & (mut)? self
+      self.bump(); // &
+      if mutable {
+        self.bump(); // mut
+      }
+      self.bump(); // self
+      Some(mutable)
+    } else {
+      None
+    }
   }
 
   /// Field declaration: name: type (= expr)?;

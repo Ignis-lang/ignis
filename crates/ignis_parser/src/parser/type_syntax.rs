@@ -60,7 +60,10 @@ impl super::IgnisParser {
         mutable,
       })
     } else if ptr {
-      Ok(IgnisTypeSyntax::Pointer(Box::new(base)))
+      Ok(IgnisTypeSyntax::Pointer {
+        inner: Box::new(base),
+        mutable,
+      })
     } else {
       Ok(base)
     }
@@ -347,10 +350,23 @@ mod tests {
   fn parses_pointer_type() {
     let ty = parse_type("*i32");
     match ty {
-      IgnisTypeSyntax::Pointer(inner) => {
+      IgnisTypeSyntax::Pointer { inner, mutable } => {
         assert_eq!(*inner, IgnisTypeSyntax::I32);
+        assert!(!mutable);
       },
       other => panic!("expected pointer, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_mutable_pointer_type() {
+    let ty = parse_type("*mut i32");
+    match ty {
+      IgnisTypeSyntax::Pointer { inner, mutable } => {
+        assert_eq!(*inner, IgnisTypeSyntax::I32);
+        assert!(mutable);
+      },
+      other => panic!("expected mutable pointer, got {:?}", other),
     }
   }
 
@@ -426,8 +442,9 @@ mod tests {
       IgnisTypeSyntax::Applied { args, .. } => {
         assert_eq!(args.len(), 1);
         match &args[0] {
-          IgnisTypeSyntax::Pointer(inner) => {
+          IgnisTypeSyntax::Pointer { inner, mutable } => {
             assert_eq!(**inner, IgnisTypeSyntax::I32);
+            assert!(!*mutable);
           },
           other => panic!("expected pointer, got {:?}", other),
         }
@@ -491,11 +508,14 @@ mod tests {
   fn parses_pointer_to_applied_type() {
     let ty = parse_type("*Box<i32>");
     match ty {
-      IgnisTypeSyntax::Pointer(inner) => match *inner {
-        IgnisTypeSyntax::Applied { args, .. } => {
-          assert_eq!(args.len(), 1);
-        },
-        other => panic!("expected applied type inside pointer, got {:?}", other),
+      IgnisTypeSyntax::Pointer { inner, mutable } => {
+        assert!(!mutable);
+        match *inner {
+          IgnisTypeSyntax::Applied { args, .. } => {
+            assert_eq!(args.len(), 1);
+          },
+          other => panic!("expected applied type inside pointer, got {:?}", other),
+        }
       },
       other => panic!("expected pointer, got {:?}", other),
     }

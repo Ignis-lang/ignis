@@ -1043,8 +1043,13 @@ impl DisplayLisp for IgnisTypeSyntax {
         }
       },
 
-      IgnisTypeSyntax::Pointer(inner) => {
-        format!("(*{})", inner.to_lisp(formatter))
+      IgnisTypeSyntax::Pointer { inner, mutable } => {
+        let inner_str = inner.to_lisp(formatter);
+        if *mutable {
+          format!("(*mut {})", inner_str)
+        } else {
+          format!("(*{})", inner_str)
+        }
       },
 
       IgnisTypeSyntax::Reference { inner, mutable } => {

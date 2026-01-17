@@ -21,7 +21,10 @@ pub enum IgnisTypeSyntax {
   Vector(Box<IgnisTypeSyntax>, Option<usize>),
   Tuple(Vec<IgnisTypeSyntax>),
   Callable(Vec<IgnisTypeSyntax>, Box<IgnisTypeSyntax>),
-  Pointer(Box<IgnisTypeSyntax>),
+  Pointer {
+    inner: Box<IgnisTypeSyntax>,
+    mutable: bool,
+  },
   Reference {
     inner: Box<IgnisTypeSyntax>,
     mutable: bool,

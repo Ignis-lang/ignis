@@ -207,6 +207,11 @@ pub enum DiagnosticMessage {
     var_name: String,
     span: Span,
   },
+  MutatingMethodOnImmutable {
+    method: String,
+    var_name: String,
+    span: Span,
+  },
   InvalidCast {
     from: String,
     to: String,
@@ -641,6 +646,13 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::MutableReferenceToImmutable { var_name, .. } => {
         write!(f, "Cannot create mutable reference to immutable variable '{}'", var_name)
       },
+      DiagnosticMessage::MutatingMethodOnImmutable { method, var_name, .. } => {
+        write!(
+          f,
+          "Cannot call mutating method '{}' on immutable variable '{}'",
+          method, var_name
+        )
+      },
       DiagnosticMessage::InvalidCast { from, to, .. } => {
         write!(f, "Cannot cast from '{}' to '{}'", from, to)
       },
@@ -1023,6 +1035,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::MissingFieldInit { span, .. }
       | DiagnosticMessage::ImmutableAssignment { span, .. }
       | DiagnosticMessage::MutableReferenceToImmutable { span, .. }
+      | DiagnosticMessage::MutatingMethodOnImmutable { span, .. }
       | DiagnosticMessage::InvalidCast { span, .. }
       | DiagnosticMessage::PrecisionLossCast { span, .. }
       | DiagnosticMessage::ArgumentCountMismatch { span, .. }
@@ -1157,6 +1170,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ExpectedBinary(_) => "I0047",
       DiagnosticMessage::ImmutableAssignment { .. } => "A0013",
       DiagnosticMessage::MutableReferenceToImmutable { .. } => "A0014",
+      DiagnosticMessage::MutatingMethodOnImmutable { .. } => "A0076",
       DiagnosticMessage::InvalidCast { .. } => "A0015",
       DiagnosticMessage::PrecisionLossCast { .. } => "A0016",
       DiagnosticMessage::ArgumentCountMismatch { .. } => "A0017",

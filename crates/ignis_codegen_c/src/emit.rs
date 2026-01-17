@@ -117,17 +117,32 @@ impl<'a> CEmitter<'a> {
     match &self.target {
       Some(target) => {
         let kind = self.classify(def_id);
-        if !target.should_emit_def(&kind) {
+
+        // For UserModule target, emit:
+        // 1. User definitions from this module
+        // 2. Monomorphized instantiations of std types (detected by mangled names)
+        if let Some(target_module_id) = target.target_user_module() {
+          let def = self.defs.get(&def_id);
+
+          // Check if it's a user definition from this module
+          if kind.is_user() && def.owner_module == target_module_id {
+            return true;
+          }
+
+          // Check if it's a monomorphized std type (Record, Enum, or Method with mangled name)
+          // Mangled names contain __ followed by type info (e.g., Vector__i32, Option__i32)
+          if kind.is_std() {
+            let name = self.symbols.get(&def.name);
+            // Pattern: TypeName__SomeType or TypeName__TypeName__method
+            if name.contains("__") && !name.starts_with("__") {
+              return true;
+            }
+          }
+
           return false;
         }
 
-        // For UserModule target, also check the owner_module matches
-        if let Some(target_module_id) = target.target_user_module() {
-          let def = self.defs.get(&def_id);
-          return def.owner_module == target_module_id;
-        }
-
-        true
+        target.should_emit_def(&kind)
       },
       None => true, // Legacy mode: emit everything
     }
@@ -194,9 +209,20 @@ impl<'a> CEmitter<'a> {
         if !self.should_emit(*def_id) {
           return false;
         }
+
         match &def.kind {
-          DefinitionKind::Record(rd) => rd.type_params.is_empty(),
-          DefinitionKind::Enum(ed) => ed.type_params.is_empty(),
+          DefinitionKind::Record(rd) => {
+            // Skip generic records and records with unresolved types in fields
+            rd.type_params.is_empty() && rd.fields.iter().all(|f| self.is_fully_monomorphized(f.type_id))
+          },
+          DefinitionKind::Enum(ed) => {
+            // Skip generic enums and enums with unresolved types in payloads
+            ed.type_params.is_empty()
+              && ed
+                .variants
+                .iter()
+                .all(|v| v.payload.iter().all(|&ty| self.is_fully_monomorphized(ty)))
+          },
           _ => false,
         }
       })
@@ -212,21 +238,53 @@ impl<'a> CEmitter<'a> {
     for (def_id, def) in type_defs {
       match &def.kind {
         DefinitionKind::Record(rd) => {
-          // Skip generic records - they should have been monomorphized
-          if rd.type_params.is_empty() {
-            self.emit_record_definition(def_id, rd);
-          }
+          self.emit_record_definition(def_id, rd);
         },
         DefinitionKind::Enum(ed) => {
-          // Skip generic enums - they should have been monomorphized
-          if ed.type_params.is_empty() {
-            self.emit_enum_definition(def_id, ed);
-          }
+          self.emit_enum_definition(def_id, ed);
         },
         _ => {},
       }
     }
     writeln!(self.output).unwrap();
+  }
+
+  /// Check if a type is fully monomorphized (no Type::Param or Type::Instance).
+  fn is_fully_monomorphized(
+    &self,
+    type_id: TypeId,
+  ) -> bool {
+    match self.types.get(&type_id) {
+      Type::Param { .. } | Type::Instance { .. } | Type::Infer => false,
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } => self.is_fully_monomorphized(*inner),
+      Type::Vector { element, .. } => self.is_fully_monomorphized(*element),
+      Type::Function { params, ret, .. } => {
+        params.iter().all(|&p| self.is_fully_monomorphized(p)) && self.is_fully_monomorphized(*ret)
+      },
+      _ => true,
+    }
+  }
+
+  /// Check if a function's signature is fully monomorphized.
+  /// Returns false if any parameter type or return type contains Type::Param/Instance.
+  fn is_function_signature_monomorphized(
+    &self,
+    func: &FunctionLir,
+  ) -> bool {
+    // Check return type
+    if !self.is_fully_monomorphized(func.return_type) {
+      return false;
+    }
+
+    // Check all parameter types
+    for &param_def_id in &func.params {
+      let param_type = *self.defs.type_of(&param_def_id);
+      if !self.is_fully_monomorphized(param_type) {
+        return false;
+      }
+    }
+
+    true
   }
 
   /// Emit a struct definition for a record type.
@@ -432,17 +490,39 @@ impl<'a> CEmitter<'a> {
     let mut funcs: Vec<_> = self.program.functions.iter().collect();
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
+    if std::env::var("IGNIS_VERBOSE").is_ok() {
+      eprintln!("[EMIT] emit_forward_declarations: {} functions in LIR", funcs.len());
+      for (def_id, _) in &funcs {
+        let name = self.def_name(**def_id);
+        if name.contains("init") || name.contains("Vector") {
+          eprintln!("[EMIT]   - {} (should_emit={})", name, self.should_emit(**def_id));
+        }
+      }
+    }
+
     // Only emit forward declarations for non-extern functions that match the target.
     // Extern functions are declared separately via emit_extern_declarations().
+    // Skip functions with unmonomorphized signatures (generic functions that weren't instantiated).
     let mut emitted_any = false;
     for (def_id, func) in &funcs {
       if func.is_extern {
         continue;
       }
+
       // Filter by target
       if !self.should_emit(**def_id) {
         continue;
       }
+
+      // Skip functions with Type::Param or Type::Instance in their signature
+      if !self.is_function_signature_monomorphized(func) {
+        if std::env::var("IGNIS_VERBOSE").is_ok() {
+          let name = self.def_name(**def_id);
+          eprintln!("[EMIT] Skipping forward decl for {} - signature not monomorphized", name);
+        }
+        continue;
+      }
+
       self.emit_function_signature(**def_id, func);
       writeln!(self.output, ";").unwrap();
       emitted_any = true;
@@ -461,10 +541,17 @@ impl<'a> CEmitter<'a> {
       if func.is_extern {
         continue;
       }
+
       // Filter by target
       if !self.should_emit(*def_id) {
         continue;
       }
+
+      // Skip functions with Type::Param or Type::Instance in their signature
+      if !self.is_function_signature_monomorphized(func) {
+        continue;
+      }
+
       self.emit_function(*def_id, func);
     }
   }
@@ -764,7 +851,7 @@ impl<'a> CEmitter<'a> {
         let b = self.format_operand(func, base);
         // Check if base is a pointer type
         let is_pointer = if let Some(base_ty) = self.operand_type(func, base) {
-          matches!(self.types.get(&base_ty), Type::Pointer(_) | Type::Reference { .. })
+          matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. })
         } else {
           false
         };
@@ -866,6 +953,7 @@ impl<'a> CEmitter<'a> {
           format!("t{}", idx)
         }
       },
+      Operand::Local(l) => format!("l{}", l.index()),
       Operand::Const(c) => self.format_const(c),
       Operand::FuncRef(def) => self.def_name(*def),
       Operand::GlobalRef(def) => self.def_name(*def),
@@ -879,6 +967,7 @@ impl<'a> CEmitter<'a> {
   ) -> Option<TypeId> {
     match op {
       Operand::Temp(t) => Some(func.temp_type(*t)),
+      Operand::Local(l) => Some(func.locals.get(l).ty),
       Operand::Const(c) => Some(c.type_id()),
       Operand::FuncRef(_) | Operand::GlobalRef(_) => None,
     }
@@ -890,7 +979,7 @@ impl<'a> CEmitter<'a> {
   ) -> bool {
     match self.types.get(&ty) {
       Type::Infer => true,
-      Type::Reference { inner, .. } | Type::Pointer(inner) => self.type_contains_infer(*inner),
+      Type::Reference { inner, .. } | Type::Pointer { inner, .. } => self.type_contains_infer(*inner),
       _ => false,
     }
   }
@@ -969,8 +1058,8 @@ impl<'a> CEmitter<'a> {
     let right_ty = self.operand_type(func, right);
     let dest_ty = func.temp_type(dest);
 
-    let is_left_ptr = left_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer(_)));
-    let is_right_ptr = right_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer(_)));
+    let is_left_ptr = left_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer { .. }));
+    let is_right_ptr = right_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer { .. }));
     let is_right_i64 = right_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::I64));
 
     let l = self.format_operand(func, left);
@@ -1051,7 +1140,7 @@ impl<'a> CEmitter<'a> {
       Type::Never => "void".to_string(),
       Type::NullPtr => "void*".to_string(),
       Type::Error => "/* error */ void*".to_string(),
-      Type::Pointer(inner) => format!("{}*", self.format_type(*inner)),
+      Type::Pointer { inner, .. } => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
       Type::Vector { element, size } => {
         if size.is_some() {
@@ -1286,7 +1375,7 @@ impl<'a> CEmitter<'a> {
       Type::F64 => "f64".to_string(),
       Type::Boolean => "bool".to_string(),
       Type::String => "str".to_string(),
-      Type::Pointer(inner) => format!("ptr_{}", self.format_type_for_mangling(inner)),
+      Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: true } => format!("mutref_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: false } => format!("ref_{}", self.format_type_for_mangling(inner)),
       Type::Record(def_id) => {
@@ -1531,7 +1620,18 @@ fn emit_func_prototype(
       fd.is_variadic,
       fd.type_params.is_empty(),
     ),
-    DefinitionKind::Method(md) => (&md.params, &md.return_type, false, false, true),
+    DefinitionKind::Method(md) => {
+      // Skip methods of generic owners - they can't be emitted without instantiation
+      let owner_is_generic = match &defs.get(&md.owner_type).kind {
+        DefinitionKind::Record(rd) => !rd.type_params.is_empty(),
+        DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
+        _ => false,
+      };
+      if owner_is_generic {
+        return None;
+      }
+      (&md.params, &md.return_type, false, false, md.type_params.is_empty())
+    },
     _ => return None,
   };
 
@@ -1740,7 +1840,7 @@ fn format_type_for_mangling_standalone(
     Type::Char => "char".to_string(),
     Type::String => "str".to_string(),
     Type::Void => "void".to_string(),
-    Type::Pointer(inner) => format!("ptr_{}", format_type_for_mangling_standalone(inner, types)),
+    Type::Pointer { inner, .. } => format!("ptr_{}", format_type_for_mangling_standalone(inner, types)),
     Type::Reference { inner, mutable: true } => {
       format!("mutref_{}", format_type_for_mangling_standalone(inner, types))
     },
@@ -1803,7 +1903,7 @@ pub fn format_c_type(
     Type::Never => "void".to_string(),
     Type::NullPtr => "void*".to_string(),
     Type::Error => "void*".to_string(),
-    Type::Pointer(inner) => format!("{}*", format_c_type(types.get(inner), types)),
+    Type::Pointer { inner, .. } => format!("{}*", format_c_type(types.get(inner), types)),
     Type::Reference { inner, .. } => format!("{}*", format_c_type(types.get(inner), types)),
     Type::Vector { element, size } => {
       if size.is_some() {

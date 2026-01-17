@@ -318,6 +318,16 @@ impl<'a> LirVerifier<'a> {
               });
             } else if let Some(val_ty) = self.operand_type(func, val) {
               if val_ty != ret_ty {
+                if std::env::var("IGNIS_VERBOSE").is_ok() {
+                  eprintln!(
+                    "[LIR_VERIFY] ReturnTypeMismatch in {}: expected {:?} = {:?}, actual {:?} = {:?}",
+                    func_name,
+                    ret_ty,
+                    self.types.get(&ret_ty),
+                    val_ty,
+                    self.types.get(&val_ty)
+                  );
+                }
                 self.errors.push(VerifyError::ReturnTypeMismatch {
                   function: func_name.to_string(),
                   block: block_name.to_string(),
@@ -360,6 +370,16 @@ impl<'a> LirVerifier<'a> {
             function: func_name.to_string(),
             block: block_name.to_string(),
             temp: *temp,
+          });
+        }
+      },
+      Operand::Local(local) => {
+        // Verify local exists
+        if local.index() >= func.locals.len() as u32 {
+          self.errors.push(VerifyError::InvalidLocalRef {
+            function: func_name.to_string(),
+            block: block_name.to_string(),
+            local: *local,
           });
         }
       },
@@ -426,6 +446,13 @@ impl<'a> LirVerifier<'a> {
       Operand::Temp(temp) => {
         if temp.index() < func.temps.get_all().len() as u32 {
           Some(func.temp_type(*temp))
+        } else {
+          None
+        }
+      },
+      Operand::Local(local) => {
+        if local.index() < func.locals.len() as u32 {
+          Some(func.locals.get(local).ty)
         } else {
           None
         }

@@ -75,6 +75,7 @@ impl ASTRecordField {
 ///
 /// Syntax: `name<U>(params): returnType { body }`
 /// Static: `static name<U>(params): returnType { body }`
+/// Instance methods can have `&self` or `&mut self` as first parameter.
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTMethod {
   pub name: SymbolId,
@@ -83,6 +84,9 @@ pub struct ASTMethod {
   pub return_type: IgnisTypeSyntax,
   pub body: NodeId,
   pub metadata: ASTMetadata,
+  /// Whether the method has `&mut self` (true) or `&self` (false) or no self (None).
+  /// None means static method or instance method without explicit self.
+  pub self_param: Option<bool>,
   pub span: Span,
 }
 
@@ -94,6 +98,7 @@ impl ASTMethod {
     return_type: IgnisTypeSyntax,
     body: NodeId,
     metadata: ASTMetadata,
+    self_param: Option<bool>,
     span: Span,
   ) -> Self {
     Self {
@@ -103,11 +108,22 @@ impl ASTMethod {
       return_type,
       body,
       metadata,
+      self_param,
       span,
     }
   }
 
   pub fn is_static(&self) -> bool {
     self.metadata.contains(ASTMetadata::STATIC)
+  }
+
+  /// Returns true if method has `&mut self`
+  pub fn has_mut_self(&self) -> bool {
+    self.self_param == Some(true)
+  }
+
+  /// Returns true if method has `&self` (immutable)
+  pub fn has_self(&self) -> bool {
+    self.self_param.is_some()
   }
 }

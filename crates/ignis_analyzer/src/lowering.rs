@@ -4,7 +4,7 @@ use ignis_ast::expressions::binary::ASTBinaryOperator;
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
 use ignis_ast::expressions::member_access::ASTAccessOp;
 use ignis_ast::expressions::unary::UnaryOperator;
-use ignis_ast::statements::record::{ASTRecord, ASTRecordItem};
+use ignis_ast::statements::record::{ASTMethod, ASTRecord, ASTRecordItem};
 use ignis_ast::statements::enum_::{ASTEnum, ASTEnumItem};
 use ignis_ast::statements::for_of::ASTForOf;
 use ignis_hir::{
@@ -115,6 +115,8 @@ impl<'a> Analyzer<'a> {
         };
 
         if let Some(body_id) = func.body {
+          // First, add type params to scope so type resolution works
+          self.enter_type_params_scope_for_function(&def_id);
           self.scopes.push(ScopeKind::Function);
 
           if let Some(def_id_val) = self.lookup_def(node_id).cloned() {
@@ -122,7 +124,9 @@ impl<'a> Analyzer<'a> {
           }
 
           let body_hir_id = self.lower_node_to_hir(&body_id, hir, ScopeKind::Function);
+
           self.scopes.pop();
+          self.exit_type_params_scope_for_function(&def_id);
           hir.function_bodies.insert(def_id, body_hir_id);
         }
 
@@ -375,6 +379,50 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Find the matching method definition for an AST method from a SymbolEntry.
+  ///
+  /// For `SymbolEntry::Single`, returns the single definition.
+  /// For `SymbolEntry::Overload`, matches by parameter count first, then by span if needed.
+  fn find_method_def_for_ast_method(
+    &self,
+    entry: &SymbolEntry,
+    ast_method: &ASTMethod,
+  ) -> Option<DefinitionId> {
+    match entry {
+      SymbolEntry::Single(def_id) => Some(*def_id),
+
+      SymbolEntry::Overload(group) => {
+        let ast_param_count = ast_method.parameters.len();
+
+        // First pass: find candidates with matching parameter count
+        let mut candidates: Vec<DefinitionId> = Vec::new();
+        for &def_id in group {
+          let def = self.defs.get(&def_id);
+          if let DefinitionKind::Method(md) = &def.kind {
+            if md.params.len() == ast_param_count {
+              candidates.push(def_id);
+            }
+          }
+        }
+
+        match candidates.len() {
+          0 => None,
+          1 => Some(candidates[0]),
+          _ => {
+            // Multiple candidates with same param count - match by span
+            for def_id in candidates {
+              let def = self.defs.get(&def_id);
+              if def.span == ast_method.span {
+                return Some(def_id);
+              }
+            }
+            None
+          },
+        }
+      },
+    }
+  }
+
   /// Lower record methods to HIR.
   /// Iterates through all methods in the record and lowers their bodies.
   fn lower_record_methods(
@@ -398,15 +446,14 @@ impl<'a> Analyzer<'a> {
             continue;
           };
 
-          // Look up method in instance_methods or static_methods
-          if method.is_static() {
-            rd.static_methods.get(&method.name).and_then(|e| e.as_single()).cloned()
+          // Look up method entry (may be Single or Overload)
+          let entry = if method.is_static() {
+            rd.static_methods.get(&method.name)
           } else {
-            rd.instance_methods
-              .get(&method.name)
-              .and_then(|e| e.as_single())
-              .cloned()
-          }
+            rd.instance_methods.get(&method.name)
+          };
+
+          entry.and_then(|e| self.find_method_def_for_ast_method(e, method))
         };
 
         let Some(method_def_id) = method_def_id else {
@@ -414,11 +461,15 @@ impl<'a> Analyzer<'a> {
         };
 
         // Lower the method body
+        // First, add owner/method type params to scope so type resolution works
+        self.enter_type_params_scope_for_method(&method_def_id);
         self.scopes.push(ScopeKind::Function);
         self.define_function_params_in_scope(&method_def_id);
 
         let body_hir_id = self.lower_node_to_hir(&method.body, hir, ScopeKind::Function);
+
         self.scopes.pop();
+        self.exit_type_params_scope_for_method(&method_def_id);
 
         // Register the method body
         hir.function_bodies.insert(method_def_id, body_hir_id);
@@ -460,8 +511,10 @@ impl<'a> Analyzer<'a> {
             continue;
           };
 
-          // Enum methods are always static
-          ed.static_methods.get(&method.name).and_then(|e| e.as_single()).cloned()
+          // Look up method entry (may be Single or Overload)
+          ed.static_methods
+            .get(&method.name)
+            .and_then(|e| self.find_method_def_for_ast_method(e, method))
         };
 
         let Some(method_def_id) = method_def_id else {
@@ -469,11 +522,15 @@ impl<'a> Analyzer<'a> {
         };
 
         // Lower the method body
+        // First, add owner/method type params to scope so type resolution works
+        self.enter_type_params_scope_for_method(&method_def_id);
         self.scopes.push(ScopeKind::Function);
         self.define_function_params_in_scope(&method_def_id);
 
         let body_hir_id = self.lower_node_to_hir(&method.body, hir, ScopeKind::Function);
+
         self.scopes.pop();
+        self.exit_type_params_scope_for_method(&method_def_id);
 
         // Register the method body
         hir.function_bodies.insert(method_def_id, body_hir_id);
@@ -539,7 +596,13 @@ impl<'a> Analyzer<'a> {
             });
           },
         };
-        let var_type = self.type_of(&def_id).clone();
+
+        // Handle type parameters specially - they don't have a type_of in the usual sense
+        // but they are used in expressions like sizeOf(T)
+        let var_type = match &self.defs.get(&def_id).kind {
+          DefinitionKind::TypeParam(tp) => self.types.param(tp.owner, tp.index),
+          _ => self.type_of(&def_id).clone(),
+        };
 
         let hir_node = HIRNode {
           kind: HIRKind::Variable(def_id),
@@ -552,6 +615,21 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Call(call) => {
         // Check for builtins BEFORE normal scope lookup
         let callee_node = self.ast.get(&call.callee);
+
+        if std::env::var("IGNIS_VERBOSE").is_ok() {
+          let callee_type = match callee_node {
+            ASTNode::Expression(ASTExpression::Variable(_)) => "Variable",
+            ASTNode::Expression(ASTExpression::MemberAccess(_)) => "MemberAccess",
+            ASTNode::Expression(ASTExpression::Path(_)) => "Path",
+            _ => "Other",
+          };
+          eprintln!(
+            "[LOWER] Call expression: callee_type={}, call.type_args={:?}",
+            callee_type,
+            call.type_args.as_ref().map(|v| v.len())
+          );
+        }
+
         if let ASTNode::Expression(ASTExpression::Variable(var)) = callee_node {
           let name = self.symbols.borrow().get(&var.name).to_string();
 
@@ -788,7 +866,7 @@ impl<'a> Analyzer<'a> {
           .unwrap_or_else(|| self.types.error());
 
         let deref_type = match self.types.get(&expr_type).clone() {
-          ignis_type::types::Type::Pointer(inner) => inner,
+          ignis_type::types::Type::Pointer { inner, .. } => inner,
           ignis_type::types::Type::Reference { inner, .. } => inner,
           _ => self.types.error(),
         };
@@ -809,10 +887,10 @@ impl<'a> Analyzer<'a> {
           .cloned()
           .unwrap_or_else(|| self.types.error());
 
-        let elem_type = if let ignis_type::types::Type::Vector { element, .. } = self.types.get(&base_type).clone() {
-          element
-        } else {
-          self.types.error()
+        let elem_type = match self.types.get(&base_type).clone() {
+          ignis_type::types::Type::Vector { element, .. } => element,
+          ignis_type::types::Type::Pointer { inner, .. } => inner,
+          _ => self.types.error(),
         };
 
         let hir_node = HIRNode {
@@ -1456,102 +1534,90 @@ impl<'a> Analyzer<'a> {
     let base = self.lower_node_to_hir(&ma.object, hir, scope_kind);
     let base_type = hir.get(base).type_id;
 
-    // For instance methods, self is passed by reference.
-    // If base is already a reference, use it directly.
-    // If base is a value, take a reference to it.
-    let (receiver_hir, receiver_record_type) = if let Type::Reference { inner, .. } = self.types.get(&base_type).clone()
-    {
-      // Already a reference, use as-is
-      (base, inner)
-    } else {
-      // Value type - we need to take a reference to it
-      // Create a reference node
-      let ref_type = self.types.reference(base_type, false);
-      let ref_node = hir.alloc(HIRNode {
-        kind: HIRKind::Reference {
-          expression: base,
-          mutable: false,
-        },
-        span: ma.span.clone(),
-        type_id: ref_type,
-      });
-      (ref_node, base_type)
-    };
+    // Determine the underlying record type (strip reference if present)
+    let (is_already_ref, receiver_record_type) =
+      if let Type::Reference { inner, .. } = self.types.get(&base_type).clone() {
+        (true, inner)
+      } else {
+        (false, base_type)
+      };
 
-    match self.types.get(&receiver_record_type).clone() {
+    // Look up the method to determine if it requires &mut self
+    let method_info: Option<(DefinitionId, bool)> = match self.types.get(&receiver_record_type).clone() {
       Type::Record(def_id) | Type::Instance { generic: def_id, .. } => {
-        let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
-          rd.clone()
-        } else {
+        let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind else {
           return hir.alloc(HIRNode {
             kind: HIRKind::Error,
             span: call.span.clone(),
             type_id: self.types.error(),
           });
         };
+        let rd = rd.clone();
 
+        // First check lookup_resolved_call (for overloaded methods)
         if let Some(method_id) = self.lookup_resolved_call(node_id).cloned() {
-          if matches!(self.defs.get(&method_id).kind, DefinitionKind::Method(_)) {
-            let args_hir: Vec<HIRId> = call
-              .arguments
-              .iter()
-              .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
-              .collect();
-
-            let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
-
-            return hir.alloc(HIRNode {
-              kind: HIRKind::MethodCall {
-                receiver: Some(receiver_hir),
-                method: method_id,
-                type_args,
-                args: args_hir,
-              },
-              span: call.span.clone(),
-              type_id: result_type,
-            });
+          if let DefinitionKind::Method(md) = &self.defs.get(&method_id).kind {
+            Some((method_id, md.self_mutable))
+          } else {
+            None
           }
+        } else if let Some(method_id) = rd.instance_methods.get(&ma.member).and_then(|e| e.as_single()) {
+          // Fallback to instance_methods lookup
+          if let DefinitionKind::Method(md) = &self.defs.get(method_id).kind {
+            Some((*method_id, md.self_mutable))
+          } else {
+            None
+          }
+        } else {
+          None
         }
-
-        // Look up instance method
-        if let Some(method_id) = rd.instance_methods.get(&ma.member).and_then(|e| e.as_single()) {
-          let args_hir: Vec<HIRId> = call
-            .arguments
-            .iter()
-            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
-            .collect();
-
-          // Resolve type arguments: explicit first, then infer if needed
-          let type_args = self.resolve_or_infer_method_type_args(method_id, call, &args_hir, hir);
-
-          return hir.alloc(HIRNode {
-            kind: HIRKind::MethodCall {
-              receiver: Some(receiver_hir),
-              method: *method_id,
-              type_args,
-              args: args_hir,
-            },
-            span: call.span.clone(),
-            type_id: result_type,
-          });
-        }
-
-        // Method not found - error
-        hir.alloc(HIRNode {
-          kind: HIRKind::Error,
-          span: call.span.clone(),
-          type_id: self.types.error(),
-        })
       },
-      _ => {
-        // Not a record - error
-        hir.alloc(HIRNode {
-          kind: HIRKind::Error,
-          span: call.span.clone(),
-          type_id: self.types.error(),
-        })
+      _ => None,
+    };
+
+    let Some((method_id, self_mutable)) = method_info else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    // Create the receiver with appropriate mutability.
+    // If base is already a reference, use it directly.
+    // If base is a value, take a reference to it (mutable if method requires &mut self).
+    let receiver_hir = if is_already_ref {
+      base
+    } else {
+      let ref_type = self.types.reference(base_type, self_mutable);
+      hir.alloc(HIRNode {
+        kind: HIRKind::Reference {
+          expression: base,
+          mutable: self_mutable,
+        },
+        span: ma.span.clone(),
+        type_id: ref_type,
+      })
+    };
+
+    let args_hir: Vec<HIRId> = call
+      .arguments
+      .iter()
+      .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+      .collect();
+
+    let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::MethodCall {
+        receiver: Some(receiver_hir),
+        method: method_id,
+        type_args,
+        args: args_hir,
       },
-    }
+      span: call.span.clone(),
+      type_id: result_type,
+    })
   }
 
   /// Lower a static method call or enum variant: Type::method(args) or Enum::Variant(args)
@@ -1564,6 +1630,14 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     result_type: TypeId,
   ) -> HIRId {
+    if std::env::var("IGNIS_VERBOSE").is_ok() {
+      eprintln!(
+        "[LOWER] lower_static_call: member={}, call.type_args={:?}",
+        self.symbols.borrow().get(&ma.member),
+        call.type_args.as_ref().map(|v| v.len())
+      );
+    }
+
     let def_id = self.resolve_type_expression_for_lowering(&ma.object);
 
     let Some(def_id) = def_id else {
@@ -1702,14 +1776,35 @@ impl<'a> Analyzer<'a> {
     hir: &mut HIR,
     scope_kind: ScopeKind,
   ) -> Option<HIRId> {
+    if std::env::var("IGNIS_VERBOSE").is_ok() {
+      let segments: Vec<_> = path
+        .segments
+        .iter()
+        .map(|s| self.symbols.borrow().get(s).to_string())
+        .collect();
+      eprintln!(
+        "[LOWER] try_lower_path_call: segments={:?}, call.type_args={:?}",
+        segments,
+        call.type_args.as_ref().map(|v| v.len())
+      );
+    }
+
     if path.segments.len() != 2 {
+      if std::env::var("IGNIS_VERBOSE").is_ok() {
+        eprintln!("[LOWER] try_lower_path_call: segments.len() != 2, returning None");
+      }
       return None;
     }
 
     let first_segment = &path.segments[0];
     let second_segment = &path.segments[1];
 
-    let type_def_id = self.scopes.lookup_def(first_segment)?.clone();
+    let Some(type_def_id) = self.scopes.lookup_def(first_segment).cloned() else {
+      if std::env::var("IGNIS_VERBOSE").is_ok() {
+        eprintln!("[LOWER] try_lower_path_call: lookup_def for first_segment returned None");
+      }
+      return None;
+    };
     let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
 
     match &self.defs.get(&type_def_id).kind.clone() {
@@ -1770,8 +1865,26 @@ impl<'a> Analyzer<'a> {
         None
       },
       DefinitionKind::Record(rd) => {
+        if std::env::var("IGNIS_VERBOSE").is_ok() {
+          let type_name = self.symbols.borrow().get(&self.defs.get(&type_def_id).name).to_string();
+          let method_name = self.symbols.borrow().get(second_segment).to_string();
+          let has_method = rd.static_methods.contains_key(second_segment);
+          eprintln!(
+            "[LOWER] try_lower_path_call: Record type={}, looking for static method={}, has_method={}",
+            type_name, method_name, has_method
+          );
+        }
+
         // Static method call on record
-        if let Some(method_id) = rd.static_methods.get(second_segment).and_then(|e| e.as_single()) {
+        // First try to get resolved method from type checker (handles overloads)
+        let method_id = self.lookup_resolved_call(node_id).cloned().or_else(|| {
+          rd.static_methods
+            .get(second_segment)
+            .and_then(|e| e.as_single())
+            .cloned()
+        });
+
+        if let Some(method_id) = method_id {
           let args_hir: Vec<HIRId> = call
             .arguments
             .iter()
@@ -1785,10 +1898,19 @@ impl<'a> Analyzer<'a> {
             .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
             .unwrap_or_else(Vec::new);
 
+          if std::env::var("IGNIS_VERBOSE").is_ok() {
+            let method_name = self.symbols.borrow().get(&self.defs.get(&method_id).name).to_string();
+            eprintln!(
+              "[LOWER] try_lower_path_call: Record static method={}, type_args.len()={}",
+              method_name,
+              type_args.len()
+            );
+          }
+
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
               receiver: None,
-              method: *method_id,
+              method: method_id,
               type_args,
               args: args_hir,
             },
@@ -1819,10 +1941,10 @@ impl<'a> Analyzer<'a> {
 
         if i == 0 {
           let arg_type = hir.get(arg_hir).type_id;
-          let ptr_u8 = self.types.pointer(self.types.u8());
+          let ptr_u8 = self.types.pointer(self.types.u8(), false);
 
           if !self.types.types_equal(&arg_type, &ptr_u8) {
-            if let ignis_type::types::Type::Pointer(_) = self.types.get(&arg_type) {
+            if let ignis_type::types::Type::Pointer { .. } = self.types.get(&arg_type) {
               let cast_node = HIRNode {
                 kind: HIRKind::Cast {
                   expression: arg_hir,
@@ -2135,7 +2257,7 @@ impl<'a> Analyzer<'a> {
   ) -> HIRId {
     let runtime = self.runtime.as_ref().expect("runtime builtins not initialized");
     let u64_type = self.types.u64();
-    let void_ptr_type = self.types.pointer(self.types.void());
+    let void_ptr_type = self.types.pointer(self.types.void(), false);
 
     let len_call = hir.alloc(HIRNode {
       kind: HIRKind::Call {
@@ -2356,7 +2478,20 @@ impl<'a> Analyzer<'a> {
 
     // If explicit type args provided, use them
     if let Some(explicit_args) = &call.type_args {
-      return explicit_args.iter().map(|t| self.resolve_type_syntax(t)).collect();
+      let resolved: Vec<_> = explicit_args.iter().map(|t| self.resolve_type_syntax(t)).collect();
+      if std::env::var("IGNIS_VERBOSE").is_ok() {
+        let callee_name = self
+          .symbols
+          .borrow()
+          .get(&self.defs.get(callee_def_id).name)
+          .to_string();
+        eprintln!(
+          "[LOWER] resolve_or_infer_type_args (fn): callee={}, explicit_args resolved to {:?}",
+          callee_name,
+          resolved.iter().map(|ty| self.types.get(ty).clone()).collect::<Vec<_>>()
+        );
+      }
+      return resolved;
     }
 
     // Infer from argument types
@@ -2402,6 +2537,10 @@ impl<'a> Analyzer<'a> {
   /// If explicit type arguments are provided, uses those directly.
   /// Otherwise, attempts to infer type arguments by unifying parameter types
   /// with argument types.
+  ///
+  /// For static methods on generic types (e.g., `Vector<T>::init()`), the returned
+  /// type args include both owner type args and method type args:
+  /// [owner_arg_0, ..., owner_arg_n, method_arg_0, ..., method_arg_m]
   fn resolve_or_infer_method_type_args(
     &mut self,
     method_def_id: &DefinitionId,
@@ -2409,14 +2548,46 @@ impl<'a> Analyzer<'a> {
     args_hir: &[HIRId],
     hir: &HIR,
   ) -> Vec<TypeId> {
-    // Get type parameters from method definition
-    let type_params = match &self.defs.get(method_def_id).kind {
-      DefinitionKind::Method(md) => md.type_params.clone(),
+    // Get method definition and extract owner/method type param counts
+    let (owner_type_params, method_type_params, is_static) = match &self.defs.get(method_def_id).kind {
+      DefinitionKind::Method(md) => {
+        let owner_def = self.defs.get(&md.owner_type);
+        let owner_params = match &owner_def.kind {
+          DefinitionKind::Record(rd) => rd.type_params.clone(),
+          DefinitionKind::Enum(ed) => ed.type_params.clone(),
+          _ => vec![],
+        };
+        (owner_params, md.type_params.clone(), md.is_static)
+      },
       _ => return vec![],
     };
 
-    // Not generic - return empty
-    if type_params.is_empty() {
+    if std::env::var("IGNIS_VERBOSE").is_ok() {
+      let method_name = self
+        .symbols
+        .borrow()
+        .get(&self.defs.get(method_def_id).name)
+        .to_string();
+      eprintln!(
+        "[LOWER] resolve_or_infer_method_type_args: method={}, is_static={}, owner_params={}, method_params={}, call.type_args={:?}",
+        method_name,
+        is_static,
+        owner_type_params.len(),
+        method_type_params.len(),
+        call.type_args.as_ref().map(|v| v.len())
+      );
+    }
+
+    // For static methods, we need both owner and method type params
+    // For instance methods, only method type params (owner args come from receiver)
+    let total_type_params = if is_static {
+      owner_type_params.len() + method_type_params.len()
+    } else {
+      method_type_params.len()
+    };
+
+    // If no type params needed at all, return empty
+    if total_type_params == 0 {
       return vec![];
     }
 
@@ -2450,15 +2621,152 @@ impl<'a> Analyzer<'a> {
     }
 
     // Extract inferred types in order
-    type_params
-      .iter()
-      .enumerate()
-      .map(|(i, _)| {
-        subst
-          .get(*method_def_id, i as u32)
-          .unwrap_or_else(|| self.types.error())
-      })
-      .collect()
+    // For static methods: first owner params, then method params
+    // For instance methods: only method params
+    if is_static {
+      let owner_def = match &self.defs.get(method_def_id).kind {
+        DefinitionKind::Method(md) => md.owner_type,
+        _ => unreachable!(),
+      };
+
+      let mut result = Vec::with_capacity(total_type_params);
+
+      // Owner type params
+      for (i, _) in owner_type_params.iter().enumerate() {
+        result.push(subst.get(owner_def, i as u32).unwrap_or_else(|| self.types.error()));
+      }
+
+      // Method type params
+      for (i, _) in method_type_params.iter().enumerate() {
+        result.push(
+          subst
+            .get(*method_def_id, i as u32)
+            .unwrap_or_else(|| self.types.error()),
+        );
+      }
+
+      result
+    } else {
+      method_type_params
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+          subst
+            .get(*method_def_id, i as u32)
+            .unwrap_or_else(|| self.types.error())
+        })
+        .collect()
+    }
+  }
+
+  /// Pushes a generic scope and registers type params for an owner definition.
+  /// Used when lowering method bodies to make type params visible for type resolution.
+  fn enter_type_params_scope_for_method(
+    &mut self,
+    method_def_id: &DefinitionId,
+  ) {
+    // Get owner's type params
+    let owner_type_params = match &self.defs.get(method_def_id).kind {
+      DefinitionKind::Method(md) => {
+        let owner_def = self.defs.get(&md.owner_type);
+        match &owner_def.kind {
+          DefinitionKind::Record(rd) => rd.type_params.clone(),
+          DefinitionKind::Enum(ed) => ed.type_params.clone(),
+          _ => Vec::new(),
+        }
+      },
+      _ => Vec::new(),
+    };
+
+    // Get method's own type params
+    let method_type_params = match &self.defs.get(method_def_id).kind {
+      DefinitionKind::Method(md) => md.type_params.clone(),
+      _ => Vec::new(),
+    };
+
+    // If no type params at all, nothing to do
+    if owner_type_params.is_empty() && method_type_params.is_empty() {
+      return;
+    }
+
+    self.scopes.push(ScopeKind::Generic);
+
+    // Register owner type params first
+    for param_id in &owner_type_params {
+      let name = self.defs.get(param_id).name;
+      let _ = self.scopes.define(&name, param_id, false);
+    }
+
+    // Then method type params
+    for param_id in &method_type_params {
+      let name = self.defs.get(param_id).name;
+      let _ = self.scopes.define(&name, param_id, false);
+    }
+  }
+
+  /// Pops the generic scope if the method or its owner has type params.
+  fn exit_type_params_scope_for_method(
+    &mut self,
+    method_def_id: &DefinitionId,
+  ) {
+    let has_owner_type_params = match &self.defs.get(method_def_id).kind {
+      DefinitionKind::Method(md) => {
+        let owner_def = self.defs.get(&md.owner_type);
+        match &owner_def.kind {
+          DefinitionKind::Record(rd) => !rd.type_params.is_empty(),
+          DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
+          _ => false,
+        }
+      },
+      _ => false,
+    };
+
+    let has_method_type_params = match &self.defs.get(method_def_id).kind {
+      DefinitionKind::Method(md) => !md.type_params.is_empty(),
+      _ => false,
+    };
+
+    if has_owner_type_params || has_method_type_params {
+      self.scopes.pop();
+    }
+  }
+
+  /// Pushes a generic scope and registers type params for a function definition.
+  /// Used when lowering function bodies to make type params visible for type resolution.
+  fn enter_type_params_scope_for_function(
+    &mut self,
+    func_def_id: &DefinitionId,
+  ) {
+    let type_params = match &self.defs.get(func_def_id).kind {
+      DefinitionKind::Function(fd) => fd.type_params.clone(),
+      _ => Vec::new(),
+    };
+
+    if type_params.is_empty() {
+      return;
+    }
+
+    self.scopes.push(ScopeKind::Generic);
+
+    for param_id in &type_params {
+      let name = self.defs.get(param_id).name;
+      let _ = self.scopes.define(&name, param_id, false);
+    }
+  }
+
+  /// Pops the generic scope if the function has type params.
+  fn exit_type_params_scope_for_function(
+    &mut self,
+    func_def_id: &DefinitionId,
+  ) {
+    let has_type_params = match &self.defs.get(func_def_id).kind {
+      DefinitionKind::Function(fd) => !fd.type_params.is_empty(),
+      _ => false,
+    };
+
+    if has_type_params {
+      self.scopes.pop();
+    }
   }
 }
 

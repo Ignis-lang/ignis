@@ -477,8 +477,7 @@ pub fn compile_project(
 
       let ownership_checker =
         ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
-          .with_source_map(&ctx.source_map)
-          .suppress_ffi_warnings_for(&config.std_path);
+          .with_source_map(&ctx.source_map);
       let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
 
       trace_dbg!(
@@ -1046,8 +1045,7 @@ pub fn build_std(
 
     let ownership_checker =
       ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
-        .with_source_map(&ctx.source_map)
-        .suppress_ffi_warnings_for(&config.std_path);
+        .with_source_map(&ctx.source_map);
     let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
 
     let (lir_program, _verify_result) = ignis_lir::lowering::lower_and_verify(
@@ -1142,8 +1140,7 @@ pub fn build_std(
 
     let ownership_checker =
       ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
-        .with_source_map(&ctx.source_map)
-        .suppress_ffi_warnings_for(&config.std_path);
+        .with_source_map(&ctx.source_map);
     let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
 
     let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
@@ -1372,8 +1369,7 @@ pub fn check_std(
 
     let ownership_checker =
       ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
-        .with_source_map(&ctx.source_map)
-        .suppress_ffi_warnings_for(&config.std_path);
+        .with_source_map(&ctx.source_map);
     let (drop_schedules, _ownership_diagnostics) = ownership_checker.check();
 
     let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
@@ -1531,13 +1527,18 @@ fn ensure_std_built(
   build_std(config.clone(), &build_dir)
 }
 
-/// Create a static archive (.a) from multiple object files
+/// Create a static archive (.a) from multiple object files.
+/// Deletes any existing archive first (`ar rcs` would otherwise append).
 fn create_static_archive_multi(
   objects: &[std::path::PathBuf],
   archive_path: &Path,
   log_info: bool,
 ) -> Result<(), String> {
   use std::process::Command;
+
+  if archive_path.exists() {
+    std::fs::remove_file(archive_path).map_err(|e| format!("Failed to remove old archive: {}", e))?;
+  }
 
   if log_info {
     let obj_names: Vec<_> = objects.iter().filter_map(|p| p.file_name()).collect();

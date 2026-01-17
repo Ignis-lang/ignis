@@ -495,6 +495,7 @@ impl<'a> Analyzer<'a> {
         params: param_defs.clone(),
         return_type: self.types.error(), // Resolved in typeck
         is_static,
+        self_mutable: method.self_param.unwrap_or(false),
       }),
       name: method.name,
       span: method.span.clone(),

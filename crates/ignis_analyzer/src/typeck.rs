@@ -496,7 +496,7 @@ impl<'a> Analyzer<'a> {
         }
 
         match self.types.get(&expr_type).clone() {
-          ignis_type::types::Type::Pointer(inner) => inner,
+          ignis_type::types::Type::Pointer { inner, .. } => inner,
           ignis_type::types::Type::Reference { inner, .. } => inner,
           _ => {
             let type_name = self.format_type_for_error(&expr_type);
@@ -525,34 +525,42 @@ impl<'a> Analyzer<'a> {
           );
         }
 
-        if let ignis_type::types::Type::Vector { element, size } = self.types.get(&base_type).clone() {
-          // Compile-time bounds checking for constant indices
-          if let Some(array_size) = size {
-            if let Some(ConstValue::Int(index_val)) = self.const_eval_expression_node(&access.index, scope_kind) {
-              if index_val < 0 || (index_val as usize) >= array_size {
-                self.add_diagnostic(
-                  DiagnosticMessage::IndexOutOfBounds {
-                    index: index_val,
-                    size: array_size,
-                    span: access.span.clone(),
-                  }
-                  .report(),
-                );
+        match self.types.get(&base_type).clone() {
+          ignis_type::types::Type::Vector { element, size } => {
+            // Compile-time bounds checking for constant indices
+            if let Some(array_size) = size {
+              if let Some(ConstValue::Int(index_val)) = self.const_eval_expression_node(&access.index, scope_kind) {
+                if index_val < 0 || (index_val as usize) >= array_size {
+                  self.add_diagnostic(
+                    DiagnosticMessage::IndexOutOfBounds {
+                      index: index_val,
+                      size: array_size,
+                      span: access.span.clone(),
+                    }
+                    .report(),
+                  );
+                }
               }
             }
-          }
-          element
-        } else {
-          if !self.types.is_error(&base_type) {
-            self.add_diagnostic(
-              DiagnosticMessage::AccessNonVector {
-                type_name: self.format_type_for_error(&base_type),
-                span: access.span.clone(),
-              }
-              .report(),
-            );
-          }
-          self.types.error()
+            element
+          },
+          ignis_type::types::Type::Pointer { inner, .. } => {
+            // Pointers are indexable, return the inner type
+            // No bounds checking for raw pointers
+            inner
+          },
+          _ => {
+            if !self.types.is_error(&base_type) {
+              self.add_diagnostic(
+                DiagnosticMessage::AccessNonVector {
+                  type_name: self.format_type_for_error(&base_type),
+                  span: access.span.clone(),
+                }
+                .report(),
+              );
+            }
+            self.types.error()
+          },
         }
       },
       ASTExpression::Grouped(grouped) => self.typecheck_node(&grouped.expression, scope_kind, ctx),
@@ -612,6 +620,17 @@ impl<'a> Analyzer<'a> {
                 return self.types.error();
               }
 
+              // For generic enums, try to infer type args from expected type
+              if !ed.type_params.is_empty() {
+                if let Some(expected) = &infer.expected {
+                  if let Type::Instance { generic, args } = self.types.get(expected).clone() {
+                    if generic == enum_def {
+                      return self.types.instance(enum_def, args);
+                    }
+                  }
+                }
+              }
+
               ed.type_id.clone()
             } else {
               self.types.error()
@@ -666,7 +685,7 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
-      ASTExpression::MemberAccess(ma) => self.typecheck_member_access(ma, scope_kind, ctx),
+      ASTExpression::MemberAccess(ma) => self.typecheck_member_access(ma, scope_kind, ctx, infer),
       ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx, infer),
     }
   }
@@ -930,10 +949,10 @@ impl<'a> Analyzer<'a> {
     self.scopes.push(ScopeKind::Function);
 
     // For instance methods, inject `self` parameter
-    let is_static = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
-      md.is_static
+    let (is_static, self_mutable) = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
+      (md.is_static, md.self_mutable)
     } else {
-      true
+      (true, false)
     };
 
     if !is_static {
@@ -974,13 +993,14 @@ impl<'a> Analyzer<'a> {
         _ => *self.defs.type_of(&owner_def_id),
       };
 
-      let self_ref_type = self.types.reference(self_type, false); // &Self
+      // Use &mut Self for methods with &mut self, &Self otherwise
+      let self_ref_type = self.types.reference(self_type, self_mutable);
 
       let self_symbol = self.symbols.borrow_mut().intern("self");
       let self_def = ignis_type::definition::Definition {
         kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
           type_id: self_ref_type,
-          mutable: false,
+          mutable: self_mutable,
         }),
         name: self_symbol,
         span: method.span.clone(),
@@ -1019,10 +1039,11 @@ impl<'a> Analyzer<'a> {
     ma: &ASTMemberAccess,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> TypeId {
     match ma.op {
       ASTAccessOp::Dot => self.typecheck_dot_access(ma, scope_kind, ctx),
-      ASTAccessOp::DoubleColon => self.typecheck_static_access(ma, scope_kind, ctx),
+      ASTAccessOp::DoubleColon => self.typecheck_static_access(ma, scope_kind, ctx, infer),
     }
   }
 
@@ -1124,6 +1145,7 @@ impl<'a> Analyzer<'a> {
     ma: &ASTMemberAccess,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
+    infer: &InferContext,
   ) -> TypeId {
     // The object should resolve to a type name (Record, Enum, or Namespace)
     // First, try to resolve it as a path expression to a type
@@ -1172,6 +1194,16 @@ impl<'a> Analyzer<'a> {
           let variant = &ed.variants[tag as usize];
           if variant.payload.is_empty() {
             // Unit variant - returns enum type
+            // For generic enums, try to infer type args from expected type
+            if !ed.type_params.is_empty() {
+              if let Some(expected) = &infer.expected {
+                if let Type::Instance { generic, args } = self.types.get(expected).clone() {
+                  if generic == def_id {
+                    return self.types.instance(def_id, args);
+                  }
+                }
+              }
+            }
             return ed.type_id.clone();
           } else {
             // Variant with payload - must be called
@@ -1683,7 +1715,10 @@ impl<'a> Analyzer<'a> {
     from: &TypeId,
     to: &TypeId,
   ) -> bool {
-    matches!((self.types.get(from), self.types.get(to)), (Type::Pointer(_), Type::Pointer(_)))
+    matches!(
+      (self.types.get(from), self.types.get(to)),
+      (Type::Pointer { .. }, Type::Pointer { .. })
+    )
   }
 
   fn typecheck_call(
@@ -1975,6 +2010,109 @@ impl<'a> Analyzer<'a> {
     Some(Substitution::for_generic(func_def_id, &resolved_type_args))
   }
 
+  /// Instantiate a callee's parameter and return types by substituting explicit type arguments.
+  ///
+  /// Returns `Some((param_types, return_type, substitution))` if the call has explicit type args
+  /// and they match the callee's type parameters. Returns `None` if no type args provided or
+  /// if there's an error (arity mismatch, type args on non-generic callee).
+  fn instantiate_callee_signature(
+    &mut self,
+    def_id: &DefinitionId,
+    call: &ASTCallExpression,
+  ) -> Option<(Vec<TypeId>, TypeId, Substitution)> {
+    let type_args_syntax = call.type_args.as_ref()?;
+
+    // Get type params and signature from the definition
+    let (type_params, raw_param_ids, return_type, owner_type_params) = match &self.defs.get(def_id).kind {
+      DefinitionKind::Function(func_def) => (
+        func_def.type_params.clone(),
+        func_def.params.clone(),
+        func_def.return_type,
+        vec![],
+      ),
+      DefinitionKind::Method(method_def) => {
+        // Get owner's type params for methods on generic records/enums
+        let owner_type_params = match &self.defs.get(&method_def.owner_type).kind {
+          DefinitionKind::Record(rd) => rd.type_params.clone(),
+          DefinitionKind::Enum(ed) => ed.type_params.clone(),
+          _ => vec![],
+        };
+        (
+          method_def.type_params.clone(),
+          method_def.params.clone(),
+          method_def.return_type,
+          owner_type_params,
+        )
+      },
+      _ => return None,
+    };
+
+    // If method has no type params but owner does, the type args are for the owner
+    let (effective_type_params, subst_owner) = if type_params.is_empty() && !owner_type_params.is_empty() {
+      // Type args are for the owner (e.g., Vector::init<i32>() -> type args for Vector)
+      let owner_def_id = match &self.defs.get(def_id).kind {
+        DefinitionKind::Method(md) => md.owner_type,
+        _ => return None,
+      };
+      (owner_type_params, Some(owner_def_id))
+    } else if !type_params.is_empty() {
+      // Type args are for the method itself
+      (type_params, None)
+    } else {
+      // Neither generic - this is an error
+      self.add_diagnostic(Diagnostic {
+        severity: Severity::Error,
+        message: "Type arguments provided but callee is not generic".to_string(),
+        error_code: "A0077".to_string(),
+        primary_span: call.span.clone(),
+        labels: vec![],
+        notes: vec![],
+      });
+      return None;
+    };
+
+    // Resolve the explicit type arguments
+    let resolved_type_args: Vec<TypeId> = type_args_syntax
+      .iter()
+      .map(|ty| self.resolve_type_syntax_with_span(ty, &call.span))
+      .collect();
+
+    // Check arity
+    if resolved_type_args.len() != effective_type_params.len() {
+      self.add_diagnostic(Diagnostic {
+        severity: Severity::Error,
+        message: format!(
+          "Expected {} type argument(s), got {}",
+          effective_type_params.len(),
+          resolved_type_args.len()
+        ),
+        error_code: "A0050".to_string(),
+        primary_span: call.span.clone(),
+        labels: vec![],
+        notes: vec![],
+      });
+      return None;
+    }
+
+    // Build substitution - use owner's def_id if type args are for owner
+    let subst_def_id = subst_owner.unwrap_or(*def_id);
+    let subst = Substitution::for_generic(subst_def_id, &resolved_type_args);
+
+    // Get raw param types and substitute
+    let param_types: Vec<TypeId> = raw_param_ids
+      .iter()
+      .map(|p| {
+        let raw_type = self.get_definition_type(p);
+        self.types.substitute(raw_type, &subst)
+      })
+      .collect();
+
+    // Substitute return type
+    let subst_return = self.types.substitute(return_type, &subst);
+
+    Some((param_types, subst_return, subst))
+  }
+
   /// Typecheck a method call: obj.method(args) or Type::method(args)
   fn typecheck_method_call(
     &mut self,
@@ -2023,13 +2161,39 @@ impl<'a> Analyzer<'a> {
                 method.clone()
               };
 
+              // Check if method requires &mut self but receiver is not mutable
+              if method.self_mutable {
+                let obj_node = self.ast.get(&ma.object);
+                if let ASTNode::Expression(obj_expr) = obj_node {
+                  if !self.is_mutable_expression(obj_expr) {
+                    let method_name = self.get_symbol_name(&ma.member);
+                    let var_name = self.get_var_name_from_expr(obj_expr);
+                    self.add_diagnostic(
+                      DiagnosticMessage::MutatingMethodOnImmutable {
+                        method: method_name,
+                        var_name,
+                        span: ma.span.clone(),
+                      }
+                      .report(),
+                    );
+                  }
+                }
+              }
+
               // For instance methods, skip the first param (self) when checking explicit args
               // The receiver is passed implicitly, not as an explicit argument
               let start = self.method_param_start(&method);
               let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-              // Get param types for inference (before borrowing self mutably)
-              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+              // Get param types for inference, applying substitution if explicit type args provided
+              let (param_types, return_type) =
+                if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(method_id, call) {
+                  // Skip self param from substituted params
+                  (subst_params[start..].to_vec(), subst_ret)
+                } else {
+                  let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+                  (raw_params, method.return_type)
+                };
 
               // Typecheck arguments
               let arg_types: Vec<TypeId> = call
@@ -2078,7 +2242,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              return method.return_type;
+              return return_type;
             },
             SymbolEntry::Overload(candidates) => {
               let arg_types: Vec<TypeId> = call
@@ -2105,7 +2269,14 @@ impl<'a> Analyzer<'a> {
               let start = self.method_param_start(&method);
               let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+              // Get param types, applying substitution if explicit type args provided
+              let (param_types, return_type) =
+                if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&resolved_def_id, call) {
+                  (subst_params[start..].to_vec(), subst_ret)
+                } else {
+                  let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+                  (raw_params, method.return_type)
+                };
 
               let method_name = self.get_symbol_name(&ma.member);
               if arg_types.len() != explicit_params.len() {
@@ -2137,7 +2308,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              return method.return_type;
+              return return_type;
             },
           }
         }
@@ -2422,7 +2593,14 @@ impl<'a> Analyzer<'a> {
               let start = self.method_param_start(&method);
               let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+              // Get param types, applying substitution if explicit type args provided
+              let (param_types, return_type) =
+                if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&resolved_def_id, call) {
+                  (subst_params[start..].to_vec(), subst_ret)
+                } else {
+                  let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+                  (raw_params, method.return_type)
+                };
 
               let method_name = self.get_symbol_name(&ma.member);
               if arg_types.len() != explicit_params.len() {
@@ -2454,7 +2632,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              return method.return_type;
+              return return_type;
             },
           }
         }
@@ -2596,7 +2774,14 @@ impl<'a> Analyzer<'a> {
               let start = self.method_param_start(&method);
               let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-              let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+              // Get param types, applying substitution if explicit type args provided
+              let (param_types, return_type) =
+                if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&resolved_def_id, call) {
+                  (subst_params[start..].to_vec(), subst_ret)
+                } else {
+                  let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+                  (raw_params, method.return_type)
+                };
 
               let method_name = self.get_symbol_name(&ma.member);
               if arg_types.len() != explicit_params.len() {
@@ -2628,7 +2813,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              return method.return_type;
+              return return_type;
             },
           }
         }
@@ -2693,14 +2878,21 @@ impl<'a> Analyzer<'a> {
           self.set_resolved_call(node_id, resolved_def_id);
 
           let def = self.defs.get(&resolved_def_id);
-          let (params, return_type, is_variadic) = match &def.kind {
+          let (params, raw_return_type, is_variadic) = match &def.kind {
             DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false),
             DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic),
             _ => return Some(self.types.error()),
           };
           let func_name = self.get_symbol_name(&def.name);
 
-          let param_types: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
+          // Get param types, applying substitution if explicit type args provided
+          let (param_types, return_type) =
+            if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&resolved_def_id, call) {
+              (subst_params, subst_ret)
+            } else {
+              let raw_params: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
+              (raw_params, raw_return_type)
+            };
 
           if is_variadic {
             if arg_types.len() < params.len() {
@@ -2860,17 +3052,94 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
   ) -> TypeId {
     let def = self.defs.get(def_id);
-    let (params, return_type, is_variadic) = match &def.kind {
-      DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false),
-      DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic),
+    let (params, raw_return_type, is_variadic, type_params) = match &def.kind {
+      DefinitionKind::Method(m) => (m.params.clone(), m.return_type, false, m.type_params.clone()),
+      DefinitionKind::Function(f) => (f.params.clone(), f.return_type, f.is_variadic, f.type_params.clone()),
       _ => return self.types.error(),
     };
     let func_name = self.get_symbol_name(&def.name);
 
-    // Get param types for inference
-    let param_types: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
+    // Get raw param types for initial inference context
+    let raw_params: Vec<TypeId> = params.iter().map(|p| self.get_definition_type(p)).collect();
 
-    // Typecheck arguments
+    // Try to instantiate with explicit type arguments first
+    let (param_types, return_type) =
+      if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(def_id, call) {
+        // Explicit type args provided - use substituted types
+        (subst_params, subst_ret)
+      } else if !type_params.is_empty() && call.type_args.is_none() {
+        // Generic callee with no explicit type args - infer from arguments
+        // First typecheck arguments without inference hints to get their types
+        let arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+          .collect();
+
+        // Infer type arguments by unifying param types with arg types
+        let mut inferred = Substitution::new();
+        for (i, &arg_ty) in arg_types.iter().enumerate() {
+          if let Some(&param_ty) = raw_params.get(i) {
+            self.types.unify_for_inference(param_ty, arg_ty, &mut inferred);
+          }
+        }
+
+        // Build substituted param types using inferred substitution
+        let subst_params: Vec<TypeId> = raw_params
+          .iter()
+          .map(|&ty| self.types.substitute(ty, &inferred))
+          .collect();
+        let subst_return = self.types.substitute(raw_return_type, &inferred);
+
+        // Now do the argument count and type checking
+        if is_variadic {
+          if arg_types.len() < params.len() {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentCountMismatch {
+                expected: params.len(),
+                got: arg_types.len(),
+                func_name: func_name.clone(),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+          }
+        } else if arg_types.len() != params.len() {
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentCountMismatch {
+              expected: params.len(),
+              got: arg_types.len(),
+              func_name: func_name.clone(),
+              span: call.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        let check_count = std::cmp::min(arg_types.len(), params.len());
+        for i in 0..check_count {
+          if !self.types.types_equal(&subst_params[i], &arg_types[i]) {
+            let expected = self.format_type_for_error(&subst_params[i]);
+            let got = self.format_type_for_error(&arg_types[i]);
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 1,
+                expected,
+                got,
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
+          }
+        }
+
+        return subst_return;
+      } else {
+        // Non-generic or error case - use raw types
+        (raw_params.clone(), raw_return_type)
+      };
+
+    // Typecheck arguments (for non-inferred case)
     let arg_types: Vec<TypeId> = call
       .arguments
       .iter()
@@ -3056,7 +3325,7 @@ impl<'a> Analyzer<'a> {
       return self.types.error();
     }
 
-    let pointer_type = self.types.pointer(value_type);
+    let pointer_type = self.types.pointer(value_type, true);
     let infer = InferContext::expecting(pointer_type.clone());
     let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &infer);
 
@@ -3154,7 +3423,7 @@ impl<'a> Analyzer<'a> {
       return self.types.error();
     }
 
-    let pointer_type = self.types.pointer(value_type);
+    let pointer_type = self.types.pointer(value_type, true);
     let ptr_infer = InferContext::expecting(pointer_type.clone());
     let ptr_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &ptr_infer);
 
@@ -3223,7 +3492,7 @@ impl<'a> Analyzer<'a> {
     &self,
     ty: &TypeId,
   ) -> bool {
-    matches!(self.types.get(ty), ignis_type::types::Type::Pointer(_))
+    matches!(self.types.get(ty), ignis_type::types::Type::Pointer { .. })
   }
 
   fn pointer_inner_type(
@@ -3231,7 +3500,7 @@ impl<'a> Analyzer<'a> {
     ty: &TypeId,
   ) -> Option<TypeId> {
     match self.types.get(ty) {
-      ignis_type::types::Type::Pointer(inner) => Some(*inner),
+      ignis_type::types::Type::Pointer { inner, .. } => Some(*inner),
       _ => None,
     }
   }
@@ -3360,7 +3629,7 @@ impl<'a> Analyzer<'a> {
             resolved_left = right_type.clone();
           }
         } else if self.types.is_null_ptr(&left_type) && self.types.is_null_ptr(&right_type) {
-          let void_ptr = self.types.pointer(self.types.void());
+          let void_ptr = self.types.pointer(self.types.void(), true);
           if self.coerce_null_literal(&binary.left, &void_ptr) {
             resolved_left = void_ptr.clone();
           }
@@ -3644,9 +3913,9 @@ impl<'a> Analyzer<'a> {
       (_, Type::Boolean) if self.types.is_integer(&expr_type) => true,
       (Type::Char, _) if self.types.is_integer(&target_type) => true,
       (_, Type::Char) if self.types.is_integer(&expr_type) => true,
-      (Type::Pointer(_), Type::Reference { .. }) => true,
-      (Type::Reference { .. }, Type::Pointer(_)) => true,
-      (Type::Pointer(_), Type::Pointer(_)) => true,
+      (Type::Pointer { .. }, Type::Reference { .. }) => true,
+      (Type::Reference { .. }, Type::Pointer { .. }) => true,
+      (Type::Pointer { .. }, Type::Pointer { .. }) => true,
       (Type::Reference { .. }, Type::Reference { .. }) => true,
       (Type::Infer, _) => true,
       (Type::Reference { inner, .. }, _) if self.types.is_infer(inner) => true,
@@ -3749,9 +4018,9 @@ impl<'a> Analyzer<'a> {
         let ret_type = self.resolve_type_syntax_impl(ret, span);
         self.types.function(param_types, ret_type, false)
       },
-      IgnisTypeSyntax::Pointer(inner) => {
+      IgnisTypeSyntax::Pointer { inner, mutable } => {
         let inner_type = self.resolve_type_syntax_impl(inner, span);
-        self.types.pointer(inner_type)
+        self.types.pointer(inner_type, *mutable)
       },
       IgnisTypeSyntax::Reference { inner, mutable } => {
         let inner_type = self.resolve_type_syntax_impl(inner, span);
@@ -3991,6 +4260,23 @@ impl<'a> Analyzer<'a> {
           false
         }
       },
+      ASTExpression::MemberAccess(ma) => {
+        // For field access (dot operator), check if the base object is mutable
+        if ma.op == ignis_ast::expressions::member_access::ASTAccessOp::Dot {
+          let node = self.ast.get(&ma.object);
+          if let ASTNode::Expression(base_expr) = node {
+            // Check if base is a mutable reference
+            if let Some(type_id) = self.lookup_type(&ma.object) {
+              if let ignis_type::types::Type::Reference { mutable, .. } = self.types.get(type_id) {
+                return *mutable;
+              }
+            }
+            // Otherwise, check if the base expression itself is mutable
+            return self.is_mutable_expression(base_expr);
+          }
+        }
+        false
+      },
       _ => false,
     }
   }
@@ -4052,7 +4338,13 @@ impl<'a> Analyzer<'a> {
       Type::Infer => "infer".to_string(),
       Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
-      Type::Pointer(inner) => format!("*{}", self.format_type_for_error(inner)),
+      Type::Pointer { inner, mutable } => {
+        if *mutable {
+          format!("*mut {}", self.format_type_for_error(inner))
+        } else {
+          format!("*{}", self.format_type_for_error(inner))
+        }
+      },
       Type::Reference { inner, mutable } => {
         if *mutable {
           format!("&mut {}", self.format_type_for_error(inner))

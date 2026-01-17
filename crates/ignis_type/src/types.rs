@@ -24,7 +24,10 @@ pub enum Type {
   Infer,
   NullPtr,
 
-  Pointer(TypeId),
+  Pointer {
+    inner: TypeId,
+    mutable: bool,
+  },
   Reference {
     inner: TypeId,
     mutable: bool,
@@ -71,6 +74,12 @@ pub enum Type {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PointerKey {
+  inner: TypeId,
+  mutable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ReferenceKey {
   inner: TypeId,
   mutable: bool,
@@ -105,7 +114,7 @@ struct ParamKey {
 pub struct TypeStore {
   types: Store<Type>,
   primitives: HashMap<Type, TypeId>,
-  pointers: HashMap<TypeId, TypeId>,
+  pointers: HashMap<PointerKey, TypeId>,
   references: HashMap<ReferenceKey, TypeId>,
   vectors: HashMap<VectorKey, TypeId>,
   tuples: HashMap<Vec<TypeId>, TypeId>,
@@ -169,12 +178,14 @@ impl TypeStore {
   pub fn pointer(
     &mut self,
     inner: TypeId,
+    mutable: bool,
   ) -> TypeId {
-    if let Some(&id) = self.pointers.get(&inner) {
+    let key = PointerKey { inner, mutable };
+    if let Some(&id) = self.pointers.get(&key) {
       return id;
     }
-    let id = self.types.alloc(Type::Pointer(inner));
-    self.pointers.insert(inner, id);
+    let id = self.types.alloc(Type::Pointer { inner, mutable });
+    self.pointers.insert(key, id);
     id
   }
 
@@ -504,7 +515,7 @@ impl TypeStore {
       | Type::NullPtr
       | Type::Error => true,
 
-      Type::Pointer(_) | Type::Reference { .. } | Type::Function { .. } => true,
+      Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. } => true,
 
       Type::Vector { element, size: Some(_) } => self.is_copy(element),
       Type::Vector { size: None, .. } => false,
@@ -550,7 +561,7 @@ impl TypeStore {
   ) -> bool {
     match self.get(ty) {
       Type::Param { .. } => true,
-      Type::Pointer(inner) | Type::Reference { inner, .. } | Type::Vector { element: inner, .. } => {
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } | Type::Vector { element: inner, .. } => {
         self.contains_type_param(inner)
       },
       Type::Tuple(elems) => elems.iter().any(|e| self.contains_type_param(e)),
@@ -574,16 +585,25 @@ impl TypeStore {
     subst: &Substitution,
   ) -> TypeId {
     match self.get(&ty).clone() {
-      Type::Param { owner, index } => subst.get(owner, index).unwrap_or(ty),
+      Type::Param { owner, index } => {
+        let result = subst.get(owner, index).unwrap_or(ty);
+        if std::env::var("IGNIS_VERBOSE").is_ok() && result == ty && !subst.is_empty() {
+          eprintln!(
+            "[TYPES] substitute: Type::Param {{ owner: {:?}, index: {} }} NOT found in subst {:?}, returning as-is",
+            owner, index, subst
+          );
+        }
+        result
+      },
 
       Type::Instance { generic, args } => {
         let new_args: Vec<_> = args.iter().map(|a| self.substitute(*a, subst)).collect();
         self.instance(generic, new_args)
       },
 
-      Type::Pointer(inner) => {
+      Type::Pointer { inner, mutable } => {
         let new_inner = self.substitute(inner, subst);
-        self.pointer(new_inner)
+        self.pointer(new_inner, mutable)
       },
 
       Type::Reference { inner, mutable } => {
@@ -662,7 +682,12 @@ impl TypeStore {
       },
 
       // Pointer types
-      (Type::Pointer(p1), Type::Pointer(p2)) => self.unify_for_inference(p1, p2, subst),
+      (Type::Pointer { inner: p1, mutable: m1 }, Type::Pointer { inner: p2, mutable: m2 }) => {
+        if m1 != m2 {
+          return false;
+        }
+        self.unify_for_inference(p1, p2, subst)
+      },
 
       // Reference types
       (Type::Reference { inner: i1, mutable: m1 }, Type::Reference { inner: i2, mutable: m2 }) => {
@@ -761,7 +786,16 @@ impl Substitution {
     owner: DefinitionId,
     index: u32,
   ) -> Option<TypeId> {
-    self.bindings.get(&(owner, index)).copied()
+    let result = self.bindings.get(&(owner, index)).copied();
+    if std::env::var("IGNIS_VERBOSE").is_ok() && result.is_none() && !self.bindings.is_empty() {
+      eprintln!(
+        "[SUBST] get({:?}, {}) returned None. bindings keys: {:?}",
+        owner,
+        index,
+        self.bindings.keys().collect::<Vec<_>>()
+      );
+    }
+    result
   }
 
   /// Create a substitution for a generic function, record, or enum.

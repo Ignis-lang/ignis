@@ -23,6 +23,9 @@ struct LoopContext {
   continue_block: BlockId,
   /// Block to jump to on `break`.
   break_block: BlockId,
+  /// Synthetic stack depth when entering the loop.
+  /// Used to drop temps created inside the loop on break/continue.
+  synthetic_stack_depth: usize,
 }
 
 /// Context for lowering HIR to LIR.
@@ -58,6 +61,15 @@ pub struct LoweringContext<'a> {
   /// If Some, only emit functions from modules in the set;
   /// functions from other modules are created as extern declarations.
   emit_modules: Option<&'a HashSet<ModuleId>>,
+
+  /// Stack of synthetic owned temps per block.
+  /// Each entry is (block_hir_id, Vec<LocalId>).
+  /// Used to emit drops for owned temporaries that are not tracked by DropSchedules.
+  synthetic_owned_stack: Vec<(HIRId, Vec<LocalId>)>,
+
+  /// Temps loaded from locals (via `Instr::Load`). These are aliases and should
+  /// not be spilled for synthetic drops - their source local has its own schedule.
+  load_alias_temps: HashSet<TempId>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -81,6 +93,8 @@ impl<'a> LoweringContext<'a> {
       loop_stack: Vec::new(),
       drop_schedules,
       emit_modules,
+      synthetic_owned_stack: Vec::new(),
+      load_alias_temps: HashSet::new(),
     }
   }
 
@@ -149,6 +163,8 @@ impl<'a> LoweringContext<'a> {
     self.current_fn_def_id = Some(def_id);
     self.def_to_local.clear();
     self.loop_stack.clear();
+    self.synthetic_owned_stack.clear();
+    self.load_alias_temps.clear();
 
     // Allocate locals for parameters and store initial values
     for (idx, &param_id) in func_def.params.iter().enumerate() {
@@ -216,6 +232,8 @@ impl<'a> LoweringContext<'a> {
     self.current_fn_def_id = Some(def_id);
     self.def_to_local.clear();
     self.loop_stack.clear();
+    self.synthetic_owned_stack.clear();
+    self.load_alias_temps.clear();
 
     // Allocate locals for parameters and store initial values
     for (idx, &param_id) in method_def.params.iter().enumerate() {
@@ -352,7 +370,12 @@ impl<'a> LoweringContext<'a> {
         None
       },
       HIRKind::ExpressionStatement(expr) => {
-        self.lower_hir_node(*expr);
+        let expr_node = self.hir.get(*expr);
+        let expr_ty = expr_node.type_id;
+        if let Some(op) = self.lower_hir_node(*expr) {
+          // Spill owned temps so they get dropped at block end
+          self.spill_if_owned_temp(op, expr_ty);
+        }
         None
       },
       HIRKind::Error => None,
@@ -436,6 +459,7 @@ impl<'a> LoweringContext<'a> {
         dest: temp,
         source: local_id,
       });
+      self.load_alias_temps.insert(temp);
       Some(Operand::Temp(temp))
     } else {
       // It's a global reference (constant or function)
@@ -577,7 +601,24 @@ impl<'a> LoweringContext<'a> {
     result_ty: TypeId,
     span: Span,
   ) -> Option<Operand> {
-    let arg_ops: Vec<_> = args.iter().filter_map(|&arg| self.lower_hir_node(arg)).collect();
+    let is_extern = self.is_callee_extern(callee);
+
+    // Extern calls don't consume ownership - spill owned temps so caller drops them.
+    // Non-extern calls transfer ownership to callee.
+    let arg_ops: Vec<_> = args
+      .iter()
+      .filter_map(|&arg| {
+        let arg_node = self.hir.get(arg);
+        let arg_ty = arg_node.type_id;
+        let op = self.lower_hir_node(arg)?;
+
+        if is_extern {
+          Some(self.spill_if_owned_temp(op, arg_ty))
+        } else {
+          Some(op)
+        }
+      })
+      .collect();
 
     let is_void = matches!(self.types.get(&result_ty), Type::Void);
 
@@ -721,7 +762,7 @@ impl<'a> LoweringContext<'a> {
       Type::Char => 11,
       Type::String => 12,
       Type::Vector { size: None, .. } => 100,
-      Type::Pointer(_) => 200,
+      Type::Pointer { .. } => 200,
       _ => 0xFFFFFFFF,
     }
   }
@@ -762,11 +803,11 @@ impl<'a> LoweringContext<'a> {
 
         // Get element type from the reference type (ref_ty is &elem_ty)
         let elem_ty = match self.types.get(&ref_ty) {
-          Type::Reference { inner, .. } | Type::Pointer(inner) => *inner,
+          Type::Reference { inner, .. } | Type::Pointer { inner, .. } => *inner,
           _ => return None,
         };
 
-        let ptr_ty = self.types.pointer(elem_ty);
+        let ptr_ty = self.types.pointer(elem_ty, mutable);
         let dest = self.fn_builder().alloc_temp(ptr_ty, span);
 
         self.fn_builder().emit(Instr::GetElementPtr {
@@ -814,8 +855,8 @@ impl<'a> LoweringContext<'a> {
     let base_op = self.lower_hir_node(base)?;
     let index_op = self.lower_hir_node(index)?;
 
-    // Get element pointer
-    let ptr_ty = self.types.pointer(elem_ty);
+    // Get element pointer (mutable for internal use)
+    let ptr_ty = self.types.pointer(elem_ty, true);
     let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
 
     self.fn_builder().emit(Instr::GetElementPtr {
@@ -858,7 +899,7 @@ impl<'a> LoweringContext<'a> {
     let elem_ops: Vec<_> = elements.iter().filter_map(|&e| self.lower_hir_node(e)).collect();
 
     // C array decay: array name becomes pointer to first element
-    let ptr_ty = self.types.pointer(elem_ty);
+    let ptr_ty = self.types.pointer(elem_ty, true);
     let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
     self.fn_builder().emit(Instr::AddrOfLocal {
       dest: ptr,
@@ -927,7 +968,7 @@ impl<'a> LoweringContext<'a> {
           })
           .collect();
 
-        let ptr_ty = self.types.pointer(ty);
+        let ptr_ty = self.types.pointer(ty, true);
         let ptr = self.fn_builder().alloc_temp(ptr_ty, value_node.span.clone());
         self.fn_builder().emit(Instr::AddrOfLocal {
           dest: ptr,
@@ -1052,7 +1093,7 @@ impl<'a> LoweringContext<'a> {
 
         if let (Some(base_val), Some(idx_val)) = (base_op, index_op) {
           let elem_ty = target_node.type_id;
-          let ptr_ty = self.types.pointer(elem_ty);
+          let ptr_ty = self.types.pointer(elem_ty, true);
           let ptr = self.fn_builder().alloc_temp(ptr_ty, Span::default());
 
           self.fn_builder().emit(Instr::GetElementPtr {
@@ -1091,11 +1132,137 @@ impl<'a> LoweringContext<'a> {
           }
         }
       },
+
+      HIRKind::FieldAccess { base, field_index } => {
+        let base_node = self.hir.get(*base).clone();
+        let span = target_node.span.clone();
+
+        // Track mutability of the base to propagate to field pointer
+        let mut base_is_mutable = true; // Default for value types (spilled to local)
+
+        // Check if base is a Dereference of a pointer/reference.
+        // This happens with auto-deref: `self.field` where `self: &mut T` becomes
+        // `FieldAccess { base: Dereference(Variable(self)), ... }`.
+        // In that case, we should use the inner pointer directly to avoid copying.
+        let base_ptr = if let HIRKind::Dereference(inner) = &base_node.kind {
+          let inner_node = self.hir.get(*inner);
+          let inner_ty = inner_node.type_id;
+          if matches!(self.types.get(&inner_ty), Type::Pointer { .. } | Type::Reference { .. }) {
+            // Extract mutability from the pointer/reference type
+            base_is_mutable = match self.types.get(&inner_ty) {
+              Type::Pointer { mutable, .. } | Type::Reference { mutable, .. } => *mutable,
+              _ => true,
+            };
+            // Inner is a pointer - use it directly without dereferencing
+            match self.lower_hir_node(*inner) {
+              Some(op) => op,
+              None => return,
+            }
+          } else {
+            // Inner is not a pointer - evaluate the dereference and spill
+            match self.spill_to_local_for_field_assign(*base, span.clone()) {
+              Some(op) => op,
+              None => return,
+            }
+          }
+        } else {
+          // Check if base is already a pointer/reference type
+          let base_ty = base_node.type_id;
+          let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. });
+
+          if base_is_ptr {
+            // Extract mutability from the pointer/reference type
+            base_is_mutable = match self.types.get(&base_ty) {
+              Type::Pointer { mutable, .. } | Type::Reference { mutable, .. } => *mutable,
+              _ => true,
+            };
+            // Base is already a pointer - lower and use directly
+            match self.lower_hir_node(*base) {
+              Some(op) => op,
+              None => return,
+            }
+          } else {
+            // Base is a value - spill to local to get addressable storage
+            match self.spill_to_local_for_field_assign(*base, span.clone()) {
+              Some(op) => op,
+              None => return,
+            }
+          }
+        };
+
+        // Get pointer to field with mutability derived from base
+        let field_ty = target_node.type_id;
+        let field_ptr_ty = self.types.pointer(field_ty, base_is_mutable);
+        let field_ptr = self.fn_builder().alloc_temp(field_ptr_ty, span.clone());
+
+        self.fn_builder().emit(Instr::GetFieldPtr {
+          dest: field_ptr,
+          base: base_ptr,
+          field_index: *field_index,
+          field_type: field_ty,
+        });
+
+        if let Some(op) = operation {
+          // Compound assignment: load current, compute, store
+          let current = self.fn_builder().alloc_temp(field_ty, span.clone());
+          self.fn_builder().emit(Instr::LoadPtr {
+            dest: current,
+            ptr: Operand::Temp(field_ptr),
+          });
+
+          if let Some(rhs) = self.lower_hir_node(value) {
+            let result = self.fn_builder().alloc_temp(field_ty, span);
+            self.fn_builder().emit(Instr::BinOp {
+              dest: result,
+              op,
+              left: Operand::Temp(current),
+              right: rhs,
+            });
+            self.fn_builder().emit(Instr::StorePtr {
+              ptr: Operand::Temp(field_ptr),
+              value: Operand::Temp(result),
+            });
+          }
+        } else if let Some(val) = self.lower_hir_node(value) {
+          self.fn_builder().emit(Instr::StorePtr {
+            ptr: Operand::Temp(field_ptr),
+            value: val,
+          });
+        }
+      },
+
       _ => {
         // Fallback: just evaluate value for side effects
         self.lower_hir_node(value);
       },
     }
+  }
+
+  /// Spill a value to a local and return a pointer to that local.
+  /// Used for field assignment when the base is a value (not a pointer).
+  fn spill_to_local_for_field_assign(
+    &mut self,
+    base_hir_id: HIRId,
+    span: Span,
+  ) -> Option<Operand> {
+    let base_ty = self.hir.get(base_hir_id).type_id;
+    let base_val = self.lower_hir_node(base_hir_id)?;
+    let temp_local = self.alloc_synthetic_local(base_ty, true);
+
+    self.fn_builder().emit(Instr::Store {
+      dest: temp_local,
+      value: base_val,
+    });
+
+    let base_ptr_ty = self.types.pointer(base_ty, true);
+    let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span);
+    self.fn_builder().emit(Instr::AddrOfLocal {
+      dest: base_ptr_temp,
+      local: temp_local,
+      mutable: true,
+    });
+
+    Some(Operand::Temp(base_ptr_temp))
   }
 
   fn lower_block(
@@ -1104,11 +1271,14 @@ impl<'a> LoweringContext<'a> {
     statements: &[HIRId],
     expression: Option<HIRId>,
   ) -> Option<Operand> {
+    self.synthetic_owned_stack.push((block_hir_id, Vec::new()));
+
     for &stmt in statements {
       self.lower_hir_node(stmt);
 
-      // If block is terminated (e.g., by return), stop
+      // Early exit (return/break/continue) already emitted drops
       if self.fn_builder().is_terminated() {
+        self.synthetic_owned_stack.pop();
         return None;
       }
     }
@@ -1117,8 +1287,10 @@ impl<'a> LoweringContext<'a> {
 
     if !self.fn_builder().is_terminated() {
       self.emit_scope_end_drops(block_hir_id);
+      self.emit_current_synthetic_drops();
     }
 
+    self.synthetic_owned_stack.pop();
     result
   }
 
@@ -1219,6 +1391,7 @@ impl<'a> LoweringContext<'a> {
         self.loop_stack.push(LoopContext {
           continue_block: body_block,
           break_block: exit_block,
+          synthetic_stack_depth: self.synthetic_owned_stack.len(),
         });
 
         // Jump to body
@@ -1241,6 +1414,7 @@ impl<'a> LoweringContext<'a> {
         self.loop_stack.push(LoopContext {
           continue_block,
           break_block: exit_block,
+          synthetic_stack_depth: self.synthetic_owned_stack.len(),
         });
 
         // Go to header
@@ -1283,6 +1457,7 @@ impl<'a> LoweringContext<'a> {
         self.loop_stack.push(LoopContext {
           continue_block,
           break_block: exit_block,
+          synthetic_stack_depth: self.synthetic_owned_stack.len(),
         });
 
         // Init (if present)
@@ -1341,18 +1516,20 @@ impl<'a> LoweringContext<'a> {
     &mut self,
     hir_id: HIRId,
   ) {
+    let loop_ctx = self.loop_stack.last().expect("break outside of loop").clone();
     self.emit_exit_drops(ExitKey::Break(hir_id));
-    let break_block = self.loop_stack.last().expect("break outside of loop").break_block;
-    self.fn_builder().terminate(Terminator::Goto(break_block));
+    self.emit_synthetic_drops_from_depth(loop_ctx.synthetic_stack_depth);
+    self.fn_builder().terminate(Terminator::Goto(loop_ctx.break_block));
   }
 
   fn lower_continue(
     &mut self,
     hir_id: HIRId,
   ) {
+    let loop_ctx = self.loop_stack.last().expect("continue outside of loop").clone();
     self.emit_exit_drops(ExitKey::Continue(hir_id));
-    let continue_block = self.loop_stack.last().expect("continue outside of loop").continue_block;
-    self.fn_builder().terminate(Terminator::Goto(continue_block));
+    self.emit_synthetic_drops_from_depth(loop_ctx.synthetic_stack_depth);
+    self.fn_builder().terminate(Terminator::Goto(loop_ctx.continue_block));
   }
 
   fn lower_return(
@@ -1360,8 +1537,9 @@ impl<'a> LoweringContext<'a> {
     hir_id: HIRId,
     value: Option<HIRId>,
   ) {
-    let val = value.and_then(|v| self.lower_hir_node(v));
+    let val = value.and_then(|v| self.lower_hir_node(v)); // Don't spill - ownership transfers to caller
     self.emit_exit_drops(ExitKey::Return(hir_id));
+    self.emit_all_synthetic_drops();
     self.fn_builder().terminate(Terminator::Return(val));
   }
 
@@ -1422,6 +1600,129 @@ impl<'a> LoweringContext<'a> {
     }
   }
 
+  /// Check if a callee (function or method) is extern.
+  /// Extern functions don't consume ownership of their arguments.
+  fn is_callee_extern(
+    &self,
+    callee: DefinitionId,
+  ) -> bool {
+    let def = self.defs.get(&callee);
+    match &def.kind {
+      DefinitionKind::Function(f) => f.is_extern,
+      DefinitionKind::Method(_) => false, // Methods are never extern
+      _ => false,
+    }
+  }
+
+  // === Synthetic temp spilling for owned temporaries ===
+
+  /// If the operand is a Temp of an owned type, spill it to a synthetic Local.
+  /// Returns the operand unchanged if it's not a Temp, doesn't need dropping,
+  /// or is a "load alias" (loaded from a local that has its own drop schedule).
+  /// The local is registered for dropping at block end.
+  fn spill_if_owned_temp(
+    &mut self,
+    operand: Operand,
+    ty: TypeId,
+  ) -> Operand {
+    let Operand::Temp(temp_id) = operand else {
+      return operand;
+    };
+
+    if !self.types.needs_drop(&ty) {
+      return operand;
+    }
+
+    if self.load_alias_temps.contains(&temp_id) {
+      return operand;
+    }
+
+    let local = self.fn_builder().alloc_local(LocalData {
+      def_id: None,
+      ty,
+      mutable: false,
+      name: None,
+    });
+
+    self.fn_builder().emit(Instr::Store {
+      dest: local,
+      value: operand,
+    });
+
+    if let Some((_, locals)) = self.synthetic_owned_stack.last_mut() {
+      locals.push(local);
+    }
+
+    Operand::Local(local)
+  }
+
+  /// Allocate a synthetic local, registering for drop if owned.
+  fn alloc_synthetic_local(
+    &mut self,
+    ty: TypeId,
+    mutable: bool,
+  ) -> LocalId {
+    let local = self.fn_builder().alloc_local(LocalData {
+      def_id: None,
+      ty,
+      mutable,
+      name: None,
+    });
+
+    if self.types.needs_drop(&ty) {
+      if let Some((_, locals)) = self.synthetic_owned_stack.last_mut() {
+        locals.push(local);
+      }
+    }
+
+    local
+  }
+
+  /// Emit drops for synthetic temps in the current block (for normal block exit).
+  fn emit_current_synthetic_drops(&mut self) {
+    // Collect locals first to avoid borrow conflict with fn_builder()
+    let locals_to_drop: Vec<LocalId> = self
+      .synthetic_owned_stack
+      .last()
+      .map(|(_, locals)| locals.iter().rev().copied().collect())
+      .unwrap_or_default();
+
+    for local in locals_to_drop {
+      self.fn_builder().emit(Instr::Drop { local });
+    }
+  }
+
+  /// Emit drops for ALL synthetic temps on the stack (for return).
+  fn emit_all_synthetic_drops(&mut self) {
+    // Collect locals first to avoid borrow conflict with fn_builder()
+    let locals_to_drop: Vec<LocalId> = self
+      .synthetic_owned_stack
+      .iter()
+      .rev()
+      .flat_map(|(_, locals)| locals.iter().rev().copied())
+      .collect();
+
+    for local in locals_to_drop {
+      self.fn_builder().emit(Instr::Drop { local });
+    }
+  }
+
+  /// Emit drops for synthetic temps from a given stack depth (for break/continue).
+  fn emit_synthetic_drops_from_depth(
+    &mut self,
+    depth: usize,
+  ) {
+    let locals_to_drop: Vec<LocalId> = self.synthetic_owned_stack[depth..]
+      .iter()
+      .rev()
+      .flat_map(|(_, locals)| locals.iter().rev().copied())
+      .collect();
+
+    for local in locals_to_drop {
+      self.fn_builder().emit(Instr::Drop { local });
+    }
+  }
+
   // === Records and enums lowering ===
 
   fn lower_field_access(
@@ -1435,7 +1736,7 @@ impl<'a> LoweringContext<'a> {
     let base_ty = base_node.type_id;
 
     // Check if base is already a pointer/reference type
-    let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer(_) | Type::Reference { .. });
+    let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. });
 
     let base_ptr = if base_is_ptr {
       // Base is already a pointer - lower and use directly
@@ -1443,20 +1744,14 @@ impl<'a> LoweringContext<'a> {
     } else {
       // Base is a value - spill to local to get addressable storage
       let base_val = self.lower_hir_node(base)?;
-
-      let temp_local = self.fn_builder().alloc_local(LocalData {
-        def_id: None,
-        ty: base_ty,
-        mutable: false,
-        name: None,
-      });
+      let temp_local = self.alloc_synthetic_local(base_ty, false);
 
       self.fn_builder().emit(Instr::Store {
         dest: temp_local,
         value: base_val,
       });
 
-      let base_ptr_ty = self.types.pointer(base_ty);
+      let base_ptr_ty = self.types.pointer(base_ty, false);
       let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
       self.fn_builder().emit(Instr::AddrOfLocal {
         dest: base_ptr_temp,
@@ -1468,7 +1763,7 @@ impl<'a> LoweringContext<'a> {
     };
 
     // Get pointer to field
-    let field_ptr_ty = self.types.pointer(field_ty);
+    let field_ptr_ty = self.types.pointer(field_ty, false);
     let field_ptr = self.fn_builder().alloc_temp(field_ptr_ty, span.clone());
 
     self.fn_builder().emit(Instr::GetFieldPtr {
@@ -1513,7 +1808,7 @@ impl<'a> LoweringContext<'a> {
       .collect();
 
     // Get pointer to local
-    let ptr_ty = self.types.pointer(record_ty);
+    let ptr_ty = self.types.pointer(record_ty, true);
     let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
     self.fn_builder().emit(Instr::AddrOfLocal {
       dest: ptr,
@@ -1544,6 +1839,7 @@ impl<'a> LoweringContext<'a> {
     span: Span,
   ) -> Option<Operand> {
     // Build argument list: receiver (if any) + args
+    // Don't spill arguments - ownership transfers to callee
     let mut call_args = Vec::new();
 
     if let Some(recv) = receiver {
@@ -1598,7 +1894,7 @@ impl<'a> LoweringContext<'a> {
       .collect();
 
     // Get pointer to local
-    let ptr_ty = self.types.pointer(enum_ty);
+    let ptr_ty = self.types.pointer(enum_ty, true);
     let ptr = self.fn_builder().alloc_temp(ptr_ty, span.clone());
     self.fn_builder().emit(Instr::AddrOfLocal {
       dest: ptr,

@@ -395,9 +395,12 @@ function main(): void {
 }
 
 #[test]
-fn ffi_leak_warning() {
-  // Passing an owned type to an extern function produces a warning.
-  let result = common::analyze(
+fn ffi_no_leak_for_named_vars() {
+  // Passing an owned type to an extern function is now handled properly -
+  // the compiler tracks that extern calls don't consume ownership, so the
+  // caller is responsible for dropping the value. Named variables get their
+  // drops scheduled by DropSchedules, so no warning is needed.
+  common::assert_ok(
     r#"
 extern ffi {
     function ffiConsume(s: string): void;
@@ -410,17 +413,73 @@ function main(): void {
 }
 "#,
   );
+}
 
-  // O0004 is a warning, not an error - but it should be in diagnostics
-  let codes: Vec<_> = result
-    .output
-    .diagnostics
-    .iter()
-    .map(|d| d.error_code.as_str())
-    .collect();
-  assert!(codes.contains(&"O0004"), "Expected O0004 warning, got: {:?}", codes);
+#[test]
+fn extern_does_not_consume_ownership() {
+  // Extern functions don't consume ownership, so the variable can be reused.
+  // This is valid because extern calls don't move the value.
+  common::assert_ok(
+    r#"
+extern io {
+    function print(s: string): void;
+}
 
-  assert_snapshot!("ffi_leak_warning", common::format_diagnostics(&result.output.diagnostics));
+function main(): void {
+    let a: string = "hello";
+    io::print(a);
+    io::print(a);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn non_extern_consumes_ownership() {
+  // Non-extern (Ignis) functions DO consume ownership.
+  // Using the variable after passing to an Ignis function is an error.
+  common::assert_err(
+    r#"
+function consume(s: string): void {
+    return;
+}
+
+function main(): void {
+    let a: string = "hello";
+    consume(a);
+    consume(a);
+    return;
+}
+"#,
+    &["O0001"],
+  );
+}
+
+#[test]
+fn extern_then_ignis_call() {
+  // After extern call (doesn't consume), variable is still valid.
+  // After Ignis call (consumes), variable is moved.
+  common::assert_err(
+    r#"
+extern io {
+    function print(s: string): void;
+}
+
+function consume(s: string): void {
+    return;
+}
+
+function main(): void {
+    let a: string = "hello";
+    io::print(a);
+    consume(a);
+    io::print(a);
+    return;
+}
+"#,
+    &["O0001"],
+  );
 }
 
 #[test]

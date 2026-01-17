@@ -25,6 +25,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use ignis_hir::{HIR, HIRId, HIRKind, HIRNode, statement::LoopKind};
 use ignis_type::definition::{
@@ -33,6 +34,15 @@ use ignis_type::definition::{
 };
 use ignis_type::symbol::SymbolTable;
 use ignis_type::types::{Substitution, Type, TypeId, TypeStore};
+
+/// Cached verbose mode flag from IGNIS_VERBOSE environment variable.
+static VERBOSE_MODE: OnceLock<bool> = OnceLock::new();
+
+/// Returns true if verbose logging is enabled via IGNIS_VERBOSE env var.
+/// Result is cached to avoid repeated syscalls.
+fn is_verbose() -> bool {
+  *VERBOSE_MODE.get_or_init(|| std::env::var("IGNIS_VERBOSE").is_ok())
+}
 
 /// Key for identifying a generic instantiation.
 ///
@@ -99,6 +109,9 @@ pub struct Monomorphizer<'a> {
 
   /// Maps instantiation keys to their concrete definition IDs
   cache: HashMap<InstanceKey, DefinitionId>,
+  /// Reverse cache: maps concrete definition IDs back to their InstanceKey
+  /// Used to recover type arguments when receiver type is already concretized
+  reverse_cache: HashMap<DefinitionId, InstanceKey>,
   /// Instantiations discovered but not yet processed
   worklist: VecDeque<InstanceKey>,
   /// Instantiations whose bodies have been substituted
@@ -124,6 +137,7 @@ impl<'a> Monomorphizer<'a> {
       types,
       symbols,
       cache: HashMap::new(),
+      reverse_cache: HashMap::new(),
       worklist: VecDeque::new(),
       processed: HashSet::new(),
       current_def_remap: HashMap::new(),
@@ -152,6 +166,7 @@ impl<'a> Monomorphizer<'a> {
       }
       let concrete_id = self.create_concrete_def_shell(&key);
       self.cache.insert(key.clone(), concrete_id);
+      self.reverse_cache.insert(concrete_id, key.clone());
     }
 
     // === PASS 2: Substitute bodies + fixpoint for nested instantiations ===
@@ -182,6 +197,7 @@ impl<'a> Monomorphizer<'a> {
         }
         let concrete_id = self.create_concrete_def_shell(&key);
         self.cache.insert(key.clone(), concrete_id);
+        self.reverse_cache.insert(concrete_id, key.clone());
       }
     }
 
@@ -214,13 +230,14 @@ impl<'a> Monomorphizer<'a> {
         }
         let concrete_id = self.create_concrete_def_shell(&key);
         self.cache.insert(key.clone(), concrete_id);
+        self.reverse_cache.insert(concrete_id, key.clone());
       }
     }
 
     // Final pass: concretize all Type::Instance in definition types
     self.concretize_all_definition_types();
 
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
+    if is_verbose() {
       eprintln!("[MONO] Monomorphization complete:");
       eprintln!("[MONO]   output_defs count: {}", self.output_defs.iter().count());
       eprintln!(
@@ -298,8 +315,8 @@ impl<'a> Monomorphizer<'a> {
             }
           }
         },
-        DefinitionKind::Method(md) if md.type_params.is_empty() => {
-          // Non-generic method: concretize return type and parameters
+        DefinitionKind::Method(md) if md.type_params.is_empty() && !self.is_owner_generic(md.owner_type) => {
+          // Non-generic method on non-generic owner: concretize return type and parameters
           let new_ret = self.concretize_type(md.return_type);
           if new_ret != md.return_type {
             if let DefinitionKind::Method(md) = &mut self.output_defs.get_mut(&def_id).kind {
@@ -311,7 +328,7 @@ impl<'a> Monomorphizer<'a> {
             let (old_ty, is_param) = {
               let param_def = self.output_defs.get(param_id);
               if let DefinitionKind::Parameter(pd) = &param_def.kind {
-                if std::env::var("IGNIS_VERBOSE").is_ok() {
+                if is_verbose() {
                   eprintln!("[MONO] method param {:?} has type: {:?}", param_id, self.types.get(&pd.type_id));
                 }
                 (pd.type_id, true)
@@ -321,7 +338,7 @@ impl<'a> Monomorphizer<'a> {
             };
             if is_param {
               let new_ty = self.concretize_type(old_ty);
-              if std::env::var("IGNIS_VERBOSE").is_ok() && new_ty != old_ty {
+              if is_verbose() && new_ty != old_ty {
                 eprintln!(
                   "[MONO] concretize param: {:?} old_ty={:?} new_ty={:?}",
                   param_id,
@@ -365,7 +382,7 @@ impl<'a> Monomorphizer<'a> {
     }
 
     let def = self.input_defs.get(&def_id);
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
+    if is_verbose() {
       eprintln!(
         "[MONO] copy_if_nongeneric: def_id={:?}, name={}",
         def_id,
@@ -381,7 +398,7 @@ impl<'a> Monomorphizer<'a> {
           self.output_hir.function_bodies.insert(def_id, body_id);
           let new_body = self.clone_hir_tree(body_id);
           self.output_hir.function_bodies.insert(def_id, new_body);
-          if std::env::var("IGNIS_VERBOSE").is_ok() {
+          if is_verbose() {
             eprintln!(
               "[MONO]   -> copied function body, count now: {}",
               self.output_hir.function_bodies.len()
@@ -445,7 +462,7 @@ impl<'a> Monomorphizer<'a> {
   ) -> Option<(DefinitionId, Vec<TypeId>)> {
     loop {
       match self.types.get(&ty).clone() {
-        Type::Reference { inner, .. } | Type::Pointer(inner) => {
+        Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
           ty = inner;
         },
         Type::Instance { generic, args } => {
@@ -666,14 +683,15 @@ impl<'a> Monomorphizer<'a> {
         // Clone receiver first to get the concretized type
         let new_receiver = receiver.map(|r| self.clone_hir_tree(r));
 
-        // Extract owner type args from the CLONED receiver (which has been concretized)
-        // This ensures we get concrete types, not Type::Param
-        let owner_args = if let Some(new_recv_id) = new_receiver {
+        // Extract owner type args and method type args
+        // For instance methods: owner_args come from receiver, method_type_args from call
+        // For static methods: type_args are split between owner and method
+        let (owner_args, method_type_args) = if let Some(new_recv_id) = new_receiver {
+          // Instance method: extract owner args from receiver type
           let recv_ty = self.output_hir.get(new_recv_id).type_id;
 
-          // Try unwrapping to get Instance/Record type and args
-          let (def_id, mut args) = if let Some((def, args)) = self.unwrap_to_instance_type(recv_ty) {
-            if std::env::var("IGNIS_VERBOSE").is_ok() {
+          let (def_id, mut extracted_args) = if let Some((def, args)) = self.unwrap_to_instance_type(recv_ty) {
+            if is_verbose() {
               eprintln!(
                 "[MONO]   unwrap_to_instance_type returned: def={:?}, args.len()={}",
                 def,
@@ -686,54 +704,41 @@ impl<'a> Monomorphizer<'a> {
           };
 
           // If args is empty, search cache for the concrete def's original args
-          if args.is_empty() {
-            if std::env::var("IGNIS_VERBOSE").is_ok() {
+          if extracted_args.is_empty() {
+            if is_verbose() {
               eprintln!("[MONO]   Args empty for def={:?}, searching cache", def_id);
             }
-            // Search cache for this concrete def to get its args
             for (key, &cached_def) in &self.cache {
               if cached_def == def_id {
-                if let InstanceKey::Generic {
-                  def: _,
-                  args: cached_args,
-                } = key
-                {
-                  if std::env::var("IGNIS_VERBOSE").is_ok() {
+                if let InstanceKey::Generic { args: cached_args, .. } = key {
+                  if is_verbose() {
                     eprintln!(
                       "[MONO]     Found in cache: args={:?}",
                       cached_args.iter().map(|t| self.types.get(t)).collect::<Vec<_>>()
                     );
                   }
-                  args = cached_args.clone();
+                  extracted_args = cached_args.clone();
                   break;
                 }
               }
             }
-            if args.is_empty() && std::env::var("IGNIS_VERBOSE").is_ok() {
-              eprintln!("[MONO]     Not found in cache - using empty args");
-            }
           }
 
           // Check if any args are Type::Param (incomplete resolution)
-          let has_param = args.iter().any(|ty| matches!(self.types.get(ty), Type::Param { .. }));
+          let has_param = extracted_args
+            .iter()
+            .any(|ty| matches!(self.types.get(ty), Type::Param { .. }));
 
           if has_param {
-            if std::env::var("IGNIS_VERBOSE").is_ok() {
+            if is_verbose() {
               eprintln!("[MONO] Warning: MethodCall receiver has Type::Param in args");
             }
-            // Try to extract concrete args from the receiver's concrete type
-            // If receiver is &Type::Record(Box__i32), we need to find the original instantiation
             match self.types.get(&recv_ty).clone() {
               Type::Record(rec_def) | Type::Enum(rec_def) => {
-                // Search cache for this concrete def to get its args
                 for (key, &cached_def) in &self.cache {
                   if cached_def == rec_def {
-                    if let InstanceKey::Generic {
-                      def: _,
-                      args: cached_args,
-                    } = key
-                    {
-                      args = cached_args.clone();
+                    if let InstanceKey::Generic { args: cached_args, .. } = key {
+                      extracted_args = cached_args.clone();
                       break;
                     }
                   }
@@ -743,23 +748,55 @@ impl<'a> Monomorphizer<'a> {
             }
           }
 
-          args
+          // For instance methods, type_args are the method's own type args
+          (extracted_args, type_args.clone())
         } else {
-          vec![]
+          // Static method: split type_args between owner and method
+          // First N args are for owner (N = owner's type param count), rest for method
+          let method_def = self.input_defs.get(method);
+          let (owner_param_count, method_param_count) = match &method_def.kind {
+            DefinitionKind::Method(md) => {
+              let owner_def = self.input_defs.get(&md.owner_type);
+              let owner_count = match &owner_def.kind {
+                DefinitionKind::Record(rd) => rd.type_params.len(),
+                DefinitionKind::Enum(ed) => ed.type_params.len(),
+                _ => 0,
+              };
+              (owner_count, md.type_params.len())
+            },
+            _ => (0, 0),
+          };
+
+          if is_verbose() {
+            eprintln!(
+              "[MONO] Static MethodCall: owner_param_count={}, method_param_count={}, type_args.len()={}",
+              owner_param_count,
+              method_param_count,
+              type_args.len()
+            );
+          }
+
+          // Split type_args: first owner_param_count for owner, rest for method
+          let owner = type_args.iter().take(owner_param_count).cloned().collect();
+          let method = type_args.iter().skip(owner_param_count).cloned().collect();
+          (owner, method)
         };
 
-        // Resolve method call to concrete instantiation using owner args from cloned receiver
-        if std::env::var("IGNIS_VERBOSE").is_ok() {
+        if is_verbose() {
           eprintln!(
-            "[MONO] clone MethodCall: method={:?}, owner_args={:?}",
+            "[MONO] clone MethodCall: method={:?}, owner_args={:?}, method_type_args={:?}",
             method,
-            owner_args.iter().map(|t| self.types.get(t)).collect::<Vec<_>>()
+            owner_args.iter().map(|t| self.types.get(t)).collect::<Vec<_>>(),
+            method_type_args.iter().map(|t| self.types.get(t)).collect::<Vec<_>>()
           );
         }
-        let concrete_method = self.resolve_concrete_method_with_args(*method, type_args, &owner_args);
-        if std::env::var("IGNIS_VERBOSE").is_ok() {
+
+        let concrete_method = self.resolve_concrete_method_with_args(*method, &method_type_args, &owner_args);
+
+        if is_verbose() {
           eprintln!("[MONO]   -> concrete_method={:?}", concrete_method);
         }
+
         let new_args: Vec<_> = args.iter().map(|a| self.clone_hir_tree(*a)).collect();
 
         // Build substitution from method's owner type and method type args
@@ -953,6 +990,10 @@ impl<'a> Monomorphizer<'a> {
   }
 
   /// Scan HIR for generic instantiations with concrete type arguments.
+  ///
+  /// Note: When called from discover_from_root on non-generic functions, the context
+  /// guarantees all types are concrete (no Type::Param). A future optimization could
+  /// add a context_is_concrete parameter to skip the Type::Param checks in those cases.
   fn scan_hir(
     &mut self,
     hir_id: HIRId,
@@ -965,7 +1006,13 @@ impl<'a> Monomorphizer<'a> {
         args,
       } => {
         if !type_args.is_empty() {
-          self.enqueue(InstanceKey::generic(*callee, type_args.clone()));
+          // Check if any type arg contains Type::Param - only enqueue if fully concrete
+          let has_param = type_args
+            .iter()
+            .any(|ty| matches!(self.types.get(ty), Type::Param { .. }));
+          if !has_param {
+            self.enqueue(InstanceKey::generic(*callee, type_args.clone()));
+          }
         }
         for arg in args {
           self.scan_hir(*arg);
@@ -1016,7 +1063,7 @@ impl<'a> Monomorphizer<'a> {
                   self.enqueue(InstanceKey::method(generic, owner_args, *method, type_args.clone()));
                 }
               }
-            } else if std::env::var("IGNIS_VERBOSE").is_ok() {
+            } else if is_verbose() {
               eprintln!("[MONO] Skipping enqueue - owner_args contains Type::Param");
             }
           }
@@ -1144,7 +1191,7 @@ impl<'a> Monomorphizer<'a> {
     key: InstanceKey,
   ) {
     if !self.cache.contains_key(&key) {
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
+      if is_verbose() {
         eprintln!("[MONO] enqueue: {:?}", key);
       }
       self.worklist.push_back(key);
@@ -1159,9 +1206,10 @@ impl<'a> Monomorphizer<'a> {
     key: &InstanceKey,
   ) -> DefinitionId {
     let mangled_name = { self.mangle_name(key) };
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
+    if is_verbose() {
       eprintln!("[MONO] create_concrete_def_shell: key={:?}, mangled_name={}", key, mangled_name);
     }
+    let verbose = is_verbose();
     let name_sym = {
       let mut syms = self.symbols.borrow_mut();
       syms.intern(&mangled_name)
@@ -1171,12 +1219,16 @@ impl<'a> Monomorphizer<'a> {
     match key {
       InstanceKey::Generic { def, .. } => {
         let generic_def = self.input_defs.get(def);
-        match &generic_def.kind.clone() {
+        let result = match &generic_def.kind.clone() {
           DefinitionKind::Function(fd) => self.instantiate_function(generic_def, fd, &subst, name_sym),
           DefinitionKind::Record(rd) => self.instantiate_record(generic_def, rd, &subst, name_sym),
           DefinitionKind::Enum(ed) => self.instantiate_enum(generic_def, ed, &subst, name_sym),
           _ => panic!("unexpected generic def kind: {:?}", generic_def.kind),
+        };
+        if verbose {
+          eprintln!("[MONO]   -> concrete_id={:?}", result);
         }
+        result
       },
       InstanceKey::Method {
         method_def,
@@ -1362,6 +1414,7 @@ impl<'a> Monomorphizer<'a> {
         params: new_params,
         return_type: new_ret,
         is_static: md.is_static,
+        self_mutable: md.self_mutable,
       }),
       name,
       span: generic_def.span.clone(),
@@ -1385,7 +1438,7 @@ impl<'a> Monomorphizer<'a> {
 
     // Substitute type params, then concretize Type::Instance to Type::Record
     let substituted_type = self.types.substitute(pd.type_id, subst);
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
+    if is_verbose() {
       eprintln!(
         "[MONO] instantiate_param: original={:?}, substituted={:?}",
         self.types.get(&pd.type_id),
@@ -1393,7 +1446,7 @@ impl<'a> Monomorphizer<'a> {
       );
     }
     let new_type = self.concretize_type(substituted_type);
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
+    if is_verbose() {
       eprintln!("[MONO]   -> concretized={:?}", self.types.get(&new_type));
     }
 
@@ -1421,34 +1474,59 @@ impl<'a> Monomorphizer<'a> {
   ) {
     let primary_def = key.primary_def();
     if let Some(&body) = self.input_hir.function_bodies.get(&primary_def) {
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
+      let subst = self.build_substitution(key);
+      if is_verbose() {
+        let def_name = self
+          .symbols
+          .borrow()
+          .get(&self.input_defs.get(&primary_def).name)
+          .to_string();
         eprintln!(
-          "[MONO] substitute_body: primary_def={:?}, concrete_id={:?}",
-          primary_def, concrete_id
+          "[MONO] substitute_body: primary_def={:?} ({}), concrete_id={:?}, subst={:?}",
+          primary_def, def_name, concrete_id, subst
         );
       }
-      let subst = self.build_substitution(key);
 
       // Build mapping from old param def_ids to new param def_ids
       self.current_def_remap = self.build_def_remapping(&primary_def, &concrete_id);
 
       let concrete_body = self.substitute_hir(body, &subst);
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
+      if is_verbose() {
         eprintln!("[MONO]   -> inserting body, concrete_body={:?}", concrete_body);
       }
       self.output_hir.function_bodies.insert(concrete_id, concrete_body);
       if !self.output_hir.items.contains(&concrete_id) {
         self.output_hir.items.push(concrete_id);
       }
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
+      if is_verbose() {
         eprintln!(
           "[MONO]   -> function_bodies count now: {}",
           self.output_hir.function_bodies.len()
         );
       }
     } else {
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
-        eprintln!("[MONO] substitute_body: NO BODY for primary_def={:?}", primary_def);
+      // Invariant: non-extern functions/methods MUST have a body.
+      // If we reach here, it means the body was never stored during lowering.
+      let def = self.input_defs.get(&primary_def);
+      let requires_body = match &def.kind {
+        DefinitionKind::Function(fd) => !fd.is_extern,
+        DefinitionKind::Method(_) => true,
+        _ => false,
+      };
+
+      if requires_body {
+        let def_name = self.symbols.borrow().get(&def.name).to_string();
+        panic!(
+          "[MONO] INVARIANT VIOLATION: Missing body for non-extern definition\n\
+           def_id: {:?}\n\
+           name: {}\n\
+           kind: {:?}\n\
+           span: {:?}\n\
+           module: {:?}\n\
+           This likely means the body was never stored during HIR lowering.\n\
+           Check lower_record_methods() / lower_enum_methods() for overload handling.",
+          primary_def, def_name, def.kind, def.span, def.owner_module
+        );
       }
     }
 
@@ -1496,26 +1574,54 @@ impl<'a> Monomorphizer<'a> {
         type_args,
         args,
       } => {
-        let concrete_callee = if !type_args.is_empty() {
-          let key = InstanceKey::generic(*callee, type_args.clone());
+        // Substitute type params in type_args (e.g., T -> i32)
+        let substituted_type_args: Vec<_> = type_args.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
+
+        // Skip instantiation if any type arg is Error (indicates analyzer bug)
+        let has_error = substituted_type_args
+          .iter()
+          .any(|ty| matches!(self.types.get(ty), Type::Error));
+
+        let concrete_callee = if !substituted_type_args.is_empty() && !has_error {
+          let key = InstanceKey::generic(*callee, substituted_type_args.clone());
           self.ensure_instantiated(&key)
         } else {
           *callee
         };
         let new_args: Vec<_> = args.iter().map(|a| self.substitute_hir(*a, subst)).collect();
-        HIRKind::Call {
-          callee: concrete_callee,
-          type_args: vec![],
-          args: new_args,
-        }
+
+        // Compute the correct return type using the call's type args.
+        // The node.type_id has type params owned by the callee, but we need to substitute
+        // them with the actual type args passed to this call.
+        let call_return_type = if !substituted_type_args.is_empty() && !has_error {
+          let call_subst = Substitution::for_generic(*callee, &substituted_type_args);
+          let substituted = self.types.substitute(node.type_id, &call_subst);
+          self.concretize_type(substituted)
+        } else {
+          let substituted = self.types.substitute(node.type_id, subst);
+          self.concretize_type(substituted)
+        };
+
+        // Allocate the Call node with the correct return type
+        return self.output_hir.alloc(HIRNode {
+          kind: HIRKind::Call {
+            callee: concrete_callee,
+            type_args: vec![],
+            args: new_args,
+          },
+          span: node.span,
+          type_id: call_return_type,
+        });
       },
       HIRKind::RecordInit {
         record_def,
         type_args,
         fields,
       } => {
-        let concrete_def = if !type_args.is_empty() {
-          let key = InstanceKey::generic(*record_def, type_args.clone());
+        // Substitute type params in type_args
+        let substituted_type_args: Vec<_> = type_args.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
+        let concrete_def = if !substituted_type_args.is_empty() {
+          let key = InstanceKey::generic(*record_def, substituted_type_args);
           self.ensure_instantiated(&key)
         } else {
           *record_def
@@ -1537,7 +1643,9 @@ impl<'a> Monomorphizer<'a> {
         args,
       } => {
         let new_receiver = receiver.map(|r| self.substitute_hir(r, subst));
-        let concrete_method = self.resolve_concrete_method(&new_receiver, *method, type_args);
+        // Substitute type params in method's type_args
+        let substituted_type_args: Vec<_> = type_args.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
+        let concrete_method = self.resolve_concrete_method(&new_receiver, *method, &substituted_type_args);
         let new_args: Vec<_> = args.iter().map(|a| self.substitute_hir(*a, subst)).collect();
         HIRKind::MethodCall {
           receiver: new_receiver,
@@ -1552,8 +1660,23 @@ impl<'a> Monomorphizer<'a> {
         variant_tag,
         payload,
       } => {
-        let concrete_def = if !type_args.is_empty() {
-          let key = InstanceKey::generic(*enum_def, type_args.clone());
+        // Substitute type params in type_args
+        let substituted_type_args: Vec<_> = type_args.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
+        if is_verbose() && !type_args.is_empty() {
+          eprintln!(
+            "[MONO] EnumVariant: type_args={:?}, substituted={:?}",
+            type_args
+              .iter()
+              .map(|ty| self.types.get(ty).clone())
+              .collect::<Vec<_>>(),
+            substituted_type_args
+              .iter()
+              .map(|ty| self.types.get(ty).clone())
+              .collect::<Vec<_>>()
+          );
+        }
+        let concrete_def = if !substituted_type_args.is_empty() {
+          let key = InstanceKey::generic(*enum_def, substituted_type_args);
           self.ensure_instantiated(&key)
         } else {
           *enum_def
@@ -1573,6 +1696,30 @@ impl<'a> Monomorphizer<'a> {
     // Substitute the type as well
     let new_type = self.types.substitute(node.type_id, subst);
     let concretized_type = self.concretize_type(new_type);
+
+    // Debug: check if we have Error types coming through
+    if is_verbose() {
+      if matches!(self.types.get(&concretized_type), Type::Error) {
+        eprintln!(
+          "[MONO] Warning: Error type in output HIR node. original={:?}, substituted={:?}, kind={:?}",
+          self.types.get(&node.type_id),
+          self.types.get(&new_type),
+          new_kind
+        );
+      }
+      // Also check for pointers to Error
+      if let Type::Pointer { inner, .. } = self.types.get(&concretized_type) {
+        if matches!(self.types.get(inner), Type::Error) {
+          eprintln!(
+            "[MONO] Warning: Pointer to Error in output HIR. original={:?}, substituted={:?}, concretized={:?}, kind={:?}",
+            self.types.get(&node.type_id),
+            self.types.get(&new_type),
+            self.types.get(&concretized_type),
+            new_kind
+          );
+        }
+      }
+    }
 
     self.output_hir.alloc(HIRNode {
       kind: new_kind,
@@ -1761,6 +1908,9 @@ impl<'a> Monomorphizer<'a> {
     key: &InstanceKey,
   ) -> DefinitionId {
     if let Some(&id) = self.cache.get(key) {
+      if is_verbose() {
+        eprintln!("[MONO] ensure_instantiated: cache hit for concrete_id={:?}", id);
+      }
       return id;
     }
     // Enqueue for processing (will be handled in fixpoint loop)
@@ -1768,6 +1918,13 @@ impl<'a> Monomorphizer<'a> {
     // Create shell immediately so we have an ID to return
     let concrete_id = self.create_concrete_def_shell(key);
     self.cache.insert(key.clone(), concrete_id);
+    self.reverse_cache.insert(concrete_id, key.clone());
+    if is_verbose() {
+      eprintln!(
+        "[MONO] ensure_instantiated: added to reverse_cache: concrete_id={:?}",
+        concrete_id
+      );
+    }
     concrete_id
   }
 
@@ -1777,11 +1934,34 @@ impl<'a> Monomorphizer<'a> {
     method_generic: DefinitionId,
     method_type_args: &[TypeId],
   ) -> DefinitionId {
-    // Get owner args from receiver type
+    // Get owner args from receiver type, unwrapping pointers/references
     let owner_args = if let Some(recv_id) = receiver {
       let recv_ty = self.output_hir.get(*recv_id).type_id;
-      if let Type::Instance { args, .. } = self.types.get(&recv_ty).clone() {
-        args
+      if let Some((def, args)) = self.unwrap_to_instance_type_from_output(recv_ty) {
+        if !args.is_empty() {
+          // Type::Instance - use args directly
+          if is_verbose() {
+            eprintln!("[MONO] resolve_concrete_method: Type::Instance with args={:?}", args);
+          }
+          args
+        } else {
+          // Type::Record/Enum (already concrete) - look up original type args from reverse cache
+          let result = self
+            .reverse_cache
+            .get(&def)
+            .and_then(|key| match key {
+              InstanceKey::Generic { args, .. } => Some(args.clone()),
+              InstanceKey::Method { owner_args, .. } => Some(owner_args.clone()),
+            })
+            .unwrap_or_default();
+          if is_verbose() {
+            eprintln!(
+              "[MONO] resolve_concrete_method: Type::Record/Enum def={:?}, reverse_cache lookup result={:?}",
+              def, result
+            );
+          }
+          result
+        }
       } else {
         vec![]
       }
@@ -1790,6 +1970,27 @@ impl<'a> Monomorphizer<'a> {
     };
 
     self.resolve_concrete_method_with_args(method_generic, method_type_args, &owner_args)
+  }
+
+  /// Same as unwrap_to_instance_type but reads from output_hir types.
+  fn unwrap_to_instance_type_from_output(
+    &self,
+    mut ty: TypeId,
+  ) -> Option<(DefinitionId, Vec<TypeId>)> {
+    loop {
+      match self.types.get(&ty).clone() {
+        Type::Reference { inner, .. } | Type::Pointer { inner, .. } => {
+          ty = inner;
+        },
+        Type::Instance { generic, args } => {
+          return Some((generic, args));
+        },
+        Type::Record(def_id) | Type::Enum(def_id) => {
+          return Some((def_id, vec![]));
+        },
+        _ => return None,
+      }
+    }
   }
 
   /// Resolve a method call to its concrete instantiation, given the owner's type args.
@@ -1826,9 +2027,16 @@ impl<'a> Monomorphizer<'a> {
         let has_param = args.iter().any(|ty| matches!(self.types.get(ty), Type::Param { .. }));
 
         if has_param {
-          if std::env::var("IGNIS_VERBOSE").is_ok() {
+          if is_verbose() {
+            let generic_name = self
+              .symbols
+              .borrow()
+              .get(&self.input_defs.get(&generic).name)
+              .to_string();
+            let args_debug: Vec<_> = args.iter().map(|ty| self.types.get(ty).clone()).collect();
             eprintln!(
-              "[MONO] Warning: concretize_type called with Type::Instance containing Type::Param - returning as-is"
+              "[MONO] Warning: concretize_type called with Type::Instance containing Type::Param - returning as-is. generic={} (def {:?}), args={:?}",
+              generic_name, generic, args_debug
             );
           }
           // Return the Type::Instance as-is - caller needs to handle this
@@ -1837,6 +2045,12 @@ impl<'a> Monomorphizer<'a> {
 
         let key = InstanceKey::generic(generic, args);
         let concrete_def = self.ensure_instantiated(&key);
+
+        // Ensure reverse_cache entry exists for the concrete def
+        if !self.reverse_cache.contains_key(&concrete_def) {
+          self.reverse_cache.insert(concrete_def, key.clone());
+        }
+
         let concrete_def_kind = &self.output_defs.get(&concrete_def).kind;
         match concrete_def_kind {
           DefinitionKind::Record(_) => self.types.record(concrete_def),
@@ -1844,12 +2058,12 @@ impl<'a> Monomorphizer<'a> {
           _ => panic!("expected record or enum"),
         }
       },
-      Type::Pointer(inner) => {
+      Type::Pointer { inner, mutable } => {
         let new_inner = self.concretize_type(inner);
         if new_inner == inner {
           ty
         } else {
-          self.types.pointer(new_inner)
+          self.types.pointer(new_inner, mutable)
         }
       },
       Type::Reference { inner, mutable } => {
@@ -1955,7 +2169,10 @@ impl<'a> Monomorphizer<'a> {
       Type::String => "string".into(),
       Type::Void => "void".into(),
       Type::Never => "never".into(),
-      Type::Pointer(inner) => format!("ptr_{}", self.mangle_type(*inner)),
+      Type::Pointer { inner, mutable } => {
+        let prefix = if *mutable { "ptrmut" } else { "ptr" };
+        format!("{}_{}", prefix, self.mangle_type(*inner))
+      },
       Type::Reference { inner, mutable } => {
         let prefix = if *mutable { "refmut" } else { "ref" };
         format!("{}_{}", prefix, self.mangle_type(*inner))
@@ -2003,6 +2220,30 @@ impl<'a> Monomorphizer<'a> {
 
   fn escape(s: &str) -> String {
     s.replace('_', "_0")
+  }
+
+  /// Check if an owner (record/enum) definition is generic.
+  fn is_owner_generic(
+    &self,
+    owner_id: DefinitionId,
+  ) -> bool {
+    // Try output_defs first (for concrete instantiations), then input_defs (for generic templates).
+    // Concrete instantiations always have empty type_params (they're fully instantiated).
+    let owner_def = self.output_defs.get(&owner_id);
+    match &owner_def.kind {
+      DefinitionKind::Record(rd) => !rd.type_params.is_empty(),
+      DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
+      // Placeholder means it's being instantiated - check input_defs
+      DefinitionKind::Placeholder => {
+        let input_owner_def = self.input_defs.get(&owner_id);
+        match &input_owner_def.kind {
+          DefinitionKind::Record(rd) => !rd.type_params.is_empty(),
+          DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
+          _ => false,
+        }
+      },
+      _ => false,
+    }
   }
 }
 
@@ -2068,7 +2309,7 @@ impl MonoOutput {
     }
 
     // Log warnings if verbose mode (controlled by environment variable)
-    if !warnings.is_empty() && std::env::var("IGNIS_VERBOSE").is_ok() {
+    if !warnings.is_empty() && is_verbose() {
       for warning in &warnings {
         eprintln!("[mono warning] {}", warning);
       }
@@ -2110,7 +2351,7 @@ impl MonoOutput {
           generic, args, context
         ));
       },
-      Type::Pointer(inner) => self.check_type_is_concrete(*inner, types, context, warnings),
+      Type::Pointer { inner, .. } => self.check_type_is_concrete(*inner, types, context, warnings),
       Type::Reference { inner, .. } => self.check_type_is_concrete(*inner, types, context, warnings),
       Type::Vector { element, .. } => self.check_type_is_concrete(*element, types, context, warnings),
       Type::Tuple(elems) => {

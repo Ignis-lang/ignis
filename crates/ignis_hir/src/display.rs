@@ -745,7 +745,13 @@ impl<'a> HIRPrinter<'a> {
       Type::Infer => "infer".to_string(),
       Type::NullPtr => "null".to_string(),
       Type::Error => "error".to_string(),
-      Type::Pointer(inner) => format!("*{}", self.format_type(inner)),
+      Type::Pointer { inner, mutable } => {
+        if *mutable {
+          format!("*mut {}", self.format_type(inner))
+        } else {
+          format!("*{}", self.format_type(inner))
+        }
+      },
       Type::Reference { inner, mutable } => {
         if *mutable {
           format!("&mut {}", self.format_type(inner))

@@ -154,6 +154,9 @@ pub struct MethodDefinition {
   pub params: Vec<DefinitionId>,
   pub return_type: TypeId,
   pub is_static: bool,
+  /// Whether the method has `&mut self` (true) or `&self` (false).
+  /// Only meaningful for instance methods (is_static=false).
+  pub self_mutable: bool,
 }
 
 /// Definition of a type parameter (T, U, etc.)

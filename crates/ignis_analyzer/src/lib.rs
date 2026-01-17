@@ -496,7 +496,7 @@ impl<'a> Analyzer<'a> {
     let span = ignis_type::span::Span::default();
     let buffer_ptr_type = self.types.vector(self.types.infer(), None);
     let u64_type = self.types.u64();
-    let void_ptr_type = self.types.pointer(self.types.void());
+    let void_ptr_type = self.types.pointer(self.types.void(), false);
 
     let buf_len = self.create_extern_builtin("ignis_buf_len", vec![("buf", buffer_ptr_type)], u64_type, span.clone());
     let buf_at = self.create_extern_builtin(
