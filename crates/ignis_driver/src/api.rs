@@ -167,6 +167,7 @@ fn empty_analyzer_output() -> ignis_analyzer::AnalyzerOutput {
     node_types: HashMap::new(),
     node_spans: HashMap::new(),
     resolved_calls: HashMap::new(),
+    import_item_defs: HashMap::new(),
   }
 }
 
@@ -211,6 +212,10 @@ pub struct AnalyzeProjectOutput {
   /// Maps Call nodes to their resolved overload.
   /// Used when hovering over an overloaded function call.
   pub resolved_calls: HashMap<NodeId, DefinitionId>,
+
+  /// Maps import item spans to their resolved definitions.
+  /// Used for hover on import statements.
+  pub import_item_defs: HashMap<Span, DefinitionId>,
 }
 
 /// Analyze a project starting from an entry file, resolving imports.
@@ -290,6 +295,7 @@ pub fn analyze_project_with_text(
       node_spans: HashMap::new(),
       symbol_names,
       resolved_calls: HashMap::new(),
+      import_item_defs: HashMap::new(),
     };
   };
 
@@ -318,6 +324,7 @@ pub fn analyze_project_with_text(
       node_spans: output.node_spans,
       symbol_names,
       resolved_calls: output.resolved_calls,
+      import_item_defs: output.import_item_defs,
     };
   }
 
@@ -334,6 +341,7 @@ pub fn analyze_project_with_text(
     node_spans: HashMap::new(),
     symbol_names,
     resolved_calls: HashMap::new(),
+    import_item_defs: HashMap::new(),
   }
 }
 

@@ -578,6 +578,9 @@ impl<'a> Analyzer<'a> {
         self.types.vector(elem_type, Some(vector.items.len()))
       },
       ASTExpression::Path(path) => {
+        // Track path segment spans for hover support
+        self.track_path_segment_spans(path);
+
         // Resolve the path to get the definition type
         match self.resolve_qualified_path(&path.segments) {
           Some(ResolvedPath::Entry(entry)) => match entry {
@@ -588,7 +591,7 @@ impl<'a> Analyzer<'a> {
                   name: path
                     .segments
                     .iter()
-                    .map(|s| self.get_symbol_name(s))
+                    .map(|s| self.get_symbol_name(&s.name))
                     .collect::<Vec<_>>()
                     .join("::"),
                   span: path.span.clone(),
@@ -1007,6 +1010,7 @@ impl<'a> Analyzer<'a> {
         visibility: ignis_type::definition::Visibility::Private,
         owner_module: self.current_module,
         owner_namespace: None,
+        doc: None,
       };
       let self_def_id = self.defs.alloc(self_def);
       let _ = self.scopes.define(&self_symbol, &self_def_id, false);
@@ -1160,7 +1164,8 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Record(rd) => {
         // Static method?
         if let Some(method_id) = rd.static_methods.get(&ma.member).and_then(|e| e.as_single()).cloned() {
-          // Method access without call - this is an error (must be called)
+          self.set_import_item_def(&ma.member_span, &method_id);
+          // Method access without call - error
           let member_name = self.get_symbol_name(&ma.member);
           self.add_diagnostic(
             DiagnosticMessage::MethodMustBeCalled {
@@ -1173,6 +1178,7 @@ impl<'a> Analyzer<'a> {
         }
         // Static field?
         if let Some(field_id) = rd.static_fields.get(&ma.member).cloned() {
+          self.set_import_item_def(&ma.member_span, &field_id);
           return self.get_definition_type(&field_id);
         }
         // Not found
@@ -1221,6 +1227,7 @@ impl<'a> Analyzer<'a> {
         }
         // Static method?
         if let Some(method_id) = ed.static_methods.get(&ma.member).and_then(|e| e.as_single()).cloned() {
+          self.set_import_item_def(&ma.member_span, &method_id);
           let member_name = self.get_symbol_name(&ma.member);
           self.add_diagnostic(
             DiagnosticMessage::MethodMustBeCalled {
@@ -1233,6 +1240,7 @@ impl<'a> Analyzer<'a> {
         }
         // Static field?
         if let Some(field_id) = ed.static_fields.get(&ma.member).cloned() {
+          self.set_import_item_def(&ma.member_span, &field_id);
           return self.get_definition_type(&field_id);
         }
         // Not found
@@ -1242,28 +1250,6 @@ impl<'a> Analyzer<'a> {
           DiagnosticMessage::StaticMemberNotFound {
             member: member_name,
             type_name,
-            span: ma.span.clone(),
-          }
-          .report(),
-        );
-        self.types.error()
-      },
-      DefinitionKind::Namespace(ns_def) => {
-        // Look up member in namespace
-        if let Some(member_def_id) = self
-          .namespaces
-          .lookup_def(ns_def.namespace_id, &ma.member)
-          .and_then(|e| e.as_single())
-          .cloned()
-        {
-          return self.get_definition_type(&member_def_id);
-        }
-        let ns_name = self.get_symbol_name(&self.defs.get(&def_id).name);
-        let member_name = self.get_symbol_name(&ma.member);
-        self.add_diagnostic(
-          DiagnosticMessage::MemberNotFoundInNamespace {
-            member: member_name,
-            namespace: ns_name,
             span: ma.span.clone(),
           }
           .report(),
@@ -1323,7 +1309,7 @@ impl<'a> Analyzer<'a> {
 
     // Start with first segment in scope
     let first_segment = &path.segments[0];
-    let mut current_def = self.scopes.lookup_def(first_segment).cloned()?;
+    let mut current_def = self.scopes.lookup_def(&first_segment.name).cloned()?;
 
     // Walk through remaining segments
     for segment in path.segments.iter().skip(1) {
@@ -1331,7 +1317,7 @@ impl<'a> Analyzer<'a> {
         DefinitionKind::Namespace(ns_def) => {
           current_def = self
             .namespaces
-            .lookup_def(ns_def.namespace_id, segment)
+            .lookup_def(ns_def.namespace_id, &segment.name)
             .and_then(|e| e.as_single())
             .cloned()?;
         },
@@ -1340,6 +1326,92 @@ impl<'a> Analyzer<'a> {
     }
 
     Some(current_def)
+  }
+
+  /// Track path segment spans for hover support.
+  ///
+  /// Walks through the path segments and links each segment's span to its
+  /// resolved definition in `import_item_defs`, enabling hover info for
+  /// individual path components (e.g., hovering on `String` in `String::toString`
+  /// shows namespace info, hovering on `toString` shows function signature).
+  fn track_path_segment_spans(
+    &mut self,
+    path: &ignis_ast::expressions::path::ASTPath,
+  ) {
+    if path.segments.is_empty() {
+      return;
+    }
+
+    // Resolve first segment
+    let first_segment = &path.segments[0];
+    let Some(first_def) = self.scopes.lookup_def(&first_segment.name).cloned() else {
+      return;
+    };
+
+    self.set_import_item_def(&first_segment.span, &first_def);
+
+    let mut current_def = first_def;
+
+    // Walk through remaining segments
+    for segment in path.segments.iter().skip(1) {
+      // Clone the definition kind to avoid borrow conflicts
+      let def_kind = self.defs.get(&current_def).kind.clone();
+
+      match def_kind {
+        DefinitionKind::Namespace(ns_def) => {
+          let entry = self.namespaces.lookup_def(ns_def.namespace_id, &segment.name).cloned();
+
+          if let Some(entry) = entry {
+            if let Some(def_id) = entry.as_single() {
+              self.set_import_item_def(&segment.span, def_id);
+              current_def = *def_id;
+            } else {
+              // Overload group - still link the span to the first candidate for hover
+              if let SymbolEntry::Overload(candidates) = &entry {
+                if let Some(first) = candidates.first() {
+                  self.set_import_item_def(&segment.span, first);
+                }
+              }
+              return;
+            }
+          } else {
+            return;
+          }
+        },
+        DefinitionKind::Record(rd) => {
+          // Handle Record::staticMethod or Record::staticField
+          if let Some(entry) = rd.static_methods.get(&segment.name) {
+            if let Some(def_id) = entry.as_single() {
+              self.set_import_item_def(&segment.span, def_id);
+            } else if let SymbolEntry::Overload(candidates) = entry {
+              if let Some(first) = candidates.first() {
+                self.set_import_item_def(&segment.span, first);
+              }
+            }
+          } else if let Some(field_id) = rd.static_fields.get(&segment.name) {
+            self.set_import_item_def(&segment.span, field_id);
+          }
+          return;
+        },
+        DefinitionKind::Enum(ed) => {
+          // Handle Enum::Variant or Enum::staticMethod
+          if let Some(entry) = ed.static_methods.get(&segment.name) {
+            if let Some(def_id) = entry.as_single() {
+              self.set_import_item_def(&segment.span, def_id);
+            } else if let SymbolEntry::Overload(candidates) = entry {
+              if let Some(first) = candidates.first() {
+                self.set_import_item_def(&segment.span, first);
+              }
+            }
+          } else if let Some(field_id) = ed.static_fields.get(&segment.name) {
+            self.set_import_item_def(&segment.span, field_id);
+          }
+          // Note: Enum variants don't have DefinitionIds, so we can't track them
+          return;
+        },
+        _ => return,
+      }
+    }
   }
 
   /// Auto-dereference references to get the underlying type
@@ -1900,7 +1972,7 @@ impl<'a> Analyzer<'a> {
       ASTNode::Expression(ASTExpression::Path(path)) => path
         .segments
         .iter()
-        .map(|s| self.get_symbol_name(s))
+        .map(|s| self.get_symbol_name(&s.name))
         .collect::<Vec<_>>()
         .join("::"),
       _ => "<function>".to_string(),
@@ -4256,7 +4328,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Path(path) => {
         if let Some(last) = path.segments.last() {
-          if let Some(def_id) = self.scopes.lookup_def(last) {
+          if let Some(def_id) = self.scopes.lookup_def(&last.name) {
             match &self.defs.get(def_id).kind {
               DefinitionKind::Variable(var_def) => var_def.mutable,
               DefinitionKind::Parameter(param_def) => param_def.mutable,
@@ -4298,7 +4370,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Variable(var) => self.get_symbol_name(&var.name),
       ASTExpression::Path(path) => {
         if let Some(last) = path.segments.last() {
-          self.get_symbol_name(last)
+          self.get_symbol_name(&last.name)
         } else {
           "<unknown>".to_string()
         }

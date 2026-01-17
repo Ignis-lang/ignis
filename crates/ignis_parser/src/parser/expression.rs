@@ -9,7 +9,7 @@ use ignis_ast::{
     dereference::ASTDereference,
     grouped::ASTGrouped,
     literal::ASTLiteral,
-    path::ASTPath,
+    path::{ASTPath, ASTPathSegment},
     reference::ASTReference,
     ternary::ASTTernary,
     unary::{ASTUnary, UnaryOperator},
@@ -384,8 +384,11 @@ impl IgnisParser {
         } else {
           let end = self.previous().span.clone();
           let span = Span::merge(&start, &end);
-          let symbol_ids: Vec<SymbolId> = segments.into_iter().map(|(id, _)| id).collect();
-          Ok(self.allocate_expression(ASTExpression::Path(ASTPath::new(symbol_ids, span))))
+          let path_segments: Vec<ASTPathSegment> = segments
+            .into_iter()
+            .map(|(id, seg_span)| ASTPathSegment::new(id, seg_span))
+            .collect();
+          Ok(self.allocate_expression(ASTExpression::Path(ASTPath::new(path_segments, span))))
         }
       },
       TokenType::Self_ => {
@@ -500,9 +503,16 @@ impl IgnisParser {
 
     let member_token = self.expect(TokenType::Identifier)?.clone();
     let member = self.insert_symbol(&member_token);
+    let member_span = member_token.span.clone();
 
     let span = Span::merge(self.get_span(&object), &member_token.span);
-    Ok(self.allocate_expression(ASTExpression::MemberAccess(ASTMemberAccess::new(object, op, member, span))))
+    Ok(self.allocate_expression(ASTExpression::MemberAccess(ASTMemberAccess::new(
+      object,
+      op,
+      member,
+      member_span,
+      span,
+    ))))
   }
 
   /// Check if current position looks like a record init: { } or { identifier :

@@ -404,53 +404,94 @@ impl LanguageServer for Server {
         }
       }
 
-      let Some(node_id) = found_node else {
-        eprintln!("[LSP DEBUG] No node found at position");
-        return Ok(None);
+      // First, check if cursor is on an import item (more specific than the import statement node)
+      let import_hover = {
+        let mut found_import = None;
+        let mut smallest_size = u32::MAX;
+
+        for (span, def_id) in &output.import_item_defs {
+          if span.file != file_id {
+            continue;
+          }
+
+          if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+            let size = span.end.0 - span.start.0;
+            if size < smallest_size {
+              smallest_size = size;
+              found_import = Some((span.clone(), def_id.clone(), size));
+            }
+          }
+        }
+
+        found_import
       };
 
-      eprintln!("[LSP DEBUG] Found node_id: {:?}", node_id.index());
-      eprintln!("[LSP DEBUG] node_defs has entry: {}", output.node_defs.contains_key(&node_id));
-      eprintln!(
-        "[LSP DEBUG] resolved_calls has entry: {}",
-        output.resolved_calls.contains_key(&node_id)
-      );
-      eprintln!("[LSP DEBUG] node_types has entry: {}", output.node_types.contains_key(&node_id));
-      eprintln!(
-        "[LSP DEBUG] Total entries - node_defs: {}, node_types: {}, node_spans: {}",
-        output.node_defs.len(),
-        output.node_types.len(),
-        output.node_spans.len()
-      );
-
       // Build hover content based on definition and/or type
-      // Check node_defs first, then resolved_calls (for overloaded function calls), then types
-      let content = if let Some(def_id) = output.node_defs.get(&node_id) {
-        eprintln!("[LSP DEBUG] Using node_defs");
-        format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
-      } else if let Some(def_id) = output.resolved_calls.get(&node_id) {
-        eprintln!("[LSP DEBUG] Using resolved_calls");
-        // This is a call to an overloaded function - show the resolved overload
-        format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
-      } else if let Some(type_id) = output.node_types.get(&node_id) {
-        eprintln!("[LSP DEBUG] Using node_types");
-        // No definition, just show the type
-        format!(
-          "```ignis\n{}\n```",
-          format_type(&output.types, &output.defs, &output.symbol_names, type_id)
-        )
+      // Import items take priority when cursor is on them (they're more specific than the import statement)
+      let (content, hover_span) = if let Some((import_span, import_def_id, import_size)) = import_hover {
+        // Check if we also have a node, and if so, whether the import item is more specific
+        let use_import = if let Some(ref node_id) = found_node {
+          if let Some(node_span) = output.node_spans.get(node_id) {
+            let node_size = node_span.end.0 - node_span.start.0;
+            import_size <= node_size // Prefer import item if it's same size or smaller
+          } else {
+            true // No span for node, use import
+          }
+        } else {
+          true // No node found, use import
+        };
+
+        if use_import {
+          let content = format_definition_hover(
+            &output.defs,
+            &output.types,
+            &output.symbol_names,
+            &output.source_map,
+            &import_def_id,
+          );
+          (content, Some(import_span))
+        } else {
+          // Fall through to node-based lookup
+          (String::new(), None)
+        }
       } else {
-        eprintln!("[LSP DEBUG] No entry in any map for node_id {:?}", node_id.index());
-        return Ok(None);
+        (String::new(), None)
+      };
+
+      // If no import item found (or node was more specific), try node-based lookups
+      let (content, hover_span) = if content.is_empty() {
+        if let Some(node_id) = found_node {
+          // Try node_defs first, then resolved_calls (for overloaded function calls), then types
+          let content = if let Some(def_id) = output.node_defs.get(&node_id) {
+            format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
+          } else if let Some(def_id) = output.resolved_calls.get(&node_id) {
+            // This is a call to an overloaded function - show the resolved overload
+            format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
+          } else if let Some(type_id) = output.node_types.get(&node_id) {
+            // No definition, just show the type
+            format!(
+              "```ignis\n{}\n```",
+              format_type(&output.types, &output.defs, &output.symbol_names, type_id)
+            )
+          } else {
+            String::new()
+          };
+
+          let span = output.node_spans.get(&node_id).cloned();
+          (content, span)
+        } else {
+          (String::new(), None)
+        }
+      } else {
+        (content, hover_span)
       };
 
       if content.is_empty() {
         return Ok(None);
       }
 
-      // Get the range of the hovered node for highlighting
-      let span = output.node_spans.get(&node_id);
-      let range = span.map(|s| line_index.span_to_range(s));
+      // Get the range of the hovered element for highlighting
+      let range = hover_span.as_ref().map(|s| line_index.span_to_range(s));
 
       Some((content, range))
     };
@@ -681,11 +722,21 @@ fn format_definition_hover(
     },
   };
 
-  // Add file info if available and if it's from a different file than where we're hovering
-  match file_info {
-    Some(filename) => format!("{}\n\n*Defined in `{}`*", signature, filename),
-    None => signature,
+  // Build the final hover content
+  let mut result = signature;
+
+  // Add documentation if present
+  if let Some(doc) = &def.doc {
+    result.push_str("\n\n---\n\n");
+    result.push_str(doc);
   }
+
+  // Add file info if available
+  if let Some(filename) = file_info {
+    result.push_str(&format!("\n\n*Defined in `{}`*", filename));
+  }
+
+  result
 }
 
 /// Format a function signature.

@@ -367,7 +367,7 @@ impl<'a> Analyzer<'a> {
       ASTNode::Expression(ASTExpression::Path(path)) => path
         .segments
         .last()
-        .and_then(|seg| self.scopes.lookup_def(seg).copied()),
+        .and_then(|seg| self.scopes.lookup_def(&seg.name).copied()),
       _ => None,
     }
   }

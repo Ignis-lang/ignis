@@ -253,7 +253,8 @@ impl CompilationContext {
 
     for root in roots {
       if let ASTNode::Statement(ASTStatement::Import(import)) = nodes.get(root) {
-        imports.push((import.items.clone(), import.from.clone(), import.span.clone()));
+        let symbol_ids: Vec<SymbolId> = import.items.iter().map(|item| item.name).collect();
+        imports.push((symbol_ids, import.from.clone(), import.span.clone()));
       }
     }
 
@@ -590,6 +591,7 @@ impl CompilationContext {
     let mut root_node_types = HashMap::new();
     let mut root_node_spans = HashMap::new();
     let mut root_resolved_calls = HashMap::new();
+    let mut root_import_item_defs = HashMap::new();
 
     // The root module is the last one in topological order
     let root_module_id = self.module_graph.root;
@@ -651,6 +653,7 @@ impl CompilationContext {
         root_node_types = output.node_types;
         root_node_spans = output.node_spans;
         root_resolved_calls = output.resolved_calls;
+        root_import_item_defs = output.import_item_defs;
       }
 
       export_table.insert(module_id, exports);
@@ -667,6 +670,7 @@ impl CompilationContext {
       node_types: root_node_types,
       node_spans: root_node_spans,
       resolved_calls: root_resolved_calls,
+      import_item_defs: root_import_item_defs,
     };
 
     (output, has_errors)

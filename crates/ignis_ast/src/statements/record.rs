@@ -11,6 +11,7 @@ pub struct ASTRecord {
   pub type_params: Option<ASTGenericParams>,
   pub items: Vec<ASTRecordItem>,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTRecord {
@@ -19,12 +20,14 @@ impl ASTRecord {
     type_params: Option<ASTGenericParams>,
     items: Vec<ASTRecordItem>,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
       type_params,
       items,
       span,
+      doc,
     }
   }
 }
@@ -88,6 +91,7 @@ pub struct ASTMethod {
   /// None means static method or instance method without explicit self.
   pub self_param: Option<bool>,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTMethod {
@@ -100,6 +104,7 @@ impl ASTMethod {
     metadata: ASTMetadata,
     self_param: Option<bool>,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
@@ -110,6 +115,7 @@ impl ASTMethod {
       metadata,
       self_param,
       span,
+      doc,
     }
   }
 

@@ -249,7 +249,7 @@ impl<'a> Analyzer<'a> {
         ASTExpression::Path(path) => path
           .segments
           .last()
-          .and_then(|last| self.scopes.lookup_def(&last))
+          .and_then(|last| self.scopes.lookup_def(&last.name))
           .and_then(|def_id| match &self.defs.get(def_id).kind {
             DefinitionKind::Constant(const_def) => const_def.value.clone(),
             _ => None,

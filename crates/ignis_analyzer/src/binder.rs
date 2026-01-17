@@ -147,6 +147,7 @@ impl<'a> Analyzer<'a> {
       visibility: Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: None,
     };
 
     let def_id = self.defs.alloc(def);
@@ -206,6 +207,7 @@ impl<'a> Analyzer<'a> {
       visibility: Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: rec.doc.clone(),
     };
 
     let def_id = self.defs.alloc(def);
@@ -273,6 +275,7 @@ impl<'a> Analyzer<'a> {
               visibility: Visibility::Public,
               owner_module: self.current_module,
               owner_namespace: self.current_namespace,
+              doc: None,
             };
             let const_def_id = self.defs.alloc(const_def);
             static_fields.insert(field.name, const_def_id);
@@ -348,6 +351,7 @@ impl<'a> Analyzer<'a> {
       visibility: Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: en.doc.clone(),
     };
 
     let def_id = self.defs.alloc(def);
@@ -440,6 +444,7 @@ impl<'a> Analyzer<'a> {
             visibility: Visibility::Public,
             owner_module: self.current_module,
             owner_namespace: self.current_namespace,
+            doc: None,
           };
           let const_def_id = self.defs.alloc(const_def);
           static_fields.insert(field.name, const_def_id);
@@ -483,6 +488,7 @@ impl<'a> Analyzer<'a> {
         visibility: Visibility::Private,
         owner_module: self.current_module,
         owner_namespace: None,
+        doc: None,
       };
       let param_def_id = self.defs.alloc(param_def);
       param_defs.push(param_def_id);
@@ -502,6 +508,7 @@ impl<'a> Analyzer<'a> {
       visibility: Visibility::Public,
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: method.doc.clone(),
     };
 
     let method_def_id = self.defs.alloc(method_def);
@@ -556,6 +563,7 @@ impl<'a> Analyzer<'a> {
         visibility: Visibility::Private,
         owner_module: self.current_module,
         owner_namespace: self.current_namespace,
+        doc: None,
       };
 
       let def_id = self.defs.alloc(ns_def);
@@ -652,6 +660,7 @@ impl<'a> Analyzer<'a> {
         visibility: Visibility::Private,
         owner_module: self.current_module,
         owner_namespace: None,
+        doc: None,
       };
       let def_id = self.defs.alloc(def);
       param_defs.push(def_id);
@@ -677,6 +686,7 @@ impl<'a> Analyzer<'a> {
       },
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: func.signature.doc.clone(),
     };
 
     let def_id = self.defs.alloc(def);
@@ -777,6 +787,7 @@ impl<'a> Analyzer<'a> {
       },
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: None,
     };
 
     let def_id = &self.defs.alloc(def);
@@ -821,6 +832,7 @@ impl<'a> Analyzer<'a> {
       visibility: Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: None,
     };
 
     let def_id = self.defs.alloc(def);
@@ -916,6 +928,7 @@ impl<'a> Analyzer<'a> {
       visibility: Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
+      doc: None,
     };
 
     let def_id = self.defs.alloc(def);
@@ -1039,6 +1052,7 @@ impl<'a> Analyzer<'a> {
         visibility: Visibility::Private,
         owner_module: self.current_module,
         owner_namespace: self.current_namespace,
+        doc: None,
       };
 
       let def_id = self.defs.alloc(def);

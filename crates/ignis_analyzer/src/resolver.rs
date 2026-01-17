@@ -1,5 +1,9 @@
 use crate::{Analyzer, ScopeKind};
-use ignis_ast::{expressions::ASTExpression, statements::ASTStatement, ASTNode, NodeId};
+use ignis_ast::{
+  expressions::{ASTExpression, ASTPathSegment},
+  statements::ASTStatement,
+  ASTNode, NodeId,
+};
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::definition::{DefinitionId, SymbolEntry};
 
@@ -254,7 +258,7 @@ impl<'a> Analyzer<'a> {
           path
             .segments
             .iter()
-            .map(|s| self.get_symbol_name(s))
+            .map(|s| self.get_symbol_name(&s.name))
             .collect::<Vec<_>>()
             .join("::")
         };
@@ -347,7 +351,7 @@ impl<'a> Analyzer<'a> {
   /// for enum variants (which are not stored as separate definitions).
   pub fn resolve_qualified_path(
     &self,
-    segments: &[ignis_type::symbol::SymbolId],
+    segments: &[ASTPathSegment],
   ) -> Option<ResolvedPath> {
     use ignis_type::definition::DefinitionKind;
 
@@ -356,22 +360,22 @@ impl<'a> Analyzer<'a> {
     }
 
     if segments.len() == 1 {
-      return self.scopes.lookup(&segments[0]).cloned().map(ResolvedPath::Entry);
+      return self.scopes.lookup(&segments[0].name).cloned().map(ResolvedPath::Entry);
     }
 
     let ns_path = &segments[..segments.len() - 1];
-    let def_name = &segments[segments.len() - 1];
+    let def_name = &segments[segments.len() - 1].name;
 
     // Check for imported namespace in scope
-    if let Some(def_id) = self.scopes.lookup_def(&ns_path[0]) {
+    if let Some(def_id) = self.scopes.lookup_def(&ns_path[0].name) {
       let def = self.defs.get(def_id);
 
       match &def.kind {
         DefinitionKind::Namespace(ns_def) => {
           let mut current_ns = ns_def.namespace_id;
 
-          for &segment in &ns_path[1..] {
-            current_ns = self.namespaces.lookup_child(current_ns, &segment)?;
+          for segment in &ns_path[1..] {
+            current_ns = self.namespaces.lookup_child(current_ns, &segment.name)?;
           }
 
           return self
@@ -417,7 +421,8 @@ impl<'a> Analyzer<'a> {
     }
 
     // Namespace defined in current module
-    let ns_id = self.namespaces.lookup(ns_path)?;
+    let ns_syms: Vec<_> = ns_path.iter().map(|s| s.name).collect();
+    let ns_id = self.namespaces.lookup(&ns_syms)?;
     self
       .namespaces
       .lookup_def(ns_id, def_name)
@@ -428,7 +433,7 @@ impl<'a> Analyzer<'a> {
   /// Diagnose why a path resolution failed and return a specific error.
   fn diagnose_path_failure<F: Fn() -> String>(
     &self,
-    segments: &[ignis_type::symbol::SymbolId],
+    segments: &[ASTPathSegment],
     span: &ignis_type::span::Span,
     full_path: F,
   ) -> DiagnosticMessage {
@@ -436,10 +441,10 @@ impl<'a> Analyzer<'a> {
 
     // For 2-segment paths like Foo::Bar, check if first segment is an enum
     if segments.len() == 2 {
-      if let Some(def_id) = self.scopes.lookup_def(&segments[0]) {
+      if let Some(def_id) = self.scopes.lookup_def(&segments[0].name) {
         let def = self.defs.get(def_id);
-        let first_name = self.get_symbol_name(&segments[0]);
-        let second_name = self.get_symbol_name(&segments[1]);
+        let first_name = self.get_symbol_name(&segments[0].name);
+        let second_name = self.get_symbol_name(&segments[1].name);
 
         match &def.kind {
           DefinitionKind::Enum(_) => {

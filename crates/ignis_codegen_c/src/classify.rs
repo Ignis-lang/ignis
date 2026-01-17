@@ -126,6 +126,7 @@ mod tests {
       visibility: Visibility::Public,
       owner_module,
       owner_namespace: None,
+      doc: None,
     }
   }
 

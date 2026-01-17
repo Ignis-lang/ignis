@@ -34,6 +34,7 @@ pub struct ASTFunctionSignature {
   pub return_type: IgnisTypeSyntax,
   pub span: Span,
   pub metadata: ASTMetadata,
+  pub doc: Option<String>,
 }
 
 impl ASTFunctionSignature {
@@ -44,6 +45,7 @@ impl ASTFunctionSignature {
     return_type: IgnisTypeSyntax,
     span: Span,
     metadata: ASTMetadata,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
@@ -52,6 +54,7 @@ impl ASTFunctionSignature {
       return_type,
       span,
       metadata,
+      doc,
     }
   }
 }

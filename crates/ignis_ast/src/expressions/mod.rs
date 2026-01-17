@@ -25,7 +25,7 @@ pub use dereference::ASTDereference;
 pub use grouped::ASTGrouped;
 pub use literal::ASTLiteral;
 pub use member_access::{ASTAccessOp, ASTMemberAccess};
-pub use path::ASTPath;
+pub use path::{ASTPath, ASTPathSegment};
 pub use record_init::{ASTRecordInit, ASTRecordInitField};
 pub use reference::ASTReference;
 pub use ternary::ASTTernary;

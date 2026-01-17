@@ -17,6 +17,7 @@ pub struct ASTMemberAccess {
   pub object: NodeId,
   pub op: ASTAccessOp,
   pub member: SymbolId,
+  pub member_span: Span,
   pub span: Span,
 }
 
@@ -25,12 +26,14 @@ impl ASTMemberAccess {
     object: NodeId,
     op: ASTAccessOp,
     member: SymbolId,
+    member_span: Span,
     span: Span,
   ) -> Self {
     Self {
       object,
       op,
       member,
+      member_span,
       span,
     }
   }

@@ -53,6 +53,7 @@ pub struct Definition {
   pub visibility: Visibility,
   pub owner_module: ModuleId,
   pub owner_namespace: Option<NamespaceId>,
+  pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +257,7 @@ impl DefinitionStore {
       visibility,
       owner_module,
       owner_namespace,
+      doc: None,
     })
   }
 

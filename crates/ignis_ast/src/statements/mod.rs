@@ -34,7 +34,7 @@ pub use for_of::{ASTForOf, ForOfBinding};
 pub use for_statement::ASTFor;
 pub use function::ASTFunction;
 pub use if_statement::ASTIf;
-pub use import_statement::ASTImport;
+pub use import_statement::{ASTImport, ASTImportItem};
 pub use namespace_statement::ASTNamespace;
 pub use record::{ASTMethod, ASTRecord, ASTRecordField, ASTRecordItem};
 pub use return_statement::ASTReturn;

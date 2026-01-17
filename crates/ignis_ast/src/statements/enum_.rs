@@ -11,6 +11,7 @@ pub struct ASTEnum {
   pub type_params: Option<ASTGenericParams>,
   pub items: Vec<ASTEnumItem>,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTEnum {
@@ -19,12 +20,14 @@ impl ASTEnum {
     type_params: Option<ASTGenericParams>,
     items: Vec<ASTEnumItem>,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
       type_params,
       items,
       span,
+      doc,
     }
   }
 }

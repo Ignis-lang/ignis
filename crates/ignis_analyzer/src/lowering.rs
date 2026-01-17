@@ -1308,14 +1308,14 @@ impl<'a> Analyzer<'a> {
           return None;
         }
         let first_segment = &path.segments[0];
-        let mut current_def = self.scopes.lookup_def(first_segment).cloned()?;
+        let mut current_def = self.scopes.lookup_def(&first_segment.name).cloned()?;
 
         for segment in path.segments.iter().skip(1) {
           match &self.defs.get(&current_def).kind {
             DefinitionKind::Namespace(ns_def) => {
               current_def = self
                 .namespaces
-                .lookup_def(ns_def.namespace_id, segment)
+                .lookup_def(ns_def.namespace_id, &segment.name)
                 .and_then(|e| e.as_single())
                 .cloned()?;
             },
@@ -1780,7 +1780,7 @@ impl<'a> Analyzer<'a> {
       let segments: Vec<_> = path
         .segments
         .iter()
-        .map(|s| self.symbols.borrow().get(s).to_string())
+        .map(|s| self.symbols.borrow().get(&s.name).to_string())
         .collect();
       eprintln!(
         "[LOWER] try_lower_path_call: segments={:?}, call.type_args={:?}",
@@ -1799,7 +1799,7 @@ impl<'a> Analyzer<'a> {
     let first_segment = &path.segments[0];
     let second_segment = &path.segments[1];
 
-    let Some(type_def_id) = self.scopes.lookup_def(first_segment).cloned() else {
+    let Some(type_def_id) = self.scopes.lookup_def(&first_segment.name).cloned() else {
       if std::env::var("IGNIS_VERBOSE").is_ok() {
         eprintln!("[LOWER] try_lower_path_call: lookup_def for first_segment returned None");
       }
@@ -1810,7 +1810,7 @@ impl<'a> Analyzer<'a> {
     match &self.defs.get(&type_def_id).kind.clone() {
       DefinitionKind::Enum(ed) => {
         // Enum variant with payload
-        if let Some(&tag) = ed.variants_by_name.get(second_segment) {
+        if let Some(&tag) = ed.variants_by_name.get(&second_segment.name) {
           let payload_hir: Vec<HIRId> = call
             .arguments
             .iter()
@@ -1836,7 +1836,7 @@ impl<'a> Analyzer<'a> {
         }
 
         // Static method call on enum
-        if let Some(method_id) = ed.static_methods.get(second_segment).and_then(|e| e.as_single()) {
+        if let Some(method_id) = ed.static_methods.get(&second_segment.name).and_then(|e| e.as_single()) {
           let args_hir: Vec<HIRId> = call
             .arguments
             .iter()
@@ -1867,8 +1867,8 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Record(rd) => {
         if std::env::var("IGNIS_VERBOSE").is_ok() {
           let type_name = self.symbols.borrow().get(&self.defs.get(&type_def_id).name).to_string();
-          let method_name = self.symbols.borrow().get(second_segment).to_string();
-          let has_method = rd.static_methods.contains_key(second_segment);
+          let method_name = self.symbols.borrow().get(&second_segment.name).to_string();
+          let has_method = rd.static_methods.contains_key(&second_segment.name);
           eprintln!(
             "[LOWER] try_lower_path_call: Record type={}, looking for static method={}, has_method={}",
             type_name, method_name, has_method
@@ -1879,7 +1879,7 @@ impl<'a> Analyzer<'a> {
         // First try to get resolved method from type checker (handles overloads)
         let method_id = self.lookup_resolved_call(node_id).cloned().or_else(|| {
           rd.static_methods
-            .get(second_segment)
+            .get(&second_segment.name)
             .and_then(|e| e.as_single())
             .cloned()
         });
@@ -2086,6 +2086,7 @@ impl<'a> Analyzer<'a> {
       visibility: ignis_type::definition::Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: None,
+      doc: None,
     };
     let tmp_def_id = self.defs.alloc(tmp_def);
 
@@ -2131,6 +2132,7 @@ impl<'a> Analyzer<'a> {
       visibility: ignis_type::definition::Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: None,
+      doc: None,
     };
     let idx_def_id = self.defs.alloc(idx_def);
     self.scopes.define(&idx_name, &idx_def_id, false).ok();
@@ -2283,6 +2285,7 @@ impl<'a> Analyzer<'a> {
       visibility: ignis_type::definition::Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: None,
+      doc: None,
     };
     let len_def_id = self.defs.alloc(len_def);
 
@@ -2309,6 +2312,7 @@ impl<'a> Analyzer<'a> {
       visibility: ignis_type::definition::Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: None,
+      doc: None,
     };
     let idx_def_id = self.defs.alloc(idx_def);
     self.scopes.define(&idx_name, &idx_def_id, false).ok();

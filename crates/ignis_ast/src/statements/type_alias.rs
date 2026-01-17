@@ -9,6 +9,7 @@ pub struct ASTTypeAlias {
   pub type_params: Option<ASTGenericParams>,
   pub target: IgnisTypeSyntax,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTTypeAlias {
@@ -17,12 +18,14 @@ impl ASTTypeAlias {
     type_params: Option<ASTGenericParams>,
     target: IgnisTypeSyntax,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
       type_params,
       target,
       span,
+      doc,
     }
   }
 }

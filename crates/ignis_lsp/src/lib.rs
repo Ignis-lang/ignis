@@ -41,8 +41,7 @@ use state::LspState;
 ///
 /// let config = Arc::new(IgnisConfig::default());
 /// let rt = tokio::runtime::Builder::new_current_thread()
-///     .enable_io()
-///     .enable_time()
+///     .enable_all()
 ///     .build()
 ///     .unwrap();
 /// rt.block_on(ignis_lsp::run(config));

@@ -393,11 +393,18 @@ impl<'a> IgnisLexer<'a> {
 
   fn comments(&mut self) -> LexerResult {
     if self.match_char('/') {
+      // Check for /// doc comment (but not //// which is a regular comment)
+      let is_doc_comment = self.peek() == '/' && self.peek_next() != '/';
+
       while self.peek() != '\n' && !self.is_at_end() {
         self.advance();
       }
 
-      return Ok(TokenType::Comment);
+      return Ok(if is_doc_comment {
+        TokenType::DocComment
+      } else {
+        TokenType::Comment
+      });
     } else if self.match_char('*') {
       let mut is_doc_comment = false;
 

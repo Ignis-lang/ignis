@@ -1285,6 +1285,7 @@ impl<'a> Monomorphizer<'a> {
       visibility: generic_def.visibility,
       owner_module: generic_def.owner_module,
       owner_namespace: generic_def.owner_namespace,
+      doc: generic_def.doc.clone(),
     };
 
     self.output_defs.alloc(new_def)
@@ -1421,6 +1422,7 @@ impl<'a> Monomorphizer<'a> {
       visibility: generic_def.visibility,
       owner_module: generic_def.owner_module,
       owner_namespace: generic_def.owner_namespace,
+      doc: generic_def.doc.clone(),
     };
 
     self.output_defs.alloc(new_def)
@@ -1460,6 +1462,7 @@ impl<'a> Monomorphizer<'a> {
       visibility: param_def.visibility,
       owner_module: param_def.owner_module,
       owner_namespace: param_def.owner_namespace,
+      doc: None,
     };
 
     self.output_defs.alloc(new_def)

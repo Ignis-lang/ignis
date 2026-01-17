@@ -8,6 +8,7 @@ pub struct ASTConstant {
   pub ty: IgnisTypeSyntax,
   pub value: Option<NodeId>,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTConstant {
@@ -16,7 +17,14 @@ impl ASTConstant {
     ty: IgnisTypeSyntax,
     value: Option<NodeId>,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
-    Self { name, ty, value, span }
+    Self {
+      name,
+      ty,
+      value,
+      span,
+      doc,
+    }
   }
 }

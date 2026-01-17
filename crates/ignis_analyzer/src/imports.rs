@@ -74,14 +74,14 @@ impl<'a> Analyzer<'a> {
       };
 
       for item in items {
-        let item_name = self.get_symbol_name(&item);
+        let item_name = self.get_symbol_name(&item.name);
 
-        if let Some(existing_def_id) = self.scopes.lookup_def(&item) {
+        if let Some(existing_def_id) = self.scopes.lookup_def(&item.name) {
           let existing_def = self.defs.get(existing_def_id);
           self.add_diagnostic(
             DiagnosticMessage::ImportShadowsLocal {
               name: item_name.clone(),
-              at: span.clone(),
+              at: item.span.clone(),
               previous_span: existing_def.span.clone(),
             }
             .report(),
@@ -89,14 +89,15 @@ impl<'a> Analyzer<'a> {
           continue;
         }
 
-        match export_data.exports.get(&item) {
+        match export_data.exports.get(&item.name) {
           Some(&def_id) => {
             let def_kind = self.defs.get(&def_id).kind.clone();
+            self.set_import_item_def(&item.span, &def_id);
 
             if let DefinitionKind::Namespace(ns_def) = &def_kind {
               self.import_namespace(def_id, ns_def);
             } else {
-              let _ = self.scopes.define(&item, &def_id, false);
+              let _ = self.scopes.define(&item.name, &def_id, false);
             }
           },
           None => {
@@ -104,7 +105,7 @@ impl<'a> Analyzer<'a> {
               DiagnosticMessage::SymbolNotExported {
                 symbol: item_name,
                 module: import_path.clone(),
-                at: span.clone(),
+                at: item.span.clone(),
               }
               .report(),
             );

@@ -108,6 +108,7 @@ pub struct Analyzer<'a> {
   for_of_binding_defs: HashMap<NodeId, DefinitionId>,
   resolved_calls: HashMap<NodeId, DefinitionId>,
   runtime: Option<RuntimeBuiltins>,
+  import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
 }
 
 pub struct AnalyzerOutput {
@@ -133,6 +134,10 @@ pub struct AnalyzerOutput {
   /// Maps Call nodes to their resolved overload.
   /// Used when hovering over an overloaded function call.
   pub resolved_calls: HashMap<NodeId, DefinitionId>,
+
+  /// Maps import item spans to their resolved definitions.
+  /// Used for hover on import statements.
+  pub import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
 }
 
 impl AnalyzerOutput {
@@ -176,6 +181,7 @@ impl<'a> Analyzer<'a> {
       for_of_binding_defs: HashMap::new(),
       resolved_calls: HashMap::new(),
       runtime: None,
+      import_item_defs: HashMap::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
     analyzer
@@ -225,6 +231,7 @@ impl<'a> Analyzer<'a> {
       node_types: analyzer.node_types,
       node_spans,
       resolved_calls: analyzer.resolved_calls,
+      import_item_defs: analyzer.import_item_defs,
     }
   }
 
@@ -263,6 +270,7 @@ impl<'a> Analyzer<'a> {
       for_of_binding_defs: HashMap::new(),
       resolved_calls: HashMap::new(),
       runtime: None,
+      import_item_defs: HashMap::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
 
@@ -292,6 +300,7 @@ impl<'a> Analyzer<'a> {
       node_types: analyzer.node_types,
       node_spans,
       resolved_calls: analyzer.resolved_calls,
+      import_item_defs: analyzer.import_item_defs,
     }
   }
 
@@ -337,6 +346,14 @@ impl<'a> Analyzer<'a> {
     def_id: &DefinitionId,
   ) {
     self.node_defs.insert(node_id.clone(), def_id.clone());
+  }
+
+  fn set_import_item_def(
+    &mut self,
+    span: &ignis_type::span::Span,
+    def_id: &DefinitionId,
+  ) {
+    self.import_item_defs.insert(span.clone(), def_id.clone());
   }
 
   fn lookup_resolved_call(
@@ -573,6 +590,7 @@ impl<'a> Analyzer<'a> {
           visibility: Visibility::Private,
           owner_module: self.current_module,
           owner_namespace: None,
+          doc: None,
         };
         self.defs.alloc(def)
       })
@@ -591,6 +609,7 @@ impl<'a> Analyzer<'a> {
       visibility: Visibility::Private,
       owner_module: self.current_module,
       owner_namespace: None,
+      doc: None,
     };
 
     self.defs.alloc(def)

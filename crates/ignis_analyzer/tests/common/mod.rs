@@ -108,6 +108,11 @@ pub fn analyze_allowing_parse_errors(src: &str) -> AnalysisResult {
         defs: DefinitionStore::new(),
         namespaces: NamespaceStore::new(),
         symbols,
+        node_defs: std::collections::HashMap::new(),
+        node_types: std::collections::HashMap::new(),
+        node_spans: std::collections::HashMap::new(),
+        resolved_calls: std::collections::HashMap::new(),
+        import_item_defs: std::collections::HashMap::new(),
       };
       AnalysisResult { output, source_map: sm }
     },

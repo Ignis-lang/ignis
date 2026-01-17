@@ -501,7 +501,11 @@ impl DisplayLisp for ASTPath {
     &self,
     formatter: &ASTFormatter,
   ) -> String {
-    let segments: Vec<String> = self.segments.iter().map(|seg| formatter.resolve_symbol(seg)).collect();
+    let segments: Vec<String> = self
+      .segments
+      .iter()
+      .map(|seg| formatter.resolve_symbol(&seg.name))
+      .collect();
 
     format!("(Path \"{}\")", segments.join("::"))
   }
@@ -737,7 +741,11 @@ impl DisplayLisp for ASTImport {
     &self,
     formatter: &ASTFormatter,
   ) -> String {
-    let items: Vec<String> = self.items.iter().map(|id| formatter.resolve_symbol(id)).collect();
+    let items: Vec<String> = self
+      .items
+      .iter()
+      .map(|item| formatter.resolve_symbol(&item.name))
+      .collect();
     // Remove surrounding quotes from the path string if present
     let path = self.from.trim_matches('"');
     format!("(Import [{}] from \"{}\")", items.join(", "), path)

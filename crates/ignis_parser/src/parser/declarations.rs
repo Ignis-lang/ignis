@@ -9,7 +9,7 @@ use ignis_ast::{
     export_statement::ASTExport,
     extern_statement::ASTExtern,
     function::{ASTFunction, ASTFunctionSignature},
-    import_statement::ASTImport,
+    import_statement::{ASTImport, ASTImportItem},
     namespace_statement::ASTNamespace,
   },
   type_::IgnisTypeSyntax,
@@ -156,6 +156,9 @@ impl super::IgnisParser {
 
   /// function name<T, U>(params): type block
   fn parse_function_declaration(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc
+    let doc = self.take_pending_doc();
+
     let keyword = self.expect(TokenType::Function)?.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -184,6 +187,7 @@ impl super::IgnisParser {
       return_type,
       signature_span,
       ignis_ast::metadata::ASTMetadata::NONE,
+      doc,
     );
 
     let function = ASTFunction::new(signature, Some(body));
@@ -193,6 +197,9 @@ impl super::IgnisParser {
 
   /// const name: type = expr;
   pub fn parse_constant_declaration(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc
+    let doc = self.take_pending_doc();
+
     let keyword = self.expect(TokenType::Const)?.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -207,7 +214,7 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&keyword.span, &semicolon.span);
 
-    let constant_statement = ASTConstant::new(name, type_annotation, Some(value), span);
+    let constant_statement = ASTConstant::new(name, type_annotation, Some(value), span, doc);
 
     Ok(self.allocate_statement(ASTStatement::Constant(constant_statement)))
   }
@@ -219,7 +226,10 @@ impl super::IgnisParser {
 
     loop {
       let identifier = self.expect(TokenType::Identifier)?.clone();
-      items.push(self.insert_symbol(&identifier));
+      let name = self.insert_symbol(&identifier);
+      let item = ASTImportItem::new(name, identifier.span.clone());
+      items.push(item);
+
       if !self.eat(TokenType::Comma) {
         break;
       }
@@ -353,7 +363,7 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&keyword.span, &semicolon.span);
 
-    let constant_statement = ASTConstant::new(name, type_annotation, None, span);
+    let constant_statement = ASTConstant::new(name, type_annotation, None, span, None);
 
     Ok(self.allocate_statement(ASTStatement::Constant(constant_statement)))
   }
@@ -381,6 +391,7 @@ impl super::IgnisParser {
       return_type,
       span.clone(),
       ignis_ast::metadata::ASTMetadata::EXTERN_MEMBER,
+      None, // doc
     );
 
     let function = ASTFunction::new(signature, None);
@@ -394,6 +405,9 @@ impl super::IgnisParser {
 
   /// type Name<T, U> = <type>;
   fn parse_type_alias_declaration(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc
+    let doc = self.take_pending_doc();
+
     let start = self.expect(TokenType::Type)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -406,7 +420,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::SemiColon)?.clone();
 
     let span = Span::merge(&start, &end.span);
-    Ok(self.allocate_statement(ASTStatement::TypeAlias(ASTTypeAlias::new(name, type_params, target, span))))
+    Ok(self.allocate_statement(ASTStatement::TypeAlias(ASTTypeAlias::new(name, type_params, target, span, doc))))
   }
 
   /// Parse member modifiers: static, public, private
@@ -436,6 +450,9 @@ impl super::IgnisParser {
 
   /// record Name<T, U> { fields, methods }
   fn parse_record_declaration(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc
+    let doc = self.take_pending_doc();
+
     let start = self.expect(TokenType::Record)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -473,7 +490,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&start, &end.span);
 
-    Ok(self.allocate_statement(ASTStatement::Record(ASTRecord::new(name, type_params, items, span))))
+    Ok(self.allocate_statement(ASTStatement::Record(ASTRecord::new(name, type_params, items, span, doc))))
   }
 
   /// Method declaration (without 'function' keyword)
@@ -483,6 +500,9 @@ impl super::IgnisParser {
     &mut self,
     modifiers: ASTMetadata,
   ) -> ParserResult<ASTMethod> {
+    // Capture pending doc
+    let doc = self.take_pending_doc();
+
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
 
@@ -535,6 +555,7 @@ impl super::IgnisParser {
       modifiers,
       self_param,
       span,
+      doc,
     ))
   }
 
@@ -597,6 +618,9 @@ impl super::IgnisParser {
 
   /// enum Name<T> { variants, methods, fields }
   fn parse_enum_declaration(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc
+    let doc = self.take_pending_doc();
+
     let start = self.expect(TokenType::Enum)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -656,7 +680,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&start, &end.span);
 
-    Ok(self.allocate_statement(ASTStatement::Enum(ASTEnum::new(name, type_params, items, span))))
+    Ok(self.allocate_statement(ASTStatement::Enum(ASTEnum::new(name, type_params, items, span, doc))))
   }
 
   /// Distinguish method from variant with payload:
@@ -866,7 +890,7 @@ mod tests {
     match stmt {
       ASTStatement::Import(imp) => {
         assert_eq!(imp.items.len(), 1);
-        assert_eq!(symbol_name(&result, &imp.items[0]), "foo");
+        assert_eq!(symbol_name(&result, &imp.items[0].name), "foo");
       },
       other => panic!("expected import, got {:?}", other),
     }
@@ -880,9 +904,9 @@ mod tests {
     match stmt {
       ASTStatement::Import(imp) => {
         assert_eq!(imp.items.len(), 3);
-        assert_eq!(symbol_name(&result, &imp.items[0]), "foo");
-        assert_eq!(symbol_name(&result, &imp.items[1]), "bar");
-        assert_eq!(symbol_name(&result, &imp.items[2]), "baz");
+        assert_eq!(symbol_name(&result, &imp.items[0].name), "foo");
+        assert_eq!(symbol_name(&result, &imp.items[1].name), "bar");
+        assert_eq!(symbol_name(&result, &imp.items[2].name), "baz");
       },
       other => panic!("expected import, got {:?}", other),
     }
@@ -896,8 +920,8 @@ mod tests {
     match stmt {
       ASTStatement::Import(imp) => {
         assert_eq!(imp.items.len(), 2);
-        assert_eq!(symbol_name(&result, &imp.items[0]), "foo");
-        assert_eq!(symbol_name(&result, &imp.items[1]), "bar");
+        assert_eq!(symbol_name(&result, &imp.items[0].name), "foo");
+        assert_eq!(symbol_name(&result, &imp.items[1].name), "bar");
       },
       other => panic!("expected import, got {:?}", other),
     }
