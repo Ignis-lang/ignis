@@ -117,7 +117,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Record(rec) => self.bind_record_complete(node_id, rec),
       ASTStatement::Enum(en) => self.bind_enum_complete(node_id, en),
       ASTStatement::Extern(extern_stmt) => {
-        self.bind_extern(extern_stmt);
+        self.bind_extern(node_id, extern_stmt);
       },
       ASTStatement::Namespace(ns_stmt) => {
         self.bind_namespace_complete(node_id, ns_stmt);
@@ -407,6 +407,9 @@ impl<'a> Analyzer<'a> {
           // Payload types resolved in typeck phase
           let payload: Vec<_> = variant.payload.iter().map(|_| self.types.error()).collect();
 
+          // Variants don't have separate definitions; map to parent enum
+          self.set_import_item_def(&variant.name_span, &enum_def_id);
+
           variants.push(EnumVariantDef {
             name: variant.name,
             payload,
@@ -512,6 +515,7 @@ impl<'a> Analyzer<'a> {
     };
 
     let method_def_id = self.defs.alloc(method_def);
+    self.set_import_item_def(&method.name_span, &method_def_id);
 
     // Bind method's own type params (in addition to owner's type params already in scope)
     let type_param_defs = self.bind_type_params(method.type_params.as_ref(), method_def_id);
@@ -691,6 +695,7 @@ impl<'a> Analyzer<'a> {
 
     let def_id = self.defs.alloc(def);
     self.set_def(node_id, &def_id);
+    self.set_import_item_def(&func.signature.name_span, &def_id);
 
     // Bind type params now that we have the owner def_id
     let type_param_defs = self.bind_type_params(func.signature.type_params.as_ref(), def_id);
@@ -988,9 +993,31 @@ impl<'a> Analyzer<'a> {
 
   fn bind_extern(
     &mut self,
+    node_id: &NodeId,
     extern_stmt: &ignis_ast::statements::extern_statement::ASTExtern,
   ) {
     let ns_id = self.namespaces.get_or_create(&extern_stmt.path, true);
+    let ns_name = *extern_stmt.path.last().expect("extern path cannot be empty");
+
+    if self.lookup_def(node_id).is_none() {
+      let ns_def = Definition {
+        kind: DefinitionKind::Namespace(NamespaceDefinition {
+          namespace_id: ns_id,
+          is_extern: true,
+        }),
+        name: ns_name,
+        span: extern_stmt.span.clone(),
+        visibility: Visibility::Public,
+        owner_module: self.current_module,
+        owner_namespace: self.current_namespace,
+        doc: None,
+      };
+
+      let def_id = self.defs.alloc(ns_def);
+      self.set_def(node_id, &def_id);
+      let _ = self.scopes.define(&ns_name, &def_id, false);
+    }
+
     let prev_ns = self.current_namespace;
     self.current_namespace = Some(ns_id);
 

@@ -509,7 +509,7 @@ function concat(a: string, b: string): string {
 "#;
 
     let result = parse(source);
-    
+
     assert!(
       result.diagnostics.is_empty(),
       "unexpected diagnostics: {:?}",
@@ -519,16 +519,16 @@ function concat(a: string, b: string): string {
 
     let func = get_function(first_root(&result));
     let doc = func.signature.doc.as_ref().expect("function should have doc comment");
-    
+
     // Should contain hard line breaks (two spaces + newline) to preserve line structure
     assert!(doc.contains("  \n"), "doc comment should contain hard line breaks");
-    
+
     // Should contain all the expected content
     assert!(doc.contains("Concatenates two strings"));
     assert!(doc.contains("@param {string} a - Prefix string"));
     assert!(doc.contains("@param {string} b - Suffix string"));
     assert!(doc.contains("@return {string} Newly allocated"));
-    
+
     // Lines should be separate (not run together)
     assert!(!doc.contains("new string.@param"), "lines should not run together");
   }
@@ -537,7 +537,7 @@ function concat(a: string, b: string): string {
   fn extract_doc_content_handles_line_comments() {
     let content = IgnisParser::extract_doc_content("/// This is a doc comment");
     assert_eq!(content, "This is a doc comment");
-    
+
     let content = IgnisParser::extract_doc_content("///   Whitespace should be trimmed   ");
     assert_eq!(content, "Whitespace should be trimmed");
   }
@@ -546,7 +546,7 @@ function concat(a: string, b: string): string {
   fn extract_doc_content_handles_block_comments() {
     let content = IgnisParser::extract_doc_content("/** Single line block */");
     assert_eq!(content, "Single line block");
-    
+
     let multiline = r#"/**
  * Line one
  * Line two
@@ -554,7 +554,7 @@ function concat(a: string, b: string): string {
  */"#;
     let content = IgnisParser::extract_doc_content(multiline);
     assert_eq!(content, "Line one  \nLine two  \nLine three");
-    
+
     // Should handle without leading asterisks
     let no_asterisks = r#"/**
 Line one

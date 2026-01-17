@@ -182,6 +182,7 @@ impl super::IgnisParser {
     let signature_span = Span::merge(&name_token.span, &right_paren.span);
     let signature = ASTFunctionSignature::new(
       name,
+      name_token.span.clone(),
       type_params,
       parameters,
       return_type,
@@ -386,6 +387,7 @@ impl super::IgnisParser {
 
     let signature = ASTFunctionSignature::new(
       name,
+      name_token.span.clone(),
       None, // TODO: parse type_params
       parameters,
       return_type,
@@ -548,6 +550,7 @@ impl super::IgnisParser {
 
     Ok(ASTMethod::new(
       name,
+      name_token.span.clone(),
       type_params,
       parameters,
       return_type,
@@ -811,7 +814,7 @@ impl super::IgnisParser {
     self.eat(TokenType::Comma);
 
     let span = Span::merge(&start_span, &end_span);
-    Ok(ASTEnumVariant::new(name, payload, span))
+    Ok(ASTEnumVariant::new(name, start_span, payload, span))
   }
 
   /// Enum field: name: type = expr;

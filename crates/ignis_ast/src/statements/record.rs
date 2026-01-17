@@ -82,6 +82,7 @@ impl ASTRecordField {
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTMethod {
   pub name: SymbolId,
+  pub name_span: Span,
   pub type_params: Option<ASTGenericParams>,
   pub parameters: Vec<ASTParameter>,
   pub return_type: IgnisTypeSyntax,
@@ -97,6 +98,7 @@ pub struct ASTMethod {
 impl ASTMethod {
   pub fn new(
     name: SymbolId,
+    name_span: Span,
     type_params: Option<ASTGenericParams>,
     parameters: Vec<ASTParameter>,
     return_type: IgnisTypeSyntax,
@@ -108,6 +110,7 @@ impl ASTMethod {
   ) -> Self {
     Self {
       name,
+      name_span,
       type_params,
       parameters,
       return_type,

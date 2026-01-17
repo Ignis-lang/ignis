@@ -1160,6 +1160,8 @@ impl<'a> Analyzer<'a> {
       return self.types.error();
     };
 
+    self.register_type_expression_span(&ma.object, &def_id);
+
     match &self.defs.get(&def_id).kind.clone() {
       DefinitionKind::Record(rd) => {
         // Static method?
@@ -1295,6 +1297,64 @@ impl<'a> Analyzer<'a> {
         }
       },
       _ => None,
+    }
+  }
+
+  /// Register span mappings for a type expression (enables hover).
+  fn register_type_expression_span(
+    &mut self,
+    node_id: &NodeId,
+    def_id: &DefinitionId,
+  ) {
+    let node = self.ast.get(node_id);
+
+    match node {
+      ASTNode::Expression(ASTExpression::Variable(var)) => {
+        self.set_import_item_def(&var.span, def_id);
+      },
+      ASTNode::Expression(ASTExpression::Path(path)) => {
+        self.register_path_spans(path);
+      },
+      ASTNode::Expression(ASTExpression::MemberAccess(ma)) => {
+        self.set_import_item_def(&ma.member_span, def_id);
+        if let Some(base_def) =
+          self.resolve_type_expression(&ma.object, ScopeKind::Global, &TypecheckContext::default())
+        {
+          self.register_type_expression_span(&ma.object, &base_def);
+        }
+      },
+      _ => {},
+    }
+  }
+
+  /// Register span mappings for each segment of a path.
+  fn register_path_spans(
+    &mut self,
+    path: &ignis_ast::expressions::path::ASTPath,
+  ) {
+    let Some(first_segment) = path.segments.first() else {
+      return;
+    };
+    let Some(first_def) = self.scopes.lookup_def(&first_segment.name).cloned() else {
+      return;
+    };
+
+    self.set_import_item_def(&first_segment.span, &first_def);
+    let mut current_def = first_def;
+
+    for segment in path.segments.iter().skip(1) {
+      let DefinitionKind::Namespace(ns_def) = self.defs.get(&current_def).kind.clone() else {
+        break;
+      };
+      let Some(entry) = self.namespaces.lookup_def(ns_def.namespace_id, &segment.name).cloned() else {
+        break;
+      };
+      let Some(def_id) = entry.as_single() else {
+        break;
+      };
+
+      self.set_import_item_def(&segment.span, def_id);
+      current_def = *def_id;
     }
   }
 
@@ -2635,6 +2695,8 @@ impl<'a> Analyzer<'a> {
       self.add_diagnostic(DiagnosticMessage::StaticAccessOnNonType { span: ma.span.clone() }.report());
       return self.types.error();
     };
+
+    self.register_type_expression_span(&ma.object, &def_id);
 
     match &self.defs.get(&def_id).kind.clone() {
       DefinitionKind::Record(rd) => {

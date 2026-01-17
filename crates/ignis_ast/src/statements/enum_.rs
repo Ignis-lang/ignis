@@ -44,6 +44,7 @@ pub enum ASTEnumItem {
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTEnumVariant {
   pub name: SymbolId,
+  pub name_span: Span,
   pub payload: Vec<IgnisTypeSyntax>,
   pub span: Span,
 }
@@ -51,10 +52,16 @@ pub struct ASTEnumVariant {
 impl ASTEnumVariant {
   pub fn new(
     name: SymbolId,
+    name_span: Span,
     payload: Vec<IgnisTypeSyntax>,
     span: Span,
   ) -> Self {
-    Self { name, payload, span }
+    Self {
+      name,
+      name_span,
+      payload,
+      span,
+    }
   }
 }
 

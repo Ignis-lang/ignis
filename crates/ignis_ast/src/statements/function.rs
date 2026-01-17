@@ -29,6 +29,7 @@ impl ASTParameter {
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTFunctionSignature {
   pub name: SymbolId,
+  pub name_span: Span,
   pub type_params: Option<ASTGenericParams>,
   pub parameters: Vec<ASTParameter>,
   pub return_type: IgnisTypeSyntax,
@@ -40,6 +41,7 @@ pub struct ASTFunctionSignature {
 impl ASTFunctionSignature {
   pub fn new(
     name: SymbolId,
+    name_span: Span,
     type_params: Option<ASTGenericParams>,
     parameters: Vec<ASTParameter>,
     return_type: IgnisTypeSyntax,
@@ -49,6 +51,7 @@ impl ASTFunctionSignature {
   ) -> Self {
     Self {
       name,
+      name_span,
       type_params,
       parameters,
       return_type,
