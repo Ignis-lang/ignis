@@ -553,7 +553,12 @@ impl<'a> Analyzer<'a> {
   }
 
   fn register_runtime_builtins(&mut self) -> RuntimeBuiltins {
-    let span = ignis_type::span::Span::default();
+    // Use SYNTHETIC file ID so these builtins never appear in completions
+    let span = ignis_type::span::Span::new(
+      ignis_type::file::FileId::SYNTHETIC,
+      ignis_type::BytePosition::default(),
+      ignis_type::BytePosition::default(),
+    );
     let buffer_ptr_type = self.types.vector(self.types.infer(), None);
     let u64_type = self.types.u64();
     let void_ptr_type = self.types.pointer(self.types.void(), false);
