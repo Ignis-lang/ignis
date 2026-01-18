@@ -21,6 +21,8 @@ impl ASTImportItem {
 pub struct ASTImport {
   pub items: Vec<ASTImportItem>,
   pub from: String,
+  /// Span of the "path" string literal (for Go to Definition on import path)
+  pub from_span: Span,
   pub span: Span,
 }
 
@@ -28,8 +30,14 @@ impl ASTImport {
   pub fn new(
     items: Vec<ASTImportItem>,
     from: String,
+    from_span: Span,
     span: Span,
   ) -> Self {
-    Self { items, from, span }
+    Self {
+      items,
+      from,
+      from_span,
+      span,
+    }
   }
 }

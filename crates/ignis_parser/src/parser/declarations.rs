@@ -245,7 +245,8 @@ impl super::IgnisParser {
     let span = Span::merge(&keyword.span, &semicolon.span);
 
     let import_path = path_token.lexeme.trim_matches('"').to_string();
-    let import_statement = ASTImport::new(items, import_path, span);
+    let from_span = path_token.span.clone();
+    let import_statement = ASTImport::new(items, import_path, from_span, span);
     Ok(self.allocate_statement(ASTStatement::Import(import_statement)))
   }
 
