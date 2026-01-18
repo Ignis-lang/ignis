@@ -1033,6 +1033,7 @@ impl<'a> Analyzer<'a> {
         }),
         name: self_symbol,
         span: method.span.clone(),
+        name_span: method.span.clone(),
         visibility: ignis_type::definition::Visibility::Private,
         owner_module: self.current_module,
         owner_namespace: None,

@@ -123,6 +123,7 @@ mod tests {
       }),
       name: SymbolId::new(0),
       span: Span::default(),
+      name_span: Span::default(),
       visibility: Visibility::Public,
       owner_module,
       owner_namespace: None,

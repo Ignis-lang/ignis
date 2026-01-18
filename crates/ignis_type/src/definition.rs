@@ -49,7 +49,10 @@ pub enum Visibility {
 pub struct Definition {
   pub kind: DefinitionKind,
   pub name: SymbolId,
+  /// Span of the entire definition (e.g., whole function/record/etc.)
   pub span: Span,
+  /// Span of just the name identifier (for detecting declarations in semantic tokens)
+  pub name_span: Span,
   pub visibility: Visibility,
   pub owner_module: ModuleId,
   pub owner_namespace: Option<NamespaceId>,
@@ -274,6 +277,7 @@ impl DefinitionStore {
     &mut self,
     name: SymbolId,
     span: Span,
+    name_span: Span,
     visibility: Visibility,
     owner_module: ModuleId,
     owner_namespace: Option<NamespaceId>,
@@ -282,6 +286,7 @@ impl DefinitionStore {
       kind: DefinitionKind::Placeholder,
       name,
       span,
+      name_span,
       visibility,
       owner_module,
       owner_namespace,
