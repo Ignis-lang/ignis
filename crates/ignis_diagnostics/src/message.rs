@@ -503,6 +503,16 @@ pub enum DiagnosticMessage {
   ExecutableMustHaveMainFunction {
     span: Span,
   },
+  PrivateFieldAccess {
+    field: String,
+    type_name: String,
+    span: Span,
+  },
+  PrivateMethodAccess {
+    method: String,
+    type_name: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -965,6 +975,14 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::ExecutableMustHaveMainFunction { .. } => {
         write!(f, "Executable must have a 'main' function")
       },
+
+      // Visibility errors
+      DiagnosticMessage::PrivateFieldAccess { field, type_name, .. } => {
+        write!(f, "Field '{}' of '{}' is private", field, type_name)
+      },
+      DiagnosticMessage::PrivateMethodAccess { method, type_name, .. } => {
+        write!(f, "Method '{}' of '{}' is private", method, type_name)
+      },
     }
   }
 }
@@ -1103,7 +1121,9 @@ impl DiagnosticMessage {
       | DiagnosticMessage::DuplicateOverload { span, .. }
       | DiagnosticMessage::MainFunctionCannotBeOverloaded { span, .. }
       | DiagnosticMessage::LibraryCannotHaveMainFunction { span, .. }
-      | DiagnosticMessage::ExecutableMustHaveMainFunction { span, .. } => span.clone(),
+      | DiagnosticMessage::ExecutableMustHaveMainFunction { span, .. }
+      | DiagnosticMessage::PrivateFieldAccess { span, .. }
+      | DiagnosticMessage::PrivateMethodAccess { span, .. } => span.clone(),
     }
   }
 
@@ -1238,6 +1258,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::MainFunctionCannotBeOverloaded { .. } => "A0104",
       DiagnosticMessage::LibraryCannotHaveMainFunction { .. } => "L0101",
       DiagnosticMessage::ExecutableMustHaveMainFunction { .. } => "L0102",
+      DiagnosticMessage::PrivateFieldAccess { .. } => "A0105",
+      DiagnosticMessage::PrivateMethodAccess { .. } => "A0106",
     }
     .to_string()
   }

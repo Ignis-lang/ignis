@@ -284,6 +284,13 @@ impl<'a> Analyzer<'a> {
             self.set_import_item_def(&field.name_span, &const_def_id);
             static_fields.insert(field.name, const_def_id);
           } else {
+            // Fields are private by default unless explicitly marked public
+            let visibility = if field.metadata.is_public() {
+              Visibility::Public
+            } else {
+              Visibility::Private
+            };
+
             let field_def = Definition {
               kind: DefinitionKind::Field(FieldDefinition {
                 type_id: self.types.error(), // Resolved in typeck
@@ -293,7 +300,7 @@ impl<'a> Analyzer<'a> {
               name: field.name,
               span: field.span.clone(),
               name_span: field.name_span.clone(),
-              visibility: Visibility::Public,
+              visibility,
               owner_module: self.current_module,
               owner_namespace: self.current_namespace,
               doc: None,
@@ -539,6 +546,13 @@ impl<'a> Analyzer<'a> {
       param_defs.push(param_def_id);
     }
 
+    // Methods are private by default unless explicitly marked public
+    let visibility = if method.metadata.is_public() {
+      Visibility::Public
+    } else {
+      Visibility::Private
+    };
+
     let method_def = Definition {
       kind: DefinitionKind::Method(MethodDefinition {
         owner_type: owner,
@@ -551,7 +565,7 @@ impl<'a> Analyzer<'a> {
       name: method.name,
       span: method.span.clone(),
       name_span: method.name_span.clone(),
-      visibility: Visibility::Public,
+      visibility,
       owner_module: self.current_module,
       owner_namespace: self.current_namespace,
       doc: method.doc.clone(),

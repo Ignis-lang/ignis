@@ -21,7 +21,7 @@ use ignis_diagnostics::{
   message::DiagnosticMessage,
 };
 use ignis_type::{
-  definition::{ConstValue, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry},
+  definition::{ConstValue, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry, Visibility},
   span::Span,
   types::{Substitution, Type, TypeId},
   value::IgnisLiteralValue,
@@ -1078,6 +1078,42 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Checks if we're currently inside a method of the given record.
+  ///
+  /// This is used for visibility checks: private fields/methods are accessible
+  /// from within the record's own methods.
+  fn is_inside_record_method(
+    &self,
+    record_def_id: &DefinitionId,
+  ) -> bool {
+    let self_symbol = self.symbols.borrow_mut().intern("self");
+
+    let Some(self_def_id) = self.scopes.lookup_def(&self_symbol) else {
+      return false;
+    };
+
+    let self_def = self.defs.get(self_def_id);
+    let DefinitionKind::Parameter(param) = &self_def.kind else {
+      return false;
+    };
+
+    // self is always a reference (&Self or &mut Self)
+    let self_type = self.types.get(&param.type_id);
+    let Type::Reference { inner, .. } = self_type else {
+      return false;
+    };
+
+    // Get the underlying record/instance type
+    let inner_type = self.types.get(inner);
+    let self_record_def_id = match inner_type {
+      Type::Record(def_id) => def_id,
+      Type::Instance { generic, .. } => generic,
+      _ => return false,
+    };
+
+    self_record_def_id == record_def_id
+  }
+
   fn typecheck_dot_access(
     &mut self,
     ma: &ASTMemberAccess,
@@ -1139,6 +1175,22 @@ impl<'a> Analyzer<'a> {
 
     // Check instance fields first
     if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
+      // Check visibility
+      let field_def = self.defs.get(&field.def_id);
+      if field_def.visibility == Visibility::Private && !self.is_inside_record_method(&def_id) {
+        let field_name = self.get_symbol_name(&ma.member);
+        let type_name = self.format_type_for_error(&obj_type);
+        self.add_diagnostic(
+          DiagnosticMessage::PrivateFieldAccess {
+            field: field_name,
+            type_name,
+            span: ma.member_span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      }
+
       self.set_import_item_def(&ma.member_span, &field.def_id);
       return self.types.substitute(field.type_id, &subst);
     }

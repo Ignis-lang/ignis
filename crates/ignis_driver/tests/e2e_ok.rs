@@ -674,8 +674,8 @@ fn e2e_record_create_access() {
     "record_create_access",
     r#"
 record Point {
-    x: i32;
-    y: i32;
+    public x: i32;
+    public y: i32;
 }
 
 function main(): i32 {
@@ -713,10 +713,10 @@ fn e2e_record_static_method() {
     "record_static_method",
     r#"
 record Point {
-    x: i32;
-    y: i32;
+    public x: i32;
+    public y: i32;
 
-    static origin(): Point {
+    public static origin(): Point {
         return Point { x: 0, y: 0 };
     }
 }
@@ -1054,7 +1054,7 @@ fn e2e_generic_record_box() {
     "generic_record_box",
     r#"
 record Box<T> {
-    value: T;
+    public value: T;
 }
 
 function main(): i32 {
@@ -1129,8 +1129,8 @@ fn e2e_generic_record_pair() {
     "generic_record_pair",
     r#"
 record Pair<A, B> {
-    first: A;
-    second: B;
+    public first: A;
+    public second: B;
 }
 
 function main(): i32 {
@@ -1147,7 +1147,7 @@ fn e2e_generic_nested_types() {
     "generic_nested_types",
     r#"
 record Box<T> {
-    value: T;
+    public value: T;
 }
 
 function main(): i32 {

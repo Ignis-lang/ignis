@@ -304,8 +304,8 @@ fn record_field_access() {
   let result = common::analyze(
     r#"
 record Point {
-    x: i32;
-    y: i32;
+    public x: i32;
+    public y: i32;
 }
 
 function main(): i32 {
@@ -329,7 +329,7 @@ fn record_instance_method() {
 record Counter {
     value: i32;
 
-    get(): i32 {
+    public get(): i32 {
         return self.value;
     }
 }
@@ -353,10 +353,10 @@ fn record_static_method() {
   let result = common::analyze(
     r#"
 record Point {
-    x: i32;
-    y: i32;
+    public x: i32;
+    public y: i32;
 
-    static origin(): Point {
+    public static origin(): Point {
         return Point { x: 0, y: 0 };
     }
 }
