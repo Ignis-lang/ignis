@@ -2,6 +2,25 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## [0.2.2] - 2026-01-18
+
+This release focuses on LSP server stability and crash prevention.
+
+### Bug Fixes
+
+- **Panic Recovery**: Added global panic hook and `catch_unwind` wrappers around analysis and completion to prevent panics from killing the LSP server
+- **Invalid ModuleId Crash**: Fixed crash when a file fails to parse by cleaning up placeholder ModuleId entries from the lookup table
+- **UTF-8 Boundary Panics**: Fixed panics when cursor offset lands in the middle of a multi-byte UTF-8 character by clamping to valid boundaries
+- **Empty Std Module Name**: Added validation to reject `"std::"` imports without a module name
+- **Duplicate Import Prefix**: Fixed import completion inserting `std::io` when user already typed `std::` (now correctly inserts just `io`)
+
+### Improvements
+
+- **Fallback Import Detection**: Added raw text-based import path detection for unclosed quotes where the lexer fails to produce a String token
+- **Dynamic Std Modules**: Import path completion now reads available modules from the project manifest instead of a hardcoded list
+- **Version Mismatch Guard**: Completion now checks document version to avoid race conditions between `did_change` and completion requests
+- Cleaned up verbose debug logging throughout the completion system
+
 ## [0.2.1] - 2026-01-18
 
 This release brings significant improvements to the Language Server Protocol (LSP) support and adds new language features for visibility control and mutable pointers.
