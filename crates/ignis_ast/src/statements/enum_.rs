@@ -71,6 +71,7 @@ impl ASTEnumVariant {
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTEnumField {
   pub name: SymbolId,
+  pub name_span: Span,
   pub type_: IgnisTypeSyntax,
   pub value: Option<NodeId>,
   pub metadata: ASTMetadata,
@@ -80,6 +81,7 @@ pub struct ASTEnumField {
 impl ASTEnumField {
   pub fn new(
     name: SymbolId,
+    name_span: Span,
     type_: IgnisTypeSyntax,
     value: Option<NodeId>,
     metadata: ASTMetadata,
@@ -87,6 +89,7 @@ impl ASTEnumField {
   ) -> Self {
     Self {
       name,
+      name_span,
       type_,
       value,
       metadata,

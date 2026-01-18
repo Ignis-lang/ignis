@@ -1,9 +1,10 @@
 //! LSP server implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ignis_type::definition::DefinitionKind;
+use ignis_driver::AnalyzeProjectOutput;
+use ignis_type::file::FileId;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -33,6 +34,8 @@ impl Server {
   /// Analyze a document and publish diagnostics.
   ///
   /// Uses project-level analysis to resolve imports properly.
+  /// Publishes diagnostics for ALL files affected by the analysis,
+  /// and clears diagnostics from files that no longer have errors.
   async fn analyze_and_publish(
     &self,
     uri: &Url,
@@ -52,29 +55,41 @@ impl Server {
     let config = (*self.state.config).clone();
 
     // Run project-level analysis with in-memory text.
-    // This uses the editor's current content instead of reading from disk,
-    // which provides immediate feedback on unsaved changes.
-    let diagnostics_by_uri = {
-      let output = ignis_driver::analyze_project_with_text(&config, &path_str, Some(text));
+    let output = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text)));
 
-      // Group diagnostics by file URI
+    // Cache the analysis result for future requests
+    {
+      let mut guard = self.state.open_files.write().await;
+
+      if let Some(doc) = guard.get_mut(uri) {
+        doc.set_cached_analysis(version, Arc::clone(&output));
+      }
+    }
+
+    // Group diagnostics by file URI, caching LineIndex per file_id
+    let diagnostics_by_uri = {
       let mut by_uri: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+      let mut line_indexes: HashMap<FileId, LineIndex> = HashMap::new();
 
       for diag in &output.diagnostics {
-        // Get the file path from the diagnostic's primary span
         let file_id = &diag.primary_span.file;
         let file_path = output.source_map.get(file_id).path.to_string_lossy().to_string();
 
         let file_uri = match Url::from_file_path(&file_path) {
           Ok(u) => u,
-          Err(_) => continue,
+          Err(_) => {
+            // Skip files with non-convertible paths (e.g., Windows UNC paths, virtual files).
+            // This is rare in practice on Unix systems.
+            continue;
+          },
         };
 
-        // Build line index for this file
-        let text = output.source_map.get(file_id).text.clone();
-        let line_index = LineIndex::new(text);
+        // Cache LineIndex per file_id to avoid O(diags) constructions
+        let line_index = line_indexes
+          .entry(file_id.clone())
+          .or_insert_with(|| LineIndex::new(output.source_map.get(file_id).text.clone()));
 
-        let lsp_diag = convert_diagnostic(diag, &line_index);
+        let lsp_diag = convert_diagnostic(diag, line_index);
 
         by_uri.entry(file_uri).or_default().push(lsp_diag);
       }
@@ -82,13 +97,76 @@ impl Server {
       by_uri
     };
 
-    // Publish diagnostics for the requested file
-    let file_diagnostics = diagnostics_by_uri.get(uri).cloned().unwrap_or_default();
+    // Get the set of URIs that had diagnostics before
+    let previous_uris: HashSet<Url> = {
+      let guard = self.state.previous_diagnostic_uris.read().await;
+      guard.clone()
+    };
 
-    self
-      .client
-      .publish_diagnostics(uri.clone(), file_diagnostics, Some(version))
-      .await;
+    // Collect URIs that have diagnostics now
+    let current_uris: HashSet<Url> = diagnostics_by_uri.keys().cloned().collect();
+
+    // Publish diagnostics for all affected files
+    for (file_uri, diags) in &diagnostics_by_uri {
+      // Use version only for the file that triggered the analysis
+      let diag_version = if file_uri == uri { Some(version) } else { None };
+
+      self
+        .client
+        .publish_diagnostics(file_uri.clone(), diags.clone(), diag_version)
+        .await;
+    }
+
+    // Clear diagnostics for files that previously had errors but now don't
+    for stale_uri in previous_uris.difference(&current_uris) {
+      self.client.publish_diagnostics(stale_uri.clone(), vec![], None).await;
+    }
+
+    // Update the set of URIs with diagnostics
+    {
+      let mut guard = self.state.previous_diagnostic_uris.write().await;
+      *guard = current_uris;
+    }
+  }
+
+  /// Run analysis for a document, using cache if available.
+  ///
+  /// Returns the analysis output and the current document version.
+  async fn get_analysis(
+    &self,
+    uri: &Url,
+  ) -> Option<(Arc<AnalyzeProjectOutput>, String, i32)> {
+    let guard = self.state.open_files.read().await;
+
+    let doc = guard.get(uri)?;
+    let path_str = doc.path.to_string_lossy().to_string();
+    let version = doc.version;
+
+    // Check if we have a cached analysis for the current version
+    if let Some(cached) = doc.get_cached_analysis() {
+      return Some((cached, path_str, version));
+    }
+
+    // No cache available - run analysis
+    let text = doc.text.clone();
+    drop(guard); // Release read lock before analysis
+
+    let config = (*self.state.config).clone();
+    let output = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text)));
+
+    // Cache the result
+    {
+      let mut guard = self.state.open_files.write().await;
+
+      if let Some(doc) = guard.get_mut(uri) {
+        // Only cache if version hasn't changed
+        if doc.version == version {
+          doc.set_cached_analysis(version, Arc::clone(&output));
+        }
+      }
+    }
+
+    Some((output, path_str, version))
   }
 }
 
@@ -110,14 +188,27 @@ impl LanguageServer for Server {
         // Full text sync - client sends entire document on change
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
 
-        // Document symbols (outline view)
-        document_symbol_provider: Some(OneOf::Left(true)),
-
         // Go to definition
         definition_provider: Some(OneOf::Left(true)),
 
         // Hover (type info)
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+
+        // Semantic tokens (semantic highlighting)
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+          SemanticTokensOptions {
+            legend: crate::semantic::build_legend(),
+            full: Some(SemanticTokensFullOptions::Bool(true)),
+            range: None,
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+          },
+        )),
+
+        // Inlay hints (parameter names at call sites)
+        inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(InlayHintOptions {
+          work_done_progress_options: WorkDoneProgressOptions::default(),
+          resolve_provider: Some(false),
+        }))),
 
         // TODO: Add more capabilities as we implement features:
         // - references_provider
@@ -183,86 +274,6 @@ impl LanguageServer for Server {
     self.client.publish_diagnostics(uri, vec![], None).await;
   }
 
-  async fn document_symbol(
-    &self,
-    params: DocumentSymbolParams,
-  ) -> Result<Option<DocumentSymbolResponse>> {
-    let uri = &params.text_document.uri;
-
-    // Get document info
-    let (path_str, text) = {
-      let guard = self.state.open_files.read().await;
-
-      let Some(doc) = guard.get(uri) else {
-        return Ok(None);
-      };
-
-      (doc.path.to_string_lossy().to_string(), doc.text.clone())
-    };
-
-    let config = (*self.state.config).clone();
-
-    // Run analysis
-    let symbols = {
-      let output = ignis_driver::analyze_project_with_text(&config, &path_str, Some(text.clone()));
-      let line_index = LineIndex::new(text);
-
-      // Collect symbols from definitions that belong to this file
-      // We check by comparing the file path in the span
-      let mut symbols: Vec<DocumentSymbol> = Vec::new();
-
-      for (_, def) in output.defs.iter() {
-        // Get the file path for this definition
-        let def_file_path = output.source_map.get(&def.span.file).path.to_string_lossy();
-
-        // Only include definitions from the current file
-        if def_file_path != path_str {
-          continue;
-        }
-
-        // Skip parameters and internal definitions
-        if matches!(
-          def.kind,
-          DefinitionKind::Parameter(_) | DefinitionKind::TypeParam(_) | DefinitionKind::Placeholder
-        ) {
-          continue;
-        }
-
-        // Skip definitions inside namespaces (they'll be nested)
-        if def.owner_namespace.is_some() {
-          continue;
-        }
-
-        let name = output
-          .symbol_names
-          .get(&def.name)
-          .cloned()
-          .unwrap_or_else(|| "?".to_string());
-
-        let kind = definition_kind_to_symbol_kind(&def.kind);
-        let range = line_index.span_to_range(&def.span);
-
-        #[allow(deprecated)]
-        let symbol = DocumentSymbol {
-          name,
-          detail: None,
-          kind,
-          tags: None,
-          deprecated: None,
-          range,
-          selection_range: range,
-          children: None,
-        };
-
-        symbols.push(symbol);
-      }
-
-      symbols
-    };
-
-    Ok(Some(DocumentSymbolResponse::Nested(symbols)))
-  }
-
   async fn goto_definition(
     &self,
     params: GotoDefinitionParams,
@@ -270,86 +281,81 @@ impl LanguageServer for Server {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // Get document info
-    let (path_str, text) = {
+    // Get cached analysis or run new analysis
+    let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      return Ok(None);
+    };
+
+    // Get line_index from open document (use cached instance)
+    let line_index = {
       let guard = self.state.open_files.read().await;
 
       let Some(doc) = guard.get(uri) else {
         return Ok(None);
       };
 
-      (doc.path.to_string_lossy().to_string(), doc.text.clone())
+      doc.line_index.clone()
     };
 
-    let config = (*self.state.config).clone();
+    // Get the FileId for the current file
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      return Ok(None);
+    };
 
-    // Run analysis
-    let location = {
-      let output = ignis_driver::analyze_project_with_text(&config, &path_str, Some(text.clone()));
-      let line_index = LineIndex::new(text);
+    // Convert LSP position to byte offset
+    let byte_offset = line_index.offset(position);
 
-      // Get the FileId for the current file
-      let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
-        return Ok(None);
-      };
+    // Find which node's span contains this position (only from this file)
+    let mut found_node = None;
+    let mut smallest_span_size = u32::MAX;
 
-      // Convert LSP position to byte offset
-      let byte_offset = line_index.offset(position);
-
-      // Find which node's span contains this position (only from this file)
-      let mut found_node = None;
-      let mut smallest_span_size = u32::MAX;
-
-      for (node_id, span) in &output.node_spans {
-        // Only consider spans from the current file
-        if span.file != file_id {
-          continue;
-        }
-
-        // Check if this span contains the cursor position
-        if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
-          // Prefer the smallest span that contains the position
-          let span_size = span.end.0 - span.start.0;
-          if span_size < smallest_span_size {
-            smallest_span_size = span_size;
-            found_node = Some(node_id.clone());
-          }
-        }
+    for (node_id, span) in &output.node_spans {
+      // Only consider spans from the current file
+      if span.file != file_id {
+        continue;
       }
 
-      // If we found a node, look up its definition
-      let Some(node_id) = found_node else {
-        return Ok(None);
-      };
+      // Check if this span contains the cursor position
+      if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+        // Prefer the smallest span that contains the position
+        let span_size = span.end.0 - span.start.0;
+        if span_size < smallest_span_size {
+          smallest_span_size = span_size;
+          found_node = Some(node_id.clone());
+        }
+      }
+    }
 
-      // Check node_defs first, then resolved_calls (for overloaded function calls)
-      let def_id = output
-        .node_defs
-        .get(&node_id)
-        .or_else(|| output.resolved_calls.get(&node_id));
-
-      let Some(def_id) = def_id else {
-        return Ok(None);
-      };
-
-      let def = output.defs.get(def_id);
-
-      // Get the file path and text for the definition's file
-      let def_file_path = output.source_map.get(&def.span.file).path.clone();
-      let def_text = output.source_map.get(&def.span.file).text.clone();
-
-      let def_uri = match Url::from_file_path(&def_file_path) {
-        Ok(u) => u,
-        Err(_) => return Ok(None),
-      };
-
-      let def_line_index = LineIndex::new(def_text);
-      let range = def_line_index.span_to_range(&def.span);
-
-      Location { uri: def_uri, range }
+    // If we found a node, look up its definition
+    let Some(node_id) = found_node else {
+      return Ok(None);
     };
 
-    Ok(Some(GotoDefinitionResponse::Scalar(location)))
+    // Check node_defs first, then resolved_calls (for overloaded function calls)
+    let def_id = output
+      .node_defs
+      .get(&node_id)
+      .or_else(|| output.resolved_calls.get(&node_id));
+
+    let Some(def_id) = def_id else {
+      return Ok(None);
+    };
+
+    let def = output.defs.get(def_id);
+
+    // Get the file path and text for the definition's file
+    let def_file_path = output.source_map.get(&def.span.file).path.clone();
+    let def_text = output.source_map.get(&def.span.file).text.clone();
+
+    let def_uri = match Url::from_file_path(&def_file_path) {
+      Ok(u) => u,
+      Err(_) => return Ok(None),
+    };
+
+    let def_line_index = LineIndex::new(def_text);
+    let range = def_line_index.span_to_range(&def.span);
+
+    Ok(Some(GotoDefinitionResponse::Scalar(Location { uri: def_uri, range })))
   }
 
   async fn hover(
@@ -359,146 +365,137 @@ impl LanguageServer for Server {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
 
-    // Get document info
-    let (path_str, text) = {
+    // Get cached analysis or run new analysis
+    let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      return Ok(None);
+    };
+
+    // Get line_index from open document (use cached instance)
+    let line_index = {
       let guard = self.state.open_files.read().await;
 
       let Some(doc) = guard.get(uri) else {
         return Ok(None);
       };
 
-      (doc.path.to_string_lossy().to_string(), doc.text.clone())
+      doc.line_index.clone()
     };
 
-    let config = (*self.state.config).clone();
+    // Get the FileId for the current file
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      return Ok(None);
+    };
 
-    // Run analysis
-    let hover_info = {
-      let output = ignis_driver::analyze_project_with_text(&config, &path_str, Some(text.clone()));
-      let line_index = LineIndex::new(text);
+    // Convert LSP position to byte offset
+    let byte_offset = line_index.offset(position);
 
-      // Get the FileId for the current file
-      let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
-        return Ok(None);
-      };
+    // Find which node's span contains this position (only from this file)
+    let mut found_node = None;
+    let mut smallest_span_size = u32::MAX;
 
-      // Convert LSP position to byte offset
-      let byte_offset = line_index.offset(position);
+    for (node_id, span) in &output.node_spans {
+      // Only consider spans from the current file
+      if span.file != file_id {
+        continue;
+      }
 
-      // Find which node's span contains this position (only from this file)
-      let mut found_node = None;
-      let mut smallest_span_size = u32::MAX;
+      if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+        let span_size = span.end.0 - span.start.0;
+        if span_size < smallest_span_size {
+          smallest_span_size = span_size;
+          found_node = Some(node_id.clone());
+        }
+      }
+    }
 
-      for (node_id, span) in &output.node_spans {
-        // Only consider spans from the current file
+    // First, check if cursor is on an import item (more specific than the import statement node)
+    let import_hover = {
+      let mut found_import = None;
+      let mut smallest_size = u32::MAX;
+
+      for (span, def_id) in &output.import_item_defs {
         if span.file != file_id {
           continue;
         }
 
         if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
-          let span_size = span.end.0 - span.start.0;
-          if span_size < smallest_span_size {
-            smallest_span_size = span_size;
-            found_node = Some(node_id.clone());
+          let size = span.end.0 - span.start.0;
+          if size < smallest_size {
+            smallest_size = size;
+            found_import = Some((span.clone(), def_id.clone(), size));
           }
         }
       }
 
-      // First, check if cursor is on an import item (more specific than the import statement node)
-      let import_hover = {
-        let mut found_import = None;
-        let mut smallest_size = u32::MAX;
+      found_import
+    };
 
-        for (span, def_id) in &output.import_item_defs {
-          if span.file != file_id {
-            continue;
-          }
-
-          if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
-            let size = span.end.0 - span.start.0;
-            if size < smallest_size {
-              smallest_size = size;
-              found_import = Some((span.clone(), def_id.clone(), size));
-            }
-          }
+    // Build hover content based on definition and/or type
+    // Import items take priority when cursor is on them (they're more specific than the import statement)
+    let (content, hover_span) = if let Some((import_span, import_def_id, import_size)) = import_hover {
+      // Check if we also have a node, and if so, whether the import item is more specific
+      let use_import = if let Some(ref node_id) = found_node {
+        if let Some(node_span) = output.node_spans.get(node_id) {
+          let node_size = node_span.end.0 - node_span.start.0;
+          import_size <= node_size // Prefer import item if it's same size or smaller
+        } else {
+          true // No span for node, use import
         }
-
-        found_import
+      } else {
+        true // No node found, use import
       };
 
-      // Build hover content based on definition and/or type
-      // Import items take priority when cursor is on them (they're more specific than the import statement)
-      let (content, hover_span) = if let Some((import_span, import_def_id, import_size)) = import_hover {
-        // Check if we also have a node, and if so, whether the import item is more specific
-        let use_import = if let Some(ref node_id) = found_node {
-          if let Some(node_span) = output.node_spans.get(node_id) {
-            let node_size = node_span.end.0 - node_span.start.0;
-            import_size <= node_size // Prefer import item if it's same size or smaller
-          } else {
-            true // No span for node, use import
-          }
+      if use_import {
+        let content = format_definition_hover(
+          &output.defs,
+          &output.types,
+          &output.symbol_names,
+          &output.source_map,
+          &import_def_id,
+        );
+        (content, Some(import_span))
+      } else {
+        // Fall through to node-based lookup
+        (String::new(), None)
+      }
+    } else {
+      (String::new(), None)
+    };
+
+    // If no import item found (or node was more specific), try node-based lookups
+    let (content, hover_span) = if content.is_empty() {
+      if let Some(node_id) = found_node {
+        // Try node_defs first, then resolved_calls (for overloaded function calls), then types
+        let content = if let Some(def_id) = output.node_defs.get(&node_id) {
+          format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
+        } else if let Some(def_id) = output.resolved_calls.get(&node_id) {
+          // This is a call to an overloaded function - show the resolved overload
+          format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
+        } else if let Some(type_id) = output.node_types.get(&node_id) {
+          // No definition, just show the type
+          format!(
+            "```ignis\n{}\n```",
+            format_type(&output.types, &output.defs, &output.symbol_names, type_id)
+          )
         } else {
-          true // No node found, use import
+          String::new()
         };
 
-        if use_import {
-          let content = format_definition_hover(
-            &output.defs,
-            &output.types,
-            &output.symbol_names,
-            &output.source_map,
-            &import_def_id,
-          );
-          (content, Some(import_span))
-        } else {
-          // Fall through to node-based lookup
-          (String::new(), None)
-        }
+        let span = output.node_spans.get(&node_id).cloned();
+        (content, span)
       } else {
         (String::new(), None)
-      };
-
-      // If no import item found (or node was more specific), try node-based lookups
-      let (content, hover_span) = if content.is_empty() {
-        if let Some(node_id) = found_node {
-          // Try node_defs first, then resolved_calls (for overloaded function calls), then types
-          let content = if let Some(def_id) = output.node_defs.get(&node_id) {
-            format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
-          } else if let Some(def_id) = output.resolved_calls.get(&node_id) {
-            // This is a call to an overloaded function - show the resolved overload
-            format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
-          } else if let Some(type_id) = output.node_types.get(&node_id) {
-            // No definition, just show the type
-            format!(
-              "```ignis\n{}\n```",
-              format_type(&output.types, &output.defs, &output.symbol_names, type_id)
-            )
-          } else {
-            String::new()
-          };
-
-          let span = output.node_spans.get(&node_id).cloned();
-          (content, span)
-        } else {
-          (String::new(), None)
-        }
-      } else {
-        (content, hover_span)
-      };
-
-      if content.is_empty() {
-        return Ok(None);
       }
-
-      // Get the range of the hovered element for highlighting
-      let range = hover_span.as_ref().map(|s| line_index.span_to_range(s));
-
-      Some((content, range))
+    } else {
+      (content, hover_span)
     };
 
-    let Some((content, range)) = hover_info else {
+    if content.is_empty() {
       return Ok(None);
-    };
+    }
+
+    // Get the range of the hovered element for highlighting
+    let range = hover_span.as_ref().map(|s| line_index.span_to_range(s));
 
     Ok(Some(Hover {
       contents: HoverContents::Markup(MarkupContent {
@@ -507,6 +504,83 @@ impl LanguageServer for Server {
       }),
       range,
     }))
+  }
+
+  async fn semantic_tokens_full(
+    &self,
+    params: SemanticTokensParams,
+  ) -> Result<Option<SemanticTokensResult>> {
+    let uri = &params.text_document.uri;
+
+    // Get cached analysis or run new analysis
+    let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      return Ok(None);
+    };
+
+    // Get text and line_index from open document (use cached line_index)
+    let (text, line_index) = {
+      let guard = self.state.open_files.read().await;
+
+      let Some(doc) = guard.get(uri) else {
+        return Ok(None);
+      };
+
+      (doc.text.clone(), doc.line_index.clone())
+    };
+
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      return Ok(None);
+    };
+
+    // Lex the source to get tokens
+    let mut lexer = ignis_parser::IgnisLexer::new(file_id, &text);
+    lexer.scan_tokens();
+
+    // Classify tokens using semantic analysis
+    let tokens =
+      crate::semantic::classify_tokens(&lexer.tokens, &output.import_item_defs, &output.defs, &file_id, &line_index);
+
+    Ok(Some(SemanticTokensResult::Tokens(tokens)))
+  }
+
+  async fn inlay_hint(
+    &self,
+    params: InlayHintParams,
+  ) -> Result<Option<Vec<InlayHint>>> {
+    let uri = &params.text_document.uri;
+
+    // Get cached analysis or run new analysis
+    let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      return Ok(None);
+    };
+
+    // Get line_index from open document (use cached instance)
+    let line_index = {
+      let guard = self.state.open_files.read().await;
+
+      let Some(doc) = guard.get(uri) else {
+        return Ok(None);
+      };
+
+      doc.line_index.clone()
+    };
+
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      return Ok(None);
+    };
+
+    let hints = crate::inlay::generate_parameter_hints(
+      &output.nodes,
+      &output.roots,
+      &output.resolved_calls,
+      &output.node_defs,
+      &output.defs,
+      &output.symbol_names,
+      &file_id,
+      &line_index,
+    );
+
+    Ok(Some(hints))
   }
 }
 
@@ -625,11 +699,9 @@ fn format_definition_hover(
   let def = defs.get(def_id);
   let name = symbol_names.get(&def.name).cloned().unwrap_or_else(|| "?".to_string());
 
-  // Get file info for the definition
   let file_info = {
     let file = source_map.get(&def.span.file);
     let path = &file.path;
-    // Extract just the filename for display
     path.file_name().map(|n| n.to_string_lossy().to_string())
   };
 
@@ -715,6 +787,38 @@ fn format_definition_hover(
 
     DefinitionKind::TypeParam(_) => {
       format!("```ignis\n{}\n```\n\n(type parameter)", name)
+    },
+
+    DefinitionKind::Field(field_def) => {
+      let ty = format_type(types, defs, symbol_names, &field_def.type_id);
+      let owner_name = symbol_names
+        .get(&defs.get(&field_def.owner_type).name)
+        .cloned()
+        .unwrap_or_else(|| "?".to_string());
+      format!("```ignis\n{}: {}\n```\n\n(field of `{}`)", name, ty, owner_name)
+    },
+
+    DefinitionKind::Variant(variant_def) => {
+      let owner_name = symbol_names
+        .get(&defs.get(&variant_def.owner_enum).name)
+        .cloned()
+        .unwrap_or_else(|| "?".to_string());
+
+      if variant_def.payload.is_empty() {
+        format!("```ignis\n{}::{}\n```\n\n(enum variant)", owner_name, name)
+      } else {
+        let payload_types: Vec<String> = variant_def
+          .payload
+          .iter()
+          .map(|ty| format_type(types, defs, symbol_names, ty))
+          .collect();
+        format!(
+          "```ignis\n{}::{}({})\n```\n\n(enum variant)",
+          owner_name,
+          name,
+          payload_types.join(", ")
+        )
+      }
     },
 
     DefinitionKind::Placeholder => {
@@ -863,21 +967,4 @@ fn format_type_params(
     .collect();
 
   format!("<{}>", names.join(", "))
-}
-
-/// Convert Ignis DefinitionKind to LSP SymbolKind.
-fn definition_kind_to_symbol_kind(kind: &DefinitionKind) -> SymbolKind {
-  match kind {
-    DefinitionKind::Function(_) => SymbolKind::FUNCTION,
-    DefinitionKind::Method(_) => SymbolKind::METHOD,
-    DefinitionKind::Variable(_) => SymbolKind::VARIABLE,
-    DefinitionKind::Constant(_) => SymbolKind::CONSTANT,
-    DefinitionKind::Parameter(_) => SymbolKind::VARIABLE,
-    DefinitionKind::Namespace(_) => SymbolKind::NAMESPACE,
-    DefinitionKind::TypeAlias(_) => SymbolKind::TYPE_PARAMETER,
-    DefinitionKind::Record(_) => SymbolKind::STRUCT,
-    DefinitionKind::Enum(_) => SymbolKind::ENUM,
-    DefinitionKind::TypeParam(_) => SymbolKind::TYPE_PARAMETER,
-    DefinitionKind::Placeholder => SymbolKind::NULL,
-  }
 }

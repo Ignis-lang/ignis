@@ -29,8 +29,9 @@ use std::sync::OnceLock;
 
 use ignis_hir::{HIR, HIRId, HIRKind, HIRNode, statement::LoopKind};
 use ignis_type::definition::{
-  Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef, FunctionDefinition,
-  MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
+  Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef, FieldDefinition,
+  FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, VariantDefinition,
+  Visibility,
 };
 use ignis_type::symbol::SymbolTable;
 use ignis_type::types::{Substitution, Type, TypeId, TypeStore};
@@ -1298,22 +1299,7 @@ impl<'a> Monomorphizer<'a> {
     subst: &Substitution,
     name: ignis_type::symbol::SymbolId,
   ) -> DefinitionId {
-    // Create concrete field definitions
-    let new_fields: Vec<_> = rd
-      .fields
-      .iter()
-      .map(|f| {
-        let substituted = self.types.substitute(f.type_id, subst);
-        let concretized = self.concretize_type(substituted);
-        RecordFieldDef {
-          name: f.name,
-          type_id: concretized,
-          index: f.index,
-        }
-      })
-      .collect();
-
-    // Reserve ID first (needed for self-referential types)
+    // Reserve ID first (needed for self-referential types and field owner_type)
     let concrete_id = self.output_defs.alloc_placeholder(
       name,
       generic_def.span.clone(),
@@ -1321,6 +1307,37 @@ impl<'a> Monomorphizer<'a> {
       generic_def.owner_module,
       generic_def.owner_namespace,
     );
+
+    let new_fields: Vec<_> = rd
+      .fields
+      .iter()
+      .map(|f| {
+        let substituted = self.types.substitute(f.type_id, subst);
+        let concretized = self.concretize_type(substituted);
+        let field_def = Definition {
+          kind: DefinitionKind::Field(FieldDefinition {
+            type_id: concretized,
+            owner_type: concrete_id,
+            index: f.index,
+          }),
+          name: f.name,
+          span: f.span.clone(),
+          visibility: Visibility::Public,
+          owner_module: generic_def.owner_module,
+          owner_namespace: generic_def.owner_namespace,
+          doc: None,
+        };
+        let field_def_id = self.output_defs.alloc(field_def);
+
+        RecordFieldDef {
+          name: f.name,
+          type_id: concretized,
+          index: f.index,
+          span: f.span.clone(),
+          def_id: field_def_id,
+        }
+      })
+      .collect();
 
     // Create concrete type (idempotent via cache)
     let concrete_type = self.types.record(concrete_id);
@@ -1348,18 +1365,7 @@ impl<'a> Monomorphizer<'a> {
     subst: &Substitution,
     name: ignis_type::symbol::SymbolId,
   ) -> DefinitionId {
-    // Create concrete variant definitions
-    let new_variants: Vec<_> = ed
-      .variants
-      .iter()
-      .map(|v| EnumVariantDef {
-        name: v.name,
-        tag_value: v.tag_value,
-        payload: v.payload.iter().map(|ty| self.types.substitute(*ty, subst)).collect(),
-      })
-      .collect();
-
-    // Reserve ID first
+    // Reserve ID first so variant definitions can reference owner_enum
     let concrete_id = self.output_defs.alloc_placeholder(
       name,
       generic_def.span.clone(),
@@ -1367,6 +1373,36 @@ impl<'a> Monomorphizer<'a> {
       generic_def.owner_module,
       generic_def.owner_namespace,
     );
+
+    let new_variants: Vec<_> = ed
+      .variants
+      .iter()
+      .map(|v| {
+        let substituted_payload: Vec<_> = v.payload.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
+        let variant_def = Definition {
+          kind: DefinitionKind::Variant(VariantDefinition {
+            payload: substituted_payload.clone(),
+            owner_enum: concrete_id,
+            tag_value: v.tag_value,
+          }),
+          name: v.name,
+          span: v.span.clone(),
+          visibility: Visibility::Public,
+          owner_module: generic_def.owner_module,
+          owner_namespace: generic_def.owner_namespace,
+          doc: None,
+        };
+        let variant_def_id = self.output_defs.alloc(variant_def);
+
+        EnumVariantDef {
+          name: v.name,
+          tag_value: v.tag_value,
+          payload: substituted_payload,
+          span: v.span.clone(),
+          def_id: variant_def_id,
+        }
+      })
+      .collect();
 
     // Create concrete type
     let concrete_type = self.types.enum_type(concrete_id);

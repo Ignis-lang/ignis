@@ -91,11 +91,17 @@ impl super::IgnisParser {
     };
 
     if segments.len() == 1 && args.is_empty() {
-      Ok(IgnisTypeSyntax::Named(segments[0].0))
+      Ok(IgnisTypeSyntax::Named {
+        symbol: segments[0].0,
+        span: segments[0].1.clone(),
+      })
     } else if segments.len() == 1 {
       // Simple name with type args: Vec<i32>
       Ok(IgnisTypeSyntax::Applied {
-        base: Box::new(IgnisTypeSyntax::Named(segments[0].0)),
+        base: Box::new(IgnisTypeSyntax::Named {
+          symbol: segments[0].0,
+          span: segments[0].1.clone(),
+        }),
         args,
       })
     } else {
@@ -388,7 +394,7 @@ mod tests {
   fn parses_named_type() {
     let ty = parse_type("MyType");
     match ty {
-      IgnisTypeSyntax::Named(_) => {},
+      IgnisTypeSyntax::Named { .. } => {},
       other => panic!("expected named type, got {:?}", other),
     }
   }
@@ -499,7 +505,7 @@ mod tests {
     // T without arguments is just Named (a type parameter)
     let ty = parse_type("T");
     match ty {
-      IgnisTypeSyntax::Named(_) => {},
+      IgnisTypeSyntax::Named { .. } => {},
       other => panic!("expected named type, got {:?}", other),
     }
   }

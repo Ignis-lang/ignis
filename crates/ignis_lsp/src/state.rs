@@ -1,14 +1,24 @@
 //! LSP server state management.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use ignis_config::IgnisConfig;
+use ignis_driver::AnalyzeProjectOutput;
 use tokio::sync::RwLock;
 use url::Url;
 
 use crate::convert::LineIndex;
+
+/// Cached analysis result for a document.
+pub struct CachedAnalysis {
+  /// Version of the document when this analysis was performed.
+  pub version: i32,
+
+  /// The analysis output.
+  pub output: Arc<AnalyzeProjectOutput>,
+}
 
 /// An open document in the editor.
 pub struct OpenDoc {
@@ -23,6 +33,9 @@ pub struct OpenDoc {
 
   /// Line index for position conversions.
   pub line_index: LineIndex,
+
+  /// Cached analysis result (if available and up-to-date).
+  pub cached_analysis: Option<CachedAnalysis>,
 }
 
 impl OpenDoc {
@@ -33,11 +46,13 @@ impl OpenDoc {
     path: PathBuf,
   ) -> Self {
     let line_index = LineIndex::new(text.clone());
+
     Self {
       version,
       text,
       path,
       line_index,
+      cached_analysis: None,
     }
   }
 
@@ -48,8 +63,31 @@ impl OpenDoc {
     text: String,
   ) {
     self.version = version;
-    self.line_index = LineIndex::new(text.clone());
     self.text = text;
+    // Rebuild line index from the stored text (avoids extra clone)
+    self.line_index = LineIndex::new(self.text.clone());
+    // Invalidate cached analysis on text change
+    self.cached_analysis = None;
+  }
+
+  /// Set the cached analysis for this document.
+  pub fn set_cached_analysis(
+    &mut self,
+    version: i32,
+    output: Arc<AnalyzeProjectOutput>,
+  ) {
+    self.cached_analysis = Some(CachedAnalysis { version, output });
+  }
+
+  /// Get the cached analysis if it matches the current version.
+  pub fn get_cached_analysis(&self) -> Option<Arc<AnalyzeProjectOutput>> {
+    self.cached_analysis.as_ref().and_then(|cache| {
+      if cache.version == self.version {
+        Some(Arc::clone(&cache.output))
+      } else {
+        None
+      }
+    })
   }
 }
 
@@ -63,6 +101,10 @@ pub struct LspState {
 
   /// Workspace root path.
   pub root: RwLock<Option<PathBuf>>,
+
+  /// URIs that had diagnostics in the last publish cycle.
+  /// Used to clear stale diagnostics when files no longer have errors.
+  pub previous_diagnostic_uris: RwLock<HashSet<Url>>,
 }
 
 impl LspState {
@@ -72,6 +114,7 @@ impl LspState {
       config,
       open_files: RwLock::new(HashMap::new()),
       root: RwLock::new(None),
+      previous_diagnostic_uris: RwLock::new(HashSet::new()),
     }
   }
 

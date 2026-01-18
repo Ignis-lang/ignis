@@ -601,6 +601,7 @@ impl super::IgnisParser {
   ) -> ParserResult<ASTRecordField> {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
+    let name_span = name_token.span.clone();
 
     self.expect(TokenType::Colon)?;
 
@@ -616,7 +617,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&name_token.span, &end.span);
 
-    Ok(ASTRecordField::new(name, type_, value, modifiers, span))
+    Ok(ASTRecordField::new(name, name_span, type_, value, modifiers, span))
   }
 
   /// enum Name<T> { variants, methods, fields }
@@ -824,6 +825,7 @@ impl super::IgnisParser {
   ) -> ParserResult<ASTEnumField> {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
+    let name_span = name_token.span.clone();
 
     self.expect(TokenType::Colon)?;
 
@@ -838,7 +840,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&name_token.span, &end.span);
 
-    Ok(ASTEnumField::new(name, type_, value, modifiers, span))
+    Ok(ASTEnumField::new(name, name_span, type_, value, modifiers, span))
   }
 }
 

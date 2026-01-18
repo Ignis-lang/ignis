@@ -15,6 +15,8 @@
 //! ```
 
 mod convert;
+mod inlay;
+mod semantic;
 mod server;
 mod state;
 

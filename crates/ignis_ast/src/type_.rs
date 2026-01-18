@@ -29,7 +29,10 @@ pub enum IgnisTypeSyntax {
     inner: Box<IgnisTypeSyntax>,
     mutable: bool,
   },
-  Named(SymbolId),
+  Named {
+    symbol: SymbolId,
+    span: Span,
+  },
   Applied {
     base: Box<IgnisTypeSyntax>,
     args: Vec<IgnisTypeSyntax>,

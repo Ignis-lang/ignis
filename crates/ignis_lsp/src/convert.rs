@@ -12,6 +12,7 @@ use tower_lsp::lsp_types::{self, DiagnosticSeverity, NumberOrString, Position, R
 /// LSP positions use 0-based line numbers and UTF-16 code unit offsets
 /// for the character position. This struct caches line start byte offsets
 /// and provides conversion from byte positions to LSP positions.
+#[derive(Clone)]
 pub struct LineIndex {
   /// Byte offsets of the start of each line (0-indexed).
   line_starts: Vec<u32>,
@@ -39,6 +40,8 @@ impl LineIndex {
     &self,
     pos: BytePosition,
   ) -> u32 {
+    debug_assert!(!self.line_starts.is_empty(), "line_starts should never be empty");
+
     let mut lo = 0usize;
     let mut hi = self.line_starts.len();
 

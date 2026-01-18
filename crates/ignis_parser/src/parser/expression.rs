@@ -548,11 +548,12 @@ impl IgnisParser {
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
       let field_name_token = self.expect(TokenType::Identifier)?.clone();
       let field_name = self.insert_symbol(&field_name_token);
+      let field_name_span = field_name_token.span.clone();
       self.expect(TokenType::Colon)?;
       let value = self.parse_expression(0)?;
 
       let field_span = Span::merge(&field_name_token.span, self.get_span(&value));
-      fields.push(ASTRecordInitField::new(field_name, value, field_span));
+      fields.push(ASTRecordInitField::new(field_name, field_name_span, value, field_span));
 
       if !self.eat(TokenType::Comma) {
         break;

@@ -17,9 +17,9 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::definition::{
-  ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FunctionDefinition,
-  MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, SymbolEntry,
-  TypeAliasDefinition, TypeParamDefinition, VariableDefinition, Visibility,
+  ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
+  FunctionDefinition, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
+  SymbolEntry, TypeAliasDefinition, TypeParamDefinition, VariableDefinition, VariantDefinition, Visibility,
 };
 
 impl<'a> Analyzer<'a> {
@@ -278,13 +278,30 @@ impl<'a> Analyzer<'a> {
               doc: None,
             };
             let const_def_id = self.defs.alloc(const_def);
+            self.set_import_item_def(&field.name_span, &const_def_id);
             static_fields.insert(field.name, const_def_id);
           } else {
-            // Instance field
+            let field_def = Definition {
+              kind: DefinitionKind::Field(FieldDefinition {
+                type_id: self.types.error(), // Resolved in typeck
+                owner_type: record_def_id,
+                index: field_index,
+              }),
+              name: field.name,
+              span: field.span.clone(),
+              visibility: Visibility::Public,
+              owner_module: self.current_module,
+              owner_namespace: self.current_namespace,
+              doc: None,
+            };
+            let field_def_id = self.defs.alloc(field_def);
+            self.set_import_item_def(&field.name_span, &field_def_id);
             fields.push(RecordFieldDef {
               name: field.name,
               type_id: self.types.error(), // Resolved in typeck
               index: field_index,
+              span: field.span.clone(),
+              def_id: field_def_id,
             });
             field_index += 1;
           }
@@ -407,13 +424,29 @@ impl<'a> Analyzer<'a> {
           // Payload types resolved in typeck phase
           let payload: Vec<_> = variant.payload.iter().map(|_| self.types.error()).collect();
 
-          // Variants don't have separate definitions; map to parent enum
-          self.set_import_item_def(&variant.name_span, &enum_def_id);
+          let variant_def = Definition {
+            kind: DefinitionKind::Variant(VariantDefinition {
+              payload: payload.clone(),
+              owner_enum: enum_def_id,
+              tag_value,
+            }),
+            name: variant.name,
+            span: variant.span.clone(),
+            visibility: Visibility::Public,
+            owner_module: self.current_module,
+            owner_namespace: self.current_namespace,
+            doc: None,
+          };
+          let variant_def_id = self.defs.alloc(variant_def);
+
+          self.set_import_item_def(&variant.name_span, &variant_def_id);
 
           variants.push(EnumVariantDef {
             name: variant.name,
             payload,
             tag_value,
+            span: variant.span.clone(),
+            def_id: variant_def_id,
           });
           variants_by_name.insert(variant.name, tag_value);
           tag_value += 1;
@@ -450,6 +483,7 @@ impl<'a> Analyzer<'a> {
             doc: None,
           };
           let const_def_id = self.defs.alloc(const_def);
+          self.set_import_item_def(&field.name_span, &const_def_id);
           static_fields.insert(field.name, const_def_id);
         },
       }

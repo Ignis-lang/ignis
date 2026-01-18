@@ -145,6 +145,34 @@ pub fn dump_defs(
         )
         .unwrap();
       },
+      DefinitionKind::Field(field_def) => {
+        let type_id = defs.type_of(&def_id);
+        let type_kind = types.get(type_id);
+        writeln!(
+          &mut output,
+          "  DefId({:?}): field {} : {:?} (index: {}, owner: {:?})",
+          def_id, name, type_kind, field_def.index, field_def.owner_type
+        )
+        .unwrap();
+      },
+      DefinitionKind::Variant(variant_def) => {
+        let payload_str = if variant_def.payload.is_empty() {
+          String::new()
+        } else {
+          let types_str: Vec<String> = variant_def
+            .payload
+            .iter()
+            .map(|ty| format!("{:?}", types.get(ty)))
+            .collect();
+          format!("({})", types_str.join(", "))
+        };
+        writeln!(
+          &mut output,
+          "  DefId({:?}): variant {}{} (tag: {}, owner: {:?})",
+          def_id, name, payload_str, variant_def.tag_value, variant_def.owner_enum
+        )
+        .unwrap();
+      },
       DefinitionKind::Placeholder => {
         writeln!(&mut output, "  DefId({:?}): <placeholder>", def_id).unwrap();
       },

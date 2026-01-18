@@ -33,6 +33,7 @@ impl ASTRecordInit {
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTRecordInitField {
   pub name: SymbolId,
+  pub name_span: Span,
   pub value: NodeId,
   pub span: Span,
 }
@@ -40,9 +41,15 @@ pub struct ASTRecordInitField {
 impl ASTRecordInitField {
   pub fn new(
     name: SymbolId,
+    name_span: Span,
     value: NodeId,
     span: Span,
   ) -> Self {
-    Self { name, value, span }
+    Self {
+      name,
+      name_span,
+      value,
+      span,
+    }
   }
 }

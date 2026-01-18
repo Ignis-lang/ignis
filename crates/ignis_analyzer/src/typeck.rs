@@ -742,6 +742,13 @@ impl<'a> Analyzer<'a> {
     // Push generic scope BEFORE resolving types so type params are visible
     self.enter_type_params_scope(&record_def_id);
 
+    // Get original field definitions (from binder) that have def_ids
+    let original_fields = if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
+      rd.fields.clone()
+    } else {
+      Vec::new()
+    };
+
     // Collect resolved field types
     let mut resolved_fields: Vec<RecordFieldDef> = Vec::new();
     let mut field_index = 0u32;
@@ -768,11 +775,23 @@ impl<'a> Analyzer<'a> {
             }
           }
         } else {
-          // Instance field
+          // Instance field - preserve the def_id from binder
+          let def_id = original_fields
+            .get(field_index as usize)
+            .map(|f| f.def_id)
+            .expect("field_index out of sync with original_fields");
+
+          // Update the field definition with resolved type
+          if let DefinitionKind::Field(field_def) = &mut self.defs.get_mut(&def_id).kind {
+            field_def.type_id = field_type.clone();
+          }
+
           resolved_fields.push(RecordFieldDef {
             name: field.name,
             type_id: field_type,
             index: field_index,
+            span: field.span.clone(),
+            def_id,
           });
           field_index += 1;
         }
@@ -856,7 +875,14 @@ impl<'a> Analyzer<'a> {
             .collect();
 
           if variant_idx < updated_variants.len() {
-            updated_variants[variant_idx].payload = payload_types;
+            // Update variant payload types
+            updated_variants[variant_idx].payload = payload_types.clone();
+
+            // Also update the VariantDefinition with resolved payload types
+            let variant_def_id = updated_variants[variant_idx].def_id;
+            if let DefinitionKind::Variant(vd) = &mut self.defs.get_mut(&variant_def_id).kind {
+              vd.payload = payload_types;
+            }
           }
           variant_idx += 1;
         },
@@ -1112,7 +1138,7 @@ impl<'a> Analyzer<'a> {
 
     // Check instance fields first
     if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
-      // Substitute type params in field type
+      self.set_import_item_def(&ma.member_span, &field.def_id);
       return self.types.substitute(field.type_id, &subst);
     }
 
@@ -1454,7 +1480,7 @@ impl<'a> Analyzer<'a> {
           return;
         },
         DefinitionKind::Enum(ed) => {
-          // Handle Enum::Variant or Enum::staticMethod
+          // Handle Enum::Variant or Enum::staticMethod or Enum::staticField
           if let Some(entry) = ed.static_methods.get(&segment.name) {
             if let Some(def_id) = entry.as_single() {
               self.set_import_item_def(&segment.span, def_id);
@@ -1465,8 +1491,12 @@ impl<'a> Analyzer<'a> {
             }
           } else if let Some(field_id) = ed.static_fields.get(&segment.name) {
             self.set_import_item_def(&segment.span, field_id);
+          } else if let Some(tag) = ed.variants_by_name.get(&segment.name) {
+            // Handle variant access (Enum::Variant)
+            if let Some(variant) = ed.variants.get(*tag as usize) {
+              self.set_import_item_def(&segment.span, &variant.def_id);
+            }
           }
-          // Note: Enum variants don't have DefinitionIds, so we can't track them
           return;
         },
         _ => return,
@@ -1585,6 +1615,8 @@ impl<'a> Analyzer<'a> {
         );
         continue;
       };
+
+      self.set_import_item_def(&init_field.name_span, &field_def.def_id);
 
       // Check for duplicate
       if !initialized.insert(init_field.name) {
@@ -2287,6 +2319,7 @@ impl<'a> Analyzer<'a> {
         if let Some(entry) = rd.instance_methods.get(&ma.member) {
           match entry {
             SymbolEntry::Single(method_id) => {
+              self.set_import_item_def(&ma.member_span, method_id);
               let method = {
                 let method_def = self.defs.get(method_id);
                 let DefinitionKind::Method(method) = &method_def.kind else {
@@ -2494,6 +2527,7 @@ impl<'a> Analyzer<'a> {
         if let Some(entry) = rd.instance_methods.get(&ma.member) {
           match entry {
             SymbolEntry::Single(method_id) => {
+              self.set_import_item_def(&ma.member_span, method_id);
               let method = {
                 let method_def = self.defs.get(method_id);
                 let DefinitionKind::Method(method) = &method_def.kind else {
@@ -2572,13 +2606,14 @@ impl<'a> Analyzer<'a> {
                 .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
                 .collect();
 
-              let resolved_def_id = match self.resolve_overload(candidates, &arg_types, &call.span, Some(&subst)) {
+              let resolved_def_id = match self.resolve_overload(candidates, &arg_types, &call.span, None) {
                 Ok(def_id) => def_id,
                 Err(()) => return self.types.error(),
               };
 
               self.set_resolved_call(node_id, resolved_def_id);
               self.set_resolved_call(&call.callee, resolved_def_id);
+              self.set_import_item_def(&ma.member_span, &resolved_def_id);
 
               let method = {
                 let method_def = self.defs.get(&resolved_def_id);
@@ -4169,11 +4204,17 @@ impl<'a> Analyzer<'a> {
         let inner_type = self.resolve_type_syntax_impl(inner, span);
         self.types.reference(inner_type, *mutable)
       },
-      IgnisTypeSyntax::Named(symbol_id) => {
-        if let Some(def_id) = self.scopes.lookup_def(&symbol_id).cloned() {
+      IgnisTypeSyntax::Named {
+        symbol,
+        span: name_span,
+      } => {
+        if let Some(def_id) = self.scopes.lookup_def(symbol).cloned() {
+          // Register span for hover/goto-definition on type references
+          self.set_import_item_def(name_span, &def_id);
+
           // Check for type alias cycle
           if self.resolving_type_aliases.contains(&def_id) {
-            let name = self.symbols.borrow().get(&symbol_id).to_string();
+            let name = self.symbols.borrow().get(symbol).to_string();
             if let Some(s) = span {
               self.add_diagnostic(DiagnosticMessage::TypeAliasCycle { name, span: s.clone() }.report());
             }
@@ -4213,7 +4254,7 @@ impl<'a> Analyzer<'a> {
 
           self.type_of(&def_id).clone()
         } else {
-          let name = self.symbols.borrow().get(&symbol_id).to_string();
+          let name = self.symbols.borrow().get(symbol).to_string();
           if let Some(s) = span {
             self.add_diagnostic(Diagnostic::new(
               Severity::Error,
@@ -4248,6 +4289,9 @@ impl<'a> Analyzer<'a> {
           }
           return self.types.error();
         };
+
+        // Register spans for all segments for hover/goto-definition
+        self.track_type_path_segment_spans(segments);
 
         // Check for type alias cycle
         if self.resolving_type_aliases.contains(&def_id) {
@@ -4315,8 +4359,15 @@ impl<'a> Analyzer<'a> {
       },
       IgnisTypeSyntax::Applied { base, args } => {
         // Handle Named base directly to avoid prematurely expanding type aliases
-        if let IgnisTypeSyntax::Named(symbol_id) = base.as_ref() {
-          if let Some(def_id) = self.scopes.lookup_def(symbol_id).cloned() {
+        if let IgnisTypeSyntax::Named {
+          symbol,
+          span: name_span,
+        } = base.as_ref()
+        {
+          if let Some(def_id) = self.scopes.lookup_def(symbol).cloned() {
+            // Register span for hover/goto-definition on type references
+            self.set_import_item_def(name_span, &def_id);
+
             match &self.defs.get(&def_id).kind {
               DefinitionKind::TypeAlias(_) | DefinitionKind::Record(_) | DefinitionKind::Enum(_) => {
                 return self.resolve_generic_type_with_args(def_id, args, span);
@@ -4694,6 +4745,48 @@ impl<'a> Analyzer<'a> {
     }
 
     Some(current_def)
+  }
+
+  /// Register spans for each segment in a type path for hover/goto-definition.
+  fn track_type_path_segment_spans(
+    &mut self,
+    segments: &[(ignis_type::symbol::SymbolId, Span)],
+  ) {
+    if segments.is_empty() {
+      return;
+    }
+
+    // Register first segment
+    let (first_sym, first_span) = &segments[0];
+    let Some(first_def) = self.scopes.lookup_def(first_sym).cloned() else {
+      return;
+    };
+    self.set_import_item_def(first_span, &first_def);
+
+    let mut current_def = first_def;
+
+    // Walk through remaining segments
+    for (segment_sym, segment_span) in segments.iter().skip(1) {
+      let def_kind = self.defs.get(&current_def).kind.clone();
+
+      match def_kind {
+        DefinitionKind::Namespace(ns_def) => {
+          let entry = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym).cloned();
+
+          if let Some(entry) = entry {
+            if let Some(def_id) = entry.as_single() {
+              self.set_import_item_def(segment_span, def_id);
+              current_def = *def_id;
+            } else {
+              return;
+            }
+          } else {
+            return;
+          }
+        },
+        _ => return,
+      }
+    }
   }
 
   /// Resolve a generic type with type arguments.

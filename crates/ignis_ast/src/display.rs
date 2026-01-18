@@ -1069,8 +1069,8 @@ impl DisplayLisp for IgnisTypeSyntax {
         }
       },
 
-      IgnisTypeSyntax::Named(symbol_id) => {
-        let name = formatter.resolve_symbol(symbol_id);
+      IgnisTypeSyntax::Named { symbol, .. } => {
+        let name = formatter.resolve_symbol(symbol);
         format!("(Named \"{}\")", name)
       },
 

@@ -68,6 +68,8 @@ pub enum DefinitionKind {
   Enum(EnumDefinition),
   Method(MethodDefinition),
   TypeParam(TypeParamDefinition),
+  Field(FieldDefinition),
+  Variant(VariantDefinition),
   /// Placeholder for forward references during monomorphization
   Placeholder,
 }
@@ -128,6 +130,15 @@ pub struct RecordFieldDef {
   pub name: SymbolId,
   pub type_id: TypeId,
   pub index: u32,
+  pub span: Span,
+  pub def_id: DefinitionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldDefinition {
+  pub type_id: TypeId,
+  pub owner_type: DefinitionId,
+  pub index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +156,15 @@ pub struct EnumDefinition {
 pub struct EnumVariantDef {
   pub name: SymbolId,
   pub payload: Vec<TypeId>,
+  pub tag_value: u32,
+  pub span: Span,
+  pub def_id: DefinitionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VariantDefinition {
+  pub payload: Vec<TypeId>,
+  pub owner_enum: DefinitionId,
   pub tag_value: u32,
 }
 
@@ -211,6 +231,14 @@ impl DefinitionStore {
       DefinitionKind::Variable(v) => &v.type_id,
       DefinitionKind::Constant(c) => &c.type_id,
       DefinitionKind::Parameter(p) => &p.type_id,
+      DefinitionKind::Field(f) => &f.type_id,
+      DefinitionKind::Variant(v) => {
+        // Return the owning enum's type
+        match &self.get(&v.owner_enum).kind {
+          DefinitionKind::Enum(ed) => &ed.type_id,
+          _ => panic!("variant owner is not an enum"),
+        }
+      },
       DefinitionKind::Namespace(_) => panic!("namespaces do not have a type"),
       DefinitionKind::TypeAlias(ta) => &ta.target,
       DefinitionKind::Record(rd) => &rd.type_id,

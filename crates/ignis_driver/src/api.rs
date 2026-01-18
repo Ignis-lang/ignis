@@ -216,6 +216,13 @@ pub struct AnalyzeProjectOutput {
   /// Maps import item spans to their resolved definitions.
   /// Used for hover on import statements.
   pub import_item_defs: HashMap<Span, DefinitionId>,
+
+  /// AST nodes for the entry file (root module).
+  /// Used for inlay hints which need to traverse the AST.
+  pub nodes: Store<ASTNode>,
+
+  /// Root node IDs in the AST for the entry file.
+  pub roots: Vec<NodeId>,
 }
 
 /// Analyze a project starting from an entry file, resolving imports.
@@ -296,6 +303,8 @@ pub fn analyze_project_with_text(
       symbol_names,
       resolved_calls: HashMap::new(),
       import_item_defs: HashMap::new(),
+      nodes: Store::new(),
+      roots: Vec::new(),
     };
   };
 
@@ -313,6 +322,13 @@ pub fn analyze_project_with_text(
     let has_errors = has_discovery_errors || analyzer_has_errors;
     let symbol_names = extract_symbol_names(&output.symbols);
 
+    // Extract AST nodes and roots from the root module for inlay hints
+    let (nodes, roots) = ctx
+      .parsed_modules
+      .remove(&root_id)
+      .map(|pm| (pm.nodes, pm.roots))
+      .unwrap_or_else(|| (Store::new(), Vec::new()));
+
     return AnalyzeProjectOutput {
       source_map: ctx.source_map,
       diagnostics: all_diagnostics,
@@ -325,10 +341,19 @@ pub fn analyze_project_with_text(
       symbol_names,
       resolved_calls: output.resolved_calls,
       import_item_defs: output.import_item_defs,
+      nodes,
+      roots,
     };
   }
 
   let symbol_names = extract_symbol_names(&ctx.symbol_table);
+
+  // Extract AST nodes and roots from the root module if available
+  let (nodes, roots) = ctx
+    .parsed_modules
+    .remove(&root_id)
+    .map(|pm| (pm.nodes, pm.roots))
+    .unwrap_or_else(|| (Store::new(), Vec::new()));
 
   AnalyzeProjectOutput {
     source_map: ctx.source_map,
@@ -342,6 +367,8 @@ pub fn analyze_project_with_text(
     symbol_names,
     resolved_calls: HashMap::new(),
     import_item_defs: HashMap::new(),
+    nodes,
+    roots,
   }
 }
 
