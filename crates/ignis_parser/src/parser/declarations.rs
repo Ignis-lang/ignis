@@ -26,6 +26,11 @@ impl super::IgnisParser {
   pub(crate) fn parse_program(&mut self) -> ParserResult<Vec<NodeId>> {
     let mut items = Vec::new();
 
+    // Handle empty file: parsing an empty file should return an empty list of statements, not an error.
+    if self.at(TokenType::Eof) {
+      return Ok(items);
+    }
+
     while !self.at(TokenType::Eof) {
       match self.parse_declaration() {
         Ok(node_id) => {
@@ -58,6 +63,12 @@ impl super::IgnisParser {
       TokenType::Type => self.parse_type_alias_declaration(),
       TokenType::Record => self.parse_record_declaration(),
       TokenType::Enum => self.parse_enum_declaration(),
+      // If we encounter Eof here (e.g. inside a block or if called unexpectedly), handle it.
+      // But loop condition in parse_program prevents this for top-level.
+      // However, if we are inside a namespace or extern, we might hit Eof.
+      TokenType::Eof => Err(DiagnosticMessage::UnexpectedToken {
+        at: self.peek().span.clone(),
+      }),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),

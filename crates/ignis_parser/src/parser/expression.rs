@@ -29,6 +29,20 @@ impl IgnisParser {
     &mut self,
     min_bp: u16,
   ) -> ParserResult<NodeId> {
+    self.recursion_depth += 1;
+    if self.recursion_depth > super::MAX_RECURSION_DEPTH {
+      return Err(DiagnosticMessage::RecursionLimitExceeded(self.peek().span.clone()));
+    }
+
+    let result = self.parse_expression_inner(min_bp);
+    self.recursion_depth -= 1;
+    result
+  }
+
+  fn parse_expression_inner(
+    &mut self,
+    min_bp: u16,
+  ) -> ParserResult<NodeId> {
     let mut left: NodeId = self.parse_prefix()?;
 
     loop {
@@ -143,6 +157,29 @@ impl IgnisParser {
 
       match tok {
         TokenType::Less => depth += 1,
+        TokenType::RightShift => {
+          if depth >= 2 {
+            depth -= 2;
+          } else {
+            depth = 0;
+          }
+          if depth == 0 {
+            // Found matching >> (as > >), check if followed by { or ::
+            let next = self.peek_nth(i + 1).type_;
+            return next == TokenType::LeftBrace || next == TokenType::DoubleColon;
+          }
+        },
+        TokenType::GreaterEqual => {
+          if depth >= 1 {
+            depth -= 1;
+          }
+          if depth == 0 {
+            // Found matching >=, check if followed by { or ::
+            // >= is > followed by =, so next token is effectively =
+            // Unlikely to be record init
+            return false;
+          }
+        },
         TokenType::Greater => {
           depth -= 1;
           if depth == 0 {
@@ -189,7 +226,6 @@ impl IgnisParser {
         | TokenType::EqualEqual
         | TokenType::BangEqual
         | TokenType::LessEqual
-        | TokenType::GreaterEqual
         | TokenType::And
         | TokenType::Or
         | TokenType::Equal => return false,
@@ -220,6 +256,26 @@ impl IgnisParser {
 
       match tok {
         TokenType::Less => depth += 1,
+        TokenType::RightShift => {
+          if depth >= 2 {
+            depth -= 2;
+          } else {
+            depth = 0;
+          }
+          if depth == 0 {
+            // Found matching >>, check if followed by (
+            return self.peek_nth(i + 1).type_ == TokenType::LeftParen;
+          }
+        },
+        TokenType::GreaterEqual => {
+          if depth >= 1 {
+            depth -= 1;
+          }
+          if depth == 0 {
+            // Found matching >=. Next is effectively =. Not (
+            return false;
+          }
+        },
         TokenType::Greater => {
           depth -= 1;
           if depth == 0 {
@@ -265,7 +321,6 @@ impl IgnisParser {
         | TokenType::EqualEqual
         | TokenType::BangEqual
         | TokenType::LessEqual
-        | TokenType::GreaterEqual
         | TokenType::And
         | TokenType::Or
         | TokenType::Equal => return false,

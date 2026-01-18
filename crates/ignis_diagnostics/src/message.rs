@@ -92,6 +92,7 @@ pub enum DiagnosticMessage {
   ExpectedCallAfterTypeArgs {
     span: Span,
   },
+  RecursionLimitExceeded(Span),
   // #endregion Parser
   // #region Analyzer
   UndeclaredVariable {
@@ -570,6 +571,7 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::ExpectedCallAfterTypeArgs { .. } => {
         write!(f, "Expected '(' after type arguments")
       },
+      DiagnosticMessage::RecursionLimitExceeded(_) => write!(f, "Recursion limit exceeded"),
 
       // Analyzer
       DiagnosticMessage::UndeclaredVariable { name, .. } => write!(f, "Undeclared variable '{}'", name),
@@ -1026,7 +1028,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::InvalidArgumentType { at, .. }
       | DiagnosticMessage::TypeMismatch { at, .. }
       | DiagnosticMessage::InvalidProperty(at)
-      | DiagnosticMessage::ExpectedCallAfterTypeArgs { span: at } => at.clone(),
+      | DiagnosticMessage::ExpectedCallAfterTypeArgs { span: at }
+      | DiagnosticMessage::RecursionLimitExceeded(at) => at.clone(),
 
       DiagnosticMessage::UndeclaredVariable { span, .. }
       | DiagnosticMessage::VariableAlreadyDefined { span, .. }
@@ -1251,6 +1254,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",
       DiagnosticMessage::ExpectedCallAfterTypeArgs { .. } => "I0048",
+      DiagnosticMessage::RecursionLimitExceeded(_) => "I0049",
       DiagnosticMessage::NoOverloadMatches { .. } => "A0100",
       DiagnosticMessage::AmbiguousOverload { .. } => "A0101",
       DiagnosticMessage::OverloadGroupAsValue { .. } => "A0102",

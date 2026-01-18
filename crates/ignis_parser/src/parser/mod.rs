@@ -28,10 +28,13 @@ pub struct IgnisParser {
   symbols: Rc<RefCell<SymbolTable>>,
 
   recovery: bool,
+  recursion_depth: usize,
 
   /// Pending doc comment to be attached to the next declaration.
   pending_doc: Option<String>,
 }
+
+pub(crate) const MAX_RECURSION_DEPTH: usize = 500;
 
 impl IgnisParser {
   pub fn new(
@@ -45,6 +48,7 @@ impl IgnisParser {
       diagnostics: Vec::new(),
       symbols,
       recovery: true,
+      recursion_depth: 0,
       pending_doc: None,
     };
 

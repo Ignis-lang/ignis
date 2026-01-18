@@ -7,11 +7,12 @@ type LexerResult = Result<TokenType, Box<DiagnosticMessage>>;
 pub struct IgnisLexer<'a> {
   file: FileId,
   source: &'a str,
-  chars: std::str::Chars<'a>,
+  chars: std::iter::Peekable<std::str::Chars<'a>>,
   pub tokens: Vec<Token>,
   start: usize,
   line: usize,
   current: usize,
+  prev: char,
   pub diagnostics: Vec<DiagnosticMessage>,
   pending_string: Option<String>,
   pending_char: Option<char>,
@@ -24,12 +25,13 @@ impl<'a> IgnisLexer<'a> {
   ) -> Self {
     Self {
       file,
-      chars: source.chars(),
+      chars: source.chars().peekable(),
       source,
       tokens: vec![],
       start: 0,
       line: 0,
       current: 0,
+      prev: '\0',
       diagnostics: vec![],
       pending_string: None,
       pending_char: None,
@@ -76,7 +78,7 @@ impl<'a> IgnisLexer<'a> {
   }
 
   fn is_at_end(&self) -> bool {
-    self.chars.as_str().is_empty()
+    self.chars.clone().peek().is_none()
   }
 
   fn scan_token(&mut self) -> LexerResult {
@@ -173,31 +175,31 @@ impl<'a> IgnisLexer<'a> {
   }
 
   fn peek(&self) -> char {
-    self.chars.clone().next().unwrap_or('\0')
+    self.chars.clone().peek().copied().unwrap_or('\0')
   }
 
   fn peek_next(&self) -> char {
-    self.source.chars().nth(self.current + 1).unwrap_or('\0')
+    let mut iter = self.chars.clone();
+    iter.next();
+    iter.next().unwrap_or('\0')
   }
 
   fn peek_prev(&self) -> char {
-    self.source.chars().nth(self.current - 1).unwrap_or('\0')
+    self.prev
   }
 
   fn match_char(
     &mut self,
     expected: char,
   ) -> bool {
-    let mut lookahead = self.chars.clone();
-
-    if let Some(next_char) = lookahead.next() {
-      if next_char == expected {
-        self.chars = lookahead;
-        self.current += next_char.len_utf8();
+    if let Some(&c) = self.chars.peek() {
+      if c == expected {
+        self.chars.next();
+        self.current += c.len_utf8();
+        self.prev = c;
         return true;
       }
     }
-
     false
   }
 
@@ -206,6 +208,7 @@ impl<'a> IgnisLexer<'a> {
 
     if let Some(c) = next_char {
       self.current += c.len_utf8();
+      self.prev = c;
     }
 
     next_char.unwrap_or('\0')
