@@ -168,6 +168,28 @@ impl Server {
 
     Some((output, path_str, version))
   }
+
+  /// Invalidate cached analysis for all open documents and re-analyze.
+  async fn invalidate_and_reanalyze(&self) {
+    let uris: Vec<Url> = {
+      let guard = self.state.open_files.read().await;
+      guard.keys().cloned().collect()
+    };
+
+    if uris.is_empty() {
+      return;
+    }
+
+    {
+      let mut guard = self.state.open_files.write().await;
+      for doc in guard.values_mut() {
+        doc.cached_analysis = None;
+      }
+    }
+
+    // Any open doc triggers full project analysis
+    self.analyze_and_publish(&uris[0]).await;
+  }
 }
 
 #[tower_lsp::async_trait]
@@ -226,6 +248,27 @@ impl LanguageServer for Server {
     &self,
     _: InitializedParams,
   ) {
+    let registration = Registration {
+      id: "ignis-file-watcher".to_string(),
+      method: "workspace/didChangeWatchedFiles".to_string(),
+      register_options: Some(
+        serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+          watchers: vec![FileSystemWatcher {
+            glob_pattern: GlobPattern::String("**/*.ign".to_string()),
+            kind: Some(WatchKind::all()),
+          }],
+        })
+        .expect("valid JSON"),
+      ),
+    };
+
+    if let Err(e) = self.client.register_capability(vec![registration]).await {
+      self
+        .client
+        .log_message(MessageType::WARNING, format!("Failed to register file watcher: {}", e))
+        .await;
+    }
+
     self
       .client
       .log_message(MessageType::INFO, "Ignis LSP initialized")
@@ -272,6 +315,37 @@ impl LanguageServer for Server {
 
     // Clear diagnostics for closed file
     self.client.publish_diagnostics(uri, vec![], None).await;
+  }
+
+  async fn did_change_watched_files(
+    &self,
+    params: DidChangeWatchedFilesParams,
+  ) {
+    let mut should_reanalyze = false;
+
+    for change in params.changes {
+      match change.typ {
+        FileChangeType::CREATED | FileChangeType::CHANGED => {
+          // Open files are handled by didChange, skip them
+          let is_open = {
+            let guard = self.state.open_files.read().await;
+            guard.contains_key(&change.uri)
+          };
+
+          if !is_open {
+            should_reanalyze = true;
+          }
+        },
+        FileChangeType::DELETED => {
+          should_reanalyze = true;
+        },
+        _ => {},
+      }
+    }
+
+    if should_reanalyze {
+      self.invalidate_and_reanalyze().await;
+    }
   }
 
   async fn goto_definition(
