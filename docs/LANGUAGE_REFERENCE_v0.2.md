@@ -1,6 +1,15 @@
 # Ignis Language Reference v0.2
 
-This document describes the Ignis programming language as implemented in version 0.2.
+This document describes the Ignis programming language as implemented in version 0.2.x.
+
+## Changes from v0.2.0 to v0.2.1
+
+### New Features
+
+- **Visibility control**: Fields and methods are private by default; use `public` keyword
+- **Mutable pointers**: Explicit `*mut T` syntax for mutable pointers
+- **Mutable self**: Methods can use `&mut self` for mutating receivers
+- **Doc comments**: `///` and `/** */` for documentation
 
 ## Changes from v0.1
 
@@ -60,6 +69,34 @@ record Person {
 }
 ```
 
+#### Visibility
+
+Fields and methods are **private by default**. Use the `public` keyword to make them accessible from outside the record:
+
+```ignis
+record Account {
+    public balance: i32;    // Accessible from anywhere
+    secret: string;         // Private - only accessible within Account methods
+    
+    public getBalance(&self): i32 {
+        return self.balance;
+    }
+    
+    private validate(&self): boolean {  // Explicitly private
+        return self.secret != "";
+    }
+}
+
+function main(): void {
+    let acc: Account = Account { balance: 100, secret: "key" };
+    let b: i32 = acc.balance;     // OK - balance is public
+    // let s: string = acc.secret; // ERROR - secret is private
+    return;
+}
+```
+
+Private members can always be accessed within the record's own methods via `self`.
+
 #### Record Instantiation
 
 ```ignis
@@ -95,6 +132,46 @@ record Pair<A, B> {
 
 let p: Pair<string, i32> = Pair { first: "age", second: 25 };
 ```
+
+#### Methods
+
+Records can have instance methods and static methods:
+
+```ignis
+record Counter {
+    value: i32;
+    
+    /// Instance method - takes self by immutable reference
+    public get(&self): i32 {
+        return self.value;
+    }
+    
+    /// Mutating method - takes self by mutable reference
+    public increment(&mut self): void {
+        self.value = self.value + 1;
+    }
+    
+    /// Static method - no self parameter
+    public static new(initial: i32): Counter {
+        return Counter { value: initial };
+    }
+}
+
+function main(): i32 {
+    let mut c: Counter = Counter::new(0);
+    c.increment();
+    c.increment();
+    return c.get();  // Returns 2
+}
+```
+
+Method self parameter types:
+
+| Self Type | Description |
+|-----------|-------------|
+| `&self` | Immutable reference to the receiver |
+| `&mut self` | Mutable reference to the receiver |
+| (none) | Static method, called via `Type::method()` |
 
 ### Enums
 
@@ -132,11 +209,26 @@ let mr: &mut i32 = &mut y;  // Mutable reference
 
 ### Pointers
 
+Ignis supports both immutable and mutable pointers:
+
 ```ignis
 let x: i32 = 42;
-let p: *i32 = &x as *i32;
-let value: i32 = *p;
+let p: *i32 = &x as *i32;     // Immutable pointer
+let value: i32 = *p;           // Dereference
+
+let mut y: i32 = 10;
+let mp: *mut i32 = &mut y as *mut i32;  // Mutable pointer
+*mp = 20;                               // Write through mutable pointer
 ```
+
+#### Pointer Types
+
+| Type | Description |
+|------|-------------|
+| `*T` | Immutable pointer to T |
+| `*mut T` | Mutable pointer to T |
+
+Mutable pointers are required to modify the pointed-to value. Attempting to write through an immutable pointer is a compile-time error.
 
 ### Type Aliases
 
@@ -277,6 +369,60 @@ function main(): void {
     return;
 }
 ```
+
+## Comments
+
+### Line Comments
+
+```ignis
+// This is a single-line comment
+let x: i32 = 42; // End-of-line comment
+```
+
+### Block Comments
+
+```ignis
+/* This is a
+   multi-line block comment */
+let y: i32 = 10;
+```
+
+### Documentation Comments
+
+Documentation comments are attached to the following declaration and appear in IDE hover information:
+
+```ignis
+/// Calculates the sum of two integers.
+/// 
+/// # Arguments
+/// * `a` - The first operand
+/// * `b` - The second operand
+///
+/// # Returns
+/// The sum of a and b.
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+/**
+ * A 2D point in Cartesian coordinates.
+ * 
+ * Use Point::origin() to create a point at (0, 0).
+ */
+record Point {
+    public x: i32;
+    public y: i32;
+    
+    /// Creates a point at the origin.
+    public static origin(): Point {
+        return Point { x: 0, y: 0 };
+    }
+}
+```
+
+Doc comment syntax:
+- `///` - Single-line doc comment
+- `/** ... */` - Multi-line doc comment
 
 ## Expressions
 
