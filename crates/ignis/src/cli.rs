@@ -208,6 +208,14 @@ pub struct CheckCommand {
   #[arg(short = 'o', long, default_value = "build")]
   pub output_dir: String,
 
+  /// Produce a linked executable (default)
+  #[arg(long = "bin", short = 'b', conflicts_with = "lib")]
+  pub bin: bool,
+
+  /// Produce a static library
+  #[arg(long = "lib", short = 'l', conflicts_with = "bin")]
+  pub lib: bool,
+
   /// Emit C code to file (otherwise kept in memory)
   #[arg(long)]
   pub emit_c: Option<String>,

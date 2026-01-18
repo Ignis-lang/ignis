@@ -718,9 +718,11 @@ impl LanguageServer for Server {
     params: SemanticTokensParams,
   ) -> Result<Option<SemanticTokensResult>> {
     let uri = &params.text_document.uri;
+    log(&format!("[semantic_tokens] request for {}", uri));
 
     // Get cached analysis or run new analysis
     let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      log("[semantic_tokens] no analysis available");
       return Ok(None);
     };
 
@@ -729,6 +731,7 @@ impl LanguageServer for Server {
       let guard = self.state.open_files.read().await;
 
       let Some(doc) = guard.get(uri) else {
+        log("[semantic_tokens] document not open");
         return Ok(None);
       };
 
@@ -736,18 +739,38 @@ impl LanguageServer for Server {
     };
 
     let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      log("[semantic_tokens] file_id not found");
       return Ok(None);
     };
 
-    // Lex the source to get tokens
-    let mut lexer = ignis_parser::IgnisLexer::new(file_id, &text);
-    lexer.scan_tokens();
+    // Wrap sync computation in catch_unwind to prevent panics from killing the server
+    let uri_str = uri.to_string();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+      // Lex the source to get tokens
+      let mut lexer = ignis_parser::IgnisLexer::new(file_id, &text);
+      lexer.scan_tokens();
 
-    // Classify tokens using semantic analysis
-    let tokens =
-      crate::semantic::classify_tokens(&lexer.tokens, &output.import_item_defs, &output.defs, &file_id, &line_index);
+      // Classify tokens using semantic analysis
+      crate::semantic::classify_tokens(&lexer.tokens, &output.import_item_defs, &output.defs, &file_id, &line_index)
+    }));
 
-    Ok(Some(SemanticTokensResult::Tokens(tokens)))
+    match result {
+      Ok(tokens) => {
+        log(&format!("[semantic_tokens] returning {} tokens", tokens.data.len()));
+        Ok(Some(SemanticTokensResult::Tokens(tokens)))
+      },
+      Err(panic_info) => {
+        let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+          s.to_string()
+        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+          s.clone()
+        } else {
+          "unknown panic".to_string()
+        };
+        log(&format!("[semantic_tokens] PANIC: {} | uri={}", panic_msg, uri_str));
+        Ok(None)
+      },
+    }
   }
 
   async fn inlay_hint(

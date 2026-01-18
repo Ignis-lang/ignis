@@ -306,12 +306,18 @@ impl super::IgnisParser {
 
   /// extern path { function ...; const ...; }
   fn parse_extern_declaration(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc for the extern block
+    let doc = self.take_pending_doc();
+
     let keyword = self.expect(TokenType::Extern)?.clone();
     let (path, _) = self.parse_qualified_identifier()?;
     self.expect(TokenType::LeftBrace)?;
 
     let mut items = Vec::new();
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      // Skip comments and capture doc comments before each item
+      self.skip_comments();
+
       let item = match self.peek().type_ {
         TokenType::Function => self.parse_function_signature_only()?,
         TokenType::Const => self.parse_constant_signature_only()?,
@@ -327,12 +333,15 @@ impl super::IgnisParser {
     let close = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&keyword.span, &close.span);
 
-    let extern_block = ASTExtern::new(path, items, span);
+    let extern_block = ASTExtern::new(path, items, span, doc);
     Ok(self.allocate_statement(ASTStatement::Extern(extern_block)))
   }
 
   /// namespace path { declarations... }
   fn parse_namespace_declaration(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc for the namespace
+    let doc = self.take_pending_doc();
+
     let keyword = self.expect(TokenType::Namespace)?.clone();
     let (path, _) = self.parse_qualified_identifier()?;
     self.expect(TokenType::LeftBrace)?;
@@ -346,7 +355,7 @@ impl super::IgnisParser {
     let close = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&keyword.span, &close.span);
 
-    let ns = ASTNamespace::new(path, items, span);
+    let ns = ASTNamespace::new(path, items, span, doc);
     Ok(self.allocate_statement(ASTStatement::Namespace(ns)))
   }
 
@@ -367,6 +376,9 @@ impl super::IgnisParser {
 
   /// const name: type;
   fn parse_constant_signature_only(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc for the extern constant
+    let doc = self.take_pending_doc();
+
     let keyword = self.expect(TokenType::Const)?.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -376,13 +388,16 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&keyword.span, &semicolon.span);
 
-    let constant_statement = ASTConstant::new(name, type_annotation, None, span, None);
+    let constant_statement = ASTConstant::new(name, type_annotation, None, span, doc);
 
     Ok(self.allocate_statement(ASTStatement::Constant(constant_statement)))
   }
 
   /// function name(params): type;
   fn parse_function_signature_only(&mut self) -> ParserResult<NodeId> {
+    // Capture pending doc for the extern function
+    let doc = self.take_pending_doc();
+
     let _function_keyword = self.expect(TokenType::Function)?.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -405,7 +420,7 @@ impl super::IgnisParser {
       return_type,
       span.clone(),
       ignis_ast::metadata::ASTMetadata::EXTERN_MEMBER,
-      None, // doc
+      doc,
     );
 
     let function = ASTFunction::new(signature, None);

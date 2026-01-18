@@ -260,8 +260,8 @@ fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
           None,
           None,
           false,
-          false,
-          false,
+          check.bin,
+          check.lib,
           true,
           check.analyze_only,
         )));
