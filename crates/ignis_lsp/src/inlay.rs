@@ -12,6 +12,7 @@ use ignis_ast::statements::{ASTEnumItem, ASTRecordItem, ASTStatement};
 use ignis_ast::{ASTNode, NodeId};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore};
 use ignis_type::file::FileId;
+use ignis_type::span::Span;
 use ignis_type::symbol::SymbolId;
 use ignis_type::Store;
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
@@ -20,11 +21,17 @@ use crate::convert::LineIndex;
 
 /// A call expression found in the AST with its resolved definition.
 struct CallInfo {
+  /// Node IDs of the arguments (for checking arg expressions).
+  argument_ids: Vec<NodeId>,
+
   /// Spans of the arguments for position calculation.
-  argument_spans: Vec<ignis_type::span::Span>,
+  argument_spans: Vec<Span>,
 
   /// The resolved definition of the callee (function or method).
   def_id: DefinitionId,
+
+  /// Whether this is an instance method call (has implicit self).
+  is_instance_call: bool,
 }
 
 /// Collect all call expressions from the AST that have resolved definitions.
@@ -43,34 +50,42 @@ fn collect_calls(
 
     match node {
       ASTNode::Expression(ASTExpression::Call(call)) => {
-        // Only process calls in the current file
-        if &call.span.file != file_id {
-          continue;
+        // Check if call is in current file BEFORE processing, but ALWAYS traverse children
+        let in_file = &call.span.file == file_id;
+
+        if in_file {
+          let def_id = resolved_calls
+            .get(&node_id)
+            .or_else(|| node_defs.get(&node_id))
+            .cloned();
+
+          if let Some(def_id) = def_id {
+            let argument_ids: Vec<_> = call.arguments.iter().cloned().collect();
+
+            let argument_spans: Vec<_> = call
+              .arguments
+              .iter()
+              .map(|arg_id| nodes.get(arg_id).span().clone())
+              .collect();
+
+            // Check if this is an instance method call (callee is member access)
+            let is_instance_call =
+              matches!(nodes.get(&call.callee), ASTNode::Expression(ASTExpression::MemberAccess(_)));
+
+            calls.push(CallInfo {
+              argument_ids,
+              argument_spans,
+              def_id,
+              is_instance_call,
+            });
+          }
         }
 
-        // Get the resolved definition (handles overloads)
-        let def_id = resolved_calls
-          .get(&node_id)
-          .or_else(|| node_defs.get(&node_id))
-          .cloned();
-
-        if let Some(def_id) = def_id {
-          // Collect argument spans
-          let argument_spans: Vec<_> = call
-            .arguments
-            .iter()
-            .map(|arg_id| nodes.get(arg_id).span().clone())
-            .collect();
-
-          calls.push(CallInfo { argument_spans, def_id });
-        }
-
-        // Continue traversing into callee and arguments
+        // ALWAYS traverse children regardless of file
         stack.push(call.callee.clone());
         stack.extend(call.arguments.iter().cloned());
       },
 
-      // Traverse into child nodes
       ASTNode::Expression(expr) => {
         collect_expression_children(expr, &mut stack);
       },
@@ -235,7 +250,6 @@ fn collect_statement_children(
       }
     },
 
-    // Statements without child expressions to traverse
     ASTStatement::Import(_)
     | ASTStatement::Export(_)
     | ASTStatement::Extern(_)
@@ -263,43 +277,52 @@ pub fn generate_parameter_hints(
   for call in calls {
     let def = defs.get(&call.def_id);
 
-    // Get parameter definitions based on definition kind
-    let param_ids: &[DefinitionId] = match &def.kind {
-      DefinitionKind::Function(func) => &func.params,
-      DefinitionKind::Method(method) => &method.params,
+    // Get parameter definitions and offset based on definition kind
+    let (param_ids, param_offset, is_variadic): (&[DefinitionId], usize, bool) = match &def.kind {
+      DefinitionKind::Function(func) => (&func.params, 0, func.is_variadic),
+      DefinitionKind::Method(method) => {
+        // Instance methods have `self` as first param, skip it for hints
+        let offset = if !method.is_static && call.is_instance_call {
+          1
+        } else {
+          0
+        };
+        (&method.params, offset, false)
+      },
       _ => continue,
     };
 
-    // Check for variadic (extern functions)
-    let is_variadic = match &def.kind {
-      DefinitionKind::Function(func) => func.is_variadic,
-      _ => false,
-    };
+    for (arg_idx, (arg_id, arg_span)) in call.argument_ids.iter().zip(call.argument_spans.iter()).enumerate() {
+      // Calculate the corresponding parameter index (accounting for self offset)
+      let param_idx = arg_idx + param_offset;
 
-    // Generate hints for each argument that has a corresponding parameter
-    for (i, arg_span) in call.argument_spans.iter().enumerate() {
-      // Skip if this is a variadic argument (beyond named params)
-      if i >= param_ids.len() {
+      if param_idx >= param_ids.len() {
         if is_variadic {
-          // Variadic args don't get hints
           continue;
         }
-        // More args than params and not variadic - likely an error, skip
         break;
       }
 
-      let param_def = defs.get(&param_ids[i]);
-      let param_name = symbol_names
-        .get(&param_def.name)
-        .cloned()
-        .unwrap_or_else(|| "?".to_string());
+      let param_def = defs.get(&param_ids[param_idx]);
+      let param_name = match symbol_names.get(&param_def.name) {
+        Some(name) => name.as_str(),
+        None => continue,
+      };
 
-      // Skip if parameter name is not meaningful (single char or underscore)
+      // Skip if parameter name is not meaningful
       if param_name.len() <= 1 || param_name.starts_with('_') {
         continue;
       }
 
-      // Position hint at the start of the argument
+      // Skip if argument is a variable with the same name as the parameter
+      if let ASTNode::Expression(ASTExpression::Variable(var)) = nodes.get(arg_id) {
+        if let Some(arg_name) = symbol_names.get(&var.name) {
+          if arg_name == param_name {
+            continue;
+          }
+        }
+      }
+
       let (line, col) = line_index.line_col_utf16(arg_span.start);
 
       hints.push(InlayHint {

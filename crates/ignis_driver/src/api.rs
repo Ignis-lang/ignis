@@ -17,12 +17,24 @@ use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_token::token::Token;
 use ignis_type::definition::{DefinitionId, DefinitionStore};
 use ignis_type::file::{FileId, SourceMap};
+use ignis_type::namespace::NamespaceStore;
 use ignis_type::span::Span;
 use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::Store;
 
 use crate::context::CompilationContext;
+
+/// How far analysis progressed before stopping (due to errors or completion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AnalysisStage {
+  /// Only lexed (tokens available).
+  Lexed,
+  /// Parsed (AST available).
+  Parsed,
+  /// Fully analyzed (types, defs, resolution available).
+  Analyzed,
+}
 
 /// Output of `analyze_text`, containing all artifacts from lexing, parsing, and analysis.
 ///
@@ -177,6 +189,9 @@ fn empty_analyzer_output() -> ignis_analyzer::AnalyzerOutput {
 /// This struct contains only `Send`-safe types, suitable for async contexts.
 /// It includes the source map so diagnostics can be rendered with proper locations.
 pub struct AnalyzeProjectOutput {
+  /// How far analysis progressed.
+  pub stage: AnalysisStage,
+
   /// The source map containing all analyzed files.
   pub source_map: SourceMap,
 
@@ -224,6 +239,13 @@ pub struct AnalyzeProjectOutput {
 
   /// Root node IDs in the AST for the entry file.
   pub roots: Vec<NodeId>,
+
+  /// Namespace hierarchy for document symbols with nesting.
+  pub namespaces: NamespaceStore,
+
+  /// Maps import path string spans to the FileId of the imported module.
+  /// Used for Go to Definition on import path strings (e.g., clicking on "std::io").
+  pub import_module_files: HashMap<Span, FileId>,
 }
 
 /// Analyze a project starting from an entry file, resolving imports.
@@ -293,6 +315,7 @@ pub fn analyze_project_with_text(
   let Some(root_id) = root_id else {
     let symbol_names = extract_symbol_names(&ctx.symbol_table);
     return AnalyzeProjectOutput {
+      stage: AnalysisStage::Lexed,
       source_map: ctx.source_map,
       diagnostics: all_diagnostics,
       has_errors: true,
@@ -306,6 +329,8 @@ pub fn analyze_project_with_text(
       import_item_defs: HashMap::new(),
       nodes: Store::new(),
       roots: Vec::new(),
+      namespaces: NamespaceStore::new(),
+      import_module_files: HashMap::new(),
     };
   };
 
@@ -331,6 +356,7 @@ pub fn analyze_project_with_text(
       .unwrap_or_else(|| (Store::new(), Vec::new()));
 
     return AnalyzeProjectOutput {
+      stage: AnalysisStage::Analyzed,
       source_map: ctx.source_map,
       diagnostics: all_diagnostics,
       has_errors,
@@ -344,6 +370,8 @@ pub fn analyze_project_with_text(
       import_item_defs: output.import_item_defs,
       nodes,
       roots,
+      namespaces: output.namespaces,
+      import_module_files: output.import_module_files,
     };
   }
 
@@ -357,6 +385,7 @@ pub fn analyze_project_with_text(
     .unwrap_or_else(|| (Store::new(), Vec::new()));
 
   AnalyzeProjectOutput {
+    stage: AnalysisStage::Parsed,
     source_map: ctx.source_map,
     diagnostics: all_diagnostics,
     has_errors: has_discovery_errors || has_cycle,
@@ -370,6 +399,8 @@ pub fn analyze_project_with_text(
     import_item_defs: HashMap::new(),
     nodes,
     roots,
+    namespaces: NamespaceStore::new(),
+    import_module_files: HashMap::new(),
   }
 }
 

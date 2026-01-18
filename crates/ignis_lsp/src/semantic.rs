@@ -18,24 +18,24 @@ use crate::convert::LineIndex;
 ///
 /// Order matters - indices are used in the LSP protocol.
 pub const SUPPORTED_TYPES: &[SemanticTokenType] = &[
-  SemanticTokenType::NAMESPACE,
-  SemanticTokenType::TYPE,
-  SemanticTokenType::CLASS,
-  SemanticTokenType::ENUM,
-  SemanticTokenType::STRUCT,
-  SemanticTokenType::TYPE_PARAMETER,
-  SemanticTokenType::PARAMETER,
-  SemanticTokenType::VARIABLE,
-  SemanticTokenType::PROPERTY,
-  SemanticTokenType::ENUM_MEMBER,
-  SemanticTokenType::FUNCTION,
-  SemanticTokenType::METHOD,
-  SemanticTokenType::KEYWORD,
-  SemanticTokenType::MODIFIER,
-  SemanticTokenType::COMMENT,
-  SemanticTokenType::STRING,
-  SemanticTokenType::NUMBER,
-  SemanticTokenType::OPERATOR,
+  SemanticTokenType::NAMESPACE,      // 0
+  SemanticTokenType::TYPE,           // 1
+  SemanticTokenType::CLASS,          // 2
+  SemanticTokenType::ENUM,           // 3
+  SemanticTokenType::STRUCT,         // 4
+  SemanticTokenType::TYPE_PARAMETER, // 5
+  SemanticTokenType::PARAMETER,      // 6
+  SemanticTokenType::VARIABLE,       // 7
+  SemanticTokenType::PROPERTY,       // 8
+  SemanticTokenType::ENUM_MEMBER,    // 9
+  SemanticTokenType::FUNCTION,       // 10
+  SemanticTokenType::METHOD,         // 11
+  SemanticTokenType::KEYWORD,        // 12
+  SemanticTokenType::MODIFIER,       // 13
+  SemanticTokenType::COMMENT,        // 14
+  SemanticTokenType::STRING,         // 15
+  SemanticTokenType::NUMBER,         // 16
+  SemanticTokenType::OPERATOR,       // 17
 ];
 
 /// Supported semantic token modifiers.
@@ -47,7 +47,7 @@ pub const SUPPORTED_MODIFIERS: &[SemanticTokenModifier] = &[
   SemanticTokenModifier::READONLY,
   SemanticTokenModifier::STATIC,
   SemanticTokenModifier::MODIFICATION,
-  SemanticTokenModifier::new("mutable"), // Custom modifier
+  SemanticTokenModifier::new("mutable"),
 ];
 
 /// Build the semantic tokens legend for capability registration.
@@ -58,19 +58,22 @@ pub fn build_legend() -> SemanticTokensLegend {
   }
 }
 
-/// Index of token types for efficient lookup.
+/// Token type indices matching SUPPORTED_TYPES array.
+/// Some variants are unused but kept for completeness with the LSP spec.
 #[derive(Debug, Clone, Copy)]
 #[repr(u32)]
+#[allow(dead_code)]
 enum TokenTypeIndex {
   Namespace = 0,
   Type = 1,
+  Class = 2,
   Enum = 3,
   Struct = 4,
   TypeParameter = 5,
   Parameter = 6,
   Variable = 7,
   Property = 8,
-  _EnumMember = 9,
+  EnumMember = 9,
   Function = 10,
   Method = 11,
   Keyword = 12,
@@ -81,15 +84,17 @@ enum TokenTypeIndex {
   Operator = 17,
 }
 
-/// Index of token modifiers for efficient lookup.
+/// Modifier indices matching SUPPORTED_MODIFIERS array.
+/// Some variants are unused but kept for completeness with the LSP spec.
 #[derive(Debug, Clone, Copy)]
 #[repr(u32)]
+#[allow(dead_code)]
 enum ModifierIndex {
   Declaration = 0,
   Definition = 1,
   Readonly = 2,
   Static = 3,
-  _Modification = 4,
+  Modification = 4,
   Mutable = 5,
 }
 
@@ -99,44 +104,50 @@ impl ModifierIndex {
   }
 }
 
+/// Token with absolute position (before delta encoding).
+struct AbsToken {
+  line: u32,
+  col: u32,
+  len: u32,
+  ty: u32,
+  mods: u32,
+}
+
 /// Classify tokens from lexer output using semantic analysis.
 pub fn classify_tokens(
   tokens: &[Token],
-  import_item_defs: &HashMap<Span, DefinitionId>,
+  ref_spans: &HashMap<Span, DefinitionId>,
   defs: &DefinitionStore,
   file_id: &ignis_type::file::FileId,
   line_index: &LineIndex,
 ) -> SemanticTokens {
-  let mut classified = Vec::new();
+  let mut abs_tokens = Vec::new();
 
   for token in tokens {
-    // Only process tokens from the target file
     if &token.span.file != file_id {
       continue;
     }
 
-    // Skip whitespace and EOF
     if matches!(token.type_, TokenType::Whitespace | TokenType::Eof) {
       continue;
     }
 
-    if let Some(ct) = classify_token(token, import_item_defs, defs, line_index) {
-      classified.push(ct);
+    if let Some(abs) = classify_token(token, ref_spans, defs, line_index) {
+      abs_tokens.push(abs);
     }
   }
 
-  encode_tokens(classified)
+  encode_tokens(abs_tokens)
 }
 
 /// Classify a single token.
 fn classify_token(
   token: &Token,
-  import_item_defs: &HashMap<Span, DefinitionId>,
+  ref_spans: &HashMap<Span, DefinitionId>,
   defs: &DefinitionStore,
   line_index: &LineIndex,
-) -> Option<SemanticToken> {
-  let (token_type, modifiers) = match token.type_ {
-    // Keywords
+) -> Option<AbsToken> {
+  let (ty, mods) = match token.type_ {
     TokenType::Let
     | TokenType::Const
     | TokenType::Function
@@ -164,22 +175,16 @@ fn classify_token(
     | TokenType::Declare
     | TokenType::Inline => (TokenTypeIndex::Keyword as u32, 0),
 
-    // Modifiers (also keywords, but highlight differently)
     TokenType::Static | TokenType::Mut | TokenType::Public | TokenType::Private => (TokenTypeIndex::Modifier as u32, 0),
 
-    // Boolean literals (keywords)
     TokenType::True | TokenType::False => (TokenTypeIndex::Keyword as u32, 0),
 
-    // Null (keyword)
     TokenType::Null => (TokenTypeIndex::Keyword as u32, 0),
 
-    // Self/This (keyword, but could also be parameter)
     TokenType::Self_ | TokenType::This => (TokenTypeIndex::Keyword as u32, 0),
 
-    // Void type (keyword)
     TokenType::Void => (TokenTypeIndex::Type as u32, ModifierIndex::Readonly.bit()),
 
-    // Primitive types
     TokenType::StringType
     | TokenType::Int8Type
     | TokenType::Int16Type
@@ -196,16 +201,13 @@ fn classify_token(
     | TokenType::HexType
     | TokenType::BinaryType => (TokenTypeIndex::Type as u32, ModifierIndex::Readonly.bit()),
 
-    // Literals
     TokenType::String => (TokenTypeIndex::String as u32, 0),
     TokenType::Int | TokenType::Float | TokenType::Hex | TokenType::Binary | TokenType::Char => {
       (TokenTypeIndex::Number as u32, 0)
     },
 
-    // Comments
     TokenType::Comment | TokenType::MultiLineComment | TokenType::DocComment => (TokenTypeIndex::Comment as u32, 0),
 
-    // Operators
     TokenType::Plus
     | TokenType::Minus
     | TokenType::Asterisk
@@ -247,45 +249,42 @@ fn classify_token(
     | TokenType::Tilde
     | TokenType::QuestionMark => (TokenTypeIndex::Operator as u32, 0),
 
-    // Identifiers need semantic analysis
     TokenType::Identifier => {
-      return classify_identifier(token, import_item_defs, defs, line_index);
+      return classify_identifier(token, ref_spans, defs, line_index);
     },
 
-    // Skip punctuation and other tokens
     _ => return None,
   };
 
-  let (line, start) = line_index.line_col_utf16(token.span.start);
+  let (line, col) = line_index.line_col_utf16(token.span.start);
 
-  Some(SemanticToken {
-    delta_line: line,
-    delta_start: start,
-    length: token.lexeme.encode_utf16().count() as u32,
-    token_type,
-    token_modifiers_bitset: modifiers,
+  Some(AbsToken {
+    line,
+    col,
+    len: token.lexeme.encode_utf16().count() as u32,
+    ty,
+    mods,
   })
 }
 
 /// Classify an identifier token using semantic analysis.
 fn classify_identifier(
   token: &Token,
-  import_item_defs: &HashMap<Span, DefinitionId>,
+  ref_spans: &HashMap<Span, DefinitionId>,
   defs: &DefinitionStore,
   line_index: &LineIndex,
-) -> Option<SemanticToken> {
-  let def_id = import_item_defs.get(&token.span)?;
+) -> Option<AbsToken> {
+  let def_id = ref_spans.get(&token.span)?;
   let def = defs.get(def_id);
+  let (ty, mods) = classify_definition(def, &token.span);
+  let (line, col) = line_index.line_col_utf16(token.span.start);
 
-  let (token_type, modifiers) = classify_definition(def, &token.span, def);
-  let (line, start) = line_index.line_col_utf16(token.span.start);
-
-  Some(SemanticToken {
-    delta_line: line,
-    delta_start: start,
-    length: token.lexeme.encode_utf16().count() as u32,
-    token_type,
-    token_modifiers_bitset: modifiers,
+  Some(AbsToken {
+    line,
+    col,
+    len: token.lexeme.encode_utf16().count() as u32,
+    ty,
+    mods,
   })
 }
 
@@ -293,9 +292,8 @@ fn classify_identifier(
 fn classify_definition(
   def: &Definition,
   token_span: &Span,
-  _original_def: &Definition,
 ) -> (u32, u32) {
-  let is_declaration = token_span == &def.span;
+  let is_declaration = token_span == &def.name_span;
 
   match &def.kind {
     DefinitionKind::Function(func_def) => {
@@ -358,7 +356,10 @@ fn classify_definition(
     },
 
     DefinitionKind::Parameter(param_def) => {
-      let mut modifiers = ModifierIndex::Declaration.bit();
+      let mut modifiers = 0;
+      if is_declaration {
+        modifiers |= ModifierIndex::Declaration.bit();
+      }
       if param_def.mutable {
         modifiers |= ModifierIndex::Mutable.bit();
       } else {
@@ -368,7 +369,10 @@ fn classify_definition(
     },
 
     DefinitionKind::TypeParam(_) => {
-      let modifiers = ModifierIndex::Declaration.bit();
+      let mut modifiers = 0;
+      if is_declaration {
+        modifiers |= ModifierIndex::Declaration.bit();
+      }
       (TokenTypeIndex::TypeParameter as u32, modifiers)
     },
 
@@ -391,47 +395,43 @@ fn classify_definition(
     },
 
     DefinitionKind::Variant(_) => {
-      // Enum variants are semantically similar to enum members
       let mut modifiers = 0;
       if is_declaration {
         modifiers |= ModifierIndex::Declaration.bit();
       }
-      (TokenTypeIndex::_EnumMember as u32, modifiers)
+      (TokenTypeIndex::EnumMember as u32, modifiers)
     },
 
     DefinitionKind::Placeholder => (TokenTypeIndex::Variable as u32, 0),
   }
 }
 
-/// Encode classified tokens into LSP delta format.
-fn encode_tokens(mut tokens: Vec<SemanticToken>) -> SemanticTokens {
-  // Sort by position (line, then column)
-  tokens.sort_by(|a, b| {
-    a.delta_line
-      .cmp(&b.delta_line)
-      .then_with(|| a.delta_start.cmp(&b.delta_start))
-  });
+/// Encode tokens with absolute positions into LSP delta format.
+fn encode_tokens(mut tokens: Vec<AbsToken>) -> SemanticTokens {
+  tokens.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.col.cmp(&b.col)));
 
-  // Convert absolute positions to deltas
   let mut prev_line = 0;
-  let mut prev_start = 0;
-  let mut data = Vec::new();
+  let mut prev_col = 0;
+  let mut data = Vec::with_capacity(tokens.len());
 
-  for mut token in tokens {
-    let abs_line = token.delta_line;
-    let abs_start = token.delta_start;
-
-    token.delta_line = abs_line.saturating_sub(prev_line);
-    token.delta_start = if token.delta_line == 0 {
-      abs_start.saturating_sub(prev_start)
+  for tok in tokens {
+    let delta_line = tok.line.saturating_sub(prev_line);
+    let delta_start = if delta_line == 0 {
+      tok.col.saturating_sub(prev_col)
     } else {
-      abs_start
+      tok.col
     };
 
-    data.push(token);
+    data.push(SemanticToken {
+      delta_line,
+      delta_start,
+      length: tok.len,
+      token_type: tok.ty,
+      token_modifiers_bitset: tok.mods,
+    });
 
-    prev_line = abs_line;
-    prev_start = abs_start;
+    prev_line = tok.line;
+    prev_col = tok.col;
   }
 
   SemanticTokens { result_id: None, data }
@@ -447,7 +447,7 @@ mod tests {
     assert_eq!(ModifierIndex::Definition.bit(), 1 << 1);
     assert_eq!(ModifierIndex::Readonly.bit(), 1 << 2);
     assert_eq!(ModifierIndex::Static.bit(), 1 << 3);
-    assert_eq!(ModifierIndex::_Modification.bit(), 1 << 4);
+    assert_eq!(ModifierIndex::Modification.bit(), 1 << 4);
     assert_eq!(ModifierIndex::Mutable.bit(), 1 << 5);
   }
 
@@ -455,5 +455,27 @@ mod tests {
   fn test_combine_modifiers() {
     let combined = ModifierIndex::Declaration.bit() | ModifierIndex::Definition.bit() | ModifierIndex::Mutable.bit();
     assert_eq!(combined, 0b100011);
+  }
+
+  #[test]
+  fn test_token_type_indices() {
+    assert_eq!(TokenTypeIndex::Namespace as u32, 0);
+    assert_eq!(TokenTypeIndex::Type as u32, 1);
+    assert_eq!(TokenTypeIndex::Class as u32, 2);
+    assert_eq!(TokenTypeIndex::Enum as u32, 3);
+    assert_eq!(TokenTypeIndex::Struct as u32, 4);
+    assert_eq!(TokenTypeIndex::TypeParameter as u32, 5);
+    assert_eq!(TokenTypeIndex::Parameter as u32, 6);
+    assert_eq!(TokenTypeIndex::Variable as u32, 7);
+    assert_eq!(TokenTypeIndex::Property as u32, 8);
+    assert_eq!(TokenTypeIndex::EnumMember as u32, 9);
+    assert_eq!(TokenTypeIndex::Function as u32, 10);
+    assert_eq!(TokenTypeIndex::Method as u32, 11);
+    assert_eq!(TokenTypeIndex::Keyword as u32, 12);
+    assert_eq!(TokenTypeIndex::Modifier as u32, 13);
+    assert_eq!(TokenTypeIndex::Comment as u32, 14);
+    assert_eq!(TokenTypeIndex::String as u32, 15);
+    assert_eq!(TokenTypeIndex::Number as u32, 16);
+    assert_eq!(TokenTypeIndex::Operator as u32, 17);
   }
 }

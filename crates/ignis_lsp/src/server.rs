@@ -10,6 +10,10 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use url::Url;
 
+use crate::completion::{
+  CompletionContext, complete_dot, complete_double_colon, complete_identifier, complete_import_path, detect_context,
+  log, to_completion_items,
+};
 use crate::convert::{convert_diagnostic, LineIndex};
 use crate::state::LspState;
 
@@ -56,6 +60,14 @@ impl Server {
 
     // Run project-level analysis with in-memory text.
     let output = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text)));
+
+    log(&format!(
+      "[analyze_and_publish] stage={:?}, node_types={}, defs={}, errors={}",
+      output.stage,
+      output.node_types.len(),
+      output.defs.iter().count(),
+      output.diagnostics.len()
+    ));
 
     // Cache the analysis result for future requests
     {
@@ -105,6 +117,16 @@ impl Server {
 
     // Collect URIs that have diagnostics now
     let current_uris: HashSet<Url> = diagnostics_by_uri.keys().cloned().collect();
+
+    // Check if the document version changed during analysis (abort if stale)
+    {
+      let guard = self.state.open_files.read().await;
+      if let Some(doc) = guard.get(uri) {
+        if doc.version != version {
+          return;
+        }
+      }
+    }
 
     // Publish diagnostics for all affected files
     for (file_uri, diags) in &diagnostics_by_uri {
@@ -232,9 +254,24 @@ impl LanguageServer for Server {
           resolve_provider: Some(false),
         }))),
 
-        // TODO: Add more capabilities as we implement features:
-        // - references_provider
-        // - completion_provider
+        // Workspace symbol search (Ctrl+T / Cmd+T)
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+
+        // Document symbols (outline view, breadcrumbs)
+        document_symbol_provider: Some(OneOf::Left(true)),
+
+        // Find all references
+        references_provider: Some(OneOf::Left(true)),
+
+        // Autocompletion
+        completion_provider: Some(CompletionOptions {
+          trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+          resolve_provider: Some(false),
+          work_done_progress_options: WorkDoneProgressOptions::default(),
+          all_commit_characters: None,
+          completion_item: None,
+        }),
+
         ..Default::default()
       },
       server_info: Some(ServerInfo {
@@ -379,6 +416,50 @@ impl LanguageServer for Server {
     // Convert LSP position to byte offset
     let byte_offset = line_index.offset(position);
 
+    // Check import path strings (navigates to module file)
+    for (span, target_file_id) in &output.import_module_files {
+      if span.file != file_id {
+        continue;
+      }
+
+      if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+        let target_file = output.source_map.get(target_file_id);
+        let target_uri = match Url::from_file_path(&target_file.path) {
+          Ok(u) => u,
+          Err(_) => continue,
+        };
+
+        let range = Range {
+          start: Position { line: 0, character: 0 },
+          end: Position { line: 0, character: 0 },
+        };
+
+        return Ok(Some(GotoDefinitionResponse::Scalar(Location { uri: target_uri, range })));
+      }
+    }
+
+    // Check import items
+    let import_def = {
+      let mut found = None;
+      let mut smallest_size = u32::MAX;
+
+      for (span, def_id) in &output.import_item_defs {
+        if span.file != file_id {
+          continue;
+        }
+
+        if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+          let size = span.end.0 - span.start.0;
+          if size < smallest_size {
+            smallest_size = size;
+            found = Some(def_id.clone());
+          }
+        }
+      }
+
+      found
+    };
+
     // Find which node's span contains this position (only from this file)
     let mut found_node = None;
     let mut smallest_span_size = u32::MAX;
@@ -400,22 +481,24 @@ impl LanguageServer for Server {
       }
     }
 
-    // If we found a node, look up its definition
-    let Some(node_id) = found_node else {
-      return Ok(None);
+    // Prefer import_item_defs if found, otherwise use node_defs/resolved_calls
+    let def_id = if let Some(id) = import_def {
+      Some(id)
+    } else if let Some(node_id) = found_node {
+      output
+        .node_defs
+        .get(&node_id)
+        .or_else(|| output.resolved_calls.get(&node_id))
+        .cloned()
+    } else {
+      None
     };
-
-    // Check node_defs first, then resolved_calls (for overloaded function calls)
-    let def_id = output
-      .node_defs
-      .get(&node_id)
-      .or_else(|| output.resolved_calls.get(&node_id));
 
     let Some(def_id) = def_id else {
       return Ok(None);
     };
 
-    let def = output.defs.get(def_id);
+    let def = output.defs.get(&def_id);
 
     // Get the file path and text for the definition's file
     let def_file_path = output.source_map.get(&def.span.file).path.clone();
@@ -463,6 +546,33 @@ impl LanguageServer for Server {
     // Convert LSP position to byte offset
     let byte_offset = line_index.offset(position);
 
+    // First, check if cursor is on an import path string (e.g., "std::io")
+    for (span, target_file_id) in &output.import_module_files {
+      if span.file != file_id {
+        continue;
+      }
+
+      if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+        let target_file = output.source_map.get(target_file_id);
+        let file_path = target_file.path.to_string_lossy();
+
+        // Extract the module path from the source text (the string content)
+        let source_text = output.source_map.get(&file_id).text.as_str();
+        let path_text = &source_text[span.start.0 as usize..span.end.0 as usize];
+
+        let content = format!("```ignis\nmodule {}\n```\n\n*File: `{}`*", path_text, file_path);
+        let range = line_index.span_to_range(span);
+
+        return Ok(Some(Hover {
+          contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: content,
+          }),
+          range: Some(range),
+        }));
+      }
+    }
+
     // Find which node's span contains this position (only from this file)
     let mut found_node = None;
     let mut smallest_span_size = u32::MAX;
@@ -482,7 +592,7 @@ impl LanguageServer for Server {
       }
     }
 
-    // First, check if cursor is on an import item (more specific than the import statement node)
+    // Second, check if cursor is on an import item (more specific than the import statement node)
     let import_hover = {
       let mut found_import = None;
       let mut smallest_size = u32::MAX;
@@ -623,6 +733,16 @@ impl LanguageServer for Server {
   ) -> Result<Option<Vec<InlayHint>>> {
     let uri = &params.text_document.uri;
 
+    // Check for cached hints first
+    {
+      let guard = self.state.open_files.read().await;
+      if let Some(doc) = guard.get(uri) {
+        if let Some(hints) = doc.get_cached_hints() {
+          return Ok(Some(hints.clone()));
+        }
+      }
+    }
+
     // Get cached analysis or run new analysis
     let Some((output, path_str, _)) = self.get_analysis(uri).await else {
       return Ok(None);
@@ -654,7 +774,830 @@ impl LanguageServer for Server {
       &line_index,
     );
 
+    // Cache the computed hints
+    {
+      let mut guard = self.state.open_files.write().await;
+      if let Some(doc) = guard.get_mut(uri) {
+        doc.set_cached_hints(hints.clone());
+      }
+    }
+
     Ok(Some(hints))
+  }
+
+  async fn symbol(
+    &self,
+    params: WorkspaceSymbolParams,
+  ) -> Result<Option<Vec<SymbolInformation>>> {
+    use ignis_type::definition::DefinitionKind;
+
+    let query = &params.query;
+
+    // Empty query = no results (avoids freezing on Ctrl+T with thousands of symbols)
+    if query.is_empty() {
+      return Ok(Some(vec![]));
+    }
+
+    // Get analysis from any open document (all share the same project defs)
+    let output = {
+      let guard = self.state.open_files.read().await;
+
+      let mut cached = None;
+      for doc in guard.values() {
+        if let Some(analysis) = doc.get_cached_analysis() {
+          cached = Some(analysis);
+          break;
+        }
+      }
+      cached
+    };
+
+    let Some(output) = output else {
+      return Ok(Some(vec![]));
+    };
+
+    // Build namespace_id -> name map for container_name
+    let namespace_names: HashMap<ignis_type::namespace::NamespaceId, String> = output
+      .defs
+      .iter()
+      .filter_map(|(_, def)| {
+        if let DefinitionKind::Namespace(ns_def) = &def.kind {
+          let name = output.symbol_names.get(&def.name)?.clone();
+          Some((ns_def.namespace_id, name))
+        } else {
+          None
+        }
+      })
+      .collect();
+
+    // Cache LineIndex per FileId to avoid recreating for each definition
+    let mut line_indexes: HashMap<FileId, LineIndex> = HashMap::new();
+
+    // Collect matching symbols with their scores
+    let mut matches: Vec<(u8, SymbolInformation)> = output
+      .defs
+      .iter()
+      .filter_map(|(_, def)| {
+        let kind = definition_to_symbol_kind(&def.kind)?;
+        let name = output.symbol_names.get(&def.name)?;
+        let score = match_score(name, query)?;
+
+        // Get file path and build location
+        let file = output.source_map.get(&def.span.file);
+        let uri = Url::from_file_path(&file.path).ok()?;
+
+        let line_index = line_indexes
+          .entry(def.span.file.clone())
+          .or_insert_with(|| LineIndex::new(file.text.clone()));
+        let range = line_index.span_to_range(&def.span);
+
+        let container_name = def
+          .owner_namespace
+          .and_then(|ns_id| namespace_names.get(&ns_id).cloned());
+
+        #[allow(deprecated)]
+        let symbol = SymbolInformation {
+          name: name.clone(),
+          kind,
+          tags: None,
+          deprecated: None,
+          location: Location { uri, range },
+          container_name,
+        };
+
+        Some((score, symbol))
+      })
+      .collect();
+
+    // Sort by score (lower = better match), then by name
+    matches
+      .sort_by(|(score_a, sym_a), (score_b, sym_b)| score_a.cmp(score_b).then_with(|| sym_a.name.cmp(&sym_b.name)));
+
+    // Take top 200 results
+    let symbols: Vec<SymbolInformation> = matches.into_iter().take(200).map(|(_, s)| s).collect();
+
+    Ok(Some(symbols))
+  }
+
+  async fn document_symbol(
+    &self,
+    params: DocumentSymbolParams,
+  ) -> Result<Option<DocumentSymbolResponse>> {
+    use ignis_type::definition::DefinitionKind;
+    use ignis_type::namespace::NamespaceId;
+
+    let uri = &params.text_document.uri;
+
+    let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      return Ok(None);
+    };
+
+    let line_index = {
+      let guard = self.state.open_files.read().await;
+
+      let Some(doc) = guard.get(uri) else {
+        return Ok(None);
+      };
+
+      doc.line_index.clone()
+    };
+
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      return Ok(None);
+    };
+
+    // Build mapping: NamespaceId -> DefinitionId (for namespace definitions in this file)
+    let mut ns_to_def: HashMap<NamespaceId, ignis_type::definition::DefinitionId> = HashMap::new();
+
+    for (def_id, def) in output.defs.iter() {
+      if def.span.file != file_id {
+        continue;
+      }
+
+      if let DefinitionKind::Namespace(ns_def) = &def.kind {
+        ns_to_def.insert(ns_def.namespace_id, def_id);
+      }
+    }
+
+    // Group definitions by their owner namespace (only for defs in this file)
+    let mut defs_by_namespace: HashMap<Option<NamespaceId>, Vec<ignis_type::definition::DefinitionId>> = HashMap::new();
+
+    for (def_id, def) in output.defs.iter() {
+      if def.span.file != file_id {
+        continue;
+      }
+
+      // Skip internal definitions that shouldn't appear in outline
+      match &def.kind {
+        DefinitionKind::Variable(_)
+        | DefinitionKind::Parameter(_)
+        | DefinitionKind::TypeParam(_)
+        | DefinitionKind::Placeholder => {
+          continue;
+        },
+        // Fields and variants are handled as children of their parent type
+        DefinitionKind::Field(_) | DefinitionKind::Variant(_) => continue,
+        // Methods are handled as children of their owner type
+        DefinitionKind::Method(_) => continue,
+        _ => {},
+      }
+
+      defs_by_namespace.entry(def.owner_namespace).or_default().push(def_id);
+    }
+
+    // Build document symbols recursively
+    let top_level_defs = defs_by_namespace.remove(&None).unwrap_or_default();
+    let mut visited_namespaces = HashSet::new();
+
+    let symbols: Vec<DocumentSymbol> = top_level_defs
+      .into_iter()
+      .filter_map(|def_id| {
+        build_document_symbol(
+          &def_id,
+          &output,
+          &file_id,
+          &line_index,
+          &defs_by_namespace,
+          &ns_to_def,
+          &mut visited_namespaces,
+        )
+      })
+      .collect();
+
+    Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+  }
+
+  async fn references(
+    &self,
+    params: ReferenceParams,
+  ) -> Result<Option<Vec<Location>>> {
+    let uri = &params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
+    let include_declaration = params.context.include_declaration;
+
+    let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      return Ok(None);
+    };
+
+    let line_index = {
+      let guard = self.state.open_files.read().await;
+
+      let Some(doc) = guard.get(uri) else {
+        return Ok(None);
+      };
+
+      doc.line_index.clone()
+    };
+
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      return Ok(None);
+    };
+
+    let byte_offset = line_index.offset(position);
+
+    // Find the definition at cursor position
+    // First check import_item_defs
+    let target_def_id = {
+      let mut found = None;
+      let mut smallest_size = u32::MAX;
+
+      for (span, def_id) in &output.import_item_defs {
+        if span.file != file_id {
+          continue;
+        }
+
+        if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+          let size = span.end.0 - span.start.0;
+          if size < smallest_size {
+            smallest_size = size;
+            found = Some(def_id.clone());
+          }
+        }
+      }
+
+      found
+    };
+
+    // If not found in imports, check node_defs
+    let target_def_id = target_def_id.or_else(|| {
+      let mut found_node = None;
+      let mut smallest_span_size = u32::MAX;
+
+      for (node_id, span) in &output.node_spans {
+        if span.file != file_id {
+          continue;
+        }
+
+        if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
+          let span_size = span.end.0 - span.start.0;
+          if span_size < smallest_span_size {
+            smallest_span_size = span_size;
+            found_node = Some(node_id.clone());
+          }
+        }
+      }
+
+      found_node.and_then(|node_id| {
+        output
+          .node_defs
+          .get(&node_id)
+          .or_else(|| output.resolved_calls.get(&node_id))
+          .cloned()
+      })
+    });
+
+    let Some(target_def_id) = target_def_id else {
+      return Ok(None);
+    };
+
+    // Collect all references to this definition
+    let mut locations: Vec<Location> = Vec::new();
+
+    // Cache LineIndex per FileId
+    let mut line_indexes: HashMap<ignis_type::file::FileId, LineIndex> = HashMap::new();
+
+    // Include the declaration itself if requested
+    if include_declaration {
+      let def = output.defs.get(&target_def_id);
+      let file = output.source_map.get(&def.span.file);
+
+      if let Ok(def_uri) = Url::from_file_path(&file.path) {
+        let li = line_indexes
+          .entry(def.span.file.clone())
+          .or_insert_with(|| LineIndex::new(file.text.clone()));
+        let range = li.span_to_range(&def.name_span);
+        locations.push(Location { uri: def_uri, range });
+      }
+    }
+
+    // Find references in node_defs (usages of the symbol)
+    for (node_id, def_id) in &output.node_defs {
+      if *def_id != target_def_id {
+        continue;
+      }
+
+      if let Some(span) = output.node_spans.get(node_id) {
+        let file = output.source_map.get(&span.file);
+
+        if let Ok(ref_uri) = Url::from_file_path(&file.path) {
+          let li = line_indexes
+            .entry(span.file.clone())
+            .or_insert_with(|| LineIndex::new(file.text.clone()));
+          let range = li.span_to_range(span);
+          locations.push(Location { uri: ref_uri, range });
+        }
+      }
+    }
+
+    // Find references in resolved_calls (overloaded function calls)
+    for (node_id, def_id) in &output.resolved_calls {
+      if *def_id != target_def_id {
+        continue;
+      }
+
+      if let Some(span) = output.node_spans.get(node_id) {
+        let file = output.source_map.get(&span.file);
+
+        if let Ok(ref_uri) = Url::from_file_path(&file.path) {
+          let li = line_indexes
+            .entry(span.file.clone())
+            .or_insert_with(|| LineIndex::new(file.text.clone()));
+          let range = li.span_to_range(span);
+          locations.push(Location { uri: ref_uri, range });
+        }
+      }
+    }
+
+    // Find references in import_item_defs (imports of the symbol)
+    for (span, def_id) in &output.import_item_defs {
+      if *def_id != target_def_id {
+        continue;
+      }
+
+      let file = output.source_map.get(&span.file);
+
+      if let Ok(ref_uri) = Url::from_file_path(&file.path) {
+        let li = line_indexes
+          .entry(span.file.clone())
+          .or_insert_with(|| LineIndex::new(file.text.clone()));
+        let range = li.span_to_range(span);
+        locations.push(Location { uri: ref_uri, range });
+      }
+    }
+
+    if locations.is_empty() {
+      Ok(None)
+    } else {
+      Ok(Some(locations))
+    }
+  }
+
+  async fn completion(
+    &self,
+    params: CompletionParams,
+  ) -> Result<Option<CompletionResponse>> {
+    let uri = &params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
+
+    // Get document info (text, path, line_index, version)
+    let (text, path_str, line_index, version) = {
+      let guard = self.state.open_files.read().await;
+
+      let Some(doc) = guard.get(uri) else {
+        return Ok(None);
+      };
+
+      (
+        doc.text.clone(),
+        doc.path.to_string_lossy().to_string(),
+        doc.line_index.clone(),
+        doc.version,
+      )
+    };
+
+    // Convert position to byte offset
+    let cursor_offset = line_index.offset(position);
+
+    if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
+      eprintln!("[LSP] Completion requested at {:?} (offset {})", position, cursor_offset);
+      log(&format!("[LSP] Document path: {}", path_str));
+    }
+
+    // Get or compute tokens
+    let tokens = {
+      let mut guard = self.state.open_files.write().await;
+
+      let Some(doc) = guard.get_mut(uri) else {
+        return Ok(None);
+      };
+
+      // Get file_id for token computation
+      let config = (*self.state.config).clone();
+      let temp_output = ignis_driver::analyze_project_with_text(&config, &path_str, Some(doc.text.clone()));
+
+      let Some(file_id) = temp_output.source_map.lookup_by_path(&path_str) else {
+        return Ok(None);
+      };
+
+      doc.get_or_compute_tokens(&file_id).to_vec()
+    };
+
+    // Detect completion context
+    let Some(context) = detect_context(&tokens, cursor_offset, &text) else {
+      if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
+        log(&format!("[LSP] No completion context detected"));
+      }
+      return Ok(None);
+    };
+
+    if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
+      log(&format!("[LSP] Detected context: {:?}", context));
+    }
+
+    // Get analysis for completions (use cache if available, fallback to last good)
+    let output = {
+      let guard = self.state.open_files.read().await;
+
+      let result = guard.get(uri).and_then(|doc| doc.get_completion_analysis());
+
+      if let Some(ref o) = result {
+        log(&format!(
+          "[LSP] Got cached analysis: stage={:?}, node_types={}, node_spans={}, defs={}",
+          o.stage,
+          o.node_types.len(),
+          o.node_spans.len(),
+          o.defs.iter().count()
+        ));
+      } else {
+        log(&format!("[LSP] No cached analysis, will run fresh"));
+      }
+
+      result
+    };
+
+    // If no cached analysis, run a fresh one
+    let output = match output {
+      Some(o) => o,
+      None => {
+        let config = (*self.state.config).clone();
+        let fresh = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text.clone())));
+
+        log(&format!(
+          "[LSP] Fresh analysis: stage={:?}, node_types={}, defs={}",
+          fresh.stage,
+          fresh.node_types.len(),
+          fresh.defs.iter().count()
+        ));
+
+        // Cache it
+        {
+          let mut guard = self.state.open_files.write().await;
+          if let Some(doc) = guard.get_mut(uri) {
+            if doc.version == version {
+              doc.set_cached_analysis(version, Arc::clone(&fresh));
+            }
+          }
+        }
+
+        fresh
+      },
+    };
+
+    // Get file_id for completion
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
+        eprintln!(
+          "[LSP] ERROR: Could not resolve path '{}' to FileId in analysis output",
+          path_str
+        );
+      }
+      return Ok(None);
+    };
+
+    if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
+      log(&format!("[LSP] Resolved file_id: {:?}", file_id));
+      let same_file_defs_count = output.defs.iter().filter(|(_, d)| d.span.file == file_id).count();
+      log(&format!("[LSP] Definitions in this file: {}", same_file_defs_count));
+    }
+
+    // Generate candidates based on context
+    let candidates = match context {
+      CompletionContext::AfterDot { dot_offset, prefix } => {
+        complete_dot(dot_offset, &prefix, &output, &file_id, &tokens, &text)
+      },
+
+      CompletionContext::AfterDoubleColon {
+        path_segments, prefix, ..
+      } => complete_double_colon(&path_segments, &prefix, &output, &file_id),
+
+      CompletionContext::Identifier { prefix, start_offset } => {
+        complete_identifier(&prefix, start_offset, &tokens, Some(&output), &file_id)
+      },
+
+      CompletionContext::ImportPath { prefix } => complete_import_path(&prefix),
+    };
+
+    if candidates.is_empty() {
+      return Ok(None);
+    }
+
+    let items = to_completion_items(candidates);
+    Ok(Some(CompletionResponse::Array(items)))
+  }
+}
+
+/// Build a DocumentSymbol for a definition, including children recursively.
+///
+/// The `visited_namespaces` parameter prevents infinite recursion if namespace
+/// hierarchy contains cycles (defensive programming).
+#[allow(deprecated)] // DocumentSymbol.deprecated field
+fn build_document_symbol(
+  def_id: &ignis_type::definition::DefinitionId,
+  output: &ignis_driver::AnalyzeProjectOutput,
+  file_id: &ignis_type::file::FileId,
+  line_index: &crate::convert::LineIndex,
+  defs_by_namespace: &HashMap<Option<ignis_type::namespace::NamespaceId>, Vec<ignis_type::definition::DefinitionId>>,
+  ns_to_def: &HashMap<ignis_type::namespace::NamespaceId, ignis_type::definition::DefinitionId>,
+  visited_namespaces: &mut HashSet<ignis_type::namespace::NamespaceId>,
+) -> Option<DocumentSymbol> {
+  use ignis_type::definition::DefinitionKind;
+
+  let def = output.defs.get(def_id);
+  let name = output.symbol_names.get(&def.name)?.clone();
+  let kind = definition_to_doc_symbol_kind(&def.kind)?;
+  let range = line_index.span_to_range(&def.span);
+  let selection_range = line_index.span_to_range(&def.name_span);
+
+  // Build children based on definition kind
+  let children = match &def.kind {
+    DefinitionKind::Namespace(ns_def) => {
+      // Cycle detection: skip if already visiting this namespace
+      if visited_namespaces.contains(&ns_def.namespace_id) {
+        return None;
+      }
+      visited_namespaces.insert(ns_def.namespace_id);
+
+      let mut children = Vec::new();
+
+      // Add sub-namespaces (recursively)
+      let ns = output.namespaces.get(&ns_def.namespace_id);
+      for (_, child_ns_id) in &ns.children {
+        if let Some(child_def_id) = ns_to_def.get(child_ns_id) {
+          if let Some(child_sym) = build_document_symbol(
+            child_def_id,
+            output,
+            file_id,
+            line_index,
+            defs_by_namespace,
+            ns_to_def,
+            visited_namespaces,
+          ) {
+            children.push(child_sym);
+          }
+        }
+      }
+
+      // Add direct definitions in this namespace
+      if let Some(ns_defs) = defs_by_namespace.get(&Some(ns_def.namespace_id)) {
+        for child_def_id in ns_defs {
+          // Skip namespace definitions (handled above via children)
+          let child_def = output.defs.get(child_def_id);
+          if matches!(child_def.kind, DefinitionKind::Namespace(_)) {
+            continue;
+          }
+
+          if let Some(child_sym) = build_document_symbol(
+            child_def_id,
+            output,
+            file_id,
+            line_index,
+            defs_by_namespace,
+            ns_to_def,
+            visited_namespaces,
+          ) {
+            children.push(child_sym);
+          }
+        }
+      }
+
+      visited_namespaces.remove(&ns_def.namespace_id);
+
+      if children.is_empty() { None } else { Some(children) }
+    },
+
+    DefinitionKind::Record(record_def) => {
+      let mut children = Vec::new();
+
+      // Add fields
+      for field in &record_def.fields {
+        if let Some(field_sym) = build_field_symbol(&field.def_id, output, file_id, line_index) {
+          children.push(field_sym);
+        }
+      }
+
+      // Add instance methods
+      for (_, entry) in &record_def.instance_methods {
+        for method_def_id in symbol_entry_to_def_ids(entry) {
+          if let Some(method_sym) = build_method_symbol(&method_def_id, output, file_id, line_index) {
+            children.push(method_sym);
+          }
+        }
+      }
+
+      // Add static methods
+      for (_, entry) in &record_def.static_methods {
+        for method_def_id in symbol_entry_to_def_ids(entry) {
+          if let Some(method_sym) = build_method_symbol(&method_def_id, output, file_id, line_index) {
+            children.push(method_sym);
+          }
+        }
+      }
+
+      // Add static fields (constants)
+      for (_, const_def_id) in &record_def.static_fields {
+        if let Some(const_sym) = build_constant_symbol(const_def_id, output, file_id, line_index) {
+          children.push(const_sym);
+        }
+      }
+
+      if children.is_empty() { None } else { Some(children) }
+    },
+
+    DefinitionKind::Enum(enum_def) => {
+      let mut children = Vec::new();
+
+      // Add variants
+      for variant in &enum_def.variants {
+        if let Some(variant_sym) = build_variant_symbol(&variant.def_id, output, file_id, line_index) {
+          children.push(variant_sym);
+        }
+      }
+
+      // Add static methods
+      for (_, entry) in &enum_def.static_methods {
+        for method_def_id in symbol_entry_to_def_ids(entry) {
+          if let Some(method_sym) = build_method_symbol(&method_def_id, output, file_id, line_index) {
+            children.push(method_sym);
+          }
+        }
+      }
+
+      // Add static fields (constants)
+      for (_, const_def_id) in &enum_def.static_fields {
+        if let Some(const_sym) = build_constant_symbol(const_def_id, output, file_id, line_index) {
+          children.push(const_sym);
+        }
+      }
+
+      if children.is_empty() { None } else { Some(children) }
+    },
+
+    _ => None,
+  };
+
+  Some(DocumentSymbol {
+    name,
+    detail: None,
+    kind,
+    tags: None,
+    deprecated: None,
+    range,
+    selection_range,
+    children,
+  })
+}
+
+/// Build a DocumentSymbol for a field.
+#[allow(deprecated)]
+fn build_field_symbol(
+  def_id: &ignis_type::definition::DefinitionId,
+  output: &ignis_driver::AnalyzeProjectOutput,
+  file_id: &ignis_type::file::FileId,
+  line_index: &crate::convert::LineIndex,
+) -> Option<DocumentSymbol> {
+  let def = output.defs.get(def_id);
+
+  // Only include symbols from the current file
+  if def.span.file != *file_id {
+    return None;
+  }
+
+  let name = output.symbol_names.get(&def.name)?.clone();
+  let range = line_index.span_to_range(&def.span);
+  let selection_range = line_index.span_to_range(&def.name_span);
+
+  Some(DocumentSymbol {
+    name,
+    detail: None,
+    kind: SymbolKind::FIELD,
+    tags: None,
+    deprecated: None,
+    range,
+    selection_range,
+    children: None,
+  })
+}
+
+/// Build a DocumentSymbol for a method.
+#[allow(deprecated)]
+fn build_method_symbol(
+  def_id: &ignis_type::definition::DefinitionId,
+  output: &ignis_driver::AnalyzeProjectOutput,
+  file_id: &ignis_type::file::FileId,
+  line_index: &crate::convert::LineIndex,
+) -> Option<DocumentSymbol> {
+  let def = output.defs.get(def_id);
+
+  // Only include symbols from the current file
+  if def.span.file != *file_id {
+    return None;
+  }
+
+  let name = output.symbol_names.get(&def.name)?.clone();
+  let range = line_index.span_to_range(&def.span);
+  let selection_range = line_index.span_to_range(&def.name_span);
+
+  Some(DocumentSymbol {
+    name,
+    detail: None,
+    kind: SymbolKind::METHOD,
+    tags: None,
+    deprecated: None,
+    range,
+    selection_range,
+    children: None,
+  })
+}
+
+/// Build a DocumentSymbol for an enum variant.
+#[allow(deprecated)]
+fn build_variant_symbol(
+  def_id: &ignis_type::definition::DefinitionId,
+  output: &ignis_driver::AnalyzeProjectOutput,
+  file_id: &ignis_type::file::FileId,
+  line_index: &crate::convert::LineIndex,
+) -> Option<DocumentSymbol> {
+  let def = output.defs.get(def_id);
+
+  // Only include symbols from the current file
+  if def.span.file != *file_id {
+    return None;
+  }
+
+  let name = output.symbol_names.get(&def.name)?.clone();
+  let range = line_index.span_to_range(&def.span);
+  let selection_range = line_index.span_to_range(&def.name_span);
+
+  Some(DocumentSymbol {
+    name,
+    detail: None,
+    kind: SymbolKind::ENUM_MEMBER,
+    tags: None,
+    deprecated: None,
+    range,
+    selection_range,
+    children: None,
+  })
+}
+
+/// Build a DocumentSymbol for a constant (static field).
+#[allow(deprecated)]
+fn build_constant_symbol(
+  def_id: &ignis_type::definition::DefinitionId,
+  output: &ignis_driver::AnalyzeProjectOutput,
+  file_id: &ignis_type::file::FileId,
+  line_index: &crate::convert::LineIndex,
+) -> Option<DocumentSymbol> {
+  let def = output.defs.get(def_id);
+
+  // Only include symbols from the current file
+  if def.span.file != *file_id {
+    return None;
+  }
+
+  let name = output.symbol_names.get(&def.name)?.clone();
+  let range = line_index.span_to_range(&def.span);
+  let selection_range = line_index.span_to_range(&def.name_span);
+
+  Some(DocumentSymbol {
+    name,
+    detail: None,
+    kind: SymbolKind::CONSTANT,
+    tags: None,
+    deprecated: None,
+    range,
+    selection_range,
+    children: None,
+  })
+}
+
+/// Convert a SymbolEntry to a list of DefinitionIds.
+fn symbol_entry_to_def_ids(entry: &ignis_type::definition::SymbolEntry) -> Vec<ignis_type::definition::DefinitionId> {
+  match entry {
+    ignis_type::definition::SymbolEntry::Single(id) => vec![*id],
+    ignis_type::definition::SymbolEntry::Overload(ids) => ids.clone(),
+  }
+}
+
+/// Convert DefinitionKind to LSP SymbolKind for document symbols.
+fn definition_to_doc_symbol_kind(kind: &ignis_type::definition::DefinitionKind) -> Option<SymbolKind> {
+  use ignis_type::definition::DefinitionKind;
+
+  match kind {
+    DefinitionKind::Function(_) => Some(SymbolKind::FUNCTION),
+    DefinitionKind::Method(_) => Some(SymbolKind::METHOD),
+    DefinitionKind::Record(_) => Some(SymbolKind::STRUCT),
+    DefinitionKind::Enum(_) => Some(SymbolKind::ENUM),
+    DefinitionKind::Namespace(_) => Some(SymbolKind::NAMESPACE),
+    DefinitionKind::TypeAlias(_) => Some(SymbolKind::INTERFACE),
+    DefinitionKind::Constant(_) => Some(SymbolKind::CONSTANT),
+    DefinitionKind::Field(_) => Some(SymbolKind::FIELD),
+    DefinitionKind::Variant(_) => Some(SymbolKind::ENUM_MEMBER),
+    // These don't appear in document outline
+    DefinitionKind::Variable(_)
+    | DefinitionKind::Parameter(_)
+    | DefinitionKind::TypeParam(_)
+    | DefinitionKind::Placeholder => None,
   }
 }
 
@@ -1041,4 +1984,43 @@ fn format_type_params(
     .collect();
 
   format!("<{}>", names.join(", "))
+}
+
+/// Match score for workspace symbol search.
+/// Returns 0 for starts_with, 1 for contains, None for no match.
+fn match_score(
+  name: &str,
+  query: &str,
+) -> Option<u8> {
+  if query.is_empty() {
+    return Some(10);
+  }
+
+  let name_lower = name.to_lowercase();
+  let query_lower = query.to_lowercase();
+
+  if name_lower.starts_with(&query_lower) {
+    Some(0)
+  } else if name_lower.contains(&query_lower) {
+    Some(1)
+  } else {
+    None
+  }
+}
+
+/// Convert DefinitionKind to LSP SymbolKind.
+/// Returns None for definitions that shouldn't appear in workspace symbol search.
+fn definition_to_symbol_kind(kind: &ignis_type::definition::DefinitionKind) -> Option<SymbolKind> {
+  use ignis_type::definition::DefinitionKind;
+
+  match kind {
+    DefinitionKind::Function(_) => Some(SymbolKind::FUNCTION),
+    DefinitionKind::Method(_) => Some(SymbolKind::METHOD),
+    DefinitionKind::Record(_) => Some(SymbolKind::STRUCT),
+    DefinitionKind::Enum(_) => Some(SymbolKind::ENUM),
+    DefinitionKind::Namespace(_) => Some(SymbolKind::NAMESPACE),
+    DefinitionKind::TypeAlias(_) => Some(SymbolKind::INTERFACE),
+    DefinitionKind::Constant(_) => Some(SymbolKind::CONSTANT),
+    _ => None,
+  }
 }
