@@ -5,6 +5,12 @@ use crate::{BytePosition, Id, Store, span::Span};
 
 pub type FileId = Id<SourceFile>;
 
+impl FileId {
+  /// Sentinel FileId for compiler-internal synthetic definitions.
+  /// Uses u32::MAX to never collide with real file indices (which start at 0).
+  pub const SYNTHETIC: FileId = FileId::new(u32::MAX);
+}
+
 #[derive(Default, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct SourceFile {
   pub path: PathBuf,
@@ -156,7 +162,11 @@ impl SourceMap {
   }
 }
 
-fn normalize_path(mut p: PathBuf) -> PathBuf {
+/// Normalize a path for consistent comparison.
+///
+/// Attempts to canonicalize the path (resolving symlinks and making it absolute).
+/// Falls back to the original path if canonicalization fails (e.g., file doesn't exist).
+pub fn normalize_path(mut p: PathBuf) -> PathBuf {
   if let Ok(c) = p.canonicalize() {
     p = c;
   }

@@ -55,7 +55,7 @@ impl<T> Hash for Id<T> {
 }
 
 impl<T> Id<T> {
-  pub fn new(index: u32) -> Self {
+  pub const fn new(index: u32) -> Self {
     Self {
       index,
       _phantom: PhantomData,
@@ -101,18 +101,50 @@ impl<T> Store<T> {
     id
   }
 
+  /// Get a reference to the value at the given ID.
+  ///
+  /// # Panics
+  /// Panics if the ID is out of bounds. Use `try_get()` for a non-panicking version.
   pub fn get(
     &self,
     id: &Id<T>,
   ) -> &T {
-    &self.data[id.index() as usize]
+    let index = id.index() as usize;
+    assert!(
+      index < self.data.len(),
+      "Store::get() called with invalid ID: index {} but store only has {} elements",
+      index,
+      self.data.len()
+    );
+    &self.data[index]
   }
 
+  /// Try to get a reference to the value at the given ID.
+  ///
+  /// Returns `None` if the ID is out of bounds.
+  pub fn try_get(
+    &self,
+    id: &Id<T>,
+  ) -> Option<&T> {
+    self.data.get(id.index() as usize)
+  }
+
+  /// Get a mutable reference to the value at the given ID.
+  ///
+  /// # Panics
+  /// Panics if the ID is out of bounds.
   pub fn get_mut(
     &mut self,
     id: &Id<T>,
   ) -> &mut T {
-    &mut self.data[id.index() as usize]
+    let index = id.index() as usize;
+    assert!(
+      index < self.data.len(),
+      "Store::get_mut() called with invalid ID: index {} but store only has {} elements",
+      index,
+      self.data.len()
+    );
+    &mut self.data[index]
   }
 
   pub fn get_all(&self) -> &[T] {
