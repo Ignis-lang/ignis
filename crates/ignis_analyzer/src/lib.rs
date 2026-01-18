@@ -99,6 +99,7 @@ pub struct Analyzer<'a> {
   diagnostics: Vec<Diagnostic>,
   export_table: ExportTable,
   module_for_path: HashMap<String, ModuleId>,
+  path_to_file: HashMap<String, ignis_type::file::FileId>,
   current_module: ModuleId,
   current_namespace: Option<NamespaceId>,
   in_callee_context: bool,
@@ -109,6 +110,7 @@ pub struct Analyzer<'a> {
   resolved_calls: HashMap<NodeId, DefinitionId>,
   runtime: Option<RuntimeBuiltins>,
   import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
+  import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
 }
 
 pub struct AnalyzerOutput {
@@ -138,6 +140,10 @@ pub struct AnalyzerOutput {
   /// Maps import item spans to their resolved definitions.
   /// Used for hover on import statements.
   pub import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
+
+  /// Maps import path string spans to the FileId of the imported module.
+  /// Used for Go to Definition on import path strings.
+  pub import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
 }
 
 impl AnalyzerOutput {
@@ -172,6 +178,7 @@ impl<'a> Analyzer<'a> {
       diagnostics: Vec::new(),
       export_table: HashMap::new(),
       module_for_path: HashMap::new(),
+      path_to_file: HashMap::new(),
       current_module,
       current_namespace: None,
       in_callee_context: false,
@@ -182,6 +189,7 @@ impl<'a> Analyzer<'a> {
       resolved_calls: HashMap::new(),
       runtime: None,
       import_item_defs: HashMap::new(),
+      import_module_files: HashMap::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
     analyzer
@@ -232,6 +240,7 @@ impl<'a> Analyzer<'a> {
       node_spans,
       resolved_calls: analyzer.resolved_calls,
       import_item_defs: analyzer.import_item_defs,
+      import_module_files: analyzer.import_module_files,
     }
   }
 
@@ -242,6 +251,7 @@ impl<'a> Analyzer<'a> {
     symbols: Rc<RefCell<SymbolTable>>,
     export_table: &ExportTable,
     module_for_path: &HashMap<String, ModuleId>,
+    path_to_file: &HashMap<String, ignis_type::file::FileId>,
     shared_types: &mut TypeStore,
     shared_defs: &mut DefinitionStore,
     shared_namespaces: &mut NamespaceStore,
@@ -261,6 +271,7 @@ impl<'a> Analyzer<'a> {
       diagnostics: Vec::new(),
       export_table: export_table.clone(),
       module_for_path: module_for_path.clone(),
+      path_to_file: path_to_file.clone(),
       current_module,
       current_namespace: None,
       in_callee_context: false,
@@ -271,6 +282,7 @@ impl<'a> Analyzer<'a> {
       resolved_calls: HashMap::new(),
       runtime: None,
       import_item_defs: HashMap::new(),
+      import_module_files: HashMap::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
 
@@ -301,6 +313,7 @@ impl<'a> Analyzer<'a> {
       node_spans,
       resolved_calls: analyzer.resolved_calls,
       import_item_defs: analyzer.import_item_defs,
+      import_module_files: analyzer.import_module_files,
     }
   }
 

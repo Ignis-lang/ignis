@@ -44,6 +44,7 @@ impl<'a> Analyzer<'a> {
       let import_path = import.from.clone();
       let items = import.items.clone();
       let span = import.span.clone();
+      let from_span = import.from_span.clone();
 
       let source_module = match module_for_path.get(&import_path) {
         Some(id) => *id,
@@ -58,6 +59,11 @@ impl<'a> Analyzer<'a> {
           return;
         },
       };
+
+      // Map the import path string span to the file of the imported module
+      if let Some(file_id) = self.path_to_file.get(&import_path) {
+        self.import_module_files.insert(from_span, file_id.clone());
+      }
 
       let export_data = match export_table.get(&source_module) {
         Some(e) => e,

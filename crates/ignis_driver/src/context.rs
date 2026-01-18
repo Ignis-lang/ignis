@@ -592,6 +592,17 @@ impl CompilationContext {
     let mut root_node_spans = HashMap::new();
     let mut root_resolved_calls = HashMap::new();
     let mut root_import_item_defs = HashMap::new();
+    let mut root_import_module_files = HashMap::new();
+
+    // Build path_to_file mapping for import path resolution
+    let path_to_file: HashMap<String, ignis_type::file::FileId> = self
+      .module_for_path
+      .iter()
+      .filter_map(|(path, module_id)| {
+        let module = self.module_graph.modules.get(module_id);
+        Some((path.clone(), module.file_id.clone()))
+      })
+      .collect();
 
     // The root module is the last one in topological order
     let root_module_id = self.module_graph.root;
@@ -614,6 +625,7 @@ impl CompilationContext {
         self.symbol_table.clone(),
         &export_table,
         &self.module_for_path,
+        &path_to_file,
         &mut shared_types,
         &mut shared_defs,
         &mut shared_namespaces,
@@ -654,6 +666,7 @@ impl CompilationContext {
         root_node_spans = output.node_spans;
         root_resolved_calls = output.resolved_calls;
         root_import_item_defs = output.import_item_defs;
+        root_import_module_files = output.import_module_files;
       }
 
       export_table.insert(module_id, exports);
@@ -671,6 +684,7 @@ impl CompilationContext {
       node_spans: root_node_spans,
       resolved_calls: root_resolved_calls,
       import_item_defs: root_import_item_defs,
+      import_module_files: root_import_module_files,
     };
 
     (output, has_errors)

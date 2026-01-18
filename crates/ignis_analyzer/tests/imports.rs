@@ -42,6 +42,7 @@ fn analyze_with_imports(
     symbols,
     export_table,
     module_for_path,
+    &HashMap::new(), // path_to_file - not needed for these tests
     shared_types,
     shared_defs,
     shared_namespaces,
@@ -72,7 +73,8 @@ fn analyze_library_with_shared_stores(
     &roots,
     symbols,
     &HashMap::new(), // No imports for library
-    &HashMap::new(),
+    &HashMap::new(), // module_for_path
+    &HashMap::new(), // path_to_file
     shared_types,
     shared_defs,
     shared_namespaces,
