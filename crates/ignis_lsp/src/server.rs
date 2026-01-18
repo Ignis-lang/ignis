@@ -1,6 +1,7 @@
 //! LSP server implementation.
 
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use ignis_driver::AnalyzeProjectOutput;
@@ -58,16 +59,25 @@ impl Server {
     // Clone config for use in sync block
     let config = (*self.state.config).clone();
 
-    // Run project-level analysis with in-memory text.
-    let output = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text)));
+    // Run project-level analysis with in-memory text, catching panics
+    let analysis_result = catch_unwind(AssertUnwindSafe(|| {
+      ignis_driver::analyze_project_with_text(&config, &path_str, Some(text))
+    }));
 
-    log(&format!(
-      "[analyze_and_publish] stage={:?}, node_types={}, defs={}, errors={}",
-      output.stage,
-      output.node_types.len(),
-      output.defs.iter().count(),
-      output.diagnostics.len()
-    ));
+    let output = match analysis_result {
+      Ok(o) => Arc::new(o),
+      Err(panic_info) => {
+        let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+          s.to_string()
+        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+          s.clone()
+        } else {
+          "unknown panic".to_string()
+        };
+        log(&format!("[analyze] PANIC: {} in {}", panic_msg, path_str));
+        return;
+      },
+    };
 
     // Cache the analysis result for future requests
     {
@@ -220,8 +230,14 @@ impl LanguageServer for Server {
     &self,
     params: InitializeParams,
   ) -> Result<InitializeResult> {
+    log("[initialize] Server starting...");
+    if let Some(client_info) = &params.client_info {
+      log(&format!("[initialize] Client: {} {:?}", client_info.name, client_info.version));
+    }
+
     // Store workspace root
     if let Some(root_uri) = params.root_uri {
+      log(&format!("[initialize] Root URI: {}", root_uri));
       if let Ok(path) = root_uri.to_file_path() {
         self.state.set_root(Some(path)).await;
       }
@@ -258,7 +274,12 @@ impl LanguageServer for Server {
         workspace_symbol_provider: Some(OneOf::Left(true)),
 
         // Document symbols (outline view, breadcrumbs)
-        document_symbol_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Right(DocumentSymbolOptions {
+          label: Some("Ignis Outline".to_string()),
+          work_done_progress_options: WorkDoneProgressOptions {
+            work_done_progress: Some(false),
+          },
+        })),
 
         // Find all references
         references_provider: Some(OneOf::Left(true)),
@@ -390,6 +411,7 @@ impl LanguageServer for Server {
     params: GotoDefinitionParams,
   ) -> Result<Option<GotoDefinitionResponse>> {
     let uri = &params.text_document_position_params.text_document.uri;
+    log(&format!("[goto_definition] Request for {}", uri));
     let position = params.text_document_position_params.position;
 
     // Get cached analysis or run new analysis
@@ -520,6 +542,7 @@ impl LanguageServer for Server {
     params: HoverParams,
   ) -> Result<Option<Hover>> {
     let uri = &params.text_document_position_params.text_document.uri;
+    log(&format!("[hover] Request for {}", uri));
     let position = params.text_document_position_params.position;
 
     // Get cached analysis or run new analysis
@@ -887,8 +910,10 @@ impl LanguageServer for Server {
     use ignis_type::namespace::NamespaceId;
 
     let uri = &params.text_document.uri;
+    log(&format!("[document_symbol] Request for URI: {}", uri));
 
     let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      log("[document_symbol] No analysis available");
       return Ok(None);
     };
 
@@ -896,6 +921,7 @@ impl LanguageServer for Server {
       let guard = self.state.open_files.read().await;
 
       let Some(doc) = guard.get(uri) else {
+        log("[document_symbol] Document not found in open_files");
         return Ok(None);
       };
 
@@ -903,8 +929,11 @@ impl LanguageServer for Server {
     };
 
     let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      log(&format!("[document_symbol] Could not resolve path to FileId: {}", path_str));
       return Ok(None);
     };
+
+    log(&format!("[document_symbol] FileId: {:?}", file_id));
 
     // Build mapping: NamespaceId -> DefinitionId (for namespace definitions in this file)
     let mut ns_to_def: HashMap<NamespaceId, ignis_type::definition::DefinitionId> = HashMap::new();
@@ -947,6 +976,10 @@ impl LanguageServer for Server {
 
     // Build document symbols recursively
     let top_level_defs = defs_by_namespace.remove(&None).unwrap_or_default();
+    log(&format!(
+      "[document_symbol] Found {} top-level definitions",
+      top_level_defs.len()
+    ));
     let mut visited_namespaces = HashSet::new();
 
     let symbols: Vec<DocumentSymbol> = top_level_defs
@@ -964,6 +997,7 @@ impl LanguageServer for Server {
       })
       .collect();
 
+    log(&format!("[document_symbol] Returning {} top-level symbols", symbols.len()));
     Ok(Some(DocumentSymbolResponse::Nested(symbols)))
   }
 
@@ -1155,13 +1189,8 @@ impl LanguageServer for Server {
       )
     };
 
-    // Convert position to byte offset
-    let cursor_offset = line_index.offset(position);
-
-    if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
-      eprintln!("[LSP] Completion requested at {:?} (offset {})", position, cursor_offset);
-      log(&format!("[LSP] Document path: {}", path_str));
-    }
+    // Convert position to byte offset, clamped to text length
+    let cursor_offset = line_index.offset(position).min(text.len() as u32);
 
     // Get or compute tokens
     let tokens = {
@@ -1170,6 +1199,11 @@ impl LanguageServer for Server {
       let Some(doc) = guard.get_mut(uri) else {
         return Ok(None);
       };
+
+      // Check for version mismatch (race condition between did_change and completion)
+      if doc.version != version {
+        return Ok(None);
+      }
 
       // Get file_id for token computation
       let config = (*self.state.config).clone();
@@ -1182,37 +1216,10 @@ impl LanguageServer for Server {
       doc.get_or_compute_tokens(&file_id).to_vec()
     };
 
-    // Detect completion context
-    let Some(context) = detect_context(&tokens, cursor_offset, &text) else {
-      if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
-        log(&format!("[LSP] No completion context detected"));
-      }
-      return Ok(None);
-    };
-
-    if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
-      log(&format!("[LSP] Detected context: {:?}", context));
-    }
-
     // Get analysis for completions (use cache if available, fallback to last good)
     let output = {
       let guard = self.state.open_files.read().await;
-
-      let result = guard.get(uri).and_then(|doc| doc.get_completion_analysis());
-
-      if let Some(ref o) = result {
-        log(&format!(
-          "[LSP] Got cached analysis: stage={:?}, node_types={}, node_spans={}, defs={}",
-          o.stage,
-          o.node_types.len(),
-          o.node_spans.len(),
-          o.defs.iter().count()
-        ));
-      } else {
-        log(&format!("[LSP] No cached analysis, will run fresh"));
-      }
-
-      result
+      guard.get(uri).and_then(|doc| doc.get_completion_analysis())
     };
 
     // If no cached analysis, run a fresh one
@@ -1221,13 +1228,6 @@ impl LanguageServer for Server {
       None => {
         let config = (*self.state.config).clone();
         let fresh = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text.clone())));
-
-        log(&format!(
-          "[LSP] Fresh analysis: stage={:?}, node_types={}, defs={}",
-          fresh.stage,
-          fresh.node_types.len(),
-          fresh.defs.iter().count()
-        ));
 
         // Cache it
         {
@@ -1245,44 +1245,57 @@ impl LanguageServer for Server {
 
     // Get file_id for completion
     let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
-      if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
-        eprintln!(
-          "[LSP] ERROR: Could not resolve path '{}' to FileId in analysis output",
-          path_str
-        );
+      return Ok(None);
+    };
+
+    // Clone config for use in sync closure
+    let config = (*self.state.config).clone();
+
+    // Wrap sync computation in catch_unwind to prevent panics from killing the server
+    let uri_str = uri.to_string();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+      let Some(context) = detect_context(&tokens, cursor_offset, &text) else {
+        return None;
+      };
+
+      let candidates = match &context {
+        CompletionContext::AfterDot { dot_offset, prefix } => {
+          complete_dot(*dot_offset, prefix, &output, &file_id, &tokens, &text)
+        },
+        CompletionContext::AfterDoubleColon {
+          path_segments, prefix, ..
+        } => complete_double_colon(path_segments, prefix, &output, &file_id),
+        CompletionContext::Identifier { prefix, start_offset } => {
+          complete_identifier(prefix, *start_offset, &tokens, Some(&output), &file_id)
+        },
+        CompletionContext::ImportPath { prefix } => complete_import_path(prefix, &config),
+      };
+
+      if candidates.is_empty() {
+        return None;
       }
-      return Ok(None);
-    };
 
-    if std::env::var("IGNIS_LSP_DEBUG").is_ok() {
-      log(&format!("[LSP] Resolved file_id: {:?}", file_id));
-      let same_file_defs_count = output.defs.iter().filter(|(_, d)| d.span.file == file_id).count();
-      log(&format!("[LSP] Definitions in this file: {}", same_file_defs_count));
-    }
+      Some(to_completion_items(candidates))
+    }));
 
-    // Generate candidates based on context
-    let candidates = match context {
-      CompletionContext::AfterDot { dot_offset, prefix } => {
-        complete_dot(dot_offset, &prefix, &output, &file_id, &tokens, &text)
+    match result {
+      Ok(Some(items)) => Ok(Some(CompletionResponse::Array(items))),
+      Ok(None) => Ok(None),
+      Err(panic_info) => {
+        let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+          s.to_string()
+        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+          s.clone()
+        } else {
+          "unknown panic".to_string()
+        };
+        log(&format!(
+          "[completion] PANIC: {} | uri={} pos={:?}",
+          panic_msg, uri_str, position
+        ));
+        Ok(None)
       },
-
-      CompletionContext::AfterDoubleColon {
-        path_segments, prefix, ..
-      } => complete_double_colon(&path_segments, &prefix, &output, &file_id),
-
-      CompletionContext::Identifier { prefix, start_offset } => {
-        complete_identifier(&prefix, start_offset, &tokens, Some(&output), &file_id)
-      },
-
-      CompletionContext::ImportPath { prefix } => complete_import_path(&prefix),
-    };
-
-    if candidates.is_empty() {
-      return Ok(None);
     }
-
-    let items = to_completion_items(candidates);
-    Ok(Some(CompletionResponse::Array(items)))
   }
 }
 

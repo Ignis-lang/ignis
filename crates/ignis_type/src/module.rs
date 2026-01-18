@@ -32,6 +32,10 @@ impl ModulePath {
   ) -> Result<Self, ModulePathError> {
     // 1. Standard library
     if let Some(module_name) = import_from.strip_prefix("std::") {
+      // Reject empty module name (e.g., "std::" without a module name)
+      if module_name.is_empty() {
+        return Err(ModulePathError::EmptyStdModuleName);
+      }
       return Ok(ModulePath::Std(module_name.to_string()));
     }
 
@@ -144,6 +148,8 @@ impl ModulePath {
 pub enum ModulePathError {
   InvalidCurrentFile,
   NoProjectRoot(String),
+  /// Empty std module name (e.g., "std::" without a module name)
+  EmptyStdModuleName,
 }
 
 /// Information about a single import statement

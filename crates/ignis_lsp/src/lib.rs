@@ -26,6 +26,7 @@ use std::sync::Arc;
 use ignis_config::IgnisConfig;
 use tower_lsp::{LspService, Server as TowerServer};
 
+use completion::log;
 use server::Server;
 use state::LspState;
 
@@ -50,6 +51,30 @@ use state::LspState;
 /// rt.block_on(ignis_lsp::run(config));
 /// ```
 pub async fn run(config: Arc<IgnisConfig>) {
+  // Install panic hook to log all panics before they kill the server
+  std::panic::set_hook(Box::new(|panic_info| {
+    let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+      s.to_string()
+    } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+      s.clone()
+    } else {
+      "unknown panic".to_string()
+    };
+
+    let location = panic_info
+      .location()
+      .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+      .unwrap_or_else(|| "unknown location".to_string());
+
+    let log_msg = format!("[PANIC] {} at {}", msg, location);
+
+    // Log to file
+    log(&log_msg);
+
+    // Also log to stderr for immediate visibility
+    eprintln!("{}", log_msg);
+  }));
+
   let stdin = tokio::io::stdin();
   let stdout = tokio::io::stdout();
 

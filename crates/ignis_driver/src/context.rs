@@ -149,12 +149,18 @@ impl CompilationContext {
 
     log_dbg!(config, "discovering module {:?}", module_path);
 
-    self
-      .module_for_path
-      .insert(path.to_string(), ModuleId::new(self.module_graph.modules.iter().count() as u32));
+    // Placeholder to prevent infinite recursion on cyclic imports
+    let placeholder_id = ModuleId::new(self.module_graph.modules.iter().count() as u32);
+    self.module_for_path.insert(path.to_string(), placeholder_id);
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
-    let parsed = self.parse_file(&fs_path, config)?;
+    let parsed = match self.parse_file(&fs_path, config) {
+      Ok(p) => p,
+      Err(()) => {
+        self.module_for_path.remove(path);
+        return Err(());
+      },
+    };
     let file_id = parsed.file_id;
     let import_paths = parsed.import_paths.clone();
 
@@ -301,17 +307,16 @@ impl CompilationContext {
 
     log_dbg!(config, "discovering module {:?} (LSP mode)", module_path);
 
-    self
-      .module_for_path
-      .insert(path.to_string(), ModuleId::new(self.module_graph.modules.iter().count() as u32));
+    // Placeholder to prevent infinite recursion on cyclic imports
+    let placeholder_id = ModuleId::new(self.module_graph.modules.iter().count() as u32);
+    self.module_for_path.insert(path.to_string(), placeholder_id);
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
 
-    // Parse file, collecting diagnostics instead of rendering
     let parsed = match self.parse_file_lsp(&fs_path, config) {
       Ok(p) => p,
       Err(()) => {
-        // File couldn't be read - already logged
+        self.module_for_path.remove(path);
         return Err(());
       },
     };

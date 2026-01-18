@@ -6,15 +6,18 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-/// Log to /tmp/ignis_lsp.log for debugging
+/// Log to ignis_lsp.log for debugging
 pub fn log(msg: &str) {
-  if let Ok(mut f) = std::fs::OpenOptions::new()
-    .create(true)
-    .append(true)
-    .open("/tmp/ignis_lsp.log")
-  {
-    let _ = writeln!(f, "{}", msg);
-  }
+  let _ = std::panic::catch_unwind(|| {
+    eprintln!("[IgnisLSP] {}", msg);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+      .create(true)
+      .append(true)
+      .open("ignis_lsp.log")
+    {
+      let _ = writeln!(f, "{}", msg);
+    }
+  });
 }
 
 use ignis_driver::AnalyzeProjectOutput;
@@ -135,6 +138,11 @@ pub fn detect_context(
     return Some(ctx);
   }
 
+  // Fallback: detect import context from raw text (robust against lexer failures)
+  if let Some(ctx) = detect_import_path_fallback(source_text, cursor_offset) {
+    return Some(ctx);
+  }
+
   // Find tokens near cursor
   let (prev_token, current_token) = find_adjacent_tokens(&meaningful, cursor_offset);
 
@@ -197,34 +205,76 @@ pub fn detect_context(
   Some(CompletionContext::Identifier { prefix, start_offset })
 }
 
+/// Fallback import path detection using raw text.
+/// Handles unclosed quotes or desynchronized tokens by searching for `from "` or `import "`.
+fn detect_import_path_fallback(
+  text: &str,
+  cursor_offset: u32,
+) -> Option<CompletionContext> {
+  let cursor = (cursor_offset as usize).min(text.len());
+  let pre_cursor = text.get(..cursor)?;
+
+  // Limit search window to avoid scanning large files
+  let window_start = pre_cursor.len().saturating_sub(200);
+  let window_start = (window_start..)
+    .take(4)
+    .find(|&i| text.is_char_boundary(i))
+    .unwrap_or(pre_cursor.len());
+
+  let window = pre_cursor.get(window_start..)?;
+
+  for pattern in ["from \"", "import \""] {
+    if let Some(idx) = window.rfind(pattern) {
+      let content = window.get(idx + pattern.len()..)?;
+      if content.contains('\n') {
+        return None;
+      }
+      return Some(CompletionContext::ImportPath {
+        prefix: content.to_string(),
+      });
+    }
+  }
+
+  None
+}
+
 /// Detect if cursor is inside an import path string.
+/// Clamps offsets to handle editor/server position mismatches.
 fn detect_import_path_context(
   tokens: &[&Token],
   cursor_offset: u32,
   source_text: &str,
 ) -> Option<CompletionContext> {
-  // Look for pattern: `from` followed by string containing cursor
-  for (i, tok) in tokens.iter().enumerate() {
-    if tok.type_ == TokenType::From {
-      // Look for string token after `from`
-      if let Some(string_tok) = tokens.get(i + 1) {
-        if string_tok.type_ == TokenType::String
-          && string_tok.span.start.0 <= cursor_offset
-          && cursor_offset <= string_tok.span.end.0
-        {
-          // Extract the prefix (content inside string up to cursor)
-          let string_start = string_tok.span.start.0 as usize + 1; // Skip opening quote
-          let cursor_pos = cursor_offset as usize;
+  let text_len = source_text.len();
 
-          if cursor_pos > string_start {
-            let prefix = source_text.get(string_start..cursor_pos).unwrap_or("").to_string();
-            return Some(CompletionContext::ImportPath { prefix });
-          } else {
-            return Some(CompletionContext::ImportPath { prefix: String::new() });
-          }
-        }
-      }
+  for (i, tok) in tokens.iter().enumerate() {
+    if tok.type_ != TokenType::From {
+      continue;
     }
+
+    let Some(string_tok) = tokens.get(i + 1) else { continue };
+    if string_tok.type_ != TokenType::String {
+      continue;
+    }
+
+    let token_start = (string_tok.span.start.0 as usize).min(text_len);
+    let token_end = (string_tok.span.end.0 as usize).min(text_len);
+    let cursor = (cursor_offset as usize).min(text_len);
+
+    if cursor < token_start || cursor > token_end {
+      continue;
+    }
+
+    // Skip opening quote
+    let content_start = (token_start + 1).min(token_end);
+    let clamped_cursor = cursor.clamp(content_start, token_end);
+
+    // Snap to valid UTF-8 boundaries
+    let content_start = find_char_boundary(source_text, content_start);
+    let clamped_cursor = find_char_boundary(source_text, clamped_cursor);
+
+    let prefix = source_text.get(content_start..clamped_cursor).unwrap_or("").to_string();
+    return Some(CompletionContext::ImportPath { prefix });
   }
 
   None
@@ -320,15 +370,6 @@ pub fn complete_dot(
 ) -> Vec<CompletionCandidate> {
   let mut candidates = Vec::new();
 
-  log(&format!(
-    "[complete_dot] dot_offset={}, file_id={:?}, node_spans={}, node_types={}, tokens={}",
-    dot_offset,
-    file_id,
-    output.node_spans.len(),
-    output.node_types.len(),
-    tokens.len()
-  ));
-
   // Try token-based lookup first (more reliable when code has been edited)
   // This looks up the identifier before the dot by name, not position
   let type_id = if !tokens.is_empty() {
@@ -338,18 +379,11 @@ pub fn complete_dot(
   };
 
   // Fall back to span-based lookup if token-based didn't work
-  let type_id = type_id.or_else(|| {
-    log(&format!("[complete_dot] Token lookup failed, trying span-based"));
-    find_receiver_type_by_span(dot_offset, output, file_id)
-  });
+  let type_id = type_id.or_else(|| find_receiver_type_by_span(dot_offset, output, file_id));
 
   let Some(type_id) = type_id else {
-    log(&format!("[complete_dot] Could not determine receiver type"));
     return candidates;
   };
-
-  let ty = output.types.get(&type_id);
-  log(&format!("[complete_dot] Receiver type: {:?}", ty));
 
   // Get members based on type
   add_instance_members(
@@ -372,18 +406,8 @@ fn find_receiver_type_by_span(
   file_id: &FileId,
 ) -> Option<TypeId> {
   if output.node_spans.is_empty() {
-    log(&format!("[find_by_span] node_spans is empty"));
     return None;
   }
-
-  // Count node_spans for this file
-  let file_spans_count = output
-    .node_spans
-    .iter()
-    .filter(|(_, span)| span.file == *file_id)
-    .count();
-
-  log(&format!("[find_by_span] node_spans in this file: {}", file_spans_count));
 
   // Find receiver node: span.end <= dot_offset, pick max by (end, -span_size)
   let receiver_node = output
@@ -397,17 +421,10 @@ fn find_receiver_type_by_span(
         .then_with(|| (b.end.0 - b.start.0).cmp(&(a.end.0 - a.start.0)))
     });
 
-  let (node_id, receiver_span) = receiver_node?;
-
-  eprintln!(
-    "[find_by_span] Found receiver node {:?} at [{}, {}]",
-    node_id, receiver_span.start.0, receiver_span.end.0
-  );
+  let (node_id, _receiver_span) = receiver_node?;
 
   // Get type of receiver
   let type_id = output.node_types.get(node_id)?;
-
-  log(&format!("[find_by_span] Receiver node has type {:?}", type_id));
 
   Some(type_id.clone())
 }
@@ -425,60 +442,21 @@ fn find_receiver_type_by_token(
     .filter(|t| t.type_ == TokenType::Identifier && t.span.end.0 <= dot_offset)
     .max_by_key(|t| t.span.end.0)?;
 
-  eprintln!(
-    "[find_by_token] Closest identifier: '{}' ends at {}, dot at {}",
-    receiver_token.lexeme, receiver_token.span.end.0, dot_offset
-  );
-
   // Check that the token ends right at the dot position
   if receiver_token.span.end.0 != dot_offset {
-    log(&format!("[find_by_token] Token doesn't end at dot position"));
     return None;
   }
 
   let var_name = &receiver_token.lexeme;
-  log(&format!("[find_by_token] Looking up variable '{}'", var_name));
 
   // Find the symbol ID for this name
   let symbol_id = output
     .symbol_names
     .iter()
     .find(|(_, name)| *name == var_name)
-    .map(|(id, _)| *id);
+    .map(|(id, _)| *id)?;
 
-  let Some(symbol_id) = symbol_id else {
-    log(&format!("[find_by_token] Symbol '{}' not found in symbol_names", var_name));
-    return None;
-  };
-
-  log(&format!("[find_by_token] Found symbol_id {:?} for '{}'", symbol_id, var_name));
-
-  // Look for a variable definition with this name
-  // First, let's see all definitions with this symbol_id
-  let matching_defs: Vec<_> = output.defs.iter().filter(|(_, def)| def.name == symbol_id).collect();
-
-  log(&format!(
-    "[find_by_token] Found {} defs with symbol_id {:?}",
-    matching_defs.len(),
-    symbol_id
-  ));
-
-  for (_def_id, def) in &matching_defs {
-    let kind_str = match &def.kind {
-      DefinitionKind::Variable(_) => "Variable",
-      DefinitionKind::Parameter(_) => "Parameter",
-      DefinitionKind::Function(_) => "Function",
-      DefinitionKind::Record(_) => "Record",
-      DefinitionKind::Method(_) => "Method",
-      _ => "Other",
-    };
-    log(&format!(
-      "[find_by_token]   def kind={}, file={:?} (looking for {:?})",
-      kind_str, def.span.file, file_id
-    ));
-  }
-
-  // Now find variable/parameter in current file
+  // Find variable/parameter in current file
   for (_def_id, def) in output.defs.iter() {
     if def.name != symbol_id {
       continue;
@@ -490,27 +468,14 @@ fn find_receiver_type_by_token(
 
     match &def.kind {
       DefinitionKind::Variable(var_def) => {
-        log(&format!(
-          "[find_by_token] Found variable '{}' with type {:?}",
-          var_name, var_def.type_id
-        ));
         return Some(var_def.type_id.clone());
       },
       DefinitionKind::Parameter(param_def) => {
-        log(&format!(
-          "[find_by_token] Found parameter '{}' with type {:?}",
-          var_name, param_def.type_id
-        ));
         return Some(param_def.type_id.clone());
       },
       _ => continue,
     }
   }
-
-  log(&format!(
-    "[find_by_token] No variable/parameter found for '{}' in file {:?}",
-    var_name, file_id
-  ));
 
   None
 }
@@ -613,42 +578,19 @@ pub fn complete_double_colon(
   output: &AnalyzeProjectOutput,
   file_id: &FileId,
 ) -> Vec<CompletionCandidate> {
-  let debug = std::env::var("IGNIS_LSP_DEBUG").is_ok();
   let mut candidates = Vec::new();
 
-  if debug {
-    eprintln!(
-      "[LSP complete_double_colon] path_segments={:?}, prefix={:?}",
-      path_segments, prefix
-    );
-  }
-
   if path_segments.is_empty() {
-    if debug {
-      log(&format!("[LSP complete_double_colon] Empty path segments"));
-    }
     return candidates;
   }
 
   // Resolve the path to a definition
   let target_def_id = resolve_path_to_def(path_segments, output, file_id);
 
-  if debug {
-    log(&format!(
-      "[LSP complete_double_colon] resolve_path_to_def returned {:?}",
-      target_def_id
-    ));
-  }
-
   let Some(def_id) = target_def_id else {
     // Try resolving as namespace
     if let Some(ns_id) = resolve_path_to_namespace(path_segments, output) {
-      if debug {
-        log(&format!("[LSP complete_double_colon] Resolved as namespace {:?}", ns_id));
-      }
       add_namespace_members(&ns_id, prefix, output, file_id, &mut candidates);
-    } else if debug {
-      log(&format!("[LSP complete_double_colon] Could not resolve path"));
     }
     return candidates;
   };
@@ -834,13 +776,6 @@ pub fn complete_identifier(
     for def_id in visible_defs {
       let def = output.defs.get(&def_id);
 
-      // Filter out extern namespaces (they should only appear in path contexts)
-      if let DefinitionKind::Namespace(ns) = &def.kind {
-        if ns.is_extern {
-          continue;
-        }
-      }
-
       // Skip internal definitions
       match &def.kind {
         DefinitionKind::Variable(_)
@@ -954,7 +889,7 @@ fn add_snippet_completions(
   };
 
   // Helper to add a snippet
-  let mut add = |label: &str, detail: &str, snippet: &str| {
+  let mut add = |label: &str, detail: &str, snippet: &str, priority: u8| {
     if matches_prefix(label, prefix) {
       candidates.push(CompletionCandidate {
         label: label.to_string(),
@@ -963,45 +898,86 @@ fn add_snippet_completions(
         documentation: None,
         insert_text: Some(snippet.to_string()),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
-        sort_priority: 15, // High priority (validated context)
+        sort_priority: priority,
       });
     }
   };
 
-  if is_start_of_stmt {
+  // Restrict snippet triggers to empty or exact keyword match to avoid noise
+  let is_alphabetic = prefix.chars().next().map_or(false, |c| c.is_alphabetic());
+  let exact_keyword = matches!(
+    prefix,
+    "if"
+      | "else"
+      | "while"
+      | "for"
+      | "match"
+      | "return"
+      | "let"
+      | "const"
+      | "function"
+      | "record"
+      | "enum"
+      | "namespace"
+      | "type"
+      | "import"
+      | "from"
+      | "public"
+      | "private"
+      | "static"
+      | "extern"
+      | "mut"
+  );
+  let wants_snippets = prefix.is_empty() || !is_alphabetic || exact_keyword;
+
+  // Priority 80 for snippets (lower than locals/defs/imports), 60 for literals
+  let snip_prio = 80;
+  let lit_prio = 60;
+
+  if is_start_of_stmt && wants_snippets {
     // Control flow
-    add("if", "if { ... }", "if ($1) {\n\t$0\n}");
-    add("if else", "if { ... } else { ... }", "if ($1) {\n\t$0\n} else {\n\t$0\n}");
-    add("while", "while { ... }", "while ($1) {\n\t$0\n}");
-    add("for", "for { ... }", "for (let $1 = $2; $3; $4) {\n\t$0\n}");
-    add("for of", "for { ... }", "for (let $1 of $2) {\n\t$0\n}");
-    add("match", "match { ... }", "match ($1) {\n\t$0\n}");
-    add("return", "return val", "return $0;");
+    add("if", "if { ... }", "if ($1) {\n\t$0\n}", snip_prio);
+    add(
+      "if else",
+      "if { ... } else { ... }",
+      "if ($1) {\n\t$2\n} else {\n\t$0\n}",
+      snip_prio,
+    );
+    add("while", "while { ... }", "while ($1) {\n\t$0\n}", snip_prio);
+    add("for", "for { ... }", "for (let $1 = $2; $3; $4) {\n\t$0\n}", snip_prio);
+    add("for of", "for { ... }", "for (let $1 of $2) {\n\t$0\n}", snip_prio);
+    add("match", "match { ... }", "match ($1) {\n\t$0\n}", snip_prio);
+    add("return", "return val", "return $0;", snip_prio);
 
     // Declarations
-    add("let", "let var: type = ...", "let $1: $2 = $0;");
-    add("const", "const var: type = ...", "const $1: $2 = $0;");
-    add("function", "function name(): type { ... }", "function $1($2): $3 {\n\t$0\n}");
-    add("record", "record Name { ... }", "record $1 {\n\t$0\n}");
-    add("enum", "enum Name { ... }", "enum $1 {\n\t$0\n}");
-    add("namespace", "namespace Name { ... }", "namespace $1 {\n\t$0\n}");
-    add("type", "type Alias = ...", "type $1 = $0;");
+    add("let", "let var: type = ...", "let $1: $2 = $0;", snip_prio);
+    add("const", "const var: type = ...", "const $1: $2 = $0;", snip_prio);
+    add(
+      "function",
+      "function name(): type { ... }",
+      "function $1($2): $3 {\n\t$0\n}",
+      snip_prio,
+    );
+    add("record", "record Name { ... }", "record $1 {\n\t$0\n}", snip_prio);
+    add("enum", "enum Name { ... }", "enum $1 {\n\t$0\n}", snip_prio);
+    add("namespace", "namespace Name { ... }", "namespace $1 {\n\t$0\n}", snip_prio);
+    add("type", "type Alias = ...", "type $1 = $0;", snip_prio);
 
     // Imports
-    add("import", "import ... from ...", "import $0 from \"$1\"");
-    add("from", "import ... from ...", "import $0 from \"$1\"");
+    add("import", "import ... from ...", "import $0 from \"$1\"", snip_prio);
+    add("from", "import ... from ...", "import $0 from \"$1\"", snip_prio);
 
     // Modifiers
-    add("public", "public modifier", "public ");
-    add("private", "private modifier", "private ");
-    add("static", "static modifier", "static ");
-    add("extern", "extern modifier", "extern ");
-    add("mut", "mut modifier", "mut ");
+    add("public", "public modifier", "public ", snip_prio);
+    add("private", "private modifier", "private ", snip_prio);
+    add("static", "static modifier", "static ", snip_prio);
+    add("extern", "extern modifier", "extern ", snip_prio);
+    add("mut", "mut modifier", "mut ", snip_prio);
   }
 
   // Special case: else (only valid after '}')
-  if is_after_right_brace {
-    add("else", "else { ... }", "else {\n\t$0\n}");
+  if is_after_right_brace && wants_snippets {
+    add("else", "else { ... }", "else {\n\t$0\n}", snip_prio);
   }
 
   // Keywords valid in almost any expression context
@@ -1011,10 +987,10 @@ fn add_snippet_completions(
       Some(TokenType::Colon | TokenType::Equal | TokenType::LeftParen | TokenType::Comma)
     )
   {
-    add("true", "boolean true", "true");
-    add("false", "boolean false", "false");
-    add("null", "null value", "null");
-    add("self", "self reference", "self");
+    add("true", "boolean true", "true", lit_prio);
+    add("false", "boolean false", "false", lit_prio);
+    add("null", "null value", "null", lit_prio);
+    add("self", "self reference", "self", lit_prio);
   }
 }
 
@@ -1078,12 +1054,13 @@ fn add_heuristic_locals(
   }
 }
 
-pub fn complete_import_path(prefix: &str) -> Vec<CompletionCandidate> {
+pub fn complete_import_path(
+  prefix: &str,
+  config: &ignis_config::IgnisConfig,
+) -> Vec<CompletionCandidate> {
   let mut candidates = Vec::new();
 
-  // Standard library modules
-  let std_modules = ["io", "math", "string", "mem", "collections"];
-
+  // Suggest "std::" as a root module
   if prefix.is_empty() || "std".starts_with(prefix) {
     candidates.push(CompletionCandidate {
       label: "std::".to_string(),
@@ -1096,16 +1073,19 @@ pub fn complete_import_path(prefix: &str) -> Vec<CompletionCandidate> {
     });
   }
 
-  // If prefix starts with "std::", list submodules
   if let Some(subprefix) = prefix.strip_prefix("std::") {
-    for module in &std_modules {
-      if module.starts_with(subprefix) {
+    let mut modules: Vec<_> = config.manifest.modules.keys().collect();
+    modules.sort();
+
+    for name in modules {
+      if name.starts_with(subprefix) {
         candidates.push(CompletionCandidate {
-          label: format!("std::{}", module),
+          label: format!("std::{}", name),
           kind: CompletionKind::Module,
-          detail: None,
+          detail: Some(format!("Module: {}", name)),
           documentation: None,
-          insert_text: Some(format!("std::{}", module)),
+          // Only insert the module name, not the full path (user already typed "std::")
+          insert_text: Some(name.clone()),
           insert_text_format: None,
           sort_priority: 10,
         });
@@ -1147,6 +1127,26 @@ pub fn to_completion_items(candidates: Vec<CompletionCandidate>) -> Vec<Completi
 }
 
 // --- Helper functions ---
+
+/// Advance to the next valid UTF-8 char boundary at or after `offset`.
+fn find_char_boundary(
+  text: &str,
+  offset: usize,
+) -> usize {
+  if offset >= text.len() {
+    return text.len();
+  }
+  if text.is_char_boundary(offset) {
+    return offset;
+  }
+  for i in 1..=3 {
+    let next = offset + i;
+    if next >= text.len() || text.is_char_boundary(next) {
+      return next.min(text.len());
+    }
+  }
+  text.len()
+}
 
 /// Check if a name matches the given prefix (case-insensitive).
 fn matches_prefix(
@@ -1205,7 +1205,10 @@ fn resolve_path_to_def(
       _ => continue,
     }
 
-    if !is_visible(def, current_file) {
+    // Allow extern namespaces to be resolved even if they are synthetic/hidden
+    let is_extern_ns = matches!(&def.kind, DefinitionKind::Namespace(ns) if ns.is_extern);
+
+    if !is_extern_ns && !is_visible(def, current_file) {
       continue;
     }
 
@@ -1455,32 +1458,36 @@ fn def_to_completion_info(
 ) -> (CompletionKind, Option<String>, Option<String>, Option<InsertTextFormat>) {
   match &def.kind {
     DefinitionKind::Function(func_def) => {
-      let params: Vec<String> = func_def
-        .params
-        .iter()
-        .filter_map(|p_id| {
-          let p_def = defs.get(p_id);
-          let p_name = symbol_names.get(&p_def.name)?;
+      let mut param_details = Vec::new();
+      let mut snippet_args = Vec::new();
+      let mut idx = 1;
+
+      for p_id in &func_def.params {
+        let p_def = defs.get(p_id);
+        if let Some(p_name) = symbol_names.get(&p_def.name) {
           if let DefinitionKind::Parameter(param) = &p_def.kind {
-            Some(format!(
-              "{}: {}",
-              p_name,
-              format_type_brief(types, defs, symbol_names, &param.type_id)
-            ))
-          } else {
-            None
+            let type_str = format_type_brief(types, defs, symbol_names, &param.type_id);
+            param_details.push(format!("{}: {}", p_name, type_str));
+            snippet_args.push(format!("${{{}:{}}}", idx, p_name));
+            idx += 1;
           }
-        })
-        .collect();
+        }
+      }
 
       let variadic = if func_def.is_variadic { ", ..." } else { "" };
       let ret = format_type_brief(types, defs, symbol_names, &func_def.return_type);
-      let detail = Some(format!("function({}{}): {}", params.join(", "), variadic, ret));
+      let detail = Some(format!("function({}{}): {}", param_details.join(", "), variadic, ret));
 
       let (insert_text, insert_format) = if next_is_paren {
-        (None, None)
+        (Some(name.to_string()), None)
       } else {
-        (Some(format!("{}($0)", name)), Some(InsertTextFormat::SNIPPET))
+        let args_str = snippet_args.join(", ");
+        let snippet = if snippet_args.is_empty() {
+          format!("{}()", name)
+        } else {
+          format!("{}({})", name, args_str)
+        };
+        (Some(snippet), Some(InsertTextFormat::SNIPPET))
       };
 
       (CompletionKind::Function, detail, insert_text, insert_format)
@@ -1516,7 +1523,10 @@ fn def_to_completion_info(
       (CompletionKind::Enum, detail, None, None)
     },
 
-    DefinitionKind::Namespace(_) => (CompletionKind::Namespace, Some("namespace".to_string()), None, None),
+    DefinitionKind::Namespace(ns) => {
+      let detail = if ns.is_extern { "extern" } else { "namespace" };
+      (CompletionKind::Namespace, Some(detail.to_string()), None, None)
+    },
 
     DefinitionKind::TypeAlias(alias_def) => {
       let target = format_type_brief(types, defs, symbol_names, &alias_def.target);
@@ -1708,5 +1718,159 @@ mod tests {
       },
       other => panic!("Expected Identifier context, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn test_detect_import_path_context_clamps_cursor() {
+    // Simulate import with string token
+    let source = r#"import foo from "std::io""#;
+    let tokens = lex(source);
+
+    // Cursor way past the end of the string token (simulates editor desync)
+    let cursor_past_end = 100u32;
+    let context = detect_context(&tokens, cursor_past_end, source);
+
+    // Should either return None or not panic
+    // The function should not panic even with out-of-bounds cursor
+    match context {
+      None => {}, // This is acceptable - cursor is outside all tokens
+      Some(CompletionContext::ImportPath { prefix }) => {
+        // If it returns ImportPath, the prefix should be valid
+        assert!(prefix.len() <= source.len(), "prefix should not exceed source length");
+      },
+      other => {
+        // Other contexts might be detected depending on token positions
+        // This is also acceptable
+        let _ = other;
+      },
+    }
+  }
+
+  #[test]
+  fn test_detect_import_path_context_cursor_at_quote() {
+    // Cursor exactly at the opening quote position
+    let source = r#"import foo from "std::io""#;
+    let tokens = lex(source);
+
+    // Find the position of the opening quote
+    let quote_pos = source.find('"').unwrap() as u32;
+
+    let context = detect_context(&tokens, quote_pos, source);
+
+    // Should not panic and should handle this edge case
+    match context {
+      Some(CompletionContext::ImportPath { prefix }) => {
+        // Cursor at quote start means empty or very short prefix
+        assert!(prefix.len() <= 10, "prefix at quote start should be short");
+      },
+      _ => {}, // Other contexts are acceptable
+    }
+  }
+
+  #[test]
+  fn test_detect_import_path_fallback_ignores_previous_string() {
+    // This tests that the fallback doesn't match quotes from previous unrelated strings
+    let source = r#"let msg = "hello"; import foo from "std::s"#;
+    //                                              cursor here ^
+
+    // Cursor inside the import string, after "std::s"
+    let cursor_pos = source.rfind("std::s").unwrap() + "std::s".len();
+
+    let context = detect_import_path_fallback(source, cursor_pos as u32);
+
+    match context {
+      Some(CompletionContext::ImportPath { prefix }) => {
+        // Should extract "std::s", not "hello" or anything from the previous string
+        assert_eq!(
+          prefix, "std::s",
+          "should extract prefix from the import string, not previous string"
+        );
+      },
+      _ => panic!("Expected ImportPath context from fallback"),
+    }
+  }
+
+  #[test]
+  fn test_detect_import_path_fallback_rejects_multiline() {
+    // Fallback should reject multiline content
+    let source = "import foo from \"std::\nio\"";
+
+    // Cursor after the newline
+    let cursor_pos = source.len();
+
+    let context = detect_import_path_fallback(source, cursor_pos as u32);
+
+    // Should return None because there's a newline in the content
+    assert!(context.is_none(), "fallback should reject multiline strings");
+  }
+
+  #[test]
+  fn test_detect_import_path_fallback_window_limit() {
+    // Test that fallback only searches within a reasonable window
+    // Create a source with a `from "` pattern far back (> 200 chars)
+    let filler = "x".repeat(250);
+    let source = format!(r#"import old from "old_module"; {} import new from "new::"#, filler);
+
+    // Cursor at the end
+    let cursor_pos = source.len();
+
+    let context = detect_import_path_fallback(&source, cursor_pos as u32);
+
+    match context {
+      Some(CompletionContext::ImportPath { prefix }) => {
+        // Should find "new::", not "old_module"
+        assert_eq!(prefix, "new::", "should find the recent import, not the distant one");
+      },
+      _ => panic!("Expected ImportPath context from fallback"),
+    }
+  }
+
+  #[test]
+  fn test_detect_import_path_fallback_utf8_safety() {
+    // Test with emoji and multi-byte UTF-8 characters
+    let source = r#"let emoji = "🔥🚀"; import foo from "std::io"#;
+
+    // Cursor at end
+    let cursor_pos = source.len();
+    let context = detect_import_path_fallback(source, cursor_pos as u32);
+
+    match context {
+      Some(CompletionContext::ImportPath { prefix }) => {
+        assert_eq!(prefix, "std::io", "should handle UTF-8 correctly");
+      },
+      _ => panic!("Expected ImportPath context"),
+    }
+
+    // Test with cursor at a byte position that would be mid-character
+    // The emoji 🔥 is 4 bytes, so position 14 is after "let emoji = \""
+    // and before the emoji ends
+    let mid_emoji_cursor = 14u32; // This is in the middle of 🔥
+    let context = detect_import_path_fallback(source, mid_emoji_cursor);
+
+    // Should not panic, and should return None (no from/import pattern in window)
+    assert!(context.is_none(), "should not panic on mid-UTF8 cursor");
+  }
+
+  #[test]
+  fn test_find_char_boundary() {
+    use super::find_char_boundary;
+
+    let text = "hello 🔥 world";
+    // "hello " = 6 bytes, 🔥 = 4 bytes, " world" = 6 bytes
+
+    // Position 6 is start of emoji - valid boundary
+    assert_eq!(find_char_boundary(text, 6), 6);
+
+    // Position 7 is in the middle of the emoji - should find next boundary at 10
+    assert_eq!(find_char_boundary(text, 7), 10);
+
+    // Position 8 is also in the middle of the emoji
+    assert_eq!(find_char_boundary(text, 8), 10);
+
+    // Position 10 is after the emoji - valid boundary
+    assert_eq!(find_char_boundary(text, 10), 10);
+
+    // Position past end should return text.len()
+    assert_eq!(find_char_boundary(text, 100), text.len());
   }
 }
