@@ -225,31 +225,42 @@ impl DefinitionStore {
     self.definitions.get_mut(id)
   }
 
+  /// Returns the type associated with a definition, or `None` for definitions
+  /// that don't have a meaningful type (Namespace, TypeParam, Placeholder).
+  pub fn try_type_of(
+    &self,
+    id: &DefinitionId,
+  ) -> Option<&TypeId> {
+    match &self.get(id).kind {
+      DefinitionKind::Function(f) => Some(&f.return_type),
+      DefinitionKind::Variable(v) => Some(&v.type_id),
+      DefinitionKind::Constant(c) => Some(&c.type_id),
+      DefinitionKind::Parameter(p) => Some(&p.type_id),
+      DefinitionKind::Field(f) => Some(&f.type_id),
+      DefinitionKind::Variant(v) => match &self.get(&v.owner_enum).kind {
+        DefinitionKind::Enum(ed) => Some(&ed.type_id),
+        _ => None,
+      },
+      DefinitionKind::TypeAlias(ta) => Some(&ta.target),
+      DefinitionKind::Record(rd) => Some(&rd.type_id),
+      DefinitionKind::Enum(ed) => Some(&ed.type_id),
+      DefinitionKind::Method(md) => Some(&md.return_type),
+      DefinitionKind::Namespace(_) | DefinitionKind::TypeParam(_) | DefinitionKind::Placeholder => None,
+    }
+  }
+
+  /// Returns the type associated with a definition.
+  ///
+  /// # Panics
+  /// Panics if called on Namespace, TypeParam, or Placeholder definitions.
   pub fn type_of(
     &self,
     id: &DefinitionId,
   ) -> &TypeId {
-    match &self.get(id).kind {
-      DefinitionKind::Function(f) => &f.return_type,
-      DefinitionKind::Variable(v) => &v.type_id,
-      DefinitionKind::Constant(c) => &c.type_id,
-      DefinitionKind::Parameter(p) => &p.type_id,
-      DefinitionKind::Field(f) => &f.type_id,
-      DefinitionKind::Variant(v) => {
-        // Return the owning enum's type
-        match &self.get(&v.owner_enum).kind {
-          DefinitionKind::Enum(ed) => &ed.type_id,
-          _ => panic!("variant owner is not an enum"),
-        }
-      },
-      DefinitionKind::Namespace(_) => panic!("namespaces do not have a type"),
-      DefinitionKind::TypeAlias(ta) => &ta.target,
-      DefinitionKind::Record(rd) => &rd.type_id,
-      DefinitionKind::Enum(ed) => &ed.type_id,
-      DefinitionKind::Method(md) => &md.return_type,
-      DefinitionKind::TypeParam(_) => panic!("type params do not have a type in this sense"),
-      DefinitionKind::Placeholder => panic!("placeholder definitions have no type"),
-    }
+    self.try_type_of(id).unwrap_or_else(|| {
+      let kind = &self.get(id).kind;
+      panic!("{kind:?} does not have a type")
+    })
   }
 
   pub fn is_mutable(

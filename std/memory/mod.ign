@@ -1,9 +1,190 @@
-/**
- * Ignis Standard Library: Memory module.
- *
- * Provides low-level allocation and byte-wise memory utilities.
- * Callers must ensure sizes and pointers are valid for the requested operations.
- */
+//!
+//! # Memory Module
+//!
+//! Low-level memory allocation and manipulation utilities.
+//!
+//! ## Overview
+//!
+//! This module provides the foundational memory operations for Ignis programs:
+//!
+//! - **Allocation**: Obtain raw memory from the runtime
+//! - **Deallocation**: Return memory to the runtime
+//! - **Copying**: Transfer data between memory regions
+//! - **Moving**: Transfer data with support for overlapping regions
+//!
+//! ## Memory Model
+//!
+//! ```text
+//!   IGNIS MEMORY ARCHITECTURE
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │                         User Code                                   │
+//!   │                                                                     │
+//!   │   let ptr: *mut u64 = Memory::allocateVector<u64>(100);            │
+//!   │   // ... use ptr ...                                                │
+//!   │   Memory::free(ptr);                                                │
+//!   └──────────────────────────────────┬──────────────────────────────────┘
+//!                                      │
+//!                                      ▼
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │                    Memory Namespace (this module)                   │
+//!   │                                                                     │
+//!   │   allocate<T>       allocateVector<T>      allocateZeroed<T>       │
+//!   │   reallocate<T>     reallocateVector<T>    allocateZeroedVector<T> │
+//!   │   free<T>           copy<T>                move<T>                  │
+//!   │   copyBytes         moveBytes                                       │
+//!   └──────────────────────────────────┬──────────────────────────────────┘
+//!                                      │
+//!                                      ▼
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │                      Ignis Runtime (ignis_rt)                       │
+//!   │                                                                     │
+//!   │   ignis_alloc    ignis_free      ignis_realloc    ignis_calloc     │
+//!   │   ignis_memcpy   ignis_memmove                                      │
+//!   └──────────────────────────────────┬──────────────────────────────────┘
+//!                                      │
+//!                                      ▼
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │                         C Runtime / OS                              │
+//!   │                                                                     │
+//!   │   malloc       free        realloc        calloc                   │
+//!   │   memcpy       memmove                                              │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Allocation Functions
+//!
+//! ```text
+//!   ALLOCATION METHODS COMPARISON
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   ┌─────────────────────┬─────────────────────────────────────────────────┐
+//!   │ Function            │ Use Case                                        │
+//!   ├─────────────────────┼─────────────────────────────────────────────────┤
+//!   │ allocate<T>(size)   │ Raw bytes, manual size calculation              │
+//!   │ allocateVector<T>(n)│ Array of n elements of type T                   │
+//!   │ allocateZeroed<T>   │ Zero-initialized memory (manual elem size)      │
+//!   │ allocateZeroedVec   │ Zero-initialized array of type T                │
+//!   └─────────────────────┴─────────────────────────────────────────────────┘
+//!
+//!   Example: Allocating 10 u64 values
+//!
+//!   Method 1: allocateVector (recommended)
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │  let ptr: *mut u64 = Memory::allocateVector<u64>(10);              │
+//!   │                                                                     │
+//!   │  Internally: ignis_alloc(10 * sizeOf<u64>()) = ignis_alloc(80)     │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//!
+//!   Method 2: allocate (manual size)
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │  let ptr: *mut u64 = Memory::allocate<u64>(80);                    │
+//!   │                                                                     │
+//!   │  Directly: ignis_alloc(80)                                         │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Copy vs Move
+//!
+//! ```text
+//!   COPY: Source and destination must NOT overlap
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   Valid copy (no overlap):
+//!   ┌────────────────────────────────────────────────────────────────────┐
+//!   │   Source:      ┌─────────────────┐                                │
+//!   │                │  A  B  C  D  E  │                                │
+//!   │                └─────────────────┘                                │
+//!   │                                                                    │
+//!   │   Destination:                   ┌─────────────────┐              │
+//!   │                                  │  ?  ?  ?  ?  ?  │              │
+//!   │                                  └─────────────────┘              │
+//!   │                                           ↓                       │
+//!   │   After copy:                    ┌─────────────────┐              │
+//!   │                                  │  A  B  C  D  E  │  ✓           │
+//!   │                                  └─────────────────┘              │
+//!   └────────────────────────────────────────────────────────────────────┘
+//!
+//!   INVALID copy (overlap) - use move instead:
+//!   ┌────────────────────────────────────────────────────────────────────┐
+//!   │   Source:      ┌─────────────────┐                                │
+//!   │                │  A  B  C  D  E  │                                │
+//!   │                └─────────────────┘                                │
+//!   │                      ▲                                            │
+//!   │                      └──── Overlap! ────┐                         │
+//!   │                                         ▼                         │
+//!   │   Destination:       ┌─────────────────┐                          │
+//!   │                      │  ?  ?  ?  ?  ?  │                          │
+//!   │                      └─────────────────┘                          │
+//!   │                                                                    │
+//!   │   ⚠ UNDEFINED BEHAVIOR with copy - source may be corrupted!       │
+//!   └────────────────────────────────────────────────────────────────────┘
+//!
+//!   MOVE: Handles overlapping regions safely
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   Overlapping move (forward):
+//!   ┌────────────────────────────────────────────────────────────────────┐
+//!   │   Before:   │  A  B  C  D  E  ?  ?  │                             │
+//!   │             └─────────────────┘                                   │
+//!   │                  └─── move 2 positions right ───┘                 │
+//!   │                                                                    │
+//!   │   After:    │  A  B  A  B  C  D  E  │                             │
+//!   │                      └─────────────────┘  ✓                       │
+//!   │                                                                    │
+//!   │   Move copies from END to avoid overwriting source data           │
+//!   └────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Safety
+//!
+//! All functions in this module are **unsafe** in the sense that:
+//!
+//! - Pointers must be valid and properly aligned
+//! - Sizes must not exceed allocated regions
+//! - Memory must not be freed twice
+//! - Memory must not be used after being freed
+//!
+//! The caller is responsible for ensuring these invariants.
+//!
+//! ## Example Usage
+//!
+//! ```ignis
+//! import Memory from "std/memory";
+//!
+//! // Allocate an array of 100 integers
+//! let data: *mut i32 = Memory::allocateVector<i32>(100);
+//!
+//! // Initialize elements
+//! for (let i: u64 = 0; i < 100; i = i + 1) {
+//!   *(data + i) = i as i32;
+//! }
+//!
+//! // Resize to 200 elements
+//! data = Memory::reallocateVector<i32>(data, 200);
+//!
+//! // Copy first 50 elements to another buffer
+//! let backup: *mut i32 = Memory::allocateVector<i32>(50);
+//! Memory::copy<i32>(backup, data, 50);
+//!
+//! // Clean up
+//! Memory::free(backup);
+//! Memory::free(data);
+//! ```
+//!
+
+/// External declarations for the Ignis runtime memory functions.
+///
+/// These functions map directly to the C runtime allocator and are the
+/// lowest-level memory operations available in Ignis.
+///
+/// # Safety
+///
+/// All functions require:
+/// - Valid pointers (for functions that take pointers)
+/// - Correct size calculations
+/// - Proper alignment (handled by the runtime)
 extern __memory {
   function ignis_alloc(size: u64): *mut u8;
   function ignis_free(ptr: *mut u8): void;
@@ -13,120 +194,473 @@ extern __memory {
   function ignis_memmove(dest: *mut u8, src: *u8, n: u64): void;
 }
 
+/// Memory allocation and manipulation namespace.
+///
+/// Provides type-safe wrappers around the raw memory allocation functions.
+/// All allocation functions return typed pointers, and generic functions
+/// automatically calculate sizes based on the type parameter.
+///
+/// # Thread Safety
+///
+/// The underlying allocator is typically thread-safe (depends on the C runtime),
+/// but concurrent access to the same memory region requires external
+/// synchronization.
 export namespace Memory {
-  /**
-   * Allocates `size` bytes and returns a pointer to T.
-   *
-   * @param {u64} size - Size in bytes to allocate.
-   * @return {*mut T} Pointer to the allocated memory (may be null).
-   */
+  /// Allocates `size` bytes of uninitialized memory.
+  ///
+  /// This is the most basic allocation function. The caller specifies
+  /// the exact number of bytes needed.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The type to cast the returned pointer to
+  ///
+  /// # Arguments
+  ///
+  /// * `size` - The number of bytes to allocate
+  ///
+  /// # Returns
+  ///
+  /// A pointer to the allocated memory, cast to `*mut T`.
+  /// Returns `null` if allocation fails.
+  ///
+  /// # Memory State
+  ///
+  /// ```text
+  ///   allocate<u64>(24)
+  ///   ════════════════════════════════════════════════════════════════════════
+  ///
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │   Returned pointer                                                  │
+  ///   │         │                                                           │
+  ///   │         ▼                                                           │
+  ///   │        ┌────────────────────────────────────────────┐               │
+  ///   │        │  ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ...  │               │
+  ///   │        │         (24 bytes, UNINITIALIZED)          │               │
+  ///   │        └────────────────────────────────────────────┘               │
+  ///   │                                                                     │
+  ///   │   ⚠ Contents are undefined - must initialize before reading!       │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// // Allocate 1024 bytes for a buffer
+  /// let buffer: *mut u8 = Memory::allocate<u8>(1024);
+  ///
+  /// // Allocate space for 3 u64 values manually
+  /// let values: *mut u64 = Memory::allocate<u64>(24);  // 3 * 8 bytes
+  /// ```
   function allocate<T>(size: u64): *mut T {
     return __memory::ignis_alloc(size) as *mut T;
   }
 
-  /**
-   * Allocates `count` elements of type T and returns a pointer to T.
-   *
-   * @param {u64} count - Number of elements to allocate.
-   * @return {*mut T} Pointer to the allocated memory (may be null).
-   */
+  /// Allocates memory for `count` elements of type `T`.
+  ///
+  /// Automatically calculates the required size using `sizeOf<T>()`.
+  /// This is the **recommended** way to allocate arrays.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The element type
+  ///
+  /// # Arguments
+  ///
+  /// * `count` - The number of elements to allocate space for
+  ///
+  /// # Returns
+  ///
+  /// A pointer to the allocated memory, typed as `*mut T`.
+  /// Returns `null` if allocation fails.
+  ///
+  /// # Size Calculation
+  ///
+  /// ```text
+  ///   allocateVector<u64>(10)
+  ///   ════════════════════════════════════════════════════════════════════════
+  ///
+  ///   total_size = count * sizeOf<T>()
+  ///              = 10 * 8
+  ///              = 80 bytes
+  ///
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐    │
+  ///   │  │  0  │  1  │  2  │  3  │  4  │  5  │  6  │  7  │  8  │  9  │    │
+  ///   │  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │    │
+  ///   │  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘    │
+  ///   │  ◄──────────────────── 80 bytes ─────────────────────────────►    │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// // Allocate array of 100 i32 values
+  /// let numbers: *mut i32 = Memory::allocateVector<i32>(100);
+  ///
+  /// // Allocate array of 50 custom structs
+  /// record Point { x: f64; y: f64; }
+  /// let points: *mut Point = Memory::allocateVector<Point>(50);
+  /// ```
   function allocateVector<T>(count: u64): *mut T {
-    return __memory::ignis_alloc(count * sizeOf(T)) as *mut T;
+    return __memory::ignis_alloc(count * sizeOf<T>()) as *mut T;
   }
 
-  /**
-   * Allocates zeroed memory for `count` elements of `elementSizeBytes`.
-   *
-   * @param {u64} count - Number of elements.
-   * @param {u64} elementSizeBytes - Size of each element in bytes.
-   * @return {*mut T} Pointer to the allocated memory (may be null).
-   */
+  /// Allocates zero-initialized memory for `count` elements.
+  ///
+  /// All bytes in the allocated region are set to zero.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The type to cast the returned pointer to
+  ///
+  /// # Arguments
+  ///
+  /// * `count` - The number of elements
+  /// * `elementSizeBytes` - The size of each element in bytes
+  ///
+  /// # Returns
+  ///
+  /// A pointer to zero-initialized memory, cast to `*mut T`.
+  /// Returns `null` if allocation fails.
+  ///
+  /// # Memory State
+  ///
+  /// ```text
+  ///   allocateZeroed<u64>(10, 8)
+  ///   ════════════════════════════════════════════════════════════════════════
+  ///
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐    │
+  ///   │  │  0  │  0  │  0  │  0  │  0  │  0  │  0  │  0  │  0  │  0  │    │
+  ///   │  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │ 8B  │    │
+  ///   │  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘    │
+  ///   │                                                                     │
+  ///   │  All bytes are guaranteed to be zero                               │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// // Allocate 100 zero-initialized u64 values
+  /// let zeros: *mut u64 = Memory::allocateZeroed<u64>(100, 8);
+  ///
+  /// // First element is guaranteed to be 0
+  /// assert(*zeros == 0);
+  /// ```
   function allocateZeroed<T>(count: u64, elementSizeBytes: u64): *mut T {
     return __memory::ignis_calloc(count, elementSizeBytes) as *mut T;
   }
 
-  /**
-   * Allocates zeroed memory for `count` elements of type T.
-   *
-   * @param {u64} count - Number of elements.
-   * @return {*mut T} Pointer to the allocated memory (may be null).
-   */
+  /// Allocates zero-initialized memory for `count` elements of type `T`.
+  ///
+  /// Combines the convenience of `allocateVector` with zero-initialization.
+  /// This is the **recommended** way to allocate zero-initialized arrays.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The element type
+  ///
+  /// # Arguments
+  ///
+  /// * `count` - The number of elements to allocate
+  ///
+  /// # Returns
+  ///
+  /// A pointer to zero-initialized memory, typed as `*mut T`.
+  /// Returns `null` if allocation fails.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// // Allocate 100 zero-initialized counters
+  /// let counters: *mut u64 = Memory::allocateZeroedVector<u64>(100);
+  ///
+  /// // All counters start at 0
+  /// for (let i: u64 = 0; i < 100; i = i + 1) {
+  ///   assert(*(counters + i) == 0);
+  /// }
+  /// ```
   function allocateZeroedVector<T>(count: u64): *mut T {
-    return __memory::ignis_calloc(count, sizeOf(T)) as *mut T;
+    return __memory::ignis_calloc(count, sizeOf<T>()) as *mut T;
   }
 
-  /**
-   * Reallocates a memory block to a new byte size.
-   *
-   * @param {*mut u8} pointer - Pointer returned by allocate/reallocate.
-   * @param {u64} size - New size in bytes.
-   * @return {*mut T} Pointer to the resized memory (may be null).
-   */
+  /// Resizes a previously allocated memory block.
+  ///
+  /// The contents of the memory block are preserved up to the minimum
+  /// of the old and new sizes. If the new size is larger, the additional
+  /// memory is uninitialized.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The type to cast the returned pointer to
+  ///
+  /// # Arguments
+  ///
+  /// * `pointer` - A pointer previously returned by an allocation function
+  /// * `size` - The new size in bytes
+  ///
+  /// # Returns
+  ///
+  /// A pointer to the resized memory block. May be the same as `pointer`
+  /// or a new location. Returns `null` if reallocation fails.
+  ///
+  /// # Reallocation Behavior
+  ///
+  /// ```text
+  ///   reallocate(ptr, newSize)
+  ///   ════════════════════════════════════════════════════════════════════════
+  ///
+  ///   Case 1: Shrinking (newSize < oldSize)
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │   Before:  ┌─────────────────────────────────────┐                  │
+  ///   │            │  A  B  C  D  E  F  G  H  I  J      │                  │
+  ///   │            └─────────────────────────────────────┘                  │
+  ///   │                                                                     │
+  ///   │   After:   ┌───────────────────┐                                   │
+  ///   │            │  A  B  C  D  E    │  (data preserved)                 │
+  ///   │            └───────────────────┘                                   │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  ///
+  ///   Case 2: Growing (newSize > oldSize)
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │   Before:  ┌───────────────────┐                                   │
+  ///   │            │  A  B  C  D  E    │                                   │
+  ///   │            └───────────────────┘                                   │
+  ///   │                                                                     │
+  ///   │   After:   ┌─────────────────────────────────────┐                  │
+  ///   │            │  A  B  C  D  E  ?  ?  ?  ?  ?      │                  │
+  ///   │            └─────────────────────────────────────┘                  │
+  ///   │                               │                                     │
+  ///   │                               └── New space is UNINITIALIZED       │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Warning
+  ///
+  /// After calling `reallocate`, the original pointer may be invalid.
+  /// Always use the returned pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let buffer: *mut u8 = Memory::allocate<u8>(100);
+  /// // ... fill buffer ...
+  ///
+  /// // Grow buffer to 200 bytes
+  /// buffer = Memory::reallocate<u8>(buffer as *mut u8, 200);
+  /// ```
   function reallocate<T>(pointer: *mut u8, size: u64): *mut T {
     return __memory::ignis_realloc(pointer, size) as *mut T;
   }
 
-  /**
-   * Reallocates a vector to hold `count` elements of type T.
-   *
-   * @param {*mut T} pointer - Pointer returned by allocateVector/reallocateVector.
-   * @param {u64} count - New number of elements.
-   * @return {*mut T} Pointer to the resized memory (may be null).
-   */
+  /// Resizes an array to hold `count` elements of type `T`.
+  ///
+  /// Automatically calculates the new size using `sizeOf<T>()`.
+  /// This is the **recommended** way to resize typed arrays.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The element type
+  ///
+  /// # Arguments
+  ///
+  /// * `pointer` - A pointer previously returned by an allocation function
+  /// * `count` - The new number of elements
+  ///
+  /// # Returns
+  ///
+  /// A pointer to the resized array. May be the same location or moved.
+  /// Returns `null` if reallocation fails.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// // Start with 10 elements
+  /// let data: *mut i32 = Memory::allocateVector<i32>(10);
+  ///
+  /// // Grow to 100 elements
+  /// data = Memory::reallocateVector<i32>(data, 100);
+  ///
+  /// // Original 10 elements are preserved
+  /// // Elements 10-99 are uninitialized
+  /// ```
   function reallocateVector<T>(pointer: *mut T, count: u64): *mut T {
-    return __memory::ignis_realloc(pointer as *mut u8, count * sizeOf(T)) as *mut T;
+    return __memory::ignis_realloc(pointer as *mut u8, count * sizeOf<T>()) as *mut T;
   }
 
-  /**
-   * Frees a previously allocated block.
-   *
-   * @param {*mut T} pointer - Pointer returned by allocation functions.
-   */
+  /// Frees a previously allocated memory block.
+  ///
+  /// After calling `free`, the pointer is invalid and must not be used.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The type of the pointer (for type safety)
+  ///
+  /// # Arguments
+  ///
+  /// * `pointer` - A pointer previously returned by an allocation function
+  ///
+  /// # Safety
+  ///
+  /// - Must not free the same pointer twice (double-free)
+  /// - Must not use the pointer after freeing (use-after-free)
+  /// - Must only free pointers returned by allocation functions
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let data: *mut u64 = Memory::allocateVector<u64>(100);
+  /// // ... use data ...
+  ///
+  /// Memory::free(data);
+  /// // data is now invalid - do not use!
+  /// ```
   function free<T>(pointer: *mut T): void {
     __memory::ignis_free(pointer as *mut u8);
   }
 
-  /**
-   * Copies `sizeBytes` bytes from `source` to `destination`.
-   *
-   * @param {*mut u8} destination - Destination buffer.
-   * @param {*u8} source - Source buffer.
-   * @param {u64} sizeBytes - Number of bytes to copy.
-   */
+  /// Copies `sizeBytes` bytes from `source` to `destination`.
+  ///
+  /// This is a low-level byte copy. For typed copies, use `copy<T>`.
+  ///
+  /// # Arguments
+  ///
+  /// * `destination` - The target memory address
+  /// * `source` - The source memory address
+  /// * `sizeBytes` - The number of bytes to copy
+  ///
+  /// # Safety
+  ///
+  /// - Source and destination must NOT overlap
+  /// - Both regions must be valid for the specified size
+  /// - If regions may overlap, use `moveBytes` instead
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let src: *mut u8 = Memory::allocate<u8>(100);
+  /// let dst: *mut u8 = Memory::allocate<u8>(100);
+  ///
+  /// // Copy 100 bytes
+  /// Memory::copyBytes(dst, src as *u8, 100);
+  /// ```
   function copyBytes(destination: *mut u8, source: *u8, sizeBytes: u64): void {
     __memory::ignis_memcpy(destination, source, sizeBytes);
   }
 
-  /**
-   * Copies `count` elements of type T from `source` to `destination`.
-   *
-   * @param {*mut T} destination - Destination buffer.
-   * @param {*T} source - Source buffer.
-   * @param {u64} count - Number of elements to copy.
-   */
+  /// Copies `count` elements of type `T` from `source` to `destination`.
+  ///
+  /// Automatically calculates the byte size using `sizeOf<T>()`.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The element type
+  ///
+  /// # Arguments
+  ///
+  /// * `destination` - The target array
+  /// * `source` - The source array
+  /// * `count` - The number of elements to copy
+  ///
+  /// # Safety
+  ///
+  /// - Source and destination must NOT overlap
+  /// - Both arrays must have at least `count` elements
+  /// - If arrays may overlap, use `move<T>` instead
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let src: *mut i32 = Memory::allocateVector<i32>(100);
+  /// let dst: *mut i32 = Memory::allocateVector<i32>(100);
+  ///
+  /// // Initialize source
+  /// for (let i: u64 = 0; i < 100; i = i + 1) {
+  ///   *(src + i) = i as i32;
+  /// }
+  ///
+  /// // Copy all 100 elements
+  /// Memory::copy<i32>(dst, src as *i32, 100);
+  /// ```
   function copy<T>(destination: *mut T, source: *T, count: u64): void {
-    __memory::ignis_memcpy(destination as *mut u8, source as *u8, count * sizeOf(T));
+    __memory::ignis_memcpy(destination as *mut u8, source as *u8, count * sizeOf<T>());
   }
 
-  /**
-   * Moves `sizeBytes` bytes from `source` to `destination`.
-   *
-   * @param {*mut u8} destination - Destination buffer.
-   * @param {*u8} source - Source buffer.
-   * @param {u64} sizeBytes - Number of bytes to move.
-   */
+  /// Moves `sizeBytes` bytes from `source` to `destination`.
+  ///
+  /// Unlike `copyBytes`, this function correctly handles overlapping regions.
+  ///
+  /// # Arguments
+  ///
+  /// * `destination` - The target memory address
+  /// * `source` - The source memory address
+  /// * `sizeBytes` - The number of bytes to move
+  ///
+  /// # Safety
+  ///
+  /// - Both regions must be valid for the specified size
+  /// - Safe to use even if regions overlap
+  ///
+  /// # When to Use
+  ///
+  /// ```text
+  ///   Use moveBytes when source and destination may overlap:
+  ///
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │   Shifting elements left in an array:                              │
+  ///   │                                                                     │
+  ///   │   Before: │  A  B  C  D  E  F  G  │                                │
+  ///   │                └────── move ──────┘                                │
+  ///   │           └────── to here                                          │
+  ///   │                                                                     │
+  ///   │   After:  │  C  D  E  F  G  F  G  │                                │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let buffer: *mut u8 = Memory::allocate<u8>(100);
+  ///
+  /// // Shift contents 10 bytes earlier (overlapping)
+  /// Memory::moveBytes(buffer, (buffer + 10) as *u8, 90);
+  /// ```
   function moveBytes(destination: *mut u8, source: *u8, sizeBytes: u64): void {
     __memory::ignis_memmove(destination, source, sizeBytes);
   }
 
-  /**
-   * Moves `count` elements of type T from `source` to `destination`.
-   *
-   * @param {*mut T} destination - Destination buffer.
-   * @param {*T} source - Source buffer.
-   * @param {u64} count - Number of elements to move.
-   */
+  /// Moves `count` elements of type `T` from `source` to `destination`.
+  ///
+  /// Handles overlapping regions correctly. Use this when source and
+  /// destination arrays may overlap.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The element type
+  ///
+  /// # Arguments
+  ///
+  /// * `destination` - The target array
+  /// * `source` - The source array
+  /// * `count` - The number of elements to move
+  ///
+  /// # Safety
+  ///
+  /// - Both arrays must have at least `count` elements
+  /// - Safe to use even if arrays overlap
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let array: *mut i32 = Memory::allocateVector<i32>(100);
+  ///
+  /// // Remove first element by shifting left
+  /// Memory::move<i32>(array, (array + 1) as *i32, 99);
+  /// ```
   function move<T>(destination: *mut T, source: *T, count: u64): void {
-    __memory::ignis_memmove(destination as *mut u8, source as *u8, count * sizeOf(T));
+    __memory::ignis_memmove(destination as *mut u8, source as *u8, count * sizeOf<T>());
   }
 }

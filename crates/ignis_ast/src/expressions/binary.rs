@@ -25,28 +25,30 @@ pub enum ASTBinaryOperator {
   Subtract,
 }
 
-impl From<&TokenType> for ASTBinaryOperator {
-  fn from(token_type: &TokenType) -> Self {
+impl TryFrom<&TokenType> for ASTBinaryOperator {
+  type Error = ();
+
+  fn try_from(token_type: &TokenType) -> Result<Self, Self::Error> {
     match token_type {
-      TokenType::Plus => ASTBinaryOperator::Add,
-      TokenType::Minus => ASTBinaryOperator::Subtract,
-      TokenType::Asterisk => ASTBinaryOperator::Multiply,
-      TokenType::Slash => ASTBinaryOperator::Divide,
-      TokenType::Mod => ASTBinaryOperator::Modulo,
-      TokenType::EqualEqual => ASTBinaryOperator::Equal,
-      TokenType::BangEqual => ASTBinaryOperator::NotEqual,
-      TokenType::Greater => ASTBinaryOperator::GreaterThan,
-      TokenType::GreaterEqual => ASTBinaryOperator::GreaterThanOrEqual,
-      TokenType::Less => ASTBinaryOperator::LessThan,
-      TokenType::LessEqual => ASTBinaryOperator::LessThanOrEqual,
-      TokenType::Ampersand => ASTBinaryOperator::BitAnd,
-      TokenType::Pipe => ASTBinaryOperator::BitOr,
-      TokenType::Caret => ASTBinaryOperator::BitXor,
-      TokenType::And => ASTBinaryOperator::And,
-      TokenType::Or => ASTBinaryOperator::Or,
-      TokenType::LeftShift => ASTBinaryOperator::ShiftLeft,
-      TokenType::RightShift => ASTBinaryOperator::ShiftRight,
-      _ => panic!("Unexpected token type for ASTBinaryOperator"),
+      TokenType::Plus => Ok(ASTBinaryOperator::Add),
+      TokenType::Minus => Ok(ASTBinaryOperator::Subtract),
+      TokenType::Asterisk => Ok(ASTBinaryOperator::Multiply),
+      TokenType::Slash => Ok(ASTBinaryOperator::Divide),
+      TokenType::Mod => Ok(ASTBinaryOperator::Modulo),
+      TokenType::EqualEqual => Ok(ASTBinaryOperator::Equal),
+      TokenType::BangEqual => Ok(ASTBinaryOperator::NotEqual),
+      TokenType::Greater => Ok(ASTBinaryOperator::GreaterThan),
+      TokenType::GreaterEqual => Ok(ASTBinaryOperator::GreaterThanOrEqual),
+      TokenType::Less => Ok(ASTBinaryOperator::LessThan),
+      TokenType::LessEqual => Ok(ASTBinaryOperator::LessThanOrEqual),
+      TokenType::Ampersand => Ok(ASTBinaryOperator::BitAnd),
+      TokenType::Pipe => Ok(ASTBinaryOperator::BitOr),
+      TokenType::Caret => Ok(ASTBinaryOperator::BitXor),
+      TokenType::And => Ok(ASTBinaryOperator::And),
+      TokenType::Or => Ok(ASTBinaryOperator::Or),
+      TokenType::LeftShift => Ok(ASTBinaryOperator::ShiftLeft),
+      TokenType::RightShift => Ok(ASTBinaryOperator::ShiftRight),
+      _ => Err(()),
     }
   }
 }

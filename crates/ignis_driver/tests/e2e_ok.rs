@@ -775,6 +775,33 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_enum_unit_comparison() {
+  e2e_test(
+    "enum_unit_comparison",
+    r#"
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+function main(): i32 {
+    let c1: Color = Color::Red;
+    let c2: Color = Color::Red;
+    let c3: Color = Color::Blue;
+
+    if c1 == c2 {
+        if c1 != c3 {
+            return 42;
+        }
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_record_static_field() {
   e2e_test(
     "record_static_field",
@@ -1175,6 +1202,182 @@ function main(): i32 {
     let a: Box<i32> = Box { value: 10 };
     let b: Box<i32> = Box { value: 32 };
     return a.get() + b.get();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_maxof_i8() {
+  e2e_test(
+    "maxof_i8",
+    r#"
+function main(): i32 {
+    let max: i8 = maxOf<i8>();
+    return max as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_minof_i8() {
+  e2e_test(
+    "minof_i8",
+    r#"
+function main(): i32 {
+    let min: i8 = minOf<i8>();
+    return min as i32 + 128;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_maxof_u8() {
+  e2e_test(
+    "maxof_u8",
+    r#"
+function main(): i32 {
+    let max: u8 = maxOf<u8>();
+    return max as i32 - 213;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_minof_u8() {
+  e2e_test(
+    "minof_u8",
+    r#"
+function main(): i32 {
+    let min: u8 = minOf<u8>();
+    return min as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_maxof_generic() {
+  e2e_test(
+    "maxof_generic",
+    r#"
+function getMax<T>(): T {
+    return maxOf<T>();
+}
+
+function main(): i32 {
+    let max: i8 = getMax<i8>();
+    return max as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_alignof_u8() {
+  e2e_test(
+    "alignof_u8",
+    r#"
+function main(): i32 {
+    let a: u64 = alignOf<u8>();
+    return a as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_alignof_u64() {
+  e2e_test(
+    "alignof_u64",
+    r#"
+function main(): i32 {
+    let a: u64 = alignOf<u64>();
+    return a as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_alignof_i32() {
+  e2e_test(
+    "alignof_i32",
+    r#"
+function main(): i32 {
+    let a: u64 = alignOf<i32>();
+    return a as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_alignof_fixed_vector() {
+  e2e_test(
+    "alignof_fixed_vector",
+    r#"
+function main(): i32 {
+    let elemAlign: u64 = alignOf<u64>();
+    let vecAlign: u64 = alignOf<u64[4]>();
+    if (elemAlign == vecAlign) {
+        return vecAlign as i32;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_alignof_generic() {
+  e2e_test(
+    "alignof_generic",
+    r#"
+function getAlign<T>(): u64 {
+    return alignOf<T>();
+}
+
+function main(): i32 {
+    let a: u64 = getAlign<u64>();
+    return a as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_ptr_to_u64_cast() {
+  e2e_test(
+    "ptr_to_u64_cast",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 42;
+    let p: *mut i32 = (&mut x) as *mut i32;
+    let addr: u64 = p as u64;
+    if (addr != 0) {
+        return 42;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_u64_to_ptr_cast() {
+  e2e_test(
+    "u64_to_ptr_cast",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 42;
+    let p: *mut i32 = (&mut x) as *mut i32;
+    let addr: u64 = p as u64;
+    let p2: *mut i32 = addr as *mut i32;
+    return *p2;
 }
 "#,
   );

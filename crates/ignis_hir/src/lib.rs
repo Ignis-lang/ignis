@@ -49,6 +49,9 @@ pub enum HIRKind {
 
   TypeOf(HIRId),
   SizeOf(TypeId),
+  AlignOf(TypeId),
+  MaxOf(TypeId),
+  MinOf(TypeId),
   BuiltinLoad {
     ty: TypeId,
     ptr: HIRId,
@@ -130,6 +133,9 @@ impl HIRKind {
       | HIRKind::Continue
       | HIRKind::Error
       | HIRKind::SizeOf(_)
+      | HIRKind::AlignOf(_)
+      | HIRKind::MaxOf(_)
+      | HIRKind::MinOf(_)
       | HIRKind::StaticAccess { .. } => {},
       HIRKind::TypeOf(id) => {
         *id = HIRId::new(id.index() + offset);

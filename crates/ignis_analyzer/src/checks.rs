@@ -3,12 +3,13 @@ use ignis_ast::{
   expressions::ASTExpression,
   statements::{
     enum_::{ASTEnum, ASTEnumItem},
-    record::{ASTRecord, ASTRecordItem},
+    record::{ASTMethod, ASTRecord, ASTRecordItem},
     ASTStatement,
   },
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
+use ignis_type::definition::DefinitionKind;
 
 /// Control flow termination status.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -277,9 +278,21 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Record(rec) => {
         self.check_static_fields_init(rec);
+
+        for item in &rec.items {
+          if let ASTRecordItem::Method(method) = item {
+            self.check_method_return(method);
+          }
+        }
       },
       ASTStatement::Enum(enum_) => {
         self.check_enum_fields_init(enum_);
+
+        for item in &enum_.items {
+          if let ASTEnumItem::Method(method) = item {
+            self.check_method_return(method);
+          }
+        }
       },
       _ => {},
     }
@@ -472,6 +485,33 @@ impl<'a> Analyzer<'a> {
           );
         }
       }
+    }
+  }
+
+  /// Check that a method with non-void return type always returns a value.
+  fn check_method_return(
+    &mut self,
+    method: &ASTMethod,
+  ) {
+    let Some(def_id) = self.lookup_import_item_def(&method.name_span) else {
+      return;
+    };
+
+    let def = self.defs.get(def_id);
+    let DefinitionKind::Method(method_def) = &def.kind else {
+      return;
+    };
+
+    let return_type = self.types.get(&method_def.return_type);
+    let is_void = return_type == &ignis_type::types::Type::Void;
+
+    if !is_void && self.check_termination(method.body) != Termination::Always {
+      self.add_diagnostic(
+        DiagnosticMessage::MissingReturnStatement {
+          span: method.span.clone(),
+        }
+        .report(),
+      );
     }
   }
 }

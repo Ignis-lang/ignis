@@ -637,13 +637,22 @@ impl<'a> Analyzer<'a> {
             return self.lower_typeof_builtin(call, hir, scope_kind);
           }
           if name == "sizeOf" {
-            return self.lower_sizeof_builtin(call, hir, scope_kind);
+            return self.lower_sizeof_builtin(call, hir);
+          }
+          if name == "alignOf" {
+            return self.lower_alignof_builtin(call, hir);
           }
           if name == "__builtin_read" {
             return self.lower_builtin_read(call, hir, scope_kind);
           }
           if name == "__builtin_write" {
             return self.lower_builtin_write(call, hir, scope_kind);
+          }
+          if name == "maxOf" {
+            return self.lower_maxof_builtin(call, hir);
+          }
+          if name == "minOf" {
+            return self.lower_minof_builtin(call, hir);
           }
         }
 
@@ -1392,32 +1401,99 @@ impl<'a> Analyzer<'a> {
     &mut self,
     call: &ignis_ast::expressions::call::ASTCallExpression,
     hir: &mut HIR,
-    scope_kind: ScopeKind,
   ) -> HIRId {
-    if call.arguments.len() != 1 {
-      return hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span: call.span.clone(),
-        type_id: self.types.error(),
-      });
-    }
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
 
-    let arg = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
-    let arg_type = hir.get(arg).type_id;
-    let base_type = self.unwrap_reference_type(&arg_type);
-
-    if matches!(self.types.get(&base_type), ignis_type::types::Type::Infer) {
-      return hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span: call.span.clone(),
-        type_id: self.types.error(),
-      });
-    }
+    let value_type = self.resolve_type_syntax(&type_args[0]);
 
     hir.alloc(HIRNode {
-      kind: HIRKind::SizeOf(base_type),
+      kind: HIRKind::SizeOf(value_type),
       span: call.span.clone(),
       type_id: self.types.u64(),
+    })
+  }
+
+  fn lower_alignof_builtin(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::AlignOf(value_type),
+      span: call.span.clone(),
+      type_id: self.types.u64(),
+    })
+  }
+
+  fn lower_maxof_builtin(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::MaxOf(value_type),
+      span: call.span.clone(),
+      type_id: value_type,
+    })
+  }
+
+  fn lower_minof_builtin(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::MinOf(value_type),
+      span: call.span.clone(),
+      type_id: value_type,
     })
   }
 

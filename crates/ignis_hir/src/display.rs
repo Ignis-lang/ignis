@@ -248,6 +248,18 @@ impl<'a> HIRPrinter<'a> {
         let ty_str = self.format_type(ty);
         format!("sizeOf({})", ty_str)
       },
+      HIRKind::AlignOf(ty) => {
+        let ty_str = self.format_type(ty);
+        format!("alignOf({})", ty_str)
+      },
+      HIRKind::MaxOf(ty) => {
+        let ty_str = self.format_type(ty);
+        format!("maxOf<{}>()", ty_str)
+      },
+      HIRKind::MinOf(ty) => {
+        let ty_str = self.format_type(ty);
+        format!("minOf<{}>()", ty_str)
+      },
       HIRKind::BuiltinLoad { ty, ptr } => {
         let ty_str = self.format_type(ty);
         let ptr_str = self.format_node_compact(*ptr);
@@ -610,6 +622,18 @@ impl<'a> HIRPrinter<'a> {
       HIRKind::SizeOf(ty) => {
         let ty_str = self.format_type(ty);
         writeln!(self.output, "SizeOf({}) : {}", ty_str, type_str).unwrap();
+      },
+      HIRKind::AlignOf(ty) => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "AlignOf({}) : {}", ty_str, type_str).unwrap();
+      },
+      HIRKind::MaxOf(ty) => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "MaxOf({}) : {}", ty_str, type_str).unwrap();
+      },
+      HIRKind::MinOf(ty) => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "MinOf({}) : {}", ty_str, type_str).unwrap();
       },
       HIRKind::BuiltinLoad { ty, ptr } => {
         let ty_str = self.format_type(ty);

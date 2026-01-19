@@ -30,8 +30,10 @@ pub struct IgnisParser {
   recovery: bool,
   recursion_depth: usize,
 
-  /// Pending doc comment to be attached to the next declaration.
+  /// Pending outer doc comment (`///`) to be attached to the next declaration.
   pending_doc: Option<String>,
+  /// Pending inner doc comment (`//!`) to be attached to the enclosing item.
+  pending_inner_doc: Option<String>,
 }
 
 pub(crate) const MAX_RECURSION_DEPTH: usize = 500;
@@ -50,6 +52,7 @@ impl IgnisParser {
       recovery: true,
       recursion_depth: 0,
       pending_doc: None,
+      pending_inner_doc: None,
     };
 
     parser.skip_comments();
@@ -201,57 +204,87 @@ impl IgnisParser {
   }
 
   /// Skip over comment tokens, capturing doc comments for the next declaration.
+  ///
+  /// - `///` outer doc comments are stored in `pending_doc`
+  /// - `//!` inner doc comments are stored in `pending_inner_doc`
   fn skip_comments(&mut self) {
     let mut doc_lines = Vec::new();
+    let mut inner_doc_lines = Vec::new();
 
     while self.cursor < self.tokens.len() {
       let token = self.tokens.get(self.cursor).unwrap();
       match token.type_ {
         TokenType::Comment | TokenType::MultiLineComment => {
-          // Regular comments - skip and clear any pending doc
+          // Regular comments - skip and clear any pending outer doc
           doc_lines.clear();
           self.cursor += 1;
         },
         TokenType::DocComment => {
-          // Doc comment - collect the content
+          // Outer doc comment (`///` or `/** */`) - collect the content
           let content = Self::extract_doc_content(&token.lexeme);
           doc_lines.push(content);
+          self.cursor += 1;
+        },
+        TokenType::InnerDocComment => {
+          // Inner doc comment (`//!` or `/*! */`) - collect the content
+          let content = Self::extract_inner_doc_content(&token.lexeme);
+          inner_doc_lines.push(content);
           self.cursor += 1;
         },
         _ => break,
       }
     }
 
-    // Store the collected doc comments
+    // Store the collected outer doc comments
     if doc_lines.is_empty() {
       self.pending_doc = None;
     } else {
       // Join with "  \n" (two spaces + newline) to create hard line breaks in Markdown
       self.pending_doc = Some(doc_lines.join("  \n"));
     }
+
+    // Store the collected inner doc comments
+    if inner_doc_lines.is_empty() {
+      self.pending_inner_doc = None;
+    } else {
+      self.pending_inner_doc = Some(inner_doc_lines.join("  \n"));
+    }
   }
 
-  /// Extract the actual documentation content from a doc comment.
+  /// Extract the actual documentation content from an outer doc comment.
   /// Handles both `/// comment` and `/** comment */` styles.
+  /// Preserves indentation for ASCII art diagrams in code blocks.
   fn extract_doc_content(lexeme: &str) -> String {
     if lexeme.starts_with("///") {
       // Line doc comment: /// content
-      lexeme[3..].trim().to_string()
+      // Strip "///" and optionally one space, but preserve remaining indentation
+      let after_slashes = &lexeme[3..];
+      if after_slashes.starts_with(' ') {
+        after_slashes[1..].trim_end().to_string()
+      } else {
+        after_slashes.trim_end().to_string()
+      }
     } else if lexeme.starts_with("/**") && lexeme.ends_with("*/") {
       let inner = &lexeme[3..lexeme.len() - 2];
-      // Strip leading asterisks and join with hard line breaks
+      // Strip leading asterisks but preserve indentation after the asterisk
       inner
         .lines()
         .map(|line| {
-          let trimmed = line.trim();
+          let trimmed = line.trim_start();
           if trimmed.starts_with('*') {
-            trimmed[1..].trim()
+            let after_star = &trimmed[1..];
+            // Strip one space after *, preserve rest
+            if after_star.starts_with(' ') {
+              after_star[1..].trim_end()
+            } else {
+              after_star.trim_end()
+            }
           } else {
-            trimmed
+            line.trim_end()
           }
         })
         .collect::<Vec<_>>()
-        .join("  \n")
+        .join("\n")
         .trim()
         .to_string()
     } else {
@@ -259,9 +292,55 @@ impl IgnisParser {
     }
   }
 
-  /// Take the pending doc comment, clearing it for the next declaration.
+  /// Extract the actual documentation content from an inner doc comment.
+  /// Handles both `//! comment` and `/*! comment */` styles.
+  /// Preserves indentation for ASCII art diagrams in code blocks.
+  fn extract_inner_doc_content(lexeme: &str) -> String {
+    if lexeme.starts_with("//!") {
+      // Line inner doc comment: //! content
+      // Strip "//!" and optionally one space, but preserve remaining indentation
+      let after_prefix = &lexeme[3..];
+      if after_prefix.starts_with(' ') {
+        after_prefix[1..].trim_end().to_string()
+      } else {
+        after_prefix.trim_end().to_string()
+      }
+    } else if lexeme.starts_with("/*!") && lexeme.ends_with("*/") {
+      let inner = &lexeme[3..lexeme.len() - 2];
+      // Strip leading asterisks but preserve indentation after the asterisk
+      inner
+        .lines()
+        .map(|line| {
+          let trimmed = line.trim_start();
+          if trimmed.starts_with('*') {
+            let after_star = &trimmed[1..];
+            // Strip one space after *, preserve rest
+            if after_star.starts_with(' ') {
+              after_star[1..].trim_end()
+            } else {
+              after_star.trim_end()
+            }
+          } else {
+            line.trim_end()
+          }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+    } else {
+      lexeme.to_string()
+    }
+  }
+
+  /// Take the pending outer doc comment, clearing it for the next declaration.
   fn take_pending_doc(&mut self) -> Option<String> {
     self.pending_doc.take()
+  }
+
+  /// Take the pending inner doc comment, clearing it.
+  fn take_pending_inner_doc(&mut self) -> Option<String> {
+    self.pending_inner_doc.take()
   }
 
   fn allocate_statement(
@@ -542,8 +621,14 @@ function concat(a: string, b: string): string {
     let content = IgnisParser::extract_doc_content("/// This is a doc comment");
     assert_eq!(content, "This is a doc comment");
 
-    let content = IgnisParser::extract_doc_content("///   Whitespace should be trimmed   ");
-    assert_eq!(content, "Whitespace should be trimmed");
+    // Leading whitespace (after first space) is preserved for ASCII art alignment
+    // Only trailing whitespace is trimmed
+    let content = IgnisParser::extract_doc_content("///   Indented content   ");
+    assert_eq!(content, "  Indented content");
+
+    // No space after /// - content starts immediately
+    let content = IgnisParser::extract_doc_content("///No space");
+    assert_eq!(content, "No space");
   }
 
   #[test]
@@ -557,7 +642,7 @@ function concat(a: string, b: string): string {
  * Line three
  */"#;
     let content = IgnisParser::extract_doc_content(multiline);
-    assert_eq!(content, "Line one  \nLine two  \nLine three");
+    assert_eq!(content, "Line one\nLine two\nLine three");
 
     // Should handle without leading asterisks
     let no_asterisks = r#"/**
@@ -565,6 +650,224 @@ Line one
 Line two
 */"#;
     let content = IgnisParser::extract_doc_content(no_asterisks);
-    assert_eq!(content, "Line one  \nLine two");
+    assert_eq!(content, "Line one\nLine two");
+  }
+
+  #[test]
+  fn extract_inner_doc_content_handles_line_comments() {
+    let content = IgnisParser::extract_inner_doc_content("//! This is an inner doc comment");
+    assert_eq!(content, "This is an inner doc comment");
+
+    // Leading whitespace (after first space) is preserved for ASCII art alignment
+    // Only trailing whitespace is trimmed
+    let content = IgnisParser::extract_inner_doc_content("//!   Indented content   ");
+    assert_eq!(content, "  Indented content");
+
+    // No space after //! - content starts immediately
+    let content = IgnisParser::extract_inner_doc_content("//!No space");
+    assert_eq!(content, "No space");
+  }
+
+  #[test]
+  fn extract_inner_doc_content_handles_block_comments() {
+    let content = IgnisParser::extract_inner_doc_content("/*! Single line inner block */");
+    assert_eq!(content, "Single line inner block");
+
+    let multiline = r#"/*!
+ * Module documentation
+ * Second line
+ */"#;
+    let content = IgnisParser::extract_inner_doc_content(multiline);
+    assert_eq!(content, "Module documentation\nSecond line");
+  }
+
+  #[test]
+  fn doc_comment_on_export_function() {
+    let source = r#"
+/// Exported function documentation
+export function foo(): void { }
+"#;
+
+    let result = parse(source);
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+
+    let root = first_root(&result);
+    match root {
+      ASTNode::Statement(ASTStatement::Export(export)) => match export {
+        ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
+          let inner = result.nodes.get(decl);
+          match inner {
+            ASTNode::Statement(ASTStatement::Function(func)) => {
+              let doc = func.signature.doc.as_ref().expect("exported function should have doc");
+              assert!(doc.contains("Exported function documentation"));
+            },
+            _ => panic!("expected function inside export"),
+          }
+        },
+        _ => panic!("expected export declaration"),
+      },
+      _ => panic!("expected export statement"),
+    }
+  }
+
+  #[test]
+  fn doc_comment_on_static_method() {
+    use ignis_ast::statements::{ASTRecordItem, ASTStatement};
+
+    let source = r#"
+record Foo {
+  /// Static method documentation
+  static bar(): void { }
+}
+"#;
+
+    let result = parse(source);
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+
+    let root = first_root(&result);
+    match root {
+      ASTNode::Statement(ASTStatement::Record(rec)) => {
+        assert_eq!(rec.items.len(), 1);
+        match &rec.items[0] {
+          ASTRecordItem::Method(method) => {
+            let doc = method.doc.as_ref().expect("static method should have doc");
+            assert!(doc.contains("Static method documentation"));
+          },
+          _ => panic!("expected method"),
+        }
+      },
+      _ => panic!("expected record statement"),
+    }
+  }
+
+  #[test]
+  fn doc_comment_on_record_field() {
+    use ignis_ast::statements::{ASTRecordItem, ASTStatement};
+
+    let source = r#"
+record Point {
+  /// X coordinate
+  x: i32;
+  /// Y coordinate
+  y: i32;
+}
+"#;
+
+    let result = parse(source);
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+
+    let root = first_root(&result);
+    match root {
+      ASTNode::Statement(ASTStatement::Record(rec)) => {
+        assert_eq!(rec.items.len(), 2);
+        match &rec.items[0] {
+          ASTRecordItem::Field(field) => {
+            let doc = field.doc.as_ref().expect("field x should have doc");
+            assert!(doc.contains("X coordinate"));
+          },
+          _ => panic!("expected field"),
+        }
+        match &rec.items[1] {
+          ASTRecordItem::Field(field) => {
+            let doc = field.doc.as_ref().expect("field y should have doc");
+            assert!(doc.contains("Y coordinate"));
+          },
+          _ => panic!("expected field"),
+        }
+      },
+      _ => panic!("expected record statement"),
+    }
+  }
+
+  #[test]
+  fn doc_comment_on_enum_variant() {
+    use ignis_ast::statements::{ASTEnumItem, ASTStatement};
+
+    let source = r#"
+enum Color {
+  /// Red color
+  Red,
+  /// Green color
+  Green,
+  /// Blue color
+  Blue
+}
+"#;
+
+    let result = parse(source);
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+
+    let root = first_root(&result);
+    match root {
+      ASTNode::Statement(ASTStatement::Enum(en)) => {
+        assert_eq!(en.items.len(), 3);
+        match &en.items[0] {
+          ASTEnumItem::Variant(variant) => {
+            let doc = variant.doc.as_ref().expect("Red variant should have doc");
+            assert!(doc.contains("Red color"));
+          },
+          _ => panic!("expected variant"),
+        }
+      },
+      _ => panic!("expected enum statement"),
+    }
+  }
+
+  #[test]
+  fn inner_doc_comment_on_namespace() {
+    use ignis_ast::statements::ASTStatement;
+
+    let source = r#"
+/// Outer doc for namespace
+namespace Math {
+  //! This module provides mathematical functions.
+  //! It includes basic arithmetic operations.
+
+  function add(a: i32, b: i32): i32 { return a + b; }
+}
+"#;
+
+    let result = parse(source);
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+
+    let root = first_root(&result);
+    match root {
+      ASTNode::Statement(ASTStatement::Namespace(ns)) => {
+        // Check outer doc
+        let outer_doc = ns.doc.as_ref().expect("namespace should have outer doc");
+        assert!(outer_doc.contains("Outer doc for namespace"));
+
+        // Check inner doc
+        let inner_doc = ns.inner_doc.as_ref().expect("namespace should have inner doc");
+        assert!(inner_doc.contains("This module provides mathematical functions"));
+        assert!(inner_doc.contains("basic arithmetic operations"));
+      },
+      _ => panic!("expected namespace statement"),
+    }
   }
 }

@@ -12,8 +12,8 @@ use tower_lsp::{Client, LanguageServer};
 use url::Url;
 
 use crate::completion::{
-  CompletionContext, complete_dot, complete_double_colon, complete_identifier, complete_import_path, detect_context,
-  log, to_completion_items,
+  CompletionContext, complete_dot, complete_double_colon, complete_identifier, complete_import_path,
+  complete_record_init, detect_context, log, to_completion_items,
 };
 use crate::convert::{convert_diagnostic, LineIndex};
 use crate::state::LspState;
@@ -569,6 +569,32 @@ impl LanguageServer for Server {
     // Convert LSP position to byte offset
     let byte_offset = line_index.offset(position);
 
+    // Check if cursor is on a comment token - if so, don't show hover
+    // This prevents showing hover for the enclosing item when hovering over doc comments
+    {
+      let source_text = output.source_map.get(&file_id).text.as_str();
+      let mut lexer = ignis_parser::IgnisLexer::new(file_id.clone(), source_text);
+      lexer.scan_tokens();
+
+      for token in &lexer.tokens {
+        if token.span.file != file_id {
+          continue;
+        }
+
+        let is_comment = matches!(
+          token.type_,
+          ignis_token::token_types::TokenType::Comment
+            | ignis_token::token_types::TokenType::MultiLineComment
+            | ignis_token::token_types::TokenType::DocComment
+            | ignis_token::token_types::TokenType::InnerDocComment
+        );
+
+        if is_comment && token.span.start.0 <= byte_offset && byte_offset <= token.span.end.0 {
+          return Ok(None);
+        }
+      }
+    }
+
     // First, check if cursor is on an import path string (e.g., "std::io")
     for (span, target_file_id) in &output.import_module_files {
       if span.file != file_id {
@@ -658,6 +684,7 @@ impl LanguageServer for Server {
           &output.types,
           &output.symbol_names,
           &output.source_map,
+          &output.namespaces,
           &import_def_id,
         );
         (content, Some(import_span))
@@ -674,10 +701,24 @@ impl LanguageServer for Server {
       if let Some(node_id) = found_node {
         // Try node_defs first, then resolved_calls (for overloaded function calls), then types
         let content = if let Some(def_id) = output.node_defs.get(&node_id) {
-          format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
+          format_definition_hover(
+            &output.defs,
+            &output.types,
+            &output.symbol_names,
+            &output.source_map,
+            &output.namespaces,
+            def_id,
+          )
         } else if let Some(def_id) = output.resolved_calls.get(&node_id) {
           // This is a call to an overloaded function - show the resolved overload
-          format_definition_hover(&output.defs, &output.types, &output.symbol_names, &output.source_map, def_id)
+          format_definition_hover(
+            &output.defs,
+            &output.types,
+            &output.symbol_names,
+            &output.source_map,
+            &output.namespaces,
+            def_id,
+          )
         } else if let Some(type_id) = output.node_types.get(&node_id) {
           // No definition, just show the type
           format!(
@@ -1292,6 +1333,11 @@ impl LanguageServer for Server {
           complete_identifier(prefix, *start_offset, &tokens, Some(&output), &file_id)
         },
         CompletionContext::ImportPath { prefix } => complete_import_path(prefix, &config),
+        CompletionContext::RecordInit {
+          record_name,
+          assigned_fields,
+          prefix,
+        } => complete_record_init(&record_name, &assigned_fields, &prefix, &output, &file_id),
       };
 
       if candidates.is_empty() {
@@ -1745,6 +1791,7 @@ fn format_definition_hover(
   types: &ignis_type::types::TypeStore,
   symbol_names: &std::collections::HashMap<ignis_type::symbol::SymbolId, String>,
   source_map: &ignis_type::file::SourceMap,
+  namespaces: &ignis_type::namespace::NamespaceStore,
   def_id: &ignis_type::definition::DefinitionId,
 ) -> String {
   use ignis_type::definition::DefinitionKind;
@@ -1752,11 +1799,38 @@ fn format_definition_hover(
   let def = defs.get(def_id);
   let name = symbol_names.get(&def.name).cloned().unwrap_or_else(|| "?".to_string());
 
-  let file_info = {
-    let file = source_map.get(&def.span.file);
-    let path = &file.path;
-    path.file_name().map(|n| n.to_string_lossy().to_string())
+  // Build the location path for display at the top of hover
+  // Prefer namespace path if available, otherwise use file path
+  let file = source_map.get(&def.span.file);
+  let file_path = &file.path;
+
+  let location_path = if let Some(ns_id) = def.owner_namespace {
+    // Use explicit namespace path
+    let path_symbols = namespaces.full_path(ns_id);
+    let ns_path = path_symbols
+      .iter()
+      .filter_map(|sym| symbol_names.get(sym))
+      .cloned()
+      .collect::<Vec<_>>()
+      .join("::");
+    if ns_path.is_empty() { None } else { Some(ns_path) }
+  } else {
+    // Fall back to file path - extract meaningful parts
+    // For std files like "std/memory/allocator.ign", show "memory/allocator"
+    // For project files, show the filename without extension
+    let path_str = file_path.to_string_lossy();
+    if let Some(std_idx) = path_str.find("/std/") {
+      // Extract path after /std/ and remove .ign extension
+      let after_std = &path_str[std_idx + 5..];
+      let without_ext = after_std.strip_suffix(".ign").unwrap_or(after_std);
+      Some(without_ext.replace('/', "::"))
+    } else {
+      // Just use file stem for project files
+      file_path.file_stem().map(|s| s.to_string_lossy().to_string())
+    }
   };
+
+  let file_info = file_path.file_name().map(|n| n.to_string_lossy().to_string());
 
   let signature = match &def.kind {
     DefinitionKind::Function(func_def) => {
@@ -1880,12 +1954,25 @@ fn format_definition_hover(
   };
 
   // Build the final hover content
-  let mut result = signature;
+  let mut result = String::new();
+
+  // Add location path at the top (like rust-analyzer shows module path)
+  if let Some(ref loc_path) = location_path {
+    if !loc_path.is_empty() {
+      result.push_str(loc_path);
+      result.push_str("\n\n");
+    }
+  }
+
+  result.push_str(&signature);
 
   // Add documentation if present
   if let Some(doc) = &def.doc {
-    result.push_str("\n\n---\n\n");
-    result.push_str(doc);
+    let trimmed = doc.trim();
+    if !trimmed.is_empty() {
+      result.push_str("\n\n---\n\n");
+      result.push_str(trimmed);
+    }
   }
 
   // Add file info if available

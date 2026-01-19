@@ -64,6 +64,16 @@ pub enum CompletionContext {
     /// Partial path typed.
     prefix: String,
   },
+
+  /// Inside record initializer: `RecordName { field1: val, | }`.
+  RecordInit {
+    /// Name of the record being initialized.
+    record_name: String,
+    /// Fields already assigned in the initializer.
+    assigned_fields: Vec<String>,
+    /// Partial field name typed.
+    prefix: String,
+  },
 }
 
 /// Internal representation of a completion candidate.
@@ -165,6 +175,13 @@ pub fn detect_context(
         path_segments,
         prefix,
       });
+    }
+
+    // Check for record initializer context: `RecordName { field: val, |`
+    if prev.type_ == TokenType::Comma || prev.type_ == TokenType::LeftBrace {
+      if let Some(ctx) = detect_record_init_context(&meaningful, prev, current_token, cursor_offset, source_text) {
+        return Some(ctx);
+      }
     }
   }
 
@@ -354,6 +371,141 @@ fn collect_path_segments_backwards(
 
   segments.reverse();
   segments
+}
+
+/// Detect record initializer context: `RecordName { field1: val, |`
+fn detect_record_init_context(
+  tokens: &[&Token],
+  trigger_token: &Token,
+  current_token: Option<&Token>,
+  cursor_offset: u32,
+  _source_text: &str,
+) -> Option<CompletionContext> {
+  let trigger_idx = tokens.iter().position(|t| std::ptr::eq(*t, trigger_token))?;
+
+  // Scan backwards to find opening `{`
+  let mut brace_depth = 0i32;
+  let mut open_brace_idx = None;
+
+  for i in (0..=trigger_idx).rev() {
+    let tok = tokens[i];
+
+    match tok.type_ {
+      TokenType::RightBrace => brace_depth += 1,
+      TokenType::LeftBrace => {
+        if brace_depth == 0 {
+          open_brace_idx = Some(i);
+          break;
+        }
+        brace_depth -= 1;
+      },
+      _ => {},
+    }
+  }
+
+  let open_brace_idx = open_brace_idx?;
+
+  if open_brace_idx == 0 {
+    return None;
+  }
+
+  let name_token = tokens[open_brace_idx - 1];
+  if name_token.type_ != TokenType::Identifier {
+    return None;
+  }
+
+  // Filter out block statements like `if (cond) {` or `else {`
+  if open_brace_idx >= 2 {
+    let before_name = tokens[open_brace_idx - 2];
+    if matches!(before_name.type_, TokenType::RightParen | TokenType::Else) {
+      return None;
+    }
+  }
+
+  let record_name = name_token.lexeme.clone();
+
+  // Collect assigned fields (pattern: `name:`)
+  let mut assigned_fields = Vec::new();
+  let mut i = open_brace_idx + 1;
+  while i < tokens.len() && tokens[i].span.start.0 < cursor_offset {
+    let tok = tokens[i];
+    if tok.type_ == TokenType::RightBrace {
+      break;
+    }
+    if tok.type_ == TokenType::Identifier && i + 1 < tokens.len() && tokens[i + 1].type_ == TokenType::Colon {
+      assigned_fields.push(tok.lexeme.clone());
+    }
+    i += 1;
+  }
+
+  let prefix = extract_prefix_at_cursor(current_token, cursor_offset);
+
+  Some(CompletionContext::RecordInit {
+    record_name,
+    assigned_fields,
+    prefix,
+  })
+}
+
+/// Complete unassigned fields in a record initializer.
+pub fn complete_record_init(
+  record_name: &str,
+  assigned_fields: &[String],
+  prefix: &str,
+  output: &AnalyzeProjectOutput,
+  file_id: &FileId,
+) -> Vec<CompletionCandidate> {
+  let mut candidates = Vec::new();
+
+  let Some(def_id) = output
+    .defs
+    .iter()
+    .find(|(_, def)| {
+      matches!(&def.kind, DefinitionKind::Record(_))
+        && output.symbol_names.get(&def.name).map_or(false, |n| n == record_name)
+        && is_visible(def, file_id)
+    })
+    .map(|(id, _)| id)
+  else {
+    return candidates;
+  };
+
+  let def = output.defs.get(&def_id);
+  let DefinitionKind::Record(record_def) = &def.kind else {
+    return candidates;
+  };
+
+  for field in &record_def.fields {
+    let Some(field_name) = output.symbol_names.get(&field.name) else {
+      continue;
+    };
+
+    if assigned_fields.contains(field_name) {
+      continue;
+    }
+
+    if !matches_prefix(field_name, prefix) {
+      continue;
+    }
+
+    let field_def = output.defs.get(&field.def_id);
+    if !is_visible(field_def, file_id) {
+      continue;
+    }
+
+    let type_str = format_type_brief(&output.types, &output.defs, &output.symbol_names, &field.type_id);
+    candidates.push(CompletionCandidate {
+      label: field_name.clone(),
+      kind: CompletionKind::Field,
+      detail: Some(type_str),
+      documentation: field_def.doc.clone(),
+      insert_text: Some(format!("{}: $0", field_name)),
+      insert_text_format: Some(InsertTextFormat::SNIPPET),
+      sort_priority: 10,
+    });
+  }
+
+  candidates
 }
 
 /// Complete members after `.` (instance access).

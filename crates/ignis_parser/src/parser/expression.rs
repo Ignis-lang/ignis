@@ -129,13 +129,12 @@ impl IgnisParser {
 
       if let Some(assign_op) = Self::to_assignment_operator(&op) {
         left = self.allocate_expression(ASTExpression::Assignment(ASTAssignment::new(left, right, assign_op, span)));
+      } else if let Ok(bin_op) = ASTBinaryOperator::try_from(&op) {
+        left = self.allocate_expression(ASTExpression::Binary(ASTBinary::new(left, bin_op, right, span)));
       } else {
-        left = self.allocate_expression(ASTExpression::Binary(ASTBinary::new(
-          left,
-          ASTBinaryOperator::from(&op),
-          right,
-          span,
-        )));
+        // Token has binding power but is not a binary operator (e.g., unary-only operators).
+        // This shouldn't happen in well-formed input, but we handle it gracefully for LSP robustness.
+        break;
       }
     }
 

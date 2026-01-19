@@ -241,7 +241,12 @@ impl<'a> HirOwnershipChecker<'a> {
       },
 
       // Expressions that don't affect ownership directly
-      HIRKind::Literal(_) | HIRKind::SizeOf(_) | HIRKind::Error => {},
+      HIRKind::Literal(_)
+      | HIRKind::SizeOf(_)
+      | HIRKind::AlignOf(_)
+      | HIRKind::MaxOf(_)
+      | HIRKind::MinOf(_)
+      | HIRKind::Error => {},
 
       HIRKind::Binary { left, right, .. } => {
         self.check_node(left);

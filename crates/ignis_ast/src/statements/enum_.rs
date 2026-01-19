@@ -47,6 +47,7 @@ pub struct ASTEnumVariant {
   pub name_span: Span,
   pub payload: Vec<IgnisTypeSyntax>,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTEnumVariant {
@@ -55,12 +56,14 @@ impl ASTEnumVariant {
     name_span: Span,
     payload: Vec<IgnisTypeSyntax>,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
       name_span,
       payload,
       span,
+      doc,
     }
   }
 }
@@ -76,6 +79,7 @@ pub struct ASTEnumField {
   pub value: Option<NodeId>,
   pub metadata: ASTMetadata,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTEnumField {
@@ -86,6 +90,7 @@ impl ASTEnumField {
     value: Option<NodeId>,
     metadata: ASTMetadata,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
@@ -94,6 +99,7 @@ impl ASTEnumField {
       value,
       metadata,
       span,
+      doc,
     }
   }
 }

@@ -369,6 +369,13 @@ impl<'a> Analyzer<'a> {
     self.import_item_defs.insert(span.clone(), def_id.clone());
   }
 
+  fn lookup_import_item_def(
+    &self,
+    span: &ignis_type::span::Span,
+  ) -> Option<&DefinitionId> {
+    self.import_item_defs.get(span)
+  }
+
   fn lookup_resolved_call(
     &self,
     node_id: &NodeId,
@@ -475,7 +482,13 @@ impl<'a> Analyzer<'a> {
   ) -> bool {
     let symbols = self.symbols.borrow();
     let name = symbols.get(symbol_id);
-    name == "typeOf" || name == "sizeOf" || name == "__builtin_read" || name == "__builtin_write"
+    name == "typeOf"
+      || name == "sizeOf"
+      || name == "alignOf"
+      || name == "maxOf"
+      || name == "minOf"
+      || name == "__builtin_read"
+      || name == "__builtin_write"
   }
 
   fn node_span(

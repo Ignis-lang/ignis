@@ -9,6 +9,7 @@ pub struct ASTVariable {
   pub type_: IgnisTypeSyntax,
   pub span: Span,
   pub metadata: ASTMetadata,
+  pub doc: Option<String>,
 }
 
 impl ASTVariable {
@@ -18,6 +19,7 @@ impl ASTVariable {
     type_: IgnisTypeSyntax,
     span: Span,
     metadata: ASTMetadata,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
@@ -25,6 +27,7 @@ impl ASTVariable {
       type_,
       span,
       metadata,
+      doc,
     }
   }
 }

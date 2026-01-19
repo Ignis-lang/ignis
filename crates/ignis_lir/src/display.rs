@@ -233,6 +233,18 @@ impl<'a> LirPrinter<'a> {
         let ty_str = self.format_type(*ty);
         writeln!(self.output, "t{} = sizeof({}) : u64", dest.index(), ty_str).unwrap();
       },
+      Instr::AlignOf { dest, ty } => {
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "t{} = alignof({}) : u64", dest.index(), ty_str).unwrap();
+      },
+      Instr::MaxOf { dest, ty } => {
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "t{} = maxof({}) : {}", dest.index(), ty_str, ty_str).unwrap();
+      },
+      Instr::MinOf { dest, ty } => {
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "t{} = minof({}) : {}", dest.index(), ty_str, ty_str).unwrap();
+      },
       Instr::Drop { local } => {
         writeln!(self.output, "drop l{}", local.index()).unwrap();
       },

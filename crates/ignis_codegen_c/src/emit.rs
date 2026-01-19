@@ -735,6 +735,12 @@ impl<'a> CEmitter<'a> {
           return;
         }
 
+        if matches!(op, BinaryOperation::Equal | BinaryOperation::NotEqual) {
+          if self.emit_enum_comparison(func, *dest, op, left, right) {
+            return;
+          }
+        }
+
         let l = self.format_operand(func, left);
         let r = self.format_operand(func, right);
 
@@ -777,7 +783,25 @@ impl<'a> CEmitter<'a> {
           panic!("ICE: cast from inferred type reached C codegen after implicit type removal");
         }
 
-        writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
+        // Check for pointer <-> integer casts and use uintptr_t for C standards compliance
+        let source_ty = self.operand_type(func, source);
+        let target_ty_info = self.types.get(target_type);
+
+        let source_is_ptr = source_ty.map_or(false, |t| matches!(self.types.get(&t), Type::Pointer { .. }));
+        let target_is_ptr = matches!(target_ty_info, Type::Pointer { .. });
+        let target_is_int = self.types.is_integer(target_type);
+        let source_is_int = source_ty.map_or(false, |t| self.types.is_integer(&t));
+
+        if source_is_ptr && target_is_int {
+          // Pointer -> integer: use (target_type)(uintptr_t)(ptr)
+          writeln!(self.output, "t{} = ({})(uintptr_t)({});", dest.index(), ty, s).unwrap();
+        } else if source_is_int && target_is_ptr {
+          // Integer -> pointer: use (target_type)(uintptr_t)(int_val)
+          writeln!(self.output, "t{} = ({})(uintptr_t)({});", dest.index(), ty, s).unwrap();
+        } else {
+          // Regular cast
+          writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
+        }
       },
       Instr::AddrOfLocal { dest, local, .. } => {
         // For array locals, the name already decays to a pointer in C
@@ -821,6 +845,18 @@ impl<'a> CEmitter<'a> {
       Instr::SizeOf { dest, ty } => {
         let c_type = self.format_type(*ty);
         writeln!(self.output, "t{} = sizeof({});", dest.index(), c_type).unwrap();
+      },
+      Instr::AlignOf { dest, ty } => {
+        let c_type = self.format_type(*ty);
+        writeln!(self.output, "t{} = _Alignof({});", dest.index(), c_type).unwrap();
+      },
+      Instr::MaxOf { dest, ty } => {
+        let c_max = self.type_max_value(*ty);
+        writeln!(self.output, "t{} = {};", dest.index(), c_max).unwrap();
+      },
+      Instr::MinOf { dest, ty } => {
+        let c_min = self.type_min_value(*ty);
+        writeln!(self.output, "t{} = {};", dest.index(), c_min).unwrap();
       },
       Instr::Drop { local } => {
         let local_data = func.locals.get(local);
@@ -1085,6 +1121,52 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  /// Emit comparison for unit enums by comparing their tags.
+  /// Returns true if this was an enum comparison, false otherwise.
+  fn emit_enum_comparison(
+    &mut self,
+    func: &FunctionLir,
+    dest: TempId,
+    op: &BinaryOperation,
+    left: &Operand,
+    right: &Operand,
+  ) -> bool {
+    let Some(left_ty) = self.operand_type(func, left) else {
+      return false;
+    };
+    let Some(right_ty) = self.operand_type(func, right) else {
+      return false;
+    };
+
+    if !self.is_unit_enum_type(left_ty) || !self.is_unit_enum_type(right_ty) {
+      return false;
+    }
+
+    let l = self.format_operand(func, left);
+    let r = self.format_operand(func, right);
+    let op_str = self.format_binop(op);
+
+    writeln!(self.output, "t{} = {}.tag {} {}.tag;", dest.index(), l, op_str, r).unwrap();
+    true
+  }
+
+  /// Returns true if the type is an enum where all variants have no payload.
+  fn is_unit_enum_type(
+    &self,
+    ty: TypeId,
+  ) -> bool {
+    match self.types.get(&ty) {
+      Type::Enum(def_id) => {
+        let def = self.defs.get(def_id);
+        if let DefinitionKind::Enum(ed) = &def.kind {
+          return ed.variants.iter().all(|v| v.payload.is_empty());
+        }
+        false
+      },
+      _ => false,
+    }
+  }
+
   fn format_binop(
     &self,
     op: &BinaryOperation,
@@ -1120,6 +1202,46 @@ impl<'a> CEmitter<'a> {
       UnaryOperation::Not => "!",
       UnaryOperation::Neg => "-",
       UnaryOperation::BitNot => "~",
+    }
+  }
+
+  /// Get C expression for the maximum value of a numeric type.
+  fn type_max_value(
+    &self,
+    ty: TypeId,
+  ) -> String {
+    match self.types.get(&ty) {
+      Type::I8 => "INT8_MAX".to_string(),
+      Type::I16 => "INT16_MAX".to_string(),
+      Type::I32 => "INT32_MAX".to_string(),
+      Type::I64 => "INT64_MAX".to_string(),
+      Type::U8 => "UINT8_MAX".to_string(),
+      Type::U16 => "UINT16_MAX".to_string(),
+      Type::U32 => "UINT32_MAX".to_string(),
+      Type::U64 => "UINT64_MAX".to_string(),
+      Type::F32 => "FLT_MAX".to_string(),
+      Type::F64 => "DBL_MAX".to_string(),
+      _ => panic!("ICE: maxOf called with non-numeric type"),
+    }
+  }
+
+  /// Get C expression for the minimum value of a numeric type.
+  fn type_min_value(
+    &self,
+    ty: TypeId,
+  ) -> String {
+    match self.types.get(&ty) {
+      Type::I8 => "INT8_MIN".to_string(),
+      Type::I16 => "INT16_MIN".to_string(),
+      Type::I32 => "INT32_MIN".to_string(),
+      Type::I64 => "INT64_MIN".to_string(),
+      Type::U8 => "((u8)0)".to_string(),
+      Type::U16 => "((u16)0)".to_string(),
+      Type::U32 => "((u32)0)".to_string(),
+      Type::U64 => "((u64)0)".to_string(),
+      Type::F32 => "(-FLT_MAX)".to_string(),
+      Type::F64 => "(-DBL_MAX)".to_string(),
+      _ => panic!("ICE: minOf called with non-numeric type"),
     }
   }
 

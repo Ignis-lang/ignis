@@ -129,7 +129,10 @@ pub enum TokenType {
   Identifier,
   Comment,
   MultiLineComment,
+  /// Outer doc comment: `///` (documents the following item)
   DocComment,
+  /// Inner doc comment: `//!` (documents the enclosing item/module)
+  InnerDocComment,
   Whitespace,
   Eof,
 }
@@ -285,6 +288,7 @@ impl Display for TokenType {
       TokenType::Decrement => write!(f, "Decrement"),
       TokenType::DivAssign => write!(f, "DivAssign"),
       TokenType::DocComment => write!(f, "DocComment"),
+      TokenType::InnerDocComment => write!(f, "InnerDocComment"),
       TokenType::Dot => write!(f, "Dot"),
       TokenType::DoubleColon => write!(f, "DoubleColon"),
       TokenType::Else => write!(f, "Else"),

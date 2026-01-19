@@ -804,10 +804,36 @@ impl<'a> Analyzer<'a> {
       rd.fields = resolved_fields;
     }
 
-    // Second pass: typecheck methods (after field types are resolved)
+    // Second pass: resolve method signatures (return type, param types)
+    // This must happen before typechecking bodies so methods can call each other
     for item in &rec.items {
       if let ASTRecordItem::Method(method) = item {
-        // Get method definition id from record
+        let method_def_id = if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
+          let entry = if method.is_static() {
+            rd.static_methods.get(&method.name)
+          } else {
+            rd.instance_methods.get(&method.name)
+          };
+          match entry {
+            Some(SymbolEntry::Single(def_id)) => Some(*def_id),
+            Some(SymbolEntry::Overload(group)) => {
+              group.iter().copied().find(|id| self.defs.get(id).span == method.span)
+            },
+            None => None,
+          }
+        } else {
+          None
+        };
+
+        if let Some(method_def_id) = method_def_id {
+          self.resolve_method_signature(&method_def_id, method);
+        }
+      }
+    }
+
+    // Third pass: typecheck method bodies (after ALL signatures are resolved)
+    for item in &rec.items {
+      if let ASTRecordItem::Method(method) = item {
         let method_def_id = if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
           let entry = if method.is_static() {
             rd.static_methods.get(&method.name)
@@ -864,6 +890,7 @@ impl<'a> Analyzer<'a> {
 
     let mut variant_idx = 0usize;
 
+    // First pass: resolve variants and fields, and method signatures
     for item in &en.items {
       match item {
         ASTEnumItem::Variant(variant) => {
@@ -901,7 +928,7 @@ impl<'a> Analyzer<'a> {
           };
 
           if let Some(method_def_id) = method_def_id {
-            self.typecheck_method(&method_def_id, method, enum_def_id, scope_kind, ctx);
+            self.resolve_method_signature(&method_def_id, method);
           }
         },
         ASTEnumItem::Field(field) => {
@@ -926,6 +953,27 @@ impl<'a> Analyzer<'a> {
       }
     }
 
+    // Second pass: typecheck method bodies
+    for item in &en.items {
+      if let ASTEnumItem::Method(method) = item {
+        let method_def_id = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
+          match ed.static_methods.get(&method.name) {
+            Some(SymbolEntry::Single(def_id)) => Some(*def_id),
+            Some(SymbolEntry::Overload(group)) => {
+              group.iter().copied().find(|id| self.defs.get(id).span == method.span)
+            },
+            None => None,
+          }
+        } else {
+          None
+        };
+
+        if let Some(method_def_id) = method_def_id {
+          self.typecheck_method(&method_def_id, method, enum_def_id, scope_kind, ctx);
+        }
+      }
+    }
+
     // Update enum definition with resolved variant payload types
     if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
       ed.variants = updated_variants;
@@ -941,13 +989,13 @@ impl<'a> Analyzer<'a> {
   // Method Typechecking (shared by Record and Enum)
   // ========================================================================
 
-  fn typecheck_method(
+  /// Resolve method signature (return type and parameter types) without typechecking the body.
+  /// This allows all method signatures to be resolved before any bodies are typechecked,
+  /// enabling methods to call each other regardless of declaration order.
+  fn resolve_method_signature(
     &mut self,
     method_def_id: &ignis_type::definition::DefinitionId,
     method: &ignis_ast::statements::record::ASTMethod,
-    owner_def_id: ignis_type::definition::DefinitionId,
-    scope_kind: ScopeKind,
-    _ctx: &TypecheckContext,
   ) {
     // Resolve return type
     let return_type = self.resolve_type_syntax_with_span(&method.return_type, &method.span);
@@ -973,6 +1021,29 @@ impl<'a> Analyzer<'a> {
     if let DefinitionKind::Method(md) = &mut self.defs.get_mut(method_def_id).kind {
       md.return_type = return_type.clone();
     }
+  }
+
+  fn typecheck_method(
+    &mut self,
+    method_def_id: &ignis_type::definition::DefinitionId,
+    method: &ignis_ast::statements::record::ASTMethod,
+    owner_def_id: ignis_type::definition::DefinitionId,
+    scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) {
+    // Get the return type that was resolved in resolve_method_signature
+    let return_type = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
+      md.return_type.clone()
+    } else {
+      return;
+    };
+
+    // Get parameter definition ids
+    let param_def_ids = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
+      md.params.clone()
+    } else {
+      return;
+    };
 
     // Typecheck the method body
     self.scopes.push(ScopeKind::Function);
@@ -1955,11 +2026,20 @@ impl<'a> Analyzer<'a> {
       if name == "sizeOf" {
         return self.typecheck_sizeof_builtin(call, scope_kind, ctx);
       }
+      if name == "alignOf" {
+        return self.typecheck_alignof_builtin(call, scope_kind, ctx);
+      }
       if name == "__builtin_read" {
         return self.typecheck_builtin_read(call, scope_kind, ctx);
       }
       if name == "__builtin_write" {
         return self.typecheck_builtin_write(call, scope_kind, ctx);
+      }
+      if name == "maxOf" {
+        return self.typecheck_maxof_builtin(call, scope_kind, ctx);
+      }
+      if name == "minOf" {
+        return self.typecheck_minof_builtin(call, scope_kind, ctx);
       }
     }
 
@@ -3457,13 +3537,42 @@ impl<'a> Analyzer<'a> {
   fn typecheck_sizeof_builtin(
     &mut self,
     call: &ASTCallExpression,
-    scope_kind: ScopeKind,
-    ctx: &TypecheckContext,
+    _scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
   ) -> TypeId {
-    if call.arguments.len() != 1 {
+    let type_args = match &call.type_args {
+      Some(args) => args,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "sizeOf".to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: "sizeOf".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if !call.arguments.is_empty() {
       self.add_diagnostic(
         DiagnosticMessage::ArgumentCountMismatch {
-          expected: 1,
+          expected: 0,
           got: call.arguments.len(),
           func_name: "sizeOf".to_string(),
           span: call.span.clone(),
@@ -3473,23 +3582,69 @@ impl<'a> Analyzer<'a> {
       return self.types.error();
     }
 
-    if let Some(def_id) = self.resolve_type_expression(&call.arguments[0], scope_kind, ctx) {
-      if matches!(self.defs.get(&def_id).kind, DefinitionKind::TypeParam(_)) {
-        return self.types.u64();
-      }
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
+
+    // Allow type parameters for generic support
+    if matches!(self.types.get(&value_type), ignis_type::types::Type::Param { .. }) {
+      return self.types.u64();
     }
 
-    let arg_type = self.typecheck_node(&call.arguments[0], scope_kind, ctx);
-    let base_type = self.unwrap_reference_type(&arg_type);
+    self.types.u64()
+  }
 
-    if matches!(self.types.get(&base_type), ignis_type::types::Type::Infer) {
+  fn typecheck_alignof_builtin(
+    &mut self,
+    call: &ASTCallExpression,
+    _scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) -> TypeId {
+    let type_args = match &call.type_args {
+      Some(args) => args,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "alignOf".to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
       self.add_diagnostic(
-        DiagnosticMessage::InvalidSizeOfOperand {
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: "alignOf".to_string(),
           span: call.span.clone(),
         }
         .report(),
       );
       return self.types.error();
+    }
+
+    if !call.arguments.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 0,
+          got: call.arguments.len(),
+          func_name: "alignOf".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
+
+    // Allow type parameters for generic support
+    if matches!(self.types.get(&value_type), ignis_type::types::Type::Param { .. }) {
+      return self.types.u64();
     }
 
     self.types.u64()
@@ -3709,14 +3864,107 @@ impl<'a> Analyzer<'a> {
     self.types.void()
   }
 
-  pub(crate) fn unwrap_reference_type(
-    &self,
-    ty: &TypeId,
+  fn typecheck_maxof_builtin(
+    &mut self,
+    call: &ASTCallExpression,
+    _scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
   ) -> TypeId {
-    match self.types.get(ty) {
-      ignis_type::types::Type::Reference { inner, .. } => self.unwrap_reference_type(inner),
-      _ => ty.clone(),
+    self.typecheck_minmax_builtin(call, "maxOf")
+  }
+
+  fn typecheck_minof_builtin(
+    &mut self,
+    call: &ASTCallExpression,
+    _scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) -> TypeId {
+    self.typecheck_minmax_builtin(call, "minOf")
+  }
+
+  fn typecheck_minmax_builtin(
+    &mut self,
+    call: &ASTCallExpression,
+    func_name: &str,
+  ) -> TypeId {
+    let type_args = match &call.type_args {
+      Some(args) => args,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: func_name.to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: func_name.to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
     }
+
+    if !call.arguments.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 0,
+          got: call.arguments.len(),
+          func_name: func_name.to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
+
+    // Allow type parameters for generic support
+    if self.types.contains_type_param(&value_type) {
+      return value_type;
+    }
+
+    // Check that the type is numeric
+    let ty = self.types.get(&value_type);
+    let is_numeric = matches!(
+      ty,
+      Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64
+        | Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
+        | Type::F32
+        | Type::F64
+    );
+
+    if !is_numeric {
+      self.add_diagnostic(
+        DiagnosticMessage::InvalidMinMaxType {
+          func_name: func_name.to_string(),
+          got: self.format_type_for_error(&value_type),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    value_type
   }
 
   fn is_pointer_type(
@@ -3870,6 +4118,11 @@ impl<'a> Analyzer<'a> {
         }
 
         if self.is_pointer_type(&resolved_left) && self.is_pointer_type(&resolved_right) {
+          return self.types.boolean();
+        }
+
+        // Unit enum comparison: both sides must be the same enum type with no payload variants
+        if self.types.types_equal(&left_type, &right_type) && self.types.is_unit_enum(&left_type, &self.defs) {
           return self.types.boolean();
         }
 
@@ -4148,6 +4401,9 @@ impl<'a> Analyzer<'a> {
       (Type::Reference { .. }, Type::Pointer { .. }) => true,
       (Type::Pointer { .. }, Type::Pointer { .. }) => true,
       (Type::Reference { .. }, Type::Reference { .. }) => true,
+      // Pointer <-> integer casts (for low-level memory manipulation)
+      (Type::Pointer { .. }, _) if self.types.is_integer(&target_type) => true,
+      (_, Type::Pointer { .. }) if self.types.is_integer(&expr_type) => true,
       (Type::Infer, _) => true,
       (Type::Reference { inner, .. }, _) if self.types.is_infer(inner) => true,
       (_, _) if self.types.types_equal(&expr_type, &target_type) => true,

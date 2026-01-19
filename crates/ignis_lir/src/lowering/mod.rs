@@ -381,6 +381,9 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Error => None,
       HIRKind::TypeOf(operand_hir) => self.lower_typeof(*operand_hir, node.type_id, node.span),
       HIRKind::SizeOf(ty) => self.lower_sizeof(*ty, node.type_id, node.span),
+      HIRKind::AlignOf(ty) => self.lower_alignof(*ty, node.type_id, node.span),
+      HIRKind::MaxOf(ty) => self.lower_maxof(*ty, node.type_id, node.span),
+      HIRKind::MinOf(ty) => self.lower_minof(*ty, node.type_id, node.span),
       HIRKind::BuiltinLoad { ty, ptr } => self.lower_builtin_load(*ty, *ptr, node.type_id, node.span),
       HIRKind::BuiltinStore { ty, ptr, value } => {
         self.lower_builtin_store(*ty, *ptr, *value, node.span);
@@ -687,6 +690,45 @@ impl<'a> LoweringContext<'a> {
     let dest = self.fn_builder().alloc_temp(result_ty, span);
 
     self.fn_builder().emit(Instr::SizeOf { dest, ty });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_alignof(
+    &mut self,
+    ty: TypeId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    self.fn_builder().emit(Instr::AlignOf { dest, ty });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_maxof(
+    &mut self,
+    ty: TypeId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    self.fn_builder().emit(Instr::MaxOf { dest, ty });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_minof(
+    &mut self,
+    ty: TypeId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    self.fn_builder().emit(Instr::MinOf { dest, ty });
 
     Some(Operand::Temp(dest))
   }

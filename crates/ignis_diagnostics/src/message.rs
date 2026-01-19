@@ -446,6 +446,11 @@ pub enum DiagnosticMessage {
   InvalidSizeOfOperand {
     span: Span,
   },
+  InvalidMinMaxType {
+    func_name: String,
+    got: String,
+    span: Span,
+  },
   // Static field errors
   StaticFieldRequiresInit {
     field: String,
@@ -900,6 +905,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::InvalidSizeOfOperand { .. } => {
         write!(f, "sizeOf requires an explicit cast to a concrete type")
       },
+      DiagnosticMessage::InvalidMinMaxType { func_name, got, .. } => {
+        write!(f, "{} requires a numeric type, got '{}'", func_name, got)
+      },
 
       // Static field errors
       DiagnosticMessage::StaticFieldRequiresInit { field, type_name, .. } => {
@@ -1112,6 +1120,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::PossibleLeakToFFI { span, .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { span, .. }
       | DiagnosticMessage::InvalidSizeOfOperand { span, .. }
+      | DiagnosticMessage::InvalidMinMaxType { span, .. }
       | DiagnosticMessage::StaticFieldRequiresInit { span, .. }
       | DiagnosticMessage::StaticOnEnumVariant { span, .. }
       | DiagnosticMessage::StaticFieldNotConst { span, .. }
@@ -1238,6 +1247,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
       DiagnosticMessage::IntegerOverflow { .. } => "A0046",
       DiagnosticMessage::InvalidSizeOfOperand { .. } => "A0049",
+      DiagnosticMessage::InvalidMinMaxType { .. } => "A0072",
       DiagnosticMessage::StaticFieldRequiresInit { .. } => "A0065",
       DiagnosticMessage::StaticOnEnumVariant { .. } => "A0067",
       DiagnosticMessage::StaticFieldNotConst { .. } => "A0068",

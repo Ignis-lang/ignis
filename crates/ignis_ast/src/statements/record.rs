@@ -51,6 +51,7 @@ pub struct ASTRecordField {
   pub value: Option<NodeId>,
   pub metadata: ASTMetadata,
   pub span: Span,
+  pub doc: Option<String>,
 }
 
 impl ASTRecordField {
@@ -61,6 +62,7 @@ impl ASTRecordField {
     value: Option<NodeId>,
     metadata: ASTMetadata,
     span: Span,
+    doc: Option<String>,
   ) -> Self {
     Self {
       name,
@@ -69,6 +71,7 @@ impl ASTRecordField {
       value,
       metadata,
       span,
+      doc,
     }
   }
 

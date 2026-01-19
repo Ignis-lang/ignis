@@ -637,6 +637,9 @@ impl<'a> Monomorphizer<'a> {
         (HIRKind::TypeOf(new_expr), None)
       },
       HIRKind::SizeOf(ty) => (HIRKind::SizeOf(*ty), None),
+      HIRKind::AlignOf(ty) => (HIRKind::AlignOf(*ty), None),
+      HIRKind::MaxOf(ty) => (HIRKind::MaxOf(*ty), None),
+      HIRKind::MinOf(ty) => (HIRKind::MinOf(*ty), None),
       HIRKind::FieldAccess { base, field_index } => {
         let new_base = self.clone_hir_tree(*base);
         (
@@ -1183,7 +1186,10 @@ impl<'a> Monomorphizer<'a> {
       | HIRKind::Break
       | HIRKind::Continue
       | HIRKind::Error
-      | HIRKind::SizeOf(_) => {},
+      | HIRKind::SizeOf(_)
+      | HIRKind::AlignOf(_)
+      | HIRKind::MaxOf(_)
+      | HIRKind::MinOf(_) => {},
     }
   }
 
@@ -1858,6 +1864,18 @@ impl<'a> Monomorphizer<'a> {
       HIRKind::SizeOf(ty) => {
         let new_ty = self.types.substitute(*ty, subst);
         HIRKind::SizeOf(new_ty)
+      },
+      HIRKind::AlignOf(ty) => {
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::AlignOf(new_ty)
+      },
+      HIRKind::MaxOf(ty) => {
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::MaxOf(new_ty)
+      },
+      HIRKind::MinOf(ty) => {
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::MinOf(new_ty)
       },
       HIRKind::FieldAccess { base, field_index } => {
         let new_base = self.substitute_hir(*base, subst);

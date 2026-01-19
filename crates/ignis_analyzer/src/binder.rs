@@ -278,7 +278,7 @@ impl<'a> Analyzer<'a> {
               visibility: Visibility::Public,
               owner_module: self.current_module,
               owner_namespace: self.current_namespace,
-              doc: None,
+              doc: field.doc.clone(),
             };
             let const_def_id = self.defs.alloc(const_def);
             self.set_import_item_def(&field.name_span, &const_def_id);
@@ -303,7 +303,7 @@ impl<'a> Analyzer<'a> {
               visibility,
               owner_module: self.current_module,
               owner_namespace: self.current_namespace,
-              doc: None,
+              doc: field.doc.clone(),
             };
             let field_def_id = self.defs.alloc(field_def);
             self.set_import_item_def(&field.name_span, &field_def_id);
@@ -448,7 +448,7 @@ impl<'a> Analyzer<'a> {
             visibility: Visibility::Public,
             owner_module: self.current_module,
             owner_namespace: self.current_namespace,
-            doc: None,
+            doc: variant.doc.clone(),
           };
           let variant_def_id = self.defs.alloc(variant_def);
 

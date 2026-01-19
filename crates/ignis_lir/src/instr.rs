@@ -127,6 +127,24 @@ pub enum Instr {
     ty: TypeId,
   },
 
+  /// Get alignment of type: `dest = alignof(ty)`
+  AlignOf {
+    dest: TempId,
+    ty: TypeId,
+  },
+
+  /// Get maximum value of numeric type: `dest = maxOf<ty>()`
+  MaxOf {
+    dest: TempId,
+    ty: TypeId,
+  },
+
+  /// Get minimum value of numeric type: `dest = minOf<ty>()`
+  MinOf {
+    dest: TempId,
+    ty: TypeId,
+  },
+
   /// Drop an owned value's resources.
   /// The local must have a droppable type (string, dynamic vector, infer).
   Drop {

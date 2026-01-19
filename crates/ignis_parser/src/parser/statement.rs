@@ -106,6 +106,9 @@ impl super::IgnisParser {
 
   /// let name: type (= init)?;
   fn parse_let_statement(&mut self) -> ParserResult<NodeId> {
+    // Capture doc comment before the variable declaration
+    let doc = self.take_pending_doc();
+
     let keyword = self.expect(TokenType::Let)?.clone();
     let is_mutable = self.eat(TokenType::Mut);
     let name_token = self.expect(TokenType::Identifier)?.clone();
@@ -130,7 +133,7 @@ impl super::IgnisParser {
       ignis_ast::metadata::ASTMetadata::VARIABLE
     };
 
-    let variable = ASTVariable::new(name, initializer, type_annotation, span, metadata);
+    let variable = ASTVariable::new(name, initializer, type_annotation, span, metadata, doc);
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
   }
 
@@ -333,7 +336,8 @@ impl super::IgnisParser {
 
     let metadata = ignis_ast::metadata::ASTMetadata::VARIABLE | ignis_ast::metadata::ASTMetadata::MUTABLE;
 
-    let variable = ASTVariable::new(name, Some(initializer), type_annotation, span, metadata);
+    // For loop initializer variables don't have doc comments
+    let variable = ASTVariable::new(name, Some(initializer), type_annotation, span, metadata, None);
 
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
   }

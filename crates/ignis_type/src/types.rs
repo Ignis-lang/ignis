@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::{Id, Store, definition::DefinitionId};
+use crate::{
+  Id, Store,
+  definition::{DefinitionId, DefinitionKind, DefinitionStore},
+};
 
 pub type TypeId = Id<Type>;
 
@@ -446,6 +449,25 @@ impl TypeStore {
     ty: &TypeId,
   ) -> bool {
     matches!(self.get(ty), Type::U8 | Type::U16 | Type::U32 | Type::U64)
+  }
+
+  /// Returns true if the type is an enum where all variants have no payload.
+  /// This is used to determine if enum values can be compared with == and !=.
+  pub fn is_unit_enum(
+    &self,
+    ty: &TypeId,
+    defs: &DefinitionStore,
+  ) -> bool {
+    match self.get(ty) {
+      Type::Enum(def_id) => {
+        let def = defs.get(def_id);
+        if let DefinitionKind::Enum(ed) = &def.kind {
+          return ed.variants.iter().all(|v| v.payload.is_empty());
+        }
+        false
+      },
+      _ => false,
+    }
   }
 
   pub fn types_equal(

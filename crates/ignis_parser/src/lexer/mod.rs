@@ -396,7 +396,15 @@ impl<'a> IgnisLexer<'a> {
 
   fn comments(&mut self) -> LexerResult {
     if self.match_char('/') {
-      // Check for /// doc comment (but not //// which is a regular comment)
+      // Check for //! inner doc comment (documents enclosing item)
+      if self.peek() == '!' {
+        while self.peek() != '\n' && !self.is_at_end() {
+          self.advance();
+        }
+        return Ok(TokenType::InnerDocComment);
+      }
+
+      // Check for /// outer doc comment (but not //// which is a regular comment)
       let is_doc_comment = self.peek() == '/' && self.peek_next() != '/';
 
       while self.peek() != '\n' && !self.is_at_end() {
@@ -409,14 +417,16 @@ impl<'a> IgnisLexer<'a> {
         TokenType::Comment
       });
     } else if self.match_char('*') {
-      let mut is_doc_comment = false;
-
-      if self.peek() == '*' {
-        is_doc_comment = true;
-      }
+      // Check for /*! inner doc comment or /** outer doc comment
+      let is_inner_doc = self.peek() == '!';
+      let is_outer_doc = self.peek() == '*' && !is_inner_doc;
 
       let mut lexeme: String = String::from("/*");
-      lexeme.push_str(if is_doc_comment { "*" } else { "" });
+      if is_inner_doc {
+        lexeme.push('!');
+      } else if is_outer_doc {
+        lexeme.push('*');
+      }
       self.advance();
 
       while !self.is_at_end() && !(self.peek() == '*' && self.peek_next() == '/') {
@@ -430,7 +440,9 @@ impl<'a> IgnisLexer<'a> {
       self.advance();
       self.advance();
 
-      return Ok(if is_doc_comment {
+      return Ok(if is_inner_doc {
+        TokenType::InnerDocComment
+      } else if is_outer_doc {
         TokenType::DocComment
       } else {
         TokenType::MultiLineComment

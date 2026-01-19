@@ -234,6 +234,18 @@ impl<'a> LirVerifier<'a> {
         // ty is a TypeId, no operand to check
         defined_temps.insert(*dest);
       },
+      Instr::AlignOf { dest, .. } => {
+        // ty is a TypeId, no operand to check
+        defined_temps.insert(*dest);
+      },
+      Instr::MaxOf { dest, .. } => {
+        // ty is a TypeId, no operand to check
+        defined_temps.insert(*dest);
+      },
+      Instr::MinOf { dest, .. } => {
+        // ty is a TypeId, no operand to check
+        defined_temps.insert(*dest);
+      },
       Instr::Drop { local } => {
         self.check_local_exists(func, func_name, block_name, *local);
 
