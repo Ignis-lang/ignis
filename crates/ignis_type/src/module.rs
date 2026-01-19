@@ -1,6 +1,35 @@
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use crate::{Id, Store, definition::DefinitionId, file::FileId, span::Span, symbol::SymbolId};
+
+/// Normalize a path by resolving `.` and `..` components without requiring the file to exist.
+///
+/// Unlike `std::fs::canonicalize`, this does not follow symlinks or check file existence.
+fn normalize_path(path: PathBuf) -> PathBuf {
+  let mut components = Vec::new();
+
+  for component in path.components() {
+    match component {
+      Component::CurDir => {
+        // Skip `.`
+      },
+      Component::ParentDir => {
+        // Pop the last component if it's a normal component
+        if let Some(Component::Normal(_)) = components.last() {
+          components.pop();
+        } else {
+          // Keep `..` if we can't go up (e.g., at root or only `..` remain)
+          components.push(component);
+        }
+      },
+      _ => {
+        components.push(component);
+      },
+    }
+  }
+
+  components.iter().collect()
+}
 
 pub type ModuleId = Id<Module>;
 
@@ -50,7 +79,7 @@ impl ModulePath {
         resolved
       };
 
-      return Ok(ModulePath::Project(with_ext));
+      return Ok(ModulePath::Project(normalize_path(with_ext)));
     }
 
     // 3. Absolute from project root
@@ -62,7 +91,7 @@ impl ModulePath {
         resolved
       };
 
-      return Ok(ModulePath::Project(with_ext));
+      return Ok(ModulePath::Project(normalize_path(with_ext)));
     }
 
     Err(ModulePathError::NoProjectRoot(import_from.to_string()))
@@ -424,5 +453,47 @@ mod tests {
     let path = ModulePath::Std("collections::vec".to_string());
     let fs_path = path.to_fs_path_with_manifest_path(Path::new("/usr/lib/ignis/std"), Some("collections/vec/mod.ign"));
     assert_eq!(fs_path, PathBuf::from("/usr/lib/ignis/std/collections/vec/mod.ign"));
+  }
+
+  #[test]
+  fn normalize_path_removes_dot_components() {
+    let path = normalize_path(PathBuf::from("/project/./src/./main.ign"));
+    assert_eq!(path, PathBuf::from("/project/src/main.ign"));
+  }
+
+  #[test]
+  fn normalize_path_resolves_parent_components() {
+    let path = normalize_path(PathBuf::from("/project/src/../lib/utils.ign"));
+    assert_eq!(path, PathBuf::from("/project/lib/utils.ign"));
+  }
+
+  #[test]
+  fn normalize_path_handles_multiple_parent_components() {
+    let path = normalize_path(PathBuf::from("/project/a/b/../../c/d.ign"));
+    assert_eq!(path, PathBuf::from("/project/c/d.ign"));
+  }
+
+  #[test]
+  fn normalize_path_handles_mixed_components() {
+    let path = normalize_path(PathBuf::from("/std/memory/../libc/./primitives.ign"));
+    assert_eq!(path, PathBuf::from("/std/libc/primitives.ign"));
+  }
+
+  #[test]
+  fn relative_paths_with_parent_are_normalized() {
+    // Two different import paths that should resolve to the same file
+    let path1 = ModulePath::from_import_path("./primitives", Path::new("/std/libc/mod.ign"), None);
+    let path2 = ModulePath::from_import_path("../libc/primitives", Path::new("/std/memory/mod.ign"), None);
+
+    assert!(path1.is_ok());
+    assert!(path2.is_ok());
+
+    // Both should resolve to the same normalized path
+    match (path1.unwrap(), path2.unwrap()) {
+      (ModulePath::Project(p1), ModulePath::Project(p2)) => {
+        assert_eq!(p1, p2);
+      },
+      _ => panic!("Expected Project paths"),
+    }
   }
 }

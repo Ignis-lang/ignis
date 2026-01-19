@@ -7,6 +7,25 @@ use ignis_type::span::Span;
 use ignis_type::BytePosition;
 use tower_lsp::lsp_types::{self, DiagnosticSeverity, NumberOrString, Position, Range};
 
+/// Find the largest byte index that is a char boundary and <= the given index.
+///
+/// This prevents panics when slicing strings at arbitrary byte positions
+/// that may fall in the middle of multi-byte UTF-8 characters.
+fn find_char_boundary(
+  text: &str,
+  index: usize,
+) -> usize {
+  if index >= text.len() {
+    return text.len();
+  }
+
+  let mut i = index;
+  while !text.is_char_boundary(i) && i > 0 {
+    i -= 1;
+  }
+  i
+}
+
 /// Index for fast line/column lookups with proper UTF-16 support.
 ///
 /// LSP positions use 0-based line numbers and UTF-16 code unit offsets
@@ -67,7 +86,7 @@ impl LineIndex {
 
     // Slice from line start to the position
     let start = line_start as usize;
-    let end = (pos.0 as usize).min(self.text.len());
+    let end = find_char_boundary(&self.text, (pos.0 as usize).min(self.text.len()));
 
     if start >= end {
       return (line, 0);
@@ -243,5 +262,33 @@ mod tests {
 
     // After 'b' (byte 6), UTF-16 col should be 4
     assert_eq!(idx.line_col_utf16(BytePosition(6)), (0, 4));
+  }
+
+  #[test]
+  fn test_find_char_boundary() {
+    // Box-drawing character '─' is 3 bytes in UTF-8 (0xE2 0x94 0x80)
+    let text = "a─b";
+    // Bytes: a=0, ─=1..4, b=4
+
+    assert_eq!(find_char_boundary(text, 0), 0); // 'a' start
+    assert_eq!(find_char_boundary(text, 1), 1); // '─' start
+    assert_eq!(find_char_boundary(text, 2), 1); // inside '─', should go back to 1
+    assert_eq!(find_char_boundary(text, 3), 1); // inside '─', should go back to 1
+    assert_eq!(find_char_boundary(text, 4), 4); // 'b' start
+    assert_eq!(find_char_boundary(text, 5), 5); // end of string
+    assert_eq!(find_char_boundary(text, 100), 5); // past end, clamp to len
+  }
+
+  #[test]
+  fn test_line_col_utf16_inside_multibyte_char() {
+    // Box-drawing character '─' is 3 bytes in UTF-8
+    let text = "a─b\n";
+    let idx = LineIndex::new(text.to_string());
+
+    // Position inside the '─' character should not panic
+    // and should report the column as if we're at the start of '─'
+    let (line, col) = idx.line_col_utf16(BytePosition(2)); // inside '─'
+    assert_eq!(line, 0);
+    assert_eq!(col, 1); // 'a' = 1, then we're at start of '─'
   }
 }
