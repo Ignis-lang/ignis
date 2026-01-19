@@ -90,20 +90,44 @@ impl Into<TargetBackend> for Target {
 
 #[derive(Parser, Debug, Clone, PartialEq)]
 pub struct BuildCommand {
-  /// The file to build or nothing to build the project
+  /// File to build (single-file mode) or nothing for project mode
   pub file_path: Option<String>,
 
-  /// The target to compile to
-  #[arg(short, long, value_enum, default_value = "c")]
-  pub target: Target,
+  /// Explicit project directory (overrides auto-detection)
+  #[arg(long)]
+  pub project: Option<String>,
 
-  /// Optimize the output
-  #[arg(short = 'O', long)]
-  pub optimize: bool,
+  /// Optimization level (0-3)
+  #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
+  pub opt_level: Option<u8>,
+
+  /// Include debug information
+  #[arg(long)]
+  pub debug: bool,
+
+  /// Disable debug information (overrides --debug and TOML)
+  #[arg(long, conflicts_with = "debug")]
+  pub no_debug: bool,
 
   /// Output directory
-  #[arg(short = 'o', long, default_value = "build")]
-  pub output_dir: String,
+  #[arg(short = 'o', long)]
+  pub output_dir: Option<String>,
+
+  /// Path to standard library (overrides TOML and env var)
+  #[arg(long)]
+  pub std_path: Option<String>,
+
+  /// C compiler to use
+  #[arg(long)]
+  pub cc: Option<String>,
+
+  /// Extra artifacts to emit (c, obj)
+  #[arg(long, value_delimiter = ',')]
+  pub emit: Vec<String>,
+
+  /// Rebuild std runtime before linking
+  #[arg(long)]
+  pub rebuild_std: bool,
 
   /// Produce a linked executable (default)
   #[arg(long = "bin", short = 'b', conflicts_with = "lib")]
@@ -113,21 +137,9 @@ pub struct BuildCommand {
   #[arg(long = "lib", short = 'l', conflicts_with = "bin")]
   pub lib: bool,
 
-  /// Emit C code to file
-  #[arg(long)]
-  pub emit_c: Option<String>,
-
-  /// Compile C to object file
-  #[arg(long)]
-  pub emit_obj: Option<String>,
-
-  /// Link and produce executable
-  #[arg(long)]
-  pub emit_bin: Option<String>,
-
-  /// Rebuild std runtime before linking
-  #[arg(long)]
-  pub rebuild_std: bool,
+  /// The target to compile to
+  #[arg(short, long, value_enum, default_value = "c")]
+  pub target: Target,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -193,20 +205,28 @@ pub struct BuildStdCommand {
 
 #[derive(Parser, Debug, Clone, PartialEq)]
 pub struct CheckCommand {
-  /// The file to check or nothing to check the project
+  /// File to check (single-file mode) or nothing for project mode
   pub file_path: Option<String>,
 
-  /// The target to compile to
-  #[arg(short, long, value_enum, default_value = "c")]
-  pub target: Target,
+  /// Explicit project directory (overrides auto-detection)
+  #[arg(long)]
+  pub project: Option<String>,
 
   /// Only run frontend/analyzer; skip lowering/codegen
-  #[arg(long, default_value = "false")]
+  #[arg(long)]
   pub analyze_only: bool,
 
   /// Output directory (used when emitting C)
-  #[arg(short = 'o', long, default_value = "build")]
-  pub output_dir: String,
+  #[arg(short = 'o', long)]
+  pub output_dir: Option<String>,
+
+  /// Path to standard library (overrides TOML and env var)
+  #[arg(long)]
+  pub std_path: Option<String>,
+
+  /// Extra artifacts to emit (c)
+  #[arg(long, value_delimiter = ',')]
+  pub emit: Vec<String>,
 
   /// Produce a linked executable (default)
   #[arg(long = "bin", short = 'b', conflicts_with = "lib")]
@@ -216,9 +236,9 @@ pub struct CheckCommand {
   #[arg(long = "lib", short = 'l', conflicts_with = "bin")]
   pub lib: bool,
 
-  /// Emit C code to file (otherwise kept in memory)
-  #[arg(long)]
-  pub emit_c: Option<String>,
+  /// The target to compile to
+  #[arg(short, long, value_enum, default_value = "c")]
+  pub target: Target,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]

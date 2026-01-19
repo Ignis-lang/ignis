@@ -97,6 +97,17 @@ impl ModulePath {
     Err(ModulePathError::NoProjectRoot(import_from.to_string()))
   }
 
+  /// Check if this path refers to a file inside the given directory.
+  pub fn is_inside_dir(
+    &self,
+    dir: &std::path::Path,
+  ) -> bool {
+    match self {
+      ModulePath::Project(path) => path.starts_with(dir),
+      ModulePath::Std(_) => false,
+    }
+  }
+
   /// Resolve to actual filesystem path (basic, no manifest lookup)
   pub fn to_fs_path(
     &self,

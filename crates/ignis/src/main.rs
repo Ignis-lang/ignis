@@ -1,360 +1,515 @@
 mod cli;
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use clap::Parser as ClapParser;
-use ignis_driver::{build_std, check_runtime, check_std, compile_project};
-use std::{sync::Arc, fs::File, io::Read, path::Path};
+use colored::*;
 
-use cli::{Cli, SubCommand};
-use ignis_config;
+use cli::{BuildCommand, CheckCommand, Cli, SubCommand};
+use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
+use ignis_driver::{
+  build_std, check_runtime, check_std, compile_file, compile_project, find_project_root, load_project_toml,
+  resolve_project, CliOverrides, Project,
+};
 
-/// Run the LSP server.
-fn run_lsp(cli: &Cli) {
-  // Build minimal config for LSP
-  let mut config = ignis_config::IgnisConfig::new_basic(
-    cli.debug,
-    cli.debug_trace.iter().copied().map(Into::into).collect(),
-    true, // Always quiet in LSP mode
-    0,    // No verbose output
-  );
+// =============================================================================
+// Compile Input Resolution
+// =============================================================================
 
-  // Set std_path from CLI or env
-  if cli.std_path.eq("IGNIS_STD_PATH") {
-    if let Ok(v) = std::env::var("IGNIS_STD_PATH") {
-      config.std_path = v;
-    }
-  } else {
-    config.std_path = cli.std_path.clone();
-  }
+/// What we're compiling: either a project or a single file.
+enum CompileInput {
+  /// Project mode: use ignis.toml configuration.
+  Project(Project),
 
-  config.std = !cli.std;
-  config.auto_load_std = !cli.auto_load_std;
-  config.manifest = load_manifest(&config.std_path);
-
-  let config = Arc::new(config);
-
-  // Create a single-threaded Tokio runtime for the LSP
-  #[allow(clippy::disallowed_methods)]
-  let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-
-  rt.block_on(ignis_lsp::run(config));
+  /// Single-file mode: compile one file without project context.
+  SingleFile(PathBuf),
 }
 
-fn load_project_config() -> Option<ignis_config::IgnisProjectConfig> {
-  let binding = std::env::current_dir().unwrap();
-  let file_path = binding.to_str().unwrap();
+/// Resolve what to compile based on CLI arguments.
+///
+/// Priority:
+/// 1. `--project <dir>` → use that project
+/// 2. `file_path` argument → single-file mode
+/// 3. No arguments → search for ignis.toml from cwd
+fn resolve_compile_input(
+  file_path: &Option<String>,
+  project_arg: &Option<String>,
+  overrides: &CliOverrides,
+) -> Result<CompileInput, ()> {
+  // 1. Explicit --project takes priority
+  if let Some(dir) = project_arg {
+    let root = PathBuf::from(dir);
+    let toml_path = root.join("ignis.toml");
 
-  let file_path = Path::new(file_path).join("ignis.toml");
-
-  if file_path.exists() {
-    let file = File::open(file_path);
-    if file.is_err() {
-      println!("Failed to open file");
-      std::process::exit(1);
+    if !toml_path.exists() {
+      eprintln!("{} No ignis.toml found in '{}'", "Error:".red().bold(), root.display());
+      return Err(());
     }
 
-    let mut file = file.unwrap();
-    let mut content = String::new();
-
-    let _ = file.read_to_string(&mut content);
-
-    let config: ignis_config::IgnisProjectConfig = toml::from_str(&content).unwrap();
-
-    return Some(config);
+    let project = load_and_resolve_project(&root, overrides)?;
+    return Ok(CompileInput::Project(project));
   }
 
-  return None;
-}
+  // 2. If file_path is given → single-file mode
+  if let Some(path_str) = file_path {
+    let path = PathBuf::from(path_str);
 
-fn check_if_project() -> bool {
-  let binding = std::env::current_dir().unwrap();
-  let file_path = binding.to_str().unwrap();
-
-  let file_path = Path::new(file_path).join("ignis.toml");
-
-  if file_path.exists() {
-    let file = File::open(file_path);
-    if file.is_err() {
-      return false;
+    if !path.exists() {
+      eprintln!("{} File not found: '{}'", "Error:".red().bold(), path.display());
+      return Err(());
     }
 
-    return true;
+    return Ok(CompileInput::SingleFile(path));
   }
 
-  false
-}
+  // 3. No arguments → search for project from cwd
+  let cwd = std::env::current_dir().map_err(|e| {
+    eprintln!("{} Failed to get current directory: {}", "Error:".red().bold(), e);
+  })?;
 
-fn load_manifest(std_path: &str) -> ignis_config::IgnisSTDManifest {
-  let file_path = Path::new(std_path).join("manifest.toml");
-
-  if file_path.exists() {
-    let file = File::open(file_path);
-    if file.is_err() {
-      println!("Failed to open file");
-      std::process::exit(1);
-    }
-
-    let mut file = file.unwrap();
-    let mut content = String::new();
-
-    let _ = file.read_to_string(&mut content);
-
-    let config: ignis_config::IgnisSTDManifest = toml::from_str(&content).unwrap();
-
-    return config;
+  match find_project_root(&cwd) {
+    Some(root) => {
+      let project = load_and_resolve_project(&root, overrides)?;
+      Ok(CompileInput::Project(project))
+    },
+    None => {
+      eprintln!("{} No ignis.toml found", "Error:".red().bold());
+      eprintln!("Hint: Run 'ignis init' to create a project, or provide a file path.");
+      Err(())
+    },
   }
-
-  return ignis_config::IgnisSTDManifest::default();
 }
 
-fn parse_cli_to_config(cli: &Cli) -> Arc<ignis_config::IgnisConfig> {
-  let mut config = ignis_config::IgnisConfig::new_basic(
+/// Load ignis.toml and resolve to a Project.
+fn load_and_resolve_project(
+  root: &Path,
+  overrides: &CliOverrides,
+) -> Result<Project, ()> {
+  let toml_path = root.join("ignis.toml");
+
+  let toml = load_project_toml(&toml_path).map_err(|e| {
+    eprintln!("{} {}", "Error:".red().bold(), e);
+  })?;
+
+  resolve_project(root.to_path_buf(), toml, overrides).map_err(|e| {
+    eprintln!("{} {}", "Error:".red().bold(), e);
+  })
+}
+
+// =============================================================================
+// Build Command
+// =============================================================================
+
+fn run_build(
+  cli: &Cli,
+  cmd: &BuildCommand,
+) -> Result<(), ()> {
+  let overrides = build_cli_overrides(cmd);
+  let input = resolve_compile_input(&cmd.file_path, &cmd.project, &overrides)?;
+
+  match input {
+    CompileInput::Project(project) => {
+      let config = build_config_from_project(&project, cli, cmd, false);
+      compile_project(config, project.entry.to_str().unwrap())
+    },
+    CompileInput::SingleFile(path) => {
+      let config = build_config_for_single_file(cli, cmd, &path, false);
+      compile_file(config, path.to_str().unwrap())
+    },
+  }
+}
+
+fn build_cli_overrides(cmd: &BuildCommand) -> CliOverrides {
+  CliOverrides {
+    opt_level: cmd.opt_level,
+    debug: if cmd.no_debug {
+      Some(false)
+    } else if cmd.debug {
+      Some(true)
+    } else {
+      None
+    },
+    out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
+    std_path: cmd.std_path.as_ref().map(PathBuf::from),
+    cc: cmd.cc.clone(),
+    cflags: None,
+    emit: if cmd.emit.is_empty() {
+      None
+    } else {
+      Some(cmd.emit.clone())
+    },
+  }
+}
+
+fn build_config_from_project(
+  project: &Project,
+  cli: &Cli,
+  cmd: &BuildCommand,
+  check_mode: bool,
+) -> Arc<IgnisConfig> {
+  let mut config = IgnisConfig::new_basic(
     cli.debug,
     cli.debug_trace.iter().copied().map(Into::into).collect(),
     cli.quiet,
     cli.verbose,
   );
 
-  config.std = !cli.std;
-  config.auto_load_std = !cli.auto_load_std;
-
-  if cli.std_path.eq("IGNIS_STD_PATH") {
-    if let Ok(v) = std::env::var("IGNIS_STD_PATH") {
-      config.std_path = v;
-    }
-  } else {
-    config.std_path = cli.std_path.clone();
+  // Set std_path from project
+  if let Some(ref std_path) = project.std_path {
+    config.std_path = std_path.to_string_lossy().to_string();
   }
+  config.std = project.std_path.is_some();
+  config.auto_load_std = project.std_path.is_some();
 
-  match &cli.subcommand {
-    SubCommand::Build(build) => {
-      let is_project = check_if_project();
+  // Load manifest
+  config.manifest = load_manifest(&config.std_path);
 
-      if build.file_path.is_none() && !is_project {
-        println!("No file path provided. Please provide a file path or run `ignis init` to create a new project.");
-        println!("For more information, run `ignis --help`");
-        std::process::exit(1);
-      }
-
-      // Determine binary output path (default behavior: always produce a binary)
-      let emit_bin = if build.lib {
-        None
-      } else if build.emit_bin.is_some() {
-        build.emit_bin.clone()
-      } else if let Some(ref file_path) = build.file_path {
-        // User specified a file explicitly - use file name without extension
-        let path = Path::new(file_path);
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-        Some(format!("{}/{}", build.output_dir, stem))
-      } else if is_project {
-        // Building project without explicit file - use project name
-        let project_config = load_project_config().unwrap();
-        Some(format!("{}/{}", build.output_dir, project_config.name))
-      } else {
-        Some(format!("{}/out", build.output_dir))
-      };
-
-      if is_project {
-        let mut project_config = load_project_config().unwrap();
-
-        if config.std_path.is_empty() {
-          config.std_path = project_config.ignis.std_path.clone();
-        }
-
-        project_config.build.target = build.target.clone().into();
-
-        if build.optimize != project_config.build.optimize {
-          project_config.build.optimize = build.optimize;
-        }
-
-        if build.output_dir != "build" {
-          project_config.build.output_dir = build.output_dir.clone();
-        }
-
-        if build.file_path.is_some() {
-          project_config.build.main_file = build.file_path.as_ref().unwrap().to_string();
-        }
-
-        config.project_config = Some(project_config);
-      }
-
-      let entry_file = if build.file_path.is_some() {
-        build.file_path.clone()
-      } else if let Some(project_config) = &config.project_config {
-        Some(project_config.build.main_file.clone())
-      } else {
-        None
-      };
-
-      config.build = true;
-      config
-        .build_config
-        .clone_from(&Some(ignis_config::IgnisBuildConfig::new(
-          entry_file,
-          build.target.clone().into(),
-          is_project,
-          build.optimize.clone(),
-          build.output_dir.clone(),
-          cli.dump.iter().copied().map(Into::into).collect(),
-          cli.dump_dir.clone(),
-          cli.dump_hir.clone(),
-          build.emit_c.clone(),
-          build.emit_obj.clone(),
-          emit_bin,
-          build.rebuild_std,
-          build.bin,
-          build.lib,
-          false,
-          false,
-        )));
-    },
-    SubCommand::Check(check) => {
-      let is_project = check_if_project();
-
-      if check.file_path.is_none() && !is_project {
-        println!("No file path provided. Please provide a file path or run `ignis init` to create a new project.");
-        println!("For more information, run `ignis --help`");
-        std::process::exit(1);
-      }
-
-      if is_project {
-        let mut project_config = load_project_config().unwrap();
-
-        if config.std_path.is_empty() {
-          config.std_path = project_config.ignis.std_path.clone();
-        }
-
-        project_config.build.target = check.target.clone().into();
-
-        if check.output_dir != "build" {
-          project_config.build.output_dir = check.output_dir.clone();
-        }
-
-        if check.file_path.is_some() {
-          project_config.build.main_file = check.file_path.as_ref().unwrap().to_string();
-        }
-
-        config.project_config = Some(project_config);
-      }
-
-      let entry_file = if check.file_path.is_some() {
-        check.file_path.clone()
-      } else if let Some(project_config) = &config.project_config {
-        Some(project_config.build.main_file.clone())
-      } else {
-        None
-      };
-
-      config.build = true;
-      config
-        .build_config
-        .clone_from(&Some(ignis_config::IgnisBuildConfig::new(
-          entry_file,
-          check.target.clone().into(),
-          is_project,
-          false,
-          check.output_dir.clone(),
-          cli.dump.iter().copied().map(Into::into).collect(),
-          cli.dump_dir.clone(),
-          cli.dump_hir.clone(),
-          check.emit_c.clone(),
-          None,
-          None,
-          false,
-          check.bin,
-          check.lib,
-          true,
-          check.analyze_only,
-        )));
-    },
-    SubCommand::Init(init) => {
-      config.init = true;
-      config.init_config.clone_from(&Some(ignis_config::IgnisInitConfig::new(
-        init.name.clone(),
-        init.project_version.clone(),
-        init.authors.clone(),
-        init.description.clone(),
-        init.keywords.clone(),
-        init.license.clone(),
-        init.repository.clone(),
-        init.git,
-        init.target.clone().into(),
-      )));
-    },
-    SubCommand::BuildStd(build_std) => {
-      config.build_std = true;
-      config.build_std_output_dir = Some(build_std.output_dir.clone());
-    },
-    SubCommand::CheckStd(check_std) => {
-      config.check_std = true;
-      config.build_std_output_dir = Some(check_std.output_dir.clone());
-    },
-    SubCommand::CheckRuntime(check_runtime) => {
-      config.check_runtime = true;
-      config.runtime_path_override = check_runtime.runtime_path.clone();
-    },
-    SubCommand::Lsp(_) => {
-      // LSP is handled before parse_cli_to_config is called
-      unreachable!("LSP subcommand should be handled separately");
-    },
+  // Determine emit paths
+  let out_dir = &project.out_dir;
+  let emit_c = if project.emit.c {
+    Some(out_dir.join("c").to_string_lossy().to_string())
+  } else {
+    None
   };
 
+  let emit_obj = if project.emit.obj && !check_mode {
+    Some(out_dir.join("obj").to_string_lossy().to_string())
+  } else {
+    None
+  };
+
+  let emit_bin = if project.bin && !check_mode {
+    Some(out_dir.join("bin").join(&project.name).to_string_lossy().to_string())
+  } else {
+    None
+  };
+
+  config.build = true;
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(project.entry.to_string_lossy().to_string()),
+    ignis_config::TargetBackend::C,
+    true, // is_project
+    project.opt_level > 0,
+    project.out_dir.to_string_lossy().to_string(),
+    cli.dump.iter().copied().map(Into::into).collect(),
+    cli.dump_dir.clone(),
+    cli.dump_hir.clone(),
+    emit_c,
+    emit_obj,
+    emit_bin,
+    cmd.rebuild_std,
+    project.bin,
+    cmd.lib,
+    check_mode,
+    false, // analyze_only
+  ));
+
+  Arc::new(config)
+}
+
+fn build_config_for_single_file(
+  cli: &Cli,
+  cmd: &BuildCommand,
+  file_path: &Path,
+  check_mode: bool,
+) -> Arc<IgnisConfig> {
+  let mut config = IgnisConfig::new_basic(
+    cli.debug,
+    cli.debug_trace.iter().copied().map(Into::into).collect(),
+    cli.quiet,
+    cli.verbose,
+  );
+
+  // Set std_path from CLI or env
+  config.std_path = resolve_std_path(cmd.std_path.as_deref());
+  config.std = !cli.std;
+  config.auto_load_std = !cli.auto_load_std;
+  config.manifest = load_manifest(&config.std_path);
+
+  let out_dir = cmd.output_dir.as_deref().unwrap_or("build");
+  let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+
+  let emit_bin = if cmd.lib || check_mode {
+    None
+  } else {
+    Some(format!("{}/{}", out_dir, stem))
+  };
+
+  config.build = true;
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(file_path.to_string_lossy().to_string()),
+    ignis_config::TargetBackend::C,
+    false, // is_project
+    cmd.opt_level.unwrap_or(0) > 0,
+    out_dir.to_string(),
+    cli.dump.iter().copied().map(Into::into).collect(),
+    cli.dump_dir.clone(),
+    cli.dump_hir.clone(),
+    None, // emit_c
+    None, // emit_obj
+    emit_bin,
+    cmd.rebuild_std,
+    cmd.bin,
+    cmd.lib,
+    check_mode,
+    false,
+  ));
+
+  Arc::new(config)
+}
+
+// =============================================================================
+// Check Command
+// =============================================================================
+
+fn run_check(
+  cli: &Cli,
+  cmd: &CheckCommand,
+) -> Result<(), ()> {
+  let overrides = check_cli_overrides(cmd);
+  let input = resolve_compile_input(&cmd.file_path, &cmd.project, &overrides)?;
+
+  match input {
+    CompileInput::Project(project) => {
+      let config = check_config_from_project(&project, cli, cmd);
+      compile_project(config, project.entry.to_str().unwrap())
+    },
+    CompileInput::SingleFile(path) => {
+      let config = check_config_for_single_file(cli, cmd, &path);
+      compile_file(config, path.to_str().unwrap())
+    },
+  }
+}
+
+fn check_cli_overrides(cmd: &CheckCommand) -> CliOverrides {
+  CliOverrides {
+    opt_level: None,
+    debug: None,
+    out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
+    std_path: cmd.std_path.as_ref().map(PathBuf::from),
+    cc: None,
+    cflags: None,
+    emit: if cmd.emit.is_empty() {
+      None
+    } else {
+      Some(cmd.emit.clone())
+    },
+  }
+}
+
+fn check_config_from_project(
+  project: &Project,
+  cli: &Cli,
+  cmd: &CheckCommand,
+) -> Arc<IgnisConfig> {
+  let mut config = IgnisConfig::new_basic(
+    cli.debug,
+    cli.debug_trace.iter().copied().map(Into::into).collect(),
+    cli.quiet,
+    cli.verbose,
+  );
+
+  if let Some(ref std_path) = project.std_path {
+    config.std_path = std_path.to_string_lossy().to_string();
+  }
+  config.std = project.std_path.is_some();
+  config.auto_load_std = project.std_path.is_some();
+  config.manifest = load_manifest(&config.std_path);
+
+  let out_dir = &project.out_dir;
+  let emit_c = if project.emit.c {
+    Some(out_dir.join("c").to_string_lossy().to_string())
+  } else {
+    None
+  };
+
+  config.build = true;
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(project.entry.to_string_lossy().to_string()),
+    ignis_config::TargetBackend::C,
+    true,
+    false, // optimize
+    project.out_dir.to_string_lossy().to_string(),
+    cli.dump.iter().copied().map(Into::into).collect(),
+    cli.dump_dir.clone(),
+    cli.dump_hir.clone(),
+    emit_c,
+    None, // emit_obj (not in check mode)
+    None, // emit_bin (not in check mode)
+    false,
+    cmd.bin,
+    cmd.lib,
+    true, // check_mode
+    cmd.analyze_only,
+  ));
+
+  Arc::new(config)
+}
+
+fn check_config_for_single_file(
+  cli: &Cli,
+  cmd: &CheckCommand,
+  file_path: &Path,
+) -> Arc<IgnisConfig> {
+  let mut config = IgnisConfig::new_basic(
+    cli.debug,
+    cli.debug_trace.iter().copied().map(Into::into).collect(),
+    cli.quiet,
+    cli.verbose,
+  );
+
+  config.std_path = resolve_std_path(cmd.std_path.as_deref());
+  config.std = !cli.std;
+  config.auto_load_std = !cli.auto_load_std;
+  config.manifest = load_manifest(&config.std_path);
+
+  let out_dir = cmd.output_dir.as_deref().unwrap_or("build");
+
+  config.build = true;
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(file_path.to_string_lossy().to_string()),
+    ignis_config::TargetBackend::C,
+    false,
+    false,
+    out_dir.to_string(),
+    cli.dump.iter().copied().map(Into::into).collect(),
+    cli.dump_dir.clone(),
+    cli.dump_hir.clone(),
+    None,
+    None,
+    None,
+    false,
+    cmd.bin,
+    cmd.lib,
+    true,
+    cmd.analyze_only,
+  ));
+
+  Arc::new(config)
+}
+
+// =============================================================================
+// Other Commands
+// =============================================================================
+
+fn run_lsp(cli: &Cli) {
+  let mut config =
+    IgnisConfig::new_basic(cli.debug, cli.debug_trace.iter().copied().map(Into::into).collect(), true, 0);
+
+  config.std_path = resolve_std_path(None);
+  config.std = !cli.std;
+  config.auto_load_std = !cli.auto_load_std;
+  config.manifest = load_manifest(&config.std_path);
+
+  let config = Arc::new(config);
+
+  #[allow(clippy::disallowed_methods)]
+  let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+  rt.block_on(ignis_lsp::run(config));
+}
+
+fn run_build_std(
+  cli: &Cli,
+  output_dir: &str,
+) -> Result<(), ()> {
+  let config = build_std_config(cli);
+  build_std(config, output_dir)
+}
+
+fn run_check_std(
+  cli: &Cli,
+  output_dir: &str,
+) -> Result<(), ()> {
+  let config = build_std_config(cli);
+  check_std(config, output_dir)
+}
+
+fn run_check_runtime(
+  cli: &Cli,
+  runtime_path: Option<&str>,
+) -> Result<(), ()> {
+  let config = build_std_config(cli);
+  check_runtime(config, runtime_path)
+}
+
+fn build_std_config(cli: &Cli) -> Arc<IgnisConfig> {
+  let mut config = IgnisConfig::new_basic(
+    cli.debug,
+    cli.debug_trace.iter().copied().map(Into::into).collect(),
+    cli.quiet,
+    cli.verbose,
+  );
+
+  config.std_path = resolve_std_path(None);
+  config.std = true;
+  config.auto_load_std = true;
   config.manifest = load_manifest(&config.std_path);
 
   Arc::new(config)
 }
 
+// =============================================================================
+// Utilities
+// =============================================================================
+
+/// Resolve std_path from CLI override or environment variable.
+fn resolve_std_path(cli_override: Option<&str>) -> String {
+  if let Some(path) = cli_override {
+    return path.to_string();
+  }
+
+  std::env::var("IGNIS_STD_PATH").unwrap_or_default()
+}
+
+/// Load the std manifest from std_path/manifest.toml.
+fn load_manifest(std_path: &str) -> IgnisSTDManifest {
+  if std_path.is_empty() {
+    return IgnisSTDManifest::default();
+  }
+
+  let manifest_path = Path::new(std_path).join("manifest.toml");
+
+  if !manifest_path.exists() {
+    return IgnisSTDManifest::default();
+  }
+
+  match std::fs::read_to_string(&manifest_path) {
+    Ok(content) => toml::from_str(&content).unwrap_or_default(),
+    Err(_) => IgnisSTDManifest::default(),
+  }
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
 fn main() {
   let cli = Cli::parse();
 
-  // Handle LSP subcommand specially (doesn't need full config parsing)
-  if matches!(cli.subcommand, SubCommand::Lsp(_)) {
-    run_lsp(&cli);
-    return;
-  }
+  let result = match &cli.subcommand {
+    SubCommand::Lsp(_) => {
+      run_lsp(&cli);
+      Ok(())
+    },
 
-  let config = parse_cli_to_config(&cli);
+    SubCommand::Build(cmd) => run_build(&cli, cmd),
 
-  if config.check_std {
-    let output_dir = config.build_std_output_dir.as_deref().unwrap_or("build");
-    match check_std(config.clone(), output_dir) {
-      Ok(()) => {},
-      Err(()) => std::process::exit(1),
-    }
-    return;
-  }
+    SubCommand::Check(cmd) => run_check(&cli, cmd),
 
-  if config.check_runtime {
-    let runtime_path = config.runtime_path_override.as_deref();
-    match check_runtime(config.clone(), runtime_path) {
-      Ok(()) => {},
-      Err(()) => std::process::exit(1),
-    }
-    return;
-  }
+    SubCommand::BuildStd(cmd) => run_build_std(&cli, &cmd.output_dir),
 
-  if config.build_std {
-    let output_dir = config.build_std_output_dir.as_ref().unwrap();
-    match build_std(config.clone(), output_dir) {
-      Ok(()) => {},
-      Err(()) => std::process::exit(1),
-    }
-    return;
-  }
+    SubCommand::CheckStd(cmd) => run_check_std(&cli, &cmd.output_dir),
 
-  if config.build {
-    let build_config = config.build_config.clone().unwrap();
-    let file_path = build_config.file.unwrap();
+    SubCommand::CheckRuntime(cmd) => run_check_runtime(&cli, cmd.runtime_path.as_deref()),
 
-    match compile_project(config, &file_path) {
-      Ok(()) => {},
-      Err(()) => std::process::exit(1),
-    }
-    return;
-  }
+    SubCommand::Init(_) => {
+      eprintln!("Init command not yet implemented");
+      Ok(())
+    },
+  };
 
-  if config.init {
-    // TODO: Implement init command
-    println!("Init command not yet implemented");
-    return;
+  if result.is_err() {
+    std::process::exit(1);
   }
 }

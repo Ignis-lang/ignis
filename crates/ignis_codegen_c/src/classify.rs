@@ -77,6 +77,18 @@ pub fn classify_def(
   def: &Definition,
   module_paths: &HashMap<ModuleId, ModulePath>,
 ) -> DefKind {
+  classify_def_with_std_path(def, module_paths, None)
+}
+
+/// Classify based on owner module and extern status, with std_path awareness.
+///
+/// If `std_path` is provided, `ModulePath::Project` paths inside that directory
+/// are classified as `DefKind::Std` with the module name extracted from the path.
+pub fn classify_def_with_std_path(
+  def: &Definition,
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  std_path: Option<&std::path::Path>,
+) -> DefKind {
   let is_extern = match &def.kind {
     DefinitionKind::Function(fd) => fd.is_extern,
     DefinitionKind::Namespace(nd) => nd.is_extern,
@@ -89,7 +101,16 @@ pub fn classify_def(
 
   match module_paths.get(&def.owner_module) {
     Some(ModulePath::Std(name)) => DefKind::Std(name.clone()),
-    Some(ModulePath::Project(_)) | None => DefKind::User,
+    Some(ModulePath::Project(path)) => {
+      if let Some(std_dir) = std_path {
+        if path.starts_with(std_dir) {
+          let module_path = module_paths.get(&def.owner_module).unwrap();
+          return DefKind::Std(module_path.module_name());
+        }
+      }
+      DefKind::User
+    },
+    None => DefKind::User,
   }
 }
 

@@ -564,7 +564,18 @@ pub fn compile_project(
         // Per-module compilation when precompiled std is available
         if link_plan.std_archive.is_some() && bc.emit_bin.is_some() {
           let module_paths = build_module_paths_from_graph(&ctx.module_graph);
-          let layout = BuildLayout::new(base_name, Path::new(&bc.output_dir));
+
+          let out_dir_path = Path::new(&bc.output_dir);
+          let project_root = if out_dir_path.is_absolute() {
+            out_dir_path.parent().map(|p| p.to_path_buf())
+          } else {
+            std::env::current_dir().ok()
+          };
+
+          let layout = match &project_root {
+            Some(root) => BuildLayout::with_project_root(base_name, out_dir_path, root),
+            None => BuildLayout::new(base_name, out_dir_path),
+          };
 
           // Create user directories
           if let Err(e) = layout.create_user_dirs() {
@@ -573,12 +584,13 @@ pub fn compile_project(
             return Err(());
           }
 
-          // Collect user modules (non-std)
+          // Collect user modules (exclude std and std-internal files)
+          let std_dir = ctx.module_graph.std_path();
           let user_modules: Vec<_> = used_modules
             .iter()
             .filter(|id| {
               let module = ctx.module_graph.modules.get(id);
-              module.path.is_project()
+              module.path.is_project() && !module.path.is_inside_dir(std_dir)
             })
             .collect();
 
@@ -661,7 +673,8 @@ pub fn compile_project(
           }
 
           // Phase 2: Generate umbrella header
-          let umbrella_content = generate_user_umbrella_header(&source_paths);
+          let relative_source_paths: Vec<PathBuf> = source_paths.iter().map(|p| layout.relativize(p)).collect();
+          let umbrella_content = generate_user_umbrella_header(&relative_source_paths);
           let umbrella_path = layout.user_umbrella_header();
           if let Err(e) = std::fs::write(&umbrella_path, &umbrella_content) {
             cmd_fail!(&config, "Build failed", start.elapsed());
@@ -721,23 +734,24 @@ pub fn compile_project(
 
             any_module_recompiled = true;
 
-            // Build per-module headers: self header + transitive dependency headers
+            // Build include list: own header + transitive user dependencies
             let mut user_module_headers: Vec<ignis_config::CHeader> = Vec::new();
 
-            // Add own header first
-            let self_header_path = source_path.with_extension("h");
+            let self_header_rel = layout.relativize(&source_path).with_extension("h");
             user_module_headers.push(ignis_config::CHeader {
-              path: normalize_path_for_include(&self_header_path),
+              path: normalize_path_for_include(&self_header_rel),
               quoted: true,
             });
 
-            // Add transitive dependency headers (user modules only)
             for dep_id in &dep_ids {
               let dep_module = ctx.module_graph.modules.get(dep_id);
               if let ModulePath::Project(dep_path) = &dep_module.path {
-                let dep_header_path = dep_path.with_extension("h");
+                if dep_path.starts_with(std_dir) {
+                  continue;
+                }
+                let dep_header_rel = layout.relativize(dep_path).with_extension("h");
                 user_module_headers.push(ignis_config::CHeader {
-                  path: normalize_path_for_include(&dep_header_path),
+                  path: normalize_path_for_include(&dep_header_rel),
                   quoted: true,
                 });
               }
@@ -1172,6 +1186,7 @@ pub fn build_std(
       &link_plan.headers,
       &module_paths,
       Some(umbrella_header),
+      std_path,
     );
 
     let c_path = layout.std_module_src(&module_name);

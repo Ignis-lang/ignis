@@ -12,7 +12,7 @@ use ignis_type::{
   types::{Type, TypeId, TypeStore},
 };
 
-use crate::classify::{classify_def, DefKind, EmitTarget};
+use crate::classify::{DefKind, EmitTarget};
 
 /// C code emitter for LIR programs.
 pub struct CEmitter<'a> {
@@ -28,6 +28,8 @@ pub struct CEmitter<'a> {
   target: Option<EmitTarget>,
   /// Module paths for classifying definitions (required when target is Some)
   module_paths: Option<&'a HashMap<ModuleId, ModulePath>>,
+  /// Std path for classifying std internal files as Std instead of User
+  std_path: Option<&'a std::path::Path>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -50,6 +52,7 @@ impl<'a> CEmitter<'a> {
       current_fn_id: None,
       target: None,
       module_paths: None,
+      std_path: None,
     }
   }
 
@@ -75,6 +78,34 @@ impl<'a> CEmitter<'a> {
       current_fn_id: None,
       target: Some(target),
       module_paths: Some(module_paths),
+      std_path: None,
+    }
+  }
+
+  /// Create an emitter for std module emission with std_path awareness.
+  pub fn with_std_target(
+    program: &'a LirProgram,
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+    namespaces: &'a NamespaceStore,
+    symbols: &'a SymbolTable,
+    headers: &'a [CHeader],
+    target: EmitTarget,
+    module_paths: &'a HashMap<ModuleId, ModulePath>,
+    std_path: &'a std::path::Path,
+  ) -> Self {
+    Self {
+      program,
+      types,
+      defs,
+      namespaces,
+      symbols,
+      headers,
+      output: String::new(),
+      current_fn_id: None,
+      target: Some(target),
+      module_paths: Some(module_paths),
+      std_path: Some(std_path),
     }
   }
 
@@ -94,9 +125,11 @@ impl<'a> CEmitter<'a> {
     &self,
     def_id: DefinitionId,
   ) -> DefKind {
+    use crate::classify::classify_def_with_std_path;
+
     let def = self.defs.get(&def_id);
     if let Some(module_paths) = self.module_paths {
-      classify_def(def, module_paths)
+      classify_def_with_std_path(def, module_paths, self.std_path)
     } else {
       // Legacy mode: no classification, treat everything as "should emit"
       // For extern functions, return Runtime; otherwise User
@@ -118,24 +151,22 @@ impl<'a> CEmitter<'a> {
       Some(target) => {
         let kind = self.classify(def_id);
 
-        // For UserModule target, emit:
-        // 1. User definitions from this module
-        // 2. Monomorphized instantiations of std types (detected by mangled names)
         if let Some(target_module_id) = target.target_user_module() {
           let def = self.defs.get(&def_id);
 
-          // Check if it's a user definition from this module
-          if kind.is_user() && def.owner_module == target_module_id {
+          if def.owner_module == target_module_id {
             return true;
           }
 
-          // Check if it's a monomorphized std type (Record, Enum, or Method with mangled name)
-          // Mangled names contain __ followed by type info (e.g., Vector__i32, Option__i32)
-          if kind.is_std() {
-            let name = self.symbols.get(&def.name);
-            // Pattern: TypeName__SomeType or TypeName__TypeName__method
-            if name.contains("__") && !name.starts_with("__") {
-              return true;
+          // Monomorphized functions (mangled names with __) are emitted only in the entry module
+          // to avoid duplicate definitions across user modules.
+          let name = self.symbols.get(&def.name);
+          if name.contains("__") && !name.starts_with("__") {
+            if let Some(entry_id) = self.program.entry_point {
+              let entry_def = self.defs.get(&entry_id);
+              if entry_def.owner_module == target_module_id {
+                return true;
+              }
             }
           }
 
@@ -1582,9 +1613,10 @@ pub fn emit_std_module_c(
   headers: &[CHeader],
   module_paths: &HashMap<ModuleId, ModulePath>,
   umbrella_header_path: Option<&str>,
+  std_path: &std::path::Path,
 ) -> String {
   let headers = prepend_umbrella_header(headers, umbrella_header_path);
-  CEmitter::with_target(
+  CEmitter::with_std_target(
     program,
     types,
     defs,
@@ -1593,6 +1625,7 @@ pub fn emit_std_module_c(
     &headers,
     EmitTarget::StdModule(module_name.to_string()),
     module_paths,
+    std_path,
   )
   .emit()
 }
@@ -1610,7 +1643,15 @@ pub fn emit_std_module_h(
   let comment = format!("std::{}", module_name);
 
   let filter = |_def_id: DefinitionId, def: &ignis_type::definition::Definition| -> bool {
-    matches!(module_paths.get(&def.owner_module), Some(ModulePath::Std(name)) if name == module_name)
+    match module_paths.get(&def.owner_module) {
+      Some(ModulePath::Std(name)) => name == module_name,
+      Some(ModulePath::Project(_)) => {
+        // For std internal files (e.g., memory/layout.ign), check if module_name matches
+        let path = module_paths.get(&def.owner_module).unwrap();
+        path.module_name() == module_name
+      },
+      None => false,
+    }
   };
 
   emit_module_header(&guard_name, &comment, defs, types, symbols, namespaces, filter)

@@ -103,6 +103,11 @@ impl ModuleGraph {
     ModulePath::from_import_path(import_from, current_file, self.project_root.as_deref())
   }
 
+  /// Get the std_path for this module graph
+  pub fn std_path(&self) -> &Path {
+    &self.std_path
+  }
+
   /// Resolve ModulePath to filesystem path, using manifest if available
   pub fn to_fs_path(
     &self,

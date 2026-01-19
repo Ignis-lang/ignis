@@ -25,6 +25,9 @@ use std::path::{Path, PathBuf};
 pub struct BuildLayout {
   base: PathBuf,
   project_name: String,
+  /// Project root directory. Used to make source paths relative.
+  /// If None, source paths are used as-is (assumed relative).
+  project_root: Option<PathBuf>,
 }
 
 impl BuildLayout {
@@ -35,7 +38,34 @@ impl BuildLayout {
     Self {
       base: out_dir.to_path_buf(),
       project_name: project_name.to_string(),
+      project_root: None,
     }
+  }
+
+  /// Create a BuildLayout with a project root for relativizing source paths.
+  pub fn with_project_root(
+    project_name: &str,
+    out_dir: &Path,
+    project_root: &Path,
+  ) -> Self {
+    Self {
+      base: out_dir.to_path_buf(),
+      project_name: project_name.to_string(),
+      project_root: Some(project_root.to_path_buf()),
+    }
+  }
+
+  /// Strip project_root prefix from source_path if present, otherwise return as-is.
+  pub fn relativize(
+    &self,
+    source_path: &Path,
+  ) -> PathBuf {
+    if let Some(root) = &self.project_root {
+      if let Ok(rel) = source_path.strip_prefix(root) {
+        return rel.to_path_buf();
+      }
+    }
+    source_path.to_path_buf()
   }
 
   pub fn base(&self) -> &Path {
@@ -140,7 +170,8 @@ impl BuildLayout {
     &self,
     source_path: &Path,
   ) -> PathBuf {
-    self.user_stamps_dir().join(source_path.with_extension("stamp"))
+    let rel = self.relativize(source_path);
+    self.user_stamps_dir().join(rel.with_extension("stamp"))
   }
 
   /// Preserves source path structure: `src/math/utils.ign` -> `include/src/math/utils.h`
@@ -148,7 +179,8 @@ impl BuildLayout {
     &self,
     source_path: &Path,
   ) -> PathBuf {
-    self.user_include_dir().join(source_path.with_extension("h"))
+    let rel = self.relativize(source_path);
+    self.user_include_dir().join(rel.with_extension("h"))
   }
 
   /// Preserves source path structure: `src/math/utils.ign` -> `src/src/math/utils.c`
@@ -156,7 +188,8 @@ impl BuildLayout {
     &self,
     source_path: &Path,
   ) -> PathBuf {
-    self.user_src_dir().join(source_path.with_extension("c"))
+    let rel = self.relativize(source_path);
+    self.user_src_dir().join(rel.with_extension("c"))
   }
 
   /// Preserves source path structure: `src/math/utils.ign` -> `obj/src/math/utils.o`
@@ -164,7 +197,8 @@ impl BuildLayout {
     &self,
     source_path: &Path,
   ) -> PathBuf {
-    self.user_obj_dir().join(source_path.with_extension("o"))
+    let rel = self.relativize(source_path);
+    self.user_obj_dir().join(rel.with_extension("o"))
   }
 
   #[deprecated(note = "Use per-module stamps via user_module_stamp_path")]
@@ -666,6 +700,68 @@ mod tests {
 
     assert_eq!(layout.bin_dir(), PathBuf::from("/tmp/build/bin"));
     assert_eq!(layout.bin_path(), PathBuf::from("/tmp/build/bin/myapp"));
+  }
+
+  #[test]
+  fn test_user_module_paths_with_absolute_source() {
+    // When project_root is set, absolute source paths are relativized
+    let layout = BuildLayout::with_project_root(
+      "allocator",
+      Path::new("/home/user/allocator/build"),
+      Path::new("/home/user/allocator"),
+    );
+
+    // Absolute path that starts with project_root
+    let abs_main = Path::new("/home/user/allocator/src/main.ign");
+    assert_eq!(
+      layout.user_module_header(abs_main),
+      PathBuf::from("/home/user/allocator/build/user/include/src/main.h")
+    );
+    assert_eq!(
+      layout.user_module_src(abs_main),
+      PathBuf::from("/home/user/allocator/build/user/src/src/main.c")
+    );
+    assert_eq!(
+      layout.user_module_obj(abs_main),
+      PathBuf::from("/home/user/allocator/build/user/obj/src/main.o")
+    );
+    assert_eq!(
+      layout.user_module_stamp_path(abs_main),
+      PathBuf::from("/home/user/allocator/build/user/.stamps/src/main.stamp")
+    );
+
+    // Nested module
+    let abs_block = Path::new("/home/user/allocator/src/block.ign");
+    assert_eq!(
+      layout.user_module_header(abs_block),
+      PathBuf::from("/home/user/allocator/build/user/include/src/block.h")
+    );
+  }
+
+  #[test]
+  fn test_user_module_paths_without_project_root() {
+    // Without project_root, absolute paths are used as-is (bug case we're preventing)
+    let layout = BuildLayout::new("allocator", Path::new("/home/user/allocator/build"));
+
+    // With no project_root, an absolute source path would go to wrong location
+    // This test documents the behavior (though it's not ideal)
+    let rel_main = Path::new("src/main.ign");
+    assert_eq!(
+      layout.user_module_header(rel_main),
+      PathBuf::from("/home/user/allocator/build/user/include/src/main.h")
+    );
+  }
+
+  #[test]
+  fn test_relativize_with_non_matching_path() {
+    // If source path doesn't start with project_root, it's returned as-is
+    let layout = BuildLayout::with_project_root("myapp", Path::new("/tmp/build"), Path::new("/home/user/myproject"));
+
+    // Path outside project root - returned as-is (will likely cause issues, but that's a usage error)
+    let outside = Path::new("/other/path/file.ign");
+    // join with absolute path replaces base, so this is the "broken" behavior
+    // but relativize returns it as-is since it doesn't match project_root
+    assert_eq!(layout.relativize(outside), PathBuf::from("/other/path/file.ign"));
   }
 
   // -- Stamp v2 tests --
