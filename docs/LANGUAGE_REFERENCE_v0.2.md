@@ -28,7 +28,6 @@ This document describes the Ignis programming language as implemented in version
 
 ### Syntax Changes
 
-- `if`/`while` statements no longer require parentheses around the condition
 - Import syntax uses namespaced modules: `import Io from "std::io"`
 - Namespace access uses `::` operator: `Math::add(1, 2)`
 
@@ -515,10 +514,8 @@ let y: f64 = x as f64;
 
 ### If/Else
 
-No parentheses required around condition:
-
 ```ignis
-if x > 0 {
+if (x > 0) {
     // then branch
 } else {
     // else branch
@@ -528,9 +525,9 @@ if x > 0 {
 Chained conditions:
 
 ```ignis
-if x > 10 {
+if (x > 10) {
     // ...
-} else if x > 5 {
+} else if (x > 5) {
     // ...
 } else {
     // ...
@@ -540,7 +537,7 @@ if x > 10 {
 ### While Loop
 
 ```ignis
-while condition {
+while (condition) {
     // body
 }
 ```
@@ -549,7 +546,7 @@ Example:
 
 ```ignis
 let mut i: i32 = 0;
-while i < 10 {
+while (i < 10) {
     i = i + 1;
 }
 ```
@@ -603,11 +600,11 @@ function bar(): void {
 ### Break and Continue
 
 ```ignis
-while true {
-    if done {
+while (true) {
+    if (done) {
         break;
     }
-    if skip {
+    if (skip) {
         continue;
     }
 }
