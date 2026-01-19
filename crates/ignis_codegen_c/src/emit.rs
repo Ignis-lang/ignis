@@ -1712,6 +1712,90 @@ where
   writeln!(output, "// Auto-generated header for {}", comment).unwrap();
   writeln!(output).unwrap();
 
+  // Collect records and enums defined in this module
+  let mut module_records: HashSet<DefinitionId> = HashSet::new();
+  let mut module_enums: HashSet<DefinitionId> = HashSet::new();
+  for (def_id, def) in defs.iter() {
+    if !filter(def_id, def) {
+      continue;
+    }
+    match &def.kind {
+      DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
+        module_records.insert(def_id);
+      },
+      DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+        module_enums.insert(def_id);
+      },
+      _ => {},
+    }
+  }
+
+  // Collect all struct types used in function signatures AND record fields
+  let mut struct_forward_decls: HashSet<String> = HashSet::new();
+  for (def_id, def) in defs.iter() {
+    if !filter(def_id, def) {
+      continue;
+    }
+    collect_struct_types_from_def(def_id, def, defs, types, symbols, namespaces, &mut struct_forward_decls);
+
+    // Also collect types used in record fields
+    if let DefinitionKind::Record(rd) = &def.kind {
+      for field in &rd.fields {
+        collect_struct_types_from_type(&field.type_id, types, defs, symbols, namespaces, &mut struct_forward_decls);
+      }
+    }
+  }
+
+  // Get names of types defined in this module
+  let module_type_names: HashSet<String> = module_records
+    .iter()
+    .chain(module_enums.iter())
+    .map(|&def_id| build_mangled_name_standalone(def_id, defs, namespaces, symbols, types))
+    .collect();
+
+  // Emit forward declarations for external struct types (not defined in this module)
+  let external_structs: Vec<_> = struct_forward_decls
+    .iter()
+    .filter(|name| !module_type_names.contains(*name))
+    .collect();
+
+  if !external_structs.is_empty() {
+    for name in external_structs {
+      writeln!(output, "typedef struct {} {};", name, name).unwrap();
+    }
+    writeln!(output).unwrap();
+  }
+
+  // Emit full struct definitions for enums first (they may be used as fields in records)
+  if !module_enums.is_empty() {
+    let mut sorted_enums: Vec<_> = module_enums.iter().collect();
+    sorted_enums.sort_by_key(|id| id.index());
+
+    for &def_id in sorted_enums {
+      let def = defs.get(&def_id);
+      if let DefinitionKind::Enum(ed) = &def.kind {
+        emit_enum_definition_standalone(def_id, ed, defs, symbols, namespaces, types, &mut output);
+      }
+    }
+  }
+
+  // Emit full struct definitions for records defined in this module
+  if !module_records.is_empty() {
+    let mut sorted_records: Vec<_> = module_records.iter().collect();
+    sorted_records.sort_by_key(|id| id.index());
+
+    for &def_id in sorted_records {
+      let def = defs.get(&def_id);
+      if let DefinitionKind::Record(rd) = &def.kind {
+        emit_record_definition_standalone(def_id, rd, defs, types, symbols, namespaces, &mut output);
+      }
+    }
+  }
+
+  if !module_enums.is_empty() || !module_records.is_empty() {
+    writeln!(output).unwrap();
+  }
+
   let mut emitted: HashSet<String> = HashSet::new();
 
   for (def_id, def) in defs.iter() {
@@ -1728,6 +1812,139 @@ where
   writeln!(output, "#endif // {}", guard_name).unwrap();
 
   output
+}
+
+/// Emit a struct definition for a record type (standalone version for headers).
+fn emit_record_definition_standalone(
+  def_id: DefinitionId,
+  rd: &RecordDefinition,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  output: &mut String,
+) {
+  let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
+
+  writeln!(output, "struct {} {{", name).unwrap();
+
+  for (index, field) in rd.fields.iter().enumerate() {
+    let field_type = format_c_type(types.get(&field.type_id), types, defs, symbols, namespaces);
+    writeln!(output, "    {} field_{};", field_type, index).unwrap();
+  }
+
+  writeln!(output, "}};").unwrap();
+}
+
+/// Emit a struct definition for an enum type (standalone version for headers).
+fn emit_enum_definition_standalone(
+  def_id: DefinitionId,
+  ed: &EnumDefinition,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  types: &TypeStore,
+  output: &mut String,
+) {
+  let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
+
+  // Emit struct with tag field
+  writeln!(output, "struct {} {{", name).unwrap();
+  writeln!(output, "    u32 tag;").unwrap();
+
+  // Check if any variant has payload
+  let has_payloads = ed.variants.iter().any(|v| !v.payload.is_empty());
+
+  if has_payloads {
+    writeln!(output, "    union {{").unwrap();
+    for variant in &ed.variants {
+      if !variant.payload.is_empty() {
+        let variant_name = symbols.get(&variant.name);
+        writeln!(output, "        struct {{").unwrap();
+        for (i, &payload_type_id) in variant.payload.iter().enumerate() {
+          let payload_type = format_c_type(types.get(&payload_type_id), types, defs, symbols, namespaces);
+          writeln!(output, "            {} field_{};", payload_type, i).unwrap();
+        }
+        writeln!(output, "        }} {};", variant_name).unwrap();
+      }
+    }
+    writeln!(output, "    }} data;").unwrap();
+  }
+
+  writeln!(output, "}};").unwrap();
+
+  // Emit variant tag constants
+  for (i, variant) in ed.variants.iter().enumerate() {
+    let variant_name = symbols.get(&variant.name);
+    writeln!(output, "#define {}_{} {}", name, variant_name, i).unwrap();
+  }
+}
+
+/// Collect struct type names used in a function/method signature.
+fn collect_struct_types_from_def(
+  _def_id: DefinitionId,
+  def: &ignis_type::definition::Definition,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  out: &mut std::collections::HashSet<String>,
+) {
+  let (params_ids, return_type, is_extern, type_params_empty) = match &def.kind {
+    DefinitionKind::Function(fd) => (&fd.params, &fd.return_type, fd.is_extern, fd.type_params.is_empty()),
+    DefinitionKind::Method(md) => {
+      // Skip methods of generic owners
+      let owner_is_generic = match &defs.get(&md.owner_type).kind {
+        DefinitionKind::Record(rd) => !rd.type_params.is_empty(),
+        DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
+        _ => false,
+      };
+      if owner_is_generic {
+        return;
+      }
+      (&md.params, &md.return_type, false, md.type_params.is_empty())
+    },
+    _ => return,
+  };
+
+  if is_extern || !type_params_empty {
+    return;
+  }
+
+  // Collect struct types from return type
+  collect_struct_types_from_type(return_type, types, defs, symbols, namespaces, out);
+
+  // Collect struct types from parameters
+  for param_id in params_ids {
+    let param_def = defs.get(param_id);
+    if let DefinitionKind::Parameter(param) = &param_def.kind {
+      collect_struct_types_from_type(&param.type_id, types, defs, symbols, namespaces, out);
+    }
+  }
+}
+
+/// Recursively collect struct type names from a type.
+fn collect_struct_types_from_type(
+  type_id: &TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  out: &mut std::collections::HashSet<String>,
+) {
+  match types.get(type_id) {
+    Type::Record(def_id) | Type::Enum(def_id) => {
+      let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
+      out.insert(name);
+    },
+    Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
+      collect_struct_types_from_type(inner, types, defs, symbols, namespaces, out);
+    },
+    Type::Vector { element, .. } => {
+      collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
+    },
+    _ => {},
+  }
 }
 
 /// Emit a function/method prototype if applicable. Returns None if skipped.
@@ -1773,7 +1990,7 @@ fn emit_func_prototype(
   }
   emitted.insert(name.clone());
 
-  let return_ty = format_c_type(types.get(return_type), types);
+  let return_ty = format_c_type(types.get(return_type), types, defs, symbols, namespaces);
 
   let mut param_strs: Vec<String> = params_ids
     .iter()
@@ -1781,7 +1998,7 @@ fn emit_func_prototype(
       let param_def = defs.get(param_id);
       if let DefinitionKind::Parameter(param) = &param_def.kind {
         let pname = symbols.get(&param_def.name);
-        let pty = format_c_type(types.get(&param.type_id), types);
+        let pty = format_c_type(types.get(&param.type_id), types, defs, symbols, namespaces);
         Some(format!("{} {}", pty, pname))
       } else {
         None
@@ -1826,7 +2043,7 @@ fn build_mangled_name_standalone(
   // Check for overloads to determine if we need a parameter suffix
   let has_overloads = has_overloads_standalone(def_id, defs);
   let param_suffix = if has_overloads {
-    format_param_types_for_mangling_standalone(def_id, defs, types)
+    format_param_types_for_mangling_standalone(def_id, defs, types, symbols)
   } else {
     String::new()
   };
@@ -1929,19 +2146,20 @@ fn format_param_types_for_mangling_standalone(
   def_id: DefinitionId,
   defs: &DefinitionStore,
   types: &TypeStore,
+  symbols: &SymbolTable,
 ) -> String {
   match &defs.get(&def_id).kind {
     DefinitionKind::Function(fd) => fd
       .params
       .iter()
-      .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types))
+      .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
       .collect::<Vec<_>>()
       .join("_"),
     DefinitionKind::Method(md) => {
       let start = if md.is_static { 0 } else { 1 };
       md.params[start..]
         .iter()
-        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types))
+        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
         .collect::<Vec<_>>()
         .join("_")
     },
@@ -1952,6 +2170,8 @@ fn format_param_types_for_mangling_standalone(
 fn format_type_for_mangling_standalone(
   ty: &TypeId,
   types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
 ) -> String {
   match types.get(ty) {
     Type::I8 => "i8".to_string(),
@@ -1968,33 +2188,38 @@ fn format_type_for_mangling_standalone(
     Type::Char => "char".to_string(),
     Type::String => "str".to_string(),
     Type::Void => "void".to_string(),
-    Type::Pointer { inner, .. } => format!("ptr_{}", format_type_for_mangling_standalone(inner, types)),
+    Type::Pointer { inner, .. } => {
+      format!("ptr_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
+    },
     Type::Reference { inner, mutable: true } => {
-      format!("mutref_{}", format_type_for_mangling_standalone(inner, types))
+      format!("mutref_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
     },
     Type::Reference { inner, mutable: false } => {
-      format!("ref_{}", format_type_for_mangling_standalone(inner, types))
+      format!("ref_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
     },
-    Type::Vector { element, .. } => format!("vec_{}", format_type_for_mangling_standalone(element, types)),
+    Type::Vector { element, .. } => {
+      format!("vec_{}", format_type_for_mangling_standalone(element, types, defs, symbols))
+    },
     Type::Tuple(elems) => {
       let parts: Vec<_> = elems
         .iter()
-        .map(|e| format_type_for_mangling_standalone(e, types))
+        .map(|e| format_type_for_mangling_standalone(e, types, defs, symbols))
         .collect();
       format!("tup_{}", parts.join("_"))
     },
     Type::Record(def_id) | Type::Enum(def_id) => {
-      // Use def index since we don't have symbols here
-      format!("T{}", def_id.index())
+      let def = defs.get(def_id);
+      symbols.get(&def.name).to_string()
     },
     Type::Instance { generic, args } => {
-      let base = format!("T{}", generic.index());
+      let def = defs.get(generic);
+      let base = symbols.get(&def.name).to_string();
       if args.is_empty() {
         base
       } else {
         let args_str = args
           .iter()
-          .map(|a| format_type_for_mangling_standalone(a, types))
+          .map(|a| format_type_for_mangling_standalone(a, types, defs, symbols))
           .collect::<Vec<_>>()
           .join("_");
         format!("{}_{}", base, args_str)
@@ -2012,6 +2237,9 @@ fn escape_ident(name: &str) -> String {
 pub fn format_c_type(
   ty: &Type,
   types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
 ) -> String {
   match ty {
     Type::I8 => "i8".to_string(),
@@ -2031,24 +2259,28 @@ pub fn format_c_type(
     Type::Never => "void".to_string(),
     Type::NullPtr => "void*".to_string(),
     Type::Error => "void*".to_string(),
-    Type::Pointer { inner, .. } => format!("{}*", format_c_type(types.get(inner), types)),
-    Type::Reference { inner, .. } => format!("{}*", format_c_type(types.get(inner), types)),
+    Type::Pointer { inner, .. } => {
+      format!("{}*", format_c_type(types.get(inner), types, defs, symbols, namespaces))
+    },
+    Type::Reference { inner, .. } => {
+      format!("{}*", format_c_type(types.get(inner), types, defs, symbols, namespaces))
+    },
     Type::Vector { element, size } => {
       if size.is_some() {
-        format!("{}*", format_c_type(types.get(element), types))
+        format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
       } else {
         "IgnisBuffer*".to_string()
       }
     },
     Type::Tuple(_) => "void*".to_string(),
     Type::Function { .. } => "void*".to_string(),
-    Type::Record(_) => {
-      // TODO: emit proper struct name (requires DefinitionStore)
-      "void*".to_string()
+    Type::Record(def_id) => {
+      let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
+      format!("struct {}", name)
     },
-    Type::Enum(_) => {
-      // TODO: emit proper tagged union name (requires DefinitionStore)
-      "void*".to_string()
+    Type::Enum(def_id) => {
+      let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
+      format!("struct {}", name)
     },
     Type::Param { .. } => {
       // Type::Param should never reach codegen (Invariant A)
@@ -2069,6 +2301,7 @@ pub fn emit_std_header(
   defs: &DefinitionStore,
   types: &TypeStore,
   symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
 ) -> String {
   use ignis_type::definition::{DefinitionKind, Visibility};
   use std::collections::HashSet;
@@ -2103,14 +2336,14 @@ pub fn emit_std_header(
       }
       emitted_names.insert(name.to_string());
 
-      let return_ty = format_c_type(types.get(&func_def.return_type), types);
+      let return_ty = format_c_type(types.get(&func_def.return_type), types, defs, symbols, namespaces);
 
       let mut param_strs = Vec::new();
       for param_id in &func_def.params {
         let param_def = defs.get(param_id);
         if let DefinitionKind::Parameter(param) = &param_def.kind {
           let param_name = symbols.get(&param_def.name);
-          let param_ty = format_c_type(types.get(&param.type_id), types);
+          let param_ty = format_c_type(types.get(&param.type_id), types, defs, symbols, namespaces);
           param_strs.push(format!("{} {}", param_ty, param_name));
         }
       }

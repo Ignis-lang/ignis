@@ -997,6 +997,9 @@ impl<'a> Analyzer<'a> {
     method_def_id: &ignis_type::definition::DefinitionId,
     method: &ignis_ast::statements::record::ASTMethod,
   ) {
+    // Push method's type params scope (in addition to owner's type params already in scope)
+    self.enter_type_params_scope(method_def_id);
+
     // Resolve return type
     let return_type = self.resolve_type_syntax_with_span(&method.return_type, &method.span);
 
@@ -1021,6 +1024,9 @@ impl<'a> Analyzer<'a> {
     if let DefinitionKind::Method(md) = &mut self.defs.get_mut(method_def_id).kind {
       md.return_type = return_type.clone();
     }
+
+    // Pop method's type params scope
+    self.exit_type_params_scope(method_def_id);
   }
 
   fn typecheck_method(
@@ -1044,6 +1050,9 @@ impl<'a> Analyzer<'a> {
     } else {
       return;
     };
+
+    // Push method's type params scope (in addition to owner's type params already in scope)
+    self.enter_type_params_scope(method_def_id);
 
     // Typecheck the method body
     self.scopes.push(ScopeKind::Function);
@@ -1130,6 +1139,9 @@ impl<'a> Analyzer<'a> {
     self.typecheck_node(&method.body, scope_kind, &method_ctx);
 
     self.scopes.pop();
+
+    // Pop method's type params scope
+    self.exit_type_params_scope(method_def_id);
   }
 
   // ========================================================================

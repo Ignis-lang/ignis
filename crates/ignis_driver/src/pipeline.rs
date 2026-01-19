@@ -1315,7 +1315,7 @@ pub fn check_std(
 
   let header_content = {
     let sym_table = output.symbols.borrow();
-    ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table)
+    ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table, &output.namespaces)
   };
   let header_path = output_path.join("ignis_std.h");
   if let Err(e) = std::fs::write(&header_path, &header_content) {
