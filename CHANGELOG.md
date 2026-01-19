@@ -2,6 +2,34 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## [0.2.3] - 2026-01-19
+
+This release introduces important syntax changes, expands the standard library with memory management and C interoperability, and improves compiler stability.
+
+### Breaking Changes
+
+- **Parenthesized Conditions**: Syntax now requires parentheses around conditions in `if` and `while` control structures.
+  - *Before*: `if x > 0 { ... }`
+  - *After*: `if (x > 0) { ... }`
+
+### Standard Library & Runtime
+
+- **New Intrinsics**: Added `alignOf`, `maxOf`, and `minOf` intrinsics, and improved syntax for type intrinsics
+- **Memory Utilities**: Added layout and alignment utilities to `std/memory`
+- **Libc Module**: Introduced `libc` module providing raw POSIX bindings
+- **Unified Runtime**: Refactored runtime to consolidate C modules into a single `libignis_rt` archive
+
+### Compiler & Interoperability
+
+- **C Headers**: Compiler now emits proper `struct` and `enum` definitions in C headers
+- **UTF-8 Support**: Fixed line and column calculation to handle UTF-8 character boundaries correctly
+- **Parser Stability**: Added recursion limit to parser to prevent stack overflows and improved lexer handling
+
+### Documentation & Examples
+
+- Updated dependencies and added documentation support for `extern` blocks and `namespace`
+- Added bump allocator example with tests and block metadata
+
 ## [0.2.2] - 2026-01-18
 
 This release focuses on LSP server stability and crash prevention.
