@@ -1,0 +1,429 @@
+//!
+//! # Alignment Utilities
+//!
+//! Low-level utilities for memory alignment calculations and checks.
+//!
+//! ## Overview
+//!
+//! Memory alignment is critical for performance and correctness on most CPU
+//! architectures. Many processors require or strongly prefer that data be
+//! aligned to addresses that are multiples of certain values (typically
+//! powers of two).
+//!
+//! This module provides functions to:
+//! - Check if values are powers of two
+//! - Align values and pointers up to specified boundaries
+//! - Check if values and pointers are properly aligned
+//!
+//! ## How Alignment Works
+//!
+//! ### Memory Alignment Basics
+//!
+//! ```text
+//!   UNALIGNED vs ALIGNED ACCESS (8-byte alignment example)
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   Memory addresses:  0    8    16   24   32   40   48   56   64
+//!                      │    │    │    │    │    │    │    │    │
+//!                      ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼
+//!                     ┌────┬────┬────┬────┬────┬────┬────┬────┬────┐
+//!                     │    │    │    │    │    │    │    │    │    │
+//!                     └────┴────┴────┴────┴────┴────┴────┴────┴────┘
+//!
+//!   ALIGNED (address 16):
+//!   ┌────────────────────────────────────────────────────────────────────┐
+//!   │  Address 16 is divisible by 8                                      │
+//!   │  16 & (8-1) = 16 & 7 = 0b10000 & 0b00111 = 0  ✓ ALIGNED            │
+//!   └────────────────────────────────────────────────────────────────────┘
+//!
+//!   UNALIGNED (address 20):
+//!   ┌────────────────────────────────────────────────────────────────────┐
+//!   │  Address 20 is NOT divisible by 8                                  │
+//!   │  20 & (8-1) = 20 & 7 = 0b10100 & 0b00111 = 4  ✗ NOT ALIGNED        │
+//!   │                                                                    │
+//!   │  To align UP: (20 + 7) & ~7 = 27 & ~7 = 0b11011 & 0b11000 = 24     │
+//!   └────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ### The Alignment Formula
+//!
+//! ```text
+//!   ALIGN UP FORMULA: (value + (alignment - 1)) & ~(alignment - 1)
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   Example: Align 20 up to 8-byte boundary
+//!
+//!   Step 1: Add (alignment - 1) to ensure we reach the next boundary
+//!   ┌────────────────────────────────────────────────────────────────────┐
+//!   │  20 + (8 - 1) = 20 + 7 = 27                                        │
+//!   │                                                                    │
+//!   │  Binary: 0b10100 + 0b00111 = 0b11011                               │
+//!   └────────────────────────────────────────────────────────────────────┘
+//!
+//!   Step 2: Mask off the lower bits to round down to alignment
+//!   ┌────────────────────────────────────────────────────────────────────┐
+//!   │  ~(8 - 1) = ~7 = ~0b00111 = 0b11111111111111111111111111111000     │
+//!   │                                                                    │
+//!   │  27 & ~7 = 0b11011 & 0b11000 = 0b11000 = 24                        │
+//!   └────────────────────────────────────────────────────────────────────┘
+//!
+//!   Result: 20 aligned up to 8 = 24  ✓
+//! ```
+//!
+//! ### Power of Two Check
+//!
+//! ```text
+//!   WHY (n & (n-1)) == 0 DETECTS POWERS OF TWO
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   Powers of two have exactly one bit set:
+//!
+//!   n = 8:   0b1000          n = 16:  0b10000         n = 32:  0b100000
+//!   n-1 = 7: 0b0111          n-1 = 15: 0b01111        n-1 = 31: 0b011111
+//!   AND:     0b0000 = 0 ✓    AND:      0b00000 = 0 ✓  AND:      0b000000 = 0 ✓
+//!
+//!   Non-powers of two have multiple bits set:
+//!
+//!   n = 6:   0b110           n = 12:  0b1100
+//!   n-1 = 5: 0b101           n-1 = 11: 0b1011
+//!   AND:     0b100 = 4 ✗     AND:      0b1000 = 8 ✗
+//!
+//!   Edge case: n = 0 must be handled separately (0 is not a power of two)
+//! ```
+//!
+//! ## Common Alignment Values
+//!
+//! ```text
+//!   ┌──────────────┬───────────┬─────────────────────────────────────────┐
+//!   │ Type         │ Alignment │ Notes                                   │
+//!   ├──────────────┼───────────┼─────────────────────────────────────────┤
+//!   │ u8 / i8      │ 1         │ No alignment requirement                │
+//!   │ u16 / i16    │ 2         │ 2-byte boundary                         │
+//!   │ u32 / i32    │ 4         │ 4-byte boundary                         │
+//!   │ u64 / i64    │ 8         │ 8-byte boundary (64-bit word)           │
+//!   │ f32          │ 4         │ Same as u32                             │
+//!   │ f64          │ 8         │ Same as u64                             │
+//!   │ Pointer      │ 8         │ On 64-bit systems                       │
+//!   │ SIMD (128)   │ 16        │ SSE registers                           │
+//!   │ SIMD (256)   │ 32        │ AVX registers                           │
+//!   │ Cache line   │ 64        │ Typical L1 cache line size              │
+//!   └──────────────┴───────────┴─────────────────────────────────────────┘
+//! ```
+//!
+//! ## Safety
+//!
+//! These functions assume:
+//! - Alignment values are powers of two and greater than zero
+//! - Values and pointers do not overflow when aligned up
+//!
+//! Functions will abort if alignment is zero or not a power of two.
+//!
+import LibC from "std::libc";
+
+export namespace Align {
+  /// Checks if a value is a power of two.
+  ///
+  /// A power of two is any value of the form 2^n where n >= 0.
+  /// This includes: 1, 2, 4, 8, 16, 32, 64, 128, 256, ...
+  ///
+  /// # Arguments
+  ///
+  /// * `value` - The value to check
+  ///
+  /// # Returns
+  ///
+  /// `true` if the value is a power of two, `false` otherwise.
+  /// Note: Zero is NOT considered a power of two.
+  ///
+  /// # Algorithm
+  ///
+  /// ```text
+  ///   For powers of two, subtracting 1 flips all bits below the single set bit:
+  ///
+  ///   n = 8:    0b1000
+  ///   n - 1:    0b0111
+  ///   n & n-1:  0b0000 = 0  ✓ Power of two
+  ///
+  ///   For non-powers, at least one bit remains after the AND:
+  ///
+  ///   n = 6:    0b110
+  ///   n - 1:    0b101
+  ///   n & n-1:  0b100 = 4   ✗ Not a power of two
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Align from "std::memory";
+  ///
+  /// assert(Align::isPowerOfTwo(1));    // 2^0
+  /// assert(Align::isPowerOfTwo(2));    // 2^1
+  /// assert(Align::isPowerOfTwo(4));    // 2^2
+  /// assert(Align::isPowerOfTwo(8));    // 2^3
+  /// assert(Align::isPowerOfTwo(256));  // 2^8
+  ///
+  /// assert(!Align::isPowerOfTwo(0));   // Zero is not a power of two
+  /// assert(!Align::isPowerOfTwo(3));   // 3 = 0b11
+  /// assert(!Align::isPowerOfTwo(6));   // 6 = 0b110
+  /// assert(!Align::isPowerOfTwo(100)); // 100 = 0b1100100
+  /// ```
+  function isPowerOfTwo(value: u64): boolean {
+    return value != 0 && (value & (value - 1)) == 0;
+  }
+
+  /// Aligns a value up to the nearest multiple of `alignment`.
+  ///
+  /// If the value is already aligned, it is returned unchanged.
+  /// Otherwise, returns the next higher value that is a multiple of `alignment`.
+  ///
+  /// # Arguments
+  ///
+  /// * `value` - The value to align
+  /// * `alignment` - The alignment boundary (must be a power of two, > 0)
+  ///
+  /// # Returns
+  ///
+  /// The smallest value >= `value` that is a multiple of `alignment`.
+  ///
+  /// # Panics
+  ///
+  /// Aborts if `alignment` is zero or not a power of two.
+  ///
+  /// # Algorithm
+  ///
+  /// ```text
+  ///   alignUp(value, alignment) = (value + (alignment - 1)) & ~(alignment - 1)
+  ///
+  ///   Example: alignUp(20, 8)
+  ///
+  ///   value = 20           0b10100
+  ///   alignment - 1 = 7    0b00111
+  ///   value + 7 = 27       0b11011
+  ///   ~7 =                 0b11111111111111111111111111111000
+  ///   27 & ~7 = 24         0b11000
+  ///
+  ///   ────────────────────────────────────────────────────────────────
+  ///   Address:  16   17   18   19   20   21   22   23   24   25   26
+  ///             │                   │                   │
+  ///             ▼                   ▼                   ▼
+  ///           aligned            value              result
+  ///           (8-byte)         (input)           (aligned up)
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Align from "std::memory";
+  ///
+  /// // Already aligned
+  /// assert(Align::alignUp(0, 8) == 0);
+  /// assert(Align::alignUp(8, 8) == 8);
+  /// assert(Align::alignUp(16, 8) == 16);
+  ///
+  /// // Needs alignment
+  /// assert(Align::alignUp(1, 8) == 8);
+  /// assert(Align::alignUp(7, 8) == 8);
+  /// assert(Align::alignUp(9, 8) == 16);
+  /// assert(Align::alignUp(20, 8) == 24);
+  ///
+  /// // Different alignments
+  /// assert(Align::alignUp(5, 4) == 8);
+  /// assert(Align::alignUp(5, 16) == 16);
+  /// ```
+  function alignUp(value: u64, alignment: u64): u64 {
+    // TODO: change to panic() when available
+    if (alignment == 0 || !isPowerOfTwo(alignment)) {
+      LibC::abort();
+    }
+
+    return (value + (alignment - 1)) & ~(alignment - 1);
+  }
+
+  /// Aligns a pointer up to the given alignment boundary.
+  ///
+  /// Converts the pointer to an integer, aligns it, and converts back.
+  ///
+  /// # Arguments
+  ///
+  /// * `ptr` - The pointer to align
+  /// * `alignment` - The alignment boundary (must be a power of two, > 0)
+  ///
+  /// # Returns
+  ///
+  /// A pointer to the same or higher address that satisfies the alignment.
+  ///
+  /// # Diagram
+  ///
+  /// ```text
+  ///   POINTER ALIGNMENT
+  ///   ════════════════════════════════════════════════════════════════════════
+  ///
+  ///   Memory:    ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
+  ///   Address:   │ 0 │ 1 │ 2 │ 3 │ 4 │ 5 │ 6 │ 7 │ 8 │ 9 │10 │11 │12 │13 │14 │15 │
+  ///              └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
+  ///                              ▲                   ▲
+  ///                              │                   │
+  ///                           ptr = 5           result = 8
+  ///
+  ///   Align::alignUpPtr(ptr=5, alignment=8) returns pointer to address 8
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Align from "std::memory";
+  ///
+  /// let buffer: u8[32];
+  /// let ptr: *mut u8 = &mut buffer[5];
+  ///
+  /// let aligned: *mut u8 = Align::alignUpPtr(ptr, 8);
+  /// // aligned now points to an 8-byte aligned address
+  /// ```
+  ///
+  /// # Safety
+  ///
+  /// The caller must ensure:
+  /// - The resulting pointer is within valid memory bounds
+  /// - The pointer is not aligned beyond the end of the allocated region
+  function alignUpPtr(ptr: *mut u8, alignment: u64): *mut u8 {
+    let addr: u64 = ptr as u64;
+    let aligned: u64 = alignUp(addr, alignment);
+
+    return aligned as *mut u8;
+  }
+
+  /// Checks if a value is aligned to the given alignment boundary.
+  ///
+  /// # Arguments
+  ///
+  /// * `value` - The value to check
+  /// * `alignment` - The alignment to check against (must be a power of two)
+  ///
+  /// # Returns
+  ///
+  /// `true` if `value` is a multiple of `alignment`, `false` otherwise.
+  ///
+  /// # Algorithm
+  ///
+  /// ```text
+  ///   A value is aligned if its lower bits (corresponding to alignment-1) are zero:
+  ///
+  ///   isAligned(24, 8):
+  ///   24 = 0b11000
+  ///   8-1 = 0b00111
+  ///   24 & 7 = 0b11000 & 0b00111 = 0  ✓ ALIGNED
+  ///
+  ///   isAligned(20, 8):
+  ///   20 = 0b10100
+  ///   8-1 = 0b00111
+  ///   20 & 7 = 0b10100 & 0b00111 = 4  ✗ NOT ALIGNED
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Align from "std::memory";
+  ///
+  /// assert(Align::isAligned(0, 8));
+  /// assert(Align::isAligned(8, 8));
+  /// assert(Align::isAligned(16, 8));
+  /// assert(Align::isAligned(24, 8));
+  ///
+  /// assert(!Align::isAligned(1, 8));
+  /// assert(!Align::isAligned(7, 8));
+  /// assert(!Align::isAligned(20, 8));
+  /// ```
+  function isAligned(value: u64, alignment: u64): boolean {
+    return (value & (alignment - 1)) == 0;
+  }
+
+  /// Checks if a pointer is aligned to the given boundary.
+  ///
+  /// # Arguments
+  ///
+  /// * `ptr` - The pointer to check
+  /// * `alignment` - The alignment to check against (must be a power of two)
+  ///
+  /// # Returns
+  ///
+  /// `true` if the pointer's address is a multiple of `alignment`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Align from "std::memory";
+  ///
+  /// let buffer: u8[32];
+  /// let ptr8: *mut u8 = &mut buffer[8];
+  /// let ptr5: *mut u8 = &mut buffer[5];
+  ///
+  /// assert(Align::isAlignedPtr(ptr8, 8));   // 8 is 8-byte aligned
+  /// assert(!Align::isAlignedPtr(ptr5, 8));  // 5 is not 8-byte aligned
+  /// ```
+  function isAlignedPtr(ptr: *mut u8, alignment: u64): boolean {
+    return isAligned(ptr as u64, alignment);
+  }
+
+  /// Aligns a value up to the machine word size (8 bytes on 64-bit).
+  ///
+  /// This is a convenience function for the common case of word alignment.
+  ///
+  /// # Arguments
+  ///
+  /// * `value` - The value to align
+  ///
+  /// # Returns
+  ///
+  /// The value aligned up to the next 8-byte boundary.
+  ///
+  /// # Deprecated
+  ///
+  /// Prefer using `Align::alignUp(value, 8)` or `Align::alignUp(value, alignOf<T>())`
+  /// for explicit and type-safe alignment.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Align from "std::memory";
+  ///
+  /// assert(Align::align(0) == 0);
+  /// assert(Align::align(1) == 8);
+  /// assert(Align::align(7) == 8);
+  /// assert(Align::align(8) == 8);
+  /// assert(Align::align(9) == 16);
+  /// ```
+  function align(value: u64): u64 {
+    let word: u64 = 8;  // Assuming 64-bit platform
+
+    return (value + word - 1) & ~(word - 1);
+  }
+
+  /// Aligns a value to the given alignment.
+  ///
+  /// # Arguments
+  ///
+  /// * `value` - The value to align
+  /// * `alignment` - The alignment boundary
+  ///
+  /// # Returns
+  ///
+  /// The value aligned up to `alignment`.
+  ///
+  /// # Deprecated
+  ///
+  /// Prefer using `Align::alignUp` which validates that alignment is a power of two.
+  /// This function does NOT validate and will produce incorrect results
+  /// if alignment is not a power of two.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Align from "std::memory";
+  ///
+  /// assert(Align::alignTo(20, 8) == 24);
+  /// assert(Align::alignTo(16, 8) == 16);
+  /// ```
+  function alignTo(value: u64, alignment: u64): u64 {
+    return (value + alignment - 1) & ~(alignment - 1);
+  }
+}

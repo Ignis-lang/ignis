@@ -1,0 +1,433 @@
+//!
+//! # Memory Layout
+//!
+//! Describes the size and alignment requirements for memory allocation.
+//!
+//! ## Overview
+//!
+//! A `Layout` encapsulates two fundamental properties needed for memory
+//! allocation:
+//!
+//! - **Size**: The number of bytes required
+//! - **Alignment**: The address boundary the allocation must satisfy
+//!
+//! These properties are essential for:
+//! - Allocating memory for types with specific alignment requirements
+//! - Creating arrays of elements with proper spacing
+//! - Interfacing with low-level allocators
+//!
+//! ## Memory Layout Concepts
+//!
+//! ### Size vs Alignment vs Stride
+//!
+//! ```text
+//!   LAYOUT PROPERTIES FOR A TYPE
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   Consider a struct with size=12, alignment=8:
+//!
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │                          Single Element                            │
+//!   │                                                                     │
+//!   │   Address:  0    4    8    12   16   20   24   28   32             │
+//!   │             │    │    │    │    │    │    │    │    │              │
+//!   │             ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼              │
+//!   │            ┌─────────────────┐                                     │
+//!   │            │   Data (12B)    │                                     │
+//!   │            └─────────────────┘                                     │
+//!   │            ◄─── size = 12 ───►                                     │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//!
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │                      Array of Elements                              │
+//!   │                                                                     │
+//!   │   Address:  0    4    8    12   16   20   24   28   32             │
+//!   │             │    │    │    │    │    │    │    │    │              │
+//!   │             ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼              │
+//!   │            ┌─────────────────┬────┬─────────────────┬────┐         │
+//!   │            │   Element 0     │pad │   Element 1     │pad │         │
+//!   │            │   (12 bytes)    │(4B)│   (12 bytes)    │(4B)│         │
+//!   │            └─────────────────┴────┴─────────────────┴────┘         │
+//!   │            ◄──── stride = 16 ────►◄──── stride = 16 ────►         │
+//!   │                                                                     │
+//!   │   stride = paddedSize() = (size + align - 1) & ~(align - 1)        │
+//!   │   stride = (12 + 7) & ~7 = 19 & ~7 = 16                            │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ### Why Padding is Needed
+//!
+//! ```text
+//!   WITHOUT PADDING (WRONG):
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │   Address:  0         12        24        36                       │
+//!   │             │         │         │         │                        │
+//!   │            ┌───────────┬───────────┬───────────┐                   │
+//!   │            │ Element 0 │ Element 1 │ Element 2 │                   │
+//!   │            └───────────┴───────────┴───────────┘                   │
+//!   │                        ▲                                           │
+//!   │                        │                                           │
+//!   │                    Address 12 is NOT 8-byte aligned!               │
+//!   │                    12 & 7 = 4 ✗                                    │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//!
+//!   WITH PADDING (CORRECT):
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │   Address:  0         12  16        28  32        44  48           │
+//!   │             │         │   │         │   │         │   │            │
+//!   │            ┌───────────┬───┬───────────┬───┬───────────┬───┐       │
+//!   │            │ Element 0 │pad│ Element 1 │pad│ Element 2 │pad│       │
+//!   │            └───────────┴───┴───────────┴───┴───────────┴───┘       │
+//!   │                            ▲               ▲                       │
+//!   │                            │               │                       │
+//!   │                    Address 16 IS 8-byte aligned! ✓                 │
+//!   │                    16 & 7 = 0                                      │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Creating Layouts
+//!
+//! ```text
+//!   LAYOUT CREATION METHODS
+//!   ════════════════════════════════════════════════════════════════════════
+//!
+//!   Method 1: From type (recommended)
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │  let layout: Layout = Layout::init<MyStruct>();                    │
+//!   │                                                                     │
+//!   │  Automatically uses sizeOf<T>() and alignOf<T>()                   │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//!
+//!   Method 2: From explicit size and alignment
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │  let layout: Layout = Layout::init(1024, 16);                      │
+//!   │                                                                     │
+//!   │  Useful for custom allocations (e.g., SIMD-aligned buffers)        │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//!
+//!   Method 3: For arrays
+//!   ┌─────────────────────────────────────────────────────────────────────┐
+//!   │  let layout: Layout = Layout::init<u64>(100);                      │
+//!   │                                                                     │
+//!   │  Creates layout for 100 contiguous u64 elements                    │
+//!   └─────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Safety
+//!
+//! Layout functions enforce the following invariants:
+//! - Alignment is always a power of two
+//! - Alignment is never zero
+//! - Size does not overflow when multiplied by count
+//!
+//! Functions abort on invalid inputs rather than returning errors.
+//!
+import LibC from "std::libc";
+import Align from "./align";
+
+/// A memory layout descriptor containing size and alignment requirements.
+///
+/// `Layout` is the fundamental building block for type-aware memory allocation.
+/// It describes how much memory is needed and what alignment constraints must
+/// be satisfied.
+///
+/// # Invariants
+///
+/// A valid `Layout` always satisfies:
+/// - `alignment > 0`
+/// - `alignment` is a power of two
+/// - `size` can be zero (for zero-sized types)
+///
+/// # Fields
+///
+/// * `size` - The number of bytes required for the allocation
+/// * `alignment` - The minimum alignment requirement (always a power of two)
+///
+/// # Memory Representation
+///
+/// ```text
+///   ┌─────────────────────────────────────────────────────────────────────┐
+///   │                          Layout Record                              │
+///   │                                                                     │
+///   │   ┌────────────────────────────────────────────────────────────┐    │
+///   │   │  size: u64       │  alignment: u64                        │    │
+///   │   │  (8 bytes)       │  (8 bytes)                             │    │
+///   │   └────────────────────────────────────────────────────────────┘    │
+///   │                                                                     │
+///   │   Total size of Layout: 16 bytes                                   │
+///   │   Alignment of Layout: 8 bytes                                     │
+///   └─────────────────────────────────────────────────────────────────────┘
+/// ```
+///
+/// # Example
+///
+/// ```ignis
+/// import { Layout } from "std/memory/layout";
+///
+/// // Create layout for a u64
+/// let layout: Layout = Layout::init<u64>();
+/// assert(layout.size() == 8);
+/// assert(layout.align() == 8);
+///
+/// // The padded size equals size when size is a multiple of alignment
+/// assert(layout.paddedSize() == 8);
+/// ```
+export record Layout {
+  size: u64;
+  alignment: u64;
+
+  /// Returns the alignment requirement of this layout.
+  ///
+  /// The alignment is always a power of two and greater than zero.
+  ///
+  /// # Returns
+  ///
+  /// The alignment in bytes.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let layout: Layout = Layout::init(100, 16);
+  /// assert(layout.align() == 16);
+  /// ```
+  public align(&self): u64 {
+    return self.alignment;
+  }
+
+  /// Returns the size requirement of this layout.
+  ///
+  /// This is the minimum number of bytes needed for the allocation.
+  /// The actual allocation may be larger due to alignment padding.
+  ///
+  /// # Returns
+  ///
+  /// The size in bytes.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let layout: Layout = Layout::init(100, 16);
+  /// assert(layout.size() == 100);
+  /// ```
+  public size(&self): u64 {
+    return self.size;
+  }
+
+  /// Creates a `Layout` from explicit size and alignment values.
+  ///
+  /// This is the primary constructor for creating layouts with custom
+  /// requirements.
+  ///
+  /// # Arguments
+  ///
+  /// * `size` - The size in bytes (may be zero)
+  /// * `alignment` - The alignment in bytes (must be a power of two, > 0)
+  ///
+  /// # Returns
+  ///
+  /// A new `Layout` with the specified size and alignment.
+  ///
+  /// # Panics
+  ///
+  /// Aborts if:
+  /// - `alignment` is zero
+  /// - `alignment` is not a power of two
+  ///
+  /// # Validation
+  ///
+  /// ```text
+  ///   Layout::init(size, alignment)
+  ///   ════════════════════════════════════════════════════════════════════════
+  ///
+  ///   Step 1: Check alignment != 0
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │  if (alignment == 0) abort()                                       │
+  ///   │                                                                     │
+  ///   │  Valid: 1, 2, 4, 8, 16, 32, ...                                    │
+  ///   │  Invalid: 0                                                        │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  ///
+  ///   Step 2: Check alignment is power of two
+  ///   ┌─────────────────────────────────────────────────────────────────────┐
+  ///   │  if (!isPowerOfTwo(alignment)) abort()                             │
+  ///   │                                                                     │
+  ///   │  Valid: 1, 2, 4, 8, 16, 32, 64, 128, 256, ...                      │
+  ///   │  Invalid: 3, 5, 6, 7, 9, 10, 12, 15, ...                           │
+  ///   └─────────────────────────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import { Layout } from "std/memory/layout";
+  ///
+  /// // Standard layout
+  /// let layout: Layout = Layout::init(1024, 8);
+  ///
+  /// // SIMD-aligned buffer
+  /// let simd: Layout = Layout::init(256, 32);
+  ///
+  /// // Cache-line aligned
+  /// let cacheLine: Layout = Layout::init(64, 64);
+  /// ```
+  public static init(size: u64, alignment: u64): Layout {
+    // TODO: change to panic() when available
+    if (alignment == 0) {
+      LibC::abort();
+    }
+
+    if (!Align::isPowerOfTwo(alignment)) {
+      LibC::abort();
+    }
+
+    return Layout { size: size, alignment: alignment };
+  }
+
+
+
+  /// Returns the size padded up to the alignment boundary.
+  ///
+  /// This is the **stride** between consecutive elements when storing
+  /// multiple values of this layout in a contiguous array. It ensures
+  /// each element starts at a properly aligned address.
+  ///
+  /// # Returns
+  ///
+  /// The smallest value >= `size` that is a multiple of `alignment`.
+  ///
+  /// # Formula
+  ///
+  /// ```text
+  ///   paddedSize = (size + (alignment - 1)) & ~(alignment - 1)
+  /// ```
+  ///
+  /// # Diagram
+  ///
+  /// ```text
+  ///   size = 12, alignment = 8
+  ///   ════════════════════════════════════════════════════════════════════════
+  ///
+  ///   ┌────────────────────────────────────────────────────────────────────┐
+  ///   │  Bytes:  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16       │
+  ///   │          │                          │              │   │          │
+  ///   │          ├──────────────────────────┼──────────────┤   │          │
+  ///   │          │      Data (12 bytes)     │   Padding    │   │          │
+  ///   │          │                          │   (4 bytes)  │   │          │
+  ///   │          └──────────────────────────┴──────────────┘   │          │
+  ///   │          ◄───────────── size = 12 ─────────────────►   │          │
+  ///   │          ◄──────────── paddedSize = 16 ────────────────►          │
+  ///   │                                                        │          │
+  ///   │                              Next element starts here ─┘          │
+  ///   │                              (aligned to 8 bytes)                 │
+  ///   └────────────────────────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import { Layout } from "std/memory/layout";
+  ///
+  /// // Size already aligned
+  /// let layout1: Layout = Layout::init(16, 8);
+  /// assert(layout1.paddedSize() == 16);
+  ///
+  /// // Size needs padding
+  /// let layout2: Layout = Layout::init(12, 8);
+  /// assert(layout2.paddedSize() == 16);
+  ///
+  /// // Larger alignment
+  /// let layout3: Layout = Layout::init(20, 16);
+  /// assert(layout3.paddedSize() == 32);
+  /// ```
+  public paddedSize(&self): u64 {
+    return (self.size + (self.alignment - 1)) & ~(self.alignment - 1);
+  }
+
+  /// Creates a `Layout` for a single value of type `T`.
+  ///
+  /// This method uses the compiler intrinsics `sizeOf<T>()` and `alignOf<T>()`
+  /// to determine the layout requirements automatically.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The type to create a layout for
+  ///
+  /// # Returns
+  ///
+  /// A `Layout` with size and alignment matching the type `T`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import { Layout } from "std/memory/layout";
+  ///
+  /// // Primitive types
+  /// let u8Layout: Layout = Layout::init<u8>();
+  /// assert(u8Layout.size() == 1);
+  /// assert(u8Layout.align() == 1);
+  ///
+  /// let u64Layout: Layout = Layout::init<u64>();
+  /// assert(u64Layout.size() == 8);
+  /// assert(u64Layout.align() == 8);
+  ///
+  /// // Custom struct
+  /// record Point { x: f64; y: f64; }
+  /// let pointLayout: Layout = Layout::init<Point>();
+  /// assert(pointLayout.size() == 16);
+  /// assert(pointLayout.align() == 8);
+  /// ```
+  public static init<T>(): Layout {
+    return Layout::init(sizeOf<T>(), alignOf<T>());
+  }
+
+  /// Creates a `Layout` for `count` contiguous elements of type `T`.
+  ///
+  /// This calculates the total size needed for an array of `count` elements,
+  /// taking into account proper alignment between elements.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The element type
+  ///
+  /// # Arguments
+  ///
+  /// * `count` - The number of elements
+  ///
+  /// # Returns
+  ///
+  /// A `Layout` with:
+  /// - `size` = `count * sizeOf<T>()`
+  /// - `alignment` = `alignOf<T>()`
+  ///
+  /// # Panics
+  ///
+  /// Aborts if the total size overflows `u64`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import { Layout } from "std/memory/layout";
+  ///
+  /// // Array of 100 u64 values
+  /// let layout: Layout = Layout::init<u64>(100);
+  /// assert(layout.size() == 800);   // 100 * 8
+  /// assert(layout.align() == 8);
+  ///
+  /// // Empty array is valid
+  /// let empty: Layout = Layout::init<u64>(0);
+  /// assert(empty.size() == 0);
+  /// assert(empty.align() == 8);
+  /// ```
+  public static init<T>(count: u64): Layout {
+    let elemSize: u64 = sizeOf<T>();
+    let total: u64 = count * elemSize;
+
+    // Overflow check: if count > 0 and total/count != elemSize, overflow occurred
+    if (count != 0 && total / count != elemSize) {
+      // TODO: change to panic() when available
+      LibC::abort();
+    }
+
+    return Layout::init(total, alignOf<T>());
+  }
+}
