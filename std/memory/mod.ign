@@ -5,12 +5,12 @@
  * Callers must ensure sizes and pointers are valid for the requested operations.
  */
 extern __memory {
-  function memoryAllocate(sizeBytes: u64): *mut u8;
-  function memoryDeallocate(pointer: *mut u8): void;
-  function memoryReallocate(pointer: *mut u8, newSizeBytes: u64): *mut u8;
-  function memoryAllocateZeroed(count: u64, elementSizeBytes: u64): *mut u8;
-  function copy(destination: *mut u8, source: *u8, sizeBytes: u64): void;
-  function move(destination: *mut u8, source: *u8, sizeBytes: u64): void;
+  function ignis_alloc(size: u64): *mut u8;
+  function ignis_free(ptr: *mut u8): void;
+  function ignis_realloc(ptr: *mut u8, size: u64): *mut u8;
+  function ignis_calloc(count: u64, size: u64): *mut u8;
+  function ignis_memcpy(dest: *mut u8, src: *u8, n: u64): void;
+  function ignis_memmove(dest: *mut u8, src: *u8, n: u64): void;
 }
 
 export namespace Memory {
@@ -19,10 +19,9 @@ export namespace Memory {
    *
    * @param {u64} size - Size in bytes to allocate.
    * @return {*mut T} Pointer to the allocated memory (may be null).
-   * @note The allocation is uninitialized.
    */
   function allocate<T>(size: u64): *mut T {
-    return __memory::memoryAllocate(size) as *mut T;
+    return __memory::ignis_alloc(size) as *mut T;
   }
 
   /**
@@ -30,10 +29,9 @@ export namespace Memory {
    *
    * @param {u64} count - Number of elements to allocate.
    * @return {*mut T} Pointer to the allocated memory (may be null).
-   * @note The allocation is uninitialized and sized as `count * sizeOf(T)`.
    */
   function allocateVector<T>(count: u64): *mut T {
-    return __memory::memoryAllocate(count * sizeOf(T)) as *mut T;
+    return __memory::ignis_alloc(count * sizeOf(T)) as *mut T;
   }
 
   /**
@@ -44,7 +42,7 @@ export namespace Memory {
    * @return {*mut T} Pointer to the allocated memory (may be null).
    */
   function allocateZeroed<T>(count: u64, elementSizeBytes: u64): *mut T {
-    return __memory::memoryAllocateZeroed(count, elementSizeBytes) as *mut T;
+    return __memory::ignis_calloc(count, elementSizeBytes) as *mut T;
   }
 
   /**
@@ -54,7 +52,7 @@ export namespace Memory {
    * @return {*mut T} Pointer to the allocated memory (may be null).
    */
   function allocateZeroedVector<T>(count: u64): *mut T {
-    return __memory::memoryAllocateZeroed(count, sizeOf(T)) as *mut T;
+    return __memory::ignis_calloc(count, sizeOf(T)) as *mut T;
   }
 
   /**
@@ -63,10 +61,9 @@ export namespace Memory {
    * @param {*mut u8} pointer - Pointer returned by allocate/reallocate.
    * @param {u64} size - New size in bytes.
    * @return {*mut T} Pointer to the resized memory (may be null).
-   * @note Delegates to the runtime allocator's realloc semantics.
    */
   function reallocate<T>(pointer: *mut u8, size: u64): *mut T {
-    return __memory::memoryReallocate(pointer, size) as *mut T;
+    return __memory::ignis_realloc(pointer, size) as *mut T;
   }
 
   /**
@@ -77,17 +74,16 @@ export namespace Memory {
    * @return {*mut T} Pointer to the resized memory (may be null).
    */
   function reallocateVector<T>(pointer: *mut T, count: u64): *mut T {
-    return __memory::memoryReallocate(pointer as *mut u8, count * sizeOf(T)) as *mut T;
+    return __memory::ignis_realloc(pointer as *mut u8, count * sizeOf(T)) as *mut T;
   }
 
   /**
    * Frees a previously allocated block.
    *
    * @param {*mut T} pointer - Pointer returned by allocation functions.
-   * @return {void}
    */
   function free<T>(pointer: *mut T): void {
-    __memory::memoryDeallocate(pointer as *mut u8);
+    __memory::ignis_free(pointer as *mut u8);
   }
 
   /**
@@ -96,11 +92,9 @@ export namespace Memory {
    * @param {*mut u8} destination - Destination buffer.
    * @param {*u8} source - Source buffer.
    * @param {u64} sizeBytes - Number of bytes to copy.
-   * @return {void}
-   * @note Behavior on overlapping ranges depends on the runtime implementation.
    */
   function copyBytes(destination: *mut u8, source: *u8, sizeBytes: u64): void {
-    __memory::copy(destination, source, sizeBytes);
+    __memory::ignis_memcpy(destination, source, sizeBytes);
   }
 
   /**
@@ -109,10 +103,9 @@ export namespace Memory {
    * @param {*mut T} destination - Destination buffer.
    * @param {*T} source - Source buffer.
    * @param {u64} count - Number of elements to copy.
-   * @return {void}
    */
   function copy<T>(destination: *mut T, source: *T, count: u64): void {
-    __memory::copy(destination as *mut u8, source as *u8, count * sizeOf(T));
+    __memory::ignis_memcpy(destination as *mut u8, source as *u8, count * sizeOf(T));
   }
 
   /**
@@ -121,10 +114,9 @@ export namespace Memory {
    * @param {*mut u8} destination - Destination buffer.
    * @param {*u8} source - Source buffer.
    * @param {u64} sizeBytes - Number of bytes to move.
-   * @return {void}
    */
   function moveBytes(destination: *mut u8, source: *u8, sizeBytes: u64): void {
-    __memory::move(destination, source, sizeBytes);
+    __memory::ignis_memmove(destination, source, sizeBytes);
   }
 
   /**
@@ -133,17 +125,8 @@ export namespace Memory {
    * @param {*mut T} destination - Destination buffer.
    * @param {*T} source - Source buffer.
    * @param {u64} count - Number of elements to move.
-   * @return {void}
    */
   function move<T>(destination: *mut T, source: *T, count: u64): void {
-    __memory::move(destination as *mut u8, source as *u8, count * sizeOf(T));
+    __memory::ignis_memmove(destination as *mut u8, source as *u8, count * sizeOf(T));
   }
-
-  // function read<T>(pointer: *T): T {
-  //   return __builtin_read<T>(pointer);
-  // }
-
-  // function write<T>(pointer: *mut T, value: T): void {
-  //   __builtin_write<T>(pointer, value);
-  // }
 }

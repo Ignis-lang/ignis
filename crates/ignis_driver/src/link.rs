@@ -3,8 +3,13 @@ use std::process::Command;
 
 use colored::*;
 use ignis_analyzer::modules::ModuleGraph;
-use ignis_config::{CHeader, IgnisSTDManifest};
+use ignis_config::{CHeader, IgnisSTDManifest, StdLinkingInfo};
 use ignis_type::module::ModuleId;
+
+/// Get the linkable path from StdLinkingInfo, preferring archive over object.
+fn get_linkable_path(info: &StdLinkingInfo) -> Option<&String> {
+  info.archive.as_ref().or(info.object.as_ref())
+}
 
 /// Plan for linking the final executable.
 #[derive(Debug, Default, Clone)]
@@ -75,10 +80,10 @@ impl LinkPlan {
       if let Some(m) = manifest {
         // First add ignis_rt (core runtime) - it's not a module but always needed
         if let Some(info) = m.get_linking_info("ignis_rt") {
-          if let Some(o) = &info.object {
-            let obj_path = std_path.join(o);
-            if !plan.objects.contains(&obj_path) {
-              plan.objects.push(obj_path);
+          if let Some(p) = get_linkable_path(info) {
+            let link_path = std_path.join(p);
+            if !plan.objects.contains(&link_path) {
+              plan.objects.push(link_path);
             }
           }
         }
@@ -86,10 +91,10 @@ impl LinkPlan {
         // Then add all module objects/libs
         for module_name in m.modules.keys() {
           if let Some(info) = m.get_linking_info(module_name) {
-            if let Some(o) = &info.object {
-              let obj_path = std_path.join(o);
-              if !plan.objects.contains(&obj_path) {
-                plan.objects.push(obj_path);
+            if let Some(p) = get_linkable_path(info) {
+              let link_path = std_path.join(p);
+              if !plan.objects.contains(&link_path) {
+                plan.objects.push(link_path);
               }
             }
             if let Some(l) = &info.lib {
@@ -115,10 +120,10 @@ impl LinkPlan {
               plan.headers.push(header);
             }
           }
-          if let Some(o) = &info.object {
-            let obj_path = std_path.join(o);
-            if !plan.objects.contains(&obj_path) {
-              plan.objects.push(obj_path);
+          if let Some(p) = get_linkable_path(info) {
+            let link_path = std_path.join(p);
+            if !plan.objects.contains(&link_path) {
+              plan.objects.push(link_path);
             }
           }
           if let Some(l) = &info.lib {
@@ -168,16 +173,26 @@ impl LinkPlan {
             plan.headers.push(header);
           }
         }
-        if let Some(o) = &info.object {
-          let obj_path = std_path.join(o);
-          if !plan.objects.contains(&obj_path) {
-            plan.objects.push(obj_path);
+        if let Some(p) = get_linkable_path(info) {
+          let link_path = std_path.join(p);
+          if !plan.objects.contains(&link_path) {
+            plan.objects.push(link_path);
           }
         }
         if let Some(l) = &info.lib {
           if !plan.libs.contains(l) {
             plan.libs.push(l.clone());
           }
+        }
+      }
+    }
+
+    // Also add ignis_rt linking info (not in modules list)
+    if let Some(info) = manifest.get_linking_info("ignis_rt") {
+      if let Some(p) = get_linkable_path(info) {
+        let link_path = std_path.join(p);
+        if !plan.objects.contains(&link_path) {
+          plan.objects.push(link_path);
         }
       }
     }
@@ -376,7 +391,7 @@ mod tests {
 
   fn create_test_manifest() -> IgnisSTDManifest {
     let toolchain = StdToolchainConfig {
-      base_header: Some("runtime/types/types.h".to_string()),
+      base_header: Some("runtime/ignis_rt.h".to_string()),
       base_header_quoted: Some(true),
       include_dirs: vec![".".to_string()],
     };
@@ -388,11 +403,12 @@ mod tests {
 
     let mut linking = HashMap::new();
     linking.insert(
-      "io".to_string(),
+      "ignis_rt".to_string(),
       StdLinkingInfo {
-        header: Some("runtime/io/io.h".to_string()),
+        header: Some("runtime/ignis_rt.h".to_string()),
         header_quoted: Some(true),
-        object: Some("runtime/io/libignis_io.o".to_string()),
+        object: None,
+        archive: Some("runtime/libignis_rt.a".to_string()),
         lib: None,
       },
     );
@@ -402,16 +418,8 @@ mod tests {
         header: Some("math.h".to_string()),
         header_quoted: Some(false),
         object: None,
+        archive: None,
         lib: Some("m".to_string()),
-      },
-    );
-    linking.insert(
-      "string".to_string(),
-      StdLinkingInfo {
-        header: Some("runtime/string/string.h".to_string()),
-        header_quoted: Some(true),
-        object: Some("runtime/string/libignis_string.o".to_string()),
-        lib: None,
       },
     );
 
@@ -442,7 +450,7 @@ mod tests {
 
     // Base header should be included even with no modules
     assert_eq!(plan.headers.len(), 1);
-    assert_eq!(plan.headers[0].path, "runtime/types/types.h");
+    assert_eq!(plan.headers[0].path, "runtime/ignis_rt.h");
     assert!(plan.headers[0].quoted);
     assert_eq!(plan.include_dirs, vec![PathBuf::from("/std/.")]);
   }
@@ -457,13 +465,12 @@ mod tests {
 
     let plan = LinkPlan::from_modules(&[io_id], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
-    // base header first, then io header
-    assert_eq!(plan.headers.len(), 2);
-    assert_eq!(plan.headers[0].path, "runtime/types/types.h");
+    // base header only (io has no separate linking info now)
+    assert_eq!(plan.headers.len(), 1);
+    assert_eq!(plan.headers[0].path, "runtime/ignis_rt.h");
     assert!(plan.headers[0].quoted);
-    assert_eq!(plan.headers[1].path, "runtime/io/io.h");
-    assert!(plan.headers[1].quoted);
-    assert_eq!(plan.objects, vec![PathBuf::from("/std/runtime/io/libignis_io.o")]);
+    // No module-specific objects (all in libignis_rt.a)
+    assert!(plan.objects.is_empty());
     assert!(plan.libs.is_empty());
   }
 
@@ -486,24 +493,12 @@ mod tests {
       Some(&manifest),
     );
 
-    // base header + 2 module headers
-    assert_eq!(plan.headers.len(), 3);
-    assert_eq!(plan.headers[0].path, "runtime/types/types.h");
-    assert!(plan.headers.iter().any(|h| h.path == "runtime/io/io.h" && h.quoted));
-    assert!(
-      plan
-        .headers
-        .iter()
-        .any(|h| h.path == "runtime/string/string.h" && h.quoted)
-    );
+    // base header only (modules have no separate headers in new layout)
+    assert_eq!(plan.headers.len(), 1);
+    assert_eq!(plan.headers[0].path, "runtime/ignis_rt.h");
 
-    assert_eq!(plan.objects.len(), 2);
-    assert!(plan.objects.contains(&PathBuf::from("/std/runtime/io/libignis_io.o")));
-    assert!(
-      plan
-        .objects
-        .contains(&PathBuf::from("/std/runtime/string/libignis_string.o"))
-    );
+    // No module-specific objects (all consolidated in libignis_rt.a)
+    assert!(plan.objects.is_empty());
   }
 
   #[test]
@@ -518,7 +513,7 @@ mod tests {
 
     // base header + math header
     assert_eq!(plan.headers.len(), 2);
-    assert_eq!(plan.headers[0].path, "runtime/types/types.h");
+    assert_eq!(plan.headers[0].path, "runtime/ignis_rt.h");
     assert_eq!(plan.headers[1].path, "math.h");
     assert!(!plan.headers[1].quoted); // system header
     assert!(plan.objects.is_empty());
@@ -538,7 +533,7 @@ mod tests {
 
     // Only base header, no module headers
     assert_eq!(plan.headers.len(), 1);
-    assert_eq!(plan.headers[0].path, "runtime/types/types.h");
+    assert_eq!(plan.headers[0].path, "runtime/ignis_rt.h");
     assert!(plan.objects.is_empty());
     assert!(plan.libs.is_empty());
   }
@@ -554,8 +549,8 @@ mod tests {
     // Same module twice should not duplicate entries
     let plan = LinkPlan::from_modules(&[io_id, io_id], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
-    // base header + 1 module header (no dupe)
-    assert_eq!(plan.headers.len(), 2);
-    assert_eq!(plan.objects.len(), 1);
+    // base header only (no dupe)
+    assert_eq!(plan.headers.len(), 1);
+    assert!(plan.objects.is_empty());
   }
 }

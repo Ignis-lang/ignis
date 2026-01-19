@@ -1019,7 +1019,13 @@ impl<'a> CEmitter<'a> {
           Type::F32 => "f",
           _ => "",
         };
-        format!("{}{}", v, suffix)
+        let s = v.to_string();
+        // C requires decimal point: 0.0f not 0f
+        if s.contains('.') || s.contains('e') || s.contains('E') {
+          format!("{}{}", s, suffix)
+        } else {
+          format!("{}.0{}", s, suffix)
+        }
       },
       ConstValue::Bool(v, _) => format!("{}", v),
       ConstValue::Char(v, _) => format!("{}", *v as u32),
@@ -1199,7 +1205,7 @@ impl<'a> CEmitter<'a> {
     };
 
     if is_extern {
-      return Self::escape_ident(&raw_name);
+      return raw_name;
     }
 
     if def.owner_namespace.is_none() && raw_name == "main" {
@@ -1579,7 +1585,7 @@ where
   writeln!(output, "#ifndef {}", guard_name).unwrap();
   writeln!(output, "#define {}", guard_name).unwrap();
   writeln!(output).unwrap();
-  writeln!(output, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(output, "#include \"runtime/ignis_rt.h\"").unwrap();
   writeln!(output).unwrap();
   writeln!(output, "// Auto-generated header for {}", comment).unwrap();
   writeln!(output).unwrap();
@@ -1692,7 +1698,7 @@ fn build_mangled_name_standalone(
   };
 
   if is_extern {
-    return escape_ident(&raw_name);
+    return raw_name;
   }
 
   // Check for overloads to determine if we need a parameter suffix
@@ -1951,7 +1957,7 @@ pub fn emit_std_header(
   writeln!(output, "#ifndef IGNIS_STD_H").unwrap();
   writeln!(output, "#define IGNIS_STD_H").unwrap();
   writeln!(output).unwrap();
-  writeln!(output, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(output, "#include \"runtime/ignis_rt.h\"").unwrap();
   writeln!(output).unwrap();
   writeln!(output, "// Auto-generated standard library prototypes").unwrap();
   writeln!(output).unwrap();
@@ -2065,11 +2071,7 @@ mod tests {
     let sym = symbols.borrow();
     let headers = vec![
       CHeader {
-        path: "runtime/types/types.h".to_string(),
-        quoted: true,
-      },
-      CHeader {
-        path: "runtime/io/io.h".to_string(),
+        path: "runtime/ignis_rt.h".to_string(),
         quoted: true,
       },
       CHeader {
@@ -2079,8 +2081,7 @@ mod tests {
     ];
     let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers);
 
-    assert!(output.contains("#include \"runtime/types/types.h\""));
-    assert!(output.contains("#include \"runtime/io/io.h\""));
+    assert!(output.contains("#include \"runtime/ignis_rt.h\""));
     assert!(output.contains("#include <math.h>"));
   }
 }

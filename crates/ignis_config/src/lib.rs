@@ -14,7 +14,7 @@ pub struct CHeader {
 /// Toolchain configuration for the standard library
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StdToolchainConfig {
-  /// Base header providing fundamental types (e.g., "runtime/types/types.h")
+  /// Base header providing fundamental types (e.g., "runtime/ignis_rt.h")
   pub base_header: Option<String>,
   /// Whether base_header uses quoted includes (default: true)
   pub base_header_quoted: Option<bool>,
@@ -30,8 +30,10 @@ pub struct StdLinkingInfo {
   pub header: Option<String>,
   /// Whether header uses quoted includes (default: false for system headers)
   pub header_quoted: Option<bool>,
-  /// Path to the object file for linking (optional)
+  /// Path to the object file for linking (optional, prefer archive)
   pub object: Option<String>,
+  /// Path to a static archive for linking (optional, preferred over object)
+  pub archive: Option<String>,
   /// External library to link (e.g., "m" for -lm)
   pub lib: Option<String>,
 }

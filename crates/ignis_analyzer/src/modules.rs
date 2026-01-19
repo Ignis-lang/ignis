@@ -558,6 +558,7 @@ mod tests {
         header: Some("runtime/io.h".to_string()),
         header_quoted: Some(true),
         object: Some("runtime/libignis_io.o".to_string()),
+        archive: None,
         lib: None,
       },
     );
@@ -629,6 +630,7 @@ mod tests {
         header: Some("runtime/io.h".to_string()),
         header_quoted: Some(true),
         object: Some("runtime/libignis_io.o".to_string()),
+        archive: None,
         lib: None,
       },
     );
@@ -638,6 +640,7 @@ mod tests {
         header: Some("math.h".to_string()),
         header_quoted: Some(false),
         object: None,
+        archive: None,
         lib: Some("m".to_string()),
       },
     );

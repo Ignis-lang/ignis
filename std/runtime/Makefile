@@ -1,35 +1,35 @@
 CC ?= gcc
-CFLAGS ?= -O2 -g -fPIC -I.
+AR ?= ar
+CFLAGS ?= -O2 -g -fPIC -I. -Wall -Wextra
 
-.PHONY: all clean
+INTERNAL_SRCS = internal/rt_memory.c internal/rt_string.c internal/rt_io.c
+INTERNAL_OBJS = $(INTERNAL_SRCS:.c=.o)
 
-# Core runtime must be built first, all other modules depend on it
-all: libignis_rt.o io/libignis_io.o string/libignis_string.o number/libignis_number.o types/libignis_types.o memory/libignis_memory.o
+.PHONY: all clean test
 
-# Core runtime
-libignis_rt.o: ignis_rt.c ignis_rt.h
-	$(CC) $(CFLAGS) -c ignis_rt.c -o libignis_rt.o
+all: libignis_rt.a
 
-# Modules depend on core runtime
-io/libignis_io.o: io/io.c io/io.h ignis_rt.h libignis_rt.o
-	$(CC) $(CFLAGS) -c io/io.c -o io/libignis_io.o
+# Pattern rule for internal objects
+internal/%.o: internal/%.c internal/rt_internal.h ignis_rt.h
+	$(CC) $(CFLAGS) -c $< -o $@
 
-string/libignis_string.o: string/string.c string/string.h ignis_rt.h libignis_rt.o
-	$(CC) $(CFLAGS) -c string/string.c -o string/libignis_string.o
-
-number/libignis_number.o: number/number.c number/number.h ignis_rt.h libignis_rt.o
-	$(CC) $(CFLAGS) -c number/number.c -o number/libignis_number.o
-
-types/libignis_types.o: types/types.c types/types.h ignis_rt.h libignis_rt.o
-	$(CC) $(CFLAGS) -c types/types.c -o types/libignis_types.o
-
-memory/libignis_memory.o: memory/memory.c memory/memory.h ignis_rt.h libignis_rt.o
-	$(CC) $(CFLAGS) -c memory/memory.c -o memory/libignis_memory.o
+# Archive from internal objects
+libignis_rt.a: $(INTERNAL_OBJS)
+	rm -f $@
+	$(AR) rcs $@ $(INTERNAL_OBJS)
 
 clean:
-	rm -f libignis_rt.o
-	rm -f io/libignis_io.o
-	rm -f string/libignis_string.o
-	rm -f number/libignis_number.o
-	rm -f types/libignis_types.o
-	rm -f memory/libignis_memory.o
+	rm -f libignis_rt.a
+	rm -f internal/*.o
+	rm -f tests/test_smoke
+
+# Smoke tests
+test: libignis_rt.a
+	@mkdir -p tests
+	@if [ -f tests/test_smoke.c ]; then \
+		$(CC) $(CFLAGS) tests/test_smoke.c -L. -lignis_rt -o tests/test_smoke && \
+		./tests/test_smoke && \
+		echo "Tests passed"; \
+	else \
+		echo "No tests found (tests/test_smoke.c)"; \
+	fi

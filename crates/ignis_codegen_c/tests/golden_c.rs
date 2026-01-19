@@ -81,6 +81,32 @@ function main(): void {
   assert_snapshot!("c_extern_declarations", c_code);
 }
 
+#[test]
+fn c_extern_underscore_not_escaped() {
+  // Extern names must not be escaped (underscores stay single).
+  let c_code = common::compile_to_c(
+    r#"
+extern __rt {
+    function ignis_alloc(size: u64): *mut u8;
+    function ignis_memcpy(dest: *mut u8, src: *u8, n: u64): void;
+}
+
+function main(): void {
+    let p: *mut u8 = __rt::ignis_alloc(16);
+    __rt::ignis_memcpy(p, p as *u8, 8);
+    return;
+}
+"#,
+  );
+
+  assert!(c_code.contains("ignis_alloc"), "single underscore");
+  assert!(c_code.contains("ignis_memcpy"), "single underscore");
+  assert!(!c_code.contains("ignis__alloc"), "no doubled underscores");
+  assert!(!c_code.contains("ignis__memcpy"), "no doubled underscores");
+
+  assert_snapshot!("c_extern_underscore_not_escaped", c_code);
+}
+
 // NOTE: Variadic syntax (...args: type[]) is not yet supported by the parser.
 // This test will be enabled once variadic parameter parsing is implemented.
 // #[test]

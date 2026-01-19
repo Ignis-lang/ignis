@@ -686,22 +686,17 @@ mod std_imports {
     let content = std::fs::read_to_string(&manifest_path).expect("Failed to read manifest");
     let manifest: IgnisSTDManifest = toml::from_str(&content).expect("Failed to parse manifest");
 
-    // Verify io has linking info
-    let io_linking = manifest.get_linking_info("io");
-    assert!(io_linking.is_some(), "io should have linking info");
-    let io_linking = io_linking.unwrap();
-    assert!(io_linking.header.is_some(), "io should have header");
-    assert!(io_linking.object.is_some(), "io should have object file");
+    // Only ignis_rt and math have linking info (modules use unified runtime)
+    let rt_linking = manifest.get_linking_info("ignis_rt").expect("ignis_rt linking info");
+    assert!(rt_linking.header.is_some());
+    assert!(rt_linking.archive.is_some());
 
-    // Verify math has linking info (only header, no object)
-    let math_linking = manifest.get_linking_info("math");
-    assert!(math_linking.is_some(), "math should have linking info");
-    let math_linking = math_linking.unwrap();
-    assert!(math_linking.header.is_some(), "math should have header");
-    // math uses libc, no custom object
+    let math_linking = manifest.get_linking_info("math").expect("math linking info");
+    assert!(math_linking.header.is_some());
+    assert!(math_linking.lib.is_some());
 
-    // Verify string has linking info
-    let string_linking = manifest.get_linking_info("string");
-    assert!(string_linking.is_some(), "string should have linking info");
+    // io/string use ignis_rt, no separate linking
+    assert!(manifest.get_linking_info("io").is_none());
+    assert!(manifest.get_linking_info("string").is_none());
   }
 }

@@ -1664,7 +1664,7 @@ fn generate_std_umbrella_header(module_names: &[&str]) -> String {
   writeln!(out, "#ifndef IGNIS_STD_H").unwrap();
   writeln!(out, "#define IGNIS_STD_H").unwrap();
   writeln!(out).unwrap();
-  writeln!(out, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(out, "#include \"runtime/ignis_rt.h\"").unwrap();
   writeln!(out).unwrap();
   for name in module_names {
     writeln!(out, "#include \"std_{}.h\"", name).unwrap();
@@ -1681,7 +1681,7 @@ fn generate_user_umbrella_header(source_paths: &[PathBuf]) -> String {
   writeln!(out, "#ifndef IGNIS_USER_H").unwrap();
   writeln!(out, "#define IGNIS_USER_H").unwrap();
   writeln!(out).unwrap();
-  writeln!(out, "#include \"runtime/types/types.h\"").unwrap();
+  writeln!(out, "#include \"runtime/ignis_rt.h\"").unwrap();
   writeln!(out).unwrap();
 
   for source_path in source_paths {
