@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <float.h>
+#include <unistd.h>
 
 // =============================================================================
 // Primitive type aliases

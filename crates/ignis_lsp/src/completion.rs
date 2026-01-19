@@ -1088,14 +1088,14 @@ fn add_snippet_completions(
 
   if is_start_of_stmt && wants_snippets {
     // Control flow
-    add("if", "if { ... }", "if ($1) {\n\t$0\n}", snip_prio);
+    add("if", "if (...) { ... }", "if ($1) {\n\t$0\n}", snip_prio);
     add(
       "if else",
-      "if { ... } else { ... }",
+      "if (...) { ... } else { ... }",
       "if ($1) {\n\t$2\n} else {\n\t$0\n}",
       snip_prio,
     );
-    add("while", "while { ... }", "while ($1) {\n\t$0\n}", snip_prio);
+    add("while", "while (...) { ... }", "while ($1) {\n\t$0\n}", snip_prio);
     add("for", "for { ... }", "for (let $1 = $2; $3; $4) {\n\t$0\n}", snip_prio);
     add("for of", "for { ... }", "for (let $1 of $2) {\n\t$0\n}", snip_prio);
     add("match", "match { ... }", "match ($1) {\n\t$0\n}", snip_prio);

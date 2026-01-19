@@ -119,7 +119,7 @@ fn e2e_if_then() {
     r#"
 function main(): i32 {
     let x: i32 = 10;
-    if x > 5 {
+    if (x > 5) {
         return 1;
     }
     return 0;
@@ -134,7 +134,7 @@ fn e2e_if_else() {
     "if_else",
     r#"
 function max(a: i32, b: i32): i32 {
-    if a > b {
+    if (a > b) {
         return a;
     } else {
         return b;
@@ -217,10 +217,10 @@ fn e2e_if_else_chain() {
     "if_else_chain",
     r#"
 function classify(n: i32): i32 {
-    if n < 0 {
+    if (n < 0) {
         return 0;
     } else {
-        if n == 0 {
+        if (n == 0) {
             return 1;
         } else {
             return 2;
@@ -243,7 +243,7 @@ fn e2e_while_loop() {
 function sum_to(n: i32): i32 {
     let mut total: i32 = 0;
     let mut i: i32 = 1;
-    while i <= n {
+    while (i <= n) {
         total = total + i;
         i = i + 1;
     }
@@ -264,9 +264,9 @@ fn e2e_while_with_break() {
     r#"
 function main(): i32 {
     let mut i: i32 = 0;
-    while true {
+    while (true) {
         i = i + 1;
-        if i >= 5 {
+        if (i >= 5) {
             break;
         }
     }
@@ -395,7 +395,7 @@ fn e2e_recursion_factorial() {
     "recursion_factorial",
     r#"
 function factorial(n: i32): i32 {
-    if n <= 1 {
+    if (n <= 1) {
         return 1;
     }
     return n * factorial(n - 1);
@@ -414,7 +414,7 @@ fn e2e_recursion_fibonacci() {
     "recursion_fibonacci",
     r#"
 function fib(n: i32): i32 {
-    if n <= 1 {
+    if (n <= 1) {
         return n;
     }
     return fib(n - 1) + fib(n - 2);
@@ -435,12 +435,12 @@ fn e2e_comparison_ops() {
 function main(): i32 {
     let mut result: i32 = 0;
     
-    if 5 == 5 { result = result + 1; }
-    if 5 != 3 { result = result + 1; }
-    if 3 < 5 { result = result + 1; }
-    if 5 > 3 { result = result + 1; }
-    if 5 <= 5 { result = result + 1; }
-    if 5 >= 5 { result = result + 1; }
+    if (5 == 5) { result = result + 1; }
+    if (5 != 3) { result = result + 1; }
+    if (3 < 5) { result = result + 1; }
+    if (5 > 3) { result = result + 1; }
+    if (5 <= 5) { result = result + 1; }
+    if (5 >= 5) { result = result + 1; }
     
     return result;
 }
@@ -541,7 +541,7 @@ function is_even(n: i32): boolean {
 }
 
 function abs(n: i32): i32 {
-    if n < 0 {
+    if (n < 0) {
         return 0 - n;
     }
     return n;
@@ -549,7 +549,7 @@ function abs(n: i32): i32 {
 
 function main(): i32 {
     let x: i32 = abs(0 - 42);
-    if is_even(x) {
+    if (is_even(x)) {
         return x;
     }
     return 0;
@@ -790,8 +790,8 @@ function main(): i32 {
     let c2: Color = Color::Red;
     let c3: Color = Color::Blue;
 
-    if c1 == c2 {
-        if c1 != c3 {
+    if (c1 == c2) {
+        if (c1 != c3) {
             return 42;
         }
     }

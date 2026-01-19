@@ -355,7 +355,7 @@ function main(): void {
     let a: string = "hello";
     let cond: boolean = true;
 
-    if cond {
+    if (cond) {
         consume(a);
     } else {
         let x: i32 = 1;
@@ -376,7 +376,7 @@ function main(): void {
     let a: string = "hello";
     let cond: boolean = true;
 
-    if cond {
+    if (cond) {
         consume(a);
     } else {
         let x: i32 = 1;

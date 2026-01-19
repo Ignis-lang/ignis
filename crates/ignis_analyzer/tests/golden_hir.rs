@@ -26,8 +26,8 @@ fn hir_nested_if() {
   let result = common::analyze(
     r#"
 function classify(x: i32): i32 {
-    if x > 0 {
-        if x > 10 {
+    if (x > 0) {
+        if (x > 10) {
             return 2;
         } else {
             return 1;
@@ -48,8 +48,8 @@ fn hir_loop_with_break() {
     r#"
 function search(): i32 {
     let mut i: i32 = 0;
-    while true {
-        if i > 10 {
+    while (true) {
+        if (i > 10) {
             break;
         }
         i = i + 1;
@@ -69,9 +69,9 @@ fn hir_loop_with_continue() {
 function skip_evens(): i32 {
     let mut sum: i32 = 0;
     let mut i: i32 = 0;
-    while i < 10 {
+    while (i < 10) {
         i = i + 1;
-        if i % 2 == 0 {
+        if (i % 2 == 0) {
             continue;
         }
         sum = sum + i;

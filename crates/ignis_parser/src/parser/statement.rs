@@ -137,11 +137,14 @@ impl super::IgnisParser {
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
   }
 
-  /// if condition block (else block)?
+  /// if (condition) block (else block)?
   fn parse_if_statement(&mut self) -> ParserResult<NodeId> {
     let keyword = self.expect(TokenType::If)?.clone();
 
+    self.expect(TokenType::LeftParen)?;
     let condition = self.parse_expression(0)?;
+    self.expect(TokenType::RightParen)?;
+
     let then_block = self.parse_block()?;
     let mut else_block = None;
     let mut end_span = self.get_span(&then_block).clone();
@@ -161,11 +164,14 @@ impl super::IgnisParser {
     Ok(self.allocate_statement(ASTStatement::If(if_statement)))
   }
 
-  /// while condition block
+  /// while (condition) block
   fn parse_while_statement(&mut self) -> ParserResult<NodeId> {
     let keyword = self.expect(TokenType::While)?.clone();
 
+    self.expect(TokenType::LeftParen)?;
     let condition = self.parse_expression(0)?;
+    self.expect(TokenType::RightParen)?;
+
     let body = self.parse_block()?;
     let span = Span::merge(&keyword.span, self.get_span(&body));
 
@@ -461,7 +467,7 @@ mod tests {
 
   #[test]
   fn parses_if_statement() {
-    let result = parse_stmt("if true { }");
+    let result = parse_stmt("if (true) { }");
     let stmt = get_stmt(&result, 0);
 
     match stmt {
@@ -474,7 +480,7 @@ mod tests {
 
   #[test]
   fn parses_if_else_statement() {
-    let result = parse_stmt("if true { } else { }");
+    let result = parse_stmt("if (true) { } else { }");
     let stmt = get_stmt(&result, 0);
 
     match stmt {
@@ -487,7 +493,7 @@ mod tests {
 
   #[test]
   fn parses_while_statement() {
-    let result = parse_stmt("while true { }");
+    let result = parse_stmt("while (true) { }");
     let stmt = get_stmt(&result, 0);
 
     match stmt {

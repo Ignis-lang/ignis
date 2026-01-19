@@ -86,7 +86,7 @@ fn if_statement() {
   let result = common::analyze(
     r#"
 function check(x: i32): i32 {
-    if x > 0 {
+    if (x > 0) {
         return 1;
     } else {
         return 0;
@@ -105,7 +105,7 @@ fn while_loop() {
     r#"
 function count(): i32 {
     let mut i: i32 = 0;
-    while i < 10 {
+    while (i < 10) {
         i = i + 1;
     }
     return i;

@@ -8,7 +8,7 @@ fn valid_function_body() -> impl Strategy<Value = String> {
     Just("return;".to_string()),
     Just("let x: i32 = 1;\n    return;".to_string()),
     Just("let mut x: i32 = 1;\n    x = 2;\n    return;".to_string()),
-    Just("if true {\n        return;\n    } else {\n        return;\n    }".to_string()),
+    Just("if (true) {\n        return;\n    } else {\n        return;\n    }".to_string()),
   ]
 }
 

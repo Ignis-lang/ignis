@@ -60,7 +60,7 @@ fn lir_if_else() {
   let result = common::lower_to_lir(
     r#"
 function max(a: i32, b: i32): i32 {
-    if a > b {
+    if (a > b) {
         return a;
     } else {
         return b;
@@ -78,7 +78,7 @@ fn lir_if_without_else() {
     r#"
 function clamp_positive(x: i32): i32 {
     let mut result: i32 = x;
-    if x < 0 {
+    if (x < 0) {
         result = 0;
     }
     return result;
@@ -96,7 +96,7 @@ fn lir_while_loop() {
 function sum_to_n(n: i32): i32 {
     let mut sum: i32 = 0;
     let mut i: i32 = 0;
-    while i < n {
+    while (i < n) {
         sum = sum + i;
         i = i + 1;
     }
@@ -114,8 +114,8 @@ fn lir_infinite_loop_with_break() {
     r#"
 function find_limit(): i32 {
     let mut i: i32 = 0;
-    while true {
-        if i > 10 {
+    while (true) {
+        if (i > 10) {
             break;
         }
         i = i + 1;
@@ -135,9 +135,9 @@ fn lir_loop_with_continue() {
 function sum_odds(n: i32): i32 {
     let mut sum: i32 = 0;
     let mut i: i32 = 0;
-    while i < n {
+    while (i < n) {
         i = i + 1;
-        if i % 2 == 0 {
+        if (i % 2 == 0) {
             continue;
         }
         sum = sum + i;
@@ -332,7 +332,7 @@ fn lir_drop_on_early_return() {
     r#"
 function early_exit(flag: boolean): i32 {
     let s: string = "hello";
-    if flag {
+    if (flag) {
         return 1;
     }
     return 0;
@@ -377,7 +377,7 @@ fn lir_drop_on_break() {
   let result = common::lower_to_lir(
     r#"
 function break_with_string(): i32 {
-    while true {
+    while (true) {
         let s: string = "hello";
         break;
     }
@@ -395,7 +395,7 @@ fn lir_drop_on_continue() {
     r#"
 function continue_with_string(): i32 {
     let mut i: i32 = 0;
-    while i < 10 {
+    while (i < 10) {
         let s: string = "hello";
         i = i + 1;
         continue;
@@ -414,7 +414,7 @@ fn lir_drop_in_loop_scope_end() {
     r#"
 function loop_with_string(): i32 {
     let mut i: i32 = 0;
-    while i < 3 {
+    while (i < 3) {
         let s: string = "hello";
         i = i + 1;
     }

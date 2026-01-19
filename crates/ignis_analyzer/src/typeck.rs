@@ -4731,8 +4731,10 @@ impl<'a> Analyzer<'a> {
         let node = self.ast.get(node_id);
         if let ASTNode::Expression(inner_expr) = node {
           if let Some(type_id) = self.lookup_type(node_id) {
-            if let ignis_type::types::Type::Reference { mutable, .. } = self.types.get(type_id) {
-              return *mutable;
+            match self.types.get(type_id) {
+              ignis_type::types::Type::Reference { mutable, .. } => return *mutable,
+              ignis_type::types::Type::Pointer { mutable, .. } => return *mutable,
+              _ => {},
             }
           }
           self.is_mutable_expression(inner_expr)
@@ -4768,10 +4770,12 @@ impl<'a> Analyzer<'a> {
         if ma.op == ignis_ast::expressions::member_access::ASTAccessOp::Dot {
           let node = self.ast.get(&ma.object);
           if let ASTNode::Expression(base_expr) = node {
-            // Check if base is a mutable reference
+            // Check if base is a mutable reference or pointer
             if let Some(type_id) = self.lookup_type(&ma.object) {
-              if let ignis_type::types::Type::Reference { mutable, .. } = self.types.get(type_id) {
-                return *mutable;
+              match self.types.get(type_id) {
+                ignis_type::types::Type::Reference { mutable, .. } => return *mutable,
+                ignis_type::types::Type::Pointer { mutable, .. } => return *mutable,
+                _ => {},
               }
             }
             // Otherwise, check if the base expression itself is mutable
@@ -4779,6 +4783,14 @@ impl<'a> Analyzer<'a> {
           }
         }
         false
+      },
+      ASTExpression::Grouped(grouped) => {
+        let inner_node = self.ast.get(&grouped.expression);
+        if let ASTNode::Expression(inner_expr) = inner_node {
+          self.is_mutable_expression(inner_expr)
+        } else {
+          false
+        }
       },
       _ => false,
     }
@@ -4797,8 +4809,35 @@ impl<'a> Analyzer<'a> {
           "<unknown>".to_string()
         }
       },
-      ASTExpression::Dereference(_) => "<dereferenced value>".to_string(),
+      ASTExpression::Dereference(deref) => {
+        let inner_node = self.ast.get(&deref.inner);
+        if let ASTNode::Expression(inner_expr) = inner_node {
+          format!("(*{})", self.get_var_name_from_expr(inner_expr))
+        } else {
+          "<dereferenced value>".to_string()
+        }
+      },
       ASTExpression::VectorAccess(_) => "<vector element>".to_string(),
+      ASTExpression::MemberAccess(ma) => {
+        let base_node = self.ast.get(&ma.object);
+        if let ASTNode::Expression(base_expr) = base_node {
+          format!(
+            "{}.{}",
+            self.get_var_name_from_expr(base_expr),
+            self.get_symbol_name(&ma.member)
+          )
+        } else {
+          format!("<object>.{}", self.get_symbol_name(&ma.member))
+        }
+      },
+      ASTExpression::Grouped(grouped) => {
+        let inner_node = self.ast.get(&grouped.expression);
+        if let ASTNode::Expression(inner_expr) = inner_node {
+          self.get_var_name_from_expr(inner_expr)
+        } else {
+          "<grouped expression>".to_string()
+        }
+      },
       _ => "<expression>".to_string(),
     }
   }
