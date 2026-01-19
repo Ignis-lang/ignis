@@ -26,9 +26,12 @@ pub struct StdToolchainConfig {
 /// Linking information for a std module (header and object file)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StdLinkingInfo {
-  /// Path to the C header file (optional)
+  /// Path to a single C header file (optional, use `headers` for multiple)
   pub header: Option<String>,
-  /// Whether header uses quoted includes (default: false for system headers)
+  /// Multiple C header files (optional, takes precedence over `header`)
+  #[serde(default)]
+  pub headers: Vec<String>,
+  /// Whether headers use quoted includes (default: false for system headers)
   pub header_quoted: Option<bool>,
   /// Path to the object file for linking (optional, prefer archive)
   pub object: Option<String>,

@@ -11,6 +11,28 @@ fn get_linkable_path(info: &StdLinkingInfo) -> Option<&String> {
   info.archive.as_ref().or(info.object.as_ref())
 }
 
+/// Get headers from StdLinkingInfo, preferring `headers` over `header`.
+fn get_headers(info: &StdLinkingInfo) -> Vec<CHeader> {
+  let quoted = info.header_quoted.unwrap_or(false);
+  if !info.headers.is_empty() {
+    info
+      .headers
+      .iter()
+      .map(|h| CHeader {
+        path: h.clone(),
+        quoted,
+      })
+      .collect()
+  } else if let Some(h) = &info.header {
+    vec![CHeader {
+      path: h.clone(),
+      quoted,
+    }]
+  } else {
+    vec![]
+  }
+}
+
 /// Plan for linking the final executable.
 #[derive(Debug, Default, Clone)]
 pub struct LinkPlan {
@@ -111,11 +133,7 @@ impl LinkPlan {
       let module = module_graph.modules.get(module_id);
       if let Some(name) = module.path.std_module_name() {
         if let Some(info) = module_graph.get_linking_info(name) {
-          if let Some(h) = &info.header {
-            let header = CHeader {
-              path: h.clone(),
-              quoted: info.header_quoted.unwrap_or(false),
-            };
+          for header in get_headers(info) {
             if !plan.headers.iter().any(|existing| existing.path == header.path) {
               plan.headers.push(header);
             }
@@ -163,11 +181,7 @@ impl LinkPlan {
     // Add headers/objects/libs for all modules in manifest
     for module_name in manifest.modules.keys() {
       if let Some(info) = manifest.get_linking_info(module_name) {
-        if let Some(h) = &info.header {
-          let header = CHeader {
-            path: h.clone(),
-            quoted: info.header_quoted.unwrap_or(false),
-          };
+        for header in get_headers(info) {
           // Dedupe by path
           if !plan.headers.iter().any(|existing| existing.path == header.path) {
             plan.headers.push(header);
@@ -406,6 +420,7 @@ mod tests {
       "ignis_rt".to_string(),
       StdLinkingInfo {
         header: Some("runtime/ignis_rt.h".to_string()),
+        headers: vec![],
         header_quoted: Some(true),
         object: None,
         archive: Some("runtime/libignis_rt.a".to_string()),
@@ -416,6 +431,7 @@ mod tests {
       "math".to_string(),
       StdLinkingInfo {
         header: Some("math.h".to_string()),
+        headers: vec![],
         header_quoted: Some(false),
         object: None,
         archive: None,

@@ -556,6 +556,7 @@ mod tests {
       "io".to_string(),
       StdLinkingInfo {
         header: Some("runtime/io.h".to_string()),
+        headers: vec![],
         header_quoted: Some(true),
         object: Some("runtime/libignis_io.o".to_string()),
         archive: None,
@@ -628,6 +629,7 @@ mod tests {
       "io".to_string(),
       StdLinkingInfo {
         header: Some("runtime/io.h".to_string()),
+        headers: vec![],
         header_quoted: Some(true),
         object: Some("runtime/libignis_io.o".to_string()),
         archive: None,
@@ -638,6 +640,7 @@ mod tests {
       "math".to_string(),
       StdLinkingInfo {
         header: Some("math.h".to_string()),
+        headers: vec![],
         header_quoted: Some(false),
         object: None,
         archive: None,
