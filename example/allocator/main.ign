@@ -1,0 +1,166 @@
+/**
+ * Bump Allocator Test
+ *
+ * This test demonstrates and validates the BumpAllocator implementation.
+ * It allocates memory, writes values, checks alignment, deallocates,
+ * and observes heap growth.
+ */
+
+import BumpAllocator, SearchMode from "./allocator";
+import Layout, Align from "std::memory";
+import Io from "std::io";
+import String from "std::string";
+import LibC from "std::libc";
+
+/// Prints the current program break (heap end address).
+function printProgramBreak(label: string): void {
+  let brk: *mut u8 = LibC::sbrk(0);
+  Io::print(label);
+  Io::print(": ");
+  Io::println(String::toString(brk as u64));
+}
+
+/// Prints a test header.
+function printHeader(title: string): void {
+  Io::println("");
+  Io::println("========================================");
+  Io::println(title);
+  Io::println("========================================");
+}
+
+/// Prints a sub-section.
+function printSection(title: string): void {
+  Io::println("");
+  Io::print("--- ");
+  Io::print(title);
+  Io::println(" ---");
+}
+
+/// Prints OK or FAIL based on condition.
+function check(name: string, condition: boolean): void {
+  Io::print("  ");
+  Io::print(name);
+  Io::print(": ");
+  if (condition) {
+    Io::println("OK");
+  } else {
+    Io::println("FAIL");
+  }
+}
+
+function main(): i32 {
+  printHeader("Bump Allocator Test");
+
+  // Show initial program break
+  printProgramBreak("Initial program break");
+
+  // Create allocator
+  let mut allocator: BumpAllocator = BumpAllocator::init();
+
+  printSection("Test 1: Allocate u32");
+  let layoutU32: Layout = Layout::init<u32>();
+  Io::print("  Layout size: ");
+  Io::println(String::toString(layoutU32.size()));
+  Io::print("  Layout align: ");
+  Io::println(String::toString(layoutU32.align()));
+
+  let ptrU32: *mut u8 = allocator.allocate(layoutU32);
+  Io::print("  Allocated at: ");
+  Io::println(String::toString(ptrU32 as u64));
+  check("Pointer not null", ptrU32 != null);
+  check("4-byte aligned", Align::isAligned(ptrU32 as u64, 4));
+
+  // Write a value to verify memory is usable
+  let u32Ptr: *mut u32 = ptrU32 as *mut u32;
+  *u32Ptr = 0xDEADBEEF;
+  check("Write/read u32", *u32Ptr == 0xDEADBEEF);
+
+  printProgramBreak("After u32 allocation");
+
+  printSection("Test 2: Allocate u8 array (12 bytes)");
+  let layoutU8Array: Layout = Layout::init(12 as u64, 1 as u64);
+  let ptrU8Array: *mut u8 = allocator.allocate(layoutU8Array);
+  Io::print("  Allocated at: ");
+  Io::println(String::toString(ptrU8Array as u64));
+  check("Pointer not null", ptrU8Array != null);
+
+  // Write pattern to array
+  let mut i: u64 = 0;
+  while (i < 12) {
+    let bytePtr: *mut u8 = (ptrU8Array as u64 + i) as *mut u8;
+    *bytePtr = (i as u8) + 1;
+    i = i + 1;
+  }
+
+  // Verify pattern
+  let byte0: *mut u8 = ptrU8Array;
+  let byte11: *mut u8 = (ptrU8Array as u64 + 11) as *mut u8;
+  check("First byte correct", *byte0 == 1);
+  check("Last byte correct", *byte11 == 12);
+
+  printSection("Test 3: Allocate u64 (8-byte alignment)");
+  let layoutU64: Layout = Layout::init<u64>();
+  let ptrU64: *mut u8 = allocator.allocate(layoutU64);
+  Io::print("  Allocated at: ");
+  Io::println(String::toString(ptrU64 as u64));
+  check("Pointer not null", ptrU64 != null);
+  check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8));
+
+  let u64Ptr: *mut u64 = ptrU64 as *mut u64;
+  *u64Ptr = 0x123456789ABCDEF0;
+  check("Write/read u64", *u64Ptr == 0x123456789ABCDEF0);
+
+  printSection("Test 4: Allocate u16 array (32 bytes, 2-byte align)");
+  let layoutU16Array: Layout = Layout::init(32 as u64, 2 as u64);
+  let ptrU16Array: *mut u8 = allocator.allocate(layoutU16Array);
+  Io::print("  Allocated at: ");
+  Io::println(String::toString(ptrU16Array as u64));
+  check("Pointer not null", ptrU16Array != null);
+  check("2-byte aligned", Align::isAligned(ptrU16Array as u64, 2));
+
+  printProgramBreak("After 4 allocations");
+
+  printSection("Test 5: Deallocate last allocation");
+  allocator.deallocate(ptrU16Array);
+  printProgramBreak("After deallocating last block");
+
+  printSection("Test 6: Deallocate middle allocation (u8 array)");
+  Io::println("  (Should only mark as free, not shrink heap)");
+  allocator.deallocate(ptrU8Array);
+  printProgramBreak("After deallocating middle block");
+
+  printSection("Test 7: Large allocation (64KB)");
+  let layoutLarge: Layout = Layout::init(65536 as u64, 8 as u64);
+  Io::print("  Requesting ");
+  Io::print(String::toString(layoutLarge.size()));
+  Io::println(" bytes");
+
+  let ptrLarge: *mut u8 = allocator.allocate(layoutLarge);
+  Io::print("  Allocated at: ");
+  Io::println(String::toString(ptrLarge as u64));
+  check("Pointer not null", ptrLarge != null);
+  check("8-byte aligned", Align::isAligned(ptrLarge as u64, 8));
+
+  printProgramBreak("After 64KB allocation");
+
+  // Write to first and last byte of large block
+  let firstByte: *mut u8 = ptrLarge;
+  let lastByte: *mut u8 = (ptrLarge as u64 + 65535) as *mut u8;
+  *firstByte = 0xAA;
+  *lastByte = 0xBB;
+  check("First byte of large block", *firstByte == 0xAA);
+  check("Last byte of large block", *lastByte == 0xBB);
+
+  printSection("Test 8: Deallocate large block");
+  allocator.deallocate(ptrLarge);
+  printProgramBreak("After deallocating 64KB block");
+
+  printSection("Test 9: Search mode change");
+  Io::println("  Changing to BestFit search mode");
+  allocator.setSearchMode(SearchMode::BestFit);
+  Io::println("  Search mode changed successfully");
+
+  printHeader("All tests completed!");
+
+  return 0;
+}

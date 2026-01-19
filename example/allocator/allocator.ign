@@ -1,0 +1,997 @@
+//!
+//! # Bump Allocator
+//!
+//! A simple bump (or arena) allocator implementation that manages memory by
+//! extending the program's data segment using the `sbrk` system call.
+//!
+//! ## Overview
+//!
+//! A bump allocator is one of the simplest allocation strategies. It maintains
+//! a pointer that "bumps" forward with each allocation. Memory is obtained from
+//! the operating system by moving the program break (the end of the data segment).
+//!
+//! ## How It Works
+//!
+//! The allocator uses a **linked list** of blocks to track allocations. Each
+//! allocation creates a new block at the end of the heap.
+//!
+//! ### Memory Layout Diagram
+//!
+//! ```text
+//!                          HEAP MEMORY (grows upward →)
+//!
+//!     Program Break (before)                    Program Break (after)
+//!            │                                          │
+//!            ▼                                          ▼
+//!  ┌─────────┬──────────────────────────────────────────┐
+//!  │ Existing│           New Allocation                 │
+//!  │  Data   │                                          │
+//!  └─────────┴──────────────────────────────────────────┘
+//!            │                                          │
+//!            └──── sbrk(size) moves break here ─────────┘
+//! ```
+//!
+//! ### Block Structure
+//!
+//! Each allocation is preceded by a metadata header (`Block`):
+//!
+//! ```text
+//!                    Single Allocation
+//!     ┌──────────────────────────────────────────────┐
+//!     │                                              │
+//!     ▼                                              │
+//!  ┌──────────────────┬─────────────────────────┐    │
+//!  │   Block Header   │      User Data          │    │
+//!  │   (metadata)     │      (payload)          │    │
+//!  ├──────────────────┼─────────────────────────┤    │
+//!  │ size: i64        │                         │    │
+//!  │ is_free: bool    │   [    N bytes    ]     │    │
+//!  │ next: *mut Block │                         │    │
+//!  └──────────────────┴─────────────────────────┘    │
+//!     │                  ▲                           │
+//!     │                  │                           │
+//!     │                  └── Pointer returned to ────┘
+//!                            the user (aligned)
+//! ```
+//!
+//! ### Linked List of Blocks
+//!
+//! Multiple allocations form a singly-linked list:
+//!
+//! ```text
+//!   BumpAllocator
+//!   ┌─────────┐
+//!   │ first ──┼──┐
+//!   │ last ───┼──┼──────────────────────────────────────────┐
+//!   └─────────┘  │                                          │
+//!                ▼                                          ▼
+//!   ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐
+//!   │  Block 1           │    │  Block 2           │    │  Block 3           │
+//!   ├────────────────────┤    ├────────────────────┤    ├────────────────────┤
+//!   │ size: 64           │    │ size: 128          │    │ size: 32           │
+//!   │ is_free: false     │    │ is_free: true      │    │ is_free: false     │
+//!   │ next: ─────────────┼───►│ next: ─────────────┼───►│ next: null         │
+//!   ├────────────────────┤    ├────────────────────┤    ├────────────────────┤
+//!   │    [User Data]     │    │    [User Data]     │    │    [User Data]     │
+//!   │    (64 bytes)      │    │    (128 bytes)     │    │    (32 bytes)      │
+//!   └────────────────────┘    └────────────────────┘    └────────────────────┘
+//!
+//!   ◄─────────────────── Heap grows this direction ─────────────────────────►
+//! ```
+//!
+//! ### Alignment Handling
+//!
+//! When allocating, the allocator ensures proper alignment for the user data:
+//!
+//! ```text
+//!   sbrk returns
+//!   raw address
+//!        │
+//!        ▼
+//!   ┌────┬───────────────────┬───────────────────────────────────────┐
+//!   │pad │   Block Header    │           User Data                   │
+//!   │    │   (24 bytes on    │           (aligned to                 │
+//!   │    │    64-bit)        │            requested alignment)       │
+//!   └────┴───────────────────┴───────────────────────────────────────┘
+//!        │                   │
+//!        │                   └── content_addr (aligned)
+//!        │
+//!        └── Block header placed just before content_addr
+//!
+//!   The formula:
+//!   1. Request: header_size + user_size + (align - 1)   [for alignment slack]
+//!   2. Calculate: content_addr = align_to(raw_addr + header_size, align)
+//!   3. Place header at: content_addr - header_size
+//! ```
+//!
+//! ### Allocation Process (Step by Step)
+//!
+//! ```text
+//!   STEP 1: Calculate total size needed
+//!   ┌─────────────────────────────────────────────────────────┐
+//!   │  size_for_sbrk = align(header_size + user_size + (A-1)) │
+//!   │  where A = requested alignment                          │
+//!   └─────────────────────────────────────────────────────────┘
+//!
+//!   STEP 2: Extend heap with sbrk()
+//!   ┌─────────────────────────────────────────────────────────┐
+//!   │  raw_address = sbrk(size_for_sbrk)                      │
+//!   │                                                         │
+//!   │  Before: [existing heap]|← program break                │
+//!   │  After:  [existing heap][  new space  ]|← new break     │
+//!   └─────────────────────────────────────────────────────────┘
+//!
+//!   STEP 3: Calculate aligned content address
+//!   ┌─────────────────────────────────────────────────────────┐
+//!   │  content_addr = align_to(raw_address + header_size, A)  │
+//!   └─────────────────────────────────────────────────────────┘
+//!
+//!   STEP 4: Initialize block header
+//!   ┌─────────────────────────────────────────────────────────┐
+//!   │  block = (content_addr - header_size) as *mut Block     │
+//!   │  (*block).is_free = false                               │
+//!   │  (*block).size = user_size                              │
+//!   │  (*block).next = null                                   │
+//!   └─────────────────────────────────────────────────────────┘
+//!
+//!   STEP 5: Update linked list
+//!   ┌─────────────────────────────────────────────────────────┐
+//!   │  if first allocation:                                   │
+//!   │      first = block                                      │
+//!   │      last = block                                       │
+//!   │  else:                                                  │
+//!   │      (*last).next = block                               │
+//!   │      last = block                                       │
+//!   └─────────────────────────────────────────────────────────┘
+//!
+//!   STEP 6: Return pointer to user
+//!   ┌─────────────────────────────────────────────────────────┐
+//!   │  return content_addr as *mut u8                         │
+//!   └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ### Deallocation Process
+//!
+//! Deallocation marks a block as free. If the deallocated block is the **last**
+//! block in the list, the heap is shrunk using a negative `sbrk` call:
+//!
+//! ```text
+//!   BEFORE DEALLOCATION:
+//!   ┌──────────┐    ┌──────────┐    ┌──────────┐
+//!   │ Block 1  │───►│ Block 2  │───►│ Block 3  │◄── last
+//!   │ in_use   │    │ free     │    │ in_use   │
+//!   └──────────┘    └──────────┘    └──────────┘
+//!                                               │
+//!                                   program break
+//!
+//!   AFTER deallocate(block3_ptr):
+//!   ┌──────────┐    ┌──────────┐
+//!   │ Block 1  │───►│ Block 2  │◄── now last
+//!   │ in_use   │    │ free     │
+//!   └──────────┘    └──────────┘
+//!                               │
+//!                   program break (moved back via sbrk(-size))
+//!
+//!   NOTE: If a middle block is freed, it is only marked as free
+//!         but NOT returned to the OS (cannot shrink the heap).
+//! ```
+//!
+//! ## Trade-offs
+//!
+//! ### Advantages
+//! - **Simple implementation**: Easy to understand and maintain
+//! - **Fast allocation**: O(1) allocation time (just bump the pointer)
+//! - **No fragmentation in allocation order**: Allocations are contiguous
+//!
+//! ### Disadvantages
+//! - **Limited deallocation**: Can only truly free the last block
+//! - **Memory waste**: Middle deallocations don't return memory to OS
+//! - **No reuse of freed blocks**: The `find_free_block` method exists but
+//!   `allocate` always requests new memory (potential optimization point)
+//!
+//! ## System Calls
+//!
+//! This allocator uses `sbrk(2)`:
+//! - `sbrk(0)`: Returns the current program break
+//! - `sbrk(n)`: Increases the program break by `n` bytes, returns old break
+//! - `sbrk(-n)`: Decreases the program break by `n` bytes (frees memory)
+//!
+//! ```text
+//!   Virtual Memory Layout
+//!   ┌─────────────────────┐ High addresses
+//!   │       Stack         │ ↓ grows down
+//!   │         │           │
+//!   │         ▼           │
+//!   │                     │
+//!   │         ▲           │
+//!   │         │           │
+//!   │       Heap          │ ↑ grows up (via sbrk)
+//!   ├─────────────────────┤ ← Program break (brk)
+//!   │   BSS (uninit data) │
+//!   ├─────────────────────┤
+//!   │   Data (init data)  │
+//!   ├─────────────────────┤
+//!   │       Text          │
+//!   └─────────────────────┘ Low addresses
+//! ```
+//!
+//! ## Safety
+//!
+//! This allocator uses **unsafe Ignis** extensively because:
+//! 1. Direct manipulation of raw pointers
+//! 2. System calls to `sbrk`
+//! 3. Manual memory management without Ignis's borrow checker guarantees
+//!
+//! Callers must ensure:
+//! - Pointers returned from `allocate` are valid until `deallocate` is called
+//! - The same pointer is not deallocated twice
+//! - Pointers are not used after deallocation
+//!
+import Block from "./block";
+import Layout, Align from "std::memory";
+import LibC, CType from "std::libc";
+
+/// Strategy for searching free blocks in the allocator.
+///
+/// When reusing freed memory blocks, different search strategies offer
+/// different trade-offs between allocation speed and memory utilization.
+///
+/// # Strategies
+///
+/// ```text
+///   FREE BLOCK SEARCH STRATEGIES
+///   ═══════════════════════════════════════════════════════════════════════
+///
+///   Given blocks: [A:64] → [B:128,free] → [C:32,free] → [D:256,free] → [E:100]
+///   Request: 50 bytes
+///
+///   FIRST FIT: Start from beginning, return first match
+///   ┌──────────────────────────────────────────────────────────────────────┐
+///   │  [A:64] → [B:128,free] → [C:32,free] → [D:256,free] → [E:100]        │
+///   │     ↓           ↓                                                    │
+///   │   skip     ✓ MATCH! (128 >= 50)                                      │
+///   │  (in use)                                                            │
+///   │                                                                      │
+///   │  Returns: B (first free block that fits)                             │
+///   │  Pros: Fast - O(n) worst case, often much faster                     │
+///   │  Cons: Can cause fragmentation at the start of the heap              │
+///   └──────────────────────────────────────────────────────────────────────┘
+///
+///   NEXT FIT: Start from last allocation position, wrap around if needed
+///   ┌──────────────────────────────────────────────────────────────────────┐
+///   │  Last allocation was at C, so search starts after C:                 │
+///   │                                                                      │
+///   │  [A:64] → [B:128,free] → [C:32,free] → [D:256,free] → [E:100]        │
+///   │                               │             ↓                        │
+///   │                          last_search   ✓ MATCH! (256 >= 50)          │
+///   │                                                                      │
+///   │  Returns: D (first free block after last_search that fits)           │
+///   │  Pros: Spreads allocations, avoids always fragmenting start          │
+///   │  Cons: May miss better-fitting blocks earlier in list                │
+///   └──────────────────────────────────────────────────────────────────────┘
+///
+///   BEST FIT: Search entire list, return smallest adequate block
+///   ┌──────────────────────────────────────────────────────────────────────┐
+///   │  [A:64] → [B:128,free] → [C:32,free] → [D:256,free] → [E:100]       │
+///   │              ↓               ↓             ↓                         │
+///   │          128 >= 50       32 < 50       256 >= 50                     │
+///   │          candidate      too small      candidate                     │
+///   │              ↓                             ↓                         │
+///   │          128 bytes                     256 bytes                     │
+///   │              ↓                                                       │
+///   │          ✓ BEST! (128 < 256, smallest that fits)                     │
+///   │                                                                      │
+///   │  Returns: B (smallest free block that fits)                          │
+///   │  Pros: Minimizes wasted space within blocks                          │
+///   │  Cons: Slower - always O(n), must check all blocks                   │
+///   └──────────────────────────────────────────────────────────────────────┘
+/// ```
+export enum SearchMode {
+  /// First Fit: Returns the first free block large enough.
+  ///
+  /// Starts searching from the beginning of the block list and returns
+  /// the first block that is both free and has sufficient size.
+  ///
+  /// - **Time Complexity**: O(n) worst case, but often faster
+  /// - **Memory Efficiency**: Can cause fragmentation at heap start
+  /// - **Best For**: General-purpose use, when speed is priority
+  FirstFit,
+
+  /// Next Fit: Like First Fit, but remembers where the last search ended.
+  ///
+  /// Starts searching from where the previous successful search ended,
+  /// wrapping around to the beginning if necessary. This distributes
+  /// allocations more evenly across the heap.
+  ///
+  /// - **Time Complexity**: O(n) worst case
+  /// - **Memory Efficiency**: Better distribution, less clustering
+  /// - **Best For**: Long-running programs with many alloc/free cycles
+  NextFit,
+
+  /// Best Fit: Returns the smallest free block that fits.
+  ///
+  /// Searches the entire list to find the free block that most closely
+  /// matches the requested size, minimizing internal fragmentation.
+  ///
+  /// - **Time Complexity**: Always O(n) - must check all blocks
+  /// - **Memory Efficiency**: Minimizes wasted space per allocation
+  /// - **Best For**: Memory-constrained environments
+  BestFit,
+}
+
+/// A simple bump allocator that manages heap memory using `sbrk`.
+///
+/// # Memory Management Strategy
+///
+/// The `BumpAllocator` maintains a singly-linked list of allocation blocks.
+/// Each block contains metadata (size, free status, next pointer) followed
+/// by the user's data.
+///
+/// ```text
+///   ┌───────────────────────────────────────────────────────────┐
+///   │                    BumpAllocator                          │
+///   │                                                           │
+///   │   first ─────────►┌─────────┐                             │
+///   │                   │ Block 1 │──────►┌─────────┐           │
+///   │                   └─────────┘       │ Block 2 │──► null   │
+///   │   last ───────────────────────────► └─────────┘           │
+///   │                                                           │
+///   └───────────────────────────────────────────────────────────┘
+/// ```
+///
+/// # Fields
+///
+/// * `first` - Pointer to the first block in the allocation list (head)
+/// * `last` - Pointer to the last block in the allocation list (tail)
+/// * `search_mode` - Strategy for finding free blocks (FirstFit, NextFit, BestFit)
+/// * `last_search` - Used by NextFit to remember where the last search ended
+///
+/// Both `first` and `last` pointers are `null` when the allocator is empty.
+///
+/// # Thread Safety
+///
+/// This allocator is **NOT** thread-safe. For multi-threaded usage,
+/// external synchronization (e.g., a `Mutex`) is required.
+export record BumpAllocator {
+  /// Pointer to the first (oldest) block in the linked list.
+  /// Used as the starting point when searching for free blocks.
+  first: *mut Block;
+
+  /// Pointer to the last (newest) block in the linked list.
+  /// New allocations are appended here. Deallocation of this
+  /// block allows heap shrinking via `sbrk(-size)`.
+  last: *mut Block;
+
+  /// Strategy used to search for free blocks when reusing memory.
+  /// See [`SearchMode`] for available strategies.
+  searchMode: SearchMode;
+
+  /// Pointer to the block where the last successful search ended.
+  /// Used exclusively by [`SearchMode::NextFit`] to remember the
+  /// starting position for the next search.
+  lastSearch: *mut Block;
+
+  /// Creates a new, empty `BumpAllocator` with the default search mode (FirstFit).
+  ///
+  /// # Returns
+  ///
+  /// A new allocator instance with no blocks allocated.
+  /// Both `first` and `last` pointers are initialized to null.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let allocator: BumpAllocator = BumpAllocator::init();
+  /// // allocator.first == null
+  /// // allocator.last == null
+  /// // allocator.search_mode == SearchMode::FirstFit
+  /// ```
+  ///
+  /// # State Diagram
+  ///
+  /// ```text
+  ///   After init():
+  ///   ┌───────────────────────────┐
+  ///   │      BumpAllocator        │
+  ///   │                           │
+  ///   │  first: null              │
+  ///   │  last:  null              │
+  ///   │  search_mode: FirstFit    │
+  ///   │  last_search: null        │
+  ///   └───────────────────────────┘
+  /// ```
+  public static init(): BumpAllocator {
+    return BumpAllocator {
+      first: null,
+      last: null,
+      searchMode: SearchMode::FirstFit,
+      lastSearch: null,
+    };
+  }
+
+  /// Creates a new, empty `BumpAllocator` with the specified search mode.
+  ///
+  /// # Arguments
+  ///
+  /// * `search_mode` - The strategy to use when searching for free blocks.
+  ///   See [`SearchMode`] for available options.
+  ///
+  /// # Returns
+  ///
+  /// A new allocator instance configured with the specified search mode.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import BumpAllocator, SearchMode from "./allocator";
+  ///
+  /// // Create allocator with Best Fit strategy
+  /// let allocator: BumpAllocator = BumpAllocator::init(SearchMode::BestFit);
+  ///
+  /// // Create allocator with Next Fit strategy
+  /// let allocator: BumpAllocator = BumpAllocator::init(SearchMode::NextFit);
+  /// ```
+  ///
+  /// # Search Mode Comparison
+  ///
+  /// ```text
+  ///   ┌─────────────┬───────────────────────────────────────────────────────┐
+  ///   │   Mode      │   Description                                         │
+  ///   ├─────────────┼───────────────────────────────────────────────────────┤
+  ///   │ FirstFit    │ Fast, returns first adequate block                    │
+  ///   │ NextFit     │ Balanced, distributes allocations evenly              │
+  ///   │ BestFit     │ Memory-efficient, minimizes wasted space              │
+  ///   └─────────────┴───────────────────────────────────────────────────────┘
+  /// ```
+  public static init(searchMode: SearchMode): BumpAllocator {
+    return BumpAllocator {
+      first: null,
+      last: null,
+      searchMode: searchMode,
+      lastSearch: null,
+    };
+  }
+
+  /// Returns the current search mode of the allocator.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import { BumpAllocator, SearchMode } from "./allocator";
+  ///
+  /// let allocator: BumpAllocator = BumpAllocator::init(SearchMode::BestFit);
+  /// assertEq(allocator.searchMode(), SearchMode::BestFit);
+  /// ```
+  public searchMode(&self): SearchMode {
+    return self.searchMode;
+  }
+
+  /// Sets the search mode for the allocator.
+  ///
+  /// This can be changed at any time and will affect subsequent allocations.
+  /// Note: Changing to [`SearchMode::NextFit`] resets the `lastSearch` pointer
+  /// to the beginning of the list.
+  ///
+  /// # Arguments
+  ///
+  /// * `mode` - The new search mode to use.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import { BumpAllocator, SearchMode } from "./allocator";
+  ///
+  /// let mut allocator: BumpAllocator = BumpAllocator::init(); // Default: FirstFit
+  /// allocator.setSearchMode(SearchMode::BestFit);
+  /// ```
+  public setSearchMode(&mut self, mode: SearchMode): void {
+    self.searchMode = mode;
+
+    // Reset lastSearch when changing modes to avoid stale pointers
+    if (mode != SearchMode::NextFit) {
+      self.lastSearch = null;
+    }
+  }
+
+  /// Searches the block list for a free block of sufficient size.
+  ///
+  /// This method uses the configured [`SearchMode`] to find a suitable block:
+  ///
+  /// - [`SearchMode::FirstFit`]: Returns the first free block that fits
+  /// - [`SearchMode::NextFit`]: Starts from last allocation, wraps around
+  /// - [`SearchMode::BestFit`]: Returns the smallest block that fits
+  ///
+  /// # Arguments
+  ///
+  /// * `size` - The minimum size required for the allocation
+  ///
+  /// # Returns
+  ///
+  /// * A pointer to a suitable free block if found
+  /// * `null` if no suitable block exists
+  ///
+  /// # Search Process
+  ///
+  /// ```text
+  ///   Looking for size = 100
+  ///
+  ///   ┌────────────┐    ┌────────────┐    ┌────────────┐    ┌────────────┐
+  ///   │ size: 64   │───►│ size: 128  │───►│ size: 200  │───►│ size: 50   │
+  ///   │ free: no   │    │ free: yes  │    │ free: yes  │    │ free: yes  │
+  ///   └────────────┘    └────────────┘    └────────────┘    └────────────┘
+  ///
+  ///   FirstFit: Returns Block 2 (128 >= 100, first match)
+  ///   BestFit:  Returns Block 2 (128 is closest to 100)
+  ///   NextFit:  Depends on last_search position
+  /// ```
+  ///
+  /// # Note
+  ///
+  /// This method exists but is currently unused by `allocate()`, which
+  /// always requests new memory from the OS. This is a potential
+  /// optimization point for reusing freed blocks.
+  ///
+  /// # Safety
+  ///
+  /// The caller must ensure that the allocator's internal state is valid
+  /// and that no other thread is modifying the block list concurrently.
+  findFreeBlock(&mut self, size: i64): *mut Block {
+    if (self.searchMode == SearchMode::FirstFit) {
+        return self.findFreeBlockFirstFit(size);
+    }
+
+    if (self.searchMode == SearchMode::NextFit) {
+        return self.findFreeBlockNextFit(size);
+    }
+
+    if (self.searchMode == SearchMode::BestFit) {
+        return self.findFreeBlockBestFit(size);
+    }
+
+    return null;
+  }
+
+  /// First Fit: Returns the first free block that is large enough.
+  ///
+  /// Searches from the beginning of the block list.
+  ///
+  /// # Time Complexity
+  ///
+  /// O(n) worst case, but typically faster as it stops at the first match.
+  findFreeBlockFirstFit(&self, size: i64): *mut Block {
+    let mut current: *mut Block = self.first;
+
+    while (current != null) {
+      if ((*current).isFree && (*current).size >= size) {
+        return current;
+      }
+
+      current = (*current).next;
+    }
+
+    return null;
+  }
+
+  /// Next Fit: Like First Fit, but starts where the last search ended.
+  ///
+  /// This strategy distributes allocations more evenly across the heap,
+  /// reducing fragmentation that tends to cluster at the beginning.
+  ///
+  /// # Algorithm
+  ///
+  /// ```text
+  ///   1. Start from last_search (or first if null)
+  ///   2. Search forward until end of list
+  ///   3. If not found, wrap around and search from first to last_search
+  ///   4. Update last_search to the found block (or leave unchanged if not found)
+  /// ```
+  ///
+  /// # Time Complexity
+  ///
+  /// O(n) worst case - may need to traverse entire list.
+  findFreeBlockNextFit(&mut self, size: i64): *mut Block {
+    // Start from last_search position, or from the beginning if null
+    let start: *mut Block = self.lastSearch == null ? self.first : self.lastSearch;
+
+    // First pass: search from start to end
+    let mut current: *mut Block = start;
+    while (current != null) {
+      if ((*current).isFree && (*current).size >= size) {
+        self.lastSearch = current;
+        return current;
+      }
+
+      current = (*current).next;
+    }
+
+    // Second pass: wrap around, search from first to start
+    current = self.first;
+    while (current != null && current != start) {
+      if ((*current).isFree && (*current).size >= size) {
+        self.lastSearch = current;
+
+        return current;
+      }
+
+      current = (*current).next;
+    }
+
+    return null;
+  }
+
+  /// Best Fit: Returns the smallest free block that is large enough.
+  ///
+  /// Searches the entire list to find the block that minimizes wasted space.
+  ///
+  /// # Algorithm
+  ///
+  /// ```text
+  ///   Example: Looking for 100 bytes
+  ///
+  ///   [128,free] → [256,free] → [110,free] → [64,free]
+  ///       ↓            ↓            ↓            ↓
+  ///   candidate    candidate    candidate    too small
+  ///    (128)        (256)        (110)
+  ///
+  ///   Best = 110 (closest to 100 without being smaller)
+  /// ```
+  ///
+  /// # Time Complexity
+  ///
+  /// Always O(n) - must check all blocks to find the best fit.
+  findFreeBlockBestFit(&self, size: i64): *mut Block {
+    let mut best: *mut Block = null;
+    let mut bestSize: i64 = maxOf<i64>();
+    let mut current: *mut Block = self.first;
+
+    while (current != null) {
+      let blockSize: i64 = (*current).size;
+      // Check if this block is free, large enough, and better than current best
+      if ((*current).isFree && blockSize >= size && blockSize < bestSize) {
+        best = current;
+        bestSize = blockSize;
+
+        // Perfect fit - no need to continue searching
+        if (blockSize == size) {
+          return best;
+        }
+      }
+
+      current = (*current).next;
+    }
+
+    return best;
+  }
+
+  /// Allocates a block of memory with the specified layout.
+  ///
+  /// This is the primary allocation method. It extends the heap using `sbrk`,
+  /// creates a new block with metadata, and returns an aligned pointer to
+  /// the user data region.
+  ///
+  /// # Arguments
+  ///
+  /// * `layout` - The [`Layout`] describing size and alignment requirements
+  ///
+  /// # Returns
+  ///
+  /// * A properly aligned pointer to the allocated memory
+  /// * `null` if allocation fails (e.g., `sbrk` returns an error)
+  ///
+  /// # Memory Layout Created
+  ///
+  /// ```text
+  ///   Memory obtained from sbrk:
+  ///   ┌──────────────────────────────────────────────────────────────────┐
+  ///   │                                                                  │
+  ///   ├────────┬────────────────────────┬───────────────────────────────┤
+  ///   │ Padding│     Block Header       │         User Data             │
+  ///   │ (opt.) │                        │                               │
+  ///   │        │ ┌───────────────────┐  │  ┌─────────────────────────┐  │
+  ///   │  ???   │ │ size: layout.size │  │  │                         │  │
+  ///   │ bytes  │ │ is_free: false    │  │  │    layout.size bytes    │  │
+  ///   │        │ │ next: null        │  │  │    (user accessible)    │  │
+  ///   │        │ └───────────────────┘  │  └─────────────────────────┘  │
+  ///   └────────┴────────────────────────┴───────────────────────────────┘
+  ///            ▲                        ▲
+  ///            │                        │
+  ///         Block*                 Returned pointer
+  ///      (internal use)            (aligned to layout.align())
+  /// ```
+  ///
+  /// # Alignment Calculation
+  ///
+  /// ```text
+  ///   Given: raw_address from sbrk, header_size, requested align
+  ///
+  ///   Step 1: Find where content would be without alignment
+  ///           unaligned_content = raw_address + header_size
+  ///
+  ///   Step 2: Align the content address upward
+  ///           content_addr = (unaligned_content + align - 1) & !(align - 1)
+  ///
+  ///   Step 3: Place header just before content
+  ///           block_addr = content_addr - header_size
+  ///
+  ///   Example with 16-byte alignment:
+  ///
+  ///     raw_address = 0x1000
+  ///     header_size = 24 bytes
+  ///     align = 16
+  ///
+  ///     unaligned = 0x1000 + 24 = 0x1018
+  ///     content_addr = align_to(0x1018, 16) = 0x1020
+  ///     block_addr = 0x1020 - 24 = 0x1008
+  ///
+  ///     Memory:
+  ///     0x1000 ┌────────┐
+  ///            │ unused │ (8 bytes of padding)
+  ///     0x1008 ├────────┤ ← Block header starts here
+  ///            │ header │ (24 bytes)
+  ///     0x1020 ├────────┤ ← Content starts here (16-byte aligned)
+  ///            │  data  │
+  ///            └────────┘
+  /// ```
+  ///
+  /// # Linked List Update
+  ///
+  /// ```text
+  ///   BEFORE (2 existing blocks):
+  ///   ┌─────────────────┐
+  ///   │  BumpAllocator  │
+  ///   │  first ─────────┼──────►[Block A]────►[Block B]
+  ///   │  last ──────────┼─────────────────────────┘
+  ///   └─────────────────┘
+  ///
+  ///   AFTER allocate() adds Block C:
+  ///   ┌─────────────────┐
+  ///   │  BumpAllocator  │
+  ///   │  first ─────────┼──────►[Block A]────►[Block B]────►[Block C]
+  ///   │  last ──────────┼──────────────────────────────────────┘
+  ///   └─────────────────┘
+  /// ```
+  ///
+  /// # Safety
+  ///
+  /// This function is unsafe because:
+  /// - It performs raw pointer arithmetic
+  /// - It dereferences raw pointers without bounds checking
+  /// - It modifies global process state via `sbrk`
+  ///
+  /// The caller must ensure:
+  /// - The layout is valid (non-zero size, power-of-two alignment)
+  /// - No concurrent modifications to the allocator
+  ///
+  /// # Errors
+  ///
+  /// Returns `null` if:
+  /// - `sbrk` fails (returns `(void*)-1`), typically due to:
+  ///   - Out of memory
+  ///   - Resource limits (`RLIMIT_DATA`) exceeded
+  public allocate(&mut self, layout: Layout): *mut u8 {
+    let alignment: u64 = layout.align();
+    let headerSize: u64 = sizeOf<Block>();
+
+    // Calculate total size needed:
+    // - headerSize: space for Block metadata
+    // - layout.size(): user-requested allocation size
+    // - (alignment - 1): worst-case padding for alignment
+    // The result is word-aligned via the align() function
+    let sizeForSbrk: u64 = Align::align(headerSize + layout.size() + (alignment - 1));
+
+    // Extend the heap by requesting more memory from the OS
+    // sbrk returns the OLD program break (start of new memory)
+    let rawAddress: CType::CVoidPtr = LibC::sbrk(sizeForSbrk as CType::IntPtrT);
+
+    // sbrk returns (void*)-1 on failure
+    if (rawAddress == (maxOf<u64>() as CType::CVoidPtr)) {
+      return null;
+    }
+
+    // Calculate the aligned address for user content
+    // This ensures the returned pointer meets the layout's alignment requirements
+    let contentAddr: u64 = Align::alignUp((rawAddress as u64) + headerSize, alignment);
+
+    // Place the block header immediately before the content
+    // This allows us to find the header given only the content pointer
+    let block: *mut Block = (contentAddr - headerSize) as *mut Block;
+    (*block).isFree = false;
+    (*block).size = layout.size() as i64;
+    (*block).next = null;
+
+    // Update the linked list of blocks
+    if (self.first == null) {
+      // First allocation ever
+      self.first = block;
+      self.last = block;
+    } else {
+      // Append to the end of the list
+      (*self.last).next = block;
+      self.last = block;
+    }
+
+    return contentAddr as *mut u8;
+  }
+
+  /// Deallocates a previously allocated block of memory.
+  ///
+  /// This method marks the block as free. If the block is the **last** block
+  /// in the list, it also shrinks the heap by calling `sbrk` with a negative
+  /// value, returning the memory to the operating system.
+  ///
+  /// # Arguments
+  ///
+  /// * `address` - Pointer to the user data region (as returned by `allocate`)
+  ///
+  /// # Behavior
+  ///
+  /// ```text
+  ///   CASE 1: Deallocating a middle block (only marks as free)
+  ///   ═══════════════════════════════════════════════════════════════
+  ///
+  ///   Before:
+  ///   [Block A: in_use] ──► [Block B: in_use] ──► [Block C: in_use]
+  ///                                ▲
+  ///                         deallocate this
+  ///
+  ///   After:
+  ///   [Block A: in_use] ──► [Block B: FREE] ──► [Block C: in_use]
+  ///                                │
+  ///                         marked free, but
+  ///                         memory NOT returned to OS
+  ///
+  ///   CASE 2: Deallocating the last block (shrinks heap)
+  ///   ═══════════════════════════════════════════════════════════════
+  ///
+  ///   Before:
+  ///   [Block A: in_use] ──► [Block B: in_use] ──► [Block C: in_use]
+  ///                                                     ▲
+  ///                                              deallocate this
+  ///                                                     │
+  ///                                              (this is `last`)
+  ///
+  ///   After:
+  ///   [Block A: in_use] ──► [Block B: in_use]
+  ///                                │
+  ///                         now `last`
+  ///
+  ///   Heap shrunk via: sbrk(-(block_C_size + overhead))
+  /// ```
+  ///
+  /// # List Update for Last Block Deallocation
+  ///
+  /// ```text
+  ///   Finding the new last block requires traversal:
+  ///
+  ///   ┌─────────────────┐
+  ///   │  BumpAllocator  │
+  ///   │  first ─────────┼──► [A] ──► [B] ──► [C]  ◄── last (to be freed)
+  ///   └─────────────────┘
+  ///
+  ///   Traversal: start at first, walk until current.next == last
+  ///
+  ///   current = A
+  ///     └─► A.next = B (not last) ──► continue
+  ///   current = B
+  ///     └─► B.next = C (== last) ──► STOP
+  ///
+  ///   Set last = B, then shrink heap
+  /// ```
+  ///
+  /// # Special Case: Single Block
+  ///
+  /// ```text
+  ///   Before:
+  ///   ┌─────────────────┐
+  ///   │  first ─────────┼──► [Only Block] ◄── last
+  ///   └─────────────────┘
+  ///
+  ///   After deallocate():
+  ///   ┌─────────────────┐
+  ///   │  first: null    │
+  ///   │  last:  null    │
+  ///   └─────────────────┘
+  ///
+  ///   (Heap shrunk, allocator reset to empty state)
+  /// ```
+  ///
+  /// # Safety
+  ///
+  /// This function is unsafe because:
+  /// - It performs raw pointer arithmetic
+  /// - It modifies global process state via `sbrk`
+  /// - It trusts that `address` was returned by this allocator
+  ///
+  /// The caller must ensure:
+  /// - `address` was previously returned by `allocate` on this allocator
+  /// - `address` has not already been deallocated (no double-free)
+  /// - No concurrent modifications to the allocator
+  ///
+  /// # Panics
+  ///
+  /// This function does not panic, but passing an invalid pointer
+  /// results in undefined behavior.
+  public deallocate(&mut self, address: *mut u8): void {
+    // Null pointer deallocation is a no-op (matches C free() behavior)
+    if (address == null) {
+      return;
+    }
+
+    // Find the block header by going back headerSize bytes
+    let block: *mut Block = self.findBlock(address);
+    (*block).isFree = true;
+
+    // Only the last block can be returned to the OS
+    // Middle blocks remain as "holes" in the heap
+    if (block != self.last) {
+      return;
+    }
+
+    // Update the linked list to remove the last block
+    if (self.first == self.last) {
+      // This was the only block - reset to empty state
+      self.first = null;
+      self.last = null;
+    } else {
+      // Find the second-to-last block (new last)
+      // This requires O(n) traversal since we have a singly-linked list
+      let mut current: *mut Block = self.first;
+
+      while ((*current).next != null && (*current).next != self.last) {
+        current = (*current).next;
+      }
+
+      self.last = current;
+    }
+
+    // Calculate how much memory to release
+    // Note: includes extra headerSize for alignment padding considerations
+    let toRelease: u64 = Align::align(((*block).size as u64) + sizeOf<Block>() + sizeOf<Block>());
+
+    // Shrink the heap by calling sbrk with a negative value
+    let decrement: i64 = -(toRelease as i64);
+
+    LibC::sbrk(decrement as CType::IntPtrT);
+  }
+
+  /// Finds the block header associated with a user data pointer.
+  ///
+  /// Given a pointer returned by `allocate`, this method calculates
+  /// the location of the corresponding `Block` metadata.
+  ///
+  /// # Arguments
+  ///
+  /// * `address` - Pointer to user data (as returned by `allocate`)
+  ///
+  /// # Returns
+  ///
+  /// Pointer to the `Block` header for this allocation.
+  ///
+  /// # Layout
+  ///
+  /// ```text
+  ///   Memory layout:
+  ///   ┌────────────────────┬────────────────────────────┐
+  ///   │    Block Header    │        User Data           │
+  ///   │    (header_size)   │                            │
+  ///   └────────────────────┴────────────────────────────┘
+  ///   ▲                    ▲
+  ///   │                    │
+  ///   │                    └── address (input)
+  ///   │
+  ///   └── returned pointer (address - header_size)
+  /// ```
+  ///
+  /// # Safety
+  ///
+  /// The caller must ensure:
+  /// - `address` was returned by `allocate` on this allocator
+  /// - `address` points to valid memory
+  ///
+  /// Passing an invalid pointer results in undefined behavior.
+  findBlock(&self, address: *mut u8): *mut Block {
+    let block: *mut Block = ((address as u64) - sizeOf<Block>()) as *mut Block;
+
+    return block;
+  }
+}
