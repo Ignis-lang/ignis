@@ -17,6 +17,7 @@
 mod completion;
 mod convert;
 mod inlay;
+pub mod project;
 mod semantic;
 mod server;
 mod state;

@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use ignis_driver::AnalyzeProjectOutput;
+use ignis_driver::{AnalysisOptions, AnalyzeProjectOutput};
 use ignis_type::file::FileId;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -16,6 +17,7 @@ use crate::completion::{
   complete_record_init, detect_context, log, to_completion_items,
 };
 use crate::convert::{convert_diagnostic, LineIndex};
+use crate::project::ProjectContext;
 use crate::state::LspState;
 
 /// The Ignis Language Server.
@@ -46,22 +48,49 @@ impl Server {
     uri: &Url,
   ) {
     // Extract data from state (behind RwLock)
-    let (path_str, text, version) = {
+    let (path_str, version) = {
       let guard = self.state.open_files.read().await;
 
       let Some(doc) = guard.get(uri) else {
         return;
       };
 
-      (doc.path.to_string_lossy().to_string(), doc.text.clone(), doc.version)
+      (doc.path.to_string_lossy().to_string(), doc.version)
     };
 
-    // Clone config for use in sync block
-    let config = (*self.state.config).clone();
+    let path = PathBuf::from(&path_str);
 
-    // Run project-level analysis with in-memory text, catching panics
+    // Get project context for this file
+    let project_ctx = self.state.project_manager.project_for_file(&path).await;
+
+    // Collect file overrides from all open .ign files
+    let file_overrides = self.collect_file_overrides().await;
+
+    // Build config and analysis options based on project context
+    let (config, entry_path, project_opt) = match &project_ctx {
+      ProjectContext::Project(resolved) => (
+        (*resolved.config).clone(),
+        resolved.project.entry.to_string_lossy().to_string(),
+        Some(resolved.project.clone()),
+      ),
+      ProjectContext::NoProject => ((*self.state.config).clone(), path_str.clone(), None),
+      ProjectContext::Error { root, error } => {
+        // Publish TOML diagnostic
+        self.publish_toml_diagnostics(root).await;
+        log(&format!("[analyze] Project error: {}", error));
+        // Continue with fallback config
+        ((*self.state.config).clone(), path_str.clone(), None)
+      },
+    };
+
+    let options = AnalysisOptions {
+      file_overrides,
+      project: project_opt,
+    };
+
+    // Run project-level analysis, catching panics
     let analysis_result = catch_unwind(AssertUnwindSafe(|| {
-      ignis_driver::analyze_project_with_text(&config, &path_str, Some(text))
+      ignis_driver::analyze_project_with_options(&config, &entry_path, options)
     }));
 
     let output = match analysis_result {
@@ -168,23 +197,40 @@ impl Server {
     &self,
     uri: &Url,
   ) -> Option<(Arc<AnalyzeProjectOutput>, String, i32)> {
-    let guard = self.state.open_files.read().await;
-
-    let doc = guard.get(uri)?;
-    let path_str = doc.path.to_string_lossy().to_string();
-    let version = doc.version;
+    let (path_str, path, version, cached) = {
+      let guard = self.state.open_files.read().await;
+      let doc = guard.get(uri)?;
+      let path_str = doc.path.to_string_lossy().to_string();
+      let path = doc.path.clone();
+      let version = doc.version;
+      let cached = doc.get_cached_analysis();
+      (path_str, path, version, cached)
+    };
 
     // Check if we have a cached analysis for the current version
-    if let Some(cached) = doc.get_cached_analysis() {
+    if let Some(cached) = cached {
       return Some((cached, path_str, version));
     }
 
-    // No cache available - run analysis
-    let text = doc.text.clone();
-    drop(guard); // Release read lock before analysis
+    // No cache available - run analysis with project-aware configuration
+    let project_ctx = self.state.project_manager.project_for_file(&path).await;
+    let file_overrides = self.collect_file_overrides().await;
 
-    let config = (*self.state.config).clone();
-    let output = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text)));
+    let (config, entry_path, project_opt) = match &project_ctx {
+      ProjectContext::Project(resolved) => (
+        (*resolved.config).clone(),
+        resolved.project.entry.to_string_lossy().to_string(),
+        Some(resolved.project.clone()),
+      ),
+      _ => ((*self.state.config).clone(), path_str.clone(), None),
+    };
+
+    let options = AnalysisOptions {
+      file_overrides,
+      project: project_opt,
+    };
+
+    let output = Arc::new(ignis_driver::analyze_project_with_options(&config, &entry_path, options));
 
     // Cache the result
     {
@@ -221,6 +267,56 @@ impl Server {
 
     // Any open doc triggers full project analysis
     self.analyze_and_publish(&uris[0]).await;
+  }
+
+  /// Collect text from all open .ign files for analysis.
+  async fn collect_file_overrides(&self) -> HashMap<PathBuf, String> {
+    let guard = self.state.open_files.read().await;
+
+    guard
+      .iter()
+      .filter(|(uri, _)| uri.path().ends_with(".ign"))
+      .filter_map(|(uri, doc)| uri.to_file_path().ok().map(|path| (path, doc.text.clone())))
+      .collect()
+  }
+
+  /// Publish diagnostics for ignis.toml errors.
+  async fn publish_toml_diagnostics(
+    &self,
+    root: &std::path::Path,
+  ) {
+    let ctx = self.state.project_manager.project_for_root(root).await;
+
+    let toml_path = root.join("ignis.toml");
+    let Ok(uri) = Url::from_file_path(&toml_path) else {
+      return;
+    };
+
+    let diagnostics = match ctx {
+      ProjectContext::Project(_) | ProjectContext::NoProject => vec![],
+      ProjectContext::Error { error, .. } => {
+        vec![Diagnostic {
+          range: Range::default(), // (0,0)-(0,0)
+          severity: Some(DiagnosticSeverity::ERROR),
+          code: Some(NumberOrString::String("P0001".to_string())),
+          source: Some("ignis".to_string()),
+          message: error.to_string(),
+          ..Default::default()
+        }]
+      },
+    };
+
+    self.client.publish_diagnostics(uri, diagnostics, None).await;
+  }
+
+  /// Re-analyze all open .ign files in a project.
+  async fn reanalyze_project_files(
+    &self,
+    _root: &std::path::Path,
+  ) {
+    // For now, just re-analyze all open files.
+    // A more sophisticated approach would filter by project root.
+    self.invalidate_and_reanalyze().await;
   }
 }
 
@@ -311,10 +407,16 @@ impl LanguageServer for Server {
       method: "workspace/didChangeWatchedFiles".to_string(),
       register_options: Some(
         serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-          watchers: vec![FileSystemWatcher {
-            glob_pattern: GlobPattern::String("**/*.ign".to_string()),
-            kind: Some(WatchKind::all()),
-          }],
+          watchers: vec![
+            FileSystemWatcher {
+              glob_pattern: GlobPattern::String("**/*.ign".to_string()),
+              kind: Some(WatchKind::all()),
+            },
+            FileSystemWatcher {
+              glob_pattern: GlobPattern::String("**/ignis.toml".to_string()),
+              kind: Some(WatchKind::all()),
+            },
+          ],
         })
         .expect("valid JSON"),
       ),
@@ -345,6 +447,18 @@ impl LanguageServer for Server {
     let version = params.text_document.version;
     let text = params.text_document.text;
 
+    // Handle ignis.toml specially
+    if uri.path().ends_with("ignis.toml") {
+      if let Ok(path) = uri.to_file_path() {
+        if let Some(root) = path.parent() {
+          self.state.project_manager.set_toml_override(root, text).await;
+          self.publish_toml_diagnostics(root).await;
+          self.reanalyze_project_files(root).await;
+        }
+      }
+      return;
+    }
+
     self.state.open_document(uri.clone(), version, text).await;
     self.analyze_and_publish(&uri).await;
   }
@@ -357,10 +471,24 @@ impl LanguageServer for Server {
     let version = params.text_document.version;
 
     // With FULL sync, there's exactly one change containing the entire text
-    if let Some(change) = params.content_changes.into_iter().next() {
-      self.state.update_document(&uri, version, change.text).await;
-      self.analyze_and_publish(&uri).await;
+    let Some(change) = params.content_changes.into_iter().next() else {
+      return;
+    };
+
+    // Handle ignis.toml specially
+    if uri.path().ends_with("ignis.toml") {
+      if let Ok(path) = uri.to_file_path() {
+        if let Some(root) = path.parent() {
+          self.state.project_manager.set_toml_override(root, change.text).await;
+          self.publish_toml_diagnostics(root).await;
+          self.reanalyze_project_files(root).await;
+        }
+      }
+      return;
     }
+
+    self.state.update_document(&uri, version, change.text).await;
+    self.analyze_and_publish(&uri).await;
   }
 
   async fn did_close(
@@ -368,6 +496,19 @@ impl LanguageServer for Server {
     params: DidCloseTextDocumentParams,
   ) {
     let uri = params.text_document.uri;
+
+    // Handle ignis.toml specially
+    if uri.path().ends_with("ignis.toml") {
+      if let Ok(path) = uri.to_file_path() {
+        if let Some(root) = path.parent() {
+          self.state.project_manager.clear_toml_override(root).await;
+          // Clear TOML diagnostics and re-analyze with disk version
+          self.client.publish_diagnostics(uri, vec![], None).await;
+          self.reanalyze_project_files(root).await;
+        }
+      }
+      return;
+    }
 
     self.state.close_document(&uri).await;
 
@@ -382,6 +523,25 @@ impl LanguageServer for Server {
     let mut should_reanalyze = false;
 
     for change in params.changes {
+      // Handle ignis.toml changes
+      if change.uri.path().ends_with("ignis.toml") {
+        if let Ok(path) = change.uri.to_file_path() {
+          if let Some(root) = path.parent() {
+            // Only invalidate cache if TOML is not open in editor
+            // (open files use in-memory override)
+            let has_override = self.state.project_manager.has_toml_override(root).await;
+
+            if !has_override {
+              self.state.project_manager.invalidate(root).await;
+              self.publish_toml_diagnostics(root).await;
+              should_reanalyze = true;
+            }
+          }
+        }
+        continue;
+      }
+
+      // Handle .ign files
       match change.typ {
         FileChangeType::CREATED | FileChangeType::CHANGED => {
           // Open files are handled by didChange, skip them

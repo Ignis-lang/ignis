@@ -8,22 +8,27 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use ignis_ast::{ASTNode, NodeId};
 use ignis_config::IgnisConfig;
 use ignis_diagnostics::diagnostic_report::Diagnostic;
+use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_token::token::Token;
-use ignis_type::definition::{DefinitionId, DefinitionStore};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore};
 use ignis_type::file::{FileId, SourceMap};
+use ignis_type::module::ModuleId;
 use ignis_type::namespace::NamespaceStore;
 use ignis_type::span::Span;
 use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::types::{TypeId, TypeStore};
+use ignis_type::BytePosition;
 use ignis_type::Store;
 
 use crate::context::CompilationContext;
+use crate::project::Project;
 
 /// How far analysis progressed before stopping (due to errors or completion).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -184,6 +189,16 @@ fn empty_analyzer_output() -> ignis_analyzer::AnalyzerOutput {
   }
 }
 
+/// Options for project analysis.
+#[derive(Default)]
+pub struct AnalysisOptions {
+  /// Text overrides for open files (unsaved editor content).
+  pub file_overrides: HashMap<PathBuf, String>,
+
+  /// Project configuration, used for entry point validation.
+  pub project: Option<Project>,
+}
+
 /// Output of `analyze_project`, containing diagnostics from multi-file analysis.
 ///
 /// This struct contains only `Send`-safe types, suitable for async contexts.
@@ -200,6 +215,9 @@ pub struct AnalyzeProjectOutput {
 
   /// True if any diagnostic is an error.
   pub has_errors: bool,
+
+  /// Whether an entry point (fn main) was found in the root module.
+  pub has_entry_point: bool,
 
   /// All definitions from the analysis.
   /// Used for document symbols, go-to-definition, etc.
@@ -267,7 +285,7 @@ pub fn analyze_project(
   config: &IgnisConfig,
   entry_path: &str,
 ) -> AnalyzeProjectOutput {
-  analyze_project_with_text(config, entry_path, None)
+  analyze_project_with_options(config, entry_path, AnalysisOptions::default())
 }
 
 /// Analyze a project with optional in-memory text for the entry file.
@@ -285,28 +303,38 @@ pub fn analyze_project_with_text(
   entry_path: &str,
   entry_text: Option<String>,
 ) -> AnalyzeProjectOutput {
+  let mut options = AnalysisOptions::default();
+
+  if let Some(text) = entry_text {
+    options.file_overrides.insert(PathBuf::from(entry_path), text);
+  }
+
+  analyze_project_with_options(config, entry_path, options)
+}
+
+/// Analyze a project with file overrides and project configuration.
+pub fn analyze_project_with_options(
+  config: &IgnisConfig,
+  entry_path: &str,
+  options: AnalysisOptions,
+) -> AnalyzeProjectOutput {
   let mut ctx = CompilationContext::new(config);
   let mut all_diagnostics: Vec<Diagnostic> = Vec::new();
 
-  // If we have in-memory text, preload it so we don't read from disk
-  if let Some(text) = entry_text {
-    ctx.preload_file(std::path::PathBuf::from(entry_path), text);
+  // Preload all file overrides
+  for (path, text) in options.file_overrides {
+    ctx.preload_file(path, text);
   }
 
   // Discover all modules using LSP mode (collects diagnostics, doesn't fail early)
   let root_id = match ctx.discover_modules_lsp(entry_path, config) {
     Ok(id) => Some(id),
-    Err(()) => {
-      // Entry file couldn't be read at all
-      None
-    },
+    Err(()) => None,
   };
 
   // Collect discovery diagnostics (lex/parse errors)
   all_diagnostics.extend(std::mem::take(&mut ctx.discovery_diagnostics));
 
-  // If we have discovery errors, we may not have a valid module graph
-  // but we still want to return the diagnostics we collected
   let has_discovery_errors = all_diagnostics
     .iter()
     .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
@@ -319,6 +347,7 @@ pub fn analyze_project_with_text(
       source_map: ctx.source_map,
       diagnostics: all_diagnostics,
       has_errors: true,
+      has_entry_point: false,
       defs: DefinitionStore::new(),
       types: TypeStore::new(),
       node_defs: HashMap::new(),
@@ -345,7 +374,20 @@ pub fn analyze_project_with_text(
     let (output, analyzer_has_errors) = ctx.analyze_modules_collect_all(&order, config, false);
     all_diagnostics.extend(output.diagnostics);
 
-    let has_errors = has_discovery_errors || analyzer_has_errors;
+    // Detect entry point
+    let has_entry_point = detect_entry_point(&output.symbols, &output.defs, root_id);
+
+    // Validate entry point based on project config
+    if let Some(ref project) = options.project {
+      validate_entry_point(project, has_entry_point, root_id, &ctx, &mut all_diagnostics);
+    }
+
+    let has_errors = has_discovery_errors
+      || analyzer_has_errors
+      || all_diagnostics
+        .iter()
+        .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
+
     let symbol_names = extract_symbol_names(&output.symbols);
 
     // Extract AST nodes and roots from the root module for inlay hints
@@ -360,6 +402,7 @@ pub fn analyze_project_with_text(
       source_map: ctx.source_map,
       diagnostics: all_diagnostics,
       has_errors,
+      has_entry_point,
       defs: output.defs,
       types: output.types,
       node_defs: output.node_defs,
@@ -389,6 +432,7 @@ pub fn analyze_project_with_text(
     source_map: ctx.source_map,
     diagnostics: all_diagnostics,
     has_errors: has_discovery_errors || has_cycle,
+    has_entry_point: false,
     defs: DefinitionStore::new(),
     types: TypeStore::new(),
     node_defs: HashMap::new(),
@@ -401,6 +445,57 @@ pub fn analyze_project_with_text(
     roots,
     namespaces: NamespaceStore::new(),
     import_module_files: HashMap::new(),
+  }
+}
+
+/// Detect if an entry point (fn main) exists in the root module.
+fn detect_entry_point(
+  symbols: &Rc<RefCell<SymbolTable>>,
+  defs: &DefinitionStore,
+  root_id: ModuleId,
+) -> bool {
+  let symbols = symbols.borrow();
+
+  defs.iter().any(|(_, def)| {
+    if def.owner_module != root_id {
+      return false;
+    }
+
+    if def.owner_namespace.is_some() {
+      return false;
+    }
+
+    let DefinitionKind::Function(func_def) = &def.kind else {
+      return false;
+    };
+
+    if func_def.is_extern {
+      return false;
+    }
+
+    symbols.get(&def.name) == "main"
+  })
+}
+
+/// Validate entry point presence based on project configuration.
+fn validate_entry_point(
+  project: &Project,
+  has_entry_point: bool,
+  root_id: ModuleId,
+  ctx: &CompilationContext,
+  diagnostics: &mut Vec<Diagnostic>,
+) {
+  // Only validate for binary projects
+  if !project.bin {
+    return;
+  }
+
+  if !has_entry_point {
+    let root_module = ctx.module_graph.modules.get(&root_id);
+    let file_id = root_module.file_id;
+    let span = Span::empty_at(file_id, BytePosition::default());
+
+    diagnostics.push(DiagnosticMessage::ExecutableMustHaveMainFunction { span }.report());
   }
 }
 

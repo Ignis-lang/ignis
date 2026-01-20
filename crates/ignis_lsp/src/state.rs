@@ -14,6 +14,7 @@ use tower_lsp::lsp_types::InlayHint;
 use url::Url;
 
 use crate::convert::LineIndex;
+use crate::project::ProjectManager;
 
 /// Cached analysis result for a document.
 pub struct CachedAnalysis {
@@ -200,8 +201,11 @@ impl OpenDoc {
 
 /// Shared state for the LSP server.
 pub struct LspState {
-  /// Compiler configuration.
+  /// Compiler configuration (fallback when no project).
   pub config: Arc<IgnisConfig>,
+
+  /// Project manager for ignis.toml discovery and caching.
+  pub project_manager: ProjectManager,
 
   /// Currently open documents.
   pub open_files: RwLock<HashMap<Url, OpenDoc>>,
@@ -218,6 +222,7 @@ impl LspState {
   /// Create new LSP state with the given configuration.
   pub fn new(config: Arc<IgnisConfig>) -> Self {
     Self {
+      project_manager: ProjectManager::new(Arc::clone(&config)),
       config,
       open_files: RwLock::new(HashMap::new()),
       root: RwLock::new(None),
