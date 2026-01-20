@@ -2,6 +2,73 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## [0.2.4] - 2026-01-20
+
+This release introduces project-based compilation with `ignis.toml` configuration files, enabling multi-file projects with structured build settings.
+
+### Project Configuration
+
+Ignis now supports project configuration via `ignis.toml`:
+
+```toml
+[package]
+name = "myproject"
+version = "0.1.0"
+
+[ignis]
+std = true
+std_path = "../std"
+
+[build]
+bin = true
+source_dir = "src"
+entry = "main.ign"
+out_dir = "build"
+opt_level = 2
+debug = true
+cc = "gcc"
+emit = ["c", "obj"]
+```
+
+#### CLI Changes
+
+- **`--project <dir>`**: Explicitly specify project directory
+- **Auto-detection**: Running `ignis build` without arguments searches upward for `ignis.toml`
+- **Single-file mode**: Still supported by passing a file path directly
+
+#### Build Configuration Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `bin` | Produce executable | `true` |
+| `source_dir` | Source directory | `"src"` |
+| `entry` | Entry file (relative to source_dir) | `"main.ign"` |
+| `out_dir` | Output directory | `"build"` |
+| `opt_level` | Optimization level (0-3) | `0` |
+| `debug` | Include debug info | `false` |
+| `cc` | C compiler | `"cc"` |
+| `cflags` | Extra compiler flags | `[]` |
+| `emit` | Extra artifacts: `"c"`, `"obj"` | `[]` |
+
+### LSP Improvements
+
+- **Project-aware analysis**: LSP now discovers and uses `ignis.toml` as the source of truth for `std_path`, entry point, and analysis settings
+- **Entry point validation**: Binary projects emit a diagnostic when missing `fn main`
+- **Config file watching**: File watchers detect `ignis.toml` changes and re-analyze
+- **In-memory overrides**: Unsaved `ignis.toml` content is used for analysis
+- **TOML diagnostics**: Parse errors in `ignis.toml` are reported in the editor
+
+### Bug Fixes
+
+- Fixed monomorphized std functions being emitted in multiple user modules (now only emitted in the entry module to avoid duplicate definitions)
+- Fixed build layout paths for absolute source paths in project mode
+
+### Internal
+
+- Deduplicated `toml` and `serde_json` workspace dependencies
+- Added `ProjectManager` with mtime-based caching for project configurations
+- Added `BuildLayout::with_project_root()` for proper path relativization
+
 ## [0.2.3] - 2026-01-19
 
 This release introduces important syntax changes, expands the standard library with memory management and C interoperability, and improves compiler stability.
