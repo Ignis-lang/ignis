@@ -1,14 +1,14 @@
 //!
-//! # Bump Allocator
+//! # Heap Allocator
 //!
-//! A simple bump (or arena) allocator implementation that manages memory by
+//! A general-purpose heap allocator implementation that manages memory by
 //! extending the program's data segment using the `sbrk` system call.
 //!
 //! ## Overview
 //!
-//! A bump allocator is one of the simplest allocation strategies. It maintains
-//! a pointer that "bumps" forward with each allocation. Memory is obtained from
-//! the operating system by moving the program break (the end of the data segment).
+//! This allocator maintains a linked list of blocks to track allocations. It supports
+//! multiple search strategies for finding free blocks and can return memory to the OS
+//! when the last block is freed.
 //!
 //! ## How It Works
 //!
@@ -319,17 +319,17 @@ export enum SearchMode {
   BestFit,
 }
 
-/// A simple bump allocator that manages heap memory using `sbrk`.
+/// A general-purpose heap allocator that manages memory using `sbrk`.
 ///
 /// # Memory Management Strategy
 ///
-/// The `BumpAllocator` maintains a singly-linked list of allocation blocks.
+/// The `HeapAllocator` maintains a singly-linked list of allocation blocks.
 /// Each block contains metadata (size, free status, next pointer) followed
 /// by the user's data.
 ///
 /// ```text
 ///   ┌───────────────────────────────────────────────────────────┐
-///   │                    BumpAllocator                          │
+///   │                    HeapAllocator                          │
 ///   │                                                           │
 ///   │   first ─────────►┌─────────┐                             │
 ///   │                   │ Block 1 │──────►┌─────────┐           │
@@ -352,7 +352,7 @@ export enum SearchMode {
 ///
 /// This allocator is **NOT** thread-safe. For multi-threaded usage,
 /// external synchronization (e.g., a `Mutex`) is required.
-export record BumpAllocator {
+export record HeapAllocator {
   /// Pointer to the first (oldest) block in the linked list.
   /// Used as the starting point when searching for free blocks.
   first: *mut Block;
@@ -371,7 +371,7 @@ export record BumpAllocator {
   /// starting position for the next search.
   lastSearch: *mut Block;
 
-  /// Creates a new, empty `BumpAllocator` with the default search mode (FirstFit).
+  /// Creates a new, empty `HeapAllocator` with the default search mode (FirstFit).
   ///
   /// # Returns
   ///
@@ -381,7 +381,7 @@ export record BumpAllocator {
   /// # Example
   ///
   /// ```ignis
-  /// let allocator: BumpAllocator = BumpAllocator::init();
+  /// let allocator: HeapAllocator = HeapAllocator::init();
   /// // allocator.first == null
   /// // allocator.last == null
   /// // allocator.search_mode == SearchMode::FirstFit
@@ -392,7 +392,7 @@ export record BumpAllocator {
   /// ```text
   ///   After init():
   ///   ┌───────────────────────────┐
-  ///   │      BumpAllocator        │
+  ///   │      HeapAllocator        │
   ///   │                           │
   ///   │  first: null              │
   ///   │  last:  null              │
@@ -400,8 +400,8 @@ export record BumpAllocator {
   ///   │  last_search: null        │
   ///   └───────────────────────────┘
   /// ```
-  public static init(): BumpAllocator {
-    return BumpAllocator {
+  public static init(): HeapAllocator {
+    return HeapAllocator {
       first: null,
       last: null,
       searchMode: SearchMode::FirstFit,
@@ -409,7 +409,7 @@ export record BumpAllocator {
     };
   }
 
-  /// Creates a new, empty `BumpAllocator` with the specified search mode.
+  /// Creates a new, empty `HeapAllocator` with the specified search mode.
   ///
   /// # Arguments
   ///
@@ -423,13 +423,13 @@ export record BumpAllocator {
   /// # Example
   ///
   /// ```ignis
-  /// import BumpAllocator, SearchMode from "./allocator";
+  /// import HeapAllocator, SearchMode from "./heap_allocator";
   ///
   /// // Create allocator with Best Fit strategy
-  /// let allocator: BumpAllocator = BumpAllocator::init(SearchMode::BestFit);
+  /// let allocator: HeapAllocator = HeapAllocator::init(SearchMode::BestFit);
   ///
   /// // Create allocator with Next Fit strategy
-  /// let allocator: BumpAllocator = BumpAllocator::init(SearchMode::NextFit);
+  /// let allocator: HeapAllocator = HeapAllocator::init(SearchMode::NextFit);
   /// ```
   ///
   /// # Search Mode Comparison
@@ -443,8 +443,8 @@ export record BumpAllocator {
   ///   │ BestFit     │ Memory-efficient, minimizes wasted space              │
   ///   └─────────────┴───────────────────────────────────────────────────────┘
   /// ```
-  public static init(searchMode: SearchMode): BumpAllocator {
-    return BumpAllocator {
+  public static init(searchMode: SearchMode): HeapAllocator {
+    return HeapAllocator {
       first: null,
       last: null,
       searchMode: searchMode,
@@ -457,9 +457,9 @@ export record BumpAllocator {
   /// # Example
   ///
   /// ```ignis
-  /// import { BumpAllocator, SearchMode } from "./allocator";
+  /// import { HeapAllocator, SearchMode } from "./heap_allocator";
   ///
-  /// let allocator: BumpAllocator = BumpAllocator::init(SearchMode::BestFit);
+  /// let allocator: HeapAllocator = HeapAllocator::init(SearchMode::BestFit);
   /// assertEq(allocator.searchMode(), SearchMode::BestFit);
   /// ```
   public searchMode(&self): SearchMode {
@@ -479,9 +479,9 @@ export record BumpAllocator {
   /// # Example
   ///
   /// ```ignis
-  /// import { BumpAllocator, SearchMode } from "./allocator";
+  /// import { HeapAllocator, SearchMode } from "./heap_allocator";
   ///
-  /// let mut allocator: BumpAllocator = BumpAllocator::init(); // Default: FirstFit
+  /// let mut allocator: HeapAllocator = HeapAllocator::init(); // Default: FirstFit
   /// allocator.setSearchMode(SearchMode::BestFit);
   /// ```
   public setSearchMode(&mut self, mode: SearchMode): void {

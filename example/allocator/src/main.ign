@@ -1,12 +1,13 @@
 /**
- * Bump Allocator Test
+ * Memory Allocators Test
  *
- * This test demonstrates and validates the BumpAllocator implementation.
- * It allocates memory, writes values, checks alignment, deallocates,
- * and observes heap growth.
+ * This test demonstrates and validates both HeapAllocator and ArenaAllocator
+ * implementations. It allocates memory, writes values, checks alignment,
+ * deallocates, and observes heap growth.
  */
 
-import BumpAllocator, SearchMode from "./allocator";
+import HeapAllocator, SearchMode from "./heap_allocator";
+import ArenaAllocator from "./arena_allocator";
 import Layout, Align from "std::memory";
 import Io from "std::io";
 import String from "std::string";
@@ -48,14 +49,24 @@ function check(name: string, condition: boolean): void {
   }
 }
 
-function main(): i32 {
-  printHeader("Bump Allocator Test");
+/// Prints arena statistics.
+function printArenaStats(arena: &ArenaAllocator): void {
+  Io::print("  Capacity: ");
+  Io::println(String::toString(arena.capacity()));
+  Io::print("  Used: ");
+  Io::println(String::toString(arena.used()));
+  Io::print("  Available: ");
+  Io::println(String::toString(arena.available()));
+}
+
+function testHeapAllocator(): void {
+  printHeader("Heap Allocator Test");
 
   // Show initial program break
   printProgramBreak("Initial program break");
 
   // Create allocator
-  let mut allocator: BumpAllocator = BumpAllocator::init();
+  let mut allocator: HeapAllocator = HeapAllocator::init();
 
   printSection("Test 1: Allocate u32");
   let layoutU32: Layout = Layout::init<u32>();
@@ -159,6 +170,122 @@ function main(): i32 {
   Io::println("  Changing to BestFit search mode");
   allocator.setSearchMode(SearchMode::BestFit);
   Io::println("  Search mode changed successfully");
+}
+
+function testArenaAllocator(): void {
+  printHeader("Arena Allocator Test");
+
+  printProgramBreak("Before arena creation");
+
+  printSection("Test 1: Create arena (4KB)");
+  let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+  check("Arena created", arena.start != null);
+  check("Arena is empty", arena.isEmpty());
+  printArenaStats(&arena);
+
+  printProgramBreak("After arena creation");
+
+  printSection("Test 2: Allocate u64 (8-byte alignment)");
+  let layoutU64: Layout = Layout::init<u64>();
+  let ptrU64: *mut u8 = arena.allocate(layoutU64);
+  Io::print("  Allocated at: ");
+  Io::println(String::toString(ptrU64 as u64));
+  check("Pointer not null", ptrU64 != null);
+  check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8));
+
+  let u64Ptr: *mut u64 = ptrU64 as *mut u64;
+  *u64Ptr = 0xCAFEBABE12345678;
+  check("Write/read u64", *u64Ptr == 0xCAFEBABE12345678);
+
+  printArenaStats(&arena);
+
+  printSection("Test 3: Multiple small allocations");
+  let layout16: Layout = Layout::init(16 as u64, 8 as u64);
+
+  let ptr1: *mut u8 = arena.allocate(layout16);
+  let ptr2: *mut u8 = arena.allocate(layout16);
+  let ptr3: *mut u8 = arena.allocate(layout16);
+
+  check("ptr1 not null", ptr1 != null);
+  check("ptr2 not null", ptr2 != null);
+  check("ptr3 not null", ptr3 != null);
+
+  // Verify allocations are contiguous (no headers between them)
+  let diff1: u64 = (ptr2 as u64) - (ptr1 as u64);
+  let diff2: u64 = (ptr3 as u64) - (ptr2 as u64);
+  Io::print("  Distance ptr1->ptr2: ");
+  Io::println(String::toString(diff1));
+  Io::print("  Distance ptr2->ptr3: ");
+  Io::println(String::toString(diff2));
+  check("Contiguous allocation (16 bytes apart)", diff1 == 16 && diff2 == 16);
+
+  printArenaStats(&arena);
+
+  printSection("Test 4: Write to all allocations");
+  // Write different values to each allocation
+  let p1: *mut u64 = ptr1 as *mut u64;
+  let p2: *mut u64 = ptr2 as *mut u64;
+  let p3: *mut u64 = ptr3 as *mut u64;
+
+  *p1 = 0x1111111111111111;
+  *p2 = 0x2222222222222222;
+  *p3 = 0x3333333333333333;
+
+  check("ptr1 value correct", *p1 == 0x1111111111111111);
+  check("ptr2 value correct", *p2 == 0x2222222222222222);
+  check("ptr3 value correct", *p3 == 0x3333333333333333);
+
+  printSection("Test 5: Allocate until near capacity");
+  let usedBefore: u64 = arena.used();
+  let availableBefore: u64 = arena.available();
+
+  Io::print("  Used before: ");
+  Io::println(String::toString(usedBefore));
+  Io::print("  Available before: ");
+  Io::println(String::toString(availableBefore));
+
+  // Allocate most of remaining space
+  let largeLayout: Layout = Layout::init(3000 as u64, 8 as u64);
+  let ptrLarge: *mut u8 = arena.allocate(largeLayout);
+  check("Large allocation succeeded", ptrLarge != null);
+
+  printArenaStats(&arena);
+
+  printSection("Test 6: Allocation failure (out of space)");
+  let hugeLayout: Layout = Layout::init(2000 as u64, 8 as u64);
+  let ptrHuge: *mut u8 = arena.allocate(hugeLayout);
+  check("Allocation failed (returned null)", ptrHuge == null);
+
+  printSection("Test 7: Reset arena");
+  Io::println("  Resetting arena...");
+  arena.reset();
+  check("Arena is empty after reset", arena.isEmpty());
+  check("Used is 0", arena.used() == 0);
+  check("Available equals capacity", arena.available() == arena.capacity());
+
+  printArenaStats(&arena);
+
+  printSection("Test 8: Allocate after reset");
+  let ptrAfterReset: *mut u8 = arena.allocate(layoutU64);
+  check("Allocation after reset succeeded", ptrAfterReset != null);
+
+  // Should be at the same address as the first allocation
+  Io::print("  First allocation was at: ");
+  Io::println(String::toString(ptrU64 as u64));
+  Io::print("  After reset allocated at: ");
+  Io::println(String::toString(ptrAfterReset as u64));
+  check("Same starting address", ptrAfterReset == ptrU64);
+
+  printSection("Test 9: Destroy arena");
+  printProgramBreak("Before destroy");
+  arena.destroy();
+  printProgramBreak("After destroy");
+  check("Arena pointers are null", arena.start == null);
+}
+
+function main(): i32 {
+  testHeapAllocator();
+  testArenaAllocator();
 
   printHeader("All tests completed!");
 

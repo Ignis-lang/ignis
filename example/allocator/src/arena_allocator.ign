@@ -1,0 +1,325 @@
+//!
+//! # Arena Allocator
+//!
+//! A simple bump (arena) allocator implementation that manages memory by
+//! extending the program's data segment using the `sbrk` system call.
+//!
+//! ## Overview
+//!
+//! An arena allocator is one of the simplest allocation strategies. It maintains
+//! a pointer that "bumps" forward with each allocation. Memory is obtained from
+//! the operating system by moving the program break (the end of the data segment).
+//!
+//! Unlike a general-purpose heap allocator, an arena allocator:
+//! - Does NOT track individual allocations
+//! - Does NOT support freeing individual allocations
+//! - Frees ALL memory at once when the arena is reset or destroyed
+//!
+//! ## How It Works
+//!
+//! The allocator maintains a simple pointer that advances with each allocation.
+//! No metadata is stored per-allocation, making it extremely fast.
+//!
+//! ### Memory Layout Diagram
+//!
+//! ```text
+//!                          ARENA MEMORY (grows upward →)
+//!
+//!     Arena Start                     Current Position              Arena End
+//!         │                                  │                          │
+//!         ▼                                  ▼                          ▼
+//!  ┌──────┬──────────┬──────────┬───────────┬────────────────────────────┐
+//!  │Alloc1│  Alloc2  │  Alloc3  │  Alloc4   │      Available Space       │
+//!  │      │          │          │           │                            │
+//!  └──────┴──────────┴──────────┴───────────┴────────────────────────────┘
+//!                                           │
+//!                                           └── Next allocation starts here
+//! ```
+//!
+//! ### No Per-Allocation Headers
+//!
+//! Unlike heap allocators, arena allocators don't need block headers:
+//!
+//! ```text
+//!   Heap Allocator (with headers):
+//!   ┌────────┬──────────┬────────┬──────────┬────────┬──────────┐
+//!   │ Header │  Data 1  │ Header │  Data 2  │ Header │  Data 3  │
+//!   └────────┴──────────┴────────┴──────────┴────────┴──────────┘
+//!
+//!   Arena Allocator (no headers):
+//!   ┌──────────┬──────────┬──────────┐
+//!   │  Data 1  │  Data 2  │  Data 3  │
+//!   └──────────┴──────────┴──────────┘
+//!
+//!   Less memory overhead, faster allocation!
+//! ```
+//!
+//! ## Use Cases
+//!
+//! Arena allocators are ideal for:
+//! - **Parsing**: Allocate AST nodes, free everything when done
+//! - **Frame-based allocation**: Game loops, request handling
+//! - **Temporary buffers**: Build something, use it, discard all
+//! - **Compiler passes**: Each pass allocates, then resets
+//!
+//! ## Trade-offs
+//!
+//! ### Advantages
+//! - **Extremely fast allocation**: Just bump a pointer
+//! - **No fragmentation**: Allocations are always contiguous
+//! - **No per-allocation overhead**: No headers needed
+//! - **Fast bulk deallocation**: Reset is O(1)
+//!
+//! ### Disadvantages
+//! - **Cannot free individual allocations**: All-or-nothing
+//! - **Memory held until reset**: May use more memory than needed
+//! - **Fixed or growable capacity**: Must decide growth strategy
+//!
+//! ## Safety
+//!
+//! This allocator uses **unsafe Ignis** extensively because:
+//! 1. Direct manipulation of raw pointers
+//! 2. System calls to `sbrk`
+//! 3. Manual memory management without Ignis's borrow checker guarantees
+//!
+//! Callers must ensure:
+//! - Pointers returned from `allocate` are valid until `reset` is called
+//! - After `reset`, all previously allocated pointers are invalid
+//!
+
+import Block from "./block";
+import Layout, Align from "std::memory";
+import LibC, CType from "std::libc";
+
+/// An arena (bump) allocator that manages memory using `sbrk`.
+///
+/// # Memory Management Strategy
+///
+/// The `ArenaAllocator` maintains a contiguous region of memory and a pointer
+/// that advances ("bumps") with each allocation. There are no per-allocation
+/// headers or free lists.
+///
+/// ```text
+///   ┌───────────────────────────────────────────────────────────┐
+///   │                    ArenaAllocator                         │
+///   │                                                           │
+///   │   start ─────────►┌─────────────────────────────────────┐ │
+///   │                   │ Alloc1 │ Alloc2 │ Alloc3 │ ...      │ │
+///   │   current ────────┼────────────────────────────►│       │ │
+///   │                   └─────────────────────────────────────┘ │
+///   │   end ────────────────────────────────────────────────►│  │
+///   │                                                           │
+///   └───────────────────────────────────────────────────────────┘
+/// ```
+///
+/// # Fields
+///
+/// * `start` - Pointer to the beginning of the arena
+/// * `current` - Pointer to the next available byte (bumps forward)
+/// * `end` - Pointer to the end of the allocated region
+///
+/// # Thread Safety
+///
+/// This allocator is **NOT** thread-safe. For multi-threaded usage,
+/// external synchronization (e.g., a `Mutex`) is required.
+export record ArenaAllocator {
+  /// Pointer to the start of the arena memory region.
+  public start: *mut u8;
+
+  /// Pointer to the next available byte for allocation.
+  /// This advances with each allocation.
+  current: *mut u8;
+
+  /// Pointer to the end of the arena memory region.
+  /// Allocations that would exceed this fail.
+  end: *mut u8;
+
+  /// Creates a new `ArenaAllocator` with the specified initial capacity.
+  ///
+  /// # Arguments
+  ///
+  /// * `capacity` - Initial size of the arena in bytes
+  ///
+  /// # Returns
+  ///
+  /// A new allocator instance, or one with null pointers if allocation fails.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let arena: ArenaAllocator = ArenaAllocator::init(4096);
+  /// ```
+  ///
+  /// # State Diagram
+  ///
+  /// ```text
+  ///   After init(1024):
+  ///   ┌───────────────────────────────────────┐
+  ///   │           ArenaAllocator              │
+  ///   │                                       │
+  ///   │  start ───►┌──────────────────────┐   │
+  ///   │  current ──┘                      │   │
+  ///   │                                   │   │
+  ///   │            [ 1024 bytes free ]    │   │
+  ///   │                                   │   │
+  ///   │  end ─────────────────────────────┘   │
+  ///   └───────────────────────────────────────┘
+  /// ```
+  public static init(capacity: u64): ArenaAllocator {
+    let alignedCapacity: u64 = Align::align(capacity);
+    let start: CType::CVoidPtr = LibC::sbrk(alignedCapacity as CType::IntPtrT);
+
+    if (start == (maxOf<u64>() as CType::CVoidPtr)) {
+      return ArenaAllocator {
+        start: null,
+        current: null,
+        end: null,
+      };
+    }
+
+    let startPtr: *mut u8 = start as *mut u8;
+    let endPtr: *mut u8 = ((start as u64) + alignedCapacity) as *mut u8;
+
+    return ArenaAllocator {
+      start: startPtr,
+      current: startPtr,
+      end: endPtr,
+    };
+  }
+
+  /// Allocates a block of memory with the specified layout.
+  ///
+  /// This is extremely fast: just align the current pointer and bump it forward.
+  ///
+  /// # Arguments
+  ///
+  /// * `layout` - The [`Layout`] describing size and alignment requirements
+  ///
+  /// # Returns
+  ///
+  /// * A properly aligned pointer to the allocated memory
+  /// * `null` if the arena doesn't have enough space
+  ///
+  /// # Memory Layout
+  ///
+  /// ```text
+  ///   Before allocate(16 bytes, 8-byte align):
+  ///   ┌──────────────────────────────────────────────────┐
+  ///   │ [used] │ [used] │ current ──► [    free    ]     │
+  ///   └──────────────────────────────────────────────────┘
+  ///
+  ///   After:
+  ///   ┌──────────────────────────────────────────────────┐
+  ///   │ [used] │ [used] │ [new 16B] │ current ──► [free] │
+  ///   └──────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Safety
+  ///
+  /// The returned pointer is valid until `reset()` or `destroy()` is called.
+  public allocate(&mut self, layout: Layout): *mut u8 {
+    let alignment: u64 = layout.align();
+    let size: u64 = layout.size();
+
+    // Align current pointer up to required alignment
+    let aligned: u64 = Align::alignUp(self.current as u64, alignment);
+    let newCurrent: u64 = aligned + size;
+
+    // Check if we have enough space
+    if (newCurrent > (self.end as u64)) {
+      return null;
+    }
+
+    // Bump the pointer
+    self.current = newCurrent as *mut u8;
+
+    return aligned as *mut u8;
+  }
+
+  /// Resets the arena, making all memory available for reuse.
+  ///
+  /// This is O(1) and extremely fast. All previously allocated pointers
+  /// become invalid after this call.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+  ///
+  /// // Allocate some memory
+  /// let ptr1: *mut u8 = arena.allocate(Layout::init(100, 8));
+  /// let ptr2: *mut u8 = arena.allocate(Layout::init(200, 8));
+  ///
+  /// // Reset - ptr1 and ptr2 are now INVALID
+  /// arena.reset();
+  ///
+  /// // Arena is empty again, can allocate fresh
+  /// let ptr3: *mut u8 = arena.allocate(Layout::init(100, 8));
+  /// ```
+  ///
+  /// # State Diagram
+  ///
+  /// ```text
+  ///   Before reset():
+  ///   ┌──────────────────────────────────────────────────┐
+  ///   │ start │ [used] │ [used] │ [used] │ current │ end │
+  ///   └──────────────────────────────────────────────────┘
+  ///
+  ///   After reset():
+  ///   ┌──────────────────────────────────────────────────┐
+  ///   │ start/current │ [        all free        ] │ end │
+  ///   └──────────────────────────────────────────────────┘
+  /// ```
+  ///
+  /// # Safety
+  ///
+  /// All pointers returned by previous `allocate` calls become invalid.
+  /// Using them after reset is undefined behavior.
+  public reset(&mut self): void {
+    self.current = self.start;
+  }
+
+  /// Returns the total capacity of the arena in bytes.
+  public capacity(&self): u64 {
+    return (self.end as u64) - (self.start as u64);
+  }
+
+  /// Returns the number of bytes currently in use.
+  public used(&self): u64 {
+    return (self.current as u64) - (self.start as u64);
+  }
+
+  /// Returns the number of bytes available for allocation.
+  public available(&self): u64 {
+    return (self.end as u64) - (self.current as u64);
+  }
+
+  /// Returns whether the arena is empty (no allocations).
+  public isEmpty(&self): boolean {
+    return self.current == self.start;
+  }
+
+  /// Destroys the arena and returns all memory to the OS.
+  ///
+  /// After this call, the allocator is in an invalid state and
+  /// should not be used.
+  ///
+  /// # Safety
+  ///
+  /// All pointers returned by `allocate` become invalid.
+  /// The allocator itself should not be used after this call.
+  public destroy(&mut self): void {
+    if (self.start == null) {
+      return;
+    }
+
+    let size: u64 = self.capacity();
+    let decrement: i64 = -(size as i64);
+
+    LibC::sbrk(decrement as CType::IntPtrT);
+
+    self.start = null;
+    self.current = null;
+    self.end = null;
+  }
+}
