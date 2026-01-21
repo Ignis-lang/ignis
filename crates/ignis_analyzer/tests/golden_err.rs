@@ -1177,3 +1177,52 @@ function main(): void {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+// ============================================================================
+// Error cascading prevention tests
+// ============================================================================
+
+#[test]
+fn private_field_no_cascading_errors() {
+  // When accessing a private field, only the "field is private" error should be emitted.
+  // Previously, this would also emit "Binary operator cannot be applied to types 'error' and 'null'"
+  // and "Cannot infer pointer type for null literal" as cascading errors.
+  let result = common::analyze(
+    r#"
+record Foo {
+    bar: *mut u8;
+
+    public static init(): Foo {
+        return Foo { bar: null };
+    }
+}
+
+function main(): void {
+    let foo: Foo = Foo::init();
+    if (foo.bar != null) {
+        return;
+    }
+}
+"#,
+  );
+
+  let error_codes: Vec<&str> = result
+    .output
+    .diagnostics
+    .iter()
+    .map(|d| d.error_code.as_str())
+    .collect();
+
+  // Should only have the private field error, no cascading errors
+  assert_eq!(
+    error_codes,
+    vec!["A0105"],
+    "Expected only A0105 (private field), got: {:?}",
+    error_codes
+  );
+
+  assert_snapshot!(
+    "private_field_no_cascading_errors",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}

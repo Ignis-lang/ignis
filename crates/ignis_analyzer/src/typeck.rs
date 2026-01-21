@@ -4019,6 +4019,17 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     let left_type = self.typecheck_node(&binary.left, scope_kind, ctx);
 
+    // Early return if left operand has error type to avoid cascading errors.
+    // Still typecheck right side to collect independent errors there,
+    // but mark null literals as error to prevent "cannot infer null" errors.
+    if self.types.is_error(&left_type) {
+      let right_type = self.typecheck_node(&binary.right, scope_kind, ctx);
+      if self.types.is_null_ptr(&right_type) {
+        self.set_type(&binary.right, &self.types.error());
+      }
+      return self.types.error();
+    }
+
     let right_type = match binary.operator {
       ASTBinaryOperator::Add | ASTBinaryOperator::Subtract if self.is_pointer_type(&left_type) => {
         let infer = InferContext::expecting(self.types.i64());
@@ -4030,6 +4041,11 @@ impl<'a> Analyzer<'a> {
       },
       _ => self.typecheck_node(&binary.right, scope_kind, ctx),
     };
+
+    // Early return if right operand has error type to avoid cascading errors.
+    if self.types.is_error(&right_type) {
+      return self.types.error();
+    }
 
     match binary.operator {
       ASTBinaryOperator::Add | ASTBinaryOperator::Subtract => {
@@ -5451,7 +5467,11 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" { 1 } else { 0 }
+    if first_name == "self" {
+      1
+    } else {
+      0
+    }
   }
 
   fn emit_no_overload_error(
