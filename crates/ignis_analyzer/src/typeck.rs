@@ -294,6 +294,11 @@ impl<'a> Analyzer<'a> {
 
         let iter_type = self.typecheck_node(&for_of.iter, ScopeKind::Loop, ctx);
 
+        if self.types.is_error(&iter_type) {
+          self.scopes.pop();
+          return self.types.void();
+        }
+
         let (element_type, _size) = match self.types.get(&iter_type) {
           Type::Vector { element, size } => (*element, *size),
           _ => {
@@ -330,7 +335,7 @@ impl<'a> Analyzer<'a> {
             let infer = InferContext::expecting(expected_return_type.clone());
             let value_type = self.typecheck_node_with_infer(&value, scope_kind, ctx, &infer);
 
-            if !self.types.types_equal(&expected_return_type, &value_type) {
+            if !self.types.is_error(&value_type) && !self.types.types_equal(&expected_return_type, &value_type) {
               let expected = self.format_type_for_error(&expected_return_type);
               let got = self.format_type_for_error(&value_type);
 
@@ -478,6 +483,11 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Dereference(deref) => {
         let expr_type = self.typecheck_node(&deref.inner, scope_kind, ctx);
+
+        if self.types.is_error(&expr_type) {
+          return self.types.error();
+        }
+
         let const_value = self.const_eval_expression_node(&deref.inner, scope_kind);
 
         if matches!(const_value, Some(ConstValue::Null)) {
@@ -515,7 +525,7 @@ impl<'a> Analyzer<'a> {
         let base_type = self.typecheck_node(&access.name, scope_kind, ctx);
         let index_type = self.typecheck_node(&access.index, scope_kind, ctx);
 
-        if !self.is_integer_type(&index_type) {
+        if !self.types.is_error(&index_type) && !self.is_integer_type(&index_type) {
           self.add_diagnostic(
             DiagnosticMessage::VectorIndexNonInteger {
               index_type: self.format_type_for_error(&index_type),
@@ -523,6 +533,10 @@ impl<'a> Analyzer<'a> {
             }
             .report(),
           );
+        }
+
+        if self.types.is_error(&base_type) {
+          return self.types.error();
         }
 
         match self.types.get(&base_type).clone() {
@@ -1205,6 +1219,10 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     let obj_type = self.typecheck_node(&ma.object, scope_kind, ctx);
     let obj_type = self.auto_deref(obj_type);
+
+    if self.types.is_error(&obj_type) {
+      return self.types.error();
+    }
 
     // Extract definition and optional type args for records and instances
     let (def_id, type_args) = match self.types.get(&obj_type).clone() {
@@ -2244,6 +2262,9 @@ impl<'a> Analyzer<'a> {
     if !skip_type_checking {
       let check_count = std::cmp::min(arg_types.len(), param_types.len());
       for i in 0..check_count {
+        if self.types.is_error(&arg_types[i]) {
+          continue;
+        }
         if !self.types.types_equal(&param_types[i], &arg_types[i]) {
           // Special case: deallocate accepts any *mut T, coercing to *mut u8
           if func_name == "deallocate" && i == 0 {
@@ -2452,6 +2473,13 @@ impl<'a> Analyzer<'a> {
     let obj_type = self.typecheck_node(&ma.object, scope_kind, ctx);
     let obj_type = self.auto_deref(obj_type);
 
+    if self.types.is_error(&obj_type) {
+      for arg in &call.arguments {
+        self.typecheck_node(arg, scope_kind, ctx);
+      }
+      return self.types.error();
+    }
+
     match self.types.get(&obj_type).clone() {
       Type::Record(def_id) => {
         let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
@@ -2539,6 +2567,9 @@ impl<'a> Analyzer<'a> {
               // Check argument types
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
@@ -2606,6 +2637,9 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
@@ -2726,6 +2760,9 @@ impl<'a> Analyzer<'a> {
               // Check argument types
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
@@ -2794,6 +2831,9 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
@@ -2936,6 +2976,9 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
@@ -3039,6 +3082,9 @@ impl<'a> Analyzer<'a> {
           // Check argument types against substituted payload types
           let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
           for i in 0..check_count {
+            if self.types.is_error(&arg_types[i]) {
+              continue;
+            }
             let expected_type = self.types.substitute(variant.payload[i], &subst);
             if !self.types.types_equal(&expected_type, &arg_types[i]) {
               let expected = self.format_type_for_error(&expected_type);
@@ -3118,6 +3164,9 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
@@ -3243,6 +3292,10 @@ impl<'a> Analyzer<'a> {
 
           let check_count = std::cmp::min(arg_types.len(), params.len());
           for i in 0..check_count {
+            if self.types.is_error(&arg_types[i]) {
+              continue;
+            }
+
             if !self.types.types_equal(&param_types[i], &arg_types[i]) {
               let expected = self.format_type_for_error(&param_types[i]);
               let got = self.format_type_for_error(&arg_types[i]);
@@ -3340,6 +3393,10 @@ impl<'a> Analyzer<'a> {
         // Check argument types against substituted payload types
         let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
         for i in 0..check_count {
+          if self.types.is_error(&arg_types[i]) {
+            continue;
+          }
+
           let expected_type = self.types.substitute(variant.payload[i], &subst);
           if !self.types.types_equal(&expected_type, &arg_types[i]) {
             let expected = self.format_type_for_error(&expected_type);
@@ -3441,6 +3498,10 @@ impl<'a> Analyzer<'a> {
 
         let check_count = std::cmp::min(arg_types.len(), params.len());
         for i in 0..check_count {
+          if self.types.is_error(&arg_types[i]) {
+            continue;
+          }
+
           if !self.types.types_equal(&subst_params[i], &arg_types[i]) {
             let expected = self.format_type_for_error(&subst_params[i]);
             let got = self.format_type_for_error(&arg_types[i]);
@@ -3505,6 +3566,10 @@ impl<'a> Analyzer<'a> {
     // Check argument types
     let check_count = std::cmp::min(arg_types.len(), params.len());
     for i in 0..check_count {
+      if self.types.is_error(&arg_types[i]) {
+        continue;
+      }
+
       if !self.types.types_equal(&param_types[i], &arg_types[i]) {
         let expected = self.format_type_for_error(&param_types[i]);
         let got = self.format_type_for_error(&arg_types[i]);
@@ -4019,7 +4084,6 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     let left_type = self.typecheck_node(&binary.left, scope_kind, ctx);
 
-    // Early return if left operand has error type to avoid cascading errors.
     // Still typecheck right side to collect independent errors there,
     // but mark null literals as error to prevent "cannot infer null" errors.
     if self.types.is_error(&left_type) {
@@ -4042,7 +4106,6 @@ impl<'a> Analyzer<'a> {
       _ => self.typecheck_node(&binary.right, scope_kind, ctx),
     };
 
-    // Early return if right operand has error type to avoid cascading errors.
     if self.types.is_error(&right_type) {
       return self.types.error();
     }
@@ -4244,6 +4307,10 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     let operand_type = self.typecheck_node(&unary.operand, scope_kind, ctx);
 
+    if self.types.is_error(&operand_type) {
+      return self.types.error();
+    }
+
     match unary.operator {
       UnaryOperator::Negate => {
         if self.types.is_numeric(&operand_type) {
@@ -4348,20 +4415,21 @@ impl<'a> Analyzer<'a> {
         self.typecheck_assignment(&target_type, &value_type, &assign.span);
       },
       _ => {
-        if self.types.is_numeric(&target_type) && self.types.is_numeric(&value_type) {
-          self.typecheck_common_type(&target_type, &value_type, &assign.span);
-        } else {
-          let operator_str = format!("{:?}", assign.operator);
-          let type_name = self.format_type_for_error(&target_type);
-          self.add_diagnostic(
-            DiagnosticMessage::CompoundAssignmentNonNumeric {
-              operator: operator_str,
-              type_name,
-              span: assign.span.clone(),
-            }
-            .report(),
-          );
-          self.types.error();
+        if !self.types.is_error(&target_type) && !self.types.is_error(&value_type) {
+          if self.types.is_numeric(&target_type) && self.types.is_numeric(&value_type) {
+            self.typecheck_common_type(&target_type, &value_type, &assign.span);
+          } else {
+            let operator_str = format!("{:?}", assign.operator);
+            let type_name = self.format_type_for_error(&target_type);
+            self.add_diagnostic(
+              DiagnosticMessage::CompoundAssignmentNonNumeric {
+                operator: operator_str,
+                type_name,
+                span: assign.span.clone(),
+              }
+              .report(),
+            );
+          }
         }
       },
     };
@@ -4375,6 +4443,10 @@ impl<'a> Analyzer<'a> {
     value_type: &TypeId,
     span: &Span,
   ) {
+    if self.types.is_error(target_type) || self.types.is_error(value_type) {
+      return;
+    }
+
     // Skip type checking if either type contains unsubstituted type parameters.
     // Type inference for generic calls happens during lowering, so we can't
     // verify the types at this stage.
@@ -4413,6 +4485,10 @@ impl<'a> Analyzer<'a> {
     span: &Span,
   ) {
     let target_type = self.resolve_type_syntax(target);
+
+    if self.types.is_error(&expr_type) || self.types.is_error(&target_type) {
+      return;
+    }
 
     let from_type = self.types.get(&expr_type).clone();
     let to_type = self.types.get(&target_type).clone();
