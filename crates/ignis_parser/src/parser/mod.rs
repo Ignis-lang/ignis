@@ -198,9 +198,7 @@ impl IgnisParser {
 
     self.skip_comments();
 
-    let token = self.tokens.get(cursor).unwrap();
-
-    token
+    (self.tokens.get(cursor).unwrap()) as _
   }
 
   /// Skip over comment tokens, capturing doc comments for the next declaration.
@@ -255,12 +253,11 @@ impl IgnisParser {
   /// Handles both `/// comment` and `/** comment */` styles.
   /// Preserves indentation for ASCII art diagrams in code blocks.
   fn extract_doc_content(lexeme: &str) -> String {
-    if lexeme.starts_with("///") {
+    if let Some(after_slashes) = lexeme.strip_prefix("///") {
       // Line doc comment: /// content
       // Strip "///" and optionally one space, but preserve remaining indentation
-      let after_slashes = &lexeme[3..];
-      if after_slashes.starts_with(' ') {
-        after_slashes[1..].trim_end().to_string()
+      if let Some(content) = after_slashes.strip_prefix(' ') {
+        content.trim_end().to_string()
       } else {
         after_slashes.trim_end().to_string()
       }
@@ -271,11 +268,10 @@ impl IgnisParser {
         .lines()
         .map(|line| {
           let trimmed = line.trim_start();
-          if trimmed.starts_with('*') {
-            let after_star = &trimmed[1..];
+          if let Some(after_star) = trimmed.strip_prefix('*') {
             // Strip one space after *, preserve rest
-            if after_star.starts_with(' ') {
-              after_star[1..].trim_end()
+            if let Some(content) = after_star.strip_prefix(' ') {
+              content.trim_end()
             } else {
               after_star.trim_end()
             }
@@ -296,12 +292,11 @@ impl IgnisParser {
   /// Handles both `//! comment` and `/*! comment */` styles.
   /// Preserves indentation for ASCII art diagrams in code blocks.
   fn extract_inner_doc_content(lexeme: &str) -> String {
-    if lexeme.starts_with("//!") {
+    if let Some(after_prefix) = lexeme.strip_prefix("//!") {
       // Line inner doc comment: //! content
       // Strip "//!" and optionally one space, but preserve remaining indentation
-      let after_prefix = &lexeme[3..];
-      if after_prefix.starts_with(' ') {
-        after_prefix[1..].trim_end().to_string()
+      if let Some(content) = after_prefix.strip_prefix(' ') {
+        content.trim_end().to_string()
       } else {
         after_prefix.trim_end().to_string()
       }
@@ -312,11 +307,10 @@ impl IgnisParser {
         .lines()
         .map(|line| {
           let trimmed = line.trim_start();
-          if trimmed.starts_with('*') {
-            let after_star = &trimmed[1..];
+          if let Some(after_star) = trimmed.strip_prefix('*') {
             // Strip one space after *, preserve rest
-            if after_star.starts_with(' ') {
-              after_star[1..].trim_end()
+            if let Some(content) = after_star.strip_prefix(' ') {
+              content.trim_end()
             } else {
               after_star.trim_end()
             }
@@ -354,7 +348,7 @@ impl IgnisParser {
     &self,
     id: &NodeId,
   ) -> &ASTNode {
-    &self.nodes.get(id)
+    self.nodes.get(id)
   }
 
   fn get_span(
@@ -368,10 +362,7 @@ impl IgnisParser {
     &self,
     id: &NodeId,
   ) -> bool {
-    match self.nodes.get(id) {
-      ASTNode::Expression(ASTExpression::Literal(_)) => true,
-      _ => false,
-    }
+    matches!(self.nodes.get(id), ASTNode::Expression(ASTExpression::Literal(_)))
   }
 
   #[inline]

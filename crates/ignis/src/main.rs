@@ -18,6 +18,7 @@ use ignis_driver::{
 // =============================================================================
 
 /// What we're compiling: either a project or a single file.
+#[allow(clippy::large_enum_variant)]
 enum CompileInput {
   /// Project mode: use ignis.toml configuration.
   Project(Project),

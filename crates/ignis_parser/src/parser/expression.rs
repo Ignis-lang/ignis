@@ -96,7 +96,7 @@ impl IgnisParser {
         continue;
       }
 
-      let op = self.peek().type_.clone();
+      let op = self.peek().type_;
       let Some((lbp, rbp)) = self.binding_powers(&op) else {
         break;
       };

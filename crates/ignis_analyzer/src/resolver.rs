@@ -38,7 +38,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     scope_kind: ScopeKind,
   ) {
-    let node = self.ast.get(&node_id);
+    let node = self.ast.get(node_id);
 
     match node {
       ASTNode::Statement(stmt) => self.resolve_statement(node_id, stmt, scope_kind),
@@ -100,7 +100,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Block(block) => {
         self.scopes.push(ScopeKind::Block);
         for stmt_id in &block.statements {
-          self.resolve_node(&stmt_id, ScopeKind::Block);
+          self.resolve_node(stmt_id, ScopeKind::Block);
         }
         self.scopes.pop();
       },
@@ -155,10 +155,10 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Export(export_stmt) => match export_stmt {
         ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
-          self.resolve_node(&decl, scope_kind);
+          self.resolve_node(decl, scope_kind);
         },
         ignis_ast::statements::ASTExport::Name { name, span } => {
-          if self.scopes.lookup_def(&name).is_none() {
+          if self.scopes.lookup_def(name).is_none() {
             let symbol = self.get_symbol_name(name);
             self.add_diagnostic(
               DiagnosticMessage::UndeclaredIdentifier {
@@ -190,7 +190,7 @@ impl<'a> Analyzer<'a> {
         match symbol_entry {
           Some(SymbolEntry::Single(def_id)) => {
             if let Some(nid) = node_id {
-              let def_id = def_id.clone();
+              let def_id = *def_id;
               self.set_def(nid, &def_id);
             }
           },
@@ -213,7 +213,7 @@ impl<'a> Analyzer<'a> {
         self.in_callee_context = prev;
 
         for arg in &call_expr.arguments {
-          self.resolve_node(&arg, scope_kind);
+          self.resolve_node(arg, scope_kind);
         }
       },
       ASTExpression::Binary(binary) => {
@@ -409,7 +409,7 @@ impl<'a> Analyzer<'a> {
           // Check enum variants
           if let Some(&tag) = ed.variants_by_name.get(def_name) {
             return Some(ResolvedPath::EnumVariant {
-              enum_def: def_id.clone(),
+              enum_def: *def_id,
               variant_index: tag,
             });
           }

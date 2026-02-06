@@ -1,3 +1,5 @@
+#![allow(clippy::result_unit_err)]
+
 mod api;
 mod build_layout;
 mod context;

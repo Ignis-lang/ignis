@@ -12,6 +12,12 @@ pub struct SymbolTable {
   pub map: std::collections::HashMap<String, SymbolId>,
 }
 
+impl Default for SymbolTable {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl SymbolTable {
   pub fn new() -> Self {
     SymbolTable {
@@ -25,11 +31,11 @@ impl SymbolTable {
     name: &str,
   ) -> SymbolId {
     if let Some(id) = self.map.get(name) {
-      id.clone()
+      *id
     } else {
       let id = self.symbols.alloc(Symbol { name: name.to_string() });
-      self.map.insert(name.to_string(), id.clone());
-      id.clone()
+      self.map.insert(name.to_string(), id);
+      id
     }
   }
 
@@ -45,11 +51,11 @@ impl SymbolTable {
     name: &str,
   ) -> SymbolId {
     if let Some(id) = self.map.get(name) {
-      id.clone()
+      *id
     } else {
       let id = self.symbols.alloc(Symbol { name: name.to_string() });
-      self.map.insert(name.to_string(), id.clone());
-      id.clone()
+      self.map.insert(name.to_string(), id);
+      id
     }
   }
 }

@@ -62,7 +62,7 @@ impl<'a> Analyzer<'a> {
 
       // Map the import path string span to the file of the imported module
       if let Some(file_id) = self.path_to_file.get(&import_path) {
-        self.import_module_files.insert(from_span, file_id.clone());
+        self.import_module_files.insert(from_span, *file_id);
       }
 
       let export_data = match export_table.get(&source_module) {

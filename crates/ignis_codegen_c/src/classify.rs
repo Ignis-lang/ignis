@@ -102,11 +102,11 @@ pub fn classify_def_with_std_path(
   match module_paths.get(&def.owner_module) {
     Some(ModulePath::Std(name)) => DefKind::Std(name.clone()),
     Some(ModulePath::Project(path)) => {
-      if let Some(std_dir) = std_path {
-        if path.starts_with(std_dir) {
-          let module_path = module_paths.get(&def.owner_module).unwrap();
-          return DefKind::Std(module_path.module_name());
-        }
+      if let Some(std_dir) = std_path
+        && path.starts_with(std_dir)
+      {
+        let module_path = module_paths.get(&def.owner_module).unwrap();
+        return DefKind::Std(module_path.module_name());
       }
       DefKind::User
     },

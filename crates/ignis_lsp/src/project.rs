@@ -106,10 +106,10 @@ impl ProjectManager {
     // Check cache
     {
       let cache = self.cache.read().await;
-      if let Some(cached) = cache.get(&root) {
-        if self.is_cache_fresh(&root, cached.mtime) {
-          return ProjectContext::Project(cached.resolved.clone());
-        }
+      if let Some(cached) = cache.get(&root)
+        && self.is_cache_fresh(&root, cached.mtime)
+      {
+        return ProjectContext::Project(cached.resolved.clone());
       }
     }
 

@@ -43,7 +43,7 @@ fn collect_calls(
   file_id: &FileId,
 ) -> Vec<CallInfo> {
   let mut calls = Vec::new();
-  let mut stack: Vec<NodeId> = roots.iter().cloned().collect();
+  let mut stack: Vec<NodeId> = roots.to_vec();
 
   while let Some(node_id) = stack.pop() {
     let node = nodes.get(&node_id);
@@ -60,7 +60,7 @@ fn collect_calls(
             .cloned();
 
           if let Some(def_id) = def_id {
-            let argument_ids: Vec<_> = call.arguments.iter().cloned().collect();
+            let argument_ids: Vec<_> = call.arguments.to_vec();
 
             let argument_spans: Vec<_> = call
               .arguments
@@ -82,7 +82,7 @@ fn collect_calls(
         }
 
         // ALWAYS traverse children regardless of file
-        stack.push(call.callee.clone());
+        stack.push(call.callee);
         stack.extend(call.arguments.iter().cloned());
       },
 
@@ -105,36 +105,36 @@ fn collect_expression_children(
 ) {
   match expr {
     ASTExpression::Assignment(a) => {
-      stack.push(a.target.clone());
-      stack.push(a.value.clone());
+      stack.push(a.target);
+      stack.push(a.value);
     },
     ASTExpression::Binary(b) => {
-      stack.push(b.left.clone());
-      stack.push(b.right.clone());
+      stack.push(b.left);
+      stack.push(b.right);
     },
     ASTExpression::Ternary(t) => {
-      stack.push(t.condition.clone());
-      stack.push(t.then_expr.clone());
-      stack.push(t.else_expr.clone());
+      stack.push(t.condition);
+      stack.push(t.then_expr);
+      stack.push(t.else_expr);
     },
     ASTExpression::Cast(c) => {
-      stack.push(c.expression.clone());
+      stack.push(c.expression);
     },
     ASTExpression::Call(c) => {
-      stack.push(c.callee.clone());
+      stack.push(c.callee);
       stack.extend(c.arguments.iter().cloned());
     },
     ASTExpression::Dereference(d) => {
-      stack.push(d.inner.clone());
+      stack.push(d.inner);
     },
     ASTExpression::Grouped(g) => {
-      stack.push(g.expression.clone());
+      stack.push(g.expression);
     },
     ASTExpression::Reference(r) => {
-      stack.push(r.inner.clone());
+      stack.push(r.inner);
     },
     ASTExpression::Unary(u) => {
-      stack.push(u.operand.clone());
+      stack.push(u.operand);
     },
     ASTExpression::Literal(_) => {},
     ASTExpression::Variable(_) => {},
@@ -142,22 +142,22 @@ fn collect_expression_children(
       stack.extend(v.items.iter().cloned());
     },
     ASTExpression::VectorAccess(va) => {
-      stack.push(va.name.clone());
-      stack.push(va.index.clone());
+      stack.push(va.name);
+      stack.push(va.index);
     },
     ASTExpression::Path(_) => {},
     ASTExpression::PostfixIncrement { expr, .. } => {
-      stack.push(expr.clone());
+      stack.push(*expr);
     },
     ASTExpression::PostfixDecrement { expr, .. } => {
-      stack.push(expr.clone());
+      stack.push(*expr);
     },
     ASTExpression::MemberAccess(m) => {
-      stack.push(m.object.clone());
+      stack.push(m.object);
     },
     ASTExpression::RecordInit(r) => {
       for field in &r.fields {
-        stack.push(field.value.clone());
+        stack.push(field.value);
       }
     },
   }
@@ -172,7 +172,7 @@ fn collect_statement_children(
   match stmt {
     ASTStatement::Variable(v) => {
       if let Some(value) = &v.value {
-        stack.push(value.clone());
+        stack.push(*value);
       }
     },
     ASTStatement::Expression(e) => {
@@ -182,34 +182,34 @@ fn collect_statement_children(
       stack.extend(b.statements.iter().cloned());
     },
     ASTStatement::If(i) => {
-      stack.push(i.condition.clone());
-      stack.push(i.then_block.clone());
+      stack.push(i.condition);
+      stack.push(i.then_block);
       if let Some(else_block) = &i.else_block {
-        stack.push(else_block.clone());
+        stack.push(*else_block);
       }
     },
     ASTStatement::While(w) => {
-      stack.push(w.condition.clone());
-      stack.push(w.body.clone());
+      stack.push(w.condition);
+      stack.push(w.body);
     },
     ASTStatement::For(f) => {
-      stack.push(f.initializer.clone());
-      stack.push(f.condition.clone());
-      stack.push(f.increment.clone());
-      stack.push(f.body.clone());
+      stack.push(f.initializer);
+      stack.push(f.condition);
+      stack.push(f.increment);
+      stack.push(f.body);
     },
     ASTStatement::ForOf(fo) => {
-      stack.push(fo.iter.clone());
-      stack.push(fo.body.clone());
+      stack.push(fo.iter);
+      stack.push(fo.body);
     },
     ASTStatement::Return(r) => {
       if let Some(expr) = &r.expression {
-        stack.push(expr.clone());
+        stack.push(*expr);
       }
     },
     ASTStatement::Function(f) => {
       if let Some(body) = &f.body {
-        stack.push(body.clone());
+        stack.push(*body);
       }
     },
     ASTStatement::Namespace(n) => {
@@ -219,11 +219,11 @@ fn collect_statement_children(
       for item in &r.items {
         match item {
           ASTRecordItem::Method(method) => {
-            stack.push(method.body.clone());
+            stack.push(method.body);
           },
           ASTRecordItem::Field(field) => {
             if let Some(value) = &field.value {
-              stack.push(value.clone());
+              stack.push(*value);
             }
           },
         }
@@ -233,11 +233,11 @@ fn collect_statement_children(
       for item in &e.items {
         match item {
           ASTEnumItem::Method(method) => {
-            stack.push(method.body.clone());
+            stack.push(method.body);
           },
           ASTEnumItem::Field(field) => {
             if let Some(value) = &field.value {
-              stack.push(value.clone());
+              stack.push(*value);
             }
           },
           ASTEnumItem::Variant(_) => {},
@@ -246,7 +246,7 @@ fn collect_statement_children(
     },
     ASTStatement::Constant(c) => {
       if let Some(value) = &c.value {
-        stack.push(value.clone());
+        stack.push(*value);
       }
     },
 
@@ -315,12 +315,11 @@ pub fn generate_parameter_hints(
       }
 
       // Skip if argument is a variable with the same name as the parameter
-      if let ASTNode::Expression(ASTExpression::Variable(var)) = nodes.get(arg_id) {
-        if let Some(arg_name) = symbol_names.get(&var.name) {
-          if arg_name == param_name {
-            continue;
-          }
-        }
+      if let ASTNode::Expression(ASTExpression::Variable(var)) = nodes.get(arg_id)
+        && let Some(arg_name) = symbol_names.get(&var.name)
+        && arg_name == param_name
+      {
+        continue;
       }
 
       let (line, col) = line_index.line_col_utf16(arg_span.start);

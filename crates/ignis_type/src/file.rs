@@ -63,6 +63,12 @@ pub struct SourceMap {
   by_path: HashMap<PathBuf, FileId>,
 }
 
+impl Default for SourceMap {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl SourceMap {
   pub fn new() -> Self {
     Self {
@@ -79,11 +85,11 @@ impl SourceMap {
     let path = normalize_path(path.into());
 
     if let Some(id) = self.by_path.get(&path) {
-      return id.clone();
+      return *id;
     }
 
     let id = self.files.alloc(SourceFile::new(path.clone(), text));
-    self.by_path.insert(path, id.clone());
+    self.by_path.insert(path, id);
     id
   }
 
@@ -93,8 +99,8 @@ impl SourceMap {
     text: String,
   ) -> FileId {
     let path = PathBuf::from(format!("<{}>", label));
-    let id = self.files.alloc(SourceFile::new(path, text));
-    id
+
+    self.files.alloc(SourceFile::new(path, text))
   }
 
   #[inline]
@@ -156,7 +162,7 @@ impl SourceMap {
       .unwrap_or_else(|| f.text.len());
 
     let line_str = &f.text[line_start..line_end].trim_end_matches(&['\r', '\n'][..]);
-    let caret = " ".repeat((col - 1) as usize) + &"^".repeat(span.len() as usize);
+    let caret = " ".repeat((col - 1) as usize) + &"^".repeat(span.len());
 
     format!("{:>4} | {}\n     | {}", line, line_str, caret)
   }

@@ -81,16 +81,15 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
     infer: &InferContext,
   ) -> TypeId {
-    if let Some(ty) = self.lookup_type(&node_id) {
-      return ty.clone();
+    if let Some(ty) = self.lookup_type(node_id) {
+      return *ty;
     }
 
-    let node = self.ast.get(&node_id);
+    let node = self.ast.get(node_id);
     let ty = match node {
       ASTNode::Statement(stmt) => self.typecheck_statement(node_id, stmt, scope_kind, ctx),
       ASTNode::Expression(expr) => self.typecheck_expression(node_id, expr, scope_kind, ctx, infer),
-    }
-    .clone();
+    };
 
     self.set_type(node_id, &ty);
 
@@ -115,7 +114,7 @@ impl<'a> Analyzer<'a> {
             self.types.error()
           }
         } else {
-          declared_type.clone()
+          declared_type
         };
 
         if self.types.is_null_ptr(&var_type) {
@@ -140,14 +139,14 @@ impl<'a> Analyzer<'a> {
           let def = self.defs.get_mut(&def_id);
 
           def.kind = DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
-            type_id: var_type.clone(),
+            type_id: var_type,
             mutable: var.metadata.is_mutable(),
           });
         }
 
         if let Some(value_id) = &var.value {
           if !self.types.is_infer(&declared_type) {
-            let infer = InferContext::expecting(var_type.clone());
+            let infer = InferContext::expecting(var_type);
             let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
             self.typecheck_assignment(&var_type, &value_type, &var.span);
           }
@@ -169,7 +168,7 @@ impl<'a> Analyzer<'a> {
 
         let param_ids = def_id
           .as_ref()
-          .and_then(|def_id| match &self.defs.get(&def_id).kind {
+          .and_then(|def_id| match &self.defs.get(def_id).kind {
             DefinitionKind::Function(func_def) => Some(func_def.params.clone()),
             _ => None,
           })
@@ -178,15 +177,15 @@ impl<'a> Analyzer<'a> {
         for (param, param_id) in func.signature.parameters.iter().zip(param_ids.iter()) {
           let param_type = self.resolve_type_syntax_with_span(&param.type_, &param.span);
 
-          if let DefinitionKind::Parameter(param_def) = &mut self.defs.get_mut(&param_id).kind {
-            param_def.type_id = param_type.clone();
+          if let DefinitionKind::Parameter(param_def) = &mut self.defs.get_mut(param_id).kind {
+            param_def.type_id = param_type;
             param_def.mutable = param.metadata.is_mutable();
           }
         }
 
         if let Some(def_id) = &def_id {
-          if let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(&def_id).kind {
-            func_def.return_type = return_type.clone();
+          if let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(def_id).kind {
+            func_def.return_type = return_type;
           }
         }
 
@@ -195,7 +194,7 @@ impl<'a> Analyzer<'a> {
           self.define_function_params_in_scope(def_id);
         }
 
-        let func_ctx = TypecheckContext::with_return(return_type.clone());
+        let func_ctx = TypecheckContext::with_return(return_type);
 
         if let Some(body_id) = &func.body {
           self.typecheck_node(body_id, ScopeKind::Function, &func_ctx);
@@ -215,14 +214,14 @@ impl<'a> Analyzer<'a> {
 
         if let Some(def_id) = self.lookup_def(node_id).cloned() {
           self.defs.get_mut(&def_id).kind = DefinitionKind::Constant(ignis_type::definition::ConstantDefinition {
-            type_id: const_type.clone(),
+            type_id: const_type,
             value: None,
             owner_type: None,
           });
         }
 
         if let Some(value_id) = &const_.value {
-          let infer = InferContext::expecting(const_type.clone());
+          let infer = InferContext::expecting(const_type);
           let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
           self.typecheck_assignment(&const_type, &value_type, &const_.span);
         }
@@ -330,10 +329,10 @@ impl<'a> Analyzer<'a> {
         self.types.void()
       },
       ASTStatement::Return(ret) => {
-        if let Some(expected_return_type) = ctx.expected_return.clone() {
+        if let Some(expected_return_type) = ctx.expected_return {
           if let Some(value) = &ret.expression {
-            let infer = InferContext::expecting(expected_return_type.clone());
-            let value_type = self.typecheck_node_with_infer(&value, scope_kind, ctx, &infer);
+            let infer = InferContext::expecting(expected_return_type);
+            let value_type = self.typecheck_node_with_infer(value, scope_kind, ctx, &infer);
 
             if !self.types.is_error(&value_type) && !self.types.types_equal(&expected_return_type, &value_type) {
               let expected = self.format_type_for_error(&expected_return_type);
@@ -384,7 +383,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Export(export_stmt) => {
         if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
-          self.typecheck_node(&decl, scope_kind, ctx);
+          self.typecheck_node(decl, scope_kind, ctx);
         }
 
         self.types.void()
@@ -586,7 +585,7 @@ impl<'a> Analyzer<'a> {
         let elem_type = vector
           .items
           .first()
-          .and_then(|e| self.lookup_type(e).map(|t| t.clone()))
+          .and_then(|e| self.lookup_type(e).copied())
           .unwrap_or(self.types.error());
 
         self.types.vector(elem_type, Some(vector.items.len()))
@@ -648,7 +647,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              ed.type_id.clone()
+              ed.type_id
             } else {
               self.types.error()
             }
@@ -657,7 +656,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::PostfixIncrement { expr, span } => {
-        let expr_type = self.typecheck_node(&expr, scope_kind, ctx);
+        let expr_type = self.typecheck_node(expr, scope_kind, ctx);
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node {
@@ -680,7 +679,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::PostfixDecrement { expr, span } => {
-        let expr_type = self.typecheck_node(&expr, scope_kind, ctx);
+        let expr_type = self.typecheck_node(expr, scope_kind, ctx);
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node {
@@ -721,7 +720,7 @@ impl<'a> Analyzer<'a> {
     };
 
     // Cycle detection: track that we're resolving this alias.
-    self.resolving_type_aliases.insert(def_id.clone());
+    self.resolving_type_aliases.insert(def_id);
 
     self.enter_type_params_scope(&def_id);
     let target_type = self.resolve_type_syntax_with_span(&ta.target, &ta.span);
@@ -777,12 +776,12 @@ impl<'a> Analyzer<'a> {
           if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
             if let Some(const_def_id) = rd.static_fields.get(&field.name).cloned() {
               if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
-                const_def.type_id = field_type.clone();
+                const_def.type_id = field_type;
               }
 
               // Typecheck the initializer if present
               if let Some(value_id) = &field.value {
-                let infer = InferContext::expecting(field_type.clone());
+                let infer = InferContext::expecting(field_type);
                 let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
                 self.typecheck_assignment(&field_type, &value_type, &field.span);
               }
@@ -797,7 +796,7 @@ impl<'a> Analyzer<'a> {
 
           // Update the field definition with resolved type
           if let DefinitionKind::Field(field_def) = &mut self.defs.get_mut(&def_id).kind {
-            field_def.type_id = field_type.clone();
+            field_def.type_id = field_type;
           }
 
           resolved_fields.push(RecordFieldDef {
@@ -952,12 +951,12 @@ impl<'a> Analyzer<'a> {
           if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
             if let Some(const_def_id) = ed.static_fields.get(&field.name).cloned() {
               if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
-                const_def.type_id = field_type.clone();
+                const_def.type_id = field_type;
               }
 
               // Typecheck the initializer if present
               if let Some(value_id) = &field.value {
-                let infer = InferContext::expecting(field_type.clone());
+                let infer = InferContext::expecting(field_type);
                 let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
                 self.typecheck_assignment(&field_type, &value_type, &field.span);
               }
@@ -1036,7 +1035,7 @@ impl<'a> Analyzer<'a> {
 
     // Update method definition with resolved return type
     if let DefinitionKind::Method(md) = &mut self.defs.get_mut(method_def_id).kind {
-      md.return_type = return_type.clone();
+      md.return_type = return_type;
     }
 
     // Pop method's type params scope
@@ -1053,7 +1052,7 @@ impl<'a> Analyzer<'a> {
   ) {
     // Get the return type that was resolved in resolve_method_signature
     let return_type = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
-      md.return_type.clone()
+      md.return_type
     } else {
       return;
     };
@@ -1392,7 +1391,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
             }
-            return ed.type_id.clone();
+            return ed.type_id;
           } else {
             // Variant with payload - must be called
             let variant_name = self.get_symbol_name(&ma.member);
@@ -1888,7 +1887,7 @@ impl<'a> Analyzer<'a> {
       IgnisLiteralValue::Null => {
         if let Some(expected) = &infer.expected {
           if self.is_pointer_type(expected) {
-            return expected.clone();
+            return *expected;
           }
 
           self.add_diagnostic(DiagnosticMessage::InvalidNullLiteral { span: lit.span.clone() }.report());
@@ -1911,7 +1910,7 @@ impl<'a> Analyzer<'a> {
     if let Some(expected) = &infer.expected {
       if self.is_integer_type(expected) {
         if self.signed_fits_in_type(value, expected) {
-          return expected.clone();
+          return *expected;
         } else {
           self.add_diagnostic(
             DiagnosticMessage::IntegerOverflow {
@@ -1938,7 +1937,7 @@ impl<'a> Analyzer<'a> {
     if let Some(expected) = &infer.expected {
       if self.is_integer_type(expected) {
         if self.unsigned_fits_in_type(value, expected) {
-          return expected.clone();
+          return *expected;
         } else {
           self.add_diagnostic(
             DiagnosticMessage::IntegerOverflow {
@@ -1962,7 +1961,7 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     if let Some(expected) = &infer.expected {
       if self.is_float_type(expected) {
-        return expected.clone();
+        return *expected;
       }
     }
     default
@@ -2213,7 +2212,7 @@ impl<'a> Analyzer<'a> {
         .enumerate()
         .map(|(i, arg)| {
           if let Some(param_type) = param_types.get(i) {
-            let infer = InferContext::expecting(param_type.clone());
+            let infer = InferContext::expecting(*param_type);
             self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
           } else {
             self.typecheck_node(arg, scope_kind, ctx)
@@ -2542,7 +2541,7 @@ impl<'a> Analyzer<'a> {
                 .enumerate()
                 .map(|(i, arg)| {
                   if let Some(param_type) = param_types.get(i) {
-                    let infer = InferContext::expecting(param_type.clone());
+                    let infer = InferContext::expecting(*param_type);
                     self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
                   } else {
                     self.typecheck_node(arg, scope_kind, ctx)
@@ -2735,7 +2734,7 @@ impl<'a> Analyzer<'a> {
                 .enumerate()
                 .map(|(i, arg)| {
                   if let Some(param_type) = param_types.get(i) {
-                    let infer = InferContext::expecting(param_type.clone());
+                    let infer = InferContext::expecting(*param_type);
                     self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
                   } else {
                     self.typecheck_node(arg, scope_kind, ctx)
@@ -3081,14 +3080,15 @@ impl<'a> Analyzer<'a> {
 
           // Check argument types against substituted payload types
           let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
-          for i in 0..check_count {
-            if self.types.is_error(&arg_types[i]) {
+          for (i, arg_type) in arg_types.iter().enumerate().take(check_count) {
+            if self.types.is_error(arg_type) {
               continue;
             }
+
             let expected_type = self.types.substitute(variant.payload[i], &subst);
-            if !self.types.types_equal(&expected_type, &arg_types[i]) {
+            if !self.types.types_equal(&expected_type, arg_type) {
               let expected = self.format_type_for_error(&expected_type);
-              let got = self.format_type_for_error(&arg_types[i]);
+              let got = self.format_type_for_error(arg_type);
               self.add_diagnostic(
                 DiagnosticMessage::ArgumentTypeMismatch {
                   param_idx: i + 1,
@@ -3392,15 +3392,15 @@ impl<'a> Analyzer<'a> {
 
         // Check argument types against substituted payload types
         let check_count = std::cmp::min(arg_types.len(), variant.payload.len());
-        for i in 0..check_count {
-          if self.types.is_error(&arg_types[i]) {
+        for (i, arg_type) in arg_types.iter().enumerate().take(check_count) {
+          if self.types.is_error(arg_type) {
             continue;
           }
 
           let expected_type = self.types.substitute(variant.payload[i], &subst);
-          if !self.types.types_equal(&expected_type, &arg_types[i]) {
+          if !self.types.types_equal(&expected_type, arg_type) {
             let expected = self.format_type_for_error(&expected_type);
-            let got = self.format_type_for_error(&arg_types[i]);
+            let got = self.format_type_for_error(arg_type);
             self.add_diagnostic(
               DiagnosticMessage::ArgumentTypeMismatch {
                 param_idx: i + 1,
@@ -3417,7 +3417,7 @@ impl<'a> Analyzer<'a> {
         if !type_args.is_empty() {
           return Some(self.types.instance(enum_def, type_args));
         }
-        return Some(ed.type_id);
+        Some(ed.type_id)
       },
       _ => None,
     }
@@ -3530,7 +3530,7 @@ impl<'a> Analyzer<'a> {
       .enumerate()
       .map(|(i, arg)| {
         if let Some(param_type) = param_types.get(i) {
-          let infer = InferContext::expecting(param_type.clone());
+          let infer = InferContext::expecting(*param_type);
           self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
         } else {
           self.typecheck_node(arg, scope_kind, ctx)
@@ -3789,7 +3789,7 @@ impl<'a> Analyzer<'a> {
     }
 
     let pointer_type = self.types.pointer(value_type, true);
-    let infer = InferContext::expecting(pointer_type.clone());
+    let infer = InferContext::expecting(pointer_type);
     let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &infer);
 
     if !self.types.types_equal(&arg_type, &pointer_type) {
@@ -3887,7 +3887,7 @@ impl<'a> Analyzer<'a> {
     }
 
     let pointer_type = self.types.pointer(value_type, true);
-    let ptr_infer = InferContext::expecting(pointer_type.clone());
+    let ptr_infer = InferContext::expecting(pointer_type);
     let ptr_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &ptr_infer);
 
     if !self.types.types_equal(&ptr_type, &pointer_type) {
@@ -4100,7 +4100,7 @@ impl<'a> Analyzer<'a> {
         self.typecheck_node_with_infer(&binary.right, scope_kind, ctx, &infer)
       },
       _ if self.types.is_numeric(&left_type) => {
-        let infer = InferContext::expecting(left_type.clone());
+        let infer = InferContext::expecting(left_type);
         self.typecheck_node_with_infer(&binary.right, scope_kind, ctx, &infer)
       },
       _ => self.typecheck_node(&binary.right, scope_kind, ctx),
@@ -4119,7 +4119,7 @@ impl<'a> Analyzer<'a> {
         let is_pointer_pair = self.is_pointer_type(&left_type) || self.is_pointer_type(&right_type);
 
         if self.is_pointer_type(&left_type) && self.types.types_equal(&right_type, &self.types.i64()) {
-          return left_type.clone();
+          return left_type;
         }
 
         if binary.operator == ASTBinaryOperator::Subtract {
@@ -4187,24 +4187,24 @@ impl<'a> Analyzer<'a> {
           return self.types.boolean();
         }
 
-        let mut resolved_left = left_type.clone();
-        let mut resolved_right = right_type.clone();
+        let mut resolved_left = left_type;
+        let mut resolved_right = right_type;
 
         if self.is_pointer_type(&left_type) && self.types.is_null_ptr(&right_type) {
           if self.coerce_null_literal(&binary.right, &left_type) {
-            resolved_right = left_type.clone();
+            resolved_right = left_type;
           }
         } else if self.is_pointer_type(&right_type) && self.types.is_null_ptr(&left_type) {
           if self.coerce_null_literal(&binary.left, &right_type) {
-            resolved_left = right_type.clone();
+            resolved_left = right_type;
           }
         } else if self.types.is_null_ptr(&left_type) && self.types.is_null_ptr(&right_type) {
           let void_ptr = self.types.pointer(self.types.void(), true);
           if self.coerce_null_literal(&binary.left, &void_ptr) {
-            resolved_left = void_ptr.clone();
+            resolved_left = void_ptr;
           }
           if self.coerce_null_literal(&binary.right, &void_ptr) {
-            resolved_right = void_ptr.clone();
+            resolved_right = void_ptr;
           }
         }
 
@@ -4393,7 +4393,7 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
   ) -> TypeId {
     let target_type = self.typecheck_node(&assign.target, scope_kind, ctx);
-    let infer = InferContext::expecting(target_type.clone());
+    let infer = InferContext::expecting(target_type);
     let value_type = self.typecheck_node_with_infer(&assign.value, scope_kind, ctx, &infer);
 
     let target_node = self.ast.get(&assign.target);
@@ -4536,7 +4536,7 @@ impl<'a> Analyzer<'a> {
     _span: &Span,
   ) -> TypeId {
     if self.types.types_equal(a, b) {
-      a.clone()
+      *a
     } else if self.types.is_numeric(a) && self.types.is_numeric(b) {
       if self.types.is_float(a) || self.types.is_float(b) {
         if matches!(self.types.get(a), ignis_type::types::Type::F64)
@@ -4547,9 +4547,9 @@ impl<'a> Analyzer<'a> {
           self.types.f32()
         }
       } else if self.types.is_float(a) {
-        a.clone()
+        *a
       } else {
-        b.clone()
+        *b
       }
     } else {
       self.types.error()
@@ -4643,17 +4643,17 @@ impl<'a> Analyzer<'a> {
           if let DefinitionKind::TypeAlias(alias_def) = &self.defs.get(&def_id).kind.clone() {
             // Already resolved - return the target type
             if !self.types.is_error(&alias_def.target) {
-              return alias_def.target.clone();
+              return alias_def.target;
             }
 
             // Not yet resolved - try to resolve inline using saved AST
             if let Some(syntax) = self.type_alias_syntax.get(&def_id).cloned() {
-              self.resolving_type_aliases.insert(def_id.clone());
+              self.resolving_type_aliases.insert(def_id);
               let resolved = self.resolve_type_syntax_impl(&syntax, span);
 
               // Update the definition with resolved type
               if let DefinitionKind::TypeAlias(ad) = &mut self.defs.get_mut(&def_id).kind {
-                ad.target = resolved.clone();
+                ad.target = resolved;
               }
 
               self.resolving_type_aliases.remove(&def_id);
@@ -4665,7 +4665,7 @@ impl<'a> Analyzer<'a> {
             return self.types.error();
           }
 
-          self.type_of(&def_id).clone()
+          *self.type_of(&def_id)
         } else {
           let name = self.symbols.borrow().get(symbol).to_string();
           if let Some(s) = span {
@@ -4745,17 +4745,17 @@ impl<'a> Analyzer<'a> {
 
           // Already resolved - return the target type
           if !self.types.is_error(&alias_def.target) {
-            return alias_def.target.clone();
+            return alias_def.target;
           }
 
           // Not yet resolved - try to resolve inline using saved AST
           if let Some(syntax) = self.type_alias_syntax.get(&def_id).cloned() {
-            self.resolving_type_aliases.insert(def_id.clone());
+            self.resolving_type_aliases.insert(def_id);
             let resolved = self.resolve_type_syntax_impl(&syntax, span);
 
             // Update the definition with resolved type
             if let DefinitionKind::TypeAlias(ad) = &mut self.defs.get_mut(&def_id).kind {
-              ad.target = resolved.clone();
+              ad.target = resolved;
             }
 
             self.resolving_type_aliases.remove(&def_id);
@@ -4950,12 +4950,13 @@ impl<'a> Analyzer<'a> {
     &self,
     expr: &ASTExpression,
   ) -> bool {
-    match expr {
-      ASTExpression::Variable(_) | ASTExpression::Path(_) => true,
-      ASTExpression::Dereference(_) => true,
-      ASTExpression::VectorAccess(_) => true,
-      _ => false,
-    }
+    matches!(
+      expr,
+      ASTExpression::Variable(_)
+        | ASTExpression::Path(_)
+        | ASTExpression::Dereference(_)
+        | ASTExpression::VectorAccess(_)
+    )
   }
 
   fn format_type_for_error(
@@ -5042,8 +5043,7 @@ impl<'a> Analyzer<'a> {
           _ => return format!("T{}", index),
         };
         if let Some(param_def_id) = type_params.get(*index as usize) {
-          let param_name = self.symbols.borrow().get(&self.defs.get(param_def_id).name).to_string();
-          param_name
+          self.symbols.borrow().get(&self.defs.get(param_def_id).name).to_string()
         } else {
           format!("T{}", index)
         }
@@ -5062,17 +5062,13 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     match &self.defs.get(def_id).kind {
       DefinitionKind::Function(func_def) => {
-        let param_types: Vec<TypeId> = func_def
-          .params
-          .iter()
-          .map(|param_id| self.type_of(param_id).clone())
-          .collect();
+        let param_types: Vec<TypeId> = func_def.params.iter().map(|param_id| *self.type_of(param_id)).collect();
 
         self
           .types
-          .function(param_types, func_def.return_type.clone(), func_def.is_variadic)
+          .function(param_types, func_def.return_type, func_def.is_variadic)
       },
-      _ => self.type_of(def_id).clone(),
+      _ => *self.type_of(def_id),
     }
   }
 
@@ -5270,7 +5266,7 @@ impl<'a> Analyzer<'a> {
           }
           return self.types.error();
         }
-        return self.type_of(&def_id).clone();
+        return *self.type_of(&def_id);
       },
     };
 
@@ -5291,7 +5287,7 @@ impl<'a> Analyzer<'a> {
         }
         return self.types.error();
       }
-      return self.type_of(&def_id).clone();
+      return *self.type_of(&def_id);
     }
 
     // Generic type - resolve arguments
@@ -5299,7 +5295,7 @@ impl<'a> Analyzer<'a> {
       // Generic type used without type arguments
       // This might be valid in some contexts (e.g., within the generic definition itself)
       // For now, return the base type - monomorphization will catch unresolved instances
-      return self.type_of(&def_id).clone();
+      return *self.type_of(&def_id);
     }
 
     // Check arity
@@ -5324,7 +5320,7 @@ impl<'a> Analyzer<'a> {
       .collect();
 
     if is_type_alias {
-      let target_type = self.type_of(&def_id).clone();
+      let target_type = *self.type_of(&def_id);
       let subst = Substitution::for_generic(def_id, &resolved_args);
       return self.types.substitute(target_type, &subst);
     }
@@ -5491,7 +5487,7 @@ impl<'a> Analyzer<'a> {
         .params
         .iter()
         .map(|p| {
-          let ty = self.defs.type_of(p).clone();
+          let ty = *self.defs.type_of(p);
           subst.map_or(ty, |s| self.types.substitute(ty, s))
         })
         .collect(),
@@ -5500,7 +5496,7 @@ impl<'a> Analyzer<'a> {
         md.params[start..]
           .iter()
           .map(|p| {
-            let ty = self.defs.type_of(p).clone();
+            let ty = *self.defs.type_of(p);
             subst.map_or(ty, |s| self.types.substitute(ty, s))
           })
           .collect()
@@ -5543,11 +5539,7 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" {
-      1
-    } else {
-      0
-    }
+    if first_name == "self" { 1 } else { 0 }
   }
 
   fn emit_no_overload_error(
@@ -5638,7 +5630,7 @@ impl<'a> Analyzer<'a> {
       .flat_map(|scope| {
         scope.symbols.iter().filter_map(|(name, entry)| {
           if let SymbolEntry::Overload(group) = entry {
-            Some((name.clone(), group.clone()))
+            Some((*name, group.clone()))
           } else {
             None
           }
@@ -5657,19 +5649,19 @@ impl<'a> Analyzer<'a> {
         DefinitionKind::Record(rd) => {
           for (name, entry) in &rd.instance_methods {
             if let SymbolEntry::Overload(group) = entry {
-              method_groups.push((name.clone(), group.clone()));
+              method_groups.push((*name, group.clone()));
             }
           }
           for (name, entry) in &rd.static_methods {
             if let SymbolEntry::Overload(group) = entry {
-              method_groups.push((name.clone(), group.clone()));
+              method_groups.push((*name, group.clone()));
             }
           }
         },
         DefinitionKind::Enum(ed) => {
           for (name, entry) in &ed.static_methods {
             if let SymbolEntry::Overload(group) = entry {
-              method_groups.push((name.clone(), group.clone()));
+              method_groups.push((*name, group.clone()));
             }
           }
         },

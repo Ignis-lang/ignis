@@ -153,7 +153,7 @@ impl<'a> Analyzer<'a> {
 
     let def_id = self.defs.alloc(def);
     self.set_def(node_id, &def_id);
-    self.type_alias_syntax.insert(def_id.clone(), ta.target.clone());
+    self.type_alias_syntax.insert(def_id, ta.target.clone());
 
     let type_param_defs = self.bind_type_params(ta.type_params.as_ref(), def_id);
     self.pop_type_params_scope(ta.type_params.as_ref());
@@ -717,7 +717,7 @@ impl<'a> Analyzer<'a> {
           type_id: self.types.error(),
           mutable: param.metadata.is_mutable(),
         }),
-        name: param.name.clone(),
+        name: param.name,
         span: param.span.clone(),
         name_span: param.span.clone(),
         visibility: Visibility::Private,
@@ -740,7 +740,7 @@ impl<'a> Analyzer<'a> {
 
     let def = Definition {
       kind: DefinitionKind::Function(func_def),
-      name: func.signature.name.clone(),
+      name: func.signature.name,
       span: span.clone(),
       name_span: func.signature.name_span.clone(),
       visibility: if func.signature.metadata.is_public() {
@@ -805,8 +805,8 @@ impl<'a> Analyzer<'a> {
       for param_id in &param_defs {
         let param_def = self.defs.get(param_id);
         let param_span = param_def.span.clone();
-        let name = param_def.name.clone();
-        if let Err(existing) = self.scopes.define(&name, &param_id, false) {
+        let name = param_def.name;
+        if let Err(existing) = self.scopes.define(&name, param_id, false) {
           let existing_def = self.defs.get(&existing);
           let symbol = self.get_symbol_name(&existing_def.name);
 
@@ -821,7 +821,7 @@ impl<'a> Analyzer<'a> {
         }
       }
 
-      self.bind_complete(&body_id, ScopeKind::Function);
+      self.bind_complete(body_id, ScopeKind::Function);
       self.scopes.pop(); // Pop function scope
     }
 
@@ -843,7 +843,7 @@ impl<'a> Analyzer<'a> {
 
     let def = Definition {
       kind: DefinitionKind::Variable(var_def),
-      name: var.name.clone(),
+      name: var.name,
       span: span.clone(),
       name_span: span.clone(),
       visibility: if var.metadata.is_public() {
@@ -893,7 +893,7 @@ impl<'a> Analyzer<'a> {
 
     let def = Definition {
       kind: DefinitionKind::Constant(const_def),
-      name: const_.name.clone(),
+      name: const_.name,
       span: span.clone(),
       name_span: span.clone(),
       visibility: Visibility::Private,
@@ -990,7 +990,7 @@ impl<'a> Analyzer<'a> {
 
     let def = Definition {
       kind: DefinitionKind::Variable(var_def),
-      name: for_of.binding.name.clone(),
+      name: for_of.binding.name,
       span: for_of.binding.span.clone(),
       name_span: for_of.binding.span.clone(),
       visibility: Visibility::Private,
@@ -1001,7 +1001,7 @@ impl<'a> Analyzer<'a> {
 
     let def_id = self.defs.alloc(def);
     let _ = self.scopes.define(&for_of.binding.name, &def_id, false);
-    self.for_of_binding_defs.insert(node_id.clone(), def_id);
+    self.for_of_binding_defs.insert(*node_id, def_id);
 
     self.bind_complete(&for_of.iter, ScopeKind::Loop);
     self.bind_complete(&for_of.body, ScopeKind::Loop);

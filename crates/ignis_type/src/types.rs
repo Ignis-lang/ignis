@@ -129,6 +129,12 @@ pub struct TypeStore {
   null_ptr: TypeId,
 }
 
+impl Default for TypeStore {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl TypeStore {
   pub fn new() -> Self {
     let mut store = Self {
@@ -479,11 +485,11 @@ impl TypeStore {
       return true;
     }
 
-    if self.is_error(&a) || self.is_error(&b) {
+    if self.is_error(a) || self.is_error(b) {
       return true;
     }
 
-    if self.is_infer(&a) || self.is_infer(&b) {
+    if self.is_infer(a) || self.is_infer(b) {
       return true;
     }
 

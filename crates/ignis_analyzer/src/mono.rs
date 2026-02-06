@@ -2013,9 +2013,9 @@ impl<'a> Monomorphizer<'a> {
           let result = self
             .reverse_cache
             .get(&def)
-            .and_then(|key| match key {
-              InstanceKey::Generic { args, .. } => Some(args.clone()),
-              InstanceKey::Method { owner_args, .. } => Some(owner_args.clone()),
+            .map(|key| match key {
+              InstanceKey::Generic { args, .. } => args.clone(),
+              InstanceKey::Method { owner_args, .. } => owner_args.clone(),
             })
             .unwrap_or_default();
           if is_verbose() {
@@ -2111,9 +2111,7 @@ impl<'a> Monomorphizer<'a> {
         let concrete_def = self.ensure_instantiated(&key);
 
         // Ensure reverse_cache entry exists for the concrete def
-        if !self.reverse_cache.contains_key(&concrete_def) {
-          self.reverse_cache.insert(concrete_def, key.clone());
-        }
+        self.reverse_cache.entry(concrete_def).or_insert_with(|| key.clone());
 
         let concrete_def_kind = &self.output_defs.get(&concrete_def).kind;
         match concrete_def_kind {

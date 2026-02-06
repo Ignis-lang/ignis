@@ -38,16 +38,16 @@ impl std::fmt::Display for Token {
   }
 }
 
-impl Into<IgnisLiteralValue> for &Token {
-  fn into(self) -> IgnisLiteralValue {
-    match self.type_ {
-      TokenType::Int => IgnisLiteralValue::Int32(self.lexeme.parse().unwrap_or(0)),
-      TokenType::Float => IgnisLiteralValue::Float64(self.lexeme.parse().unwrap_or(OrderedFloat::default())),
-      TokenType::Char => IgnisLiteralValue::Char(self.lexeme.chars().next().unwrap_or('\0')),
-      TokenType::String => IgnisLiteralValue::String(self.lexeme.clone()),
-      TokenType::False | TokenType::True => IgnisLiteralValue::Boolean(self.lexeme.parse().unwrap_or(false)),
-      TokenType::Hex => IgnisLiteralValue::Hex(self.lexeme.clone()),
-      TokenType::Binary => IgnisLiteralValue::Binary(self.lexeme.clone()),
+impl From<&Token> for IgnisLiteralValue {
+  fn from(val: &Token) -> Self {
+    match val.type_ {
+      TokenType::Int => IgnisLiteralValue::Int32(val.lexeme.parse().unwrap_or(0)),
+      TokenType::Float => IgnisLiteralValue::Float64(val.lexeme.parse().unwrap_or(OrderedFloat::default())),
+      TokenType::Char => IgnisLiteralValue::Char(val.lexeme.chars().next().unwrap_or('\0')),
+      TokenType::String => IgnisLiteralValue::String(val.lexeme.clone()),
+      TokenType::False | TokenType::True => IgnisLiteralValue::Boolean(val.lexeme.parse().unwrap_or(false)),
+      TokenType::Hex => IgnisLiteralValue::Hex(val.lexeme.clone()),
+      TokenType::Binary => IgnisLiteralValue::Binary(val.lexeme.clone()),
       _ => IgnisLiteralValue::Null,
     }
   }

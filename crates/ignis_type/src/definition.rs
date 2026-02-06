@@ -197,6 +197,12 @@ pub struct DefinitionStore {
   definitions: Store<Definition>,
 }
 
+impl Default for DefinitionStore {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl DefinitionStore {
   pub fn new() -> Self {
     Self {

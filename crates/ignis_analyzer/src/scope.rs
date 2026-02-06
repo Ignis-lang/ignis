@@ -31,6 +31,12 @@ pub struct ScopeTree {
   current: ScopeId,
 }
 
+impl Default for ScopeTree {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl ScopeTree {
   pub fn new() -> Self {
     let mut scopes = Store::new();
@@ -51,19 +57,19 @@ impl ScopeTree {
     kind: ScopeKind,
   ) -> ScopeId {
     let new = self.scopes.alloc(Scope {
-      parent: Some(self.current.clone()),
+      parent: Some(self.current),
       kind,
       symbols: HashMap::new(),
     });
 
-    self.current = new.clone();
+    self.current = new;
 
     new
   }
 
   pub fn pop(&mut self) {
     if let Some(parent) = &self.scopes.get(&self.current).parent {
-      self.current = parent.clone();
+      self.current = *parent;
     }
   }
 
@@ -77,13 +83,13 @@ impl ScopeTree {
 
     match scope.symbols.get_mut(name) {
       None => {
-        scope.symbols.insert(name.clone(), SymbolEntry::Single(*def));
+        scope.symbols.insert(*name, SymbolEntry::Single(*def));
         Ok(())
       },
-      Some(SymbolEntry::Single(existing)) => Err(existing.clone()),
+      Some(SymbolEntry::Single(existing)) => Err(*existing),
       Some(SymbolEntry::Overload(group)) => {
         if !is_overloadable {
-          Err(group[0].clone())
+          Err(group[0])
         } else {
           group.push(*def);
           Ok(())
@@ -116,8 +122,8 @@ impl ScopeTree {
   ) -> Option<&SymbolEntry> {
     let mut current = &self.current;
     loop {
-      let scope = self.scopes.get(&current);
-      if let Some(def) = scope.symbols.get(&name) {
+      let scope = self.scopes.get(current);
+      if let Some(def) = scope.symbols.get(name) {
         return Some(def);
       }
       match &scope.parent {
@@ -140,7 +146,7 @@ impl ScopeTree {
       let scope = self.scopes.get(current);
 
       if scope.kind == ScopeKind::Loop {
-        return Some(current.clone());
+        return Some(*current);
       }
 
       match &scope.parent {
@@ -158,7 +164,7 @@ impl ScopeTree {
     &mut self,
     scope_id: &ScopeId,
   ) {
-    self.current = scope_id.clone();
+    self.current = *scope_id;
   }
 
   pub fn get_scope(

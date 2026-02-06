@@ -101,12 +101,12 @@ impl LinkPlan {
       // libignis_std.a depends on them. Add all objects/libs from manifest.
       if let Some(m) = manifest {
         // First add ignis_rt (core runtime) - it's not a module but always needed
-        if let Some(info) = m.get_linking_info("ignis_rt") {
-          if let Some(p) = get_linkable_path(info) {
-            let link_path = std_path.join(p);
-            if !plan.objects.contains(&link_path) {
-              plan.objects.push(link_path);
-            }
+        if let Some(info) = m.get_linking_info("ignis_rt")
+          && let Some(p) = get_linkable_path(info)
+        {
+          let link_path = std_path.join(p);
+          if !plan.objects.contains(&link_path) {
+            plan.objects.push(link_path);
           }
         }
 
@@ -119,10 +119,10 @@ impl LinkPlan {
                 plan.objects.push(link_path);
               }
             }
-            if let Some(l) = &info.lib {
-              if !plan.libs.contains(l) {
-                plan.libs.push(l.clone());
-              }
+            if let Some(l) = &info.lib
+              && !plan.libs.contains(l)
+            {
+              plan.libs.push(l.clone());
             }
           }
         }
@@ -131,24 +131,24 @@ impl LinkPlan {
 
     for module_id in used_modules {
       let module = module_graph.modules.get(module_id);
-      if let Some(name) = module.path.std_module_name() {
-        if let Some(info) = module_graph.get_linking_info(name) {
-          for header in get_headers(info) {
-            if !plan.headers.iter().any(|existing| existing.path == header.path) {
-              plan.headers.push(header);
-            }
+      if let Some(name) = module.path.std_module_name()
+        && let Some(info) = module_graph.get_linking_info(name)
+      {
+        for header in get_headers(info) {
+          if !plan.headers.iter().any(|existing| existing.path == header.path) {
+            plan.headers.push(header);
           }
-          if let Some(p) = get_linkable_path(info) {
-            let link_path = std_path.join(p);
-            if !plan.objects.contains(&link_path) {
-              plan.objects.push(link_path);
-            }
+        }
+        if let Some(p) = get_linkable_path(info) {
+          let link_path = std_path.join(p);
+          if !plan.objects.contains(&link_path) {
+            plan.objects.push(link_path);
           }
-          if let Some(l) = &info.lib {
-            if !plan.libs.contains(l) {
-              plan.libs.push(l.clone());
-            }
-          }
+        }
+        if let Some(l) = &info.lib
+          && !plan.libs.contains(l)
+        {
+          plan.libs.push(l.clone());
         }
       }
     }
@@ -193,21 +193,21 @@ impl LinkPlan {
             plan.objects.push(link_path);
           }
         }
-        if let Some(l) = &info.lib {
-          if !plan.libs.contains(l) {
-            plan.libs.push(l.clone());
-          }
+        if let Some(l) = &info.lib
+          && !plan.libs.contains(l)
+        {
+          plan.libs.push(l.clone());
         }
       }
     }
 
     // Also add ignis_rt linking info (not in modules list)
-    if let Some(info) = manifest.get_linking_info("ignis_rt") {
-      if let Some(p) = get_linkable_path(info) {
-        let link_path = std_path.join(p);
-        if !plan.objects.contains(&link_path) {
-          plan.objects.push(link_path);
-        }
+    if let Some(info) = manifest.get_linking_info("ignis_rt")
+      && let Some(p) = get_linkable_path(info)
+    {
+      let link_path = std_path.join(p);
+      if !plan.objects.contains(&link_path) {
+        plan.objects.push(link_path);
       }
     }
 

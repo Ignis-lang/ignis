@@ -328,25 +328,25 @@ impl<'a> LirVerifier<'a> {
                 function: func_name.to_string(),
                 block: block_name.to_string(),
               });
-            } else if let Some(val_ty) = self.operand_type(func, val) {
-              if val_ty != ret_ty {
-                if std::env::var("IGNIS_VERBOSE").is_ok() {
-                  eprintln!(
-                    "[LIR_VERIFY] ReturnTypeMismatch in {}: expected {:?} = {:?}, actual {:?} = {:?}",
-                    func_name,
-                    ret_ty,
-                    self.types.get(&ret_ty),
-                    val_ty,
-                    self.types.get(&val_ty)
-                  );
-                }
-                self.errors.push(VerifyError::ReturnTypeMismatch {
-                  function: func_name.to_string(),
-                  block: block_name.to_string(),
-                  expected: ret_ty,
-                  actual: val_ty,
-                });
+            } else if let Some(val_ty) = self.operand_type(func, val)
+              && val_ty != ret_ty
+            {
+              if std::env::var("IGNIS_VERBOSE").is_ok() {
+                eprintln!(
+                  "[LIR_VERIFY] ReturnTypeMismatch in {}: expected {:?} = {:?}, actual {:?} = {:?}",
+                  func_name,
+                  ret_ty,
+                  self.types.get(&ret_ty),
+                  val_ty,
+                  self.types.get(&val_ty)
+                );
               }
+              self.errors.push(VerifyError::ReturnTypeMismatch {
+                function: func_name.to_string(),
+                block: block_name.to_string(),
+                expected: ret_ty,
+                actual: val_ty,
+              });
             }
           },
           None => {

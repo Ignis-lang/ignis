@@ -1,20 +1,10 @@
 use crate::{BytePosition, file::FileId};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct Span {
   pub start: BytePosition,
   pub end: BytePosition,
   pub file: FileId,
-}
-
-impl Default for Span {
-  fn default() -> Self {
-    Self {
-      start: BytePosition::default(),
-      end: BytePosition::default(),
-      file: FileId::default(),
-    }
-  }
 }
 
 impl Span {
@@ -42,7 +32,7 @@ impl Span {
   ) -> Self {
     debug_assert_eq!(a.file, b.file, "Cannot merge spans from different files");
     Self {
-      file: a.file.clone(),
+      file: a.file,
       start: a.start.min(b.start),
       end: a.end.max(b.end),
     }
@@ -69,6 +59,10 @@ impl Span {
     } else {
       0
     }
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.len() == 0
   }
 
   /// Returns true if this span is valid (start <= end).

@@ -1,3 +1,6 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::large_enum_variant)]
+
 //! Ignis Language Server Protocol implementation.
 //!
 //! This crate provides an LSP server for the Ignis programming language,

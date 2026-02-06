@@ -116,7 +116,7 @@ fn print_body(
     if let Some(label_line_text) = lines.get((label_line as usize).saturating_sub(1)) {
       println!("{:3}{:3}{}", label_line.to_string().blue().bold(), pipe, label_line_text);
 
-      let label_caret = "^".repeat(1).yellow().bold();
+      let label_caret = "^".to_string().yellow().bold();
       println!("{:3}{:3}{}{}", "", pipe, " ".repeat(label_col as usize), label_caret);
     }
   }

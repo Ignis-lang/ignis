@@ -171,12 +171,11 @@ impl ModulePath {
       ModulePath::Std(name) => name.replace("::", "_"),
       ModulePath::Project(path) => {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("module");
-        if stem == "mod" {
-          if let Some(parent) = path.parent() {
-            if let Some(dir_name) = parent.file_name().and_then(|s| s.to_str()) {
-              return dir_name.to_string();
-            }
-          }
+        if stem == "mod"
+          && let Some(parent) = path.parent()
+          && let Some(dir_name) = parent.file_name().and_then(|s| s.to_str())
+        {
+          return dir_name.to_string();
         }
         stem.to_string()
       },

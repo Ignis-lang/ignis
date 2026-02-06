@@ -284,7 +284,7 @@ impl<'a> HIRPrinter<'a> {
       .map(|param_id| {
         let param_def = self.defs.get(param_id);
         let param_name = self.symbols.get(&param_def.name);
-        let param_type = self.format_type(&self.defs.type_of(param_id));
+        let param_type = self.format_type(self.defs.type_of(param_id));
 
         if let DefinitionKind::Parameter(p) = &param_def.kind {
           if p.mutable {

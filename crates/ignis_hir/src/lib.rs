@@ -267,6 +267,12 @@ pub struct HIR {
   pub entry_point: Option<DefinitionId>,
 }
 
+impl Default for HIR {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl HIR {
   pub fn new() -> Self {
     Self {

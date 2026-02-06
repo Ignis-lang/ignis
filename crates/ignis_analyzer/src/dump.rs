@@ -194,9 +194,7 @@ pub fn dump_hir_function(
   let func_def_id = all_defs
     .iter()
     .enumerate()
-    .find(|(_, def)| {
-      matches!(&def.kind, DefinitionKind::Function(_)) && symbols.get(&def.name).to_string() == function_name
-    })
+    .find(|(_, def)| matches!(&def.kind, DefinitionKind::Function(_)) && symbols.get(&def.name) == function_name)
     .map(|(idx, _)| DefinitionId::new(idx as u32))
     .ok_or_else(|| format!("Function '{}' not found", function_name))?;
 
@@ -237,7 +235,7 @@ pub fn dump_hir_summary(
   }
 
   writeln!(&mut output, "\nFunctions with bodies:").unwrap();
-  for (def_id, _) in &hir.function_bodies {
+  for def_id in hir.function_bodies.keys() {
     let def = defs.get(def_id);
     let name = symbols.get(&def.name).to_string();
     writeln!(&mut output, "  - DefId({:?}): {}", def_id, name).unwrap();

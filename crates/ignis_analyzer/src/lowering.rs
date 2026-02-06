@@ -587,7 +587,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Variable(var) => {
         let def_id = match self.scopes.lookup_def(&var.name) {
-          Some(id) => id.clone(),
+          Some(id) => *id,
           None => {
             return hir.alloc(HIRNode {
               kind: HIRKind::Error,
@@ -601,7 +601,7 @@ impl<'a> Analyzer<'a> {
         // but they are used in expressions like sizeOf(T)
         let var_type = match &self.defs.get(&def_id).kind {
           DefinitionKind::TypeParam(tp) => self.types.param(tp.owner, tp.index),
-          _ => self.type_of(&def_id).clone(),
+          _ => *self.type_of(&def_id),
         };
 
         let hir_node = HIRNode {
@@ -672,7 +672,7 @@ impl<'a> Analyzer<'a> {
         } else {
           match callee_node {
             ASTNode::Expression(ASTExpression::Variable(var)) => match self.scopes.lookup_def(&var.name) {
-              Some(def_id) => def_id.clone(),
+              Some(def_id) => *def_id,
               None => {
                 let span = self.node_span(&call.callee).clone();
                 return hir.alloc(HIRNode {
@@ -1096,7 +1096,7 @@ impl<'a> Analyzer<'a> {
         if let Some(def_id) = def_id {
           if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
             if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
-              let field_type = stored_type.unwrap_or_else(|| field.type_id);
+              let field_type = stored_type.unwrap_or(field.type_id);
               return hir.alloc(HIRNode {
                 kind: HIRKind::FieldAccess {
                   base: derefed_base,
@@ -1920,11 +1920,11 @@ impl<'a> Analyzer<'a> {
             .collect();
 
           // Resolve explicit type arguments for the method if present
-          let type_args = call
+          let type_args: Vec<TypeId> = call
             .type_args
             .as_ref()
             .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
-            .unwrap_or_else(Vec::new);
+            .unwrap_or_default();
 
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
@@ -1968,11 +1968,11 @@ impl<'a> Analyzer<'a> {
             .collect();
 
           // Resolve explicit type arguments for the method if present
-          let type_args = call
+          let type_args: Vec<TypeId> = call
             .type_args
             .as_ref()
             .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
-            .unwrap_or_else(Vec::new);
+            .unwrap_or_default();
 
           if std::env::var("IGNIS_VERBOSE").is_ok() {
             let method_name = self.symbols.borrow().get(&self.defs.get(&method_id).name).to_string();
@@ -2084,7 +2084,7 @@ impl<'a> Analyzer<'a> {
       },
     };
 
-    let binding_type = self.defs.type_of(&binding_def_id).clone();
+    let binding_type = *self.defs.type_of(&binding_def_id);
     let (is_by_ref, is_mut_ref) = match self.types.get(&binding_type).clone() {
       Type::Reference { mutable, .. } => (true, mutable),
       _ => (false, false),

@@ -78,9 +78,9 @@ pub enum Target {
   None,
 }
 
-impl Into<TargetBackend> for Target {
-  fn into(self) -> TargetBackend {
-    match self {
+impl From<Target> for TargetBackend {
+  fn from(val: Target) -> Self {
+    match val {
       Target::C => TargetBackend::C,
       Target::Iir => TargetBackend::Iir,
       Target::None => TargetBackend::None,

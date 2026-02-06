@@ -131,8 +131,8 @@ impl CompilationContext {
     current_file: Option<&Path>,
     config: &IgnisConfig,
   ) -> Result<ModuleId, ()> {
-    let module_path = if current_file.is_some() {
-      match self.module_graph.resolve_import_path(path, current_file.unwrap()) {
+    let module_path = if let Some(current_file) = current_file {
+      match self.module_graph.resolve_import_path(path, current_file) {
         Ok(p) => p,
         Err(e) => {
           eprintln!("{} Failed to resolve import path '{}': {:?}", "Error:".red().bold(), path, e);
@@ -195,7 +195,7 @@ impl CompilationContext {
     let file_id = self.source_map.add_file(path, text);
     let src = &self.source_map.get(&file_id).text.clone();
 
-    let mut lexer = IgnisLexer::new(file_id, &src);
+    let mut lexer = IgnisLexer::new(file_id, src);
     lexer.scan_tokens();
 
     trace_dbg!(
@@ -289,8 +289,8 @@ impl CompilationContext {
     current_file: Option<&Path>,
     config: &IgnisConfig,
   ) -> Result<ModuleId, ()> {
-    let module_path = if current_file.is_some() {
-      match self.module_graph.resolve_import_path(path, current_file.unwrap()) {
+    let module_path = if let Some(current_file) = current_file {
+      match self.module_graph.resolve_import_path(path, current_file) {
         Ok(p) => p,
         Err(e) => {
           log_dbg!(config, "failed to resolve import path '{}': {:?}", path, e);
@@ -603,9 +603,9 @@ impl CompilationContext {
     let path_to_file: HashMap<String, ignis_type::file::FileId> = self
       .module_for_path
       .iter()
-      .filter_map(|(path, module_id)| {
+      .map(|(path, module_id)| {
         let module = self.module_graph.modules.get(module_id);
-        Some((path.clone(), module.file_id.clone()))
+        (path.clone(), module.file_id)
       })
       .collect();
 

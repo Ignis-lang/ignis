@@ -741,8 +741,8 @@ impl<'a> HirOwnershipChecker<'a> {
         self.states.insert(var, first);
       } else {
         // Inconsistent: check if some moved and some didn't
-        let has_moved = states.iter().any(|&s| s == OwnershipState::Moved);
-        let has_valid = states.iter().any(|&s| s == OwnershipState::Valid);
+        let has_moved = states.contains(&OwnershipState::Moved);
+        let has_valid = states.contains(&OwnershipState::Valid);
 
         if has_moved && has_valid {
           let var_name = self.get_var_name(&var);

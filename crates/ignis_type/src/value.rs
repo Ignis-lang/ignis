@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use ordered_float::OrderedFloat;
 
-fn escape_special_characters(value: &String) -> String {
+fn escape_special_characters(value: &str) -> String {
   value
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")

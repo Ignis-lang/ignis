@@ -106,17 +106,17 @@ impl<'a> LoweringContext<'a> {
       let def = self.defs.get(&def_id);
 
       // Filter by module if emit_modules is specified
-      if let Some(emit_set) = &self.emit_modules {
-        if !emit_set.contains(&def.owner_module) {
-          // Not in emit set: register as extern if it's a function or method
-          match &def.kind {
-            DefinitionKind::Function(_) | DefinitionKind::Method(_) => {
-              self.create_extern_function(def_id);
-            },
-            _ => {},
-          }
-          continue;
+      if let Some(emit_set) = &self.emit_modules
+        && !emit_set.contains(&def.owner_module)
+      {
+        // Not in emit set: register as extern if it's a function or method
+        match &def.kind {
+          DefinitionKind::Function(_) | DefinitionKind::Method(_) => {
+            self.create_extern_function(def_id);
+          },
+          _ => {},
         }
+        continue;
       }
 
       match &def.kind {
@@ -1711,10 +1711,10 @@ impl<'a> LoweringContext<'a> {
       name: None,
     });
 
-    if self.types.needs_drop(&ty) {
-      if let Some((_, locals)) = self.synthetic_owned_stack.last_mut() {
-        locals.push(local);
-      }
+    if self.types.needs_drop(&ty)
+      && let Some((_, locals)) = self.synthetic_owned_stack.last_mut()
+    {
+      locals.push(local);
     }
 
     local
@@ -1884,10 +1884,10 @@ impl<'a> LoweringContext<'a> {
     // Don't spill arguments - ownership transfers to callee
     let mut call_args = Vec::new();
 
-    if let Some(recv) = receiver {
-      if let Some(recv_op) = self.lower_hir_node(recv) {
-        call_args.push(recv_op);
-      }
+    if let Some(recv) = receiver
+      && let Some(recv_op) = self.lower_hir_node(recv)
+    {
+      call_args.push(recv_op);
     }
 
     for &arg in args {
@@ -1974,12 +1974,12 @@ impl<'a> LoweringContext<'a> {
     } else {
       // Check if this is a constant with a known value
       let def_data = self.defs.get(&def);
-      if let DefinitionKind::Constant(const_def) = &def_data.kind {
-        if let Some(value) = &const_def.value {
-          // Convert ConstValue from definition to LIR ConstValue
-          if let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty) {
-            return Some(Operand::Const(lir_const));
-          }
+      if let DefinitionKind::Constant(const_def) = &def_data.kind
+        && let Some(value) = &const_def.value
+      {
+        // Convert ConstValue from definition to LIR ConstValue
+        if let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty) {
+          return Some(Operand::Const(lir_const));
         }
       }
       // Static field/method - for functions, just return None (call will handle it)

@@ -44,7 +44,7 @@ impl<'a> IgnisLexer<'a> {
     end: usize,
   ) -> Span {
     Span {
-      file: self.file.clone(),
+      file: self.file,
       start: BytePosition(start as u32),
       end: BytePosition(end as u32),
     }
@@ -192,13 +192,13 @@ impl<'a> IgnisLexer<'a> {
     &mut self,
     expected: char,
   ) -> bool {
-    if let Some(&c) = self.chars.peek() {
-      if c == expected {
-        self.chars.next();
-        self.current += c.len_utf8();
-        self.prev = c;
-        return true;
-      }
+    if let Some(&c) = self.chars.peek()
+      && c == expected
+    {
+      self.chars.next();
+      self.current += c.len_utf8();
+      self.prev = c;
+      return true;
     }
     false
   }
@@ -429,7 +429,7 @@ impl<'a> IgnisLexer<'a> {
       }
       self.advance();
 
-      while !self.is_at_end() && !(self.peek() == '*' && self.peek_next() == '/') {
+      while !(self.is_at_end() || (self.peek() == '*' && self.peek_next() == '/')) {
         lexeme.push(self.peek());
         if self.peek() == '\n' {
           self.line += 1;
@@ -489,7 +489,7 @@ impl<'a> IgnisLexer<'a> {
 
     self
       .tokens
-      .push(Token::new(kind.clone(), literal, self.mk_span(self.start, self.current)));
+      .push(Token::new(kind, literal, self.mk_span(self.start, self.current)));
   }
 }
 

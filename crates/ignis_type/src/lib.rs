@@ -159,11 +159,16 @@ impl<T> Store<T> {
     self.data.is_empty()
   }
 
-  pub fn into_iter(self) -> impl Iterator<Item = T> {
-    self.data.into_iter()
-  }
-
   pub fn iter(&self) -> impl Iterator<Item = (Id<T>, &T)> {
     self.data.iter().enumerate().map(|(i, v)| (Id::new(i as u32), v))
+  }
+}
+
+impl<T> IntoIterator for Store<T> {
+  type Item = T;
+  type IntoIter = std::vec::IntoIter<T>;
+
+  fn into_iter(self) -> Self::IntoIter {
+    self.data.into_iter()
   }
 }

@@ -161,12 +161,13 @@ impl<'a> CEmitter<'a> {
           // Monomorphized functions (mangled names with __) are emitted only in the entry module
           // to avoid duplicate definitions across user modules.
           let name = self.symbols.get(&def.name);
-          if name.contains("__") && !name.starts_with("__") {
-            if let Some(entry_id) = self.program.entry_point {
-              let entry_def = self.defs.get(&entry_id);
-              if entry_def.owner_module == target_module_id {
-                return true;
-              }
+          if name.contains("__")
+            && !name.starts_with("__")
+            && let Some(entry_id) = self.program.entry_point
+          {
+            let entry_def = self.defs.get(&entry_id);
+            if entry_def.owner_module == target_module_id {
+              return true;
             }
           }
 
@@ -422,36 +423,36 @@ impl<'a> CEmitter<'a> {
       if let DefinitionKind::Record(rd) = &def.kind {
         let type_name = self.build_mangled_name(def_id);
         for (&field_name_sym, &const_def_id) in &rd.static_fields {
-          if let DefinitionKind::Constant(const_def) = &self.defs.get(&const_def_id).kind {
-            if let Some(value) = &const_def.value {
-              let field_name = self.symbols.get(&field_name_sym);
-              let c_type = self.format_type(const_def.type_id);
-              let c_value = self.const_value_to_c(value, &const_def.type_id);
-              let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
-              constants.push((
-                const_def_id,
-                format!("static const {} {} = {};", c_type, full_name, c_value),
-                full_name,
-              ));
-            }
+          if let DefinitionKind::Constant(const_def) = &self.defs.get(&const_def_id).kind
+            && let Some(value) = &const_def.value
+          {
+            let field_name = self.symbols.get(&field_name_sym);
+            let c_type = self.format_type(const_def.type_id);
+            let c_value = self.const_value_to_c(value, &const_def.type_id);
+            let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
+            constants.push((
+              const_def_id,
+              format!("static const {} {} = {};", c_type, full_name, c_value),
+              full_name,
+            ));
           }
         }
       }
       if let DefinitionKind::Enum(ed) = &def.kind {
         let type_name = self.build_mangled_name(def_id);
         for (&field_name_sym, &const_def_id) in &ed.static_fields {
-          if let DefinitionKind::Constant(const_def) = &self.defs.get(&const_def_id).kind {
-            if let Some(value) = &const_def.value {
-              let field_name = self.symbols.get(&field_name_sym);
-              let c_type = self.format_type(const_def.type_id);
-              let c_value = self.const_value_to_c(value, &const_def.type_id);
-              let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
-              constants.push((
-                const_def_id,
-                format!("static const {} {} = {};", c_type, full_name, c_value),
-                full_name,
-              ));
-            }
+          if let DefinitionKind::Constant(const_def) = &self.defs.get(&const_def_id).kind
+            && let Some(value) = &const_def.value
+          {
+            let field_name = self.symbols.get(&field_name_sym);
+            let c_type = self.format_type(const_def.type_id);
+            let c_value = self.const_value_to_c(value, &const_def.type_id);
+            let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
+            constants.push((
+              const_def_id,
+              format!("static const {} {} = {};", c_type, full_name, c_value),
+              full_name,
+            ));
           }
         }
       }
@@ -766,10 +767,10 @@ impl<'a> CEmitter<'a> {
           return;
         }
 
-        if matches!(op, BinaryOperation::Equal | BinaryOperation::NotEqual) {
-          if self.emit_enum_comparison(func, *dest, op, left, right) {
-            return;
-          }
+        if matches!(op, BinaryOperation::Equal | BinaryOperation::NotEqual)
+          && self.emit_enum_comparison(func, *dest, op, left, right)
+        {
+          return;
         }
 
         let l = self.format_operand(func, left);
@@ -818,10 +819,10 @@ impl<'a> CEmitter<'a> {
         let source_ty = self.operand_type(func, source);
         let target_ty_info = self.types.get(target_type);
 
-        let source_is_ptr = source_ty.map_or(false, |t| matches!(self.types.get(&t), Type::Pointer { .. }));
+        let source_is_ptr = source_ty.is_some_and(|t| matches!(self.types.get(&t), Type::Pointer { .. }));
         let target_is_ptr = matches!(target_ty_info, Type::Pointer { .. });
         let target_is_int = self.types.is_integer(target_type);
-        let source_is_int = source_ty.map_or(false, |t| self.types.is_integer(&t));
+        let source_is_int = source_ty.is_some_and(|t| self.types.is_integer(&t));
 
         if source_is_ptr && target_is_int {
           // Pointer -> integer: use (target_type)(uintptr_t)(ptr)
@@ -991,7 +992,7 @@ impl<'a> CEmitter<'a> {
           // C main must return int - if we're in main with void return, emit return 0
           let is_main = self
             .current_fn_id
-            .map_or(false, |id| Some(id) == self.program.entry_point && self.def_name(id) == "main");
+            .is_some_and(|id| Some(id) == self.program.entry_point && self.def_name(id) == "main");
           if is_main {
             writeln!(self.output, "return 0;").unwrap();
           } else {
@@ -1056,9 +1057,7 @@ impl<'a> CEmitter<'a> {
     func: &FunctionLir,
     op: &Operand,
   ) -> bool {
-    self
-      .operand_type(func, op)
-      .map_or(false, |t| self.type_contains_infer(t))
+    self.operand_type(func, op).is_some_and(|t| self.type_contains_infer(t))
   }
 
   fn format_const(
@@ -1131,9 +1130,9 @@ impl<'a> CEmitter<'a> {
     let right_ty = self.operand_type(func, right);
     let dest_ty = func.temp_type(dest);
 
-    let is_left_ptr = left_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer { .. }));
-    let is_right_ptr = right_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::Pointer { .. }));
-    let is_right_i64 = right_ty.map_or(false, |ty| matches!(self.types.get(&ty), Type::I64));
+    let is_left_ptr = left_ty.is_some_and(|ty| matches!(self.types.get(&ty), Type::Pointer { .. }));
+    let is_right_ptr = right_ty.is_some_and(|ty| matches!(self.types.get(&ty), Type::Pointer { .. }));
+    let is_right_i64 = right_ty.is_some_and(|ty| matches!(self.types.get(&ty), Type::I64));
 
     let l = self.format_operand(func, left);
     let r = self.format_operand(func, right);
@@ -2169,10 +2168,8 @@ fn has_overloads_standalone(
         if target_owner_type == def_owner_type {
           count += 1;
         }
-      } else {
-        if def.owner_namespace == target_ns && def_owner_type.is_none() {
-          count += 1;
-        }
+      } else if def.owner_namespace == target_ns && def_owner_type.is_none() {
+        count += 1;
       }
 
       if count > 1 {

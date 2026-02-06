@@ -148,10 +148,10 @@ impl OpenDoc {
     &mut self,
     hints: Vec<InlayHint>,
   ) {
-    if let Some(cache) = &mut self.cached_analysis {
-      if cache.version == self.version {
-        cache.hints = Some(hints);
-      }
+    if let Some(cache) = &mut self.cached_analysis
+      && cache.version == self.version
+    {
+      cache.hints = Some(hints);
     }
   }
 
@@ -187,7 +187,7 @@ impl OpenDoc {
     }
 
     // Compute tokens
-    let mut lexer = IgnisLexer::new(file_id.clone(), &self.text);
+    let mut lexer = IgnisLexer::new(*file_id, &self.text);
     lexer.scan_tokens();
 
     self.cached_tokens = Some(CachedTokens {

@@ -66,32 +66,32 @@ fn write_dump_output(
   file_name: &str,
   content: &str,
 ) -> Result<(), ()> {
-  if let Some(build_config) = config.build_config.as_ref() {
-    if let Some(dump_dir) = &build_config.dump_dir {
-      let output_dir = Path::new(dump_dir);
-      if let Err(e) = std::fs::create_dir_all(output_dir) {
-        eprintln!(
-          "{} Failed to create dump directory '{}': {}",
-          "Error:".red().bold(),
-          output_dir.display(),
-          e
-        );
-        return Err(());
-      }
-
-      let output_path = output_dir.join(file_name);
-      if let Err(e) = std::fs::write(&output_path, content) {
-        eprintln!(
-          "{} Failed to write dump file '{}': {}",
-          "Error:".red().bold(),
-          output_path.display(),
-          e
-        );
-        return Err(());
-      }
-
-      return Ok(());
+  if let Some(build_config) = config.build_config.as_ref()
+    && let Some(dump_dir) = &build_config.dump_dir
+  {
+    let output_dir = Path::new(dump_dir);
+    if let Err(e) = std::fs::create_dir_all(output_dir) {
+      eprintln!(
+        "{} Failed to create dump directory '{}': {}",
+        "Error:".red().bold(),
+        output_dir.display(),
+        e
+      );
+      return Err(());
     }
+
+    let output_path = output_dir.join(file_name);
+    if let Err(e) = std::fs::write(&output_path, content) {
+      eprintln!(
+        "{} Failed to write dump file '{}': {}",
+        "Error:".red().bold(),
+        output_path.display(),
+        e
+      );
+      return Err(());
+    }
+
+    return Ok(());
   }
 
   println!("\n{}", content);
@@ -159,16 +159,15 @@ fn write_compile_file_dumps(
     write_dump_output(config, "dump-hir-summary.txt", &summary_dump)?;
   }
 
-  if let Some(build_config) = config.build_config.as_ref() {
-    if let Some(func_name) = &build_config.dump_hir {
-      match ignis_analyzer::dump::dump_hir_function(&output.analyzer.hir, &output.analyzer.defs, &sym_table, func_name)
-      {
-        Ok(dump) => {
-          let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
-          write_dump_output(config, &file_name, &dump)?;
-        },
-        Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
-      }
+  if let Some(build_config) = config.build_config.as_ref()
+    && let Some(func_name) = &build_config.dump_hir
+  {
+    match ignis_analyzer::dump::dump_hir_function(&output.analyzer.hir, &output.analyzer.defs, &sym_table, func_name) {
+      Ok(dump) => {
+        let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
+        write_dump_output(config, &file_name, &dump)?;
+      },
+      Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
     }
   }
 
@@ -330,15 +329,15 @@ pub fn compile_project(
       write_dump_output(&config, "dump-hir-summary.txt", &summary_dump)?;
     }
 
-    if let Some(build_config) = config.build_config.as_ref() {
-      if let Some(func_name) = &build_config.dump_hir {
-        match ignis_analyzer::dump::dump_hir_function(&output.hir, &output.defs, &sym_table, func_name) {
-          Ok(out) => {
-            let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
-            write_dump_output(&config, &file_name, &out)?;
-          },
-          Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
-        }
+    if let Some(build_config) = config.build_config.as_ref()
+      && let Some(func_name) = &build_config.dump_hir
+    {
+      match ignis_analyzer::dump::dump_hir_function(&output.hir, &output.defs, &sym_table, func_name) {
+        Ok(out) => {
+          let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
+          write_dump_output(&config, &file_name, &out)?;
+        },
+        Err(err) => eprintln!("{} {}", "Error:".red().bold(), err),
       }
     }
 
@@ -866,17 +865,17 @@ pub fn compile_project(
             PathBuf::from(path)
           } else {
             let output_dir = Path::new(&bc.output_dir);
-            if !output_dir.exists() {
-              if let Err(e) = std::fs::create_dir_all(output_dir) {
-                cmd_fail!(&config, "Build failed", start.elapsed());
-                eprintln!(
-                  "{} Failed to create output directory '{}': {}",
-                  "Error:".red().bold(),
-                  bc.output_dir,
-                  e
-                );
-                return Err(());
-              }
+            if !output_dir.exists()
+              && let Err(e) = std::fs::create_dir_all(output_dir)
+            {
+              cmd_fail!(&config, "Build failed", start.elapsed());
+              eprintln!(
+                "{} Failed to create output directory '{}': {}",
+                "Error:".red().bold(),
+                bc.output_dir,
+                e
+              );
+              return Err(());
             }
             output_dir.join(format!("{}.c", base_name))
           };
@@ -993,7 +992,7 @@ pub fn build_std(
 
   let mut ctx = CompilationContext::new(&config);
 
-  for (module_name, _) in &config.manifest.modules {
+  for module_name in config.manifest.modules.keys() {
     if let Err(()) = ctx.discover_std_module(module_name, &config) {
       cmd_fail!(&config, "Build failed", start.elapsed());
       eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
@@ -1298,22 +1297,22 @@ pub fn check_std(
   section!(&config, "Scanning & parsing");
 
   let output_path = Path::new(output_dir);
-  if !output_path.exists() {
-    if let Err(e) = std::fs::create_dir_all(output_path) {
-      cmd_fail!(&config, "Check failed", start.elapsed());
-      eprintln!(
-        "{} Failed to create output directory '{}': {}",
-        "Error:".red().bold(),
-        output_path.display(),
-        e
-      );
-      return Err(());
-    }
+  if !output_path.exists()
+    && let Err(e) = std::fs::create_dir_all(output_path)
+  {
+    cmd_fail!(&config, "Check failed", start.elapsed());
+    eprintln!(
+      "{} Failed to create output directory '{}': {}",
+      "Error:".red().bold(),
+      output_path.display(),
+      e
+    );
+    return Err(());
   }
 
   let mut ctx = CompilationContext::new(&config);
 
-  for (module_name, _) in &config.manifest.modules {
+  for module_name in config.manifest.modules.keys() {
     if let Err(()) = ctx.discover_std_module(module_name, &config) {
       cmd_fail!(&config, "Check failed", start.elapsed());
       eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
@@ -1480,10 +1479,10 @@ fn collect_c_files(
       let path = entry.path();
       if path.is_dir() {
         collect_c_files(&path, out);
-      } else if let Some(ext) = path.extension() {
-        if ext == "c" {
-          out.push(path);
-        }
+      } else if let Some(ext) = path.extension()
+        && ext == "c"
+      {
+        out.push(path);
       }
     }
   }

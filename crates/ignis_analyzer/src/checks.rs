@@ -59,7 +59,7 @@ impl<'a> Analyzer<'a> {
     in_loop: bool,
     in_function: bool,
   ) {
-    let node = self.ast.get(&node_id);
+    let node = self.ast.get(node_id);
 
     match node {
       ASTNode::Statement(stmt) => self.extra_checks_statement(node_id, stmt, scope_kind, in_loop, in_function),
@@ -80,7 +80,7 @@ impl<'a> Analyzer<'a> {
         let def_id = self.define_decl_in_current_scope(node_id);
         if let Some(body_id) = &func.body {
           if let Some(def_id) = &def_id {
-            let return_type = self.types.get(self.type_of(&def_id));
+            let return_type = self.types.get(self.type_of(def_id));
             let is_void = return_type == &ignis_type::types::Type::Void;
 
             if !is_void && self.check_termination(*body_id) != Termination::Always {
@@ -346,7 +346,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Vector(vector) => {
         for elem in &vector.items {
-          self.extra_checks_node(&elem, scope_kind, in_loop, in_function);
+          self.extra_checks_node(elem, scope_kind, in_loop, in_function);
         }
       },
       ASTExpression::Path(_) => {},

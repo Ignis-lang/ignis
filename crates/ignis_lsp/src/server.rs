@@ -137,7 +137,7 @@ impl Server {
 
         // Cache LineIndex per file_id to avoid O(diags) constructions
         let line_index = line_indexes
-          .entry(file_id.clone())
+          .entry(*file_id)
           .or_insert_with(|| LineIndex::new(output.source_map.get(file_id).text.clone()));
 
         let lsp_diag = convert_diagnostic(diag, line_index);
@@ -160,10 +160,10 @@ impl Server {
     // Check if the document version changed during analysis (abort if stale)
     {
       let guard = self.state.open_files.read().await;
-      if let Some(doc) = guard.get(uri) {
-        if doc.version != version {
-          return;
-        }
+      if let Some(doc) = guard.get(uri)
+        && doc.version != version
+      {
+        return;
       }
     }
 
@@ -449,12 +449,12 @@ impl LanguageServer for Server {
 
     // Handle ignis.toml specially
     if uri.path().ends_with("ignis.toml") {
-      if let Ok(path) = uri.to_file_path() {
-        if let Some(root) = path.parent() {
-          self.state.project_manager.set_toml_override(root, text).await;
-          self.publish_toml_diagnostics(root).await;
-          self.reanalyze_project_files(root).await;
-        }
+      if let Ok(path) = uri.to_file_path()
+        && let Some(root) = path.parent()
+      {
+        self.state.project_manager.set_toml_override(root, text).await;
+        self.publish_toml_diagnostics(root).await;
+        self.reanalyze_project_files(root).await;
       }
       return;
     }
@@ -477,12 +477,12 @@ impl LanguageServer for Server {
 
     // Handle ignis.toml specially
     if uri.path().ends_with("ignis.toml") {
-      if let Ok(path) = uri.to_file_path() {
-        if let Some(root) = path.parent() {
-          self.state.project_manager.set_toml_override(root, change.text).await;
-          self.publish_toml_diagnostics(root).await;
-          self.reanalyze_project_files(root).await;
-        }
+      if let Ok(path) = uri.to_file_path()
+        && let Some(root) = path.parent()
+      {
+        self.state.project_manager.set_toml_override(root, change.text).await;
+        self.publish_toml_diagnostics(root).await;
+        self.reanalyze_project_files(root).await;
       }
       return;
     }
@@ -499,13 +499,13 @@ impl LanguageServer for Server {
 
     // Handle ignis.toml specially
     if uri.path().ends_with("ignis.toml") {
-      if let Ok(path) = uri.to_file_path() {
-        if let Some(root) = path.parent() {
-          self.state.project_manager.clear_toml_override(root).await;
-          // Clear TOML diagnostics and re-analyze with disk version
-          self.client.publish_diagnostics(uri, vec![], None).await;
-          self.reanalyze_project_files(root).await;
-        }
+      if let Ok(path) = uri.to_file_path()
+        && let Some(root) = path.parent()
+      {
+        self.state.project_manager.clear_toml_override(root).await;
+        // Clear TOML diagnostics and re-analyze with disk version
+        self.client.publish_diagnostics(uri, vec![], None).await;
+        self.reanalyze_project_files(root).await;
       }
       return;
     }
@@ -525,17 +525,17 @@ impl LanguageServer for Server {
     for change in params.changes {
       // Handle ignis.toml changes
       if change.uri.path().ends_with("ignis.toml") {
-        if let Ok(path) = change.uri.to_file_path() {
-          if let Some(root) = path.parent() {
-            // Only invalidate cache if TOML is not open in editor
-            // (open files use in-memory override)
-            let has_override = self.state.project_manager.has_toml_override(root).await;
+        if let Ok(path) = change.uri.to_file_path()
+          && let Some(root) = path.parent()
+        {
+          // Only invalidate cache if TOML is not open in editor
+          // (open files use in-memory override)
+          let has_override = self.state.project_manager.has_toml_override(root).await;
 
-            if !has_override {
-              self.state.project_manager.invalidate(root).await;
-              self.publish_toml_diagnostics(root).await;
-              should_reanalyze = true;
-            }
+          if !has_override {
+            self.state.project_manager.invalidate(root).await;
+            self.publish_toml_diagnostics(root).await;
+            should_reanalyze = true;
           }
         }
         continue;
@@ -634,7 +634,7 @@ impl LanguageServer for Server {
           let size = span.end.0 - span.start.0;
           if size < smallest_size {
             smallest_size = size;
-            found = Some(def_id.clone());
+            found = Some(*def_id);
           }
         }
       }
@@ -658,7 +658,7 @@ impl LanguageServer for Server {
         let span_size = span.end.0 - span.start.0;
         if span_size < smallest_span_size {
           smallest_span_size = span_size;
-          found_node = Some(node_id.clone());
+          found_node = Some(*node_id);
         }
       }
     }
@@ -733,7 +733,7 @@ impl LanguageServer for Server {
     // This prevents showing hover for the enclosing item when hovering over doc comments
     {
       let source_text = output.source_map.get(&file_id).text.as_str();
-      let mut lexer = ignis_parser::IgnisLexer::new(file_id.clone(), source_text);
+      let mut lexer = ignis_parser::IgnisLexer::new(file_id, source_text);
       lexer.scan_tokens();
 
       for token in &lexer.tokens {
@@ -796,7 +796,7 @@ impl LanguageServer for Server {
         let span_size = span.end.0 - span.start.0;
         if span_size < smallest_span_size {
           smallest_span_size = span_size;
-          found_node = Some(node_id.clone());
+          found_node = Some(*node_id);
         }
       }
     }
@@ -815,7 +815,7 @@ impl LanguageServer for Server {
           let size = span.end.0 - span.start.0;
           if size < smallest_size {
             smallest_size = size;
-            found_import = Some((span.clone(), def_id.clone(), size));
+            found_import = Some((span.clone(), *def_id, size));
           }
         }
       }
@@ -983,10 +983,10 @@ impl LanguageServer for Server {
     // Check for cached hints first
     {
       let guard = self.state.open_files.read().await;
-      if let Some(doc) = guard.get(uri) {
-        if let Some(hints) = doc.get_cached_hints() {
-          return Ok(Some(hints.clone()));
-        }
+      if let Some(doc) = guard.get(uri)
+        && let Some(hints) = doc.get_cached_hints()
+      {
+        return Ok(Some(hints.clone()));
       }
     }
 
@@ -1094,7 +1094,7 @@ impl LanguageServer for Server {
         let uri = Url::from_file_path(&file.path).ok()?;
 
         let line_index = line_indexes
-          .entry(def.span.file.clone())
+          .entry(def.span.file)
           .or_insert_with(|| LineIndex::new(file.text.clone()));
         let range = line_index.span_to_range(&def.span);
 
@@ -1268,7 +1268,7 @@ impl LanguageServer for Server {
           let size = span.end.0 - span.start.0;
           if size < smallest_size {
             smallest_size = size;
-            found = Some(def_id.clone());
+            found = Some(*def_id);
           }
         }
       }
@@ -1290,7 +1290,7 @@ impl LanguageServer for Server {
           let span_size = span.end.0 - span.start.0;
           if span_size < smallest_span_size {
             smallest_span_size = span_size;
-            found_node = Some(node_id.clone());
+            found_node = Some(*node_id);
           }
         }
       }
@@ -1321,7 +1321,7 @@ impl LanguageServer for Server {
 
       if let Ok(def_uri) = Url::from_file_path(&file.path) {
         let li = line_indexes
-          .entry(def.span.file.clone())
+          .entry(def.span.file)
           .or_insert_with(|| LineIndex::new(file.text.clone()));
         let range = li.span_to_range(&def.name_span);
         locations.push(Location { uri: def_uri, range });
@@ -1339,7 +1339,7 @@ impl LanguageServer for Server {
 
         if let Ok(ref_uri) = Url::from_file_path(&file.path) {
           let li = line_indexes
-            .entry(span.file.clone())
+            .entry(span.file)
             .or_insert_with(|| LineIndex::new(file.text.clone()));
           let range = li.span_to_range(span);
           locations.push(Location { uri: ref_uri, range });
@@ -1358,7 +1358,7 @@ impl LanguageServer for Server {
 
         if let Ok(ref_uri) = Url::from_file_path(&file.path) {
           let li = line_indexes
-            .entry(span.file.clone())
+            .entry(span.file)
             .or_insert_with(|| LineIndex::new(file.text.clone()));
           let range = li.span_to_range(span);
           locations.push(Location { uri: ref_uri, range });
@@ -1376,7 +1376,7 @@ impl LanguageServer for Server {
 
       if let Ok(ref_uri) = Url::from_file_path(&file.path) {
         let li = line_indexes
-          .entry(span.file.clone())
+          .entry(span.file)
           .or_insert_with(|| LineIndex::new(file.text.clone()));
         let range = li.span_to_range(span);
         locations.push(Location { uri: ref_uri, range });
@@ -1456,10 +1456,10 @@ impl LanguageServer for Server {
         // Cache it
         {
           let mut guard = self.state.open_files.write().await;
-          if let Some(doc) = guard.get_mut(uri) {
-            if doc.version == version {
-              doc.set_cached_analysis(version, Arc::clone(&fresh));
-            }
+          if let Some(doc) = guard.get_mut(uri)
+            && doc.version == version
+          {
+            doc.set_cached_analysis(version, Arc::clone(&fresh));
           }
         }
 
@@ -1478,9 +1478,7 @@ impl LanguageServer for Server {
     // Wrap sync computation in catch_unwind to prevent panics from killing the server
     let uri_str = uri.to_string();
     let result = catch_unwind(AssertUnwindSafe(|| {
-      let Some(context) = detect_context(&tokens, cursor_offset, &text) else {
-        return None;
-      };
+      let context = detect_context(&tokens, cursor_offset, &text)?;
 
       let candidates = match &context {
         CompletionContext::AfterDot { dot_offset, prefix } => {
@@ -1497,7 +1495,7 @@ impl LanguageServer for Server {
           record_name,
           assigned_fields,
           prefix,
-        } => complete_record_init(&record_name, &assigned_fields, &prefix, &output, &file_id),
+        } => complete_record_init(record_name, assigned_fields, prefix, &output, &file_id),
       };
 
       if candidates.is_empty() {
@@ -1563,9 +1561,9 @@ fn build_document_symbol(
 
       // Add sub-namespaces (recursively)
       let ns = output.namespaces.get(&ns_def.namespace_id);
-      for (_, child_ns_id) in &ns.children {
-        if let Some(child_def_id) = ns_to_def.get(child_ns_id) {
-          if let Some(child_sym) = build_document_symbol(
+      for child_ns_id in ns.children.values() {
+        if let Some(child_def_id) = ns_to_def.get(child_ns_id)
+          && let Some(child_sym) = build_document_symbol(
             child_def_id,
             output,
             file_id,
@@ -1573,9 +1571,9 @@ fn build_document_symbol(
             defs_by_namespace,
             ns_to_def,
             visited_namespaces,
-          ) {
-            children.push(child_sym);
-          }
+          )
+        {
+          children.push(child_sym);
         }
       }
 
@@ -1618,7 +1616,7 @@ fn build_document_symbol(
       }
 
       // Add instance methods
-      for (_, entry) in &record_def.instance_methods {
+      for entry in record_def.instance_methods.values() {
         for method_def_id in symbol_entry_to_def_ids(entry) {
           if let Some(method_sym) = build_method_symbol(&method_def_id, output, file_id, line_index) {
             children.push(method_sym);
@@ -1627,7 +1625,7 @@ fn build_document_symbol(
       }
 
       // Add static methods
-      for (_, entry) in &record_def.static_methods {
+      for entry in record_def.static_methods.values() {
         for method_def_id in symbol_entry_to_def_ids(entry) {
           if let Some(method_sym) = build_method_symbol(&method_def_id, output, file_id, line_index) {
             children.push(method_sym);
@@ -1636,7 +1634,7 @@ fn build_document_symbol(
       }
 
       // Add static fields (constants)
-      for (_, const_def_id) in &record_def.static_fields {
+      for const_def_id in record_def.static_fields.values() {
         if let Some(const_sym) = build_constant_symbol(const_def_id, output, file_id, line_index) {
           children.push(const_sym);
         }
@@ -1656,7 +1654,7 @@ fn build_document_symbol(
       }
 
       // Add static methods
-      for (_, entry) in &enum_def.static_methods {
+      for entry in enum_def.static_methods.values() {
         for method_def_id in symbol_entry_to_def_ids(entry) {
           if let Some(method_sym) = build_method_symbol(&method_def_id, output, file_id, line_index) {
             children.push(method_sym);
@@ -1665,7 +1663,7 @@ fn build_document_symbol(
       }
 
       // Add static fields (constants)
-      for (_, const_def_id) in &enum_def.static_fields {
+      for const_def_id in enum_def.static_fields.values() {
         if let Some(const_sym) = build_constant_symbol(const_def_id, output, file_id, line_index) {
           children.push(const_sym);
         }
@@ -1917,20 +1915,14 @@ fn format_type(
         format_type(types, defs, symbol_names, ret)
       )
     },
-    Type::Record(def_id) => {
-      let name = symbol_names
-        .get(&defs.get(def_id).name)
-        .cloned()
-        .unwrap_or_else(|| "?".to_string());
-      name
-    },
-    Type::Enum(def_id) => {
-      let name = symbol_names
-        .get(&defs.get(def_id).name)
-        .cloned()
-        .unwrap_or_else(|| "?".to_string());
-      name
-    },
+    Type::Record(def_id) => symbol_names
+      .get(&defs.get(def_id).name)
+      .cloned()
+      .unwrap_or_else(|| "?".to_string()),
+    Type::Enum(def_id) => symbol_names
+      .get(&defs.get(def_id).name)
+      .cloned()
+      .unwrap_or_else(|| "?".to_string()),
     Type::Param { index, .. } => {
       format!("T{}", index)
     },
@@ -2117,11 +2109,11 @@ fn format_definition_hover(
   let mut result = String::new();
 
   // Add location path at the top (like rust-analyzer shows module path)
-  if let Some(ref loc_path) = location_path {
-    if !loc_path.is_empty() {
-      result.push_str(loc_path);
-      result.push_str("\n\n");
-    }
+  if let Some(ref loc_path) = location_path
+    && !loc_path.is_empty()
+  {
+    result.push_str(loc_path);
+    result.push_str("\n\n");
   }
 
   result.push_str(&signature);

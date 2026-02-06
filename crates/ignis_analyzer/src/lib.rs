@@ -1,3 +1,8 @@
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::too_many_arguments)]
+
 macro_rules! with_for_of_scope {
   ($self:expr, $node_id:expr, $for_of:expr, $body:block) => {{
     $self.scopes.push(ScopeKind::Loop);
@@ -152,7 +157,7 @@ impl AnalyzerOutput {
 
     for (def_id, def) in self.defs.iter() {
       if def.visibility == Visibility::Public {
-        exports.insert(def.name.clone(), def_id);
+        exports.insert(def.name, def_id);
       }
     }
 
@@ -335,7 +340,7 @@ impl<'a> Analyzer<'a> {
     &self,
     node_id: &NodeId,
   ) -> Option<&TypeId> {
-    self.node_types.get(&node_id)
+    self.node_types.get(node_id)
   }
 
   fn set_type(
@@ -343,7 +348,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     type_id: &TypeId,
   ) {
-    self.node_types.insert(node_id.clone(), type_id.clone());
+    self.node_types.insert(*node_id, *type_id);
   }
 
   fn lookup_def(
@@ -358,7 +363,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     def_id: &DefinitionId,
   ) {
-    self.node_defs.insert(node_id.clone(), def_id.clone());
+    self.node_defs.insert(*node_id, *def_id);
   }
 
   fn set_import_item_def(
@@ -366,7 +371,7 @@ impl<'a> Analyzer<'a> {
     span: &ignis_type::span::Span,
     def_id: &DefinitionId,
   ) {
-    self.import_item_defs.insert(span.clone(), def_id.clone());
+    self.import_item_defs.insert(span.clone(), *def_id);
   }
 
   fn lookup_import_item_def(
@@ -388,7 +393,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     def_id: DefinitionId,
   ) {
-    self.resolved_calls.insert(node_id.clone(), def_id);
+    self.resolved_calls.insert(*node_id, def_id);
   }
 
   fn define_decl_in_current_scope(
@@ -396,12 +401,12 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
   ) -> Option<DefinitionId> {
     let def_id = match self.lookup_def(node_id) {
-      Some(id) => id.clone(),
+      Some(id) => *id,
       None => {
         return None;
       },
     };
-    let name = self.defs.get(&def_id).name.clone();
+    let name = self.defs.get(&def_id).name;
 
     // Only functions are overloadable - records, types, etc. are not
     let is_overloadable = matches!(
@@ -409,7 +414,7 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Function(_) | DefinitionKind::Method(_)
     );
 
-    let current_scope_id = self.scopes.current().clone();
+    let current_scope_id = *self.scopes.current();
     let scope = self.scopes.get_scope(&current_scope_id);
 
     if let Some(existing_entry) = scope.symbols.get(&name) {
@@ -457,7 +462,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     def_id: &DefinitionId,
   ) {
-    let params = match &self.defs.get(&def_id).kind {
+    let params = match &self.defs.get(def_id).kind {
       DefinitionKind::Function(func_def) => func_def.params.clone(),
       DefinitionKind::Method(method_def) => method_def.params.clone(),
       _ => Vec::new(),
@@ -526,7 +531,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     node_id: &NodeId,
   ) {
-    let node = self.ast.get(&node_id);
+    let node = self.ast.get(node_id);
     if let ASTNode::Statement(stmt) = node {
       self.define_root_statement(node_id, stmt);
     }
@@ -557,7 +562,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Export(export_stmt) => match export_stmt {
         ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
-          self.define_root(&decl);
+          self.define_root(decl);
         },
         ignis_ast::statements::ASTExport::Name { .. } => {},
       },
@@ -661,7 +666,7 @@ fn build_node_spans(
   // Add spans for all nodes with definitions
   for node_id in node_defs.keys() {
     if let Some(span) = get_node_span(ast, node_id) {
-      spans.insert(node_id.clone(), span);
+      spans.insert(*node_id, span);
     }
   }
 
@@ -669,7 +674,7 @@ fn build_node_spans(
   for node_id in node_types.keys() {
     if !spans.contains_key(node_id) {
       if let Some(span) = get_node_span(ast, node_id) {
-        spans.insert(node_id.clone(), span);
+        spans.insert(*node_id, span);
       }
     }
   }

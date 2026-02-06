@@ -23,7 +23,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     scope_kind: ScopeKind,
   ) {
-    let node = self.ast.get(&node_id);
+    let node = self.ast.get(node_id);
 
     match node {
       ASTNode::Statement(stmt) => self.const_eval_statement(node_id, stmt, scope_kind),
@@ -139,7 +139,7 @@ impl<'a> Analyzer<'a> {
     use ignis_diagnostics::message::DiagnosticMessage;
 
     let record_def_id = match self.lookup_def(node_id) {
-      Some(id) => id.clone(),
+      Some(id) => *id,
       None => return,
     };
 
@@ -188,7 +188,7 @@ impl<'a> Analyzer<'a> {
     use ignis_diagnostics::message::DiagnosticMessage;
 
     let enum_def_id = match self.lookup_def(node_id) {
-      Some(id) => id.clone(),
+      Some(id) => *id,
       None => return,
     };
 
@@ -230,7 +230,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     scope_kind: ScopeKind,
   ) -> Option<ConstValue> {
-    let node = self.ast.get(&node_id);
+    let node = self.ast.get(node_id);
 
     match node {
       ASTNode::Expression(expr) => match expr {
@@ -315,7 +315,7 @@ fn const_value_from_literal(value: &IgnisLiteralValue) -> ConstValue {
     IgnisLiteralValue::UnsignedInt32(i) => ConstValue::Int(*i as i64),
     IgnisLiteralValue::UnsignedInt64(i) => ConstValue::Int(*i as i64),
     IgnisLiteralValue::Float32(f) => ConstValue::Float(OrderedFloat::from(f.into_inner() as f64)),
-    IgnisLiteralValue::Float64(f) => ConstValue::Float(f.clone()),
+    IgnisLiteralValue::Float64(f) => ConstValue::Float(*f),
     IgnisLiteralValue::Boolean(b) => ConstValue::Bool(*b),
     IgnisLiteralValue::Char(c) => ConstValue::Char(*c),
     IgnisLiteralValue::String(s) => ConstValue::String(s.clone()),

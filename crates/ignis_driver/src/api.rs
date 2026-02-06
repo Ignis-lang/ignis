@@ -327,10 +327,7 @@ pub fn analyze_project_with_options(
   }
 
   // Discover all modules using LSP mode (collects diagnostics, doesn't fail early)
-  let root_id = match ctx.discover_modules_lsp(entry_path, config) {
-    Ok(id) => Some(id),
-    Err(()) => None,
-  };
+  let root_id = ctx.discover_modules_lsp(entry_path, config).ok();
 
   // Collect discovery diagnostics (lex/parse errors)
   all_diagnostics.extend(std::mem::take(&mut ctx.discovery_diagnostics));

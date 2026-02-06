@@ -178,10 +178,10 @@ pub fn detect_context(
     }
 
     // Check for record initializer context: `RecordName { field: val, |`
-    if prev.type_ == TokenType::Comma || prev.type_ == TokenType::LeftBrace {
-      if let Some(ctx) = detect_record_init_context(&meaningful, prev, current_token, cursor_offset, source_text) {
-        return Some(ctx);
-      }
+    if (prev.type_ == TokenType::Comma || prev.type_ == TokenType::LeftBrace)
+      && let Some(ctx) = detect_record_init_context(&meaningful, prev, current_token, cursor_offset, source_text)
+    {
+      return Some(ctx);
     }
   }
 
@@ -325,11 +325,12 @@ fn extract_prefix_at_cursor(
   current_token: Option<&Token>,
   cursor_offset: u32,
 ) -> String {
-  if let Some(tok) = current_token {
-    if tok.type_ == TokenType::Identifier && tok.span.start.0 <= cursor_offset {
-      let end = (cursor_offset - tok.span.start.0) as usize;
-      return tok.lexeme.chars().take(end).collect();
-    }
+  if let Some(tok) = current_token
+    && tok.type_ == TokenType::Identifier
+    && tok.span.start.0 <= cursor_offset
+  {
+    let end = (cursor_offset - tok.span.start.0) as usize;
+    return tok.lexeme.chars().take(end).collect();
   }
   String::new()
 }
@@ -360,12 +361,10 @@ fn collect_path_segments_backwards(
       } else {
         break;
       }
+    } else if tok.type_ == TokenType::DoubleColon {
+      expect_ident = true;
     } else {
-      if tok.type_ == TokenType::DoubleColon {
-        expect_ident = true;
-      } else {
-        break;
-      }
+      break;
     }
   }
 
@@ -462,7 +461,7 @@ pub fn complete_record_init(
     .iter()
     .find(|(_, def)| {
       matches!(&def.kind, DefinitionKind::Record(_))
-        && output.symbol_names.get(&def.name).map_or(false, |n| n == record_name)
+        && output.symbol_names.get(&def.name).is_some_and(|n| n == record_name)
         && is_visible(def, file_id)
     })
     .map(|(id, _)| id)
@@ -578,7 +577,7 @@ fn find_receiver_type_by_span(
   // Get type of receiver
   let type_id = output.node_types.get(node_id)?;
 
-  Some(type_id.clone())
+  Some(*type_id)
 }
 
 /// Find receiver type by looking up the identifier token before the dot.
@@ -620,10 +619,10 @@ fn find_receiver_type_by_token(
 
     match &def.kind {
       DefinitionKind::Variable(var_def) => {
-        return Some(var_def.type_id.clone());
+        return Some(var_def.type_id);
       },
       DefinitionKind::Parameter(param_def) => {
-        return Some(param_def.type_id.clone());
+        return Some(param_def.type_id);
       },
       _ => continue,
     }
@@ -1056,7 +1055,7 @@ fn add_snippet_completions(
   };
 
   // Restrict snippet triggers to empty or exact keyword match to avoid noise
-  let is_alphabetic = prefix.chars().next().map_or(false, |c| c.is_alphabetic());
+  let is_alphabetic = prefix.chars().next().is_some_and(|c| c.is_alphabetic());
   let exact_keyword = matches!(
     prefix,
     "if"
@@ -1375,9 +1374,7 @@ fn resolve_path_to_def(
 
   // Navigate remaining segments
   for segment in &path[1..] {
-    let Some(def_id) = current_def_id else {
-      return None;
-    };
+    let def_id = current_def_id?;
 
     let def = output.defs.get(&def_id);
 
@@ -1387,15 +1384,15 @@ fn resolve_path_to_def(
 
         // Look for child namespace
         for (sym_id, child_ns_id) in &ns.children {
-          if let Some(name) = output.symbol_names.get(sym_id) {
-            if name == segment {
-              // Find the definition for this namespace
-              for (d_id, d) in output.defs.iter() {
-                if let DefinitionKind::Namespace(child_ns_def) = &d.kind {
-                  if child_ns_def.namespace_id == *child_ns_id {
-                    return Some(d_id);
-                  }
-                }
+          if let Some(name) = output.symbol_names.get(sym_id)
+            && name == segment
+          {
+            // Find the definition for this namespace
+            for (d_id, d) in output.defs.iter() {
+              if let DefinitionKind::Namespace(child_ns_def) = &d.kind
+                && child_ns_def.namespace_id == *child_ns_id
+              {
+                return Some(d_id);
               }
             }
           }
@@ -1403,12 +1400,12 @@ fn resolve_path_to_def(
 
         // Look for definition in namespace
         for (sym_id, entry) in &ns.definitions {
-          if let Some(name) = output.symbol_names.get(sym_id) {
-            if name == segment {
-              match entry {
-                SymbolEntry::Single(id) => return Some(*id),
-                SymbolEntry::Overload(ids) => return ids.first().copied(),
-              }
+          if let Some(name) = output.symbol_names.get(sym_id)
+            && name == segment
+          {
+            match entry {
+              SymbolEntry::Single(id) => return Some(*id),
+              SymbolEntry::Overload(ids) => return ids.first().copied(),
             }
           }
         }
@@ -1456,7 +1453,7 @@ fn add_namespace_members(
   let ns = output.namespaces.get(ns_id);
 
   // Child namespaces
-  for (sym_id, _child_ns_id) in &ns.children {
+  for sym_id in ns.children.keys() {
     let Some(name) = output.symbol_names.get(sym_id) else {
       continue;
     };
@@ -1616,13 +1613,13 @@ fn def_to_completion_info(
 
       for p_id in &func_def.params {
         let p_def = defs.get(p_id);
-        if let Some(p_name) = symbol_names.get(&p_def.name) {
-          if let DefinitionKind::Parameter(param) = &p_def.kind {
-            let type_str = format_type_brief(types, defs, symbol_names, &param.type_id);
-            param_details.push(format!("{}: {}", p_name, type_str));
-            snippet_args.push(format!("${{{}:{}}}", idx, p_name));
-            idx += 1;
-          }
+        if let Some(p_name) = symbol_names.get(&p_def.name)
+          && let DefinitionKind::Parameter(param) = &p_def.kind
+        {
+          let type_str = format_type_brief(types, defs, symbol_names, &param.type_id);
+          param_details.push(format!("{}: {}", p_name, type_str));
+          snippet_args.push(format!("${{{}:{}}}", idx, p_name));
+          idx += 1;
         }
       }
 

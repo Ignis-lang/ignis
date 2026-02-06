@@ -60,10 +60,10 @@ impl BuildLayout {
     &self,
     source_path: &Path,
   ) -> PathBuf {
-    if let Some(root) = &self.project_root {
-      if let Ok(rel) = source_path.strip_prefix(root) {
-        return rel.to_path_buf();
-      }
+    if let Some(root) = &self.project_root
+      && let Ok(rel) = source_path.strip_prefix(root)
+    {
+      return rel.to_path_buf();
     }
     source_path.to_path_buf()
   }
@@ -361,12 +361,11 @@ pub fn write_if_changed(
   path: &Path,
   content: &str,
 ) -> io::Result<bool> {
-  if path.exists() {
-    if let Ok(existing) = std::fs::read_to_string(path) {
-      if existing == content {
-        return Ok(false);
-      }
-    }
+  if path.exists()
+    && let Ok(existing) = std::fs::read_to_string(path)
+    && existing == content
+  {
+    return Ok(false);
   }
   if let Some(parent) = path.parent() {
     std::fs::create_dir_all(parent)?;
