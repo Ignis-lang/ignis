@@ -1,0 +1,104 @@
+//!
+//! # Pointer Module
+//!
+//! Thin wrapper for raw pointers with small utility methods.
+//!
+//! ## Overview
+//!
+//! `Pointer<T>` does not add ownership or safety guarantees.
+//! It only groups common pointer operations into a single record API.
+
+export record Pointer<T> {
+  address: *mut T;
+
+  /// Creates a null pointer.
+  public static init(): Pointer<T> {
+    return Pointer {
+      address: null,
+    };
+  }
+
+  /// Creates a pointer from a mutable raw pointer.
+  public static init(address: *mut T): Pointer<T> {
+    return Pointer {
+      address: address,
+    };
+  }
+
+  /// Creates a pointer from a const raw pointer.
+  public static fromConst(address: *T): Pointer<T> {
+    return Pointer {
+      address: address as *mut T,
+    };
+  }
+
+  /// Returns whether this pointer is null.
+  public isNull(&self): boolean {
+    return self.address == null;
+  }
+
+  /// Returns this pointer as immutable raw pointer.
+  public asPtr(&self): *T {
+    return self.address as *T;
+  }
+
+  /// Returns this pointer as mutable raw pointer.
+  public asMutPtr(&self): *mut T {
+    return self.address;
+  }
+
+  /// Returns the pointer address as an integer.
+  public toAddress(&self): u64 {
+    return self.address as u64;
+  }
+
+  /// Replaces the wrapped raw pointer.
+  public set(&mut self, address: *mut T): void {
+    self.address = address;
+  }
+
+  /// Returns a new pointer offset by `count` elements.
+  public offset(&self, count: i64): Pointer<T> {
+    return Pointer::init(self.address + count);
+  }
+
+  /// Returns a new pointer moved forward by `count` elements.
+  public add(&self, count: u64): Pointer<T> {
+    return Pointer::init(self.address + (count as i64));
+  }
+
+  /// Returns a new pointer moved backward by `count` elements.
+  public sub(&self, count: u64): Pointer<T> {
+    return Pointer::init(self.address - (count as i64));
+  }
+
+  /// Returns the distance to another pointer in elements.
+  public distance(&self, other: Pointer<T>): i64 {
+    return self.address - other.address;
+  }
+
+  /// Reads the value pointed to by this pointer.
+  public read(&self): T {
+    return *self.address;
+  }
+
+  /// Writes a value through this pointer.
+  public write(&mut self, value: T): void {
+    *self.address = value;
+  }
+
+  /// Reads the value at `index` elements from this pointer.
+  public readAt(&self, index: i64): T {
+    return *(self.address + index);
+  }
+
+  /// Writes `value` at `index` elements from this pointer.
+  public writeAt(&mut self, index: i64, value: T): void {
+    *(self.address + index) = value;
+  }
+
+  /// Checks whether two pointers refer to the same address.
+  public equals(&self, other: Pointer<T>): boolean {
+    return self.address == other.address;
+  }
+}
