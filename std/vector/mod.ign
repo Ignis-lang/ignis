@@ -1,11 +1,93 @@
+//!
+//! # Vector Module
+//!
+//! Growable contiguous array backed by `std::memory`.
+//!
+//! ## Overview
+//!
+//! `Vector<T>` stores elements in a contiguous heap allocation and grows
+//! capacity geometrically (`x2`) when needed.
+//!
+//! - `length` is the number of initialized elements
+//! - `capacity` is the number of elements that can be stored without reallocating
+//! - `data` points to the first element (or `null` when empty)
+//!
+//! ## Growth Strategy
+//!
+//! ```text
+//!   push() when length == capacity
+//!   ┌──────────────────────────────────────────────────────────────────────┐
+//!   │ old capacity = N                                                     │
+//!   │ new capacity = max(1, N * 2)                                         │
+//!   │ reallocate buffer to new capacity                                    │
+//!   └──────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Safety Notes
+//!
+//! This container performs manual memory management and raw pointer writes.
+//! It does not run element destructors automatically.
+//!
+//! Call `free()` when the vector is no longer needed.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Vector from "std::vector";
+//! import String from "std::string";
+//! import Io from "std::io";
+//!
+//! function main(): i32 {
+//!   let mut values: Vector<i32> = Vector::init<i32>();
+//!   values.push(10);
+//!   values.push(20);
+//!
+//!   Io::println(String::concat("len=", String::toString(values.length())));
+//!   Io::println(String::concat("cap=", String::toString(values.capacity())));
+//!
+//!   values.pop();
+//!   values.free();
+//!   return 0;
+//! }
+//! ```
+
 import Option from "std::types";
 import Memory from "std::memory";
 
+/// Growable contiguous array of `T`.
+///
+/// # Example
+///
+/// ```ignis
+/// import Vector from "std::vector";
+///
+/// function main(): i32 {
+///   let mut values: Vector<i32> = Vector::init<i32>();
+///   values.push(1);
+///   values.push(2);
+///   values.free();
+///   return 0;
+/// }
+/// ```
 export record Vector<T> {
+  /// Pointer to the backing storage (or `null` when empty).
   data: *mut T;
+
+  /// Number of initialized elements.
   length: u64;
+
+  /// Number of elements that fit without reallocation.
   capacity: u64;
 
+  /// Creates an empty vector with zero capacity.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let v: Vector<i32> = Vector::init<i32>();
+  /// ```
   public static init(): Vector<T> {
     return Vector {
       data: null,
@@ -14,6 +96,15 @@ export record Vector<T> {
     };
   }
 
+  /// Creates an empty vector with preallocated `capacity` elements.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let v: Vector<i32> = Vector::init<i32>(16);
+  /// ```
   public static init(capacity: u64): Vector<T> {
     return Vector {
       data: Memory::allocateVector<T>(capacity),
@@ -22,22 +113,68 @@ export record Vector<T> {
     };
   }
 
+  /// Returns the current number of elements.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(10);
+  /// let len: u64 = v.length();
+  /// v.free();
+  /// ```
   public length(&self): u64 {
     return self.length;
   }
 
+  /// Returns the currently reserved capacity.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let v: Vector<i32> = Vector::init<i32>(8);
+  /// let cap: u64 = v.capacity();
+  /// ```
   public capacity(&self): u64 {
     return self.capacity;
   }
 
+  /// Returns `true` when `length == 0`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let v: Vector<i32> = Vector::init<i32>();
+  /// let empty: boolean = v.isEmpty();
+  /// ```
   public isEmpty(&self): boolean {
     return self.length == 0;
   }
 
+  /// Removes all logical elements without releasing capacity.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(2);
+  /// v.clear();
+  /// v.free();
+  /// ```
   public clear(&mut self): void {
     self.length = 0;
   }
 
+  /// Grows the backing storage using geometric growth.
   private grow(&mut self): void {
     let mut newCapacity: u64 = self.capacity * 2;
     if (newCapacity == 0) {
@@ -53,6 +190,17 @@ export record Vector<T> {
     self.capacity = newCapacity;
   }
 
+  /// Appends `value` at the end of the vector.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(42);
+  /// v.free();
+  /// ```
   public push(&mut self, value: T): void {
     if (self.length == self.capacity) {
       self.grow();
@@ -63,6 +211,19 @@ export record Vector<T> {
     self.length += 1;
   }
 
+  /// Removes and returns the last element, or `Option::NONE` if empty.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  /// import Option from "std::types";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(7);
+  /// let x: Option<i32> = v.pop();
+  /// v.free();
+  /// ```
   public pop(&mut self): Option<T> {
     if (self.length == 0) {
       return Option::NONE;
@@ -72,6 +233,19 @@ export record Vector<T> {
     }
   }
 
+  /// Returns an immutable reference to `index`, if it exists.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  /// import Option from "std::types";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(9);
+  /// let item: Option<&i32> = v.get(0);
+  /// v.free();
+  /// ```
   public get(&self, index: u64): Option<&T> {
     if (index < self.length) {
       return Option::SOME(&self.data[index]);
@@ -80,6 +254,19 @@ export record Vector<T> {
     }
   }
 
+  /// Returns a mutable reference to `index`, if it exists.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  /// import Option from "std::types";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// let item: Option<&mut i32> = v.getMut(0);
+  /// v.free();
+  /// ```
   public getMut(&mut self, index: u64): Option<&mut T> {
     if (index < self.length) {
       return Option::SOME(&mut self.data[index]);
@@ -88,14 +275,49 @@ export record Vector<T> {
     }
   }
 
+  /// Returns the backing pointer as immutable raw pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(10);
+  /// let ptr: *i32 = v.asPtr();
+  /// v.free();
+  /// ```
   public asPtr(&self): *T {
     return self.data as *T;
   }
 
+  /// Returns the backing pointer as mutable raw pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(10);
+  /// let ptr: *mut i32 = v.asMutPtr();
+  /// v.free();
+  /// ```
   public asMutPtr(&mut self): *mut T {
     return self.data;
   }
 
+  /// Releases the backing storage and resets length/capacity to zero.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.free();
+  /// ```
   public free(&mut self): void {
     if (self.data != null) {
       Memory::free(self.data);

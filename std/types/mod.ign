@@ -2,6 +2,42 @@
 //! # Types Module
 //!
 //! Core runtime type identifiers and fundamental sum types.
+//!
+//! ## Contents
+//!
+//! - `Type::TypeId`: runtime identifiers mirrored from the runtime layer
+//! - `Result<T, E>`: success/error sum type
+//! - `Option<S>`: presence/absence sum type
+//!
+//! These types are intentionally minimal and suitable for std-wide reuse.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Option, Result from "std::types";
+//! import Io from "std::io";
+//!
+//! function maybeName(flag: boolean): Option<string> {
+//!   if (flag) {
+//!     return Option::SOME("ignis");
+//!   }
+//!
+//!   return Option::NONE;
+//! }
+//!
+//! function parseOk(): Result<i32, string> {
+//!   return Result::OK(10);
+//! }
+//!
+//! function main(): i32 {
+//!   let name: Option<string> = maybeName(true);
+//!   let result: Result<i32, string> = parseOk();
+//!
+//!   // Handle with pattern matching in user code.
+//!   Io::println("types ready");
+//!   return 0;
+//! }
+//! ```
 extern __types {
     const TYPE_I8_ID: u32;
     const TYPE_I16_ID: u32;
@@ -21,6 +57,20 @@ extern __types {
 
 export namespace Type {
   /// Runtime type identifiers mirrored from the Ignis runtime.
+  ///
+  /// These constants are useful for diagnostics, low-level tooling and FFI
+  /// integrations that need stable runtime tags.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Type from "std::types";
+  ///
+  /// function main(): i32 {
+  ///   let id: u32 = Type::TypeId::I32;
+  ///   return id as i32;
+  /// }
+  /// ```
   namespace TypeId {
     const I8: u32 = __types::TYPE_I8_ID;
     const I16: u32 = __types::TYPE_I16_ID;
@@ -40,12 +90,44 @@ export namespace Type {
 }
 
 /// Result type that models either success (`OK`) or failure (`ERROR`).
+///
+/// Use this when an operation can fail and callers should handle both paths.
+///
+/// # Example
+///
+/// ```ignis
+/// import Result from "std::types";
+///
+/// function parse(flag: boolean): Result<i32, string> {
+///   if (flag) {
+///     return Result::OK(10);
+///   }
+///
+///   return Result::ERROR("invalid");
+/// }
+/// ```
 export enum Result<T, E> {
   OK(T),
   ERROR(E),
 }
 
 /// Option type that models presence (`SOME`) or absence (`NONE`).
+///
+/// Use this when a value may be missing and that state is expected.
+///
+/// # Example
+///
+/// ```ignis
+/// import Option from "std::types";
+///
+/// function maybeName(flag: boolean): Option<string> {
+///   if (flag) {
+///     return Option::SOME("ignis");
+///   }
+///
+///   return Option::NONE;
+/// }
+/// ```
 export enum Option<S> {
   SOME(S),
   NONE,

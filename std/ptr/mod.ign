@@ -7,11 +7,78 @@
 //!
 //! `Pointer<T>` does not add ownership or safety guarantees.
 //! It only groups common pointer operations into a single record API.
+//!
+//! ## What This Type Is
+//!
+//! `Pointer<T>` is a convenience wrapper around `*mut T` that provides:
+//! - Null checks
+//! - Address conversion helpers
+//! - Pointer arithmetic helpers
+//! - Read/write helpers for direct memory access
+//!
+//! It is useful when low-level code wants method-call style APIs while still
+//! operating on raw pointers.
+//!
+//! ## What This Type Is Not
+//!
+//! It is not a smart pointer and does not:
+//! - Manage memory lifetime
+//! - Prevent aliasing bugs
+//! - Validate bounds
+//! - Guarantee alignment
+//!
+//! ## Safety
+//!
+//! The caller is responsible for ensuring all pointer operations are valid.
+//! Dereferencing a null, dangling, unaligned, or out-of-bounds pointer is
+//! undefined behavior.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Pointer from "std::ptr";
+//! import Memory from "std::memory";
+//! import String from "std::string";
+//! import Io from "std::io";
+//!
+//! function main(): i32 {
+//!   let raw: *mut i32 = Memory::allocateVector<i32>(2);
+//!   let mut ptr: Pointer<i32> = Pointer::init(raw);
+//!
+//!   ptr.write(10);
+//!   ptr.writeAt(1, 20);
+//!
+//!   Io::println(String::toString(ptr.read()));
+//!   Io::println(String::toString(ptr.readAt(1)));
+//!
+//!   Memory::free(raw);
+//!   return 0;
+//! }
+//! ```
 
+/// Method-style wrapper around a raw pointer.
+///
+/// # Example
+///
+/// ```ignis
+/// import Pointer from "std::ptr";
+///
+/// let mut x: i32 = 10;
+/// let p: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+/// ```
 export record Pointer<T> {
+  /// Wrapped raw pointer.
   address: *mut T;
 
   /// Creates a null pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let p: Pointer<i32> = Pointer::init<i32>();
+  /// ```
   public static init(): Pointer<T> {
     return Pointer {
       address: null,
@@ -19,6 +86,15 @@ export record Pointer<T> {
   }
 
   /// Creates a pointer from a mutable raw pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut x: i32 = 10;
+  /// let p: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// ```
   public static init(address: *mut T): Pointer<T> {
     return Pointer {
       address: address,
@@ -26,6 +102,15 @@ export record Pointer<T> {
   }
 
   /// Creates a pointer from a const raw pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let x: i32 = 10;
+  /// let p: Pointer<i32> = Pointer::fromConst((&x) as *i32);
+  /// ```
   public static fromConst(address: *T): Pointer<T> {
     return Pointer {
       address: address as *mut T,
@@ -33,71 +118,228 @@ export record Pointer<T> {
   }
 
   /// Returns whether this pointer is null.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let p: Pointer<i32> = Pointer::init<i32>();
+  /// let isNull: boolean = p.isNull();
+  /// ```
   public isNull(&self): boolean {
     return self.address == null;
   }
 
   /// Returns this pointer as immutable raw pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut x: i32 = 10;
+  /// let p: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// let raw: *i32 = p.asPtr();
+  /// ```
   public asPtr(&self): *T {
     return self.address as *T;
   }
 
   /// Returns this pointer as mutable raw pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut x: i32 = 10;
+  /// let p: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// let raw: *mut i32 = p.asMutPtr();
+  /// ```
   public asMutPtr(&self): *mut T {
     return self.address;
   }
 
   /// Returns the pointer address as an integer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut x: i32 = 10;
+  /// let p: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// let address: u64 = p.toAddress();
+  /// ```
   public toAddress(&self): u64 {
     return self.address as u64;
   }
 
   /// Replaces the wrapped raw pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut a: i32 = 1;
+  /// let mut b: i32 = 2;
+  /// let mut p: Pointer<i32> = Pointer::init((&mut a) as *mut i32);
+  /// p.set((&mut b) as *mut i32);
+  /// ```
   public set(&mut self, address: *mut T): void {
     self.address = address;
   }
 
   /// Returns a new pointer offset by `count` elements.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  /// import Memory from "std::memory";
+  ///
+  /// let raw: *mut i32 = Memory::allocateVector<i32>(2);
+  /// let p0: Pointer<i32> = Pointer::init(raw);
+  /// let p1: Pointer<i32> = p0.offset(1);
+  /// Memory::free(raw);
+  /// ```
   public offset(&self, count: i64): Pointer<T> {
     return Pointer::init(self.address + count);
   }
 
   /// Returns a new pointer moved forward by `count` elements.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  /// import Memory from "std::memory";
+  ///
+  /// let raw: *mut i32 = Memory::allocateVector<i32>(2);
+  /// let p0: Pointer<i32> = Pointer::init(raw);
+  /// let p1: Pointer<i32> = p0.add(1);
+  /// Memory::free(raw);
+  /// ```
   public add(&self, count: u64): Pointer<T> {
     return Pointer::init(self.address + (count as i64));
   }
 
   /// Returns a new pointer moved backward by `count` elements.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  /// import Memory from "std::memory";
+  ///
+  /// let raw: *mut i32 = Memory::allocateVector<i32>(2);
+  /// let p1: Pointer<i32> = Pointer::init(raw).add(1);
+  /// let p0: Pointer<i32> = p1.sub(1);
+  /// Memory::free(raw);
+  /// ```
   public sub(&self, count: u64): Pointer<T> {
     return Pointer::init(self.address - (count as i64));
   }
 
   /// Returns the distance to another pointer in elements.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  /// import Memory from "std::memory";
+  ///
+  /// let raw: *mut i32 = Memory::allocateVector<i32>(4);
+  /// let a: Pointer<i32> = Pointer::init(raw);
+  /// let b: Pointer<i32> = a.add(3);
+  /// let d: i64 = b.distance(a);
+  /// Memory::free(raw);
+  /// ```
   public distance(&self, other: Pointer<T>): i64 {
     return self.address - other.address;
   }
 
   /// Reads the value pointed to by this pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut x: i32 = 10;
+  /// let p: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// let value: i32 = p.read();
+  /// ```
   public read(&self): T {
     return *self.address;
   }
 
   /// Writes a value through this pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut x: i32 = 0;
+  /// let mut p: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// p.write(42);
+  /// ```
   public write(&mut self, value: T): void {
     *self.address = value;
   }
 
   /// Reads the value at `index` elements from this pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  /// import Memory from "std::memory";
+  ///
+  /// let raw: *mut i32 = Memory::allocateVector<i32>(2);
+  /// let mut p: Pointer<i32> = Pointer::init(raw);
+  /// p.writeAt(0, 10);
+  /// p.writeAt(1, 20);
+  /// let value: i32 = p.readAt(1);
+  /// Memory::free(raw);
+  /// ```
   public readAt(&self, index: i64): T {
     return *(self.address + index);
   }
 
   /// Writes `value` at `index` elements from this pointer.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  /// import Memory from "std::memory";
+  ///
+  /// let raw: *mut i32 = Memory::allocateVector<i32>(2);
+  /// let mut p: Pointer<i32> = Pointer::init(raw);
+  /// p.writeAt(0, 10);
+  /// p.writeAt(1, 20);
+  /// Memory::free(raw);
+  /// ```
   public writeAt(&mut self, index: i64, value: T): void {
     *(self.address + index) = value;
   }
 
   /// Checks whether two pointers refer to the same address.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Pointer from "std::ptr";
+  ///
+  /// let mut x: i32 = 10;
+  /// let a: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// let b: Pointer<i32> = Pointer::init((&mut x) as *mut i32);
+  /// let same: boolean = a.equals(b);
+  /// ```
   public equals(&self, other: Pointer<T>): boolean {
     return self.address == other.address;
   }
