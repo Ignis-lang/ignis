@@ -271,6 +271,12 @@ impl<'a> HIRPrinter<'a> {
         let value_str = self.format_node_compact(*value);
         format!("builtin_write<{}>({}, {})", ty_str, ptr_str, value_str)
       },
+      HIRKind::Panic(msg) => {
+        let msg_str = self.format_node_compact(*msg);
+        format!("@panic({})", msg_str)
+      },
+      HIRKind::Trap => "@trap()".to_string(),
+      HIRKind::BuiltinUnreachable => "@unreachable()".to_string(),
       _ => format!("<complex: {}>", type_str),
     }
   }
@@ -649,6 +655,18 @@ impl<'a> HIRPrinter<'a> {
         self.print_node(*ptr);
         self.print_node(*value);
         self.indent -= 1;
+      },
+      HIRKind::Panic(msg) => {
+        writeln!(self.output, "Panic : {}", type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*msg);
+        self.indent -= 1;
+      },
+      HIRKind::Trap => {
+        writeln!(self.output, "Trap : {}", type_str).unwrap();
+      },
+      HIRKind::BuiltinUnreachable => {
+        writeln!(self.output, "BuiltinUnreachable : {}", type_str).unwrap();
       },
       HIRKind::FieldAccess { base, field_index } => {
         writeln!(self.output, "FieldAccess(.{}) : {}", field_index, type_str).unwrap();

@@ -519,6 +519,29 @@ pub enum DiagnosticMessage {
     type_name: String,
     span: Span,
   },
+  // Builtin call errors
+  UnknownBuiltin {
+    name: String,
+    span: Span,
+  },
+  CompileError {
+    message: String,
+    span: Span,
+  },
+  BuiltinArgCount {
+    name: String,
+    expected: usize,
+    got: usize,
+    span: Span,
+  },
+  BuiltinExpectedStringLiteral {
+    name: String,
+    span: Span,
+  },
+  UnknownConfigFlag {
+    key: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -993,6 +1016,25 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::PrivateMethodAccess { method, type_name, .. } => {
         write!(f, "Method '{}' of '{}' is private", method, type_name)
       },
+
+      // Builtin call errors
+      DiagnosticMessage::UnknownBuiltin { name, .. } => {
+        write!(f, "Unknown builtin '@{}'", name)
+      },
+      DiagnosticMessage::CompileError { message, .. } => {
+        write!(f, "{}", message)
+      },
+      DiagnosticMessage::BuiltinArgCount {
+        name, expected, got, ..
+      } => {
+        write!(f, "@{} expects {} argument(s), got {}", name, expected, got)
+      },
+      DiagnosticMessage::BuiltinExpectedStringLiteral { name, .. } => {
+        write!(f, "@{} expects a string literal argument", name)
+      },
+      DiagnosticMessage::UnknownConfigFlag { key, .. } => {
+        write!(f, "Unknown config flag '{}'", key)
+      },
     }
   }
 }
@@ -1135,7 +1177,12 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LibraryCannotHaveMainFunction { span, .. }
       | DiagnosticMessage::ExecutableMustHaveMainFunction { span, .. }
       | DiagnosticMessage::PrivateFieldAccess { span, .. }
-      | DiagnosticMessage::PrivateMethodAccess { span, .. } => span.clone(),
+      | DiagnosticMessage::PrivateMethodAccess { span, .. }
+      | DiagnosticMessage::UnknownBuiltin { span, .. }
+      | DiagnosticMessage::CompileError { span, .. }
+      | DiagnosticMessage::BuiltinArgCount { span, .. }
+      | DiagnosticMessage::BuiltinExpectedStringLiteral { span, .. }
+      | DiagnosticMessage::UnknownConfigFlag { span, .. } => span.clone(),
     }
   }
 
@@ -1274,6 +1321,11 @@ impl DiagnosticMessage {
       DiagnosticMessage::ExecutableMustHaveMainFunction { .. } => "L0102",
       DiagnosticMessage::PrivateFieldAccess { .. } => "A0105",
       DiagnosticMessage::PrivateMethodAccess { .. } => "A0106",
+      DiagnosticMessage::UnknownBuiltin { .. } => "A0110",
+      DiagnosticMessage::CompileError { .. } => "A0111",
+      DiagnosticMessage::BuiltinArgCount { .. } => "A0112",
+      DiagnosticMessage::BuiltinExpectedStringLiteral { .. } => "A0113",
+      DiagnosticMessage::UnknownConfigFlag { .. } => "A0115",
     }
     .to_string()
   }
@@ -1284,7 +1336,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UnreachableCode { .. }
       | DiagnosticMessage::MissingReturnStatement { .. }
       | DiagnosticMessage::PossibleLeakToFFI { .. }
-      | DiagnosticMessage::OwnershipEscapeToGlobal { .. } => Severity::Warning,
+      | DiagnosticMessage::OwnershipEscapeToGlobal { .. }
+      | DiagnosticMessage::UnknownConfigFlag { .. } => Severity::Warning,
       _ => Severity::Error,
     }
   }

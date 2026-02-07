@@ -415,6 +415,22 @@ impl<'a> LoweringContext<'a> {
         type_args: _,
       } => self.lower_enum_variant(*enum_def, *variant_tag, payload, node.type_id, node.span),
       HIRKind::StaticAccess { def } => self.lower_static_access(*def, node.type_id, node.span),
+
+      HIRKind::Panic(_msg) => {
+        // MVP: emit trap + unreachable (no runtime panic message support yet)
+        self.fn_builder().emit(Instr::Trap { span: node.span });
+        self.fn_builder().terminate(Terminator::Unreachable);
+        None
+      },
+      HIRKind::Trap => {
+        self.fn_builder().emit(Instr::Trap { span: node.span });
+        self.fn_builder().terminate(Terminator::Unreachable);
+        None
+      },
+      HIRKind::BuiltinUnreachable => {
+        self.fn_builder().terminate(Terminator::Unreachable);
+        None
+      },
     }
   }
 

@@ -934,6 +934,12 @@ impl<'a> Monomorphizer<'a> {
         (HIRKind::ExpressionStatement(new_expr), None)
       },
       HIRKind::Error => (HIRKind::Error, None),
+      HIRKind::Panic(msg) => {
+        let new_msg = self.clone_hir_tree(*msg);
+        (HIRKind::Panic(new_msg), None)
+      },
+      HIRKind::Trap => (HIRKind::Trap, None),
+      HIRKind::BuiltinUnreachable => (HIRKind::BuiltinUnreachable, None),
     }
   }
 
@@ -1189,7 +1195,12 @@ impl<'a> Monomorphizer<'a> {
       | HIRKind::SizeOf(_)
       | HIRKind::AlignOf(_)
       | HIRKind::MaxOf(_)
-      | HIRKind::MinOf(_) => {},
+      | HIRKind::MinOf(_)
+      | HIRKind::Trap
+      | HIRKind::BuiltinUnreachable => {},
+      HIRKind::Panic(msg) => {
+        self.scan_hir(*msg);
+      },
     }
   }
 
@@ -1962,6 +1973,12 @@ impl<'a> Monomorphizer<'a> {
         HIRKind::ExpressionStatement(new_expr)
       },
       HIRKind::Error => HIRKind::Error,
+      HIRKind::Panic(msg) => {
+        let new_msg = self.substitute_hir(*msg, subst);
+        HIRKind::Panic(new_msg)
+      },
+      HIRKind::Trap => HIRKind::Trap,
+      HIRKind::BuiltinUnreachable => HIRKind::BuiltinUnreachable,
       // These are handled in substitute_hir directly
       HIRKind::Call { .. } | HIRKind::RecordInit { .. } | HIRKind::MethodCall { .. } | HIRKind::EnumVariant { .. } => {
         unreachable!("should be handled in substitute_hir")

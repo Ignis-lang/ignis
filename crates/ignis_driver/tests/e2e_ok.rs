@@ -1434,3 +1434,49 @@ function main(): i32 {
 "#,
   );
 }
+
+// ========================================================================
+// @builtin(...) syntax tests
+// ========================================================================
+
+#[test]
+fn e2e_builtin_sizeof_new_syntax() {
+  e2e_test(
+    "builtin_sizeof_new_syntax",
+    r#"
+function main(): i32 {
+    let s: u64 = @sizeOf<i32>();
+    return s as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_builtin_alignof_new_syntax() {
+  e2e_test(
+    "builtin_alignof_new_syntax",
+    r#"
+function main(): i32 {
+    let a: u64 = @alignOf<i32>();
+    return a as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_config_flag_false() {
+  e2e_test(
+    "config_flag_false",
+    r#"
+function main(): i32 {
+    let flag: boolean = @configFlag("feature.nonexistent");
+    if (flag) {
+        return 1;
+    }
+    return 0;
+}
+"#,
+  );
+}

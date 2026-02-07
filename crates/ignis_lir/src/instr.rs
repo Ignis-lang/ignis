@@ -1,5 +1,5 @@
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
-use ignis_type::{definition::DefinitionId, types::TypeId};
+use ignis_type::{definition::DefinitionId, span::Span, types::TypeId};
 
 use crate::{LocalId, Operand, TempId};
 
@@ -143,6 +143,11 @@ pub enum Instr {
   MinOf {
     dest: TempId,
     ty: TypeId,
+  },
+
+  /// Hardware trap (abnormal termination).
+  Trap {
+    span: Span,
   },
 
   /// Drop an owned value's resources.

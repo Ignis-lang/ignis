@@ -320,6 +320,11 @@ impl<'a> HirOwnershipChecker<'a> {
         // Check if static variable is still valid
         self.check_use(def, span);
       },
+
+      HIRKind::Panic(msg) => {
+        self.check_node(msg);
+      },
+      HIRKind::Trap | HIRKind::BuiltinUnreachable => {},
     }
   }
 

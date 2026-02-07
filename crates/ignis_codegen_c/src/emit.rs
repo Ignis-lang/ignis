@@ -639,9 +639,7 @@ impl<'a> CEmitter<'a> {
       match func.inline_mode {
         InlineMode::Inline if is_public => write!(self.output, "inline ").unwrap(),
         InlineMode::Inline => write!(self.output, "static inline ").unwrap(),
-        InlineMode::Always if is_public => {
-          write!(self.output, "__attribute__((always_inline)) inline ").unwrap()
-        },
+        InlineMode::Always if is_public => write!(self.output, "__attribute__((always_inline)) inline ").unwrap(),
         InlineMode::Always => write!(self.output, "__attribute__((always_inline)) static inline ").unwrap(),
         InlineMode::Never => write!(self.output, "__attribute__((noinline)) ").unwrap(),
         InlineMode::None => {},
@@ -986,6 +984,9 @@ impl<'a> CEmitter<'a> {
           let v = self.format_operand(func, payload_value);
           writeln!(self.output, "({})->payload.variant_{}.field_{} = {};", p, variant_tag, i, v).unwrap();
         }
+      },
+      Instr::Trap { .. } => {
+        writeln!(self.output, "__builtin_trap();").unwrap();
       },
     }
   }

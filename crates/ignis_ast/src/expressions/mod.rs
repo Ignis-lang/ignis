@@ -2,6 +2,7 @@ use ignis_type::span::Span;
 
 pub mod assignment;
 pub mod binary;
+pub mod builtin_call;
 pub mod call;
 pub mod cast;
 pub mod dereference;
@@ -19,6 +20,7 @@ pub mod vector_access;
 
 pub use assignment::ASTAssignment;
 pub use binary::ASTBinary;
+pub use builtin_call::ASTBuiltinCall;
 pub use call::ASTCallExpression;
 pub use cast::ASTCast;
 pub use dereference::ASTDereference;
@@ -54,6 +56,7 @@ pub enum ASTExpression {
   PostfixDecrement { expr: crate::NodeId, span: Span },
   MemberAccess(ASTMemberAccess),
   RecordInit(ASTRecordInit),
+  BuiltinCall(ASTBuiltinCall),
 }
 
 impl ASTExpression {
@@ -77,6 +80,7 @@ impl ASTExpression {
       ASTExpression::PostfixDecrement { span, .. } => span,
       ASTExpression::MemberAccess(expr) => &expr.span,
       ASTExpression::RecordInit(expr) => &expr.span,
+      ASTExpression::BuiltinCall(expr) => &expr.span,
     }
   }
 }

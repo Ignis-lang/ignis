@@ -160,6 +160,11 @@ fn collect_expression_children(
         stack.push(field.value);
       }
     },
+    ASTExpression::BuiltinCall(bc) => {
+      for arg_id in &bc.args {
+        stack.push(*arg_id);
+      }
+    },
   }
 }
 

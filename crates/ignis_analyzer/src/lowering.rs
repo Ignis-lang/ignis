@@ -1,6 +1,7 @@
 use crate::{Analyzer, ResolvedPath, ScopeKind};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, expressions::ASTExpression};
 use ignis_ast::expressions::binary::ASTBinaryOperator;
+use ignis_ast::expressions::builtin_call::ASTBuiltinCall;
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
 use ignis_ast::expressions::member_access::ASTAccessOp;
 use ignis_ast::expressions::unary::UnaryOperator;
@@ -1068,6 +1069,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::MemberAccess(ma) => self.lower_member_access(node_id, ma, hir, scope_kind),
       ASTExpression::RecordInit(ri) => self.lower_record_init(node_id, ri, hir, scope_kind),
+      ASTExpression::BuiltinCall(bc) => self.lower_builtin_call(bc, hir, scope_kind),
     }
   }
 
@@ -1570,6 +1572,177 @@ impl<'a> Analyzer<'a> {
       span: call.span.clone(),
       type_id: self.types.void(),
     })
+  }
+
+  // ========================================================================
+  // @builtin(...) Lowering
+  // ========================================================================
+
+  fn lower_builtin_call(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let name = self.get_symbol_name(&bc.name);
+
+    match name.as_str() {
+      "configFlag" => self.lower_builtin_config_flag(bc, hir),
+      "compileError" => self.lower_builtin_compile_error(bc, hir),
+      "sizeOf" => self.lower_builtin_sizeof_new(bc, hir),
+      "alignOf" => self.lower_builtin_alignof_new(bc, hir),
+      "panic" => self.lower_builtin_panic(bc, hir, scope_kind),
+      "trap" => self.lower_builtin_trap(bc, hir),
+      "unreachable" => self.lower_builtin_unreachable(bc, hir),
+      _ => hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      }),
+    }
+  }
+
+  fn lower_builtin_config_flag(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let key = self.extract_string_literal_for_lowering(&bc.args[0]);
+
+    let value = match key {
+      Some(ref k) => match &self.compilation_ctx {
+        Some(ctx) => {
+          let resolved = ctx.resolve_flag(k);
+          if resolved.is_none() {
+            self.add_diagnostic(
+              ignis_diagnostics::message::DiagnosticMessage::UnknownConfigFlag {
+                key: k.clone(),
+                span: bc.span.clone(),
+              }
+              .report(),
+            );
+          }
+          resolved.unwrap_or(false)
+        },
+        None => false,
+      },
+      None => false,
+    };
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::Boolean(value)),
+      span: bc.span.clone(),
+      type_id: self.types.boolean(),
+    })
+  }
+
+  fn lower_builtin_compile_error(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    // Diagnostic already emitted during typechecking
+    hir.alloc(HIRNode {
+      kind: HIRKind::Error,
+      span: bc.span.clone(),
+      type_id: self.types.never(),
+    })
+  }
+
+  fn lower_builtin_sizeof_new(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let Some(ref type_args) = bc.type_args else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::SizeOf(value_type),
+      span: bc.span.clone(),
+      type_id: self.types.u64(),
+    })
+  }
+
+  fn lower_builtin_alignof_new(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let Some(ref type_args) = bc.type_args else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::AlignOf(value_type),
+      span: bc.span.clone(),
+      type_id: self.types.u64(),
+    })
+  }
+
+  fn lower_builtin_panic(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let msg = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Panic(msg),
+      span: bc.span.clone(),
+      type_id: self.types.never(),
+    })
+  }
+
+  fn lower_builtin_trap(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    hir.alloc(HIRNode {
+      kind: HIRKind::Trap,
+      span: bc.span.clone(),
+      type_id: self.types.never(),
+    })
+  }
+
+  fn lower_builtin_unreachable(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinUnreachable,
+      span: bc.span.clone(),
+      type_id: self.types.never(),
+    })
+  }
+
+  fn extract_string_literal_for_lowering(
+    &self,
+    node_id: &NodeId,
+  ) -> Option<String> {
+    let node = self.ast.get(node_id);
+    if let ASTNode::Expression(ASTExpression::Literal(lit)) = node {
+      if let ignis_type::value::IgnisLiteralValue::String(s) = &lit.value {
+        return Some(s.clone());
+      }
+    }
+    None
   }
 
   /// Lower a method call: obj.method(args) or Type::method(args)

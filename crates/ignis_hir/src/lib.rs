@@ -61,6 +61,9 @@ pub enum HIRKind {
     ptr: HIRId,
     value: HIRId,
   },
+  Panic(HIRId),
+  Trap,
+  BuiltinUnreachable,
 
   // Record/Enum operations
   FieldAccess {
@@ -136,7 +139,12 @@ impl HIRKind {
       | HIRKind::AlignOf(_)
       | HIRKind::MaxOf(_)
       | HIRKind::MinOf(_)
-      | HIRKind::StaticAccess { .. } => {},
+      | HIRKind::StaticAccess { .. }
+      | HIRKind::Trap
+      | HIRKind::BuiltinUnreachable => {},
+      HIRKind::Panic(id) => {
+        *id = HIRId::new(id.index() + offset);
+      },
       HIRKind::TypeOf(id) => {
         *id = HIRId::new(id.index() + offset);
       },

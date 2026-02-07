@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 use ignis_ast::{
   expressions::{
+    builtin_call::ASTBuiltinCall,
     member_access::{ASTAccessOp, ASTMemberAccess},
     record_init::ASTRecordInit,
     ASTCallExpression, ASTExpression, ASTLiteral,
@@ -703,6 +704,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::MemberAccess(ma) => self.typecheck_member_access(ma, scope_kind, ctx, infer),
       ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx, infer),
+      ASTExpression::BuiltinCall(bc) => self.typecheck_builtin_call(node_id, bc, scope_kind, ctx),
     }
   }
 
@@ -4044,6 +4046,238 @@ impl<'a> Analyzer<'a> {
     value_type
   }
 
+  // ========================================================================
+  // @builtin(...) Typechecking
+  // ========================================================================
+
+  fn typecheck_builtin_call(
+    &mut self,
+    _node_id: &NodeId,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let name = self.get_symbol_name(&bc.name);
+
+    match name.as_str() {
+      "configFlag" => self.typecheck_builtin_config_flag(bc),
+      "compileError" => self.typecheck_builtin_compile_error(bc),
+      "sizeOf" => {
+        let ty = self.types.u64();
+        self.typecheck_builtin_type_arg(bc, "sizeOf", ty)
+      },
+      "alignOf" => {
+        let ty = self.types.u64();
+        self.typecheck_builtin_type_arg(bc, "alignOf", ty)
+      },
+      "panic" => self.typecheck_builtin_panic(bc, scope_kind, ctx),
+      "trap" => self.typecheck_builtin_no_args(bc, "trap"),
+      "unreachable" => self.typecheck_builtin_no_args(bc, "unreachable"),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownBuiltin {
+            name,
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+    }
+  }
+
+  fn typecheck_builtin_config_flag(
+    &mut self,
+    bc: &ASTBuiltinCall,
+  ) -> TypeId {
+    if bc.args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: "configFlag".to_string(),
+          expected: 1,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if self.extract_string_literal(&bc.args[0]).is_none() {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinExpectedStringLiteral {
+          name: "configFlag".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.types.boolean()
+  }
+
+  fn typecheck_builtin_compile_error(
+    &mut self,
+    bc: &ASTBuiltinCall,
+  ) -> TypeId {
+    if bc.args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: "compileError".to_string(),
+          expected: 1,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let Some(msg) = self.extract_string_literal(&bc.args[0]) else {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinExpectedStringLiteral {
+          name: "compileError".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    };
+
+    self.add_diagnostic(
+      DiagnosticMessage::CompileError {
+        message: msg,
+        span: bc.span.clone(),
+      }
+      .report(),
+    );
+
+    self.types.never()
+  }
+
+  fn typecheck_builtin_type_arg(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    name: &str,
+    result_type: TypeId,
+  ) -> TypeId {
+    let type_args = match &bc.type_args {
+      Some(ta) => ta,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: format!("@{}", name),
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: format!("@{}", name),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if !bc.args.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: name.to_string(),
+          expected: 0,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.resolve_type_syntax_with_span(&type_args[0], &bc.span);
+    result_type
+  }
+
+  fn typecheck_builtin_panic(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    if bc.args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: "panic".to_string(),
+          expected: 1,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.typecheck_node(&bc.args[0], scope_kind, ctx);
+    self.types.never()
+  }
+
+  fn typecheck_builtin_no_args(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    name: &str,
+  ) -> TypeId {
+    if bc.type_args.is_some() {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 0,
+          got: bc.type_args.as_ref().map_or(0, |ta| ta.len()),
+          type_name: format!("@{}", name),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if !bc.args.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: name.to_string(),
+          expected: 0,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.types.never()
+  }
+
+  fn extract_string_literal(
+    &self,
+    node_id: &NodeId,
+  ) -> Option<String> {
+    let node = self.ast.get(node_id);
+    if let ASTNode::Expression(ASTExpression::Literal(lit)) = node {
+      if let IgnisLiteralValue::String(s) = &lit.value {
+        return Some(s.clone());
+      }
+    }
+    None
+  }
+
   fn is_pointer_type(
     &self,
     ty: &TypeId,
@@ -5539,11 +5773,7 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" {
-      1
-    } else {
-      0
-    }
+    if first_name == "self" { 1 } else { 0 }
   }
 
   fn emit_no_overload_error(

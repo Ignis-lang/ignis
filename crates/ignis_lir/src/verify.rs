@@ -279,6 +279,7 @@ impl<'a> LirVerifier<'a> {
           self.check_operand(func, func_name, block_name, p, defined_temps);
         }
       },
+      Instr::Trap { .. } => {},
     }
   }
 

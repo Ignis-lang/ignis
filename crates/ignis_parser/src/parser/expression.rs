@@ -4,6 +4,7 @@ use ignis_ast::{
     ASTExpression, ASTAccessOp, ASTMemberAccess, ASTRecordInit, ASTRecordInitField,
     assignment::{ASTAssignment, ASTAssignmentOperator},
     binary::{ASTBinary, ASTBinaryOperator},
+    builtin_call::ASTBuiltinCall,
     call::ASTCallExpression,
     cast::ASTCast,
     dereference::ASTDereference,
@@ -510,6 +511,7 @@ impl IgnisParser {
           span,
         ))))
       },
+      TokenType::At => self.parse_builtin_call(&token),
       _ => Err(DiagnosticMessage::ExpectedExpression(token.span.clone())),
     }
   }
@@ -618,6 +620,28 @@ impl IgnisParser {
     let span = Span::merge(&start, &end.span);
 
     Ok(self.allocate_expression(ASTExpression::RecordInit(ASTRecordInit::new(path, type_args, fields, span))))
+  }
+
+  fn parse_builtin_call(
+    &mut self,
+    at_token: &Token,
+  ) -> ParserResult<NodeId> {
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    let type_args = if self.at(TokenType::Less) && self.looks_like_type_args() {
+      self.parse_optional_type_args()?
+    } else {
+      None
+    };
+
+    let _ = self.expect(TokenType::LeftParen)?;
+    let args = self.parse_arguments()?;
+    let right_paren = self.expect(TokenType::RightParen)?.clone();
+
+    let span = Span::merge(&at_token.span, &right_paren.span);
+
+    Ok(self.allocate_expression(ASTExpression::BuiltinCall(ASTBuiltinCall::new(name, type_args, args, span))))
   }
 }
 

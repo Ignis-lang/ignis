@@ -144,3 +144,31 @@ function main(): i32 {
 "#,
   );
 }
+
+// ========================================================================
+// @builtin(...) error tests
+// ========================================================================
+
+#[test]
+fn e2e_err_compile_error() {
+  e2e_error_test(
+    "err_compile_error",
+    r#"
+function main(): void {
+    @compileError("this should not compile");
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_unknown_builtin() {
+  e2e_error_test(
+    "err_unknown_builtin",
+    r#"
+function main(): void {
+    @bogus();
+}
+"#,
+  );
+}

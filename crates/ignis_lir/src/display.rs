@@ -290,6 +290,9 @@ impl<'a> LirPrinter<'a> {
         )
         .unwrap();
       },
+      Instr::Trap { .. } => {
+        writeln!(self.output, "    trap").unwrap();
+      },
     }
   }
 

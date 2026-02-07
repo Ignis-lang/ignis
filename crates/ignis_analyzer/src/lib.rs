@@ -36,7 +36,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
-use ignis_type::{symbol::SymbolTable, Store as ASTStore};
+use ignis_type::{compilation_context::CompilationContext, symbol::SymbolTable, Store as ASTStore};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
 use ignis_type::module::ModuleId;
@@ -116,6 +116,7 @@ pub struct Analyzer<'a> {
   runtime: Option<RuntimeBuiltins>,
   import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
   import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
+  compilation_ctx: Option<CompilationContext>,
 }
 
 pub struct AnalyzerOutput {
@@ -195,6 +196,7 @@ impl<'a> Analyzer<'a> {
       runtime: None,
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
+      compilation_ctx: None,
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
     analyzer
@@ -288,6 +290,7 @@ impl<'a> Analyzer<'a> {
       runtime: None,
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
+      compilation_ctx: None,
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
 

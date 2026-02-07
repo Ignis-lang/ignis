@@ -380,6 +380,11 @@ impl<'a> Analyzer<'a> {
           self.extra_checks_node(&field.value, scope_kind, in_loop, in_function);
         }
       },
+      ASTExpression::BuiltinCall(bc) => {
+        for arg_id in &bc.args {
+          self.extra_checks_node(arg_id, scope_kind, in_loop, in_function);
+        }
+      },
     }
   }
 

@@ -56,6 +56,7 @@ use crate::{
     ASTExpression, ASTAccessOp, ASTMemberAccess, ASTRecordInit,
     assignment::{ASTAssignment, ASTAssignmentOperator},
     binary::{ASTBinary, ASTBinaryOperator},
+    builtin_call::ASTBuiltinCall,
     call::ASTCallExpression,
     cast::ASTCast,
     grouped::ASTGrouped,
@@ -269,6 +270,7 @@ impl DisplayLisp for ASTExpression {
       },
       ASTExpression::MemberAccess(expr) => expr.to_lisp(formatter),
       ASTExpression::RecordInit(expr) => expr.to_lisp(formatter),
+      ASTExpression::BuiltinCall(expr) => expr.to_lisp(formatter),
     }
   }
 }
@@ -1000,6 +1002,32 @@ impl DisplayLisp for ASTRecordInit {
       .collect();
 
     format!("(RecordInit \"{}\" {})", path_str, fields.join(" "))
+  }
+}
+
+// Builtin Call Expression
+impl DisplayLisp for ASTBuiltinCall {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let name = formatter.resolve_symbol(&self.name);
+
+    let type_args_str = match &self.type_args {
+      Some(tas) => {
+        let types: Vec<String> = tas.iter().map(|t| t.to_lisp(formatter)).collect();
+        format!("<{}>", types.join(", "))
+      },
+      None => String::new(),
+    };
+
+    let args: Vec<String> = self.args.iter().map(|arg| formatter.format_node(arg)).collect();
+
+    if args.is_empty() {
+      format!("(@{}{})", name, type_args_str)
+    } else {
+      format!("(@{}{} {})", name, type_args_str, args.join(" "))
+    }
   }
 }
 

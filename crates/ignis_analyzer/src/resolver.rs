@@ -342,6 +342,11 @@ impl<'a> Analyzer<'a> {
           self.resolve_node(&field.value, scope_kind);
         }
       },
+      ASTExpression::BuiltinCall(bc) => {
+        for arg_id in &bc.args {
+          self.resolve_node(arg_id, scope_kind);
+        }
+      },
     }
   }
 
