@@ -302,8 +302,8 @@ impl super::IgnisParser {
 
   /// const name: type = expr;
   pub fn parse_constant_declaration(&mut self) -> ParserResult<NodeId> {
-    // Capture pending doc
     let doc = self.take_pending_doc();
+    let _attrs = self.take_pending_attrs();
 
     let keyword = self.expect(TokenType::Const)?.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
@@ -326,6 +326,8 @@ impl super::IgnisParser {
 
   /// import a, b, c from "path";
   fn parse_import_declaration(&mut self) -> ParserResult<NodeId> {
+    let _attrs = self.take_pending_attrs();
+
     let keyword = self.expect(TokenType::Import)?.clone();
     let mut items = Vec::new();
 
@@ -380,6 +382,8 @@ impl super::IgnisParser {
 
       Ok(self.allocate_statement(ASTStatement::Export(export_statement)))
     } else {
+      let _attrs = self.take_pending_attrs();
+
       let name_token = self.expect(TokenType::Identifier)?.clone();
       let semicolon = self.expect(TokenType::SemiColon)?.clone();
       let span = Span::merge(&keyword.span, &semicolon.span);
@@ -411,8 +415,8 @@ impl super::IgnisParser {
 
   /// extern path { function ...; const ...; }
   fn parse_extern_declaration(&mut self) -> ParserResult<NodeId> {
-    // Capture pending doc for the extern block
     let doc = self.take_pending_doc();
+    let _attrs = self.take_pending_attrs();
 
     let keyword = self.expect(TokenType::Extern)?.clone();
     let (path, _) = self.parse_qualified_identifier()?;
@@ -444,8 +448,8 @@ impl super::IgnisParser {
 
   /// namespace path { declarations... }
   fn parse_namespace_declaration(&mut self) -> ParserResult<NodeId> {
-    // Capture pending outer doc for the namespace
     let doc = self.take_pending_doc();
+    let _attrs = self.take_pending_attrs();
 
     let keyword = self.expect(TokenType::Namespace)?.clone();
     let (path, _) = self.parse_qualified_identifier()?;
@@ -551,8 +555,8 @@ impl super::IgnisParser {
 
   /// type Name<T, U> = <type>;
   fn parse_type_alias_declaration(&mut self) -> ParserResult<NodeId> {
-    // Capture pending doc
     let doc = self.take_pending_doc();
+    let _attrs = self.take_pending_attrs();
 
     let start = self.expect(TokenType::Type)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
