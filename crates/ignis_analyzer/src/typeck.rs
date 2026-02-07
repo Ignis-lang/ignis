@@ -4078,7 +4078,7 @@ impl<'a> Analyzer<'a> {
       "pointerCast" => self.typecheck_builtin_pointer_cast(bc, scope_kind, ctx),
       "integerFromPointer" => self.typecheck_builtin_integer_from_pointer(bc, scope_kind, ctx),
       "pointerFromInteger" => self.typecheck_builtin_pointer_from_integer(bc, scope_kind, ctx),
-      "panic" => self.typecheck_builtin_panic(bc, scope_kind, ctx),
+      "panic" => self.typecheck_builtin_panic(bc),
       "trap" => self.typecheck_builtin_no_args(bc, "trap"),
       "unreachable" => self.typecheck_builtin_no_args(bc, "unreachable"),
       _ => {
@@ -4098,6 +4098,19 @@ impl<'a> Analyzer<'a> {
     &mut self,
     bc: &ASTBuiltinCall,
   ) -> TypeId {
+    if bc.type_args.is_some() {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 0,
+          got: bc.type_args.as_ref().map_or(0, |ta| ta.len()),
+          type_name: "@configFlag".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
     if bc.args.len() != 1 {
       self.add_diagnostic(
         DiagnosticMessage::BuiltinArgCount {
@@ -4129,6 +4142,19 @@ impl<'a> Analyzer<'a> {
     &mut self,
     bc: &ASTBuiltinCall,
   ) -> TypeId {
+    if bc.type_args.is_some() {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 0,
+          got: bc.type_args.as_ref().map_or(0, |ta| ta.len()),
+          type_name: "@compileError".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
     if bc.args.len() != 1 {
       self.add_diagnostic(
         DiagnosticMessage::BuiltinArgCount {
@@ -4413,9 +4439,20 @@ impl<'a> Analyzer<'a> {
   fn typecheck_builtin_panic(
     &mut self,
     bc: &ASTBuiltinCall,
-    scope_kind: ScopeKind,
-    ctx: &TypecheckContext,
   ) -> TypeId {
+    if bc.type_args.is_some() {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 0,
+          got: bc.type_args.as_ref().map_or(0, |ta| ta.len()),
+          type_name: "@panic".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
     if bc.args.len() != 1 {
       self.add_diagnostic(
         DiagnosticMessage::BuiltinArgCount {
@@ -4429,7 +4466,17 @@ impl<'a> Analyzer<'a> {
       return self.types.error();
     }
 
-    self.typecheck_node(&bc.args[0], scope_kind, ctx);
+    if self.extract_string_literal(&bc.args[0]).is_none() {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinExpectedStringLiteral {
+          name: "panic".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
     self.types.never()
   }
 

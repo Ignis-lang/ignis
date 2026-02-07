@@ -1046,7 +1046,12 @@ impl<'a> CEmitter<'a> {
         writeln!(self.output, "__builtin_trap();").unwrap();
       },
       Instr::PanicMessage { message, .. } => {
-        writeln!(self.output, "fprintf(stderr, \"panic: %s\\n\", \"{}\");", message).unwrap();
+        writeln!(
+          self.output,
+          "fprintf(stderr, \"panic: %s\\n\", \"{}\");",
+          Self::escape_string(message)
+        )
+        .unwrap();
         writeln!(self.output, "exit(101);").unwrap();
       },
     }
