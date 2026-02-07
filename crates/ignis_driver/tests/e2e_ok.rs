@@ -1768,6 +1768,26 @@ function main(): i32 {
 // Lint Tests (no warnings expected)
 // =========================================================================
 
+// ========================================================================
+// Never-type control flow tests
+// ========================================================================
+
+#[test]
+fn e2e_never_no_missing_return() {
+  e2e_no_warnings(
+    "never_no_missing_return",
+    r#"
+function failHard(): i32 {
+    @panic("fatal error");
+}
+
+function main(): i32 {
+    return 0;
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_lint_allow_unused_variable() {
   e2e_no_warnings(

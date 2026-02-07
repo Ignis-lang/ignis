@@ -392,10 +392,24 @@ impl<'a> Analyzer<'a> {
     &self,
     node_id: NodeId,
   ) -> Termination {
+    if self.is_never_typed(node_id) {
+      return Termination::Always;
+    }
+
     match self.ast.get(&node_id) {
       ASTNode::Statement(stmt) => self.statement_termination(stmt),
       ASTNode::Expression(_) => Termination::Sometimes,
     }
+  }
+
+  /// Returns true if the node has type `Never` (e.g. @panic, @trap, @unreachable).
+  fn is_never_typed(
+    &self,
+    node_id: NodeId,
+  ) -> bool {
+    self
+      .lookup_type(&node_id)
+      .is_some_and(|tid| *self.types.get(tid) == ignis_type::types::Type::Never)
   }
 
   fn statement_termination(
@@ -431,11 +445,15 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  /// Check if a statement is a terminator (return/break/continue)
+  /// Check if a node is a terminator (return/break/continue, or Never-typed expression).
   fn is_terminator(
     &self,
     node_id: NodeId,
   ) -> bool {
+    if self.is_never_typed(node_id) {
+      return true;
+    }
+
     match self.ast.get(&node_id) {
       ASTNode::Statement(stmt) => matches!(
         stmt,
