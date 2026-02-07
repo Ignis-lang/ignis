@@ -157,12 +157,10 @@ impl<'a> Analyzer<'a> {
 
       let deprecated_msg = match &def.kind {
         DefinitionKind::Function(FunctionDefinition { attrs, .. })
-        | DefinitionKind::Method(MethodDefinition { attrs, .. }) => {
-          attrs.iter().find_map(|a| match a {
-            ignis_type::attribute::FunctionAttr::Deprecated(msg) => Some(msg.clone()),
-            _ => None,
-          })
-        },
+        | DefinitionKind::Method(MethodDefinition { attrs, .. }) => attrs.iter().find_map(|a| match a {
+          ignis_type::attribute::FunctionAttr::Deprecated(msg) => Some(msg.clone()),
+          _ => None,
+        }),
         _ => None,
       };
 

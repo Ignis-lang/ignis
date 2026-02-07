@@ -206,6 +206,54 @@ function main(): void {
   );
 }
 
+#[test]
+fn e2e_err_bitcast_missing_arg() {
+  e2e_error_test(
+    "err_bitcast_missing_arg",
+    r#"
+function main(): void {
+    let x: i32 = @bitCast<i32>();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pointer_cast_missing_arg() {
+  e2e_error_test(
+    "err_pointer_cast_missing_arg",
+    r#"
+function main(): void {
+    let x: *mut i32 = @pointerCast<*mut i32>();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_integer_from_pointer_missing_arg() {
+  e2e_error_test(
+    "err_integer_from_pointer_missing_arg",
+    r#"
+function main(): void {
+    let x: u64 = @integerFromPointer();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pointer_from_integer_missing_arg() {
+  e2e_error_test(
+    "err_pointer_from_integer_missing_arg",
+    r#"
+function main(): void {
+    let x: *mut i32 = @pointerFromInteger<*mut i32>();
+}
+"#,
+  );
+}
+
 // =========================================================================
 // Attribute Error Tests
 // =========================================================================

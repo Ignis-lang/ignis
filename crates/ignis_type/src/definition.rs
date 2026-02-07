@@ -1,6 +1,14 @@
 use std::collections::HashMap;
 
-use crate::{Id, Store, attribute::{FieldAttr, FunctionAttr, RecordAttr}, module::ModuleId, namespace::NamespaceId, span::Span, symbol::SymbolId, types::TypeId};
+use crate::{
+  Id, Store,
+  attribute::{FieldAttr, FunctionAttr, RecordAttr},
+  module::ModuleId,
+  namespace::NamespaceId,
+  span::Span,
+  symbol::SymbolId,
+  types::TypeId,
+};
 
 /// Inline hint for function/method codegen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

@@ -1091,7 +1091,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UnknownAttribute { name, target, .. } => {
         write!(f, "unknown attribute '@{}' on {}", name, target)
       },
-      DiagnosticMessage::AttributeArgCount { attr, expected, got, .. } => {
+      DiagnosticMessage::AttributeArgCount {
+        attr, expected, got, ..
+      } => {
         write!(f, "@{} expects {} argument(s), got {}", attr, expected, got)
       },
       DiagnosticMessage::AttributeExpectedString { attr, .. } => {

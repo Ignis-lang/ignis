@@ -1747,6 +1747,14 @@ impl<'a> Analyzer<'a> {
       });
     };
 
+    if bc.args.is_empty() {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
     let target = self.resolve_type_syntax(&type_args[0]);
     let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
 
@@ -1774,6 +1782,14 @@ impl<'a> Analyzer<'a> {
       });
     };
 
+    if bc.args.is_empty() {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
     let target = self.resolve_type_syntax(&type_args[0]);
     let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
 
@@ -1793,6 +1809,14 @@ impl<'a> Analyzer<'a> {
     hir: &mut HIR,
     scope_kind: ScopeKind,
   ) -> HIRId {
+    if bc.args.is_empty() {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
     let u64_ty = self.types.u64();
     let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
 
@@ -1819,6 +1843,14 @@ impl<'a> Analyzer<'a> {
         type_id: self.types.error(),
       });
     };
+
+    if bc.args.is_empty() {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
 
     let target = self.resolve_type_syntax(&type_args[0]);
     let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);

@@ -114,7 +114,10 @@ impl super::IgnisParser {
     match token.type_ {
       TokenType::Int => {
         self.bump();
-        let value: i64 = token.lexeme.parse().map_err(|_| DiagnosticMessage::ExpectedInteger(token.span.clone()))?;
+        let value: i64 = token
+          .lexeme
+          .parse()
+          .map_err(|_| DiagnosticMessage::ExpectedInteger(token.span.clone()))?;
         Ok(ASTAttributeArg::IntLiteral(value, token.span))
       },
       TokenType::String => {
