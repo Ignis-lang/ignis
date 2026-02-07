@@ -9,8 +9,8 @@ use colored::*;
 use cli::{BuildCommand, CheckCommand, Cli, SubCommand};
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
-  build_std, check_runtime, check_std, compile_file, compile_project, find_project_root, load_project_toml,
-  resolve_project, CliOverrides, Project,
+  build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
+  CliOverrides, Project,
 };
 
 // =============================================================================
@@ -116,7 +116,7 @@ fn run_build(
     },
     CompileInput::SingleFile(path) => {
       let config = build_config_for_single_file(cli, cmd, &path, false);
-      compile_file(config, path.to_str().unwrap())
+      compile_project(config, path.to_str().unwrap())
     },
   }
 }
@@ -278,7 +278,7 @@ fn run_check(
     },
     CompileInput::SingleFile(path) => {
       let config = check_config_for_single_file(cli, cmd, &path);
-      compile_file(config, path.to_str().unwrap())
+      compile_project(config, path.to_str().unwrap())
     },
   }
 }
