@@ -416,9 +416,14 @@ impl<'a> LoweringContext<'a> {
       } => self.lower_enum_variant(*enum_def, *variant_tag, payload, node.type_id, node.span),
       HIRKind::StaticAccess { def } => self.lower_static_access(*def, node.type_id, node.span),
 
-      HIRKind::Panic(_msg) => {
-        // MVP: emit trap + unreachable (no runtime panic message support yet)
-        self.fn_builder().emit(Instr::Trap { span: node.span });
+      HIRKind::Panic(msg) => {
+        let msg_node = self.hir.get(*msg);
+        let message = match &msg_node.kind {
+          HIRKind::Literal(IgnisLiteralValue::String(s)) => s.clone(),
+          _ => "<non-literal panic>".into(),
+        };
+
+        self.fn_builder().emit(Instr::PanicMessage { message, span: node.span });
         self.fn_builder().terminate(Terminator::Unreachable);
         None
       },

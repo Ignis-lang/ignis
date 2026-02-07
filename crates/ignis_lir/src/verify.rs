@@ -280,6 +280,7 @@ impl<'a> LirVerifier<'a> {
         }
       },
       Instr::Trap { .. } => {},
+      Instr::PanicMessage { .. } => {},
     }
   }
 

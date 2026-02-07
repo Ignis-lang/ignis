@@ -293,6 +293,9 @@ impl<'a> LirPrinter<'a> {
       Instr::Trap { .. } => {
         writeln!(self.output, "    trap").unwrap();
       },
+      Instr::PanicMessage { message, .. } => {
+        writeln!(self.output, "    panic \"{}\"", message).unwrap();
+      },
     }
   }
 

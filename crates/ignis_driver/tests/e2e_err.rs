@@ -172,3 +172,27 @@ function main(): void {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_config_flag_non_string() {
+  e2e_error_test(
+    "err_config_flag_non_string",
+    r#"
+function main(): void {
+    let flag: boolean = @configFlag(42);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_builtin_arg_count() {
+  e2e_error_test(
+    "err_builtin_arg_count",
+    r#"
+function main(): void {
+    let flag: boolean = @configFlag();
+}
+"#,
+  );
+}

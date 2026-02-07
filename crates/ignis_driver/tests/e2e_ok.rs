@@ -1436,6 +1436,30 @@ function main(): i32 {
 }
 
 // ========================================================================
+// @panic tests
+// ========================================================================
+
+#[test]
+fn e2e_panic_message() {
+  let result = common::compile_and_run(
+    r#"
+function main(): i32 {
+    @panic("Test");
+    return 0;
+}
+"#,
+  )
+  .expect("Compilation of 'panic_message' failed");
+
+  assert_eq!(result.exit_code, 101);
+  assert!(
+    result.stderr.contains("panic: Test"),
+    "Expected stderr to contain 'panic: Test', got: {}",
+    result.stderr
+  );
+}
+
+// ========================================================================
 // @builtin(...) syntax tests
 // ========================================================================
 
@@ -1473,6 +1497,38 @@ fn e2e_config_flag_false() {
 function main(): i32 {
     let flag: boolean = @configFlag("feature.nonexistent");
     if (flag) {
+        return 1;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_config_flag_build_debug() {
+  e2e_test(
+    "config_flag_build_debug",
+    r#"
+function main(): i32 {
+    let debug: boolean = @configFlag("build.debug");
+    if (debug) {
+        return 42;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_config_flag_os() {
+  e2e_test(
+    "config_flag_os",
+    r#"
+function main(): i32 {
+    let isLinux: boolean = @configFlag("os.linux");
+    if (isLinux) {
         return 1;
     }
     return 0;

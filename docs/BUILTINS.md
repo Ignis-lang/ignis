@@ -243,40 +243,6 @@ In the current implementation, `@panic` and `@trap` emit identical code (`__buil
 | `@trap()` | none | `Never` | Yes (trap) |
 | `@unreachable()` | none | `Never` | No (UB hint) |
 
-## Inline Functions
-
-The `inline` keyword is a modifier for functions and methods. It instructs the compiler to inline the function at call sites.
-
-```ignis
-inline function add(a: i32, b: i32): i32 {
-    return a + b;
-}
-```
-
-In methods:
-
-```ignis
-record Vector2 {
-    x: f64,
-    y: f64,
-
-    inline function length(&self): f64 {
-        return Math::sqrt(self.x * self.x + self.y * self.y);
-    }
-}
-```
-
-Functions marked `inline` are emitted with the `static inline` specifier in the C backend. The C compiler (gcc/clang) decides whether to actually inline the function body. `inline` is a hint, not a guarantee.
-
-### Where `inline` Can Be Used
-
-| Context | Example |
-|---------|---------|
-| Top-level functions | `inline function foo(): void { ... }` |
-| Record methods | `inline function method(&self): i32 { ... }` inside a record |
-
-`inline` cannot be applied to external functions (`extern`) since their bodies are not available to the compiler.
-
 ## Diagnostics
 
 | Code | Message | Severity |

@@ -150,6 +150,12 @@ pub enum Instr {
     span: Span,
   },
 
+  /// Print a panic message to stderr and exit with code 101.
+  PanicMessage {
+    message: String,
+    span: Span,
+  },
+
   /// Drop an owned value's resources.
   /// The local must have a droppable type (string, dynamic vector, infer).
   Drop {

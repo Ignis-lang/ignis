@@ -196,7 +196,7 @@ impl<'a> Analyzer<'a> {
       runtime: None,
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
-      compilation_ctx: None,
+      compilation_ctx: Some(CompilationContext::default()),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
     analyzer
@@ -290,7 +290,7 @@ impl<'a> Analyzer<'a> {
       runtime: None,
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
-      compilation_ctx: None,
+      compilation_ctx: Some(CompilationContext::default()),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
 

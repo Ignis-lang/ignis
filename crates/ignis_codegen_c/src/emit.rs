@@ -112,6 +112,7 @@ impl<'a> CEmitter<'a> {
   }
 
   pub fn emit(mut self) -> String {
+    self.emit_implicit_headers();
     self.emit_headers();
     self.emit_type_forward_declarations();
     self.emit_type_definitions();
@@ -120,6 +121,33 @@ impl<'a> CEmitter<'a> {
     self.emit_forward_declarations();
     self.emit_functions();
     self.output
+  }
+
+  /// Emit C headers implied by instructions in the program (e.g. stdio for panic, math for pow).
+  fn emit_implicit_headers(&mut self) {
+    let mut needs_stdio = false;
+    let mut needs_math = false;
+
+    for func in self.program.functions.values() {
+      for (_, block) in func.blocks.iter() {
+        for instr in &block.instructions {
+          match instr {
+            Instr::PanicMessage { .. } => needs_stdio = true,
+            Instr::BinOp { op: BinaryOperation::Pow, .. } => needs_math = true,
+            _ => {},
+          }
+        }
+      }
+    }
+
+    if needs_stdio {
+      writeln!(self.output, "#include <stdio.h>").unwrap();
+      writeln!(self.output, "#include <stdlib.h>").unwrap();
+    }
+
+    if needs_math {
+      writeln!(self.output, "#include <math.h>").unwrap();
+    }
   }
 
   /// Classify a definition based on its owner module.
@@ -987,6 +1015,10 @@ impl<'a> CEmitter<'a> {
       },
       Instr::Trap { .. } => {
         writeln!(self.output, "__builtin_trap();").unwrap();
+      },
+      Instr::PanicMessage { message, .. } => {
+        writeln!(self.output, "fprintf(stderr, \"panic: %s\\n\", \"{}\");", message).unwrap();
+        writeln!(self.output, "exit(101);").unwrap();
       },
     }
   }
