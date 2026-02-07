@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::{
   Id, Store,
   definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  symbol::SymbolTable,
 };
 
 pub type TypeId = Id<Type>;
@@ -863,5 +864,124 @@ impl Substitution {
   /// Check if this substitution is empty (no bindings).
   pub fn is_empty(&self) -> bool {
     self.bindings.is_empty()
+  }
+}
+
+/// Format a `TypeId` as its human-readable Ignis name (e.g. `i32`, `*mut i32`,
+/// `record Point`).  Used by `@typeName<T>()` and the HIR pretty-printer.
+pub fn format_type_name(
+  type_id: &TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+) -> String {
+  let ty = types.get(type_id);
+
+  match ty {
+    Type::I8 => "i8".to_string(),
+    Type::I16 => "i16".to_string(),
+    Type::I32 => "i32".to_string(),
+    Type::I64 => "i64".to_string(),
+    Type::U8 => "u8".to_string(),
+    Type::U16 => "u16".to_string(),
+    Type::U32 => "u32".to_string(),
+    Type::U64 => "u64".to_string(),
+    Type::F32 => "f32".to_string(),
+    Type::F64 => "f64".to_string(),
+    Type::Boolean => "bool".to_string(),
+    Type::Char => "char".to_string(),
+    Type::String => "string".to_string(),
+    Type::Void => "void".to_string(),
+    Type::Never => "never".to_string(),
+    Type::Infer => "infer".to_string(),
+    Type::NullPtr => "null".to_string(),
+    Type::Error => "error".to_string(),
+
+    Type::Pointer { inner, mutable } => {
+      if *mutable {
+        format!("*mut {}", format_type_name(inner, types, defs, symbols))
+      } else {
+        format!("*{}", format_type_name(inner, types, defs, symbols))
+      }
+    },
+
+    Type::Reference { inner, mutable } => {
+      if *mutable {
+        format!("&mut {}", format_type_name(inner, types, defs, symbols))
+      } else {
+        format!("&{}", format_type_name(inner, types, defs, symbols))
+      }
+    },
+
+    Type::Vector { element, size } => {
+      if let Some(s) = size {
+        format!("[{}; {}]", format_type_name(element, types, defs, symbols), s)
+      } else {
+        format!("[{}]", format_type_name(element, types, defs, symbols))
+      }
+    },
+
+    Type::Tuple(elements) => {
+      let elem_strs: Vec<_> = elements
+        .iter()
+        .map(|e| format_type_name(e, types, defs, symbols))
+        .collect();
+      format!("({})", elem_strs.join(", "))
+    },
+
+    Type::Function {
+      params,
+      ret,
+      is_variadic,
+    } => {
+      let param_strs: Vec<_> = params
+        .iter()
+        .map(|p| format_type_name(p, types, defs, symbols))
+        .collect();
+      let variadic = if *is_variadic { ", ..." } else { "" };
+      format!(
+        "fn({}{}) -> {}",
+        param_strs.join(", "),
+        variadic,
+        format_type_name(ret, types, defs, symbols)
+      )
+    },
+
+    Type::Record(def_id) => {
+      let name = symbols.get(&defs.get(def_id).name);
+      format!("record {}", name)
+    },
+
+    Type::Enum(def_id) => {
+      let name = symbols.get(&defs.get(def_id).name);
+      format!("enum {}", name)
+    },
+
+    Type::Param { owner, index } => {
+      let owner_def = defs.get(owner);
+      let type_params = match &owner_def.kind {
+        DefinitionKind::Function(fd) => &fd.type_params,
+        DefinitionKind::Record(rd) => &rd.type_params,
+        DefinitionKind::Method(md) => &md.type_params,
+        DefinitionKind::Enum(ed) => &ed.type_params,
+        _ => return format!("T{}", index),
+      };
+
+      if let Some(param_def_id) = type_params.get(*index as usize) {
+        let param_name = symbols.get(&defs.get(param_def_id).name);
+        param_name.to_string()
+      } else {
+        format!("T{}", index)
+      }
+    },
+
+    Type::Instance { generic, args } => {
+      let name = symbols.get(&defs.get(generic).name);
+      let arg_strs: Vec<_> = args
+        .iter()
+        .map(|a| format_type_name(a, types, defs, symbols))
+        .collect();
+      format!("{}<{}>", name, arg_strs.join(", "))
+    },
   }
 }

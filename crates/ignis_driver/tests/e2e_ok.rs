@@ -1536,3 +1536,38 @@ function main(): i32 {
 "#,
   );
 }
+
+// ========================================================================
+// @typeName tests
+// ========================================================================
+
+#[test]
+fn e2e_typename_i32() {
+  e2e_test(
+    "typename_i32",
+    r#"
+function main(): i32 {
+    let name: string = @typeName<i32>();
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_typename_record() {
+  e2e_test(
+    "typename_record",
+    r#"
+record Point {
+    public x: i32;
+    public y: i32;
+}
+
+function main(): i32 {
+    let name: string = @typeName<Point>();
+    return 0;
+}
+"#,
+  );
+}

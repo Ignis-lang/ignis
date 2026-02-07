@@ -4070,6 +4070,10 @@ impl<'a> Analyzer<'a> {
         let ty = self.types.u64();
         self.typecheck_builtin_type_arg(bc, "alignOf", ty)
       },
+      "typeName" => {
+        let ty = self.types.string();
+        self.typecheck_builtin_type_arg(bc, "typeName", ty)
+      },
       "panic" => self.typecheck_builtin_panic(bc, scope_kind, ctx),
       "trap" => self.typecheck_builtin_no_args(bc, "trap"),
       "unreachable" => self.typecheck_builtin_no_args(bc, "unreachable"),

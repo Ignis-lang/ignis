@@ -1591,6 +1591,7 @@ impl<'a> Analyzer<'a> {
       "compileError" => self.lower_builtin_compile_error(bc, hir),
       "sizeOf" => self.lower_builtin_sizeof_new(bc, hir),
       "alignOf" => self.lower_builtin_alignof_new(bc, hir),
+      "typeName" => self.lower_builtin_typename(bc, hir),
       "panic" => self.lower_builtin_panic(bc, hir, scope_kind),
       "trap" => self.lower_builtin_trap(bc, hir),
       "unreachable" => self.lower_builtin_unreachable(bc, hir),
@@ -1698,6 +1699,33 @@ impl<'a> Analyzer<'a> {
       kind: HIRKind::AlignOf(value_type),
       span: bc.span.clone(),
       type_id: self.types.u64(),
+    })
+  }
+
+  fn lower_builtin_typename(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let Some(ref type_args) = bc.type_args else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    let name = {
+      let symbols = self.symbols.borrow();
+      ignis_type::types::format_type_name(&value_type, &self.types, &self.defs, &symbols)
+    };
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::String(name)),
+      span: bc.span.clone(),
+      type_id: self.types.string(),
     })
   }
 
