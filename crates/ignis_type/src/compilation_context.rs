@@ -48,7 +48,9 @@ impl CompilationContext {
     match key {
       "build.debug" => Some(self.debug),
       "build.release" => Some(!self.debug),
-      _ => key.strip_prefix("feature.").map(|feature| self.features.contains(feature)),
+      _ => key
+        .strip_prefix("feature.")
+        .map(|feature| self.features.contains(feature)),
     }
   }
 }

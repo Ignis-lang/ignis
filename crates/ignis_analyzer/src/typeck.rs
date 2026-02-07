@@ -4074,6 +4074,10 @@ impl<'a> Analyzer<'a> {
         let ty = self.types.string();
         self.typecheck_builtin_type_arg(bc, "typeName", ty)
       },
+      "bitCast" => self.typecheck_builtin_bitcast(bc, scope_kind, ctx),
+      "pointerCast" => self.typecheck_builtin_pointer_cast(bc, scope_kind, ctx),
+      "integerFromPointer" => self.typecheck_builtin_integer_from_pointer(bc, scope_kind, ctx),
+      "pointerFromInteger" => self.typecheck_builtin_pointer_from_integer(bc, scope_kind, ctx),
       "panic" => self.typecheck_builtin_panic(bc, scope_kind, ctx),
       "trap" => self.typecheck_builtin_no_args(bc, "trap"),
       "unreachable" => self.typecheck_builtin_no_args(bc, "unreachable"),
@@ -4210,6 +4214,200 @@ impl<'a> Analyzer<'a> {
 
     self.resolve_type_syntax_with_span(&type_args[0], &bc.span);
     result_type
+  }
+
+  fn typecheck_builtin_cast_1_type_1_expr(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    name: &str,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> Option<(TypeId, TypeId)> {
+    let type_args = match &bc.type_args {
+      Some(ta) => ta,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: format!("@{}", name),
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        return None;
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: format!("@{}", name),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return None;
+    }
+
+    if bc.args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: name.to_string(),
+          expected: 1,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return None;
+    }
+
+    let resolved = self.resolve_type_syntax_with_span(&type_args[0], &bc.span);
+    let expr_ty = self.typecheck_node(&bc.args[0], scope_kind, ctx);
+
+    Some((resolved, expr_ty))
+  }
+
+  fn typecheck_builtin_bitcast(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let Some((target_ty, _expr_ty)) = self.typecheck_builtin_cast_1_type_1_expr(bc, "bitCast", scope_kind, ctx) else {
+      return self.types.error();
+    };
+
+    target_ty
+  }
+
+  fn typecheck_builtin_pointer_cast(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let Some((target_ty, expr_ty)) = self.typecheck_builtin_cast_1_type_1_expr(bc, "pointerCast", scope_kind, ctx)
+    else {
+      return self.types.error();
+    };
+
+    if !self.types.is_pointer(&target_ty) {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinTypeConstraint {
+          name: "pointerCast".to_string(),
+          constraint: "expected pointer type argument".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if !self.types.is_pointer(&expr_ty) && !self.types.is_null_ptr(&expr_ty) {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinTypeConstraint {
+          name: "pointerCast".to_string(),
+          constraint: "expected pointer argument".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    target_ty
+  }
+
+  fn typecheck_builtin_integer_from_pointer(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    if bc.type_args.is_some() {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 0,
+          got: bc.type_args.as_ref().map_or(0, |ta| ta.len()),
+          type_name: "@integerFromPointer".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if bc.args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: "integerFromPointer".to_string(),
+          expected: 1,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let expr_ty = self.typecheck_node(&bc.args[0], scope_kind, ctx);
+
+    if !self.types.is_pointer(&expr_ty) && !self.types.is_null_ptr(&expr_ty) {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinTypeConstraint {
+          name: "integerFromPointer".to_string(),
+          constraint: "expected pointer argument".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.types.u64()
+  }
+
+  fn typecheck_builtin_pointer_from_integer(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let Some((target_ty, expr_ty)) =
+      self.typecheck_builtin_cast_1_type_1_expr(bc, "pointerFromInteger", scope_kind, ctx)
+    else {
+      return self.types.error();
+    };
+
+    if !self.types.is_pointer(&target_ty) {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinTypeConstraint {
+          name: "pointerFromInteger".to_string(),
+          constraint: "expected pointer type argument".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if !self.types.is_integer(&expr_ty) {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinTypeConstraint {
+          name: "pointerFromInteger".to_string(),
+          constraint: "expected integer argument".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    target_ty
   }
 
   fn typecheck_builtin_panic(

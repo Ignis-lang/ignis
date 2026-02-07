@@ -127,13 +127,18 @@ impl<'a> CEmitter<'a> {
   fn emit_implicit_headers(&mut self) {
     let mut needs_stdio = false;
     let mut needs_math = false;
+    let mut needs_string = false;
 
     for func in self.program.functions.values() {
       for (_, block) in func.blocks.iter() {
         for instr in &block.instructions {
           match instr {
             Instr::PanicMessage { .. } => needs_stdio = true,
-            Instr::BinOp { op: BinaryOperation::Pow, .. } => needs_math = true,
+            Instr::BinOp {
+              op: BinaryOperation::Pow,
+              ..
+            } => needs_math = true,
+            Instr::BitCast { .. } => needs_string = true,
             _ => {},
           }
         }
@@ -147,6 +152,10 @@ impl<'a> CEmitter<'a> {
 
     if needs_math {
       writeln!(self.output, "#include <math.h>").unwrap();
+    }
+
+    if needs_string {
+      writeln!(self.output, "#include <string.h>").unwrap();
     }
   }
 
@@ -887,6 +896,26 @@ impl<'a> CEmitter<'a> {
           // Regular cast
           writeln!(self.output, "t{} = ({})({});", dest.index(), ty, s).unwrap();
         }
+      },
+      Instr::BitCast {
+        dest,
+        source,
+        target_type,
+      } => {
+        let s = self.format_operand(func, source);
+        let target_ty_str = self.format_type(*target_type);
+        let source_ty = self.operand_type(func, source);
+        let source_ty_str = source_ty
+          .map(|t| self.format_type(t))
+          .unwrap_or_else(|| "void".to_string());
+
+        writeln!(
+          self.output,
+          "_Static_assert(sizeof({}) == sizeof({}), \"bitCast: size mismatch\");",
+          target_ty_str, source_ty_str
+        )
+        .unwrap();
+        writeln!(self.output, "memcpy(&t{}, &{}, sizeof({}));", dest.index(), s, target_ty_str).unwrap();
       },
       Instr::AddrOfLocal { dest, local, .. } => {
         // For array locals, the name already decays to a pointer in C

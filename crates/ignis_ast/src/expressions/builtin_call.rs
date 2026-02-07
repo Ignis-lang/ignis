@@ -17,6 +17,11 @@ impl ASTBuiltinCall {
     args: Vec<crate::NodeId>,
     span: Span,
   ) -> Self {
-    Self { name, type_args, args, span }
+    Self {
+      name,
+      type_args,
+      args,
+      span,
+    }
   }
 }

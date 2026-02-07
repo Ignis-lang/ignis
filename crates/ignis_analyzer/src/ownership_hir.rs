@@ -261,6 +261,10 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_node(expression);
       },
 
+      HIRKind::BitCast { expression, .. } => {
+        self.check_node(expression);
+      },
+
       HIRKind::Reference { expression, .. } => {
         self.check_node(expression);
       },
@@ -597,6 +601,7 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       },
       HIRKind::Cast { expression, .. } => self.extract_pointer_variable(*expression),
+      HIRKind::BitCast { expression, .. } => self.extract_pointer_variable(*expression),
       _ => None,
     }
   }

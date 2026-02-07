@@ -84,6 +84,13 @@ pub enum Instr {
     target_type: TypeId,
   },
 
+  /// Bit-level reinterpret cast: `memcpy(&dest, &source, sizeof(target_type))`
+  BitCast {
+    dest: TempId,
+    source: Operand,
+    target_type: TypeId,
+  },
+
   /// Get address of a local: `dest = &local`
   AddrOfLocal {
     dest: TempId,

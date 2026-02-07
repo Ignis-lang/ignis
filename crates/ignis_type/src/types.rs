@@ -434,6 +434,13 @@ impl TypeStore {
     )
   }
 
+  pub fn is_pointer(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(self.get(ty), Type::Pointer { .. })
+  }
+
   pub fn is_float(
     &self,
     ty: &TypeId,
@@ -977,10 +984,7 @@ pub fn format_type_name(
 
     Type::Instance { generic, args } => {
       let name = symbols.get(&defs.get(generic).name);
-      let arg_strs: Vec<_> = args
-        .iter()
-        .map(|a| format_type_name(a, types, defs, symbols))
-        .collect();
+      let arg_strs: Vec<_> = args.iter().map(|a| format_type_name(a, types, defs, symbols)).collect();
       format!("{}<{}>", name, arg_strs.join(", "))
     },
   }

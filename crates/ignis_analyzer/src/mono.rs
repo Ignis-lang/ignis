@@ -587,6 +587,16 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
+      HIRKind::BitCast { expression, target } => {
+        let new_expr = self.clone_hir_tree(*expression);
+        (
+          HIRKind::BitCast {
+            expression: new_expr,
+            target: *target,
+          },
+          None,
+        )
+      },
       HIRKind::BuiltinLoad { ty, ptr } => {
         let new_ptr = self.clone_hir_tree(*ptr);
         (HIRKind::BuiltinLoad { ty: *ty, ptr: new_ptr }, None)
@@ -1159,6 +1169,9 @@ impl<'a> Monomorphizer<'a> {
         self.scan_hir(*operand);
       },
       HIRKind::Cast { expression, .. } => {
+        self.scan_hir(*expression);
+      },
+      HIRKind::BitCast { expression, .. } => {
         self.scan_hir(*expression);
       },
       HIRKind::Reference { expression, .. } => {
@@ -1825,6 +1838,14 @@ impl<'a> Monomorphizer<'a> {
         let new_expr = self.substitute_hir(*expression, subst);
         let new_target = self.types.substitute(*target, subst);
         HIRKind::Cast {
+          expression: new_expr,
+          target: new_target,
+        }
+      },
+      HIRKind::BitCast { expression, target } => {
+        let new_expr = self.substitute_hir(*expression, subst);
+        let new_target = self.types.substitute(*target, subst);
+        HIRKind::BitCast {
           expression: new_expr,
           target: new_target,
         }

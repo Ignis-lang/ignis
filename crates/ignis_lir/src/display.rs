@@ -192,6 +192,15 @@ impl<'a> LirPrinter<'a> {
         let ty = self.format_type(*target_type);
         writeln!(self.output, "t{} = cast {} as {}", dest.index(), s, ty).unwrap();
       },
+      Instr::BitCast {
+        dest,
+        source,
+        target_type,
+      } => {
+        let s = self.format_operand(func, source);
+        let ty = self.format_type(*target_type);
+        writeln!(self.output, "t{} = bitcast {} as {}", dest.index(), s, ty).unwrap();
+      },
       Instr::AddrOfLocal { dest, local, mutable } => {
         let ty = self.format_type(func.temp_type(*dest));
         let ref_kind = if *mutable { "&mut" } else { "&" };

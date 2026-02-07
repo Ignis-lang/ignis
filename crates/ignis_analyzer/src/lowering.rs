@@ -1592,6 +1592,10 @@ impl<'a> Analyzer<'a> {
       "sizeOf" => self.lower_builtin_sizeof_new(bc, hir),
       "alignOf" => self.lower_builtin_alignof_new(bc, hir),
       "typeName" => self.lower_builtin_typename(bc, hir),
+      "bitCast" => self.lower_builtin_bitcast(bc, hir, scope_kind),
+      "pointerCast" => self.lower_builtin_pointer_cast(bc, hir, scope_kind),
+      "integerFromPointer" => self.lower_builtin_integer_from_pointer(bc, hir, scope_kind),
+      "pointerFromInteger" => self.lower_builtin_pointer_from_integer(bc, hir, scope_kind),
       "panic" => self.lower_builtin_panic(bc, hir, scope_kind),
       "trap" => self.lower_builtin_trap(bc, hir),
       "unreachable" => self.lower_builtin_unreachable(bc, hir),
@@ -1726,6 +1730,106 @@ impl<'a> Analyzer<'a> {
       kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::String(name)),
       span: bc.span.clone(),
       type_id: self.types.string(),
+    })
+  }
+
+  fn lower_builtin_bitcast(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let Some(ref type_args) = bc.type_args else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    let target = self.resolve_type_syntax(&type_args[0]);
+    let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BitCast {
+        expression: expr_id,
+        target,
+      },
+      span: bc.span.clone(),
+      type_id: target,
+    })
+  }
+
+  fn lower_builtin_pointer_cast(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let Some(ref type_args) = bc.type_args else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    let target = self.resolve_type_syntax(&type_args[0]);
+    let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Cast {
+        expression: expr_id,
+        target,
+      },
+      span: bc.span.clone(),
+      type_id: target,
+    })
+  }
+
+  fn lower_builtin_integer_from_pointer(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let u64_ty = self.types.u64();
+    let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Cast {
+        expression: expr_id,
+        target: u64_ty,
+      },
+      span: bc.span.clone(),
+      type_id: u64_ty,
+    })
+  }
+
+  fn lower_builtin_pointer_from_integer(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let Some(ref type_args) = bc.type_args else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    let target = self.resolve_type_syntax(&type_args[0]);
+    let expr_id = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Cast {
+        expression: expr_id,
+        target,
+      },
+      span: bc.span.clone(),
+      type_id: target,
     })
   }
 

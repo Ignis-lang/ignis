@@ -240,6 +240,11 @@ impl<'a> HIRPrinter<'a> {
         let target_str = self.format_type(target);
         format!("Cast({} as {})", expr_str, target_str)
       },
+      HIRKind::BitCast { expression, target } => {
+        let expr_str = self.format_node_compact(*expression);
+        let target_str = self.format_type(target);
+        format!("BitCast({} as {})", expr_str, target_str)
+      },
       HIRKind::TypeOf(expr) => {
         let expr_str = self.format_node_compact(*expr);
         format!("typeOf({})", expr_str)
@@ -409,6 +414,13 @@ impl<'a> HIRPrinter<'a> {
       HIRKind::Cast { expression, target } => {
         let target_str = self.format_type(target);
         writeln!(self.output, "Cast(-> {}) : {}", target_str, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*expression);
+        self.indent -= 1;
+      },
+      HIRKind::BitCast { expression, target } => {
+        let target_str = self.format_type(target);
+        writeln!(self.output, "BitCast(-> {}) : {}", target_str, type_str).unwrap();
         self.indent += 1;
         self.print_node(*expression);
         self.indent -= 1;

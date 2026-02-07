@@ -205,6 +205,10 @@ impl<'a> LirVerifier<'a> {
         self.check_operand(func, func_name, block_name, source, defined_temps);
         defined_temps.insert(*dest);
       },
+      Instr::BitCast { dest, source, .. } => {
+        self.check_operand(func, func_name, block_name, source, defined_temps);
+        defined_temps.insert(*dest);
+      },
       Instr::AddrOfLocal { dest, local, .. } => {
         self.check_local_exists(func, func_name, block_name, *local);
         defined_temps.insert(*dest);

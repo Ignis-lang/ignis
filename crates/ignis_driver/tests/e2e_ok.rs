@@ -1571,3 +1571,72 @@ function main(): i32 {
 "#,
   );
 }
+
+// ========================================================================
+// Pointer/cast builtin tests
+// ========================================================================
+
+#[test]
+fn e2e_pointer_cast() {
+  e2e_test(
+    "pointer_cast",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 42;
+    let p: *mut i32 = (&mut x) as *mut i32;
+    let q: *mut u8 = @pointerCast<*mut u8>(p);
+    let r: *mut i32 = @pointerCast<*mut i32>(q);
+    return *r;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_integer_from_pointer() {
+  e2e_test(
+    "integer_from_pointer",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 7;
+    let p: *mut i32 = (&mut x) as *mut i32;
+    let addr: u64 = @integerFromPointer(p);
+    if (addr != 0) {
+        return 7;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pointer_from_integer() {
+  e2e_test(
+    "pointer_from_integer",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 99;
+    let p: *mut i32 = (&mut x) as *mut i32;
+    let addr: u64 = @integerFromPointer(p);
+    let q: *mut i32 = @pointerFromInteger<*mut i32>(addr);
+    return *q;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_bitcast_i32_f32() {
+  e2e_test(
+    "bitcast_i32_f32",
+    r#"
+function main(): i32 {
+    let bits: i32 = 1065353216;
+    let f: f32 = @bitCast<f32>(bits);
+    let back: i32 = @bitCast<i32>(f);
+    return back - 1065353216;
+}
+"#,
+  );
+}

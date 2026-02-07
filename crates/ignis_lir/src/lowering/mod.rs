@@ -330,6 +330,7 @@ impl<'a> LoweringContext<'a> {
         type_args: _,
       } => self.lower_call(*callee, args, node.type_id, node.span),
       HIRKind::Cast { expression, target } => self.lower_cast(*expression, *target, node.span),
+      HIRKind::BitCast { expression, target } => self.lower_bitcast(*expression, *target, node.span),
       HIRKind::Reference { expression, mutable } => {
         self.lower_reference(*expression, *mutable, node.type_id, node.span)
       },
@@ -423,7 +424,10 @@ impl<'a> LoweringContext<'a> {
           _ => "<non-literal panic>".into(),
         };
 
-        self.fn_builder().emit(Instr::PanicMessage { message, span: node.span });
+        self.fn_builder().emit(Instr::PanicMessage {
+          message,
+          span: node.span,
+        });
         self.fn_builder().terminate(Terminator::Unreachable);
         None
       },
@@ -674,6 +678,24 @@ impl<'a> LoweringContext<'a> {
     let dest = self.fn_builder().alloc_temp(target, span);
 
     self.fn_builder().emit(Instr::Cast {
+      dest,
+      source,
+      target_type: target,
+    });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_bitcast(
+    &mut self,
+    expr: HIRId,
+    target: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let source = self.lower_hir_node(expr)?;
+    let dest = self.fn_builder().alloc_temp(target, span);
+
+    self.fn_builder().emit(Instr::BitCast {
       dest,
       source,
       target_type: target,

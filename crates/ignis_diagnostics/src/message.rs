@@ -538,6 +538,11 @@ pub enum DiagnosticMessage {
     name: String,
     span: Span,
   },
+  BuiltinTypeConstraint {
+    name: String,
+    constraint: String,
+    span: Span,
+  },
   UnknownConfigFlag {
     key: String,
     span: Span,
@@ -1032,6 +1037,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::BuiltinExpectedStringLiteral { name, .. } => {
         write!(f, "@{} expects a string literal argument", name)
       },
+      DiagnosticMessage::BuiltinTypeConstraint { name, constraint, .. } => {
+        write!(f, "@{}: {}", name, constraint)
+      },
       DiagnosticMessage::UnknownConfigFlag { key, .. } => {
         write!(f, "Unknown config flag '{}'", key)
       },
@@ -1182,6 +1190,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::CompileError { span, .. }
       | DiagnosticMessage::BuiltinArgCount { span, .. }
       | DiagnosticMessage::BuiltinExpectedStringLiteral { span, .. }
+      | DiagnosticMessage::BuiltinTypeConstraint { span, .. }
       | DiagnosticMessage::UnknownConfigFlag { span, .. } => span.clone(),
     }
   }
@@ -1325,6 +1334,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::CompileError { .. } => "A0111",
       DiagnosticMessage::BuiltinArgCount { .. } => "A0112",
       DiagnosticMessage::BuiltinExpectedStringLiteral { .. } => "A0113",
+      DiagnosticMessage::BuiltinTypeConstraint { .. } => "A0116",
       DiagnosticMessage::UnknownConfigFlag { .. } => "A0115",
     }
     .to_string()

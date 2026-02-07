@@ -34,6 +34,10 @@ pub enum HIRKind {
     expression: HIRId,
     target: TypeId,
   },
+  BitCast {
+    expression: HIRId,
+    target: TypeId,
+  },
   Reference {
     expression: HIRId,
     mutable: bool,
@@ -168,6 +172,9 @@ impl HIRKind {
         }
       },
       HIRKind::Cast { expression, .. } => {
+        *expression = HIRId::new(expression.index() + offset);
+      },
+      HIRKind::BitCast { expression, .. } => {
         *expression = HIRId::new(expression.index() + offset);
       },
       HIRKind::Reference { expression, .. } => {
