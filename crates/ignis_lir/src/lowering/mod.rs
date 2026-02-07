@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
 use ignis_type::{
-  definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  definition::{DefinitionId, DefinitionKind, DefinitionStore, InlineMode},
   module::ModuleId,
   span::Span,
   symbol::SymbolTable,
@@ -156,6 +156,7 @@ impl<'a> LoweringContext<'a> {
       func_def.return_type,
       func_def.is_extern,
       func_def.is_variadic,
+      func_def.inline_mode,
       def.span.clone(),
     );
 
@@ -225,6 +226,7 @@ impl<'a> LoweringContext<'a> {
       method_def.return_type,
       false, // is_extern - methods are never extern
       false, // is_variadic - methods are never variadic
+      method_def.inline_mode,
       def.span.clone(),
     );
 
@@ -295,6 +297,7 @@ impl<'a> LoweringContext<'a> {
       return_type,
       true, // is_extern
       is_variadic,
+      InlineMode::None, // extern functions are never inline
       def.span.clone(),
     );
 

@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 
-use ignis_type::{Store, definition::DefinitionId, span::Span, types::TypeId};
+use ignis_type::{
+  Store,
+  definition::{DefinitionId, InlineMode},
+  span::Span,
+  types::TypeId,
+};
 
 use crate::{Block, BlockId, LocalId, TempId};
 
@@ -52,6 +57,8 @@ pub struct FunctionLir {
   pub is_extern: bool,
   /// Whether this function is variadic.
   pub is_variadic: bool,
+  /// Inline hint for the backend.
+  pub inline_mode: InlineMode,
   /// Source span for error reporting.
   pub span: Span,
 }

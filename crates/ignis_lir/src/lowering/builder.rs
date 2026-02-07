@@ -1,4 +1,9 @@
-use ignis_type::{Store, definition::DefinitionId, span::Span, types::TypeId};
+use ignis_type::{
+  Store,
+  definition::{DefinitionId, InlineMode},
+  span::Span,
+  types::TypeId,
+};
 
 use crate::{Block, BlockId, FunctionLir, Instr, LocalData, LocalId, TempData, TempId, Terminator};
 
@@ -9,6 +14,7 @@ pub struct FunctionBuilder {
   return_type: TypeId,
   is_extern: bool,
   is_variadic: bool,
+  inline_mode: InlineMode,
   span: Span,
 
   locals: Store<LocalData>,
@@ -29,6 +35,7 @@ impl FunctionBuilder {
     return_type: TypeId,
     is_extern: bool,
     is_variadic: bool,
+    inline_mode: InlineMode,
     span: Span,
   ) -> Self {
     let mut builder = Self {
@@ -37,6 +44,7 @@ impl FunctionBuilder {
       return_type,
       is_extern,
       is_variadic,
+      inline_mode,
       span,
       locals: Store::new(),
       temps: Store::new(),
@@ -159,6 +167,7 @@ impl FunctionBuilder {
       entry_block: BlockId::new(0), // Entry is always first
       is_extern: self.is_extern,
       is_variadic: self.is_variadic,
+      inline_mode: self.inline_mode,
       span: self.span,
     }
   }

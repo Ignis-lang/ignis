@@ -5,7 +5,9 @@ use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
-  definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, RecordDefinition},
+  definition::{
+    DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, InlineMode, RecordDefinition, Visibility,
+  },
   module::{ModuleId, ModulePath},
   namespace::NamespaceStore,
   symbol::SymbolTable,
@@ -541,6 +543,15 @@ impl<'a> CEmitter<'a> {
         continue;
       }
 
+      // static inline functions don't need forward declarations.
+      // Exported inline functions are not static, so they still need one.
+      if matches!(func.inline_mode, InlineMode::Inline | InlineMode::Always) {
+        let is_public = self.defs.get(def_id).visibility == Visibility::Public;
+        if !is_public {
+          continue;
+        }
+      }
+
       // Filter by target
       if !self.should_emit(**def_id) {
         continue;
@@ -620,6 +631,22 @@ impl<'a> CEmitter<'a> {
     } else {
       params.join(", ")
     };
+
+    // Public functions must not be `static` -- conflicts with the header declaration.
+    if !is_entry_main && !func.is_extern {
+      let is_public = self.defs.get(&def_id).visibility == Visibility::Public;
+
+      match func.inline_mode {
+        InlineMode::Inline if is_public => write!(self.output, "inline ").unwrap(),
+        InlineMode::Inline => write!(self.output, "static inline ").unwrap(),
+        InlineMode::Always if is_public => {
+          write!(self.output, "__attribute__((always_inline)) inline ").unwrap()
+        },
+        InlineMode::Always => write!(self.output, "__attribute__((always_inline)) static inline ").unwrap(),
+        InlineMode::Never => write!(self.output, "__attribute__((noinline)) ").unwrap(),
+        InlineMode::None => {},
+      }
+    }
 
     write!(self.output, "{} {}({})", ret_ty, name, params_str).unwrap();
   }

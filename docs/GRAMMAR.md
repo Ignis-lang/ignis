@@ -259,8 +259,8 @@
 
 <directive-attrs> ::= (<directive-attr>)+
 
-<directive-attr> ::= "#[" <directive-attr-list>? "]"
-                   | "#" <qualified-identifier> ("(" <expression-list>? ")")?
+<directive-attr> ::= "@[" <directive-attr-list>? "]"
+                   | "@" <qualified-identifier> ("(" <expression-list>? ")")?
 
 <directive-attr-list> ::= <directive-attr-item> ("," <directive-attr-item>)* ","?
 <directive-attr-item> ::= <qualified-identifier> ("(" <expression-list>? ")")?
@@ -419,8 +419,8 @@
 <this> ::= "this"
 <self> ::= "self"
 
-<directive-expression> ::= "#" <qualified-identifier> ("(" <expression-list>? ")")?
-                         | "#[" <expression-list>? "]"
+<directive-expression> ::= "@" <qualified-identifier> ("(" <expression-list>? ")")?
+                         | "@[" <expression-list>? "]"
 
 <lambda> ::= (<generic-type>)? "(" <parameters>? ")" ":" <type> "->" (<expression> | <block>)
 

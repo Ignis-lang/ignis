@@ -1382,3 +1382,55 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// INLINE KEYWORD TESTS
+// =========================================================================
+
+#[test]
+fn e2e_inline_function() {
+  e2e_test(
+    "inline_function",
+    r#"
+inline function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return add(10, 32);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_inline_always() {
+  e2e_test(
+    "inline_always",
+    r#"
+inline(always) function twice(x: i32): i32 {
+    return x + x;
+}
+
+function main(): i32 {
+    return twice(21);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_inline_never() {
+  e2e_test(
+    "inline_never",
+    r#"
+inline(never) function triple(x: i32): i32 {
+    return x + x + x;
+}
+
+function main(): i32 {
+    return triple(14);
+}
+"#,
+  );
+}

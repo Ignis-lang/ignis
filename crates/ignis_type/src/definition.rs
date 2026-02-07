@@ -2,6 +2,19 @@ use std::collections::HashMap;
 
 use crate::{Id, Store, module::ModuleId, namespace::NamespaceId, span::Span, symbol::SymbolId, types::TypeId};
 
+/// Inline hint for function/method codegen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InlineMode {
+  #[default]
+  None,
+  /// `inline function`
+  Inline,
+  /// `inline(always) function`
+  Always,
+  /// `inline(never) function`
+  Never,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
   Int(i64),
@@ -90,6 +103,7 @@ pub struct FunctionDefinition {
   pub return_type: TypeId,
   pub is_extern: bool,
   pub is_variadic: bool,
+  pub inline_mode: InlineMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -181,6 +195,7 @@ pub struct MethodDefinition {
   /// Whether the method has `&mut self` (true) or `&self` (false).
   /// Only meaningful for instance methods (is_static=false).
   pub self_mutable: bool,
+  pub inline_mode: InlineMode,
 }
 
 /// Definition of a type parameter (T, U, etc.)

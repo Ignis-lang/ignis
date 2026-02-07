@@ -609,7 +609,7 @@ impl<'a> Analyzer<'a> {
     return_type: TypeId,
     span: ignis_type::span::Span,
   ) -> DefinitionId {
-    use ignis_type::definition::{Definition, FunctionDefinition, ParameterDefinition};
+    use ignis_type::definition::{Definition, FunctionDefinition, InlineMode, ParameterDefinition};
 
     let fn_name = self.symbols.borrow_mut().intern(name);
     let param_defs: Vec<DefinitionId> = params
@@ -640,6 +640,7 @@ impl<'a> Analyzer<'a> {
         return_type,
         is_extern: true,
         is_variadic: false,
+        inline_mode: InlineMode::None,
       }),
       name: fn_name,
       span: span.clone(),

@@ -561,6 +561,7 @@ impl<'a> Analyzer<'a> {
         return_type: self.types.error(), // Resolved in typeck
         is_static,
         self_mutable: method.self_param.unwrap_or(false),
+        inline_mode: method.inline_mode,
       }),
       name: method.name,
       span: method.span.clone(),
@@ -736,6 +737,7 @@ impl<'a> Analyzer<'a> {
       return_type: self.types.error(),
       is_extern,
       is_variadic,
+      inline_mode: func.signature.inline_mode,
     };
 
     let def = Definition {

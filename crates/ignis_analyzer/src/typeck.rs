@@ -5539,7 +5539,11 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" { 1 } else { 0 }
+    if first_name == "self" {
+      1
+    } else {
+      0
+    }
   }
 
   fn emit_no_overload_error(

@@ -1,4 +1,4 @@
-use ignis_type::{span::Span, symbol::SymbolId};
+use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
 
 use crate::{generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
 
@@ -99,6 +99,7 @@ pub struct ASTMethod {
   pub self_param: Option<bool>,
   pub span: Span,
   pub doc: Option<String>,
+  pub inline_mode: InlineMode,
 }
 
 impl ASTMethod {
@@ -113,6 +114,7 @@ impl ASTMethod {
     self_param: Option<bool>,
     span: Span,
     doc: Option<String>,
+    inline_mode: InlineMode,
   ) -> Self {
     Self {
       name,
@@ -125,6 +127,7 @@ impl ASTMethod {
       self_param,
       span,
       doc,
+      inline_mode,
     }
   }
 

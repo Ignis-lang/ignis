@@ -16,7 +16,7 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_token::token_types::TokenType;
-use ignis_type::{span::Span, symbol::SymbolId};
+use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
 
 use crate::parser::ParserResult;
 
@@ -51,10 +51,37 @@ impl super::IgnisParser {
     Ok(items)
   }
 
+  /// Parse `inline`, `inline(always)`, or `inline(never)`.
+  fn parse_inline_mode(&mut self) -> ParserResult<InlineMode> {
+    self.expect(TokenType::Inline)?;
+
+    if self.eat(TokenType::LeftParen) {
+      let ident = self.expect(TokenType::Identifier)?.clone();
+      let name = ident.lexeme.as_str();
+
+      let mode = match name {
+        "always" => InlineMode::Always,
+        "never" => InlineMode::Never,
+        _ => {
+          return Err(DiagnosticMessage::UnexpectedToken { at: ident.span });
+        },
+      };
+
+      self.expect(TokenType::RightParen)?;
+      Ok(mode)
+    } else {
+      Ok(InlineMode::Inline)
+    }
+  }
+
   /// Parse a top-level declaration
   fn parse_declaration(&mut self) -> ParserResult<NodeId> {
     match self.peek().type_ {
-      TokenType::Function => self.parse_function_declaration(),
+      TokenType::Inline => {
+        let inline_mode = self.parse_inline_mode()?;
+        self.parse_function_declaration(inline_mode)
+      },
+      TokenType::Function => self.parse_function_declaration(InlineMode::None),
       TokenType::Import => self.parse_import_declaration(),
       TokenType::Export => self.parse_export_declaration(),
       TokenType::Const => self.parse_constant_declaration(),
@@ -63,9 +90,6 @@ impl super::IgnisParser {
       TokenType::Type => self.parse_type_alias_declaration(),
       TokenType::Record => self.parse_record_declaration(),
       TokenType::Enum => self.parse_enum_declaration(),
-      // If we encounter Eof here (e.g. inside a block or if called unexpectedly), handle it.
-      // But loop condition in parse_program prevents this for top-level.
-      // However, if we are inside a namespace or extern, we might hit Eof.
       TokenType::Eof => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -166,7 +190,10 @@ impl super::IgnisParser {
   // =========================================================================
 
   /// function name<T, U>(params): type block
-  fn parse_function_declaration(&mut self) -> ParserResult<NodeId> {
+  fn parse_function_declaration(
+    &mut self,
+    inline_mode: InlineMode,
+  ) -> ParserResult<NodeId> {
     // Capture pending doc
     let doc = self.take_pending_doc();
 
@@ -200,6 +227,7 @@ impl super::IgnisParser {
       signature_span,
       ignis_ast::metadata::ASTMetadata::NONE,
       doc,
+      inline_mode,
     );
 
     let function = ASTFunction::new(signature, Some(body));
@@ -273,6 +301,7 @@ impl super::IgnisParser {
     self.pending_doc = saved_doc;
 
     if self.at(TokenType::Function)
+      || self.at(TokenType::Inline)
       || self.at(TokenType::Const)
       || self.at(TokenType::Extern)
       || self.at(TokenType::Namespace)
@@ -298,7 +327,11 @@ impl super::IgnisParser {
   /// Helper: parse declaration without consuming 'export' again
   fn parse_declaration_inner_after_export(&mut self) -> ParserResult<NodeId> {
     match self.peek().type_ {
-      TokenType::Function => self.parse_function_declaration(),
+      TokenType::Inline => {
+        let inline_mode = self.parse_inline_mode()?;
+        self.parse_function_declaration(inline_mode)
+      },
+      TokenType::Function => self.parse_function_declaration(InlineMode::None),
       TokenType::Const => self.parse_constant_declaration(),
       TokenType::Extern => self.parse_extern_declaration(),
       TokenType::Namespace => self.parse_namespace_declaration(),
@@ -372,7 +405,11 @@ impl super::IgnisParser {
 
   fn parse_namespace_item(&mut self) -> ParserResult<NodeId> {
     match self.peek().type_ {
-      TokenType::Function => self.parse_function_declaration(),
+      TokenType::Inline => {
+        let inline_mode = self.parse_inline_mode()?;
+        self.parse_function_declaration(inline_mode)
+      },
+      TokenType::Function => self.parse_function_declaration(InlineMode::None),
       TokenType::Const => self.parse_constant_declaration(),
       TokenType::Namespace => self.parse_namespace_declaration(),
       TokenType::Extern => self.parse_extern_declaration(),
@@ -432,6 +469,7 @@ impl super::IgnisParser {
       span.clone(),
       ignis_ast::metadata::ASTMetadata::EXTERN_MEMBER,
       doc,
+      InlineMode::None, // extern functions are never inline
     );
 
     let function = ASTFunction::new(signature, None);
@@ -467,11 +505,12 @@ impl super::IgnisParser {
   ///
   /// Also captures any pending doc comment BEFORE consuming modifiers,
   /// so that `/// doc\nstatic field: i32;` correctly attaches the doc to the field.
-  fn parse_member_modifiers(&mut self) -> (ASTMetadata, Option<String>) {
+  fn parse_member_modifiers(&mut self) -> ParserResult<(ASTMetadata, Option<String>, InlineMode)> {
     // Capture doc BEFORE consuming modifiers
     let doc = self.take_pending_doc();
 
     let mut meta = ASTMetadata::NONE;
+    let mut inline_mode = InlineMode::None;
 
     loop {
       match self.peek().type_ {
@@ -487,11 +526,30 @@ impl super::IgnisParser {
           meta |= ASTMetadata::PRIVATE;
           self.bump();
         },
+        TokenType::Inline => {
+          self.bump();
+
+          if self.eat(TokenType::LeftParen) {
+            let ident = self.expect(TokenType::Identifier)?.clone();
+
+            inline_mode = match ident.lexeme.as_str() {
+              "always" => InlineMode::Always,
+              "never" => InlineMode::Never,
+              _ => {
+                return Err(DiagnosticMessage::UnexpectedToken { at: ident.span });
+              },
+            };
+
+            self.expect(TokenType::RightParen)?;
+          } else {
+            inline_mode = InlineMode::Inline;
+          }
+        },
         _ => break,
       }
     }
 
-    (meta, doc)
+    Ok((meta, doc, inline_mode))
   }
 
   /// record Name<T, U> { fields, methods }
@@ -511,7 +569,7 @@ impl super::IgnisParser {
     let mut items = Vec::new();
 
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
-      let (modifiers, member_doc) = self.parse_member_modifiers();
+      let (modifiers, member_doc, member_inline) = self.parse_member_modifiers()?;
 
       if !self.at(TokenType::Identifier) {
         return Err(DiagnosticMessage::UnexpectedToken {
@@ -525,7 +583,7 @@ impl super::IgnisParser {
       // - identifier : ... -> field
       let next = self.peek_nth(1).type_;
       if next == TokenType::LeftParen || next == TokenType::Less {
-        let method = self.parse_method(modifiers, member_doc)?;
+        let method = self.parse_method(modifiers, member_doc, member_inline)?;
         items.push(ASTRecordItem::Method(method));
       } else {
         let field = self.parse_record_field(modifiers, member_doc)?;
@@ -546,6 +604,7 @@ impl super::IgnisParser {
     &mut self,
     modifiers: ASTMetadata,
     doc: Option<String>,
+    inline_mode: InlineMode,
   ) -> ParserResult<ASTMethod> {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -601,6 +660,7 @@ impl super::IgnisParser {
       self_param,
       span,
       doc,
+      inline_mode,
     ))
   }
 
@@ -680,7 +740,7 @@ impl super::IgnisParser {
     let mut items = Vec::new();
 
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
-      let (modifiers, member_doc) = self.parse_member_modifiers();
+      let (modifiers, member_doc, member_inline) = self.parse_member_modifiers()?;
 
       if !self.at(TokenType::Identifier) {
         return Err(DiagnosticMessage::UnexpectedToken {
@@ -701,11 +761,11 @@ impl super::IgnisParser {
         items.push(ASTEnumItem::Field(field));
       } else if next == TokenType::Less && self.is_generic_method_ahead() {
         // Generic method: name<T>(...): type { }
-        let method = self.parse_method(modifiers, member_doc)?;
+        let method = self.parse_method(modifiers, member_doc, member_inline)?;
         items.push(ASTEnumItem::Method(method));
       } else if next == TokenType::LeftParen && self.is_method_ahead() {
         // Method: name(...): type { }
-        let method = self.parse_method(modifiers, member_doc)?;
+        let method = self.parse_method(modifiers, member_doc, member_inline)?;
         items.push(ASTEnumItem::Method(method));
       } else {
         // Variant: Name or Name(Type, Type)
@@ -1467,6 +1527,174 @@ mod tests {
         }
       },
       other => panic!("expected enum, got {:?}", other),
+    }
+  }
+
+  // =========================================================================
+  // INLINE KEYWORD TESTS
+  // =========================================================================
+
+  #[test]
+  fn parses_inline_function() {
+    use ignis_type::definition::InlineMode;
+
+    let result = parse("inline function foo(): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(symbol_name(&result, &func.signature.name), "foo");
+        assert_eq!(func.signature.inline_mode, InlineMode::Inline);
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_inline_always_function() {
+    use ignis_type::definition::InlineMode;
+
+    let result = parse("inline(always) function foo(): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(symbol_name(&result, &func.signature.name), "foo");
+        assert_eq!(func.signature.inline_mode, InlineMode::Always);
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_inline_never_function() {
+    use ignis_type::definition::InlineMode;
+
+    let result = parse("inline(never) function foo(): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(symbol_name(&result, &func.signature.name), "foo");
+        assert_eq!(func.signature.inline_mode, InlineMode::Never);
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_export_inline_function() {
+    use ignis_ast::statements::ASTExport;
+    use ignis_type::definition::InlineMode;
+
+    let result = parse("export inline function foo(): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Export(ASTExport::Declaration { decl, .. }) => {
+        let inner = result.nodes.get(decl);
+        match inner {
+          ASTNode::Statement(ASTStatement::Function(func)) => {
+            assert_eq!(symbol_name(&result, &func.signature.name), "foo");
+            assert_eq!(func.signature.inline_mode, InlineMode::Inline);
+          },
+          other => panic!("expected function inside export, got {:?}", other),
+        }
+      },
+      other => panic!("expected export declaration, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_inline_method_in_record() {
+    use ignis_ast::statements::ASTRecordItem;
+    use ignis_type::definition::InlineMode;
+
+    let result = parse(
+      r#"record Foo {
+        x: i32;
+        inline getX(&self): i32 { return self.x; }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(rec.items.len(), 2);
+        match &rec.items[1] {
+          ASTRecordItem::Method(method) => {
+            assert_eq!(symbol_name(&result, &method.name), "getX");
+            assert_eq!(method.inline_mode, InlineMode::Inline);
+          },
+          other => panic!("expected method, got {:?}", other),
+        }
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_inline_always_method_in_record() {
+    use ignis_ast::statements::ASTRecordItem;
+    use ignis_type::definition::InlineMode;
+
+    let result = parse(
+      r#"record Foo {
+        x: i32;
+        inline(always) getX(&self): i32 { return self.x; }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(rec.items.len(), 2);
+        match &rec.items[1] {
+          ASTRecordItem::Method(method) => {
+            assert_eq!(symbol_name(&result, &method.name), "getX");
+            assert_eq!(method.inline_mode, InlineMode::Always);
+          },
+          other => panic!("expected method, got {:?}", other),
+        }
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_function_without_inline_has_none() {
+    use ignis_type::definition::InlineMode;
+
+    let result = parse("function foo(): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(func.signature.inline_mode, InlineMode::None);
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_namespace_inline_function() {
+    use ignis_type::definition::InlineMode;
+
+    let result = parse("namespace Math { inline function add(a: i32, b: i32): i32 { return a + b; } }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Namespace(ns) => {
+        let inner = result.nodes.get(&ns.items[0]);
+        match inner {
+          ASTNode::Statement(ASTStatement::Function(func)) => {
+            assert_eq!(symbol_name(&result, &func.signature.name), "add");
+            assert_eq!(func.signature.inline_mode, InlineMode::Inline);
+          },
+          other => panic!("expected function inside namespace, got {:?}", other),
+        }
+      },
+      other => panic!("expected namespace, got {:?}", other),
     }
   }
 }

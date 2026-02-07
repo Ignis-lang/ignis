@@ -124,7 +124,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use ignis_type::definition::{FunctionDefinition, Visibility};
+  use ignis_type::definition::{FunctionDefinition, InlineMode, Visibility};
   use ignis_type::span::Span;
   use ignis_type::symbol::SymbolId;
   use ignis_type::types::TypeId;
@@ -141,6 +141,7 @@ mod tests {
         return_type: TypeId::new(0),
         is_extern,
         is_variadic: false,
+        inline_mode: InlineMode::None,
       }),
       name: SymbolId::new(0),
       span: Span::default(),

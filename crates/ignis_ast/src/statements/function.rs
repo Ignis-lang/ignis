@@ -1,4 +1,4 @@
-use ignis_type::{span::Span, symbol::SymbolId};
+use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
 
 use crate::{generics::ASTGenericParams, metadata::ASTMetadata, NodeId, type_::IgnisTypeSyntax};
 
@@ -36,6 +36,7 @@ pub struct ASTFunctionSignature {
   pub span: Span,
   pub metadata: ASTMetadata,
   pub doc: Option<String>,
+  pub inline_mode: InlineMode,
 }
 
 impl ASTFunctionSignature {
@@ -48,6 +49,7 @@ impl ASTFunctionSignature {
     span: Span,
     metadata: ASTMetadata,
     doc: Option<String>,
+    inline_mode: InlineMode,
   ) -> Self {
     Self {
       name,
@@ -58,6 +60,7 @@ impl ASTFunctionSignature {
       span,
       metadata,
       doc,
+      inline_mode,
     }
   }
 }

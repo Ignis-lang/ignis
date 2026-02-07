@@ -1134,9 +1134,6 @@ fn format_metadata(metadata: &ASTMetadata) -> String {
   if metadata.contains(ASTMetadata::STATIC) {
     flags.push("static");
   }
-  if metadata.contains(ASTMetadata::INLINE) {
-    flags.push("inline");
-  }
   if metadata.contains(ASTMetadata::EXPORT) {
     flags.push("export");
   }

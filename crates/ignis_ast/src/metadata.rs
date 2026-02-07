@@ -11,7 +11,6 @@ bitflags! {
         const EXPLICIT_REFERENCE= 1 << 4;
         const EXPORT            = 1 << 5;
         const EXTERN_MEMBER     = 1 << 6;
-        const INLINE            = 1 << 7;
         const METHOD            = 1 << 8;
         const MUTABLE           = 1 << 9;
         const NAMESPACE_MEMBER  = 1 << 10;
