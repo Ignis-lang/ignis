@@ -8,7 +8,7 @@ mod type_syntax;
 
 use ignis_diagnostics::message::{DiagnosticMessage, Expected};
 use ignis_token::{token::Token, token_types::TokenType};
-use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, expressions::ASTExpression};
+use ignis_ast::{ASTNode, NodeId, attribute::ASTAttribute, statements::ASTStatement, expressions::ASTExpression};
 use ignis_type::{
   Store,
   span::Span,
@@ -34,6 +34,8 @@ pub struct IgnisParser {
   pending_doc: Option<String>,
   /// Pending inner doc comment (`//!`) to be attached to the enclosing item.
   pending_inner_doc: Option<String>,
+  /// Pending attributes (`@packed`, `@aligned(n)`, etc.) to be attached to the next declaration.
+  pending_attrs: Vec<ASTAttribute>,
 }
 
 pub(crate) const MAX_RECURSION_DEPTH: usize = 500;
@@ -53,6 +55,7 @@ impl IgnisParser {
       recursion_depth: 0,
       pending_doc: None,
       pending_inner_doc: None,
+      pending_attrs: Vec::new(),
     };
 
     parser.skip_comments();
@@ -335,6 +338,10 @@ impl IgnisParser {
   /// Take the pending inner doc comment, clearing it.
   fn take_pending_inner_doc(&mut self) -> Option<String> {
     self.pending_inner_doc.take()
+  }
+
+  fn take_pending_attrs(&mut self) -> Vec<ASTAttribute> {
+    std::mem::take(&mut self.pending_attrs)
   }
 
   fn allocate_statement(

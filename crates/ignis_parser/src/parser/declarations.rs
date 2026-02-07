@@ -1,5 +1,6 @@
 use ignis_ast::{
   NodeId,
+  attribute::{ASTAttribute, ASTAttributeArg},
   generics::{ASTGenericParam, ASTGenericParams},
   metadata::ASTMetadata,
   statements::{
@@ -74,8 +75,61 @@ impl super::IgnisParser {
     }
   }
 
+  /// Collects zero or more `@name` or `@name(args)` into `self.pending_attrs`.
+  fn parse_attributes_to_pending(&mut self) -> ParserResult<()> {
+    while self.at(TokenType::At) {
+      let at_token = self.expect(TokenType::At)?.clone();
+      let name_token = self.expect(TokenType::Identifier)?.clone();
+      let name = self.insert_symbol(&name_token);
+
+      let mut args = Vec::new();
+
+      let end_span = if self.eat(TokenType::LeftParen) {
+        if !self.at(TokenType::RightParen) {
+          args.push(self.parse_attribute_arg()?);
+
+          while self.eat(TokenType::Comma) {
+            if self.at(TokenType::RightParen) {
+              break;
+            }
+            args.push(self.parse_attribute_arg()?);
+          }
+        }
+
+        self.expect(TokenType::RightParen)?.span.clone()
+      } else {
+        name_token.span.clone()
+      };
+
+      let span = Span::merge(&at_token.span, &end_span);
+      self.pending_attrs.push(ASTAttribute { name, args, span });
+    }
+
+    Ok(())
+  }
+
+  fn parse_attribute_arg(&mut self) -> ParserResult<ASTAttributeArg> {
+    let token = self.peek().clone();
+
+    match token.type_ {
+      TokenType::Int => {
+        self.bump();
+        let value: i64 = token.lexeme.parse().map_err(|_| DiagnosticMessage::ExpectedInteger(token.span.clone()))?;
+        Ok(ASTAttributeArg::IntLiteral(value, token.span))
+      },
+      TokenType::String => {
+        self.bump();
+        let value = token.lexeme.trim_matches('"').to_string();
+        Ok(ASTAttributeArg::StringLiteral(value, token.span))
+      },
+      _ => Err(DiagnosticMessage::UnexpectedToken { at: token.span }),
+    }
+  }
+
   /// Parse a top-level declaration
   fn parse_declaration(&mut self) -> ParserResult<NodeId> {
+    self.parse_attributes_to_pending()?;
+
     match self.peek().type_ {
       TokenType::Inline => {
         let inline_mode = self.parse_inline_mode()?;
@@ -218,6 +272,8 @@ impl super::IgnisParser {
     let _span = Span::merge(&keyword.span, self.get_span(&body));
 
     let signature_span = Span::merge(&name_token.span, &right_paren.span);
+    let attrs = self.take_pending_attrs();
+
     let signature = ASTFunctionSignature::new(
       name,
       name_token.span.clone(),
@@ -228,6 +284,7 @@ impl super::IgnisParser {
       ignis_ast::metadata::ASTMetadata::NONE,
       doc,
       inline_mode,
+      attrs,
     );
 
     let function = ASTFunction::new(signature, Some(body));
@@ -291,14 +348,14 @@ impl super::IgnisParser {
 
   /// export <declaration> | export <identifier>;
   fn parse_export_declaration(&mut self) -> ParserResult<NodeId> {
-    // Save any pending doc before consuming `export` keyword.
-    // This is needed because `bump` calls `skip_comments` which would clear pending_doc.
+    // Save pending doc/attrs before `export` — bump() calls skip_comments() which clears pending_doc.
     let saved_doc = self.pending_doc.take();
+    let saved_attrs = std::mem::take(&mut self.pending_attrs);
 
     let keyword = self.expect(TokenType::Export)?.clone();
 
-    // Restore the doc so inner declarations can use it
     self.pending_doc = saved_doc;
+    self.pending_attrs = saved_attrs;
 
     if self.at(TokenType::Function)
       || self.at(TokenType::Inline)
@@ -404,6 +461,8 @@ impl super::IgnisParser {
   }
 
   fn parse_namespace_item(&mut self) -> ParserResult<NodeId> {
+    self.parse_attributes_to_pending()?;
+
     match self.peek().type_ {
       TokenType::Inline => {
         let inline_mode = self.parse_inline_mode()?;
@@ -470,6 +529,7 @@ impl super::IgnisParser {
       ignis_ast::metadata::ASTMetadata::EXTERN_MEMBER,
       doc,
       InlineMode::None, // extern functions are never inline
+      vec![],
     );
 
     let function = ASTFunction::new(signature, None);
@@ -501,16 +561,17 @@ impl super::IgnisParser {
     Ok(self.allocate_statement(ASTStatement::TypeAlias(ASTTypeAlias::new(name, type_params, target, span, doc))))
   }
 
-  /// Parse member modifiers: static, public, private
+  /// Parse member modifiers: static, public, private, inline, and attributes (@name).
   ///
   /// Also captures any pending doc comment BEFORE consuming modifiers,
   /// so that `/// doc\nstatic field: i32;` correctly attaches the doc to the field.
-  fn parse_member_modifiers(&mut self) -> ParserResult<(ASTMetadata, Option<String>, InlineMode)> {
+  fn parse_member_modifiers(&mut self) -> ParserResult<(ASTMetadata, Option<String>, InlineMode, Vec<ASTAttribute>)> {
     // Capture doc BEFORE consuming modifiers
     let doc = self.take_pending_doc();
 
     let mut meta = ASTMetadata::NONE;
     let mut inline_mode = InlineMode::None;
+    let mut attrs = Vec::new();
 
     loop {
       match self.peek().type_ {
@@ -545,17 +606,21 @@ impl super::IgnisParser {
             inline_mode = InlineMode::Inline;
           }
         },
+        TokenType::At => {
+          self.parse_attributes_to_pending()?;
+          attrs.append(&mut self.pending_attrs);
+        },
         _ => break,
       }
     }
 
-    Ok((meta, doc, inline_mode))
+    Ok((meta, doc, inline_mode, attrs))
   }
 
   /// record Name<T, U> { fields, methods }
   fn parse_record_declaration(&mut self) -> ParserResult<NodeId> {
-    // Capture pending doc
     let doc = self.take_pending_doc();
+    let attrs = self.take_pending_attrs();
 
     let start = self.expect(TokenType::Record)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
@@ -569,7 +634,7 @@ impl super::IgnisParser {
     let mut items = Vec::new();
 
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
-      let (modifiers, member_doc, member_inline) = self.parse_member_modifiers()?;
+      let (modifiers, member_doc, member_inline, member_attrs) = self.parse_member_modifiers()?;
 
       if !self.at(TokenType::Identifier) {
         return Err(DiagnosticMessage::UnexpectedToken {
@@ -583,10 +648,10 @@ impl super::IgnisParser {
       // - identifier : ... -> field
       let next = self.peek_nth(1).type_;
       if next == TokenType::LeftParen || next == TokenType::Less {
-        let method = self.parse_method(modifiers, member_doc, member_inline)?;
+        let method = self.parse_method(modifiers, member_doc, member_inline, member_attrs)?;
         items.push(ASTRecordItem::Method(method));
       } else {
-        let field = self.parse_record_field(modifiers, member_doc)?;
+        let field = self.parse_record_field(modifiers, member_doc, member_attrs)?;
         items.push(ASTRecordItem::Field(field));
       }
     }
@@ -594,7 +659,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&start, &end.span);
 
-    Ok(self.allocate_statement(ASTStatement::Record(ASTRecord::new(name, type_params, items, span, doc))))
+    Ok(self.allocate_statement(ASTStatement::Record(ASTRecord::new(name, type_params, items, span, doc, attrs))))
   }
 
   /// Method declaration (without 'function' keyword)
@@ -605,6 +670,7 @@ impl super::IgnisParser {
     modifiers: ASTMetadata,
     doc: Option<String>,
     inline_mode: InlineMode,
+    attrs: Vec<ASTAttribute>,
   ) -> ParserResult<ASTMethod> {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -661,6 +727,7 @@ impl super::IgnisParser {
       span,
       doc,
       inline_mode,
+      attrs,
     ))
   }
 
@@ -701,6 +768,7 @@ impl super::IgnisParser {
     &mut self,
     modifiers: ASTMetadata,
     doc: Option<String>,
+    attrs: Vec<ASTAttribute>,
   ) -> ParserResult<ASTRecordField> {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -720,13 +788,13 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::SemiColon)?.clone();
     let span = Span::merge(&name_token.span, &end.span);
 
-    Ok(ASTRecordField::new(name, name_span, type_, value, modifiers, span, doc))
+    Ok(ASTRecordField::new(name, name_span, type_, value, modifiers, span, doc, attrs))
   }
 
   /// enum Name<T> { variants, methods, fields }
   fn parse_enum_declaration(&mut self) -> ParserResult<NodeId> {
-    // Capture pending doc
     let doc = self.take_pending_doc();
+    let attrs = self.take_pending_attrs();
 
     let start = self.expect(TokenType::Enum)?.span.clone();
     let name_token = self.expect(TokenType::Identifier)?.clone();
@@ -740,7 +808,7 @@ impl super::IgnisParser {
     let mut items = Vec::new();
 
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
-      let (modifiers, member_doc, member_inline) = self.parse_member_modifiers()?;
+      let (modifiers, member_doc, member_inline, member_attrs) = self.parse_member_modifiers()?;
 
       if !self.at(TokenType::Identifier) {
         return Err(DiagnosticMessage::UnexpectedToken {
@@ -761,11 +829,11 @@ impl super::IgnisParser {
         items.push(ASTEnumItem::Field(field));
       } else if next == TokenType::Less && self.is_generic_method_ahead() {
         // Generic method: name<T>(...): type { }
-        let method = self.parse_method(modifiers, member_doc, member_inline)?;
+        let method = self.parse_method(modifiers, member_doc, member_inline, member_attrs)?;
         items.push(ASTEnumItem::Method(method));
       } else if next == TokenType::LeftParen && self.is_method_ahead() {
         // Method: name(...): type { }
-        let method = self.parse_method(modifiers, member_doc, member_inline)?;
+        let method = self.parse_method(modifiers, member_doc, member_inline, member_attrs)?;
         items.push(ASTEnumItem::Method(method));
       } else {
         // Variant: Name or Name(Type, Type)
@@ -787,7 +855,7 @@ impl super::IgnisParser {
     let end = self.expect(TokenType::RightBrace)?.clone();
     let span = Span::merge(&start, &end.span);
 
-    Ok(self.allocate_statement(ASTStatement::Enum(ASTEnum::new(name, type_params, items, span, doc))))
+    Ok(self.allocate_statement(ASTStatement::Enum(ASTEnum::new(name, type_params, items, span, doc, attrs))))
   }
 
   /// Distinguish method from variant with payload:

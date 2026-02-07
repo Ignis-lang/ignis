@@ -1640,3 +1640,118 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Attribute Metadata Tests
+// =========================================================================
+
+#[test]
+fn e2e_attr_packed() {
+  e2e_test(
+    "attr_packed",
+    r#"
+@packed
+record Compact {
+    a: i32;
+    b: i8;
+}
+
+function main(): i32 {
+    let s: u64 = @sizeOf<Compact>();
+    return s as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_attr_aligned() {
+  e2e_test(
+    "attr_aligned",
+    r#"
+@aligned(16)
+record Aligned16 {
+    x: i32;
+}
+
+function main(): i32 {
+    let a: u64 = @alignOf<Aligned16>();
+    return a as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_attr_aligned_field() {
+  e2e_test(
+    "attr_aligned_field",
+    r#"
+record WithAlignedField {
+    a: i8;
+    @aligned(64)
+    b: i32;
+}
+
+function main(): i32 {
+    let s: u64 = @sizeOf<WithAlignedField>();
+    return s as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_attr_cold() {
+  e2e_test(
+    "attr_cold",
+    r#"
+@cold
+function rarelyUsed(): i32 {
+    return 77;
+}
+
+function main(): i32 {
+    return rarelyUsed();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_attr_extern_name() {
+  e2e_test(
+    "attr_extern_name",
+    r#"
+@externName("my_custom_symbol")
+export function internalName(): i32 {
+    return 99;
+}
+
+function main(): i32 {
+    return internalName();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_attr_packed_aligned() {
+  e2e_test(
+    "attr_packed_aligned",
+    r#"
+@packed
+@aligned(8)
+record PackedAligned {
+    a: i32;
+    b: i8;
+    c: i16;
+}
+
+function main(): i32 {
+    let s: u64 = @sizeOf<PackedAligned>();
+    return s as i32;
+}
+"#,
+  );
+}

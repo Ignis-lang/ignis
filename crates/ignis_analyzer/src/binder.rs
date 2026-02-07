@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
+  attribute::ASTAttribute,
   generics::ASTGenericParams,
   metadata::ASTMetadata,
   statements::{
@@ -16,10 +17,13 @@ use ignis_ast::{
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
-use ignis_type::definition::{
-  ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
-  FunctionDefinition, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
-  SymbolEntry, TypeAliasDefinition, TypeParamDefinition, VariableDefinition, VariantDefinition, Visibility,
+use ignis_type::{
+  attribute::{FieldAttr, FunctionAttr, RecordAttr},
+  definition::{
+    ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
+    FunctionDefinition, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
+    SymbolEntry, TypeAliasDefinition, TypeParamDefinition, VariableDefinition, VariantDefinition, Visibility,
+  },
 };
 
 impl<'a> Analyzer<'a> {
@@ -202,6 +206,7 @@ impl<'a> Analyzer<'a> {
         instance_methods: HashMap::new(),
         static_methods: HashMap::new(),
         static_fields: HashMap::new(),
+        attrs: vec![],
       }),
       name: rec.name,
       span: rec.span.clone(),
@@ -246,6 +251,8 @@ impl<'a> Analyzer<'a> {
     let Some(record_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    let record_attrs = self.bind_record_attrs(&rec.attrs);
 
     // Create the Type::Record and update the definition's type_id
     let type_id = self.types.record(record_def_id);
@@ -307,12 +314,14 @@ impl<'a> Analyzer<'a> {
             };
             let field_def_id = self.defs.alloc(field_def);
             self.set_import_item_def(&field.name_span, &field_def_id);
+            let field_attrs = self.bind_field_attrs(&field.attrs);
             fields.push(RecordFieldDef {
               name: field.name,
               type_id: self.types.error(), // Resolved in typeck
               index: field_index,
               span: field.span.clone(),
               def_id: field_def_id,
+              attrs: field_attrs,
             });
             field_index += 1;
           }
@@ -351,6 +360,7 @@ impl<'a> Analyzer<'a> {
       rd.instance_methods = instance_methods;
       rd.static_methods = static_methods;
       rd.static_fields = static_fields;
+      rd.attrs = record_attrs;
     }
   }
 
@@ -373,6 +383,7 @@ impl<'a> Analyzer<'a> {
         tag_type: self.types.u32(),
         static_methods: HashMap::new(),
         static_fields: HashMap::new(),
+        attrs: vec![],
       }),
       name: en.name,
       span: en.span.clone(),
@@ -417,6 +428,8 @@ impl<'a> Analyzer<'a> {
     let Some(enum_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    let enum_attrs = self.bind_record_attrs(&en.attrs);
 
     // Create the Type::Enum and update the definition's type_id
     let type_id = self.types.enum_type(enum_def_id);
@@ -513,6 +526,7 @@ impl<'a> Analyzer<'a> {
       ed.variants_by_name = variants_by_name;
       ed.static_methods = static_methods;
       ed.static_fields = static_fields;
+      ed.attrs = enum_attrs;
     }
   }
 
@@ -553,6 +567,8 @@ impl<'a> Analyzer<'a> {
       Visibility::Private
     };
 
+    let method_attrs = self.bind_function_attrs(&method.attrs);
+
     let method_def = Definition {
       kind: DefinitionKind::Method(MethodDefinition {
         owner_type: owner,
@@ -562,6 +578,7 @@ impl<'a> Analyzer<'a> {
         is_static,
         self_mutable: method.self_param.unwrap_or(false),
         inline_mode: method.inline_mode,
+        attrs: method_attrs,
       }),
       name: method.name,
       span: method.span.clone(),
@@ -730,6 +747,8 @@ impl<'a> Analyzer<'a> {
       param_defs.push(def_id);
     }
 
+    let attrs = self.bind_function_attrs(&func.signature.attrs);
+
     // Create function definition first (without type params)
     let func_def = FunctionDefinition {
       type_params: Vec::new(), // Will be populated after binding type params
@@ -738,6 +757,7 @@ impl<'a> Analyzer<'a> {
       is_extern,
       is_variadic,
       inline_mode: func.signature.inline_mode,
+      attrs,
     };
 
     let def = Definition {
@@ -1224,6 +1244,253 @@ impl<'a> Analyzer<'a> {
 
     if has_type_params {
       self.scopes.pop();
+    }
+  }
+
+  // ========================================================================
+  // Attribute Binding
+  // ========================================================================
+
+  fn bind_record_attrs(
+    &mut self,
+    ast_attrs: &[ASTAttribute],
+  ) -> Vec<RecordAttr> {
+    let mut attrs = Vec::new();
+
+    for attr in ast_attrs {
+      let name = self.get_symbol_name(&attr.name);
+
+      match name.as_str() {
+        "packed" => {
+          if !attr.args.is_empty() {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 0,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else {
+            attrs.push(RecordAttr::Packed);
+          }
+        },
+        "aligned" => {
+          if attr.args.len() != 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 1,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else if let Some(n) = self.extract_int_arg(&name, &attr.args[0]) {
+            if !n.is_power_of_two() {
+              self.add_diagnostic(
+                DiagnosticMessage::AlignmentNotPowerOfTwo {
+                  value: n,
+                  span: attr.span.clone(),
+                }
+                .report(),
+              );
+            } else {
+              attrs.push(RecordAttr::Aligned(n));
+            }
+          }
+        },
+        _ => {
+          self.add_diagnostic(
+            DiagnosticMessage::UnknownAttribute {
+              name,
+              target: "record".to_string(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    attrs
+  }
+
+  fn bind_field_attrs(
+    &mut self,
+    ast_attrs: &[ASTAttribute],
+  ) -> Vec<FieldAttr> {
+    let mut attrs = Vec::new();
+
+    for attr in ast_attrs {
+      let name = self.get_symbol_name(&attr.name);
+
+      match name.as_str() {
+        "aligned" => {
+          if attr.args.len() != 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 1,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else if let Some(n) = self.extract_int_arg(&name, &attr.args[0]) {
+            if !n.is_power_of_two() {
+              self.add_diagnostic(
+                DiagnosticMessage::AlignmentNotPowerOfTwo {
+                  value: n,
+                  span: attr.span.clone(),
+                }
+                .report(),
+              );
+            } else {
+              attrs.push(FieldAttr::Aligned(n));
+            }
+          }
+        },
+        _ => {
+          self.add_diagnostic(
+            DiagnosticMessage::UnknownAttribute {
+              name,
+              target: "field".to_string(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    attrs
+  }
+
+  fn bind_function_attrs(
+    &mut self,
+    ast_attrs: &[ASTAttribute],
+  ) -> Vec<FunctionAttr> {
+    let mut attrs = Vec::new();
+
+    for attr in ast_attrs {
+      let name = self.get_symbol_name(&attr.name);
+
+      match name.as_str() {
+        "externName" => {
+          if attr.args.len() != 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 1,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else if let Some(s) = self.extract_string_arg(&name, &attr.args[0]) {
+            attrs.push(FunctionAttr::ExternName(s));
+          }
+        },
+        "cold" => {
+          if !attr.args.is_empty() {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 0,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else {
+            attrs.push(FunctionAttr::Cold);
+          }
+        },
+        "deprecated" => {
+          if attr.args.len() > 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 1,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else if attr.args.is_empty() {
+            attrs.push(FunctionAttr::Deprecated(None));
+          } else if let Some(s) = self.extract_string_arg(&name, &attr.args[0]) {
+            attrs.push(FunctionAttr::Deprecated(Some(s)));
+          }
+        },
+        _ => {
+          self.add_diagnostic(
+            DiagnosticMessage::UnknownAttribute {
+              name,
+              target: "function".to_string(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    attrs
+  }
+
+  fn extract_int_arg(
+    &mut self,
+    attr_name: &str,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<u64> {
+    match arg {
+      ignis_ast::attribute::ASTAttributeArg::IntLiteral(v, _) => {
+        if *v < 0 {
+          self.add_diagnostic(
+            DiagnosticMessage::AttributeExpectedInt {
+              attr: attr_name.to_string(),
+              span: arg.span().clone(),
+            }
+            .report(),
+          );
+          None
+        } else {
+          Some(*v as u64)
+        }
+      },
+      ignis_ast::attribute::ASTAttributeArg::StringLiteral(_, span) => {
+        self.add_diagnostic(
+          DiagnosticMessage::AttributeExpectedInt {
+            attr: attr_name.to_string(),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn extract_string_arg(
+    &mut self,
+    attr_name: &str,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<String> {
+    match arg {
+      ignis_ast::attribute::ASTAttributeArg::StringLiteral(s, _) => Some(s.clone()),
+      ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
+        self.add_diagnostic(
+          DiagnosticMessage::AttributeExpectedString {
+            attr: attr_name.to_string(),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        None
+      },
     }
   }
 }

@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
+pub mod attribute;
 pub mod display;
 pub mod expressions;
 pub mod generics;

@@ -142,6 +142,7 @@ mod tests {
         is_extern,
         is_variadic: false,
         inline_mode: InlineMode::None,
+        attrs: vec![],
       }),
       name: SymbolId::new(0),
       span: Span::default(),

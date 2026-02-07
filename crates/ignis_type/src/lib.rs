@@ -1,6 +1,7 @@
 use core::marker::PhantomData;
 use std::hash::{Hash, Hasher};
 
+pub mod attribute;
 pub mod compilation_context;
 pub mod definition;
 pub mod file;

@@ -1,6 +1,6 @@
 use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
 
-use crate::{generics::ASTGenericParams, metadata::ASTMetadata, NodeId, type_::IgnisTypeSyntax};
+use crate::{attribute::ASTAttribute, generics::ASTGenericParams, metadata::ASTMetadata, NodeId, type_::IgnisTypeSyntax};
 
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTParameter {
@@ -37,6 +37,7 @@ pub struct ASTFunctionSignature {
   pub metadata: ASTMetadata,
   pub doc: Option<String>,
   pub inline_mode: InlineMode,
+  pub attrs: Vec<ASTAttribute>,
 }
 
 impl ASTFunctionSignature {
@@ -50,6 +51,7 @@ impl ASTFunctionSignature {
     metadata: ASTMetadata,
     doc: Option<String>,
     inline_mode: InlineMode,
+    attrs: Vec<ASTAttribute>,
   ) -> Self {
     Self {
       name,
@@ -61,6 +63,7 @@ impl ASTFunctionSignature {
       metadata,
       doc,
       inline_mode,
+      attrs,
     }
   }
 }

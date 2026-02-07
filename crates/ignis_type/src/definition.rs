@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{Id, Store, module::ModuleId, namespace::NamespaceId, span::Span, symbol::SymbolId, types::TypeId};
+use crate::{Id, Store, attribute::{FieldAttr, FunctionAttr, RecordAttr}, module::ModuleId, namespace::NamespaceId, span::Span, symbol::SymbolId, types::TypeId};
 
 /// Inline hint for function/method codegen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -104,6 +104,7 @@ pub struct FunctionDefinition {
   pub is_extern: bool,
   pub is_variadic: bool,
   pub inline_mode: InlineMode,
+  pub attrs: Vec<FunctionAttr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -140,6 +141,7 @@ pub struct RecordDefinition {
   pub instance_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_fields: HashMap<SymbolId, DefinitionId>,
+  pub attrs: Vec<RecordAttr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -149,6 +151,7 @@ pub struct RecordFieldDef {
   pub index: u32,
   pub span: Span,
   pub def_id: DefinitionId,
+  pub attrs: Vec<FieldAttr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -167,6 +170,7 @@ pub struct EnumDefinition {
   pub tag_type: TypeId,
   pub static_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_fields: HashMap<SymbolId, DefinitionId>,
+  pub attrs: Vec<RecordAttr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -196,6 +200,7 @@ pub struct MethodDefinition {
   /// Only meaningful for instance methods (is_static=false).
   pub self_mutable: bool,
   pub inline_mode: InlineMode,
+  pub attrs: Vec<FunctionAttr>,
 }
 
 /// Definition of a type parameter (T, U, etc.)

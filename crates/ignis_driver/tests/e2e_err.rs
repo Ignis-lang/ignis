@@ -196,3 +196,58 @@ function main(): void {
 "#,
   );
 }
+
+// =========================================================================
+// Attribute Error Tests
+// =========================================================================
+
+#[test]
+fn e2e_err_attr_unknown() {
+  e2e_error_test(
+    "err_attr_unknown",
+    r#"
+@bogusAttr
+record Foo {
+    x: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_attr_packed_on_function() {
+  e2e_error_test(
+    "err_attr_packed_on_function",
+    r#"
+@packed
+function foo(): void {
+    return;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_attr_alignment_not_power_of_two() {
+  e2e_error_test(
+    "err_attr_alignment_not_power_of_two",
+    r#"
+@aligned(7)
+record BadAlign {
+    x: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+}

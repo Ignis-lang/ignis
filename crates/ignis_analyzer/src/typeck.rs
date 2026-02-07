@@ -790,11 +790,11 @@ impl<'a> Analyzer<'a> {
             }
           }
         } else {
-          // Instance field - preserve the def_id from binder
-          let def_id = original_fields
+          // Instance field - preserve the def_id and attrs from binder
+          let original = original_fields
             .get(field_index as usize)
-            .map(|f| f.def_id)
             .expect("field_index out of sync with original_fields");
+          let def_id = original.def_id;
 
           // Update the field definition with resolved type
           if let DefinitionKind::Field(field_def) = &mut self.defs.get_mut(&def_id).kind {
@@ -807,6 +807,7 @@ impl<'a> Analyzer<'a> {
             index: field_index,
             span: field.span.clone(),
             def_id,
+            attrs: original.attrs.clone(),
           });
           field_index += 1;
         }

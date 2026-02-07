@@ -1,6 +1,6 @@
 use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
 
-use crate::{generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
+use crate::{attribute::ASTAttribute, generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
 
 use super::function::ASTParameter;
 
@@ -12,6 +12,7 @@ pub struct ASTRecord {
   pub items: Vec<ASTRecordItem>,
   pub span: Span,
   pub doc: Option<String>,
+  pub attrs: Vec<ASTAttribute>,
 }
 
 impl ASTRecord {
@@ -21,6 +22,7 @@ impl ASTRecord {
     items: Vec<ASTRecordItem>,
     span: Span,
     doc: Option<String>,
+    attrs: Vec<ASTAttribute>,
   ) -> Self {
     Self {
       name,
@@ -28,6 +30,7 @@ impl ASTRecord {
       items,
       span,
       doc,
+      attrs,
     }
   }
 }
@@ -52,6 +55,7 @@ pub struct ASTRecordField {
   pub metadata: ASTMetadata,
   pub span: Span,
   pub doc: Option<String>,
+  pub attrs: Vec<ASTAttribute>,
 }
 
 impl ASTRecordField {
@@ -63,6 +67,7 @@ impl ASTRecordField {
     metadata: ASTMetadata,
     span: Span,
     doc: Option<String>,
+    attrs: Vec<ASTAttribute>,
   ) -> Self {
     Self {
       name,
@@ -72,6 +77,7 @@ impl ASTRecordField {
       metadata,
       span,
       doc,
+      attrs,
     }
   }
 
@@ -100,6 +106,7 @@ pub struct ASTMethod {
   pub span: Span,
   pub doc: Option<String>,
   pub inline_mode: InlineMode,
+  pub attrs: Vec<ASTAttribute>,
 }
 
 impl ASTMethod {
@@ -115,6 +122,7 @@ impl ASTMethod {
     span: Span,
     doc: Option<String>,
     inline_mode: InlineMode,
+    attrs: Vec<ASTAttribute>,
   ) -> Self {
     Self {
       name,
@@ -128,6 +136,7 @@ impl ASTMethod {
       span,
       doc,
       inline_mode,
+      attrs,
     }
   }
 

@@ -5,6 +5,7 @@ use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
+  attribute::{FieldAttr, FunctionAttr, RecordAttr},
   definition::{
     DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, InlineMode, RecordDefinition, Visibility,
   },
@@ -374,11 +375,14 @@ impl<'a> CEmitter<'a> {
     } else {
       for field in &rd.fields {
         let field_ty = self.format_type(field.type_id);
-        writeln!(self.output, "    {} field_{};", field_ty, field.index).unwrap();
+        let field_attr_str = self.format_field_attrs(&field.attrs);
+        writeln!(self.output, "    {} field_{}{};", field_ty, field.index, field_attr_str).unwrap();
       }
     }
 
-    writeln!(self.output, "}};").unwrap();
+    write!(self.output, "}}").unwrap();
+    self.emit_record_attrs(&rd.attrs);
+    writeln!(self.output, ";").unwrap();
   }
 
   /// Emit a tagged union definition for an enum type.
@@ -417,7 +421,9 @@ impl<'a> CEmitter<'a> {
       writeln!(self.output, "    }} payload;").unwrap();
     }
 
-    writeln!(self.output, "}};").unwrap();
+    write!(self.output, "}}").unwrap();
+    self.emit_record_attrs(&ed.attrs);
+    writeln!(self.output, ";").unwrap();
 
     // Emit tag constants as #defines
     for variant in &ed.variants {
@@ -432,6 +438,44 @@ impl<'a> CEmitter<'a> {
     def_id: DefinitionId,
   ) -> String {
     self.build_mangled_name(def_id)
+  }
+
+  fn emit_record_attrs(
+    &mut self,
+    attrs: &[RecordAttr],
+  ) {
+    for attr in attrs {
+      match attr {
+        RecordAttr::Packed => write!(self.output, " __attribute__((packed))").unwrap(),
+        RecordAttr::Aligned(n) => write!(self.output, " __attribute__((aligned({})))", n).unwrap(),
+      }
+    }
+  }
+
+  fn format_field_attrs(
+    &self,
+    attrs: &[FieldAttr],
+  ) -> String {
+    let mut result = String::new();
+    for attr in attrs {
+      match attr {
+        FieldAttr::Aligned(n) => {
+          write!(result, " __attribute__((aligned({})))", n).unwrap();
+        },
+      }
+    }
+    result
+  }
+
+  fn get_function_attrs(
+    &self,
+    def_id: DefinitionId,
+  ) -> &[FunctionAttr] {
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Function(f) => &f.attrs,
+      DefinitionKind::Method(m) => &m.attrs,
+      _ => &[],
+    }
   }
 
   fn emit_headers(&mut self) {
@@ -672,6 +716,11 @@ impl<'a> CEmitter<'a> {
     // Public functions must not be `static` -- conflicts with the header declaration.
     if !is_entry_main && !func.is_extern {
       let is_public = self.defs.get(&def_id).visibility == Visibility::Public;
+
+      let func_attrs = self.get_function_attrs(def_id);
+      if func_attrs.iter().any(|a| matches!(a, FunctionAttr::Cold)) {
+        write!(self.output, "__attribute__((cold)) ").unwrap();
+      }
 
       match func.inline_mode {
         InlineMode::Inline if is_public => write!(self.output, "inline ").unwrap(),
@@ -1444,6 +1493,22 @@ impl<'a> CEmitter<'a> {
     let def = self.defs.get(&def_id);
     let raw_name = self.symbols.get(&def.name).to_string();
 
+    // Check for @externName override
+    if let DefinitionKind::Function(f) = &def.kind {
+      for attr in &f.attrs {
+        if let FunctionAttr::ExternName(name) = attr {
+          return name.clone();
+        }
+      }
+    }
+    if let DefinitionKind::Method(m) = &def.kind {
+      for attr in &m.attrs {
+        if let FunctionAttr::ExternName(name) = attr {
+          return name.clone();
+        }
+      }
+    }
+
     let is_extern = match &def.kind {
       DefinitionKind::Function(f) => f.is_extern,
       DefinitionKind::Constant(c) => c.value.is_none(), // extern const has no value
@@ -1964,10 +2029,13 @@ fn emit_record_definition_standalone(
 
   for (index, field) in rd.fields.iter().enumerate() {
     let field_type = format_c_type(types.get(&field.type_id), types, defs, symbols, namespaces);
-    writeln!(output, "    {} field_{};", field_type, index).unwrap();
+    let field_attr_str = format_field_attrs_standalone(&field.attrs);
+    writeln!(output, "    {} field_{}{};", field_type, index, field_attr_str).unwrap();
   }
 
-  writeln!(output, "}};").unwrap();
+  write!(output, "}}").unwrap();
+  emit_record_attrs_standalone(&rd.attrs, output);
+  writeln!(output, ";").unwrap();
 }
 
 /// Emit a struct definition for an enum type (standalone version for headers).
@@ -2005,13 +2073,39 @@ fn emit_enum_definition_standalone(
     writeln!(output, "    }} data;").unwrap();
   }
 
-  writeln!(output, "}};").unwrap();
+  write!(output, "}}").unwrap();
+  emit_record_attrs_standalone(&ed.attrs, output);
+  writeln!(output, ";").unwrap();
 
   // Emit variant tag constants
   for (i, variant) in ed.variants.iter().enumerate() {
     let variant_name = symbols.get(&variant.name);
     writeln!(output, "#define {}_{} {}", name, variant_name, i).unwrap();
   }
+}
+
+fn emit_record_attrs_standalone(
+  attrs: &[RecordAttr],
+  output: &mut String,
+) {
+  for attr in attrs {
+    match attr {
+      RecordAttr::Packed => write!(output, " __attribute__((packed))").unwrap(),
+      RecordAttr::Aligned(n) => write!(output, " __attribute__((aligned({})))", n).unwrap(),
+    }
+  }
+}
+
+fn format_field_attrs_standalone(attrs: &[FieldAttr]) -> String {
+  let mut result = String::new();
+  for attr in attrs {
+    match attr {
+      FieldAttr::Aligned(n) => {
+        write!(result, " __attribute__((aligned({})))", n).unwrap();
+      },
+    }
+  }
+  result
 }
 
 /// Collect struct type names used in a function/method signature.

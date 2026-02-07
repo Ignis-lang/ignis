@@ -1,6 +1,6 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
-use crate::{generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
+use crate::{attribute::ASTAttribute, generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
 
 use super::record::ASTMethod;
 
@@ -12,6 +12,7 @@ pub struct ASTEnum {
   pub items: Vec<ASTEnumItem>,
   pub span: Span,
   pub doc: Option<String>,
+  pub attrs: Vec<ASTAttribute>,
 }
 
 impl ASTEnum {
@@ -21,6 +22,7 @@ impl ASTEnum {
     items: Vec<ASTEnumItem>,
     span: Span,
     doc: Option<String>,
+    attrs: Vec<ASTAttribute>,
   ) -> Self {
     Self {
       name,
@@ -28,6 +30,7 @@ impl ASTEnum {
       items,
       span,
       doc,
+      attrs,
     }
   }
 }

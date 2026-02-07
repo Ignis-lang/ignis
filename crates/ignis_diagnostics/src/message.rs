@@ -547,6 +547,29 @@ pub enum DiagnosticMessage {
     key: String,
     span: Span,
   },
+  UnknownAttribute {
+    name: String,
+    target: String,
+    span: Span,
+  },
+  AttributeArgCount {
+    attr: String,
+    expected: usize,
+    got: usize,
+    span: Span,
+  },
+  AttributeExpectedString {
+    attr: String,
+    span: Span,
+  },
+  AttributeExpectedInt {
+    attr: String,
+    span: Span,
+  },
+  AlignmentNotPowerOfTwo {
+    value: u64,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1043,6 +1066,21 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UnknownConfigFlag { key, .. } => {
         write!(f, "Unknown config flag '{}'", key)
       },
+      DiagnosticMessage::UnknownAttribute { name, target, .. } => {
+        write!(f, "unknown attribute '@{}' on {}", name, target)
+      },
+      DiagnosticMessage::AttributeArgCount { attr, expected, got, .. } => {
+        write!(f, "@{} expects {} argument(s), got {}", attr, expected, got)
+      },
+      DiagnosticMessage::AttributeExpectedString { attr, .. } => {
+        write!(f, "@{} expects a string argument", attr)
+      },
+      DiagnosticMessage::AttributeExpectedInt { attr, .. } => {
+        write!(f, "@{} expects an integer argument", attr)
+      },
+      DiagnosticMessage::AlignmentNotPowerOfTwo { value, .. } => {
+        write!(f, "alignment {} is not a power of two", value)
+      },
     }
   }
 }
@@ -1191,7 +1229,12 @@ impl DiagnosticMessage {
       | DiagnosticMessage::BuiltinArgCount { span, .. }
       | DiagnosticMessage::BuiltinExpectedStringLiteral { span, .. }
       | DiagnosticMessage::BuiltinTypeConstraint { span, .. }
-      | DiagnosticMessage::UnknownConfigFlag { span, .. } => span.clone(),
+      | DiagnosticMessage::UnknownConfigFlag { span, .. }
+      | DiagnosticMessage::UnknownAttribute { span, .. }
+      | DiagnosticMessage::AttributeArgCount { span, .. }
+      | DiagnosticMessage::AttributeExpectedString { span, .. }
+      | DiagnosticMessage::AttributeExpectedInt { span, .. }
+      | DiagnosticMessage::AlignmentNotPowerOfTwo { span, .. } => span.clone(),
     }
   }
 
@@ -1336,6 +1379,11 @@ impl DiagnosticMessage {
       DiagnosticMessage::BuiltinExpectedStringLiteral { .. } => "A0113",
       DiagnosticMessage::BuiltinTypeConstraint { .. } => "A0116",
       DiagnosticMessage::UnknownConfigFlag { .. } => "A0115",
+      DiagnosticMessage::UnknownAttribute { .. } => "A0117",
+      DiagnosticMessage::AttributeArgCount { .. } => "A0118",
+      DiagnosticMessage::AttributeExpectedString { .. } => "A0119",
+      DiagnosticMessage::AttributeExpectedInt { .. } => "A0120",
+      DiagnosticMessage::AlignmentNotPowerOfTwo { .. } => "A0121",
     }
     .to_string()
   }

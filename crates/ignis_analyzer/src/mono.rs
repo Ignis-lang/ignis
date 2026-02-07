@@ -1311,6 +1311,7 @@ impl<'a> Monomorphizer<'a> {
         is_extern: fd.is_extern,
         is_variadic: fd.is_variadic,
         inline_mode: fd.inline_mode,
+        attrs: fd.attrs.clone(),
       }),
       name,
       span: generic_def.span.clone(),
@@ -1369,6 +1370,7 @@ impl<'a> Monomorphizer<'a> {
           index: f.index,
           span: f.span.clone(),
           def_id: field_def_id,
+          attrs: f.attrs.clone(),
         }
       })
       .collect();
@@ -1386,6 +1388,7 @@ impl<'a> Monomorphizer<'a> {
         instance_methods: HashMap::new(),
         static_methods: HashMap::new(),
         static_fields: rd.static_fields.clone(),
+        attrs: rd.attrs.clone(),
       }),
     );
 
@@ -1453,6 +1456,7 @@ impl<'a> Monomorphizer<'a> {
         tag_type: ed.tag_type,
         static_methods: HashMap::new(),
         static_fields: ed.static_fields.clone(),
+        attrs: ed.attrs.clone(),
       }),
     );
 
@@ -1489,6 +1493,7 @@ impl<'a> Monomorphizer<'a> {
         is_static: md.is_static,
         self_mutable: md.self_mutable,
         inline_mode: md.inline_mode,
+        attrs: md.attrs.clone(),
       }),
       name,
       span: generic_def.span.clone(),

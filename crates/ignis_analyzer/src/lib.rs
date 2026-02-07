@@ -644,6 +644,7 @@ impl<'a> Analyzer<'a> {
         is_extern: true,
         is_variadic: false,
         inline_mode: InlineMode::None,
+        attrs: vec![],
       }),
       name: fn_name,
       span: span.clone(),
