@@ -99,6 +99,7 @@ impl<'a> Analyzer<'a> {
           Some(&def_id) => {
             let def_kind = self.defs.get(&def_id).kind.clone();
             self.set_import_item_def(&item.span, &def_id);
+            self.imported_defs.insert(def_id, item.span.clone());
 
             if let DefinitionKind::Namespace(ns_def) = &def_kind {
               self.import_namespace(def_id, ns_def);

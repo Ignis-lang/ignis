@@ -2127,6 +2127,7 @@ impl<'a> Analyzer<'a> {
       self.set_resolved_call(node_id, def_id);
       // Also record for the callee so hover works on the function name
       self.set_resolved_call(&call.callee, def_id);
+      self.mark_referenced(def_id);
     }
 
     // Check if this is a generic function (has type params)
@@ -2603,6 +2604,7 @@ impl<'a> Analyzer<'a> {
 
               self.set_resolved_call(node_id, resolved_def_id);
               self.set_resolved_call(&call.callee, resolved_def_id);
+              self.mark_referenced(resolved_def_id);
 
               let method = {
                 let method_def = self.defs.get(&resolved_def_id);
@@ -2797,6 +2799,7 @@ impl<'a> Analyzer<'a> {
 
               self.set_resolved_call(node_id, resolved_def_id);
               self.set_resolved_call(&call.callee, resolved_def_id);
+              self.mark_referenced(resolved_def_id);
               self.set_import_item_def(&ma.member_span, &resolved_def_id);
 
               let method = {
@@ -2942,6 +2945,7 @@ impl<'a> Analyzer<'a> {
 
               self.set_resolved_call(node_id, resolved_def_id);
               self.set_resolved_call(&call.callee, resolved_def_id);
+              self.mark_referenced(resolved_def_id);
 
               let method = {
                 let method_def = self.defs.get(&resolved_def_id);
@@ -3131,6 +3135,7 @@ impl<'a> Analyzer<'a> {
 
               self.set_resolved_call(node_id, resolved_def_id);
               self.set_resolved_call(&call.callee, resolved_def_id);
+              self.mark_referenced(resolved_def_id);
 
               let method = {
                 let method_def = self.defs.get(&resolved_def_id);
@@ -3228,6 +3233,7 @@ impl<'a> Analyzer<'a> {
         SymbolEntry::Single(def_id) => {
           self.set_resolved_call(node_id, def_id);
           self.set_resolved_call(&call.callee, def_id);
+          self.mark_referenced(def_id);
           Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx))
         },
         SymbolEntry::Overload(candidates) => {
@@ -3235,6 +3241,7 @@ impl<'a> Analyzer<'a> {
             let def_id = candidates[0];
             self.set_resolved_call(node_id, def_id);
             self.set_resolved_call(&call.callee, def_id);
+            self.mark_referenced(def_id);
             return Some(self.typecheck_static_method_or_function_call(&def_id, call, scope_kind, ctx));
           }
 
@@ -3251,6 +3258,7 @@ impl<'a> Analyzer<'a> {
 
           self.set_resolved_call(node_id, resolved_def_id);
           self.set_resolved_call(&call.callee, resolved_def_id);
+          self.mark_referenced(resolved_def_id);
 
           let def = self.defs.get(&resolved_def_id);
           let (params, raw_return_type, is_variadic) = match &def.kind {

@@ -11,12 +11,15 @@ pub struct ASTAttribute {
 pub enum ASTAttributeArg {
   IntLiteral(i64, Span),
   StringLiteral(String, Span),
+  Identifier(SymbolId, Span),
 }
 
 impl ASTAttributeArg {
   pub fn span(&self) -> &Span {
     match self {
-      ASTAttributeArg::IntLiteral(_, span) | ASTAttributeArg::StringLiteral(_, span) => span,
+      ASTAttributeArg::IntLiteral(_, span)
+      | ASTAttributeArg::StringLiteral(_, span)
+      | ASTAttributeArg::Identifier(_, span) => span,
     }
   }
 }

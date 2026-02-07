@@ -570,6 +570,28 @@ pub enum DiagnosticMessage {
     value: u64,
     span: Span,
   },
+  // Lint diagnostics
+  UnusedVariable {
+    name: String,
+    span: Span,
+  },
+  UnusedImport {
+    name: String,
+    span: Span,
+  },
+  DeprecatedCall {
+    name: String,
+    message: String,
+    span: Span,
+  },
+  UnknownLint {
+    name: String,
+    span: Span,
+  },
+  AttributeExpectedIdentifier {
+    attr: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1081,6 +1103,21 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::AlignmentNotPowerOfTwo { value, .. } => {
         write!(f, "alignment {} is not a power of two", value)
       },
+      DiagnosticMessage::UnusedVariable { name, .. } => {
+        write!(f, "unused variable '{}'", name)
+      },
+      DiagnosticMessage::UnusedImport { name, .. } => {
+        write!(f, "unused import '{}'", name)
+      },
+      DiagnosticMessage::DeprecatedCall { name, message, .. } => {
+        write!(f, "use of deprecated function '{}': {}", name, message)
+      },
+      DiagnosticMessage::UnknownLint { name, .. } => {
+        write!(f, "unknown lint '{}'", name)
+      },
+      DiagnosticMessage::AttributeExpectedIdentifier { attr, .. } => {
+        write!(f, "@{} expects an identifier argument", attr)
+      },
     }
   }
 }
@@ -1234,7 +1271,12 @@ impl DiagnosticMessage {
       | DiagnosticMessage::AttributeArgCount { span, .. }
       | DiagnosticMessage::AttributeExpectedString { span, .. }
       | DiagnosticMessage::AttributeExpectedInt { span, .. }
-      | DiagnosticMessage::AlignmentNotPowerOfTwo { span, .. } => span.clone(),
+      | DiagnosticMessage::AlignmentNotPowerOfTwo { span, .. }
+      | DiagnosticMessage::UnusedVariable { span, .. }
+      | DiagnosticMessage::UnusedImport { span, .. }
+      | DiagnosticMessage::DeprecatedCall { span, .. }
+      | DiagnosticMessage::UnknownLint { span, .. }
+      | DiagnosticMessage::AttributeExpectedIdentifier { span, .. } => span.clone(),
     }
   }
 
@@ -1384,6 +1426,11 @@ impl DiagnosticMessage {
       DiagnosticMessage::AttributeExpectedString { .. } => "A0119",
       DiagnosticMessage::AttributeExpectedInt { .. } => "A0120",
       DiagnosticMessage::AlignmentNotPowerOfTwo { .. } => "A0121",
+      DiagnosticMessage::UnusedVariable { .. } => "A0122",
+      DiagnosticMessage::UnusedImport { .. } => "A0123",
+      DiagnosticMessage::DeprecatedCall { .. } => "A0124",
+      DiagnosticMessage::UnknownLint { .. } => "A0125",
+      DiagnosticMessage::AttributeExpectedIdentifier { .. } => "A0126",
     }
     .to_string()
   }
@@ -1395,7 +1442,10 @@ impl DiagnosticMessage {
       | DiagnosticMessage::MissingReturnStatement { .. }
       | DiagnosticMessage::PossibleLeakToFFI { .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { .. }
-      | DiagnosticMessage::UnknownConfigFlag { .. } => Severity::Warning,
+      | DiagnosticMessage::UnknownConfigFlag { .. }
+      | DiagnosticMessage::UnusedVariable { .. }
+      | DiagnosticMessage::UnusedImport { .. }
+      | DiagnosticMessage::DeprecatedCall { .. } => Severity::Warning,
       _ => Severity::Error,
     }
   }
@@ -1420,6 +1470,17 @@ impl DiagnosticMessage {
 
   pub fn report(&self) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(self.level(), self.to_string(), self.code(), self.primary_span());
+    for (span, message) in self.secondary_labels() {
+      diagnostic = diagnostic.with_label(span, message);
+    }
+    diagnostic
+  }
+
+  pub fn report_with_severity(
+    &self,
+    severity: Severity,
+  ) -> Diagnostic {
+    let mut diagnostic = Diagnostic::new(severity, self.to_string(), self.code(), self.primary_span());
     for (span, message) in self.secondary_labels() {
       diagnostic = diagnostic.with_label(span, message);
     }

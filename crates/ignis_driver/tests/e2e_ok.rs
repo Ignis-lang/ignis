@@ -10,6 +10,14 @@ fn e2e_test(
   assert_snapshot!(name, common::format_e2e_result(&result));
 }
 
+fn e2e_no_warnings(
+  name: &str,
+  source: &str,
+) {
+  let warnings = common::compile_warnings(source).expect(&format!("Compilation of '{}' failed", name));
+  assert!(warnings.is_empty(), "expected no warnings for '{}', got: {:?}", name, warnings);
+}
+
 #[test]
 fn e2e_empty_main() {
   e2e_test(
@@ -1751,6 +1759,37 @@ record PackedAligned {
 function main(): i32 {
     let s: u64 = @sizeOf<PackedAligned>();
     return s as i32;
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Lint Tests (no warnings expected)
+// =========================================================================
+
+#[test]
+fn e2e_lint_allow_unused_variable() {
+  e2e_no_warnings(
+    "lint_allow_unused_variable",
+    r#"
+@allow(unused_variable)
+function main(): i32 {
+    let x: i32 = 5;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_lint_underscore_suppresses_unused() {
+  e2e_no_warnings(
+    "lint_underscore_suppresses_unused",
+    r#"
+function main(): i32 {
+    let _unused: i32 = 5;
+    return 0;
 }
 "#,
   );

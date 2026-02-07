@@ -174,6 +174,34 @@ pub fn compile_diagnostics(source: &str) -> Result<Vec<String>, String> {
   Ok(messages)
 }
 
+/// Returns analyzer warning messages, or Err if lex/parse fails.
+pub fn compile_warnings(source: &str) -> Result<Vec<String>, String> {
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("test.ign", source.to_string());
+  let src = &sm.get(&file_id).text;
+
+  let mut lexer = IgnisLexer::new(file_id, src);
+  lexer.scan_tokens();
+  if !lexer.diagnostics.is_empty() {
+    return Err(format!("Lexer errors: {:?}", lexer.diagnostics));
+  }
+
+  let symbol_table = Rc::new(RefCell::new(SymbolTable::new()));
+  let mut parser = IgnisParser::new(lexer.tokens, symbol_table.clone());
+  let (nodes, roots) = parser.parse().map_err(|e| format!("Parse errors: {:?}", e))?;
+
+  let result = Analyzer::analyze(&nodes, &roots, symbol_table);
+
+  let messages: Vec<String> = result
+    .diagnostics
+    .iter()
+    .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Warning))
+    .map(|d| d.message.clone())
+    .collect();
+
+  Ok(messages)
+}
+
 /// Collect root definitions for monomorphization.
 fn collect_mono_roots(
   defs: &DefinitionStore,

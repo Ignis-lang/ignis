@@ -192,6 +192,7 @@ impl<'a> Analyzer<'a> {
             if let Some(nid) = node_id {
               let def_id = *def_id;
               self.set_def(nid, &def_id);
+              self.mark_referenced(def_id);
             }
           },
           Some(SymbolEntry::Overload(_)) => {},

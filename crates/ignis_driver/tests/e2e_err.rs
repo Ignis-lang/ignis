@@ -11,6 +11,15 @@ fn e2e_error_test(
   assert_snapshot!(name, diagnostics.join("\n"));
 }
 
+fn e2e_warning_test(
+  name: &str,
+  source: &str,
+) {
+  let warnings = common::compile_warnings(source).expect("lex/parse failed");
+  assert!(!warnings.is_empty(), "expected warnings");
+  assert_snapshot!(name, warnings.join("\n"));
+}
+
 #[test]
 fn e2e_err_index_out_of_bounds_positive() {
   e2e_error_test(
@@ -247,6 +256,71 @@ record BadAlign {
 
 function main(): void {
     return;
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Lint Warning Tests
+// =========================================================================
+
+#[test]
+fn e2e_warn_unused_variable() {
+  e2e_warning_test(
+    "warn_unused_variable",
+    r#"
+function main(): i32 {
+    let x: i32 = 5;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_warn_deprecated_call() {
+  e2e_warning_test(
+    "warn_deprecated_call",
+    r#"
+@deprecated("use bar instead")
+function foo(): i32 {
+    return 1;
+}
+
+function main(): i32 {
+    return foo();
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Lint Error Tests
+// =========================================================================
+
+#[test]
+fn e2e_err_unknown_lint() {
+  e2e_error_test(
+    "err_unknown_lint",
+    r#"
+@allow(bogusLint)
+function main(): void {
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_deny_unused_variable() {
+  e2e_error_test(
+    "err_deny_unused_variable",
+    r#"
+@deny(unused_variable)
+function main(): i32 {
+    let x: i32 = 5;
+    return 0;
 }
 "#,
   );

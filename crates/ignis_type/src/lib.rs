@@ -5,6 +5,7 @@ pub mod attribute;
 pub mod compilation_context;
 pub mod definition;
 pub mod file;
+pub mod lint;
 pub mod module;
 pub mod namespace;
 pub mod span;

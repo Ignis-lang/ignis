@@ -1301,6 +1301,7 @@ impl<'a> Analyzer<'a> {
             }
           }
         },
+        "allow" | "warn" | "deny" => {},
         _ => {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
@@ -1352,6 +1353,7 @@ impl<'a> Analyzer<'a> {
             }
           }
         },
+        "allow" | "warn" | "deny" => {},
         _ => {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
@@ -1425,6 +1427,7 @@ impl<'a> Analyzer<'a> {
             attrs.push(FunctionAttr::Deprecated(Some(s)));
           }
         },
+        "allow" | "warn" | "deny" => {},
         _ => {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
@@ -1461,7 +1464,8 @@ impl<'a> Analyzer<'a> {
           Some(*v as u64)
         }
       },
-      ignis_ast::attribute::ASTAttributeArg::StringLiteral(_, span) => {
+      ignis_ast::attribute::ASTAttributeArg::StringLiteral(_, span)
+      | ignis_ast::attribute::ASTAttributeArg::Identifier(_, span) => {
         self.add_diagnostic(
           DiagnosticMessage::AttributeExpectedInt {
             attr: attr_name.to_string(),
@@ -1481,7 +1485,8 @@ impl<'a> Analyzer<'a> {
   ) -> Option<String> {
     match arg {
       ignis_ast::attribute::ASTAttributeArg::StringLiteral(s, _) => Some(s.clone()),
-      ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
+      ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span)
+      | ignis_ast::attribute::ASTAttributeArg::Identifier(_, span) => {
         self.add_diagnostic(
           DiagnosticMessage::AttributeExpectedString {
             attr: attr_name.to_string(),
@@ -1492,5 +1497,70 @@ impl<'a> Analyzer<'a> {
         None
       },
     }
+  }
+
+  pub fn bind_lint_directives(
+    &mut self,
+    ast_attrs: &[ignis_ast::attribute::ASTAttribute],
+  ) -> Vec<(ignis_type::lint::LintId, ignis_type::lint::LintLevel)> {
+    use ignis_type::lint::{LintId, LintLevel};
+
+    let mut directives = Vec::new();
+
+    for attr in ast_attrs {
+      let name = self.get_symbol_name(&attr.name);
+
+      let level = match name.as_str() {
+        "allow" => LintLevel::Allow,
+        "warn" => LintLevel::Warn,
+        "deny" => LintLevel::Deny,
+        _ => continue,
+      };
+
+      if attr.args.len() != 1 {
+        self.add_diagnostic(
+          DiagnosticMessage::AttributeArgCount {
+            attr: name,
+            expected: 1,
+            got: attr.args.len(),
+            span: attr.span.clone(),
+          }
+          .report(),
+        );
+        continue;
+      }
+
+      match &attr.args[0] {
+        ignis_ast::attribute::ASTAttributeArg::Identifier(sym, span) => {
+          let lint_name = self.get_symbol_name(sym);
+
+          match lint_name.as_str() {
+            "unused_variable" => directives.push((LintId::UnusedVariable, level)),
+            "unused_import" => directives.push((LintId::UnusedImport, level)),
+            "deprecated" => directives.push((LintId::Deprecated, level)),
+            _ => {
+              self.add_diagnostic(
+                DiagnosticMessage::UnknownLint {
+                  name: lint_name,
+                  span: span.clone(),
+                }
+                .report(),
+              );
+            },
+          }
+        },
+        other => {
+          self.add_diagnostic(
+            DiagnosticMessage::AttributeExpectedIdentifier {
+              attr: name,
+              span: other.span().clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    directives
   }
 }

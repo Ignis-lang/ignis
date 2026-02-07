@@ -122,6 +122,11 @@ impl super::IgnisParser {
         let value = token.lexeme.trim_matches('"').to_string();
         Ok(ASTAttributeArg::StringLiteral(value, token.span))
       },
+      TokenType::Identifier => {
+        self.bump();
+        let sym = self.symbols.borrow_mut().intern(&token.lexeme);
+        Ok(ASTAttributeArg::Identifier(sym, token.span))
+      },
       _ => Err(DiagnosticMessage::UnexpectedToken { at: token.span }),
     }
   }

@@ -23,6 +23,7 @@ mod checks;
 mod const_eval;
 pub mod dump;
 pub mod imports;
+mod lint;
 mod lowering;
 pub mod modules;
 pub mod mono;
@@ -39,6 +40,7 @@ use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSynta
 use ignis_type::{compilation_context::CompilationContext, symbol::SymbolTable, Store as ASTStore};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
+use ignis_type::lint::{LintId, LintLevel};
 use ignis_type::module::ModuleId;
 use ignis_type::namespace::{NamespaceId, NamespaceStore};
 use ignis_hir::HIR;
@@ -117,6 +119,9 @@ pub struct Analyzer<'a> {
   import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
   import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
   compilation_ctx: Option<CompilationContext>,
+  referenced_defs: HashSet<DefinitionId>,
+  imported_defs: HashMap<DefinitionId, ignis_type::span::Span>,
+  lint_overrides: Vec<(LintId, LintLevel)>,
 }
 
 pub struct AnalyzerOutput {
@@ -197,6 +202,9 @@ impl<'a> Analyzer<'a> {
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
       compilation_ctx: Some(CompilationContext::default()),
+      referenced_defs: HashSet::new(),
+      imported_defs: HashMap::new(),
+      lint_overrides: Vec::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
     analyzer
@@ -230,6 +238,7 @@ impl<'a> Analyzer<'a> {
     analyzer.borrowcheck_phase(roots);
     analyzer.const_eval_phase(roots);
     analyzer.extra_checks_phase(roots);
+    analyzer.lint_phase(roots);
     let hir = analyzer.lower_to_hir(roots);
 
     // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
@@ -291,6 +300,9 @@ impl<'a> Analyzer<'a> {
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
       compilation_ctx: Some(CompilationContext::default()),
+      referenced_defs: HashSet::new(),
+      imported_defs: HashMap::new(),
+      lint_overrides: Vec::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
 
@@ -300,6 +312,7 @@ impl<'a> Analyzer<'a> {
     analyzer.borrowcheck_phase(roots);
     analyzer.const_eval_phase(roots);
     analyzer.extra_checks_phase(roots);
+    analyzer.lint_phase(roots);
     let hir = analyzer.lower_to_hir(roots);
 
     *shared_types = std::mem::replace(&mut analyzer.types, TypeStore::new());
@@ -397,6 +410,42 @@ impl<'a> Analyzer<'a> {
     def_id: DefinitionId,
   ) {
     self.resolved_calls.insert(*node_id, def_id);
+  }
+
+  fn mark_referenced(
+    &mut self,
+    def_id: DefinitionId,
+  ) {
+    self.referenced_defs.insert(def_id);
+  }
+
+  fn effective_lint_level(
+    &self,
+    lint: LintId,
+  ) -> LintLevel {
+    for (id, level) in self.lint_overrides.iter().rev() {
+      if *id == lint {
+        return *level;
+      }
+    }
+
+    LintLevel::Warn
+  }
+
+  fn push_lint_overrides(
+    &mut self,
+    overrides: &[(LintId, LintLevel)],
+  ) {
+    self.lint_overrides.extend_from_slice(overrides);
+  }
+
+  #[allow(dead_code)]
+  fn pop_lint_overrides(
+    &mut self,
+    count: usize,
+  ) {
+    let new_len = self.lint_overrides.len().saturating_sub(count);
+    self.lint_overrides.truncate(new_len);
   }
 
   fn define_decl_in_current_scope(
