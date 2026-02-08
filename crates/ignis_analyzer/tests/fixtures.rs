@@ -199,3 +199,13 @@ fn fixture_copy_explicit() {
 fn fixture_drop_ownership() {
   test_fixture("test_cases/analyzer/lang_traits/drop_ownership.ign");
 }
+
+#[test]
+fn fixture_copy_structural() {
+  test_fixture("test_cases/analyzer/lang_traits/copy_structural.ign");
+}
+
+#[test]
+fn fixture_copy_structural_noncopy() {
+  test_fixture("test_cases/analyzer/lang_traits/copy_structural_noncopy.ign");
+}

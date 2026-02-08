@@ -1032,14 +1032,8 @@ impl<'a> CEmitter<'a> {
           Type::Vector { size: None, .. } => {
             writeln!(self.output, "ignis_buf_drop(l{});", local.index()).unwrap();
           },
-          Type::Record(def_id) => {
-            let def_id = *def_id;
-            if let Some(method_def_id) = self.find_drop_method(def_id) {
-              let name = self.def_name(method_def_id);
-              writeln!(self.output, "{}(&l{});", name, local.index()).unwrap();
-            } else {
-              writeln!(self.output, "/* drop l{}: record without drop method */", local.index()).unwrap();
-            }
+          Type::Record(_) => {
+            self.emit_field_drops(&format!("l{}", local.index()), ty);
           },
           Type::Enum(_) => {
             // Typechecker rejects @implements(Drop) on enums; unreachable in practice.
@@ -1521,6 +1515,49 @@ impl<'a> CEmitter<'a> {
     }
 
     None
+  }
+
+  /// Recursively emit drop calls for each droppable field of a value.
+  ///
+  /// For records with an explicit `drop` method, calls that method.
+  /// For records without one but with droppable fields, recurses into each field.
+  fn emit_field_drops(
+    &mut self,
+    expr: &str,
+    ty: TypeId,
+  ) {
+    match self.types.get(&ty).clone() {
+      Type::String => {
+        writeln!(self.output, "ignis_string_drop({});", expr).unwrap();
+      },
+
+      Type::Vector { size: None, .. } => {
+        writeln!(self.output, "ignis_buf_drop({});", expr).unwrap();
+      },
+
+      Type::Record(def_id) => {
+        if let Some(method_def_id) = self.find_drop_method(def_id) {
+          let name = self.def_name(method_def_id);
+          writeln!(self.output, "{}(&{});", name, expr).unwrap();
+        } else {
+          let field_info: Vec<(u32, TypeId)> = {
+            let def = self.defs.get(&def_id);
+            match &def.kind {
+              DefinitionKind::Record(rd) => rd.fields.iter().map(|f| (f.index, f.type_id)).collect(),
+              _ => vec![],
+            }
+          };
+
+          for (index, field_ty) in field_info {
+            if self.types.needs_drop_with_defs(&field_ty, self.defs) {
+              self.emit_field_drops(&format!("{}.field_{}", expr, index), field_ty);
+            }
+          }
+        }
+      },
+
+      _ => {},
+    }
   }
 
   fn def_name(

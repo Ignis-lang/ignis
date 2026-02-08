@@ -588,12 +588,12 @@ impl TypeStore {
   }
 
   /// Returns true if the type has Copy semantics, consulting `@implements(...)` metadata
-  /// on records and enums via `DefinitionStore`.
+  /// and field types on records and enums via `DefinitionStore`.
   ///
   /// - `@implements(Drop)` on a record/enum makes it non-Copy.
   /// - `@implements(Copy)` on a record/enum makes it explicitly Copy.
-  /// - Records/enums without explicit traits default to Copy (current v0.2 behavior).
-  /// - All other types delegate to the existing `is_copy()` logic.
+  /// - Otherwise, structurally Copy iff all fields/payloads are Copy.
+  /// - All other types delegate to `is_copy()`.
   pub fn is_copy_with_defs(
     &self,
     ty: &TypeId,
@@ -616,9 +616,15 @@ impl TypeStore {
         }
 
         let def = defs.get(def_id);
-        // TODO: structural field check — recurse into fields instead of defaulting to Copy
         let result = if let DefinitionKind::Record(rd) = &def.kind {
-          !rd.lang_traits.drop
+          if rd.lang_traits.drop {
+            false
+          } else if rd.lang_traits.copy {
+            true
+          } else {
+            let field_types: Vec<TypeId> = rd.fields.iter().map(|f| f.type_id).collect();
+            field_types.iter().all(|t| self.is_copy_with_defs_inner(t, defs, visiting))
+          }
         } else {
           true
         };
@@ -627,8 +633,6 @@ impl TypeStore {
         result
       },
 
-      // Typechecker rejects @implements(...) on enums, so lang_traits is always default here.
-      // Checked defensively.
       Type::Enum(def_id) => {
         if !visiting.insert(*ty) {
           return false;
@@ -636,7 +640,14 @@ impl TypeStore {
 
         let def = defs.get(def_id);
         let result = if let DefinitionKind::Enum(ed) = &def.kind {
-          !ed.lang_traits.drop
+          if ed.lang_traits.drop {
+            false
+          } else if ed.lang_traits.copy {
+            true
+          } else {
+            let payload_types: Vec<TypeId> = ed.variants.iter().flat_map(|v| v.payload.iter().copied()).collect();
+            payload_types.iter().all(|t| self.is_copy_with_defs_inner(t, defs, visiting))
+          }
         } else {
           true
         };
@@ -681,11 +692,11 @@ impl TypeStore {
   }
 
   /// Returns true if the type needs drop cleanup, consulting `@implements(Drop)` metadata
-  /// on records and enums via `DefinitionStore`.
+  /// and field types on records and enums via `DefinitionStore`.
   ///
   /// - `@implements(Drop)` on a record/enum means it needs dropping.
-  /// - Records/enums without explicit Drop default to no-drop (transitive field check deferred).
-  /// - String and dynamic Vector still need dropping as before.
+  /// - Otherwise, transitively needs drop if any field/payload needs dropping.
+  /// - String and dynamic Vector always need dropping.
   pub fn needs_drop_with_defs(
     &self,
     ty: &TypeId,
@@ -702,27 +713,43 @@ impl TypeStore {
     visiting: &mut HashSet<TypeId>,
   ) -> bool {
     match self.get(ty) {
-      // TODO: transitive field check — recurse into fields
       Type::Record(def_id) => {
         if !visiting.insert(*ty) {
           return false;
         }
 
         let def = defs.get(def_id);
-        let result = matches!(&def.kind, DefinitionKind::Record(rd) if rd.lang_traits.drop);
+        let result = if let DefinitionKind::Record(rd) = &def.kind {
+          if rd.lang_traits.drop {
+            true
+          } else {
+            let field_types: Vec<TypeId> = rd.fields.iter().map(|f| f.type_id).collect();
+            field_types.iter().any(|t| self.needs_drop_with_defs_inner(t, defs, visiting))
+          }
+        } else {
+          false
+        };
 
         visiting.remove(ty);
         result
       },
 
-      // Typechecker rejects @implements(...) on enums; checked defensively.
       Type::Enum(def_id) => {
         if !visiting.insert(*ty) {
           return false;
         }
 
         let def = defs.get(def_id);
-        let result = matches!(&def.kind, DefinitionKind::Enum(ed) if ed.lang_traits.drop);
+        let result = if let DefinitionKind::Enum(ed) = &def.kind {
+          if ed.lang_traits.drop {
+            true
+          } else {
+            let payload_types: Vec<TypeId> = ed.variants.iter().flat_map(|v| v.payload.iter().copied()).collect();
+            payload_types.iter().any(|t| self.needs_drop_with_defs_inner(t, defs, visiting))
+          }
+        } else {
+          false
+        };
 
         visiting.remove(ty);
         result
@@ -743,6 +770,16 @@ impl TypeStore {
       },
 
       Type::String | Type::Vector { size: None, .. } | Type::Infer => true,
+
+      Type::Tuple(elems) => {
+        let elems = elems.clone();
+        elems.iter().any(|e| self.needs_drop_with_defs_inner(e, defs, visiting))
+      },
+
+      Type::Vector { element, size: Some(_) } => {
+        let element = *element;
+        self.needs_drop_with_defs_inner(&element, defs, visiting)
+      },
 
       _ => false,
     }

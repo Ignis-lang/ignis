@@ -1860,3 +1860,65 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_structural_copy() {
+  e2e_test(
+    "structural_copy",
+    r#"
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+function main(): i32 {
+    let p: Point = Point { x: 10, y: 32 };
+    let q: Point = p;
+    return p.x + q.y;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_drop_glue() {
+  e2e_test(
+    "drop_glue",
+    r#"
+record Named {
+  public name: string;
+  public value: i32;
+}
+
+function main(): i32 {
+    let n: Named = Named { name: "hello", value: 42 };
+    return n.value;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_nested_drop_glue() {
+  e2e_test(
+    "nested_drop_glue",
+    r#"
+record Inner {
+  public label: string;
+}
+
+record Outer {
+  public inner: Inner;
+  public code: i32;
+}
+
+function main(): i32 {
+    let o: Outer = Outer {
+        inner: Inner { label: "test" },
+        code: 42
+    };
+    return o.code;
+}
+"#,
+  );
+}
