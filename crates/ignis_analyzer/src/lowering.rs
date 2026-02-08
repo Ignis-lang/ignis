@@ -2005,6 +2005,12 @@ impl<'a> Analyzer<'a> {
     };
 
     let Some((method_id, self_mutable)) = method_info else {
+      if let Some(ext_def_id) = self.lookup_resolved_call(node_id).cloned() {
+        if matches!(self.defs.get(&ext_def_id).kind, DefinitionKind::Function(_)) {
+          return self.lower_extension_call(node_id, ma, call, hir, scope_kind, result_type, base, &ext_def_id);
+        }
+      }
+
       return hir.alloc(HIRNode {
         kind: HIRKind::Error,
         span: call.span.clone(),
@@ -2045,6 +2051,40 @@ impl<'a> Analyzer<'a> {
         args: args_hir,
       },
       span: call.span.clone(),
+      type_id: result_type,
+    })
+  }
+
+  /// Lower `obj.extMethod(args)` → `extMethod(obj, args)` (regular call).
+  fn lower_extension_call(
+    &mut self,
+    _node_id: &NodeId,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+    result_type: TypeId,
+    base: HIRId,
+    ext_def_id: &DefinitionId,
+  ) -> HIRId {
+    let args_hir: Vec<HIRId> = call
+      .arguments
+      .iter()
+      .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+      .collect();
+
+    let mut all_args = vec![base];
+    all_args.extend(args_hir);
+
+    let type_args = self.resolve_or_infer_call_type_args(ext_def_id, call, &all_args, hir);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Call {
+        callee: *ext_def_id,
+        type_args,
+        args: all_args,
+      },
+      span: ma.span.clone(),
       type_id: result_type,
     })
   }

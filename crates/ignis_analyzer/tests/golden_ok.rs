@@ -423,3 +423,73 @@ function main(): Option {
   );
   assert_snapshot!("enum_with_payload_hir", common::format_hir(&result));
 }
+
+#[test]
+fn extension_method_basic() {
+  let result = common::analyze(
+    r#"
+@extension(i32)
+function double(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): i32 {
+    let x: i32 = 21;
+    return x.double();
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "extension_method_basic_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("extension_method_basic_hir", common::format_hir(&result));
+}
+
+#[test]
+fn extension_method_with_args() {
+  let result = common::analyze(
+    r#"
+@extension(i32)
+function add(value: i32, other: i32): i32 {
+    return value + other;
+}
+
+function main(): i32 {
+    let x: i32 = 10;
+    return x.add(5);
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "extension_method_with_args_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("extension_method_with_args_hir", common::format_hir(&result));
+}
+
+#[test]
+fn extension_method_string() {
+  let result = common::analyze(
+    r#"
+@extension(string)
+function isEmpty(value: string): bool {
+    return false;
+}
+
+function main(): void {
+    let s: string = "hello";
+    let result: bool = s.isEmpty();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "extension_method_string_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("extension_method_string_hir", common::format_hir(&result));
+}

@@ -2021,3 +2021,60 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_extension_method_i32() {
+  e2e_test(
+    "extension_method_i32",
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): i32 {
+    let x: i32 = 21;
+    return x.doubled();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_extension_method_with_args() {
+  e2e_test(
+    "extension_method_with_args",
+    r#"
+@extension(i32)
+function add(value: i32, other: i32): i32 {
+    return value + other;
+}
+
+function main(): i32 {
+    let x: i32 = 30;
+    return x.add(12);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_extension_method_bool() {
+  e2e_test(
+    "extension_method_bool",
+    r#"
+@extension(boolean)
+function toInt(value: boolean): i32 {
+    if (value) {
+        return 1;
+    }
+    return 0;
+}
+
+function main(): i32 {
+    let b: boolean = true;
+    return b.toInt();
+}
+"#,
+  );
+}

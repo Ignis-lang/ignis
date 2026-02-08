@@ -37,7 +37,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
-use ignis_type::{compilation_context::CompilationContext, symbol::SymbolTable, Store as ASTStore};
+use ignis_type::{compilation_context::CompilationContext, symbol::{SymbolId, SymbolTable}, Store as ASTStore};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
 use ignis_type::lint::{LintId, LintLevel};
@@ -122,6 +122,7 @@ pub struct Analyzer<'a> {
   referenced_defs: HashSet<DefinitionId>,
   imported_defs: HashMap<DefinitionId, ignis_type::span::Span>,
   lint_overrides: Vec<(LintId, LintLevel)>,
+  extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
 }
 
 pub struct AnalyzerOutput {
@@ -205,6 +206,7 @@ impl<'a> Analyzer<'a> {
       referenced_defs: HashSet::new(),
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
+      extension_methods: HashMap::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
     analyzer
@@ -271,6 +273,7 @@ impl<'a> Analyzer<'a> {
     shared_types: &mut TypeStore,
     shared_defs: &mut DefinitionStore,
     shared_namespaces: &mut NamespaceStore,
+    shared_extension_methods: &mut HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
     current_module: ModuleId,
   ) -> AnalyzerOutput {
     let symbols_clone = symbols.clone();
@@ -303,6 +306,7 @@ impl<'a> Analyzer<'a> {
       referenced_defs: HashSet::new(),
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
+      extension_methods: std::mem::take(shared_extension_methods),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
 
@@ -318,6 +322,7 @@ impl<'a> Analyzer<'a> {
     *shared_types = std::mem::replace(&mut analyzer.types, TypeStore::new());
     *shared_defs = std::mem::replace(&mut analyzer.defs, DefinitionStore::new());
     *shared_namespaces = std::mem::replace(&mut analyzer.namespaces, NamespaceStore::new());
+    *shared_extension_methods = std::mem::take(&mut analyzer.extension_methods);
 
     // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
     let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);

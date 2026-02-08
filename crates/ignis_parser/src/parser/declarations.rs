@@ -130,6 +130,11 @@ impl super::IgnisParser {
         let sym = self.symbols.borrow_mut().intern(&token.lexeme);
         Ok(ASTAttributeArg::Identifier(sym, token.span))
       },
+      tt if tt.is_primitive_type_keyword() => {
+        self.bump();
+        let sym = self.symbols.borrow_mut().intern(&token.lexeme);
+        Ok(ASTAttributeArg::Identifier(sym, token.span))
+      },
       _ => Err(DiagnosticMessage::UnexpectedToken { at: token.span }),
     }
   }

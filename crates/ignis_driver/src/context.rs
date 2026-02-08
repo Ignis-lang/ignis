@@ -586,6 +586,7 @@ impl CompilationContext {
     let mut shared_types = TypeStore::new();
     let mut shared_defs = DefinitionStore::new();
     let mut shared_namespaces = ignis_type::namespace::NamespaceStore::new();
+    let mut shared_extension_methods = std::collections::HashMap::new();
     let mut combined_hir = HIR::new();
     let mut all_diagnostics = Vec::new();
     let mut has_errors = false;
@@ -634,6 +635,7 @@ impl CompilationContext {
         &mut shared_types,
         &mut shared_defs,
         &mut shared_namespaces,
+        &mut shared_extension_methods,
         module_id,
       );
 

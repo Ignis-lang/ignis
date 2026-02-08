@@ -1501,6 +1501,38 @@ impl<'a> Analyzer<'a> {
             attrs.push(FunctionAttr::Deprecated(Some(s)));
           }
         },
+        "extension" => {
+          if attr.args.len() != 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 1,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else {
+            match &attr.args[0] {
+              ignis_ast::attribute::ASTAttributeArg::StringLiteral(s, _) => {
+                attrs.push(FunctionAttr::Extension(s.clone()));
+              },
+              ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _) => {
+                let type_name = self.symbols.borrow().get(sym).to_string();
+                attrs.push(FunctionAttr::Extension(type_name));
+              },
+              ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
+                self.add_diagnostic(
+                  DiagnosticMessage::AttributeExpectedString {
+                    attr: name.to_string(),
+                    span: span.clone(),
+                  }
+                  .report(),
+                );
+              },
+            }
+          }
+        },
         "allow" | "warn" | "deny" => {},
         _ => {
           self.add_diagnostic(

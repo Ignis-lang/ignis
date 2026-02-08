@@ -1226,3 +1226,54 @@ function main(): void {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+#[test]
+fn extension_invalid_target_type() {
+  common::assert_err(
+    r#"
+@extension(Foo)
+function something(value: i32): i32 {
+    return value;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0135"],
+  );
+}
+
+#[test]
+fn extension_no_params() {
+  common::assert_err(
+    r#"
+@extension(i32)
+function noParams(): i32 {
+    return 0;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0136"],
+  );
+}
+
+#[test]
+fn extension_receiver_type_mismatch() {
+  common::assert_err(
+    r#"
+@extension(i32)
+function wrongReceiver(value: f64): f64 {
+    return value;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0137"],
+  );
+}

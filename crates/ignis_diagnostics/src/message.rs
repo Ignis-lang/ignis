@@ -618,6 +618,29 @@ pub enum DiagnosticMessage {
     trait_name: String,
     span: Span,
   },
+  // Extension method diagnostics
+  ExtensionInvalidTargetType {
+    type_name: String,
+    span: Span,
+  },
+  ExtensionRequiresParameter {
+    span: Span,
+  },
+  ExtensionReceiverTypeMismatch {
+    expected: String,
+    got: String,
+    span: Span,
+  },
+  ExtensionMethodOnLiteral {
+    method: String,
+    type_name: String,
+    span: Span,
+  },
+  ExtensionMethodOnTemporary {
+    method: String,
+    type_name: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1188,6 +1211,33 @@ impl fmt::Display for DiagnosticMessage {
           trait_name
         )
       },
+      DiagnosticMessage::ExtensionInvalidTargetType { type_name, .. } => {
+        write!(f, "@extension target type '{}' is not a valid primitive type", type_name)
+      },
+      DiagnosticMessage::ExtensionRequiresParameter { .. } => {
+        write!(f, "@extension function must have at least one parameter (receiver)")
+      },
+      DiagnosticMessage::ExtensionReceiverTypeMismatch { expected, got, .. } => {
+        write!(
+          f,
+          "first parameter type must be '{}' or a reference to it, got '{}'",
+          expected, got
+        )
+      },
+      DiagnosticMessage::ExtensionMethodOnLiteral { method, type_name, .. } => {
+        write!(
+          f,
+          "cannot call extension method '{}' on a {} literal; assign to a variable first",
+          method, type_name
+        )
+      },
+      DiagnosticMessage::ExtensionMethodOnTemporary { method, type_name, .. } => {
+        write!(
+          f,
+          "cannot call extension method '{}' on a temporary {}; assign to a variable first",
+          method, type_name
+        )
+      },
     }
   }
 }
@@ -1351,7 +1401,12 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LangTraitDropCopyConflict { span, .. }
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
       | DiagnosticMessage::LangTraitInvalidSignature { span, .. }
-      | DiagnosticMessage::LangTraitNotApplicable { span, .. } => span.clone(),
+      | DiagnosticMessage::LangTraitNotApplicable { span, .. }
+      | DiagnosticMessage::ExtensionInvalidTargetType { span, .. }
+      | DiagnosticMessage::ExtensionRequiresParameter { span, .. }
+      | DiagnosticMessage::ExtensionReceiverTypeMismatch { span, .. }
+      | DiagnosticMessage::ExtensionMethodOnLiteral { span, .. }
+      | DiagnosticMessage::ExtensionMethodOnTemporary { span, .. } => span.clone(),
     }
   }
 
@@ -1511,6 +1566,11 @@ impl DiagnosticMessage {
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",
       DiagnosticMessage::LangTraitInvalidSignature { .. } => "A0133",
       DiagnosticMessage::LangTraitNotApplicable { .. } => "A0134",
+      DiagnosticMessage::ExtensionInvalidTargetType { .. } => "A0135",
+      DiagnosticMessage::ExtensionRequiresParameter { .. } => "A0136",
+      DiagnosticMessage::ExtensionReceiverTypeMismatch { .. } => "A0137",
+      DiagnosticMessage::ExtensionMethodOnLiteral { .. } => "A0138",
+      DiagnosticMessage::ExtensionMethodOnTemporary { .. } => "A0139",
     }
     .to_string()
   }

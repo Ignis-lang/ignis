@@ -405,6 +405,28 @@ impl TypeStore {
     self.null_ptr
   }
 
+  pub fn type_id_from_name(
+    &self,
+    name: &str,
+  ) -> Option<TypeId> {
+    match name {
+      "i8" => Some(self.i8()),
+      "i16" => Some(self.i16()),
+      "i32" => Some(self.i32()),
+      "i64" => Some(self.i64()),
+      "u8" => Some(self.u8()),
+      "u16" => Some(self.u16()),
+      "u32" => Some(self.u32()),
+      "u64" => Some(self.u64()),
+      "f32" => Some(self.f32()),
+      "f64" => Some(self.f64()),
+      "bool" | "boolean" => Some(self.boolean()),
+      "char" => Some(self.char()),
+      "string" => Some(self.string()),
+      _ => None,
+    }
+  }
+
   pub fn is_numeric(
     &self,
     ty: &TypeId,

@@ -22,6 +22,7 @@ use ignis_diagnostics::{
   message::DiagnosticMessage,
 };
 use ignis_type::{
+  attribute::FunctionAttr,
   definition::{ConstValue, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry, Visibility},
   span::Span,
   types::{Substitution, Type, TypeId},
@@ -188,6 +189,10 @@ impl<'a> Analyzer<'a> {
           if let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(def_id).kind {
             func_def.return_type = return_type;
           }
+        }
+
+        if let Some(def_id) = &def_id {
+          self.register_extension_method(def_id, &func.signature.span);
         }
 
         self.scopes.push(ScopeKind::Function);
@@ -594,6 +599,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Path(path) => {
         // Track path segment spans for hover support
         self.track_path_segment_spans(path);
+        self.mark_path_prefix_referenced(&path.segments);
 
         // Resolve the path to get the definition type
         match self.resolve_qualified_path(&path.segments) {
@@ -1467,6 +1473,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTNode::Expression(ASTExpression::Path(path)) => {
         // Qualified path - resolve through namespaces
+        self.mark_path_prefix_referenced(&path.segments);
         self.resolve_qualified_path_to_def(path)
       },
       ASTNode::Expression(ASTExpression::MemberAccess(ma)) => {
@@ -1660,6 +1667,23 @@ impl<'a> Analyzer<'a> {
           return;
         },
         _ => return,
+      }
+    }
+  }
+
+  /// Mark prefix segments of a qualified path (e.g. `Io` in `Io::println`)
+  /// as referenced so the unused-import lint doesn't false-positive on them.
+  fn mark_path_prefix_referenced(
+    &mut self,
+    segments: &[ignis_ast::expressions::path::ASTPathSegment],
+  ) {
+    if segments.len() < 2 {
+      return;
+    }
+
+    for segment in &segments[..segments.len() - 1] {
+      if let Some(def_id) = self.scopes.lookup_def(&segment.name).cloned() {
+        self.mark_referenced(def_id);
       }
     }
   }
@@ -2095,9 +2119,12 @@ impl<'a> Analyzer<'a> {
     // Get the callee entry from scope or resolve it if it's a path
     let callee_entry = match self.ast.get(&call.callee) {
       ASTNode::Expression(ASTExpression::Variable(var)) => self.scopes.lookup(&var.name).cloned(),
-      ASTNode::Expression(ASTExpression::Path(path)) => match self.resolve_qualified_path(&path.segments) {
-        Some(ResolvedPath::Entry(entry)) => Some(entry),
-        _ => None,
+      ASTNode::Expression(ASTExpression::Path(path)) => {
+        self.mark_path_prefix_referenced(&path.segments);
+        match self.resolve_qualified_path(&path.segments) {
+          Some(ResolvedPath::Entry(entry)) => Some(entry),
+          _ => None,
+        }
       },
       _ => None,
     };
@@ -2682,6 +2709,10 @@ impl<'a> Analyzer<'a> {
           return self.types.error();
         }
 
+        if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
+          return result;
+        }
+
         // Method not found
         let type_name = self.format_type_for_error(&obj_type);
         let member_name = self.get_symbol_name(&ma.member);
@@ -2877,6 +2908,10 @@ impl<'a> Analyzer<'a> {
           return self.types.error();
         }
 
+        if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
+          return result;
+        }
+
         // Method not found
         let type_name = self.format_type_for_error(&obj_type);
         let member_name = self.get_symbol_name(&ma.member);
@@ -2895,6 +2930,10 @@ impl<'a> Analyzer<'a> {
         self.types.error()
       },
       _ => {
+        if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
+          return result;
+        }
+
         let type_name = self.format_type_for_error(&obj_type);
         self.add_diagnostic(
           DiagnosticMessage::DotAccessOnNonRecord {
@@ -3231,6 +3270,8 @@ impl<'a> Analyzer<'a> {
     if path.segments.len() < 2 {
       return None;
     }
+
+    self.mark_path_prefix_referenced(&path.segments);
 
     match self.resolve_qualified_path(&path.segments) {
       Some(ResolvedPath::Entry(entry)) => match entry {
@@ -6424,5 +6465,215 @@ impl<'a> Analyzer<'a> {
     }
 
     true
+  }
+
+  fn register_extension_method(
+    &mut self,
+    def_id: &DefinitionId,
+    func_span: &Span,
+  ) {
+    let func_def = match &self.defs.get(def_id).kind {
+      DefinitionKind::Function(fd) => fd.clone(),
+      _ => return,
+    };
+
+    let ext_type_name = match func_def.attrs.iter().find_map(|a| {
+      if let FunctionAttr::Extension(name) = a {
+        Some(name.clone())
+      } else {
+        None
+      }
+    }) {
+      Some(name) => name,
+      None => return,
+    };
+
+    let target_type_id = match self.types.type_id_from_name(&ext_type_name) {
+      Some(id) => id,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::ExtensionInvalidTargetType {
+            type_name: ext_type_name,
+            span: func_span.clone(),
+          }
+          .report(),
+        );
+        return;
+      },
+    };
+
+    if func_def.params.is_empty() {
+      self.add_diagnostic(DiagnosticMessage::ExtensionRequiresParameter { span: func_span.clone() }.report());
+      return;
+    }
+
+    let first_param_type = self.get_definition_type(&func_def.params[0]);
+    let receiver_ok = self.types.types_equal(&first_param_type, &target_type_id) || {
+      match self.types.get(&first_param_type).clone() {
+        Type::Reference { inner, .. } => self.types.types_equal(&inner, &target_type_id),
+        _ => false,
+      }
+    };
+
+    if !receiver_ok {
+      let expected = self.format_type_for_error(&target_type_id);
+      let got = self.format_type_for_error(&first_param_type);
+      self.add_diagnostic(
+        DiagnosticMessage::ExtensionReceiverTypeMismatch {
+          expected,
+          got,
+          span: func_span.clone(),
+        }
+        .report(),
+      );
+      return;
+    }
+
+    let func_name = self.defs.get(def_id).name;
+    self
+      .extension_methods
+      .entry(target_type_id)
+      .or_default()
+      .entry(func_name)
+      .or_default()
+      .push(*def_id);
+  }
+
+  fn try_resolve_extension_method(
+    &mut self,
+    node_id: &NodeId,
+    obj_type: &TypeId,
+    ma: &ASTMemberAccess,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> Option<TypeId> {
+    let method_map = self.extension_methods.get(obj_type)?.clone();
+    let candidates = method_map.get(&ma.member)?.clone();
+
+    if candidates.is_empty() {
+      return None;
+    }
+
+    let obj_node = self.ast.get(&ma.object);
+    if let ASTNode::Expression(obj_expr) = obj_node {
+      match obj_expr {
+        ASTExpression::Variable(_) | ASTExpression::MemberAccess(_) | ASTExpression::VectorAccess(_) => {},
+        ASTExpression::Literal(_) => {
+          let method_name = self.get_symbol_name(&ma.member);
+          let type_name = self.format_type_for_error(obj_type);
+          self.add_diagnostic(
+            DiagnosticMessage::ExtensionMethodOnLiteral {
+              method: method_name,
+              type_name,
+              span: ma.span.clone(),
+            }
+            .report(),
+          );
+          return Some(self.types.error());
+        },
+        _ => {
+          let method_name = self.get_symbol_name(&ma.member);
+          let type_name = self.format_type_for_error(obj_type);
+          self.add_diagnostic(
+            DiagnosticMessage::ExtensionMethodOnTemporary {
+              method: method_name,
+              type_name,
+              span: ma.span.clone(),
+            }
+            .report(),
+          );
+          return Some(self.types.error());
+        },
+      }
+    }
+
+    if candidates.len() == 1 {
+      let ext_def_id = candidates[0];
+      let func_def = match &self.defs.get(&ext_def_id).kind {
+        DefinitionKind::Function(fd) => fd.clone(),
+        _ => return None,
+      };
+
+      let explicit_params: Vec<_> = func_def.params[1..].to_vec();
+      let param_types: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+
+      let arg_types: Vec<TypeId> = call
+        .arguments
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+          if let Some(param_type) = param_types.get(i) {
+            let infer = InferContext::expecting(*param_type);
+            self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+          } else {
+            self.typecheck_node(arg, scope_kind, ctx)
+          }
+        })
+        .collect();
+
+      let method_name = self.get_symbol_name(&ma.member);
+      if arg_types.len() != explicit_params.len() {
+        self.add_diagnostic(
+          DiagnosticMessage::ArgumentCountMismatch {
+            expected: explicit_params.len(),
+            got: arg_types.len(),
+            func_name: method_name.clone(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+      }
+
+      let check_count = std::cmp::min(arg_types.len(), param_types.len());
+      for i in 0..check_count {
+        if self.types.is_error(&arg_types[i]) {
+          continue;
+        }
+        if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+          let expected = self.format_type_for_error(&param_types[i]);
+          let got = self.format_type_for_error(&arg_types[i]);
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentTypeMismatch {
+              param_idx: i + 1,
+              expected,
+              got,
+              span: self.node_span(&call.arguments[i]).clone(),
+            }
+            .report(),
+          );
+        }
+      }
+
+      self.set_resolved_call(node_id, ext_def_id);
+      self.mark_referenced(ext_def_id);
+
+      return Some(func_def.return_type);
+    }
+
+    // Prepend receiver type: check_arity counts all params including receiver.
+    let arg_types: Vec<TypeId> = call
+      .arguments
+      .iter()
+      .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+      .collect();
+
+    let mut full_arg_types = vec![*obj_type];
+    full_arg_types.extend_from_slice(&arg_types);
+
+    let resolved_def_id = match self.resolve_overload(&candidates, &full_arg_types, &call.span, None) {
+      Ok(def_id) => def_id,
+      Err(()) => return Some(self.types.error()),
+    };
+
+    self.set_resolved_call(node_id, resolved_def_id);
+    self.mark_referenced(resolved_def_id);
+
+    let func_def = match &self.defs.get(&resolved_def_id).kind {
+      DefinitionKind::Function(fd) => fd.clone(),
+      _ => return Some(self.types.error()),
+    };
+
+    Some(func_def.return_type)
   }
 }

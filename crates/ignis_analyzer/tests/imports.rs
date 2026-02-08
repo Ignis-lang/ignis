@@ -46,6 +46,7 @@ fn analyze_with_imports(
     shared_types,
     shared_defs,
     shared_namespaces,
+    &mut HashMap::new(), // extension_methods - not needed for these tests
     ModuleId::new(1), // Different module ID from library
   )
 }
@@ -78,6 +79,7 @@ fn analyze_library_with_shared_stores(
     shared_types,
     shared_defs,
     shared_namespaces,
+    &mut HashMap::new(), // extension_methods - not needed for these tests
     ModuleId::new(0),
   )
 }

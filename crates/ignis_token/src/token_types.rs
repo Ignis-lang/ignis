@@ -197,6 +197,25 @@ impl TokenType {
     }
   }
 
+  pub fn is_primitive_type_keyword(&self) -> bool {
+    matches!(
+      self,
+      TokenType::Int8Type
+        | TokenType::Int16Type
+        | TokenType::Int32Type
+        | TokenType::Int64Type
+        | TokenType::UnsignedInt8Type
+        | TokenType::UnsignedInt16Type
+        | TokenType::UnsignedInt32Type
+        | TokenType::UnsignedInt64Type
+        | TokenType::Float32Type
+        | TokenType::Float64Type
+        | TokenType::BooleanType
+        | TokenType::CharType
+        | TokenType::StringType
+    )
+  }
+
   pub fn get_keywords() -> Vec<TokenType> {
     vec![
       TokenType::As,
