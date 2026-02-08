@@ -390,3 +390,56 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_extension_method_on_literal() {
+  e2e_error_test(
+    "err_extension_method_on_literal",
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): i32 {
+    return 21.doubled();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_extension_method_on_temporary() {
+  e2e_error_test(
+    "err_extension_method_on_temporary",
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): i32 {
+    let x: i32 = 5;
+    return (x + 1).doubled();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_extension_mut_on_immutable() {
+  e2e_error_test(
+    "err_extension_mut_on_immutable",
+    r#"
+@extension(i32, mut)
+function increment(value: i32): i32 {
+    return value + 1;
+}
+
+function main(): i32 {
+    let x: i32 = 5;
+    return x.increment();
+}
+"#,
+  );
+}

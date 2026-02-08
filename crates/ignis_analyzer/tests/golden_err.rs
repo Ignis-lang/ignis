@@ -1296,3 +1296,82 @@ function main(): void {
     &["A0076"],
   );
 }
+
+#[test]
+fn extension_method_on_literal() {
+  common::assert_err(
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): void {
+    let _x: i32 = 10.doubled();
+    return;
+}
+"#,
+    &["A0138"],
+  );
+}
+
+#[test]
+fn extension_method_on_temporary_binop() {
+  common::assert_err(
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): void {
+    let a: i32 = 5;
+    let b: i32 = 3;
+    let _x: i32 = (a + b).doubled();
+    return;
+}
+"#,
+    &["A0139"],
+  );
+}
+
+#[test]
+fn extension_method_on_temporary_call() {
+  common::assert_err(
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function getNumber(): i32 {
+    return 42;
+}
+
+function main(): void {
+    let _x: i32 = getNumber().doubled();
+    return;
+}
+"#,
+    &["A0139"],
+  );
+}
+
+#[test]
+fn extension_method_on_temporary_unary() {
+  common::assert_err(
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): void {
+    let a: i32 = 5;
+    let _x: i32 = (-a).doubled();
+    return;
+}
+"#,
+    &["A0139"],
+  );
+}

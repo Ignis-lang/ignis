@@ -493,3 +493,81 @@ function main(): void {
   );
   assert_snapshot!("extension_method_string_hir", common::format_hir(&result));
 }
+
+#[test]
+fn extension_method_multiple_for_same_type() {
+  let result = common::analyze(
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+@extension(i32)
+function isPositive(value: i32): boolean {
+    return value > 0;
+}
+
+function main(): void {
+    let x: i32 = 21;
+    let d: i32 = x.doubled();
+    let p: boolean = x.isPositive();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "extension_method_multiple_for_same_type_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("extension_method_multiple_for_same_type_hir", common::format_hir(&result));
+}
+
+#[test]
+fn extension_method_f64() {
+  let result = common::analyze(
+    r#"
+@extension(f64)
+function halved(value: f64): f64 {
+    return value / 2.0;
+}
+
+function main(): void {
+    let x: f64 = 10.0;
+    let h: f64 = x.halved();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "extension_method_f64_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("extension_method_f64_hir", common::format_hir(&result));
+}
+
+#[test]
+fn extension_method_mut_on_mutable() {
+  let result = common::analyze(
+    r#"
+@extension(i32, mut)
+function increment(value: i32): i32 {
+    return value + 1;
+}
+
+function main(): void {
+    let mut x: i32 = 5;
+    let y: i32 = x.increment();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "extension_method_mut_on_mutable_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("extension_method_mut_on_mutable_hir", common::format_hir(&result));
+}

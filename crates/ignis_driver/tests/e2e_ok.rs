@@ -2078,3 +2078,100 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_extension_method_f64() {
+  e2e_test(
+    "extension_method_f64",
+    r#"
+@extension(f64)
+function truncated(value: f64): i32 {
+    return value as i32;
+}
+
+function main(): i32 {
+    let x: f64 = 42.9;
+    return x.truncated();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_extension_method_multiple_on_same_type() {
+  e2e_test(
+    "extension_method_multiple_on_same_type",
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+@extension(i32)
+function plusTen(value: i32): i32 {
+    return value + 10;
+}
+
+function main(): i32 {
+    let x: i32 = 16;
+    return x.doubled() + x.plusTen();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_extension_method_chain_via_variable() {
+  e2e_test(
+    "extension_method_chain_via_variable",
+    r#"
+@extension(i32)
+function doubled(value: i32): i32 {
+    return value * 2;
+}
+
+function main(): i32 {
+    let x: i32 = 7;
+    let y: i32 = x.doubled();
+    return y.doubled();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_extension_method_mut() {
+  e2e_test(
+    "extension_method_mut",
+    r#"
+@extension(i32, mut)
+function addSelf(value: i32): i32 {
+    return value + value;
+}
+
+function main(): i32 {
+    let mut x: i32 = 21;
+    return x.addSelf();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_structural_copy_use_after_copy() {
+  e2e_test(
+    "structural_copy_use_after_copy",
+    r#"
+record Pair {
+  public a: i32;
+  public b: i32;
+}
+
+function main(): i32 {
+    let p1: Pair = Pair { a: 10, b: 32 };
+    let p2: Pair = p1;
+    return p1.a + p2.b;
+}
+"#,
+  );
+}
