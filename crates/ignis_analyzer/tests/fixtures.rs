@@ -142,3 +142,45 @@ fn fixture_type_param_with_args() {
 fn fixture_generic_type_alias() {
   test_fixture("test_cases/analyzer/generics/type_alias/generic_type_alias.ign");
 }
+
+// --- Lang Trait Tests ---
+
+#[test]
+fn fixture_drop_valid() {
+  test_fixture("test_cases/analyzer/lang_traits/drop_valid.ign");
+}
+
+#[test]
+fn fixture_clone_valid() {
+  test_fixture("test_cases/analyzer/lang_traits/clone_valid.ign");
+}
+
+#[test]
+fn fixture_drop_clone_valid() {
+  test_fixture("test_cases/analyzer/lang_traits/drop_clone_valid.ign");
+}
+
+#[test]
+fn fixture_drop_copy_conflict() {
+  test_fixture("test_cases/analyzer/lang_traits/drop_copy_conflict.ign");
+}
+
+#[test]
+fn fixture_unknown_trait() {
+  test_fixture("test_cases/analyzer/lang_traits/unknown_trait.ign");
+}
+
+#[test]
+fn fixture_drop_missing_method() {
+  test_fixture("test_cases/analyzer/lang_traits/drop_missing_method.ign");
+}
+
+#[test]
+fn fixture_drop_wrong_signature() {
+  test_fixture("test_cases/analyzer/lang_traits/drop_wrong_signature.ign");
+}
+
+#[test]
+fn fixture_clone_wrong_return() {
+  test_fixture("test_cases/analyzer/lang_traits/clone_wrong_return.ign");
+}

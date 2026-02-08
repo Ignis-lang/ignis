@@ -35,6 +35,14 @@ pub enum ConstValue {
   Null,
 }
 
+/// Memory traits declared via `@implements(...)` on a record or enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LangTraitSet {
+  pub drop: bool,
+  pub clone: bool,
+  pub copy: bool,
+}
+
 pub type DefinitionId = Id<Definition>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -150,6 +158,7 @@ pub struct RecordDefinition {
   pub static_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_fields: HashMap<SymbolId, DefinitionId>,
   pub attrs: Vec<RecordAttr>,
+  pub lang_traits: LangTraitSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -179,6 +188,7 @@ pub struct EnumDefinition {
   pub static_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_fields: HashMap<SymbolId, DefinitionId>,
   pub attrs: Vec<RecordAttr>,
+  pub lang_traits: LangTraitSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

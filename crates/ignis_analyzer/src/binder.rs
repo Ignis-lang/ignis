@@ -21,8 +21,9 @@ use ignis_type::{
   attribute::{FieldAttr, FunctionAttr, RecordAttr},
   definition::{
     ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
-    FunctionDefinition, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
-    SymbolEntry, TypeAliasDefinition, TypeParamDefinition, VariableDefinition, VariantDefinition, Visibility,
+    FunctionDefinition, LangTraitSet, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition,
+    RecordFieldDef, SymbolEntry, TypeAliasDefinition, TypeParamDefinition, VariableDefinition, VariantDefinition,
+    Visibility,
   },
 };
 
@@ -207,6 +208,7 @@ impl<'a> Analyzer<'a> {
         static_methods: HashMap::new(),
         static_fields: HashMap::new(),
         attrs: vec![],
+        lang_traits: LangTraitSet::default(),
       }),
       name: rec.name,
       span: rec.span.clone(),
@@ -252,7 +254,8 @@ impl<'a> Analyzer<'a> {
       return;
     };
 
-    let record_attrs = self.bind_record_attrs(&rec.attrs);
+    let type_name = self.get_symbol_name(&rec.name);
+    let (record_attrs, lang_traits) = self.bind_record_attrs(&rec.attrs, &type_name);
 
     // Create the Type::Record and update the definition's type_id
     let type_id = self.types.record(record_def_id);
@@ -361,6 +364,7 @@ impl<'a> Analyzer<'a> {
       rd.static_methods = static_methods;
       rd.static_fields = static_fields;
       rd.attrs = record_attrs;
+      rd.lang_traits = lang_traits;
     }
   }
 
@@ -384,6 +388,7 @@ impl<'a> Analyzer<'a> {
         static_methods: HashMap::new(),
         static_fields: HashMap::new(),
         attrs: vec![],
+        lang_traits: LangTraitSet::default(),
       }),
       name: en.name,
       span: en.span.clone(),
@@ -429,7 +434,8 @@ impl<'a> Analyzer<'a> {
       return;
     };
 
-    let enum_attrs = self.bind_record_attrs(&en.attrs);
+    let type_name = self.get_symbol_name(&en.name);
+    let (enum_attrs, lang_traits) = self.bind_record_attrs(&en.attrs, &type_name);
 
     // Create the Type::Enum and update the definition's type_id
     let type_id = self.types.enum_type(enum_def_id);
@@ -527,6 +533,7 @@ impl<'a> Analyzer<'a> {
       ed.static_methods = static_methods;
       ed.static_fields = static_fields;
       ed.attrs = enum_attrs;
+      ed.lang_traits = lang_traits;
     }
   }
 
@@ -1254,8 +1261,10 @@ impl<'a> Analyzer<'a> {
   fn bind_record_attrs(
     &mut self,
     ast_attrs: &[ASTAttribute],
-  ) -> Vec<RecordAttr> {
+    type_name: &str,
+  ) -> (Vec<RecordAttr>, LangTraitSet) {
     let mut attrs = Vec::new();
+    let mut lang_traits = LangTraitSet::default();
 
     for attr in ast_attrs {
       let name = self.get_symbol_name(&attr.name);
@@ -1301,6 +1310,9 @@ impl<'a> Analyzer<'a> {
             }
           }
         },
+        "implements" => {
+          self.bind_implements_attr(attr, &mut lang_traits, type_name);
+        },
         "allow" | "warn" | "deny" => {},
         _ => {
           self.add_diagnostic(
@@ -1315,7 +1327,69 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    attrs
+    (attrs, lang_traits)
+  }
+
+  fn bind_implements_attr(
+    &mut self,
+    attr: &ASTAttribute,
+    lang_traits: &mut LangTraitSet,
+    type_name: &str,
+  ) {
+    if attr.args.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::AttributeArgCount {
+          attr: "implements".to_string(),
+          expected: 1,
+          got: 0,
+          span: attr.span.clone(),
+        }
+        .report(),
+      );
+      return;
+    }
+
+    for arg in &attr.args {
+      match arg {
+        ignis_ast::attribute::ASTAttributeArg::Identifier(sym, span) => {
+          let trait_name = self.get_symbol_name(sym);
+
+          match trait_name.as_str() {
+            "Drop" => lang_traits.drop = true,
+            "Clone" => lang_traits.clone = true,
+            "Copy" => lang_traits.copy = true,
+            _ => {
+              self.add_diagnostic(
+                DiagnosticMessage::UnknownLangTrait {
+                  name: trait_name,
+                  span: span.clone(),
+                }
+                .report(),
+              );
+            },
+          }
+        },
+        other => {
+          self.add_diagnostic(
+            DiagnosticMessage::AttributeExpectedIdentifier {
+              attr: "implements".to_string(),
+              span: other.span().clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    if lang_traits.drop && lang_traits.copy {
+      self.add_diagnostic(
+        DiagnosticMessage::LangTraitDropCopyConflict {
+          type_name: type_name.to_string(),
+          span: attr.span.clone(),
+        }
+        .report(),
+      );
+    }
   }
 
   fn bind_field_attrs(

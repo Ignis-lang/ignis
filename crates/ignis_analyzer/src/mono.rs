@@ -1389,6 +1389,7 @@ impl<'a> Monomorphizer<'a> {
         static_methods: HashMap::new(),
         static_fields: rd.static_fields.clone(),
         attrs: rd.attrs.clone(),
+        lang_traits: rd.lang_traits,
       }),
     );
 
@@ -1457,6 +1458,7 @@ impl<'a> Monomorphizer<'a> {
         static_methods: HashMap::new(),
         static_fields: ed.static_fields.clone(),
         attrs: ed.attrs.clone(),
+        lang_traits: ed.lang_traits,
       }),
     );
 

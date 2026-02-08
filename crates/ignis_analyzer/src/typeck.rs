@@ -1,5 +1,5 @@
 use crate::{Analyzer, InferContext, ResolvedPath, ScopeKind, TypecheckContext};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ignis_ast::{
   expressions::{
@@ -873,6 +873,8 @@ impl<'a> Analyzer<'a> {
       }
     }
 
+    self.validate_lang_trait_methods(&record_def_id, &rec.span);
+
     // Pop generic scope if it was pushed
     self.exit_type_params_scope(&record_def_id);
 
@@ -994,6 +996,8 @@ impl<'a> Analyzer<'a> {
     if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
       ed.variants = updated_variants;
     }
+
+    self.validate_lang_trait_methods(&enum_def_id, &en.span);
 
     // Pop generic scope if it was pushed
     self.exit_type_params_scope(&enum_def_id);
@@ -5867,6 +5871,174 @@ impl<'a> Analyzer<'a> {
 
     if has_type_params {
       self.scopes.pop();
+    }
+  }
+
+  // ========================================================================
+  // Lang Trait Validation
+  // ========================================================================
+
+  fn validate_lang_trait_methods(
+    &mut self,
+    type_def_id: &DefinitionId,
+    type_span: &Span,
+  ) {
+    let type_def = self.defs.get(type_def_id);
+    let type_name = self.get_symbol_name(&type_def.name);
+
+    // Clone to release borrow on self.defs
+    let (lang_traits, instance_methods, type_id) = match &type_def.kind {
+      DefinitionKind::Record(rd) => (rd.lang_traits, Some(rd.instance_methods.clone()), rd.type_id),
+      DefinitionKind::Enum(ed) => (ed.lang_traits, None, ed.type_id),
+      _ => return,
+    };
+
+    if !lang_traits.drop && !lang_traits.clone && !lang_traits.copy {
+      return;
+    }
+
+    if lang_traits.drop {
+      self.validate_lang_trait_method(
+        instance_methods.as_ref(),
+        "Drop",
+        "drop",
+        true,
+        type_id,
+        true,
+        &type_name,
+        type_span,
+      );
+    }
+
+    if lang_traits.clone {
+      self.validate_lang_trait_method(
+        instance_methods.as_ref(),
+        "Clone",
+        "clone",
+        false,
+        type_id,
+        false,
+        &type_name,
+        type_span,
+      );
+    }
+  }
+
+  fn validate_lang_trait_method(
+    &mut self,
+    instance_methods: Option<&HashMap<ignis_type::symbol::SymbolId, SymbolEntry>>,
+    trait_name: &str,
+    method_name: &str,
+    expect_mut_self: bool,
+    type_id: TypeId,
+    expect_void_return: bool,
+    type_name: &str,
+    type_span: &Span,
+  ) {
+    let method_sym = self.symbols.borrow_mut().intern(method_name);
+
+    let Some(methods) = instance_methods else {
+      self.add_diagnostic(
+        DiagnosticMessage::LangTraitMissingMethod {
+          trait_name: trait_name.to_string(),
+          method_name: method_name.to_string(),
+          type_name: type_name.to_string(),
+          span: type_span.clone(),
+        }
+        .report(),
+      );
+      return;
+    };
+
+    let Some(entry) = methods.get(&method_sym) else {
+      self.add_diagnostic(
+        DiagnosticMessage::LangTraitMissingMethod {
+          trait_name: trait_name.to_string(),
+          method_name: method_name.to_string(),
+          type_name: type_name.to_string(),
+          span: type_span.clone(),
+        }
+        .report(),
+      );
+      return;
+    };
+
+    let method_def_id = match entry {
+      SymbolEntry::Single(id) => *id,
+      SymbolEntry::Overload(group) => {
+        if let Some(id) = group.first().copied() {
+          id
+        } else {
+          return;
+        }
+      },
+    };
+
+    let method_def = self.defs.get(&method_def_id);
+    let method_span = method_def.span.clone();
+
+    let DefinitionKind::Method(md) = &method_def.kind else {
+      return;
+    };
+
+    let self_mutable = md.self_mutable;
+    let params = md.params.clone();
+    let return_type = md.return_type;
+
+    // md.params includes self at index 0 after typechecking
+    let has_wrong_self_mut = self_mutable != expect_mut_self;
+    let has_extra_params = params.len() > 1;
+
+    let return_ok = if expect_void_return {
+      return_type == self.types.void()
+    } else {
+      return_type == type_id
+    };
+
+    if has_wrong_self_mut || has_extra_params || !return_ok {
+      let self_prefix = if expect_mut_self { "&mut self" } else { "&self" };
+
+      let return_str = if expect_void_return {
+        "void".to_string()
+      } else {
+        type_name.to_string()
+      };
+
+      let expected = format!("{}({}): {}", method_name, self_prefix, return_str);
+
+      let got_self = if self_mutable { "&mut self" } else { "&self" };
+      let got_return = self.format_type_for_error(&return_type);
+
+      let extra_params = &params[1..];
+      let got_params = if extra_params.is_empty() {
+        got_self.to_string()
+      } else {
+        let param_types: Vec<String> = extra_params
+          .iter()
+          .map(|p| {
+            let pdef = self.defs.get(p);
+            if let DefinitionKind::Parameter(pd) = &pdef.kind {
+              self.format_type_for_error(&pd.type_id)
+            } else {
+              "?".to_string()
+            }
+          })
+          .collect();
+        format!("{}, {}", got_self, param_types.join(", "))
+      };
+
+      let got = format!("{}({}): {}", method_name, got_params, got_return);
+
+      self.add_diagnostic(
+        DiagnosticMessage::LangTraitInvalidSignature {
+          trait_name: trait_name.to_string(),
+          method_name: method_name.to_string(),
+          expected,
+          got,
+          span: method_span,
+        }
+        .report(),
+      );
     }
   }
 

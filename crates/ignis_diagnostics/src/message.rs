@@ -592,6 +592,28 @@ pub enum DiagnosticMessage {
     attr: String,
     span: Span,
   },
+  // Lang trait diagnostics
+  UnknownLangTrait {
+    name: String,
+    span: Span,
+  },
+  LangTraitDropCopyConflict {
+    type_name: String,
+    span: Span,
+  },
+  LangTraitMissingMethod {
+    trait_name: String,
+    method_name: String,
+    type_name: String,
+    span: Span,
+  },
+  LangTraitInvalidSignature {
+    trait_name: String,
+    method_name: String,
+    expected: String,
+    got: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1120,6 +1142,41 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::AttributeExpectedIdentifier { attr, .. } => {
         write!(f, "@{} expects an identifier argument", attr)
       },
+      DiagnosticMessage::UnknownLangTrait { name, .. } => {
+        write!(f, "unknown lang trait '{}' in @implements", name)
+      },
+      DiagnosticMessage::LangTraitDropCopyConflict { type_name, .. } => {
+        write!(
+          f,
+          "type '{}' cannot implement both Drop and Copy",
+          type_name
+        )
+      },
+      DiagnosticMessage::LangTraitMissingMethod {
+        trait_name,
+        method_name,
+        type_name,
+        ..
+      } => {
+        write!(
+          f,
+          "type '{}' declares @implements({}) but has no '{}' method",
+          type_name, trait_name, method_name
+        )
+      },
+      DiagnosticMessage::LangTraitInvalidSignature {
+        trait_name,
+        method_name,
+        expected,
+        got,
+        ..
+      } => {
+        write!(
+          f,
+          "{} method '{}' has wrong signature: expected '{}', got '{}'",
+          trait_name, method_name, expected, got
+        )
+      },
     }
   }
 }
@@ -1278,7 +1335,11 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UnusedImport { span, .. }
       | DiagnosticMessage::DeprecatedCall { span, .. }
       | DiagnosticMessage::UnknownLint { span, .. }
-      | DiagnosticMessage::AttributeExpectedIdentifier { span, .. } => span.clone(),
+      | DiagnosticMessage::AttributeExpectedIdentifier { span, .. }
+      | DiagnosticMessage::UnknownLangTrait { span, .. }
+      | DiagnosticMessage::LangTraitDropCopyConflict { span, .. }
+      | DiagnosticMessage::LangTraitMissingMethod { span, .. }
+      | DiagnosticMessage::LangTraitInvalidSignature { span, .. } => span.clone(),
     }
   }
 
@@ -1433,6 +1494,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::DeprecatedCall { .. } => "A0124",
       DiagnosticMessage::UnknownLint { .. } => "A0125",
       DiagnosticMessage::AttributeExpectedIdentifier { .. } => "A0126",
+      DiagnosticMessage::UnknownLangTrait { .. } => "A0130",
+      DiagnosticMessage::LangTraitDropCopyConflict { .. } => "A0131",
+      DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",
+      DiagnosticMessage::LangTraitInvalidSignature { .. } => "A0133",
     }
     .to_string()
   }
