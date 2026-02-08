@@ -5887,13 +5887,32 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&type_def.name);
 
     // Clone to release borrow on self.defs
-    let (lang_traits, instance_methods, type_id) = match &type_def.kind {
-      DefinitionKind::Record(rd) => (rd.lang_traits, Some(rd.instance_methods.clone()), rd.type_id),
-      DefinitionKind::Enum(ed) => (ed.lang_traits, None, ed.type_id),
+    let (lang_traits, instance_methods, type_id, is_enum) = match &type_def.kind {
+      DefinitionKind::Record(rd) => (rd.lang_traits, Some(rd.instance_methods.clone()), rd.type_id, false),
+      DefinitionKind::Enum(ed) => (ed.lang_traits, None, ed.type_id, true),
       _ => return,
     };
 
     if !lang_traits.drop && !lang_traits.clone && !lang_traits.copy {
+      return;
+    }
+
+    // Enums don't support instance methods yet, so lang trait methods can't be defined
+    if is_enum {
+      self.add_diagnostic(
+        DiagnosticMessage::LangTraitNotApplicable {
+          trait_name: if lang_traits.drop {
+            "Drop"
+          } else if lang_traits.clone {
+            "Clone"
+          } else {
+            "Copy"
+          }
+          .to_string(),
+          span: type_span.clone(),
+        }
+        .report(),
+      );
       return;
     }
 
@@ -5963,6 +5982,7 @@ impl<'a> Analyzer<'a> {
       return;
     };
 
+    // Only checks the first overload; trait methods should not be overloaded
     let method_def_id = match entry {
       SymbolEntry::Single(id) => *id,
       SymbolEntry::Overload(group) => {
@@ -6009,7 +6029,7 @@ impl<'a> Analyzer<'a> {
       let got_self = if self_mutable { "&mut self" } else { "&self" };
       let got_return = self.format_type_for_error(&return_type);
 
-      let extra_params = &params[1..];
+      let extra_params = if params.is_empty() { &[][..] } else { &params[1..] };
       let got_params = if extra_params.is_empty() {
         got_self.to_string()
       } else {

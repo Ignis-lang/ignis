@@ -184,3 +184,8 @@ fn fixture_drop_wrong_signature() {
 fn fixture_clone_wrong_return() {
   test_fixture("test_cases/analyzer/lang_traits/clone_wrong_return.ign");
 }
+
+#[test]
+fn fixture_enum_drop() {
+  test_fixture("test_cases/analyzer/lang_traits/enum_drop.ign");
+}

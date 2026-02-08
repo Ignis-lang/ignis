@@ -614,6 +614,10 @@ pub enum DiagnosticMessage {
     got: String,
     span: Span,
   },
+  LangTraitNotApplicable {
+    trait_name: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1177,6 +1181,13 @@ impl fmt::Display for DiagnosticMessage {
           trait_name, method_name, expected, got
         )
       },
+      DiagnosticMessage::LangTraitNotApplicable { trait_name, .. } => {
+        write!(
+          f,
+          "@implements({}) is not supported on enums (enums cannot have instance methods)",
+          trait_name
+        )
+      },
     }
   }
 }
@@ -1339,7 +1350,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UnknownLangTrait { span, .. }
       | DiagnosticMessage::LangTraitDropCopyConflict { span, .. }
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
-      | DiagnosticMessage::LangTraitInvalidSignature { span, .. } => span.clone(),
+      | DiagnosticMessage::LangTraitInvalidSignature { span, .. }
+      | DiagnosticMessage::LangTraitNotApplicable { span, .. } => span.clone(),
     }
   }
 
@@ -1498,6 +1510,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::LangTraitDropCopyConflict { .. } => "A0131",
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",
       DiagnosticMessage::LangTraitInvalidSignature { .. } => "A0133",
+      DiagnosticMessage::LangTraitNotApplicable { .. } => "A0134",
     }
     .to_string()
   }
