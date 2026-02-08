@@ -334,7 +334,7 @@ pub fn analyze_project_with_options(
   // Discover all modules using LSP mode (collects diagnostics, doesn't fail early)
   let root_id = ctx.discover_modules_lsp(entry_path, config).ok();
 
-  if let Some(root_id) = root_id {
+  if config.std && let Some(root_id) = root_id {
     ctx.discover_prelude_modules_lsp(root_id, config);
   }
 

@@ -217,23 +217,23 @@ pub fn detect_context(
   // Check if the identifier we're about to return is preceded by `.` or `::`
   // in the meaningful token list. This handles `foo.ba|` where prev_token is
   // the identifier being typed, not the dot.
-  if !prefix.is_empty() {
-    if let Some(before_ident) = find_token_before_offset(&meaningful, start_offset) {
-      if before_ident.type_ == TokenType::Dot {
-        return Some(CompletionContext::AfterDot {
-          dot_offset: before_ident.span.start.0,
-          prefix,
-        });
-      }
+  if !prefix.is_empty()
+    && let Some(before_ident) = find_token_before_offset(&meaningful, start_offset)
+  {
+    if before_ident.type_ == TokenType::Dot {
+      return Some(CompletionContext::AfterDot {
+        dot_offset: before_ident.span.start.0,
+        prefix,
+      });
+    }
 
-      if before_ident.type_ == TokenType::DoubleColon {
-        let path_segments = collect_path_segments_backwards(&meaningful, before_ident);
-        return Some(CompletionContext::AfterDoubleColon {
-          double_colon_offset: before_ident.span.start.0,
-          path_segments,
-          prefix,
-        });
-      }
+    if before_ident.type_ == TokenType::DoubleColon {
+      let path_segments = collect_path_segments_backwards(&meaningful, before_ident);
+      return Some(CompletionContext::AfterDoubleColon {
+        double_colon_offset: before_ident.span.start.0,
+        path_segments,
+        prefix,
+      });
     }
   }
 
