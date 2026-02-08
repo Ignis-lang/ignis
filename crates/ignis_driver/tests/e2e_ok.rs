@@ -1814,3 +1814,49 @@ function main(): i32 {
 "#,
   );
 }
+
+// ========================================================================
+// Lang Traits (@implements)
+// ========================================================================
+
+#[test]
+fn e2e_drop_basic() {
+  e2e_test(
+    "drop_basic",
+    r#"
+@implements(Drop)
+record Resource {
+  public value: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function main(): i32 {
+    let r: Resource = Resource { value: 42 };
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_copy_explicit() {
+  e2e_test(
+    "copy_explicit",
+    r#"
+@implements(Copy)
+record Point {
+  public x: i32;
+  public y: i32;
+}
+
+function main(): i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    let q: Point = p;
+    return p.x + q.y;
+}
+"#,
+  );
+}

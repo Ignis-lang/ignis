@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use ignis_type::types::{Type, TypeId, TypeStore};
+use ignis_type::{
+  definition::DefinitionStore,
+  types::{Type, TypeId, TypeStore},
+};
 
 use crate::{BlockId, FunctionLir, Instr, LirProgram, LocalId, Operand, TempId, Terminator};
 
@@ -79,6 +82,7 @@ pub type VerifyResult = Result<(), Vec<VerifyError>>;
 pub struct LirVerifier<'a> {
   program: &'a LirProgram,
   types: &'a TypeStore,
+  defs: &'a DefinitionStore,
   errors: Vec<VerifyError>,
 }
 
@@ -86,10 +90,12 @@ impl<'a> LirVerifier<'a> {
   pub fn new(
     program: &'a LirProgram,
     types: &'a TypeStore,
+    defs: &'a DefinitionStore,
   ) -> Self {
     Self {
       program,
       types,
+      defs,
       errors: Vec::new(),
     }
   }
@@ -257,7 +263,7 @@ impl<'a> LirVerifier<'a> {
         if local.index() < func.locals.get_all().len() as u32 {
           let local_data = func.locals.get(local);
           let ty = local_data.ty;
-          if !is_droppable(self.types, ty) {
+          if !is_droppable(self.types, self.defs, ty) {
             self.errors.push(VerifyError::DropNonDroppable {
               function: func_name.to_string(),
               block: block_name.to_string(),
@@ -504,15 +510,16 @@ impl<'a> LirVerifier<'a> {
 pub fn verify_lir(
   program: &LirProgram,
   types: &TypeStore,
+  defs: &DefinitionStore,
 ) -> VerifyResult {
-  LirVerifier::new(program, types).verify()
+  LirVerifier::new(program, types, defs).verify()
 }
 
-/// Check if a type requires a drop call.
-/// Droppable types: string, dynamic vector (size: None), infer.
+/// Check if a type requires a drop call. Delegates to `TypeStore::needs_drop_with_defs`.
 pub fn is_droppable(
   types: &TypeStore,
+  defs: &DefinitionStore,
   ty: TypeId,
 ) -> bool {
-  matches!(types.get(&ty), Type::String | Type::Vector { size: None, .. } | Type::Infer)
+  types.needs_drop_with_defs(&ty, defs)
 }

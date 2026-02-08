@@ -1032,6 +1032,19 @@ impl<'a> CEmitter<'a> {
           Type::Vector { size: None, .. } => {
             writeln!(self.output, "ignis_buf_drop(l{});", local.index()).unwrap();
           },
+          Type::Record(def_id) => {
+            let def_id = *def_id;
+            if let Some(method_def_id) = self.find_drop_method(def_id) {
+              let name = self.def_name(method_def_id);
+              writeln!(self.output, "{}(&l{});", name, local.index()).unwrap();
+            } else {
+              writeln!(self.output, "/* drop l{}: record without drop method */", local.index()).unwrap();
+            }
+          },
+          Type::Enum(_) => {
+            // Typechecker rejects @implements(Drop) on enums; unreachable in practice.
+            writeln!(self.output, "/* drop l{}: enum drop not supported */", local.index()).unwrap();
+          },
           Type::Infer => {
             panic!("ICE: drop of inferred type reached C codegen after implicit type removal");
           },
@@ -1484,6 +1497,30 @@ impl<'a> CEmitter<'a> {
   ) -> String {
     let ty_str = self.format_type(ty);
     format!("sizeof({})", ty_str)
+  }
+
+  /// Find the `drop` instance method on a record definition.
+  fn find_drop_method(
+    &self,
+    def_id: DefinitionId,
+  ) -> Option<DefinitionId> {
+    let def = self.defs.get(&def_id);
+
+    let instance_methods = match &def.kind {
+      DefinitionKind::Record(rd) => &rd.instance_methods,
+      _ => return None,
+    };
+
+    for (sym_id, entry) in instance_methods {
+      if self.symbols.get(sym_id) == "drop" {
+        return match entry {
+          ignis_type::definition::SymbolEntry::Single(id) => Some(*id),
+          ignis_type::definition::SymbolEntry::Overload(ids) => ids.first().copied(),
+        };
+      }
+    }
+
+    None
   }
 
   fn def_name(

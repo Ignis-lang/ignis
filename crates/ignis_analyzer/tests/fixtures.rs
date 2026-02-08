@@ -189,3 +189,13 @@ fn fixture_clone_wrong_return() {
 fn fixture_enum_drop() {
   test_fixture("test_cases/analyzer/lang_traits/enum_drop.ign");
 }
+
+#[test]
+fn fixture_copy_explicit() {
+  test_fixture("test_cases/analyzer/lang_traits/copy_explicit.ign");
+}
+
+#[test]
+fn fixture_drop_ownership() {
+  test_fixture("test_cases/analyzer/lang_traits/drop_ownership.ign");
+}

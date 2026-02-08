@@ -1717,7 +1717,7 @@ impl<'a> LoweringContext<'a> {
       return operand;
     };
 
-    if !self.types.needs_drop(&ty) {
+    if !self.types.needs_drop_with_defs(&ty, self.defs) {
       return operand;
     }
 
@@ -1757,7 +1757,7 @@ impl<'a> LoweringContext<'a> {
       name: None,
     });
 
-    if self.types.needs_drop(&ty)
+    if self.types.needs_drop_with_defs(&ty, self.defs)
       && let Some((_, locals)) = self.synthetic_owned_stack.last_mut()
     {
       locals.push(local);
@@ -2091,6 +2091,6 @@ pub fn lower_and_verify(
   emit_modules: Option<&HashSet<ModuleId>>,
 ) -> (LirProgram, Result<(), Vec<crate::VerifyError>>) {
   let program = lower_hir(hir, types, defs, symbols, drop_schedules, emit_modules);
-  let verify_result = crate::verify::verify_lir(&program, types);
+  let verify_result = crate::verify::verify_lir(&program, types, defs);
   (program, verify_result)
 }

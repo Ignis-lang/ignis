@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
   Id, Store,
@@ -585,6 +585,167 @@ impl TypeStore {
     ty: &TypeId,
   ) -> bool {
     self.is_owned(ty)
+  }
+
+  /// Returns true if the type has Copy semantics, consulting `@implements(...)` metadata
+  /// on records and enums via `DefinitionStore`.
+  ///
+  /// - `@implements(Drop)` on a record/enum makes it non-Copy.
+  /// - `@implements(Copy)` on a record/enum makes it explicitly Copy.
+  /// - Records/enums without explicit traits default to Copy (current v0.2 behavior).
+  /// - All other types delegate to the existing `is_copy()` logic.
+  pub fn is_copy_with_defs(
+    &self,
+    ty: &TypeId,
+    defs: &DefinitionStore,
+  ) -> bool {
+    let mut visiting = HashSet::new();
+    self.is_copy_with_defs_inner(ty, defs, &mut visiting)
+  }
+
+  fn is_copy_with_defs_inner(
+    &self,
+    ty: &TypeId,
+    defs: &DefinitionStore,
+    visiting: &mut HashSet<TypeId>,
+  ) -> bool {
+    match self.get(ty) {
+      Type::Record(def_id) => {
+        if !visiting.insert(*ty) {
+          return false;
+        }
+
+        let def = defs.get(def_id);
+        // TODO: structural field check — recurse into fields instead of defaulting to Copy
+        let result = if let DefinitionKind::Record(rd) = &def.kind {
+          !rd.lang_traits.drop
+        } else {
+          true
+        };
+
+        visiting.remove(ty);
+        result
+      },
+
+      // Typechecker rejects @implements(...) on enums, so lang_traits is always default here.
+      // Checked defensively.
+      Type::Enum(def_id) => {
+        if !visiting.insert(*ty) {
+          return false;
+        }
+
+        let def = defs.get(def_id);
+        let result = if let DefinitionKind::Enum(ed) = &def.kind {
+          !ed.lang_traits.drop
+        } else {
+          true
+        };
+
+        visiting.remove(ty);
+        result
+      },
+
+      Type::Vector { element, size: Some(_) } => self.is_copy_with_defs_inner(element, defs, visiting),
+      Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_with_defs_inner(e, defs, visiting)),
+
+      Type::Instance { generic, args } => {
+        let generic = *generic;
+        let args = args.clone();
+
+        let def = defs.get(&generic);
+        match &def.kind {
+          DefinitionKind::Record(rd) => {
+            if rd.lang_traits.drop {
+              return false;
+            }
+            if rd.lang_traits.copy {
+              return true;
+            }
+          },
+          DefinitionKind::Enum(ed) => {
+            if ed.lang_traits.drop {
+              return false;
+            }
+            if ed.lang_traits.copy {
+              return true;
+            }
+          },
+          _ => {},
+        }
+
+        args.iter().all(|a| self.is_copy_with_defs_inner(a, defs, visiting))
+      },
+
+      _ => self.is_copy(ty),
+    }
+  }
+
+  /// Returns true if the type needs drop cleanup, consulting `@implements(Drop)` metadata
+  /// on records and enums via `DefinitionStore`.
+  ///
+  /// - `@implements(Drop)` on a record/enum means it needs dropping.
+  /// - Records/enums without explicit Drop default to no-drop (transitive field check deferred).
+  /// - String and dynamic Vector still need dropping as before.
+  pub fn needs_drop_with_defs(
+    &self,
+    ty: &TypeId,
+    defs: &DefinitionStore,
+  ) -> bool {
+    let mut visiting = HashSet::new();
+    self.needs_drop_with_defs_inner(ty, defs, &mut visiting)
+  }
+
+  fn needs_drop_with_defs_inner(
+    &self,
+    ty: &TypeId,
+    defs: &DefinitionStore,
+    visiting: &mut HashSet<TypeId>,
+  ) -> bool {
+    match self.get(ty) {
+      // TODO: transitive field check — recurse into fields
+      Type::Record(def_id) => {
+        if !visiting.insert(*ty) {
+          return false;
+        }
+
+        let def = defs.get(def_id);
+        let result = matches!(&def.kind, DefinitionKind::Record(rd) if rd.lang_traits.drop);
+
+        visiting.remove(ty);
+        result
+      },
+
+      // Typechecker rejects @implements(...) on enums; checked defensively.
+      Type::Enum(def_id) => {
+        if !visiting.insert(*ty) {
+          return false;
+        }
+
+        let def = defs.get(def_id);
+        let result = matches!(&def.kind, DefinitionKind::Enum(ed) if ed.lang_traits.drop);
+
+        visiting.remove(ty);
+        result
+      },
+
+      Type::Instance { generic, args } => {
+        let generic = *generic;
+        let args = args.clone();
+
+        let def = defs.get(&generic);
+        match &def.kind {
+          DefinitionKind::Record(rd) if rd.lang_traits.drop => return true,
+          DefinitionKind::Enum(ed) if ed.lang_traits.drop => return true,
+          _ => {},
+        }
+
+        args.iter().any(|a| self.needs_drop_with_defs_inner(a, defs, visiting))
+      },
+
+      Type::String | Type::Vector { size: None, .. } | Type::Infer => true,
+
+      _ => false,
+    }
   }
 
   /// Returns true if the type contains any type parameters.

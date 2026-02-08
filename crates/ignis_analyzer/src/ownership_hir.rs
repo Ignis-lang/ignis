@@ -140,7 +140,7 @@ impl<'a> HirOwnershipChecker<'a> {
     // Register owned parameters
     for &param_id in params {
       let param_ty = self.defs.type_of(&param_id);
-      if self.types.is_owned(param_ty) {
+      if self.types.needs_drop_with_defs(param_ty, self.defs) {
         self.declare_owned(param_id);
       }
     }
@@ -185,7 +185,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
         // Register the new variable if it's owned
         let var_ty = self.defs.type_of(&name);
-        if self.types.is_owned(var_ty) {
+        if self.types.needs_drop_with_defs(var_ty, self.defs) {
           self.declare_owned(name);
         }
       },
@@ -376,7 +376,7 @@ impl<'a> HirOwnershipChecker<'a> {
     if let Some(target_def) = self.get_assign_target_def(target) {
       let target_ty = self.defs.type_of(&target_def);
 
-      if self.types.is_owned(target_ty) && self.is_valid(&target_def) {
+      if self.types.needs_drop_with_defs(target_ty, self.defs) && self.is_valid(&target_def) {
         // Need to drop old value before overwriting
         self.schedules.on_overwrite.entry(hir_id).or_default().push(target_def);
       }
@@ -421,7 +421,7 @@ impl<'a> HirOwnershipChecker<'a> {
       // If returning an owned variable, mark as Returned (not dropped)
       if let Some(def_id) = self.get_moved_var(val_id) {
         let ty = self.defs.type_of(&def_id);
-        if self.types.is_owned(ty) {
+        if self.types.needs_drop_with_defs(ty, self.defs) {
           self.states.insert(def_id, OwnershipState::Returned);
         }
       }
@@ -562,7 +562,7 @@ impl<'a> HirOwnershipChecker<'a> {
       if let Some(arg_def) = self.get_moved_var(arg_id) {
         let arg_ty = self.defs.type_of(&arg_def);
 
-        if self.types.is_owned(arg_ty) && !self.types.is_copy(arg_ty) {
+        if self.types.needs_drop_with_defs(arg_ty, self.defs) && !self.types.is_copy_with_defs(arg_ty, self.defs) {
           // FFI Ownership Semantics:
           // - Ignis functions: consume ownership (caller must not use value after call)
           // - Extern functions: do NOT consume ownership (caller retains responsibility)
@@ -784,7 +784,7 @@ impl<'a> HirOwnershipChecker<'a> {
     match &node.kind {
       HIRKind::Variable(def_id) => {
         let ty = self.defs.type_of(def_id);
-        if self.types.is_owned(ty) && !self.types.is_copy(ty) {
+        if self.types.needs_drop_with_defs(ty, self.defs) && !self.types.is_copy_with_defs(ty, self.defs) {
           Some(*def_id)
         } else {
           None
