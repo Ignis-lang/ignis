@@ -1502,7 +1502,7 @@ impl<'a> Analyzer<'a> {
           }
         },
         "extension" => {
-          if attr.args.len() != 1 {
+          if attr.args.is_empty() || attr.args.len() > 2 {
             self.add_diagnostic(
               DiagnosticMessage::AttributeArgCount {
                 attr: name,
@@ -1513,13 +1513,10 @@ impl<'a> Analyzer<'a> {
               .report(),
             );
           } else {
-            match &attr.args[0] {
-              ignis_ast::attribute::ASTAttributeArg::StringLiteral(s, _) => {
-                attrs.push(FunctionAttr::Extension(s.clone()));
-              },
+            let type_name = match &attr.args[0] {
+              ignis_ast::attribute::ASTAttributeArg::StringLiteral(s, _) => Some(s.clone()),
               ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _) => {
-                let type_name = self.symbols.borrow().get(sym).to_string();
-                attrs.push(FunctionAttr::Extension(type_name));
+                Some(self.symbols.borrow().get(sym).to_string())
               },
               ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
                 self.add_diagnostic(
@@ -1529,7 +1526,17 @@ impl<'a> Analyzer<'a> {
                   }
                   .report(),
                 );
+                None
               },
+            };
+
+            let mutable = attr.args.get(1).is_some_and(|arg| {
+              matches!(arg, ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _)
+                if self.symbols.borrow().get(sym) == "mut")
+            });
+
+            if let Some(type_name) = type_name {
+              attrs.push(FunctionAttr::Extension { type_name, mutable });
             }
           }
         },

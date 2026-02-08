@@ -6478,8 +6478,8 @@ impl<'a> Analyzer<'a> {
     };
 
     let ext_type_name = match func_def.attrs.iter().find_map(|a| {
-      if let FunctionAttr::Extension(name) = a {
-        Some(name.clone())
+      if let FunctionAttr::Extension { type_name, .. } = a {
+        Some(type_name.clone())
       } else {
         None
       }
@@ -6647,6 +6647,7 @@ impl<'a> Analyzer<'a> {
 
       self.set_resolved_call(node_id, ext_def_id);
       self.mark_referenced(ext_def_id);
+      self.check_extension_mutability(&func_def, ma);
 
       return Some(func_def.return_type);
     }
@@ -6674,6 +6675,38 @@ impl<'a> Analyzer<'a> {
       _ => return Some(self.types.error()),
     };
 
+    self.check_extension_mutability(&func_def, ma);
+
     Some(func_def.return_type)
+  }
+
+  fn check_extension_mutability(
+    &mut self,
+    func_def: &ignis_type::definition::FunctionDefinition,
+    ma: &ASTMemberAccess,
+  ) {
+    let requires_mut = func_def.attrs.iter().any(|a| {
+      matches!(a, FunctionAttr::Extension { mutable: true, .. })
+    });
+
+    if !requires_mut {
+      return;
+    }
+
+    let obj_node = self.ast.get(&ma.object);
+    if let ASTNode::Expression(obj_expr) = obj_node {
+      if !self.is_mutable_expression(obj_expr) {
+        let method_name = self.get_symbol_name(&ma.member);
+        let var_name = self.get_var_name_from_expr(obj_expr);
+        self.add_diagnostic(
+          DiagnosticMessage::MutatingMethodOnImmutable {
+            method: method_name,
+            var_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+      }
+    }
   }
 }

@@ -9,7 +9,7 @@ pub enum FunctionAttr {
   ExternName(String),
   Cold,
   Deprecated(Option<String>),
-  Extension(String),
+  Extension { type_name: String, mutable: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

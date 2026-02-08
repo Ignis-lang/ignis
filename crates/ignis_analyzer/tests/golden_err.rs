@@ -1277,3 +1277,22 @@ function main(): void {
     &["A0137"],
   );
 }
+
+#[test]
+fn extension_mut_on_immutable() {
+  common::assert_err(
+    r#"
+@extension(string, mut)
+function append(s: string, suffix: string): void {
+    return;
+}
+
+function main(): void {
+    let name: string = "hello";
+    name.append(" world");
+    return;
+}
+"#,
+    &["A0076"],
+  );
+}
