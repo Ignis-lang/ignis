@@ -114,6 +114,7 @@ pub fn analyze_allowing_parse_errors(src: &str) -> AnalysisResult {
         resolved_calls: std::collections::HashMap::new(),
         import_item_defs: std::collections::HashMap::new(),
         import_module_files: std::collections::HashMap::new(),
+        extension_methods: std::collections::HashMap::new(),
       };
       AnalysisResult { output, source_map: sm }
     },

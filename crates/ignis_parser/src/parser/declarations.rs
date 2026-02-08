@@ -368,14 +368,7 @@ impl super::IgnisParser {
 
   /// export <declaration> | export <identifier>;
   fn parse_export_declaration(&mut self) -> ParserResult<NodeId> {
-    // Save pending doc/attrs before `export` — bump() calls skip_comments() which clears pending_doc.
-    let saved_doc = self.pending_doc.take();
-    let saved_attrs = std::mem::take(&mut self.pending_attrs);
-
     let keyword = self.expect(TokenType::Export)?.clone();
-
-    self.pending_doc = saved_doc;
-    self.pending_attrs = saved_attrs;
 
     if self.at(TokenType::Function)
       || self.at(TokenType::Inline)

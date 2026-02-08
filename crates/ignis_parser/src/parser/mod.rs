@@ -208,26 +208,31 @@ impl IgnisParser {
   ///
   /// - `///` outer doc comments are stored in `pending_doc`
   /// - `//!` inner doc comments are stored in `pending_inner_doc`
+  ///
+  /// Only updates `pending_doc`/`pending_inner_doc` when comment tokens are actually
+  /// encountered. When no comments appear between tokens, pending docs are preserved
+  /// so that attributes (`@extension(...)`) don't erase a preceding doc comment.
   fn skip_comments(&mut self) {
     let mut doc_lines = Vec::new();
     let mut inner_doc_lines = Vec::new();
+    let mut saw_comments = false;
 
     while self.cursor < self.tokens.len() {
       let token = self.tokens.get(self.cursor).unwrap();
       match token.type_ {
         TokenType::Comment | TokenType::MultiLineComment => {
-          // Regular comments - skip and clear any pending outer doc
+          saw_comments = true;
           doc_lines.clear();
           self.cursor += 1;
         },
         TokenType::DocComment => {
-          // Outer doc comment (`///` or `/** */`) - collect the content
+          saw_comments = true;
           let content = Self::extract_doc_content(&token.lexeme);
           doc_lines.push(content);
           self.cursor += 1;
         },
         TokenType::InnerDocComment => {
-          // Inner doc comment (`//!` or `/*! */`) - collect the content
+          saw_comments = true;
           let content = Self::extract_inner_doc_content(&token.lexeme);
           inner_doc_lines.push(content);
           self.cursor += 1;
@@ -236,15 +241,16 @@ impl IgnisParser {
       }
     }
 
-    // Store the collected outer doc comments
+    if !saw_comments {
+      return;
+    }
+
     if doc_lines.is_empty() {
       self.pending_doc = None;
     } else {
-      // Join with "  \n" (two spaces + newline) to create hard line breaks in Markdown
       self.pending_doc = Some(doc_lines.join("  \n"));
     }
 
-    // Store the collected inner doc comments
     if inner_doc_lines.is_empty() {
       self.pending_inner_doc = None;
     } else {
@@ -828,6 +834,75 @@ enum Color {
         }
       },
       _ => panic!("expected enum statement"),
+    }
+  }
+
+  #[test]
+  fn doc_comment_survives_attributes() {
+    use ignis_ast::statements::ASTStatement;
+
+    let source = r#"
+/// Documented function with attribute
+@deprecated("use bar instead")
+function foo(): void { }
+"#;
+
+    let result = parse(source);
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+
+    let root = first_root(&result);
+    match root {
+      ASTNode::Statement(ASTStatement::Function(func)) => {
+        let doc = func.signature.doc.as_ref().expect("function with attribute should have doc");
+        assert!(doc.contains("Documented function with attribute"));
+      },
+      _ => panic!("expected function statement"),
+    }
+  }
+
+  #[test]
+  fn doc_comment_survives_multiple_attributes() {
+    use ignis_ast::statements::ASTStatement;
+
+    let source = r#"
+namespace Ns {
+  /// Documented with two attributes
+  @deprecated
+  @cold
+  function baz(): void { }
+}
+"#;
+
+    let result = parse(source);
+
+    assert!(
+      result.diagnostics.is_empty(),
+      "unexpected diagnostics: {:?}",
+      result.diagnostics
+    );
+
+    let root = first_root(&result);
+    match root {
+      ASTNode::Statement(ASTStatement::Namespace(ns)) => {
+        let func_node = result.nodes.get(&ns.items[0]);
+        match func_node {
+          ASTNode::Statement(ASTStatement::Function(func)) => {
+            let doc = func
+              .signature
+              .doc
+              .as_ref()
+              .expect("function with multiple attributes should have doc");
+            assert!(doc.contains("Documented with two attributes"));
+          },
+          _ => panic!("expected function inside namespace"),
+        }
+      },
+      _ => panic!("expected namespace statement"),
     }
   }
 

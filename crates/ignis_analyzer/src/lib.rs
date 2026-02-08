@@ -156,6 +156,10 @@ pub struct AnalyzerOutput {
   /// Maps import path string spans to the FileId of the imported module.
   /// Used for Go to Definition on import path strings.
   pub import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
+
+  /// Extension methods indexed by target type.
+  /// Used by LSP to provide dot-completion for primitive types.
+  pub extension_methods: HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
 }
 
 impl AnalyzerOutput {
@@ -259,6 +263,7 @@ impl<'a> Analyzer<'a> {
       resolved_calls: analyzer.resolved_calls,
       import_item_defs: analyzer.import_item_defs,
       import_module_files: analyzer.import_module_files,
+      extension_methods: analyzer.extension_methods,
     }
   }
 
@@ -340,6 +345,7 @@ impl<'a> Analyzer<'a> {
       resolved_calls: analyzer.resolved_calls,
       import_item_defs: analyzer.import_item_defs,
       import_module_files: analyzer.import_module_files,
+      extension_methods: shared_extension_methods.clone(),
     }
   }
 

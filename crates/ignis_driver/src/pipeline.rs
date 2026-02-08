@@ -252,6 +252,8 @@ pub fn compile_project(
     },
   };
 
+  ctx.discover_prelude_modules(root_id, &config);
+
   let std_module_names: Vec<String> = ctx
     .module_graph
     .modules

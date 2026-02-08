@@ -15,8 +15,10 @@ use ignis_hir::HIR;
 use ignis_type::definition::{DefinitionKind, DefinitionStore};
 use ignis_type::file::{FileId, SourceMap};
 use ignis_type::module::{Module, ModuleId, ModulePath};
+use ignis_type::span::Span;
 use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::types::TypeStore;
+use ignis_type::BytePosition;
 use ignis_type::Store;
 
 /// Parsed module data
@@ -90,6 +92,41 @@ impl CompilationContext {
     log_dbg!(config, "starting module discovery from {}", entry_path);
 
     self.discover_recursive(entry_path, None, config)
+  }
+
+  /// Std modules implicitly available in every compilation (extension methods on primitives).
+  const PRELUDE_STD_MODULES: &'static [&'static str] = &["string", "number", "vector", "types"];
+
+  /// Discover prelude std modules and add implicit import edges from root.
+  pub fn discover_prelude_modules(
+    &mut self,
+    root_id: ModuleId,
+    config: &IgnisConfig,
+  ) {
+    let root_file = self.module_graph.modules.get(&root_id).file_id;
+    let dummy_span = Span::empty_at(root_file, BytePosition::default());
+
+    for module_name in Self::PRELUDE_STD_MODULES {
+      if let Ok(prelude_id) = self.discover_std_module(module_name, config) {
+        self.module_graph.add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
+      }
+    }
+  }
+
+  /// LSP variant of `discover_prelude_modules`.
+  pub fn discover_prelude_modules_lsp(
+    &mut self,
+    root_id: ModuleId,
+    config: &IgnisConfig,
+  ) {
+    let root_file = self.module_graph.modules.get(&root_id).file_id;
+    let dummy_span = Span::empty_at(root_file, BytePosition::default());
+
+    for module_name in Self::PRELUDE_STD_MODULES {
+      if let Ok(prelude_id) = self.discover_std_module_lsp(module_name, config) {
+        self.module_graph.add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
+      }
+    }
   }
 
   /// Discover a std module by name (e.g., "io", "string").
@@ -692,6 +729,7 @@ impl CompilationContext {
       resolved_calls: root_resolved_calls,
       import_item_defs: root_import_item_defs,
       import_module_files: root_import_module_files,
+      extension_methods: shared_extension_methods,
     };
 
     (output, has_errors)

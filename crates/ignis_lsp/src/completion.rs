@@ -186,38 +186,56 @@ pub fn detect_context(
   }
 
   // Default: identifier context
-  // Check current_token first (cursor inside token), then prev_token (cursor at end of token)
-  let (prefix, start_offset) = if let Some(tok) = current_token {
-    if tok.type_ == TokenType::Identifier {
-      // Cursor is inside an identifier
-      let prefix_end = cursor_offset.min(tok.span.end.0);
-      let prefix_start = tok.span.start.0;
-      if prefix_end > prefix_start {
-        let prefix = source_text
-          .get(prefix_start as usize..prefix_end as usize)
-          .unwrap_or("")
-          .to_string();
-        (prefix, prefix_start)
-      } else {
-        (String::new(), cursor_offset)
-      }
-    } else {
-      (String::new(), cursor_offset)
-    }
-  } else if let Some(tok) = prev_token {
-    // Cursor might be at the exact end of an identifier
-    if tok.type_ == TokenType::Identifier && tok.span.end.0 == cursor_offset {
+  //
+  // Find the identifier token being typed. Two cases:
+  //   1. current_token is an Identifier → cursor is inside it
+  //   2. prev_token is an Identifier ending exactly at cursor → cursor at end
+  //
+  // Case 2 matters when the next token starts at cursor (e.g., `result.t|)`)
+  // — find_adjacent_tokens returns prev=t, current=), and we must not miss `t`.
+  let ident_token = current_token
+    .filter(|tok| tok.type_ == TokenType::Identifier)
+    .or_else(|| prev_token.filter(|tok| tok.type_ == TokenType::Identifier && tok.span.end.0 == cursor_offset));
+
+  let (prefix, start_offset) = if let Some(tok) = ident_token {
+    let prefix_end = cursor_offset.min(tok.span.end.0);
+    let prefix_start = tok.span.start.0;
+
+    if prefix_end > prefix_start {
       let prefix = source_text
-        .get(tok.span.start.0 as usize..tok.span.end.0 as usize)
+        .get(prefix_start as usize..prefix_end as usize)
         .unwrap_or("")
         .to_string();
-      (prefix, tok.span.start.0)
+      (prefix, prefix_start)
     } else {
       (String::new(), cursor_offset)
     }
   } else {
     (String::new(), cursor_offset)
   };
+
+  // Check if the identifier we're about to return is preceded by `.` or `::`
+  // in the meaningful token list. This handles `foo.ba|` where prev_token is
+  // the identifier being typed, not the dot.
+  if !prefix.is_empty() {
+    if let Some(before_ident) = find_token_before_offset(&meaningful, start_offset) {
+      if before_ident.type_ == TokenType::Dot {
+        return Some(CompletionContext::AfterDot {
+          dot_offset: before_ident.span.start.0,
+          prefix,
+        });
+      }
+
+      if before_ident.type_ == TokenType::DoubleColon {
+        let path_segments = collect_path_segments_backwards(&meaningful, before_ident);
+        return Some(CompletionContext::AfterDoubleColon {
+          double_colon_offset: before_ident.span.start.0,
+          path_segments,
+          prefix,
+        });
+      }
+    }
+  }
 
   Some(CompletionContext::Identifier { prefix, start_offset })
 }
@@ -318,6 +336,24 @@ fn find_adjacent_tokens<'a>(
   }
 
   (prev, current)
+}
+
+/// Find the meaningful token immediately before a given byte offset.
+fn find_token_before_offset<'a>(
+  tokens: &[&'a Token],
+  offset: u32,
+) -> Option<&'a Token> {
+  let mut result = None;
+
+  for tok in tokens {
+    if tok.span.end.0 <= offset {
+      result = Some(*tok);
+    } else {
+      break;
+    }
+  }
+
+  result
 }
 
 /// Extract prefix being typed at cursor position.
@@ -547,6 +583,17 @@ pub fn complete_dot(
     &mut candidates,
   );
 
+  // Add extension methods for this type
+  add_extension_methods(
+    &type_id,
+    prefix,
+    &output.types,
+    &output.defs,
+    &output.symbol_names,
+    &output.extension_methods,
+    &mut candidates,
+  );
+
   candidates
 }
 
@@ -719,6 +766,78 @@ fn add_instance_members(
     },
 
     _ => {},
+  }
+}
+
+/// Add extension methods for a type (e.g., `toString` on primitives).
+fn add_extension_methods(
+  type_id: &TypeId,
+  prefix: &str,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbol_names: &HashMap<SymbolId, String>,
+  extension_methods: &HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
+  candidates: &mut Vec<CompletionCandidate>,
+) {
+  // Dereference through references/pointers
+  let ty = types.get(type_id);
+  let lookup_id = match ty {
+    Type::Reference { inner, .. } | Type::Pointer { inner, .. } => inner,
+    _ => type_id,
+  };
+
+  let Some(methods_by_name) = extension_methods.get(lookup_id) else {
+    return;
+  };
+
+  for (sym_id, def_ids) in methods_by_name {
+    let Some(name) = symbol_names.get(sym_id) else {
+      continue;
+    };
+
+    if !matches_prefix(name, prefix) {
+      continue;
+    }
+
+    for def_id in def_ids {
+      let def = defs.get(def_id);
+
+      let detail = if let DefinitionKind::Function(func_def) = &def.kind {
+        let params: Vec<String> = func_def
+          .params
+          .iter()
+          .skip(1) // skip the `self` parameter
+          .filter_map(|p_id| {
+            let p_def = defs.get(p_id);
+            let p_name = symbol_names.get(&p_def.name)?;
+            if let DefinitionKind::Parameter(param) = &p_def.kind {
+              Some(format!(
+                "{}: {}",
+                p_name,
+                format_type_brief(types, defs, symbol_names, &param.type_id)
+              ))
+            } else {
+              None
+            }
+          })
+          .collect();
+
+        let ret = format_type_brief(types, defs, symbol_names, &func_def.return_type);
+        Some(format!("fn({}) -> {}", params.join(", "), ret))
+      } else {
+        None
+      };
+
+      candidates.push(CompletionCandidate {
+        label: name.clone(),
+        kind: CompletionKind::Method,
+        detail,
+        documentation: def.doc.clone(),
+        insert_text: Some(format!("{}($0)", name)),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        sort_priority: 15,
+      });
+    }
   }
 }
 
@@ -902,8 +1021,7 @@ pub fn complete_identifier(
   // Check if next token is `(` to avoid inserting `foo(()` for functions
   let next_is_paren = is_next_token_paren(tokens, start_offset);
 
-  // Add heuristic locals (Phase 0 scope analysis)
-  add_heuristic_locals(tokens, start_offset, prefix, &mut candidates);
+  let mut seen_names = std::collections::HashSet::new();
 
   if let Some(output) = output {
     let mut visible_defs = std::collections::HashSet::new();
@@ -929,9 +1047,7 @@ pub fn complete_identifier(
 
       // Skip internal definitions
       match &def.kind {
-        DefinitionKind::Variable(_)
-        | DefinitionKind::Parameter(_)
-        | DefinitionKind::TypeParam(_)
+        DefinitionKind::TypeParam(_)
         | DefinitionKind::Field(_)
         | DefinitionKind::Variant(_)
         | DefinitionKind::Method(_)
@@ -957,7 +1073,16 @@ pub fn complete_identifier(
 
       // Determine sort priority
       // Locals (10) > Same file (20) > Imports (30) > Keywords (50)
-      let sort_priority = if def.span.file == *file_id { 20 } else { 30 };
+      let is_local = matches!(&def.kind, DefinitionKind::Variable(_) | DefinitionKind::Parameter(_));
+      let sort_priority = if is_local {
+        10
+      } else if def.span.file == *file_id {
+        20
+      } else {
+        30
+      };
+
+      seen_names.insert(name.clone());
 
       candidates.push(CompletionCandidate {
         label: name.clone(),
@@ -970,6 +1095,8 @@ pub fn complete_identifier(
       });
     }
   }
+
+  add_heuristic_locals(tokens, start_offset, prefix, &seen_names, &mut candidates);
 
   // Add keywords
   add_snippet_completions(tokens, start_offset, prefix, &mut candidates);
@@ -1146,10 +1273,12 @@ fn add_snippet_completions(
 }
 
 /// Scan tokens backwards to find local variable declarations.
+/// Names in `already_seen` are skipped to avoid duplicates.
 fn add_heuristic_locals(
   tokens: &[Token],
   cursor_offset: u32,
   prefix: &str,
+  already_seen: &std::collections::HashSet<String>,
   candidates: &mut Vec<CompletionCandidate>,
 ) {
   // Find token index at cursor
@@ -1172,6 +1301,11 @@ fn add_heuristic_locals(
         continue;
       }
 
+      // Skip names already added from the definition-based path
+      if already_seen.contains(name) {
+        continue;
+      }
+
       // Check previous token
       if i > 0 {
         let prev = &tokens[i - 1];
@@ -1189,10 +1323,6 @@ fn add_heuristic_locals(
               });
             }
           },
-          // Basic parameter detection: Function <Name> ( <Param>
-          // Or: <Param> : <Type> inside parens (harder without parsing)
-          // Simple heuristic: Identifiers followed by Colon or Comma inside function?
-          // For now, let/const/mut is the safest bet without a parser.
           _ => {},
         }
       }
@@ -1689,6 +1819,16 @@ fn def_to_completion_info(
       (CompletionKind::Constant, detail, None, None)
     },
 
+    DefinitionKind::Variable(var_def) => {
+      let ty = format_type_brief(types, defs, symbol_names, &var_def.type_id);
+      (CompletionKind::Variable, Some(ty), None, None)
+    },
+
+    DefinitionKind::Parameter(param_def) => {
+      let ty = format_type_brief(types, defs, symbol_names, &param_def.type_id);
+      (CompletionKind::Variable, Some(ty), None, None)
+    },
+
     _ => (CompletionKind::Variable, None, None, None),
   }
 }
@@ -1866,6 +2006,61 @@ mod tests {
         assert_eq!(prefix, "fo");
       },
       other => panic!("Expected Identifier context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_dot_then_identifier_at_end() {
+    // Cursor at end of `t` in `foo.t` (no trailing space)
+    let source = "foo.t";
+    let tokens = lex(source);
+
+    let context = detect_context(&tokens, 5, source);
+
+    match context {
+      Some(CompletionContext::AfterDot { dot_offset, prefix }) => {
+        assert_eq!(dot_offset, 3, "dot should start at position 3");
+        assert_eq!(prefix, "t", "prefix should be 't'");
+      },
+      other => panic!("Expected AfterDot context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_dot_then_identifier_before_paren() {
+    // Cursor at end of `t` in `foo.t)` — next token starts at cursor
+    let source = "println(foo.t)";
+    let tokens = lex(source);
+
+    // Cursor at position 13 (end of `t`, right before `)`)
+    let context = detect_context(&tokens, 13, source);
+
+    match context {
+      Some(CompletionContext::AfterDot { dot_offset, prefix }) => {
+        assert_eq!(dot_offset, 11, "dot should start at position 11");
+        assert_eq!(prefix, "t", "prefix should be 't'");
+      },
+      other => panic!("Expected AfterDot context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_double_colon_then_identifier_before_paren() {
+    // Cursor at end of `b` in `Foo::b)` — next token starts at cursor
+    let source = "call(Foo::b)";
+    let tokens = lex(source);
+
+    // Cursor at position 11 (end of `b`, right before `)`)
+    let context = detect_context(&tokens, 11, source);
+
+    match context {
+      Some(CompletionContext::AfterDoubleColon {
+        path_segments, prefix, ..
+      }) => {
+        assert_eq!(path_segments, vec!["Foo"]);
+        assert_eq!(prefix, "b");
+      },
+      other => panic!("Expected AfterDoubleColon context, got {:?}", other),
     }
   }
 

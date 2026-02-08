@@ -62,6 +62,10 @@ impl<'a> Analyzer<'a> {
     let mut diagnostics = Vec::new();
 
     for (def_id, def) in self.defs.iter() {
+      if def.owner_module != self.current_module {
+        continue;
+      }
+
       if !matches!(def.kind, DefinitionKind::Variable(_)) {
         continue;
       }

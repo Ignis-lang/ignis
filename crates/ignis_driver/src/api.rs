@@ -186,6 +186,7 @@ fn empty_analyzer_output() -> ignis_analyzer::AnalyzerOutput {
     resolved_calls: HashMap::new(),
     import_item_defs: HashMap::new(),
     import_module_files: HashMap::new(),
+    extension_methods: HashMap::new(),
   }
 }
 
@@ -264,6 +265,10 @@ pub struct AnalyzeProjectOutput {
   /// Maps import path string spans to the FileId of the imported module.
   /// Used for Go to Definition on import path strings (e.g., clicking on "std::io").
   pub import_module_files: HashMap<Span, FileId>,
+
+  /// Extension methods indexed by target type.
+  /// Used by LSP to provide dot-completion for primitive types.
+  pub extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
 }
 
 /// Analyze a project starting from an entry file, resolving imports.
@@ -329,6 +334,10 @@ pub fn analyze_project_with_options(
   // Discover all modules using LSP mode (collects diagnostics, doesn't fail early)
   let root_id = ctx.discover_modules_lsp(entry_path, config).ok();
 
+  if let Some(root_id) = root_id {
+    ctx.discover_prelude_modules_lsp(root_id, config);
+  }
+
   // Collect discovery diagnostics (lex/parse errors)
   all_diagnostics.extend(std::mem::take(&mut ctx.discovery_diagnostics));
 
@@ -357,6 +366,7 @@ pub fn analyze_project_with_options(
       roots: Vec::new(),
       namespaces: NamespaceStore::new(),
       import_module_files: HashMap::new(),
+      extension_methods: HashMap::new(),
     };
   };
 
@@ -412,6 +422,7 @@ pub fn analyze_project_with_options(
       roots,
       namespaces: output.namespaces,
       import_module_files: output.import_module_files,
+      extension_methods: output.extension_methods,
     };
   }
 
@@ -442,6 +453,7 @@ pub fn analyze_project_with_options(
     roots,
     namespaces: NamespaceStore::new(),
     import_module_files: HashMap::new(),
+    extension_methods: HashMap::new(),
   }
 }
 
