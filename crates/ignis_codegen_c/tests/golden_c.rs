@@ -289,3 +289,207 @@ function main(): void {
   assert!(c_code.contains("identity____string"));
   assert_snapshot!("c_generic_function_mangling", c_code);
 }
+
+// =============================================================================
+// Drop glue tests
+// =============================================================================
+
+#[test]
+fn c_drop_glue_string_field() {
+  let c_code = common::compile_to_c(
+    r#"
+record Named {
+    name: string;
+    value: i32;
+}
+
+function main(): void {
+    let n: Named = Named { name: "hello", value: 42 };
+    return;
+}
+"#,
+  );
+  assert!(c_code.contains("ignis_string_drop"), "Expected ignis_string_drop call for string field");
+  assert_snapshot!("c_drop_glue_string_field", c_code);
+}
+
+#[test]
+fn c_drop_glue_nested_record() {
+  let c_code = common::compile_to_c(
+    r#"
+record Inner {
+    label: string;
+}
+
+record Outer {
+    inner: Inner;
+    code: i32;
+}
+
+function main(): void {
+    let o: Outer = Outer { inner: Inner { label: "test" }, code: 1 };
+    return;
+}
+"#,
+  );
+  // Outer has no explicit drop, but Inner.label is a string, so codegen
+  // must recurse: Outer -> Inner -> ignis_string_drop
+  assert!(c_code.contains("ignis_string_drop"), "Expected nested ignis_string_drop");
+  assert_snapshot!("c_drop_glue_nested_record", c_code);
+}
+
+#[test]
+fn c_drop_glue_explicit_drop_method() {
+  let c_code = common::compile_to_c(
+    r#"
+@implements(Drop)
+record Resource {
+    id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): void {
+    let r: Resource = Resource { id: 1 };
+    return;
+}
+"#,
+  );
+  // With explicit @implements(Drop), codegen should call the drop method
+  assert!(c_code.contains("Resource_drop"), "Expected Resource_drop call");
+  assert_snapshot!("c_drop_glue_explicit_drop_method", c_code);
+}
+
+#[test]
+fn c_no_drop_glue_primitive_record() {
+  let c_code = common::compile_to_c(
+    r#"
+record Point {
+    x: i32;
+    y: i32;
+}
+
+function main(): void {
+    let p: Point = Point { x: 1, y: 2 };
+    return;
+}
+"#,
+  );
+  // All-primitive record: no drop calls at all
+  assert!(!c_code.contains("ignis_string_drop"), "No string drop expected for primitive record");
+  assert!(!c_code.contains("ignis_buf_drop"), "No buf drop expected for primitive record");
+  assert_snapshot!("c_no_drop_glue_primitive_record", c_code);
+}
+
+#[test]
+fn c_drop_glue_multiple_string_fields() {
+  let c_code = common::compile_to_c(
+    r#"
+record Person {
+    first: string;
+    last: string;
+    age: i32;
+}
+
+function main(): void {
+    let p: Person = Person { first: "John", last: "Doe", age: 30 };
+    return;
+}
+"#,
+  );
+  // Both string fields must get drop calls
+  let drop_count = c_code.matches("ignis_string_drop").count();
+  assert!(drop_count >= 2, "Expected at least 2 ignis_string_drop calls, found {}", drop_count);
+  assert_snapshot!("c_drop_glue_multiple_string_fields", c_code);
+}
+
+#[test]
+fn c_drop_glue_inner_explicit_drop() {
+  let c_code = common::compile_to_c(
+    r#"
+@implements(Drop)
+record Managed {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Container {
+    managed: Managed;
+    tag: i32;
+}
+
+function main(): void {
+    let c: Container = Container {
+        managed: Managed { value: 99 },
+        tag: 1
+    };
+    return;
+}
+"#,
+  );
+  // Container has no explicit drop, but its Managed field has one.
+  // Codegen should call Managed's drop method for the inner field.
+  assert!(c_code.contains("Managed_drop"), "Expected Managed_drop call for inner field");
+  assert_snapshot!("c_drop_glue_inner_explicit_drop", c_code);
+}
+
+#[test]
+fn c_drop_glue_explicit_with_string() {
+  let c_code = common::compile_to_c(
+    r#"
+@implements(Drop)
+record Logger {
+    name: string;
+    level: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): void {
+    let l: Logger = Logger { name: "app", level: 3 };
+    return;
+}
+"#,
+  );
+  // With explicit @implements(Drop), the drop method is called,
+  // NOT field-by-field glue. The user's drop method is responsible for cleanup.
+  assert!(c_code.contains("Logger_drop"), "Expected Logger_drop call");
+  assert_snapshot!("c_drop_glue_explicit_with_string", c_code);
+}
+
+#[test]
+fn c_no_drop_glue_nested_primitive() {
+  let c_code = common::compile_to_c(
+    r#"
+record Vec2 {
+    x: i32;
+    y: i32;
+}
+
+record Rect {
+    origin: Vec2;
+    size: Vec2;
+}
+
+function main(): void {
+    let r: Rect = Rect {
+        origin: Vec2 { x: 0, y: 0 },
+        size: Vec2 { x: 10, y: 20 }
+    };
+    return;
+}
+"#,
+  );
+  // Nested all-primitive records: no drops at all
+  assert!(!c_code.contains("ignis_string_drop"), "No string drop for nested primitive records");
+  assert!(!c_code.contains("ignis_buf_drop"), "No buf drop for nested primitive records");
+  assert!(!c_code.contains("_drop"), "No drop calls at all for nested primitive records");
+  assert_snapshot!("c_no_drop_glue_nested_primitive", c_code);
+}

@@ -209,3 +209,8 @@ fn fixture_copy_structural() {
 fn fixture_copy_structural_noncopy() {
   test_fixture("test_cases/analyzer/lang_traits/copy_structural_noncopy.ign");
 }
+
+#[test]
+fn fixture_copy_structural_nested() {
+  test_fixture("test_cases/analyzer/lang_traits/copy_structural_nested.ign");
+}

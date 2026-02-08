@@ -1922,3 +1922,102 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_drop_glue_multiple_strings() {
+  e2e_test(
+    "drop_glue_multiple_strings",
+    r#"
+record Person {
+  public first: string;
+  public last: string;
+  public age: i32;
+}
+
+function main(): i32 {
+    let p: Person = Person { first: "John", last: "Doe", age: 30 };
+    return p.age;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_structural_copy_nested() {
+  e2e_test(
+    "structural_copy_nested",
+    r#"
+record Vec2 {
+  public x: i32;
+  public y: i32;
+}
+
+record Rect {
+  public origin: Vec2;
+  public size: Vec2;
+}
+
+function main(): i32 {
+    let r: Rect = Rect {
+        origin: Vec2 { x: 0, y: 0 },
+        size: Vec2 { x: 10, y: 20 }
+    };
+    let r2: Rect = r;
+    return r.size.y + r2.origin.x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_drop_glue_inner_explicit_drop() {
+  e2e_test(
+    "drop_glue_inner_explicit_drop",
+    r#"
+@implements(Drop)
+record Managed {
+  public value: i32;
+
+  drop(&mut self): void {
+      return;
+  }
+}
+
+record Container {
+  public managed: Managed;
+  public tag: i32;
+}
+
+function main(): i32 {
+    let c: Container = Container {
+        managed: Managed { value: 99 },
+        tag: 42
+    };
+    return c.tag;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_drop_glue_explicit_with_string() {
+  e2e_test(
+    "drop_glue_explicit_with_string",
+    r#"
+@implements(Drop)
+record Logger {
+  public name: string;
+  public level: i32;
+
+  drop(&mut self): void {
+      return;
+  }
+}
+
+function main(): i32 {
+    let l: Logger = Logger { name: "app", level: 3 };
+    return l.level;
+}
+"#,
+  );
+}
