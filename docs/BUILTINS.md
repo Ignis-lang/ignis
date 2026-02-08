@@ -4,19 +4,23 @@ This document describes the builtin functions and compiler directives available 
 
 ## Builtin Syntax
 
-Builtins use the `@` prefix followed by an identifier and a parenthesized argument list:
+There are two categories of builtins:
+
+**Directive builtins** use the `@` prefix:
 
 ```
 @name(arg1, arg2, ...)
-```
-
-Builtins that operate on types use generic syntax with angle brackets:
-
-```
 @name<Type>()
 ```
 
-Builtins are expressions -- they have a type and return a value (or diverge with `Never`).
+**Function builtins** are called like regular functions but are resolved by the compiler:
+
+```
+name(arg)
+name<Type>()
+```
+
+Both categories are expressions -- they have a type and return a value (or diverge with `Never`).
 
 ### Argument Types
 
@@ -29,9 +33,12 @@ Builtin arguments come in two forms:
 @sizeOf<i32>()                 // type argument
 @configFlag("os.linux")        // expression argument (string literal)
 @panic("something went wrong") // expression argument
+maxOf<i32>()                   // function builtin with type argument
 ```
 
-## Builtins Reference
+---
+
+## Directive Builtins (`@` prefix)
 
 ### `@configFlag(key)`
 
@@ -131,6 +138,8 @@ function main(): i32 {
 }
 ```
 
+Emits C `sizeof(T)`.
+
 ---
 
 ### `@alignOf<T>()`
@@ -150,15 +159,109 @@ function main(): i32 {
 }
 ```
 
+Emits C `_Alignof(T)`.
+
+---
+
+### `@typeName<T>()`
+
+Returns a human-readable string representation of a type name. Resolved at compile time -- the result is a string literal in the generated code.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | none |
+| **Returns** | `string` |
+
+```ignis
+function main(): void {
+    let name: string = @typeName<i32>(); // "i32"
+    return;
+}
+```
+
+---
+
+### `@bitCast<T>(value)`
+
+Reinterprets the bit pattern of a value as another type. Source and target types must have the same byte size.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type (target) |
+| **Arguments** | 1 expression (value to reinterpret) |
+| **Returns** | `T` |
+
+```ignis
+function floatBits(f: f32): u32 {
+    return @bitCast<u32>(f);
+}
+```
+
+The compiler validates at compile time that `@sizeOf<Source>() == @sizeOf<Target>()`. At runtime, this emits a `memcpy` with a `_Static_assert` for size equality.
+
+---
+
+### `@pointerCast<T>(ptr)`
+
+Converts between pointer types. Both the argument and the type argument must be pointer types.
+
+| | |
+|---|---|
+| **Type arguments** | 1 pointer type (target) |
+| **Arguments** | 1 expression (pointer to cast) |
+| **Returns** | `T` |
+
+```ignis
+function toBytePtr(ptr: *const i32): *const u8 {
+    return @pointerCast<*const u8>(ptr);
+}
+```
+
+---
+
+### `@integerFromPointer(ptr)`
+
+Converts a pointer to its integer address representation.
+
+| | |
+|---|---|
+| **Arguments** | 1 expression (pointer) |
+| **Returns** | `u64` |
+
+```ignis
+function getAddress(ptr: *const i32): u64 {
+    return @integerFromPointer(ptr);
+}
+```
+
+---
+
+### `@pointerFromInteger<T>(value)`
+
+Converts an integer address to a pointer. The type argument must be a pointer type.
+
+| | |
+|---|---|
+| **Type arguments** | 1 pointer type |
+| **Arguments** | 1 expression (integer) |
+| **Returns** | `T` |
+
+```ignis
+function fromAddress(addr: u64): *const i32 {
+    return @pointerFromInteger<*const i32>(addr);
+}
+```
+
 ---
 
 ### `@panic(message)`
 
-Terminates program execution immediately.
+Prints a message to stderr and terminates the program with exit code 101.
 
 | | |
 |---|---|
-| **Arguments** | 1 expression |
+| **Arguments** | 1 string literal |
 | **Returns** | `Never` |
 
 ```ignis
@@ -172,7 +275,7 @@ function divide(a: i32, b: i32): i32 {
 
 The return type is `Never`, so the compiler knows execution does not continue past a `@panic` call.
 
-Current implementation: emits a hardware trap (`__builtin_trap()` in C). The message is validated at compile time but not printed at runtime. Future versions will emit a runtime call that prints the message and a stack trace before aborting.
+Emits `fprintf(stderr, "panic: %s\n", message); exit(101);` in the C backend.
 
 ---
 
@@ -223,15 +326,82 @@ Use `@trap()` when you want a safe, debuggable crash. Use `@unreachable()` only 
 
 | Builtin | Emits code | Predictable crash | UB if reached | Use case |
 |---------|:---:|:---:|:---:|---------|
-| `@panic("msg")` | Yes (trap) | Yes | No | Logic errors, failed assertions |
+| `@panic("msg")` | Yes (fprintf+exit) | Yes | No | Logic errors, failed assertions |
 | `@trap()` | Yes (trap) | Yes | No | Low-level assertions, impossible states |
 | `@unreachable()` | No | No | **Yes** | Optimization hints with formal proof |
 
-In the current implementation, `@panic` and `@trap` emit identical code (`__builtin_trap()`). The semantic difference matters for the future: `@panic` will eventually print its message.
+---
+
+## Function Builtins (no `@` prefix)
+
+These are called like regular functions but resolved by the compiler.
+
+### `typeOf(expression)`
+
+Returns a runtime type identifier for a value.
+
+| | |
+|---|---|
+| **Arguments** | 1 expression |
+| **Returns** | `u32` |
+
+```ignis
+function main(): i32 {
+    let x: i32 = 42;
+    let id: u32 = typeOf(x);
+    return id as i32;
+}
+```
+
+Returns a unique numeric identifier for the type of the expression.
+
+---
+
+### `maxOf<T>()`
+
+Returns the maximum representable value for a numeric type.
+
+| | |
+|---|---|
+| **Type arguments** | 1 numeric type |
+| **Arguments** | none |
+| **Returns** | `T` |
+
+```ignis
+function main(): i32 {
+    let max: i32 = maxOf<i32>(); // 2147483647
+    return max;
+}
+```
+
+Supported types: all integer types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`) and floating-point types (`f32`, `f64`).
+
+---
+
+### `minOf<T>()`
+
+Returns the minimum representable value for a numeric type.
+
+| | |
+|---|---|
+| **Type arguments** | 1 numeric type |
+| **Arguments** | none |
+| **Returns** | `T` |
+
+```ignis
+function main(): i32 {
+    let min: i32 = minOf<i32>(); // -2147483648
+    return min;
+}
+```
+
+For unsigned types, `minOf` returns `0`.
 
 ---
 
 ## Summary
+
+### Directive Builtins
 
 | Builtin | Arguments | Return type | Emits runtime code |
 |---------|-----------|:---:|:---:|
@@ -239,16 +409,29 @@ In the current implementation, `@panic` and `@trap` emit identical code (`__buil
 | `@compileError("msg")` | 1 string literal | `Never` | No (compile error) |
 | `@sizeOf<T>()` | 1 type arg | `u64` | Yes (`sizeof`) |
 | `@alignOf<T>()` | 1 type arg | `u64` | Yes (`_Alignof`) |
-| `@panic("msg")` | 1 expression | `Never` | Yes (trap) |
-| `@trap()` | none | `Never` | Yes (trap) |
-| `@unreachable()` | none | `Never` | No (UB hint) |
+| `@typeName<T>()` | 1 type arg | `string` | No (resolved to literal) |
+| `@bitCast<T>(expr)` | 1 type arg + 1 expr | `T` | Yes (`memcpy`) |
+| `@pointerCast<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (C cast) |
+| `@integerFromPointer(ptr)` | 1 pointer expr | `u64` | Yes (C cast) |
+| `@pointerFromInteger<T>(int)` | 1 type arg + 1 expr | `T` | Yes (C cast) |
+| `@panic("msg")` | 1 string literal | `Never` | Yes (fprintf + exit) |
+| `@trap()` | none | `Never` | Yes (`__builtin_trap`) |
+| `@unreachable()` | none | `Never` | No (`__builtin_unreachable`) |
+
+### Function Builtins
+
+| Builtin | Arguments | Return type | Emits runtime code |
+|---------|-----------|:---:|:---:|
+| `typeOf(expr)` | 1 expression | `u32` | Yes |
+| `maxOf<T>()` | 1 type arg | `T` | Yes (C constant) |
+| `minOf<T>()` | 1 type arg | `T` | Yes (C constant) |
 
 ## Diagnostics
 
 | Code | Message | Severity |
 |------|---------|----------|
 | A0110 | Unknown builtin '@name' | Error |
-| A0111 | *(user-provided message)* | Error |
+| A0111 | *(user-provided message from @compileError)* | Error |
 | A0112 | @name expects N argument(s), got M | Error |
 | A0113 | @name expects a string literal argument | Error |
 | A0070 | Wrong number of type arguments for '@name': expected N, got M | Error |
