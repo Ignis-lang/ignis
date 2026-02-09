@@ -95,7 +95,7 @@
 //!   ┌─────────────────────────────────────────────────────────────────────┐
 //!   │  let layout: Layout = Layout::init<MyStruct>();                     │
 //!   │                                                                     │
-//!   │  Automatically uses sizeOf<T>() and alignOf<T>()                    │
+//!   │  Automatically uses @sizeOf<T>() and @alignOf<T>()                  │
 //!   └─────────────────────────────────────────────────────────────────────┘
 //!
 //!   Method 2: From explicit size and alignment
@@ -120,9 +120,8 @@
 //! - Alignment is never zero
 //! - Size does not overflow when multiplied by count
 //!
-//! Functions abort on invalid inputs rather than returning errors.
+//! Functions panic on invalid inputs rather than returning errors.
 //!
-import LibC from "std::libc";
 import Align from "./align";
 
 /// A memory layout descriptor containing size and alignment requirements.
@@ -271,13 +270,12 @@ export record Layout {
   /// let cacheLine: Layout = Layout::init(64, 64);
   /// ```
   public static init(size: u64, alignment: u64): Layout {
-    // TODO: change to panic() when available
     if (alignment == 0) {
-      LibC::abort();
+      @panic("Layout::init: alignment must be greater than zero");
     }
 
     if (!Align::isPowerOfTwo(alignment)) {
-      LibC::abort();
+      @panic("Layout::init: alignment must be a power of two");
     }
 
     return Layout { size: size, alignment: alignment };
@@ -345,7 +343,7 @@ export record Layout {
 
   /// Creates a `Layout` for a single value of type `T`.
   ///
-  /// This method uses the compiler intrinsics `sizeOf<T>()` and `alignOf<T>()`
+  /// This method uses the compiler intrinsics `@sizeOf<T>()` and `@alignOf<T>()`
   /// to determine the layout requirements automatically.
   ///
   /// # Type Parameters
@@ -377,7 +375,7 @@ export record Layout {
   /// assert(pointLayout.align() == 8);
   /// ```
   public static init<T>(): Layout {
-    return Layout::init(sizeOf<T>(), alignOf<T>());
+    return Layout::init(@sizeOf<T>(), @alignOf<T>());
   }
 
   /// Creates a `Layout` for `count` contiguous elements of type `T`.
@@ -396,12 +394,12 @@ export record Layout {
   /// # Returns
   ///
   /// A `Layout` with:
-  /// - `size` = `count * sizeOf<T>()`
-  /// - `alignment` = `alignOf<T>()`
+  /// - `size` = `count * @sizeOf<T>()`
+  /// - `alignment` = `@alignOf<T>()`
   ///
   /// # Panics
   ///
-  /// Aborts if the total size overflows `u64`.
+  /// Panics if the total size overflows `u64`.
   ///
   /// # Example
   ///
@@ -419,15 +417,14 @@ export record Layout {
   /// assert(empty.align() == 8);
   /// ```
   public static init<T>(count: u64): Layout {
-    let elemSize: u64 = sizeOf<T>();
+    let elemSize: u64 = @sizeOf<T>();
     let total: u64 = count * elemSize;
 
     // Overflow check: if count > 0 and total/count != elemSize, overflow occurred
     if (count != 0 && total / count != elemSize) {
-      // TODO: change to panic() when available
-      LibC::abort();
+      @panic("Layout::init<T>(count): total size overflow");
     }
 
-    return Layout::init(total, alignOf<T>());
+    return Layout::init(total, @alignOf<T>());
   }
 }

@@ -423,7 +423,10 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Variable(var) => {
         let entry = self.scopes.lookup(&var.name).cloned();
         match entry {
-          Some(SymbolEntry::Single(def_id)) => self.get_definition_type(&def_id),
+          Some(SymbolEntry::Single(def_id)) => {
+            self.mark_referenced(def_id);
+            self.get_definition_type(&def_id)
+          },
           Some(SymbolEntry::Overload(_)) => {
             self.add_diagnostic(
               DiagnosticMessage::OverloadGroupAsValue {
@@ -5159,6 +5162,8 @@ impl<'a> Analyzer<'a> {
         span: name_span,
       } => {
         if let Some(def_id) = self.scopes.lookup_def(symbol).cloned() {
+          self.mark_referenced(def_id);
+
           // Register span for hover/goto-definition on type references
           self.set_import_item_def(name_span, &def_id);
 
@@ -5746,6 +5751,7 @@ impl<'a> Analyzer<'a> {
     let Some(first_def) = self.scopes.lookup_def(first_sym).cloned() else {
       return;
     };
+    self.mark_referenced(first_def);
     self.set_import_item_def(first_span, &first_def);
 
     let mut current_def = first_def;
@@ -5760,6 +5766,7 @@ impl<'a> Analyzer<'a> {
 
           if let Some(entry) = entry {
             if let Some(def_id) = entry.as_single() {
+              self.mark_referenced(*def_id);
               self.set_import_item_def(segment_span, def_id);
               current_def = *def_id;
             } else {
@@ -6264,7 +6271,11 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" { 1 } else { 0 }
+    if first_name == "self" {
+      1
+    } else {
+      0
+    }
   }
 
   fn emit_no_overload_error(
@@ -6503,7 +6514,12 @@ impl<'a> Analyzer<'a> {
     };
 
     if func_def.params.is_empty() {
-      self.add_diagnostic(DiagnosticMessage::ExtensionRequiresParameter { span: func_span.clone() }.report());
+      self.add_diagnostic(
+        DiagnosticMessage::ExtensionRequiresParameter {
+          span: func_span.clone(),
+        }
+        .report(),
+      );
       return;
     }
 
@@ -6685,9 +6701,10 @@ impl<'a> Analyzer<'a> {
     func_def: &ignis_type::definition::FunctionDefinition,
     ma: &ASTMemberAccess,
   ) {
-    let requires_mut = func_def.attrs.iter().any(|a| {
-      matches!(a, FunctionAttr::Extension { mutable: true, .. })
-    });
+    let requires_mut = func_def
+      .attrs
+      .iter()
+      .any(|a| matches!(a, FunctionAttr::Extension { mutable: true, .. }));
 
     if !requires_mut {
       return;

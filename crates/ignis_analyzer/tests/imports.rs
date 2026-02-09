@@ -47,7 +47,7 @@ fn analyze_with_imports(
     shared_defs,
     shared_namespaces,
     &mut HashMap::new(), // extension_methods - not needed for these tests
-    ModuleId::new(1), // Different module ID from library
+    ModuleId::new(1),    // Different module ID from library
   )
 }
 
@@ -240,6 +240,120 @@ fn import_non_exported_symbol_error() {
   assert!(
     has_error_code(&output, "M0002"),
     "Expected M0002 SymbolNotExported error, got: {:?}",
+    output.diagnostics
+  );
+}
+
+#[test]
+fn import_used_in_type_path_is_not_unused_import() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    export namespace CType {
+      type SizeT = u64;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
+
+  let lib_exports = lib_output.collect_exports();
+  let lib_module_id = ModuleId::new(0);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_exports);
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./lib".to_string(), lib_module_id);
+
+  let main_src = r#"
+    import CType from "./lib";
+
+    function main(): CType::SizeT {
+      let n: CType::SizeT = 1;
+      return n;
+    }
+  "#;
+
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
+
+  assert!(
+    !has_error_code(&output, "A0123"),
+    "Import used only in type paths should not be unused. Got diagnostics: {:?}",
+    output.diagnostics
+  );
+}
+
+#[test]
+fn reexported_import_is_not_unused_import() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    export function add(a: i32, b: i32): i32 {
+      return a + b;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
+
+  let lib_exports = lib_output.collect_exports();
+  let lib_module_id = ModuleId::new(0);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_exports);
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./lib".to_string(), lib_module_id);
+
+  let main_src = r#"
+    import add from "./lib";
+    export add;
+
+    function main(): i32 {
+      return 0;
+    }
+  "#;
+
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
+
+  assert!(
+    !has_error_code(&output, "A0123"),
+    "Re-exported imports should not be unused. Got diagnostics: {:?}",
     output.diagnostics
   );
 }

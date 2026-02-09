@@ -158,7 +158,9 @@ impl<'a> Analyzer<'a> {
           self.resolve_node(decl, scope_kind);
         },
         ignis_ast::statements::ASTExport::Name { name, span } => {
-          if self.scopes.lookup_def(name).is_none() {
+          if let Some(def_id) = self.scopes.lookup_def(name).cloned() {
+            self.mark_referenced(def_id);
+          } else {
             let symbol = self.get_symbol_name(name);
             self.add_diagnostic(
               DiagnosticMessage::UndeclaredIdentifier {
