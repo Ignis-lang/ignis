@@ -108,7 +108,9 @@ impl CompilationContext {
 
     for module_name in Self::PRELUDE_STD_MODULES {
       if let Ok(prelude_id) = self.discover_std_module(module_name, config) {
-        self.module_graph.add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
+        self
+          .module_graph
+          .add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
       }
     }
   }
@@ -124,7 +126,9 @@ impl CompilationContext {
 
     for module_name in Self::PRELUDE_STD_MODULES {
       if let Ok(prelude_id) = self.discover_std_module_lsp(module_name, config) {
-        self.module_graph.add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
+        self
+          .module_graph
+          .add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
       }
     }
   }

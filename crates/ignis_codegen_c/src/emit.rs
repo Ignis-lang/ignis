@@ -1068,7 +1068,11 @@ impl<'a> CEmitter<'a> {
         if let Some(base_ty) = base_ty
           && self.resolve_droppable_record(base_ty).is_some()
         {
-          let access = if is_pointer { format!("({})->", b) } else { format!("({}).", b) };
+          let access = if is_pointer {
+            format!("({})->", b)
+          } else {
+            format!("({}).", b)
+          };
           writeln!(
             self.output,
             "if ({}__ignis_drop_state) {{ fprintf(stderr, \"panic: use of dropped value\\n\"); exit(101); }}",
@@ -1084,7 +1088,11 @@ impl<'a> CEmitter<'a> {
           writeln!(self.output, "t{} = &(({}).field_{});", dest.index(), b, field_index).unwrap();
         }
       },
-      Instr::InitRecord { dest_ptr, fields, record_type } => {
+      Instr::InitRecord {
+        dest_ptr,
+        fields,
+        record_type,
+      } => {
         let p = self.format_operand(func, dest_ptr);
 
         for (field_idx, field_value) in fields {

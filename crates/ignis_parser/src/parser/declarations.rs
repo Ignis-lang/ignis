@@ -849,9 +849,9 @@ impl super::IgnisParser {
       let next = self.peek_nth(1).type_;
       if !has_function_keyword && next == TokenType::Colon {
         let field_span = self.peek().span.clone();
-        self.diagnostics.push(
-          DiagnosticMessage::TraitFieldNotAllowed { span: field_span },
-        );
+        self
+          .diagnostics
+          .push(DiagnosticMessage::TraitFieldNotAllowed { span: field_span });
         // Skip to semicolon or next item for recovery
         while !self.at(TokenType::SemiColon) && !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
           self.bump();

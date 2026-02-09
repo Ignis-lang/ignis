@@ -858,7 +858,11 @@ function foo(): void { }
     let root = first_root(&result);
     match root {
       ASTNode::Statement(ASTStatement::Function(func)) => {
-        let doc = func.signature.doc.as_ref().expect("function with attribute should have doc");
+        let doc = func
+          .signature
+          .doc
+          .as_ref()
+          .expect("function with attribute should have doc");
         assert!(doc.contains("Documented function with attribute"));
       },
       _ => panic!("expected function statement"),

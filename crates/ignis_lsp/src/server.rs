@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ignis_driver::{AnalysisOptions, AnalyzeProjectOutput};
@@ -68,11 +68,16 @@ impl Server {
 
     // Build config and analysis options based on project context
     let (config, entry_path, project_opt) = match &project_ctx {
-      ProjectContext::Project(resolved) => (
-        (*resolved.config).clone(),
-        resolved.project.entry.to_string_lossy().to_string(),
-        Some(resolved.project.clone()),
-      ),
+      ProjectContext::Project(resolved) => {
+        let config = (*resolved.config).clone();
+        let editing_std_file = is_file_inside_std_path(&path, &config.std_path);
+
+        if editing_std_file {
+          (config, path_str.clone(), None)
+        } else {
+          (config, resolved.project.entry.to_string_lossy().to_string(), Some(resolved.project.clone()))
+        }
+      },
       ProjectContext::NoProject => ((*self.state.config).clone(), path_str.clone(), None),
       ProjectContext::Error { root, error } => {
         // Publish TOML diagnostic
@@ -217,11 +222,16 @@ impl Server {
     let file_overrides = self.collect_file_overrides().await;
 
     let (config, entry_path, project_opt) = match &project_ctx {
-      ProjectContext::Project(resolved) => (
-        (*resolved.config).clone(),
-        resolved.project.entry.to_string_lossy().to_string(),
-        Some(resolved.project.clone()),
-      ),
+      ProjectContext::Project(resolved) => {
+        let config = (*resolved.config).clone();
+        let editing_std_file = is_file_inside_std_path(&path, &config.std_path);
+
+        if editing_std_file {
+          (config, path_str.clone(), None)
+        } else {
+          (config, resolved.project.entry.to_string_lossy().to_string(), Some(resolved.project.clone()))
+        }
+      },
       _ => ((*self.state.config).clone(), path_str.clone(), None),
     };
 
@@ -318,6 +328,27 @@ impl Server {
     // A more sophisticated approach would filter by project root.
     self.invalidate_and_reanalyze().await;
   }
+}
+
+fn is_file_inside_std_path(
+  file_path: &Path,
+  std_path: &str,
+) -> bool {
+  if std_path.is_empty() {
+    return false;
+  }
+
+  let std_canon = match Path::new(std_path).canonicalize() {
+    Ok(path) => path,
+    Err(_) => return false,
+  };
+
+  let file_canon = match file_path.canonicalize() {
+    Ok(path) => path,
+    Err(_) => return false,
+  };
+
+  file_canon.starts_with(std_canon)
 }
 
 #[tower_lsp::async_trait]

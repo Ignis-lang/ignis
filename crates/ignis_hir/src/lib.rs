@@ -346,6 +346,5 @@ impl HIR {
         self.items.push(item);
       }
     }
-
   }
 }
