@@ -3,7 +3,7 @@
 //! This module implements ownership analysis that runs on the HIR representation,
 //! producing `DropSchedules` that tell LIR lowering when to emit drop instructions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
 use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
@@ -68,6 +68,24 @@ pub struct HirOwnershipChecker<'a> {
 
   /// Collected diagnostics
   diagnostics: Vec<Diagnostic>,
+
+  /// Pointer alias sets: maps each pointer DefinitionId to a shared alias-set id.
+  /// All pointers with the same alias-set id are considered aliases.
+  pointer_alias_set: HashMap<DefinitionId, usize>,
+
+  /// Reverse map: alias-set id → all pointer DefinitionIds in that set.
+  alias_set_members: HashMap<usize, HashSet<DefinitionId>>,
+
+  /// Next alias set id to allocate.
+  next_alias_set: usize,
+
+  /// Whether the current point in the block is reachable.
+  /// Set to `false` after terminators (break, continue, return, panic, trap).
+  reachable: bool,
+
+  /// Stack tracking whether a `continue` was seen for each enclosing loop.
+  /// Pushed on loop entry, popped on loop exit.
+  loop_continue_stack: Vec<bool>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -89,6 +107,11 @@ impl<'a> HirOwnershipChecker<'a> {
       schedules: DropSchedules::new(),
       current_fn: None,
       diagnostics: Vec::new(),
+      pointer_alias_set: HashMap::new(),
+      alias_set_members: HashMap::new(),
+      next_alias_set: 0,
+      reachable: true,
+      loop_continue_stack: Vec::new(),
     }
   }
 
@@ -139,6 +162,11 @@ impl<'a> HirOwnershipChecker<'a> {
     self.states.clear();
     self.scope_stack.clear();
     self.branch_snapshots.clear();
+    self.pointer_alias_set.clear();
+    self.alias_set_members.clear();
+    self.next_alias_set = 0;
+    self.reachable = true;
+    self.loop_continue_stack.clear();
     self.current_fn = Some(fn_def_id);
 
     // Push function root scope (no block_hir_id)
@@ -192,6 +220,9 @@ impl<'a> HirOwnershipChecker<'a> {
           if let Some(source_def) = self.get_moved_var(val_id) {
             self.try_consume(source_def, span.clone());
           }
+
+          // Track pointer aliasing: `let q: *mut T = p` makes q alias p
+          self.try_record_pointer_alias_from_init(name, val_id);
         }
 
         // Register the new variable if it's owned
@@ -207,14 +238,21 @@ impl<'a> HirOwnershipChecker<'a> {
 
       HIRKind::Return(value) => {
         self.check_return(hir_id, value, span);
+        self.reachable = false;
       },
 
       HIRKind::Break => {
         self.check_break(hir_id);
+        self.reachable = false;
       },
 
       HIRKind::Continue => {
         self.check_continue(hir_id);
+
+        if let Some(flag) = self.loop_continue_stack.last_mut() {
+          *flag = true;
+        }
+        self.reachable = false;
       },
 
       HIRKind::If {
@@ -350,8 +388,12 @@ impl<'a> HirOwnershipChecker<'a> {
 
       HIRKind::Panic(msg) => {
         self.check_node(msg);
+        self.reachable = false;
       },
-      HIRKind::Trap | HIRKind::BuiltinUnreachable => {},
+
+      HIRKind::Trap | HIRKind::BuiltinUnreachable => {
+        self.reachable = false;
+      },
     }
   }
 
@@ -368,14 +410,19 @@ impl<'a> HirOwnershipChecker<'a> {
       is_loop: false,
     });
 
-    // Check statements
+    // Check statements, stopping after terminators
     for &stmt_id in statements {
+      if !self.reachable {
+        break;
+      }
       self.check_node(stmt_id);
     }
 
-    // Check tail expression if present
+    // Check tail expression if present and still reachable
     if let Some(expr_id) = expression {
-      self.check_node(expr_id);
+      if self.reachable {
+        self.check_node(expr_id);
+      }
     }
 
     // Calculate drops for this scope
@@ -406,11 +453,22 @@ impl<'a> HirOwnershipChecker<'a> {
         }
 
         // Re-initialization: assigning to a dropped/moved variable makes it valid again.
-        // This is the only way to "revive" a consumed variable.
         let current_state = self.states.get(&target_def).copied();
         if matches!(current_state, Some(OwnershipState::Dropped) | Some(OwnershipState::Moved)) {
           self.states.insert(target_def, OwnershipState::Valid);
         }
+      }
+
+      // Reset Freed state on pointer reassignment: assigning a new value to
+      // a freed pointer variable makes it valid for subsequent deallocate calls.
+      if self.types.is_pointer(target_ty) {
+        if self.states.get(&target_def) == Some(&OwnershipState::Freed) {
+          self.states.insert(target_def, OwnershipState::Valid);
+        }
+
+        // Break old alias links and record new ones for the target
+        self.remove_from_alias_set(target_def);
+        self.try_record_pointer_alias_from_assign(target_def, value);
       }
     }
 
@@ -505,12 +563,17 @@ impl<'a> HirOwnershipChecker<'a> {
     // Check condition
     self.check_node(condition);
 
+    // Save reachability before branches
+    let pre_if_reachable = self.reachable;
+
     // Snapshot state before then branch
     self.branch_snapshots.push(self.states.clone());
 
     // Check then branch
+    self.reachable = pre_if_reachable;
     self.check_node(then_branch);
     let then_state = self.states.clone();
+    let then_reachable = self.reachable;
 
     if let Some(else_id) = else_branch {
       // Restore state for else branch
@@ -518,18 +581,26 @@ impl<'a> HirOwnershipChecker<'a> {
       self.branch_snapshots.push(self.states.clone());
 
       // Check else branch
+      self.reachable = pre_if_reachable;
       self.check_node(else_id);
       let else_state = self.states.clone();
+      let else_reachable = self.reachable;
 
       // Pop snapshot
       self.branch_snapshots.pop();
 
       // Merge branch states
       self.merge_branch_states(vec![then_state, else_state], span);
+
+      // Reachable after if-else: at least one branch must be reachable
+      self.reachable = then_reachable || else_reachable;
     } else {
       // No explicit else: merge then-state with the pre-if snapshot.
       let pre_if_state = self.branch_snapshots.pop().unwrap();
       self.merge_branch_states(vec![then_state, pre_if_state], span);
+
+      // No else means the "else" path always falls through → reachable
+      self.reachable = then_reachable || pre_if_reachable;
     }
   }
 
@@ -538,12 +609,16 @@ impl<'a> HirOwnershipChecker<'a> {
     condition: LoopKind,
     body: HIRId,
   ) {
-    // Check loop condition/init/update based on loop kind
-    match &condition {
-      LoopKind::Infinite => {},
+    // Extract for-loop update to analyze after body (matching runtime execution order:
+    // init → cond → body → update → cond → ...).
+    let for_update = match &condition {
+      LoopKind::Infinite => None,
+
       LoopKind::While { condition: cond_id } => {
         self.check_node(*cond_id);
+        None
       },
+
       LoopKind::For {
         init,
         condition: cond,
@@ -555,21 +630,86 @@ impl<'a> HirOwnershipChecker<'a> {
         if let Some(cond_id) = cond {
           self.check_node(*cond_id);
         }
-        if let Some(update_id) = update {
-          self.check_node(*update_id);
-        }
+        *update
       },
-    }
+    };
 
-    // Push a loop marker scope for break/continue target resolution
+    // Snapshot state before the loop body for two-pass analysis and post-loop merge
+    let pre_loop_state = self.states.clone();
+
+    // Push a loop marker scope for break/continue target resolution.
+    // Both body and update live inside this scope.
     self.scope_stack.push(ScopeEntry {
       block_hir_id: None,
       owned_vars: Vec::new(),
       is_loop: true,
     });
 
+    // Push continue tracking for this loop
+    self.loop_continue_stack.push(false);
+
+    // === First pass: analyze body and update ===
+    let pre_body_reachable = self.reachable;
     self.check_node(body);
+
+    let body_falls_through = self.reachable;
+    let continue_seen = *self.loop_continue_stack.last().unwrap_or(&false);
+
+    // Update is reachable if the body falls through normally or if any path
+    // continued (continue in a for-loop jumps to the update expression).
+    let update_reachable = body_falls_through || continue_seen;
+
+    if let Some(update_id) = for_update {
+      if update_reachable {
+        self.reachable = true;
+        self.check_node(update_id);
+      }
+    }
+
+    // === Second pass: catch cross-iteration ownership bugs ===
+    // Only run if a second iteration is actually possible (the body has paths
+    // that fall through or continue). If the body always breaks/returns, the
+    // loop can only execute once and there are no cross-iteration issues.
+    let can_iterate_again = body_falls_through || continue_seen;
+
+    if can_iterate_again {
+      let post_first_iter = self.states.clone();
+      let diag_count_before_second_pass = self.diagnostics.len();
+
+      // Conservative merge: for each var, take the most restrictive state
+      // between pre-loop and post-first-iteration
+      self.states = self.conservative_merge(&pre_loop_state, &post_first_iter);
+
+      // Re-check body with merged state (second iteration simulation)
+      self.reachable = pre_body_reachable;
+      self.check_node(body);
+
+      let body_falls_through_2 = self.reachable;
+      let continue_seen_2 = *self.loop_continue_stack.last().unwrap_or(&false);
+      let update_reachable_2 = body_falls_through_2 || continue_seen_2;
+
+      if let Some(update_id) = for_update {
+        if update_reachable_2 {
+          self.reachable = true;
+          self.check_node(update_id);
+        }
+      }
+
+      // Deduplicate: keep only diagnostics from second pass that are genuinely
+      // new (different message text) compared to those already collected.
+      self.deduplicate_second_pass_diagnostics(diag_count_before_second_pass);
+    }
+
+    // Pop continue tracking
+    self.loop_continue_stack.pop();
+
     self.scope_stack.pop();
+
+    // After the loop, code is reachable: the loop condition might be false
+    // from the start (while/for), or a break might exit (infinite).
+    // Use conservative post-loop state (merge pre-loop with post-iteration).
+    self.states = self.conservative_merge(&pre_loop_state, &self.states.clone());
+    self.reachable = pre_body_reachable;
   }
 
   fn check_call(
@@ -599,14 +739,6 @@ impl<'a> HirOwnershipChecker<'a> {
           // FFI Ownership Semantics:
           // - Ignis functions: consume ownership (caller must not use value after call)
           // - Extern functions: do NOT consume ownership (caller retains responsibility)
-          //
-          // This means when passing owned values to extern functions:
-          // 1. The Ignis caller must ensure proper cleanup if needed
-          // 2. The extern function should not free/deallocate the value
-          // 3. Standard library functions (std::*) typically handle this correctly
-          //
-          // Note: A future lint could warn about potential leaks when passing owned
-          // values to non-std extern functions, but this was removed to reduce noise.
           if !is_extern {
             self.try_consume(arg_def, span.clone());
           }
@@ -615,7 +747,24 @@ impl<'a> HirOwnershipChecker<'a> {
     }
 
     if let Some(ptr_def) = deallocate_ptr {
-      self.states.insert(ptr_def, OwnershipState::Freed);
+      // Check all aliases: if ANY alias is already freed, this is a double-free
+      let aliases = self.get_alias_set(ptr_def);
+
+      let already_freed = aliases
+        .iter()
+        .any(|&alias| self.states.get(&alias) == Some(&OwnershipState::Freed));
+
+      if already_freed {
+        let var_name = self.get_var_name(&ptr_def);
+        self
+          .diagnostics
+          .push(DiagnosticMessage::DoubleFree { var_name, span }.report());
+      }
+
+      // Mark ALL aliases (including ptr_def itself) as Freed
+      for alias in aliases {
+        self.states.insert(alias, OwnershipState::Freed);
+      }
     }
   }
 
@@ -828,6 +977,177 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       }
     }
+  }
+
+  /// Conservative merge of two state maps: for each variable, take the most
+  /// restrictive state between the two maps. Used for loop back-edge merging.
+  fn conservative_merge(
+    &self,
+    a: &HashMap<DefinitionId, OwnershipState>,
+    b: &HashMap<DefinitionId, OwnershipState>,
+  ) -> HashMap<DefinitionId, OwnershipState> {
+    let mut merged = a.clone();
+
+    for (&var, &state_b) in b {
+      let state_a = a.get(&var).copied().unwrap_or(OwnershipState::Valid);
+      let restrictive = Self::most_restrictive(state_a, state_b);
+      merged.insert(var, restrictive);
+    }
+
+    merged
+  }
+
+  /// Returns the most restrictive of two ownership states.
+  /// Ordering: Dropped > Moved > Freed > Returned > Valid
+  fn most_restrictive(
+    a: OwnershipState,
+    b: OwnershipState,
+  ) -> OwnershipState {
+    fn rank(s: OwnershipState) -> u8 {
+      match s {
+        OwnershipState::Valid => 0,
+        OwnershipState::Returned => 1,
+        OwnershipState::Freed => 2,
+        OwnershipState::Moved => 3,
+        OwnershipState::Dropped => 4,
+      }
+    }
+
+    if rank(a) >= rank(b) {
+      a
+    } else {
+      b
+    }
+  }
+
+  /// Remove diagnostics from the second pass that duplicate first-pass messages.
+  fn deduplicate_second_pass_diagnostics(
+    &mut self,
+    first_pass_end: usize,
+  ) {
+    if self.diagnostics.len() <= first_pass_end {
+      return;
+    }
+
+    let first_pass_messages: HashSet<String> = self.diagnostics[..first_pass_end]
+      .iter()
+      .map(|d| d.message.clone())
+      .collect();
+
+    let mut deduped_tail: Vec<Diagnostic> = Vec::new();
+    for diag in self.diagnostics.drain(first_pass_end..) {
+      if !first_pass_messages.contains(&diag.message) {
+        deduped_tail.push(diag);
+      }
+    }
+
+    self.diagnostics.extend(deduped_tail);
+  }
+
+  // === Pointer alias tracking ===
+
+  /// Record pointer alias from `let name = value` when both are pointer-typed.
+  fn try_record_pointer_alias_from_init(
+    &mut self,
+    name: DefinitionId,
+    value_hir: HIRId,
+  ) {
+    let name_ty = self.defs.type_of(&name);
+    if !self.types.is_pointer(name_ty) {
+      return;
+    }
+
+    if let Some(source_def) = self.extract_pointer_variable(value_hir) {
+      self.merge_alias_sets(name, source_def);
+    }
+  }
+
+  /// Record pointer alias from `target = value` assignment.
+  fn try_record_pointer_alias_from_assign(
+    &mut self,
+    target_def: DefinitionId,
+    value_hir: HIRId,
+  ) {
+    if let Some(source_def) = self.extract_pointer_variable(value_hir) {
+      self.merge_alias_sets(target_def, source_def);
+    }
+  }
+
+  /// Merge the alias sets of two pointer variables so they are tracked together.
+  fn merge_alias_sets(
+    &mut self,
+    a: DefinitionId,
+    b: DefinitionId,
+  ) {
+    let set_a = self.pointer_alias_set.get(&a).copied();
+    let set_b = self.pointer_alias_set.get(&b).copied();
+
+    match (set_a, set_b) {
+      (Some(sa), Some(sb)) if sa == sb => {
+        // Already in the same set
+      },
+
+      (Some(sa), Some(sb)) => {
+        // Merge sb into sa
+        if let Some(members_b) = self.alias_set_members.remove(&sb) {
+          for m in &members_b {
+            self.pointer_alias_set.insert(*m, sa);
+          }
+          self.alias_set_members.entry(sa).or_default().extend(members_b);
+        }
+      },
+
+      (Some(sa), None) => {
+        self.pointer_alias_set.insert(b, sa);
+        self.alias_set_members.entry(sa).or_default().insert(b);
+      },
+
+      (None, Some(sb)) => {
+        self.pointer_alias_set.insert(a, sb);
+        self.alias_set_members.entry(sb).or_default().insert(a);
+      },
+
+      (None, None) => {
+        let new_set = self.next_alias_set;
+        self.next_alias_set += 1;
+        self.pointer_alias_set.insert(a, new_set);
+        self.pointer_alias_set.insert(b, new_set);
+        let mut members = HashSet::new();
+        members.insert(a);
+        members.insert(b);
+        self.alias_set_members.insert(new_set, members);
+      },
+    }
+  }
+
+  /// Remove a pointer variable from its current alias set (e.g. on reassignment).
+  fn remove_from_alias_set(
+    &mut self,
+    def: DefinitionId,
+  ) {
+    if let Some(set_id) = self.pointer_alias_set.remove(&def) {
+      if let Some(members) = self.alias_set_members.get_mut(&set_id) {
+        members.remove(&def);
+        if members.is_empty() {
+          self.alias_set_members.remove(&set_id);
+        }
+      }
+    }
+  }
+
+  /// Get all members of the alias set containing `def`, including `def` itself.
+  /// If `def` is not in any alias set, returns just `[def]`.
+  fn get_alias_set(
+    &self,
+    def: DefinitionId,
+  ) -> Vec<DefinitionId> {
+    if let Some(&set_id) = self.pointer_alias_set.get(&def) {
+      if let Some(members) = self.alias_set_members.get(&set_id) {
+        return members.iter().copied().collect();
+      }
+    }
+
+    vec![def]
   }
 
   // === Helpers ===

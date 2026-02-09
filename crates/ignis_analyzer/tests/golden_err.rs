@@ -792,6 +792,124 @@ function main(): void {
 }
 
 // =============================================================================
+// Double-free tests
+// =============================================================================
+
+#[test]
+fn double_free_immediate() {
+  let result = common::analyze(
+    r#"
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
+
+function main(): void {
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
+    mem::deallocate(p as *mut u8);
+    mem::deallocate(p as *mut u8);
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "O0009"),
+    "Expected double-free error O0009"
+  );
+
+  assert_snapshot!("double_free_immediate", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn double_free_in_branch() {
+  let result = common::analyze(
+    r#"
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
+
+function main(): void {
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
+    mem::deallocate(p as *mut u8);
+    let cond: boolean = true;
+    if (cond) {
+        mem::deallocate(p as *mut u8);
+    }
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "O0009"),
+    "Expected double-free error O0009"
+  );
+
+  assert_snapshot!("double_free_in_branch", common::format_diagnostics(&result.output.diagnostics));
+}
+
+// =============================================================================
+// Double-free alias tests
+// =============================================================================
+
+#[test]
+fn double_free_via_alias() {
+  // q = p creates an alias; deallocate(q) then deallocate(p) is a double-free
+  let result = common::analyze(
+    r#"
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
+
+function main(): void {
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
+    let q: *mut i32 = p;
+    mem::deallocate(q as *mut u8);
+    mem::deallocate(p as *mut u8);
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "O0009"),
+    "Expected double-free via alias error O0009, got: {:?}",
+    result
+      .output
+      .diagnostics
+      .iter()
+      .map(|d| &d.error_code)
+      .collect::<Vec<_>>()
+  );
+
+  assert_snapshot!("double_free_via_alias", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn free_then_reassign_then_free_ok() {
+  // After reassignment with a fresh allocate, the freed state is cleared
+  common::assert_ok(
+    r#"
+extern mem {
+    function allocate(size: u32): *mut u8;
+    function deallocate(ptr: *mut u8): void;
+}
+
+function main(): void {
+    let mut p: *mut i32 = mem::allocate(16) as *mut i32;
+    mem::deallocate(p as *mut u8);
+    p = mem::allocate(32) as *mut i32;
+    mem::deallocate(p as *mut u8);
+    return;
+}
+"#,
+  );
+}
+
+// =============================================================================
 // Path expression tests
 // =============================================================================
 

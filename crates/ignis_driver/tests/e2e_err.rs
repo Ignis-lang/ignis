@@ -556,3 +556,136 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Ownership + Loop Interaction Tests
+// =========================================================================
+
+#[test]
+fn e2e_err_drop_in_while_use_after() {
+  e2e_ownership_error_test(
+    "err_drop_in_while_use_after",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 1 };
+    let mut i: i32 = 0;
+    while (i < 1) {
+        r.drop();
+        i = i + 1;
+    }
+    return r.tag;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_double_drop_in_while() {
+  e2e_ownership_error_test(
+    "err_double_drop_in_while",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 1 };
+    r.drop();
+    let mut i: i32 = 0;
+    while (i < 1) {
+        r.drop();
+        i = i + 1;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Reachability: break makes subsequent code unreachable
+// =========================================================================
+
+#[test]
+fn e2e_ok_break_skips_unreachable_code() {
+  // The code after `break` in the while body is unreachable.
+  // The ownership checker should NOT report UseAfterDrop for it.
+  let diagnostics = common::compile_ownership_diagnostics(
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 1 };
+    let mut i: i32 = 0;
+    while (i < 10) {
+        r.drop();
+        break;
+        i = r.tag;
+    }
+    return 0;
+}
+"#,
+  )
+  .expect("compilation failed before ownership check");
+
+  // Should be empty: `i = r.tag` is after `break`, so unreachable
+  assert!(
+    diagnostics.is_empty(),
+    "Expected no ownership errors when break makes code unreachable, got: {:?}",
+    diagnostics
+  );
+}
+
+// =========================================================================
+// Cross-iteration: drop in body visible on next iteration
+// =========================================================================
+
+#[test]
+fn e2e_err_cross_iteration_drop_in_body() {
+  // r.drop() in the body means on the second iteration, r is already dropped.
+  // The two-pass analysis should catch this.
+  e2e_ownership_error_test(
+    "err_cross_iteration_drop",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 1 };
+    let mut i: i32 = 0;
+    while (i < 2) {
+        r.drop();
+        i = i + 1;
+    }
+    return 0;
+}
+"#,
+  );
+}

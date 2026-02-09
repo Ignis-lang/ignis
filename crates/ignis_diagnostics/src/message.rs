@@ -448,6 +448,10 @@ pub enum DiagnosticMessage {
     var_name: String,
     span: Span,
   },
+  DoubleFree {
+    var_name: String,
+    span: Span,
+  },
   // Ownership checker warnings
   PossibleLeakToFFI {
     var_name: String,
@@ -1078,6 +1082,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::InconsistentDropInBranches { var_name, .. } => {
         write!(f, "Variable '{}' is dropped in one branch but not the other", var_name)
       },
+      DiagnosticMessage::DoubleFree { var_name, .. } => {
+        write!(f, "Pointer '{}' has already been freed", var_name)
+      },
       DiagnosticMessage::PossibleLeakToFFI { var_name, .. } => {
         write!(f, "Possible memory leak: ownership of '{}' escapes to FFI", var_name)
       },
@@ -1474,6 +1481,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UseAfterDrop { span, .. }
       | DiagnosticMessage::DoubleDrop { span, .. }
       | DiagnosticMessage::InconsistentDropInBranches { span, .. }
+      | DiagnosticMessage::DoubleFree { span, .. }
       | DiagnosticMessage::PossibleLeakToFFI { span, .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { span, .. }
       | DiagnosticMessage::InvalidSizeOfOperand { span, .. }
@@ -1654,6 +1662,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::UseAfterDrop { .. } => "O0006",
       DiagnosticMessage::DoubleDrop { .. } => "O0007",
       DiagnosticMessage::InconsistentDropInBranches { .. } => "O0008",
+      DiagnosticMessage::DoubleFree { .. } => "O0009",
       DiagnosticMessage::ForOfExpectsVector { .. } => "A0069",
       DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",
