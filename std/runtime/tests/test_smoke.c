@@ -100,22 +100,6 @@ static void test_memcpy_memmove(void) {
   assert(strncmp(overlap + 6, "hello", 5) == 0);
 }
 
-static void test_buffer_basic(void) {
-  IgnisBuffer *buf = ignis_buf_new(sizeof(i32), IGNIS_TYPE_I32_ID);
-  assert(buf != NULL);
-  assert(ignis_buf_len(buf) == 0);
-
-  i32 val = 42;
-  ignis_buf_push(buf, &val);
-  assert(ignis_buf_len(buf) == 1);
-
-  i32 *ptr = (i32 *)ignis_buf_at(buf, 0);
-  assert(ptr != NULL);
-  assert(*ptr == 42);
-
-  ignis_buf_drop(buf);
-}
-
 int main(void) {
   test_string_basic();
   test_string_concat();
@@ -125,7 +109,5 @@ int main(void) {
   test_number_to_string();
   test_memory_alloc();
   test_memcpy_memmove();
-  test_buffer_basic();
-
   return 0;
 }

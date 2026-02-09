@@ -22,10 +22,12 @@ pub enum OwnershipState {
   Valid,
   /// Ownership was transferred (moved)
   Moved,
-  /// Explicitly freed
+  /// Explicitly freed via `deallocate`
   Freed,
   /// Returned from function (ownership transferred to caller)
   Returned,
+  /// Explicitly dropped via manual `.drop()` call
+  Dropped,
 }
 
 /// Entry in the scope stack.
@@ -98,20 +100,29 @@ impl<'a> HirOwnershipChecker<'a> {
     self
   }
 
-  /// Run ownership check on all functions, returns schedules and diagnostics.
+  /// Run ownership check on all functions and methods, returns schedules and diagnostics.
   pub fn check(mut self) -> (DropSchedules, Vec<Diagnostic>) {
     for &fn_def_id in &self.hir.items {
       let def = self.defs.get(&fn_def_id);
 
-      if let DefinitionKind::Function(func_def) = &def.kind {
-        // Skip extern functions (no body to analyze)
-        if func_def.is_extern {
-          continue;
-        }
+      match &def.kind {
+        DefinitionKind::Function(func_def) => {
+          if func_def.is_extern {
+            continue;
+          }
 
-        if let Some(&body_id) = self.hir.function_bodies.get(&fn_def_id) {
-          self.check_function(fn_def_id, body_id, &func_def.params.clone());
-        }
+          if let Some(&body_id) = self.hir.function_bodies.get(&fn_def_id) {
+            self.check_function(fn_def_id, body_id, &func_def.params.clone());
+          }
+        },
+
+        DefinitionKind::Method(method_def) => {
+          if let Some(&body_id) = self.hir.function_bodies.get(&fn_def_id) {
+            self.check_function(fn_def_id, body_id, &method_def.params.clone());
+          }
+        },
+
+        _ => {},
       }
     }
 
@@ -305,10 +316,22 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       },
 
-      HIRKind::MethodCall { receiver, args, .. } => {
+      HIRKind::MethodCall {
+        receiver, args, method, ..
+      } => {
+        let is_drop = receiver.is_some() && self.is_drop_method(method);
+
         if let Some(recv) = receiver {
-          self.check_node(recv);
+          if is_drop {
+            // Skip receiver check here: handle_manual_drop reports DoubleDrop directly.
+            if let Some(recv_def) = self.extract_receiver_variable(recv) {
+              self.handle_manual_drop(recv_def, span.clone());
+            }
+          } else {
+            self.check_node(recv);
+          }
         }
+
         for &arg in &args {
           self.check_node(arg);
         }
@@ -376,9 +399,18 @@ impl<'a> HirOwnershipChecker<'a> {
     if let Some(target_def) = self.get_assign_target_def(target) {
       let target_ty = self.defs.type_of(&target_def);
 
-      if self.types.needs_drop_with_defs(target_ty, self.defs) && self.is_valid(&target_def) {
-        // Need to drop old value before overwriting
-        self.schedules.on_overwrite.entry(hir_id).or_default().push(target_def);
+      if self.types.needs_drop_with_defs(target_ty, self.defs) {
+        if self.is_valid(&target_def) {
+          // Need to drop old value before overwriting
+          self.schedules.on_overwrite.entry(hir_id).or_default().push(target_def);
+        }
+
+        // Re-initialization: assigning to a dropped/moved variable makes it valid again.
+        // This is the only way to "revive" a consumed variable.
+        let current_state = self.states.get(&target_def).copied();
+        if matches!(current_state, Some(OwnershipState::Dropped) | Some(OwnershipState::Moved)) {
+          self.states.insert(target_def, OwnershipState::Valid);
+        }
       }
     }
 
@@ -495,8 +527,9 @@ impl<'a> HirOwnershipChecker<'a> {
       // Merge branch states
       self.merge_branch_states(vec![then_state, else_state], span);
     } else {
-      // No else branch - restore state from before if
-      self.states = self.branch_snapshots.pop().unwrap();
+      // No explicit else: merge then-state with the pre-if snapshot.
+      let pre_if_state = self.branch_snapshots.pop().unwrap();
+      self.merge_branch_states(vec![then_state, pre_if_state], span);
     }
   }
 
@@ -697,19 +730,6 @@ impl<'a> HirOwnershipChecker<'a> {
     span: Span,
   ) {
     // Use-after-free is checked at dereference/index, not here
-    if let Some(OwnershipState::Moved) = self.states.get(&def_id) {
-      let var_name = self.get_var_name(&def_id);
-      self
-        .diagnostics
-        .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
-    }
-  }
-
-  fn try_consume(
-    &mut self,
-    def_id: DefinitionId,
-    span: Span,
-  ) {
     match self.states.get(&def_id) {
       Some(OwnershipState::Moved) => {
         let var_name = self.get_var_name(&def_id);
@@ -717,7 +737,28 @@ impl<'a> HirOwnershipChecker<'a> {
           .diagnostics
           .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
       },
-      Some(OwnershipState::Freed) => {},
+      Some(OwnershipState::Dropped) => {
+        let var_name = self.get_var_name(&def_id);
+        self
+          .diagnostics
+          .push(DiagnosticMessage::UseAfterDrop { var_name, span }.report());
+      },
+      _ => {},
+    }
+  }
+
+  /// Attempt to move a variable, transitioning Valid -> Moved.
+  ///
+  /// Invalid states are diagnosed by `check_use`, which runs before this path.
+  fn try_consume(
+    &mut self,
+    def_id: DefinitionId,
+    _span: Span,
+  ) {
+    match self.states.get(&def_id) {
+      Some(OwnershipState::Moved | OwnershipState::Dropped | OwnershipState::Freed) => {
+        // Already diagnosed by check_use — just leave state as-is.
+      },
       _ => {
         self.states.insert(def_id, OwnershipState::Moved);
       },
@@ -750,8 +791,9 @@ impl<'a> HirOwnershipChecker<'a> {
       if all_same {
         self.states.insert(var, first);
       } else {
-        // Inconsistent: check if some moved and some didn't
         let has_moved = states.contains(&OwnershipState::Moved);
+        let has_dropped = states.contains(&OwnershipState::Dropped);
+        let has_freed = states.contains(&OwnershipState::Freed);
         let has_valid = states.contains(&OwnershipState::Valid);
 
         if has_moved && has_valid {
@@ -765,9 +807,24 @@ impl<'a> HirOwnershipChecker<'a> {
           );
         }
 
-        // Use most restrictive state (Moved > Valid)
-        if has_moved {
+        if has_dropped && has_valid {
+          let var_name = self.get_var_name(&var);
+          self.diagnostics.push(
+            DiagnosticMessage::InconsistentDropInBranches {
+              var_name,
+              span: span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        // Most restrictive state wins: Dropped > Moved > Freed > Valid
+        if has_dropped {
+          self.states.insert(var, OwnershipState::Dropped);
+        } else if has_moved {
           self.states.insert(var, OwnershipState::Moved);
+        } else if has_freed {
+          self.states.insert(var, OwnershipState::Freed);
         }
       }
     }
@@ -811,5 +868,99 @@ impl<'a> HirOwnershipChecker<'a> {
   ) -> String {
     let def = self.defs.get(def_id);
     self.symbols.get(&def.name).to_string()
+  }
+
+  /// Check if a method DefinitionId refers to a drop method on a record with `@implements(Drop)`.
+  fn is_drop_method(
+    &self,
+    method_def_id: DefinitionId,
+  ) -> bool {
+    let method_def = self.defs.get(&method_def_id);
+
+    let owner_type_def_id = match &method_def.kind {
+      DefinitionKind::Method(md) => md.owner_type,
+      _ => return false,
+    };
+
+    let method_name = self.symbols.get(&method_def.name);
+    if method_name != "drop" && !method_name.ends_with("__drop") {
+      return false;
+    }
+
+    let owner_def = self.defs.get(&owner_type_def_id);
+    match &owner_def.kind {
+      DefinitionKind::Record(rd) => rd.lang_traits.drop,
+      _ => false,
+    }
+  }
+
+  /// Extract the binding DefinitionId from a method receiver.
+  /// Expects the HIR pattern: `Reference { expression: Variable(def_id), mutable: true }`
+  /// or a direct `Variable(def_id)`.
+  ///
+  /// Returns `None` for complex receivers (e.g. `container.inner.drop()`, `getObj().drop()`,
+  /// `array[i].drop()`). These cases are not tracked at compile time — the runtime
+  /// `__ignis_drop_state` guard in the generated C code handles double-drop prevention
+  /// for them instead.
+  fn extract_receiver_variable(
+    &self,
+    recv_hir: HIRId,
+  ) -> Option<DefinitionId> {
+    let recv_node = self.hir.get(recv_hir);
+
+    match &recv_node.kind {
+      HIRKind::Reference { expression, .. } => {
+        let inner = self.hir.get(*expression);
+        match &inner.kind {
+          HIRKind::Variable(def_id) => Some(*def_id),
+          _ => None,
+        }
+      },
+      HIRKind::Variable(def_id) => Some(*def_id),
+      _ => None,
+    }
+  }
+
+  /// Handle a manual `.drop()` call on a receiver variable.
+  /// Transitions: Valid → Dropped, Dropped → DoubleDrop, Moved → UseAfterMove.
+  fn handle_manual_drop(
+    &mut self,
+    def_id: DefinitionId,
+    span: Span,
+  ) {
+    match self.states.get(&def_id) {
+      Some(OwnershipState::Dropped) => {
+        let var_name = self.get_var_name(&def_id);
+        self
+          .diagnostics
+          .push(DiagnosticMessage::DoubleDrop { var_name, span }.report());
+      },
+
+      Some(OwnershipState::Moved) => {
+        let var_name = self.get_var_name(&def_id);
+        self
+          .diagnostics
+          .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
+      },
+
+      Some(OwnershipState::Freed) => {
+        let var_name = self.get_var_name(&def_id);
+        self
+          .diagnostics
+          .push(DiagnosticMessage::UseAfterFree { var_name, span }.report());
+      },
+
+      Some(OwnershipState::Valid) | None => {
+        self.states.insert(def_id, OwnershipState::Dropped);
+      },
+
+      Some(OwnershipState::Returned) => {
+        // Value already left this scope; model this as use-after-move.
+        let var_name = self.get_var_name(&def_id);
+        self
+          .diagnostics
+          .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
+      },
+    }
   }
 }

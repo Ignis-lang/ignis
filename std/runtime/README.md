@@ -29,14 +29,13 @@ Core runtime types, IDs, and APIs.
 - Types and IDs:
   - `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `boolean`
   - `IgnisTypeId`
-  - `IgnisHeader`, `IgnisString`, `IgnisBuffer`
+  - `IgnisHeader`, `IgnisString`
   - `null`
-  - `IGNIS_TYPE_*_ID` macros (primitives, buffer, pointer)
+  - `IGNIS_TYPE_*_ID` macros (primitives, pointer)
 - Alloc/Free:
   - `ignis_alloc`, `ignis_realloc`, `ignis_calloc`, `ignis_free`
 - Drop:
   - `ignis_string_drop`
-  - `ignis_buf_drop`
 - String API:
   - `ignis_string_new`, `ignis_string_with_capacity`
   - `ignis_string_from_cstr`, `ignis_string_from_len`, `ignis_string_clone`
@@ -44,24 +43,14 @@ Core runtime types, IDs, and APIs.
   - `ignis_string_cstr`, `ignis_string_len`, `ignis_string_cap`
   - `ignis_string_char_at`, `ignis_string_clear`, `ignis_string_reserve`
   - `ignis_string_drop`
-- Buffer API:
-  - `ignis_buf_new`, `ignis_buf_with_capacity`
-  - `ignis_buf_push`, `ignis_buf_at`, `ignis_buf_at_const`
-  - `ignis_buf_len`, `ignis_buf_cap`
-  - `ignis_buf_resize`, `ignis_buf_reserve`, `ignis_buf_clear`
-  - `ignis_buf_drop`
 - Internal helpers in `ignis_rt.c`:
   - `ignis_string_grow`
-  - `ignis_buf_grow`
 
 ### `std/runtime/memory/memory.h` and `std/runtime/memory/memory.c`
 Wrappers used by `std/memory/mod.ign`.
 
 - Allocation:
   - `memoryAllocate`, `memoryDeallocate`, `memoryReallocate`, `memoryAllocateZeroed`
-- Dynamic buffers:
-  - `bufNew`, `bufWithCapacity`, `bufPush`, `bufAt`
-  - `bufLen`, `bufCap`, `bufResize`, `bufReserve`, `bufClear`, `bufDrop`
 
 ### `std/runtime/number/number.h` and `std/runtime/number/number.c`
 Numeric helpers and conversions used by `std/number` and `std/string`.

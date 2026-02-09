@@ -28,7 +28,8 @@
 //! This container performs manual memory management and raw pointer writes.
 //! It does not run element destructors automatically.
 //!
-//! Call `free()` when the vector is no longer needed.
+//! The vector implements `Drop` and will automatically release its backing
+//! storage when it goes out of scope.
 //!
 //! ## Example
 //!
@@ -46,7 +47,7 @@
 //!   Io::println(String::concat("cap=", String::toString(values.capacity())));
 //!
 //!   values.pop();
-//!   values.free();
+//!   // Vector is automatically dropped here
 //!   return 0;
 //! }
 //! ```
@@ -65,10 +66,11 @@ import Memory from "std::memory";
 ///   let mut values: Vector<i32> = Vector::init<i32>();
 ///   values.push(1);
 ///   values.push(2);
-///   values.free();
+///   // Vector is automatically dropped here
 ///   return 0;
 /// }
 /// ```
+@implements(Drop)
 export record Vector<T> {
   /// Pointer to the backing storage (or `null` when empty).
   data: *mut T;
@@ -123,7 +125,6 @@ export record Vector<T> {
   /// let mut v: Vector<i32> = Vector::init<i32>();
   /// v.push(10);
   /// let len: u64 = v.length();
-  /// v.free();
   /// ```
   public length(&self): u64 {
     return self.length;
@@ -168,7 +169,6 @@ export record Vector<T> {
   /// v.push(1);
   /// v.push(2);
   /// v.clear();
-  /// v.free();
   /// ```
   public clear(&mut self): void {
     self.length = 0;
@@ -199,7 +199,6 @@ export record Vector<T> {
   ///
   /// let mut v: Vector<i32> = Vector::init<i32>();
   /// v.push(42);
-  /// v.free();
   /// ```
   public push(&mut self, value: T): void {
     if (self.length == self.capacity) {
@@ -222,7 +221,6 @@ export record Vector<T> {
   /// let mut v: Vector<i32> = Vector::init<i32>();
   /// v.push(7);
   /// let x: Option<i32> = v.pop();
-  /// v.free();
   /// ```
   public pop(&mut self): Option<T> {
     if (self.length == 0) {
@@ -244,7 +242,6 @@ export record Vector<T> {
   /// let mut v: Vector<i32> = Vector::init<i32>();
   /// v.push(9);
   /// let item: Option<&i32> = v.get(0);
-  /// v.free();
   /// ```
   public get(&self, index: u64): Option<&T> {
     if (index < self.length) {
@@ -265,7 +262,6 @@ export record Vector<T> {
   /// let mut v: Vector<i32> = Vector::init<i32>();
   /// v.push(1);
   /// let item: Option<&mut i32> = v.getMut(0);
-  /// v.free();
   /// ```
   public getMut(&mut self, index: u64): Option<&mut T> {
     if (index < self.length) {
@@ -285,7 +281,6 @@ export record Vector<T> {
   /// let mut v: Vector<i32> = Vector::init<i32>();
   /// v.push(10);
   /// let ptr: *i32 = v.asPtr();
-  /// v.free();
   /// ```
   public asPtr(&self): *T {
     return self.data as *T;
@@ -301,7 +296,6 @@ export record Vector<T> {
   /// let mut v: Vector<i32> = Vector::init<i32>();
   /// v.push(10);
   /// let ptr: *mut i32 = v.asMutPtr();
-  /// v.free();
   /// ```
   public asMutPtr(&mut self): *mut T {
     return self.data;
@@ -309,16 +303,9 @@ export record Vector<T> {
 
   /// Releases the backing storage and resets length/capacity to zero.
   ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import Vector from "std::vector";
-  ///
-  /// let mut v: Vector<i32> = Vector::init<i32>();
-  /// v.push(1);
-  /// v.free();
-  /// ```
-  public free(&mut self): void {
+  /// Called automatically when the vector goes out of scope via `@implements(Drop)`.
+  /// Can also be called manually to release resources early.
+  public drop(&mut self): void {
     if (self.data != null) {
       Memory::free(self.data);
       self.data = null;

@@ -309,7 +309,10 @@ function main(): void {
 }
 "#,
   );
-  assert!(c_code.contains("ignis_string_drop"), "Expected ignis_string_drop call for string field");
+  assert!(
+    c_code.contains("ignis_string_drop"),
+    "Expected ignis_string_drop call for string field"
+  );
   assert_snapshot!("c_drop_glue_string_field", c_code);
 }
 
@@ -378,7 +381,10 @@ function main(): void {
 "#,
   );
   // All-primitive record: no drop calls at all
-  assert!(!c_code.contains("ignis_string_drop"), "No string drop expected for primitive record");
+  assert!(
+    !c_code.contains("ignis_string_drop"),
+    "No string drop expected for primitive record"
+  );
   assert!(!c_code.contains("ignis_buf_drop"), "No buf drop expected for primitive record");
   assert_snapshot!("c_no_drop_glue_primitive_record", c_code);
 }
@@ -401,7 +407,11 @@ function main(): void {
   );
   // Both string fields must get drop calls
   let drop_count = c_code.matches("ignis_string_drop").count();
-  assert!(drop_count >= 2, "Expected at least 2 ignis_string_drop calls, found {}", drop_count);
+  assert!(
+    drop_count >= 2,
+    "Expected at least 2 ignis_string_drop calls, found {}",
+    drop_count
+  );
   assert_snapshot!("c_drop_glue_multiple_string_fields", c_code);
 }
 
@@ -488,8 +498,39 @@ function main(): void {
 "#,
   );
   // Nested all-primitive records: no drops at all
-  assert!(!c_code.contains("ignis_string_drop"), "No string drop for nested primitive records");
+  assert!(
+    !c_code.contains("ignis_string_drop"),
+    "No string drop for nested primitive records"
+  );
   assert!(!c_code.contains("ignis_buf_drop"), "No buf drop for nested primitive records");
   assert!(!c_code.contains("_drop"), "No drop calls at all for nested primitive records");
   assert_snapshot!("c_no_drop_glue_nested_primitive", c_code);
+}
+
+#[test]
+fn c_drop_glue_manual_drop_sets_state() {
+  let c_code = common::compile_to_c(
+    r#"
+@implements(Drop)
+record Resource {
+    id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): void {
+    let mut r: Resource = Resource { id: 1 };
+    r.drop();
+    return;
+}
+"#,
+  );
+  // Manual .drop() should set __ignis_drop_state = 1 after the call
+  assert!(
+    c_code.contains("__ignis_drop_state = 1"),
+    "Expected __ignis_drop_state = 1 after manual drop call"
+  );
+  assert_snapshot!("c_drop_glue_manual_drop_sets_state", c_code);
 }

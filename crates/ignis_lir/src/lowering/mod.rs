@@ -849,7 +849,7 @@ impl<'a> LoweringContext<'a> {
       Type::Boolean => 10,
       Type::Char => 11,
       Type::String => 12,
-      Type::Vector { size: None, .. } => 100,
+
       Type::Pointer { .. } => 200,
       _ => 0xFFFFFFFF,
     }
@@ -1829,8 +1829,40 @@ impl<'a> LoweringContext<'a> {
     let base_ptr = if base_is_ptr {
       // Base is already a pointer - lower and use directly
       self.lower_hir_node(base)?
+    } else if let HIRKind::Dereference(inner) = &base_node.kind.clone() {
+      // Base is a dereference — check if the inner expression is a pointer/reference.
+      // This pattern occurs with auto-deref: `self.field` where `self: &mut T` becomes
+      // `FieldAccess { base: Dereference(Variable(self)), ... }`.
+      // Use the inner pointer directly to avoid copying the entire struct to a
+      // synthetic local, which would register it for drop and cause spurious
+      // (potentially recursive) drop calls.
+      let inner_node = self.hir.get(*inner);
+      let inner_ty = inner_node.type_id;
+
+      if matches!(self.types.get(&inner_ty), Type::Pointer { .. } | Type::Reference { .. }) {
+        self.lower_hir_node(*inner)?
+      } else {
+        // Inner is not a pointer — evaluate the full dereference and spill
+        let base_val = self.lower_hir_node(base)?;
+        let temp_local = self.alloc_synthetic_local(base_ty, false);
+
+        self.fn_builder().emit(Instr::Store {
+          dest: temp_local,
+          value: base_val,
+        });
+
+        let base_ptr_ty = self.types.pointer(base_ty, false);
+        let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
+        self.fn_builder().emit(Instr::AddrOfLocal {
+          dest: base_ptr_temp,
+          local: temp_local,
+          mutable: false,
+        });
+
+        Operand::Temp(base_ptr_temp)
+      }
     } else {
-      // Base is a value - spill to local to get addressable storage
+      // Base is a value (not a dereference, not a pointer) — spill to local
       let base_val = self.lower_hir_node(base)?;
       let temp_local = self.alloc_synthetic_local(base_ty, false);
 

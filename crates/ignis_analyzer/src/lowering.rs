@@ -385,9 +385,7 @@ impl<'a> Analyzer<'a> {
         // Lower enum methods to HIR
         self.lower_enum_methods(enum_, hir, scope_kind)
       },
-      ASTStatement::Trait(tr) => {
-        self.lower_trait_methods(tr, hir, scope_kind)
-      },
+      ASTStatement::Trait(tr) => self.lower_trait_methods(tr, hir, scope_kind),
       ASTStatement::ForOf(for_of) => self.lower_for_of(node_id, for_of, hir),
       _ => hir.alloc(HIRNode {
         kind: HIRKind::Block {
@@ -966,7 +964,7 @@ impl<'a> Analyzer<'a> {
             .first()
             .and_then(|e| self.lookup_type(e).cloned())
             .unwrap_or_else(|| self.types.error()),
-          Some(vector.items.len()),
+          vector.items.len(),
         );
 
         let hir_node = HIRNode {
@@ -2491,8 +2489,24 @@ impl<'a> Analyzer<'a> {
       .cloned()
       .unwrap_or_else(|| self.types.error());
 
-    let (element_type, size) = match self.types.get(&iter_type).clone() {
-      Type::Vector { element, size } => (element, size),
+    enum IterKind {
+      FixedVector(usize),
+      Record(DefinitionId),
+    }
+
+    let (element_type, iter_kind) = match self.types.get(&iter_type).clone() {
+      Type::Vector { element, size } => (element, IterKind::FixedVector(size)),
+      Type::Record(def_id) => match self.extract_record_iterable_info(&def_id) {
+        Some((elem_ty, _data_index, _len_index)) => (elem_ty, IterKind::Record(def_id)),
+        None => {
+          self.scopes.pop();
+          return hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: span.clone(),
+            type_id: self.types.error(),
+          });
+        },
+      },
       _ => {
         self.scopes.pop();
         return hir.alloc(HIRNode {
@@ -2537,9 +2551,9 @@ impl<'a> Analyzer<'a> {
       span,
     };
 
-    let loop_hir = match size {
-      Some(n) => self.lower_for_of_fixed(&ctx, hir, n),
-      None => self.lower_for_of_dynamic(&ctx, hir),
+    let loop_hir = match iter_kind {
+      IterKind::FixedVector(n) => self.lower_for_of_fixed(&ctx, hir, n),
+      IterKind::Record(def_id) => self.lower_for_of_record(&ctx, hir, &def_id),
     };
 
     self.scopes.pop();
@@ -2761,20 +2775,139 @@ impl<'a> Analyzer<'a> {
     })
   }
 
-  fn lower_for_of_dynamic(
+  /// Extracts iteration info from a record type for `for..of`.
+  ///
+  /// Returns `(element_type, data_field_index, length_field_index)` if the
+  /// record has a pointer-typed `data` field and a `u64`-typed `length` field.
+  fn extract_record_iterable_info(
+    &self,
+    def_id: &DefinitionId,
+  ) -> Option<(TypeId, u32, u32)> {
+    let rd = match &self.defs.get(def_id).kind {
+      DefinitionKind::Record(rd) => rd.clone(),
+      _ => return None,
+    };
+
+    let sym = self.symbols.borrow();
+    let data_sym = *sym.map.get("data")?;
+    let length_sym = *sym.map.get("length")?;
+
+    let mut data_info: Option<(TypeId, u32)> = None;
+    let mut length_index: Option<u32> = None;
+
+    for field in &rd.fields {
+      if field.name == data_sym {
+        if let Type::Pointer { inner, .. } = self.types.get(&field.type_id) {
+          data_info = Some((*inner, field.index));
+        }
+      } else if field.name == length_sym {
+        if self.types.types_equal(&field.type_id, &self.types.u64()) {
+          length_index = Some(field.index);
+        }
+      }
+    }
+
+    match (data_info, length_index) {
+      (Some((elem_ty, data_idx)), Some(len_idx)) => Some((elem_ty, data_idx, len_idx)),
+      _ => None,
+    }
+  }
+
+  /// Lowers `for..of` over a record with `data: *T` and `length: u64` fields.
+  ///
+  /// Desugars to:
+  /// ```text
+  /// {
+  ///   let __data: *T = iter.data;       // FieldAccess
+  ///   let __len: u64 = iter.length;     // FieldAccess
+  ///   let mut __i: u64 = 0;
+  ///   for (; __i < __len; __i += 1) {
+  ///     let elem: T = __data[__i];      // Index on pointer
+  ///     <body>
+  ///   }
+  /// }
+  /// ```
+  fn lower_for_of_record(
     &mut self,
     ctx: &ForOfContext<'_>,
     hir: &mut HIR,
+    def_id: &DefinitionId,
   ) -> HIRId {
-    let runtime = self.runtime.as_ref().expect("runtime builtins not initialized");
     let u64_type = self.types.u64();
-    let void_ptr_type = self.types.pointer(self.types.void(), false);
 
-    let len_call = hir.alloc(HIRNode {
-      kind: HIRKind::Call {
-        callee: runtime.buf_len,
-        type_args: vec![],
-        args: vec![ctx.iter_hir],
+    let (_, data_field_index, length_field_index) = match self.extract_record_iterable_info(def_id) {
+      Some(info) => info,
+      None => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: ctx.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    // Get the data pointer type from the field
+    let data_ptr_type = {
+      let rd = match &self.defs.get(def_id).kind {
+        DefinitionKind::Record(rd) => rd.clone(),
+        _ => {
+          return hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: ctx.span.clone(),
+            type_id: self.types.error(),
+          });
+        },
+      };
+      rd.fields[data_field_index as usize].type_id
+    };
+
+    // -- __data = iter.data (FieldAccess) --
+
+    let data_access = hir.alloc(HIRNode {
+      kind: HIRKind::FieldAccess {
+        base: ctx.iter_hir,
+        field_index: data_field_index,
+      },
+      span: ctx.span.clone(),
+      type_id: data_ptr_type,
+    });
+
+    let data_name = self
+      .symbols
+      .borrow_mut()
+      .intern(&format!("__for_of_data_{}", ctx.synth_id));
+
+    let data_def = ignis_type::definition::Definition {
+      kind: ignis_type::definition::DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
+        type_id: data_ptr_type,
+        mutable: false,
+      }),
+      name: data_name,
+      span: ctx.span.clone(),
+      name_span: ctx.span.clone(),
+      visibility: ignis_type::definition::Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: None,
+      doc: None,
+    };
+    let data_def_id = self.defs.alloc(data_def);
+    self.scopes.define(&data_name, &data_def_id, false).ok();
+
+    let data_let = hir.alloc(HIRNode {
+      kind: HIRKind::Let {
+        name: data_def_id,
+        value: Some(data_access),
+      },
+      span: ctx.span.clone(),
+      type_id: self.types.void(),
+    });
+
+    // -- __len = iter.length (FieldAccess) --
+
+    let len_access = hir.alloc(HIRNode {
+      kind: HIRKind::FieldAccess {
+        base: ctx.iter_hir,
+        field_index: length_field_index,
       },
       span: ctx.span.clone(),
       type_id: u64_type,
@@ -2784,6 +2917,7 @@ impl<'a> Analyzer<'a> {
       .symbols
       .borrow_mut()
       .intern(&format!("__for_of_len_{}", ctx.synth_id));
+
     let len_def = ignis_type::definition::Definition {
       kind: ignis_type::definition::DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
         type_id: u64_type,
@@ -2798,20 +2932,24 @@ impl<'a> Analyzer<'a> {
       doc: None,
     };
     let len_def_id = self.defs.alloc(len_def);
+    self.scopes.define(&len_name, &len_def_id, false).ok();
 
     let len_let = hir.alloc(HIRNode {
       kind: HIRKind::Let {
         name: len_def_id,
-        value: Some(len_call),
+        value: Some(len_access),
       },
       span: ctx.span.clone(),
       type_id: self.types.void(),
     });
 
+    // -- index variable: let mut __i: u64 = 0 --
+
     let idx_name = self
       .symbols
       .borrow_mut()
       .intern(&format!("__for_of_i_{}", ctx.synth_id));
+
     let idx_def = ignis_type::definition::Definition {
       kind: ignis_type::definition::DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
         type_id: u64_type,
@@ -2842,6 +2980,8 @@ impl<'a> Analyzer<'a> {
       type_id: self.types.void(),
     });
 
+    // -- condition: __i < __len --
+
     let idx_var = hir.alloc(HIRNode {
       kind: HIRKind::Variable(idx_def_id),
       span: ctx.span.clone(),
@@ -2861,6 +3001,8 @@ impl<'a> Analyzer<'a> {
       span: ctx.span.clone(),
       type_id: self.types.boolean(),
     });
+
+    // -- update: __i += 1 --
 
     let idx_var_update = hir.alloc(HIRNode {
       kind: HIRKind::Variable(idx_def_id),
@@ -2882,46 +3024,38 @@ impl<'a> Analyzer<'a> {
       type_id: self.types.void(),
     });
 
-    let buf_at_builtin = if ctx.is_mut_ref {
-      runtime.buf_at
-    } else {
-      runtime.buf_at_const
-    };
+    // -- body: let elem = __data[__i] --
 
+    let data_var = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(data_def_id),
+      span: ctx.span.clone(),
+      type_id: data_ptr_type,
+    });
     let idx_var_access = hir.alloc(HIRNode {
       kind: HIRKind::Variable(idx_def_id),
       span: ctx.span.clone(),
       type_id: u64_type,
     });
-
-    let buf_at_call = hir.alloc(HIRNode {
-      kind: HIRKind::Call {
-        callee: buf_at_builtin,
-        type_args: vec![],
-        args: vec![ctx.iter_hir, idx_var_access],
+    let index_expr = hir.alloc(HIRNode {
+      kind: HIRKind::Index {
+        base: data_var,
+        index: idx_var_access,
       },
       span: ctx.span.clone(),
-      type_id: void_ptr_type,
-    });
-
-    let ref_type = self.types.reference(ctx.element_type, ctx.is_mut_ref);
-    let casted = hir.alloc(HIRNode {
-      kind: HIRKind::Cast {
-        expression: buf_at_call,
-        target: ref_type,
-      },
-      span: ctx.span.clone(),
-      type_id: ref_type,
+      type_id: ctx.element_type,
     });
 
     let elem_value = if ctx.is_by_ref {
-      casted
-    } else {
       hir.alloc(HIRNode {
-        kind: HIRKind::Dereference(casted),
+        kind: HIRKind::Reference {
+          expression: index_expr,
+          mutable: ctx.is_mut_ref,
+        },
         span: ctx.span.clone(),
-        type_id: ctx.element_type,
+        type_id: self.types.reference(ctx.element_type, ctx.is_mut_ref),
       })
+    } else {
+      index_expr
     };
 
     let binding_let = hir.alloc(HIRNode {
@@ -2959,7 +3093,7 @@ impl<'a> Analyzer<'a> {
 
     hir.alloc(HIRNode {
       kind: HIRKind::Block {
-        statements: vec![len_let, loop_hir],
+        statements: vec![data_let, len_let, loop_hir],
         expression: None,
       },
       span: ctx.span.clone(),

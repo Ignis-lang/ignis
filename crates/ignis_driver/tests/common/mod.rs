@@ -202,6 +202,56 @@ pub fn compile_warnings(source: &str) -> Result<Vec<String>, String> {
   Ok(messages)
 }
 
+/// Returns ownership checker error messages (from post-mono analysis), or Err if earlier phases fail.
+pub fn compile_ownership_diagnostics(source: &str) -> Result<Vec<String>, String> {
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("test.ign", source.to_string());
+  let src = &sm.get(&file_id).text;
+
+  let mut lexer = IgnisLexer::new(file_id, src);
+  lexer.scan_tokens();
+  if !lexer.diagnostics.is_empty() {
+    return Err(format!("Lexer errors: {:?}", lexer.diagnostics));
+  }
+
+  let symbol_table = Rc::new(RefCell::new(SymbolTable::new()));
+  let mut parser = IgnisParser::new(lexer.tokens, symbol_table.clone());
+  let (nodes, roots) = parser.parse().map_err(|e| format!("Parse errors: {:?}", e))?;
+
+  let result = Analyzer::analyze(&nodes, &roots, symbol_table);
+  let has_errors = result
+    .diagnostics
+    .iter()
+    .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
+  if has_errors {
+    return Err(format!("Analyzer errors: {:?}", result.diagnostics));
+  }
+
+  let mut types = result.types.clone();
+
+  let mono_roots = {
+    let sym_table = result.symbols.borrow();
+    collect_mono_roots(&result.defs, &sym_table)
+  };
+  let mono_output =
+    ignis_analyzer::mono::Monomorphizer::new(&result.hir, &result.defs, &mut types, result.symbols.clone())
+      .run(&mono_roots);
+
+  let sym_table = result.symbols.borrow();
+
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
+  let (_, ownership_diagnostics) = ownership_checker.check();
+
+  let messages: Vec<String> = ownership_diagnostics
+    .iter()
+    .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+    .map(|d| d.message.clone())
+    .collect();
+
+  Ok(messages)
+}
+
 /// Collect root definitions for monomorphization.
 fn collect_mono_roots(
   defs: &DefinitionStore,

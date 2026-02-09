@@ -2023,6 +2023,104 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_drop_reads_self_field() {
+  e2e_test(
+    "drop_reads_self_field",
+    r#"
+@implements(Drop)
+record Resource {
+  public tag: i32;
+
+  drop(&mut self): void {
+      let _t: i32 = self.tag;
+      return;
+  }
+}
+
+function main(): i32 {
+    let r: Resource = Resource { tag: 42 };
+    return r.tag;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_drop_writes_self_field() {
+  e2e_test(
+    "drop_writes_self_field",
+    r#"
+@implements(Drop)
+record Handle {
+  public id: i32;
+
+  drop(&mut self): void {
+      self.id = 0;
+      return;
+  }
+}
+
+function main(): i32 {
+    let h: Handle = Handle { id: 7 };
+    return h.id;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_drop_conditional_on_self_field() {
+  e2e_test(
+    "drop_conditional_on_self_field",
+    r#"
+@implements(Drop)
+record Guard {
+  public active: boolean;
+  public code: i32;
+
+  drop(&mut self): void {
+      if (self.active) {
+          self.active = false;
+      }
+      return;
+  }
+}
+
+function main(): i32 {
+    let g: Guard = Guard { active: true, code: 99 };
+    return g.code;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_drop_reads_multiple_fields() {
+  e2e_test(
+    "drop_reads_multiple_fields",
+    r#"
+@implements(Drop)
+record Pair {
+  public a: i32;
+  public b: i32;
+
+  drop(&mut self): void {
+      let _sum: i32 = self.a + self.b;
+      self.a = 0;
+      self.b = 0;
+      return;
+  }
+}
+
+function main(): i32 {
+    let p: Pair = Pair { a: 10, b: 32 };
+    return p.a + p.b;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_extension_method_i32() {
   e2e_test(
     "extension_method_i32",
@@ -2374,6 +2472,170 @@ record Person {
 function main(): i32 {
     let p: Person = Person { age: 20 };
     return p.greet() + p.describe();
+}
+"#,
+  );
+}
+
+// =========================================================================
+// for..of over record with data/length fields (Vector-like iteration)
+// =========================================================================
+
+#[test]
+fn e2e_for_of_record_by_value() {
+  e2e_test(
+    "for_of_record_by_value",
+    r#"
+record IntVec {
+    data: *mut i32;
+    length: u64;
+    capacity: u64;
+}
+
+function main(): i32 {
+    let mut arr: i32[3] = [10, 20, 12];
+    let vec: IntVec = IntVec { data: (&mut arr[0]) as *mut i32, length: 3, capacity: 3 };
+
+    let mut sum: i32 = 0;
+    for (let item of vec) {
+        sum += item;
+    }
+
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_record_by_ref() {
+  e2e_test(
+    "for_of_record_by_ref",
+    r#"
+record IntVec {
+    data: *mut i32;
+    length: u64;
+    capacity: u64;
+}
+
+function main(): i32 {
+    let mut arr: i32[3] = [5, 15, 22];
+    let vec: IntVec = IntVec { data: (&mut arr[0]) as *mut i32, length: 3, capacity: 3 };
+
+    let mut sum: i32 = 0;
+    for (let item: &i32 of vec) {
+        sum += *item;
+    }
+
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_record_with_break() {
+  e2e_test(
+    "for_of_record_with_break",
+    r#"
+record IntVec {
+    data: *mut i32;
+    length: u64;
+    capacity: u64;
+}
+
+function main(): i32 {
+    let mut arr: i32[4] = [1, 2, 100, 4];
+    let vec: IntVec = IntVec { data: (&mut arr[0]) as *mut i32, length: 4, capacity: 4 };
+
+    let mut sum: i32 = 0;
+    for (let item of vec) {
+        if (item == 100) {
+            break;
+        }
+        sum += item;
+    }
+
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_for_of_record_with_continue() {
+  e2e_test(
+    "for_of_record_with_continue",
+    r#"
+record IntVec {
+    data: *mut i32;
+    length: u64;
+    capacity: u64;
+}
+
+function main(): i32 {
+    let mut arr: i32[4] = [1, 100, 3, 5];
+    let vec: IntVec = IntVec { data: (&mut arr[0]) as *mut i32, length: 4, capacity: 4 };
+
+    let mut sum: i32 = 0;
+    for (let item of vec) {
+        if (item == 100) {
+            continue;
+        }
+        sum += item;
+    }
+
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_drop_then_reassign_then_use() {
+  e2e_test(
+    "drop_then_reassign_then_use",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 10 };
+    r.drop();
+    r = Resource { tag: 77 };
+    return r.tag;
+}
+"#,
+  );
+}
+
+/// Verifies that the runtime drop guard prevents double-drop when auto-drop fires
+/// on a variable that was already manually dropped (defense-in-depth with Phase 1).
+#[test]
+fn e2e_drop_guard_prevents_double_auto_drop() {
+  e2e_test(
+    "drop_guard_prevents_double_auto_drop",
+    r#"
+@implements(Drop)
+record Counter {
+    public value: i32;
+
+    drop(&mut self): void {
+        self.value = self.value + 1;
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut c: Counter = Counter { value: 0 };
+    c.drop();
+    return 0;
 }
 "#,
   );

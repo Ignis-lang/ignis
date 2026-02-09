@@ -37,7 +37,11 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
-use ignis_type::{compilation_context::CompilationContext, symbol::{SymbolId, SymbolTable}, Store as ASTStore};
+use ignis_type::{
+  compilation_context::CompilationContext,
+  symbol::{SymbolId, SymbolTable},
+  Store as ASTStore,
+};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
 use ignis_type::lint::{LintId, LintLevel};
@@ -87,13 +91,6 @@ impl InferContext {
   }
 }
 
-#[derive(Debug, Clone)]
-pub struct RuntimeBuiltins {
-  pub buf_len: DefinitionId,
-  pub buf_at: DefinitionId,
-  pub buf_at_const: DefinitionId,
-}
-
 pub struct Analyzer<'a> {
   ast: &'a ASTStore<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
@@ -115,7 +112,7 @@ pub struct Analyzer<'a> {
   lowering_counter: u32,
   for_of_binding_defs: HashMap<NodeId, DefinitionId>,
   resolved_calls: HashMap<NodeId, DefinitionId>,
-  runtime: Option<RuntimeBuiltins>,
+
   import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
   import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
   compilation_ctx: Option<CompilationContext>,
@@ -161,7 +158,8 @@ pub struct AnalyzerOutput {
 
   /// Extension methods indexed by target type.
   /// Used by LSP to provide dot-completion for primitive types.
-  pub extension_methods: HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
+  pub extension_methods:
+    HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
 }
 
 impl AnalyzerOutput {
@@ -184,7 +182,7 @@ impl<'a> Analyzer<'a> {
     symbols: Rc<RefCell<SymbolTable>>,
     current_module: ModuleId,
   ) -> Self {
-    let mut analyzer = Self {
+    Self {
       ast,
       symbols,
       types: TypeStore::new(),
@@ -205,7 +203,6 @@ impl<'a> Analyzer<'a> {
       lowering_counter: 0,
       for_of_binding_defs: HashMap::new(),
       resolved_calls: HashMap::new(),
-      runtime: None,
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
       compilation_ctx: Some(CompilationContext::default()),
@@ -215,9 +212,7 @@ impl<'a> Analyzer<'a> {
       extension_methods: HashMap::new(),
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
-    };
-    analyzer.runtime = Some(analyzer.register_runtime_builtins());
-    analyzer
+    }
   }
 
   pub fn analyze(
@@ -308,7 +303,6 @@ impl<'a> Analyzer<'a> {
       lowering_counter: 0,
       for_of_binding_defs: HashMap::new(),
       resolved_calls: HashMap::new(),
-      runtime: None,
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
       compilation_ctx: Some(CompilationContext::default()),
@@ -319,7 +313,6 @@ impl<'a> Analyzer<'a> {
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
     };
-    analyzer.runtime = Some(analyzer.register_runtime_builtins());
 
     analyzer.bind_phase(roots);
     analyzer.resolve_phase(roots);
@@ -638,91 +631,6 @@ impl<'a> Analyzer<'a> {
       },
       _ => {},
     }
-  }
-
-  fn register_runtime_builtins(&mut self) -> RuntimeBuiltins {
-    // Use SYNTHETIC file ID so these builtins never appear in completions
-    let span = ignis_type::span::Span::new(
-      ignis_type::file::FileId::SYNTHETIC,
-      ignis_type::BytePosition::default(),
-      ignis_type::BytePosition::default(),
-    );
-    let buffer_ptr_type = self.types.vector(self.types.infer(), None);
-    let u64_type = self.types.u64();
-    let void_ptr_type = self.types.pointer(self.types.void(), false);
-
-    let buf_len = self.create_extern_builtin("ignis_buf_len", vec![("buf", buffer_ptr_type)], u64_type, span.clone());
-    let buf_at = self.create_extern_builtin(
-      "ignis_buf_at",
-      vec![("buf", buffer_ptr_type), ("idx", u64_type)],
-      void_ptr_type,
-      span.clone(),
-    );
-    let buf_at_const = self.create_extern_builtin(
-      "ignis_buf_at_const",
-      vec![("buf", buffer_ptr_type), ("idx", u64_type)],
-      void_ptr_type,
-      span,
-    );
-
-    RuntimeBuiltins {
-      buf_len,
-      buf_at,
-      buf_at_const,
-    }
-  }
-
-  fn create_extern_builtin(
-    &mut self,
-    name: &str,
-    params: Vec<(&str, TypeId)>,
-    return_type: TypeId,
-    span: ignis_type::span::Span,
-  ) -> DefinitionId {
-    use ignis_type::definition::{Definition, FunctionDefinition, InlineMode, ParameterDefinition};
-
-    let fn_name = self.symbols.borrow_mut().intern(name);
-    let param_defs: Vec<DefinitionId> = params
-      .iter()
-      .map(|(pname, ptype)| {
-        let pname_sym = self.symbols.borrow_mut().intern(pname);
-        let def = Definition {
-          kind: DefinitionKind::Parameter(ParameterDefinition {
-            type_id: *ptype,
-            mutable: false,
-          }),
-          name: pname_sym,
-          span: span.clone(),
-          name_span: span.clone(),
-          visibility: Visibility::Private,
-          owner_module: self.current_module,
-          owner_namespace: None,
-          doc: None,
-        };
-        self.defs.alloc(def)
-      })
-      .collect();
-
-    let def = Definition {
-      kind: DefinitionKind::Function(FunctionDefinition {
-        type_params: Vec::new(),
-        params: param_defs,
-        return_type,
-        is_extern: true,
-        is_variadic: false,
-        inline_mode: InlineMode::None,
-        attrs: vec![],
-      }),
-      name: fn_name,
-      span: span.clone(),
-      name_span: span,
-      visibility: Visibility::Private,
-      owner_module: self.current_module,
-      owner_namespace: None,
-      doc: None,
-    };
-
-    self.defs.alloc(def)
   }
 }
 

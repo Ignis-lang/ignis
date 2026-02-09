@@ -11,6 +11,15 @@ fn e2e_error_test(
   assert_snapshot!(name, diagnostics.join("\n"));
 }
 
+fn e2e_ownership_error_test(
+  name: &str,
+  source: &str,
+) {
+  let diagnostics = common::compile_ownership_diagnostics(source).expect("compilation failed before ownership check");
+  assert!(!diagnostics.is_empty(), "expected ownership errors");
+  assert_snapshot!(name, diagnostics.join("\n"));
+}
+
 fn e2e_warning_test(
   name: &str,
   source: &str,
@@ -439,6 +448,110 @@ function increment(value: i32): i32 {
 function main(): i32 {
     let x: i32 = 5;
     return x.increment();
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Ownership: Drop Safety Tests
+// =========================================================================
+
+#[test]
+fn e2e_err_use_after_drop() {
+  e2e_ownership_error_test(
+    "err_use_after_drop",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 42 };
+    r.drop();
+    return r.tag;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_double_drop() {
+  e2e_ownership_error_test(
+    "err_double_drop",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 42 };
+    r.drop();
+    r.drop();
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_move_after_drop() {
+  e2e_ownership_error_test(
+    "err_move_after_drop",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function consume(r: Resource): i32 {
+    return r.tag;
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 42 };
+    r.drop();
+    return consume(r);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_conditional_drop_then_use() {
+  e2e_ownership_error_test(
+    "err_conditional_drop_then_use",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource { tag: 42 };
+    let cond: boolean = true;
+    if (cond) {
+        r.drop();
+    }
+    return r.tag;
 }
 "#,
   );

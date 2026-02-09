@@ -278,6 +278,9 @@ pub enum DiagnosticMessage {
     size: usize,
     span: Span,
   },
+  DynamicVectorsNotSupported {
+    span: Span,
+  },
   NotCallable {
     type_name: String,
     span: Span,
@@ -430,6 +433,18 @@ pub enum DiagnosticMessage {
     span: Span,
   },
   InconsistentMoveInBranches {
+    var_name: String,
+    span: Span,
+  },
+  UseAfterDrop {
+    var_name: String,
+    span: Span,
+  },
+  DoubleDrop {
+    var_name: String,
+    span: Span,
+  },
+  InconsistentDropInBranches {
     var_name: String,
     span: Span,
   },
@@ -900,6 +915,12 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::IndexOutOfBounds { index, size, .. } => {
         write!(f, "Index {} is out of bounds for array of size {}", index, size)
       },
+      DiagnosticMessage::DynamicVectorsNotSupported { .. } => {
+        write!(
+          f,
+          "Dynamic-size vectors are not supported; use a fixed-size array `T[N]` or `Vector<T>` from std"
+        )
+      },
       DiagnosticMessage::NotCallable { type_name, .. } => {
         write!(f, "Cannot call non-function type '{}'", type_name)
       },
@@ -1047,6 +1068,15 @@ impl fmt::Display for DiagnosticMessage {
       },
       DiagnosticMessage::InconsistentMoveInBranches { var_name, .. } => {
         write!(f, "Variable '{}' is moved in one branch but not the other", var_name)
+      },
+      DiagnosticMessage::UseAfterDrop { var_name, .. } => {
+        write!(f, "Use of dropped value '{}'", var_name)
+      },
+      DiagnosticMessage::DoubleDrop { var_name, .. } => {
+        write!(f, "Value '{}' has already been dropped", var_name)
+      },
+      DiagnosticMessage::InconsistentDropInBranches { var_name, .. } => {
+        write!(f, "Variable '{}' is dropped in one branch but not the other", var_name)
       },
       DiagnosticMessage::PossibleLeakToFFI { var_name, .. } => {
         write!(f, "Possible memory leak: ownership of '{}' escapes to FFI", var_name)
@@ -1205,11 +1235,7 @@ impl fmt::Display for DiagnosticMessage {
         write!(f, "unknown lang trait '{}' in @implements", name)
       },
       DiagnosticMessage::LangTraitDropCopyConflict { type_name, .. } => {
-        write!(
-          f,
-          "type '{}' cannot implement both Drop and Copy",
-          type_name
-        )
+        write!(f, "type '{}' cannot implement both Drop and Copy", type_name)
       },
       DiagnosticMessage::LangTraitMissingMethod {
         trait_name,
@@ -1314,7 +1340,11 @@ impl fmt::Display for DiagnosticMessage {
         write!(f, "fields are not allowed in trait declarations")
       },
       DiagnosticMessage::TraitStaticMethodNotAllowed { method_name, .. } => {
-        write!(f, "static methods are not allowed in trait declarations; '{}' must have &self or &mut self", method_name)
+        write!(
+          f,
+          "static methods are not allowed in trait declarations; '{}' must have &self or &mut self",
+          method_name
+        )
       },
     }
   }
@@ -1402,6 +1432,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::VectorIndexNonInteger { span, .. }
       | DiagnosticMessage::AccessNonVector { span, .. }
       | DiagnosticMessage::IndexOutOfBounds { span, .. }
+      | DiagnosticMessage::DynamicVectorsNotSupported { span, .. }
       | DiagnosticMessage::NotCallable { span, .. }
       | DiagnosticMessage::UnreachableCode { span, .. }
       | DiagnosticMessage::ExternWithBody { span, .. }
@@ -1440,6 +1471,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::UseAfterMove { span, .. }
       | DiagnosticMessage::UseAfterFree { span, .. }
       | DiagnosticMessage::InconsistentMoveInBranches { span, .. }
+      | DiagnosticMessage::UseAfterDrop { span, .. }
+      | DiagnosticMessage::DoubleDrop { span, .. }
+      | DiagnosticMessage::InconsistentDropInBranches { span, .. }
       | DiagnosticMessage::PossibleLeakToFFI { span, .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { span, .. }
       | DiagnosticMessage::InvalidSizeOfOperand { span, .. }
@@ -1573,6 +1607,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::VectorIndexNonInteger { .. } => "A0022",
       DiagnosticMessage::AccessNonVector { .. } => "A0023",
       DiagnosticMessage::IndexOutOfBounds { .. } => "A0048",
+      DiagnosticMessage::DynamicVectorsNotSupported { .. } => "A0147",
       DiagnosticMessage::NotCallable { .. } => "A0024",
       DiagnosticMessage::UnreachableCode { .. } => "A0025",
       DiagnosticMessage::ExternWithBody { .. } => "A0026",
@@ -1616,6 +1651,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::InconsistentMoveInBranches { .. } => "O0003",
       DiagnosticMessage::PossibleLeakToFFI { .. } => "O0004",
       DiagnosticMessage::OwnershipEscapeToGlobal { .. } => "O0005",
+      DiagnosticMessage::UseAfterDrop { .. } => "O0006",
+      DiagnosticMessage::DoubleDrop { .. } => "O0007",
+      DiagnosticMessage::InconsistentDropInBranches { .. } => "O0008",
       DiagnosticMessage::ForOfExpectsVector { .. } => "A0069",
       DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",

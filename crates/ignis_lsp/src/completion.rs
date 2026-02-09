@@ -1895,10 +1895,7 @@ fn format_type_brief(
 
     Type::Vector { element, size } => {
       let elem_str = format_type_brief(types, defs, symbol_names, element);
-      match size {
-        Some(s) => format!("{}[{}]", elem_str, s),
-        None => format!("[{}]", elem_str),
-      }
+      format!("{}[{}]", elem_str, size)
     },
 
     Type::Tuple(elements) => {

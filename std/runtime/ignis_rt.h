@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <float.h>
 #include <unistd.h>
@@ -50,7 +51,6 @@ typedef u32 IgnisTypeId;
 #define IGNIS_TYPE_BOOL_ID 10
 #define IGNIS_TYPE_CHAR_ID 11
 #define IGNIS_TYPE_STRING_ID 12
-#define IGNIS_TYPE_BUFFER_ID 100
 #define IGNIS_TYPE_PTR_ID 200
 
 // =============================================================================
@@ -83,20 +83,6 @@ typedef struct IgnisString {
  * `string` is an alias for a heap-managed IgnisString pointer.
  */
 typedef IgnisString *string;
-
-/**
- * DEPRECATED: IgnisBuffer will be removed once std migrates to Vector<T>.
- *
- * Heap-managed dynamic buffer for homogeneous elements.
- */
-typedef struct {
-  IgnisHeader hdr;
-  void *data;
-  size_t len;
-  size_t cap;
-  size_t elem_size;
-  IgnisTypeId elem_type_id;
-} IgnisBuffer;
 
 /**
  * Null pointer alias.
@@ -288,18 +274,4 @@ void ignis_print(const IgnisString *s);
  */
 void ignis_eprint(const IgnisString *s);
 
-// =============================================================================
-// Buffer API (DEPRECATED: remove after migration to Vector<T>)
-// =============================================================================
 
-IgnisBuffer *ignis_buf_new(size_t elem_size, IgnisTypeId elem_type_id);
-IgnisBuffer *ignis_buf_with_capacity(size_t elem_size, IgnisTypeId elem_type_id, size_t cap);
-void ignis_buf_push(IgnisBuffer *buf, const void *elem);
-void *ignis_buf_at(IgnisBuffer *buf, size_t idx);
-const void *ignis_buf_at_const(const IgnisBuffer *buf, size_t idx);
-size_t ignis_buf_len(const IgnisBuffer *buf);
-size_t ignis_buf_cap(const IgnisBuffer *buf);
-void ignis_buf_resize(IgnisBuffer *buf, size_t new_len);
-void ignis_buf_reserve(IgnisBuffer *buf, size_t additional);
-void ignis_buf_clear(IgnisBuffer *buf);
-void ignis_buf_drop(IgnisBuffer *buf);

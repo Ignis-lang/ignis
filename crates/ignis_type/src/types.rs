@@ -38,7 +38,7 @@ pub enum Type {
   },
   Vector {
     element: TypeId,
-    size: Option<usize>,
+    size: usize,
   },
   Tuple(Vec<TypeId>),
 
@@ -92,7 +92,7 @@ struct ReferenceKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct VectorKey {
   element: TypeId,
-  size: Option<usize>,
+  size: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -216,7 +216,7 @@ impl TypeStore {
   pub fn vector(
     &mut self,
     element: TypeId,
-    size: Option<usize>,
+    size: usize,
   ) -> TypeId {
     let key = VectorKey { element, size };
     if let Some(&id) = self.vectors.get(&key) {
@@ -575,8 +575,7 @@ impl TypeStore {
 
       Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. } => true,
 
-      Type::Vector { element, size: Some(_) } => self.is_copy(element),
-      Type::Vector { size: None, .. } => false,
+      Type::Vector { element, .. } => self.is_copy(element),
 
       Type::String | Type::Infer => false,
 
@@ -598,7 +597,7 @@ impl TypeStore {
     &self,
     ty: &TypeId,
   ) -> bool {
-    matches!(self.get(ty), Type::String | Type::Vector { size: None, .. } | Type::Infer)
+    matches!(self.get(ty), Type::String | Type::Infer)
   }
 
   #[inline]
@@ -645,7 +644,9 @@ impl TypeStore {
             true
           } else {
             let field_types: Vec<TypeId> = rd.fields.iter().map(|f| f.type_id).collect();
-            field_types.iter().all(|t| self.is_copy_with_defs_inner(t, defs, visiting))
+            field_types
+              .iter()
+              .all(|t| self.is_copy_with_defs_inner(t, defs, visiting))
           }
         } else {
           true
@@ -668,7 +669,9 @@ impl TypeStore {
             true
           } else {
             let payload_types: Vec<TypeId> = ed.variants.iter().flat_map(|v| v.payload.iter().copied()).collect();
-            payload_types.iter().all(|t| self.is_copy_with_defs_inner(t, defs, visiting))
+            payload_types
+              .iter()
+              .all(|t| self.is_copy_with_defs_inner(t, defs, visiting))
           }
         } else {
           true
@@ -678,7 +681,7 @@ impl TypeStore {
         result
       },
 
-      Type::Vector { element, size: Some(_) } => self.is_copy_with_defs_inner(element, defs, visiting),
+      Type::Vector { element, .. } => self.is_copy_with_defs_inner(element, defs, visiting),
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_with_defs_inner(e, defs, visiting)),
 
       Type::Instance { generic, args } => {
@@ -746,7 +749,9 @@ impl TypeStore {
             true
           } else {
             let field_types: Vec<TypeId> = rd.fields.iter().map(|f| f.type_id).collect();
-            field_types.iter().any(|t| self.needs_drop_with_defs_inner(t, defs, visiting))
+            field_types
+              .iter()
+              .any(|t| self.needs_drop_with_defs_inner(t, defs, visiting))
           }
         } else {
           false
@@ -767,7 +772,9 @@ impl TypeStore {
             true
           } else {
             let payload_types: Vec<TypeId> = ed.variants.iter().flat_map(|v| v.payload.iter().copied()).collect();
-            payload_types.iter().any(|t| self.needs_drop_with_defs_inner(t, defs, visiting))
+            payload_types
+              .iter()
+              .any(|t| self.needs_drop_with_defs_inner(t, defs, visiting))
           }
         } else {
           false
@@ -791,14 +798,14 @@ impl TypeStore {
         args.iter().any(|a| self.needs_drop_with_defs_inner(a, defs, visiting))
       },
 
-      Type::String | Type::Vector { size: None, .. } | Type::Infer => true,
+      Type::String | Type::Infer => true,
 
       Type::Tuple(elems) => {
         let elems = elems.clone();
         elems.iter().any(|e| self.needs_drop_with_defs_inner(e, defs, visiting))
       },
 
-      Type::Vector { element, size: Some(_) } => {
+      Type::Vector { element, .. } => {
         let element = *element;
         self.needs_drop_with_defs_inner(&element, defs, visiting)
       },
@@ -1141,11 +1148,7 @@ pub fn format_type_name(
     },
 
     Type::Vector { element, size } => {
-      if let Some(s) = size {
-        format!("[{}; {}]", format_type_name(element, types, defs, symbols), s)
-      } else {
-        format!("[{}]", format_type_name(element, types, defs, symbols))
-      }
+      format!("[{}; {}]", format_type_name(element, types, defs, symbols), size)
     },
 
     Type::Tuple(elements) => {

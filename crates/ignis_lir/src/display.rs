@@ -410,11 +410,7 @@ impl<'a> LirPrinter<'a> {
         }
       },
       Type::Vector { element, size } => {
-        if let Some(s) = size {
-          format!("[{}; {}]", self.format_type(*element), s)
-        } else {
-          format!("[{}]", self.format_type(*element))
-        }
+        format!("[{}; {}]", self.format_type(*element), size)
       },
       Type::Tuple(elems) => {
         let parts: Vec<_> = elems.iter().map(|e| self.format_type(*e)).collect();

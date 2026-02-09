@@ -369,7 +369,7 @@ impl<'a> CEmitter<'a> {
 
     writeln!(self.output, "struct {} {{", name).unwrap();
 
-    if rd.fields.is_empty() {
+    if rd.fields.is_empty() && !rd.lang_traits.drop {
       // C doesn't allow empty structs, add a dummy field
       writeln!(self.output, "    char _empty;").unwrap();
     } else {
@@ -377,6 +377,10 @@ impl<'a> CEmitter<'a> {
         let field_ty = self.format_type(field.type_id);
         let field_attr_str = self.format_field_attrs(&field.attrs);
         writeln!(self.output, "    {} field_{}{};", field_ty, field.index, field_attr_str).unwrap();
+      }
+
+      if rd.lang_traits.drop {
+        writeln!(self.output, "    uint8_t __ignis_drop_state;").unwrap();
       }
     }
 
@@ -770,7 +774,7 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output, "    // Locals").unwrap();
     for (idx, local) in locals.iter().enumerate() {
       let name = local.name.as_deref().unwrap_or("_");
-      if let Type::Vector { element, size: Some(n) } = self.types.get(&local.ty) {
+      if let Type::Vector { element, size: n } = self.types.get(&local.ty) {
         let elem_ty = self.format_type(*element);
         writeln!(self.output, "    {} l{}[{}]; // {}", elem_ty, idx, n, name).unwrap();
       } else {
@@ -837,7 +841,7 @@ impl<'a> CEmitter<'a> {
         let local_info = func.locals.get(dest);
         let val = self.format_operand(func, value);
 
-        if let Type::Vector { size: Some(n), element } = self.types.get(&local_info.ty) {
+        if let Type::Vector { size: n, element } = self.types.get(&local_info.ty) {
           let elem_size = self.sizeof_type(*element);
           writeln!(self.output, "memcpy(l{}, {}, {} * {});", dest.index(), val, n, elem_size).unwrap();
         } else {
@@ -901,6 +905,8 @@ impl<'a> CEmitter<'a> {
         writeln!(self.output, "t{} = {}{};", dest.index(), op_str, o).unwrap();
       },
       Instr::Call { dest, callee, args } => {
+        self.emit_method_receiver_drop_guard(func, *callee, args);
+
         let name = self.def_name(*callee);
         let args_str: Vec<_> = args.iter().map(|a| self.format_operand(func, a)).collect();
 
@@ -909,6 +915,8 @@ impl<'a> CEmitter<'a> {
         } else {
           writeln!(self.output, "{}({});", name, args_str.join(", ")).unwrap();
         }
+
+        self.emit_manual_drop_state_update(func, *callee, args);
       },
       Instr::Cast {
         dest,
@@ -969,7 +977,7 @@ impl<'a> CEmitter<'a> {
       Instr::AddrOfLocal { dest, local, .. } => {
         // For array locals, the name already decays to a pointer in C
         let local_info = func.locals.get(local);
-        if matches!(self.types.get(&local_info.ty), Type::Vector { size: Some(_), .. }) {
+        if matches!(self.types.get(&local_info.ty), Type::Vector { .. }) {
           writeln!(self.output, "t{} = l{};", dest.index(), local.index()).unwrap();
         } else {
           writeln!(self.output, "t{} = &l{};", dest.index(), local.index()).unwrap();
@@ -1029,9 +1037,6 @@ impl<'a> CEmitter<'a> {
           Type::String => {
             writeln!(self.output, "ignis_string_drop(l{});", local.index()).unwrap();
           },
-          Type::Vector { size: None, .. } => {
-            writeln!(self.output, "ignis_buf_drop(l{});", local.index()).unwrap();
-          },
           Type::Record(_) => {
             self.emit_field_drops(&format!("l{}", local.index()), ty);
           },
@@ -1055,21 +1060,31 @@ impl<'a> CEmitter<'a> {
         ..
       } => {
         let b = self.format_operand(func, base);
-        // Check if base is a pointer type
-        let is_pointer = if let Some(base_ty) = self.operand_type(func, base) {
-          matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. })
-        } else {
-          false
-        };
+        let base_ty = self.operand_type(func, base);
+        let is_pointer = base_ty
+          .as_ref()
+          .is_some_and(|ty| matches!(self.types.get(ty), Type::Pointer { .. } | Type::Reference { .. }));
 
-        // Use -> for pointers, . for values
+        if let Some(base_ty) = base_ty
+          && self.resolve_droppable_record(base_ty).is_some()
+        {
+          let access = if is_pointer { format!("({})->", b) } else { format!("({}).", b) };
+          writeln!(
+            self.output,
+            "if ({}__ignis_drop_state) {{ fprintf(stderr, \"panic: use of dropped value\\n\"); exit(101); }}",
+            access
+          )
+          .unwrap();
+          write!(self.output, "    ").unwrap();
+        }
+
         if is_pointer {
           writeln!(self.output, "t{} = &(({})->field_{});", dest.index(), b, field_index).unwrap();
         } else {
           writeln!(self.output, "t{} = &(({}).field_{});", dest.index(), b, field_index).unwrap();
         }
       },
-      Instr::InitRecord { dest_ptr, fields, .. } => {
+      Instr::InitRecord { dest_ptr, fields, record_type } => {
         let p = self.format_operand(func, dest_ptr);
 
         for (field_idx, field_value) in fields {
@@ -1078,6 +1093,13 @@ impl<'a> CEmitter<'a> {
           }
           let v = self.format_operand(func, field_value);
           writeln!(self.output, "({})->field_{} = {};", p, field_idx, v).unwrap();
+        }
+
+        if self.resolve_droppable_record(*record_type).is_some() {
+          if !fields.is_empty() {
+            write!(self.output, "    ").unwrap();
+          }
+          writeln!(self.output, "({})->__ignis_drop_state = 0;", p).unwrap();
         }
       },
       Instr::InitEnumVariant {
@@ -1450,14 +1472,8 @@ impl<'a> CEmitter<'a> {
       Type::Error => "/* error */ void*".to_string(),
       Type::Pointer { inner, .. } => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
-      Type::Vector { element, size } => {
-        if size.is_some() {
-          // Fixed-size array decays to pointer in most contexts
-          format!("{}*", self.format_type(*element))
-        } else {
-          // Dynamic buffer
-          "IgnisBuffer*".to_string()
-        }
+      Type::Vector { element, .. } => {
+        format!("{}*", self.format_type(*element))
       },
       Type::Tuple(_) => "/* tuple */ void*".to_string(),
       Type::Function { .. } => "/* fn */ void*".to_string(),
@@ -1494,23 +1510,41 @@ impl<'a> CEmitter<'a> {
   }
 
   /// Find the `drop` instance method on a record definition.
+  ///
+  /// For non-generic records, the method is looked up via `instance_methods`.
+  /// For monomorphized records (where `instance_methods` is intentionally empty
+  /// post-mono), we fall back to scanning the LIR program's compiled functions
+  /// for a `Method` whose `owner_type` matches this record.
   fn find_drop_method(
     &self,
     def_id: DefinitionId,
   ) -> Option<DefinitionId> {
     let def = self.defs.get(&def_id);
 
-    let instance_methods = match &def.kind {
-      DefinitionKind::Record(rd) => &rd.instance_methods,
+    let rd = match &def.kind {
+      DefinitionKind::Record(rd) => rd,
       _ => return None,
     };
 
-    for (sym_id, entry) in instance_methods {
+    for (sym_id, entry) in &rd.instance_methods {
       if self.symbols.get(sym_id) == "drop" {
         return match entry {
           ignis_type::definition::SymbolEntry::Single(id) => Some(*id),
           ignis_type::definition::SymbolEntry::Overload(ids) => ids.first().copied(),
         };
+      }
+    }
+
+    if rd.lang_traits.drop && rd.instance_methods.is_empty() {
+      for (method_def_id, method_def) in self.defs.iter() {
+        if let DefinitionKind::Method(md) = &method_def.kind
+          && md.owner_type == def_id
+        {
+          let method_name = self.symbols.get(&method_def.name);
+          if method_name == "drop" || method_name.ends_with("__drop") {
+            return Some(method_def_id);
+          }
+        }
       }
     }
 
@@ -1531,14 +1565,25 @@ impl<'a> CEmitter<'a> {
         writeln!(self.output, "ignis_string_drop({});", expr).unwrap();
       },
 
-      Type::Vector { size: None, .. } => {
-        writeln!(self.output, "ignis_buf_drop({});", expr).unwrap();
-      },
-
       Type::Record(def_id) => {
+        let has_drop_trait = self.record_has_drop_trait(def_id);
+
         if let Some(method_def_id) = self.find_drop_method(def_id) {
+          if has_drop_trait {
+            // Guard: skip if already dropped (prevents double-drop at runtime)
+            writeln!(self.output, "if (!({}).__ignis_drop_state) {{", expr).unwrap();
+            write!(self.output, "    ").unwrap();
+          }
+
           let name = self.def_name(method_def_id);
           writeln!(self.output, "{}(&{});", name, expr).unwrap();
+
+          if has_drop_trait {
+            // Mark as dropped AFTER destructor executes (so drop body can access its own fields)
+            write!(self.output, "    ").unwrap();
+            writeln!(self.output, "({}).__ignis_drop_state = 1;", expr).unwrap();
+            writeln!(self.output, "}}").unwrap();
+          }
         } else {
           let field_info: Vec<(u32, TypeId)> = {
             let def = self.defs.get(&def_id);
@@ -1598,6 +1643,94 @@ impl<'a> CEmitter<'a> {
     }
 
     self.build_mangled_name(def_id)
+  }
+
+  /// Emit a receiver drop-state guard for non-static method calls.
+  fn emit_method_receiver_drop_guard(
+    &mut self,
+    func: &FunctionLir,
+    callee: DefinitionId,
+    args: &[Operand],
+  ) {
+    let callee_def = self.defs.get(&callee);
+    let owner_def_id = match &callee_def.kind {
+      DefinitionKind::Method(md) if !md.is_static => md.owner_type,
+      _ => return,
+    };
+
+    if !self.record_has_drop_trait(owner_def_id) {
+      return;
+    }
+
+    if let Some(recv_op) = args.first() {
+      let recv = self.format_operand(func, recv_op);
+      writeln!(
+        self.output,
+        "if (({})->__ignis_drop_state) {{ fprintf(stderr, \"panic: use of dropped value\\n\"); exit(101); }}",
+        recv
+      )
+      .unwrap();
+      write!(self.output, "    ").unwrap();
+    }
+  }
+
+  /// Mark the receiver as dropped after a manual `.drop()` call.
+  fn emit_manual_drop_state_update(
+    &mut self,
+    func: &FunctionLir,
+    callee: DefinitionId,
+    args: &[Operand],
+  ) {
+    let callee_def = self.defs.get(&callee);
+    let owner_def_id = match &callee_def.kind {
+      DefinitionKind::Method(md) if !md.is_static => md.owner_type,
+      _ => return,
+    };
+
+    if !self.record_has_drop_trait(owner_def_id) {
+      return;
+    }
+
+    let method_name = self.symbols.get(&callee_def.name);
+    if method_name != "drop" && !method_name.ends_with("__drop") {
+      return;
+    }
+
+    if let Some(recv_op) = args.first() {
+      let recv = self.format_operand(func, recv_op);
+      write!(self.output, "    ").unwrap();
+      writeln!(self.output, "({})->__ignis_drop_state = 1;", recv).unwrap();
+    }
+  }
+
+  /// Check if a record DefinitionId has `@implements(Drop)`.
+  fn record_has_drop_trait(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let def = self.defs.get(&def_id);
+    match &def.kind {
+      DefinitionKind::Record(rd) => rd.lang_traits.drop,
+      _ => false,
+    }
+  }
+
+  /// Resolve a type (possibly behind pointer/reference) to a droppable record.
+  fn resolve_droppable_record(
+    &self,
+    ty: TypeId,
+  ) -> Option<DefinitionId> {
+    match self.types.get(&ty).clone() {
+      Type::Record(def_id) => {
+        if self.record_has_drop_trait(def_id) {
+          Some(def_id)
+        } else {
+          None
+        }
+      },
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } => self.resolve_droppable_record(inner),
+      _ => None,
+    }
   }
 
   fn escape_ident(name: &str) -> String {
@@ -2107,6 +2240,10 @@ fn emit_record_definition_standalone(
     writeln!(output, "    {} field_{}{};", field_type, index, field_attr_str).unwrap();
   }
 
+  if rd.lang_traits.drop {
+    writeln!(output, "    uint8_t __ignis_drop_state;").unwrap();
+  }
+
   write!(output, "}}").unwrap();
   emit_record_attrs_standalone(&rd.attrs, output);
   writeln!(output, ";").unwrap();
@@ -2565,12 +2702,8 @@ pub fn format_c_type(
     Type::Reference { inner, .. } => {
       format!("{}*", format_c_type(types.get(inner), types, defs, symbols, namespaces))
     },
-    Type::Vector { element, size } => {
-      if size.is_some() {
-        format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
-      } else {
-        "IgnisBuffer*".to_string()
-      }
+    Type::Vector { element, .. } => {
+      format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
     },
     Type::Tuple(_) => "void*".to_string(),
     Type::Function { .. } => "void*".to_string(),

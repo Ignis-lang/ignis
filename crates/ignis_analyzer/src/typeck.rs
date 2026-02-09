@@ -304,8 +304,25 @@ impl<'a> Analyzer<'a> {
           return self.types.void();
         }
 
-        let (element_type, _size) = match self.types.get(&iter_type) {
-          Type::Vector { element, size } => (*element, *size),
+        let element_type = match self.types.get(&iter_type) {
+          Type::Vector { element, .. } => *element,
+          Type::Record(def_id) => {
+            let def_id = *def_id;
+            match self.extract_record_iterable_element_type(&def_id) {
+              Some(elem) => elem,
+              None => {
+                self.add_diagnostic(
+                  DiagnosticMessage::ForOfExpectsVector {
+                    got: self.format_type_for_error(&iter_type),
+                    span: self.node_span(&for_of.iter).clone(),
+                  }
+                  .report(),
+                );
+                self.scopes.pop();
+                return self.types.void();
+              },
+            }
+          },
           _ => {
             self.add_diagnostic(
               DiagnosticMessage::ForOfExpectsVector {
@@ -554,18 +571,16 @@ impl<'a> Analyzer<'a> {
         match self.types.get(&base_type).clone() {
           ignis_type::types::Type::Vector { element, size } => {
             // Compile-time bounds checking for constant indices
-            if let Some(array_size) = size {
-              if let Some(ConstValue::Int(index_val)) = self.const_eval_expression_node(&access.index, scope_kind) {
-                if index_val < 0 || (index_val as usize) >= array_size {
-                  self.add_diagnostic(
-                    DiagnosticMessage::IndexOutOfBounds {
-                      index: index_val,
-                      size: array_size,
-                      span: access.span.clone(),
-                    }
-                    .report(),
-                  );
-                }
+            if let Some(ConstValue::Int(index_val)) = self.const_eval_expression_node(&access.index, scope_kind) {
+              if index_val < 0 || (index_val as usize) >= size {
+                self.add_diagnostic(
+                  DiagnosticMessage::IndexOutOfBounds {
+                    index: index_val,
+                    size,
+                    span: access.span.clone(),
+                  }
+                  .report(),
+                );
               }
             }
             element
@@ -601,7 +616,7 @@ impl<'a> Analyzer<'a> {
           .and_then(|e| self.lookup_type(e).copied())
           .unwrap_or(self.types.error());
 
-        self.types.vector(elem_type, Some(vector.items.len()))
+        self.types.vector(elem_type, vector.items.len())
       },
       ASTExpression::Path(path) => {
         // Track path segment spans for hover support
@@ -1183,11 +1198,7 @@ impl<'a> Analyzer<'a> {
 
           None => {
             if entry.has_default {
-              let cloned_id = self.clone_trait_default_for_record(
-                &entry.method_def_id,
-                record_def_id,
-                record_span,
-              );
+              let cloned_id = self.clone_trait_default_for_record(&entry.method_def_id, record_def_id, record_span);
               if let DefinitionKind::Record(rd) = &mut self.defs.get_mut(record_def_id).kind {
                 rd.instance_methods.insert(entry.name, SymbolEntry::Single(cloned_id));
               }
@@ -1399,7 +1410,12 @@ impl<'a> Analyzer<'a> {
       }
 
       let infer = InferContext::expecting(return_type);
-      self.typecheck_node_with_infer(&body_node, ScopeKind::Function, &TypecheckContext::with_return(return_type), &infer);
+      self.typecheck_node_with_infer(
+        &body_node,
+        ScopeKind::Function,
+        &TypecheckContext::with_return(return_type),
+        &infer,
+      );
 
       self.scopes.pop();
       self.exit_type_params_scope(&cloned_id);
@@ -5531,7 +5547,15 @@ impl<'a> Analyzer<'a> {
       IgnisTypeSyntax::Null => self.types.error(),
       IgnisTypeSyntax::Vector(inner, size) => {
         let inner_type = self.resolve_type_syntax_impl(inner, span);
-        self.types.vector(inner_type, *size)
+        match size {
+          Some(n) => self.types.vector(inner_type, *n),
+          None => {
+            if let Some(s) = span {
+              self.add_diagnostic(DiagnosticMessage::DynamicVectorsNotSupported { span: s.clone() }.report());
+            }
+            self.types.error()
+          },
+        }
       },
       IgnisTypeSyntax::Tuple(elements) => {
         let element_types: Vec<_> = elements
@@ -5938,11 +5962,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       Type::Vector { element, size } => {
-        if let Some(s) = size {
-          format!("[{}; {}]", self.format_type_for_error(element), s)
-        } else {
-          format!("[{}]", self.format_type_for_error(element))
-        }
+        format!("[{}; {}]", self.format_type_for_error(element), size)
       },
       Type::Tuple(elements) => {
         let elem_strs: Vec<_> = elements.iter().map(|e| self.format_type_for_error(e)).collect();
@@ -6078,6 +6098,48 @@ impl<'a> Analyzer<'a> {
 
         element_type
       },
+    }
+  }
+
+  /// Checks whether a record type is iterable for `for..of`.
+  ///
+  /// A record is iterable if it has:
+  /// - A `data` field of pointer type (`*T` or `*mut T`)
+  /// - A `length` field of type `u64`
+  ///
+  /// Returns the element type `T` from the data pointer, or `None`.
+  fn extract_record_iterable_element_type(
+    &self,
+    def_id: &DefinitionId,
+  ) -> Option<TypeId> {
+    let rd = match &self.defs.get(def_id).kind {
+      DefinitionKind::Record(rd) => rd.clone(),
+      _ => return None,
+    };
+
+    let sym = self.symbols.borrow();
+    let data_sym = *sym.map.get("data")?;
+    let length_sym = *sym.map.get("length")?;
+
+    let mut data_element_type = None;
+    let mut has_length = false;
+
+    for field in &rd.fields {
+      if field.name == data_sym {
+        if let Type::Pointer { inner, .. } = self.types.get(&field.type_id) {
+          data_element_type = Some(*inner);
+        }
+      } else if field.name == length_sym {
+        if self.types.types_equal(&field.type_id, &self.types.u64()) {
+          has_length = true;
+        }
+      }
+    }
+
+    if has_length {
+      data_element_type
+    } else {
+      None
     }
   }
 

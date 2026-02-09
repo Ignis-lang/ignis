@@ -1248,11 +1248,31 @@ impl<'a> Monomorphizer<'a> {
     let subst = self.build_substitution(key);
 
     match key {
-      InstanceKey::Generic { def, .. } => {
+      InstanceKey::Generic { def, args } => {
         let generic_def = self.input_defs.get(def);
         let result = match &generic_def.kind.clone() {
           DefinitionKind::Function(fd) => self.instantiate_function(generic_def, fd, &subst, name_sym),
-          DefinitionKind::Record(rd) => self.instantiate_record(generic_def, rd, &subst, name_sym),
+          DefinitionKind::Record(rd) => {
+            let concrete_id = self.instantiate_record(generic_def, rd, &subst, name_sym);
+
+            if rd.lang_traits.drop {
+              let drop_sym = self.symbols.borrow().map.get("drop").copied();
+              if let Some(drop_sym) = drop_sym {
+                if let Some(entry) = rd.instance_methods.get(&drop_sym) {
+                  if let Some(&method_def_id) = entry.as_single() {
+                    self.enqueue(InstanceKey::Method {
+                      owner_def: *def,
+                      owner_args: args.clone(),
+                      method_def: method_def_id,
+                      method_args: vec![],
+                    });
+                  }
+                }
+              }
+            }
+
+            concrete_id
+          },
           DefinitionKind::Enum(ed) => self.instantiate_enum(generic_def, ed, &subst, name_sym),
           _ => panic!("unexpected generic def kind: {:?}", generic_def.kind),
         };
@@ -2287,10 +2307,7 @@ impl<'a> Monomorphizer<'a> {
         let prefix = if *mutable { "refmut" } else { "ref" };
         format!("{}_{}", prefix, self.mangle_type(*inner))
       },
-      Type::Vector { element, size } => match size {
-        Some(n) => format!("arr{}_{}", n, self.mangle_type(*element)),
-        None => format!("vec_{}", self.mangle_type(*element)),
-      },
+      Type::Vector { element, size } => format!("arr{}_{}", size, self.mangle_type(*element)),
       Type::Instance { generic, args } => {
         let base = Self::escape(&self.get_def_name(generic));
         let args_str = args.iter().map(|a| self.mangle_type(*a)).collect::<Vec<_>>().join("__");

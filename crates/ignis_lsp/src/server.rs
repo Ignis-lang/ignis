@@ -1886,11 +1886,7 @@ fn format_type(
       }
     },
     Type::Vector { element, size } => {
-      if let Some(s) = size {
-        format!("[{}; {}]", format_type(types, defs, symbol_names, element), s)
-      } else {
-        format!("[{}]", format_type(types, defs, symbol_names, element))
-      }
+      format!("[{}; {}]", format_type(types, defs, symbol_names, element), size)
     },
     Type::Tuple(elements) => {
       let elem_strs: Vec<_> = elements
