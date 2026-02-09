@@ -1830,6 +1830,7 @@ fn definition_to_doc_symbol_kind(kind: &ignis_type::definition::DefinitionKind) 
     DefinitionKind::Enum(_) => Some(SymbolKind::ENUM),
     DefinitionKind::Namespace(_) => Some(SymbolKind::NAMESPACE),
     DefinitionKind::TypeAlias(_) => Some(SymbolKind::INTERFACE),
+    DefinitionKind::Trait(_) => Some(SymbolKind::INTERFACE),
     DefinitionKind::Constant(_) => Some(SymbolKind::CONSTANT),
     DefinitionKind::Field(_) => Some(SymbolKind::FIELD),
     DefinitionKind::Variant(_) => Some(SymbolKind::ENUM_MEMBER),
@@ -2098,6 +2099,12 @@ fn format_definition_hover(
           payload_types.join(", ")
         )
       }
+    },
+
+    DefinitionKind::Trait(trait_def) => {
+      let type_params = format_type_params(&trait_def.type_params, defs, symbol_names);
+      let method_count = trait_def.methods.len();
+      format!("```ignis\ntrait {}{}\n```\n\n({} methods)", name, type_params, method_count)
     },
 
     DefinitionKind::Placeholder => {

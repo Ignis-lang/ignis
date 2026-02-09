@@ -571,3 +571,168 @@ function main(): void {
   );
   assert_snapshot!("extension_method_mut_on_mutable_hir", common::format_hir(&result));
 }
+
+// ============================================================================
+// Trait Tests
+// ============================================================================
+
+#[test]
+fn trait_basic_required_method() {
+  let result = common::analyze(
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+@implements(Greetable)
+record Person {
+    public age: i32;
+
+    greet(&self): i32 {
+        return self.age;
+    }
+}
+
+function main(): void {
+    let p: Person = Person { age: 30 };
+    let _x: i32 = p.greet();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "trait_basic_required_method_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("trait_basic_required_method_hir", common::format_hir(&result));
+}
+
+#[test]
+fn trait_default_method() {
+  let result = common::analyze(
+    r#"
+trait Describable {
+    describe(&self): i32 {
+        return 0;
+    }
+}
+
+@implements(Describable)
+record Item {
+    public value: i32;
+}
+
+function main(): void {
+    let item: Item = Item { value: 5 };
+    let _x: i32 = item.describe();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "trait_default_method_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("trait_default_method_hir", common::format_hir(&result));
+}
+
+#[test]
+fn trait_default_method_override() {
+  let result = common::analyze(
+    r#"
+trait Describable {
+    describe(&self): i32 {
+        return 0;
+    }
+}
+
+@implements(Describable)
+record Item {
+    public value: i32;
+
+    describe(&self): i32 {
+        return self.value;
+    }
+}
+
+function main(): void {
+    let item: Item = Item { value: 42 };
+    let _x: i32 = item.describe();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "trait_default_method_override_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("trait_default_method_override_hir", common::format_hir(&result));
+}
+
+#[test]
+fn trait_multiple_implements() {
+  let result = common::analyze(
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+trait Describable {
+    describe(&self): i32;
+}
+
+@implements(Greetable)
+@implements(Describable)
+record Person {
+    public age: i32;
+
+    greet(&self): i32 {
+        return self.age;
+    }
+
+    describe(&self): i32 {
+        return self.age + 1;
+    }
+}
+
+function main(): void {
+    let p: Person = Person { age: 25 };
+    let _a: i32 = p.greet();
+    let _b: i32 = p.describe();
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "trait_multiple_implements_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("trait_multiple_implements_hir", common::format_hir(&result));
+}
+
+#[test]
+fn trait_in_namespace() {
+  let result = common::analyze(
+    r#"
+namespace Graphics {
+    trait Renderable {
+        render(&self): i32;
+    }
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "trait_in_namespace_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("trait_in_namespace_hir", common::format_hir(&result));
+}

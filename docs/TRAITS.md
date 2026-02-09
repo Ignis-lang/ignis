@@ -1,10 +1,15 @@
 # Traits and Extension Methods
 
-Ignis has a lightweight trait system for core compiler behaviors (Copy, Drop, Clone) and an extension method system for adding methods to existing types.
+Ignis now has two trait layers:
+
+1. **Lang traits** (`Drop`, `Clone`, `Copy`) used by ownership and codegen.
+2. **User-defined traits** (`trait Name { ... }`) used as method contracts on records.
+
+It also has an extension method system (`@extension`) for adding methods to existing types.
 
 ## Lang Traits
 
-Lang traits are built-in traits that the compiler understands and uses for code generation. They are declared on records with the `@implements` attribute.
+Lang traits are built-in traits that the compiler understands and uses for code generation. They are declared with `@implements(...)`.
 
 ### Available Lang Traits
 
@@ -14,7 +19,7 @@ Lang traits are built-in traits that the compiler understands and uses for code 
 | `Clone` | `clone(&self): Self` | Explicit duplication via `.clone()` |
 | `Copy` | *(none)* | Value is copied (not moved) on assignment |
 
-Lang traits are not user-extensible -- you cannot define new traits. They exist solely to hook into the compiler's ownership and copy semantics.
+Lang traits are fixed and compiler-defined. User-defined traits are a separate feature covered below.
 
 ### `@implements(Drop)`
 
@@ -73,6 +78,93 @@ record Pair {
 ```
 
 In practice, `@implements(Copy)` is rarely needed because the compiler already derives Copy structurally for records where all fields are Copy. The explicit annotation is for cases where you want to make the intent clear or override the compiler's analysis.
+
+---
+
+## User-Defined Traits
+
+User-defined traits describe behavior that records must provide.
+
+### Declaring a Trait
+
+```ignis
+trait Describable {
+    describe(&self): i32;
+
+    code(&self): i32 {
+        return 0;
+    }
+}
+```
+
+Rules:
+- Trait methods use the same style as record/enum methods: `name(...)` (no `function` required).
+- A method ending with `;` is required (no body).
+- A method with `{ ... }` is a default method.
+- Trait methods must be instance methods (`&self` or `&mut self`).
+- Static methods are not allowed in traits.
+- Fields are not allowed in traits.
+- Traits are allowed at top level and inside `namespace` blocks.
+- Traits are not allowed inside `extern` blocks.
+
+### Implementing a Trait
+
+Use `@implements(TraitName)` on a record:
+
+```ignis
+trait Greetable {
+    greet(&self): i32;
+}
+
+@implements(Greetable)
+record Person {
+    public age: i32;
+
+    greet(&self): i32 {
+        return self.age;
+    }
+}
+```
+
+You can implement multiple traits either by repeating the attribute or by passing multiple names in one `@implements(...)`.
+
+### Default Methods
+
+If a record does not define a method that has a default body in the trait, the compiler uses that default body for the record.
+
+```ignis
+trait HasValue {
+    getValue(&self): i32;
+
+    doubled(&self): i32 {
+        return self.getValue() * 2;
+    }
+}
+
+@implements(HasValue)
+record Box {
+    public value: i32;
+
+    getValue(&self): i32 {
+        return self.value;
+    }
+}
+```
+
+### Signature Validation
+
+When a record method implements a trait method, the signature must match exactly:
+
+- `&self` vs `&mut self`
+- Number of explicit parameters
+- Parameter types
+- Return type
+
+If a required trait method is missing, compilation fails.
+
+### Current Limit
+
+User-defined trait implementation checks are currently applied to records. Enums continue using lang traits only.
 
 ---
 
@@ -304,6 +396,7 @@ When `std = false` (standalone mode), prelude modules are not loaded and these m
 | `@implements(Drop)` | Declare custom drop behavior |
 | `@implements(Clone)` | Declare explicit clone method |
 | `@implements(Copy)` | Force copy semantics |
+| `@implements(MyTrait)` | Declare a user-defined trait implementation on a record |
 
 ### Function Attributes
 
@@ -341,8 +434,8 @@ Available lints: `unused_variable`, `unused_import`, `deprecated`.
 |------|---------|----------|
 | A0076 | Cannot call mutating method on immutable variable | Error |
 | A0130 | Unknown lang trait 'Name' | Error |
-| A0131 | Missing required method for lang trait | Error |
-| A0132 | Drop and Copy cannot coexist on same type | Error |
+| A0131 | Drop and Copy cannot coexist on same type | Error |
+| A0132 | Missing required method for lang trait | Error |
 | A0133 | Invalid signature for lang trait method | Error |
 | A0134 | Lang trait not applicable to this type | Error |
 | A0135 | Invalid target type for @extension | Error |
@@ -350,3 +443,10 @@ Available lints: `unused_variable`, `unused_import`, `deprecated`.
 | A0137 | Extension receiver type mismatch | Error |
 | A0138 | Cannot call extension method on literal | Error |
 | A0139 | Cannot call extension method on temporary | Error |
+| A0140 | Trait requires a method that the record does not implement | Error |
+| A0141 | Method signature does not match trait definition | Error |
+| A0142 | Unknown trait in `@implements(...)` | Error |
+| A0143 | Traits cannot be declared in `extern` blocks | Error |
+| A0144 | Trait method must have `&self` or `&mut self` | Error |
+| A0145 | Fields are not allowed in trait declarations | Error |
+| A0146 | Static methods are not allowed in trait declarations | Error |

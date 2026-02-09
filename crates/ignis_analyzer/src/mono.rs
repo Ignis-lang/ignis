@@ -1390,6 +1390,7 @@ impl<'a> Monomorphizer<'a> {
         static_fields: rd.static_fields.clone(),
         attrs: rd.attrs.clone(),
         lang_traits: rd.lang_traits,
+        implemented_traits: rd.implemented_traits.clone(),
       }),
     );
 

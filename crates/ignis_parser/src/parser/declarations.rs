@@ -5,7 +5,7 @@ use ignis_ast::{
   metadata::ASTMetadata,
   statements::{
     ASTStatement, ASTEnum, ASTEnumField, ASTEnumItem, ASTEnumVariant, ASTMethod, ASTRecord, ASTRecordField,
-    ASTRecordItem, ASTTypeAlias,
+    ASTRecordItem, ASTTrait, ASTTraitMethod, ASTTypeAlias,
     const_statement::ASTConstant,
     export_statement::ASTExport,
     extern_statement::ASTExtern,
@@ -162,6 +162,7 @@ impl super::IgnisParser {
       TokenType::Type => self.parse_type_alias_declaration(),
       TokenType::Record => self.parse_record_declaration(),
       TokenType::Enum => self.parse_enum_declaration(),
+      TokenType::Trait => self.parse_trait_declaration(),
       TokenType::Eof => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -378,6 +379,7 @@ impl super::IgnisParser {
       || self.at(TokenType::Type)
       || self.at(TokenType::Record)
       || self.at(TokenType::Enum)
+      || self.at(TokenType::Trait)
     {
       let declaration = self.parse_declaration_inner_after_export()?;
       let span = Span::merge(&keyword.span, self.get_span(&declaration));
@@ -410,6 +412,7 @@ impl super::IgnisParser {
       TokenType::Type => self.parse_type_alias_declaration(),
       TokenType::Record => self.parse_record_declaration(),
       TokenType::Enum => self.parse_enum_declaration(),
+      TokenType::Trait => self.parse_trait_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -429,6 +432,12 @@ impl super::IgnisParser {
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
       // Skip comments and capture doc comments before each item
       self.skip_comments();
+
+      if self.at(TokenType::Trait) {
+        return Err(DiagnosticMessage::TraitInExternBlock {
+          span: self.peek().span.clone(),
+        });
+      }
 
       let item = match self.peek().type_ {
         TokenType::Function => self.parse_function_signature_only()?,
@@ -490,6 +499,7 @@ impl super::IgnisParser {
       TokenType::Type => self.parse_type_alias_declaration(),
       TokenType::Record => self.parse_record_declaration(),
       TokenType::Enum => self.parse_enum_declaration(),
+      TokenType::Trait => self.parse_trait_declaration(),
       _ => Err(DiagnosticMessage::UnexpectedToken {
         at: self.peek().span.clone(),
       }),
@@ -804,6 +814,128 @@ impl super::IgnisParser {
     let span = Span::merge(&name_token.span, &end.span);
 
     Ok(ASTRecordField::new(name, name_span, type_, value, modifiers, span, doc, attrs))
+  }
+
+  /// trait Name<T> { methods }
+  fn parse_trait_declaration(&mut self) -> ParserResult<NodeId> {
+    let doc = self.take_pending_doc();
+    let attrs = self.take_pending_attrs();
+
+    let start = self.expect(TokenType::Trait)?.span.clone();
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    let type_params = self.parse_optional_generic_params()?;
+
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut methods = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      let (modifiers, member_doc, member_inline, member_attrs) = self.parse_member_modifiers()?;
+
+      // Trait methods may use the `function` keyword (optional)
+      let has_function_keyword = self.eat(TokenType::Function);
+
+      if !self.at(TokenType::Identifier) {
+        return Err(DiagnosticMessage::UnexpectedToken {
+          at: self.peek().span.clone(),
+        });
+      }
+
+      // In traits, only methods are allowed (no fields).
+      // Lookahead: identifier followed by `:` is a field (error).
+      // Only applies when `function` keyword was NOT used.
+      let next = self.peek_nth(1).type_;
+      if !has_function_keyword && next == TokenType::Colon {
+        let field_span = self.peek().span.clone();
+        self.diagnostics.push(
+          DiagnosticMessage::TraitFieldNotAllowed { span: field_span },
+        );
+        // Skip to semicolon or next item for recovery
+        while !self.at(TokenType::SemiColon) && !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+          self.bump();
+        }
+        self.eat(TokenType::SemiColon);
+        continue;
+      }
+
+      let method = self.parse_trait_method(modifiers, member_doc, member_inline, member_attrs)?;
+      methods.push(method);
+    }
+
+    let end = self.expect(TokenType::RightBrace)?.clone();
+    let span = Span::merge(&start, &end.span);
+
+    Ok(self.allocate_statement(ASTStatement::Trait(ASTTrait::new(name, type_params, methods, span, doc, attrs))))
+  }
+
+  /// Trait method declaration (without `function` keyword).
+  ///
+  /// Required: `name(&self, params): returnType;`
+  /// Default: `name(&self, params): returnType { body }`
+  fn parse_trait_method(
+    &mut self,
+    _modifiers: ASTMetadata,
+    doc: Option<String>,
+    inline_mode: InlineMode,
+    attrs: Vec<ASTAttribute>,
+  ) -> ParserResult<ASTTraitMethod> {
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+
+    let type_params = self.parse_optional_generic_params()?;
+
+    self.expect(TokenType::LeftParen)?;
+
+    let self_param = self.try_parse_self_param();
+
+    // If we parsed self and there are more params, consume the comma
+    if self_param.is_some() && self.at(TokenType::Comma) {
+      self.bump();
+    }
+
+    let mut parameters = Vec::new();
+    while !self.at(TokenType::RightParen) && !self.at(TokenType::Eof) {
+      parameters.push(self.parse_parameter()?);
+      if !self.eat(TokenType::Comma) {
+        break;
+      }
+    }
+
+    self.expect(TokenType::RightParen)?;
+
+    let return_type = if self.eat(TokenType::Colon) {
+      self.parse_type_syntax()?
+    } else {
+      IgnisTypeSyntax::Void
+    };
+
+    // Semicolon = required method, block = default method
+    let (body, end_span) = if self.at(TokenType::LeftBrace) {
+      let body_id = self.parse_block()?;
+      let span = self.get_span(&body_id).clone();
+      (Some(body_id), span)
+    } else {
+      let semi = self.expect(TokenType::SemiColon)?.clone();
+      (None, semi.span)
+    };
+
+    let span = Span::merge(&name_token.span, &end_span);
+
+    Ok(ASTTraitMethod::new(
+      name,
+      name_token.span.clone(),
+      type_params,
+      parameters,
+      return_type,
+      body,
+      self_param,
+      span,
+      doc,
+      inline_mode,
+      attrs,
+    ))
   }
 
   /// enum Name<T> { variants, methods, fields }

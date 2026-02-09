@@ -123,6 +123,8 @@ pub struct Analyzer<'a> {
   imported_defs: HashMap<DefinitionId, ignis_type::span::Span>,
   lint_overrides: Vec<(LintId, LintLevel)>,
   extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
+  trait_default_bodies: HashMap<DefinitionId, NodeId>,
+  trait_default_clones: HashMap<DefinitionId, NodeId>,
 }
 
 pub struct AnalyzerOutput {
@@ -211,6 +213,8 @@ impl<'a> Analyzer<'a> {
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
       extension_methods: HashMap::new(),
+      trait_default_bodies: HashMap::new(),
+      trait_default_clones: HashMap::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
     analyzer
@@ -312,6 +316,8 @@ impl<'a> Analyzer<'a> {
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
       extension_methods: std::mem::take(shared_extension_methods),
+      trait_default_bodies: HashMap::new(),
+      trait_default_clones: HashMap::new(),
     };
     analyzer.runtime = Some(analyzer.register_runtime_builtins());
 
@@ -611,7 +617,8 @@ impl<'a> Analyzer<'a> {
       | ASTStatement::Constant(_)
       | ASTStatement::TypeAlias(_)
       | ASTStatement::Record(_)
-      | ASTStatement::Enum(_) => {
+      | ASTStatement::Enum(_)
+      | ASTStatement::Trait(_) => {
         self.define_decl_in_current_scope(node_id);
       },
       ASTStatement::Extern(extern_stmt) => {

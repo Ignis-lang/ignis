@@ -102,6 +102,7 @@ pub enum DefinitionKind {
   TypeParam(TypeParamDefinition),
   Field(FieldDefinition),
   Variant(VariantDefinition),
+  Trait(TraitDefinition),
   /// Placeholder for forward references during monomorphization
   Placeholder,
 }
@@ -159,6 +160,7 @@ pub struct RecordDefinition {
   pub static_fields: HashMap<SymbolId, DefinitionId>,
   pub attrs: Vec<RecordAttr>,
   pub lang_traits: LangTraitSet,
+  pub implemented_traits: Vec<DefinitionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -219,6 +221,20 @@ pub struct MethodDefinition {
   pub self_mutable: bool,
   pub inline_mode: InlineMode,
   pub attrs: Vec<FunctionAttr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitDefinition {
+  pub type_params: Vec<DefinitionId>,
+  pub methods: Vec<TraitMethodEntry>,
+  pub type_id: TypeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraitMethodEntry {
+  pub name: SymbolId,
+  pub method_def_id: DefinitionId,
+  pub has_default: bool,
 }
 
 /// Definition of a type parameter (T, U, etc.)
@@ -289,6 +305,7 @@ impl DefinitionStore {
       DefinitionKind::Record(rd) => Some(&rd.type_id),
       DefinitionKind::Enum(ed) => Some(&ed.type_id),
       DefinitionKind::Method(md) => Some(&md.return_type),
+      DefinitionKind::Trait(td) => Some(&td.type_id),
       DefinitionKind::Namespace(_) | DefinitionKind::TypeParam(_) | DefinitionKind::Placeholder => None,
     }
   }

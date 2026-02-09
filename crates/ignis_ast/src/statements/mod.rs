@@ -18,6 +18,7 @@ pub mod import_statement;
 pub mod namespace_statement;
 pub mod record;
 pub mod return_statement;
+pub mod trait_declaration;
 pub mod type_alias;
 pub mod variable;
 pub mod while_statement;
@@ -38,6 +39,7 @@ pub use import_statement::{ASTImport, ASTImportItem};
 pub use namespace_statement::ASTNamespace;
 pub use record::{ASTMethod, ASTRecord, ASTRecordField, ASTRecordItem};
 pub use return_statement::ASTReturn;
+pub use trait_declaration::{ASTTrait, ASTTraitMethod};
 pub use type_alias::ASTTypeAlias;
 pub use variable::ASTVariable;
 pub use while_statement::ASTWhile;
@@ -64,6 +66,7 @@ pub enum ASTStatement {
   TypeAlias(ASTTypeAlias),
   Record(ASTRecord),
   Enum(ASTEnum),
+  Trait(ASTTrait),
 }
 
 impl ASTStatement {
@@ -89,6 +92,7 @@ impl ASTStatement {
       ASTStatement::TypeAlias(ta) => &ta.span,
       ASTStatement::Record(rec) => &rec.span,
       ASTStatement::Enum(en) => &en.span,
+      ASTStatement::Trait(tr) => &tr.span,
     }
   }
 }

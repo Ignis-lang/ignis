@@ -2175,3 +2175,206 @@ function main(): i32 {
 "#,
   );
 }
+
+// ============================================================================
+// Trait Tests
+// ============================================================================
+
+#[test]
+fn e2e_trait_basic() {
+  e2e_test(
+    "trait_basic",
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+@implements(Greetable)
+record Person {
+    public age: i32;
+
+    greet(&self): i32 {
+        return self.age;
+    }
+}
+
+function main(): i32 {
+    let p: Person = Person { age: 42 };
+    return p.greet();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_trait_default_method() {
+  e2e_test(
+    "trait_default_method",
+    r#"
+trait Describable {
+    describe(&self): i32 {
+        return 99;
+    }
+}
+
+@implements(Describable)
+record Item {
+    public value: i32;
+}
+
+function main(): i32 {
+    let item: Item = Item { value: 5 };
+    return item.describe();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_trait_override_default() {
+  e2e_test(
+    "trait_override_default",
+    r#"
+trait Describable {
+    describe(&self): i32 {
+        return 0;
+    }
+}
+
+@implements(Describable)
+record Item {
+    public value: i32;
+
+    describe(&self): i32 {
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let item: Item = Item { value: 42 };
+    return item.describe();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_trait_default_method_uses_self() {
+  e2e_test(
+    "trait_default_method_uses_self",
+    r#"
+trait HasValue {
+    getValue(&self): i32;
+
+    doubled(&self): i32 {
+        return self.getValue() * 2;
+    }
+}
+
+@implements(HasValue)
+record Box {
+    public value: i32;
+
+    getValue(&self): i32 {
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let b: Box = Box { value: 21 };
+    return b.doubled();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_trait_two_records_same_default() {
+  e2e_test(
+    "trait_two_records_same_default",
+    r#"
+trait Answerable {
+    answer(&self): i32 {
+        return 42;
+    }
+}
+
+@implements(Answerable)
+record Alpha {
+    public x: i32;
+}
+
+@implements(Answerable)
+record Beta {
+    public y: i32;
+}
+
+function main(): i32 {
+    let a: Alpha = Alpha { x: 1 };
+    let b: Beta = Beta { y: 2 };
+    return a.answer() + b.answer() - 42;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_trait_method_with_params() {
+  e2e_test(
+    "trait_method_with_params",
+    r#"
+trait Addable {
+    addTo(&self, other: i32): i32;
+}
+
+@implements(Addable)
+record Counter {
+    public count: i32;
+
+    addTo(&self, other: i32): i32 {
+        return self.count + other;
+    }
+}
+
+function main(): i32 {
+    let c: Counter = Counter { count: 30 };
+    return c.addTo(12);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_trait_multiple_traits() {
+  e2e_test(
+    "trait_multiple_traits",
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+trait Describable {
+    describe(&self): i32;
+}
+
+@implements(Greetable)
+@implements(Describable)
+record Person {
+    public age: i32;
+
+    greet(&self): i32 {
+        return self.age;
+    }
+
+    describe(&self): i32 {
+        return self.age + 1;
+    }
+}
+
+function main(): i32 {
+    let p: Person = Person { age: 20 };
+    return p.greet() + p.describe();
+}
+"#,
+  );
+}

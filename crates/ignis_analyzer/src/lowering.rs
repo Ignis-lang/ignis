@@ -39,6 +39,23 @@ impl<'a> Analyzer<'a> {
       self.lower_node_to_hir(root, &mut hir, ScopeKind::Global);
     }
 
+    // Lower trait default method bodies per-implementing record.
+    // Each cloned method gets its own freshly lowered HIR body with correct `self` type.
+    let clones: Vec<_> = self.trait_default_clones.iter().map(|(&k, &v)| (k, v)).collect();
+    for (cloned_id, body_node) in clones {
+      self.enter_type_params_scope_for_method(&cloned_id);
+      self.scopes.push(ScopeKind::Function);
+      self.define_function_params_in_scope(&cloned_id);
+
+      let body_hir_id = self.lower_node_to_hir(&body_node, &mut hir, ScopeKind::Function);
+
+      self.scopes.pop();
+      self.exit_type_params_scope_for_method(&cloned_id);
+
+      hir.function_bodies.insert(cloned_id, body_hir_id);
+      hir.items.push(cloned_id);
+    }
+
     hir
   }
 
@@ -368,6 +385,9 @@ impl<'a> Analyzer<'a> {
         // Lower enum methods to HIR
         self.lower_enum_methods(enum_, hir, scope_kind)
       },
+      ASTStatement::Trait(tr) => {
+        self.lower_trait_methods(tr, hir, scope_kind)
+      },
       ASTStatement::ForOf(for_of) => self.lower_for_of(node_id, for_of, hir),
       _ => hir.alloc(HIRNode {
         kind: HIRKind::Block {
@@ -546,6 +566,24 @@ impl<'a> Analyzer<'a> {
         expression: None,
       },
       span: enum_.span.clone(),
+      type_id: self.types.void(),
+    })
+  }
+
+  /// Trait declarations produce no HIR. Default method bodies are lowered
+  /// per-implementing record in the post-lowering step (via `trait_default_clones`).
+  fn lower_trait_methods(
+    &mut self,
+    tr: &ignis_ast::statements::ASTTrait,
+    hir: &mut HIR,
+    _scope_kind: ScopeKind,
+  ) -> HIRId {
+    hir.alloc(HIRNode {
+      kind: HIRKind::Block {
+        statements: Vec::new(),
+        expression: None,
+      },
+      span: tr.span.clone(),
       type_id: self.types.void(),
     })
   }

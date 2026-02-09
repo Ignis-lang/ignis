@@ -1375,3 +1375,142 @@ function main(): void {
     &["A0139"],
   );
 }
+
+// ============================================================================
+// Trait Error Tests
+// ============================================================================
+
+#[test]
+fn trait_missing_required_method() {
+  common::assert_err(
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+@implements(Greetable)
+record Person {
+    public age: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0140"],
+  );
+}
+
+#[test]
+fn trait_method_signature_mismatch() {
+  common::assert_err(
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+@implements(Greetable)
+record Person {
+    public age: i32;
+
+    greet(&self): void {
+        return;
+    }
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0141"],
+  );
+}
+
+#[test]
+fn trait_unknown_in_implements() {
+  common::assert_err(
+    r#"
+@implements(NonexistentTrait)
+record Foo {
+    public x: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0142"],
+  );
+}
+
+#[test]
+fn trait_in_extern_block() {
+  let result = common::analyze_allowing_parse_errors(
+    r#"
+extern C {
+    trait Foo {
+        bar(&self): void;
+    }
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  let codes: Vec<_> = result
+    .output
+    .diagnostics
+    .iter()
+    .map(|d| d.error_code.as_str())
+    .collect();
+  assert!(
+    codes.contains(&"A0143"),
+    "Expected A0143 (TraitInExternBlock), got: {:?}",
+    codes
+  );
+}
+
+#[test]
+fn trait_with_field() {
+  let result = common::analyze_allowing_parse_errors(
+    r#"
+trait Foo {
+    x: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  let codes: Vec<_> = result
+    .output
+    .diagnostics
+    .iter()
+    .map(|d| d.error_code.as_str())
+    .collect();
+  assert!(
+    codes.contains(&"A0145"),
+    "Expected A0145 (TraitFieldNotAllowed), got: {:?}",
+    codes
+  );
+}
+
+#[test]
+fn trait_static_method() {
+  common::assert_err(
+    r#"
+trait Foo {
+    bar(): void;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0146"],
+  );
+}

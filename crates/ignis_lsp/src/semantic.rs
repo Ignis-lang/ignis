@@ -402,6 +402,14 @@ fn classify_definition(
       (TokenTypeIndex::EnumMember as u32, modifiers)
     },
 
+    DefinitionKind::Trait(_) => {
+      let mut modifiers = 0;
+      if is_declaration {
+        modifiers |= ModifierIndex::Declaration.bit();
+      }
+      (TokenTypeIndex::Type as u32, modifiers)
+    },
+
     DefinitionKind::Placeholder => (TokenTypeIndex::Variable as u32, 0),
   }
 }

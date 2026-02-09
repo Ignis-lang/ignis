@@ -173,6 +173,16 @@ pub fn dump_defs(
         )
         .unwrap();
       },
+      DefinitionKind::Trait(trait_def) => {
+        writeln!(
+          &mut output,
+          "  DefId({:?}): trait {} ({} methods)",
+          def_id,
+          name,
+          trait_def.methods.len()
+        )
+        .unwrap();
+      },
       DefinitionKind::Placeholder => {
         writeln!(&mut output, "  DefId({:?}): <placeholder>", def_id).unwrap();
       },

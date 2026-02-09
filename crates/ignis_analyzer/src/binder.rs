@@ -10,6 +10,7 @@ use ignis_ast::{
     enum_::{ASTEnum, ASTEnumItem},
     function::ASTFunction,
     record::{ASTMethod, ASTRecord, ASTRecordItem},
+    trait_declaration::ASTTrait,
     type_alias::ASTTypeAlias,
     variable::ASTVariable,
     ASTStatement,
@@ -22,8 +23,8 @@ use ignis_type::{
   definition::{
     ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
     FunctionDefinition, LangTraitSet, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition,
-    RecordFieldDef, SymbolEntry, TypeAliasDefinition, TypeParamDefinition, VariableDefinition, VariantDefinition,
-    Visibility,
+    RecordFieldDef, SymbolEntry, TraitDefinition, TraitMethodEntry, TypeAliasDefinition, TypeParamDefinition,
+    VariableDefinition, VariantDefinition, Visibility,
   },
 };
 
@@ -70,6 +71,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::TypeAlias(ta) => self.bind_type_alias_predecl(node_id, ta),
       ASTStatement::Record(rec) => self.bind_record_predecl(node_id, rec),
       ASTStatement::Enum(en) => self.bind_enum_predecl(node_id, en),
+      ASTStatement::Trait(tr) => self.bind_trait_predecl(node_id, tr),
       ASTStatement::Namespace(ns_stmt) => {
         // Recursively predeclare types in namespace
         self.bind_namespace_predecl(node_id, ns_stmt);
@@ -121,6 +123,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::TypeAlias(ta) => self.bind_type_alias_complete(node_id, ta),
       ASTStatement::Record(rec) => self.bind_record_complete(node_id, rec),
       ASTStatement::Enum(en) => self.bind_enum_complete(node_id, en),
+      ASTStatement::Trait(tr) => self.bind_trait_complete(node_id, tr),
       ASTStatement::Extern(extern_stmt) => {
         self.bind_extern(node_id, extern_stmt);
       },
@@ -209,6 +212,7 @@ impl<'a> Analyzer<'a> {
         static_fields: HashMap::new(),
         attrs: vec![],
         lang_traits: LangTraitSet::default(),
+        implemented_traits: Vec::new(),
       }),
       name: rec.name,
       span: rec.span.clone(),
@@ -255,7 +259,7 @@ impl<'a> Analyzer<'a> {
     };
 
     let type_name = self.get_symbol_name(&rec.name);
-    let (record_attrs, lang_traits) = self.bind_record_attrs(&rec.attrs, &type_name);
+    let (record_attrs, lang_traits, implemented_traits) = self.bind_record_attrs(&rec.attrs, &type_name);
 
     // Create the Type::Record and update the definition's type_id
     let type_id = self.types.record(record_def_id);
@@ -365,6 +369,7 @@ impl<'a> Analyzer<'a> {
       rd.static_fields = static_fields;
       rd.attrs = record_attrs;
       rd.lang_traits = lang_traits;
+      rd.implemented_traits = implemented_traits;
     }
   }
 
@@ -435,7 +440,7 @@ impl<'a> Analyzer<'a> {
     };
 
     let type_name = self.get_symbol_name(&en.name);
-    let (enum_attrs, lang_traits) = self.bind_record_attrs(&en.attrs, &type_name);
+    let (enum_attrs, lang_traits, _implemented_traits) = self.bind_record_attrs(&en.attrs, &type_name);
 
     // Create the Type::Enum and update the definition's type_id
     let type_id = self.types.enum_type(enum_def_id);
@@ -620,6 +625,171 @@ impl<'a> Analyzer<'a> {
     self.scopes.pop(); // Pop function scope
 
     // Pop method's generic scope (does nothing if no type params)
+    self.pop_type_params_scope(method.type_params.as_ref());
+
+    method_def_id
+  }
+
+  // ========================================================================
+  // Trait Binding
+  // ========================================================================
+
+  fn bind_trait_predecl(
+    &mut self,
+    node_id: &NodeId,
+    tr: &ASTTrait,
+  ) {
+    let def = Definition {
+      kind: DefinitionKind::Trait(TraitDefinition {
+        type_params: Vec::new(),
+        methods: Vec::new(),
+        type_id: self.types.error(),
+      }),
+      name: tr.name,
+      span: tr.span.clone(),
+      name_span: tr.span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+      doc: tr.doc.clone(),
+    };
+
+    let def_id = self.defs.alloc(def);
+    self.set_def(node_id, &def_id);
+
+    let type_param_defs = self.bind_type_params(tr.type_params.as_ref(), def_id);
+    self.pop_type_params_scope(tr.type_params.as_ref());
+
+    if let DefinitionKind::Trait(td) = &mut self.defs.get_mut(&def_id).kind {
+      td.type_params = type_param_defs;
+    }
+
+    if let Err(existing) = self.scopes.define(&tr.name, &def_id, false) {
+      let existing_def = self.defs.get(&existing);
+      let symbol = self.get_symbol_name(&existing_def.name);
+      self.add_diagnostic(
+        DiagnosticMessage::TypeAlreadyDefined {
+          name: symbol,
+          span: tr.span.clone(),
+          previous_span: existing_def.span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
+
+  fn bind_trait_complete(
+    &mut self,
+    node_id: &NodeId,
+    tr: &ASTTrait,
+  ) {
+    let Some(trait_def_id) = self.lookup_def(node_id).cloned() else {
+      return;
+    };
+
+    let type_id = self.types.error();
+
+    self.push_type_params_scope(trait_def_id);
+
+    let mut trait_methods = Vec::new();
+
+    for method in &tr.methods {
+      if method.self_param.is_none() {
+        let method_name = self.get_symbol_name(&method.name);
+        self.add_diagnostic(
+          DiagnosticMessage::TraitStaticMethodNotAllowed {
+            method_name,
+            span: method.span.clone(),
+          }
+          .report(),
+        );
+        continue;
+      }
+
+      let method_def_id = self.bind_trait_method(method, trait_def_id);
+
+      trait_methods.push(TraitMethodEntry {
+        name: method.name,
+        method_def_id,
+        has_default: method.body.is_some(),
+      });
+    }
+
+    self.pop_type_params_scope_if_generic(trait_def_id);
+
+    if let DefinitionKind::Trait(td) = &mut self.defs.get_mut(&trait_def_id).kind {
+      td.type_id = type_id;
+      td.methods = trait_methods;
+    }
+  }
+
+  fn bind_trait_method(
+    &mut self,
+    method: &ignis_ast::statements::trait_declaration::ASTTraitMethod,
+    owner: DefinitionId,
+  ) -> DefinitionId {
+    let mut param_defs = Vec::new();
+    for param in &method.parameters {
+      let param_def = Definition {
+        kind: DefinitionKind::Parameter(ParameterDefinition {
+          type_id: self.types.error(),
+          mutable: param.metadata.is_mutable(),
+        }),
+        name: param.name,
+        span: param.span.clone(),
+        name_span: param.span.clone(),
+        visibility: Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: None,
+        doc: None,
+      };
+      let param_def_id = self.defs.alloc(param_def);
+      param_defs.push(param_def_id);
+    }
+
+    let method_attrs = self.bind_function_attrs(&method.attrs);
+
+    let method_def = Definition {
+      kind: DefinitionKind::Method(MethodDefinition {
+        owner_type: owner,
+        type_params: Vec::new(),
+        params: param_defs.clone(),
+        return_type: self.types.error(),
+        is_static: false,
+        self_mutable: method.self_param.unwrap_or(false),
+        inline_mode: method.inline_mode,
+        attrs: method_attrs,
+      }),
+      name: method.name,
+      span: method.span.clone(),
+      name_span: method.name_span.clone(),
+      visibility: Visibility::Public,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+      doc: method.doc.clone(),
+    };
+
+    let method_def_id = self.defs.alloc(method_def);
+    self.set_import_item_def(&method.name_span, &method_def_id);
+
+    let type_param_defs = self.bind_type_params(method.type_params.as_ref(), method_def_id);
+
+    if let DefinitionKind::Method(md) = &mut self.defs.get_mut(&method_def_id).kind {
+      md.type_params = type_param_defs;
+    }
+
+    if let Some(body_id) = &method.body {
+      self.scopes.push(ScopeKind::Function);
+
+      for param_id in &param_defs {
+        let param_def = self.defs.get(param_id);
+        let _ = self.scopes.define(&param_def.name, param_id, false);
+      }
+
+      self.bind_complete(body_id, ScopeKind::Function);
+      self.scopes.pop();
+    }
+
     self.pop_type_params_scope(method.type_params.as_ref());
 
     method_def_id
@@ -1221,6 +1391,7 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Enum(ed) => ed.type_params.clone(),
       DefinitionKind::Function(fd) => fd.type_params.clone(),
       DefinitionKind::Method(md) => md.type_params.clone(),
+      DefinitionKind::Trait(td) => td.type_params.clone(),
       _ => Vec::new(),
     };
 
@@ -1246,6 +1417,7 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
       DefinitionKind::Function(fd) => !fd.type_params.is_empty(),
       DefinitionKind::Method(md) => !md.type_params.is_empty(),
+      DefinitionKind::Trait(td) => !td.type_params.is_empty(),
       _ => false,
     };
 
@@ -1262,9 +1434,10 @@ impl<'a> Analyzer<'a> {
     &mut self,
     ast_attrs: &[ASTAttribute],
     type_name: &str,
-  ) -> (Vec<RecordAttr>, LangTraitSet) {
+  ) -> (Vec<RecordAttr>, LangTraitSet, Vec<DefinitionId>) {
     let mut attrs = Vec::new();
     let mut lang_traits = LangTraitSet::default();
+    let mut implemented_traits = Vec::new();
 
     for attr in ast_attrs {
       let name = self.get_symbol_name(&attr.name);
@@ -1311,7 +1484,8 @@ impl<'a> Analyzer<'a> {
           }
         },
         "implements" => {
-          self.bind_implements_attr(attr, &mut lang_traits, type_name);
+          let user_traits = self.bind_implements_attr(attr, &mut lang_traits, type_name);
+          implemented_traits.extend(user_traits);
         },
         "allow" | "warn" | "deny" => {},
         _ => {
@@ -1327,7 +1501,7 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    (attrs, lang_traits)
+    (attrs, lang_traits, implemented_traits)
   }
 
   fn bind_implements_attr(
@@ -1335,7 +1509,9 @@ impl<'a> Analyzer<'a> {
     attr: &ASTAttribute,
     lang_traits: &mut LangTraitSet,
     type_name: &str,
-  ) {
+  ) -> Vec<DefinitionId> {
+    let mut user_traits = Vec::new();
+
     if attr.args.is_empty() {
       self.add_diagnostic(
         DiagnosticMessage::AttributeArgCount {
@@ -1346,7 +1522,7 @@ impl<'a> Analyzer<'a> {
         }
         .report(),
       );
-      return;
+      return user_traits;
     }
 
     for arg in &attr.args {
@@ -1359,13 +1535,38 @@ impl<'a> Analyzer<'a> {
             "Clone" => lang_traits.clone = true,
             "Copy" => lang_traits.copy = true,
             _ => {
-              self.add_diagnostic(
-                DiagnosticMessage::UnknownLangTrait {
-                  name: trait_name,
-                  span: span.clone(),
+              if let Some(entry) = self.scopes.lookup(sym) {
+                if let SymbolEntry::Single(def_id) = entry {
+                  let def_id = *def_id;
+                  if matches!(self.defs.get(&def_id).kind, DefinitionKind::Trait(_)) {
+                    user_traits.push(def_id);
+                  } else {
+                    self.add_diagnostic(
+                      DiagnosticMessage::UnknownTraitInImplements {
+                        name: trait_name,
+                        span: span.clone(),
+                      }
+                      .report(),
+                    );
+                  }
+                } else {
+                  self.add_diagnostic(
+                    DiagnosticMessage::UnknownTraitInImplements {
+                      name: trait_name,
+                      span: span.clone(),
+                    }
+                    .report(),
+                  );
                 }
-                .report(),
-              );
+              } else {
+                self.add_diagnostic(
+                  DiagnosticMessage::UnknownTraitInImplements {
+                    name: trait_name,
+                    span: span.clone(),
+                  }
+                  .report(),
+                );
+              }
             },
           }
         },
@@ -1390,6 +1591,8 @@ impl<'a> Analyzer<'a> {
         .report(),
       );
     }
+
+    user_traits
   }
 
   fn bind_field_attrs(

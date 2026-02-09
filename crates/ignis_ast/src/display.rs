@@ -302,6 +302,7 @@ impl DisplayLisp for ASTStatement {
       ASTStatement::TypeAlias(statement) => statement.to_lisp(formatter),
       ASTStatement::Record(statement) => statement.to_lisp(formatter),
       ASTStatement::Enum(statement) => statement.to_lisp(formatter),
+      ASTStatement::Trait(_) => "(trait)".to_string(),
     }
   }
 }

@@ -261,7 +261,8 @@ fn collect_statement_children(
     | ASTStatement::TypeAlias(_)
     | ASTStatement::Break(_)
     | ASTStatement::Continue(_)
-    | ASTStatement::Comment(_) => {},
+    | ASTStatement::Comment(_)
+    | ASTStatement::Trait(_) => {},
   }
 }
 

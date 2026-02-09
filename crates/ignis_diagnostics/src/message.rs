@@ -641,6 +641,38 @@ pub enum DiagnosticMessage {
     type_name: String,
     span: Span,
   },
+  // Trait diagnostics
+  TraitMissingRequiredMethod {
+    trait_name: String,
+    method_name: String,
+    type_name: String,
+    span: Span,
+  },
+  TraitMethodSignatureMismatch {
+    trait_name: String,
+    method_name: String,
+    expected: String,
+    got: String,
+    span: Span,
+  },
+  UnknownTraitInImplements {
+    name: String,
+    span: Span,
+  },
+  TraitInExternBlock {
+    span: Span,
+  },
+  TraitMethodRequiresSelf {
+    method_name: String,
+    span: Span,
+  },
+  TraitFieldNotAllowed {
+    span: Span,
+  },
+  TraitStaticMethodNotAllowed {
+    method_name: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1238,6 +1270,52 @@ impl fmt::Display for DiagnosticMessage {
           method, type_name
         )
       },
+
+      // Trait diagnostics
+      DiagnosticMessage::TraitMissingRequiredMethod {
+        trait_name,
+        method_name,
+        type_name,
+        ..
+      } => {
+        write!(
+          f,
+          "trait '{}' requires method '{}' but it is not implemented on '{}'",
+          trait_name, method_name, type_name
+        )
+      },
+      DiagnosticMessage::TraitMethodSignatureMismatch {
+        trait_name,
+        method_name,
+        expected,
+        got,
+        ..
+      } => {
+        write!(
+          f,
+          "method '{}' signature does not match trait '{}': expected '{}', found '{}'",
+          method_name, trait_name, expected, got
+        )
+      },
+      DiagnosticMessage::UnknownTraitInImplements { name, .. } => {
+        write!(f, "unknown trait '{}' in @implements", name)
+      },
+      DiagnosticMessage::TraitInExternBlock { .. } => {
+        write!(f, "traits cannot be declared in extern blocks")
+      },
+      DiagnosticMessage::TraitMethodRequiresSelf { method_name, .. } => {
+        write!(
+          f,
+          "trait method '{}' must have a self parameter (&self or &mut self)",
+          method_name
+        )
+      },
+      DiagnosticMessage::TraitFieldNotAllowed { .. } => {
+        write!(f, "fields are not allowed in trait declarations")
+      },
+      DiagnosticMessage::TraitStaticMethodNotAllowed { method_name, .. } => {
+        write!(f, "static methods are not allowed in trait declarations; '{}' must have &self or &mut self", method_name)
+      },
     }
   }
 }
@@ -1406,7 +1484,14 @@ impl DiagnosticMessage {
       | DiagnosticMessage::ExtensionRequiresParameter { span, .. }
       | DiagnosticMessage::ExtensionReceiverTypeMismatch { span, .. }
       | DiagnosticMessage::ExtensionMethodOnLiteral { span, .. }
-      | DiagnosticMessage::ExtensionMethodOnTemporary { span, .. } => span.clone(),
+      | DiagnosticMessage::ExtensionMethodOnTemporary { span, .. }
+      | DiagnosticMessage::TraitMissingRequiredMethod { span, .. }
+      | DiagnosticMessage::TraitMethodSignatureMismatch { span, .. }
+      | DiagnosticMessage::UnknownTraitInImplements { span, .. }
+      | DiagnosticMessage::TraitInExternBlock { span, .. }
+      | DiagnosticMessage::TraitMethodRequiresSelf { span, .. }
+      | DiagnosticMessage::TraitFieldNotAllowed { span, .. }
+      | DiagnosticMessage::TraitStaticMethodNotAllowed { span, .. } => span.clone(),
     }
   }
 
@@ -1571,6 +1656,13 @@ impl DiagnosticMessage {
       DiagnosticMessage::ExtensionReceiverTypeMismatch { .. } => "A0137",
       DiagnosticMessage::ExtensionMethodOnLiteral { .. } => "A0138",
       DiagnosticMessage::ExtensionMethodOnTemporary { .. } => "A0139",
+      DiagnosticMessage::TraitMissingRequiredMethod { .. } => "A0140",
+      DiagnosticMessage::TraitMethodSignatureMismatch { .. } => "A0141",
+      DiagnosticMessage::UnknownTraitInImplements { .. } => "A0142",
+      DiagnosticMessage::TraitInExternBlock { .. } => "A0143",
+      DiagnosticMessage::TraitMethodRequiresSelf { .. } => "A0144",
+      DiagnosticMessage::TraitFieldNotAllowed { .. } => "A0145",
+      DiagnosticMessage::TraitStaticMethodNotAllowed { .. } => "A0146",
     }
     .to_string()
   }

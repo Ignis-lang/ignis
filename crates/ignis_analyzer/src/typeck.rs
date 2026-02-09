@@ -406,6 +406,10 @@ impl<'a> Analyzer<'a> {
         self.typecheck_enum(node_id, en, scope_kind, ctx);
         self.types.void()
       },
+      ASTStatement::Trait(tr) => {
+        self.typecheck_trait(node_id, tr, scope_kind, ctx);
+        self.types.void()
+      },
       _ => self.types.void(),
     }
   }
@@ -883,6 +887,7 @@ impl<'a> Analyzer<'a> {
     }
 
     self.validate_lang_trait_methods(&record_def_id, &rec.span);
+    self.validate_trait_implementations(&record_def_id, &rec.span);
 
     // Pop generic scope if it was pushed
     self.exit_type_params_scope(&record_def_id);
@@ -1012,6 +1017,397 @@ impl<'a> Analyzer<'a> {
     self.exit_type_params_scope(&enum_def_id);
 
     self.define_decl_in_current_scope(node_id);
+  }
+
+  // ========================================================================
+  // Trait Typechecking
+  // ========================================================================
+
+  fn typecheck_trait(
+    &mut self,
+    node_id: &NodeId,
+    tr: &ignis_ast::statements::ASTTrait,
+    _scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) {
+    let Some(trait_def_id) = self.lookup_def(node_id).cloned() else {
+      return;
+    };
+
+    self.enter_type_params_scope(&trait_def_id);
+
+    let method_entries = if let DefinitionKind::Trait(td) = &self.defs.get(&trait_def_id).kind {
+      td.methods.clone()
+    } else {
+      return;
+    };
+
+    // Resolve method signatures (params and return types).
+    // Default method bodies are deferred — typechecked later per-implementing record.
+    for entry in &method_entries {
+      let Some(ast_method) = tr.methods.iter().find(|m| m.name == entry.name) else {
+        continue;
+      };
+
+      let method_def_id = entry.method_def_id;
+      self.enter_type_params_scope(&method_def_id);
+
+      let return_type = self.resolve_type_syntax_with_span(&ast_method.return_type, &ast_method.span);
+
+      let param_def_ids = if let DefinitionKind::Method(md) = &self.defs.get(&method_def_id).kind {
+        md.params.clone()
+      } else {
+        continue;
+      };
+
+      for (param, param_def_id) in ast_method.parameters.iter().zip(param_def_ids.iter()) {
+        let param_type = self.resolve_type_syntax_with_span(&param.type_, &param.span);
+        if let DefinitionKind::Parameter(pd) = &mut self.defs.get_mut(param_def_id).kind {
+          pd.type_id = param_type;
+        }
+      }
+
+      if let DefinitionKind::Method(md) = &mut self.defs.get_mut(&method_def_id).kind {
+        md.return_type = return_type;
+      }
+
+      self.exit_type_params_scope(&method_def_id);
+    }
+
+    // Store AST body NodeIds for default methods (typechecked later per-implementing record)
+    for entry in &method_entries {
+      if !entry.has_default {
+        continue;
+      }
+
+      let Some(ast_method) = tr.methods.iter().find(|m| m.name == entry.name) else {
+        continue;
+      };
+
+      let Some(body_node) = &ast_method.body else {
+        continue;
+      };
+
+      self.trait_default_bodies.insert(entry.method_def_id, *body_node);
+    }
+
+    self.exit_type_params_scope(&trait_def_id);
+    self.define_decl_in_current_scope(node_id);
+  }
+
+  /// Validate that a record correctly implements all its declared traits.
+  /// Called after record methods have been typechecked.
+  fn validate_trait_implementations(
+    &mut self,
+    record_def_id: &DefinitionId,
+    record_span: &Span,
+  ) {
+    let type_def = self.defs.get(record_def_id);
+    let type_name = self.get_symbol_name(&type_def.name);
+
+    let (implemented_traits, instance_methods) = match &type_def.kind {
+      DefinitionKind::Record(rd) => (rd.implemented_traits.clone(), rd.instance_methods.clone()),
+      _ => return,
+    };
+
+    if implemented_traits.is_empty() {
+      return;
+    }
+
+    for trait_def_id in &implemented_traits {
+      let trait_def = self.defs.get(trait_def_id);
+      let trait_name = self.get_symbol_name(&trait_def.name);
+
+      let method_entries = if let DefinitionKind::Trait(td) = &trait_def.kind {
+        td.methods.clone()
+      } else {
+        continue;
+      };
+
+      for entry in &method_entries {
+        let method_name = self.get_symbol_name(&entry.name);
+        let method_entry = instance_methods.get(&entry.name);
+
+        match method_entry {
+          Some(sym_entry) => {
+            let impl_def_id = match sym_entry {
+              SymbolEntry::Single(id) => *id,
+              SymbolEntry::Overload(group) => {
+                // Trait params exclude self; record params include self as [0]
+                let trait_method = self.defs.get(&entry.method_def_id);
+                let trait_param_count = if let DefinitionKind::Method(md) = &trait_method.kind {
+                  md.params.len()
+                } else {
+                  0
+                };
+
+                let found = group.iter().copied().find(|id| {
+                  if let DefinitionKind::Method(md) = &self.defs.get(id).kind {
+                    let explicit = if !md.is_static && !md.params.is_empty() {
+                      md.params.len() - 1
+                    } else {
+                      md.params.len()
+                    };
+                    explicit == trait_param_count
+                  } else {
+                    false
+                  }
+                });
+
+                match found {
+                  Some(id) => id,
+                  None => {
+                    self.add_diagnostic(
+                      DiagnosticMessage::TraitMissingRequiredMethod {
+                        trait_name: trait_name.clone(),
+                        method_name: method_name.clone(),
+                        type_name: type_name.clone(),
+                        span: record_span.clone(),
+                      }
+                      .report(),
+                    );
+                    continue;
+                  },
+                }
+              },
+            };
+
+            self.validate_trait_method_signature(
+              &entry.method_def_id,
+              &impl_def_id,
+              &trait_name,
+              &method_name,
+              record_span,
+            );
+          },
+
+          None => {
+            if entry.has_default {
+              let cloned_id = self.clone_trait_default_for_record(
+                &entry.method_def_id,
+                record_def_id,
+                record_span,
+              );
+              if let DefinitionKind::Record(rd) = &mut self.defs.get_mut(record_def_id).kind {
+                rd.instance_methods.insert(entry.name, SymbolEntry::Single(cloned_id));
+              }
+            } else {
+              self.add_diagnostic(
+                DiagnosticMessage::TraitMissingRequiredMethod {
+                  trait_name: trait_name.clone(),
+                  method_name: method_name.clone(),
+                  type_name: type_name.clone(),
+                  span: record_span.clone(),
+                }
+                .report(),
+              );
+            }
+          },
+        }
+      }
+    }
+  }
+
+  /// Validate that a record method's signature matches the trait method's signature.
+  fn validate_trait_method_signature(
+    &mut self,
+    trait_method_id: &DefinitionId,
+    impl_method_id: &DefinitionId,
+    trait_name: &str,
+    method_name: &str,
+    span: &Span,
+  ) {
+    let trait_method = self.defs.get(trait_method_id);
+    let impl_method = self.defs.get(impl_method_id);
+
+    let (trait_return, trait_self_mut) = match &trait_method.kind {
+      DefinitionKind::Method(md) => (md.return_type, md.self_mutable),
+      _ => return,
+    };
+
+    let (impl_return, impl_self_mut, impl_is_static) = match &impl_method.kind {
+      DefinitionKind::Method(md) => (md.return_type, md.self_mutable, md.is_static),
+      _ => return,
+    };
+
+    // Trait method params are only explicit params (no injected self).
+    let trait_explicit_params = match &trait_method.kind {
+      DefinitionKind::Method(md) => md.params.clone(),
+      _ => return,
+    };
+
+    // Record method params have `self` injected as params[0] by typecheck_method
+    // for instance methods. Skip it to get only explicit params.
+    let impl_explicit_params: Vec<_> = match &impl_method.kind {
+      DefinitionKind::Method(md) => {
+        if !impl_is_static && !md.params.is_empty() {
+          md.params[1..].to_vec()
+        } else {
+          md.params.clone()
+        }
+      },
+      _ => return,
+    };
+
+    if trait_self_mut != impl_self_mut {
+      let expected = if trait_self_mut { "&mut self" } else { "&self" };
+      let got = if impl_self_mut { "&mut self" } else { "&self" };
+      self.add_diagnostic(
+        DiagnosticMessage::TraitMethodSignatureMismatch {
+          trait_name: trait_name.to_string(),
+          method_name: method_name.to_string(),
+          expected: expected.to_string(),
+          got: got.to_string(),
+          span: span.clone(),
+        }
+        .report(),
+      );
+      return;
+    }
+
+    if trait_explicit_params.len() != impl_explicit_params.len() {
+      let expected = format!("{} parameters", trait_explicit_params.len());
+      let got = format!("{} parameters", impl_explicit_params.len());
+      self.add_diagnostic(
+        DiagnosticMessage::TraitMethodSignatureMismatch {
+          trait_name: trait_name.to_string(),
+          method_name: method_name.to_string(),
+          expected,
+          got,
+          span: span.clone(),
+        }
+        .report(),
+      );
+      return;
+    }
+
+    for (trait_param_id, impl_param_id) in trait_explicit_params.iter().zip(impl_explicit_params.iter()) {
+      let trait_type = self.defs.type_of(trait_param_id);
+      let impl_type = self.defs.type_of(impl_param_id);
+      if trait_type != impl_type {
+        let expected = self.format_type_for_error(trait_type);
+        let got = self.format_type_for_error(impl_type);
+        self.add_diagnostic(
+          DiagnosticMessage::TraitMethodSignatureMismatch {
+            trait_name: trait_name.to_string(),
+            method_name: method_name.to_string(),
+            expected,
+            got,
+            span: span.clone(),
+          }
+          .report(),
+        );
+        return;
+      }
+    }
+
+    if trait_return != impl_return {
+      let expected = self.format_type_for_error(&trait_return);
+      let got = self.format_type_for_error(&impl_return);
+      self.add_diagnostic(
+        DiagnosticMessage::TraitMethodSignatureMismatch {
+          trait_name: trait_name.to_string(),
+          method_name: method_name.to_string(),
+          expected,
+          got,
+          span: span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
+
+  /// Clone a trait's default method for a record, giving it the record's self type.
+  /// Typechecks the body in the record's scope and registers the clone for HIR lowering.
+  fn clone_trait_default_for_record(
+    &mut self,
+    trait_method_id: &DefinitionId,
+    record_def_id: &DefinitionId,
+    record_span: &Span,
+  ) -> DefinitionId {
+    let trait_method = self.defs.get(trait_method_id);
+    let (params, return_type, self_mutable, type_params, inline_mode, attrs) =
+      if let DefinitionKind::Method(md) = &trait_method.kind {
+        (
+          md.params.clone(),
+          md.return_type,
+          md.self_mutable,
+          md.type_params.clone(),
+          md.inline_mode,
+          md.attrs.clone(),
+        )
+      } else {
+        return *trait_method_id;
+      };
+
+    let method_name = trait_method.name;
+    let method_span = trait_method.span.clone();
+    let method_name_span = trait_method.name_span.clone();
+    let method_doc = trait_method.doc.clone();
+
+    let record_type = *self.defs.type_of(record_def_id);
+    let self_ref_type = self.types.reference(record_type, self_mutable);
+
+    let self_symbol = self.symbols.borrow_mut().intern("self");
+    let self_def = ignis_type::definition::Definition {
+      kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
+        type_id: self_ref_type,
+        mutable: self_mutable,
+      }),
+      name: self_symbol,
+      span: method_span.clone(),
+      name_span: record_span.clone(),
+      visibility: ignis_type::definition::Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: None,
+      doc: None,
+    };
+    let self_def_id = self.defs.alloc(self_def);
+
+    let mut new_params = vec![self_def_id];
+    new_params.extend(params.clone());
+
+    let new_def = ignis_type::definition::Definition {
+      kind: DefinitionKind::Method(ignis_type::definition::MethodDefinition {
+        owner_type: *record_def_id,
+        type_params,
+        params: new_params,
+        return_type,
+        is_static: false,
+        self_mutable,
+        inline_mode,
+        attrs,
+      }),
+      name: method_name,
+      span: method_span,
+      name_span: method_name_span,
+      visibility: ignis_type::definition::Visibility::Public,
+      owner_module: self.current_module,
+      owner_namespace: self.defs.get(record_def_id).owner_namespace,
+      doc: method_doc,
+    };
+    let cloned_id = self.defs.alloc(new_def);
+
+    if let Some(&body_node) = self.trait_default_bodies.get(trait_method_id) {
+      self.enter_type_params_scope(&cloned_id);
+      self.scopes.push(ScopeKind::Function);
+
+      let _ = self.scopes.define(&self_symbol, &self_def_id, false);
+      for &param_def_id in &params {
+        let param_def = self.defs.get(&param_def_id);
+        let _ = self.scopes.define(&param_def.name, &param_def_id, false);
+      }
+
+      let infer = InferContext::expecting(return_type);
+      self.typecheck_node_with_infer(&body_node, ScopeKind::Function, &TypecheckContext::with_return(return_type), &infer);
+
+      self.scopes.pop();
+      self.exit_type_params_scope(&cloned_id);
+
+      self.trait_default_clones.insert(cloned_id, body_node);
+    }
+
+    cloned_id
   }
 
   // ========================================================================

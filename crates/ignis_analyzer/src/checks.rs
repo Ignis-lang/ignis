@@ -294,6 +294,34 @@ impl<'a> Analyzer<'a> {
           }
         }
       },
+      ASTStatement::Trait(tr) => {
+        for method in &tr.methods {
+          let Some(body_id) = &method.body else {
+            continue;
+          };
+
+          let Some(def_id) = self.lookup_import_item_def(&method.name_span) else {
+            continue;
+          };
+
+          let def = self.defs.get(def_id);
+          let DefinitionKind::Method(method_def) = &def.kind else {
+            continue;
+          };
+
+          let return_type = self.types.get(&method_def.return_type);
+          let is_void = return_type == &ignis_type::types::Type::Void;
+
+          if !is_void && self.check_termination(*body_id) != Termination::Always {
+            self.add_diagnostic(
+              DiagnosticMessage::MissingReturnStatement {
+                span: method.span.clone(),
+              }
+              .report(),
+            );
+          }
+        }
+      },
       _ => {},
     }
   }
