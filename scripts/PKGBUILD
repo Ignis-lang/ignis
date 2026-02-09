@@ -1,0 +1,51 @@
+# Maintainer: Ignacio Perez <ignacio@feuer.me>
+
+pkgname=ignis
+pkgver=0.2.4
+pkgrel=1
+pkgdesc="The Ignis programming language compiler"
+arch=(x86_64)
+url="https://github.com/Ignis-lang/ignis"
+license=('GPL-3.0-only')
+depends=(
+  'gcc'
+  'binutils'
+  'make'
+)
+makedepends=(
+  'rust'
+  'cargo'
+  'git'
+)
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  cargo build --release --locked -p ignis
+}
+
+check() {
+  cd "${pkgname}-${pkgver}"
+  cargo test --locked -p ignis
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+
+  install -Dm755 "target/release/ignis" "${pkgdir}/usr/lib/ignis/ignis-bin"
+  install -d "${pkgdir}/usr/share/ignis"
+  cp -r "std" "${pkgdir}/usr/share/ignis/std"
+
+  install -Dm755 /dev/null "${pkgdir}/usr/bin/ignis"
+  cat > "${pkgdir}/usr/bin/ignis" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+export IGNIS_STD_PATH="${IGNIS_STD_PATH:-/usr/share/ignis/std}"
+export IGNIS_HOME="${IGNIS_HOME:-/usr/share/ignis}"
+
+exec /usr/lib/ignis/ignis-bin "$@"
+EOF
+  chmod 755 "${pkgdir}/usr/bin/ignis"
+}

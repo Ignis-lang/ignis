@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (example: v0.2.4)'
+        required: true
+        type: string
+      sign:
+        description: 'Sign artifacts with GPG'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build linux-amd64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v0-rust"
+          shared-key: "linux-amd64"
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Build Ignis
+        run: cargo build --release --locked -p ignis
+
+      - name: Create package
+        run: |
+          mkdir -p pkg/scripts
+
+          cp target/release/ignis pkg/ignis
+          chmod +x pkg/ignis
+
+          cp -r std pkg/std
+          cp scripts/install.sh pkg/scripts/
+          cp scripts/uninstall.sh pkg/scripts/
+          cp scripts/PKGBUILD pkg/scripts/
+          chmod +x pkg/scripts/install.sh pkg/scripts/uninstall.sh
+
+      - name: Create tar archive
+        run: tar -czf ignis-linux-amd64.tar.gz -C pkg .
+
+      - name: Generate checksum
+        run: sha256sum ignis-linux-amd64.tar.gz > ignis-linux-amd64.tar.gz.sha256
+
+      - name: Import GPG key
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.sign == 'true'
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Sign artifacts
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.sign == 'true'
+        run: |
+          gpg --armor --detach-sign ignis-linux-amd64.tar.gz
+          gpg --armor --detach-sign ignis-linux-amd64.tar.gz.sha256
+
+      - name: Upload artifacts
+        if: env.ACT != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ignis-linux-amd64
+          path: |
+            ignis-linux-amd64.tar.gz
+            ignis-linux-amd64.tar.gz.sha256
+            ignis-linux-amd64.tar.gz.asc
+            ignis-linux-amd64.tar.gz.sha256.asc
+          if-no-files-found: ignore
+          retention-days: 90
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve release version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release body
+        run: |
+          cat > release_body.md << 'EOF'
+          ## Installation
+
+          Download and install the Linux amd64 artifact:
+
+          ```bash
+          wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.value }}/ignis-linux-amd64.tar.gz
+          wget https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.value }}/ignis-linux-amd64.tar.gz.sha256
+
+          sha256sum -c ignis-linux-amd64.tar.gz.sha256
+          tar -xzf ignis-linux-amd64.tar.gz
+          sudo ./scripts/install.sh
+          ```
+
+          ## Notes
+
+          - `install.sh` installs a wrapper that auto-configures `IGNIS_STD_PATH`.
+          - You can install to user space with `--prefix ~/.local`.
+          EOF
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.value }}
+          name: Ignis ${{ steps.version.outputs.value }}
+          body_path: release_body.md
+          files: |
+            artifacts/*/ignis-linux-amd64.tar.gz
+            artifacts/*/ignis-linux-amd64.tar.gz.sha256
+          draft: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload signatures to release
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.sign == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.value }}
+          files: |
+            artifacts/*/*.asc
+          draft: true
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

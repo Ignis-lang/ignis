@@ -27,17 +27,76 @@ See [docs/LANGUAGE_REFERENCE_v0.2.md](docs/LANGUAGE_REFERENCE_v0.2.md) for full 
 
 ### Requirements
 
-- Rust/Cargo 1.74+
-- GCC (for compiling generated C code)
+- Linux (amd64 for release artifacts)
+- GCC, `ar` (binutils), and `make`
+
+### Quick Install (Linux)
 
 ```bash
-# From source
-git clone https://github.com/ignis-lang/ignis.git
-cd ignis
-cargo install --path crates/ignis
+# Install to /usr/local (requires sudo)
+curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/install.sh | sudo bash
 
-# Or build without installing
-cargo build --release
+# Install to ~/.local (no sudo required)
+curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/install.sh | bash -s -- --prefix ~/.local
+```
+
+### Build from Source
+
+```bash
+# Build from source with the installer
+curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/install.sh | bash -s -- --build
+
+# Or build manually
+git clone https://github.com/Ignis-lang/ignis.git
+cd ignis
+cargo build --release -p ignis
+./target/release/ignis --help
+```
+
+### Arch Linux
+
+```bash
+cd scripts
+makepkg -si
+```
+
+### Nix
+
+```bash
+# Run from flake
+nix run github:Ignis-lang/ignis
+
+# Install in your profile
+nix profile install github:Ignis-lang/ignis
+
+# Development shell
+nix develop github:Ignis-lang/ignis
+```
+
+Or with traditional Nix:
+
+```bash
+nix-build
+./result/bin/ignis --help
+```
+
+### Uninstall
+
+```bash
+# Uninstall from /usr/local
+curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/uninstall.sh | sudo bash
+
+# Uninstall from ~/.local
+curl -fsSL https://raw.githubusercontent.com/Ignis-lang/ignis/main/scripts/uninstall.sh | bash -s -- --prefix ~/.local
+```
+
+### Verify Downloads
+
+```bash
+sha256sum -c ignis-linux-amd64.tar.gz.sha256
+
+# Optional: verify detached signature if present
+gpg --verify ignis-linux-amd64.tar.gz.asc ignis-linux-amd64.tar.gz
 ```
 
 ## Quick Start
