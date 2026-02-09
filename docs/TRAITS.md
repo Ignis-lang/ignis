@@ -88,11 +88,11 @@ Instance methods take `&self` (immutable) or `&mut self` (mutable) as their impl
 record Counter {
     public value: i32;
 
-    function get(&self): i32 {
+    get(&self): i32 {
         return self.value;
     }
 
-    function increment(&mut self): void {
+    increment(&mut self): void {
         self.value = self.value + 1;
         return;
     }
