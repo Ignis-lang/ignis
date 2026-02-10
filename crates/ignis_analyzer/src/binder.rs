@@ -19,7 +19,7 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::{
-  attribute::{FieldAttr, FunctionAttr, NamespaceAttr, RecordAttr},
+  attribute::{FieldAttr, FunctionAttr, NamespaceAttr, ParamAttr, RecordAttr},
   definition::{
     ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
     FunctionDefinition, LangTraitSet, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition,
@@ -564,10 +564,12 @@ impl<'a> Analyzer<'a> {
     // Create parameter definitions
     let mut param_defs = Vec::new();
     for param in &method.parameters {
+      let param_attrs = self.bind_param_attrs(&param.attrs);
       let param_def = Definition {
         kind: DefinitionKind::Parameter(ParameterDefinition {
           type_id: self.types.error(), // Resolved in typeck
           mutable: param.metadata.is_mutable(),
+          attrs: param_attrs,
         }),
         name: param.name,
         span: param.span.clone(),
@@ -739,10 +741,12 @@ impl<'a> Analyzer<'a> {
   ) -> DefinitionId {
     let mut param_defs = Vec::new();
     for param in &method.parameters {
+      let param_attrs = self.bind_param_attrs(&param.attrs);
       let param_def = Definition {
         kind: DefinitionKind::Parameter(ParameterDefinition {
           type_id: self.types.error(),
           mutable: param.metadata.is_mutable(),
+          attrs: param_attrs,
         }),
         name: param.name,
         span: param.span.clone(),
@@ -917,10 +921,12 @@ impl<'a> Analyzer<'a> {
 
     let mut param_defs = Vec::new();
     for param in &func.signature.parameters {
+      let param_attrs = self.bind_param_attrs(&param.attrs);
       let def = Definition {
         kind: DefinitionKind::Parameter(ParameterDefinition {
           type_id: self.types.error(),
           mutable: param.metadata.is_mutable(),
+          attrs: param_attrs,
         }),
         name: param.name,
         span: param.span.clone(),
@@ -1835,6 +1841,47 @@ impl<'a> Analyzer<'a> {
             DiagnosticMessage::UnknownAttribute {
               name,
               target: "function".to_string(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    attrs
+  }
+
+  fn bind_param_attrs(
+    &mut self,
+    ast_attrs: &[ASTAttribute],
+  ) -> Vec<ParamAttr> {
+    let mut attrs = Vec::new();
+
+    for attr in ast_attrs {
+      let name = self.get_symbol_name(&attr.name);
+
+      match name.as_str() {
+        "takes" => {
+          if !attr.args.is_empty() {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 0,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else {
+            attrs.push(ParamAttr::Takes);
+          }
+        },
+        _ => {
+          self.add_diagnostic(
+            DiagnosticMessage::UnknownAttribute {
+              name,
+              target: "parameter".to_string(),
               span: attr.span.clone(),
             }
             .report(),

@@ -13,6 +13,11 @@ pub enum FunctionAttr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ParamAttr {
+  Takes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FieldAttr {
   Aligned(u64),
 }

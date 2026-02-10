@@ -1593,6 +1593,7 @@ impl<'a> Monomorphizer<'a> {
       kind: DefinitionKind::Parameter(ParameterDefinition {
         type_id: new_type,
         mutable: pd.mutable,
+        attrs: pd.attrs.clone(),
       }),
       name: param_def.name,
       span: param_def.span.clone(),

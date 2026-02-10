@@ -6,7 +6,9 @@ use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
   attribute::{FieldAttr, FunctionAttr, RecordAttr},
-  definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, InlineMode, RecordDefinition, Visibility},
+  definition::{
+    DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, InlineMode, RecordDefinition, Visibility,
+  },
   module::{ModuleId, ModulePath},
   namespace::NamespaceStore,
   symbol::SymbolTable,

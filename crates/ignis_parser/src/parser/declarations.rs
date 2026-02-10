@@ -76,7 +76,7 @@ impl super::IgnisParser {
   }
 
   /// Collects zero or more `@name` or `@name(args)` into `self.pending_attrs`.
-  fn parse_attributes_to_pending(&mut self) -> ParserResult<()> {
+  pub(crate) fn parse_attributes_to_pending(&mut self) -> ParserResult<()> {
     while self.at(TokenType::At) {
       let at_token = self.expect(TokenType::At)?.clone();
       let name_token = self.expect(TokenType::Identifier)?.clone();
@@ -106,6 +106,41 @@ impl super::IgnisParser {
     }
 
     Ok(())
+  }
+
+  /// Parses `@attr`s and returns them directly, bypassing `pending_attrs`.
+  pub(crate) fn parse_inline_attributes(&mut self) -> ParserResult<Vec<ASTAttribute>> {
+    let mut attrs = Vec::new();
+
+    while self.at(TokenType::At) {
+      let at_token = self.expect(TokenType::At)?.clone();
+      let name_token = self.expect(TokenType::Identifier)?.clone();
+      let name = self.insert_symbol(&name_token);
+
+      let mut args = Vec::new();
+
+      let end_span = if self.eat(TokenType::LeftParen) {
+        if !self.at(TokenType::RightParen) {
+          args.push(self.parse_attribute_arg()?);
+
+          while self.eat(TokenType::Comma) {
+            if self.at(TokenType::RightParen) {
+              break;
+            }
+            args.push(self.parse_attribute_arg()?);
+          }
+        }
+
+        self.expect(TokenType::RightParen)?.span.clone()
+      } else {
+        name_token.span.clone()
+      };
+
+      let span = Span::merge(&at_token.span, &end_span);
+      attrs.push(ASTAttribute { name, args, span });
+    }
+
+    Ok(attrs)
   }
 
   fn parse_attribute_arg(&mut self) -> ParserResult<ASTAttributeArg> {

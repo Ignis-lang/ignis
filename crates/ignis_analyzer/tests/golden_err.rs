@@ -483,6 +483,103 @@ function main(): void {
 }
 
 #[test]
+fn ffi_leak_warning_without_takes() {
+  // Passing an owned type to an extern function without @takes emits O0004.
+  common::assert_err(
+    r#"
+extern io {
+    function consumeString(s: string): void;
+}
+
+function main(): void {
+    let a: string = "hello";
+    io::consumeString(a);
+    return;
+}
+"#,
+    &["O0004"],
+  );
+}
+
+#[test]
+fn ffi_no_warning_with_takes() {
+  // @takes suppresses the warning and consumes ownership instead.
+  common::assert_ok(
+    r#"
+extern io {
+    function freeString(@takes s: string): void;
+}
+
+function main(): void {
+    let a: string = "hello";
+    io::freeString(a);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn ffi_takes_consumes_ownership() {
+  // After passing to a @takes extern param, the value is moved — using it again is O0001.
+  common::assert_err(
+    r#"
+extern io {
+    function freeString(@takes s: string): void;
+}
+
+function consume(s: string): void {
+    return;
+}
+
+function main(): void {
+    let a: string = "hello";
+    io::freeString(a);
+    consume(a);
+    return;
+}
+"#,
+    &["O0001"],
+  );
+}
+
+#[test]
+fn ffi_no_warning_for_copy_types() {
+  // Copy types (primitives, raw pointers) don't trigger the FFI leak warning.
+  common::assert_ok(
+    r#"
+extern ffi {
+    function doSomething(x: i32, p: *mut void): void;
+}
+
+function main(): void {
+    let n: i32 = 42;
+    let p: *mut void = 0 as *mut void;
+    ffi::doSomething(n, p);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn unknown_param_attribute() {
+  // Unknown param attributes are rejected.
+  common::assert_err(
+    r#"
+function foo(@bogus x: i32): void {
+    return;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0117"],
+  );
+}
+
+#[test]
 fn copy_type_no_move() {
   // Copy types (primitives) don't move - this should NOT produce an error
   common::assert_ok(
@@ -1778,5 +1875,64 @@ function main(): void {
   assert_snapshot!(
     "enum_copy_noncopy_payload_diags",
     common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn drop_on_complex_receiver_field_access() {
+  // Calling .drop() on a field access is a complex receiver — O0010 warning.
+  common::assert_err(
+    r#"
+@implements(Drop, Clone)
+record Inner {
+    value: i32;
+
+    clone(&self): Inner {
+        return Inner { value: self.value };
+    }
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Container {
+    public inner: Inner;
+}
+
+function main(): void {
+    let mut c: Container = Container { inner: Inner { value: 1 } };
+    c.inner.drop();
+    return;
+}
+"#,
+    &["O0010"],
+  );
+}
+
+#[test]
+fn drop_on_simple_receiver_no_warning() {
+  // Calling .drop() on a simple variable should NOT emit O0010.
+  common::assert_ok(
+    r#"
+@implements(Drop, Clone)
+record Foo {
+    value: i32;
+
+    clone(&self): Foo {
+        return Foo { value: self.value };
+    }
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    f.drop();
+    return;
+}
+"#,
   );
 }

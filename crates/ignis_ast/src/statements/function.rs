@@ -8,6 +8,7 @@ pub struct ASTParameter {
   pub type_: IgnisTypeSyntax,
   pub span: Span,
   pub metadata: ASTMetadata,
+  pub attrs: Vec<ASTAttribute>,
 }
 
 impl ASTParameter {
@@ -16,12 +17,14 @@ impl ASTParameter {
     type_: IgnisTypeSyntax,
     span: Span,
     metadata: ASTMetadata,
+    attrs: Vec<ASTAttribute>,
   ) -> Self {
     Self {
       name,
       type_,
       span,
       metadata,
+      attrs,
     }
   }
 }

@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
 use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
 use ignis_type::{
-  definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  attribute::ParamAttr,
+  definition::{DefinitionId, DefinitionKind, DefinitionStore, ParameterDefinition},
   file::SourceMap,
   span::Span,
   symbol::SymbolTable,
@@ -362,9 +363,12 @@ impl<'a> HirOwnershipChecker<'a> {
 
         if let Some(recv) = receiver {
           if is_drop {
-            // Skip receiver check here: handle_manual_drop reports DoubleDrop directly.
             if let Some(recv_def) = self.extract_receiver_variable(recv) {
               self.handle_manual_drop(recv_def, span.clone());
+            } else {
+              self
+                .diagnostics
+                .push(DiagnosticMessage::DropOnComplexReceiver { span: span.clone() }.report());
             }
           } else {
             self.check_node(recv);
@@ -721,7 +725,11 @@ impl<'a> HirOwnershipChecker<'a> {
   ) {
     let callee_def = self.defs.get(&callee);
     let callee_name = self.symbols.get(&callee_def.name);
-    let is_extern = matches!(&callee_def.kind, DefinitionKind::Function(f) if f.is_extern);
+
+    let (is_extern, param_defs) = match &callee_def.kind {
+      DefinitionKind::Function(f) => (f.is_extern, f.params.clone()),
+      _ => (false, vec![]),
+    };
 
     // Track deallocate arg to mark as Freed after processing
     let deallocate_ptr = if callee_name == "deallocate" && !args.is_empty() {
@@ -730,17 +738,35 @@ impl<'a> HirOwnershipChecker<'a> {
       None
     };
 
-    for &arg_id in args {
+    for (i, &arg_id) in args.iter().enumerate() {
       self.check_node(arg_id);
 
       if let Some(arg_def) = self.get_moved_var(arg_id) {
         let arg_ty = self.defs.type_of(&arg_def);
 
         if self.types.needs_drop_with_defs(arg_ty, self.defs) && !self.types.is_copy_with_defs(arg_ty, self.defs) {
-          // FFI Ownership Semantics:
-          // - Ignis functions: consume ownership (caller must not use value after call)
-          // - Extern functions: do NOT consume ownership (caller retains responsibility)
-          if !is_extern {
+          if is_extern {
+            let has_takes = param_defs.get(i).is_some_and(|pid| {
+              matches!(
+                &self.defs.get(pid).kind,
+                DefinitionKind::Parameter(ParameterDefinition { attrs, .. })
+                  if attrs.contains(&ParamAttr::Takes)
+              )
+            });
+
+            if has_takes {
+              self.try_consume(arg_def, span.clone());
+            } else {
+              let var_name = self.get_var_name(&arg_def);
+              self.diagnostics.push(
+                DiagnosticMessage::PossibleLeakToFFI {
+                  var_name,
+                  span: span.clone(),
+                }
+                .report(),
+              );
+            }
+          } else {
             self.try_consume(arg_def, span.clone());
           }
         }
@@ -1013,11 +1039,7 @@ impl<'a> HirOwnershipChecker<'a> {
       }
     }
 
-    if rank(a) >= rank(b) {
-      a
-    } else {
-      b
-    }
+    if rank(a) >= rank(b) { a } else { b }
   }
 
   /// Remove diagnostics from the second pass that duplicate first-pass messages.
