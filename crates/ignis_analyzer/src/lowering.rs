@@ -418,9 +418,10 @@ impl<'a> Analyzer<'a> {
         for &def_id in group {
           let def = self.defs.get(&def_id);
           if let DefinitionKind::Method(md) = &def.kind
-            && md.params.len() == ast_param_count {
-              candidates.push(def_id);
-            }
+            && md.params.len() == ast_param_count
+          {
+            candidates.push(def_id);
+          }
         }
 
         match candidates.len() {
@@ -688,9 +689,10 @@ impl<'a> Analyzer<'a> {
         }
 
         if let ASTNode::Expression(ASTExpression::Path(path)) = callee_node
-          && let Some(result) = self.try_lower_path_call(node_id, path, call, hir, scope_kind) {
-            return result;
-          }
+          && let Some(result) = self.try_lower_path_call(node_id, path, call, hir, scope_kind)
+        {
+          return result;
+        }
 
         // Get the callee def_id by looking up the variable name
         let callee_def_id = if let Some(def_id) = self.lookup_resolved_call(node_id).cloned() {
@@ -1122,17 +1124,18 @@ impl<'a> Analyzer<'a> {
 
         if let Some(def_id) = def_id
           && let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind
-            && let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
-              let field_type = stored_type.unwrap_or(field.type_id);
-              return hir.alloc(HIRNode {
-                kind: HIRKind::FieldAccess {
-                  base: derefed_base,
-                  field_index: field.index,
-                },
-                span: ma.span.clone(),
-                type_id: field_type,
-              });
-            }
+          && let Some(field) = rd.fields.iter().find(|f| f.name == ma.member)
+        {
+          let field_type = stored_type.unwrap_or(field.type_id);
+          return hir.alloc(HIRNode {
+            kind: HIRKind::FieldAccess {
+              base: derefed_base,
+              field_index: field.index,
+            },
+            span: ma.span.clone(),
+            type_id: field_type,
+          });
+        }
 
         // Error fallback
         hir.alloc(HIRNode {
@@ -2010,9 +2013,10 @@ impl<'a> Analyzer<'a> {
   ) -> Option<String> {
     let node = self.ast.get(node_id);
     if let ASTNode::Expression(ASTExpression::Literal(lit)) = node
-      && let ignis_type::value::IgnisLiteralValue::String(s) = &lit.value {
-        return Some(s.clone());
-      }
+      && let ignis_type::value::IgnisLiteralValue::String(s) = &lit.value
+    {
+      return Some(s.clone());
+    }
     None
   }
 
@@ -2099,9 +2103,10 @@ impl<'a> Analyzer<'a> {
 
     let Some((method_id, self_mutable)) = method_info else {
       if let Some(ext_def_id) = self.lookup_resolved_call(node_id).cloned()
-        && matches!(self.defs.get(&ext_def_id).kind, DefinitionKind::Function(_)) {
-          return self.lower_extension_call(node_id, ma, call, hir, scope_kind, result_type, base, &ext_def_id);
-        }
+        && matches!(self.defs.get(&ext_def_id).kind, DefinitionKind::Function(_))
+      {
+        return self.lower_extension_call(node_id, ma, call, hir, scope_kind, result_type, base, &ext_def_id);
+      }
 
       return hir.alloc(HIRNode {
         kind: HIRKind::Error,
@@ -2211,26 +2216,27 @@ impl<'a> Analyzer<'a> {
     };
 
     if let Some(method_id) = self.lookup_resolved_call(node_id).cloned()
-      && matches!(self.defs.get(&method_id).kind, DefinitionKind::Method(_)) {
-        let args_hir: Vec<HIRId> = call
-          .arguments
-          .iter()
-          .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
-          .collect();
+      && matches!(self.defs.get(&method_id).kind, DefinitionKind::Method(_))
+    {
+      let args_hir: Vec<HIRId> = call
+        .arguments
+        .iter()
+        .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+        .collect();
 
-        let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
+      let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
 
-        return hir.alloc(HIRNode {
-          kind: HIRKind::MethodCall {
-            receiver: None,
-            method: method_id,
-            type_args,
-            args: args_hir,
-          },
-          span: call.span.clone(),
-          type_id: result_type,
-        });
-      }
+      return hir.alloc(HIRNode {
+        kind: HIRKind::MethodCall {
+          receiver: None,
+          method: method_id,
+          type_args,
+          args: args_hir,
+        },
+        span: call.span.clone(),
+        type_id: result_type,
+      });
+    }
 
     match &self.defs.get(&def_id).kind.clone() {
       DefinitionKind::Record(rd) => {
@@ -2506,17 +2512,18 @@ impl<'a> Analyzer<'a> {
           let ptr_u8 = self.types.pointer(self.types.u8(), false);
 
           if !self.types.types_equal(&arg_type, &ptr_u8)
-            && let ignis_type::types::Type::Pointer { .. } = self.types.get(&arg_type) {
-              let cast_node = HIRNode {
-                kind: HIRKind::Cast {
-                  expression: arg_hir,
-                  target: ptr_u8,
-                },
-                span: hir.get(arg_hir).span.clone(),
-                type_id: ptr_u8,
-              };
-              return hir.alloc(cast_node);
-            }
+            && let ignis_type::types::Type::Pointer { .. } = self.types.get(&arg_type)
+          {
+            let cast_node = HIRNode {
+              kind: HIRKind::Cast {
+                expression: arg_hir,
+                target: ptr_u8,
+              },
+              span: hir.get(arg_hir).span.clone(),
+              type_id: ptr_u8,
+            };
+            return hir.alloc(cast_node);
+          }
         }
 
         arg_hir
@@ -2856,10 +2863,9 @@ impl<'a> Analyzer<'a> {
         if let Type::Pointer { inner, .. } = self.types.get(&field.type_id) {
           data_info = Some((*inner, field.index));
         }
-      } else if field.name == length_sym
-        && self.types.types_equal(&field.type_id, &self.types.u64()) {
-          length_index = Some(field.index);
-        }
+      } else if field.name == length_sym && self.types.types_equal(&field.type_id, &self.types.u64()) {
+        length_index = Some(field.index);
+      }
     }
 
     match (data_info, length_index) {

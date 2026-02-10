@@ -1004,9 +1004,10 @@ impl<'a> Analyzer<'a> {
 
     if is_main
       && let Some(SymbolEntry::Overload(group)) = self.scopes.lookup(&func.signature.name)
-        && group.len() > 1 {
-          self.add_diagnostic(DiagnosticMessage::MainFunctionCannotBeOverloaded { span: span.clone() }.report());
-        }
+      && group.len() > 1
+    {
+      self.add_diagnostic(DiagnosticMessage::MainFunctionCannotBeOverloaded { span: span.clone() }.report());
+    }
 
     if let Some(body_id) = &func.body {
       // Note: generic scope is already pushed by bind_type_params if there are type params
@@ -1258,9 +1259,10 @@ impl<'a> Analyzer<'a> {
 
     if let ASTNode::Statement(ASTStatement::Function(_)) = node
       && let Some(def_id) = self.lookup_def(node_id).cloned()
-        && let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(&def_id).kind {
-          func_def.is_extern = true;
-        }
+      && let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(&def_id).kind
+    {
+      func_def.is_extern = true;
+    }
   }
 
   fn bind_extern(
@@ -1386,9 +1388,10 @@ impl<'a> Analyzer<'a> {
     type_params: Option<&ASTGenericParams>,
   ) {
     if let Some(params) = type_params
-      && !params.is_empty() {
-        self.scopes.pop();
-      }
+      && !params.is_empty()
+    {
+      self.scopes.pop();
+    }
   }
 
   /// Pushes a generic scope and registers already-bound type params for an owner definition.

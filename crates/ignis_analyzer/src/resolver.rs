@@ -65,15 +65,16 @@ impl<'a> Analyzer<'a> {
 
         if let Some(def_id) = &def_id
           && let ignis_type::definition::DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind
-            && !func_def.type_params.is_empty() {
-              self.scopes.push(ScopeKind::Generic);
-              pushed_generic = true;
+          && !func_def.type_params.is_empty()
+        {
+          self.scopes.push(ScopeKind::Generic);
+          pushed_generic = true;
 
-              for param_id in &func_def.type_params {
-                let name = self.defs.get(param_id).name;
-                let _ = self.scopes.define(&name, param_id, false);
-              }
-            }
+          for param_id in &func_def.type_params {
+            let name = self.defs.get(param_id).name;
+            let _ = self.scopes.define(&name, param_id, false);
+          }
+        }
 
         self.scopes.push(ScopeKind::Function);
         if let Some(def_id) = &def_id {
@@ -452,32 +453,33 @@ impl<'a> Analyzer<'a> {
 
     // For 2-segment paths like Foo::Bar, check if first segment is an enum
     if segments.len() == 2
-      && let Some(def_id) = self.scopes.lookup_def(&segments[0].name) {
-        let def = self.defs.get(def_id);
-        let first_name = self.get_symbol_name(&segments[0].name);
-        let second_name = self.get_symbol_name(&segments[1].name);
+      && let Some(def_id) = self.scopes.lookup_def(&segments[0].name)
+    {
+      let def = self.defs.get(def_id);
+      let first_name = self.get_symbol_name(&segments[0].name);
+      let second_name = self.get_symbol_name(&segments[1].name);
 
-        match &def.kind {
-          DefinitionKind::Enum(_) => {
-            // Enum exists but variant not found
-            return DiagnosticMessage::EnumVariantNotFound {
-              enum_name: first_name,
-              variant: second_name,
-              span: span.clone(),
-            };
-          },
-          DefinitionKind::Record(_) | DefinitionKind::Namespace(_) => {
-            // Fall through to generic error - member not found
-          },
-          _ => {
-            // Not an enum/record/namespace, but user tried to access member
-            return DiagnosticMessage::EnumNotFound {
-              name: first_name,
-              span: span.clone(),
-            };
-          },
-        }
+      match &def.kind {
+        DefinitionKind::Enum(_) => {
+          // Enum exists but variant not found
+          return DiagnosticMessage::EnumVariantNotFound {
+            enum_name: first_name,
+            variant: second_name,
+            span: span.clone(),
+          };
+        },
+        DefinitionKind::Record(_) | DefinitionKind::Namespace(_) => {
+          // Fall through to generic error - member not found
+        },
+        _ => {
+          // Not an enum/record/namespace, but user tried to access member
+          return DiagnosticMessage::EnumNotFound {
+            name: first_name,
+            span: span.clone(),
+          };
+        },
       }
+    }
 
     // Default to generic undeclared identifier
     DiagnosticMessage::UndeclaredIdentifier {
