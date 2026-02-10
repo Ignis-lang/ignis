@@ -65,8 +65,21 @@ pub enum HIRKind {
     ptr: HIRId,
     value: HIRId,
   },
+  /// `__builtin_drop_in_place<T>(ptr)` — runs T's drop on the pointed-to value.
+  BuiltinDropInPlace {
+    ty: TypeId,
+    ptr: HIRId,
+  },
+  /// `__builtin_drop_glue<T>()` — returns a `(*mut u8) -> void` that drops T at the given address.
+  BuiltinDropGlue {
+    ty: TypeId,
+  },
   /// Rc::new(value) — allocates an IgnisRcBox and stores value in the payload.
   RcNew {
+    value: HIRId,
+  },
+  /// rc.clone() — retains the Rc handle and returns the same pointer.
+  RcClone {
     value: HIRId,
   },
 
@@ -150,8 +163,9 @@ impl HIRKind {
       | HIRKind::MinOf(_)
       | HIRKind::StaticAccess { .. }
       | HIRKind::Trap
-      | HIRKind::BuiltinUnreachable => {},
-      HIRKind::RcNew { value } => {
+      | HIRKind::BuiltinUnreachable
+      | HIRKind::BuiltinDropGlue { .. } => {},
+      HIRKind::RcNew { value } | HIRKind::RcClone { value } => {
         *value = HIRId::new(value.index() + offset);
       },
       HIRKind::Panic(id) => {
@@ -160,7 +174,7 @@ impl HIRKind {
       HIRKind::TypeOf(id) => {
         *id = HIRId::new(id.index() + offset);
       },
-      HIRKind::BuiltinLoad { ptr, .. } => {
+      HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => {
         *ptr = HIRId::new(ptr.index() + offset);
       },
       HIRKind::BuiltinStore { ptr, value, .. } => {

@@ -203,4 +203,16 @@ pub enum Instr {
   RcRetain {
     operand: Operand,
   },
+
+  /// Run T's drop on the value at `ptr`. No-op when T doesn't need dropping.
+  DropInPlace {
+    ptr: Operand,
+    ty: TypeId,
+  },
+
+  /// `dest = &drop_glue_<T>` — function pointer `(*mut u8) -> void` that drops T.
+  DropGlue {
+    dest: TempId,
+    ty: TypeId,
+  },
 }

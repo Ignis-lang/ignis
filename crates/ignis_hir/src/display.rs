@@ -276,6 +276,15 @@ impl<'a> HIRPrinter<'a> {
         let value_str = self.format_node_compact(*value);
         format!("builtin_write<{}>({}, {})", ty_str, ptr_str, value_str)
       },
+      HIRKind::BuiltinDropInPlace { ty, ptr } => {
+        let ty_str = self.format_type(ty);
+        let ptr_str = self.format_node_compact(*ptr);
+        format!("builtin_drop_in_place<{}>({})", ty_str, ptr_str)
+      },
+      HIRKind::BuiltinDropGlue { ty } => {
+        let ty_str = self.format_type(ty);
+        format!("builtin_drop_glue<{}>()", ty_str)
+      },
       HIRKind::Panic(msg) => {
         let msg_str = self.format_node_compact(*msg);
         format!("@panic({})", msg_str)
@@ -668,8 +677,25 @@ impl<'a> HIRPrinter<'a> {
         self.print_node(*value);
         self.indent -= 1;
       },
+      HIRKind::BuiltinDropInPlace { ty, ptr } => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "BuiltinDropInPlace({}) : {}", ty_str, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*ptr);
+        self.indent -= 1;
+      },
+      HIRKind::BuiltinDropGlue { ty } => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "BuiltinDropGlue({}) : {}", ty_str, type_str).unwrap();
+      },
       HIRKind::RcNew { value } => {
         writeln!(self.output, "RcNew : {}", type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*value);
+        self.indent -= 1;
+      },
+      HIRKind::RcClone { value } => {
+        writeln!(self.output, "RcClone : {}", type_str).unwrap();
         self.indent += 1;
         self.print_node(*value);
         self.indent -= 1;

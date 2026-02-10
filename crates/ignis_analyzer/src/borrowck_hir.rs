@@ -308,14 +308,14 @@ impl<'a> HirBorrowChecker<'a> {
       HIRKind::TypeOf(inner) => {
         self.check_node(inner);
       },
-      HIRKind::BuiltinLoad { ptr, .. } => {
+      HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => {
         self.check_node(ptr);
       },
       HIRKind::BuiltinStore { ptr, value, .. } => {
         self.check_node(ptr);
         self.check_node(value);
       },
-      HIRKind::RcNew { value } => {
+      HIRKind::RcNew { value } | HIRKind::RcClone { value } => {
         self.check_node(value);
       },
       HIRKind::Panic(msg) => {
@@ -334,6 +334,7 @@ impl<'a> HirBorrowChecker<'a> {
       | HIRKind::MaxOf(_)
       | HIRKind::MinOf(_)
       | HIRKind::StaticAccess { .. }
+      | HIRKind::BuiltinDropGlue { .. }
       | HIRKind::Error => {},
     }
   }

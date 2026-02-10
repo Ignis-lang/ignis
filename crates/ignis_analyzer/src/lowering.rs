@@ -674,26 +674,17 @@ impl<'a> Analyzer<'a> {
         if let ASTNode::Expression(ASTExpression::Variable(var)) = callee_node {
           let name = self.symbols.borrow().get(&var.name).to_string();
 
-          if name == "typeOf" {
-            return self.lower_typeof_builtin(call, hir, scope_kind);
-          }
-          if name == "sizeOf" {
-            return self.lower_sizeof_builtin(call, hir);
-          }
-          if name == "alignOf" {
-            return self.lower_alignof_builtin(call, hir);
-          }
-          if name == "__builtin_read" {
-            return self.lower_builtin_read(call, hir, scope_kind);
-          }
-          if name == "__builtin_write" {
-            return self.lower_builtin_write(call, hir, scope_kind);
-          }
-          if name == "maxOf" {
-            return self.lower_maxof_builtin(call, hir);
-          }
-          if name == "minOf" {
-            return self.lower_minof_builtin(call, hir);
+          match name.as_str() {
+            "typeOf" => return self.lower_typeof_builtin(call, hir, scope_kind),
+            "sizeOf" => return self.lower_sizeof_builtin(call, hir),
+            "alignOf" => return self.lower_alignof_builtin(call, hir),
+            "__builtin_read" => return self.lower_builtin_read(call, hir, scope_kind),
+            "__builtin_write" => return self.lower_builtin_write(call, hir, scope_kind),
+            "__builtin_drop_in_place" => return self.lower_builtin_drop_in_place(call, hir, scope_kind),
+            "__builtin_drop_glue" => return self.lower_builtin_drop_glue(call, hir),
+            "maxOf" => return self.lower_maxof_builtin(call, hir),
+            "minOf" => return self.lower_minof_builtin(call, hir),
+            _ => {},
           }
         }
 
@@ -1614,6 +1605,72 @@ impl<'a> Analyzer<'a> {
     })
   }
 
+  fn lower_builtin_drop_in_place(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    if call.arguments.len() != 1 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: call.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+    let ptr = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinDropInPlace { ty: value_type, ptr },
+      span: call.span.clone(),
+      type_id: self.types.void(),
+    })
+  }
+
+  fn lower_builtin_drop_glue(
+    &mut self,
+    call: &ignis_ast::expressions::call::ASTCallExpression,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let type_args = match &call.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: call.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    // Return type: (*mut u8) -> void
+    let u8_type = self.types.u8();
+    let u8_ptr = self.types.pointer(u8_type, true);
+    let void_type = self.types.void();
+    let fn_ptr_type = self.types.function(vec![u8_ptr], void_type, false);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinDropGlue { ty: value_type },
+      span: call.span.clone(),
+      type_id: fn_ptr_type,
+    })
+  }
+
   // ========================================================================
   // @builtin(...) Lowering
   // ========================================================================
@@ -2002,6 +2059,18 @@ impl<'a> Analyzer<'a> {
   ) -> HIRId {
     let base = self.lower_node_to_hir(&ma.object, hir, scope_kind);
     let base_type = hir.get(base).type_id;
+
+    // Built-in Rc.clone() — emit RcClone node directly
+    if matches!(self.types.get(&base_type), Type::Rc { .. }) {
+      let member_name = self.symbols.borrow().get(&ma.member).to_string();
+      if member_name == "clone" {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::RcClone { value: base },
+          span: call.span.clone(),
+          type_id: result_type,
+        });
+      }
+    }
 
     // Determine the underlying record type (strip reference if present)
     let (is_already_ref, receiver_record_type) =

@@ -582,7 +582,7 @@ function main(): i32 {
 }
 
 #[test]
-fn c_rc_copy_retain() {
+fn c_rc_clone_retain() {
   let c_code = common::compile_to_c(
     r#"
 @lang(rc_runtime)
@@ -602,7 +602,7 @@ extern RcRuntime {
 
 function main(): i32 {
     let a: Rc<i32> = Rc::new(10);
-    let b: Rc<i32> = a;
+    let b: Rc<i32> = a.clone();
     return 0;
 }
 "#,
@@ -610,7 +610,7 @@ function main(): i32 {
 
   assert!(
     c_code.contains("my_rc_retain"),
-    "Expected custom retain hook when copying an Rc"
+    "Expected custom retain hook when cloning an Rc"
   );
 
   let release_count = c_code.matches("my_rc_release").count();
@@ -619,7 +619,7 @@ function main(): i32 {
     "Expected at least 2 custom release calls (one per Rc variable), got {}",
     release_count,
   );
-  assert_snapshot!("c_rc_copy_retain", c_code);
+  assert_snapshot!("c_rc_clone_retain", c_code);
 }
 
 #[test]

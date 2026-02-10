@@ -126,6 +126,7 @@ impl<'a> CEmitter<'a> {
     self.emit_static_constants();
     self.emit_extern_declarations();
     self.emit_rc_drop_helpers();
+    self.emit_drop_glue_helpers();
     self.emit_forward_declarations();
     self.emit_functions();
     self.output
@@ -678,6 +679,64 @@ impl<'a> CEmitter<'a> {
     inner_type: TypeId,
   ) -> String {
     format!("ignis_rc_drop_{}", self.format_type_for_mangling(&inner_type))
+  }
+
+  fn drop_glue_name(
+    &self,
+    ty: TypeId,
+  ) -> String {
+    format!("ignis_drop_glue_{}", self.format_type_for_mangling(&ty))
+  }
+
+  fn emit_drop_glue_helpers(&mut self) {
+    let mut glue_types = Vec::new();
+
+    for (def_id, func) in &self.program.functions {
+      if !self.should_emit(*def_id) {
+        continue;
+      }
+
+      for (_, block) in func.blocks.iter() {
+        for instr in &block.instructions {
+          if let Instr::DropGlue { ty, .. } = instr {
+            glue_types.push(*ty);
+          }
+        }
+      }
+    }
+
+    if glue_types.is_empty() {
+      return;
+    }
+
+    glue_types.sort_by_key(|ty| ty.index());
+    glue_types.dedup();
+
+    for ty in glue_types {
+      self.emit_drop_glue_helper(ty);
+      writeln!(self.output).unwrap();
+    }
+  }
+
+  fn emit_drop_glue_helper(
+    &mut self,
+    ty: TypeId,
+  ) {
+    let helper_name = self.drop_glue_name(ty);
+
+    writeln!(self.output, "static void {}(u8* payload) {{", helper_name).unwrap();
+
+    if !self.types.needs_drop_with_defs(&ty, self.defs) {
+      writeln!(self.output, "    (void)payload;").unwrap();
+      writeln!(self.output, "}}").unwrap();
+      return;
+    }
+
+    let c_type = self.format_type(ty);
+    writeln!(self.output, "    {}* value = ({}*)payload;", c_type, c_type).unwrap();
+    write!(self.output, "    ").unwrap();
+    self.emit_field_drops("(*value)", ty);
+    writeln!(self.output, "}}").unwrap();
   }
 
   fn emit_forward_declarations(&mut self) {
@@ -1258,6 +1317,25 @@ impl<'a> CEmitter<'a> {
         let retain_name = self.def_name(hooks.retain);
         let op = self.format_operand(func, operand);
         writeln!(self.output, "{}({});", retain_name, op).unwrap();
+      },
+
+      Instr::DropInPlace { ptr, ty } => {
+        if self.types.needs_drop_with_defs(ty, self.defs) {
+          let p = self.format_operand(func, ptr);
+          let c_type = self.format_type(*ty);
+          writeln!(self.output, "{{ {}* __dip = ({}*){}; (void)__dip;", c_type, c_type, p).unwrap();
+          write!(self.output, "    ").unwrap();
+          self.emit_field_drops("(*__dip)", *ty);
+          writeln!(self.output, "}}").unwrap();
+        } else {
+          let p = self.format_operand(func, ptr);
+          writeln!(self.output, "(void){}; /* drop_in_place: no-op */", p).unwrap();
+        }
+      },
+
+      Instr::DropGlue { dest, ty } => {
+        let glue_name = self.drop_glue_name(*ty);
+        writeln!(self.output, "t{} = (void(*)(u8*)){};", dest.index(), glue_name).unwrap();
       },
     }
   }

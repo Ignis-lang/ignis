@@ -597,7 +597,10 @@ impl TypeStore {
       | Type::NullPtr
       | Type::Error => true,
 
-      Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. } | Type::Rc { .. } => true,
+      Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. } => true,
+
+      // Rc is non-Copy: sharing requires explicit .clone()
+      Type::Rc { .. } => false,
 
       Type::Vector { element, .. } => self.is_copy(element),
 
@@ -705,7 +708,7 @@ impl TypeStore {
         result
       },
 
-      Type::Rc { .. } => true,
+      Type::Rc { .. } => false,
 
       Type::Vector { element, .. } => self.is_copy_with_defs_inner(element, defs, visiting),
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_with_defs_inner(e, defs, visiting)),
