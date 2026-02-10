@@ -109,6 +109,7 @@ typedef struct {
   uint32_t refcount;
   IgnisDropFn drop_fn;
   size_t payload_size;
+  size_t payload_align;
 } IgnisRcBox;
 
 /**
@@ -116,11 +117,12 @@ typedef struct {
  * The refcount is initialized to 1.
  *
  * @param payload_size Size of the payload in bytes.
+ * @param payload_align Required payload alignment in bytes (power-of-two).
  * @param drop_fn Optional destructor called on the payload when refcount reaches 0.
  *                Pass NULL if no cleanup is needed.
  * @return Pointer to the IgnisRcBox, or NULL on allocation failure.
  */
-IgnisRcBox *ignis_rc_alloc(size_t payload_size, IgnisDropFn drop_fn);
+IgnisRcBox *ignis_rc_alloc(size_t payload_size, size_t payload_align, IgnisDropFn drop_fn);
 
 /**
  * Increments the reference count.
@@ -347,5 +349,3 @@ void ignis_print(const IgnisString *s);
  * Writes the string to stderr.
  */
 void ignis_eprint(const IgnisString *s);
-
-

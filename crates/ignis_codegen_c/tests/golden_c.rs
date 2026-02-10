@@ -543,6 +543,21 @@ function main(): void {
 fn c_rc_basic_drop() {
   let c_code = common::compile_to_c(
     r#"
+@lang(rc_runtime)
+extern RcRuntime {
+    @externName("my_rc_alloc")
+    function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("my_rc_get")
+    function get(handle: *mut void): *mut u8;
+
+    @externName("my_rc_retain")
+    function retain(handle: *mut void): void;
+
+    @externName("my_rc_release")
+    function release(handle: *mut void): void;
+}
+
 function main(): i32 {
     let r: Rc<i32> = Rc::new(42);
     return 0;
@@ -550,8 +565,19 @@ function main(): i32 {
 "#,
   );
 
-  assert!(c_code.contains("ignis_rc_alloc"), "Expected ignis_rc_alloc call for Rc::new");
-  assert!(c_code.contains("ignis_rc_release"), "Expected ignis_rc_release for Rc drop");
+  assert!(c_code.contains("my_rc_alloc"), "Expected custom alloc hook call for Rc::new");
+  assert!(
+    c_code.contains("my_rc_release"),
+    "Expected custom release hook call for Rc drop"
+  );
+  assert!(
+    c_code.contains("my_rc_get"),
+    "Expected custom get hook call for Rc payload write"
+  );
+  assert!(
+    !c_code.contains("ignis_rc_alloc("),
+    "Codegen should not hardcode ignis_rc_alloc"
+  );
   assert_snapshot!("c_rc_basic_drop", c_code);
 }
 
@@ -559,6 +585,21 @@ function main(): i32 {
 fn c_rc_copy_retain() {
   let c_code = common::compile_to_c(
     r#"
+@lang(rc_runtime)
+extern RcRuntime {
+    @externName("my_rc_alloc")
+    function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("my_rc_get")
+    function get(handle: *mut void): *mut u8;
+
+    @externName("my_rc_retain")
+    function retain(handle: *mut void): void;
+
+    @externName("my_rc_release")
+    function release(handle: *mut void): void;
+}
+
 function main(): i32 {
     let a: Rc<i32> = Rc::new(10);
     let b: Rc<i32> = a;
@@ -568,14 +609,14 @@ function main(): i32 {
   );
 
   assert!(
-    c_code.contains("ignis_rc_retain"),
-    "Expected ignis_rc_retain when copying an Rc"
+    c_code.contains("my_rc_retain"),
+    "Expected custom retain hook when copying an Rc"
   );
 
-  let release_count = c_code.matches("ignis_rc_release").count();
+  let release_count = c_code.matches("my_rc_release").count();
   assert!(
     release_count >= 2,
-    "Expected at least 2 ignis_rc_release calls (one per Rc variable), got {}",
+    "Expected at least 2 custom release calls (one per Rc variable), got {}",
     release_count,
   );
   assert_snapshot!("c_rc_copy_retain", c_code);
@@ -585,6 +626,21 @@ function main(): i32 {
 fn c_rc_record_field_drop() {
   let c_code = common::compile_to_c(
     r#"
+@lang(rc_runtime)
+extern RcRuntime {
+    @externName("my_rc_alloc")
+    function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("my_rc_get")
+    function get(handle: *mut void): *mut u8;
+
+    @externName("my_rc_retain")
+    function retain(handle: *mut void): void;
+
+    @externName("my_rc_release")
+    function release(handle: *mut void): void;
+}
+
 record Holder {
     public value: Rc<i32>;
     public tag: i32;
@@ -598,8 +654,8 @@ function main(): i32 {
   );
 
   assert!(
-    c_code.contains("ignis_rc_release"),
-    "Expected ignis_rc_release in field drop glue for Rc field"
+    c_code.contains("my_rc_release"),
+    "Expected custom release hook in field drop glue for Rc field"
   );
   assert_snapshot!("c_rc_record_field_drop", c_code);
 }

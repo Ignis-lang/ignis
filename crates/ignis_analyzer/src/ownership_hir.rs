@@ -1016,7 +1016,11 @@ impl<'a> HirOwnershipChecker<'a> {
       }
     }
 
-    if rank(a) >= rank(b) { a } else { b }
+    if rank(a) >= rank(b) {
+      a
+    } else {
+      b
+    }
   }
 
   /// Remove diagnostics from the second pass that duplicate first-pass messages.

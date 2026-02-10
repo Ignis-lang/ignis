@@ -705,6 +705,25 @@ pub enum DiagnosticMessage {
     method_name: String,
     span: Span,
   },
+
+  // Rc hooks diagnostics
+  MissingRcHooks {
+    span: Span,
+  },
+  DuplicateRcHooks {
+    span: Span,
+    previous_span: Span,
+  },
+  RcHookMissing {
+    hook_name: String,
+    span: Span,
+  },
+  RcHookInvalidSignature {
+    hook_name: String,
+    expected: String,
+    got: String,
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1391,6 +1410,32 @@ impl fmt::Display for DiagnosticMessage {
           method_name
         )
       },
+
+      // Rc hooks
+      DiagnosticMessage::MissingRcHooks { .. } => {
+        write!(f, "Rc<T> is used but no `@lang(rc_runtime)` extern namespace was found")
+      },
+      DiagnosticMessage::DuplicateRcHooks { .. } => {
+        write!(
+          f,
+          "multiple `@lang(rc_runtime)` extern namespaces were found; only one provider is allowed"
+        )
+      },
+      DiagnosticMessage::RcHookMissing { hook_name, .. } => {
+        write!(f, "Rc hooks provider is missing required hook function '{}'", hook_name)
+      },
+      DiagnosticMessage::RcHookInvalidSignature {
+        hook_name,
+        expected,
+        got,
+        ..
+      } => {
+        write!(
+          f,
+          "Rc hook '{}' has wrong signature: expected '{}', got '{}'",
+          hook_name, expected, got
+        )
+      },
     }
   }
 }
@@ -1573,7 +1618,11 @@ impl DiagnosticMessage {
       | DiagnosticMessage::TraitInExternBlock { span, .. }
       | DiagnosticMessage::TraitMethodRequiresSelf { span, .. }
       | DiagnosticMessage::TraitFieldNotAllowed { span, .. }
-      | DiagnosticMessage::TraitStaticMethodNotAllowed { span, .. } => span.clone(),
+      | DiagnosticMessage::TraitStaticMethodNotAllowed { span, .. }
+      | DiagnosticMessage::MissingRcHooks { span, .. }
+      | DiagnosticMessage::DuplicateRcHooks { span, .. }
+      | DiagnosticMessage::RcHookMissing { span, .. }
+      | DiagnosticMessage::RcHookInvalidSignature { span, .. } => span.clone(),
     }
   }
 
@@ -1752,6 +1801,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::TraitMethodRequiresSelf { .. } => "A0144",
       DiagnosticMessage::TraitFieldNotAllowed { .. } => "A0145",
       DiagnosticMessage::TraitStaticMethodNotAllowed { .. } => "A0146",
+      DiagnosticMessage::MissingRcHooks { .. } => "A0150",
+      DiagnosticMessage::DuplicateRcHooks { .. } => "A0151",
+      DiagnosticMessage::RcHookMissing { .. } => "A0152",
+      DiagnosticMessage::RcHookInvalidSignature { .. } => "A0153",
     }
     .to_string()
   }
@@ -1784,6 +1837,12 @@ impl DiagnosticMessage {
       },
       DiagnosticMessage::MissingReturnStatement { span, .. } => {
         vec![(span.clone(), "Function should return a value".to_string())]
+      },
+      DiagnosticMessage::DuplicateRcHooks { previous_span, .. } => {
+        vec![(
+          previous_span.clone(),
+          "Previous `@lang(rc_runtime)` provider defined here".to_string(),
+        )]
       },
       _ => vec![],
     }

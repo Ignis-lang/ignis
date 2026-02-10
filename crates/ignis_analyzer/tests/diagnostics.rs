@@ -222,6 +222,69 @@ function main(): Color {
   );
 }
 
+#[test]
+fn rc_hooks_missing_provider() {
+  common::assert_err(
+    r#"
+function main(): i32 {
+    let value: Rc<i32> = Rc::new(42);
+    return 0;
+}
+"#,
+    &["A0150"],
+  );
+}
+
+#[test]
+fn rc_hooks_invalid_signature() {
+  common::assert_err(
+    r#"
+@lang(rc_runtime)
+extern RcRuntime {
+    function alloc(payload_size: i32, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+    function get(handle: *mut void): *mut u8;
+    function retain(handle: *mut void): void;
+    function release(handle: *mut void): void;
+}
+
+function main(): i32 {
+    let value: Rc<i32> = Rc::new(42);
+    return 0;
+}
+"#,
+    &["A0153"],
+  );
+}
+
+#[test]
+fn rc_hooks_duplicate_provider() {
+  common::assert_err(
+    r#"
+@lang(rc_runtime)
+extern RcRuntimeA {
+    function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+    function get(handle: *mut void): *mut u8;
+    function retain(handle: *mut void): void;
+    function release(handle: *mut void): void;
+}
+
+@lang(rc_runtime)
+extern RcRuntimeB {
+    function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+    function get(handle: *mut void): *mut u8;
+    function retain(handle: *mut void): void;
+    function release(handle: *mut void): void;
+}
+
+function main(): i32 {
+    let value: Rc<i32> = Rc::new(42);
+    return 0;
+}
+"#,
+    &["A0151"],
+  );
+}
+
 // TODO: enum_variant_requires_payload test
 // Currently enum variants accessed via path syntax (Option::Some) are not
 // resolved through the MemberAccess static access code path, so the

@@ -192,7 +192,7 @@ pub enum Instr {
     payload: Vec<Operand>,
   },
 
-  /// `dest = ignis_rc_alloc(sizeof(inner_type), NULL); *payload = value`
+  /// `dest = rc_alloc(sizeof(inner_type), alignof(inner_type), drop_fn); *payload = value`
   RcNew {
     dest: TempId,
     value: Operand,

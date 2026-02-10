@@ -432,13 +432,15 @@ pub fn compile_project(
         .as_ref()
         .map(|bc| bc.output_dir.clone())
         .unwrap_or_else(|| "build".to_string());
-      let link_plan = LinkPlan::from_modules(
+      let mut link_plan = LinkPlan::from_modules(
         &used_modules,
         &ctx.module_graph,
         Path::new(&config.std_path),
         Path::new(&build_dir),
         manifest,
       );
+      link_plan.cc = config.c_compiler.clone();
+      link_plan.cflags = config.cflags.clone();
 
       if bc.rebuild_std {
         trace_dbg!(&config, DebugTrace::Std, "rebuilding standard library runtime");
@@ -780,6 +782,7 @@ pub fn compile_project(
               &output.namespaces,
               &sym_table,
               &link_plan_with_user_includes.headers,
+              output.rc_hooks,
               &module_paths,
               &user_module_headers,
             );
@@ -859,6 +862,7 @@ pub fn compile_project(
               &output.namespaces,
               &sym_table,
               &link_plan.headers,
+              output.rc_hooks,
               &module_paths,
             )
           } else {
@@ -869,6 +873,7 @@ pub fn compile_project(
               &output.namespaces,
               &sym_table,
               &link_plan.headers,
+              output.rc_hooks,
             )
           };
 
@@ -1019,6 +1024,8 @@ pub fn build_std(
 
   let output = ctx.compile_all(&config)?;
   let mut link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+  link_plan.cc = config.c_compiler.clone();
+  link_plan.cflags = config.cflags.clone();
 
   // Add std include directory for std module inter-dependencies
   // This allows std module C files to #include "ignis_std.h"
@@ -1198,6 +1205,7 @@ pub fn build_std(
       &output.namespaces,
       &sym_table,
       &link_plan.headers,
+      output.rc_hooks,
       &module_paths,
       Some(umbrella_header),
       std_path,
@@ -1338,7 +1346,9 @@ pub fn check_std(
   section!(&config, "Analyzing");
 
   let output = ctx.compile_all(&config)?;
-  let link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+  let mut link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
+  link_plan.cc = config.c_compiler.clone();
+  link_plan.cflags = config.cflags.clone();
 
   section!(&config, "Codegen (check)");
 
@@ -1425,6 +1435,7 @@ pub fn check_std(
       &output.namespaces,
       &sym_table,
       &link_plan.headers,
+      output.rc_hooks,
     );
 
     let c_path = output_path.join(format!("{}.c", module_name));

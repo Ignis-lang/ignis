@@ -48,6 +48,10 @@ pub struct LinkPlan {
   pub libs: Vec<String>,
   /// Include directories (-I flags)
   pub include_dirs: Vec<PathBuf>,
+  /// C compiler executable (e.g. gcc, clang).
+  pub cc: String,
+  /// Additional compiler/linker flags.
+  pub cflags: Vec<String>,
 }
 
 impl LinkPlan {
@@ -236,8 +240,18 @@ pub fn compile_to_object(
   link_plan: &LinkPlan,
   quiet: bool,
 ) -> Result<(), String> {
-  let mut cmd = Command::new("gcc");
+  let compiler = if link_plan.cc.trim().is_empty() {
+    "gcc"
+  } else {
+    link_plan.cc.as_str()
+  };
+
+  let mut cmd = Command::new(compiler);
   cmd.arg("-c").arg(c_path).arg("-o").arg(obj_path);
+
+  for flag in &link_plan.cflags {
+    cmd.arg(flag);
+  }
 
   for inc_dir in &link_plan.include_dirs {
     cmd.arg("-I").arg(inc_dir);
@@ -252,11 +266,11 @@ pub fn compile_to_object(
     );
   }
 
-  let output = cmd.output().map_err(|e| format!("Failed to run gcc: {}", e))?;
+  let output = cmd.output().map_err(|e| format!("Failed to run {}: {}", compiler, e))?;
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format_tool_error("gcc", "compilation", &stderr));
+    return Err(format_tool_error(compiler, "compilation", &stderr));
   }
 
   Ok(())
@@ -269,8 +283,18 @@ pub fn link_executable(
   link_plan: &LinkPlan,
   quiet: bool,
 ) -> Result<(), String> {
-  let mut cmd = Command::new("gcc");
+  let compiler = if link_plan.cc.trim().is_empty() {
+    "gcc"
+  } else {
+    link_plan.cc.as_str()
+  };
+
+  let mut cmd = Command::new(compiler);
   cmd.arg(obj_path);
+
+  for flag in &link_plan.cflags {
+    cmd.arg(flag);
+  }
 
   // Link std archive if present (libignis_std.a)
   if let Some(std_archive) = &link_plan.std_archive {
@@ -296,11 +320,11 @@ pub fn link_executable(
     );
   }
 
-  let output = cmd.output().map_err(|e| format!("Failed to run gcc: {}", e))?;
+  let output = cmd.output().map_err(|e| format!("Failed to run {}: {}", compiler, e))?;
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format_tool_error("gcc", "linking", &stderr));
+    return Err(format_tool_error(compiler, "linking", &stderr));
   }
 
   Ok(())
@@ -313,7 +337,17 @@ pub fn link_executable_multi(
   link_plan: &LinkPlan,
   quiet: bool,
 ) -> Result<(), String> {
-  let mut cmd = Command::new("gcc");
+  let compiler = if link_plan.cc.trim().is_empty() {
+    "gcc"
+  } else {
+    link_plan.cc.as_str()
+  };
+
+  let mut cmd = Command::new(compiler);
+
+  for flag in &link_plan.cflags {
+    cmd.arg(flag);
+  }
 
   for obj in obj_paths {
     cmd.arg(obj);
@@ -350,11 +384,11 @@ pub fn link_executable_multi(
     );
   }
 
-  let output = cmd.output().map_err(|e| format!("Failed to run gcc: {}", e))?;
+  let output = cmd.output().map_err(|e| format!("Failed to run {}: {}", compiler, e))?;
 
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format_tool_error("gcc", "linking", &stderr));
+    return Err(format_tool_error(compiler, "linking", &stderr));
   }
 
   Ok(())
