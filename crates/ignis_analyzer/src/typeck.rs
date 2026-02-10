@@ -1375,6 +1375,7 @@ impl<'a> Analyzer<'a> {
       kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
         type_id: self_ref_type,
         mutable: self_mutable,
+        attrs: vec![],
       }),
       name: self_symbol,
       span: method_span.clone(),
@@ -1562,6 +1563,7 @@ impl<'a> Analyzer<'a> {
         kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
           type_id: self_ref_type,
           mutable: self_mutable,
+          attrs: vec![],
         }),
         name: self_symbol,
         span: method.span.clone(),
@@ -6522,11 +6524,7 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    if has_length {
-      data_element_type
-    } else {
-      None
-    }
+    if has_length { data_element_type } else { None }
   }
 
   fn validate_mutable_iter_for_mut_ref(
@@ -7212,11 +7210,7 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" {
-      1
-    } else {
-      0
-    }
+    if first_name == "self" { 1 } else { 0 }
   }
 
   fn emit_no_overload_error(

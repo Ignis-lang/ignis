@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
   Id, Store,
-  attribute::{FieldAttr, FunctionAttr, NamespaceAttr, RecordAttr},
+  attribute::{FieldAttr, FunctionAttr, NamespaceAttr, ParamAttr, RecordAttr},
   module::ModuleId,
   namespace::NamespaceId,
   span::Span,
@@ -143,6 +143,7 @@ pub struct ConstantDefinition {
 pub struct ParameterDefinition {
   pub type_id: TypeId,
   pub mutable: bool,
+  pub attrs: Vec<ParamAttr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

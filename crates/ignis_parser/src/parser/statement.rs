@@ -12,8 +12,11 @@ use ignis_type::span::Span;
 use crate::parser::ParserResult;
 
 impl super::IgnisParser {
-  /// Parse a function parameter: name: type
+  /// Parses `[@attr] name: type`. Uses inline attribute parsing to avoid
+  /// clobbering the global `pending_attrs` buffer (which holds function-level attrs).
   pub(crate) fn parse_parameter(&mut self) -> ParserResult<ASTParameter> {
+    let attrs = self.parse_inline_attributes()?;
+
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
 
@@ -27,6 +30,7 @@ impl super::IgnisParser {
       type_annotation,
       span,
       ignis_ast::metadata::ASTMetadata::NONE,
+      attrs,
     ))
   }
 

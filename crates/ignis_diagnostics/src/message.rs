@@ -461,6 +461,9 @@ pub enum DiagnosticMessage {
     var_name: String,
     span: Span,
   },
+  DropOnComplexReceiver {
+    span: Span,
+  },
   // Builtin errors
   InvalidSizeOfOperand {
     span: Span,
@@ -1104,6 +1107,12 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::OwnershipEscapeToGlobal { var_name, .. } => {
         write!(f, "Ownership of '{}' escapes to global scope", var_name)
       },
+      DiagnosticMessage::DropOnComplexReceiver { .. } => {
+        write!(
+          f,
+          ".drop() on complex receiver is not tracked at compile time; relies on runtime guard"
+        )
+      },
 
       // Builtin errors
       DiagnosticMessage::InvalidSizeOfOperand { .. } => {
@@ -1522,6 +1531,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::DoubleFree { span, .. }
       | DiagnosticMessage::PossibleLeakToFFI { span, .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { span, .. }
+      | DiagnosticMessage::DropOnComplexReceiver { span, .. }
       | DiagnosticMessage::InvalidSizeOfOperand { span, .. }
       | DiagnosticMessage::InvalidMinMaxType { span, .. }
       | DiagnosticMessage::StaticFieldRequiresInit { span, .. }
@@ -1703,6 +1713,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::DoubleDrop { .. } => "O0007",
       DiagnosticMessage::InconsistentDropInBranches { .. } => "O0008",
       DiagnosticMessage::DoubleFree { .. } => "O0009",
+      DiagnosticMessage::DropOnComplexReceiver { .. } => "O0010",
       DiagnosticMessage::ForOfExpectsVector { .. } => "A0069",
       DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",
@@ -1763,6 +1774,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::MissingReturnStatement { .. }
       | DiagnosticMessage::PossibleLeakToFFI { .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { .. }
+      | DiagnosticMessage::DropOnComplexReceiver { .. }
       | DiagnosticMessage::UnknownConfigFlag { .. }
       | DiagnosticMessage::UnusedVariable { .. }
       | DiagnosticMessage::UnusedImport { .. }
