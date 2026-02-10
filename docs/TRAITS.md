@@ -9,7 +9,7 @@ It also has an extension method system (`@extension`) for adding methods to exis
 
 ## Lang Traits
 
-Lang traits are built-in traits that the compiler understands and uses for code generation. They are declared with `@implements(...)`.
+Lang traits are built-in traits that the compiler understands and uses for code generation. They are declared with `@implements(...)` on records and enums.
 
 ### Available Lang Traits
 
@@ -23,7 +23,7 @@ Lang traits are fixed and compiler-defined. User-defined traits are a separate f
 
 ### `@implements(Drop)`
 
-Declares that a record has custom cleanup behavior. The record must define a `drop` instance method.
+Declares custom cleanup behavior. The type must define a `drop` instance method.
 
 ```ignis
 @implements(Drop)
@@ -39,13 +39,13 @@ record FileHandle {
 
 Rules:
 - The `drop` method signature must be exactly `drop(&mut self): void`
-- Only records can implement Drop (not enums)
+- Records and enums can implement `Drop`
 - A type with Drop is automatically non-Copy
 - Drop and Copy cannot coexist on the same type
 
 ### `@implements(Clone)`
 
-Declares that a record can be explicitly duplicated. The record must define a `clone` instance method.
+Declares that a type can be explicitly duplicated. The type must define a `clone` instance method.
 
 ```ignis
 @implements(Clone)
@@ -67,7 +67,7 @@ function main(): void {
 
 ### `@implements(Copy)`
 
-Forces a record to have copy semantics. No method is required -- this is a flag that tells the compiler to duplicate the value on assignment instead of moving it.
+Declares copy semantics for a type. No method is required.
 
 ```ignis
 @implements(Copy)
@@ -77,7 +77,7 @@ record Pair {
 }
 ```
 
-In practice, `@implements(Copy)` is rarely needed because the compiler already derives Copy structurally for records where all fields are Copy. The explicit annotation is for cases where you want to make the intent clear or override the compiler's analysis.
+`@implements(Copy)` is validated structurally. For records, every field must be Copy. For enums, every variant payload must be Copy. If any member is non-Copy, compilation fails.
 
 ---
 
@@ -450,3 +450,5 @@ Available lints: `unused_variable`, `unused_import`, `deprecated`.
 | A0144 | Trait method must have `&self` or `&mut self` | Error |
 | A0145 | Fields are not allowed in trait declarations | Error |
 | A0146 | Static methods are not allowed in trait declarations | Error |
+| A0148 | Type declares `@implements(Copy)` but a record field is non-Copy | Error |
+| A0149 | Type declares `@implements(Copy)` but an enum payload is non-Copy | Error |

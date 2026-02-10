@@ -22,6 +22,8 @@ name<Type>()
 
 Both categories are expressions -- they have a type and return a value (or diverge with `Never`).
 
+Legacy `__builtin_*` names are deprecated; use directive form (`@read`, `@write`, `@dropInPlace`, `@dropGlue`, etc.).
+
 ### Argument Types
 
 Builtin arguments come in two forms:
@@ -255,6 +257,90 @@ function fromAddress(addr: u64): *const i32 {
 
 ---
 
+### `@read<T>(ptr)`
+
+Reads a value of type `T` from a mutable pointer.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | 1 expression (`*mut T`) |
+| **Returns** | `T` |
+
+```ignis
+function load(ptr: *mut i32): i32 {
+    return @read<i32>(ptr);
+}
+```
+
+The pointer argument must be exactly `*mut T`. Passing `null` is a compile-time error when statically known.
+
+---
+
+### `@write<T>(ptr, value)`
+
+Writes a value of type `T` to a mutable pointer.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | 2 expressions (`*mut T`, `T`) |
+| **Returns** | `void` |
+
+```ignis
+function store(ptr: *mut i32, value: i32): void {
+    @write<i32>(ptr, value);
+}
+```
+
+The first argument must be exactly `*mut T`. Passing `null` is a compile-time error when statically known.
+
+---
+
+### `@dropInPlace<T>(ptr)`
+
+Runs drop glue for `T` at the given address.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | 1 expression (`*mut T`) |
+| **Returns** | `void` |
+
+```ignis
+function dropValue(ptr: *mut i32): void {
+    @dropInPlace<i32>(ptr);
+}
+```
+
+If `T` does not need drop, this is a no-op.
+
+---
+
+### `@dropGlue<T>()`
+
+Returns a monomorphized drop callback for `T`.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | none |
+| **Returns** | `(*mut u8) -> void` |
+
+```ignis
+extern Runtime {
+    function alloc(size: u64, align: u64, dropFn: (*mut u8) -> void): *mut void;
+}
+
+function allocBoxed<T>(size: u64, align: u64): *mut void {
+    return Runtime::alloc(size, align, @dropGlue<T>());
+}
+```
+
+This is used by containers and runtimes that need to drop unknown generic payloads through a uniform callback ABI.
+
+---
+
 ### `@panic(message)`
 
 Prints a message to stderr and terminates the program with exit code 101.
@@ -414,6 +500,10 @@ For unsigned types, `minOf` returns `0`.
 | `@pointerCast<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (C cast) |
 | `@integerFromPointer(ptr)` | 1 pointer expr | `u64` | Yes (C cast) |
 | `@pointerFromInteger<T>(int)` | 1 type arg + 1 expr | `T` | Yes (C cast) |
+| `@read<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (load through pointer) |
+| `@write<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (store through pointer) |
+| `@dropInPlace<T>(ptr)` | 1 type arg + 1 expr | `void` | Yes (drop glue call) |
+| `@dropGlue<T>()` | 1 type arg | `(*mut u8) -> void` | Yes (function pointer constant) |
 | `@panic("msg")` | 1 string literal | `Never` | Yes (fprintf + exit) |
 | `@trap()` | none | `Never` | Yes (`__builtin_trap`) |
 | `@unreachable()` | none | `Never` | No (`__builtin_unreachable`) |
