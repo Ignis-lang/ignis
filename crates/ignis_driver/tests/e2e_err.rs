@@ -143,7 +143,7 @@ fn e2e_err_builtin_read_null() {
     "err_builtin_read_null",
     r#"
 function main(): i32 {
-    let value: i32 = __builtin_read<i32>(null);
+    let value: i32 = @read<i32>(null);
     return value;
 }
 "#,
@@ -156,7 +156,7 @@ fn e2e_err_builtin_write_null() {
     "err_builtin_write_null",
     r#"
 function main(): i32 {
-    __builtin_write<i32>(null, 10);
+    @write<i32>(null, 10);
     return 0;
 }
 "#,

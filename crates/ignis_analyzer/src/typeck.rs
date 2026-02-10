@@ -2533,10 +2533,6 @@ impl<'a> Analyzer<'a> {
         "typeOf" => return self.typecheck_typeof_builtin(call, scope_kind, ctx),
         "sizeOf" => return self.typecheck_sizeof_builtin(call, scope_kind, ctx),
         "alignOf" => return self.typecheck_alignof_builtin(call, scope_kind, ctx),
-        "__builtin_read" => return self.typecheck_builtin_read(call, scope_kind, ctx),
-        "__builtin_write" => return self.typecheck_builtin_write(call, scope_kind, ctx),
-        "__builtin_drop_in_place" => return self.typecheck_builtin_drop_in_place(call, scope_kind, ctx),
-        "__builtin_drop_glue" => return self.typecheck_builtin_drop_glue(call),
         "maxOf" => return self.typecheck_maxof_builtin(call, scope_kind, ctx),
         "minOf" => return self.typecheck_minof_builtin(call, scope_kind, ctx),
         _ => {},
@@ -4547,19 +4543,19 @@ impl<'a> Analyzer<'a> {
 
   fn typecheck_builtin_read(
     &mut self,
-    call: &ASTCallExpression,
+    bc: &ASTBuiltinCall,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
   ) -> TypeId {
-    let type_args = match &call.type_args {
+    let type_args = match &bc.type_args {
       Some(args) => args,
       None => {
         self.add_diagnostic(
           DiagnosticMessage::WrongNumberOfTypeArgs {
             expected: 1,
             got: 0,
-            type_name: "__builtin_read".to_string(),
-            span: call.span.clone(),
+            type_name: "@read".to_string(),
+            span: bc.span.clone(),
           }
           .report(),
         );
@@ -4572,34 +4568,43 @@ impl<'a> Analyzer<'a> {
         DiagnosticMessage::WrongNumberOfTypeArgs {
           expected: 1,
           got: type_args.len(),
-          type_name: "__builtin_read".to_string(),
-          span: call.span.clone(),
+          type_name: "@read".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
-    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&bc.span));
+
+    // Allow type parameters for generic support
+    if matches!(self.types.get(&value_type), ignis_type::types::Type::Param { .. }) {
+      for arg in &bc.args {
+        self.typecheck_node(arg, scope_kind, ctx);
+      }
+      return value_type;
+    }
+
+    if self.types.is_infer(&value_type) {
       self.add_diagnostic(
         DiagnosticMessage::CannotInferTypeParam {
           param_name: "T".to_string(),
-          func_name: "__builtin_read".to_string(),
-          span: call.span.clone(),
+          func_name: "@read".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    if call.arguments.len() != 1 {
+    if bc.args.len() != 1 {
       self.add_diagnostic(
-        DiagnosticMessage::ArgumentCountMismatch {
+        DiagnosticMessage::BuiltinArgCount {
+          name: "read".to_string(),
           expected: 1,
-          got: call.arguments.len(),
-          func_name: "__builtin_read".to_string(),
-          span: call.span.clone(),
+          got: bc.args.len(),
+          span: bc.span.clone(),
         }
         .report(),
       );
@@ -4608,7 +4613,7 @@ impl<'a> Analyzer<'a> {
 
     let pointer_type = self.types.pointer(value_type, true);
     let infer = InferContext::expecting(pointer_type);
-    let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &infer);
+    let arg_type = self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &infer);
 
     if !self.types.types_equal(&arg_type, &pointer_type) {
       let expected = self.format_type_for_error(&pointer_type);
@@ -4618,25 +4623,22 @@ impl<'a> Analyzer<'a> {
           param_idx: 1,
           expected,
           got,
-          span: self.node_span(&call.arguments[0]).clone(),
+          span: self.node_span(&bc.args[0]).clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    if matches!(
-      self.const_eval_expression_node(&call.arguments[0], scope_kind),
-      Some(ConstValue::Null)
-    ) {
+    if matches!(self.const_eval_expression_node(&bc.args[0], scope_kind), Some(ConstValue::Null)) {
       self.add_diagnostic(
         DiagnosticMessage::NullDereference {
-          span: self.node_span(&call.arguments[0]).clone(),
+          span: self.node_span(&bc.args[0]).clone(),
         }
         .report(),
       );
 
-      self.set_type(&call.arguments[0], &self.types.error());
+      self.set_type(&bc.args[0], &self.types.error());
       return self.types.error();
     }
 
@@ -4645,19 +4647,19 @@ impl<'a> Analyzer<'a> {
 
   fn typecheck_builtin_write(
     &mut self,
-    call: &ASTCallExpression,
+    bc: &ASTBuiltinCall,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
   ) -> TypeId {
-    let type_args = match &call.type_args {
+    let type_args = match &bc.type_args {
       Some(args) => args,
       None => {
         self.add_diagnostic(
           DiagnosticMessage::WrongNumberOfTypeArgs {
             expected: 1,
             got: 0,
-            type_name: "__builtin_write".to_string(),
-            span: call.span.clone(),
+            type_name: "@write".to_string(),
+            span: bc.span.clone(),
           }
           .report(),
         );
@@ -4670,34 +4672,43 @@ impl<'a> Analyzer<'a> {
         DiagnosticMessage::WrongNumberOfTypeArgs {
           expected: 1,
           got: type_args.len(),
-          type_name: "__builtin_write".to_string(),
-          span: call.span.clone(),
+          type_name: "@write".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
-    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&bc.span));
+
+    // Allow type parameters for generic support
+    if matches!(self.types.get(&value_type), ignis_type::types::Type::Param { .. }) {
+      for arg in &bc.args {
+        self.typecheck_node(arg, scope_kind, ctx);
+      }
+      return self.types.void();
+    }
+
+    if self.types.is_infer(&value_type) {
       self.add_diagnostic(
         DiagnosticMessage::CannotInferTypeParam {
           param_name: "T".to_string(),
-          func_name: "__builtin_write".to_string(),
-          span: call.span.clone(),
+          func_name: "@write".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    if call.arguments.len() != 2 {
+    if bc.args.len() != 2 {
       self.add_diagnostic(
-        DiagnosticMessage::ArgumentCountMismatch {
+        DiagnosticMessage::BuiltinArgCount {
+          name: "write".to_string(),
           expected: 2,
-          got: call.arguments.len(),
-          func_name: "__builtin_write".to_string(),
-          span: call.span.clone(),
+          got: bc.args.len(),
+          span: bc.span.clone(),
         }
         .report(),
       );
@@ -4706,7 +4717,7 @@ impl<'a> Analyzer<'a> {
 
     let pointer_type = self.types.pointer(value_type, true);
     let ptr_infer = InferContext::expecting(pointer_type);
-    let ptr_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &ptr_infer);
+    let ptr_type = self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &ptr_infer);
 
     if !self.types.types_equal(&ptr_type, &pointer_type) {
       let expected = self.format_type_for_error(&pointer_type);
@@ -4716,7 +4727,7 @@ impl<'a> Analyzer<'a> {
           param_idx: 1,
           expected,
           got,
-          span: self.node_span(&call.arguments[0]).clone(),
+          span: self.node_span(&bc.args[0]).clone(),
         }
         .report(),
       );
@@ -4724,7 +4735,7 @@ impl<'a> Analyzer<'a> {
     }
 
     let value_infer = InferContext::expecting(value_type);
-    let arg_type = self.typecheck_node_with_infer(&call.arguments[1], scope_kind, ctx, &value_infer);
+    let arg_type = self.typecheck_node_with_infer(&bc.args[1], scope_kind, ctx, &value_infer);
 
     if !self.types.types_equal(&arg_type, &value_type) {
       let expected = self.format_type_for_error(&value_type);
@@ -4734,25 +4745,22 @@ impl<'a> Analyzer<'a> {
           param_idx: 2,
           expected,
           got,
-          span: self.node_span(&call.arguments[1]).clone(),
+          span: self.node_span(&bc.args[1]).clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    if matches!(
-      self.const_eval_expression_node(&call.arguments[0], scope_kind),
-      Some(ConstValue::Null)
-    ) {
+    if matches!(self.const_eval_expression_node(&bc.args[0], scope_kind), Some(ConstValue::Null)) {
       self.add_diagnostic(
         DiagnosticMessage::NullDereference {
-          span: self.node_span(&call.arguments[0]).clone(),
+          span: self.node_span(&bc.args[0]).clone(),
         }
         .report(),
       );
 
-      self.set_type(&call.arguments[0], &self.types.error());
+      self.set_type(&bc.args[0], &self.types.error());
       return self.types.error();
     }
 
@@ -4761,19 +4769,19 @@ impl<'a> Analyzer<'a> {
 
   fn typecheck_builtin_drop_in_place(
     &mut self,
-    call: &ASTCallExpression,
+    bc: &ASTBuiltinCall,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
   ) -> TypeId {
-    let type_args = match &call.type_args {
+    let type_args = match &bc.type_args {
       Some(args) => args,
       None => {
         self.add_diagnostic(
           DiagnosticMessage::WrongNumberOfTypeArgs {
             expected: 1,
             got: 0,
-            type_name: "__builtin_drop_in_place".to_string(),
-            span: call.span.clone(),
+            type_name: "@dropInPlace".to_string(),
+            span: bc.span.clone(),
           }
           .report(),
         );
@@ -4786,34 +4794,43 @@ impl<'a> Analyzer<'a> {
         DiagnosticMessage::WrongNumberOfTypeArgs {
           expected: 1,
           got: type_args.len(),
-          type_name: "__builtin_drop_in_place".to_string(),
-          span: call.span.clone(),
+          type_name: "@dropInPlace".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
-    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&bc.span));
+
+    // Allow type parameters for generic support
+    if matches!(self.types.get(&value_type), ignis_type::types::Type::Param { .. }) {
+      for arg in &bc.args {
+        self.typecheck_node(arg, scope_kind, ctx);
+      }
+      return self.types.void();
+    }
+
+    if self.types.is_infer(&value_type) {
       self.add_diagnostic(
         DiagnosticMessage::CannotInferTypeParam {
           param_name: "T".to_string(),
-          func_name: "__builtin_drop_in_place".to_string(),
-          span: call.span.clone(),
+          func_name: "@dropInPlace".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    if call.arguments.len() != 1 {
+    if bc.args.len() != 1 {
       self.add_diagnostic(
-        DiagnosticMessage::ArgumentCountMismatch {
+        DiagnosticMessage::BuiltinArgCount {
+          name: "dropInPlace".to_string(),
           expected: 1,
-          got: call.arguments.len(),
-          func_name: "__builtin_drop_in_place".to_string(),
-          span: call.span.clone(),
+          got: bc.args.len(),
+          span: bc.span.clone(),
         }
         .report(),
       );
@@ -4822,7 +4839,7 @@ impl<'a> Analyzer<'a> {
 
     let pointer_type = self.types.pointer(value_type, true);
     let infer = InferContext::expecting(pointer_type);
-    let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &infer);
+    let arg_type = self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &infer);
 
     if !self.types.types_equal(&arg_type, &pointer_type) {
       let expected = self.format_type_for_error(&pointer_type);
@@ -4832,7 +4849,7 @@ impl<'a> Analyzer<'a> {
           param_idx: 1,
           expected,
           got,
-          span: self.node_span(&call.arguments[0]).clone(),
+          span: self.node_span(&bc.args[0]).clone(),
         }
         .report(),
       );
@@ -4844,17 +4861,17 @@ impl<'a> Analyzer<'a> {
 
   fn typecheck_builtin_drop_glue(
     &mut self,
-    call: &ASTCallExpression,
+    bc: &ASTBuiltinCall,
   ) -> TypeId {
-    let type_args = match &call.type_args {
+    let type_args = match &bc.type_args {
       Some(args) => args,
       None => {
         self.add_diagnostic(
           DiagnosticMessage::WrongNumberOfTypeArgs {
             expected: 1,
             got: 0,
-            type_name: "__builtin_drop_glue".to_string(),
-            span: call.span.clone(),
+            type_name: "@dropGlue".to_string(),
+            span: bc.span.clone(),
           }
           .report(),
         );
@@ -4867,34 +4884,43 @@ impl<'a> Analyzer<'a> {
         DiagnosticMessage::WrongNumberOfTypeArgs {
           expected: 1,
           got: type_args.len(),
-          type_name: "__builtin_drop_glue".to_string(),
-          span: call.span.clone(),
+          type_name: "@dropGlue".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
-    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&bc.span));
+
+    // Allow type parameters for generic support
+    if matches!(self.types.get(&value_type), ignis_type::types::Type::Param { .. }) {
+      let u8_type = self.types.u8();
+      let u8_ptr = self.types.pointer(u8_type, true);
+      let void_type = self.types.void();
+      return self.types.function(vec![u8_ptr], void_type, false);
+    }
+
+    if self.types.is_infer(&value_type) {
       self.add_diagnostic(
         DiagnosticMessage::CannotInferTypeParam {
           param_name: "T".to_string(),
-          func_name: "__builtin_drop_glue".to_string(),
-          span: call.span.clone(),
+          func_name: "@dropGlue".to_string(),
+          span: bc.span.clone(),
         }
         .report(),
       );
       return self.types.error();
     }
 
-    if !call.arguments.is_empty() {
+    if !bc.args.is_empty() {
       self.add_diagnostic(
-        DiagnosticMessage::ArgumentCountMismatch {
+        DiagnosticMessage::BuiltinArgCount {
+          name: "dropGlue".to_string(),
           expected: 0,
-          got: call.arguments.len(),
-          func_name: "__builtin_drop_glue".to_string(),
-          span: call.span.clone(),
+          got: bc.args.len(),
+          span: bc.span.clone(),
         }
         .report(),
       );
@@ -5043,6 +5069,10 @@ impl<'a> Analyzer<'a> {
       "pointerCast" => self.typecheck_builtin_pointer_cast(bc, scope_kind, ctx),
       "integerFromPointer" => self.typecheck_builtin_integer_from_pointer(bc, scope_kind, ctx),
       "pointerFromInteger" => self.typecheck_builtin_pointer_from_integer(bc, scope_kind, ctx),
+      "read" => self.typecheck_builtin_read(bc, scope_kind, ctx),
+      "write" => self.typecheck_builtin_write(bc, scope_kind, ctx),
+      "dropInPlace" => self.typecheck_builtin_drop_in_place(bc, scope_kind, ctx),
+      "dropGlue" => self.typecheck_builtin_drop_glue(bc),
       "panic" => self.typecheck_builtin_panic(bc),
       "trap" => self.typecheck_builtin_no_args(bc, "trap"),
       "unreachable" => self.typecheck_builtin_no_args(bc, "unreachable"),
@@ -6914,23 +6944,63 @@ impl<'a> Analyzer<'a> {
     let (lang_traits, instance_methods, type_id, is_enum, fields, variants) = match &type_def.kind {
       DefinitionKind::Record(rd) => {
         let fields: Vec<_> = rd.fields.iter().map(|f| (f.name, f.type_id, f.span.clone())).collect();
+
+        // Generic records need Instance(def, [Param(0), ...]) so clone/drop signatures match
+        let effective_type = if rd.type_params.is_empty() {
+          rd.type_id
+        } else {
+          let params: Vec<TypeId> = rd
+            .type_params
+            .iter()
+            .map(|&tp_def| {
+              let tp_kind = &self.defs.get(&tp_def).kind;
+              if let DefinitionKind::TypeParam(tp) = tp_kind {
+                self.types.param(tp.owner, tp.index)
+              } else {
+                panic!("expected TypeParam in record type_params");
+              }
+            })
+            .collect();
+          self.types.instance(*type_def_id, params)
+        };
+
         (
           rd.lang_traits,
           Some(rd.instance_methods.clone()),
-          rd.type_id,
+          effective_type,
           false,
           fields,
           Vec::new(),
         )
       },
-      DefinitionKind::Enum(ed) => (
-        ed.lang_traits,
-        Some(ed.instance_methods.clone()),
-        ed.type_id,
-        true,
-        Vec::new(),
-        ed.variants.clone(),
-      ),
+      DefinitionKind::Enum(ed) => {
+        let effective_type = if ed.type_params.is_empty() {
+          ed.type_id
+        } else {
+          let params: Vec<TypeId> = ed
+            .type_params
+            .iter()
+            .map(|&tp_def| {
+              let tp_kind = &self.defs.get(&tp_def).kind;
+              if let DefinitionKind::TypeParam(tp) = tp_kind {
+                self.types.param(tp.owner, tp.index)
+              } else {
+                panic!("expected TypeParam in enum type_params");
+              }
+            })
+            .collect();
+          self.types.instance(*type_def_id, params)
+        };
+
+        (
+          ed.lang_traits,
+          Some(ed.instance_methods.clone()),
+          effective_type,
+          true,
+          Vec::new(),
+          ed.variants.clone(),
+        )
+      },
       _ => return,
     };
 

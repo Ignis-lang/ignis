@@ -42,31 +42,35 @@ typedef struct {
   _Alignas(16) unsigned char payload[];
 } IgnisRcBox;
 
-static inline IgnisRcBox *ignis_rc_alloc(size_t payload_size, size_t payload_align, IgnisDropFn drop_fn) {
+static inline void *ignis_rc_alloc(size_t payload_size, size_t payload_align, IgnisDropFn drop_fn) {
   (void)payload_align;
   IgnisRcBox *box = (IgnisRcBox *)calloc(1, sizeof(IgnisRcBox) + payload_size);
   box->refcount = 1;
   box->drop_fn = drop_fn;
   box->payload_size = payload_size;
-  return box;
+  return (void *)box;
 }
 
-static inline void ignis_rc_retain(IgnisRcBox *box) {
+static inline void ignis_rc_retain(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
   box->refcount++;
 }
 
-static inline void ignis_rc_release(IgnisRcBox *box) {
+static inline void ignis_rc_release(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
   if (--box->refcount == 0) {
     if (box->drop_fn) box->drop_fn(box->payload);
     free(box);
   }
 }
 
-static inline void *ignis_rc_get(IgnisRcBox *box) {
+static inline void *ignis_rc_get(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
   return box->payload;
 }
 
-static inline int ignis_rc_count(IgnisRcBox *box) {
+static inline int ignis_rc_count(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
   return box->refcount;
 }
 

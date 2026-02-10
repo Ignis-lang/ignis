@@ -1,23 +1,93 @@
-@lang(rc_runtime)
-extern __rc_default {
+//!
+//! # Rc Module
+//!
+//! Reference-counted shared ownership for heap-allocated values.
+//!
+//! ## Overview
+//!
+//! `Rc<T>` provides shared ownership of a value of type `T` allocated on the
+//! heap. Cloning an `Rc` increments the reference count; dropping one
+//! decrements it. When the last reference is released, the payload's
+//! destructor (if any) runs and the allocation is freed.
+//!
+//! Rc values are **move-by-default**: assigning or passing an Rc transfers
+//! ownership. Use `.clone()` to create an additional reference that shares
+//! the same allocation.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Rc from "std::rc";
+//!
+//! function main(): i32 {
+//!   let a: Rc<i32> = Rc::new<i32>(42);
+//!   let b: Rc<i32> = a.clone();
+//!   // both `a` and `b` point to the same allocation
+//!   // memory is freed when both go out of scope
+//!   return 0;
+//! }
+//! ```
+
+extern __rc_ffi {
   @externName("ignis_rc_alloc")
-  function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+  function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
 
   @externName("ignis_rc_get")
-  function get(handle: *mut void): *mut u8;
+  function ignis_rc_get(handle: *mut void): *mut void;
 
   @externName("ignis_rc_retain")
-  function retain(handle: *mut void): void;
+  function ignis_rc_retain(handle: *mut void): void;
 
   @externName("ignis_rc_release")
-  function release(handle: *mut void): void;
+  function ignis_rc_release(handle: *mut void): void;
 }
 
-/// Reference-counted shared handle API marker.
+/// Reference-counted shared pointer.
 ///
-/// `Rc<T>` and `Rc::new(value)` are compiler intrinsics backed by the
-/// `@lang(rc_runtime)` provider declared in this module.
-///
-/// This namespace intentionally has no user-callable members yet; it exists as
-/// the public std entry point for the Rc concept and documentation.
-export namespace Rc {}
+/// Wraps an opaque handle to a heap allocation that tracks how many
+/// live references exist. The inner value's destructor runs automatically
+/// when the last `Rc` is dropped.
+@implements(Drop, Clone)
+export record Rc<T> {
+  handle: *mut void;
+
+  /// Allocates a new reference-counted value.
+  ///
+  /// Copies `value` into a fresh heap allocation with refcount 1.
+  /// The appropriate drop glue for `T` is registered so that the
+  /// payload is correctly destroyed when the last reference is released.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let r: Rc<i32> = Rc::new<i32>(100);
+  /// ```
+  public static new(value: T): Rc<T> {
+    let h: *mut void = __rc_ffi::ignis_rc_alloc(
+      @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+    );
+
+    let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+
+    @write<T>(payload as *mut T, value);
+
+    return Rc { handle: h };
+  }
+
+  /// Creates a new reference to the same allocation.
+  ///
+  /// Increments the reference count by one and returns an `Rc` that
+  /// shares the same underlying value.
+  clone(&self): Rc<T> {
+    __rc_ffi::ignis_rc_retain(self.handle);
+    return Rc { handle: self.handle };
+  }
+
+  /// Releases this reference.
+  ///
+  /// Decrements the reference count. If this was the last reference,
+  /// the payload destructor runs and the allocation is freed.
+  drop(&mut self): void {
+    __rc_ffi::ignis_rc_release(self.handle);
+  }
+}

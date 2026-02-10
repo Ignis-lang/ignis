@@ -678,10 +678,6 @@ impl<'a> Analyzer<'a> {
             "typeOf" => return self.lower_typeof_builtin(call, hir, scope_kind),
             "sizeOf" => return self.lower_sizeof_builtin(call, hir),
             "alignOf" => return self.lower_alignof_builtin(call, hir),
-            "__builtin_read" => return self.lower_builtin_read(call, hir, scope_kind),
-            "__builtin_write" => return self.lower_builtin_write(call, hir, scope_kind),
-            "__builtin_drop_in_place" => return self.lower_builtin_drop_in_place(call, hir, scope_kind),
-            "__builtin_drop_glue" => return self.lower_builtin_drop_glue(call, hir),
             "maxOf" => return self.lower_maxof_builtin(call, hir),
             "minOf" => return self.lower_minof_builtin(call, hir),
             _ => {},
@@ -1530,147 +1526,6 @@ impl<'a> Analyzer<'a> {
     })
   }
 
-  fn lower_builtin_read(
-    &mut self,
-    call: &ignis_ast::expressions::call::ASTCallExpression,
-    hir: &mut HIR,
-    scope_kind: ScopeKind,
-  ) -> HIRId {
-    let type_args = match &call.type_args {
-      Some(args) if args.len() == 1 => args,
-      _ => {
-        return hir.alloc(HIRNode {
-          kind: HIRKind::Error,
-          span: call.span.clone(),
-          type_id: self.types.error(),
-        });
-      },
-    };
-
-    if call.arguments.len() != 1 {
-      return hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span: call.span.clone(),
-        type_id: self.types.error(),
-      });
-    }
-
-    let value_type = self.resolve_type_syntax(&type_args[0]);
-    let ptr = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
-
-    hir.alloc(HIRNode {
-      kind: HIRKind::BuiltinLoad { ty: value_type, ptr },
-      span: call.span.clone(),
-      type_id: value_type,
-    })
-  }
-
-  fn lower_builtin_write(
-    &mut self,
-    call: &ignis_ast::expressions::call::ASTCallExpression,
-    hir: &mut HIR,
-    scope_kind: ScopeKind,
-  ) -> HIRId {
-    let type_args = match &call.type_args {
-      Some(args) if args.len() == 1 => args,
-      _ => {
-        return hir.alloc(HIRNode {
-          kind: HIRKind::Error,
-          span: call.span.clone(),
-          type_id: self.types.error(),
-        });
-      },
-    };
-
-    if call.arguments.len() != 2 {
-      return hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span: call.span.clone(),
-        type_id: self.types.error(),
-      });
-    }
-
-    let value_type = self.resolve_type_syntax(&type_args[0]);
-    let ptr = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
-    let value = self.lower_node_to_hir(&call.arguments[1], hir, scope_kind);
-
-    hir.alloc(HIRNode {
-      kind: HIRKind::BuiltinStore {
-        ty: value_type,
-        ptr,
-        value,
-      },
-      span: call.span.clone(),
-      type_id: self.types.void(),
-    })
-  }
-
-  fn lower_builtin_drop_in_place(
-    &mut self,
-    call: &ignis_ast::expressions::call::ASTCallExpression,
-    hir: &mut HIR,
-    scope_kind: ScopeKind,
-  ) -> HIRId {
-    let type_args = match &call.type_args {
-      Some(args) if args.len() == 1 => args,
-      _ => {
-        return hir.alloc(HIRNode {
-          kind: HIRKind::Error,
-          span: call.span.clone(),
-          type_id: self.types.error(),
-        });
-      },
-    };
-
-    if call.arguments.len() != 1 {
-      return hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span: call.span.clone(),
-        type_id: self.types.error(),
-      });
-    }
-
-    let value_type = self.resolve_type_syntax(&type_args[0]);
-    let ptr = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
-
-    hir.alloc(HIRNode {
-      kind: HIRKind::BuiltinDropInPlace { ty: value_type, ptr },
-      span: call.span.clone(),
-      type_id: self.types.void(),
-    })
-  }
-
-  fn lower_builtin_drop_glue(
-    &mut self,
-    call: &ignis_ast::expressions::call::ASTCallExpression,
-    hir: &mut HIR,
-  ) -> HIRId {
-    let type_args = match &call.type_args {
-      Some(args) if args.len() == 1 => args,
-      _ => {
-        return hir.alloc(HIRNode {
-          kind: HIRKind::Error,
-          span: call.span.clone(),
-          type_id: self.types.error(),
-        });
-      },
-    };
-
-    let value_type = self.resolve_type_syntax(&type_args[0]);
-
-    // Return type: (*mut u8) -> void
-    let u8_type = self.types.u8();
-    let u8_ptr = self.types.pointer(u8_type, true);
-    let void_type = self.types.void();
-    let fn_ptr_type = self.types.function(vec![u8_ptr], void_type, false);
-
-    hir.alloc(HIRNode {
-      kind: HIRKind::BuiltinDropGlue { ty: value_type },
-      span: call.span.clone(),
-      type_id: fn_ptr_type,
-    })
-  }
-
   // ========================================================================
   // @builtin(...) Lowering
   // ========================================================================
@@ -1693,6 +1548,10 @@ impl<'a> Analyzer<'a> {
       "pointerCast" => self.lower_builtin_pointer_cast(bc, hir, scope_kind),
       "integerFromPointer" => self.lower_builtin_integer_from_pointer(bc, hir, scope_kind),
       "pointerFromInteger" => self.lower_builtin_pointer_from_integer(bc, hir, scope_kind),
+      "read" => self.lower_builtin_read(bc, hir, scope_kind),
+      "write" => self.lower_builtin_write(bc, hir, scope_kind),
+      "dropInPlace" => self.lower_builtin_drop_in_place(bc, hir, scope_kind),
+      "dropGlue" => self.lower_builtin_drop_glue(bc, hir),
       "panic" => self.lower_builtin_panic(bc, hir, scope_kind),
       "trap" => self.lower_builtin_trap(bc, hir),
       "unreachable" => self.lower_builtin_unreachable(bc, hir),
@@ -1702,6 +1561,146 @@ impl<'a> Analyzer<'a> {
         type_id: self.types.error(),
       }),
     }
+  }
+
+  fn lower_builtin_read(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let type_args = match &bc.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: bc.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    if bc.args.len() != 1 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+    let ptr = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinLoad { ty: value_type, ptr },
+      span: bc.span.clone(),
+      type_id: value_type,
+    })
+  }
+
+  fn lower_builtin_write(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let type_args = match &bc.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: bc.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    if bc.args.len() != 2 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+    let ptr = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+    let value = self.lower_node_to_hir(&bc.args[1], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinStore {
+        ty: value_type,
+        ptr,
+        value,
+      },
+      span: bc.span.clone(),
+      type_id: self.types.void(),
+    })
+  }
+
+  fn lower_builtin_drop_in_place(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let type_args = match &bc.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: bc.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    if bc.args.len() != 1 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+    let ptr = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinDropInPlace { ty: value_type, ptr },
+      span: bc.span.clone(),
+      type_id: self.types.void(),
+    })
+  }
+
+  fn lower_builtin_drop_glue(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let type_args = match &bc.type_args {
+      Some(args) if args.len() == 1 => args,
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: bc.span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let value_type = self.resolve_type_syntax(&type_args[0]);
+
+    let u8_type = self.types.u8();
+    let u8_ptr = self.types.pointer(u8_type, true);
+    let void_type = self.types.void();
+    let fn_ptr_type = self.types.function(vec![u8_ptr], void_type, false);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::BuiltinDropGlue { ty: value_type },
+      span: bc.span.clone(),
+      type_id: fn_ptr_type,
+    })
   }
 
   fn lower_builtin_config_flag(
