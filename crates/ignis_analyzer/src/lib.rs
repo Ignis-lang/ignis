@@ -263,6 +263,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Analyze with shared stores, enabling cross-module compilation.
+  #[allow(clippy::too_many_arguments)]
   pub fn analyze_with_shared_stores(
     ast: &ASTStore<ASTNode>,
     roots: &Vec<NodeId>,
@@ -492,9 +493,9 @@ impl<'a> Analyzer<'a> {
             return Some(def_id);
           }
           // If both are functions, convert single to overload group
-          if is_overloadable {
-            if let DefinitionKind::Function(_) = self.defs.get(&def_id).kind {
-              if let DefinitionKind::Function(_) = self.defs.get(existing_def_id).kind {
+          if is_overloadable
+            && let DefinitionKind::Function(_) = self.defs.get(&def_id).kind
+              && let DefinitionKind::Function(_) = self.defs.get(existing_def_id).kind {
                 let old_id = *existing_def_id;
                 let scope_mut = self.scopes.get_scope_mut(&current_scope_id);
                 scope_mut
@@ -502,8 +503,6 @@ impl<'a> Analyzer<'a> {
                   .insert(name, SymbolEntry::Overload(vec![old_id, def_id]));
                 return Some(def_id);
               }
-            }
-          }
           // Otherwise, don't add duplicate
           return Some(def_id);
         },
@@ -642,11 +641,10 @@ fn build_node_spans(
 
   // Add spans for all nodes with types (that aren't already added)
   for node_id in node_types.keys() {
-    if !spans.contains_key(node_id) {
-      if let Some(span) = get_node_span(ast, node_id) {
+    if !spans.contains_key(node_id)
+      && let Some(span) = get_node_span(ast, node_id) {
         spans.insert(*node_id, span);
       }
-    }
   }
 
   spans

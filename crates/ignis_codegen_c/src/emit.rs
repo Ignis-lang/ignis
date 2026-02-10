@@ -60,6 +60,7 @@ impl<'a> CEmitter<'a> {
   }
 
   /// Create an emitter with a specific emit target for filtering.
+  #[allow(clippy::too_many_arguments)]
   pub fn with_target(
     program: &'a LirProgram,
     types: &'a TypeStore,
@@ -86,6 +87,7 @@ impl<'a> CEmitter<'a> {
   }
 
   /// Create an emitter for std module emission with std_path awareness.
+  #[allow(clippy::too_many_arguments)]
   pub fn with_std_target(
     program: &'a LirProgram,
     types: &'a TypeStore,
@@ -563,6 +565,7 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output).unwrap();
   }
 
+  #[allow(clippy::only_used_in_recursion)]
   fn const_value_to_c(
     &self,
     value: &ignis_type::definition::ConstValue,
@@ -2134,6 +2137,7 @@ pub fn emit_user_c(
 }
 
 /// Emit C for a specific std module. Prepends umbrella header if provided.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_std_module_c(
   module_name: &str,
   program: &LirProgram,
@@ -2192,6 +2196,7 @@ pub fn emit_std_module_h(
 ///
 /// `user_module_headers` should contain the module's own header plus headers of its
 /// transitive user module dependencies. These are prepended to the standard headers.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_user_module_c(
   module_id: ModuleId,
   program: &LirProgram,

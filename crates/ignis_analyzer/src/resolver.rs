@@ -63,9 +63,9 @@ impl<'a> Analyzer<'a> {
         let def_id = self.define_decl_in_current_scope(node_id);
         let mut pushed_generic = false;
 
-        if let Some(def_id) = &def_id {
-          if let ignis_type::definition::DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind {
-            if !func_def.type_params.is_empty() {
+        if let Some(def_id) = &def_id
+          && let ignis_type::definition::DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind
+            && !func_def.type_params.is_empty() {
               self.scopes.push(ScopeKind::Generic);
               pushed_generic = true;
 
@@ -74,8 +74,6 @@ impl<'a> Analyzer<'a> {
                 let _ = self.scopes.define(&name, param_id, false);
               }
             }
-          }
-        }
 
         self.scopes.push(ScopeKind::Function);
         if let Some(def_id) = &def_id {
@@ -453,8 +451,8 @@ impl<'a> Analyzer<'a> {
     use ignis_type::definition::DefinitionKind;
 
     // For 2-segment paths like Foo::Bar, check if first segment is an enum
-    if segments.len() == 2 {
-      if let Some(def_id) = self.scopes.lookup_def(&segments[0].name) {
+    if segments.len() == 2
+      && let Some(def_id) = self.scopes.lookup_def(&segments[0].name) {
         let def = self.defs.get(def_id);
         let first_name = self.get_symbol_name(&segments[0].name);
         let second_name = self.get_symbol_name(&segments[1].name);
@@ -480,7 +478,6 @@ impl<'a> Analyzer<'a> {
           },
         }
       }
-    }
 
     // Default to generic undeclared identifier
     DiagnosticMessage::UndeclaredIdentifier {

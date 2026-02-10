@@ -82,10 +82,8 @@ impl<'a> Analyzer<'a> {
           self.bind_predecl(item, scope_kind);
         }
       },
-      ASTStatement::Export(export_stmt) => {
-        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
-          self.bind_predecl(decl, scope_kind);
-        }
+      ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
+        self.bind_predecl(decl, scope_kind);
       },
       _ => {},
     }
@@ -1004,13 +1002,11 @@ impl<'a> Analyzer<'a> {
       },
     }
 
-    if is_main {
-      if let Some(SymbolEntry::Overload(group)) = self.scopes.lookup(&func.signature.name) {
-        if group.len() > 1 {
+    if is_main
+      && let Some(SymbolEntry::Overload(group)) = self.scopes.lookup(&func.signature.name)
+        && group.len() > 1 {
           self.add_diagnostic(DiagnosticMessage::MainFunctionCannotBeOverloaded { span: span.clone() }.report());
         }
-      }
-    }
 
     if let Some(body_id) = &func.body {
       // Note: generic scope is already pushed by bind_type_params if there are type params
@@ -1260,13 +1256,11 @@ impl<'a> Analyzer<'a> {
   ) {
     let node = self.ast.get(node_id);
 
-    if let ASTNode::Statement(ASTStatement::Function(_)) = node {
-      if let Some(def_id) = self.lookup_def(node_id).cloned() {
-        if let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(&def_id).kind {
+    if let ASTNode::Statement(ASTStatement::Function(_)) = node
+      && let Some(def_id) = self.lookup_def(node_id).cloned()
+        && let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(&def_id).kind {
           func_def.is_extern = true;
         }
-      }
-    }
   }
 
   fn bind_extern(
@@ -1391,11 +1385,10 @@ impl<'a> Analyzer<'a> {
     &mut self,
     type_params: Option<&ASTGenericParams>,
   ) {
-    if let Some(params) = type_params {
-      if !params.is_empty() {
+    if let Some(params) = type_params
+      && !params.is_empty() {
         self.scopes.pop();
       }
-    }
   }
 
   /// Pushes a generic scope and registers already-bound type params for an owner definition.
@@ -1627,20 +1620,10 @@ impl<'a> Analyzer<'a> {
             "Clone" => lang_traits.clone = true,
             "Copy" => lang_traits.copy = true,
             _ => {
-              if let Some(entry) = self.scopes.lookup(sym) {
-                if let SymbolEntry::Single(def_id) = entry {
-                  let def_id = *def_id;
-                  if matches!(self.defs.get(&def_id).kind, DefinitionKind::Trait(_)) {
-                    user_traits.push(def_id);
-                  } else {
-                    self.add_diagnostic(
-                      DiagnosticMessage::UnknownTraitInImplements {
-                        name: trait_name,
-                        span: span.clone(),
-                      }
-                      .report(),
-                    );
-                  }
+              if let Some(SymbolEntry::Single(def_id)) = self.scopes.lookup(sym) {
+                let def_id = *def_id;
+                if matches!(self.defs.get(&def_id).kind, DefinitionKind::Trait(_)) {
+                  user_traits.push(def_id);
                 } else {
                   self.add_diagnostic(
                     DiagnosticMessage::UnknownTraitInImplements {
