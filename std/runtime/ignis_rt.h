@@ -90,6 +90,70 @@ typedef IgnisString *string;
 typedef void *null;
 
 // =============================================================================
+// Reference counting (Rc)
+// =============================================================================
+
+/**
+ * Function pointer type for drop callbacks.
+ * Receives a pointer to the payload (not the RcBox header).
+ */
+typedef void (*IgnisDropFn)(void *);
+
+/**
+ * Header for reference-counted allocations.
+ *
+ * Layout in memory: [IgnisRcBox header][payload bytes...]
+ * The payload starts at (char*)rc + sizeof(IgnisRcBox), aligned to max_align_t.
+ */
+typedef struct {
+  uint32_t refcount;
+  IgnisDropFn drop_fn;
+  size_t payload_size;
+} IgnisRcBox;
+
+/**
+ * Allocates an IgnisRcBox with `payload_size` bytes of payload.
+ * The refcount is initialized to 1.
+ *
+ * @param payload_size Size of the payload in bytes.
+ * @param drop_fn Optional destructor called on the payload when refcount reaches 0.
+ *                Pass NULL if no cleanup is needed.
+ * @return Pointer to the IgnisRcBox, or NULL on allocation failure.
+ */
+IgnisRcBox *ignis_rc_alloc(size_t payload_size, IgnisDropFn drop_fn);
+
+/**
+ * Increments the reference count.
+ *
+ * @param rc Pointer to an IgnisRcBox (must not be NULL).
+ */
+void ignis_rc_retain(IgnisRcBox *rc);
+
+/**
+ * Decrements the reference count.
+ * When the count reaches 0, calls drop_fn(payload) if set, then frees the allocation.
+ *
+ * @param rc Pointer to an IgnisRcBox (must not be NULL).
+ */
+void ignis_rc_release(IgnisRcBox *rc);
+
+/**
+ * Returns a pointer to the payload stored after the IgnisRcBox header.
+ *
+ * @param rc Pointer to an IgnisRcBox (must not be NULL).
+ * @return Pointer to the payload.
+ */
+void *ignis_rc_get(IgnisRcBox *rc);
+
+/**
+ * Returns the current reference count (useful for debugging/testing).
+ *
+ * @param rc Pointer to an IgnisRcBox (must not be NULL).
+ * @return Current reference count.
+ */
+uint32_t ignis_rc_count(const IgnisRcBox *rc);
+
+// =============================================================================
 // Memory allocation
 // =============================================================================
 

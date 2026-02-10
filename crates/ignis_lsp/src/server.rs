@@ -75,7 +75,11 @@ impl Server {
         if editing_std_file {
           (config, path_str.clone(), None)
         } else {
-          (config, resolved.project.entry.to_string_lossy().to_string(), Some(resolved.project.clone()))
+          (
+            config,
+            resolved.project.entry.to_string_lossy().to_string(),
+            Some(resolved.project.clone()),
+          )
         }
       },
       ProjectContext::NoProject => ((*self.state.config).clone(), path_str.clone(), None),
@@ -229,7 +233,11 @@ impl Server {
         if editing_std_file {
           (config, path_str.clone(), None)
         } else {
-          (config, resolved.project.entry.to_string_lossy().to_string(), Some(resolved.project.clone()))
+          (
+            config,
+            resolved.project.entry.to_string_lossy().to_string(),
+            Some(resolved.project.clone()),
+          )
         }
       },
       _ => ((*self.state.config).clone(), path_str.clone(), None),

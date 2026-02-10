@@ -6351,11 +6351,7 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    if has_length {
-      data_element_type
-    } else {
-      None
-    }
+    if has_length { data_element_type } else { None }
   }
 
   fn validate_mutable_iter_for_mut_ref(
@@ -7001,11 +6997,7 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" {
-      1
-    } else {
-      0
-    }
+    if first_name == "self" { 1 } else { 0 }
   }
 
   fn emit_no_overload_error(

@@ -100,6 +100,91 @@ static void test_memcpy_memmove(void) {
   assert(strncmp(overlap + 6, "hello", 5) == 0);
 }
 
+// =============================================================================
+// Rc tests
+// =============================================================================
+
+static void test_rc_alloc_and_get(void) {
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+  assert(rc != NULL);
+  assert(ignis_rc_count(rc) == 1);
+
+  int *payload = (int *)ignis_rc_get(rc);
+  assert(payload != NULL);
+
+  *payload = 42;
+  assert(*(int *)ignis_rc_get(rc) == 42);
+
+  ignis_rc_release(rc);
+}
+
+static void test_rc_retain_release(void) {
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+  assert(ignis_rc_count(rc) == 1);
+
+  ignis_rc_retain(rc);
+  assert(ignis_rc_count(rc) == 2);
+
+  ignis_rc_retain(rc);
+  assert(ignis_rc_count(rc) == 3);
+
+  ignis_rc_release(rc);
+  assert(ignis_rc_count(rc) == 2);
+
+  ignis_rc_release(rc);
+  assert(ignis_rc_count(rc) == 1);
+
+  // Final release frees the allocation
+  ignis_rc_release(rc);
+}
+
+static int drop_called_count = 0;
+
+static void test_drop_fn(void *payload) {
+  (void)payload;
+  drop_called_count += 1;
+}
+
+static void test_rc_drop_fn_called(void) {
+  drop_called_count = 0;
+
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), test_drop_fn);
+  ignis_rc_retain(rc);
+
+  // First release should NOT call drop (refcount goes to 1)
+  ignis_rc_release(rc);
+  assert(drop_called_count == 0);
+
+  // Second release should call drop (refcount goes to 0)
+  ignis_rc_release(rc);
+  assert(drop_called_count == 1);
+}
+
+static void test_rc_payload_with_drop(void) {
+  drop_called_count = 0;
+
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int) * 4, test_drop_fn);
+  int *arr = (int *)ignis_rc_get(rc);
+
+  arr[0] = 10;
+  arr[1] = 20;
+  arr[2] = 30;
+  arr[3] = 40;
+
+  assert(arr[0] == 10);
+  assert(arr[3] == 40);
+
+  ignis_rc_release(rc);
+  assert(drop_called_count == 1);
+}
+
+static void test_rc_zero_payload(void) {
+  IgnisRcBox *rc = ignis_rc_alloc(0, NULL);
+  assert(rc != NULL);
+  assert(ignis_rc_count(rc) == 1);
+  ignis_rc_release(rc);
+}
+
 int main(void) {
   test_string_basic();
   test_string_concat();
@@ -109,5 +194,10 @@ int main(void) {
   test_number_to_string();
   test_memory_alloc();
   test_memcpy_memmove();
+  test_rc_alloc_and_get();
+  test_rc_retain_release();
+  test_rc_drop_fn_called();
+  test_rc_payload_with_drop();
+  test_rc_zero_payload();
   return 0;
 }
