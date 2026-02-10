@@ -267,31 +267,35 @@ impl<'a> Monomorphizer<'a> {
         DefinitionKind::Variable(vd) => {
           let new_ty = self.concretize_type(vd.type_id);
           if new_ty != vd.type_id
-            && let DefinitionKind::Variable(vd) = &mut self.output_defs.get_mut(&def_id).kind {
-              vd.type_id = new_ty;
-            }
+            && let DefinitionKind::Variable(vd) = &mut self.output_defs.get_mut(&def_id).kind
+          {
+            vd.type_id = new_ty;
+          }
         },
         DefinitionKind::Parameter(pd) => {
           let new_ty = self.concretize_type(pd.type_id);
           if new_ty != pd.type_id
-            && let DefinitionKind::Parameter(pd) = &mut self.output_defs.get_mut(&def_id).kind {
-              pd.type_id = new_ty;
-            }
+            && let DefinitionKind::Parameter(pd) = &mut self.output_defs.get_mut(&def_id).kind
+          {
+            pd.type_id = new_ty;
+          }
         },
         DefinitionKind::Constant(cd) => {
           let new_ty = self.concretize_type(cd.type_id);
           if new_ty != cd.type_id
-            && let DefinitionKind::Constant(cd) = &mut self.output_defs.get_mut(&def_id).kind {
-              cd.type_id = new_ty;
-            }
+            && let DefinitionKind::Constant(cd) = &mut self.output_defs.get_mut(&def_id).kind
+          {
+            cd.type_id = new_ty;
+          }
         },
         DefinitionKind::Function(fd) if fd.type_params.is_empty() => {
           // Non-generic function: concretize return type and parameters
           let new_ret = self.concretize_type(fd.return_type);
           if new_ret != fd.return_type
-            && let DefinitionKind::Function(fd) = &mut self.output_defs.get_mut(&def_id).kind {
-              fd.return_type = new_ret;
-            }
+            && let DefinitionKind::Function(fd) = &mut self.output_defs.get_mut(&def_id).kind
+          {
+            fd.return_type = new_ret;
+          }
           // Concretize parameter types
           for param_id in &fd.params.clone() {
             let (old_ty, is_param) = {
@@ -305,9 +309,10 @@ impl<'a> Monomorphizer<'a> {
             if is_param {
               let new_ty = self.concretize_type(old_ty);
               if new_ty != old_ty
-                && let DefinitionKind::Parameter(pd) = &mut self.output_defs.get_mut(param_id).kind {
-                  pd.type_id = new_ty;
-                }
+                && let DefinitionKind::Parameter(pd) = &mut self.output_defs.get_mut(param_id).kind
+              {
+                pd.type_id = new_ty;
+              }
             }
           }
         },
@@ -315,9 +320,10 @@ impl<'a> Monomorphizer<'a> {
           // Non-generic method on non-generic owner: concretize return type and parameters
           let new_ret = self.concretize_type(md.return_type);
           if new_ret != md.return_type
-            && let DefinitionKind::Method(md) = &mut self.output_defs.get_mut(&def_id).kind {
-              md.return_type = new_ret;
-            }
+            && let DefinitionKind::Method(md) = &mut self.output_defs.get_mut(&def_id).kind
+          {
+            md.return_type = new_ret;
+          }
           // Concretize parameter types
           for param_id in &md.params.clone() {
             let (old_ty, is_param) = {
@@ -342,9 +348,10 @@ impl<'a> Monomorphizer<'a> {
                 );
               }
               if new_ty != old_ty
-                && let DefinitionKind::Parameter(pd) = &mut self.output_defs.get_mut(param_id).kind {
-                  pd.type_id = new_ty;
-                }
+                && let DefinitionKind::Parameter(pd) = &mut self.output_defs.get_mut(param_id).kind
+              {
+                pd.type_id = new_ty;
+              }
             }
           }
         },
@@ -726,16 +733,17 @@ impl<'a> Monomorphizer<'a> {
             }
             for (key, &cached_def) in &self.cache {
               if cached_def == def_id
-                && let InstanceKey::Generic { args: cached_args, .. } = key {
-                  if is_verbose() {
-                    eprintln!(
-                      "[MONO]     Found in cache: args={:?}",
-                      cached_args.iter().map(|t| self.types.get(t)).collect::<Vec<_>>()
-                    );
-                  }
-                  extracted_args = cached_args.clone();
-                  break;
+                && let InstanceKey::Generic { args: cached_args, .. } = key
+              {
+                if is_verbose() {
+                  eprintln!(
+                    "[MONO]     Found in cache: args={:?}",
+                    cached_args.iter().map(|t| self.types.get(t)).collect::<Vec<_>>()
+                  );
                 }
+                extracted_args = cached_args.clone();
+                break;
+              }
             }
           }
 
@@ -752,10 +760,11 @@ impl<'a> Monomorphizer<'a> {
               Type::Record(rec_def) | Type::Enum(rec_def) => {
                 for (key, &cached_def) in &self.cache {
                   if cached_def == rec_def
-                    && let InstanceKey::Generic { args: cached_args, .. } = key {
-                      extracted_args = cached_args.clone();
-                      break;
-                    }
+                    && let InstanceKey::Generic { args: cached_args, .. } = key
+                  {
+                    extracted_args = cached_args.clone();
+                    break;
+                  }
                 }
               },
               _ => {},
@@ -989,10 +998,9 @@ impl<'a> Monomorphizer<'a> {
           DefinitionKind::Enum(ed) => !ed.type_params.is_empty(),
           _ => false,
         };
-        if !owner_is_generic
-          && let Some(&body) = self.input_hir.function_bodies.get(&def_id) {
-            self.scan_hir(body);
-          }
+        if !owner_is_generic && let Some(&body) = self.input_hir.function_bodies.get(&def_id) {
+          self.scan_hir(body);
+        }
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
         for method_entry in ed.instance_methods.values() {
@@ -1082,9 +1090,10 @@ impl<'a> Monomorphizer<'a> {
               }
               let method_def = self.input_defs.get(method);
               if let DefinitionKind::Method(md) = &method_def.kind
-                && (!md.type_params.is_empty() || !owner_args.is_empty()) {
-                  self.enqueue(InstanceKey::method(generic, owner_args, *method, type_args.clone()));
-                }
+                && (!md.type_params.is_empty() || !owner_args.is_empty())
+              {
+                self.enqueue(InstanceKey::method(generic, owner_args, *method, type_args.clone()));
+              }
             } else if is_verbose() {
               eprintln!("[MONO] Skipping enqueue - owner_args contains Type::Param");
             }
@@ -1262,14 +1271,15 @@ impl<'a> Monomorphizer<'a> {
               let drop_sym = self.symbols.borrow().map.get("drop").copied();
               if let Some(drop_sym) = drop_sym
                 && let Some(entry) = rd.instance_methods.get(&drop_sym)
-                  && let Some(&method_def_id) = entry.as_single() {
-                    self.enqueue(InstanceKey::Method {
-                      owner_def: *def,
-                      owner_args: args.clone(),
-                      method_def: method_def_id,
-                      method_args: vec![],
-                    });
-                  }
+                && let Some(&method_def_id) = entry.as_single()
+              {
+                self.enqueue(InstanceKey::Method {
+                  owner_def: *def,
+                  owner_args: args.clone(),
+                  method_def: method_def_id,
+                  method_args: vec![],
+                });
+              }
             }
 
             concrete_id
@@ -1281,14 +1291,15 @@ impl<'a> Monomorphizer<'a> {
               let drop_sym = self.symbols.borrow().map.get("drop").copied();
               if let Some(drop_sym) = drop_sym
                 && let Some(entry) = ed.instance_methods.get(&drop_sym)
-                  && let Some(&method_def_id) = entry.as_single() {
-                    self.enqueue(InstanceKey::Method {
-                      owner_def: *def,
-                      owner_args: args.clone(),
-                      method_def: method_def_id,
-                      method_args: vec![],
-                    });
-                  }
+                && let Some(&method_def_id) = entry.as_single()
+              {
+                self.enqueue(InstanceKey::Method {
+                  owner_def: *def,
+                  owner_args: args.clone(),
+                  method_def: method_def_id,
+                  method_args: vec![],
+                });
+              }
             }
 
             concrete_id
@@ -1837,15 +1848,16 @@ impl<'a> Monomorphizer<'a> {
       }
       // Also check for pointers to Error
       if let Type::Pointer { inner, .. } = self.types.get(&concretized_type)
-        && matches!(self.types.get(inner), Type::Error) {
-          eprintln!(
-            "[MONO] Warning: Pointer to Error in output HIR. original={:?}, substituted={:?}, concretized={:?}, kind={:?}",
-            self.types.get(&node.type_id),
-            self.types.get(&new_type),
-            self.types.get(&concretized_type),
-            new_kind
-          );
-        }
+        && matches!(self.types.get(inner), Type::Error)
+      {
+        eprintln!(
+          "[MONO] Warning: Pointer to Error in output HIR. original={:?}, substituted={:?}, concretized={:?}, kind={:?}",
+          self.types.get(&node.type_id),
+          self.types.get(&new_type),
+          self.types.get(&concretized_type),
+          new_kind
+        );
+      }
     }
 
     self.output_hir.alloc(HIRNode {

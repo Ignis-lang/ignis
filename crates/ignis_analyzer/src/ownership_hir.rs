@@ -3,7 +3,7 @@
 //! This module implements ownership analysis that runs on the HIR representation,
 //! producing `DropSchedules` that tell LIR lowering when to emit drop instructions.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
 use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
@@ -42,6 +42,15 @@ struct ScopeEntry {
 
   /// Is this a loop scope? (for break/continue target calculation)
   is_loop: bool,
+}
+
+/// Summary of which parameters a function/method drops via `&mut` references.
+/// Parameter indices that end up in `Dropped` state after the function body executes.
+#[derive(Debug, Clone, Default)]
+struct FunctionDropSummary {
+  /// Parameter indices (0-based) that are dropped inside the function body.
+  /// For methods, index 0 is `self`.
+  dropped_params: BTreeSet<usize>,
 }
 
 /// Ownership checker that operates on HIR and produces drop schedules.
@@ -87,6 +96,10 @@ pub struct HirOwnershipChecker<'a> {
   /// Stack tracking whether a `continue` was seen for each enclosing loop.
   /// Pushed on loop entry, popped on loop exit.
   loop_continue_stack: Vec<bool>,
+
+  /// Pre-computed summaries: which parameters each function/method drops.
+  /// Built by `build_summaries()` before the main analysis pass.
+  summaries: HashMap<DefinitionId, FunctionDropSummary>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -113,6 +126,7 @@ impl<'a> HirOwnershipChecker<'a> {
       next_alias_set: 0,
       reachable: true,
       loop_continue_stack: Vec::new(),
+      summaries: HashMap::new(),
     }
   }
 
@@ -124,8 +138,354 @@ impl<'a> HirOwnershipChecker<'a> {
     self
   }
 
+  // === Interprocedural summary pre-pass ===
+
+  /// Build drop summaries for all functions/methods before the main analysis.
+  /// Computes a fixpoint over `&mut` parameter drop effects.
+  fn build_summaries(&mut self) {
+    let mut seeds: Vec<(DefinitionId, HIRId, HashMap<DefinitionId, usize>)> = Vec::new();
+
+    for &fn_def_id in &self.hir.items {
+      let def = self.defs.get(&fn_def_id);
+
+      let (params, self_param_mutable) = match &def.kind {
+        DefinitionKind::Function(f) if !f.is_extern => (f.params.clone(), None),
+        DefinitionKind::Method(m) => {
+          if m.is_static {
+            (m.params.clone(), None)
+          } else {
+            (m.params.clone(), Some(m.self_mutable))
+          }
+        },
+        _ => continue,
+      };
+
+      let Some(&body_id) = self.hir.function_bodies.get(&fn_def_id) else {
+        continue;
+      };
+
+      let tracked_params = self.collect_tracked_mut_ref_params(&params, self_param_mutable);
+      if tracked_params.is_empty() {
+        continue;
+      }
+
+      seeds.push((fn_def_id, body_id, tracked_params));
+    }
+
+    self.summaries.clear();
+    for (fn_def_id, _, _) in &seeds {
+      self.summaries.insert(*fn_def_id, FunctionDropSummary::default());
+    }
+
+    let mut changed = true;
+    while changed {
+      changed = false;
+      let previous = self.summaries.clone();
+
+      for (fn_def_id, body_id, tracked_params) in &seeds {
+        let dropped_params = self.summary_must_drops(*body_id, tracked_params, &previous);
+
+        let entry = self.summaries.entry(*fn_def_id).or_default();
+        if entry.dropped_params != dropped_params {
+          entry.dropped_params = dropped_params;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  /// Collect tracked parameter indices for ownership summaries.
+  fn collect_tracked_mut_ref_params(
+    &self,
+    params: &[DefinitionId],
+    self_param_mutable: Option<bool>,
+  ) -> HashMap<DefinitionId, usize> {
+    let mut tracked = HashMap::new();
+
+    for (index, &param_id) in params.iter().enumerate() {
+      let is_mut_ref = if index == 0 {
+        match self_param_mutable {
+          Some(is_mut) => is_mut,
+          None => self.is_mut_ref_param(param_id),
+        }
+      } else {
+        self.is_mut_ref_param(param_id)
+      };
+
+      if is_mut_ref {
+        tracked.insert(param_id, index);
+      }
+    }
+
+    tracked
+  }
+
+  fn is_mut_ref_param(
+    &self,
+    param_id: DefinitionId,
+  ) -> bool {
+    let param_def = self.defs.get(&param_id);
+    match &param_def.kind {
+      DefinitionKind::Parameter(p) => {
+        matches!(
+          self.types.get(&p.type_id),
+          ignis_type::types::Type::Reference { mutable: true, .. }
+        )
+      },
+      _ => false,
+    }
+  }
+
+  /// Evaluate MUST-drop effects for a node under current callee summaries.
+  /// A parameter index appears in the result only if the node always drops it.
+  fn summary_must_drops(
+    &self,
+    hir_id: HIRId,
+    tracked_params: &HashMap<DefinitionId, usize>,
+    summaries: &HashMap<DefinitionId, FunctionDropSummary>,
+  ) -> BTreeSet<usize> {
+    let mut dropped = BTreeSet::new();
+    let node = self.hir.get(hir_id);
+
+    match &node.kind {
+      HIRKind::Block { statements, expression } => {
+        for &stmt in statements {
+          dropped.extend(self.summary_must_drops(stmt, tracked_params, summaries));
+        }
+
+        if let Some(expr) = expression {
+          dropped.extend(self.summary_must_drops(*expr, tracked_params, summaries));
+        }
+      },
+
+      HIRKind::Let { value, .. } => {
+        if let Some(value_id) = value {
+          dropped.extend(self.summary_must_drops(*value_id, tracked_params, summaries));
+        }
+      },
+
+      HIRKind::Assign { target, value, .. } => {
+        dropped.extend(self.summary_must_drops(*target, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*value, tracked_params, summaries));
+      },
+
+      HIRKind::Return(value) => {
+        if let Some(value_id) = value {
+          dropped.extend(self.summary_must_drops(*value_id, tracked_params, summaries));
+        }
+      },
+
+      HIRKind::If {
+        condition,
+        then_branch,
+        else_branch,
+      } => {
+        dropped.extend(self.summary_must_drops(*condition, tracked_params, summaries));
+
+        let then_drops = self.summary_must_drops(*then_branch, tracked_params, summaries);
+        if let Some(else_id) = else_branch {
+          let else_drops = self.summary_must_drops(*else_id, tracked_params, summaries);
+          dropped.extend(then_drops.intersection(&else_drops).copied());
+        }
+      },
+
+      HIRKind::Loop { condition, .. } => {
+        // Body execution is not guaranteed for while/for loops, so only account
+        // for effects that always happen before first iteration.
+        match condition {
+          LoopKind::Infinite => {},
+          LoopKind::While { condition } => {
+            dropped.extend(self.summary_must_drops(*condition, tracked_params, summaries));
+          },
+          LoopKind::For {
+            init,
+            condition,
+            update: _,
+          } => {
+            if let Some(init_id) = init {
+              dropped.extend(self.summary_must_drops(*init_id, tracked_params, summaries));
+            }
+
+            if let Some(cond_id) = condition {
+              dropped.extend(self.summary_must_drops(*cond_id, tracked_params, summaries));
+            }
+          },
+        }
+      },
+
+      HIRKind::Call { callee, args, .. } => {
+        for &arg in args {
+          dropped.extend(self.summary_must_drops(arg, tracked_params, summaries));
+        }
+
+        dropped.extend(self.summary_callee_drops_to_tracked(*callee, None, args, tracked_params, summaries));
+      },
+
+      HIRKind::MethodCall {
+        receiver, method, args, ..
+      } => {
+        if let Some(recv) = receiver {
+          dropped.extend(self.summary_must_drops(*recv, tracked_params, summaries));
+        }
+
+        for &arg in args {
+          dropped.extend(self.summary_must_drops(arg, tracked_params, summaries));
+        }
+
+        if let Some(recv) = receiver
+          && self.is_drop_method(*method)
+          && let Some(recv_def_id) = self.extract_receiver_variable(*recv)
+          && let Some(&param_idx) = tracked_params.get(&recv_def_id)
+        {
+          dropped.insert(param_idx);
+        }
+
+        dropped.extend(self.summary_callee_drops_to_tracked(*method, *receiver, args, tracked_params, summaries));
+      },
+
+      HIRKind::ExpressionStatement(inner) => {
+        dropped.extend(self.summary_must_drops(*inner, tracked_params, summaries));
+      },
+
+      HIRKind::Binary { left, right, .. } => {
+        dropped.extend(self.summary_must_drops(*left, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*right, tracked_params, summaries));
+      },
+
+      HIRKind::Unary { operand, .. } => {
+        dropped.extend(self.summary_must_drops(*operand, tracked_params, summaries));
+      },
+
+      HIRKind::Cast { expression, .. } | HIRKind::BitCast { expression, .. } => {
+        dropped.extend(self.summary_must_drops(*expression, tracked_params, summaries));
+      },
+
+      HIRKind::Reference { expression, .. } | HIRKind::Dereference(expression) | HIRKind::TypeOf(expression) => {
+        dropped.extend(self.summary_must_drops(*expression, tracked_params, summaries));
+      },
+
+      HIRKind::Index { base, index } => {
+        dropped.extend(self.summary_must_drops(*base, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*index, tracked_params, summaries));
+      },
+
+      HIRKind::FieldAccess { base, .. } => {
+        dropped.extend(self.summary_must_drops(*base, tracked_params, summaries));
+      },
+
+      HIRKind::RecordInit { fields, .. } => {
+        for (_, field_value) in fields {
+          dropped.extend(self.summary_must_drops(*field_value, tracked_params, summaries));
+        }
+      },
+
+      HIRKind::EnumVariant { payload, .. } => {
+        for &value in payload {
+          dropped.extend(self.summary_must_drops(value, tracked_params, summaries));
+        }
+      },
+
+      HIRKind::VectorLiteral { elements } => {
+        for &element in elements {
+          dropped.extend(self.summary_must_drops(element, tracked_params, summaries));
+        }
+      },
+
+      HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => {
+        dropped.extend(self.summary_must_drops(*ptr, tracked_params, summaries));
+      },
+
+      HIRKind::BuiltinStore { ptr, value, .. } => {
+        dropped.extend(self.summary_must_drops(*ptr, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*value, tracked_params, summaries));
+      },
+
+      HIRKind::Panic(message) => {
+        dropped.extend(self.summary_must_drops(*message, tracked_params, summaries));
+      },
+
+      HIRKind::Variable(_)
+      | HIRKind::Literal(_)
+      | HIRKind::SizeOf(_)
+      | HIRKind::AlignOf(_)
+      | HIRKind::MaxOf(_)
+      | HIRKind::MinOf(_)
+      | HIRKind::StaticAccess { .. }
+      | HIRKind::Break
+      | HIRKind::Continue
+      | HIRKind::Trap
+      | HIRKind::BuiltinUnreachable
+      | HIRKind::BuiltinDropGlue { .. }
+      | HIRKind::Error => {},
+    }
+
+    dropped
+  }
+
+  fn summary_callee_drops_to_tracked(
+    &self,
+    callee: DefinitionId,
+    receiver: Option<HIRId>,
+    args: &[HIRId],
+    tracked_params: &HashMap<DefinitionId, usize>,
+    summaries: &HashMap<DefinitionId, FunctionDropSummary>,
+  ) -> BTreeSet<usize> {
+    let Some(callee_summary) = summaries.get(&callee) else {
+      return BTreeSet::new();
+    };
+
+    let mut dropped = BTreeSet::new();
+
+    for &param_index in &callee_summary.dropped_params {
+      let arg_hir_id = match receiver {
+        Some(recv_hir) => {
+          if param_index == 0 {
+            Some(recv_hir)
+          } else {
+            args.get(param_index - 1).copied()
+          }
+        },
+        None => args.get(param_index).copied(),
+      };
+
+      let Some(arg_hir_id) = arg_hir_id else {
+        continue;
+      };
+
+      if let Some(param_idx) = self.summary_extract_tracked_param(arg_hir_id, tracked_params) {
+        dropped.insert(param_idx);
+      }
+    }
+
+    dropped
+  }
+
+  fn summary_extract_tracked_param(
+    &self,
+    arg_hir_id: HIRId,
+    tracked_params: &HashMap<DefinitionId, usize>,
+  ) -> Option<usize> {
+    let node = self.hir.get(arg_hir_id);
+    match &node.kind {
+      HIRKind::Reference {
+        expression,
+        mutable: true,
+      } => {
+        let inner = self.hir.get(*expression);
+        match &inner.kind {
+          HIRKind::Variable(def_id) => tracked_params.get(def_id).copied(),
+          _ => None,
+        }
+      },
+      HIRKind::Variable(def_id) => tracked_params.get(def_id).copied(),
+      _ => None,
+    }
+  }
+
   /// Run ownership check on all functions and methods, returns schedules and diagnostics.
   pub fn check(mut self) -> (DropSchedules, Vec<Diagnostic>) {
+    self.build_summaries();
+
     for &fn_def_id in &self.hir.items {
       let def = self.defs.get(&fn_def_id);
 
@@ -378,6 +738,10 @@ impl<'a> HirOwnershipChecker<'a> {
         for &arg in &args {
           self.check_node(arg);
         }
+
+        if !is_drop {
+          self.apply_callee_drop_summary(method, receiver, &args);
+        }
       },
 
       HIRKind::EnumVariant { payload, .. } => {
@@ -425,9 +789,10 @@ impl<'a> HirOwnershipChecker<'a> {
 
     // Check tail expression if present and still reachable
     if let Some(expr_id) = expression
-      && self.reachable {
-        self.check_node(expr_id);
-      }
+      && self.reachable
+    {
+      self.check_node(expr_id);
+    }
 
     // Calculate drops for this scope
     self.exit_block_scope(block_hir_id);
@@ -664,10 +1029,11 @@ impl<'a> HirOwnershipChecker<'a> {
     let update_reachable = body_falls_through || continue_seen;
 
     if let Some(update_id) = for_update
-      && update_reachable {
-        self.reachable = true;
-        self.check_node(update_id);
-      }
+      && update_reachable
+    {
+      self.reachable = true;
+      self.check_node(update_id);
+    }
 
     // === Second pass: catch cross-iteration ownership bugs ===
     // Only run if a second iteration is actually possible (the body has paths
@@ -692,10 +1058,11 @@ impl<'a> HirOwnershipChecker<'a> {
       let update_reachable_2 = body_falls_through_2 || continue_seen_2;
 
       if let Some(update_id) = for_update
-        && update_reachable_2 {
-          self.reachable = true;
-          self.check_node(update_id);
-        }
+        && update_reachable_2
+      {
+        self.reachable = true;
+        self.check_node(update_id);
+      }
 
       // Deduplicate: keep only diagnostics from second pass that are genuinely
       // new (different message text) compared to those already collected.
@@ -770,6 +1137,8 @@ impl<'a> HirOwnershipChecker<'a> {
       }
     }
 
+    self.apply_callee_drop_summary(callee, None, args);
+
     if let Some(ptr_def) = deallocate_ptr {
       // Check all aliases: if ANY alias is already freed, this is a double-free
       let aliases = self.get_alias_set(ptr_def);
@@ -789,6 +1158,89 @@ impl<'a> HirOwnershipChecker<'a> {
       for alias in aliases {
         self.states.insert(alias, OwnershipState::Freed);
       }
+    }
+  }
+
+  /// Apply callee drop summaries at a call site.
+  /// If the callee drops a `&mut` parameter, mark the caller-side argument as dropped.
+  fn apply_callee_drop_summary(
+    &mut self,
+    callee: DefinitionId,
+    receiver: Option<HIRId>,
+    args: &[HIRId],
+  ) {
+    let dropped_params = match self.summaries.get(&callee) {
+      Some(summary) => summary.dropped_params.clone(),
+      None => return,
+    };
+
+    let mut warned_complex_args: HashSet<HIRId> = HashSet::new();
+
+    for param_idx in dropped_params {
+      let arg_hir = match receiver {
+        Some(recv_hir) => {
+          if param_idx == 0 {
+            Some(recv_hir)
+          } else {
+            args.get(param_idx - 1).copied()
+          }
+        },
+        None => args.get(param_idx).copied(),
+      };
+
+      let Some(arg_hir_id) = arg_hir else {
+        continue;
+      };
+
+      if let Some(arg_def_id) = self.extract_mut_ref_variable(arg_hir_id) {
+        let arg_span = self.hir.get(arg_hir_id).span.clone();
+        self.handle_manual_drop(arg_def_id, arg_span);
+      } else if self.is_complex_mut_ref_argument(arg_hir_id) && warned_complex_args.insert(arg_hir_id) {
+        let arg_span = self.hir.get(arg_hir_id).span.clone();
+        self
+          .diagnostics
+          .push(DiagnosticMessage::InterproceduralDropOnComplexArgument { span: arg_span }.report());
+      }
+    }
+  }
+
+  /// Extract a variable from a call argument expected to be `&mut T`.
+  /// Accepts `&mut x` and direct `x` (defensive fallback for lowered forms).
+  fn extract_mut_ref_variable(
+    &self,
+    arg_hir: HIRId,
+  ) -> Option<DefinitionId> {
+    let node = self.hir.get(arg_hir);
+    match &node.kind {
+      HIRKind::Reference {
+        expression,
+        mutable: true,
+      } => {
+        let inner = self.hir.get(*expression);
+        match &inner.kind {
+          HIRKind::Variable(def_id) => Some(*def_id),
+          _ => None,
+        }
+      },
+      HIRKind::Variable(def_id) => Some(*def_id),
+      _ => None,
+    }
+  }
+
+  fn is_complex_mut_ref_argument(
+    &self,
+    arg_hir: HIRId,
+  ) -> bool {
+    let node = self.hir.get(arg_hir);
+    match &node.kind {
+      HIRKind::Reference {
+        expression,
+        mutable: true,
+      } => {
+        let inner = self.hir.get(*expression);
+        !matches!(inner.kind, HIRKind::Variable(_))
+      },
+      _ => false,
     }
   }
 
@@ -818,12 +1270,13 @@ impl<'a> HirOwnershipChecker<'a> {
     span: Span,
   ) {
     if let Some(ptr_def) = self.extract_pointer_variable(ptr_hir)
-      && self.states.get(&ptr_def) == Some(&OwnershipState::Freed) {
-        let var_name = self.get_var_name(&ptr_def);
-        self
-          .diagnostics
-          .push(DiagnosticMessage::UseAfterFree { var_name, span }.report());
-      }
+      && self.states.get(&ptr_def) == Some(&OwnershipState::Freed)
+    {
+      let var_name = self.get_var_name(&ptr_def);
+      self
+        .diagnostics
+        .push(DiagnosticMessage::UseAfterFree { var_name, span }.report());
+    }
   }
 
   // === Scope management ===
@@ -855,9 +1308,10 @@ impl<'a> HirOwnershipChecker<'a> {
       .collect();
 
     if let Some(hir_id) = entry.block_hir_id
-      && !drops.is_empty() {
-        self.schedules.on_scope_end.insert(hir_id, drops);
-      }
+      && !drops.is_empty()
+    {
+      self.schedules.on_scope_end.insert(hir_id, drops);
+    }
   }
 
   /// Calculate drops for exiting from current scope to target scope index.
@@ -1143,12 +1597,13 @@ impl<'a> HirOwnershipChecker<'a> {
     def: DefinitionId,
   ) {
     if let Some(set_id) = self.pointer_alias_set.remove(&def)
-      && let Some(members) = self.alias_set_members.get_mut(&set_id) {
-        members.remove(&def);
-        if members.is_empty() {
-          self.alias_set_members.remove(&set_id);
-        }
+      && let Some(members) = self.alias_set_members.get_mut(&set_id)
+    {
+      members.remove(&def);
+      if members.is_empty() {
+        self.alias_set_members.remove(&set_id);
       }
+    }
   }
 
   /// Get all members of the alias set containing `def`, including `def` itself.
@@ -1158,9 +1613,10 @@ impl<'a> HirOwnershipChecker<'a> {
     def: DefinitionId,
   ) -> Vec<DefinitionId> {
     if let Some(&set_id) = self.pointer_alias_set.get(&def)
-      && let Some(members) = self.alias_set_members.get(&set_id) {
-        return members.iter().copied().collect();
-      }
+      && let Some(members) = self.alias_set_members.get(&set_id)
+    {
+      return members.iter().copied().collect();
+    }
 
     vec![def]
   }

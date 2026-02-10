@@ -97,15 +97,16 @@ impl<'a> Analyzer<'a> {
 
           if let Some(def_id) = &def_id
             && let ignis_type::definition::DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind
-              && !func_def.type_params.is_empty() {
-                self.scopes.push(ScopeKind::Generic);
-                pushed_generic = true;
+            && !func_def.type_params.is_empty()
+          {
+            self.scopes.push(ScopeKind::Generic);
+            pushed_generic = true;
 
-                for param_id in &func_def.type_params {
-                  let name = self.defs.get(param_id).name;
-                  let _ = self.scopes.define(&name, param_id, false);
-                }
-              }
+            for param_id in &func_def.type_params {
+              let name = self.defs.get(param_id).name;
+              let _ = self.scopes.define(&name, param_id, false);
+            }
+          }
 
           self.scopes.push(ScopeKind::Function);
           if let Some(def_id) = &def_id {
@@ -496,17 +497,19 @@ impl<'a> Analyzer<'a> {
 
     for item in &rec.items {
       if let ASTRecordItem::Field(field) = item
-        && field.is_static() && field.value.is_none() {
-          let field_name = self.get_symbol_name(&field.name);
-          self.add_diagnostic(
-            DiagnosticMessage::StaticFieldRequiresInit {
-              field: field_name,
-              type_name: type_name.clone(),
-              span: field.span.clone(),
-            }
-            .report(),
-          );
-        }
+        && field.is_static()
+        && field.value.is_none()
+      {
+        let field_name = self.get_symbol_name(&field.name);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticFieldRequiresInit {
+            field: field_name,
+            type_name: type_name.clone(),
+            span: field.span.clone(),
+          }
+          .report(),
+        );
+      }
     }
   }
 
@@ -519,17 +522,18 @@ impl<'a> Analyzer<'a> {
 
     for item in &enum_.items {
       if let ASTEnumItem::Field(field) = item
-        && field.value.is_none() {
-          let field_name = self.get_symbol_name(&field.name);
-          self.add_diagnostic(
-            DiagnosticMessage::StaticFieldRequiresInit {
-              field: field_name,
-              type_name: type_name.clone(),
-              span: field.span.clone(),
-            }
-            .report(),
-          );
-        }
+        && field.value.is_none()
+      {
+        let field_name = self.get_symbol_name(&field.name);
+        self.add_diagnostic(
+          DiagnosticMessage::StaticFieldRequiresInit {
+            field: field_name,
+            type_name: type_name.clone(),
+            span: field.span.clone(),
+          }
+          .report(),
+        );
+      }
     }
   }
 

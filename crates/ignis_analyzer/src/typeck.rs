@@ -147,11 +147,12 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(value_id) = &var.value
-          && !self.types.is_infer(&declared_type) {
-            let infer = InferContext::expecting(var_type);
-            let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
-            self.typecheck_assignment(&var_type, &value_type, &var.span);
-          }
+          && !self.types.is_infer(&declared_type)
+        {
+          let infer = InferContext::expecting(var_type);
+          let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
+          self.typecheck_assignment(&var_type, &value_type, &var.span);
+        }
 
         self.define_decl_in_current_scope(node_id);
 
@@ -185,9 +186,10 @@ impl<'a> Analyzer<'a> {
         }
 
         if let Some(def_id) = &def_id
-          && let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(def_id).kind {
-            func_def.return_type = return_type;
-          }
+          && let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(def_id).kind
+        {
+          func_def.return_type = return_type;
+        }
 
         if let Some(def_id) = &def_id {
           self.register_extension_method(def_id, &func.signature.span);
@@ -570,16 +572,17 @@ impl<'a> Analyzer<'a> {
           ignis_type::types::Type::Vector { element, size } => {
             // Compile-time bounds checking for constant indices
             if let Some(ConstValue::Int(index_val)) = self.const_eval_expression_node(&access.index, scope_kind)
-              && (index_val < 0 || (index_val as usize) >= size) {
-                self.add_diagnostic(
-                  DiagnosticMessage::IndexOutOfBounds {
-                    index: index_val,
-                    size,
-                    span: access.span.clone(),
-                  }
-                  .report(),
-                );
-              }
+              && (index_val < 0 || (index_val as usize) >= size)
+            {
+              self.add_diagnostic(
+                DiagnosticMessage::IndexOutOfBounds {
+                  index: index_val,
+                  size,
+                  span: access.span.clone(),
+                }
+                .report(),
+              );
+            }
             element
           },
           ignis_type::types::Type::Pointer { inner, .. } => {
@@ -665,10 +668,11 @@ impl<'a> Analyzer<'a> {
               // For generic enums, try to infer type args from expected type
               if !ed.type_params.is_empty()
                 && let Some(expected) = &infer.expected
-                  && let Type::Instance { generic, args } = self.types.get(expected).clone()
-                    && generic == enum_def {
-                      return self.types.instance(enum_def, args);
-                    }
+                && let Type::Instance { generic, args } = self.types.get(expected).clone()
+                && generic == enum_def
+              {
+                return self.types.instance(enum_def, args);
+              }
 
               ed.type_id
             } else {
@@ -683,16 +687,17 @@ impl<'a> Analyzer<'a> {
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
-          && !self.is_mutable_expression(target_expr) {
-            let var_name = self.get_var_name_from_expr(target_expr);
-            self.add_diagnostic(
-              DiagnosticMessage::ImmutableAssignment {
-                var_name,
-                span: span.clone(),
-              }
-              .report(),
-            );
-          }
+          && !self.is_mutable_expression(target_expr)
+        {
+          let var_name = self.get_var_name_from_expr(target_expr);
+          self.add_diagnostic(
+            DiagnosticMessage::ImmutableAssignment {
+              var_name,
+              span: span.clone(),
+            }
+            .report(),
+          );
+        }
 
         if self.types.is_numeric(&expr_type) {
           expr_type
@@ -705,16 +710,17 @@ impl<'a> Analyzer<'a> {
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
-          && !self.is_mutable_expression(target_expr) {
-            let var_name = self.get_var_name_from_expr(target_expr);
-            self.add_diagnostic(
-              DiagnosticMessage::ImmutableAssignment {
-                var_name,
-                span: span.clone(),
-              }
-              .report(),
-            );
-          }
+          && !self.is_mutable_expression(target_expr)
+        {
+          let var_name = self.get_var_name_from_expr(target_expr);
+          self.add_diagnostic(
+            DiagnosticMessage::ImmutableAssignment {
+              var_name,
+              span: span.clone(),
+            }
+            .report(),
+          );
+        }
 
         if self.types.is_numeric(&expr_type) {
           expr_type
@@ -796,18 +802,19 @@ impl<'a> Analyzer<'a> {
         if field.is_static() {
           // Static field - update the constant definition
           if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind
-            && let Some(const_def_id) = rd.static_fields.get(&field.name).cloned() {
-              if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
-                const_def.type_id = field_type;
-              }
-
-              // Typecheck the initializer if present
-              if let Some(value_id) = &field.value {
-                let infer = InferContext::expecting(field_type);
-                let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
-                self.typecheck_assignment(&field_type, &value_type, &field.span);
-              }
+            && let Some(const_def_id) = rd.static_fields.get(&field.name).cloned()
+          {
+            if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+              const_def.type_id = field_type;
             }
+
+            // Typecheck the initializer if present
+            if let Some(value_id) = &field.value {
+              let infer = InferContext::expecting(field_type);
+              let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
+              self.typecheck_assignment(&field_type, &value_type, &field.span);
+            }
+          }
         } else {
           // Instance field - preserve the def_id and attrs from binder
           let original = original_fields
@@ -979,18 +986,19 @@ impl<'a> Analyzer<'a> {
 
           // Update the constant definition
           if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind
-            && let Some(const_def_id) = ed.static_fields.get(&field.name).cloned() {
-              if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
-                const_def.type_id = field_type;
-              }
-
-              // Typecheck the initializer if present
-              if let Some(value_id) = &field.value {
-                let infer = InferContext::expecting(field_type);
-                let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
-                self.typecheck_assignment(&field_type, &value_type, &field.span);
-              }
+            && let Some(const_def_id) = ed.static_fields.get(&field.name).cloned()
+          {
+            if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+              const_def.type_id = field_type;
             }
+
+            // Typecheck the initializer if present
+            if let Some(value_id) = &field.value {
+              let infer = InferContext::expecting(field_type);
+              let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
+              self.typecheck_assignment(&field_type, &value_type, &field.span);
+            }
+          }
         },
       }
     }
@@ -1660,17 +1668,18 @@ impl<'a> Analyzer<'a> {
       Type::Instance { generic, args } => (generic, args),
       Type::Enum(def_id) => {
         if let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind
-          && ed.instance_methods.contains_key(&ma.member) {
-            let member_name = self.get_symbol_name(&ma.member);
-            self.add_diagnostic(
-              DiagnosticMessage::MethodMustBeCalled {
-                method: member_name,
-                span: ma.span.clone(),
-              }
-              .report(),
-            );
-            return self.types.error();
-          }
+          && ed.instance_methods.contains_key(&ma.member)
+        {
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::MethodMustBeCalled {
+              method: member_name,
+              span: ma.span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
         self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
         return self.types.error();
       },
@@ -1836,10 +1845,11 @@ impl<'a> Analyzer<'a> {
             // For generic enums, try to infer type args from expected type
             if !ed.type_params.is_empty()
               && let Some(expected) = &infer.expected
-                && let Type::Instance { generic, args } = self.types.get(expected).clone()
-                  && generic == def_id {
-                    return self.types.instance(def_id, args);
-                  }
+              && let Type::Instance { generic, args } = self.types.get(expected).clone()
+              && generic == def_id
+            {
+              return self.types.instance(def_id, args);
+            }
             return ed.type_id;
           } else {
             // Variant with payload - must be called
@@ -2057,9 +2067,10 @@ impl<'a> Analyzer<'a> {
             } else {
               // Overload group - still link the span to the first candidate for hover
               if let SymbolEntry::Overload(candidates) = &entry
-                && let Some(first) = candidates.first() {
-                  self.set_import_item_def(&segment.span, first);
-                }
+                && let Some(first) = candidates.first()
+              {
+                self.set_import_item_def(&segment.span, first);
+              }
               return;
             }
           } else {
@@ -2072,9 +2083,10 @@ impl<'a> Analyzer<'a> {
             if let Some(def_id) = entry.as_single() {
               self.set_import_item_def(&segment.span, def_id);
             } else if let SymbolEntry::Overload(candidates) = entry
-              && let Some(first) = candidates.first() {
-                self.set_import_item_def(&segment.span, first);
-              }
+              && let Some(first) = candidates.first()
+            {
+              self.set_import_item_def(&segment.span, first);
+            }
           } else if let Some(field_id) = rd.static_fields.get(&segment.name) {
             self.set_import_item_def(&segment.span, field_id);
           }
@@ -2086,9 +2098,10 @@ impl<'a> Analyzer<'a> {
             if let Some(def_id) = entry.as_single() {
               self.set_import_item_def(&segment.span, def_id);
             } else if let SymbolEntry::Overload(candidates) = entry
-              && let Some(first) = candidates.first() {
-                self.set_import_item_def(&segment.span, first);
-              }
+              && let Some(first) = candidates.first()
+            {
+              self.set_import_item_def(&segment.span, first);
+            }
           } else if let Some(field_id) = ed.static_fields.get(&segment.name) {
             self.set_import_item_def(&segment.span, field_id);
           } else if let Some(tag) = ed.variants_by_name.get(&segment.name) {
@@ -2372,21 +2385,22 @@ impl<'a> Analyzer<'a> {
     span: &Span,
   ) -> TypeId {
     if let Some(expected) = &infer.expected
-      && self.is_integer_type(expected) {
-        if self.signed_fits_in_type(value, expected) {
-          return *expected;
-        } else {
-          self.add_diagnostic(
-            DiagnosticMessage::IntegerOverflow {
-              value,
-              target_type: self.format_type_for_error(expected),
-              span: span.clone(),
-            }
-            .report(),
-          );
-          return self.types.error();
-        }
+      && self.is_integer_type(expected)
+    {
+      if self.signed_fits_in_type(value, expected) {
+        return *expected;
+      } else {
+        self.add_diagnostic(
+          DiagnosticMessage::IntegerOverflow {
+            value,
+            target_type: self.format_type_for_error(expected),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
       }
+    }
     default
   }
 
@@ -2398,21 +2412,22 @@ impl<'a> Analyzer<'a> {
     span: &Span,
   ) -> TypeId {
     if let Some(expected) = &infer.expected
-      && self.is_integer_type(expected) {
-        if self.unsigned_fits_in_type(value, expected) {
-          return *expected;
-        } else {
-          self.add_diagnostic(
-            DiagnosticMessage::IntegerOverflow {
-              value: value as i64,
-              target_type: self.format_type_for_error(expected),
-              span: span.clone(),
-            }
-            .report(),
-          );
-          return self.types.error();
-        }
+      && self.is_integer_type(expected)
+    {
+      if self.unsigned_fits_in_type(value, expected) {
+        return *expected;
+      } else {
+        self.add_diagnostic(
+          DiagnosticMessage::IntegerOverflow {
+            value: value as i64,
+            target_type: self.format_type_for_error(expected),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
       }
+    }
     default
   }
 
@@ -2422,9 +2437,10 @@ impl<'a> Analyzer<'a> {
     infer: &InferContext,
   ) -> TypeId {
     if let Some(expected) = &infer.expected
-      && self.is_float_type(expected) {
-        return *expected;
-      }
+      && self.is_float_type(expected)
+    {
+      return *expected;
+    }
     default
   }
 
@@ -2528,10 +2544,11 @@ impl<'a> Analyzer<'a> {
 
     // Check for path-based calls that might be static method or enum variant
     if let ASTNode::Expression(ASTExpression::Path(path)) = self.ast.get(&call.callee)
-      && let Some(result) = self.typecheck_path_call(node_id, path, call, scope_kind, ctx, infer) {
-        return result;
-      }
-      // Fall through to normal call handling if path doesn't resolve to record/enum
+      && let Some(result) = self.typecheck_path_call(node_id, path, call, scope_kind, ctx, infer)
+    {
+      return result;
+    }
+    // Fall through to normal call handling if path doesn't resolve to record/enum
 
     // Get the callee entry from scope or resolve it if it's a path
     let callee_entry = match self.ast.get(&call.callee) {
@@ -2624,9 +2641,10 @@ impl<'a> Analyzer<'a> {
 
       if resolved_def_id.is_none()
         && let Some(ty) = self.lookup_type(&call.callee)
-          && self.types.is_error(ty) {
-            return self.types.error();
-          }
+        && self.types.is_error(ty)
+      {
+        return self.types.error();
+      }
 
       if callee_unresolved {
         return self.types.error();
@@ -2716,10 +2734,9 @@ impl<'a> Analyzer<'a> {
         }
         if !self.types.types_equal(&param_types[i], &arg_types[i]) {
           // Special case: deallocate accepts any *mut T, coercing to *mut u8
-          if func_name == "deallocate" && i == 0
-            && self.is_ptr_coercion(&arg_types[i], &param_types[i]) {
-              continue;
-            }
+          if func_name == "deallocate" && i == 0 && self.is_ptr_coercion(&arg_types[i], &param_types[i]) {
+            continue;
+          }
 
           let expected = self.format_type_for_error(&param_types[i]);
           let got = self.format_type_for_error(&arg_types[i]);
@@ -2953,18 +2970,19 @@ impl<'a> Analyzer<'a> {
               if method.self_mutable {
                 let obj_node = self.ast.get(&ma.object);
                 if let ASTNode::Expression(obj_expr) = obj_node
-                  && !self.is_mutable_expression(obj_expr) {
-                    let method_name = self.get_symbol_name(&ma.member);
-                    let var_name = self.get_var_name_from_expr(obj_expr);
-                    self.add_diagnostic(
-                      DiagnosticMessage::MutatingMethodOnImmutable {
-                        method: method_name,
-                        var_name,
-                        span: ma.span.clone(),
-                      }
-                      .report(),
-                    );
-                  }
+                  && !self.is_mutable_expression(obj_expr)
+                {
+                  let method_name = self.get_symbol_name(&ma.member);
+                  let var_name = self.get_var_name_from_expr(obj_expr);
+                  self.add_diagnostic(
+                    DiagnosticMessage::MutatingMethodOnImmutable {
+                      method: method_name,
+                      var_name,
+                      span: ma.span.clone(),
+                    }
+                    .report(),
+                  );
+                }
               }
 
               // For instance methods, skip the first param (self) when checking explicit args
@@ -3360,18 +3378,19 @@ impl<'a> Analyzer<'a> {
               if method.self_mutable {
                 let obj_node = self.ast.get(&ma.object);
                 if let ASTNode::Expression(obj_expr) = obj_node
-                  && !self.is_mutable_expression(obj_expr) {
-                    let method_name = self.get_symbol_name(&ma.member);
-                    let var_name = self.get_var_name_from_expr(obj_expr);
-                    self.add_diagnostic(
-                      DiagnosticMessage::MutatingMethodOnImmutable {
-                        method: method_name,
-                        var_name,
-                        span: ma.span.clone(),
-                      }
-                      .report(),
-                    );
-                  }
+                  && !self.is_mutable_expression(obj_expr)
+                {
+                  let method_name = self.get_symbol_name(&ma.member);
+                  let var_name = self.get_var_name_from_expr(obj_expr);
+                  self.add_diagnostic(
+                    DiagnosticMessage::MutatingMethodOnImmutable {
+                      method: method_name,
+                      var_name,
+                      span: ma.span.clone(),
+                    }
+                    .report(),
+                  );
+                }
               }
 
               let start = self.method_param_start(&method);
@@ -5351,9 +5370,10 @@ impl<'a> Analyzer<'a> {
   ) -> Option<String> {
     let node = self.ast.get(node_id);
     if let ASTNode::Expression(ASTExpression::Literal(lit)) = node
-      && let IgnisLiteralValue::String(s) = &lit.value {
-        return Some(s.clone());
-      }
+      && let IgnisLiteralValue::String(s) = &lit.value
+    {
+      return Some(s.clone());
+    }
     None
   }
 
@@ -5436,21 +5456,23 @@ impl<'a> Analyzer<'a> {
         }
 
         if binary.operator == ASTBinaryOperator::Subtract
-          && self.is_pointer_type(&left_type) && self.is_pointer_type(&right_type) {
-            let left_inner = self.pointer_inner_type(&left_type);
-            let right_inner = self.pointer_inner_type(&right_type);
+          && self.is_pointer_type(&left_type)
+          && self.is_pointer_type(&right_type)
+        {
+          let left_inner = self.pointer_inner_type(&left_type);
+          let right_inner = self.pointer_inner_type(&right_type);
 
-            if let (Some(left_base), Some(right_base)) = (left_inner, right_inner) {
-              if self.types.types_equal(&left_base, &right_base) {
-                return self.types.i64();
-              }
+          if let (Some(left_base), Some(right_base)) = (left_inner, right_inner) {
+            if self.types.types_equal(&left_base, &right_base) {
+              return self.types.i64();
+            }
 
-              let u8_type = self.types.u8();
-              if self.types.types_equal(&left_base, &u8_type) && self.types.types_equal(&right_base, &u8_type) {
-                return self.types.i64();
-              }
+            let u8_type = self.types.u8();
+            if self.types.types_equal(&left_base, &u8_type) && self.types.types_equal(&right_base, &u8_type) {
+              return self.types.i64();
             }
           }
+        }
 
         let operator = format!("{:?}", binary.operator);
         let left = self.format_type_for_error(&left_type);
@@ -5710,16 +5732,17 @@ impl<'a> Analyzer<'a> {
 
     let target_node = self.ast.get(&assign.target);
     if let ASTNode::Expression(target_expr) = target_node
-      && !self.is_mutable_expression(target_expr) {
-        let var_name = self.get_var_name_from_expr(target_expr);
-        self.add_diagnostic(
-          DiagnosticMessage::ImmutableAssignment {
-            var_name,
-            span: assign.span.clone(),
-          }
-          .report(),
-        );
-      }
+      && !self.is_mutable_expression(target_expr)
+    {
+      let var_name = self.get_var_name_from_expr(target_expr);
+      self.add_diagnostic(
+        DiagnosticMessage::ImmutableAssignment {
+          var_name,
+          span: assign.span.clone(),
+        }
+        .report(),
+      );
+    }
 
     match assign.operator {
       ASTAssignmentOperator::Assign => {
@@ -6097,17 +6120,18 @@ impl<'a> Analyzer<'a> {
           symbol,
           span: name_span,
         } = base.as_ref()
-          && let Some(def_id) = self.scopes.lookup_def(symbol).cloned() {
-            // Register span for hover/goto-definition on type references
-            self.set_import_item_def(name_span, &def_id);
+          && let Some(def_id) = self.scopes.lookup_def(symbol).cloned()
+        {
+          // Register span for hover/goto-definition on type references
+          self.set_import_item_def(name_span, &def_id);
 
-            match &self.defs.get(&def_id).kind {
-              DefinitionKind::TypeAlias(_) | DefinitionKind::Record(_) | DefinitionKind::Enum(_) => {
-                return self.resolve_generic_type_with_args(def_id, args, span);
-              },
-              _ => {},
-            }
+          match &self.defs.get(&def_id).kind {
+            DefinitionKind::TypeAlias(_) | DefinitionKind::Record(_) | DefinitionKind::Enum(_) => {
+              return self.resolve_generic_type_with_args(def_id, args, span);
+            },
+            _ => {},
           }
+        }
 
         let base_type = self.resolve_type_syntax_impl(base, span);
 
@@ -6486,10 +6510,9 @@ impl<'a> Analyzer<'a> {
         if let Type::Pointer { inner, .. } = self.types.get(&field.type_id) {
           data_element_type = Some(*inner);
         }
-      } else if field.name == length_sym
-        && self.types.types_equal(&field.type_id, &self.types.u64()) {
-          has_length = true;
-        }
+      } else if field.name == length_sym && self.types.types_equal(&field.type_id, &self.types.u64()) {
+        has_length = true;
+      }
     }
 
     if has_length { data_element_type } else { None }
@@ -6502,9 +6525,10 @@ impl<'a> Analyzer<'a> {
   ) {
     let node = self.ast.get(iter_node);
     if let ASTNode::Expression(expr) = node
-      && !self.is_mutable_expression(expr) {
-        self.add_diagnostic(DiagnosticMessage::ForOfMutRequiresMutableIter { span: span.clone() }.report());
-      }
+      && !self.is_mutable_expression(expr)
+    {
+      self.add_diagnostic(DiagnosticMessage::ForOfMutRequiresMutableIter { span: span.clone() }.report());
+    }
   }
 
   // ========================================================================
@@ -7615,17 +7639,18 @@ impl<'a> Analyzer<'a> {
 
     let obj_node = self.ast.get(&ma.object);
     if let ASTNode::Expression(obj_expr) = obj_node
-      && !self.is_mutable_expression(obj_expr) {
-        let method_name = self.get_symbol_name(&ma.member);
-        let var_name = self.get_var_name_from_expr(obj_expr);
-        self.add_diagnostic(
-          DiagnosticMessage::MutatingMethodOnImmutable {
-            method: method_name,
-            var_name,
-            span: ma.span.clone(),
-          }
-          .report(),
-        );
-      }
+      && !self.is_mutable_expression(obj_expr)
+    {
+      let method_name = self.get_symbol_name(&ma.member);
+      let var_name = self.get_var_name_from_expr(obj_expr);
+      self.add_diagnostic(
+        DiagnosticMessage::MutatingMethodOnImmutable {
+          method: method_name,
+          var_name,
+          span: ma.span.clone(),
+        }
+        .report(),
+      );
+    }
   }
 }

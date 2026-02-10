@@ -42,10 +42,11 @@ impl<'a> Analyzer<'a> {
         // Only eval if value exists (not for extern const)
         if let Some(value_id) = &const_.value
           && let Some(value) = self.const_eval_expression_node(value_id, scope_kind)
-            && let Some(def_id) = self.lookup_def(node_id)
-              && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&def_id.clone()).kind {
-                const_def.value = Some(value);
-              }
+          && let Some(def_id) = self.lookup_def(node_id)
+          && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&def_id.clone()).kind
+        {
+          const_def.value = Some(value);
+        }
         self.define_decl_in_current_scope(node_id);
       },
       ASTStatement::Block(block) => {
@@ -143,29 +144,31 @@ impl<'a> Analyzer<'a> {
     for item in &rec.items {
       if let ASTRecordItem::Field(field) = item
         && field.is_static()
-          && let Some(value_id) = &field.value {
-            match self.const_eval_expression_node(value_id, scope_kind) {
-              Some(value) => {
-                // Get the static field's definition from the record
-                if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind
-                  && let Some(const_def_id) = rd.static_fields.get(&field.name).cloned()
-                    && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
-                      const_def.value = Some(value);
-                    }
-              },
-              None => {
-                let field_name = self.get_symbol_name(&field.name);
-                self.add_diagnostic(
-                  DiagnosticMessage::StaticFieldNotConst {
-                    field: field_name,
-                    type_name: type_name.clone(),
-                    span: field.span.clone(),
-                  }
-                  .report(),
-                );
-              },
+        && let Some(value_id) = &field.value
+      {
+        match self.const_eval_expression_node(value_id, scope_kind) {
+          Some(value) => {
+            // Get the static field's definition from the record
+            if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind
+              && let Some(const_def_id) = rd.static_fields.get(&field.name).cloned()
+              && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind
+            {
+              const_def.value = Some(value);
             }
-          }
+          },
+          None => {
+            let field_name = self.get_symbol_name(&field.name);
+            self.add_diagnostic(
+              DiagnosticMessage::StaticFieldNotConst {
+                field: field_name,
+                type_name: type_name.clone(),
+                span: field.span.clone(),
+              }
+              .report(),
+            );
+          },
+        }
+      }
     }
   }
 
@@ -187,29 +190,31 @@ impl<'a> Analyzer<'a> {
 
     for item in &enum_.items {
       if let ASTEnumItem::Field(field) = item
-        && let Some(value_id) = &field.value {
-          match self.const_eval_expression_node(value_id, scope_kind) {
-            Some(value) => {
-              // Get the static field's definition from the enum
-              if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind
-                && let Some(const_def_id) = ed.static_fields.get(&field.name).cloned()
-                  && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
-                    const_def.value = Some(value);
-                  }
-            },
-            None => {
-              let field_name = self.get_symbol_name(&field.name);
-              self.add_diagnostic(
-                DiagnosticMessage::StaticFieldNotConst {
-                  field: field_name,
-                  type_name: type_name.clone(),
-                  span: field.span.clone(),
-                }
-                .report(),
-              );
-            },
-          }
+        && let Some(value_id) = &field.value
+      {
+        match self.const_eval_expression_node(value_id, scope_kind) {
+          Some(value) => {
+            // Get the static field's definition from the enum
+            if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind
+              && let Some(const_def_id) = ed.static_fields.get(&field.name).cloned()
+              && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind
+            {
+              const_def.value = Some(value);
+            }
+          },
+          None => {
+            let field_name = self.get_symbol_name(&field.name);
+            self.add_diagnostic(
+              DiagnosticMessage::StaticFieldNotConst {
+                field: field_name,
+                type_name: type_name.clone(),
+                span: field.span.clone(),
+              }
+              .report(),
+            );
+          },
         }
+      }
     }
   }
 

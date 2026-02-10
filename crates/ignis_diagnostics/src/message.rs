@@ -464,6 +464,9 @@ pub enum DiagnosticMessage {
   DropOnComplexReceiver {
     span: Span,
   },
+  InterproceduralDropOnComplexArgument {
+    span: Span,
+  },
   // Builtin errors
   InvalidSizeOfOperand {
     span: Span,
@@ -1113,6 +1116,12 @@ impl fmt::Display for DiagnosticMessage {
           ".drop() on complex receiver is not tracked at compile time; relies on runtime guard"
         )
       },
+      DiagnosticMessage::InterproceduralDropOnComplexArgument { .. } => {
+        write!(
+          f,
+          "drop effect through call on complex '&mut' argument is not tracked at compile time"
+        )
+      },
 
       // Builtin errors
       DiagnosticMessage::InvalidSizeOfOperand { .. } => {
@@ -1532,6 +1541,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::PossibleLeakToFFI { span, .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { span, .. }
       | DiagnosticMessage::DropOnComplexReceiver { span, .. }
+      | DiagnosticMessage::InterproceduralDropOnComplexArgument { span, .. }
       | DiagnosticMessage::InvalidSizeOfOperand { span, .. }
       | DiagnosticMessage::InvalidMinMaxType { span, .. }
       | DiagnosticMessage::StaticFieldRequiresInit { span, .. }
@@ -1714,6 +1724,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::InconsistentDropInBranches { .. } => "O0008",
       DiagnosticMessage::DoubleFree { .. } => "O0009",
       DiagnosticMessage::DropOnComplexReceiver { .. } => "O0010",
+      DiagnosticMessage::InterproceduralDropOnComplexArgument { .. } => "O0011",
       DiagnosticMessage::ForOfExpectsVector { .. } => "A0069",
       DiagnosticMessage::ForOfRequiresCopyOrRef { .. } => "A0070",
       DiagnosticMessage::ForOfMutRequiresMutableIter { .. } => "A0071",
@@ -1775,6 +1786,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::PossibleLeakToFFI { .. }
       | DiagnosticMessage::OwnershipEscapeToGlobal { .. }
       | DiagnosticMessage::DropOnComplexReceiver { .. }
+      | DiagnosticMessage::InterproceduralDropOnComplexArgument { .. }
       | DiagnosticMessage::UnknownConfigFlag { .. }
       | DiagnosticMessage::UnusedVariable { .. }
       | DiagnosticMessage::UnusedImport { .. }

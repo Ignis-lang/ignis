@@ -1936,3 +1936,311 @@ function main(): void {
 "#,
   );
 }
+
+#[test]
+fn interprocedural_function_drop_marks_caller_value_dropped() {
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function takesAndDrops(x: &mut Foo): void {
+    x.drop();
+    return;
+}
+
+function consume(x: Foo): void {
+    return;
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    takesAndDrops(&mut f);
+    consume(f);
+    return;
+}
+"#,
+    &["O0006"],
+  );
+}
+
+#[test]
+fn interprocedural_method_drop_marks_receiver_dropped() {
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+
+    consume(&mut self): void {
+        self.drop();
+        return;
+    }
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    f.consume();
+    f.drop();
+    return;
+}
+"#,
+    &["O0007"],
+  );
+}
+
+#[test]
+fn interprocedural_function_without_drop_does_not_consume_owner() {
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function inspect(x: &mut Foo): void {
+    return;
+}
+
+function consume(x: Foo): void {
+    return;
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    inspect(&mut f);
+    consume(f);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn interprocedural_conditional_drop_does_not_always_consume() {
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+
+    maybeDrop(&mut self, flag: i32): void {
+        if (flag > 0) {
+            self.drop();
+        }
+        return;
+    }
+}
+
+function consume(x: Foo): void {
+    return;
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    f.maybeDrop(0);
+    consume(f);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn interprocedural_if_else_drop_consumes() {
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function alwaysDrop(x: &mut Foo, flag: i32): void {
+    if (flag > 0) {
+        takesAndDrops(x);
+    } else {
+        takesAndDrops(x);
+    }
+    return;
+}
+
+function takesAndDrops(x: &mut Foo): void {
+    x.drop();
+    return;
+}
+
+function consume(x: Foo): void {
+    return;
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    alwaysDrop(&mut f, 0);
+    consume(f);
+    return;
+}
+"#,
+    &["O0006"],
+  );
+}
+
+#[test]
+fn interprocedural_loop_drop_not_guaranteed() {
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+
+    maybeDropInLoop(&mut self, runs: i32): void {
+        while (runs > 0) {
+            self.drop();
+            break;
+        }
+        return;
+    }
+}
+
+function consume(x: Foo): void {
+    return;
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    f.maybeDropInLoop(0);
+    consume(f);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn interprocedural_transitive_wrapper_drop_consumes() {
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function innerDrop(x: &mut Foo): void {
+    x.drop();
+    return;
+}
+
+function outerDrop(x: &mut Foo): void {
+    innerDrop(x);
+    return;
+}
+
+function consume(x: Foo): void {
+    return;
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    outerDrop(&mut f);
+    consume(f);
+    return;
+}
+"#,
+    &["O0006"],
+  );
+}
+
+#[test]
+fn interprocedural_transitive_method_wrapper_drop_consumes() {
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+
+    innerDrop(&mut self): void {
+        self.drop();
+        return;
+    }
+
+    outerDrop(&mut self): void {
+        self.innerDrop();
+        return;
+    }
+}
+
+function main(): void {
+    let mut f: Foo = Foo { value: 1 };
+    f.outerDrop();
+    f.drop();
+    return;
+}
+"#,
+    &["O0007"],
+  );
+}
+
+#[test]
+fn interprocedural_complex_mut_argument_warns_untracked_drop_effect() {
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Foo {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Container {
+    public inner: Foo;
+}
+
+function takesAndDrops(x: &mut Foo): void {
+    x.drop();
+    return;
+}
+
+function main(): void {
+    let mut c: Container = Container { inner: Foo { value: 1 } };
+    takesAndDrops(&mut c.inner);
+    return;
+}
+"#,
+    &["O0011"],
+  );
+}
