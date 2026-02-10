@@ -534,3 +534,72 @@ function main(): void {
   );
   assert_snapshot!("c_drop_glue_manual_drop_sets_state", c_code);
 }
+
+// =============================================================================
+// Rc<T> codegen tests
+// =============================================================================
+
+#[test]
+fn c_rc_basic_drop() {
+  let c_code = common::compile_to_c(
+    r#"
+function main(): i32 {
+    let r: Rc<i32> = Rc::new(42);
+    return 0;
+}
+"#,
+  );
+
+  assert!(c_code.contains("ignis_rc_alloc"), "Expected ignis_rc_alloc call for Rc::new");
+  assert!(c_code.contains("ignis_rc_release"), "Expected ignis_rc_release for Rc drop");
+  assert_snapshot!("c_rc_basic_drop", c_code);
+}
+
+#[test]
+fn c_rc_copy_retain() {
+  let c_code = common::compile_to_c(
+    r#"
+function main(): i32 {
+    let a: Rc<i32> = Rc::new(10);
+    let b: Rc<i32> = a;
+    return 0;
+}
+"#,
+  );
+
+  assert!(
+    c_code.contains("ignis_rc_retain"),
+    "Expected ignis_rc_retain when copying an Rc"
+  );
+
+  let release_count = c_code.matches("ignis_rc_release").count();
+  assert!(
+    release_count >= 2,
+    "Expected at least 2 ignis_rc_release calls (one per Rc variable), got {}",
+    release_count,
+  );
+  assert_snapshot!("c_rc_copy_retain", c_code);
+}
+
+#[test]
+fn c_rc_record_field_drop() {
+  let c_code = common::compile_to_c(
+    r#"
+record Holder {
+    public value: Rc<i32>;
+    public tag: i32;
+}
+
+function main(): i32 {
+    let h: Holder = Holder { value: Rc::new(42), tag: 1 };
+    return h.tag;
+}
+"#,
+  );
+
+  assert!(
+    c_code.contains("ignis_rc_release"),
+    "Expected ignis_rc_release in field drop glue for Rc field"
+  );
+  assert_snapshot!("c_rc_record_field_drop", c_code);
+}

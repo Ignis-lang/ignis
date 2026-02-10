@@ -257,6 +257,11 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Path(path) => {
+        // Skip resolution for builtin type constructors (e.g., Rc::new)
+        if !path.segments.is_empty() && self.is_builtin_name(&path.segments[0].name) {
+          return;
+        }
+
         let full_path = || {
           path
             .segments

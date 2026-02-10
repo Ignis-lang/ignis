@@ -31,3 +31,40 @@ static inline string ignis_string_from_cstr(const char *s) {
 static inline void ignis_string_drop(string s) {
   free(s);
 }
+
+/* Minimal Rc runtime stubs for E2E tests */
+typedef void (*IgnisDropFn)(void *);
+
+typedef struct {
+  _Atomic int refcount;
+  IgnisDropFn drop_fn;
+  size_t payload_size;
+  _Alignas(16) unsigned char payload[];
+} IgnisRcBox;
+
+static inline IgnisRcBox *ignis_rc_alloc(size_t payload_size, IgnisDropFn drop_fn) {
+  IgnisRcBox *box = (IgnisRcBox *)calloc(1, sizeof(IgnisRcBox) + payload_size);
+  box->refcount = 1;
+  box->drop_fn = drop_fn;
+  box->payload_size = payload_size;
+  return box;
+}
+
+static inline void ignis_rc_retain(IgnisRcBox *box) {
+  box->refcount++;
+}
+
+static inline void ignis_rc_release(IgnisRcBox *box) {
+  if (--box->refcount == 0) {
+    if (box->drop_fn) box->drop_fn(box->payload);
+    free(box);
+  }
+}
+
+static inline void *ignis_rc_get(IgnisRcBox *box) {
+  return box->payload;
+}
+
+static inline int ignis_rc_count(IgnisRcBox *box) {
+  return box->refcount;
+}

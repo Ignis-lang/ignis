@@ -2149,6 +2149,19 @@ impl<'a> Analyzer<'a> {
       );
     }
 
+    // Intercept Rc::new(value) — the typechecker already validated this
+    if matches!(self.types.get(&result_type), Type::Rc { .. }) {
+      let member_name = self.get_symbol_name(&ma.member);
+      if member_name == "new" && call.arguments.len() == 1 {
+        let value = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
+        return hir.alloc(HIRNode {
+          kind: HIRKind::RcNew { value },
+          span: call.span.clone(),
+          type_id: result_type,
+        });
+      }
+    }
+
     let def_id = self.resolve_type_expression_for_lowering(&ma.object);
 
     let Some(def_id) = def_id else {
@@ -2310,13 +2323,25 @@ impl<'a> Analyzer<'a> {
     let first_segment = &path.segments[0];
     let second_segment = &path.segments[1];
 
+    let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+    if matches!(self.types.get(&result_type), Type::Rc { .. }) {
+      let method_name = self.symbols.borrow().get(&second_segment.name).to_string();
+      if method_name == "new" && call.arguments.len() == 1 {
+        let value = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
+        return Some(hir.alloc(HIRNode {
+          kind: HIRKind::RcNew { value },
+          span: call.span.clone(),
+          type_id: result_type,
+        }));
+      }
+    }
+
     let Some(type_def_id) = self.scopes.lookup_def(&first_segment.name).cloned() else {
       if std::env::var("IGNIS_VERBOSE").is_ok() {
         eprintln!("[LOWER] try_lower_path_call: lookup_def for first_segment returned None");
       }
       return None;
     };
-    let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
 
     match &self.defs.get(&type_def_id).kind.clone() {
       DefinitionKind::Enum(ed) => {

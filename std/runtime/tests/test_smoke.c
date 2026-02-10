@@ -185,6 +185,120 @@ static void test_rc_zero_payload(void) {
   ignis_rc_release(rc);
 }
 
+// =============================================================================
+// Rc tests with memory stats (leak detection)
+// =============================================================================
+
+static void test_rc_multiple_alive_no_leak(void) {
+  ignis_mem_reset_stats();
+
+  IgnisRcBox *a = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *b = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *c = ignis_rc_alloc(sizeof(int), NULL);
+
+  *(int *)ignis_rc_get(a) = 1;
+  *(int *)ignis_rc_get(b) = 2;
+  *(int *)ignis_rc_get(c) = 3;
+
+  IgnisMemStats mid = ignis_mem_stats();
+  assert(mid.allocs_live == 3);
+
+  ignis_rc_release(a);
+  ignis_rc_release(b);
+  ignis_rc_release(c);
+
+  IgnisMemStats end = ignis_mem_stats();
+  assert(end.allocs_live == 0);
+  assert(end.bytes_live == 0);
+}
+
+static void test_rc_shared_no_leak(void) {
+  ignis_mem_reset_stats();
+
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+  *(int *)ignis_rc_get(rc) = 42;
+
+  // Simulate three "copies" (like let b = a; let c = a;)
+  ignis_rc_retain(rc);
+  ignis_rc_retain(rc);
+  assert(ignis_rc_count(rc) == 3);
+
+  ignis_rc_release(rc);
+  ignis_rc_release(rc);
+  ignis_rc_release(rc);
+
+  IgnisMemStats end = ignis_mem_stats();
+  assert(end.allocs_live == 0);
+  assert(end.bytes_live == 0);
+}
+
+static int nested_drop_released = 0;
+
+static void nested_inner_drop(void *payload) {
+  IgnisRcBox **inner = (IgnisRcBox **)payload;
+  ignis_rc_release(*inner);
+  nested_drop_released = 1;
+}
+
+static void test_rc_nested_drop_no_leak(void) {
+  ignis_mem_reset_stats();
+  nested_drop_released = 0;
+
+  // Inner Rc: plain i32
+  IgnisRcBox *inner = ignis_rc_alloc(sizeof(int), NULL);
+  *(int *)ignis_rc_get(inner) = 99;
+
+  // Outer Rc: holds a pointer to inner, drop_fn releases inner
+  IgnisRcBox *outer = ignis_rc_alloc(sizeof(IgnisRcBox *), nested_inner_drop);
+  *(IgnisRcBox **)ignis_rc_get(outer) = inner;
+
+  IgnisMemStats mid = ignis_mem_stats();
+  assert(mid.allocs_live == 2);
+
+  // Releasing outer should cascade-release inner via the drop_fn
+  ignis_rc_release(outer);
+
+  assert(nested_drop_released == 1);
+
+  IgnisMemStats end = ignis_mem_stats();
+  assert(end.allocs_live == 0);
+  assert(end.bytes_live == 0);
+}
+
+static void test_rc_interleaved_retain_release_no_leak(void) {
+  ignis_mem_reset_stats();
+
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+
+  ignis_rc_retain(rc);   // 2
+  ignis_rc_retain(rc);   // 3
+  ignis_rc_release(rc);  // 2
+  ignis_rc_retain(rc);   // 3
+  ignis_rc_release(rc);  // 2
+  ignis_rc_release(rc);  // 1
+
+  assert(ignis_rc_count(rc) == 1);
+
+  ignis_rc_release(rc);  // 0 — freed
+
+  IgnisMemStats end = ignis_mem_stats();
+  assert(end.allocs_live == 0);
+  assert(end.bytes_live == 0);
+}
+
+static void test_rc_payload_alignment(void) {
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(double), NULL);
+  void *payload = ignis_rc_get(rc);
+
+  // Payload must be aligned to max_align_t (at least 8 bytes on all platforms)
+  assert(((uintptr_t)payload % _Alignof(max_align_t)) == 0);
+
+  *(double *)payload = 3.14159;
+  assert(*(double *)ignis_rc_get(rc) == 3.14159);
+
+  ignis_rc_release(rc);
+}
+
 int main(void) {
   test_string_basic();
   test_string_concat();
@@ -199,5 +313,10 @@ int main(void) {
   test_rc_drop_fn_called();
   test_rc_payload_with_drop();
   test_rc_zero_payload();
+  test_rc_multiple_alive_no_leak();
+  test_rc_shared_no_leak();
+  test_rc_nested_drop_no_leak();
+  test_rc_interleaved_retain_release_no_leak();
+  test_rc_payload_alignment();
   return 0;
 }

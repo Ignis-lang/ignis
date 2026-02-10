@@ -315,6 +315,9 @@ impl<'a> HirBorrowChecker<'a> {
         self.check_node(ptr);
         self.check_node(value);
       },
+      HIRKind::RcNew { value } => {
+        self.check_node(value);
+      },
       HIRKind::Panic(msg) => {
         self.check_node(msg);
         self.reachable = false;

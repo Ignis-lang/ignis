@@ -13,10 +13,15 @@ use ignis_type::file::SourceMap;
 use ignis_type::symbol::SymbolTable;
 use tempfile::TempDir;
 
+/// LSan uses exit code 23 to signal detected memory leaks.
+const LSAN_EXIT_CODE: i32 = 23;
+
 pub struct E2EResult {
   pub exit_code: i32,
   pub stdout: String,
   pub stderr: String,
+  pub leaked: bool,
+  pub leak_report: String,
 }
 
 fn compile_to_c(source: &str) -> Result<String, String> {
@@ -100,7 +105,46 @@ fn compile_to_c(source: &str) -> Result<String, String> {
   ))
 }
 
+/// Splits stderr into (user output, LSan report). LSan output starts with
+/// a line matching `==<pid>==ERROR: LeakSanitizer:` and runs to the end.
+fn split_lsan_output(stderr: &str) -> (String, String) {
+  const LSAN_HEADER: &str = "ERROR: LeakSanitizer:";
+
+  if !stderr.contains(LSAN_HEADER) {
+    return (stderr.to_string(), String::new());
+  }
+
+  let mut user_lines = Vec::new();
+  let mut leak_lines = Vec::new();
+  let mut in_lsan = false;
+
+  for line in stderr.lines() {
+    if !in_lsan && line.starts_with("==") && line.contains(LSAN_HEADER) {
+      in_lsan = true;
+    }
+
+    if in_lsan {
+      leak_lines.push(line);
+    } else {
+      user_lines.push(line);
+    }
+  }
+
+  (user_lines.join("\n"), leak_lines.join("\n"))
+}
+
 pub fn compile_and_run(source: &str) -> Result<E2EResult, String> {
+  compile_and_run_inner(source, true)
+}
+
+pub fn compile_and_run_no_lsan(source: &str) -> Result<E2EResult, String> {
+  compile_and_run_inner(source, false)
+}
+
+fn compile_and_run_inner(
+  source: &str,
+  check_leaks: bool,
+) -> Result<E2EResult, String> {
   let c_code = compile_to_c(source)?;
 
   let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
@@ -110,14 +154,16 @@ pub fn compile_and_run(source: &str) -> Result<E2EResult, String> {
 
   std::fs::write(&c_path, &c_code).map_err(|e| format!("Failed to write C file: {}", e))?;
 
-  let compile = Command::new("gcc")
-    .arg("-I")
-    .arg(&fixtures_dir)
-    .arg(&c_path)
-    .arg("-o")
-    .arg(&bin_path)
-    .output()
-    .map_err(|e| format!("Failed to run gcc: {}", e))?;
+  let mut gcc = Command::new("gcc");
+  gcc.arg("-I").arg(&fixtures_dir);
+
+  if check_leaks {
+    gcc.arg("-fsanitize=leak").arg("-g").arg("-fno-omit-frame-pointer");
+  }
+
+  gcc.arg(&c_path).arg("-o").arg(&bin_path);
+
+  let compile = gcc.output().map_err(|e| format!("Failed to run gcc: {}", e))?;
 
   if !compile.status.success() {
     return Err(format!(
@@ -127,14 +173,35 @@ pub fn compile_and_run(source: &str) -> Result<E2EResult, String> {
     ));
   }
 
-  let run = Command::new(&bin_path)
-    .output()
-    .map_err(|e| format!("Failed to run binary: {}", e))?;
+  let mut run_cmd = Command::new(&bin_path);
+
+  if check_leaks {
+    run_cmd.env("LSAN_OPTIONS", "detect_leaks=1:leak_check_at_exit=1");
+  } else {
+    run_cmd.env("LSAN_OPTIONS", "detect_leaks=0");
+  }
+
+  let run = run_cmd.output().map_err(|e| format!("Failed to run binary: {}", e))?;
+
+  let raw_exit = run.status.code().unwrap_or(-1);
+  let raw_stderr = String::from_utf8_lossy(&run.stderr).to_string();
+
+  let leaked = check_leaks && raw_exit == LSAN_EXIT_CODE;
+  let (user_stderr, leak_report) = split_lsan_output(&raw_stderr);
+
+  let exit_code = if leaked {
+    // LSan overwrites the exit code; report 0 so snapshots stay stable.
+    0
+  } else {
+    raw_exit
+  };
 
   Ok(E2EResult {
-    exit_code: run.status.code().unwrap_or(-1),
+    exit_code,
     stdout: String::from_utf8_lossy(&run.stdout).to_string(),
-    stderr: String::from_utf8_lossy(&run.stderr).to_string(),
+    stderr: user_stderr,
+    leaked,
+    leak_report,
   })
 }
 

@@ -7,6 +7,21 @@ fn e2e_test(
   source: &str,
 ) {
   let result = common::compile_and_run(source).expect(&format!("Compilation of '{}' failed", name));
+
+  assert!(
+    !result.leaked,
+    "LeakSanitizer detected a memory leak in '{}':\n{}",
+    name, result.leak_report,
+  );
+
+  assert_snapshot!(name, common::format_e2e_result(&result));
+}
+
+fn e2e_test_allow_leak(
+  name: &str,
+  source: &str,
+) {
+  let result = common::compile_and_run_no_lsan(source).expect(&format!("Compilation of '{}' failed", name));
   assert_snapshot!(name, common::format_e2e_result(&result));
 }
 
@@ -2001,7 +2016,9 @@ function main(): i32 {
 
 #[test]
 fn e2e_drop_glue_explicit_with_string() {
-  e2e_test(
+  // The custom drop method intentionally does nothing, so the string field leaks.
+  // This tests that the user's drop is called (not that it's correct).
+  e2e_test_allow_leak(
     "drop_glue_explicit_with_string",
     r#"
 @implements(Drop)
@@ -2739,6 +2756,136 @@ enum MaybeMsg {
 
 function main(): i32 {
     let m: MaybeMsg = MaybeMsg::Some("hello");
+    return 0;
+}
+"#,
+  );
+}
+
+// === Rc<T> tests ===
+
+#[test]
+fn e2e_rc_new_i32() {
+  e2e_test(
+    "rc_new_i32",
+    r#"
+function main(): i32 {
+    let r: Rc<i32> = Rc::new(42);
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_copy() {
+  e2e_test(
+    "rc_copy",
+    r#"
+function main(): i32 {
+    let a: Rc<i32> = Rc::new(10);
+    let b: Rc<i32> = a;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_pass_to_function() {
+  e2e_test(
+    "rc_pass_to_function",
+    r#"
+function consume(r: Rc<i32>): i32 {
+    return 0;
+}
+
+function main(): i32 {
+    let a: Rc<i32> = Rc::new(7);
+    return consume(a);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_return_from_function() {
+  e2e_test(
+    "rc_return_from_function",
+    r#"
+function make(): Rc<i32> {
+    let r: Rc<i32> = Rc::new(99);
+    return r;
+}
+
+function main(): i32 {
+    let x: Rc<i32> = make();
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_in_loop() {
+  e2e_test(
+    "rc_in_loop",
+    r#"
+function main(): i32 {
+    let mut i: i32 = 0;
+    while (i < 10) {
+        let r: Rc<i32> = Rc::new(i);
+        i = i + 1;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_overwrite() {
+  e2e_test(
+    "rc_overwrite",
+    r#"
+function main(): i32 {
+    let mut r: Rc<i32> = Rc::new(1);
+    r = Rc::new(2);
+    r = Rc::new(3);
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_in_record() {
+  e2e_test(
+    "rc_in_record",
+    r#"
+record Holder {
+    public value: Rc<i32>;
+    public tag: i32;
+}
+
+function main(): i32 {
+    let h: Holder = Holder { value: Rc::new(42), tag: 1 };
+    return h.tag;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_multiple_copies() {
+  e2e_test(
+    "rc_multiple_copies",
+    r#"
+function main(): i32 {
+    let a: Rc<i32> = Rc::new(5);
+    let b: Rc<i32> = a;
+    let c: Rc<i32> = a;
+    let d: Rc<i32> = b;
     return 0;
 }
 "#,

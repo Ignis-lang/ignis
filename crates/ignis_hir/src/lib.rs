@@ -65,6 +65,11 @@ pub enum HIRKind {
     ptr: HIRId,
     value: HIRId,
   },
+  /// Rc::new(value) — allocates an IgnisRcBox and stores value in the payload.
+  RcNew {
+    value: HIRId,
+  },
+
   Panic(HIRId),
   Trap,
   BuiltinUnreachable,
@@ -146,6 +151,9 @@ impl HIRKind {
       | HIRKind::StaticAccess { .. }
       | HIRKind::Trap
       | HIRKind::BuiltinUnreachable => {},
+      HIRKind::RcNew { value } => {
+        *value = HIRId::new(value.index() + offset);
+      },
       HIRKind::Panic(id) => {
         *id = HIRId::new(id.index() + offset);
       },

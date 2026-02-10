@@ -3577,6 +3577,66 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Typechecks `Rc::new(value)`. Returns `None` for non-Rc calls.
+  fn try_typecheck_rc_static_call(
+    &mut self,
+    _node_id: &NodeId,
+    ma: &ASTMemberAccess,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+    infer: &InferContext,
+  ) -> Option<TypeId> {
+    let node = self.ast.get(&ma.object);
+    let var_name_sym = match node {
+      ASTNode::Expression(ASTExpression::Variable(var)) => var.name,
+      _ => return None,
+    };
+
+    let name = self.symbols.borrow().get(&var_name_sym).to_string();
+    if name != "Rc" {
+      return None;
+    }
+
+    let member_name = self.get_symbol_name(&ma.member);
+
+    if member_name == "new" {
+      if call.arguments.len() != 1 {
+        self.add_diagnostic(
+          DiagnosticMessage::ArgumentCountMismatch {
+            expected: 1,
+            got: call.arguments.len(),
+            func_name: "Rc::new".to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return Some(self.types.error());
+      }
+
+      // Propagate expected inner type from Rc<T> context into the argument.
+      let arg_infer = match infer.expected.map(|e| self.types.get(&e).clone()) {
+        Some(Type::Rc { inner }) => InferContext::expecting(inner),
+        _ => InferContext::none(),
+      };
+
+      let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &arg_infer);
+      let rc_type = self.types.rc(arg_type);
+
+      return Some(rc_type);
+    }
+
+    self.add_diagnostic(
+      DiagnosticMessage::StaticMemberNotFound {
+        member: member_name,
+        type_name: "Rc".to_string(),
+        span: ma.span.clone(),
+      }
+      .report(),
+    );
+    Some(self.types.error())
+  }
+
   /// Typecheck a static method call: Type::method(args)
   fn typecheck_static_method_call(
     &mut self,
@@ -3587,6 +3647,10 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
     infer: &InferContext,
   ) -> TypeId {
+    if let Some(result) = self.try_typecheck_rc_static_call(node_id, ma, call, scope_kind, ctx, infer) {
+      return result;
+    }
+
     let def_id = self.resolve_type_expression(&ma.object, scope_kind, ctx);
 
     let Some(def_id) = def_id else {
@@ -3899,6 +3963,45 @@ impl<'a> Analyzer<'a> {
   ) -> Option<TypeId> {
     if path.segments.len() < 2 {
       return None;
+    }
+
+    if path.segments.len() == 2 {
+      let first_name = self.get_symbol_name(&path.segments[0].name);
+      if first_name == "Rc" {
+        let method_name = self.get_symbol_name(&path.segments[1].name);
+        if method_name == "new" {
+          if call.arguments.len() != 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentCountMismatch {
+                expected: 1,
+                got: call.arguments.len(),
+                func_name: "Rc::new".to_string(),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+            return Some(self.types.error());
+          }
+
+          let arg_infer = match infer.expected.map(|e| self.types.get(&e).clone()) {
+            Some(Type::Rc { inner }) => InferContext::expecting(inner),
+            _ => InferContext::none(),
+          };
+
+          let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &arg_infer);
+          return Some(self.types.rc(arg_type));
+        }
+
+        self.add_diagnostic(
+          DiagnosticMessage::StaticMemberNotFound {
+            type_name: "Rc".to_string(),
+            member: method_name,
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return Some(self.types.error());
+      }
     }
 
     self.mark_path_prefix_referenced(&path.segments);
@@ -5954,6 +6057,27 @@ impl<'a> Analyzer<'a> {
           span: name_span,
         } = base.as_ref()
         {
+          let name = self.symbols.borrow().get(symbol).to_string();
+          if name == "Rc" {
+            if args.len() != 1 {
+              if let Some(s) = span {
+                self.add_diagnostic(
+                  DiagnosticMessage::WrongNumberOfTypeArgs {
+                    expected: 1,
+                    got: args.len(),
+                    type_name: "Rc".to_string(),
+                    span: s.clone(),
+                  }
+                  .report(),
+                );
+              }
+              return self.types.error();
+            }
+
+            let inner = self.resolve_type_syntax_impl(&args[0], span);
+            return self.types.rc(inner);
+          }
+
           if let Some(def_id) = self.scopes.lookup_def(symbol).cloned() {
             // Register span for hover/goto-definition on type references
             self.set_import_item_def(name_span, &def_id);
@@ -6179,6 +6303,7 @@ impl<'a> Analyzer<'a> {
       Type::Vector { element, size } => {
         format!("[{}; {}]", self.format_type_for_error(element), size)
       },
+      Type::Rc { inner } => format!("Rc<{}>", self.format_type_for_error(inner)),
       Type::Tuple(elements) => {
         let elem_strs: Vec<_> = elements.iter().map(|e| self.format_type_for_error(e)).collect();
         format!("({})", elem_strs.join(", "))
@@ -6351,7 +6476,11 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    if has_length { data_element_type } else { None }
+    if has_length {
+      data_element_type
+    } else {
+      None
+    }
   }
 
   fn validate_mutable_iter_for_mut_ref(
@@ -6997,7 +7126,11 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" { 1 } else { 0 }
+    if first_name == "self" {
+      1
+    } else {
+      0
+    }
   }
 
   fn emit_no_overload_error(

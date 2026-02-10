@@ -555,6 +555,7 @@ impl<'a> Analyzer<'a> {
       || name == "minOf"
       || name == "__builtin_read"
       || name == "__builtin_write"
+      || name == "Rc"
   }
 
   fn node_span(

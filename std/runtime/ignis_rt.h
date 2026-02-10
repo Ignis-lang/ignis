@@ -157,6 +157,16 @@ uint32_t ignis_rc_count(const IgnisRcBox *rc);
 // Memory allocation
 // =============================================================================
 
+typedef struct {
+  size_t allocs_live;
+  size_t bytes_live;
+  size_t alloc_total;
+  size_t free_total;
+} IgnisMemStats;
+
+IgnisMemStats ignis_mem_stats(void);
+void ignis_mem_reset_stats(void);
+
 /**
  * Allocates `size` bytes with the runtime allocator.
  */
