@@ -4,7 +4,7 @@ Ignis uses a compile-time ownership model inspired by Rust, with automatic drop 
 
 ## Ownership
 
-Every value in Ignis has exactly one owner. When the owner goes out of scope, the value is dropped (cleaned up). Ownership can be transferred via assignment or function calls, but never duplicated unless the type is Copy.
+Every value in Ignis has exactly one owner. When the owner goes out of scope, the value is dropped (cleaned up). Ownership can be transferred via assignment or function calls, but never duplicated unless the type is Copy or explicitly cloned.
 
 ```ignis
 function main(): void {
@@ -90,7 +90,7 @@ function main(): void {
 
 ### Explicit Copy with `@implements(Copy)`
 
-You can force a record to be Copy with the `@implements(Copy)` attribute, even if the compiler's structural analysis would not derive it:
+You can declare Copy explicitly with `@implements(Copy)`:
 
 ```ignis
 @implements(Copy)
@@ -98,6 +98,11 @@ record Handle {
     public id: i32;
 }
 ```
+
+The declaration is still validated structurally:
+
+- For records, every field must be Copy
+- For enums, every variant payload must be Copy
 
 Copy and Drop are mutually exclusive -- a type cannot be both.
 
@@ -112,8 +117,22 @@ These types own resources and are moved (not copied) on assignment:
 
 - `string` -- owns a heap-allocated character buffer
 - Dynamic vectors `[T]` -- own a heap-allocated element buffer
+- `Rc<T>` -- shared ownership handle with retain/release semantics
 - Records with any non-Copy field
 - Records annotated with `@implements(Drop)`
+- Enums annotated with `@implements(Drop)`
+
+### Shared Ownership with `Rc<T>`
+
+`Rc<T>` is provided by `std::rc` as a normal library type.
+
+- `let b = a` moves the handle
+- `a.clone()` retains and creates a second handle
+- `a.strongCount()` returns the current strong reference count
+- `a.get()` returns `&T`
+- `a.getMut()` returns `*mut T` when `strongCount == 1`, otherwise `null`
+
+`getMut` currently returns a raw pointer because pattern matching is not available yet for ergonomic `Option<&mut T>` handling.
 
 ## Drop
 
@@ -157,7 +176,7 @@ record Resource {
 Requirements for the `drop` method:
 - Signature must be `drop(&mut self): void`
 - Must be an instance method with mutable self
-- Only records support `@implements(Drop)` (not enums)
+- Supported on records and enums
 
 When the compiler inserts a drop for this type, it calls the user-defined `drop` method instead of generating field-by-field glue.
 
@@ -309,7 +328,9 @@ For a record type `R`:
 |------|---------|----------|
 | A0076 | Cannot call mutating method on immutable variable | Error |
 | A0130 | Unknown lang trait | Error |
-| A0131 | Missing required method for lang trait | Error |
-| A0132 | Drop and Copy cannot coexist | Error |
+| A0131 | Drop and Copy cannot coexist | Error |
+| A0132 | Missing required method for lang trait | Error |
 | A0133 | Invalid signature for lang trait method | Error |
 | A0134 | Lang trait not applicable to this type | Error |
+| A0148 | Type declares `@implements(Copy)` but a record field is non-Copy | Error |
+| A0149 | Type declares `@implements(Copy)` but an enum payload is non-Copy | Error |
