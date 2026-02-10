@@ -782,7 +782,6 @@ pub fn compile_project(
               &output.namespaces,
               &sym_table,
               &link_plan_with_user_includes.headers,
-              output.rc_hooks,
               &module_paths,
               &user_module_headers,
             );
@@ -862,7 +861,6 @@ pub fn compile_project(
               &output.namespaces,
               &sym_table,
               &link_plan.headers,
-              output.rc_hooks,
               &module_paths,
             )
           } else {
@@ -873,7 +871,6 @@ pub fn compile_project(
               &output.namespaces,
               &sym_table,
               &link_plan.headers,
-              output.rc_hooks,
             )
           };
 
@@ -1205,7 +1202,6 @@ pub fn build_std(
       &output.namespaces,
       &sym_table,
       &link_plan.headers,
-      output.rc_hooks,
       &module_paths,
       Some(umbrella_header),
       std_path,
@@ -1435,7 +1431,6 @@ pub fn check_std(
       &output.namespaces,
       &sym_table,
       &link_plan.headers,
-      output.rc_hooks,
     );
 
     let c_path = output_path.join(format!("{}.c", module_name));

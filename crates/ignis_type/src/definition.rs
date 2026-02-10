@@ -107,20 +107,6 @@ pub enum DefinitionKind {
   Placeholder,
 }
 
-/// Resolved Rc hook functions from `@lang(rc_runtime)`.
-/// These are the four operations emitted for `Rc<T>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RcHooks {
-  /// `alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void`
-  pub alloc: DefinitionId,
-  /// `get(handle: *mut void): *mut u8`
-  pub get: DefinitionId,
-  /// `retain(handle: *mut void): void`
-  pub retain: DefinitionId,
-  /// `release(handle: *mut void): void`
-  pub release: DefinitionId,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NamespaceDefinition {
   pub namespace_id: NamespaceId,

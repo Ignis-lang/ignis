@@ -192,18 +192,6 @@ pub enum Instr {
     payload: Vec<Operand>,
   },
 
-  /// `dest = rc_alloc(sizeof(inner_type), alignof(inner_type), drop_fn); *payload = value`
-  RcNew {
-    dest: TempId,
-    value: Operand,
-    inner_type: TypeId,
-  },
-
-  /// `ignis_rc_retain(operand)`
-  RcRetain {
-    operand: Operand,
-  },
-
   /// Run T's drop on the value at `ptr`. No-op when T doesn't need dropping.
   DropInPlace {
     ptr: Operand,

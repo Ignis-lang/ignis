@@ -1486,10 +1486,7 @@ impl<'a> Analyzer<'a> {
             continue;
           };
 
-          if !matches!(
-            hook_name.as_str(),
-            "rc_runtime" | "string_runtime" | "vector_runtime" | "weak_runtime"
-          ) {
+          if !matches!(hook_name.as_str(), "string_runtime" | "vector_runtime" | "weak_runtime") {
             self.add_diagnostic(
               DiagnosticMessage::UnknownAttribute {
                 name: format!("lang({})", hook_name),

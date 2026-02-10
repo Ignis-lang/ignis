@@ -291,13 +291,6 @@ impl<'a> LirVerifier<'a> {
       },
       Instr::Trap { .. } => {},
       Instr::PanicMessage { .. } => {},
-      Instr::RcNew { dest, value, .. } => {
-        defined_temps.insert(*dest);
-        self.check_operand(func, func_name, block_name, value, defined_temps);
-      },
-      Instr::RcRetain { operand } => {
-        self.check_operand(func, func_name, block_name, operand, defined_temps);
-      },
       Instr::DropInPlace { ptr, .. } => {
         self.check_operand(func, func_name, block_name, ptr, defined_temps);
       },

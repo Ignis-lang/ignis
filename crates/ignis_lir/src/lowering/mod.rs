@@ -337,9 +337,6 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Dereference(expr) => self.lower_dereference(*expr, node.type_id, node.span),
       HIRKind::Index { base, index } => self.lower_index(*base, *index, node.type_id, node.span),
       HIRKind::VectorLiteral { elements } => self.lower_vector_literal(elements, node.type_id, node.span),
-      HIRKind::RcNew { value } => self.lower_rc_new(*value, node.type_id, node.span),
-      HIRKind::RcClone { value } => self.lower_rc_clone(*value, node.type_id, node.span),
-
       // Statements
       HIRKind::Let { name, value } => {
         self.lower_let(*name, value.as_ref().copied());
@@ -1039,53 +1036,6 @@ impl<'a> LoweringContext<'a> {
     // Load the vector value
     let dest = self.fn_builder().alloc_temp(vec_ty, span);
     self.fn_builder().emit(Instr::Load { dest, source: local });
-
-    Some(Operand::Temp(dest))
-  }
-
-  fn lower_rc_new(
-    &mut self,
-    value_hir: HIRId,
-    rc_ty: TypeId,
-    span: Span,
-  ) -> Option<Operand> {
-    let inner_type = match self.types.get(&rc_ty) {
-      Type::Rc { inner } => *inner,
-      _ => return None,
-    };
-
-    let value_op = self.lower_hir_node(value_hir)?;
-
-    let dest = self.fn_builder().alloc_temp(rc_ty, span);
-    self.fn_builder().emit(Instr::RcNew {
-      dest,
-      value: value_op,
-      inner_type,
-    });
-
-    Some(Operand::Temp(dest))
-  }
-
-  fn lower_rc_clone(
-    &mut self,
-    value_hir: HIRId,
-    rc_ty: TypeId,
-    span: Span,
-  ) -> Option<Operand> {
-    let value_op = self.lower_hir_node(value_hir)?;
-
-    self.fn_builder().emit(Instr::RcRetain {
-      operand: value_op.clone(),
-    });
-
-    // Clone produces a second owned handle pointing to the same allocation.
-    // Copy the opaque pointer into a fresh temp so each binding gets its own
-    // independently droppable value.
-    let dest = self.fn_builder().alloc_temp(rc_ty, span);
-    self.fn_builder().emit(Instr::Copy {
-      dest,
-      source: value_op,
-    });
 
     Some(Operand::Temp(dest))
   }

@@ -959,14 +959,6 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::Trap => (HIRKind::Trap, None),
       HIRKind::BuiltinUnreachable => (HIRKind::BuiltinUnreachable, None),
-      HIRKind::RcNew { value } => {
-        let nv = self.clone_hir_tree(*value);
-        (HIRKind::RcNew { value: nv }, None)
-      },
-      HIRKind::RcClone { value } => {
-        let nv = self.clone_hir_tree(*value);
-        (HIRKind::RcClone { value: nv }, None)
-      },
     }
   }
 
@@ -1235,9 +1227,6 @@ impl<'a> Monomorphizer<'a> {
       | HIRKind::BuiltinDropGlue { .. } => {},
       HIRKind::Panic(msg) => {
         self.scan_hir(*msg);
-      },
-      HIRKind::RcNew { value } | HIRKind::RcClone { value } => {
-        self.scan_hir(*value);
       },
     }
   }
@@ -2086,14 +2075,7 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::Trap => HIRKind::Trap,
       HIRKind::BuiltinUnreachable => HIRKind::BuiltinUnreachable,
-      HIRKind::RcNew { value } => {
-        let nv = self.substitute_hir(*value, subst);
-        HIRKind::RcNew { value: nv }
-      },
-      HIRKind::RcClone { value } => {
-        let nv = self.substitute_hir(*value, subst);
-        HIRKind::RcClone { value: nv }
-      },
+
       // These are handled in substitute_hir directly
       HIRKind::Call { .. } | HIRKind::RecordInit { .. } | HIRKind::MethodCall { .. } | HIRKind::EnumVariant { .. } => {
         unreachable!("should be handled in substitute_hir")
@@ -2374,7 +2356,6 @@ impl<'a> Monomorphizer<'a> {
         format!("{}_{}", prefix, self.mangle_type(*inner))
       },
       Type::Vector { element, size } => format!("arr{}_{}", size, self.mangle_type(*element)),
-      Type::Rc { inner } => format!("rc_{}", self.mangle_type(*inner)),
       Type::Instance { generic, args } => {
         let base = Self::escape(&self.get_def_name(generic));
         let args_str = args.iter().map(|a| self.mangle_type(*a)).collect::<Vec<_>>().join("__");
