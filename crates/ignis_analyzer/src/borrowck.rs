@@ -171,8 +171,8 @@ impl<'a> Analyzer<'a> {
 
         self.borrowcheck_node(&for_stmt.initializer, checker, ScopeKind::Loop);
         self.borrowcheck_node(&for_stmt.condition, checker, ScopeKind::Loop);
-        self.borrowcheck_node(&for_stmt.increment, checker, ScopeKind::Loop);
         self.borrowcheck_node(&for_stmt.body, checker, ScopeKind::Loop);
+        self.borrowcheck_node(&for_stmt.increment, checker, ScopeKind::Loop);
 
         self.scopes.pop();
       },

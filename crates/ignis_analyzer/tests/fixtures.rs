@@ -191,6 +191,11 @@ fn fixture_enum_drop() {
 }
 
 #[test]
+fn fixture_copy_noncopy_field() {
+  test_fixture("test_cases/analyzer/lang_traits/copy_noncopy_field.ign");
+}
+
+#[test]
 fn fixture_copy_explicit() {
   test_fixture("test_cases/analyzer/lang_traits/copy_explicit.ign");
 }

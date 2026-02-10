@@ -12,7 +12,7 @@ use ignis_type::{
   file::SourceMap,
   span::Span,
   symbol::SymbolTable,
-  types::TypeStore,
+  types::{TypeStore, format_type_name},
 };
 
 /// Ownership state for a variable.
@@ -881,10 +881,9 @@ impl<'a> HirOwnershipChecker<'a> {
     // Use-after-free is checked at dereference/index, not here
     match self.states.get(&def_id) {
       Some(OwnershipState::Moved) => {
-        let var_name = self.get_var_name(&def_id);
         self
           .diagnostics
-          .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
+          .push(self.build_use_after_move_diagnostic(&def_id, span));
       },
       Some(OwnershipState::Dropped) => {
         let var_name = self.get_var_name(&def_id);
@@ -1257,10 +1256,9 @@ impl<'a> HirOwnershipChecker<'a> {
       },
 
       Some(OwnershipState::Moved) => {
-        let var_name = self.get_var_name(&def_id);
         self
           .diagnostics
-          .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
+          .push(self.build_use_after_move_diagnostic(&def_id, span));
       },
 
       Some(OwnershipState::Freed) => {
@@ -1276,11 +1274,94 @@ impl<'a> HirOwnershipChecker<'a> {
 
       Some(OwnershipState::Returned) => {
         // Value already left this scope; model this as use-after-move.
-        let var_name = self.get_var_name(&def_id);
         self
           .diagnostics
-          .push(DiagnosticMessage::UseAfterMove { var_name, span }.report());
+          .push(self.build_use_after_move_diagnostic(&def_id, span));
       },
+    }
+  }
+
+  /// Build a `UseAfterMove` diagnostic with notes explaining why the type
+  /// is non-Copy and what remedies are available.
+  fn build_use_after_move_diagnostic(
+    &self,
+    def_id: &DefinitionId,
+    span: Span,
+  ) -> Diagnostic {
+    let var_name = self.get_var_name(def_id);
+    let mut diag = DiagnosticMessage::UseAfterMove { var_name, span }.report();
+
+    let ty = self.defs.type_of(def_id);
+    self.append_non_copy_notes(&mut diag, ty);
+
+    diag
+  }
+
+  /// Append notes explaining why `ty` is non-Copy and suggest remedies.
+  fn append_non_copy_notes(
+    &self,
+    diag: &mut Diagnostic,
+    ty: &ignis_type::types::TypeId,
+  ) {
+    let type_name = format_type_name(ty, self.types, self.defs, self.symbols);
+
+    match self.types.get(ty) {
+      ignis_type::types::Type::Record(def_id) => {
+        let def = self.defs.get(def_id);
+        if let DefinitionKind::Record(rd) = &def.kind {
+          if rd.lang_traits.drop {
+            diag
+              .notes
+              .push(format!("'{}' implements Drop, which makes it non-Copy", type_name));
+          } else if let Some(field) = rd
+            .fields
+            .iter()
+            .find(|f| !self.types.is_copy_with_defs(&f.type_id, self.defs))
+          {
+            let field_name = self.symbols.get(&field.name);
+            let field_type = format_type_name(&field.type_id, self.types, self.defs, self.symbols);
+            diag.notes.push(format!(
+              "'{}' is non-Copy because field '{}' has type '{}' which is non-Copy",
+              type_name, field_name, field_type
+            ));
+          } else {
+            // All fields are structurally Copy but the record is still non-Copy.
+            // Shouldn't happen after Copy structural validation, but be defensive.
+            diag
+              .notes
+              .push(format!("'{}' is non-Copy; consider adding '@implements(Copy)'", type_name));
+          }
+
+          if rd.lang_traits.clone {
+            diag
+              .notes
+              .push("help: consider using '.clone()' to create an explicit copy".to_string());
+          } else if !rd.lang_traits.drop
+            && rd
+              .fields
+              .iter()
+              .all(|f| self.types.is_copy_with_defs(&f.type_id, self.defs))
+          {
+            diag.notes.push(format!(
+              "help: consider adding '@implements(Copy)' to '{}' since all its fields are Copy",
+              type_name
+            ));
+          } else {
+            diag.notes.push(format!(
+              "help: consider adding '@implements(Clone)' to '{}' and implementing a 'clone' method",
+              type_name
+            ));
+          }
+        }
+      },
+
+      ignis_type::types::Type::String => {
+        diag
+          .notes
+          .push("'string' is non-Copy because it owns heap-allocated memory".to_string());
+      },
+
+      _ => {},
     }
   }
 }

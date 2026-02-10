@@ -498,6 +498,48 @@ function main(): void {
 }
 
 // =============================================================================
+// Copy structural validation
+// =============================================================================
+
+#[test]
+fn copy_on_noncopy_field() {
+  common::assert_err(
+    r#"
+@implements(Copy)
+record Bad {
+    name: string;
+    id: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0148"],
+  );
+}
+
+#[test]
+fn copy_on_all_copy_fields_ok() {
+  common::assert_ok(
+    r#"
+@implements(Copy)
+record Point {
+    public x: i32;
+    public y: i32;
+}
+
+function main(): void {
+    let a: Point = Point { x: 1, y: 2 };
+    let b: Point = a;
+    let c: Point = a;
+    return;
+}
+"#,
+  );
+}
+
+// =============================================================================
 // Literal coercion tests
 // =============================================================================
 
@@ -1630,5 +1672,46 @@ function main(): void {
 }
 "#,
     &["A0146"],
+  );
+}
+
+// =============================================================================
+// Clone lang trait
+// =============================================================================
+
+#[test]
+fn clone_missing_method() {
+  common::assert_err(
+    r#"
+@implements(Clone)
+record Foo {
+    public x: i32;
+}
+
+function main(): void {
+    return;
+}
+"#,
+    &["A0132"],
+  );
+}
+
+#[test]
+fn clone_with_valid_method() {
+  common::assert_ok(
+    r#"
+@implements(Clone)
+record Foo {
+    public x: i32;
+
+    clone(&self): Foo {
+        return Foo { x: self.x };
+    }
+}
+
+function main(): void {
+    return;
+}
+"#,
   );
 }

@@ -6136,7 +6136,11 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    if has_length { data_element_type } else { None }
+    if has_length {
+      data_element_type
+    } else {
+      None
+    }
   }
 
   fn validate_mutable_iter_for_mut_ref(
@@ -6389,9 +6393,12 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&type_def.name);
 
     // Clone to release borrow on self.defs
-    let (lang_traits, instance_methods, type_id, is_enum) = match &type_def.kind {
-      DefinitionKind::Record(rd) => (rd.lang_traits, Some(rd.instance_methods.clone()), rd.type_id, false),
-      DefinitionKind::Enum(ed) => (ed.lang_traits, None, ed.type_id, true),
+    let (lang_traits, instance_methods, type_id, is_enum, fields) = match &type_def.kind {
+      DefinitionKind::Record(rd) => {
+        let fields: Vec<_> = rd.fields.iter().map(|f| (f.name, f.type_id, f.span.clone())).collect();
+        (rd.lang_traits, Some(rd.instance_methods.clone()), rd.type_id, false, fields)
+      },
+      DefinitionKind::Enum(ed) => (ed.lang_traits, None, ed.type_id, true, Vec::new()),
       _ => return,
     };
 
@@ -6442,6 +6449,34 @@ impl<'a> Analyzer<'a> {
         &type_name,
         type_span,
       );
+    }
+
+    if lang_traits.copy && !is_enum {
+      self.validate_copy_structural(&type_name, &fields, type_span);
+    }
+  }
+
+  fn validate_copy_structural(
+    &mut self,
+    type_name: &str,
+    fields: &[(ignis_type::symbol::SymbolId, ignis_type::types::TypeId, Span)],
+    type_span: &Span,
+  ) {
+    for (field_sym, field_ty, _field_span) in fields {
+      if !self.types.is_copy_with_defs(field_ty, &self.defs) {
+        let field_name = self.get_symbol_name(field_sym);
+        let field_type = self.format_type_for_error(field_ty);
+
+        self.add_diagnostic(
+          DiagnosticMessage::CopyOnNonCopyField {
+            type_name: type_name.to_string(),
+            field_name,
+            field_type,
+            span: type_span.clone(),
+          }
+          .report(),
+        );
+      }
     }
   }
 
@@ -6725,7 +6760,11 @@ impl<'a> Analyzer<'a> {
 
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
-    if first_name == "self" { 1 } else { 0 }
+    if first_name == "self" {
+      1
+    } else {
+      0
+    }
   }
 
   fn emit_no_overload_error(

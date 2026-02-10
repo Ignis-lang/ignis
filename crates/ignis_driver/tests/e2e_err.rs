@@ -689,3 +689,79 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// UseAfterMove: contextual notes
+// =========================================================================
+
+#[test]
+fn e2e_err_use_after_move_drop_record() {
+  e2e_ownership_error_test(
+    "err_use_after_move_drop_record",
+    r#"
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function consume(r: Resource): i32 {
+    return r.tag;
+}
+
+function main(): i32 {
+    let r: Resource = Resource { tag: 42 };
+    let x: i32 = consume(r);
+    return consume(r);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_use_after_move_noncopy_field() {
+  e2e_ownership_error_test(
+    "err_use_after_move_noncopy_field",
+    r#"
+record Named {
+    public name: string;
+}
+
+function consume(n: Named): i32 {
+    return 0;
+}
+
+function main(): i32 {
+    let n: Named = Named { name: "hello" };
+    let x: i32 = consume(n);
+    return consume(n);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_use_after_move_assign() {
+  e2e_ownership_error_test(
+    "err_use_after_move_assign",
+    r#"
+@implements(Drop)
+record Handle {
+    public id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let h: Handle = Handle { id: 1 };
+    let h2: Handle = h;
+    return h.id;
+}
+"#,
+  );
+}

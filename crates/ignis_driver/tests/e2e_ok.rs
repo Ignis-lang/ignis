@@ -2640,3 +2640,38 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Clone: .clone() does not move the original
+// =========================================================================
+
+#[test]
+fn e2e_clone_does_not_move() {
+  e2e_test(
+    "clone_does_not_move",
+    r#"
+@implements(Drop, Clone)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+
+    clone(&self): Resource {
+        return Resource { tag: self.tag };
+    }
+}
+
+function consume(r: Resource): i32 {
+    return r.tag;
+}
+
+function main(): i32 {
+    let r: Resource = Resource { tag: 42 };
+    let r2: Resource = r.clone();
+    return consume(r) + consume(r2);
+}
+"#,
+  );
+}

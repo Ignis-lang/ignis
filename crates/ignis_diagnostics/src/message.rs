@@ -637,6 +637,12 @@ pub enum DiagnosticMessage {
     trait_name: String,
     span: Span,
   },
+  CopyOnNonCopyField {
+    type_name: String,
+    field_name: String,
+    field_type: String,
+    span: Span,
+  },
   // Extension method diagnostics
   ExtensionInvalidTargetType {
     type_name: String,
@@ -1276,6 +1282,18 @@ impl fmt::Display for DiagnosticMessage {
           trait_name
         )
       },
+      DiagnosticMessage::CopyOnNonCopyField {
+        type_name,
+        field_name,
+        field_type,
+        ..
+      } => {
+        write!(
+          f,
+          "type '{}' declares @implements(Copy) but field '{}' has non-Copy type '{}'",
+          type_name, field_name, field_type
+        )
+      },
       DiagnosticMessage::ExtensionInvalidTargetType { type_name, .. } => {
         write!(f, "@extension target type '{}' is not a valid primitive type", type_name)
       },
@@ -1522,6 +1540,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
       | DiagnosticMessage::LangTraitInvalidSignature { span, .. }
       | DiagnosticMessage::LangTraitNotApplicable { span, .. }
+      | DiagnosticMessage::CopyOnNonCopyField { span, .. }
       | DiagnosticMessage::ExtensionInvalidTargetType { span, .. }
       | DiagnosticMessage::ExtensionRequiresParameter { span, .. }
       | DiagnosticMessage::ExtensionReceiverTypeMismatch { span, .. }
@@ -1698,6 +1717,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",
       DiagnosticMessage::LangTraitInvalidSignature { .. } => "A0133",
       DiagnosticMessage::LangTraitNotApplicable { .. } => "A0134",
+      DiagnosticMessage::CopyOnNonCopyField { .. } => "A0148",
       DiagnosticMessage::ExtensionInvalidTargetType { .. } => "A0135",
       DiagnosticMessage::ExtensionRequiresParameter { .. } => "A0136",
       DiagnosticMessage::ExtensionReceiverTypeMismatch { .. } => "A0137",

@@ -246,7 +246,13 @@ pub fn compile_ownership_diagnostics(source: &str) -> Result<Vec<String>, String
   let messages: Vec<String> = ownership_diagnostics
     .iter()
     .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
-    .map(|d| d.message.clone())
+    .map(|d| {
+      let mut parts = vec![d.message.clone()];
+      for note in &d.notes {
+        parts.push(format!("  note: {}", note));
+      }
+      parts.join("\n")
+    })
     .collect();
 
   Ok(messages)
