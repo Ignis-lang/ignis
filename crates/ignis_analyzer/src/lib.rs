@@ -18,7 +18,6 @@ macro_rules! with_for_of_scope {
 }
 
 mod binder;
-mod borrowck;
 pub mod borrowck_hir;
 mod checks;
 mod const_eval;

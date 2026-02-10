@@ -54,6 +54,21 @@ fn fixture_mutate_while_borrowed() {
   test_fixture("test_cases/analyzer/borrows/mutate_while_borrowed.ign");
 }
 
+#[test]
+fn fixture_mutate_field_while_borrowed() {
+  test_fixture("test_cases/analyzer/borrows/mutate_field_while_borrowed.ign");
+}
+
+#[test]
+fn fixture_mutate_index_while_borrowed() {
+  test_fixture("test_cases/analyzer/borrows/mutate_index_while_borrowed.ign");
+}
+
+#[test]
+fn fixture_mutate_deref_while_borrowed() {
+  test_fixture("test_cases/analyzer/borrows/mutate_deref_while_borrowed.ign");
+}
+
 // --- Cast Tests ---
 
 #[test]
