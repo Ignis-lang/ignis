@@ -187,7 +187,6 @@ fn empty_analyzer_output() -> ignis_analyzer::AnalyzerOutput {
     import_item_defs: HashMap::new(),
     import_module_files: HashMap::new(),
     extension_methods: HashMap::new(),
-    rc_hooks: None,
   }
 }
 

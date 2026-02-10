@@ -41,11 +41,6 @@ pub enum Type {
     size: usize,
   },
 
-  /// `Rc<T>` — reference-counted shared pointer backed by IgnisRcBox.
-  Rc {
-    inner: TypeId,
-  },
-
   Tuple(Vec<TypeId>),
 
   Function {
@@ -127,7 +122,6 @@ pub struct TypeStore {
   pointers: HashMap<PointerKey, TypeId>,
   references: HashMap<ReferenceKey, TypeId>,
   vectors: HashMap<VectorKey, TypeId>,
-  rcs: HashMap<TypeId, TypeId>,
   tuples: HashMap<Vec<TypeId>, TypeId>,
   functions: HashMap<FunctionKey, TypeId>,
   records: HashMap<DefinitionId, TypeId>,
@@ -151,7 +145,6 @@ impl TypeStore {
       pointers: HashMap::new(),
       references: HashMap::new(),
       vectors: HashMap::new(),
-      rcs: HashMap::new(),
       tuples: HashMap::new(),
       functions: HashMap::new(),
       records: HashMap::new(),
@@ -232,18 +225,6 @@ impl TypeStore {
     }
     let id = self.types.alloc(Type::Vector { element, size });
     self.vectors.insert(key, id);
-    id
-  }
-
-  pub fn rc(
-    &mut self,
-    inner: TypeId,
-  ) -> TypeId {
-    if let Some(&id) = self.rcs.get(&inner) {
-      return id;
-    }
-    let id = self.types.alloc(Type::Rc { inner });
-    self.rcs.insert(inner, id);
     id
   }
 
@@ -599,9 +580,6 @@ impl TypeStore {
 
       Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. } => true,
 
-      // Rc is non-Copy: sharing requires explicit .clone()
-      Type::Rc { .. } => false,
-
       Type::Vector { element, .. } => self.is_copy(element),
 
       Type::String | Type::Infer => false,
@@ -624,7 +602,7 @@ impl TypeStore {
     &self,
     ty: &TypeId,
   ) -> bool {
-    matches!(self.get(ty), Type::String | Type::Infer | Type::Rc { .. })
+    matches!(self.get(ty), Type::String | Type::Infer)
   }
 
   #[inline]
@@ -707,8 +685,6 @@ impl TypeStore {
         visiting.remove(ty);
         result
       },
-
-      Type::Rc { .. } => false,
 
       Type::Vector { element, .. } => self.is_copy_with_defs_inner(element, defs, visiting),
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_with_defs_inner(e, defs, visiting)),
@@ -827,7 +803,7 @@ impl TypeStore {
         args.iter().any(|a| self.needs_drop_with_defs_inner(a, defs, visiting))
       },
 
-      Type::String | Type::Infer | Type::Rc { .. } => true,
+      Type::String | Type::Infer => true,
 
       Type::Tuple(elems) => {
         let elems = elems.clone();
@@ -853,10 +829,9 @@ impl TypeStore {
   ) -> bool {
     match self.get(ty) {
       Type::Param { .. } => true,
-      Type::Pointer { inner, .. }
-      | Type::Reference { inner, .. }
-      | Type::Vector { element: inner, .. }
-      | Type::Rc { inner } => self.contains_type_param(inner),
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } | Type::Vector { element: inner, .. } => {
+        self.contains_type_param(inner)
+      },
       Type::Tuple(elems) => elems.iter().any(|e| self.contains_type_param(e)),
       Type::Function { params, ret, .. } => {
         params.iter().any(|p| self.contains_type_param(p)) || self.contains_type_param(ret)
@@ -907,11 +882,6 @@ impl TypeStore {
       Type::Vector { element, size } => {
         let new_elem = self.substitute(element, subst);
         self.vector(new_elem, size)
-      },
-
-      Type::Rc { inner } => {
-        let new_inner = self.substitute(inner, subst);
-        self.rc(new_inner)
       },
 
       Type::Tuple(elems) => {
@@ -994,8 +964,6 @@ impl TypeStore {
         }
         self.unify_for_inference(i1, i2, subst)
       },
-
-      (Type::Rc { inner: i1 }, Type::Rc { inner: i2 }) => self.unify_for_inference(i1, i2, subst),
 
       // Vector types
       (Type::Vector { element: e1, size: s1 }, Type::Vector { element: e2, size: s2 }) => {
@@ -1186,10 +1154,6 @@ pub fn format_type_name(
 
     Type::Vector { element, size } => {
       format!("[{}; {}]", format_type_name(element, types, defs, symbols), size)
-    },
-
-    Type::Rc { inner } => {
-      format!("Rc<{}>", format_type_name(inner, types, defs, symbols))
     },
 
     Type::Tuple(elements) => {

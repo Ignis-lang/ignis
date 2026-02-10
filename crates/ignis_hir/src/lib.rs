@@ -74,15 +74,6 @@ pub enum HIRKind {
   BuiltinDropGlue {
     ty: TypeId,
   },
-  /// Rc::new(value) — allocates an IgnisRcBox and stores value in the payload.
-  RcNew {
-    value: HIRId,
-  },
-  /// rc.clone() — retains the Rc handle and returns the same pointer.
-  RcClone {
-    value: HIRId,
-  },
-
   Panic(HIRId),
   Trap,
   BuiltinUnreachable,
@@ -165,9 +156,6 @@ impl HIRKind {
       | HIRKind::Trap
       | HIRKind::BuiltinUnreachable
       | HIRKind::BuiltinDropGlue { .. } => {},
-      HIRKind::RcNew { value } | HIRKind::RcClone { value } => {
-        *value = HIRId::new(value.index() + offset);
-      },
       HIRKind::Panic(id) => {
         *id = HIRId::new(id.index() + offset);
       },

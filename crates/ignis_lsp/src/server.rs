@@ -1924,9 +1924,6 @@ fn format_type(
         format!("&{}", format_type(types, defs, symbol_names, inner))
       }
     },
-    Type::Rc { inner } => {
-      format!("Rc<{}>", format_type(types, defs, symbol_names, inner))
-    },
     Type::Vector { element, size } => {
       format!("{}[{}]", format_type(types, defs, symbol_names, element), size)
     },

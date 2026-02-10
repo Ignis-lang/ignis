@@ -395,10 +395,6 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::Trap | HIRKind::BuiltinUnreachable => {
         self.reachable = false;
       },
-
-      HIRKind::RcNew { value } | HIRKind::RcClone { value } => {
-        self.check_node(value);
-      },
     }
   }
 
@@ -1359,16 +1355,6 @@ impl<'a> HirOwnershipChecker<'a> {
             ));
           }
         }
-      },
-
-      ignis_type::types::Type::Rc { .. } => {
-        diag.notes.push(format!(
-          "'{}' is non-Copy because Rc owns a reference-counted allocation",
-          type_name
-        ));
-        diag
-          .notes
-          .push("help: consider using '.clone()' to create a shared reference".to_string());
       },
 
       ignis_type::types::Type::String => {

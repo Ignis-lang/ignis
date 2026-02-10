@@ -688,18 +688,6 @@ impl<'a> HIRPrinter<'a> {
         let ty_str = self.format_type(ty);
         writeln!(self.output, "BuiltinDropGlue({}) : {}", ty_str, type_str).unwrap();
       },
-      HIRKind::RcNew { value } => {
-        writeln!(self.output, "RcNew : {}", type_str).unwrap();
-        self.indent += 1;
-        self.print_node(*value);
-        self.indent -= 1;
-      },
-      HIRKind::RcClone { value } => {
-        writeln!(self.output, "RcClone : {}", type_str).unwrap();
-        self.indent += 1;
-        self.print_node(*value);
-        self.indent -= 1;
-      },
       HIRKind::Panic(msg) => {
         writeln!(self.output, "Panic : {}", type_str).unwrap();
         self.indent += 1;

@@ -33,19 +33,17 @@ use std::cell::RefCell;
 
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
 use ignis_type::{
-  attribute::NamespaceAttr,
   compilation_context::CompilationContext,
   symbol::{SymbolId, SymbolTable},
   Store as ASTStore,
 };
-use ignis_type::types::{Type, TypeId, TypeStore, format_type_name};
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, RcHooks, SymbolEntry, Visibility};
+use ignis_type::types::{TypeId, TypeStore};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
 use ignis_type::lint::{LintId, LintLevel};
 use ignis_type::module::ModuleId;
 use ignis_type::namespace::{NamespaceId, NamespaceStore};
 use ignis_hir::HIR;
 use ignis_diagnostics::diagnostic_report::Diagnostic;
-use ignis_diagnostics::message::DiagnosticMessage;
 
 use imports::ExportTable;
 
@@ -158,10 +156,6 @@ pub struct AnalyzerOutput {
   /// Used by LSP to provide dot-completion for primitive types.
   pub extension_methods:
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
-
-  /// Resolved `@lang(rc_runtime)` hooks.
-  /// Present when `Rc<T>` is used and a provider is valid.
-  pub rc_hooks: Option<ignis_type::definition::RcHooks>,
 }
 
 impl AnalyzerOutput {
@@ -246,14 +240,6 @@ impl<'a> Analyzer<'a> {
     analyzer.extra_checks_phase(roots);
     analyzer.lint_phase(roots);
 
-    let (rc_hooks, rc_hook_diagnostics) = resolve_rc_hooks(
-      &mut analyzer.types,
-      &analyzer.defs,
-      &analyzer.namespaces,
-      &symbols_clone.borrow(),
-    );
-    analyzer.diagnostics.extend(rc_hook_diagnostics);
-
     let hir = analyzer.lower_to_hir(roots);
 
     // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
@@ -273,7 +259,6 @@ impl<'a> Analyzer<'a> {
       import_item_defs: analyzer.import_item_defs,
       import_module_files: analyzer.import_module_files,
       extension_methods: analyzer.extension_methods,
-      rc_hooks,
     }
   }
 
@@ -355,7 +340,6 @@ impl<'a> Analyzer<'a> {
       import_item_defs: analyzer.import_item_defs,
       import_module_files: analyzer.import_module_files,
       extension_methods: shared_extension_methods.clone(),
-      rc_hooks: None,
     }
   }
 
@@ -561,7 +545,7 @@ impl<'a> Analyzer<'a> {
     let symbols = self.symbols.borrow();
     let name = symbols.get(symbol_id);
 
-    matches!(name, "typeOf" | "sizeOf" | "alignOf" | "maxOf" | "minOf" | "Rc")
+    matches!(name, "typeOf" | "sizeOf" | "alignOf" | "maxOf" | "minOf")
   }
 
   fn node_span(
@@ -638,336 +622,6 @@ impl<'a> Analyzer<'a> {
       _ => {},
     }
   }
-}
-
-#[derive(Clone, Copy)]
-enum HookLookup {
-  Missing,
-  Overload,
-  Def(DefinitionId),
-}
-
-struct RcHookCandidate {
-  namespace_span: ignis_type::span::Span,
-  alloc: HookLookup,
-  get: HookLookup,
-  retain: HookLookup,
-  release: HookLookup,
-}
-
-pub fn resolve_rc_hooks(
-  types: &mut TypeStore,
-  defs: &DefinitionStore,
-  namespaces: &NamespaceStore,
-  symbols: &SymbolTable,
-) -> (Option<RcHooks>, Vec<Diagnostic>) {
-  let rc_used = types.iter().any(|(_, ty)| matches!(ty, Type::Rc { .. }));
-  if !rc_used {
-    return (None, Vec::new());
-  }
-
-  let mut candidates = Vec::new();
-
-  for (_, def) in defs.iter() {
-    let DefinitionKind::Namespace(ns_def) = &def.kind else {
-      continue;
-    };
-
-    if !ns_def.is_extern {
-      continue;
-    }
-
-    let is_rc_runtime = ns_def
-      .attrs
-      .iter()
-      .any(|attr| matches!(attr, NamespaceAttr::LangHook(hook_name) if hook_name == "rc_runtime"));
-
-    if !is_rc_runtime {
-      continue;
-    }
-
-    let namespace = namespaces.get(&ns_def.namespace_id);
-    let alloc = lookup_hook(namespace, symbols, "alloc");
-    let get = lookup_hook(namespace, symbols, "get");
-    let retain = lookup_hook(namespace, symbols, "retain");
-    let release = lookup_hook(namespace, symbols, "release");
-
-    candidates.push(RcHookCandidate {
-      namespace_span: def.span.clone(),
-      alloc,
-      get,
-      retain,
-      release,
-    });
-  }
-
-  let mut diagnostics = Vec::new();
-
-  if candidates.len() > 1 {
-    let first = &candidates[0];
-    for candidate in candidates.iter().skip(1) {
-      diagnostics.push(
-        DiagnosticMessage::DuplicateRcHooks {
-          span: candidate.namespace_span.clone(),
-          previous_span: first.namespace_span.clone(),
-        }
-        .report(),
-      );
-    }
-
-    return (None, diagnostics);
-  }
-
-  if let Some(candidate) = candidates.first() {
-    let (hooks, mut hook_diags) = validate_rc_hook_candidate(candidate, types, defs, symbols);
-    diagnostics.append(&mut hook_diags);
-    return (hooks, diagnostics);
-  }
-
-  diagnostics.push(
-    DiagnosticMessage::MissingRcHooks {
-      span: defs.iter().next().map(|(_, def)| def.span.clone()).unwrap_or_default(),
-    }
-    .report(),
-  );
-
-  (None, diagnostics)
-}
-
-fn lookup_hook(
-  namespace: &ignis_type::namespace::Namespace,
-  symbols: &SymbolTable,
-  hook_name: &str,
-) -> HookLookup {
-  let Some((_, entry)) = namespace
-    .definitions
-    .iter()
-    .find(|(name, _)| symbols.get(name) == hook_name)
-  else {
-    return HookLookup::Missing;
-  };
-
-  match entry {
-    SymbolEntry::Single(def_id) => HookLookup::Def(*def_id),
-    SymbolEntry::Overload(_) => HookLookup::Overload,
-  }
-}
-
-fn validate_rc_hook_candidate(
-  candidate: &RcHookCandidate,
-  types: &mut TypeStore,
-  defs: &DefinitionStore,
-  symbols: &SymbolTable,
-) -> (Option<RcHooks>, Vec<Diagnostic>) {
-  let mut diagnostics = Vec::new();
-
-  let u64_ty = types.u64();
-  let void_ty = types.void();
-  let mut_void_ptr = types.pointer(void_ty, true);
-  let mut_u8_ptr = types.pointer(types.u8(), true);
-  let drop_fn_ty = types.function(vec![mut_u8_ptr], void_ty, false);
-
-  let alloc = validate_hook_function(
-    "alloc",
-    candidate.alloc,
-    &[u64_ty, u64_ty, drop_fn_ty],
-    mut_void_ptr,
-    "alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void",
-    defs,
-    types,
-    symbols,
-    &candidate.namespace_span,
-    &mut diagnostics,
-  );
-
-  let get = validate_hook_function(
-    "get",
-    candidate.get,
-    &[mut_void_ptr],
-    mut_u8_ptr,
-    "get(handle: *mut void): *mut u8",
-    defs,
-    types,
-    symbols,
-    &candidate.namespace_span,
-    &mut diagnostics,
-  );
-
-  let retain = validate_hook_function(
-    "retain",
-    candidate.retain,
-    &[mut_void_ptr],
-    void_ty,
-    "retain(handle: *mut void): void",
-    defs,
-    types,
-    symbols,
-    &candidate.namespace_span,
-    &mut diagnostics,
-  );
-
-  let release = validate_hook_function(
-    "release",
-    candidate.release,
-    &[mut_void_ptr],
-    void_ty,
-    "release(handle: *mut void): void",
-    defs,
-    types,
-    symbols,
-    &candidate.namespace_span,
-    &mut diagnostics,
-  );
-
-  if !diagnostics.is_empty() {
-    return (None, diagnostics);
-  }
-
-  (
-    Some(RcHooks {
-      alloc: alloc.expect("alloc validated"),
-      get: get.expect("get validated"),
-      retain: retain.expect("retain validated"),
-      release: release.expect("release validated"),
-    }),
-    diagnostics,
-  )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn validate_hook_function(
-  hook_name: &str,
-  hook: HookLookup,
-  expected_params: &[TypeId],
-  expected_return: TypeId,
-  expected_signature: &str,
-  defs: &DefinitionStore,
-  types: &TypeStore,
-  symbols: &SymbolTable,
-  fallback_span: &ignis_type::span::Span,
-  diagnostics: &mut Vec<Diagnostic>,
-) -> Option<DefinitionId> {
-  match hook {
-    HookLookup::Missing => {
-      diagnostics.push(
-        DiagnosticMessage::RcHookMissing {
-          hook_name: hook_name.to_string(),
-          span: fallback_span.clone(),
-        }
-        .report(),
-      );
-      None
-    },
-    HookLookup::Overload => {
-      diagnostics.push(
-        DiagnosticMessage::RcHookInvalidSignature {
-          hook_name: hook_name.to_string(),
-          expected: expected_signature.to_string(),
-          got: "overload group".to_string(),
-          span: fallback_span.clone(),
-        }
-        .report(),
-      );
-      None
-    },
-    HookLookup::Def(def_id) => {
-      let def = defs.get(&def_id);
-      let span = def.span.clone();
-
-      let DefinitionKind::Function(function_def) = &def.kind else {
-        diagnostics.push(
-          DiagnosticMessage::RcHookInvalidSignature {
-            hook_name: hook_name.to_string(),
-            expected: expected_signature.to_string(),
-            got: "non-function definition".to_string(),
-            span,
-          }
-          .report(),
-        );
-        return None;
-      };
-
-      if function_def.params.len() != expected_params.len() {
-        diagnostics.push(
-          DiagnosticMessage::RcHookInvalidSignature {
-            hook_name: hook_name.to_string(),
-            expected: expected_signature.to_string(),
-            got: format_function_signature(def_id, defs, types, symbols),
-            span,
-          }
-          .report(),
-        );
-        return None;
-      }
-
-      if function_def.is_variadic {
-        diagnostics.push(
-          DiagnosticMessage::RcHookInvalidSignature {
-            hook_name: hook_name.to_string(),
-            expected: expected_signature.to_string(),
-            got: format_function_signature(def_id, defs, types, symbols),
-            span,
-          }
-          .report(),
-        );
-        return None;
-      }
-
-      for (index, param_def_id) in function_def.params.iter().enumerate() {
-        let actual_ty = defs.type_of(param_def_id);
-        if *actual_ty != expected_params[index] {
-          diagnostics.push(
-            DiagnosticMessage::RcHookInvalidSignature {
-              hook_name: hook_name.to_string(),
-              expected: expected_signature.to_string(),
-              got: format_function_signature(def_id, defs, types, symbols),
-              span,
-            }
-            .report(),
-          );
-          return None;
-        }
-      }
-
-      if function_def.return_type != expected_return {
-        diagnostics.push(
-          DiagnosticMessage::RcHookInvalidSignature {
-            hook_name: hook_name.to_string(),
-            expected: expected_signature.to_string(),
-            got: format_function_signature(def_id, defs, types, symbols),
-            span,
-          }
-          .report(),
-        );
-        return None;
-      }
-
-      Some(def_id)
-    },
-  }
-}
-
-fn format_function_signature(
-  def_id: DefinitionId,
-  defs: &DefinitionStore,
-  types: &TypeStore,
-  symbols: &SymbolTable,
-) -> String {
-  let def = defs.get(&def_id);
-  let name = symbols.get(&def.name);
-
-  let DefinitionKind::Function(function_def) = &def.kind else {
-    return "non-function definition".to_string();
-  };
-
-  let mut param_types = Vec::new();
-  for param_def_id in &function_def.params {
-    let param_ty = *defs.type_of(param_def_id);
-    param_types.push(format_type_name(&param_ty, types, defs, symbols));
-  }
-
-  let ret = format_type_name(&function_def.return_type, types, defs, symbols);
-  format!("{}({}): {}", name, param_types.join(", "), ret)
 }
 
 /// Build a mapping from NodeId to Span for all nodes that have definitions or types.

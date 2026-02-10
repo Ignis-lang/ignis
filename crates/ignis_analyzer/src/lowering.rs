@@ -2059,18 +2059,6 @@ impl<'a> Analyzer<'a> {
     let base = self.lower_node_to_hir(&ma.object, hir, scope_kind);
     let base_type = hir.get(base).type_id;
 
-    // Built-in Rc.clone() — emit RcClone node directly
-    if matches!(self.types.get(&base_type), Type::Rc { .. }) {
-      let member_name = self.symbols.borrow().get(&ma.member).to_string();
-      if member_name == "clone" {
-        return hir.alloc(HIRNode {
-          kind: HIRKind::RcClone { value: base },
-          span: call.span.clone(),
-          type_id: result_type,
-        });
-      }
-    }
-
     // Determine the underlying record type (strip reference if present)
     let (is_already_ref, receiver_record_type) =
       if let Type::Reference { inner, .. } = self.types.get(&base_type).clone() {
@@ -2215,19 +2203,6 @@ impl<'a> Analyzer<'a> {
         self.symbols.borrow().get(&ma.member),
         call.type_args.as_ref().map(|v| v.len())
       );
-    }
-
-    // Intercept Rc::new(value) — the typechecker already validated this
-    if matches!(self.types.get(&result_type), Type::Rc { .. }) {
-      let member_name = self.get_symbol_name(&ma.member);
-      if member_name == "new" && call.arguments.len() == 1 {
-        let value = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
-        return hir.alloc(HIRNode {
-          kind: HIRKind::RcNew { value },
-          span: call.span.clone(),
-          type_id: result_type,
-        });
-      }
     }
 
     let def_id = self.resolve_type_expression_for_lowering(&ma.object);
@@ -2392,17 +2367,6 @@ impl<'a> Analyzer<'a> {
     let second_segment = &path.segments[1];
 
     let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
-    if matches!(self.types.get(&result_type), Type::Rc { .. }) {
-      let method_name = self.symbols.borrow().get(&second_segment.name).to_string();
-      if method_name == "new" && call.arguments.len() == 1 {
-        let value = self.lower_node_to_hir(&call.arguments[0], hir, scope_kind);
-        return Some(hir.alloc(HIRNode {
-          kind: HIRKind::RcNew { value },
-          span: call.span.clone(),
-          type_id: result_type,
-        }));
-      }
-    }
 
     let Some(type_def_id) = self.scopes.lookup_def(&first_segment.name).cloned() else {
       if std::env::var("IGNIS_VERBOSE").is_ok() {

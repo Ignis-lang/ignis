@@ -6,7 +6,7 @@ use ignis_hir::operation::{BinaryOperation, UnaryOperation};
 use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
 use ignis_type::{
   attribute::{FieldAttr, FunctionAttr, RecordAttr},
-  definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, InlineMode, RcHooks, RecordDefinition, Visibility},
+  definition::{DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, InlineMode, RecordDefinition, Visibility},
   module::{ModuleId, ModulePath},
   namespace::NamespaceStore,
   symbol::SymbolTable,
@@ -31,8 +31,6 @@ pub struct CEmitter<'a> {
   module_paths: Option<&'a HashMap<ModuleId, ModulePath>>,
   /// Std path for classifying std internal files as Std instead of User
   std_path: Option<&'a std::path::Path>,
-  /// Resolved Rc hook functions. Required when Rc<T> appears in emitted code.
-  rc_hooks: Option<RcHooks>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -43,7 +41,6 @@ impl<'a> CEmitter<'a> {
     namespaces: &'a NamespaceStore,
     symbols: &'a SymbolTable,
     headers: &'a [CHeader],
-    rc_hooks: Option<RcHooks>,
   ) -> Self {
     Self {
       program,
@@ -57,7 +54,6 @@ impl<'a> CEmitter<'a> {
       target: None,
       module_paths: None,
       std_path: None,
-      rc_hooks,
     }
   }
 
@@ -69,7 +65,6 @@ impl<'a> CEmitter<'a> {
     namespaces: &'a NamespaceStore,
     symbols: &'a SymbolTable,
     headers: &'a [CHeader],
-    rc_hooks: Option<RcHooks>,
     target: EmitTarget,
     module_paths: &'a HashMap<ModuleId, ModulePath>,
   ) -> Self {
@@ -85,7 +80,6 @@ impl<'a> CEmitter<'a> {
       target: Some(target),
       module_paths: Some(module_paths),
       std_path: None,
-      rc_hooks,
     }
   }
 
@@ -97,7 +91,6 @@ impl<'a> CEmitter<'a> {
     namespaces: &'a NamespaceStore,
     symbols: &'a SymbolTable,
     headers: &'a [CHeader],
-    rc_hooks: Option<RcHooks>,
     target: EmitTarget,
     module_paths: &'a HashMap<ModuleId, ModulePath>,
     std_path: &'a std::path::Path,
@@ -114,7 +107,6 @@ impl<'a> CEmitter<'a> {
       target: Some(target),
       module_paths: Some(module_paths),
       std_path: Some(std_path),
-      rc_hooks,
     }
   }
 
@@ -125,7 +117,6 @@ impl<'a> CEmitter<'a> {
     self.emit_type_definitions();
     self.emit_static_constants();
     self.emit_extern_declarations();
-    self.emit_rc_drop_helpers();
     self.emit_drop_glue_helpers();
     self.emit_forward_declarations();
     self.emit_functions();
@@ -336,9 +327,7 @@ impl<'a> CEmitter<'a> {
   ) -> bool {
     match self.types.get(&type_id) {
       Type::Param { .. } | Type::Instance { .. } | Type::Infer => false,
-      Type::Pointer { inner, .. } | Type::Reference { inner, .. } | Type::Rc { inner } => {
-        self.is_fully_monomorphized(*inner)
-      },
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } => self.is_fully_monomorphized(*inner),
       Type::Vector { element, .. } => self.is_fully_monomorphized(*element),
       Type::Function { params, ret, .. } => {
         params.iter().all(|&p| self.is_fully_monomorphized(p)) && self.is_fully_monomorphized(*ret)
@@ -617,68 +606,6 @@ impl<'a> CEmitter<'a> {
       writeln!(self.output, ";").unwrap();
     }
     writeln!(self.output).unwrap();
-  }
-
-  fn emit_rc_drop_helpers(&mut self) {
-    if self.rc_hooks.is_none() {
-      return;
-    }
-
-    let mut inner_types = Vec::new();
-
-    for (def_id, func) in &self.program.functions {
-      if !self.should_emit(*def_id) {
-        continue;
-      }
-
-      for (_, block) in func.blocks.iter() {
-        for instr in &block.instructions {
-          if let Instr::RcNew { inner_type, .. } = instr {
-            inner_types.push(*inner_type);
-          }
-        }
-      }
-    }
-
-    if inner_types.is_empty() {
-      return;
-    }
-
-    inner_types.sort_by_key(|ty| ty.index());
-    inner_types.dedup();
-
-    for inner_type in inner_types {
-      self.emit_rc_drop_helper(inner_type);
-      writeln!(self.output).unwrap();
-    }
-  }
-
-  fn emit_rc_drop_helper(
-    &mut self,
-    inner_type: TypeId,
-  ) {
-    let helper_name = self.rc_drop_helper_name(inner_type);
-
-    writeln!(self.output, "static void {}(u8* payload) {{", helper_name).unwrap();
-
-    if !self.types.needs_drop_with_defs(&inner_type, self.defs) {
-      writeln!(self.output, "    (void)payload;").unwrap();
-      writeln!(self.output, "}}").unwrap();
-      return;
-    }
-
-    let inner_c = self.format_type(inner_type);
-    writeln!(self.output, "    {}* value = ({}*)payload;", inner_c, inner_c).unwrap();
-    write!(self.output, "    ").unwrap();
-    self.emit_field_drops("(*value)", inner_type);
-    writeln!(self.output, "}}").unwrap();
-  }
-
-  fn rc_drop_helper_name(
-    &self,
-    inner_type: TypeId,
-  ) -> String {
-    format!("ignis_rc_drop_{}", self.format_type_for_mangling(&inner_type))
   }
 
   fn drop_glue_name(
@@ -1177,13 +1104,6 @@ impl<'a> CEmitter<'a> {
           Type::Enum(_) => {
             self.emit_field_drops(&format!("l{}", local.index()), ty);
           },
-          Type::Rc { .. } => {
-            let hooks = self
-              .rc_hooks
-              .expect("ICE: Rc drop reached codegen without resolved Rc hooks");
-            let release_name = self.def_name(hooks.release);
-            writeln!(self.output, "{}(l{});", release_name, local.index()).unwrap();
-          },
           Type::Infer => {
             panic!("ICE: drop of inferred type reached C codegen after implicit type removal");
           },
@@ -1280,45 +1200,6 @@ impl<'a> CEmitter<'a> {
         .unwrap();
         writeln!(self.output, "exit(101);").unwrap();
       },
-      Instr::RcNew {
-        dest,
-        value,
-        inner_type,
-      } => {
-        let hooks = self
-          .rc_hooks
-          .expect("ICE: RcNew reached codegen without resolved Rc hooks");
-        let alloc_name = self.def_name(hooks.alloc);
-        let get_name = self.def_name(hooks.get);
-        let drop_helper = self.rc_drop_helper_name(*inner_type);
-
-        let v = self.format_operand(func, value);
-        let inner_c = self.format_type(*inner_type);
-        writeln!(
-          self.output,
-          "t{dest} = (void*){}((u64)sizeof({inner_c}), (u64)_Alignof({inner_c}), (void*){});",
-          alloc_name,
-          drop_helper,
-          dest = dest.index(),
-        )
-        .unwrap();
-        writeln!(
-          self.output,
-          "    *(({inner_c}*){}(t{dest})) = {v};",
-          get_name,
-          dest = dest.index(),
-        )
-        .unwrap();
-      },
-      Instr::RcRetain { operand } => {
-        let hooks = self
-          .rc_hooks
-          .expect("ICE: RcRetain reached codegen without resolved Rc hooks");
-        let retain_name = self.def_name(hooks.retain);
-        let op = self.format_operand(func, operand);
-        writeln!(self.output, "{}({});", retain_name, op).unwrap();
-      },
-
       Instr::DropInPlace { ptr, ty } => {
         if self.types.needs_drop_with_defs(ty, self.defs) {
           let p = self.format_operand(func, ptr);
@@ -1677,7 +1558,6 @@ impl<'a> CEmitter<'a> {
       Type::Error => "/* error */ void*".to_string(),
       Type::Pointer { inner, .. } => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
-      Type::Rc { .. } => "void*".to_string(),
       Type::Vector { element, .. } => {
         format!("{}*", self.format_type(*element))
       },
@@ -1826,14 +1706,6 @@ impl<'a> CEmitter<'a> {
         } else {
           self.emit_enum_variant_drops(expr, def_id);
         }
-      },
-
-      Type::Rc { .. } => {
-        let hooks = self
-          .rc_hooks
-          .expect("ICE: Rc field drop reached codegen without resolved Rc hooks");
-        let release_name = self.def_name(hooks.release);
-        writeln!(self.output, "{}({});", release_name, expr).unwrap();
       },
 
       _ => {},
@@ -2232,9 +2104,8 @@ pub fn emit_c(
   namespaces: &NamespaceStore,
   symbols: &SymbolTable,
   headers: &[CHeader],
-  rc_hooks: Option<RcHooks>,
 ) -> String {
-  CEmitter::new(program, types, defs, namespaces, symbols, headers, rc_hooks).emit()
+  CEmitter::new(program, types, defs, namespaces, symbols, headers).emit()
 }
 
 /// Emit C for user definitions only (excludes std and runtime).
@@ -2245,7 +2116,6 @@ pub fn emit_user_c(
   namespaces: &NamespaceStore,
   symbols: &SymbolTable,
   headers: &[CHeader],
-  rc_hooks: Option<RcHooks>,
   module_paths: &HashMap<ModuleId, ModulePath>,
 ) -> String {
   CEmitter::with_target(
@@ -2255,7 +2125,6 @@ pub fn emit_user_c(
     namespaces,
     symbols,
     headers,
-    rc_hooks,
     EmitTarget::User,
     module_paths,
   )
@@ -2271,7 +2140,6 @@ pub fn emit_std_module_c(
   namespaces: &NamespaceStore,
   symbols: &SymbolTable,
   headers: &[CHeader],
-  rc_hooks: Option<RcHooks>,
   module_paths: &HashMap<ModuleId, ModulePath>,
   umbrella_header_path: Option<&str>,
   std_path: &std::path::Path,
@@ -2284,7 +2152,6 @@ pub fn emit_std_module_c(
     namespaces,
     symbols,
     &headers,
-    rc_hooks,
     EmitTarget::StdModule(module_name.to_string()),
     module_paths,
     std_path,
@@ -2331,7 +2198,6 @@ pub fn emit_user_module_c(
   namespaces: &NamespaceStore,
   symbols: &SymbolTable,
   headers: &[CHeader],
-  rc_hooks: Option<RcHooks>,
   module_paths: &HashMap<ModuleId, ModulePath>,
   user_module_headers: &[CHeader],
 ) -> String {
@@ -2345,7 +2211,6 @@ pub fn emit_user_module_c(
     namespaces,
     symbols,
     &all_headers,
-    rc_hooks,
     EmitTarget::UserModule(module_id),
     module_paths,
   )
@@ -3001,7 +2866,6 @@ pub fn format_c_type(
     Type::Reference { inner, .. } => {
       format!("{}*", format_c_type(types.get(inner), types, defs, symbols, namespaces))
     },
-    Type::Rc { .. } => "void*".to_string(),
     Type::Vector { element, .. } => {
       format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
     },
@@ -3121,7 +2985,7 @@ mod tests {
   fn test_emit_headers_no_includes() {
     let (program, types, defs, namespaces, symbols) = empty_program();
     let sym = symbols.borrow();
-    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &[], None);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &[]);
 
     // No hardcoded headers - emitter outputs only what it's given
     assert!(!output.contains("#include"));
@@ -3135,7 +2999,7 @@ mod tests {
       path: "runtime/io/io.h".to_string(),
       quoted: true,
     }];
-    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers, None);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers);
 
     assert!(output.contains("#include \"runtime/io/io.h\""));
   }
@@ -3148,7 +3012,7 @@ mod tests {
       path: "math.h".to_string(),
       quoted: false,
     }];
-    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers, None);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers);
 
     assert!(output.contains("#include <math.h>"));
   }
@@ -3167,7 +3031,7 @@ mod tests {
         quoted: false,
       },
     ];
-    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers, None);
+    let output = emit_c(&program, &types, &defs, &namespaces, &sym, &headers);
 
     assert!(output.contains("#include \"runtime/ignis_rt.h\""));
     assert!(output.contains("#include <math.h>"));
