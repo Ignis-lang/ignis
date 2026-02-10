@@ -561,19 +561,7 @@ impl<'a> Analyzer<'a> {
     let symbols = self.symbols.borrow();
     let name = symbols.get(symbol_id);
 
-    matches!(
-      name,
-      "typeOf"
-        | "sizeOf"
-        | "alignOf"
-        | "maxOf"
-        | "minOf"
-        | "__builtin_read"
-        | "__builtin_write"
-        | "__builtin_drop_in_place"
-        | "__builtin_drop_glue"
-        | "Rc"
-    )
+    matches!(name, "typeOf" | "sizeOf" | "alignOf" | "maxOf" | "minOf" | "Rc")
   }
 
   fn node_span(

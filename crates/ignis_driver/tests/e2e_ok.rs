@@ -226,8 +226,8 @@ fn e2e_builtin_read_write() {
 function main(): i32 {
     let mut value: i32 = 41;
     let ptr: *mut i32 = (&mut value) as *mut i32;
-    __builtin_write<i32>(ptr, 42);
-    let out: i32 = __builtin_read<i32>(ptr);
+    @write<i32>(ptr, 42);
+    let out: i32 = @read<i32>(ptr);
     return out;
 }
 "#,
@@ -2966,6 +2966,99 @@ function main(): i32 {
 
     // retain once on clone, release happens twice at scope end (a and b)
     return retains * 10 + releases;
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Library-level SharedRef (Rc prototype)
+// =========================================================================
+
+#[test]
+fn e2e_library_rc_basic() {
+  e2e_test(
+    "library_rc_basic",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+}
+
+@implements(Drop, Clone)
+record SharedRef<T> {
+    public handle: *mut void;
+
+    public static new(value: T): SharedRef<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return SharedRef { handle: h };
+    }
+
+    clone(&self): SharedRef<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return SharedRef { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let a: SharedRef<i32> = SharedRef::new<i32>(42);
+    let b: SharedRef<i32> = a.clone();
+
+    let payload_b: *mut void = __rc_ffi::ignis_rc_get(b.handle);
+    let val: i32 = @read<i32>(payload_b as *mut i32);
+    return val;
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Generic Clone
+// =========================================================================
+
+#[test]
+fn e2e_generic_record_clone() {
+  e2e_test(
+    "generic_record_clone",
+    r#"
+@implements(Drop, Clone)
+record Box<T> {
+    public value: T;
+
+    clone(&self): Box<T> {
+        return Box<T> { value: self.value };
+    }
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function consume(b: Box<i32>): i32 {
+    return b.value;
+}
+
+function main(): i32 {
+    let a: Box<i32> = Box<i32> { value: 21 };
+    let b: Box<i32> = a.clone();
+    return consume(a) + consume(b);
 }
 "#,
   );

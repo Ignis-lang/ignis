@@ -65,12 +65,12 @@ pub enum HIRKind {
     ptr: HIRId,
     value: HIRId,
   },
-  /// `__builtin_drop_in_place<T>(ptr)` — runs T's drop on the pointed-to value.
+  /// `@dropInPlace<T>(ptr)` — runs T's drop on the pointed-to value.
   BuiltinDropInPlace {
     ty: TypeId,
     ptr: HIRId,
   },
-  /// `__builtin_drop_glue<T>()` — returns a `(*mut u8) -> void` that drops T at the given address.
+  /// `@dropGlue<T>()` — returns a `(*mut u8) -> void` that drops T at the given address.
   BuiltinDropGlue {
     ty: TypeId,
   },
