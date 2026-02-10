@@ -2853,3 +2853,256 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Rc strongCount / get / getMut
+// =========================================================================
+
+#[test]
+fn e2e_rc_strong_count() {
+  e2e_test(
+    "rc_strong_count",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+
+    @externName("ignis_rc_count")
+    function ignis_rc_count(handle: *mut void): u32;
+}
+
+@implements(Drop, Clone)
+record Rc<T> {
+    handle: *mut void;
+
+    public static new(value: T): Rc<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return Rc { handle: h };
+    }
+
+    public strongCount(&self): u32 {
+        return __rc_ffi::ignis_rc_count(self.handle);
+    }
+
+    clone(&self): Rc<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return Rc { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let a: Rc<i32> = Rc::new<i32>(10);
+    let count1: u32 = a.strongCount();
+    let b: Rc<i32> = a.clone();
+    let count2: u32 = a.strongCount();
+    // count1 = 1, count2 = 2, sum = 3
+    return (count1 + count2) as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_get() {
+  e2e_test(
+    "rc_get",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+}
+
+@implements(Drop, Clone)
+record Rc<T> {
+    handle: *mut void;
+
+    public static new(value: T): Rc<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return Rc { handle: h };
+    }
+
+    public get(&self): &T {
+        let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
+        return (payload as *mut T) as &T;
+    }
+
+    clone(&self): Rc<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return Rc { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let a: Rc<i32> = Rc::new<i32>(42);
+    let val: &i32 = a.get();
+    return *val;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_get_mut_unique() {
+  e2e_test(
+    "rc_get_mut_unique",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+
+    @externName("ignis_rc_count")
+    function ignis_rc_count(handle: *mut void): u32;
+}
+
+@implements(Drop, Clone)
+record Rc<T> {
+    handle: *mut void;
+
+    public static new(value: T): Rc<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return Rc { handle: h };
+    }
+
+    public get(&self): &T {
+        let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
+        return (payload as *mut T) as &T;
+    }
+
+    public getMut(&mut self): *mut T {
+        if (__rc_ffi::ignis_rc_count(self.handle) == 1) {
+            let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
+            return payload as *mut T;
+        }
+        return 0 as *mut T;
+    }
+
+    clone(&self): Rc<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return Rc { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let mut a: Rc<i32> = Rc::new<i32>(10);
+    let ptr: *mut i32 = a.getMut(); // unique owner -> non-null
+    *ptr = 42;
+    let val: &i32 = a.get();
+    return *val;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_get_mut_shared() {
+  e2e_test(
+    "rc_get_mut_shared",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+
+    @externName("ignis_rc_count")
+    function ignis_rc_count(handle: *mut void): u32;
+}
+
+@implements(Drop, Clone)
+record Rc<T> {
+    handle: *mut void;
+
+    public static new(value: T): Rc<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return Rc { handle: h };
+    }
+
+    public getMut(&mut self): *mut T {
+        if (__rc_ffi::ignis_rc_count(self.handle) == 1) {
+            let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
+            return payload as *mut T;
+        }
+        return 0 as *mut T;
+    }
+
+    clone(&self): Rc<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return Rc { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let mut a: Rc<i32> = Rc::new<i32>(10);
+    let _b: Rc<i32> = a.clone();
+    let ptr: *mut i32 = a.getMut(); // shared -> null
+    return ptr as i32;
+}
+"#,
+  );
+}
