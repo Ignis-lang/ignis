@@ -3106,3 +3106,328 @@ function main(): i32 {
 "#,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Weak<T> tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_weak_downgrade_upgrade() {
+  e2e_test(
+    "weak_downgrade_upgrade",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+
+    @externName("ignis_rc_count")
+    function ignis_rc_count(handle: *mut void): u32;
+
+    @externName("ignis_rc_downgrade")
+    function ignis_rc_downgrade(handle: *mut void): void;
+
+    @externName("ignis_rc_upgrade")
+    function ignis_rc_upgrade(handle: *mut void): *mut void;
+
+    @externName("ignis_weak_retain")
+    function ignis_weak_retain(handle: *mut void): void;
+
+    @externName("ignis_weak_release")
+    function ignis_weak_release(handle: *mut void): void;
+
+    @externName("ignis_weak_count")
+    function ignis_weak_count(handle: *mut void): u32;
+}
+
+@implements(Drop, Clone)
+record Rc<T> {
+    handle: *mut void;
+
+    public static new(value: T): Rc<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return Rc { handle: h };
+    }
+
+    public strongCount(&self): u32 {
+        return __rc_ffi::ignis_rc_count(self.handle);
+    }
+
+    public downgrade(&self): Weak<T> {
+        __rc_ffi::ignis_rc_downgrade(self.handle);
+        return Weak { handle: self.handle };
+    }
+
+    public get(&self): &T {
+        let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
+        return (payload as *mut T) as &T;
+    }
+
+    clone(&self): Rc<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return Rc { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+@implements(Drop, Clone)
+record Weak<T> {
+    handle: *mut void;
+
+    public upgrade(&self): *mut void {
+        return __rc_ffi::ignis_rc_upgrade(self.handle);
+    }
+
+    public weakCount(&self): u32 {
+        return __rc_ffi::ignis_weak_count(self.handle);
+    }
+
+    public strongCount(&self): u32 {
+        return __rc_ffi::ignis_rc_count(self.handle);
+    }
+
+    clone(&self): Weak<T> {
+        __rc_ffi::ignis_weak_retain(self.handle);
+        return Weak { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_weak_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let a: Rc<i32> = Rc::new<i32>(42);
+    let w: Weak<i32> = a.downgrade();
+
+    // Rc alive -> upgrade succeeds (non-null)
+    let upgraded: *mut void = w.upgrade();
+    if (upgraded as u64 == 0) {
+        return 1;
+    }
+
+    // upgrade incremented strong count: was 1, now 2
+    // release the extra strong ref so cleanup is correct
+    __rc_ffi::ignis_rc_release(upgraded);
+
+    // Read through original Rc to verify payload intact
+    let val: &i32 = a.get();
+    return *val; // 42
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_weak_upgrade_after_drop() {
+  e2e_test(
+    "weak_upgrade_after_drop",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+
+    @externName("ignis_rc_count")
+    function ignis_rc_count(handle: *mut void): u32;
+
+    @externName("ignis_rc_downgrade")
+    function ignis_rc_downgrade(handle: *mut void): void;
+
+    @externName("ignis_rc_upgrade")
+    function ignis_rc_upgrade(handle: *mut void): *mut void;
+
+    @externName("ignis_weak_retain")
+    function ignis_weak_retain(handle: *mut void): void;
+
+    @externName("ignis_weak_release")
+    function ignis_weak_release(handle: *mut void): void;
+}
+
+@implements(Drop, Clone)
+record Rc<T> {
+    handle: *mut void;
+
+    public static new(value: T): Rc<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return Rc { handle: h };
+    }
+
+    public downgrade(&self): Weak<T> {
+        __rc_ffi::ignis_rc_downgrade(self.handle);
+        return Weak { handle: self.handle };
+    }
+
+    clone(&self): Rc<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return Rc { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+@implements(Drop, Clone)
+record Weak<T> {
+    handle: *mut void;
+
+    public upgrade(&self): *mut void {
+        return __rc_ffi::ignis_rc_upgrade(self.handle);
+    }
+
+    clone(&self): Weak<T> {
+        __rc_ffi::ignis_weak_retain(self.handle);
+        return Weak { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_weak_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let mut a: Rc<i32> = Rc::new<i32>(99);
+    let w: Weak<i32> = a.downgrade();
+    a.drop();
+
+    // Rc is dead -> upgrade should return null
+    let upgraded: *mut void = w.upgrade();
+    if (upgraded as u64 == 0) {
+        return 0; // success
+    }
+
+    return 1; // should not reach here
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_weak_clone_count() {
+  e2e_test(
+    "weak_clone_count",
+    r#"
+extern __rc_ffi {
+    @externName("ignis_rc_alloc")
+    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("ignis_rc_get")
+    function ignis_rc_get(handle: *mut void): *mut void;
+
+    @externName("ignis_rc_retain")
+    function ignis_rc_retain(handle: *mut void): void;
+
+    @externName("ignis_rc_release")
+    function ignis_rc_release(handle: *mut void): void;
+
+    @externName("ignis_rc_count")
+    function ignis_rc_count(handle: *mut void): u32;
+
+    @externName("ignis_rc_downgrade")
+    function ignis_rc_downgrade(handle: *mut void): void;
+
+    @externName("ignis_rc_upgrade")
+    function ignis_rc_upgrade(handle: *mut void): *mut void;
+
+    @externName("ignis_weak_retain")
+    function ignis_weak_retain(handle: *mut void): void;
+
+    @externName("ignis_weak_release")
+    function ignis_weak_release(handle: *mut void): void;
+
+    @externName("ignis_weak_count")
+    function ignis_weak_count(handle: *mut void): u32;
+}
+
+@implements(Drop, Clone)
+record Rc<T> {
+    handle: *mut void;
+
+    public static new(value: T): Rc<T> {
+        let h: *mut void = __rc_ffi::ignis_rc_alloc(
+            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
+        );
+        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
+        @write<T>(payload as *mut T, value);
+        return Rc { handle: h };
+    }
+
+    public downgrade(&self): Weak<T> {
+        __rc_ffi::ignis_rc_downgrade(self.handle);
+        return Weak { handle: self.handle };
+    }
+
+    public weakCount(&self): u32 {
+        return __rc_ffi::ignis_weak_count(self.handle);
+    }
+
+    clone(&self): Rc<T> {
+        __rc_ffi::ignis_rc_retain(self.handle);
+        return Rc { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_rc_release(self.handle);
+    }
+}
+
+@implements(Drop, Clone)
+record Weak<T> {
+    handle: *mut void;
+
+    public weakCount(&self): u32 {
+        return __rc_ffi::ignis_weak_count(self.handle);
+    }
+
+    clone(&self): Weak<T> {
+        __rc_ffi::ignis_weak_retain(self.handle);
+        return Weak { handle: self.handle };
+    }
+
+    drop(&mut self): void {
+        __rc_ffi::ignis_weak_release(self.handle);
+    }
+}
+
+function main(): i32 {
+    let a: Rc<i32> = Rc::new<i32>(5);
+    let w1: Weak<i32> = a.downgrade();
+    let wc1: u32 = a.weakCount();         // 1
+
+    let w2: Weak<i32> = w1.clone();
+    let wc2: u32 = a.weakCount();         // 2
+
+    // wc1=1, wc2=2 -> sum=3
+    return (wc1 + wc2) as i32;
+}
+"#,
+  );
+}

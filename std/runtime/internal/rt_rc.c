@@ -40,6 +40,7 @@ IgnisRcBox *ignis_rc_alloc(size_t payload_size, size_t payload_align, IgnisDropF
   }
 
   rc->refcount = 1;
+  rc->weak_count = 0;
   rc->drop_fn = drop_fn;
   rc->payload_size = payload_size;
   rc->payload_align = normalized_align;
@@ -67,7 +68,9 @@ void ignis_rc_release(IgnisRcBox *rc) {
       rc->drop_fn(payload);
     }
 
-    ignis_free(rc);
+    if (rc->weak_count == 0) {
+      ignis_free(rc);
+    }
   }
 }
 
@@ -77,4 +80,37 @@ void *ignis_rc_get(IgnisRcBox *rc) {
 
 uint32_t ignis_rc_count(const IgnisRcBox *rc) {
   return rc->refcount;
+}
+
+void ignis_rc_downgrade(IgnisRcBox *rc) {
+  rc->weak_count += 1;
+}
+
+IgnisRcBox *ignis_rc_upgrade(IgnisRcBox *rc) {
+  if (rc->refcount == 0) {
+    return NULL;
+  }
+
+  rc->refcount += 1;
+  return rc;
+}
+
+void ignis_weak_retain(IgnisRcBox *rc) {
+  rc->weak_count += 1;
+}
+
+void ignis_weak_release(IgnisRcBox *rc) {
+  if (IGNIS_UNLIKELY(rc->weak_count == 0)) {
+    return;
+  }
+
+  rc->weak_count -= 1;
+
+  if (rc->weak_count == 0 && rc->refcount == 0) {
+    ignis_free(rc);
+  }
+}
+
+uint32_t ignis_weak_count(const IgnisRcBox *rc) {
+  return rc->weak_count;
 }
