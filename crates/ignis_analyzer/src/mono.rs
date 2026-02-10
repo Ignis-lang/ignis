@@ -1727,6 +1727,7 @@ impl<'a> Monomorphizer<'a> {
           let key = InstanceKey::generic(*callee, substituted_type_args.clone());
           self.ensure_instantiated(&key)
         } else {
+          self.copy_if_nongeneric(*callee);
           *callee
         };
         let new_args: Vec<_> = args.iter().map(|a| self.substitute_hir(*a, subst)).collect();

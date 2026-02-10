@@ -32,22 +32,28 @@ static inline void ignis_string_drop(string s) {
   free(s);
 }
 
-/* Minimal Rc runtime stubs for E2E tests */
+/* Minimal Rc/Weak runtime stubs for E2E tests.
+ *
+ * Ignis emits function-typed parameters as void* in the generated C,
+ * so all stubs use void* for drop_fn to match the codegen signatures.
+ */
 typedef void (*IgnisDropFn)(void *);
 
 typedef struct {
   _Atomic int refcount;
+  _Atomic int weak_count;
   IgnisDropFn drop_fn;
   size_t payload_size;
   _Alignas(16) unsigned char payload[];
 } IgnisRcBox;
 
-static inline void *ignis_rc_alloc(size_t payload_size, size_t payload_align, IgnisDropFn drop_fn) {
+static inline void *ignis_rc_alloc(u64 payload_size, u64 payload_align, void *drop_fn) {
   (void)payload_align;
-  IgnisRcBox *box = (IgnisRcBox *)calloc(1, sizeof(IgnisRcBox) + payload_size);
+  IgnisRcBox *box = (IgnisRcBox *)calloc(1, sizeof(IgnisRcBox) + (size_t)payload_size);
   box->refcount = 1;
-  box->drop_fn = drop_fn;
-  box->payload_size = payload_size;
+  box->weak_count = 0;
+  box->drop_fn = (IgnisDropFn)drop_fn;
+  box->payload_size = (size_t)payload_size;
   return (void *)box;
 }
 
@@ -60,7 +66,7 @@ static inline void ignis_rc_release(void *handle) {
   IgnisRcBox *box = (IgnisRcBox *)handle;
   if (--box->refcount == 0) {
     if (box->drop_fn) box->drop_fn(box->payload);
-    free(box);
+    if (box->weak_count == 0) free(box);
   }
 }
 
@@ -69,9 +75,38 @@ static inline void *ignis_rc_get(void *handle) {
   return box->payload;
 }
 
-static inline int ignis_rc_count(void *handle) {
+static inline u32 ignis_rc_count(void *handle) {
   IgnisRcBox *box = (IgnisRcBox *)handle;
-  return box->refcount;
+  return (u32)box->refcount;
+}
+
+static inline void ignis_rc_downgrade(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
+  box->weak_count++;
+}
+
+static inline void *ignis_rc_upgrade(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
+  if (box->refcount == 0) return NULL;
+  box->refcount++;
+  return handle;
+}
+
+static inline void ignis_weak_retain(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
+  box->weak_count++;
+}
+
+static inline void ignis_weak_release(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
+  if (--box->weak_count == 0 && box->refcount == 0) {
+    free(box);
+  }
+}
+
+static inline u32 ignis_weak_count(void *handle) {
+  IgnisRcBox *box = (IgnisRcBox *)handle;
+  return (u32)box->weak_count;
 }
 
 /* Custom Rc hook wrappers used by std=false/custom-runtime E2E tests */
@@ -93,7 +128,7 @@ static inline int ignis_test_rc_release_count(void) {
 
 static inline void *custom_rc_alloc(uint64_t payload_size, uint64_t payload_align, void *drop_fn) {
   (void)payload_align;
-  return (void *)ignis_rc_alloc((size_t)payload_size, (size_t)payload_align, (IgnisDropFn)drop_fn);
+  return (void *)ignis_rc_alloc(payload_size, payload_align, drop_fn);
 }
 
 static inline void *custom_rc_get(void *handle) {

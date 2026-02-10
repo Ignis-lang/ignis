@@ -5,23 +5,26 @@
 //!
 //! `Rc<T>` provides shared ownership of a value of type `T` allocated on the
 //! heap. Cloning an `Rc` increments the reference count; dropping one
-//! decrements it. When the last reference is released, the payload's
-//! destructor (if any) runs and the allocation is freed.
+//! decrements it. When the last strong reference is released, the payload's
+//! destructor runs. The allocation is freed when both strong and weak counts
+//! reach zero.
 //!
-//! Rc values are **move-by-default**: assigning or passing an Rc transfers
-//! ownership. Use `.clone()` to create an additional reference that shares
-//! the same allocation.
+//! `Weak<T>` is a non-owning observer. It keeps the allocation header alive
+//! so `upgrade()` can check whether the value still exists, but does not
+//! prevent the payload from being destroyed.
 //!
-//! # Example
+//! Both types are **move-by-default**. Use `.clone()` to share.
+//!
+//! ## Example
 //!
 //! ```ignis
-//! import Rc from "std::rc";
+//! import Rc, Weak from "std::rc";
 //!
 //! function main(): i32 {
 //!   let a: Rc<i32> = Rc::new<i32>(42);
 //!   let b: Rc<i32> = a.clone();
-//!   // both `a` and `b` point to the same allocation
-//!   // memory is freed when both go out of scope
+//!   let w: Weak<i32> = a.downgrade();
+//!   let h: *mut void = w.upgrade();  // non-null while a or b is alive
 //!   return 0;
 //! }
 //! ```
@@ -41,24 +44,35 @@ extern __rc_ffi {
 
   @externName("ignis_rc_count")
   function ignis_rc_count(handle: *mut void): u32;
+
+  @externName("ignis_rc_downgrade")
+  function ignis_rc_downgrade(handle: *mut void): void;
+
+  @externName("ignis_rc_upgrade")
+  function ignis_rc_upgrade(handle: *mut void): *mut void;
+
+  @externName("ignis_weak_retain")
+  function ignis_weak_retain(handle: *mut void): void;
+
+  @externName("ignis_weak_release")
+  function ignis_weak_release(handle: *mut void): void;
+
+  @externName("ignis_weak_count")
+  function ignis_weak_count(handle: *mut void): u32;
 }
 
 /// Reference-counted shared pointer.
-///
-/// Wraps an opaque handle to a heap allocation that tracks how many live
-/// references exist. The payload destructor runs when the last `Rc` is dropped.
 @implements(Drop, Clone)
 export record Rc<T> {
   handle: *mut void;
 
-  /// Allocates a new `Rc` with refcount 1.
-  ///
-  /// Copies `value` into a heap allocation and registers `@dropGlue<T>()`
-  /// so the payload is destroyed when the last reference is released.
+  /// Allocates a new `Rc` with strong count 1.
   ///
   /// # Example
   ///
   /// ```ignis
+  /// import Rc from "std::rc";
+  ///
   /// let r: Rc<i32> = Rc::new<i32>(100);
   /// ```
   public static new(value: T): Rc<T> {
@@ -77,29 +91,81 @@ export record Rc<T> {
     };
   }
 
-  /// Returns the number of live references to this allocation.
+  /// Returns the number of live strong references.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(1);
+  /// let b: Rc<i32> = a.clone();
+  /// let n: u32 = a.strongCount(); // 2
+  /// ```
   public strongCount(&self): u32 {
     return __rc_ffi::ignis_rc_count(self.handle);
   }
 
+  /// Returns the number of live weak references.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc, Weak from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(1);
+  /// let w: Weak<i32> = a.downgrade();
+  /// let n: u32 = a.weakCount(); // 1
+  /// ```
+  public weakCount(&self): u32 {
+    return __rc_ffi::ignis_weak_count(self.handle);
+  }
+
+  /// Creates a `Weak<T>` that does not keep the value alive.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc, Weak from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(42);
+  /// let w: Weak<i32> = a.downgrade();
+  /// ```
+  public downgrade(&self): Weak<T> {
+    __rc_ffi::ignis_rc_downgrade(self.handle);
+
+    return Weak {
+      handle: self.handle
+    };
+  }
+
   /// Returns an immutable reference to the inner value.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(42);
+  /// let val: &i32 = a.get();
+  /// ```
   public get(&self): &T {
     let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
     return (payload as *mut T) as &T;
   }
 
-  /// Returns a mutable pointer to the inner value if this is the only
-  /// live reference (`strongCount == 1`). Returns `null` otherwise.
+  /// Returns a mutable pointer to the inner value if `strongCount == 1`,
+  /// or null otherwise.
   ///
-  /// TODO: return `Option<&mut T>` once pattern matching is available:
+  /// TODO: return `Option<&mut T>` once pattern matching is available.
+  ///
+  /// # Example
+  ///
   /// ```ignis
-  /// public getMut(&mut self): Option<&mut T> {
-  ///   if (self.strongCount() == 1) {
-  ///     let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-  ///     return Option::SOME((payload as *mut T) as &mut T);
-  ///   }
-  ///   return Option::NONE;
-  /// }
+  /// import Rc from "std::rc";
+  ///
+  /// let mut a: Rc<i32> = Rc::new<i32>(10);
+  /// let ptr: *mut i32 = a.getMut(); // non-null (unique owner)
   /// ```
   public getMut(&mut self): *mut T {
     if (__rc_ffi::ignis_rc_count(self.handle) == 1) {
@@ -110,10 +176,16 @@ export record Rc<T> {
     return 0 as *mut T;
   }
 
-  /// Creates a new reference to the same allocation.
+  /// Increments the strong count and returns a new `Rc` sharing the allocation.
   ///
-  /// Increments the reference count by one and returns an `Rc` that
-  /// shares the same underlying value.
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(1);
+  /// let b: Rc<i32> = a.clone();
+  /// ```
   clone(&self): Rc<T> {
     __rc_ffi::ignis_rc_retain(self.handle);
 
@@ -122,11 +194,93 @@ export record Rc<T> {
     };
   }
 
-  /// Releases this reference.
-  ///
-  /// Decrements the reference count. If this was the last reference,
-  /// the payload destructor runs and the allocation is freed.
+  /// Decrements the strong count. Runs the payload destructor when it
+  /// reaches zero. Frees the allocation when both counts reach zero.
   drop(&mut self): void {
     __rc_ffi::ignis_rc_release(self.handle);
+  }
+}
+
+/// Non-owning observer of an `Rc<T>` allocation.
+///
+/// Keeps the allocation header alive so `upgrade()` can check whether the
+/// value still exists. Use `Rc::downgrade()` to create one.
+@implements(Drop, Clone)
+export record Weak<T> {
+  handle: *mut void;
+
+  /// Returns a handle to the value if it is still alive, or null.
+  ///
+  /// When successful the strong count is incremented; the caller must
+  /// release the returned handle to avoid leaking a reference.
+  ///
+  /// TODO: return `Option<Rc<T>>` once pattern matching is available.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc, Weak from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(42);
+  /// let w: Weak<i32> = a.downgrade();
+  /// let h: *mut void = w.upgrade(); // non-null
+  /// ```
+  public upgrade(&self): *mut void {
+    return __rc_ffi::ignis_rc_upgrade(self.handle);
+  }
+
+  /// Returns the number of live weak references.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc, Weak from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(1);
+  /// let w: Weak<i32> = a.downgrade();
+  /// let n: u32 = w.weakCount(); // 1
+  /// ```
+  public weakCount(&self): u32 {
+    return __rc_ffi::ignis_weak_count(self.handle);
+  }
+
+  /// Returns the number of live strong references.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc, Weak from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(1);
+  /// let w: Weak<i32> = a.downgrade();
+  /// let n: u32 = w.strongCount(); // 1
+  /// ```
+  public strongCount(&self): u32 {
+    return __rc_ffi::ignis_rc_count(self.handle);
+  }
+
+  /// Increments the weak count and returns a new `Weak` sharing the header.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Rc, Weak from "std::rc";
+  ///
+  /// let a: Rc<i32> = Rc::new<i32>(1);
+  /// let w1: Weak<i32> = a.downgrade();
+  /// let w2: Weak<i32> = w1.clone();
+  /// ```
+  clone(&self): Weak<T> {
+    __rc_ffi::ignis_weak_retain(self.handle);
+
+    return Weak {
+      handle: self.handle
+    };
+  }
+
+  /// Decrements the weak count. Frees the allocation when both counts
+  /// reach zero.
+  drop(&mut self): void {
+    __rc_ffi::ignis_weak_release(self.handle);
   }
 }

@@ -104,9 +104,12 @@ typedef void (*IgnisDropFn)(void *);
  *
  * Layout in memory: [IgnisRcBox header][payload bytes...]
  * The payload starts at (char*)rc + sizeof(IgnisRcBox), aligned to max_align_t.
+ *
+ * The allocation is freed when both refcount and weak_count reach 0.
  */
 typedef struct {
   uint32_t refcount;
+  uint32_t weak_count;
   IgnisDropFn drop_fn;
   size_t payload_size;
   size_t payload_align;
@@ -133,7 +136,8 @@ void ignis_rc_retain(IgnisRcBox *rc);
 
 /**
  * Decrements the reference count.
- * When the count reaches 0, calls drop_fn(payload) if set, then frees the allocation.
+ * When the count reaches 0, calls drop_fn(payload) if set.
+ * Frees the allocation only if weak_count is also 0.
  *
  * @param rc Pointer to an IgnisRcBox (must not be NULL).
  */
@@ -148,12 +152,35 @@ void ignis_rc_release(IgnisRcBox *rc);
 void *ignis_rc_get(IgnisRcBox *rc);
 
 /**
- * Returns the current reference count (useful for debugging/testing).
- *
- * @param rc Pointer to an IgnisRcBox (must not be NULL).
- * @return Current reference count.
+ * Returns the current strong reference count.
  */
 uint32_t ignis_rc_count(const IgnisRcBox *rc);
+
+/**
+ * Increments the weak count (creates a weak reference).
+ */
+void ignis_rc_downgrade(IgnisRcBox *rc);
+
+/**
+ * If refcount > 0, increments it and returns `rc`. Otherwise returns NULL.
+ */
+IgnisRcBox *ignis_rc_upgrade(IgnisRcBox *rc);
+
+/**
+ * Increments the weak count (clones a weak reference).
+ */
+void ignis_weak_retain(IgnisRcBox *rc);
+
+/**
+ * Decrements the weak count.
+ * Frees the allocation if both counts reach 0.
+ */
+void ignis_weak_release(IgnisRcBox *rc);
+
+/**
+ * Returns the current weak reference count.
+ */
+uint32_t ignis_weak_count(const IgnisRcBox *rc);
 
 // =============================================================================
 // Memory allocation
