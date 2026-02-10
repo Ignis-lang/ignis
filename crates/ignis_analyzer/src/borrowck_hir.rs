@@ -188,8 +188,8 @@ impl<'a> HirBorrowChecker<'a> {
         self.check_node(target);
 
         // Check mutation of borrowed variable
-        if let Some(target_def) = self.extract_root_variable(target) {
-          if self
+        if let Some(target_def) = self.extract_root_variable(target)
+          && self
             .borrow_state
             .get(&target_def)
             .copied()
@@ -201,7 +201,6 @@ impl<'a> HirBorrowChecker<'a> {
               .diagnostics
               .push(DiagnosticMessage::MutatedWhileBorrowed { var_name, span }.report());
           }
-        }
       },
 
       HIRKind::Return(value) => {
@@ -355,11 +354,10 @@ impl<'a> HirBorrowChecker<'a> {
       self.check_node(stmt_id);
     }
 
-    if let Some(expr_id) = expression {
-      if self.reachable {
+    if let Some(expr_id) = expression
+      && self.reachable {
         self.check_node(expr_id);
       }
-    }
 
     // Release all borrows registered in this scope
     self.exit_block_scope();
@@ -444,12 +442,11 @@ impl<'a> HirBorrowChecker<'a> {
     let continue_seen = *self.loop_continue_stack.last().unwrap_or(&false);
     let update_reachable = body_falls_through || continue_seen;
 
-    if let Some(update_id) = for_update {
-      if update_reachable {
+    if let Some(update_id) = for_update
+      && update_reachable {
         self.reachable = true;
         self.check_node(update_id);
       }
-    }
 
     // Second pass for cross-iteration borrow conflicts
     let can_iterate_again = body_falls_through || continue_seen;
@@ -464,12 +461,11 @@ impl<'a> HirBorrowChecker<'a> {
 
       let body_falls_through_2 = self.reachable;
       let continue_seen_2 = *self.loop_continue_stack.last().unwrap_or(&false);
-      if let Some(update_id) = for_update {
-        if body_falls_through_2 || continue_seen_2 {
+      if let Some(update_id) = for_update
+        && (body_falls_through_2 || continue_seen_2) {
           self.reachable = true;
           self.check_node(update_id);
         }
-      }
 
       self.deduplicate_second_pass_diagnostics(diag_count_before);
     }
@@ -643,25 +639,22 @@ impl<'a> HirBorrowChecker<'a> {
       HIRKind::Reference { expression, .. } => *expression,
       _ => {
         // Also check if the return type is a reference type (value might be a variable holding a ref)
-        if matches!(self.types.get(&node.type_id), Type::Reference { .. }) {
-          if let HIRKind::Variable(def_id) = &node.kind {
-            if matches!(self.defs.get(def_id).kind, DefinitionKind::Variable(_)) {
+        if matches!(self.types.get(&node.type_id), Type::Reference { .. })
+          && let HIRKind::Variable(def_id) = &node.kind
+            && matches!(self.defs.get(def_id).kind, DefinitionKind::Variable(_)) {
               // Variable holds a reference — could be a local ref, but we can't easily
               // tell if it was derived from a local. Defer to the specific case below.
             }
-          }
-        }
         return;
       },
     };
 
-    if let Some(def_id) = self.extract_root_variable(inner) {
-      if matches!(self.defs.get(&def_id).kind, DefinitionKind::Variable(_)) {
+    if let Some(def_id) = self.extract_root_variable(inner)
+      && matches!(self.defs.get(&def_id).kind, DefinitionKind::Variable(_)) {
         self
           .diagnostics
           .push(DiagnosticMessage::CannotReturnLocalReference { span: span.clone() }.report());
       }
-    }
   }
 
   /// Extract the root variable DefinitionId from an HIR expression.

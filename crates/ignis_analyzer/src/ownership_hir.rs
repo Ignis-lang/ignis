@@ -424,11 +424,10 @@ impl<'a> HirOwnershipChecker<'a> {
     }
 
     // Check tail expression if present and still reachable
-    if let Some(expr_id) = expression {
-      if self.reachable {
+    if let Some(expr_id) = expression
+      && self.reachable {
         self.check_node(expr_id);
       }
-    }
 
     // Calculate drops for this scope
     self.exit_block_scope(block_hir_id);
@@ -664,12 +663,11 @@ impl<'a> HirOwnershipChecker<'a> {
     // continued (continue in a for-loop jumps to the update expression).
     let update_reachable = body_falls_through || continue_seen;
 
-    if let Some(update_id) = for_update {
-      if update_reachable {
+    if let Some(update_id) = for_update
+      && update_reachable {
         self.reachable = true;
         self.check_node(update_id);
       }
-    }
 
     // === Second pass: catch cross-iteration ownership bugs ===
     // Only run if a second iteration is actually possible (the body has paths
@@ -693,12 +691,11 @@ impl<'a> HirOwnershipChecker<'a> {
       let continue_seen_2 = *self.loop_continue_stack.last().unwrap_or(&false);
       let update_reachable_2 = body_falls_through_2 || continue_seen_2;
 
-      if let Some(update_id) = for_update {
-        if update_reachable_2 {
+      if let Some(update_id) = for_update
+        && update_reachable_2 {
           self.reachable = true;
           self.check_node(update_id);
         }
-      }
 
       // Deduplicate: keep only diagnostics from second pass that are genuinely
       // new (different message text) compared to those already collected.
@@ -820,14 +817,13 @@ impl<'a> HirOwnershipChecker<'a> {
     ptr_hir: HIRId,
     span: Span,
   ) {
-    if let Some(ptr_def) = self.extract_pointer_variable(ptr_hir) {
-      if self.states.get(&ptr_def) == Some(&OwnershipState::Freed) {
+    if let Some(ptr_def) = self.extract_pointer_variable(ptr_hir)
+      && self.states.get(&ptr_def) == Some(&OwnershipState::Freed) {
         let var_name = self.get_var_name(&ptr_def);
         self
           .diagnostics
           .push(DiagnosticMessage::UseAfterFree { var_name, span }.report());
       }
-    }
   }
 
   // === Scope management ===
@@ -858,11 +854,10 @@ impl<'a> HirOwnershipChecker<'a> {
       .copied()
       .collect();
 
-    if let Some(hir_id) = entry.block_hir_id {
-      if !drops.is_empty() {
+    if let Some(hir_id) = entry.block_hir_id
+      && !drops.is_empty() {
         self.schedules.on_scope_end.insert(hir_id, drops);
       }
-    }
   }
 
   /// Calculate drops for exiting from current scope to target scope index.
@@ -1147,14 +1142,13 @@ impl<'a> HirOwnershipChecker<'a> {
     &mut self,
     def: DefinitionId,
   ) {
-    if let Some(set_id) = self.pointer_alias_set.remove(&def) {
-      if let Some(members) = self.alias_set_members.get_mut(&set_id) {
+    if let Some(set_id) = self.pointer_alias_set.remove(&def)
+      && let Some(members) = self.alias_set_members.get_mut(&set_id) {
         members.remove(&def);
         if members.is_empty() {
           self.alias_set_members.remove(&set_id);
         }
       }
-    }
   }
 
   /// Get all members of the alias set containing `def`, including `def` itself.
@@ -1163,11 +1157,10 @@ impl<'a> HirOwnershipChecker<'a> {
     &self,
     def: DefinitionId,
   ) -> Vec<DefinitionId> {
-    if let Some(&set_id) = self.pointer_alias_set.get(&def) {
-      if let Some(members) = self.alias_set_members.get(&set_id) {
+    if let Some(&set_id) = self.pointer_alias_set.get(&def)
+      && let Some(members) = self.alias_set_members.get(&set_id) {
         return members.iter().copied().collect();
       }
-    }
 
     vec![def]
   }

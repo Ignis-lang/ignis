@@ -40,15 +40,12 @@ impl<'a> Analyzer<'a> {
     match stmt {
       ASTStatement::Constant(const_) => {
         // Only eval if value exists (not for extern const)
-        if let Some(value_id) = &const_.value {
-          if let Some(value) = self.const_eval_expression_node(value_id, scope_kind) {
-            if let Some(def_id) = self.lookup_def(node_id) {
-              if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&def_id.clone()).kind {
+        if let Some(value_id) = &const_.value
+          && let Some(value) = self.const_eval_expression_node(value_id, scope_kind)
+            && let Some(def_id) = self.lookup_def(node_id)
+              && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&def_id.clone()).kind {
                 const_def.value = Some(value);
               }
-            }
-          }
-        }
         self.define_decl_in_current_scope(node_id);
       },
       ASTStatement::Block(block) => {
@@ -114,10 +111,8 @@ impl<'a> Analyzer<'a> {
           self.const_eval_node(item, scope_kind);
         }
       },
-      ASTStatement::Export(export_stmt) => {
-        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
-          self.const_eval_node(decl, scope_kind);
-        }
+      ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
+        self.const_eval_node(decl, scope_kind);
       },
       ASTStatement::Record(rec) => {
         self.const_eval_record_static_fields(node_id, rec, scope_kind);
@@ -146,19 +141,17 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&rec.name);
 
     for item in &rec.items {
-      if let ASTRecordItem::Field(field) = item {
-        if field.is_static() {
-          if let Some(value_id) = &field.value {
+      if let ASTRecordItem::Field(field) = item
+        && field.is_static()
+          && let Some(value_id) = &field.value {
             match self.const_eval_expression_node(value_id, scope_kind) {
               Some(value) => {
                 // Get the static field's definition from the record
-                if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
-                  if let Some(const_def_id) = rd.static_fields.get(&field.name).cloned() {
-                    if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+                if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind
+                  && let Some(const_def_id) = rd.static_fields.get(&field.name).cloned()
+                    && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
                       const_def.value = Some(value);
                     }
-                  }
-                }
               },
               None => {
                 let field_name = self.get_symbol_name(&field.name);
@@ -173,8 +166,6 @@ impl<'a> Analyzer<'a> {
               },
             }
           }
-        }
-      }
     }
   }
 
@@ -195,18 +186,16 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&enum_.name);
 
     for item in &enum_.items {
-      if let ASTEnumItem::Field(field) = item {
-        if let Some(value_id) = &field.value {
+      if let ASTEnumItem::Field(field) = item
+        && let Some(value_id) = &field.value {
           match self.const_eval_expression_node(value_id, scope_kind) {
             Some(value) => {
               // Get the static field's definition from the enum
-              if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
-                if let Some(const_def_id) = ed.static_fields.get(&field.name).cloned() {
-                  if let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
+              if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind
+                && let Some(const_def_id) = ed.static_fields.get(&field.name).cloned()
+                  && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind {
                     const_def.value = Some(value);
                   }
-                }
-              }
             },
             None => {
               let field_name = self.get_symbol_name(&field.name);
@@ -221,14 +210,13 @@ impl<'a> Analyzer<'a> {
             },
           }
         }
-      }
     }
   }
 
   pub(crate) fn const_eval_expression_node(
     &self,
     node_id: &NodeId,
-    scope_kind: ScopeKind,
+    _scope_kind: ScopeKind,
   ) -> Option<ConstValue> {
     let node = self.ast.get(node_id);
 
@@ -255,34 +243,34 @@ impl<'a> Analyzer<'a> {
             _ => None,
           }),
         ASTExpression::Binary(binary) => {
-          let left = self.const_eval_expression_node(&binary.left, scope_kind);
-          let right = self.const_eval_expression_node(&binary.right, scope_kind);
+          let left = self.const_eval_expression_node(&binary.left, _scope_kind);
+          let right = self.const_eval_expression_node(&binary.right, _scope_kind);
           const_eval_binary(&binary.operator, left, right)
         },
         ASTExpression::Ternary(ternary) => {
-          let condition = self.const_eval_expression_node(&ternary.condition, scope_kind)?;
+          let condition = self.const_eval_expression_node(&ternary.condition, _scope_kind)?;
 
           match condition {
-            ConstValue::Bool(true) => self.const_eval_expression_node(&ternary.then_expr, scope_kind),
-            ConstValue::Bool(false) => self.const_eval_expression_node(&ternary.else_expr, scope_kind),
+            ConstValue::Bool(true) => self.const_eval_expression_node(&ternary.then_expr, _scope_kind),
+            ConstValue::Bool(false) => self.const_eval_expression_node(&ternary.else_expr, _scope_kind),
             _ => None,
           }
         },
         ASTExpression::Unary(unary) => {
-          let operand = self.const_eval_expression_node(&unary.operand, scope_kind);
+          let operand = self.const_eval_expression_node(&unary.operand, _scope_kind);
           const_eval_unary(&unary.operator, operand)
         },
         ASTExpression::Vector(vector) => {
           let values: Option<Vec<ConstValue>> = vector
             .items
             .iter()
-            .map(|item| self.const_eval_expression_node(item, scope_kind))
+            .map(|item| self.const_eval_expression_node(item, _scope_kind))
             .collect();
           values.map(ConstValue::Array)
         },
         ASTExpression::VectorAccess(access) => {
-          let array = self.const_eval_expression_node(&access.name, scope_kind)?;
-          let index = self.const_eval_expression_node(&access.index, scope_kind)?;
+          let array = self.const_eval_expression_node(&access.name, _scope_kind)?;
+          let index = self.const_eval_expression_node(&access.index, _scope_kind)?;
 
           match (array, index) {
             (ConstValue::Array(arr), ConstValue::Int(i)) => {
@@ -296,7 +284,7 @@ impl<'a> Analyzer<'a> {
             _ => None,
           }
         },
-        ASTExpression::Grouped(grouped) => self.const_eval_expression_node(&grouped.expression, scope_kind),
+        ASTExpression::Grouped(grouped) => self.const_eval_expression_node(&grouped.expression, _scope_kind),
         _ => None,
       },
       ASTNode::Statement(_) => None,

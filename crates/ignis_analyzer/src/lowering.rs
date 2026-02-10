@@ -417,11 +417,10 @@ impl<'a> Analyzer<'a> {
         let mut candidates: Vec<DefinitionId> = Vec::new();
         for &def_id in group {
           let def = self.defs.get(&def_id);
-          if let DefinitionKind::Method(md) = &def.kind {
-            if md.params.len() == ast_param_count {
+          if let DefinitionKind::Method(md) = &def.kind
+            && md.params.len() == ast_param_count {
               candidates.push(def_id);
             }
-          }
         }
 
         match candidates.len() {
@@ -688,11 +687,10 @@ impl<'a> Analyzer<'a> {
           return self.lower_method_call(node_id, ma, call, hir, scope_kind);
         }
 
-        if let ASTNode::Expression(ASTExpression::Path(path)) = callee_node {
-          if let Some(result) = self.try_lower_path_call(node_id, path, call, hir, scope_kind) {
+        if let ASTNode::Expression(ASTExpression::Path(path)) = callee_node
+          && let Some(result) = self.try_lower_path_call(node_id, path, call, hir, scope_kind) {
             return result;
           }
-        }
 
         // Get the callee def_id by looking up the variable name
         let callee_def_id = if let Some(def_id) = self.lookup_resolved_call(node_id).cloned() {
@@ -1122,9 +1120,9 @@ impl<'a> Analyzer<'a> {
           _ => None,
         };
 
-        if let Some(def_id) = def_id {
-          if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
-            if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
+        if let Some(def_id) = def_id
+          && let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind
+            && let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
               let field_type = stored_type.unwrap_or(field.type_id);
               return hir.alloc(HIRNode {
                 kind: HIRKind::FieldAccess {
@@ -1135,8 +1133,6 @@ impl<'a> Analyzer<'a> {
                 type_id: field_type,
               });
             }
-          }
-        }
 
         // Error fallback
         hir.alloc(HIRNode {
@@ -2013,11 +2009,10 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
   ) -> Option<String> {
     let node = self.ast.get(node_id);
-    if let ASTNode::Expression(ASTExpression::Literal(lit)) = node {
-      if let ignis_type::value::IgnisLiteralValue::String(s) = &lit.value {
+    if let ASTNode::Expression(ASTExpression::Literal(lit)) = node
+      && let ignis_type::value::IgnisLiteralValue::String(s) = &lit.value {
         return Some(s.clone());
       }
-    }
     None
   }
 
@@ -2103,11 +2098,10 @@ impl<'a> Analyzer<'a> {
     };
 
     let Some((method_id, self_mutable)) = method_info else {
-      if let Some(ext_def_id) = self.lookup_resolved_call(node_id).cloned() {
-        if matches!(self.defs.get(&ext_def_id).kind, DefinitionKind::Function(_)) {
+      if let Some(ext_def_id) = self.lookup_resolved_call(node_id).cloned()
+        && matches!(self.defs.get(&ext_def_id).kind, DefinitionKind::Function(_)) {
           return self.lower_extension_call(node_id, ma, call, hir, scope_kind, result_type, base, &ext_def_id);
         }
-      }
 
       return hir.alloc(HIRNode {
         kind: HIRKind::Error,
@@ -2154,6 +2148,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Lower `obj.extMethod(args)` → `extMethod(obj, args)` (regular call).
+  #[allow(clippy::too_many_arguments)]
   fn lower_extension_call(
     &mut self,
     _node_id: &NodeId,
@@ -2215,8 +2210,8 @@ impl<'a> Analyzer<'a> {
       });
     };
 
-    if let Some(method_id) = self.lookup_resolved_call(node_id).cloned() {
-      if matches!(self.defs.get(&method_id).kind, DefinitionKind::Method(_)) {
+    if let Some(method_id) = self.lookup_resolved_call(node_id).cloned()
+      && matches!(self.defs.get(&method_id).kind, DefinitionKind::Method(_)) {
         let args_hir: Vec<HIRId> = call
           .arguments
           .iter()
@@ -2236,7 +2231,6 @@ impl<'a> Analyzer<'a> {
           type_id: result_type,
         });
       }
-    }
 
     match &self.defs.get(&def_id).kind.clone() {
       DefinitionKind::Record(rd) => {
@@ -2511,8 +2505,8 @@ impl<'a> Analyzer<'a> {
           let arg_type = hir.get(arg_hir).type_id;
           let ptr_u8 = self.types.pointer(self.types.u8(), false);
 
-          if !self.types.types_equal(&arg_type, &ptr_u8) {
-            if let ignis_type::types::Type::Pointer { .. } = self.types.get(&arg_type) {
+          if !self.types.types_equal(&arg_type, &ptr_u8)
+            && let ignis_type::types::Type::Pointer { .. } = self.types.get(&arg_type) {
               let cast_node = HIRNode {
                 kind: HIRKind::Cast {
                   expression: arg_hir,
@@ -2523,7 +2517,6 @@ impl<'a> Analyzer<'a> {
               };
               return hir.alloc(cast_node);
             }
-          }
         }
 
         arg_hir
@@ -2863,11 +2856,10 @@ impl<'a> Analyzer<'a> {
         if let Type::Pointer { inner, .. } = self.types.get(&field.type_id) {
           data_info = Some((*inner, field.index));
         }
-      } else if field.name == length_sym {
-        if self.types.types_equal(&field.type_id, &self.types.u64()) {
+      } else if field.name == length_sym
+        && self.types.types_equal(&field.type_id, &self.types.u64()) {
           length_index = Some(field.index);
         }
-      }
     }
 
     match (data_info, length_index) {

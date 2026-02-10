@@ -95,9 +95,9 @@ impl<'a> Analyzer<'a> {
 
           let mut pushed_generic = false;
 
-          if let Some(def_id) = &def_id {
-            if let ignis_type::definition::DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind {
-              if !func_def.type_params.is_empty() {
+          if let Some(def_id) = &def_id
+            && let ignis_type::definition::DefinitionKind::Function(func_def) = &self.defs.get(def_id).kind
+              && !func_def.type_params.is_empty() {
                 self.scopes.push(ScopeKind::Generic);
                 pushed_generic = true;
 
@@ -106,8 +106,6 @@ impl<'a> Analyzer<'a> {
                   let _ = self.scopes.define(&name, param_id, false);
                 }
               }
-            }
-          }
 
           self.scopes.push(ScopeKind::Function);
           if let Some(def_id) = &def_id {
@@ -271,10 +269,8 @@ impl<'a> Analyzer<'a> {
           self.extra_checks_node(item, scope_kind, in_loop, in_function);
         }
       },
-      ASTStatement::Export(export_stmt) => {
-        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
-          self.extra_checks_node(decl, scope_kind, in_loop, in_function);
-        }
+      ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
+        self.extra_checks_node(decl, scope_kind, in_loop, in_function);
       },
       ASTStatement::Record(rec) => {
         self.check_static_fields_init(rec);
@@ -499,8 +495,8 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&rec.name);
 
     for item in &rec.items {
-      if let ASTRecordItem::Field(field) = item {
-        if field.is_static() && field.value.is_none() {
+      if let ASTRecordItem::Field(field) = item
+        && field.is_static() && field.value.is_none() {
           let field_name = self.get_symbol_name(&field.name);
           self.add_diagnostic(
             DiagnosticMessage::StaticFieldRequiresInit {
@@ -511,7 +507,6 @@ impl<'a> Analyzer<'a> {
             .report(),
           );
         }
-      }
     }
   }
 
@@ -523,8 +518,8 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&enum_.name);
 
     for item in &enum_.items {
-      if let ASTEnumItem::Field(field) = item {
-        if field.value.is_none() {
+      if let ASTEnumItem::Field(field) = item
+        && field.value.is_none() {
           let field_name = self.get_symbol_name(&field.name);
           self.add_diagnostic(
             DiagnosticMessage::StaticFieldRequiresInit {
@@ -535,7 +530,6 @@ impl<'a> Analyzer<'a> {
             .report(),
           );
         }
-      }
     }
   }
 
