@@ -643,6 +643,13 @@ pub enum DiagnosticMessage {
     field_type: String,
     span: Span,
   },
+  CopyOnNonCopyVariantPayload {
+    type_name: String,
+    variant_name: String,
+    payload_type: String,
+    payload_index: usize,
+    span: Span,
+  },
   // Extension method diagnostics
   ExtensionInvalidTargetType {
     type_name: String,
@@ -1294,6 +1301,19 @@ impl fmt::Display for DiagnosticMessage {
           type_name, field_name, field_type
         )
       },
+      DiagnosticMessage::CopyOnNonCopyVariantPayload {
+        type_name,
+        variant_name,
+        payload_type,
+        payload_index,
+        ..
+      } => {
+        write!(
+          f,
+          "type '{}' declares @implements(Copy) but variant '{}' payload {} has non-Copy type '{}'",
+          type_name, variant_name, payload_index, payload_type
+        )
+      },
       DiagnosticMessage::ExtensionInvalidTargetType { type_name, .. } => {
         write!(f, "@extension target type '{}' is not a valid primitive type", type_name)
       },
@@ -1541,6 +1561,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LangTraitInvalidSignature { span, .. }
       | DiagnosticMessage::LangTraitNotApplicable { span, .. }
       | DiagnosticMessage::CopyOnNonCopyField { span, .. }
+      | DiagnosticMessage::CopyOnNonCopyVariantPayload { span, .. }
       | DiagnosticMessage::ExtensionInvalidTargetType { span, .. }
       | DiagnosticMessage::ExtensionRequiresParameter { span, .. }
       | DiagnosticMessage::ExtensionReceiverTypeMismatch { span, .. }
@@ -1718,6 +1739,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::LangTraitInvalidSignature { .. } => "A0133",
       DiagnosticMessage::LangTraitNotApplicable { .. } => "A0134",
       DiagnosticMessage::CopyOnNonCopyField { .. } => "A0148",
+      DiagnosticMessage::CopyOnNonCopyVariantPayload { .. } => "A0149",
       DiagnosticMessage::ExtensionInvalidTargetType { .. } => "A0135",
       DiagnosticMessage::ExtensionRequiresParameter { .. } => "A0136",
       DiagnosticMessage::ExtensionReceiverTypeMismatch { .. } => "A0137",

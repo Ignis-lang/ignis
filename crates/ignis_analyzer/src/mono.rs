@@ -443,7 +443,11 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
-        // Non-generic enum: copy static method bodies
+        for method_entry in ed.instance_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.copy_if_nongeneric(*method_id);
+          }
+        }
         for method_entry in ed.static_methods.values() {
           if let Some(method_id) = method_entry.as_single() {
             self.copy_if_nongeneric(*method_id);
@@ -996,7 +1000,11 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
-        // Non-generic enum: scan static methods
+        for method_entry in ed.instance_methods.values() {
+          if let Some(method_id) = method_entry.as_single() {
+            self.discover_from_root(*method_id);
+          }
+        }
         for method_entry in ed.static_methods.values() {
           if let Some(method_id) = method_entry.as_single() {
             self.discover_from_root(*method_id);
@@ -1273,7 +1281,27 @@ impl<'a> Monomorphizer<'a> {
 
             concrete_id
           },
-          DefinitionKind::Enum(ed) => self.instantiate_enum(generic_def, ed, &subst, name_sym),
+          DefinitionKind::Enum(ed) => {
+            let concrete_id = self.instantiate_enum(generic_def, ed, &subst, name_sym);
+
+            if ed.lang_traits.drop {
+              let drop_sym = self.symbols.borrow().map.get("drop").copied();
+              if let Some(drop_sym) = drop_sym {
+                if let Some(entry) = ed.instance_methods.get(&drop_sym) {
+                  if let Some(&method_def_id) = entry.as_single() {
+                    self.enqueue(InstanceKey::Method {
+                      owner_def: *def,
+                      owner_args: args.clone(),
+                      method_def: method_def_id,
+                      method_args: vec![],
+                    });
+                  }
+                }
+              }
+            }
+
+            concrete_id
+          },
           _ => panic!("unexpected generic def kind: {:?}", generic_def.kind),
         };
         if verbose {
@@ -1476,6 +1504,7 @@ impl<'a> Monomorphizer<'a> {
         variants: new_variants,
         variants_by_name: ed.variants_by_name.clone(),
         tag_type: ed.tag_type,
+        instance_methods: HashMap::new(),
         static_methods: HashMap::new(),
         static_fields: ed.static_fields.clone(),
         attrs: ed.attrs.clone(),

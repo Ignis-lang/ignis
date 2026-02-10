@@ -1715,3 +1715,68 @@ function main(): void {
 "#,
   );
 }
+
+#[test]
+fn enum_drop_valid() {
+  common::assert_ok(
+    r#"
+@implements(Drop)
+enum Resource {
+    Active(i32),
+    Idle
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn enum_drop_missing_method() {
+  let result = common::analyze(
+    r#"
+@implements(Drop)
+enum Resource {
+    Active(i32),
+    Idle
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "enum_drop_missing_method_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn enum_copy_noncopy_payload() {
+  let result = common::analyze(
+    r#"
+@implements(Copy)
+enum MaybeMsg {
+    Some(string),
+    None
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "enum_copy_noncopy_payload_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}

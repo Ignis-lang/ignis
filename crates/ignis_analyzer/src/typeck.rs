@@ -961,9 +961,14 @@ impl<'a> Analyzer<'a> {
           variant_idx += 1;
         },
         ASTEnumItem::Method(method) => {
-          // Get method definition id from enum (all methods are static in enum)
           let method_def_id = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
-            match ed.static_methods.get(&method.name) {
+            let is_static = method.is_static() || !method.has_self();
+            let source = if is_static {
+              &ed.static_methods
+            } else {
+              &ed.instance_methods
+            };
+            match source.get(&method.name) {
               Some(SymbolEntry::Single(def_id)) => Some(*def_id),
               Some(SymbolEntry::Overload(group)) => {
                 group.iter().copied().find(|id| self.defs.get(id).span == method.span)
@@ -1004,7 +1009,13 @@ impl<'a> Analyzer<'a> {
     for item in &en.items {
       if let ASTEnumItem::Method(method) = item {
         let method_def_id = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
-          match ed.static_methods.get(&method.name) {
+          let is_static = method.is_static() || !method.has_self();
+          let source = if is_static {
+            &ed.static_methods
+          } else {
+            &ed.instance_methods
+          };
+          match source.get(&method.name) {
             Some(SymbolEntry::Single(def_id)) => Some(*def_id),
             Some(SymbolEntry::Overload(group)) => {
               group.iter().copied().find(|id| self.defs.get(id).span == method.span)
@@ -1655,8 +1666,20 @@ impl<'a> Analyzer<'a> {
     let (def_id, type_args) = match self.types.get(&obj_type).clone() {
       Type::Record(def_id) => (def_id, vec![]),
       Type::Instance { generic, args } => (generic, args),
-      Type::Enum(_) => {
-        // Enum values don't have instance access
+      Type::Enum(def_id) => {
+        if let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind {
+          if ed.instance_methods.contains_key(&ma.member) {
+            let member_name = self.get_symbol_name(&ma.member);
+            self.add_diagnostic(
+              DiagnosticMessage::MethodMustBeCalled {
+                method: member_name,
+                span: ma.span.clone(),
+              }
+              .report(),
+            );
+            return self.types.error();
+          }
+        }
         self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
         return self.types.error();
       },
@@ -1676,8 +1699,18 @@ impl<'a> Analyzer<'a> {
     // Check if it's a record definition
     let rd = match &self.defs.get(&def_id).kind {
       DefinitionKind::Record(rd) => rd.clone(),
-      DefinitionKind::Enum(_) => {
-        // Enum values don't have instance access
+      DefinitionKind::Enum(ed) => {
+        if ed.instance_methods.contains_key(&ma.member) {
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::MethodMustBeCalled {
+              method: member_name,
+              span: ma.span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
         self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
         return self.types.error();
       },
@@ -3340,8 +3373,190 @@ impl<'a> Analyzer<'a> {
         );
         self.types.error()
       },
-      Type::Enum(_) => {
-        self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
+      Type::Enum(def_id) => {
+        let ed = if let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind {
+          ed.clone()
+        } else {
+          return self.types.error();
+        };
+
+        if let Some(entry) = ed.instance_methods.get(&ma.member) {
+          match entry {
+            SymbolEntry::Single(method_id) => {
+              self.set_import_item_def(&ma.member_span, method_id);
+              let method = {
+                let method_def = self.defs.get(method_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
+
+              if method.self_mutable {
+                let obj_node = self.ast.get(&ma.object);
+                if let ASTNode::Expression(obj_expr) = obj_node {
+                  if !self.is_mutable_expression(obj_expr) {
+                    let method_name = self.get_symbol_name(&ma.member);
+                    let var_name = self.get_var_name_from_expr(obj_expr);
+                    self.add_diagnostic(
+                      DiagnosticMessage::MutatingMethodOnImmutable {
+                        method: method_name,
+                        var_name,
+                        span: ma.span.clone(),
+                      }
+                      .report(),
+                    );
+                  }
+                }
+              }
+
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+              let (param_types, return_type) =
+                if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(method_id, call) {
+                  (subst_params[start..].to_vec(), subst_ret)
+                } else {
+                  let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+                  (raw_params, method.return_type)
+                };
+
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                  if let Some(param_type) = param_types.get(i) {
+                    let infer = InferContext::expecting(*param_type);
+                    self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+                  } else {
+                    self.typecheck_node(arg, scope_kind, ctx)
+                  }
+                })
+                .collect();
+
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
+                }
+              }
+
+              return return_type;
+            },
+            SymbolEntry::Overload(candidates) => {
+              let arg_types: Vec<TypeId> = call
+                .arguments
+                .iter()
+                .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+                .collect();
+
+              let resolved_def_id = match self.resolve_overload(candidates, &arg_types, &call.span, None) {
+                Ok(def_id) => def_id,
+                Err(()) => return self.types.error(),
+              };
+
+              self.set_resolved_call(node_id, resolved_def_id);
+              self.set_resolved_call(&call.callee, resolved_def_id);
+              self.mark_referenced(resolved_def_id);
+
+              let method = {
+                let method_def = self.defs.get(&resolved_def_id);
+                let DefinitionKind::Method(method) = &method_def.kind else {
+                  return self.types.error();
+                };
+                method.clone()
+              };
+
+              let start = self.method_param_start(&method);
+              let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+              let (param_types, return_type) =
+                if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&resolved_def_id, call) {
+                  (subst_params[start..].to_vec(), subst_ret)
+                } else {
+                  let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+                  (raw_params, method.return_type)
+                };
+
+              let method_name = self.get_symbol_name(&ma.member);
+              if arg_types.len() != explicit_params.len() {
+                self.add_diagnostic(
+                  DiagnosticMessage::ArgumentCountMismatch {
+                    expected: explicit_params.len(),
+                    got: arg_types.len(),
+                    func_name: method_name.clone(),
+                    span: call.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+
+              let check_count = std::cmp::min(arg_types.len(), param_types.len());
+              for i in 0..check_count {
+                if self.types.is_error(&arg_types[i]) {
+                  continue;
+                }
+                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                  let expected = self.format_type_for_error(&param_types[i]);
+                  let got = self.format_type_for_error(&arg_types[i]);
+                  self.add_diagnostic(
+                    DiagnosticMessage::ArgumentTypeMismatch {
+                      param_idx: i + 1,
+                      expected,
+                      got,
+                      span: self.node_span(&call.arguments[i]).clone(),
+                    }
+                    .report(),
+                  );
+                }
+              }
+
+              return return_type;
+            },
+          }
+        }
+
+        if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
+          return result;
+        }
+
+        let type_name = self.format_type_for_error(&obj_type);
+        let member_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::FieldNotFound {
+            field: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
         self.types.error()
       },
       _ => {
@@ -6393,35 +6608,30 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&type_def.name);
 
     // Clone to release borrow on self.defs
-    let (lang_traits, instance_methods, type_id, is_enum, fields) = match &type_def.kind {
+    let (lang_traits, instance_methods, type_id, is_enum, fields, variants) = match &type_def.kind {
       DefinitionKind::Record(rd) => {
         let fields: Vec<_> = rd.fields.iter().map(|f| (f.name, f.type_id, f.span.clone())).collect();
-        (rd.lang_traits, Some(rd.instance_methods.clone()), rd.type_id, false, fields)
+        (
+          rd.lang_traits,
+          Some(rd.instance_methods.clone()),
+          rd.type_id,
+          false,
+          fields,
+          Vec::new(),
+        )
       },
-      DefinitionKind::Enum(ed) => (ed.lang_traits, None, ed.type_id, true, Vec::new()),
+      DefinitionKind::Enum(ed) => (
+        ed.lang_traits,
+        Some(ed.instance_methods.clone()),
+        ed.type_id,
+        true,
+        Vec::new(),
+        ed.variants.clone(),
+      ),
       _ => return,
     };
 
     if !lang_traits.drop && !lang_traits.clone && !lang_traits.copy {
-      return;
-    }
-
-    // Enums don't support instance methods yet, so lang trait methods can't be defined
-    if is_enum {
-      self.add_diagnostic(
-        DiagnosticMessage::LangTraitNotApplicable {
-          trait_name: if lang_traits.drop {
-            "Drop"
-          } else if lang_traits.clone {
-            "Clone"
-          } else {
-            "Copy"
-          }
-          .to_string(),
-          span: type_span.clone(),
-        }
-        .report(),
-      );
       return;
     }
 
@@ -6451,8 +6661,12 @@ impl<'a> Analyzer<'a> {
       );
     }
 
-    if lang_traits.copy && !is_enum {
-      self.validate_copy_structural(&type_name, &fields, type_span);
+    if lang_traits.copy {
+      if is_enum {
+        self.validate_copy_structural_enum(&type_name, &variants, type_span);
+      } else {
+        self.validate_copy_structural(&type_name, &fields, type_span);
+      }
     }
   }
 
@@ -6476,6 +6690,33 @@ impl<'a> Analyzer<'a> {
           }
           .report(),
         );
+      }
+    }
+  }
+
+  fn validate_copy_structural_enum(
+    &mut self,
+    type_name: &str,
+    variants: &[ignis_type::definition::EnumVariantDef],
+    type_span: &Span,
+  ) {
+    for variant in variants {
+      for (i, &payload_ty) in variant.payload.iter().enumerate() {
+        if !self.types.is_copy_with_defs(&payload_ty, &self.defs) {
+          let variant_name = self.get_symbol_name(&variant.name);
+          let payload_type = self.format_type_for_error(&payload_ty);
+
+          self.add_diagnostic(
+            DiagnosticMessage::CopyOnNonCopyVariantPayload {
+              type_name: type_name.to_string(),
+              variant_name,
+              payload_type,
+              payload_index: i,
+              span: type_span.clone(),
+            }
+            .report(),
+          );
+        }
       }
     }
   }

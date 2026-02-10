@@ -765,3 +765,32 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_enum_drop_use_after_move() {
+  e2e_ownership_error_test(
+    "enum_drop_use_after_move",
+    r#"
+@implements(Drop)
+enum Resource {
+    Active(i32),
+    Idle
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function consume(r: Resource): i32 {
+    return 0;
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource::Active(10);
+    consume(r);
+    r.drop();
+    return 0;
+}
+"#,
+  );
+}

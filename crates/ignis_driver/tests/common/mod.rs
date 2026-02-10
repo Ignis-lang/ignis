@@ -298,6 +298,12 @@ fn collect_mono_roots(
 
       // Include non-generic enums and their methods
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+        for entry in ed.instance_methods.values() {
+          match entry {
+            SymbolEntry::Single(id) => roots.push(*id),
+            SymbolEntry::Overload(ids) => roots.extend(ids),
+          }
+        }
         for entry in ed.static_methods.values() {
           match entry {
             SymbolEntry::Single(id) => roots.push(*id),

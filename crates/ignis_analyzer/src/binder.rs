@@ -390,6 +390,7 @@ impl<'a> Analyzer<'a> {
         variants: Vec::new(),
         variants_by_name: HashMap::new(),
         tag_type: self.types.u32(),
+        instance_methods: HashMap::new(),
         static_methods: HashMap::new(),
         static_fields: HashMap::new(),
         attrs: vec![],
@@ -450,6 +451,7 @@ impl<'a> Analyzer<'a> {
 
     let mut variants = Vec::new();
     let mut variants_by_name = HashMap::new();
+    let mut instance_methods = HashMap::new();
     let mut static_methods = HashMap::new();
     let mut static_fields = HashMap::new();
     let mut tag_value = 0u32;
@@ -489,17 +491,23 @@ impl<'a> Analyzer<'a> {
           tag_value += 1;
         },
         ASTEnumItem::Method(method) => {
-          // In enum, all methods are implicitly static
-          let method_def_id = self.bind_method(method, enum_def_id, true);
+          let is_static = method.is_static() || !method.has_self();
+          let method_def_id = self.bind_method(method, enum_def_id, is_static);
 
-          match static_methods.get_mut(&method.name) {
+          let target_map = if is_static {
+            &mut static_methods
+          } else {
+            &mut instance_methods
+          };
+
+          match target_map.get_mut(&method.name) {
             Some(SymbolEntry::Overload(group)) => group.push(method_def_id),
             Some(SymbolEntry::Single(existing)) => {
               let existing = *existing;
-              static_methods.insert(method.name, SymbolEntry::Overload(vec![existing, method_def_id]));
+              target_map.insert(method.name, SymbolEntry::Overload(vec![existing, method_def_id]));
             },
             None => {
-              static_methods.insert(method.name, SymbolEntry::Single(method_def_id));
+              target_map.insert(method.name, SymbolEntry::Single(method_def_id));
             },
           }
         },
@@ -535,6 +543,7 @@ impl<'a> Analyzer<'a> {
       ed.type_id = type_id;
       ed.variants = variants;
       ed.variants_by_name = variants_by_name;
+      ed.instance_methods = instance_methods;
       ed.static_methods = static_methods;
       ed.static_fields = static_fields;
       ed.attrs = enum_attrs;

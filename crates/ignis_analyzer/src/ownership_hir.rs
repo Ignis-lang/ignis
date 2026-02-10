@@ -1189,7 +1189,7 @@ impl<'a> HirOwnershipChecker<'a> {
     self.symbols.get(&def.name).to_string()
   }
 
-  /// Check if a method DefinitionId refers to a drop method on a record with `@implements(Drop)`.
+  /// Check if a method DefinitionId refers to a drop method on a type with `@implements(Drop)`.
   fn is_drop_method(
     &self,
     method_def_id: DefinitionId,
@@ -1209,6 +1209,7 @@ impl<'a> HirOwnershipChecker<'a> {
     let owner_def = self.defs.get(&owner_type_def_id);
     match &owner_def.kind {
       DefinitionKind::Record(rd) => rd.lang_traits.drop,
+      DefinitionKind::Enum(ed) => ed.lang_traits.drop,
       _ => false,
     }
   }

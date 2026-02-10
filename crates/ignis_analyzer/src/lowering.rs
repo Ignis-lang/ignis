@@ -530,10 +530,14 @@ impl<'a> Analyzer<'a> {
             continue;
           };
 
-          // Look up method entry (may be Single or Overload)
-          ed.static_methods
-            .get(&method.name)
-            .and_then(|e| self.find_method_def_for_ast_method(e, method))
+          let is_static = method.is_static() || !method.has_self();
+          let entry = if is_static {
+            ed.static_methods.get(&method.name)
+          } else {
+            ed.instance_methods.get(&method.name)
+          };
+
+          entry.and_then(|e| self.find_method_def_for_ast_method(e, method))
         };
 
         let Some(method_def_id) = method_def_id else {
@@ -2009,15 +2013,18 @@ impl<'a> Analyzer<'a> {
 
     // Look up the method to determine if it requires &mut self
     let method_info: Option<(DefinitionId, bool)> = match self.types.get(&receiver_record_type).clone() {
-      Type::Record(def_id) | Type::Instance { generic: def_id, .. } => {
-        let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind else {
-          return hir.alloc(HIRNode {
-            kind: HIRKind::Error,
-            span: call.span.clone(),
-            type_id: self.types.error(),
-          });
+      Type::Record(def_id) | Type::Instance { generic: def_id, .. } | Type::Enum(def_id) => {
+        let instance_methods = match &self.defs.get(&def_id).kind {
+          DefinitionKind::Record(rd) => rd.instance_methods.clone(),
+          DefinitionKind::Enum(ed) => ed.instance_methods.clone(),
+          _ => {
+            return hir.alloc(HIRNode {
+              kind: HIRKind::Error,
+              span: call.span.clone(),
+              type_id: self.types.error(),
+            });
+          },
         };
-        let rd = rd.clone();
 
         // First check lookup_resolved_call (for overloaded methods)
         if let Some(method_id) = self.lookup_resolved_call(node_id).cloned() {
@@ -2026,8 +2033,7 @@ impl<'a> Analyzer<'a> {
           } else {
             None
           }
-        } else if let Some(method_id) = rd.instance_methods.get(&ma.member).and_then(|e| e.as_single()) {
-          // Fallback to instance_methods lookup
+        } else if let Some(method_id) = instance_methods.get(&ma.member).and_then(|e| e.as_single()) {
           if let DefinitionKind::Method(md) = &self.defs.get(method_id).kind {
             Some((*method_id, md.self_mutable))
           } else {

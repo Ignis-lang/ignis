@@ -425,6 +425,10 @@ impl<'a> CEmitter<'a> {
       writeln!(self.output, "    }} payload;").unwrap();
     }
 
+    if ed.lang_traits.drop {
+      writeln!(self.output, "    uint8_t __ignis_drop_state;").unwrap();
+    }
+
     write!(self.output, "}}").unwrap();
     self.emit_record_attrs(&ed.attrs);
     writeln!(self.output, ";").unwrap();
@@ -1041,8 +1045,7 @@ impl<'a> CEmitter<'a> {
             self.emit_field_drops(&format!("l{}", local.index()), ty);
           },
           Type::Enum(_) => {
-            // Typechecker rejects @implements(Drop) on enums; unreachable in practice.
-            writeln!(self.output, "/* drop l{}: enum drop not supported */", local.index()).unwrap();
+            self.emit_field_drops(&format!("l{}", local.index()), ty);
           },
           Type::Infer => {
             panic!("ICE: drop of inferred type reached C codegen after implicit type removal");
@@ -1529,12 +1532,13 @@ impl<'a> CEmitter<'a> {
   ) -> Option<DefinitionId> {
     let def = self.defs.get(&def_id);
 
-    let rd = match &def.kind {
-      DefinitionKind::Record(rd) => rd,
+    let (instance_methods, has_drop) = match &def.kind {
+      DefinitionKind::Record(rd) => (&rd.instance_methods, rd.lang_traits.drop),
+      DefinitionKind::Enum(ed) => (&ed.instance_methods, ed.lang_traits.drop),
       _ => return None,
     };
 
-    for (sym_id, entry) in &rd.instance_methods {
+    for (sym_id, entry) in instance_methods {
       if self.symbols.get(sym_id) == "drop" {
         return match entry {
           ignis_type::definition::SymbolEntry::Single(id) => Some(*id),
@@ -1543,7 +1547,7 @@ impl<'a> CEmitter<'a> {
       }
     }
 
-    if rd.lang_traits.drop && rd.instance_methods.is_empty() {
+    if has_drop && instance_methods.is_empty() {
       for (method_def_id, method_def) in self.defs.iter() {
         if let DefinitionKind::Method(md) = &method_def.kind
           && md.owner_type == def_id
@@ -1561,8 +1565,8 @@ impl<'a> CEmitter<'a> {
 
   /// Recursively emit drop calls for each droppable field of a value.
   ///
-  /// For records with an explicit `drop` method, calls that method.
-  /// For records without one but with droppable fields, recurses into each field.
+  /// For types with an explicit `drop` method, calls that method.
+  /// For types without one but with droppable fields, recurses into each field.
   fn emit_field_drops(
     &mut self,
     expr: &str,
@@ -1578,7 +1582,6 @@ impl<'a> CEmitter<'a> {
 
         if let Some(method_def_id) = self.find_drop_method(def_id) {
           if has_drop_trait {
-            // Guard: skip if already dropped (prevents double-drop at runtime)
             writeln!(self.output, "if (!({}).__ignis_drop_state) {{", expr).unwrap();
             write!(self.output, "    ").unwrap();
           }
@@ -1587,7 +1590,6 @@ impl<'a> CEmitter<'a> {
           writeln!(self.output, "{}(&{});", name, expr).unwrap();
 
           if has_drop_trait {
-            // Mark as dropped AFTER destructor executes (so drop body can access its own fields)
             write!(self.output, "    ").unwrap();
             writeln!(self.output, "({}).__ignis_drop_state = 1;", expr).unwrap();
             writeln!(self.output, "}}").unwrap();
@@ -1609,8 +1611,86 @@ impl<'a> CEmitter<'a> {
         }
       },
 
+      Type::Enum(def_id) => {
+        let has_drop_trait = self.record_has_drop_trait(def_id);
+
+        if let Some(method_def_id) = self.find_drop_method(def_id) {
+          if has_drop_trait {
+            writeln!(self.output, "if (!({}).__ignis_drop_state) {{", expr).unwrap();
+            write!(self.output, "    ").unwrap();
+          }
+
+          let name = self.def_name(method_def_id);
+          writeln!(self.output, "{}(&{});", name, expr).unwrap();
+
+          if has_drop_trait {
+            write!(self.output, "    ").unwrap();
+            writeln!(self.output, "({}).__ignis_drop_state = 1;", expr).unwrap();
+            writeln!(self.output, "}}").unwrap();
+          }
+        } else {
+          self.emit_enum_variant_drops(expr, def_id);
+        }
+      },
+
       _ => {},
     }
+  }
+
+  /// Emit drop calls for an enum's variant payloads via switch-on-tag.
+  ///
+  /// Generates a `switch` statement that dispatches on the tag field, then
+  /// recursively drops each droppable payload field within the active variant.
+  fn emit_enum_variant_drops(
+    &mut self,
+    expr: &str,
+    def_id: DefinitionId,
+  ) {
+    let variants: Vec<_> = {
+      let def = self.defs.get(&def_id);
+      match &def.kind {
+        DefinitionKind::Enum(ed) => ed.variants.clone(),
+        _ => return,
+      }
+    };
+
+    let has_droppable_variant = variants.iter().any(|v| {
+      v.payload
+        .iter()
+        .any(|payload_ty| self.types.needs_drop_with_defs(payload_ty, self.defs))
+    });
+
+    if !has_droppable_variant {
+      return;
+    }
+
+    writeln!(self.output, "switch (({}).tag) {{", expr).unwrap();
+
+    for variant in &variants {
+      let droppable_fields: Vec<(usize, TypeId)> = variant
+        .payload
+        .iter()
+        .enumerate()
+        .filter(|(_, payload_ty)| self.types.needs_drop_with_defs(payload_ty, self.defs))
+        .map(|(i, ty)| (i, *ty))
+        .collect();
+
+      if droppable_fields.is_empty() {
+        continue;
+      }
+
+      writeln!(self.output, "case {}:", variant.tag_value).unwrap();
+
+      for (field_idx, field_ty) in droppable_fields {
+        let field_expr = format!("{}.payload.variant_{}.field_{}", expr, variant.tag_value, field_idx);
+        write!(self.output, "    ").unwrap();
+        self.emit_field_drops(&field_expr, field_ty);
+      }
+
+      writeln!(self.output, "    break;").unwrap();
+    }
+
+    writeln!(self.output, "}}").unwrap();
   }
 
   fn def_name(
@@ -1711,7 +1791,7 @@ impl<'a> CEmitter<'a> {
     }
   }
 
-  /// Check if a record DefinitionId has `@implements(Drop)`.
+  /// Check if a record or enum DefinitionId has `@implements(Drop)`.
   fn record_has_drop_trait(
     &self,
     def_id: DefinitionId,
@@ -1719,17 +1799,18 @@ impl<'a> CEmitter<'a> {
     let def = self.defs.get(&def_id);
     match &def.kind {
       DefinitionKind::Record(rd) => rd.lang_traits.drop,
+      DefinitionKind::Enum(ed) => ed.lang_traits.drop,
       _ => false,
     }
   }
 
-  /// Resolve a type (possibly behind pointer/reference) to a droppable record.
+  /// Resolve a type (possibly behind pointer/reference) to a droppable record or enum.
   fn resolve_droppable_record(
     &self,
     ty: TypeId,
   ) -> Option<DefinitionId> {
     match self.types.get(&ty).clone() {
-      Type::Record(def_id) => {
+      Type::Record(def_id) | Type::Enum(def_id) => {
         if self.record_has_drop_trait(def_id) {
           Some(def_id)
         } else {

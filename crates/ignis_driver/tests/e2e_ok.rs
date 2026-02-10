@@ -2675,3 +2675,72 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Enum Drop
+// =========================================================================
+
+#[test]
+fn e2e_enum_drop_custom() {
+  e2e_test(
+    "enum_drop_custom",
+    r#"
+@implements(Drop)
+enum Resource {
+    Active(i32),
+    Idle
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let r: Resource = Resource::Active(10);
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_enum_drop_manual() {
+  e2e_test(
+    "enum_drop_manual",
+    r#"
+@implements(Drop)
+enum Resource {
+    Active(i32),
+    Idle
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let mut r: Resource = Resource::Active(42);
+    r.drop();
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_enum_drop_owned_payload() {
+  e2e_test(
+    "enum_drop_owned_payload",
+    r#"
+enum MaybeMsg {
+    Some(string),
+    None
+}
+
+function main(): i32 {
+    let m: MaybeMsg = MaybeMsg::Some("hello");
+    return 0;
+}
+"#,
+  );
+}

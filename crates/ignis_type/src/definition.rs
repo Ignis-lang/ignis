@@ -187,6 +187,7 @@ pub struct EnumDefinition {
   pub variants: Vec<EnumVariantDef>,
   pub variants_by_name: HashMap<SymbolId, u32>,
   pub tag_type: TypeId,
+  pub instance_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_methods: HashMap<SymbolId, SymbolEntry>,
   pub static_fields: HashMap<SymbolId, DefinitionId>,
   pub attrs: Vec<RecordAttr>,

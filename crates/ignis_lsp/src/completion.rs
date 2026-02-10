@@ -756,12 +756,18 @@ fn add_instance_members(
     },
 
     DefinitionKind::Enum(enum_def) => {
-      // Enums might have instance methods
-      // (in this implementation, they don't have fields accessible via `.`)
-      for (sym_id, entry) in &enum_def.static_methods {
-        // Note: For instance access on enum values, we'd need instance_methods
-        // This is a placeholder for future extension
-        let _ = (sym_id, entry);
+      for (sym_id, entry) in &enum_def.instance_methods {
+        add_method_candidates(
+          sym_id,
+          entry,
+          prefix,
+          defs,
+          symbol_names,
+          types,
+          current_file,
+          false,
+          candidates,
+        );
       }
     },
 
