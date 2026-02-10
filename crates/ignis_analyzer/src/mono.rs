@@ -617,6 +617,11 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
+      HIRKind::BuiltinDropInPlace { ty, ptr } => {
+        let new_ptr = self.clone_hir_tree(*ptr);
+        (HIRKind::BuiltinDropInPlace { ty: *ty, ptr: new_ptr }, None)
+      },
+      HIRKind::BuiltinDropGlue { ty } => (HIRKind::BuiltinDropGlue { ty: *ty }, None),
       HIRKind::Reference { expression, mutable } => {
         let new_expr = self.clone_hir_tree(*expression);
         (
@@ -958,6 +963,10 @@ impl<'a> Monomorphizer<'a> {
         let nv = self.clone_hir_tree(*value);
         (HIRKind::RcNew { value: nv }, None)
       },
+      HIRKind::RcClone { value } => {
+        let nv = self.clone_hir_tree(*value);
+        (HIRKind::RcClone { value: nv }, None)
+      },
     }
   }
 
@@ -1062,7 +1071,7 @@ impl<'a> Monomorphizer<'a> {
           self.scan_hir(*val);
         }
       },
-      HIRKind::BuiltinLoad { ptr, .. } => {
+      HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => {
         self.scan_hir(*ptr);
       },
       HIRKind::BuiltinStore { ptr, value, .. } => {
@@ -1222,11 +1231,12 @@ impl<'a> Monomorphizer<'a> {
       | HIRKind::MaxOf(_)
       | HIRKind::MinOf(_)
       | HIRKind::Trap
-      | HIRKind::BuiltinUnreachable => {},
+      | HIRKind::BuiltinUnreachable
+      | HIRKind::BuiltinDropGlue { .. } => {},
       HIRKind::Panic(msg) => {
         self.scan_hir(*msg);
       },
-      HIRKind::RcNew { value } => {
+      HIRKind::RcNew { value } | HIRKind::RcClone { value } => {
         self.scan_hir(*value);
       },
     }
@@ -1943,6 +1953,18 @@ impl<'a> Monomorphizer<'a> {
           value: new_value,
         }
       },
+      HIRKind::BuiltinDropInPlace { ty, ptr } => {
+        let new_ptr = self.substitute_hir(*ptr, subst);
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::BuiltinDropInPlace {
+          ty: new_ty,
+          ptr: new_ptr,
+        }
+      },
+      HIRKind::BuiltinDropGlue { ty } => {
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::BuiltinDropGlue { ty: new_ty }
+      },
       HIRKind::Index { base, index } => {
         let new_base = self.substitute_hir(*base, subst);
         let new_index = self.substitute_hir(*index, subst);
@@ -2067,6 +2089,10 @@ impl<'a> Monomorphizer<'a> {
       HIRKind::RcNew { value } => {
         let nv = self.substitute_hir(*value, subst);
         HIRKind::RcNew { value: nv }
+      },
+      HIRKind::RcClone { value } => {
+        let nv = self.substitute_hir(*value, subst);
+        HIRKind::RcClone { value: nv }
       },
       // These are handled in substitute_hir directly
       HIRKind::Call { .. } | HIRKind::RecordInit { .. } | HIRKind::MethodCall { .. } | HIRKind::EnumVariant { .. } => {

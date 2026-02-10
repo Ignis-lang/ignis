@@ -2778,13 +2778,27 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_rc_copy() {
+fn e2e_rc_move() {
   e2e_test(
-    "rc_copy",
+    "rc_move",
     r#"
 function main(): i32 {
     let a: Rc<i32> = Rc::new(10);
     let b: Rc<i32> = a;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_clone() {
+  e2e_test(
+    "rc_clone",
+    r#"
+function main(): i32 {
+    let a: Rc<i32> = Rc::new(10);
+    let b: Rc<i32> = a.clone();
     return 0;
 }
 "#,
@@ -2803,6 +2817,24 @@ function consume(r: Rc<i32>): i32 {
 function main(): i32 {
     let a: Rc<i32> = Rc::new(7);
     return consume(a);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_rc_pass_clone_to_function() {
+  e2e_test(
+    "rc_pass_clone_to_function",
+    r#"
+function consume(r: Rc<i32>): i32 {
+    return 0;
+}
+
+function main(): i32 {
+    let a: Rc<i32> = Rc::new(7);
+    let result: i32 = consume(a.clone());
+    return result;
 }
 "#,
   );
@@ -2877,15 +2909,15 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_rc_multiple_copies() {
+fn e2e_rc_multiple_clones() {
   e2e_test(
-    "rc_multiple_copies",
+    "rc_multiple_clones",
     r#"
 function main(): i32 {
     let a: Rc<i32> = Rc::new(5);
-    let b: Rc<i32> = a;
-    let c: Rc<i32> = a;
-    let d: Rc<i32> = b;
+    let b: Rc<i32> = a.clone();
+    let c: Rc<i32> = a.clone();
+    let d: Rc<i32> = b.clone();
     return 0;
 }
 "#,
@@ -2927,12 +2959,12 @@ function main(): i32 {
     RcStats::reset();
 
     let a: Rc<i32> = Rc::new(10);
-    let b: Rc<i32> = a;
+    let b: Rc<i32> = a.clone();
 
     let retains: i32 = RcStats::retainCount();
     let releases: i32 = RcStats::releaseCount();
 
-    // retain once on copy, release happens twice at scope end (a and b)
+    // retain once on clone, release happens twice at scope end (a and b)
     return retains * 10 + releases;
 }
 "#,

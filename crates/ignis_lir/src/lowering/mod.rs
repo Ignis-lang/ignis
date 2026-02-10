@@ -338,6 +338,7 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Index { base, index } => self.lower_index(*base, *index, node.type_id, node.span),
       HIRKind::VectorLiteral { elements } => self.lower_vector_literal(elements, node.type_id, node.span),
       HIRKind::RcNew { value } => self.lower_rc_new(*value, node.type_id, node.span),
+      HIRKind::RcClone { value } => self.lower_rc_clone(*value, node.type_id, node.span),
 
       // Statements
       HIRKind::Let { name, value } => {
@@ -394,6 +395,11 @@ impl<'a> LoweringContext<'a> {
         self.lower_builtin_store(*ty, *ptr, *value, node.span);
         None
       },
+      HIRKind::BuiltinDropInPlace { ty, ptr } => {
+        self.lower_builtin_drop_in_place(*ty, *ptr);
+        None
+      },
+      HIRKind::BuiltinDropGlue { ty } => self.lower_builtin_drop_glue(*ty, node.type_id, node.span),
 
       // Records and enums
       HIRKind::FieldAccess { base, field_index } => {
@@ -492,13 +498,6 @@ impl<'a> LoweringContext<'a> {
         source: local_id,
       });
       self.load_alias_temps.insert(temp);
-
-      // Rc values need a retain when copied out of a local
-      if matches!(self.types.get(&ty), Type::Rc { .. }) {
-        self.fn_builder().emit(Instr::RcRetain {
-          operand: Operand::Temp(temp),
-        });
-      }
 
       Some(Operand::Temp(temp))
     } else {
@@ -829,6 +828,32 @@ impl<'a> LoweringContext<'a> {
     });
   }
 
+  fn lower_builtin_drop_in_place(
+    &mut self,
+    ty: TypeId,
+    ptr: HIRId,
+  ) {
+    let ptr_op = match self.lower_hir_node(ptr) {
+      Some(op) => op,
+      None => return,
+    };
+
+    self.fn_builder().emit(Instr::DropInPlace { ptr: ptr_op, ty });
+  }
+
+  fn lower_builtin_drop_glue(
+    &mut self,
+    ty: TypeId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    self.fn_builder().emit(Instr::DropGlue { dest, ty });
+
+    Some(Operand::Temp(dest))
+  }
+
   fn unwrap_reference_type(
     &self,
     ty: TypeId,
@@ -1036,6 +1061,30 @@ impl<'a> LoweringContext<'a> {
       dest,
       value: value_op,
       inner_type,
+    });
+
+    Some(Operand::Temp(dest))
+  }
+
+  fn lower_rc_clone(
+    &mut self,
+    value_hir: HIRId,
+    rc_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let value_op = self.lower_hir_node(value_hir)?;
+
+    self.fn_builder().emit(Instr::RcRetain {
+      operand: value_op.clone(),
+    });
+
+    // Clone produces a second owned handle pointing to the same allocation.
+    // Copy the opaque pointer into a fresh temp so each binding gets its own
+    // independently droppable value.
+    let dest = self.fn_builder().alloc_temp(rc_ty, span);
+    self.fn_builder().emit(Instr::Copy {
+      dest,
+      source: value_op,
     });
 
     Some(Operand::Temp(dest))

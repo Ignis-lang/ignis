@@ -271,7 +271,7 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_call(callee, &args, span);
       },
 
-      HIRKind::BuiltinLoad { ptr, .. } => {
+      HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => {
         self.check_node(ptr);
       },
 
@@ -295,6 +295,7 @@ impl<'a> HirOwnershipChecker<'a> {
       | HIRKind::AlignOf(_)
       | HIRKind::MaxOf(_)
       | HIRKind::MinOf(_)
+      | HIRKind::BuiltinDropGlue { .. }
       | HIRKind::Error => {},
 
       HIRKind::Binary { left, right, .. } => {
@@ -395,7 +396,7 @@ impl<'a> HirOwnershipChecker<'a> {
         self.reachable = false;
       },
 
-      HIRKind::RcNew { value } => {
+      HIRKind::RcNew { value } | HIRKind::RcClone { value } => {
         self.check_node(value);
       },
     }
@@ -1358,6 +1359,16 @@ impl<'a> HirOwnershipChecker<'a> {
             ));
           }
         }
+      },
+
+      ignis_type::types::Type::Rc { .. } => {
+        diag.notes.push(format!(
+          "'{}' is non-Copy because Rc owns a reference-counted allocation",
+          type_name
+        ));
+        diag
+          .notes
+          .push("help: consider using '.clone()' to create a shared reference".to_string());
       },
 
       ignis_type::types::Type::String => {

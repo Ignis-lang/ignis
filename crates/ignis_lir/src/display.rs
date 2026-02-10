@@ -318,6 +318,15 @@ impl<'a> LirPrinter<'a> {
         let op = self.format_operand(func, operand);
         writeln!(self.output, "    rc_retain {}", op).unwrap();
       },
+      Instr::DropInPlace { ptr, ty } => {
+        let p = self.format_operand(func, ptr);
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "    drop_in_place {} : {}", p, ty_str).unwrap();
+      },
+      Instr::DropGlue { dest, ty } => {
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "    t{} = drop_glue<{}>()", dest.index(), ty_str).unwrap();
+      },
     }
   }
 

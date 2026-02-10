@@ -1,6 +1,3 @@
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::only_used_in_recursion)]
-
 mod classify;
 mod emit;
 

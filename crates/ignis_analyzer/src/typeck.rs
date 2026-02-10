@@ -2528,26 +2528,18 @@ impl<'a> Analyzer<'a> {
     // Check for builtins - they are handled specially
     if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
       let name = self.get_symbol_name(&var.name);
-      if name == "typeOf" {
-        return self.typecheck_typeof_builtin(call, scope_kind, ctx);
-      }
-      if name == "sizeOf" {
-        return self.typecheck_sizeof_builtin(call, scope_kind, ctx);
-      }
-      if name == "alignOf" {
-        return self.typecheck_alignof_builtin(call, scope_kind, ctx);
-      }
-      if name == "__builtin_read" {
-        return self.typecheck_builtin_read(call, scope_kind, ctx);
-      }
-      if name == "__builtin_write" {
-        return self.typecheck_builtin_write(call, scope_kind, ctx);
-      }
-      if name == "maxOf" {
-        return self.typecheck_maxof_builtin(call, scope_kind, ctx);
-      }
-      if name == "minOf" {
-        return self.typecheck_minof_builtin(call, scope_kind, ctx);
+
+      match name.as_str() {
+        "typeOf" => return self.typecheck_typeof_builtin(call, scope_kind, ctx),
+        "sizeOf" => return self.typecheck_sizeof_builtin(call, scope_kind, ctx),
+        "alignOf" => return self.typecheck_alignof_builtin(call, scope_kind, ctx),
+        "__builtin_read" => return self.typecheck_builtin_read(call, scope_kind, ctx),
+        "__builtin_write" => return self.typecheck_builtin_write(call, scope_kind, ctx),
+        "__builtin_drop_in_place" => return self.typecheck_builtin_drop_in_place(call, scope_kind, ctx),
+        "__builtin_drop_glue" => return self.typecheck_builtin_drop_glue(call),
+        "maxOf" => return self.typecheck_maxof_builtin(call, scope_kind, ctx),
+        "minOf" => return self.typecheck_minof_builtin(call, scope_kind, ctx),
+        _ => {},
       }
     }
 
@@ -3559,6 +3551,43 @@ impl<'a> Analyzer<'a> {
         );
         self.types.error()
       },
+      Type::Rc { .. } => {
+        let member_name = self.get_symbol_name(&ma.member);
+
+        if member_name == "clone" {
+          if !call.arguments.is_empty() {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentCountMismatch {
+                expected: 0,
+                got: call.arguments.len(),
+                func_name: "clone".to_string(),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+          }
+
+          self.set_type(node_id, &obj_type);
+
+          return obj_type;
+        }
+
+        if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
+          return result;
+        }
+
+        let type_name = self.format_type_for_error(&obj_type);
+        self.add_diagnostic(
+          DiagnosticMessage::FieldNotFound {
+            field: member_name,
+            type_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+
       _ => {
         if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
           return result;
@@ -4728,6 +4757,155 @@ impl<'a> Analyzer<'a> {
     }
 
     self.types.void()
+  }
+
+  fn typecheck_builtin_drop_in_place(
+    &mut self,
+    call: &ASTCallExpression,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let type_args = match &call.type_args {
+      Some(args) => args,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "__builtin_drop_in_place".to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: "__builtin_drop_in_place".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
+    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
+      self.add_diagnostic(
+        DiagnosticMessage::CannotInferTypeParam {
+          param_name: "T".to_string(),
+          func_name: "__builtin_drop_in_place".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if call.arguments.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 1,
+          got: call.arguments.len(),
+          func_name: "__builtin_drop_in_place".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let pointer_type = self.types.pointer(value_type, true);
+    let infer = InferContext::expecting(pointer_type);
+    let arg_type = self.typecheck_node_with_infer(&call.arguments[0], scope_kind, ctx, &infer);
+
+    if !self.types.types_equal(&arg_type, &pointer_type) {
+      let expected = self.format_type_for_error(&pointer_type);
+      let got = self.format_type_for_error(&arg_type);
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentTypeMismatch {
+          param_idx: 1,
+          expected,
+          got,
+          span: self.node_span(&call.arguments[0]).clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.types.void()
+  }
+
+  fn typecheck_builtin_drop_glue(
+    &mut self,
+    call: &ASTCallExpression,
+  ) -> TypeId {
+    let type_args = match &call.type_args {
+      Some(args) => args,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "__builtin_drop_glue".to_string(),
+            span: call.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: "__builtin_drop_glue".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&call.span));
+    if self.types.contains_type_param(&value_type) || self.types.is_infer(&value_type) {
+      self.add_diagnostic(
+        DiagnosticMessage::CannotInferTypeParam {
+          param_name: "T".to_string(),
+          func_name: "__builtin_drop_glue".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if !call.arguments.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 0,
+          got: call.arguments.len(),
+          func_name: "__builtin_drop_glue".to_string(),
+          span: call.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    // Returns a function pointer: (*mut u8) -> void
+    let u8_type = self.types.u8();
+    let u8_ptr = self.types.pointer(u8_type, true);
+    let void_type = self.types.void();
+    self.types.function(vec![u8_ptr], void_type, false)
   }
 
   fn typecheck_maxof_builtin(

@@ -1,8 +1,3 @@
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::collapsible_match)]
-#![allow(clippy::only_used_in_recursion)]
-#![allow(clippy::too_many_arguments)]
-
 macro_rules! with_for_of_scope {
   ($self:expr, $node_id:expr, $for_of:expr, $body:block) => {{
     $self.scopes.push(ScopeKind::Loop);
@@ -565,14 +560,20 @@ impl<'a> Analyzer<'a> {
   ) -> bool {
     let symbols = self.symbols.borrow();
     let name = symbols.get(symbol_id);
-    name == "typeOf"
-      || name == "sizeOf"
-      || name == "alignOf"
-      || name == "maxOf"
-      || name == "minOf"
-      || name == "__builtin_read"
-      || name == "__builtin_write"
-      || name == "Rc"
+
+    matches!(
+      name,
+      "typeOf"
+        | "sizeOf"
+        | "alignOf"
+        | "maxOf"
+        | "minOf"
+        | "__builtin_read"
+        | "__builtin_write"
+        | "__builtin_drop_in_place"
+        | "__builtin_drop_glue"
+        | "Rc"
+    )
   }
 
   fn node_span(
