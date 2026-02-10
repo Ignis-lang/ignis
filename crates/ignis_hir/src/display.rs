@@ -668,6 +668,12 @@ impl<'a> HIRPrinter<'a> {
         self.print_node(*value);
         self.indent -= 1;
       },
+      HIRKind::RcNew { value } => {
+        writeln!(self.output, "RcNew : {}", type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*value);
+        self.indent -= 1;
+      },
       HIRKind::Panic(msg) => {
         writeln!(self.output, "Panic : {}", type_str).unwrap();
         self.indent += 1;

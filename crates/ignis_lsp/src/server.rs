@@ -1902,7 +1902,7 @@ fn format_type(
     Type::U64 => "u64".to_string(),
     Type::F32 => "f32".to_string(),
     Type::F64 => "f64".to_string(),
-    Type::Boolean => "bool".to_string(),
+    Type::Boolean => "boolean".to_string(),
     Type::Char => "char".to_string(),
     Type::String => "string".to_string(),
     Type::Void => "void".to_string(),
@@ -1924,8 +1924,11 @@ fn format_type(
         format!("&{}", format_type(types, defs, symbol_names, inner))
       }
     },
+    Type::Rc { inner } => {
+      format!("Rc<{}>", format_type(types, defs, symbol_names, inner))
+    },
     Type::Vector { element, size } => {
-      format!("[{}; {}]", format_type(types, defs, symbol_names, element), size)
+      format!("{}[{}]", format_type(types, defs, symbol_names, element), size)
     },
     Type::Tuple(elements) => {
       let elem_strs: Vec<_> = elements
@@ -1945,7 +1948,7 @@ fn format_type(
         .collect();
       let variadic = if *is_variadic { ", ..." } else { "" };
       format!(
-        "fn({}{}) -> {}",
+        "({}{}) -> {}",
         param_strs.join(", "),
         variadic,
         format_type(types, defs, symbol_names, ret)

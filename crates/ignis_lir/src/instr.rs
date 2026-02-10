@@ -191,4 +191,16 @@ pub enum Instr {
     variant_tag: u32,
     payload: Vec<Operand>,
   },
+
+  /// `dest = ignis_rc_alloc(sizeof(inner_type), NULL); *payload = value`
+  RcNew {
+    dest: TempId,
+    value: Operand,
+    inner_type: TypeId,
+  },
+
+  /// `ignis_rc_retain(operand)`
+  RcRetain {
+    operand: Operand,
+  },
 }

@@ -328,7 +328,9 @@ impl<'a> CEmitter<'a> {
   ) -> bool {
     match self.types.get(&type_id) {
       Type::Param { .. } | Type::Instance { .. } | Type::Infer => false,
-      Type::Pointer { inner, .. } | Type::Reference { inner, .. } => self.is_fully_monomorphized(*inner),
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } | Type::Rc { inner } => {
+        self.is_fully_monomorphized(*inner)
+      },
       Type::Vector { element, .. } => self.is_fully_monomorphized(*element),
       Type::Function { params, ret, .. } => {
         params.iter().all(|&p| self.is_fully_monomorphized(p)) && self.is_fully_monomorphized(*ret)
@@ -1047,6 +1049,9 @@ impl<'a> CEmitter<'a> {
           Type::Enum(_) => {
             self.emit_field_drops(&format!("l{}", local.index()), ty);
           },
+          Type::Rc { .. } => {
+            writeln!(self.output, "ignis_rc_release(l{});", local.index()).unwrap();
+          },
           Type::Infer => {
             panic!("ICE: drop of inferred type reached C codegen after implicit type removal");
           },
@@ -1142,6 +1147,30 @@ impl<'a> CEmitter<'a> {
         )
         .unwrap();
         writeln!(self.output, "exit(101);").unwrap();
+      },
+      Instr::RcNew {
+        dest,
+        value,
+        inner_type,
+      } => {
+        let v = self.format_operand(func, value);
+        let inner_c = self.format_type(*inner_type);
+        writeln!(
+          self.output,
+          "t{dest} = (IgnisRcBox*)ignis_rc_alloc(sizeof({inner_c}), NULL);",
+          dest = dest.index(),
+        )
+        .unwrap();
+        writeln!(
+          self.output,
+          "    *(({inner_c}*)ignis_rc_get(t{dest})) = {v};",
+          dest = dest.index(),
+        )
+        .unwrap();
+      },
+      Instr::RcRetain { operand } => {
+        let op = self.format_operand(func, operand);
+        writeln!(self.output, "ignis_rc_retain({});", op).unwrap();
       },
     }
   }
@@ -1483,6 +1512,7 @@ impl<'a> CEmitter<'a> {
       Type::Error => "/* error */ void*".to_string(),
       Type::Pointer { inner, .. } => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
+      Type::Rc { .. } => "IgnisRcBox*".to_string(),
       Type::Vector { element, .. } => {
         format!("{}*", self.format_type(*element))
       },
@@ -1631,6 +1661,10 @@ impl<'a> CEmitter<'a> {
         } else {
           self.emit_enum_variant_drops(expr, def_id);
         }
+      },
+
+      Type::Rc { .. } => {
+        writeln!(self.output, "ignis_rc_release({});", expr).unwrap();
       },
 
       _ => {},
@@ -2791,6 +2825,7 @@ pub fn format_c_type(
     Type::Reference { inner, .. } => {
       format!("{}*", format_c_type(types.get(inner), types, defs, symbols, namespaces))
     },
+    Type::Rc { .. } => "IgnisRcBox*".to_string(),
     Type::Vector { element, .. } => {
       format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
     },

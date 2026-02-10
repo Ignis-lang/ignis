@@ -305,6 +305,19 @@ impl<'a> LirPrinter<'a> {
       Instr::PanicMessage { message, .. } => {
         writeln!(self.output, "    panic \"{}\"", message).unwrap();
       },
+      Instr::RcNew {
+        dest,
+        value,
+        inner_type,
+      } => {
+        let v = self.format_operand(func, value);
+        let ty = self.format_type(*inner_type);
+        writeln!(self.output, "    t{} = rc_new {} : {}", dest.index(), v, ty).unwrap();
+      },
+      Instr::RcRetain { operand } => {
+        let op = self.format_operand(func, operand);
+        writeln!(self.output, "    rc_retain {}", op).unwrap();
+      },
     }
   }
 
@@ -412,6 +425,7 @@ impl<'a> LirPrinter<'a> {
       Type::Vector { element, size } => {
         format!("[{}; {}]", self.format_type(*element), size)
       },
+      Type::Rc { inner } => format!("Rc<{}>", self.format_type(*inner)),
       Type::Tuple(elems) => {
         let parts: Vec<_> = elems.iter().map(|e| self.format_type(*e)).collect();
         format!("({})", parts.join(", "))

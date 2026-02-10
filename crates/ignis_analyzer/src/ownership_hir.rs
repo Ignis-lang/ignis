@@ -394,6 +394,10 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::Trap | HIRKind::BuiltinUnreachable => {
         self.reachable = false;
       },
+
+      HIRKind::RcNew { value } => {
+        self.check_node(value);
+      },
     }
   }
 

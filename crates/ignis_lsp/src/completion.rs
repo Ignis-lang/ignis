@@ -1899,6 +1899,11 @@ fn format_type_brief(
       }
     },
 
+    Type::Rc { inner } => {
+      let inner_str = format_type_brief(types, defs, symbol_names, inner);
+      format!("Rc<{}>", inner_str)
+    },
+
     Type::Vector { element, size } => {
       let elem_str = format_type_brief(types, defs, symbol_names, element);
       format!("{}[{}]", elem_str, size)
