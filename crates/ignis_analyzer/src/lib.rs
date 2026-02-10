@@ -19,6 +19,7 @@ macro_rules! with_for_of_scope {
 
 mod binder;
 mod borrowck;
+pub mod borrowck_hir;
 mod checks;
 mod const_eval;
 pub mod dump;
@@ -53,6 +54,7 @@ use ignis_diagnostics::diagnostic_report::Diagnostic;
 use imports::ExportTable;
 
 pub use ignis_hir::{DropSchedules, ExitKey};
+pub use borrowck_hir::HirBorrowChecker;
 pub use ownership_hir::HirOwnershipChecker;
 pub use resolver::ResolvedPath;
 pub use scope::{ScopeTree, ScopeId, ScopeKind};
@@ -240,7 +242,6 @@ impl<'a> Analyzer<'a> {
     analyzer.bind_phase(roots);
     analyzer.resolve_phase(roots);
     analyzer.typecheck_phase(roots);
-    analyzer.borrowcheck_phase(roots);
     analyzer.const_eval_phase(roots);
     analyzer.extra_checks_phase(roots);
     analyzer.lint_phase(roots);
@@ -317,7 +318,6 @@ impl<'a> Analyzer<'a> {
     analyzer.bind_phase(roots);
     analyzer.resolve_phase(roots);
     analyzer.typecheck_phase(roots);
-    analyzer.borrowcheck_phase(roots);
     analyzer.const_eval_phase(roots);
     analyzer.extra_checks_phase(roots);
     analyzer.lint_phase(roots);

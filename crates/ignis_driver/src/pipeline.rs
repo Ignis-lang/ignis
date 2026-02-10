@@ -473,24 +473,32 @@ pub fn compile_project(
           .with_source_map(&ctx.source_map);
       let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
 
+      let borrow_checker =
+        ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+          .with_source_map(&ctx.source_map);
+      let borrow_diagnostics = borrow_checker.check();
+
+      let mut post_mono_diagnostics = ownership_diagnostics;
+      post_mono_diagnostics.extend(borrow_diagnostics);
+
       trace_dbg!(
         &config,
         DebugTrace::Ownership,
-        "check produced {} diagnostics",
-        ownership_diagnostics.len()
+        "post-mono check produced {} diagnostics",
+        post_mono_diagnostics.len()
       );
 
       if !config.quiet {
-        for diag in &ownership_diagnostics {
+        for diag in &post_mono_diagnostics {
           ignis_diagnostics::render(diag, &ctx.source_map);
         }
       }
 
-      let error_count = ownership_diagnostics
+      let error_count = post_mono_diagnostics
         .iter()
         .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
         .count();
-      let warning_count = ownership_diagnostics
+      let warning_count = post_mono_diagnostics
         .iter()
         .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Warning))
         .count();

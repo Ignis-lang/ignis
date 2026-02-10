@@ -59,10 +59,19 @@ fn compile_to_c(source: &str) -> Result<String, String> {
   // Re-borrow for downstream passes
   let sym_table = result.symbols.borrow();
 
-  // Run ownership analysis to produce drop schedules
+  // Run post-mono checks: ownership analysis + borrow checking
   let ownership_checker =
     ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
   let (drop_schedules, _) = ownership_checker.check();
+
+  let borrow_checker = ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
+  let borrow_diagnostics = borrow_checker.check();
+  if borrow_diagnostics
+    .iter()
+    .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+  {
+    return Err(format!("Borrow check errors: {:?}", borrow_diagnostics));
+  }
 
   let (lir, verify) = ignis_lir::lowering::lower_and_verify(
     &mono_output.hir,
@@ -243,7 +252,12 @@ pub fn compile_ownership_diagnostics(source: &str) -> Result<Vec<String>, String
     ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
   let (_, ownership_diagnostics) = ownership_checker.check();
 
-  let messages: Vec<String> = ownership_diagnostics
+  let borrow_checker = ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
+  let borrow_diagnostics = borrow_checker.check();
+
+  let all_diagnostics: Vec<_> = ownership_diagnostics.into_iter().chain(borrow_diagnostics).collect();
+
+  let messages: Vec<String> = all_diagnostics
     .iter()
     .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
     .map(|d| {

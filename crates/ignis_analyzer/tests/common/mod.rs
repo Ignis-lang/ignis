@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ignis_analyzer::{Analyzer, AnalyzerOutput, HirOwnershipChecker};
+use ignis_analyzer::{Analyzer, AnalyzerOutput, HirBorrowChecker, HirOwnershipChecker};
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
 use ignis_hir::{display::print_hir, HIR};
 use ignis_parser::{IgnisLexer, IgnisParser};
@@ -36,6 +36,10 @@ pub fn analyze(src: &str) -> AnalysisResult {
   let (_, ownership_diags) = checker.check();
   output.diagnostics.extend(ownership_diags);
 
+  let borrow_checker = HirBorrowChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+  let borrow_diags = borrow_checker.check();
+  output.diagnostics.extend(borrow_diags);
+
   AnalysisResult { output, source_map: sm }
 }
 
@@ -62,6 +66,10 @@ pub fn analyze_with_errors(src: &str) -> Option<AnalysisResult> {
       let checker = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
       let (_, ownership_diags) = checker.check();
       output.diagnostics.extend(ownership_diags);
+
+      let borrow_checker = HirBorrowChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+      let borrow_diags = borrow_checker.check();
+      output.diagnostics.extend(borrow_diags);
 
       Some(AnalysisResult { output, source_map: sm })
     },
@@ -91,6 +99,10 @@ pub fn analyze_allowing_parse_errors(src: &str) -> AnalysisResult {
       let checker = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
       let (_, ownership_diags) = checker.check();
       output.diagnostics.extend(ownership_diags);
+
+      let borrow_checker = HirBorrowChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+      let borrow_diags = borrow_checker.check();
+      output.diagnostics.extend(borrow_diags);
 
       AnalysisResult { output, source_map: sm }
     },
