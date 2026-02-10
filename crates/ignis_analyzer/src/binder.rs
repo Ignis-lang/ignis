@@ -19,7 +19,7 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::{
-  attribute::{FieldAttr, FunctionAttr, RecordAttr},
+  attribute::{FieldAttr, FunctionAttr, NamespaceAttr, RecordAttr},
   definition::{
     ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
     FunctionDefinition, LangTraitSet, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition,
@@ -822,6 +822,7 @@ impl<'a> Analyzer<'a> {
         kind: DefinitionKind::Namespace(NamespaceDefinition {
           namespace_id: ns_id,
           is_extern: false,
+          attrs: Vec::new(),
         }),
         name: ns_name,
         span: ns_stmt.span.clone(),
@@ -1269,12 +1270,14 @@ impl<'a> Analyzer<'a> {
   ) {
     let ns_id = self.namespaces.get_or_create(&extern_stmt.path, true);
     let ns_name = *extern_stmt.path.last().expect("extern path cannot be empty");
+    let namespace_attrs = self.bind_namespace_attrs(&extern_stmt.attrs, "extern namespace");
 
     if self.lookup_def(node_id).is_none() {
       let ns_def = Definition {
         kind: DefinitionKind::Namespace(NamespaceDefinition {
           namespace_id: ns_id,
           is_extern: true,
+          attrs: namespace_attrs,
         }),
         name: ns_name,
         span: extern_stmt.span.clone(),
@@ -1438,6 +1441,83 @@ impl<'a> Analyzer<'a> {
   // ========================================================================
   // Attribute Binding
   // ========================================================================
+
+  fn bind_namespace_attrs(
+    &mut self,
+    ast_attrs: &[ASTAttribute],
+    target: &str,
+  ) -> Vec<NamespaceAttr> {
+    let mut attrs = Vec::new();
+
+    for attr in ast_attrs {
+      let name = self.get_symbol_name(&attr.name);
+
+      match name.as_str() {
+        "lang" => {
+          if attr.args.len() != 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 1,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+            continue;
+          }
+
+          let hook_name = match &attr.args[0] {
+            ignis_ast::attribute::ASTAttributeArg::Identifier(symbol_id, _) => Some(self.get_symbol_name(symbol_id)),
+            ignis_ast::attribute::ASTAttributeArg::StringLiteral(value, _) => Some(value.clone()),
+            ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
+              self.add_diagnostic(
+                DiagnosticMessage::AttributeExpectedIdentifier {
+                  attr: "lang".to_string(),
+                  span: span.clone(),
+                }
+                .report(),
+              );
+              None
+            },
+          };
+
+          let Some(hook_name) = hook_name else {
+            continue;
+          };
+
+          if !matches!(
+            hook_name.as_str(),
+            "rc_runtime" | "string_runtime" | "vector_runtime" | "weak_runtime"
+          ) {
+            self.add_diagnostic(
+              DiagnosticMessage::UnknownAttribute {
+                name: format!("lang({})", hook_name),
+                target: target.to_string(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+            continue;
+          }
+
+          attrs.push(NamespaceAttr::LangHook(hook_name));
+        },
+        _ => {
+          self.add_diagnostic(
+            DiagnosticMessage::UnknownAttribute {
+              name,
+              target: target.to_string(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    attrs
+  }
 
   fn bind_record_attrs(
     &mut self,

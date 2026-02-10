@@ -16,3 +16,11 @@ pub enum FunctionAttr {
 pub enum FieldAttr {
   Aligned(u64),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NamespaceAttr {
+  /// Marks a namespace as a compiler-recognized language hook provider.
+  ///
+  /// Examples: `rc_runtime`, `string_runtime`, `vector_runtime`, `weak_runtime`.
+  LangHook(String),
+}

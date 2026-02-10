@@ -2891,3 +2891,50 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_rc_custom_hooks_symbols_and_balance() {
+  e2e_test(
+    "rc_custom_hooks_symbols_and_balance",
+    r#"
+@lang(rc_runtime)
+extern RcRuntimeCustom {
+    @externName("custom_rc_alloc")
+    function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+    @externName("custom_rc_get")
+    function get(handle: *mut void): *mut u8;
+
+    @externName("custom_rc_retain")
+    function retain(handle: *mut void): void;
+
+    @externName("custom_rc_release")
+    function release(handle: *mut void): void;
+}
+
+extern RcStats {
+    @externName("ignis_test_rc_reset_stats")
+    function reset(): void;
+
+    @externName("ignis_test_rc_retain_count")
+    function retainCount(): i32;
+
+    @externName("ignis_test_rc_release_count")
+    function releaseCount(): i32;
+}
+
+function main(): i32 {
+    RcStats::reset();
+
+    let a: Rc<i32> = Rc::new(10);
+    let b: Rc<i32> = a;
+
+    let retains: i32 = RcStats::retainCount();
+    let releases: i32 = RcStats::releaseCount();
+
+    // retain once on copy, release happens twice at scope end (a and b)
+    return retains * 10 + releases;
+}
+"#,
+  );
+}

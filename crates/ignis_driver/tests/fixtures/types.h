@@ -42,7 +42,8 @@ typedef struct {
   _Alignas(16) unsigned char payload[];
 } IgnisRcBox;
 
-static inline IgnisRcBox *ignis_rc_alloc(size_t payload_size, IgnisDropFn drop_fn) {
+static inline IgnisRcBox *ignis_rc_alloc(size_t payload_size, size_t payload_align, IgnisDropFn drop_fn) {
+  (void)payload_align;
   IgnisRcBox *box = (IgnisRcBox *)calloc(1, sizeof(IgnisRcBox) + payload_size);
   box->refcount = 1;
   box->drop_fn = drop_fn;
@@ -67,4 +68,40 @@ static inline void *ignis_rc_get(IgnisRcBox *box) {
 
 static inline int ignis_rc_count(IgnisRcBox *box) {
   return box->refcount;
+}
+
+/* Custom Rc hook wrappers used by std=false/custom-runtime E2E tests */
+static int ignis_test_rc_retain_calls = 0;
+static int ignis_test_rc_release_calls = 0;
+
+static inline void ignis_test_rc_reset_stats(void) {
+  ignis_test_rc_retain_calls = 0;
+  ignis_test_rc_release_calls = 0;
+}
+
+static inline int ignis_test_rc_retain_count(void) {
+  return ignis_test_rc_retain_calls;
+}
+
+static inline int ignis_test_rc_release_count(void) {
+  return ignis_test_rc_release_calls;
+}
+
+static inline void *custom_rc_alloc(uint64_t payload_size, uint64_t payload_align, void *drop_fn) {
+  (void)payload_align;
+  return (void *)ignis_rc_alloc((size_t)payload_size, (size_t)payload_align, (IgnisDropFn)drop_fn);
+}
+
+static inline void *custom_rc_get(void *handle) {
+  return ignis_rc_get((IgnisRcBox *)handle);
+}
+
+static inline void custom_rc_retain(void *handle) {
+  ignis_test_rc_retain_calls += 1;
+  ignis_rc_retain((IgnisRcBox *)handle);
+}
+
+static inline void custom_rc_release(void *handle) {
+  ignis_test_rc_release_calls += 1;
+  ignis_rc_release((IgnisRcBox *)handle);
 }

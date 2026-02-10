@@ -165,6 +165,8 @@ fn build_config_from_project(
 
   // Load manifest
   config.manifest = load_manifest(&config.std_path);
+  config.c_compiler = project.cc.clone();
+  config.cflags = project.cflags.clone();
 
   // Determine emit paths
   let out_dir = &project.out_dir;
@@ -227,6 +229,8 @@ fn build_config_for_single_file(
   config.std = !cli.std;
   config.auto_load_std = !cli.auto_load_std;
   config.manifest = load_manifest(&config.std_path);
+  config.c_compiler = cmd.cc.clone().unwrap_or_else(|| "gcc".to_string());
+  config.cflags = Vec::new();
 
   let out_dir = cmd.output_dir.as_deref().unwrap_or("build");
   let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
@@ -317,6 +321,8 @@ fn check_config_from_project(
   config.std = project.std_path.is_some();
   config.auto_load_std = project.std_path.is_some();
   config.manifest = load_manifest(&config.std_path);
+  config.c_compiler = project.cc.clone();
+  config.cflags = project.cflags.clone();
 
   let out_dir = &project.out_dir;
   let emit_c = if project.emit.c {

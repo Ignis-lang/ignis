@@ -25,8 +25,10 @@ pub struct E2EResult {
 }
 
 fn compile_to_c(source: &str) -> Result<String, String> {
+  let source = inject_test_rc_hooks_if_needed(source);
+
   let mut sm = SourceMap::new();
-  let file_id = sm.add_file("test.ign", source.to_string());
+  let file_id = sm.add_file("test.ign", source);
   let src = &sm.get(&file_id).text;
 
   let mut lexer = IgnisLexer::new(file_id, src);
@@ -102,7 +104,42 @@ fn compile_to_c(source: &str) -> Result<String, String> {
     &result.namespaces,
     &sym_table,
     &headers,
+    result.rc_hooks,
   ))
+}
+
+fn inject_test_rc_hooks_if_needed(source: &str) -> String {
+  let uses_rc = source.contains("Rc<") || source.contains("Rc::new");
+  let declares_hooks = source.contains("function alloc(")
+    && source.contains("function get(")
+    && source.contains("function retain(")
+    && source.contains("function release(");
+
+  if !uses_rc || declares_hooks {
+    return source.to_string();
+  }
+
+  format!(
+    r#"
+@lang(rc_runtime)
+extern __rc_test {{
+  @externName("ignis_rc_alloc")
+  function alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
+
+  @externName("ignis_rc_get")
+  function get(handle: *mut void): *mut u8;
+
+  @externName("ignis_rc_retain")
+  function retain(handle: *mut void): void;
+
+  @externName("ignis_rc_release")
+  function release(handle: *mut void): void;
+}}
+
+{}
+"#,
+    source
+  )
 }
 
 /// Splits stderr into (user output, LSan report). LSan output starts with

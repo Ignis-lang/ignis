@@ -349,6 +349,10 @@ impl TypeStore {
     self.types.get(id)
   }
 
+  pub fn iter(&self) -> impl Iterator<Item = (TypeId, &Type)> {
+    self.types.iter()
+  }
+
   #[inline]
   pub fn i8(&self) -> TypeId {
     self.primitives[&Type::I8]

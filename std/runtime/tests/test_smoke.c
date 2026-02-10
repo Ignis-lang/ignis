@@ -105,7 +105,7 @@ static void test_memcpy_memmove(void) {
 // =============================================================================
 
 static void test_rc_alloc_and_get(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
   assert(rc != NULL);
   assert(ignis_rc_count(rc) == 1);
 
@@ -119,7 +119,7 @@ static void test_rc_alloc_and_get(void) {
 }
 
 static void test_rc_retain_release(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
   assert(ignis_rc_count(rc) == 1);
 
   ignis_rc_retain(rc);
@@ -148,7 +148,7 @@ static void test_drop_fn(void *payload) {
 static void test_rc_drop_fn_called(void) {
   drop_called_count = 0;
 
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), test_drop_fn);
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), test_drop_fn);
   ignis_rc_retain(rc);
 
   // First release should NOT call drop (refcount goes to 1)
@@ -163,7 +163,7 @@ static void test_rc_drop_fn_called(void) {
 static void test_rc_payload_with_drop(void) {
   drop_called_count = 0;
 
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int) * 4, test_drop_fn);
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int) * 4, _Alignof(int), test_drop_fn);
   int *arr = (int *)ignis_rc_get(rc);
 
   arr[0] = 10;
@@ -179,7 +179,7 @@ static void test_rc_payload_with_drop(void) {
 }
 
 static void test_rc_zero_payload(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(0, NULL);
+  IgnisRcBox *rc = ignis_rc_alloc(0, _Alignof(max_align_t), NULL);
   assert(rc != NULL);
   assert(ignis_rc_count(rc) == 1);
   ignis_rc_release(rc);
@@ -192,9 +192,9 @@ static void test_rc_zero_payload(void) {
 static void test_rc_multiple_alive_no_leak(void) {
   ignis_mem_reset_stats();
 
-  IgnisRcBox *a = ignis_rc_alloc(sizeof(int), NULL);
-  IgnisRcBox *b = ignis_rc_alloc(sizeof(int), NULL);
-  IgnisRcBox *c = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *a = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
+  IgnisRcBox *b = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
+  IgnisRcBox *c = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
 
   *(int *)ignis_rc_get(a) = 1;
   *(int *)ignis_rc_get(b) = 2;
@@ -215,7 +215,7 @@ static void test_rc_multiple_alive_no_leak(void) {
 static void test_rc_shared_no_leak(void) {
   ignis_mem_reset_stats();
 
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
   *(int *)ignis_rc_get(rc) = 42;
 
   // Simulate three "copies" (like let b = a; let c = a;)
@@ -245,11 +245,11 @@ static void test_rc_nested_drop_no_leak(void) {
   nested_drop_released = 0;
 
   // Inner Rc: plain i32
-  IgnisRcBox *inner = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *inner = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
   *(int *)ignis_rc_get(inner) = 99;
 
   // Outer Rc: holds a pointer to inner, drop_fn releases inner
-  IgnisRcBox *outer = ignis_rc_alloc(sizeof(IgnisRcBox *), nested_inner_drop);
+  IgnisRcBox *outer = ignis_rc_alloc(sizeof(IgnisRcBox *), _Alignof(IgnisRcBox *), nested_inner_drop);
   *(IgnisRcBox **)ignis_rc_get(outer) = inner;
 
   IgnisMemStats mid = ignis_mem_stats();
@@ -268,7 +268,7 @@ static void test_rc_nested_drop_no_leak(void) {
 static void test_rc_interleaved_retain_release_no_leak(void) {
   ignis_mem_reset_stats();
 
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), NULL);
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
 
   ignis_rc_retain(rc);   // 2
   ignis_rc_retain(rc);   // 3
@@ -287,7 +287,7 @@ static void test_rc_interleaved_retain_release_no_leak(void) {
 }
 
 static void test_rc_payload_alignment(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(double), NULL);
+  IgnisRcBox *rc = ignis_rc_alloc(sizeof(double), _Alignof(double), NULL);
   void *payload = ignis_rc_get(rc);
 
   // Payload must be aligned to max_align_t (at least 8 bytes on all platforms)

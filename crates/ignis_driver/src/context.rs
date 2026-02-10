@@ -720,6 +720,26 @@ impl CompilationContext {
       export_table.insert(module_id, exports);
     }
 
+    let (rc_hooks, rc_hook_diagnostics) = {
+      let symbols = self.symbol_table.borrow();
+      ignis_analyzer::resolve_rc_hooks(&mut shared_types, &shared_defs, &shared_namespaces, &symbols)
+    };
+
+    if render_diagnostics && !config.quiet {
+      for diag in &rc_hook_diagnostics {
+        ignis_diagnostics::render(diag, &self.source_map);
+      }
+    }
+
+    if rc_hook_diagnostics
+      .iter()
+      .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+    {
+      has_errors = true;
+    }
+
+    all_diagnostics.extend(rc_hook_diagnostics);
+
     let output = ignis_analyzer::AnalyzerOutput {
       types: shared_types,
       defs: shared_defs,
@@ -734,6 +754,7 @@ impl CompilationContext {
       import_item_defs: root_import_item_defs,
       import_module_files: root_import_module_files,
       extension_methods: shared_extension_methods,
+      rc_hooks,
     };
 
     (output, has_errors)

@@ -371,6 +371,10 @@ pub struct IgnisConfig {
   pub check_std: bool,
   pub check_runtime: bool,
   pub runtime_path_override: Option<String>,
+  /// C compiler executable used for C compilation/linking (e.g. gcc, clang).
+  pub c_compiler: String,
+  /// Additional C compiler/linker flags passed to the C toolchain invocation.
+  pub cflags: Vec<String>,
 }
 
 impl IgnisConfig {
@@ -395,6 +399,8 @@ impl IgnisConfig {
     check_std: bool,
     check_runtime: bool,
     runtime_path_override: Option<String>,
+    c_compiler: String,
+    cflags: Vec<String>,
   ) -> Self {
     Self {
       project_config,
@@ -417,6 +423,8 @@ impl IgnisConfig {
       check_std,
       check_runtime,
       runtime_path_override,
+      c_compiler,
+      cflags,
     }
   }
 
@@ -440,6 +448,7 @@ impl IgnisConfig {
       quiet,
       verbose,
       output_level,
+      c_compiler: "gcc".to_string(),
       ..Self::default()
     }
   }
