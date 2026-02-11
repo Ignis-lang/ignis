@@ -17,6 +17,7 @@
 //! // ignis_lsp::run(config).await;
 //! ```
 
+mod at_items;
 mod completion;
 mod convert;
 mod inlay;

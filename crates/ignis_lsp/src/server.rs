@@ -13,7 +13,7 @@ use tower_lsp::{Client, LanguageServer};
 use url::Url;
 
 use crate::completion::{
-  CompletionContext, complete_dot, complete_double_colon, complete_identifier, complete_import_path,
+  CompletionContext, complete_at_items, complete_dot, complete_double_colon, complete_identifier, complete_import_path,
   complete_record_init, detect_context, log, to_completion_items,
 };
 use crate::convert::{convert_diagnostic, LineIndex};
@@ -794,6 +794,17 @@ impl LanguageServer for Server {
       }
     }
 
+    // Check if cursor is on a `@builtin` or `@directive` name
+    {
+      let source_text = output.source_map.get(&file_id).text.as_str();
+      let mut lexer = ignis_parser::IgnisLexer::new(file_id, source_text);
+      lexer.scan_tokens();
+
+      if let Some(hover) = resolve_at_item_hover(&lexer.tokens, byte_offset, &file_id, &line_index) {
+        return Ok(Some(hover));
+      }
+    }
+
     // First, check if cursor is on an import path string (e.g., "std::io")
     for (span, target_file_id) in &output.import_module_files {
       if span.file != file_id {
@@ -1535,6 +1546,7 @@ impl LanguageServer for Server {
           assigned_fields,
           prefix,
         } => complete_record_init(record_name, assigned_fields, prefix, &output, &file_id),
+        CompletionContext::AfterAt { prefix } => complete_at_items(prefix),
       };
 
       if candidates.is_empty() {
@@ -1971,6 +1983,84 @@ fn format_type(
       format!("{}<{}>", base_name, arg_strs.join(", "))
     },
   }
+}
+
+/// Check if the cursor is on an `@`-item name and return hover if so.
+///
+/// Scans tokens for pattern: `@` followed by `Identifier` where cursor is on
+/// either the `@` or the identifier.
+fn resolve_at_item_hover(
+  tokens: &[ignis_token::token::Token],
+  byte_offset: u32,
+  file_id: &ignis_type::file::FileId,
+  line_index: &crate::convert::LineIndex,
+) -> Option<Hover> {
+  use ignis_token::token_types::TokenType;
+
+  let meaningful: Vec<&ignis_token::token::Token> = tokens
+    .iter()
+    .filter(|t| {
+      t.span.file == *file_id
+        && !matches!(
+          t.type_,
+          TokenType::Whitespace | TokenType::Comment | TokenType::MultiLineComment | TokenType::DocComment
+        )
+    })
+    .collect();
+
+  for (i, tok) in meaningful.iter().enumerate() {
+    if tok.type_ == TokenType::Identifier
+      && tok.span.start.0 <= byte_offset
+      && byte_offset <= tok.span.end.0
+      && i > 0
+      && meaningful[i - 1].type_ == TokenType::At
+      && let Some(item) = crate::at_items::lookup(&tok.lexeme)
+    {
+      let hover_text = crate::at_items::format_hover(item);
+      let at_span = ignis_type::span::Span {
+        file: *file_id,
+        start: meaningful[i - 1].span.start,
+        end: tok.span.end,
+      };
+      let range = line_index.span_to_range(&at_span);
+
+      return Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+          kind: MarkupKind::Markdown,
+          value: hover_text,
+        }),
+        range: Some(range),
+      });
+    }
+
+    if tok.type_ == TokenType::At
+      && tok.span.start.0 <= byte_offset
+      && byte_offset <= tok.span.end.0
+      && i + 1 < meaningful.len()
+      && meaningful[i + 1].type_ == TokenType::Identifier
+    {
+      let name_tok = meaningful[i + 1];
+      if let Some(item) = crate::at_items::lookup(&name_tok.lexeme) {
+        let hover_text = crate::at_items::format_hover(item);
+        let at_span = ignis_type::span::Span {
+          file: *file_id,
+          start: tok.span.start,
+          end: name_tok.span.end,
+        };
+        let range = line_index.span_to_range(&at_span);
+
+        return Some(Hover {
+          contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: hover_text,
+          }),
+          range: Some(range),
+        });
+      }
+    }
+  }
+
+  None
 }
 
 /// Format a definition for hover display with full signature.

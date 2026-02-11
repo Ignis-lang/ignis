@@ -122,6 +122,7 @@ pub fn classify_tokens(
   line_index: &LineIndex,
 ) -> SemanticTokens {
   let mut abs_tokens = Vec::new();
+  let mut prev_meaningful_type: Option<TokenType> = None;
 
   for token in tokens {
     if &token.span.file != file_id {
@@ -132,8 +133,15 @@ pub fn classify_tokens(
       continue;
     }
 
-    if let Some(abs) = classify_token(token, ref_spans, defs, line_index) {
+    if let Some(abs) = classify_token(token, ref_spans, defs, line_index, prev_meaningful_type) {
       abs_tokens.push(abs);
+    }
+
+    if !matches!(
+      token.type_,
+      TokenType::Comment | TokenType::MultiLineComment | TokenType::DocComment | TokenType::InnerDocComment
+    ) {
+      prev_meaningful_type = Some(token.type_);
     }
   }
 
@@ -146,6 +154,7 @@ fn classify_token(
   ref_spans: &HashMap<Span, DefinitionId>,
   defs: &DefinitionStore,
   line_index: &LineIndex,
+  prev_meaningful_type: Option<TokenType>,
 ) -> Option<AbsToken> {
   let (ty, mods) = match token.type_ {
     TokenType::Let
@@ -247,13 +256,43 @@ fn classify_token(
     | TokenType::Pipe
     | TokenType::Caret
     | TokenType::Tilde
-    | TokenType::QuestionMark => (TokenTypeIndex::Operator as u32, 0),
+    | TokenType::QuestionMark
+    | TokenType::At => (TokenTypeIndex::Operator as u32, 0),
 
     TokenType::Identifier => {
+      if prev_meaningful_type == Some(TokenType::At) {
+        return classify_at_identifier(token, line_index);
+      }
       return classify_identifier(token, ref_spans, defs, line_index);
     },
 
     _ => return None,
+  };
+
+  let (line, col) = line_index.line_col_utf16(token.span.start);
+
+  Some(AbsToken {
+    line,
+    col,
+    len: token.lexeme.encode_utf16().count() as u32,
+    ty,
+    mods,
+  })
+}
+
+/// Classify an identifier that follows `@` (builtin or directive).
+fn classify_at_identifier(
+  token: &Token,
+  line_index: &LineIndex,
+) -> Option<AbsToken> {
+  use crate::at_items;
+
+  let (ty, mods) = match at_items::lookup(&token.lexeme) {
+    Some(item) => match item.kind {
+      at_items::AtItemKind::Builtin => (TokenTypeIndex::Function as u32, 0),
+      at_items::AtItemKind::Directive => (TokenTypeIndex::Keyword as u32, 0),
+    },
+    None => (TokenTypeIndex::Keyword as u32, 0),
   };
 
   let (line, col) = line_index.line_col_utf16(token.span.start);
@@ -485,5 +524,107 @@ mod tests {
     assert_eq!(TokenTypeIndex::String as u32, 15);
     assert_eq!(TokenTypeIndex::Number as u32, 16);
     assert_eq!(TokenTypeIndex::Operator as u32, 17);
+  }
+
+  use ignis_parser::IgnisLexer;
+  use ignis_type::file::FileId;
+
+  fn lex(source: &str) -> Vec<ignis_token::token::Token> {
+    let mut lexer = IgnisLexer::new(FileId::default(), source);
+    lexer.scan_tokens();
+    lexer.tokens.into_iter().filter(|t| t.type_ != TokenType::Eof).collect()
+  }
+
+  /// Classify `source` and return `(token_type, lexeme)` for each emitted semantic token.
+  fn classify_source(source: &str) -> Vec<(u32, String)> {
+    use ignis_type::definition::DefinitionStore;
+
+    let file_id = FileId::default();
+    let tokens = lex(source);
+    let ref_spans = HashMap::new();
+    let defs = DefinitionStore::new();
+    let line_index = LineIndex::new(source.to_string());
+
+    let semantic = classify_tokens(&tokens, &ref_spans, &defs, &file_id, &line_index);
+
+    let meaningful: Vec<_> = tokens
+      .iter()
+      .filter(|t| !matches!(t.type_, TokenType::Whitespace | TokenType::Eof))
+      .collect();
+
+    let mut result = Vec::new();
+    let mut abs_line = 0u32;
+    let mut abs_col = 0u32;
+
+    for st in &semantic.data {
+      if st.delta_line > 0 {
+        abs_line += st.delta_line;
+        abs_col = st.delta_start;
+      } else {
+        abs_col += st.delta_start;
+      }
+
+      let lexeme = meaningful
+        .iter()
+        .find(|tok| {
+          let (tok_line, tok_col) = line_index.line_col_utf16(tok.span.start);
+          tok_line == abs_line && tok_col == abs_col
+        })
+        .map(|tok| tok.lexeme.clone())
+        .unwrap_or_else(|| format!("?@{}:{}", abs_line, abs_col));
+
+      result.push((st.token_type, lexeme));
+    }
+
+    result
+  }
+
+  #[test]
+  fn test_at_token_classified_as_operator() {
+    let result = classify_source("@sizeOf");
+    assert!(!result.is_empty());
+    assert_eq!(result[0].0, TokenTypeIndex::Operator as u32);
+  }
+
+  #[test]
+  fn test_builtin_after_at_classified_as_function() {
+    let result = classify_source("@sizeOf");
+    assert!(result.len() >= 2, "expected at least 2 tokens, got {}", result.len());
+
+    let (ty, ref lexeme) = result[1];
+    assert_eq!(lexeme, "sizeOf");
+    assert_eq!(ty, TokenTypeIndex::Function as u32);
+  }
+
+  #[test]
+  fn test_directive_after_at_classified_as_keyword() {
+    let result = classify_source("@packed");
+    assert!(result.len() >= 2, "expected at least 2 tokens, got {}", result.len());
+
+    let (ty, ref lexeme) = result[1];
+    assert_eq!(lexeme, "packed");
+    assert_eq!(ty, TokenTypeIndex::Keyword as u32);
+  }
+
+  #[test]
+  fn test_unknown_at_item_defaults_to_keyword() {
+    let result = classify_source("@nonexistent");
+    assert!(result.len() >= 2);
+
+    let (ty, ref lexeme) = result[1];
+    assert_eq!(lexeme, "nonexistent");
+    assert_eq!(ty, TokenTypeIndex::Keyword as u32);
+  }
+
+  #[test]
+  fn test_at_classification_does_not_leak_to_next_line() {
+    // `foo` has no definition so classify_identifier returns None — it either
+    // won't appear at all or must not be classified as Function.
+    let result = classify_source("@packed\nfoo");
+    let foo_entry = result.iter().find(|(_, lex)| lex == "foo");
+
+    if let Some((ty, _)) = foo_entry {
+      assert_ne!(*ty, TokenTypeIndex::Function as u32);
+    }
   }
 }
