@@ -74,6 +74,12 @@ pub enum CompletionContext {
     /// Partial field name typed.
     prefix: String,
   },
+
+  /// After `@` — builtin call or directive attribute.
+  AfterAt {
+    /// Partial identifier typed after `@`.
+    prefix: String,
+  },
 }
 
 /// Internal representation of a completion candidate.
@@ -155,6 +161,11 @@ pub fn detect_context(
 
   // Find tokens near cursor
   let (prev_token, current_token) = find_adjacent_tokens(&meaningful, cursor_offset);
+
+  // Check for `@` context (builtins and directives)
+  if let Some(ctx) = detect_at_context(prev_token, current_token, &meaningful, cursor_offset, source_text) {
+    return Some(ctx);
+  }
 
   // Check for `.` context
   if let Some(prev) = prev_token {
@@ -480,6 +491,151 @@ fn detect_record_init_context(
     assigned_fields,
     prefix,
   })
+}
+
+/// Detect `@` context for builtin/directive completion.
+///
+/// Handles:
+/// - `@|` — cursor right after `@`
+/// - `@pa|` — cursor typing identifier after `@`
+/// - `@[fo|` or `@[foo, ba|` — cursor inside attribute list
+fn detect_at_context(
+  prev_token: Option<&Token>,
+  current_token: Option<&Token>,
+  meaningful: &[&Token],
+  cursor_offset: u32,
+  source_text: &str,
+) -> Option<CompletionContext> {
+  if let Some(prev) = prev_token
+    && prev.type_ == TokenType::At
+  {
+    let prefix = extract_prefix_at_cursor(current_token, cursor_offset);
+    return Some(CompletionContext::AfterAt { prefix });
+  }
+
+  // Identifier at cursor preceded by `@`
+  if let Some(curr) = current_token
+    && curr.type_ == TokenType::Identifier
+  {
+    let at_before = find_token_before_offset(meaningful, curr.span.start.0);
+    if let Some(at_tok) = at_before
+      && at_tok.type_ == TokenType::At
+    {
+      let prefix_end = cursor_offset.min(curr.span.end.0);
+      let prefix_start = curr.span.start.0;
+      let prefix = source_text
+        .get(prefix_start as usize..prefix_end as usize)
+        .unwrap_or("")
+        .to_string();
+      return Some(CompletionContext::AfterAt { prefix });
+    }
+  }
+
+  // Identifier ending at cursor — check what precedes it
+  if let Some(prev) = prev_token
+    && prev.type_ == TokenType::Identifier
+    && prev.span.end.0 == cursor_offset
+  {
+    let before_ident = find_token_before_offset(meaningful, prev.span.start.0);
+    if let Some(before) = before_ident {
+      if before.type_ == TokenType::At {
+        let prefix = prev.lexeme.clone();
+        return Some(CompletionContext::AfterAt { prefix });
+      }
+
+      if (before.type_ == TokenType::LeftBrack || before.type_ == TokenType::Comma)
+        && let Some(ctx) = check_at_bracket_list(meaningful, before, &prev.lexeme)
+      {
+        return Some(ctx);
+      }
+    }
+  }
+
+  // Inside `@[...]` with no identifier started yet
+  if let Some(prev) = prev_token
+    && (prev.type_ == TokenType::LeftBrack || prev.type_ == TokenType::Comma)
+    && let Some(ctx) = check_at_bracket_list(meaningful, prev, &extract_prefix_at_cursor(current_token, cursor_offset))
+  {
+    return Some(ctx);
+  }
+
+  None
+}
+
+/// Check if a `[` or `,` token is part of an `@[...]` attribute list.
+///
+/// Returns `AfterAt` context with the given prefix if the bracket/comma
+/// is preceded by the `@[` pattern.
+fn check_at_bracket_list(
+  meaningful: &[&Token],
+  bracket_or_comma: &Token,
+  prefix: &str,
+) -> Option<CompletionContext> {
+  let trigger_idx = meaningful.iter().position(|t| std::ptr::eq(*t, bracket_or_comma))?;
+
+  if bracket_or_comma.type_ == TokenType::LeftBrack
+    && trigger_idx > 0
+    && meaningful[trigger_idx - 1].type_ == TokenType::At
+  {
+    return Some(CompletionContext::AfterAt {
+      prefix: prefix.to_string(),
+    });
+  }
+
+  if bracket_or_comma.type_ == TokenType::Comma {
+    let mut depth = 0i32;
+    for i in (0..trigger_idx).rev() {
+      match meaningful[i].type_ {
+        TokenType::RightBrack => depth += 1,
+        TokenType::LeftBrack => {
+          if depth == 0 {
+            if i > 0 && meaningful[i - 1].type_ == TokenType::At {
+              return Some(CompletionContext::AfterAt {
+                prefix: prefix.to_string(),
+              });
+            }
+            break;
+          }
+          depth -= 1;
+        },
+        _ => {},
+      }
+    }
+  }
+
+  None
+}
+
+/// Build completion candidates for `@`-items (builtins and directives).
+pub fn complete_at_items(prefix: &str) -> Vec<CompletionCandidate> {
+  use crate::at_items;
+
+  let matches = at_items::completions_matching(prefix);
+  let mut candidates = Vec::new();
+
+  for item in matches {
+    let (kind, detail_prefix) = match item.kind {
+      at_items::AtItemKind::Builtin => (CompletionKind::Function, "builtin"),
+      at_items::AtItemKind::Directive => (CompletionKind::Keyword, "directive"),
+    };
+
+    let (insert_text, insert_format) = match at_items::snippet_for(item) {
+      Some(snippet) => (Some(snippet), Some(InsertTextFormat::SNIPPET)),
+      None => (Some(item.name.to_string()), None),
+    };
+
+    candidates.push(CompletionCandidate {
+      label: item.name.to_string(),
+      kind,
+      detail: Some(format!("({}) {}", detail_prefix, item.summary)),
+      documentation: item.doc.map(|d| d.to_string()),
+      insert_text,
+      insert_text_format: insert_format,
+      sort_priority: 15,
+    });
+  }
+
+  candidates
 }
 
 /// Complete unassigned fields in a record initializer.
@@ -2219,5 +2375,106 @@ mod tests {
 
     // Position past end should return text.len()
     assert_eq!(find_char_boundary(text, 100), text.len());
+  }
+
+  #[test]
+  fn test_detect_context_after_at() {
+    let source = "@";
+    let tokens = lex(source);
+    let context = detect_context(&tokens, 1, source);
+
+    match context {
+      Some(CompletionContext::AfterAt { prefix }) => {
+        assert_eq!(prefix, "");
+      },
+      other => panic!("Expected AfterAt context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_after_at_with_prefix() {
+    let source = "@pa";
+    let tokens = lex(source);
+    let context = detect_context(&tokens, 3, source);
+
+    match context {
+      Some(CompletionContext::AfterAt { prefix }) => {
+        assert_eq!(prefix, "pa");
+      },
+      other => panic!("Expected AfterAt context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_after_at_full_name() {
+    let source = "@sizeOf";
+    let tokens = lex(source);
+    let context = detect_context(&tokens, 7, source);
+
+    match context {
+      Some(CompletionContext::AfterAt { prefix }) => {
+        assert_eq!(prefix, "sizeOf");
+      },
+      other => panic!("Expected AfterAt context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_at_bracket_list() {
+    let source = "@[fo";
+    let tokens = lex(source);
+    let context = detect_context(&tokens, 4, source);
+
+    match context {
+      Some(CompletionContext::AfterAt { prefix }) => {
+        assert_eq!(prefix, "fo");
+      },
+      other => panic!("Expected AfterAt context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_at_bracket_list_comma() {
+    let source = "@[foo, ba";
+    let tokens = lex(source);
+    let context = detect_context(&tokens, 9, source);
+
+    match context {
+      Some(CompletionContext::AfterAt { prefix }) => {
+        assert_eq!(prefix, "ba");
+      },
+      other => panic!("Expected AfterAt context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_complete_at_items_returns_all() {
+    let candidates = complete_at_items("");
+    assert!(candidates.len() > 20, "expected all items, got {}", candidates.len());
+    assert!(candidates.iter().any(|c| c.label == "sizeOf"));
+    assert!(candidates.iter().any(|c| c.label == "packed"));
+  }
+
+  #[test]
+  fn test_complete_at_items_filters_by_prefix() {
+    let candidates = complete_at_items("si");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].label, "sizeOf");
+  }
+
+  #[test]
+  fn test_complete_at_items_builtin_has_snippet() {
+    let candidates = complete_at_items("sizeOf");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].insert_text_format, Some(InsertTextFormat::SNIPPET));
+    assert!(candidates[0].insert_text.as_deref().unwrap().contains("${1:T}"));
+  }
+
+  #[test]
+  fn test_complete_at_items_directive_no_snippet() {
+    let candidates = complete_at_items("packed");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].insert_text_format, None);
+    assert_eq!(candidates[0].insert_text.as_deref(), Some("packed"));
   }
 }
