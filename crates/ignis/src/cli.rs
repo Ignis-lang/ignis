@@ -147,9 +147,13 @@ pub struct InitCommand {
   /// The name of the project
   pub name: String,
 
-  /// Initialize Git repository
-  #[arg(short, long, default_value = "false")]
-  pub git: bool,
+  /// Disable Git repository initialization
+  #[arg(long)]
+  pub no_git: bool,
+
+  /// Initialize as a library project
+  #[arg(long)]
+  pub lib: bool,
 
   /// The author of the project
   #[arg(short, long)]
@@ -175,9 +179,9 @@ pub struct InitCommand {
   #[arg(short, long, value_enum, default_value = "c")]
   pub target: Target,
 
-  /// Main file of the project
-  #[arg(short, long, default_value = "main.ign")]
-  pub main_file: String,
+  /// Entry file name (defaults to main.ign or lib.ign with --lib)
+  #[arg(short, long)]
+  pub main_file: Option<String>,
 
   /// Output directory
   #[arg(short, long, default_value = "build")]

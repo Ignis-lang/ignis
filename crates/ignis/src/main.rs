@@ -1,4 +1,5 @@
 mod cli;
+mod init;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
   CliOverrides, Project,
 };
+use init::run_init;
 
 // =============================================================================
 // Compile Input Resolution
@@ -510,10 +512,7 @@ fn main() {
 
     SubCommand::CheckRuntime(cmd) => run_check_runtime(&cli, cmd.runtime_path.as_deref()),
 
-    SubCommand::Init(_) => {
-      eprintln!("Init command not yet implemented");
-      Ok(())
-    },
+    SubCommand::Init(cmd) => run_init(cmd, cli.quiet),
   };
 
   if result.is_err() {
