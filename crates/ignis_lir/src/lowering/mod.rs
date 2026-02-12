@@ -468,6 +468,7 @@ impl<'a> LoweringContext<'a> {
       IgnisLiteralValue::Boolean(v) => ConstValue::Bool(*v, ty),
       IgnisLiteralValue::Char(v) => ConstValue::Char(*v, ty),
       IgnisLiteralValue::String(v) => ConstValue::String(v.clone(), ty),
+      IgnisLiteralValue::Atom(sym) => ConstValue::Atom(sym.index(), ty),
       IgnisLiteralValue::Hex(v) => {
         let val = u64::from_str_radix(v, 16).unwrap_or(0);
         ConstValue::UInt(val, ty)

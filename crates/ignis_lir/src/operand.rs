@@ -38,6 +38,7 @@ pub enum ConstValue {
   Bool(bool, TypeId),
   Char(char, TypeId),
   String(String, TypeId),
+  Atom(u32, TypeId),
   Null(TypeId),
   /// Undefined/uninitialized.
   Undef(TypeId),
@@ -53,6 +54,7 @@ impl ConstValue {
       ConstValue::Bool(_, ty) => *ty,
       ConstValue::Char(_, ty) => *ty,
       ConstValue::String(_, ty) => *ty,
+      ConstValue::Atom(_, ty) => *ty,
       ConstValue::Null(ty) => *ty,
       ConstValue::Undef(ty) => *ty,
     }

@@ -1054,6 +1054,7 @@ impl DisplayLisp for IgnisTypeSyntax {
       IgnisTypeSyntax::F64 => "F64".to_string(),
       IgnisTypeSyntax::String => "String".to_string(),
       IgnisTypeSyntax::Boolean => "Bool".to_string(),
+      IgnisTypeSyntax::Atom => "Atom".to_string(),
       IgnisTypeSyntax::Void => "Void".to_string(),
       IgnisTypeSyntax::Null => "Null".to_string(),
       IgnisTypeSyntax::Char => "Char".to_string(),

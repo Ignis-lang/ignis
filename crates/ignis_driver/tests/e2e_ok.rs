@@ -3431,3 +3431,63 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_atom_literal() {
+  e2e_test(
+    "atom_literal",
+    r#"
+function main(): i32 {
+    let a: atom = :foo;
+    let b: atom = :foo;
+    
+    if (a == b) {
+        return 1;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_atom_is_copy_across_call() {
+  e2e_test(
+    "atom_is_copy_across_call",
+    r#"
+function id(x: atom): atom {
+    return x;
+}
+
+function main(): i32 {
+    let original: atom = :foo;
+    let copied: atom = id(original);
+
+    if (original == copied) {
+        return 7;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_atom_equality() {
+  e2e_test(
+    "atom_equality",
+    r#"
+function main(): i32 {
+    let x: atom = :same;
+    let y: atom = :same;
+    let z: atom = :different;
+    
+    if (x == y && x != z) {
+        return 42;
+    }
+    return 0;
+}
+"#,
+  );
+}

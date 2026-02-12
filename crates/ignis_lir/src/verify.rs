@@ -506,6 +506,7 @@ impl<'a> LirVerifier<'a> {
       crate::ConstValue::Bool(_, ty) => *ty,
       crate::ConstValue::Char(_, ty) => *ty,
       crate::ConstValue::String(_, ty) => *ty,
+      crate::ConstValue::Atom(_, ty) => *ty,
       crate::ConstValue::Null(ty) => *ty,
       crate::ConstValue::Undef(ty) => *ty,
     }

@@ -376,6 +376,7 @@ impl<'a> LirPrinter<'a> {
       ConstValue::Bool(v, _) => format!("{}", v),
       ConstValue::Char(v, _) => format!("'{}'", escape_char(*v)),
       ConstValue::String(v, _) => format!("\"{}\"", escape_string(v)),
+      ConstValue::Atom(id, _) => format!(":atom#{}", id),
       ConstValue::Null(_) => "null".to_string(),
       ConstValue::Undef(_) => "undef".to_string(),
     }
@@ -399,6 +400,7 @@ impl<'a> LirPrinter<'a> {
       Type::Boolean => "bool".to_string(),
       Type::Char => "char".to_string(),
       Type::String => "string".to_string(),
+      Type::Atom => "atom".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "!".to_string(),
       Type::Infer => "?".to_string(),

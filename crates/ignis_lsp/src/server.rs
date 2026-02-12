@@ -1917,6 +1917,7 @@ fn format_type(
     Type::Boolean => "boolean".to_string(),
     Type::Char => "char".to_string(),
     Type::String => "string".to_string(),
+    Type::Atom => "atom".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "never".to_string(),
     Type::Infer => "infer".to_string(),

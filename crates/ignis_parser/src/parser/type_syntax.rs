@@ -189,6 +189,7 @@ impl super::IgnisParser {
       TokenType::Float64Type => IgnisTypeSyntax::F64,
       TokenType::BooleanType => IgnisTypeSyntax::Boolean,
       TokenType::StringType => IgnisTypeSyntax::String,
+      TokenType::AtomType => IgnisTypeSyntax::Atom,
       TokenType::CharType => IgnisTypeSyntax::Char,
       TokenType::Void => IgnisTypeSyntax::Void,
       _ => IgnisTypeSyntax::Void,
@@ -213,6 +214,7 @@ impl super::IgnisParser {
         | TokenType::Float32Type
         | TokenType::Float64Type
         | TokenType::BooleanType
+        | TokenType::AtomType
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void

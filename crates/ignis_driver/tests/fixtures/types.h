@@ -18,6 +18,7 @@ typedef int64_t i64;
 typedef float f32;
 typedef double f64;
 typedef u8 boolean;
+typedef u32 ignis_atom_t;
 typedef char *string;
 
 /* Minimal string runtime stubs for E2E tests */

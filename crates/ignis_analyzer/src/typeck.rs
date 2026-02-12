@@ -2361,6 +2361,7 @@ impl<'a> Analyzer<'a> {
       IgnisLiteralValue::Boolean(_) => self.types.boolean(),
       IgnisLiteralValue::Char(_) => self.types.char(),
       IgnisLiteralValue::String(_) => self.types.string(),
+      IgnisLiteralValue::Atom(_) => self.types.atom(),
       IgnisLiteralValue::Null => {
         if let Some(expected) = &infer.expected {
           if self.is_pointer_type(expected) {
@@ -5551,6 +5552,12 @@ impl<'a> Analyzer<'a> {
           return self.types.boolean();
         }
 
+        if matches!(self.types.get(&left_type), Type::Atom)
+          && matches!(self.types.get(&right_type), Type::Atom)
+        {
+          return self.types.boolean();
+        }
+
         let operator = format!("{:?}", binary.operator);
         let left = self.format_type_for_error(&left_type);
         let right = self.format_type_for_error(&right_type);
@@ -5923,6 +5930,7 @@ impl<'a> Analyzer<'a> {
       IgnisTypeSyntax::F64 => self.types.f64(),
       IgnisTypeSyntax::String => self.types.string(),
       IgnisTypeSyntax::Boolean => self.types.boolean(),
+      IgnisTypeSyntax::Atom => self.types.atom(),
       IgnisTypeSyntax::Void => self.types.void(),
       IgnisTypeSyntax::Char => self.types.char(),
       IgnisTypeSyntax::Implicit => self.types.infer(),
@@ -6323,6 +6331,7 @@ impl<'a> Analyzer<'a> {
       Type::Boolean => "bool".to_string(),
       Type::Char => "char".to_string(),
       Type::String => "string".to_string(),
+      Type::Atom => "atom".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "never".to_string(),
       Type::Infer => "infer".to_string(),

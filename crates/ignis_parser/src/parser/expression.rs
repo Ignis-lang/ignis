@@ -213,6 +213,7 @@ impl IgnisParser {
         | TokenType::Float32Type
         | TokenType::Float64Type
         | TokenType::BooleanType
+        | TokenType::AtomType
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void => {},
@@ -308,6 +309,7 @@ impl IgnisParser {
         | TokenType::Float32Type
         | TokenType::Float64Type
         | TokenType::BooleanType
+        | TokenType::AtomType
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void => {},
@@ -512,6 +514,22 @@ impl IgnisParser {
         ))))
       },
       TokenType::At => self.parse_builtin_call(&token),
+      TokenType::Colon => {
+        let colon_span = token.span.clone();
+
+        if self.at(TokenType::Colon) {
+          return Err(DiagnosticMessage::UnexpectedToken {
+            at: self.peek().span.clone(),
+          });
+        }
+
+        let ident = self.expect(TokenType::Identifier)?.clone();
+        let symbol = self.insert_symbol(&ident);
+        let span = Span::merge(&colon_span, &ident.span);
+
+        let lit = ASTLiteral::new(IgnisLiteralValue::Atom(symbol), span);
+        Ok(self.allocate_expression(ASTExpression::Literal(lit)))
+      },
       _ => Err(DiagnosticMessage::ExpectedExpression(token.span.clone())),
     }
   }
@@ -770,6 +788,20 @@ mod tests {
       ASTExpression::Literal(lit) => match &lit.value {
         IgnisLiteralValue::Null => {},
         other => panic!("expected Null, got {:?}", other),
+      },
+      other => panic!("expected literal, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_atom_literal() {
+    let result = parse_expr(":foo");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Literal(lit) => match &lit.value {
+        IgnisLiteralValue::Atom(_) => {},
+        other => panic!("expected Atom, got {:?}", other),
       },
       other => panic!("expected literal, got {:?}", other),
     }
@@ -1256,6 +1288,20 @@ mod tests {
   #[test]
   fn parses_generic_call_with_reference_type_arg() {
     let result = parse_expr("process<&mut i32>(x)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Call(call) => {
+        let type_args = call.type_args.as_ref().expect("should have type args");
+        assert_eq!(type_args.len(), 1);
+      },
+      other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_call_with_atom_type_arg() {
+    let result = parse_expr("intern<atom>(x)");
     let expr = get_expr(&result);
 
     match expr {

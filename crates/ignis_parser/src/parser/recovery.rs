@@ -52,6 +52,7 @@ impl IgnisParser {
         | TokenType::True
         | TokenType::False
         | TokenType::Null
+        | TokenType::Colon
         | TokenType::LeftParen
         | TokenType::LeftBrack
         | TokenType::Bang

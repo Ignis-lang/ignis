@@ -1,6 +1,8 @@
 use std::fmt::Display;
 use ordered_float::OrderedFloat;
 
+use crate::symbol::SymbolId;
+
 fn escape_special_characters(value: &str) -> String {
   value
     .replace("\\", "\\\\")
@@ -26,6 +28,7 @@ pub enum IgnisLiteralValue {
   Boolean(bool),
   Char(char),
   String(String),
+  Atom(SymbolId),
   Hex(String),
   Binary(String),
   Null,
@@ -49,6 +52,7 @@ impl Display for IgnisLiteralValue {
       IgnisLiteralValue::Float64(x) => write!(f, "{}", x),
       IgnisLiteralValue::Char(x) => write!(f, "'{}'", x),
       IgnisLiteralValue::String(x) => write!(f, "\"{}\"", escape_special_characters(x)),
+      IgnisLiteralValue::Atom(sym) => write!(f, ":{}", sym.index()),
       IgnisLiteralValue::Hex(x) => write!(f, "0x{}", x),
       IgnisLiteralValue::Binary(x) => write!(f, "0b{}", x),
       IgnisLiteralValue::Boolean(x) => write!(f, "{}", x),
