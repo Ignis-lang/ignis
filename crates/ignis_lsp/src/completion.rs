@@ -1019,13 +1019,13 @@ pub fn complete_double_colon(
   // Resolve the path to a definition
   let target_def_id = resolve_path_to_def(path_segments, output, file_id);
 
-  let Some(def_id) = target_def_id else {
-    // Try resolving as namespace
-    if let Some(ns_id) = resolve_path_to_namespace(path_segments, output) {
-      add_namespace_members(&ns_id, prefix, output, file_id, &mut candidates);
-    }
-    return candidates;
-  };
+    let Some(def_id) = target_def_id else {
+      // Try resolving as namespace
+      if let Some(ns_id) = resolve_path_to_namespace(path_segments, output) {
+        add_namespace_members(&ns_id, prefix, output, &mut candidates);
+      }
+      return candidates;
+    };
 
   let def = output.defs.get(&def_id);
 
@@ -1161,7 +1161,7 @@ pub fn complete_double_colon(
     },
 
     DefinitionKind::Namespace(ns_def) => {
-      add_namespace_members(&ns_def.namespace_id, prefix, output, file_id, &mut candidates);
+      add_namespace_members(&ns_def.namespace_id, prefix, output, &mut candidates);
     },
 
     _ => {},
@@ -1627,7 +1627,7 @@ fn resolve_path_to_def(
 
   // Find the first segment as a definition
   let first_name = &path[0];
-  let mut current_def_id: Option<DefinitionId> = None;
+  let mut current_def_id: Option<DefinitionId> = resolve_imported_path_head(first_name, output, current_file);
 
   // Search for definition by name, prefer same file
   for (def_id, def) in output.defs.iter() {
@@ -1673,42 +1673,102 @@ fn resolve_path_to_def(
     current_def_id = match &def.kind {
       DefinitionKind::Namespace(ns_def) => {
         let ns = output.namespaces.get(&ns_def.namespace_id);
+        let mut next_def_id: Option<DefinitionId> = None;
 
         // Look for child namespace
         for (sym_id, child_ns_id) in &ns.children {
           if let Some(name) = output.symbol_names.get(sym_id)
             && name == segment
           {
-            // Find the definition for this namespace
-            for (d_id, d) in output.defs.iter() {
-              if let DefinitionKind::Namespace(child_ns_def) = &d.kind
-                && child_ns_def.namespace_id == *child_ns_id
-              {
-                return Some(d_id);
-              }
-            }
+            next_def_id = find_namespace_def_id(child_ns_id, output, current_file);
+            break;
           }
         }
 
-        // Look for definition in namespace
-        for (sym_id, entry) in &ns.definitions {
-          if let Some(name) = output.symbol_names.get(sym_id)
-            && name == segment
-          {
-            match entry {
-              SymbolEntry::Single(id) => return Some(*id),
-              SymbolEntry::Overload(ids) => return ids.first().copied(),
+        if next_def_id.is_some() {
+          next_def_id
+        } else {
+          // Look for definition in namespace
+          for (sym_id, entry) in &ns.definitions {
+            if let Some(name) = output.symbol_names.get(sym_id)
+              && name == segment
+            {
+              next_def_id = match entry {
+                SymbolEntry::Single(id) => Some(*id),
+                SymbolEntry::Overload(ids) => ids.first().copied(),
+              };
+              break;
             }
           }
-        }
 
-        None
+          next_def_id
+        }
       },
       _ => None,
     };
   }
 
   current_def_id
+}
+
+fn resolve_imported_path_head(
+  head: &str,
+  output: &AnalyzeProjectOutput,
+  current_file: &FileId,
+) -> Option<DefinitionId> {
+  let source = &output.source_map.get(current_file).text;
+
+  for (span, def_id) in &output.import_item_defs {
+    if span.file != *current_file {
+      continue;
+    }
+
+    let start = span.start.0 as usize;
+    let end = span.end.0 as usize;
+
+    if start >= source.len() || end > source.len() || start >= end {
+      continue;
+    }
+
+    let name = source[start..end].trim();
+    if name == head {
+      return Some(*def_id);
+    }
+  }
+
+  None
+}
+
+fn find_namespace_def_id(
+  namespace_id: &ignis_type::namespace::NamespaceId,
+  output: &AnalyzeProjectOutput,
+  current_file: &FileId,
+) -> Option<DefinitionId> {
+  let mut fallback: Option<DefinitionId> = None;
+
+  for (def_id, def) in output.defs.iter() {
+    let DefinitionKind::Namespace(ns_def) = &def.kind else {
+      continue;
+    };
+
+    if ns_def.namespace_id != *namespace_id {
+      continue;
+    }
+
+    if !ns_def.is_extern && !is_visible(def, current_file) {
+      continue;
+    }
+
+    if def.span.file == *current_file {
+      return Some(def_id);
+    }
+
+    if fallback.is_none() {
+      fallback = Some(def_id);
+    }
+  }
+
+  fallback
 }
 
 /// Resolve a path to a namespace ID.
@@ -1720,18 +1780,51 @@ fn resolve_path_to_namespace(
     return None;
   }
 
-  // Build symbol IDs for path
-  let mut sym_path = Vec::new();
+  // Fast path: resolve by symbol IDs if all segments are known.
+  let mut sym_path = Vec::with_capacity(path.len());
+  let mut all_segments_known = true;
   for segment in path {
-    let sym_id = output
+    if let Some(sym_id) = output
       .symbol_names
       .iter()
       .find(|(_, n)| *n == segment)
-      .map(|(id, _)| *id)?;
-    sym_path.push(sym_id);
+      .map(|(id, _)| *id)
+    {
+      sym_path.push(sym_id);
+    } else {
+      all_segments_known = false;
+      break;
+    }
   }
 
-  output.namespaces.lookup(&sym_path)
+  if all_segments_known
+    && let Some(ns_id) = output.namespaces.lookup(&sym_path)
+  {
+    return Some(ns_id);
+  }
+
+  // Fallback: match namespace full paths by names.
+  for (_, def) in output.defs.iter() {
+    let DefinitionKind::Namespace(ns_def) = &def.kind else {
+      continue;
+    };
+
+    let full_path = output.namespaces.full_path(ns_def.namespace_id);
+    if full_path.len() != path.len() {
+      continue;
+    }
+
+    let is_match = full_path
+      .iter()
+      .zip(path.iter())
+      .all(|(sym_id, segment)| output.symbol_names.get(sym_id).is_some_and(|name| name == segment));
+
+    if is_match {
+      return Some(ns_def.namespace_id);
+    }
+  }
+
+  None
 }
 
 /// Add members of a namespace to candidates.
@@ -1739,7 +1832,6 @@ fn add_namespace_members(
   ns_id: &ignis_type::namespace::NamespaceId,
   prefix: &str,
   output: &AnalyzeProjectOutput,
-  current_file: &FileId,
   candidates: &mut Vec<CompletionCandidate>,
 ) {
   let ns = output.namespaces.get(ns_id);
@@ -1782,10 +1874,6 @@ fn add_namespace_members(
 
     for def_id in def_ids {
       let def = output.defs.get(&def_id);
-
-      if !is_visible(def, current_file) {
-        continue;
-      }
 
       let (kind, detail, insert_text, insert_format) =
         def_to_completion_info(def, name, &output.types, &output.defs, &output.symbol_names, false);
@@ -2031,6 +2119,7 @@ fn format_type_brief(
     Type::Boolean => "bool".to_string(),
     Type::Char => "char".to_string(),
     Type::String => "string".to_string(),
+    Type::Atom => "atom".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "never".to_string(),
     Type::Infer => "infer".to_string(),
@@ -2106,6 +2195,9 @@ fn format_type_brief(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::path::PathBuf;
+
+  use ignis_config::IgnisConfig;
   use ignis_parser::IgnisLexer;
   use ignis_type::file::FileId;
 
@@ -2221,6 +2313,71 @@ mod tests {
       },
       other => panic!("Expected AfterDoubleColon context, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn test_detect_context_after_nested_double_colon() {
+    let source = "Math::Linear::";
+    let tokens = lex(source);
+
+    let context = detect_context(&tokens, source.len() as u32, source);
+
+    match context {
+      Some(CompletionContext::AfterDoubleColon {
+        path_segments, prefix, ..
+      }) => {
+        assert_eq!(path_segments, vec!["Math", "Linear"]);
+        assert_eq!(prefix, "");
+      },
+      other => panic!("Expected AfterDoubleColon context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_after_nested_double_colon_with_prefix() {
+    let source = "Math::Linear::Ve";
+    let tokens = lex(source);
+
+    let context = detect_context(&tokens, source.len() as u32, source);
+
+    match context {
+      Some(CompletionContext::AfterDoubleColon {
+        path_segments, prefix, ..
+      }) => {
+        assert_eq!(path_segments, vec!["Math", "Linear"]);
+        assert_eq!(prefix, "Ve");
+      },
+      other => panic!("Expected AfterDoubleColon context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_complete_double_colon_resolves_imported_namespace_head() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let entry_path = repo_root.join("example/hello-world.ign");
+    let source = std::fs::read_to_string(&entry_path).expect("example/hello-world.ign should exist");
+
+    let mut config = IgnisConfig::default();
+    config.std = true;
+    config.auto_load_std = true;
+    config.std_path = repo_root.join("std").to_string_lossy().to_string();
+
+    let output = ignis_driver::analyze_project_with_text(
+      &config,
+      entry_path.to_str().expect("entry path should be valid UTF-8"),
+      Some(source),
+    );
+
+    let current_file = output
+      .source_map
+      .lookup_by_path(&entry_path)
+      .expect("entry file should be present in source map");
+
+    let path = vec!["Io".to_string()];
+    assert!(resolve_path_to_def(&path, &output, &current_file).is_some());
+
+    let candidates = complete_double_colon(&path, "", &output, &current_file);
+    assert!(candidates.iter().any(|c| c.label == "println"));
   }
 
   #[test]

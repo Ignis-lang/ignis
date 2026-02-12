@@ -15,6 +15,7 @@ pub enum IgnisTypeSyntax {
   Implicit,
   String,
   Boolean,
+  Atom,
   Void,
   Null,
   Char,

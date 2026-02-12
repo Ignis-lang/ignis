@@ -1359,6 +1359,7 @@ impl<'a> CEmitter<'a> {
       ConstValue::Bool(v, _) => format!("{}", v),
       ConstValue::Char(v, _) => format!("{}", *v as u32),
       ConstValue::String(v, _) => format!("ignis_string_from_cstr(\"{}\")", Self::escape_string(v)),
+      ConstValue::Atom(id, _) => format!("{}U", id),
       ConstValue::Null(ty) => format!("({})NULL", self.format_type(*ty)),
       ConstValue::Undef(_) => "/* undef */ 0".to_string(),
     }
@@ -1557,6 +1558,7 @@ impl<'a> CEmitter<'a> {
       Type::Boolean => "boolean".to_string(),
       Type::Char => "char".to_string(),
       Type::String => "string".to_string(),
+      Type::Atom => "ignis_atom_t".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "void".to_string(),
       Type::NullPtr => "void*".to_string(),
@@ -2067,7 +2069,9 @@ impl<'a> CEmitter<'a> {
       Type::F32 => "f32".to_string(),
       Type::F64 => "f64".to_string(),
       Type::Boolean => "bool".to_string(),
+      Type::Char => "char".to_string(),
       Type::String => "str".to_string(),
+      Type::Atom => "atom".to_string(),
       Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: true } => format!("mutref_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: false } => format!("ref_{}", self.format_type_for_mangling(inner)),
@@ -2795,6 +2799,7 @@ fn format_type_for_mangling_standalone(
     Type::Boolean => "bool".to_string(),
     Type::Char => "char".to_string(),
     Type::String => "str".to_string(),
+    Type::Atom => "atom".to_string(),
     Type::Void => "void".to_string(),
     Type::Pointer { inner, .. } => {
       format!("ptr_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
@@ -2863,6 +2868,7 @@ pub fn format_c_type(
     Type::Boolean => "boolean".to_string(),
     Type::Char => "char".to_string(),
     Type::String => "string".to_string(),
+    Type::Atom => "ignis_atom_t".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "void".to_string(),
     Type::NullPtr => "void*".to_string(),

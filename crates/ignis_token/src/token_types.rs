@@ -82,6 +82,7 @@ pub enum TokenType {
   Float32Type,       // f32
   Float64Type,       // f64
   CharType,          // char
+  AtomType,          // atom
   HexType,           // hex
   BinaryType,        // binary
 
@@ -142,6 +143,7 @@ impl TokenType {
   pub fn get_keyword_from_string(key: &str) -> Option<TokenType> {
     match key {
       "as" => Some(TokenType::As),
+      "atom" => Some(TokenType::AtomType),
       "binary" => Some(TokenType::BinaryType),
       "boolean" => Some(TokenType::BooleanType),
       "break" => Some(TokenType::Break),
@@ -214,6 +216,7 @@ impl TokenType {
         | TokenType::Float64Type
         | TokenType::BooleanType
         | TokenType::CharType
+        | TokenType::AtomType
         | TokenType::StringType
     )
   }
@@ -221,6 +224,7 @@ impl TokenType {
   pub fn get_keywords() -> Vec<TokenType> {
     vec![
       TokenType::As,
+      TokenType::AtomType,
       TokenType::BinaryType,
       TokenType::BooleanType,
       TokenType::Break,
@@ -290,6 +294,7 @@ impl Display for TokenType {
       TokenType::As => write!(f, "As"),
       TokenType::Asterisk => write!(f, "Asterisk"),
       TokenType::At => write!(f, "At"),
+      TokenType::AtomType => write!(f, "AtomType"),
       TokenType::Bad => write!(f, "Bad"),
       TokenType::Bang => write!(f, "Bang"),
       TokenType::BangEqual => write!(f, "BangEqual"),

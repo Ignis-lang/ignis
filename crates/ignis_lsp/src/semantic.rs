@@ -204,6 +204,7 @@ fn classify_token(
     | TokenType::UnsignedInt32Type
     | TokenType::UnsignedInt64Type
     | TokenType::BooleanType
+    | TokenType::AtomType
     | TokenType::Float32Type
     | TokenType::Float64Type
     | TokenType::CharType
@@ -614,6 +615,13 @@ mod tests {
     let (ty, ref lexeme) = result[1];
     assert_eq!(lexeme, "nonexistent");
     assert_eq!(ty, TokenTypeIndex::Keyword as u32);
+  }
+
+  #[test]
+  fn test_atom_type_keyword_classified_as_type() {
+    let result = classify_source("let value: atom = :ok;");
+    let atom_entry = result.iter().find(|(_, lex)| lex == "atom").expect("expected atom token");
+    assert_eq!(atom_entry.0, TokenTypeIndex::Type as u32);
   }
 
   #[test]

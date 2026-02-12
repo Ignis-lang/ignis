@@ -613,6 +613,7 @@ impl<'a> Analyzer<'a> {
           ignis_type::value::IgnisLiteralValue::Boolean(_) => self.types.boolean(),
           ignis_type::value::IgnisLiteralValue::Char(_) => self.types.char(),
           ignis_type::value::IgnisLiteralValue::String(_) => self.types.string(),
+          ignis_type::value::IgnisLiteralValue::Atom(_) => self.types.atom(),
           ignis_type::value::IgnisLiteralValue::Hex(_) => self.types.u32(),
           ignis_type::value::IgnisLiteralValue::Binary(_) => self.types.u8(),
           ignis_type::value::IgnisLiteralValue::Null => self.types.null_ptr(),

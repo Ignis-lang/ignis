@@ -2343,6 +2343,7 @@ impl<'a> Monomorphizer<'a> {
       Type::Boolean => "bool".into(),
       Type::Char => "char".into(),
       Type::String => "string".into(),
+      Type::Atom => "atom".into(),
       Type::Void => "void".into(),
       Type::Never => "never".into(),
       Type::Pointer { inner, mutable } => {

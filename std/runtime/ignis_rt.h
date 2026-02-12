@@ -27,6 +27,8 @@ typedef double f64;
 
 typedef u8 boolean;
 
+typedef u32 ignis_atom_t;
+
 typedef void *Pointer;
 
 #define TRUE 1

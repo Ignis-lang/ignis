@@ -23,6 +23,7 @@ pub enum Type {
   Boolean,
   Char,
   String,
+  Atom,
   Void,
   Never,
   Infer,
@@ -173,6 +174,7 @@ impl TypeStore {
       Type::Boolean,
       Type::Char,
       Type::String,
+      Type::Atom,
       Type::Void,
       Type::Never,
       Type::Infer,
@@ -390,6 +392,10 @@ impl TypeStore {
     self.primitives[&Type::String]
   }
   #[inline]
+  pub fn atom(&self) -> TypeId {
+    self.primitives[&Type::Atom]
+  }
+  #[inline]
   pub fn void(&self) -> TypeId {
     self.primitives[&Type::Void]
   }
@@ -428,6 +434,7 @@ impl TypeStore {
       "bool" | "boolean" => Some(self.boolean()),
       "char" => Some(self.char()),
       "string" => Some(self.string()),
+      "atom" => Some(self.atom()),
       _ => None,
     }
   }
@@ -573,6 +580,7 @@ impl TypeStore {
       | Type::F64
       | Type::Boolean
       | Type::Char
+      | Type::Atom
       | Type::Void
       | Type::Never
       | Type::NullPtr
@@ -1130,6 +1138,7 @@ pub fn format_type_name(
     Type::Boolean => "bool".to_string(),
     Type::Char => "char".to_string(),
     Type::String => "string".to_string(),
+    Type::Atom => "atom".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "never".to_string(),
     Type::Infer => "infer".to_string(),
