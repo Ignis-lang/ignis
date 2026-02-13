@@ -1,96 +1,79 @@
 //! Inlay hints implementation.
 //!
-//! Provides parameter name hints at call sites:
-//! ```ignis
-//! createUser("john", 25) → createUser(name: "john", age: 25)
-//! ```
+//! Provides:
+//! - Parameter name hints at call sites
+//! - Type hints for match scrutinees
 
 use std::collections::HashMap;
 
-use ignis_ast::expressions::ASTExpression;
+use ignis_ast::expressions::{ASTAccessOp, ASTExpression};
 use ignis_ast::statements::{ASTEnumItem, ASTRecordItem, ASTStatement};
 use ignis_ast::{ASTNode, NodeId};
+use ignis_driver::PerFileAnalysis;
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore};
-use ignis_type::file::FileId;
-use ignis_type::span::Span;
 use ignis_type::symbol::SymbolId;
-use ignis_type::Store;
-use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position};
+use ignis_type::types::{Type, TypeStore};
+use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
 
 use crate::convert::LineIndex;
 
-/// A call expression found in the AST with its resolved definition.
 struct CallInfo {
-  /// Node IDs of the arguments (for checking arg expressions).
   argument_ids: Vec<NodeId>,
-
-  /// Spans of the arguments for position calculation.
-  argument_spans: Vec<Span>,
-
-  /// The resolved definition of the callee (function or method).
+  argument_spans: Vec<ignis_type::span::Span>,
   def_id: DefinitionId,
-
-  /// Whether this is an instance method call (has implicit self).
   is_instance_call: bool,
 }
 
-/// Collect all call expressions from the AST that have resolved definitions.
-fn collect_calls(
-  nodes: &Store<ASTNode>,
-  roots: &[NodeId],
-  resolved_calls: &HashMap<NodeId, DefinitionId>,
-  node_defs: &HashMap<NodeId, DefinitionId>,
-  file_id: &FileId,
-) -> Vec<CallInfo> {
+struct MatchScrutineeInfo {
+  node_id: NodeId,
+  span: ignis_type::span::Span,
+}
+
+fn collect_calls(file: &PerFileAnalysis) -> Vec<CallInfo> {
   let mut calls = Vec::new();
-  let mut stack: Vec<NodeId> = roots.to_vec();
+  let mut stack: Vec<NodeId> = file.roots.clone();
 
   while let Some(node_id) = stack.pop() {
-    let node = nodes.get(&node_id);
+    let node = file.nodes.get(&node_id);
 
-    match node {
+    match &node {
       ASTNode::Expression(ASTExpression::Call(call)) => {
-        // Check if call is in current file BEFORE processing, but ALWAYS traverse children
-        let in_file = &call.span.file == file_id;
+        let def_id = file
+          .resolved_calls
+          .get(&node_id)
+          .or_else(|| file.node_defs.get(&node_id))
+          .cloned();
 
-        if in_file {
-          let def_id = resolved_calls
-            .get(&node_id)
-            .or_else(|| node_defs.get(&node_id))
-            .cloned();
+        if let Some(def_id) = def_id {
+          let argument_ids = call.arguments.to_vec();
 
-          if let Some(def_id) = def_id {
-            let argument_ids: Vec<_> = call.arguments.to_vec();
+          let argument_spans = call
+            .arguments
+            .iter()
+            .map(|arg_id| file.nodes.get(arg_id).span().clone())
+            .collect();
 
-            let argument_spans: Vec<_> = call
-              .arguments
-              .iter()
-              .map(|arg_id| nodes.get(arg_id).span().clone())
-              .collect();
+          let is_instance_call = matches!(
+            file.nodes.get(&call.callee),
+            ASTNode::Expression(ASTExpression::MemberAccess(member_access)) if member_access.op == ASTAccessOp::Dot
+          );
 
-            // Check if this is an instance method call (callee is member access)
-            let is_instance_call =
-              matches!(nodes.get(&call.callee), ASTNode::Expression(ASTExpression::MemberAccess(_)));
-
-            calls.push(CallInfo {
-              argument_ids,
-              argument_spans,
-              def_id,
-              is_instance_call,
-            });
-          }
+          calls.push(CallInfo {
+            argument_ids,
+            argument_spans,
+            def_id,
+            is_instance_call,
+          });
         }
 
-        // ALWAYS traverse children regardless of file
         stack.push(call.callee);
         stack.extend(call.arguments.iter().cloned());
       },
-
       ASTNode::Expression(expr) => {
         collect_expression_children(expr, &mut stack);
       },
       ASTNode::Statement(stmt) => {
-        collect_statement_children(stmt, nodes, &mut stack);
+        collect_statement_children(stmt, &mut stack);
       },
     }
   }
@@ -98,7 +81,41 @@ fn collect_calls(
   calls
 }
 
-/// Push child node IDs from an expression onto the stack.
+fn collect_match_scrutinees(file: &PerFileAnalysis) -> Vec<MatchScrutineeInfo> {
+  let mut scrutinees = Vec::new();
+  let mut stack: Vec<NodeId> = file.roots.clone();
+
+  while let Some(node_id) = stack.pop() {
+    let node = file.nodes.get(&node_id);
+
+    match &node {
+      ASTNode::Expression(ASTExpression::Match(match_expr)) => {
+        let scrutinee_span = file.nodes.get(&match_expr.scrutinee).span().clone();
+        scrutinees.push(MatchScrutineeInfo {
+          node_id: match_expr.scrutinee,
+          span: scrutinee_span,
+        });
+
+        stack.push(match_expr.scrutinee);
+        for arm in &match_expr.arms {
+          if let Some(guard) = arm.guard {
+            stack.push(guard);
+          }
+          stack.push(arm.body);
+        }
+      },
+      ASTNode::Expression(expr) => {
+        collect_expression_children(expr, &mut stack);
+      },
+      ASTNode::Statement(stmt) => {
+        collect_statement_children(stmt, &mut stack);
+      },
+    }
+  }
+
+  scrutinees
+}
+
 fn collect_expression_children(
   expr: &ASTExpression,
   stack: &mut Vec<NodeId>,
@@ -167,22 +184,18 @@ fn collect_expression_children(
     },
     ASTExpression::Match(match_expr) => {
       stack.push(match_expr.scrutinee);
-
       for arm in &match_expr.arms {
         if let Some(guard) = arm.guard {
           stack.push(guard);
         }
-
         stack.push(arm.body);
       }
     },
   }
 }
 
-/// Push child node IDs from a statement onto the stack.
 fn collect_statement_children(
   stmt: &ASTStatement,
-  _nodes: &Store<ASTNode>,
   stack: &mut Vec<NodeId>,
 ) {
   match stmt {
@@ -277,28 +290,33 @@ fn collect_statement_children(
   }
 }
 
-/// Generate inlay hints for parameter names at call sites.
-pub fn generate_parameter_hints(
-  nodes: &Store<ASTNode>,
-  roots: &[NodeId],
-  resolved_calls: &HashMap<NodeId, DefinitionId>,
-  node_defs: &HashMap<NodeId, DefinitionId>,
+pub fn generate_hints(
+  file: &PerFileAnalysis,
   defs: &DefinitionStore,
+  types: &TypeStore,
   symbol_names: &HashMap<SymbolId, String>,
-  file_id: &FileId,
   line_index: &LineIndex,
 ) -> Vec<InlayHint> {
-  let calls = collect_calls(nodes, roots, resolved_calls, node_defs, file_id);
+  let mut hints = generate_parameter_hints(file, defs, symbol_names, line_index);
+  hints.extend(generate_match_scrutinee_type_hints(file, defs, types, symbol_names, line_index));
+  hints
+}
+
+fn generate_parameter_hints(
+  file: &PerFileAnalysis,
+  defs: &DefinitionStore,
+  symbol_names: &HashMap<SymbolId, String>,
+  line_index: &LineIndex,
+) -> Vec<InlayHint> {
+  let calls = collect_calls(file);
   let mut hints = Vec::new();
 
   for call in calls {
     let def = defs.get(&call.def_id);
 
-    // Get parameter definitions and offset based on definition kind
     let (param_ids, param_offset, is_variadic): (&[DefinitionId], usize, bool) = match &def.kind {
       DefinitionKind::Function(func) => (&func.params, 0, func.is_variadic),
       DefinitionKind::Method(method) => {
-        // Instance methods have `self` as first param, skip it for hints
         let offset = if !method.is_static && call.is_instance_call {
           1
         } else {
@@ -310,7 +328,6 @@ pub fn generate_parameter_hints(
     };
 
     for (arg_idx, (arg_id, arg_span)) in call.argument_ids.iter().zip(call.argument_spans.iter()).enumerate() {
-      // Calculate the corresponding parameter index (accounting for self offset)
       let param_idx = arg_idx + param_offset;
 
       if param_idx >= param_ids.len() {
@@ -326,13 +343,11 @@ pub fn generate_parameter_hints(
         None => continue,
       };
 
-      // Skip if parameter name is not meaningful
       if param_name.len() <= 1 || param_name.starts_with('_') {
         continue;
       }
 
-      // Skip if argument is a variable with the same name as the parameter
-      if let ASTNode::Expression(ASTExpression::Variable(var)) = nodes.get(arg_id)
+      if let ASTNode::Expression(ASTExpression::Variable(var)) = file.nodes.get(arg_id)
         && let Some(arg_name) = symbol_names.get(&var.name)
         && arg_name == param_name
       {
@@ -355,4 +370,60 @@ pub fn generate_parameter_hints(
   }
 
   hints
+}
+
+fn generate_match_scrutinee_type_hints(
+  file: &PerFileAnalysis,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbol_names: &HashMap<SymbolId, String>,
+  line_index: &LineIndex,
+) -> Vec<InlayHint> {
+  let scrutinees = collect_match_scrutinees(file);
+  let mut hints = Vec::new();
+
+  for scrutinee in scrutinees {
+    let Some(type_id) = file.node_types.get(&scrutinee.node_id) else {
+      continue;
+    };
+
+    let ty = types.get(type_id);
+    if matches!(ty, Type::Error | Type::Infer) {
+      continue;
+    }
+
+    let type_label = crate::type_format::format_type(types, defs, symbol_names, type_id);
+    let (line, col) = line_index.line_col_utf16(scrutinee.span.end);
+
+    hints.push(InlayHint {
+      position: Position { line, character: col },
+      label: InlayHintLabel::String(format!(": {}", type_label)),
+      kind: Some(InlayHintKind::TYPE),
+      text_edits: None,
+      tooltip: None,
+      padding_left: Some(true),
+      padding_right: None,
+      data: None,
+    });
+  }
+
+  hints
+}
+
+pub fn filter_hints_by_range(
+  hints: &[InlayHint],
+  range: &Range,
+) -> Vec<InlayHint> {
+  hints
+    .iter()
+    .filter(|hint| {
+      let pos = hint.position;
+      let starts_after_or_at =
+        pos.line > range.start.line || (pos.line == range.start.line && pos.character >= range.start.character);
+      let ends_before_or_at =
+        pos.line < range.end.line || (pos.line == range.end.line && pos.character < range.end.character);
+      starts_after_or_at && ends_before_or_at
+    })
+    .cloned()
+    .collect()
 }

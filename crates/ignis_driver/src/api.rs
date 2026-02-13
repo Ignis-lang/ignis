@@ -27,7 +27,7 @@ use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::BytePosition;
 use ignis_type::Store;
 
-use crate::context::CompilationContext;
+use crate::context::{CompilationContext, ModuleSemanticData};
 use crate::project::Project;
 
 /// How far analysis progressed before stopping (due to errors or completion).
@@ -204,6 +204,32 @@ pub struct AnalysisOptions {
 ///
 /// This struct contains only `Send`-safe types, suitable for async contexts.
 /// It includes the source map so diagnostics can be rendered with proper locations.
+pub struct PerFileAnalysis {
+  /// AST nodes for this file.
+  pub nodes: Store<ASTNode>,
+
+  /// Root node IDs in the AST for this file.
+  pub roots: Vec<NodeId>,
+
+  /// Maps AST nodes to their resolved definitions in this file.
+  pub node_defs: HashMap<NodeId, DefinitionId>,
+
+  /// Maps AST nodes to their inferred types in this file.
+  pub node_types: HashMap<NodeId, TypeId>,
+
+  /// Maps AST nodes to their source spans in this file.
+  pub node_spans: HashMap<NodeId, Span>,
+
+  /// Maps Call nodes to their resolved overload in this file.
+  pub resolved_calls: HashMap<NodeId, DefinitionId>,
+
+  /// Maps import item spans to their resolved definitions in this file.
+  pub import_item_defs: HashMap<Span, DefinitionId>,
+
+  /// Maps import path spans to target module file IDs in this file.
+  pub import_module_files: HashMap<Span, FileId>,
+}
+
 pub struct AnalyzeProjectOutput {
   /// How far analysis progressed.
   pub stage: AnalysisStage,
@@ -228,47 +254,99 @@ pub struct AnalyzeProjectOutput {
   /// Used for hover information.
   pub types: TypeStore,
 
-  /// Maps AST nodes to their resolved definitions.
-  /// Used for go-to-definition from usage sites.
+  /// Root-file map kept for backward compatibility.
   pub node_defs: HashMap<NodeId, DefinitionId>,
 
-  /// Maps AST nodes to their inferred types.
-  /// Used for hover information.
+  /// Root-file map kept for backward compatibility.
   pub node_types: HashMap<NodeId, TypeId>,
 
-  /// Maps AST nodes to their source spans.
-  /// Used for finding which node is at a given cursor position.
+  /// Root-file map kept for backward compatibility.
   pub node_spans: HashMap<NodeId, Span>,
 
   /// Symbol names (SymbolId -> String).
   /// Extracted from SymbolTable for Send safety.
   pub symbol_names: HashMap<SymbolId, String>,
 
-  /// Maps Call nodes to their resolved overload.
-  /// Used when hovering over an overloaded function call.
+  /// Root-file map kept for backward compatibility.
   pub resolved_calls: HashMap<NodeId, DefinitionId>,
 
-  /// Maps import item spans to their resolved definitions.
-  /// Used for hover on import statements.
+  /// Root-file map kept for backward compatibility.
   pub import_item_defs: HashMap<Span, DefinitionId>,
 
-  /// AST nodes for the entry file (root module).
-  /// Used for inlay hints which need to traverse the AST.
+  /// Entry-file AST kept for backward compatibility.
   pub nodes: Store<ASTNode>,
 
-  /// Root node IDs in the AST for the entry file.
+  /// Entry-file roots kept for backward compatibility.
   pub roots: Vec<NodeId>,
 
   /// Namespace hierarchy for document symbols with nesting.
   pub namespaces: NamespaceStore,
 
-  /// Maps import path string spans to the FileId of the imported module.
-  /// Used for Go to Definition on import path strings (e.g., clicking on "std::io").
+  /// Root-file map kept for backward compatibility.
   pub import_module_files: HashMap<Span, FileId>,
 
   /// Extension methods indexed by target type.
   /// Used by LSP to provide dot-completion for primitive types.
   pub extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
+
+  /// Per-file AST and semantic maps used by LSP features.
+  pub files: HashMap<FileId, PerFileAnalysis>,
+}
+
+impl AnalyzeProjectOutput {
+  pub fn has_type_information(&self) -> bool {
+    if !self.node_types.is_empty() {
+      return true;
+    }
+
+    self.files.values().any(|file| !file.node_types.is_empty())
+  }
+
+  pub fn file_analysis(
+    &self,
+    file_id: &FileId,
+  ) -> Option<&PerFileAnalysis> {
+    self.files.get(file_id)
+  }
+}
+
+fn build_per_file_analysis(
+  parsed_modules: HashMap<ModuleId, crate::context::ParsedModule>,
+  mut per_module_semantic: HashMap<ModuleId, ModuleSemanticData>,
+) -> HashMap<FileId, PerFileAnalysis> {
+  let mut files = HashMap::new();
+
+  for (module_id, parsed) in parsed_modules {
+    let semantic = per_module_semantic.remove(&module_id);
+
+    let file_output = if let Some(semantic) = semantic {
+      PerFileAnalysis {
+        nodes: parsed.nodes,
+        roots: parsed.roots,
+        node_defs: semantic.node_defs,
+        node_types: semantic.node_types,
+        node_spans: semantic.node_spans,
+        resolved_calls: semantic.resolved_calls,
+        import_item_defs: semantic.import_item_defs,
+        import_module_files: semantic.import_module_files,
+      }
+    } else {
+      PerFileAnalysis {
+        nodes: parsed.nodes,
+        roots: parsed.roots,
+        node_defs: HashMap::new(),
+        node_types: HashMap::new(),
+        node_spans: HashMap::new(),
+        resolved_calls: HashMap::new(),
+        import_item_defs: HashMap::new(),
+        import_module_files: HashMap::new(),
+      }
+    };
+
+    files.insert(parsed.file_id, file_output);
+  }
+
+  files
 }
 
 /// Analyze a project starting from an entry file, resolving imports.
@@ -355,6 +433,8 @@ pub fn analyze_project_with_options(
   // If we couldn't discover the root module, return what we have
   let Some(root_id) = root_id else {
     let symbol_names = extract_symbol_names(&ctx.symbol_table);
+    let files = build_per_file_analysis(std::mem::take(&mut ctx.parsed_modules), HashMap::new());
+
     return AnalyzeProjectOutput {
       stage: AnalysisStage::Lexed,
       source_map: ctx.source_map,
@@ -374,6 +454,7 @@ pub fn analyze_project_with_options(
       namespaces: NamespaceStore::new(),
       import_module_files: HashMap::new(),
       extension_methods: HashMap::new(),
+      files,
     };
   };
 
@@ -385,7 +466,7 @@ pub fn analyze_project_with_options(
 
   // Only run analyzer if we have modules to analyze and no critical errors
   if !order.is_empty() && !has_cycle {
-    let (output, analyzer_has_errors) = ctx.analyze_modules_collect_all(&order, config, false);
+    let (output, analyzer_has_errors, per_module_semantic) = ctx.analyze_modules_collect_all(&order, config, false);
     all_diagnostics.extend(output.diagnostics);
 
     // Detect entry point
@@ -404,11 +485,12 @@ pub fn analyze_project_with_options(
 
     let symbol_names = extract_symbol_names(&output.symbols);
 
-    // Extract AST nodes and roots from the root module for inlay hints
-    let (nodes, roots) = ctx
-      .parsed_modules
-      .remove(&root_id)
-      .map(|pm| (pm.nodes, pm.roots))
+    let files = build_per_file_analysis(std::mem::take(&mut ctx.parsed_modules), per_module_semantic);
+
+    let root_file_id = ctx.module_graph.modules.get(&root_id).file_id;
+    let (nodes, roots) = files
+      .get(&root_file_id)
+      .map(|file| (file.nodes.clone(), file.roots.clone()))
       .unwrap_or_else(|| (Store::new(), Vec::new()));
 
     return AnalyzeProjectOutput {
@@ -430,16 +512,18 @@ pub fn analyze_project_with_options(
       namespaces: output.namespaces,
       import_module_files: output.import_module_files,
       extension_methods: output.extension_methods,
+      files,
     };
   }
 
   let symbol_names = extract_symbol_names(&ctx.symbol_table);
 
-  // Extract AST nodes and roots from the root module if available
-  let (nodes, roots) = ctx
-    .parsed_modules
-    .remove(&root_id)
-    .map(|pm| (pm.nodes, pm.roots))
+  let files = build_per_file_analysis(std::mem::take(&mut ctx.parsed_modules), HashMap::new());
+
+  let root_file_id = ctx.module_graph.modules.get(&root_id).file_id;
+  let (nodes, roots) = files
+    .get(&root_file_id)
+    .map(|file| (file.nodes.clone(), file.roots.clone()))
     .unwrap_or_else(|| (Store::new(), Vec::new()));
 
   AnalyzeProjectOutput {
@@ -461,6 +545,7 @@ pub fn analyze_project_with_options(
     namespaces: NamespaceStore::new(),
     import_module_files: HashMap::new(),
     extension_methods: HashMap::new(),
+    files,
   }
 }
 

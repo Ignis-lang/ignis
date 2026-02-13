@@ -29,6 +29,15 @@ pub(crate) struct ParsedModule {
   pub import_paths: Vec<(Vec<SymbolId>, String, ignis_type::span::Span)>,
 }
 
+pub(crate) struct ModuleSemanticData {
+  pub node_defs: HashMap<NodeId, ignis_type::definition::DefinitionId>,
+  pub node_types: HashMap<NodeId, ignis_type::types::TypeId>,
+  pub node_spans: HashMap<NodeId, Span>,
+  pub resolved_calls: HashMap<NodeId, ignis_type::definition::DefinitionId>,
+  pub import_item_defs: HashMap<Span, ignis_type::definition::DefinitionId>,
+  pub import_module_files: HashMap<Span, FileId>,
+}
+
 /// Discovery and compilation context
 pub struct CompilationContext {
   pub source_map: SourceMap,
@@ -608,7 +617,7 @@ impl CompilationContext {
     order: &[ModuleId],
     config: &IgnisConfig,
   ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
-    let (output, has_errors) = self.analyze_modules_collect_all(order, config, true);
+    let (output, has_errors, _) = self.analyze_modules_collect_all(order, config, true);
 
     if has_errors {
       return Err(());
@@ -623,17 +632,16 @@ impl CompilationContext {
   /// It continues analyzing all modules and returns all diagnostics.
   /// This is useful for LSP where we want to show all errors at once.
   ///
-  /// Returns (output, has_errors).
+  /// Returns (output, has_errors, per-module semantic maps).
   ///
-  /// Note: node_defs, node_types, node_spans, and resolved_calls are only kept for
-  /// the ROOT module (last in topological order). This is because NodeIds are indices
-  /// into per-module AST stores and would collide if merged naively.
-  pub fn analyze_modules_collect_all(
+  /// Node-indexed semantic maps are tracked per module and also exposed separately,
+  /// because `NodeId` values are only meaningful within their module AST store.
+  pub(crate) fn analyze_modules_collect_all(
     &self,
     order: &[ModuleId],
     config: &IgnisConfig,
     render_diagnostics: bool,
-  ) -> (ignis_analyzer::AnalyzerOutput, bool) {
+  ) -> (ignis_analyzer::AnalyzerOutput, bool, HashMap<ModuleId, ModuleSemanticData>) {
     let mut export_table: ExportTable = HashMap::new();
     let mut shared_types = TypeStore::new();
     let mut shared_defs = DefinitionStore::new();
@@ -651,6 +659,7 @@ impl CompilationContext {
     let mut root_resolved_calls = HashMap::new();
     let mut root_import_item_defs = HashMap::new();
     let mut root_import_module_files = HashMap::new();
+    let mut per_module_semantic = HashMap::new();
 
     // Build path_to_file mapping for import path resolution
     let path_to_file: HashMap<String, ignis_type::file::FileId> = self
@@ -715,18 +724,29 @@ impl CompilationContext {
       }
 
       let exports = output.collect_exports();
+
+      let module_semantic = ModuleSemanticData {
+        node_defs: output.node_defs,
+        node_types: output.node_types,
+        node_spans: output.node_spans,
+        resolved_calls: output.resolved_calls,
+        import_item_defs: output.import_item_defs,
+        import_module_files: output.import_module_files,
+      };
+
+      if root_module_id == Some(module_id) {
+        root_node_defs = module_semantic.node_defs.clone();
+        root_node_types = module_semantic.node_types.clone();
+        root_node_spans = module_semantic.node_spans.clone();
+        root_resolved_calls = module_semantic.resolved_calls.clone();
+        root_import_item_defs = module_semantic.import_item_defs.clone();
+        root_import_module_files = module_semantic.import_module_files.clone();
+      }
+
+      per_module_semantic.insert(module_id, module_semantic);
+
       combined_hir.merge(output.hir);
       all_diagnostics.extend(output.diagnostics);
-
-      // Only keep node_* data for the root module to avoid NodeId collisions
-      if root_module_id == Some(module_id) {
-        root_node_defs = output.node_defs;
-        root_node_types = output.node_types;
-        root_node_spans = output.node_spans;
-        root_resolved_calls = output.resolved_calls;
-        root_import_item_defs = output.import_item_defs;
-        root_import_module_files = output.import_module_files;
-      }
 
       export_table.insert(module_id, exports);
     }
@@ -747,6 +767,6 @@ impl CompilationContext {
       extension_methods: shared_extension_methods,
     };
 
-    (output, has_errors)
+    (output, has_errors, per_module_semantic)
   }
 }

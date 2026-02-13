@@ -25,6 +25,7 @@ pub mod project;
 mod semantic;
 mod server;
 mod state;
+mod type_format;
 
 use std::sync::Arc;
 

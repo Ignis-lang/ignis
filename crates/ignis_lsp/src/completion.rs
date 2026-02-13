@@ -759,15 +759,17 @@ fn find_receiver_type_by_span(
   output: &AnalyzeProjectOutput,
   file_id: &FileId,
 ) -> Option<TypeId> {
-  if output.node_spans.is_empty() {
+  let file_analysis = output.file_analysis(file_id)?;
+
+  if file_analysis.node_spans.is_empty() {
     return None;
   }
 
   // Find receiver node: span.end <= dot_offset, pick max by (end, -span_size)
-  let receiver_node = output
+  let receiver_node = file_analysis
     .node_spans
     .iter()
-    .filter(|(_, span)| span.file == *file_id && span.end.0 <= dot_offset)
+    .filter(|(_, span)| span.end.0 <= dot_offset)
     .max_by(|(_, a), (_, b)| {
       a.end
         .0
@@ -778,7 +780,7 @@ fn find_receiver_type_by_span(
   let (node_id, _receiver_span) = receiver_node?;
 
   // Get type of receiver
-  let type_id = output.node_types.get(node_id)?;
+  let type_id = file_analysis.node_types.get(node_id)?;
 
   Some(*type_id)
 }
@@ -1186,6 +1188,7 @@ pub fn complete_identifier(
   let mut seen_names = std::collections::HashSet::new();
 
   if let Some(output) = output {
+    let file_analysis = output.file_analysis(file_id);
     let mut visible_defs = std::collections::HashSet::new();
 
     // 1. Collect definitions from the current file
@@ -1196,9 +1199,8 @@ pub fn complete_identifier(
     }
 
     // 2. Collect imported definitions
-    // output.import_item_defs maps import usage span -> definition
-    for (span, def_id) in &output.import_item_defs {
-      if span.file == *file_id {
+    if let Some(file_analysis) = file_analysis {
+      for def_id in file_analysis.import_item_defs.values() {
         visible_defs.insert(*def_id);
       }
     }
@@ -1716,13 +1718,10 @@ fn resolve_imported_path_head(
   output: &AnalyzeProjectOutput,
   current_file: &FileId,
 ) -> Option<DefinitionId> {
+  let file_analysis = output.file_analysis(current_file)?;
   let source = &output.source_map.get(current_file).text;
 
-  for (span, def_id) in &output.import_item_defs {
-    if span.file != *current_file {
-      continue;
-    }
-
+  for (span, def_id) in &file_analysis.import_item_defs {
     let start = span.start.0 as usize;
     let end = span.end.0 as usize;
 

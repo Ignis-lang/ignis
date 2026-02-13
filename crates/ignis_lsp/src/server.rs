@@ -399,7 +399,7 @@ impl LanguageServer for Server {
           },
         )),
 
-        // Inlay hints (parameter names at call sites)
+        // Inlay hints
         inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(InlayHintOptions {
           work_done_progress_options: WorkDoneProgressOptions::default(),
           resolve_provider: Some(false),
@@ -634,15 +634,15 @@ impl LanguageServer for Server {
       return Ok(None);
     };
 
+    let Some(file_analysis) = output.file_analysis(&file_id) else {
+      return Ok(None);
+    };
+
     // Convert LSP position to byte offset
     let byte_offset = line_index.offset(position);
 
     // Check import path strings (navigates to module file)
-    for (span, target_file_id) in &output.import_module_files {
-      if span.file != file_id {
-        continue;
-      }
-
+    for (span, target_file_id) in &file_analysis.import_module_files {
       if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
         let target_file = output.source_map.get(target_file_id);
         let target_uri = match Url::from_file_path(&target_file.path) {
@@ -664,11 +664,7 @@ impl LanguageServer for Server {
       let mut found = None;
       let mut smallest_size = u32::MAX;
 
-      for (span, def_id) in &output.import_item_defs {
-        if span.file != file_id {
-          continue;
-        }
-
+      for (span, def_id) in &file_analysis.import_item_defs {
         if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
           let size = span.end.0 - span.start.0;
           if size < smallest_size {
@@ -685,12 +681,7 @@ impl LanguageServer for Server {
     let mut found_node = None;
     let mut smallest_span_size = u32::MAX;
 
-    for (node_id, span) in &output.node_spans {
-      // Only consider spans from the current file
-      if span.file != file_id {
-        continue;
-      }
-
+    for (node_id, span) in &file_analysis.node_spans {
       // Check if this span contains the cursor position
       if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
         // Prefer the smallest span that contains the position
@@ -706,10 +697,10 @@ impl LanguageServer for Server {
     let def_id = if let Some(id) = import_def {
       Some(id)
     } else if let Some(node_id) = found_node {
-      output
+      file_analysis
         .node_defs
         .get(&node_id)
-        .or_else(|| output.resolved_calls.get(&node_id))
+        .or_else(|| file_analysis.resolved_calls.get(&node_id))
         .cloned()
     } else {
       None
@@ -765,6 +756,10 @@ impl LanguageServer for Server {
       return Ok(None);
     };
 
+    let Some(file_analysis) = output.file_analysis(&file_id) else {
+      return Ok(None);
+    };
+
     // Convert LSP position to byte offset
     let byte_offset = line_index.offset(position);
 
@@ -806,11 +801,7 @@ impl LanguageServer for Server {
     }
 
     // First, check if cursor is on an import path string (e.g., "std::io")
-    for (span, target_file_id) in &output.import_module_files {
-      if span.file != file_id {
-        continue;
-      }
-
+    for (span, target_file_id) in &file_analysis.import_module_files {
       if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
         let target_file = output.source_map.get(target_file_id);
         let file_path = target_file.path.to_string_lossy();
@@ -836,12 +827,7 @@ impl LanguageServer for Server {
     let mut found_node = None;
     let mut smallest_span_size = u32::MAX;
 
-    for (node_id, span) in &output.node_spans {
-      // Only consider spans from the current file
-      if span.file != file_id {
-        continue;
-      }
-
+    for (node_id, span) in &file_analysis.node_spans {
       if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
         let span_size = span.end.0 - span.start.0;
         if span_size < smallest_span_size {
@@ -856,11 +842,7 @@ impl LanguageServer for Server {
       let mut found_import = None;
       let mut smallest_size = u32::MAX;
 
-      for (span, def_id) in &output.import_item_defs {
-        if span.file != file_id {
-          continue;
-        }
-
+      for (span, def_id) in &file_analysis.import_item_defs {
         if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
           let size = span.end.0 - span.start.0;
           if size < smallest_size {
@@ -878,7 +860,7 @@ impl LanguageServer for Server {
     let (content, hover_span) = if let Some((import_span, import_def_id, import_size)) = import_hover {
       // Check if we also have a node, and if so, whether the import item is more specific
       let use_import = if let Some(ref node_id) = found_node {
-        if let Some(node_span) = output.node_spans.get(node_id) {
+        if let Some(node_span) = file_analysis.node_spans.get(node_id) {
           let node_size = node_span.end.0 - node_span.start.0;
           import_size <= node_size // Prefer import item if it's same size or smaller
         } else {
@@ -910,7 +892,7 @@ impl LanguageServer for Server {
     let (content, hover_span) = if content.is_empty() {
       if let Some(node_id) = found_node {
         // Try node_defs first, then resolved_calls (for overloaded function calls), then types
-        let content = if let Some(def_id) = output.node_defs.get(&node_id) {
+        let content = if let Some(def_id) = file_analysis.node_defs.get(&node_id) {
           format_definition_hover(
             &output.defs,
             &output.types,
@@ -919,7 +901,7 @@ impl LanguageServer for Server {
             &output.namespaces,
             def_id,
           )
-        } else if let Some(def_id) = output.resolved_calls.get(&node_id) {
+        } else if let Some(def_id) = file_analysis.resolved_calls.get(&node_id) {
           // This is a call to an overloaded function - show the resolved overload
           format_definition_hover(
             &output.defs,
@@ -929,7 +911,7 @@ impl LanguageServer for Server {
             &output.namespaces,
             def_id,
           )
-        } else if let Some(type_id) = output.node_types.get(&node_id) {
+        } else if let Some(type_id) = file_analysis.node_types.get(&node_id) {
           // No definition, just show the type
           format!(
             "```ignis\n{}\n```",
@@ -939,7 +921,7 @@ impl LanguageServer for Server {
           String::new()
         };
 
-        let span = output.node_spans.get(&node_id).cloned();
+        let span = file_analysis.node_spans.get(&node_id).cloned();
         (content, span)
       } else {
         (String::new(), None)
@@ -994,6 +976,11 @@ impl LanguageServer for Server {
       return Ok(None);
     };
 
+    let Some(file_analysis) = output.file_analysis(&file_id) else {
+      log("[semantic_tokens] per-file analysis not found");
+      return Ok(None);
+    };
+
     // Wrap sync computation in catch_unwind to prevent panics from killing the server
     let uri_str = uri.to_string();
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1002,7 +989,13 @@ impl LanguageServer for Server {
       lexer.scan_tokens();
 
       // Classify tokens using semantic analysis
-      crate::semantic::classify_tokens(&lexer.tokens, &output.import_item_defs, &output.defs, &file_id, &line_index)
+      crate::semantic::classify_tokens(
+        &lexer.tokens,
+        &file_analysis.import_item_defs,
+        &output.defs,
+        &file_id,
+        &line_index,
+      )
     }));
 
     match result {
@@ -1036,7 +1029,8 @@ impl LanguageServer for Server {
       if let Some(doc) = guard.get(uri)
         && let Some(hints) = doc.get_cached_hints()
       {
-        return Ok(Some(hints.clone()));
+        let range_hints = crate::inlay::filter_hints_by_range(hints, &params.range);
+        return Ok(Some(range_hints));
       }
     }
 
@@ -1060,16 +1054,11 @@ impl LanguageServer for Server {
       return Ok(None);
     };
 
-    let hints = crate::inlay::generate_parameter_hints(
-      &output.nodes,
-      &output.roots,
-      &output.resolved_calls,
-      &output.node_defs,
-      &output.defs,
-      &output.symbol_names,
-      &file_id,
-      &line_index,
-    );
+    let Some(file) = output.file_analysis(&file_id) else {
+      return Ok(None);
+    };
+
+    let hints = crate::inlay::generate_hints(file, &output.defs, &output.types, &output.symbol_names, &line_index);
 
     // Cache the computed hints
     {
@@ -1079,7 +1068,8 @@ impl LanguageServer for Server {
       }
     }
 
-    Ok(Some(hints))
+    let range_hints = crate::inlay::filter_hints_by_range(&hints, &params.range);
+    Ok(Some(range_hints))
   }
 
   async fn symbol(
@@ -1301,6 +1291,10 @@ impl LanguageServer for Server {
       return Ok(None);
     };
 
+    let Some(file_analysis) = output.file_analysis(&file_id) else {
+      return Ok(None);
+    };
+
     let byte_offset = line_index.offset(position);
 
     // Find the definition at cursor position
@@ -1309,11 +1303,7 @@ impl LanguageServer for Server {
       let mut found = None;
       let mut smallest_size = u32::MAX;
 
-      for (span, def_id) in &output.import_item_defs {
-        if span.file != file_id {
-          continue;
-        }
-
+      for (span, def_id) in &file_analysis.import_item_defs {
         if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
           let size = span.end.0 - span.start.0;
           if size < smallest_size {
@@ -1331,11 +1321,7 @@ impl LanguageServer for Server {
       let mut found_node = None;
       let mut smallest_span_size = u32::MAX;
 
-      for (node_id, span) in &output.node_spans {
-        if span.file != file_id {
-          continue;
-        }
-
+      for (node_id, span) in &file_analysis.node_spans {
         if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
           let span_size = span.end.0 - span.start.0;
           if span_size < smallest_span_size {
@@ -1346,10 +1332,10 @@ impl LanguageServer for Server {
       }
 
       found_node.and_then(|node_id| {
-        output
+        file_analysis
           .node_defs
           .get(&node_id)
-          .or_else(|| output.resolved_calls.get(&node_id))
+          .or_else(|| file_analysis.resolved_calls.get(&node_id))
           .cloned()
       })
     });
@@ -1378,13 +1364,48 @@ impl LanguageServer for Server {
       }
     }
 
-    // Find references in node_defs (usages of the symbol)
-    for (node_id, def_id) in &output.node_defs {
-      if *def_id != target_def_id {
-        continue;
+    for file_analysis in output.files.values() {
+      for (node_id, def_id) in &file_analysis.node_defs {
+        if *def_id != target_def_id {
+          continue;
+        }
+
+        if let Some(span) = file_analysis.node_spans.get(node_id) {
+          let file = output.source_map.get(&span.file);
+
+          if let Ok(ref_uri) = Url::from_file_path(&file.path) {
+            let li = line_indexes
+              .entry(span.file)
+              .or_insert_with(|| LineIndex::new(file.text.clone()));
+            let range = li.span_to_range(span);
+            locations.push(Location { uri: ref_uri, range });
+          }
+        }
       }
 
-      if let Some(span) = output.node_spans.get(node_id) {
+      for (node_id, def_id) in &file_analysis.resolved_calls {
+        if *def_id != target_def_id {
+          continue;
+        }
+
+        if let Some(span) = file_analysis.node_spans.get(node_id) {
+          let file = output.source_map.get(&span.file);
+
+          if let Ok(ref_uri) = Url::from_file_path(&file.path) {
+            let li = line_indexes
+              .entry(span.file)
+              .or_insert_with(|| LineIndex::new(file.text.clone()));
+            let range = li.span_to_range(span);
+            locations.push(Location { uri: ref_uri, range });
+          }
+        }
+      }
+
+      for (span, def_id) in &file_analysis.import_item_defs {
+        if *def_id != target_def_id {
+          continue;
+        }
+
         let file = output.source_map.get(&span.file);
 
         if let Ok(ref_uri) = Url::from_file_path(&file.path) {
@@ -1394,42 +1415,6 @@ impl LanguageServer for Server {
           let range = li.span_to_range(span);
           locations.push(Location { uri: ref_uri, range });
         }
-      }
-    }
-
-    // Find references in resolved_calls (overloaded function calls)
-    for (node_id, def_id) in &output.resolved_calls {
-      if *def_id != target_def_id {
-        continue;
-      }
-
-      if let Some(span) = output.node_spans.get(node_id) {
-        let file = output.source_map.get(&span.file);
-
-        if let Ok(ref_uri) = Url::from_file_path(&file.path) {
-          let li = line_indexes
-            .entry(span.file)
-            .or_insert_with(|| LineIndex::new(file.text.clone()));
-          let range = li.span_to_range(span);
-          locations.push(Location { uri: ref_uri, range });
-        }
-      }
-    }
-
-    // Find references in import_item_defs (imports of the symbol)
-    for (span, def_id) in &output.import_item_defs {
-      if *def_id != target_def_id {
-        continue;
-      }
-
-      let file = output.source_map.get(&span.file);
-
-      if let Ok(ref_uri) = Url::from_file_path(&file.path) {
-        let li = line_indexes
-          .entry(span.file)
-          .or_insert_with(|| LineIndex::new(file.text.clone()));
-        let range = li.span_to_range(span);
-        locations.push(Location { uri: ref_uri, range });
       }
     }
 
@@ -1900,90 +1885,7 @@ fn format_type(
   symbol_names: &std::collections::HashMap<ignis_type::symbol::SymbolId, String>,
   type_id: &ignis_type::types::TypeId,
 ) -> String {
-  use ignis_type::types::Type;
-
-  let ty = types.get(type_id);
-  match ty {
-    Type::I8 => "i8".to_string(),
-    Type::I16 => "i16".to_string(),
-    Type::I32 => "i32".to_string(),
-    Type::I64 => "i64".to_string(),
-    Type::U8 => "u8".to_string(),
-    Type::U16 => "u16".to_string(),
-    Type::U32 => "u32".to_string(),
-    Type::U64 => "u64".to_string(),
-    Type::F32 => "f32".to_string(),
-    Type::F64 => "f64".to_string(),
-    Type::Boolean => "boolean".to_string(),
-    Type::Char => "char".to_string(),
-    Type::String => "string".to_string(),
-    Type::Atom => "atom".to_string(),
-    Type::Void => "void".to_string(),
-    Type::Never => "never".to_string(),
-    Type::Infer => "infer".to_string(),
-    Type::NullPtr => "null".to_string(),
-    Type::Error => "error".to_string(),
-    Type::Pointer { inner, mutable } => {
-      if *mutable {
-        format!("*mut {}", format_type(types, defs, symbol_names, inner))
-      } else {
-        format!("*{}", format_type(types, defs, symbol_names, inner))
-      }
-    },
-    Type::Reference { inner, mutable } => {
-      if *mutable {
-        format!("&mut {}", format_type(types, defs, symbol_names, inner))
-      } else {
-        format!("&{}", format_type(types, defs, symbol_names, inner))
-      }
-    },
-    Type::Vector { element, size } => {
-      format!("{}[{}]", format_type(types, defs, symbol_names, element), size)
-    },
-    Type::Tuple(elements) => {
-      let elem_strs: Vec<_> = elements
-        .iter()
-        .map(|e| format_type(types, defs, symbol_names, e))
-        .collect();
-      format!("({})", elem_strs.join(", "))
-    },
-    Type::Function {
-      params,
-      ret,
-      is_variadic,
-    } => {
-      let param_strs: Vec<_> = params
-        .iter()
-        .map(|p| format_type(types, defs, symbol_names, p))
-        .collect();
-      let variadic = if *is_variadic { ", ..." } else { "" };
-      format!(
-        "({}{}) -> {}",
-        param_strs.join(", "),
-        variadic,
-        format_type(types, defs, symbol_names, ret)
-      )
-    },
-    Type::Record(def_id) => symbol_names
-      .get(&defs.get(def_id).name)
-      .cloned()
-      .unwrap_or_else(|| "?".to_string()),
-    Type::Enum(def_id) => symbol_names
-      .get(&defs.get(def_id).name)
-      .cloned()
-      .unwrap_or_else(|| "?".to_string()),
-    Type::Param { index, .. } => {
-      format!("T{}", index)
-    },
-    Type::Instance { generic, args } => {
-      let base_name = symbol_names
-        .get(&defs.get(generic).name)
-        .cloned()
-        .unwrap_or_else(|| "?".to_string());
-      let arg_strs: Vec<_> = args.iter().map(|a| format_type(types, defs, symbol_names, a)).collect();
-      format!("{}<{}>", base_name, arg_strs.join(", "))
-    },
-  }
+  crate::type_format::format_type(types, defs, symbol_names, type_id)
 }
 
 /// Check if the cursor is on an `@`-item name and return hover if so.
