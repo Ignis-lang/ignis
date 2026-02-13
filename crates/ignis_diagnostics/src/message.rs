@@ -6,6 +6,15 @@ use ignis_type::span::Span;
 
 use super::diagnostic_report::{Severity, Diagnostic};
 
+fn display_type_name(type_name: impl fmt::Display) -> String {
+  let value = type_name.to_string();
+  if value == "error" {
+    "<invalid>".to_string()
+  } else {
+    value
+  }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expected {
   Token(TokenType),
@@ -800,10 +809,15 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::InvalidMetaEntity { expected, .. } => write!(f, "Invalid meta entity, expected {}", expected),
       DiagnosticMessage::MissingArgument(_) => write!(f, "Missing argument for meta"),
       DiagnosticMessage::InvalidArgumentType { expected, .. } => {
-        write!(f, "Invalid argument type, expected '{}'", expected)
+        write!(f, "Invalid argument type, expected '{}'", display_type_name(expected))
       },
       DiagnosticMessage::TypeMismatch { expected, got, .. } => {
-        write!(f, "Type mismatch. Expected '{}', but got '{}'", expected, got)
+        write!(
+          f,
+          "Type mismatch. Expected '{}', but got '{}'",
+          display_type_name(expected),
+          display_type_name(got)
+        )
       },
       DiagnosticMessage::InvalidProperty(_) => write!(f, "Invalid property"),
       DiagnosticMessage::ExpectedCallAfterTypeArgs { .. } => {
@@ -904,10 +918,20 @@ impl fmt::Display for DiagnosticMessage {
         )
       },
       DiagnosticMessage::InvalidCast { from, to, .. } => {
-        write!(f, "Cannot cast from '{}' to '{}'", from, to)
+        write!(
+          f,
+          "Cannot cast from '{}' to '{}'",
+          display_type_name(from),
+          display_type_name(to)
+        )
       },
       DiagnosticMessage::PrecisionLossCast { from, to, .. } => {
-        write!(f, "Cast from '{}' to '{}' may lose precision", from, to)
+        write!(
+          f,
+          "Cast from '{}' to '{}' may lose precision",
+          display_type_name(from),
+          display_type_name(to)
+        )
       },
       DiagnosticMessage::ArgumentCountMismatch {
         expected,
@@ -926,7 +950,9 @@ impl fmt::Display for DiagnosticMessage {
         write!(
           f,
           "Argument {} type mismatch: expected '{}', got '{}'",
-          param_idx, expected, got
+          param_idx,
+          display_type_name(expected),
+          display_type_name(got)
         )
       },
       DiagnosticMessage::InvalidBinaryOperandType {
@@ -938,13 +964,20 @@ impl fmt::Display for DiagnosticMessage {
         write!(
           f,
           "Binary operator '{}' cannot be applied to types '{}' and '{}'",
-          operator, left_type, right_type
+          operator,
+          display_type_name(left_type),
+          display_type_name(right_type)
         )
       },
       DiagnosticMessage::InvalidUnaryOperandType {
         operator, operand_type, ..
       } => {
-        write!(f, "Unary operator '{}' cannot be applied to type '{}'", operator, operand_type)
+        write!(
+          f,
+          "Unary operator '{}' cannot be applied to type '{}'",
+          operator,
+          display_type_name(operand_type)
+        )
       },
       DiagnosticMessage::InvalidNullLiteral { .. } => {
         write!(f, "Null literal can only be used with pointer types")
@@ -964,17 +997,19 @@ impl fmt::Display for DiagnosticMessage {
         write!(
           f,
           "Pointer operator '{}' cannot be applied to types '{}' and '{}'",
-          operator, left_type, right_type
+          operator,
+          display_type_name(left_type),
+          display_type_name(right_type)
         )
       },
       DiagnosticMessage::DereferenceNonPointer { type_name, .. } => {
-        write!(f, "Cannot dereference non-pointer type '{}'", type_name)
+        write!(f, "Cannot dereference non-pointer type '{}'", display_type_name(type_name))
       },
       DiagnosticMessage::VectorIndexNonInteger { index_type, .. } => {
-        write!(f, "Vector index must be integer type, got '{}'", index_type)
+        write!(f, "Vector index must be integer type, got '{}'", display_type_name(index_type))
       },
       DiagnosticMessage::AccessNonVector { type_name, .. } => {
-        write!(f, "Cannot index non-vector type '{}'", type_name)
+        write!(f, "Cannot index non-vector type '{}'", display_type_name(type_name))
       },
       DiagnosticMessage::IndexOutOfBounds { index, size, .. } => {
         write!(f, "Index {} is out of bounds for array of size {}", index, size)
@@ -986,7 +1021,7 @@ impl fmt::Display for DiagnosticMessage {
         )
       },
       DiagnosticMessage::NotCallable { type_name, .. } => {
-        write!(f, "Cannot call non-function type '{}'", type_name)
+        write!(f, "Cannot call non-function type '{}'", display_type_name(type_name))
       },
 
       // Control Flow & Semantic Errors
@@ -1009,14 +1044,20 @@ impl fmt::Display for DiagnosticMessage {
         write!(
           f,
           "Compound assignment operator '{}' cannot be applied to type '{}'",
-          operator, type_name
+          operator,
+          display_type_name(type_name)
         )
       },
       DiagnosticMessage::ReturnTypeMismatch { expected, got, .. } => {
-        write!(f, "Return type mismatch: expected '{}', got '{}'", expected, got)
+        write!(
+          f,
+          "Return type mismatch: expected '{}', got '{}'",
+          display_type_name(expected),
+          display_type_name(got)
+        )
       },
       DiagnosticMessage::MissingReturnValue { expected, .. } => {
-        write!(f, "Missing return value: expected '{}', got void", expected)
+        write!(f, "Missing return value: expected '{}', got void", display_type_name(expected))
       },
 
       // Binder errors
@@ -1103,7 +1144,12 @@ impl fmt::Display for DiagnosticMessage {
 
       // Type checker errors
       DiagnosticMessage::AssignmentTypeMismatch { expected, got, .. } => {
-        write!(f, "Type mismatch: expected '{}', found '{}'", expected, got)
+        write!(
+          f,
+          "Type mismatch: expected '{}', found '{}'",
+          display_type_name(expected),
+          display_type_name(got)
+        )
       },
       DiagnosticMessage::IntegerOverflow { value, target_type, .. } => {
         write!(f, "Integer literal {} overflows type '{}'", value, target_type)
@@ -1169,7 +1215,7 @@ impl fmt::Display for DiagnosticMessage {
         write!(f, "sizeOf requires an explicit cast to a concrete type")
       },
       DiagnosticMessage::InvalidMinMaxType { func_name, got, .. } => {
-        write!(f, "{} requires a numeric type, got '{}'", func_name, got)
+        write!(f, "{} requires a numeric type, got '{}'", func_name, display_type_name(got))
       },
 
       // Static field errors
@@ -1191,7 +1237,7 @@ impl fmt::Display for DiagnosticMessage {
 
       // For-of errors
       DiagnosticMessage::ForOfExpectsVector { got, .. } => {
-        write!(f, "for-of expects vector type, got '{}'", got)
+        write!(f, "for-of expects vector type, got '{}'", display_type_name(got))
       },
       DiagnosticMessage::ForOfRequiresCopyOrRef { element_type, .. } => {
         write!(
@@ -1338,7 +1384,10 @@ impl fmt::Display for DiagnosticMessage {
         write!(
           f,
           "{} method '{}' has wrong signature: expected '{}', got '{}'",
-          trait_name, method_name, expected, got
+          trait_name,
+          method_name,
+          display_type_name(expected),
+          display_type_name(got)
         )
       },
       DiagnosticMessage::LangTraitNotApplicable { trait_name, .. } => {
@@ -1383,7 +1432,8 @@ impl fmt::Display for DiagnosticMessage {
         write!(
           f,
           "first parameter type must be '{}' or a reference to it, got '{}'",
-          expected, got
+          display_type_name(expected),
+          display_type_name(got)
         )
       },
       DiagnosticMessage::ExtensionMethodOnLiteral { method, type_name, .. } => {
@@ -1424,7 +1474,10 @@ impl fmt::Display for DiagnosticMessage {
         write!(
           f,
           "method '{}' signature does not match trait '{}': expected '{}', found '{}'",
-          method_name, trait_name, expected, got
+          method_name,
+          trait_name,
+          display_type_name(expected),
+          display_type_name(got)
         )
       },
       DiagnosticMessage::UnknownTraitInImplements { name, .. } => {
@@ -1461,7 +1514,12 @@ impl fmt::Display for DiagnosticMessage {
         write!(f, "non-exhaustive match")
       },
       DiagnosticMessage::PatternTypeMismatch { expected, got, .. } => {
-        write!(f, "pattern type mismatch: expected '{}', got '{}'", expected, got)
+        write!(
+          f,
+          "pattern type mismatch: expected '{}', got '{}'",
+          display_type_name(expected),
+          display_type_name(got)
+        )
       },
       DiagnosticMessage::UnknownVariant { enum_name, variant, .. } => {
         write!(f, "unknown variant '{}::{}'", enum_name, variant)
@@ -1472,10 +1530,15 @@ impl fmt::Display for DiagnosticMessage {
         write!(f, "variant '{}' expects {} payload values, got {}", variant, expected, got)
       },
       DiagnosticMessage::GuardNotBoolean { got, .. } => {
-        write!(f, "match guard must be boolean, got '{}'", got)
+        write!(f, "match guard must be boolean, got '{}'", display_type_name(got))
       },
       DiagnosticMessage::MatchArmTypeMismatch { expected, got, .. } => {
-        write!(f, "match arm type mismatch: expected '{}', got '{}'", expected, got)
+        write!(
+          f,
+          "match arm type mismatch: expected '{}', got '{}'",
+          display_type_name(expected),
+          display_type_name(got)
+        )
       },
       DiagnosticMessage::UnreachableMatchArm { .. } => {
         write!(f, "unreachable match arm")
@@ -1928,5 +1991,24 @@ impl DiagnosticMessage {
       diagnostic = diagnostic.with_label(span, message);
     }
     diagnostic
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::DiagnosticMessage;
+  use ignis_type::span::Span;
+
+  #[test]
+  fn assignment_type_mismatch_hides_internal_error_type() {
+    let message = DiagnosticMessage::AssignmentTypeMismatch {
+      expected: "i32".to_string(),
+      got: "error".to_string(),
+      span: Span::default(),
+    };
+
+    let rendered = message.to_string();
+    assert!(rendered.contains("<invalid>"));
+    assert!(!rendered.contains("'error'"));
   }
 }

@@ -157,7 +157,7 @@ function negate(x: i32): i32 {
     return -x;
 }
 
-function invert(b: bool): bool {
+function invert(b: boolean): boolean {
     return !b;
 }
 "#,
@@ -170,13 +170,13 @@ function invert(b: bool): bool {
 fn hir_comparison_operators() {
   let result = common::analyze(
     r#"
-function compare(a: i32, b: i32): bool {
-    let lt: bool = a < b;
-    let le: bool = a <= b;
-    let gt: bool = a > b;
-    let ge: bool = a >= b;
-    let eq: bool = a == b;
-    let ne: bool = a != b;
+function compare(a: i32, b: i32): boolean {
+    let lt: boolean = a < b;
+    let le: boolean = a <= b;
+    let gt: boolean = a > b;
+    let ge: boolean = a >= b;
+    let eq: boolean = a == b;
+    let ne: boolean = a != b;
     return eq;
 }
 "#,
@@ -189,9 +189,9 @@ function compare(a: i32, b: i32): bool {
 fn hir_logical_operators() {
   let result = common::analyze(
     r#"
-function logic(a: bool, b: bool): bool {
-    let and_result: bool = a && b;
-    let or_result: bool = a || b;
+function logic(a: boolean, b: boolean): boolean {
+    let and_result: boolean = a && b;
+    let or_result: boolean = a || b;
     return and_result || or_result;
 }
 "#,

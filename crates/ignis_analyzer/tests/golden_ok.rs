@@ -475,13 +475,13 @@ fn extension_method_string() {
   let result = common::analyze(
     r#"
 @extension(string)
-function isEmpty(value: string): bool {
+function isEmpty(value: string): boolean {
     return false;
 }
 
 function main(): void {
     let s: string = "hello";
-    let result: bool = s.isEmpty();
+    let result: boolean = s.isEmpty();
     return;
 }
 "#,
