@@ -1484,21 +1484,9 @@ impl LanguageServer for Server {
     // If no cached analysis, run a fresh one
     let output = match output {
       Some(o) => o,
-      None => {
-        let config = (*self.state.config).clone();
-        let fresh = Arc::new(ignis_driver::analyze_project_with_text(&config, &path_str, Some(text.clone())));
-
-        // Cache it
-        {
-          let mut guard = self.state.open_files.write().await;
-          if let Some(doc) = guard.get_mut(uri)
-            && doc.version == version
-          {
-            doc.set_cached_analysis(version, Arc::clone(&fresh));
-          }
-        }
-
-        fresh
+      None => match self.get_analysis(uri).await {
+        Some((fresh, _, _)) => fresh,
+        None => return Ok(None),
       },
     };
 

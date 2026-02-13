@@ -3,8 +3,10 @@
 //! This module provides autocompletion by analyzing tokens and cached analysis
 //! without depending on a valid AST.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
+
+use crate::at_items::AtItemKind;
 
 /// Log to ignis_lsp.log for debugging
 pub fn log(msg: &str) {
@@ -20,9 +22,12 @@ pub fn log(msg: &str) {
   });
 }
 
+use ignis_ast::statements::{ASTExport, ASTStatement};
+use ignis_ast::ASTNode;
 use ignis_driver::AnalyzeProjectOutput;
 use ignis_token::token::Token;
 use ignis_token::token_types::TokenType;
+use ignis_type::span::Span;
 use ignis_type::definition::{Definition, DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
 use ignis_type::file::FileId;
 use ignis_type::symbol::SymbolId;
@@ -82,6 +87,19 @@ pub enum CompletionContext {
   },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionScope {
+  Global,
+  TypeBody,
+  CallableBody,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScopeFrame {
+  scope: CompletionScope,
+  start: u32,
+}
+
 /// Internal representation of a completion candidate.
 pub struct CompletionCandidate {
   pub label: String,
@@ -95,7 +113,7 @@ pub struct CompletionCandidate {
 }
 
 /// Kind of completion item.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompletionKind {
   Function,
   Method,
@@ -1024,7 +1042,7 @@ pub fn complete_double_colon(
   let Some(def_id) = target_def_id else {
     // Try resolving as namespace
     if let Some(ns_id) = resolve_path_to_namespace(path_segments, output) {
-      add_namespace_members(&ns_id, prefix, output, &mut candidates);
+      add_namespace_members(&ns_id, prefix, output, file_id, &mut candidates);
     }
     return candidates;
   };
@@ -1163,7 +1181,7 @@ pub fn complete_double_colon(
     },
 
     DefinitionKind::Namespace(ns_def) => {
-      add_namespace_members(&ns_def.namespace_id, prefix, output, &mut candidates);
+      add_namespace_members(&ns_def.namespace_id, prefix, output, file_id, &mut candidates);
     },
 
     _ => {},
@@ -1185,28 +1203,89 @@ pub fn complete_identifier(
   // Check if next token is `(` to avoid inserting `foo(()` for functions
   let next_is_paren = is_next_token_paren(tokens, start_offset);
 
-  let mut seen_names = std::collections::HashSet::new();
+  let (scope, local_scope_start) = analyze_completion_scope(tokens, start_offset);
+
+  let mut seen_names = HashSet::new();
 
   if let Some(output) = output {
     let file_analysis = output.file_analysis(file_id);
-    let mut visible_defs = std::collections::HashSet::new();
+    let mut visible_defs: HashMap<DefinitionId, u8> = HashMap::new();
 
-    // 1. Collect definitions from the current file
+    let mut register_visible_def = |def_id: DefinitionId, priority: u8| {
+      visible_defs
+        .entry(def_id)
+        .and_modify(|existing| {
+          if priority < *existing {
+            *existing = priority;
+          }
+        })
+        .or_insert(priority);
+    };
+
+    // Current-file symbols (excluding lexical locals).
     for (def_id, def) in output.defs.iter() {
-      if def.span.file == *file_id {
-        visible_defs.insert(def_id);
+      if def.span.file != *file_id {
+        continue;
       }
+
+      if !include_in_file_identifier_completion(def) {
+        continue;
+      }
+
+      register_visible_def(def_id, 20);
     }
 
-    // 2. Collect imported definitions
+    // Explicitly imported symbols in this file.
     if let Some(file_analysis) = file_analysis {
-      for def_id in file_analysis.import_item_defs.values() {
-        visible_defs.insert(*def_id);
+      let import_item_spans = collect_explicit_import_item_spans(file_analysis);
+
+      for (span, def_id) in &file_analysis.import_item_defs {
+        if !import_item_spans.contains(span) {
+          continue;
+        }
+
+        register_visible_def(*def_id, 30);
       }
     }
 
-    // Add collected definitions
-    for def_id in visible_defs {
+    // Public type-like symbols from other files (e.g. Option/Result).
+    if !prefix.is_empty() {
+      for (def_id, def) in output.defs.iter() {
+        if def.span.file == *file_id {
+          continue;
+        }
+
+        if !include_cross_file_identifier_completion(def) {
+          continue;
+        }
+
+        if !is_visible(def, file_id) {
+          continue;
+        }
+
+        register_visible_def(def_id, 40);
+      }
+    }
+
+    let mut visible_defs: Vec<(DefinitionId, u8)> = visible_defs.into_iter().collect();
+    visible_defs.sort_by(|(left_id, left_priority), (right_id, right_priority)| {
+      left_priority.cmp(right_priority).then_with(|| {
+        let left_name = output
+          .symbol_names
+          .get(&output.defs.get(left_id).name)
+          .map(String::as_str)
+          .unwrap_or_default();
+        let right_name = output
+          .symbol_names
+          .get(&output.defs.get(right_id).name)
+          .map(String::as_str)
+          .unwrap_or_default();
+
+        left_name.cmp(right_name)
+      })
+    });
+
+    for (def_id, source_priority) in visible_defs {
       let def = output.defs.get(&def_id);
 
       // Skip internal definitions
@@ -1227,24 +1306,12 @@ pub fn complete_identifier(
         continue;
       }
 
-      // Final visibility check (redundant for imports but safe)
       if !is_visible(def, file_id) {
         continue;
       }
 
       let (kind, detail, insert_text, insert_format) =
         def_to_completion_info(def, name, &output.types, &output.defs, &output.symbol_names, next_is_paren);
-
-      // Determine sort priority
-      // Locals (10) > Same file (20) > Imports (30) > Keywords (50)
-      let is_local = matches!(&def.kind, DefinitionKind::Variable(_) | DefinitionKind::Parameter(_));
-      let sort_priority = if is_local {
-        10
-      } else if def.span.file == *file_id {
-        20
-      } else {
-        30
-      };
 
       seen_names.insert(name.clone());
 
@@ -1255,17 +1322,249 @@ pub fn complete_identifier(
         documentation: def.doc.clone(),
         insert_text,
         insert_text_format: insert_format,
-        sort_priority,
+        sort_priority: source_priority,
       });
     }
   }
 
-  add_heuristic_locals(tokens, start_offset, prefix, &seen_names, &mut candidates);
+  if scope == CompletionScope::CallableBody {
+    add_heuristic_locals(tokens, start_offset, prefix, local_scope_start, &seen_names, &mut candidates);
+  }
+
+  add_at_item_completions(prefix, scope, &mut candidates);
 
   // Add keywords
-  add_snippet_completions(tokens, start_offset, prefix, &mut candidates);
+  add_snippet_completions(tokens, start_offset, prefix, scope, &mut candidates);
 
   candidates
+}
+
+fn include_in_file_identifier_completion(def: &Definition) -> bool {
+  if def.owner_namespace.is_some() {
+    return false;
+  }
+
+  matches!(
+    &def.kind,
+    DefinitionKind::Function(_)
+      | DefinitionKind::Constant(_)
+      | DefinitionKind::Record(_)
+      | DefinitionKind::Enum(_)
+      | DefinitionKind::Namespace(_)
+      | DefinitionKind::TypeAlias(_)
+  )
+}
+
+fn include_cross_file_identifier_completion(def: &Definition) -> bool {
+  if def.owner_namespace.is_some() {
+    return false;
+  }
+
+  matches!(
+    &def.kind,
+    DefinitionKind::Record(_) | DefinitionKind::Enum(_) | DefinitionKind::Namespace(_) | DefinitionKind::TypeAlias(_)
+  )
+}
+
+fn collect_explicit_import_item_spans(file: &ignis_driver::PerFileAnalysis) -> HashSet<Span> {
+  let mut spans = HashSet::new();
+  let mut stack = file.roots.clone();
+
+  while let Some(node_id) = stack.pop() {
+    match file.nodes.get(&node_id) {
+      ASTNode::Statement(ASTStatement::Import(import_stmt)) => {
+        for item in &import_stmt.items {
+          spans.insert(item.span.clone());
+        }
+      },
+      ASTNode::Statement(ASTStatement::Namespace(ns)) => {
+        stack.extend(ns.items.iter().copied());
+      },
+      ASTNode::Statement(ASTStatement::Export(ASTExport::Declaration { decl, .. })) => {
+        stack.push(*decl);
+      },
+      _ => {},
+    }
+  }
+
+  spans
+}
+
+fn add_at_item_completions(
+  prefix: &str,
+  scope: CompletionScope,
+  candidates: &mut Vec<CompletionCandidate>,
+) {
+  let wanted_kind = match scope {
+    CompletionScope::CallableBody => AtItemKind::Builtin,
+    CompletionScope::Global => AtItemKind::Directive,
+    CompletionScope::TypeBody => return,
+  };
+
+  for item in crate::at_items::completions_matching(prefix) {
+    if item.kind != wanted_kind {
+      continue;
+    }
+
+    match item.kind {
+      AtItemKind::Builtin => {
+        let (insert_text, insert_text_format) = if let Some(snippet) = crate::at_items::snippet_for(item) {
+          (Some(format!("@{}", snippet)), Some(InsertTextFormat::SNIPPET))
+        } else {
+          (Some(format!("@{}", item.name)), None)
+        };
+
+        candidates.push(CompletionCandidate {
+          label: item.name.to_string(),
+          kind: CompletionKind::Function,
+          detail: Some("builtin".to_string()),
+          documentation: Some(crate::at_items::format_hover(item)),
+          insert_text,
+          insert_text_format,
+          sort_priority: 35,
+        });
+      },
+      AtItemKind::Directive => {
+        let (insert_text, insert_text_format) = directive_insert_text(item.name);
+
+        candidates.push(CompletionCandidate {
+          label: item.name.to_string(),
+          kind: CompletionKind::Keyword,
+          detail: Some("directive".to_string()),
+          documentation: Some(crate::at_items::format_hover(item)),
+          insert_text,
+          insert_text_format,
+          sort_priority: 45,
+        });
+      },
+    }
+  }
+}
+
+fn directive_insert_text(name: &str) -> (Option<String>, Option<InsertTextFormat>) {
+  let plain = || (Some(format!("@{}", name)), None);
+
+  let snippet = match name {
+    "aligned" => "@aligned(${1:N})",
+    "implements" => "@implements(${1:Trait})",
+    "externName" => "@externName(\"${1:symbol}\")",
+    "deprecated" => "@deprecated(${1:\"message\"})",
+    "extension" => "@extension(${1:TypeName})",
+    "inline" => "@inline(${1:always})",
+    "takes" => "@takes",
+    "allow" => "@allow(${1:lint_name})",
+    "warn" => "@warn(${1:lint_name})",
+    "deny" => "@deny(${1:lint_name})",
+    "langHook" => "@langHook(\"${1:hook_name}\")",
+    "packed" | "cold" => return plain(),
+    _ => return plain(),
+  };
+
+  (Some(snippet.to_string()), Some(InsertTextFormat::SNIPPET))
+}
+
+fn analyze_completion_scope(
+  tokens: &[Token],
+  cursor_offset: u32,
+) -> (CompletionScope, Option<u32>) {
+  let meaningful: Vec<&Token> = tokens
+    .iter()
+    .filter(|token| {
+      !matches!(
+        token.type_,
+        TokenType::Whitespace | TokenType::Comment | TokenType::MultiLineComment | TokenType::DocComment
+      )
+    })
+    .collect();
+
+  let mut stack: Vec<ScopeFrame> = Vec::new();
+
+  for (index, token) in meaningful.iter().enumerate() {
+    if token.span.start.0 >= cursor_offset {
+      break;
+    }
+
+    match token.type_ {
+      TokenType::LeftBrace => {
+        let parent_scope = stack.last().map(|frame| frame.scope);
+        let scope = classify_left_brace_scope(&meaningful, index, parent_scope);
+        stack.push(ScopeFrame {
+          scope,
+          start: token.span.start.0,
+        });
+      },
+      TokenType::RightBrace => {
+        stack.pop();
+      },
+      _ => {},
+    }
+  }
+
+  let scope = stack.last().map(|frame| frame.scope).unwrap_or(CompletionScope::Global);
+
+  let local_scope_start = if scope == CompletionScope::CallableBody {
+    stack
+      .iter()
+      .rfind(|frame| frame.scope == CompletionScope::CallableBody)
+      .map(|frame| frame.start)
+  } else {
+    None
+  };
+
+  (scope, local_scope_start)
+}
+
+fn classify_left_brace_scope(
+  tokens: &[&Token],
+  brace_index: usize,
+  parent_scope: Option<CompletionScope>,
+) -> CompletionScope {
+  if parent_scope == Some(CompletionScope::CallableBody) {
+    return CompletionScope::CallableBody;
+  }
+
+  let mut segment_start = 0usize;
+  for index in (0..brace_index).rev() {
+    if matches!(
+      tokens[index].type_,
+      TokenType::SemiColon | TokenType::LeftBrace | TokenType::RightBrace
+    ) {
+      segment_start = index + 1;
+      break;
+    }
+  }
+
+  let segment = &tokens[segment_start..brace_index];
+
+  let has_type_keyword = segment
+    .iter()
+    .any(|token| matches!(token.type_, TokenType::Record | TokenType::Enum));
+  if has_type_keyword {
+    return CompletionScope::TypeBody;
+  }
+
+  let has_function_keyword = segment.iter().any(|token| token.type_ == TokenType::Function);
+  if has_function_keyword {
+    return CompletionScope::CallableBody;
+  }
+
+  let has_control_keyword = segment.iter().any(|token| {
+    matches!(
+      token.type_,
+      TokenType::If | TokenType::While | TokenType::For | TokenType::Else | TokenType::Match
+    )
+  });
+  if has_control_keyword {
+    return parent_scope.unwrap_or(CompletionScope::Global);
+  }
+
+  let has_right_paren = segment.iter().any(|token| token.type_ == TokenType::RightParen);
+  let has_colon = segment.iter().any(|token| token.type_ == TokenType::Colon);
+  if has_right_paren && has_colon {
+    return CompletionScope::CallableBody;
+  }
+
+  parent_scope.unwrap_or(CompletionScope::Global)
 }
 
 /// Find the previous meaningful token before the cursor.
@@ -1303,6 +1602,7 @@ fn add_snippet_completions(
   tokens: &[Token],
   start_offset: u32,
   prefix: &str,
+  scope: CompletionScope,
   candidates: &mut Vec<CompletionCandidate>,
 ) {
   let prev_token = find_prev_meaningful_token(tokens, start_offset);
@@ -1377,57 +1677,59 @@ fn add_snippet_completions(
   let lit_prio = 60;
 
   if is_start_of_stmt && wants_snippets {
-    // Control flow
-    add("if", "if (...) { ... }", "if ($1) {\n\t$0\n}", snip_prio);
-    add(
-      "if else",
-      "if (...) { ... } else { ... }",
-      "if ($1) {\n\t$2\n} else {\n\t$0\n}",
-      snip_prio,
-    );
-    add("while", "while (...) { ... }", "while ($1) {\n\t$0\n}", snip_prio);
-    add("for", "for { ... }", "for (let $1 = $2; $3; $4) {\n\t$0\n}", snip_prio);
-    add("for of", "for { ... }", "for (let $1 of $2) {\n\t$0\n}", snip_prio);
-    add("match", "match { ... }", "match ($1) {\n\t$0\n}", snip_prio);
-    add("return", "return val", "return $0;", snip_prio);
-
-    // Declarations
-    add("let", "let var: type = ...", "let $1: $2 = $0;", snip_prio);
-    add("const", "const var: type = ...", "const $1: $2 = $0;", snip_prio);
-    add(
-      "function",
-      "function name(): type { ... }",
-      "function $1($2): $3 {\n\t$0\n}",
-      snip_prio,
-    );
-    add("record", "record Name { ... }", "record $1 {\n\t$0\n}", snip_prio);
-    add("enum", "enum Name { ... }", "enum $1 {\n\t$0\n}", snip_prio);
-    add("namespace", "namespace Name { ... }", "namespace $1 {\n\t$0\n}", snip_prio);
-    add("type", "type Alias = ...", "type $1 = $0;", snip_prio);
-
-    // Imports
-    add("import", "import ... from ...", "import $0 from \"$1\"", snip_prio);
-    add("from", "import ... from ...", "import $0 from \"$1\"", snip_prio);
-
-    // Modifiers
-    add("public", "public modifier", "public ", snip_prio);
-    add("private", "private modifier", "private ", snip_prio);
-    add("static", "static modifier", "static ", snip_prio);
-    add("extern", "extern modifier", "extern ", snip_prio);
-    add("mut", "mut modifier", "mut ", snip_prio);
+    match scope {
+      CompletionScope::CallableBody => {
+        add("if", "if (...) { ... }", "if ($1) {\n\t$0\n}", snip_prio);
+        add(
+          "if else",
+          "if (...) { ... } else { ... }",
+          "if ($1) {\n\t$2\n} else {\n\t$0\n}",
+          snip_prio,
+        );
+        add("while", "while (...) { ... }", "while ($1) {\n\t$0\n}", snip_prio);
+        add("for", "for { ... }", "for (let $1 = $2; $3; $4) {\n\t$0\n}", snip_prio);
+        add("for of", "for { ... }", "for (let $1 of $2) {\n\t$0\n}", snip_prio);
+        add("match", "match { ... }", "match ($1) {\n\t$0\n}", snip_prio);
+        add("return", "return val", "return $0;", snip_prio);
+        add("let", "let var: type = ...", "let $1: $2 = $0;", snip_prio);
+        add("const", "const var: type = ...", "const $1: $2 = $0;", snip_prio);
+      },
+      CompletionScope::TypeBody => {
+        add("public", "public modifier", "public ", snip_prio);
+        add("private", "private modifier", "private ", snip_prio);
+        add("static", "static modifier", "static ", snip_prio);
+        add("inline", "inline modifier", "inline ", snip_prio);
+      },
+      CompletionScope::Global => {
+        add("const", "const var: type = ...", "const $1: $2 = $0;", snip_prio);
+        add(
+          "function",
+          "function name(): type { ... }",
+          "function $1($2): $3 {\n\t$0\n}",
+          snip_prio,
+        );
+        add("record", "record Name { ... }", "record $1 {\n\t$0\n}", snip_prio);
+        add("enum", "enum Name { ... }", "enum $1 {\n\t$0\n}", snip_prio);
+        add("namespace", "namespace Name { ... }", "namespace $1 {\n\t$0\n}", snip_prio);
+        add("type", "type Alias = ...", "type $1 = $0;", snip_prio);
+        add("extern", "extern path { ... }", "extern $1 {\n\t$0\n}", snip_prio);
+        add("import", "import ... from ...", "import $0 from \"$1\"", snip_prio);
+      },
+    }
   }
 
   // Special case: else (only valid after '}')
-  if is_after_right_brace && wants_snippets {
+  if scope == CompletionScope::CallableBody && is_after_right_brace && wants_snippets {
     add("else", "else { ... }", "else {\n\t$0\n}", snip_prio);
   }
 
   // Keywords valid in almost any expression context
-  if is_start_of_stmt
-    || matches!(
-      prev_token.map(|t| t.type_),
-      Some(TokenType::Colon | TokenType::Equal | TokenType::LeftParen | TokenType::Comma)
-    )
+  if scope == CompletionScope::CallableBody
+    && (is_start_of_stmt
+      || matches!(
+        prev_token.map(|t| t.type_),
+        Some(TokenType::Colon | TokenType::Equal | TokenType::LeftParen | TokenType::Comma)
+      ))
   {
     add("true", "boolean true", "true", lit_prio);
     add("false", "boolean false", "false", lit_prio);
@@ -1442,7 +1744,8 @@ fn add_heuristic_locals(
   tokens: &[Token],
   cursor_offset: u32,
   prefix: &str,
-  already_seen: &std::collections::HashSet<String>,
+  local_scope_start: Option<u32>,
+  already_seen: &HashSet<String>,
   candidates: &mut Vec<CompletionCandidate>,
 ) {
   // Find token index at cursor
@@ -1451,13 +1754,19 @@ fn add_heuristic_locals(
     .position(|t| t.span.start.0 >= cursor_offset)
     .unwrap_or(tokens.len());
 
-  let mut seen = std::collections::HashSet::new();
+  let mut seen = HashSet::new();
 
   // Scan backwards from cursor
   for i in (0..cursor_idx).rev() {
     let tok = &tokens[i];
 
-    // Look for: let/const/mut <IDENT>
+    if let Some(local_scope_start) = local_scope_start {
+      if tok.span.start.0 < local_scope_start {
+        break;
+      }
+    }
+
+    // Look for: let/const <IDENT>
     if tok.type_ == TokenType::Identifier {
       let name = &tok.lexeme;
 
@@ -1474,7 +1783,7 @@ fn add_heuristic_locals(
       if i > 0 {
         let prev = &tokens[i - 1];
         match prev.type_ {
-          TokenType::Let | TokenType::Const | TokenType::Mut => {
+          TokenType::Let | TokenType::Const => {
             if seen.insert(name.clone()) {
               candidates.push(CompletionCandidate {
                 label: name.clone(),
@@ -1543,7 +1852,27 @@ pub fn complete_import_path(
 
 /// Convert internal candidates to LSP CompletionItems.
 pub fn to_completion_items(candidates: Vec<CompletionCandidate>) -> Vec<CompletionItem> {
-  let mut items: Vec<CompletionItem> = candidates
+  let mut unique_candidates: Vec<CompletionCandidate> = Vec::new();
+  let mut keys: HashMap<(String, CompletionKind, Option<String>), usize> = HashMap::new();
+
+  for candidate in candidates {
+    let key = (candidate.label.clone(), candidate.kind, candidate.detail.clone());
+
+    if let Some(index) = keys.get(&key) {
+      let current = &mut unique_candidates[*index];
+
+      if candidate.sort_priority < current.sort_priority {
+        *current = candidate;
+      }
+
+      continue;
+    }
+
+    keys.insert(key, unique_candidates.len());
+    unique_candidates.push(candidate);
+  }
+
+  let mut items: Vec<CompletionItem> = unique_candidates
     .into_iter()
     .enumerate()
     .map(|(i, c)| {
@@ -1719,9 +2048,14 @@ fn resolve_imported_path_head(
   current_file: &FileId,
 ) -> Option<DefinitionId> {
   let file_analysis = output.file_analysis(current_file)?;
+  let import_item_spans = collect_explicit_import_item_spans(file_analysis);
   let source = &output.source_map.get(current_file).text;
 
   for (span, def_id) in &file_analysis.import_item_defs {
+    if !import_item_spans.contains(span) {
+      continue;
+    }
+
     let start = span.start.0 as usize;
     let end = span.end.0 as usize;
 
@@ -1829,17 +2163,22 @@ fn add_namespace_members(
   ns_id: &ignis_type::namespace::NamespaceId,
   prefix: &str,
   output: &AnalyzeProjectOutput,
+  current_file: &FileId,
   candidates: &mut Vec<CompletionCandidate>,
 ) {
   let ns = output.namespaces.get(ns_id);
 
   // Child namespaces
-  for sym_id in ns.children.keys() {
+  for (sym_id, child_ns_id) in &ns.children {
     let Some(name) = output.symbol_names.get(sym_id) else {
       continue;
     };
 
     if !matches_prefix(name, prefix) {
+      continue;
+    }
+
+    if find_namespace_def_id(child_ns_id, output, current_file).is_none() {
       continue;
     }
 
@@ -2203,6 +2542,103 @@ mod tests {
     lexer.scan_tokens();
     // Filter out EOF token
     lexer.tokens.into_iter().filter(|t| t.type_ != TokenType::Eof).collect()
+  }
+
+  fn labels(candidates: &[CompletionCandidate]) -> Vec<String> {
+    candidates.iter().map(|candidate| candidate.label.clone()).collect()
+  }
+
+  #[test]
+  fn test_scope_detection_inside_record_body() {
+    let source = "record Rc {\n  \n}";
+    let cursor = source.find("\n  ").unwrap() as u32 + 2;
+    let tokens = lex(source);
+
+    let (scope, _) = analyze_completion_scope(&tokens, cursor);
+    assert_eq!(scope, CompletionScope::TypeBody);
+  }
+
+  #[test]
+  fn test_scope_detection_inside_function_body() {
+    let source = "function f(): void {\n  \n}";
+    let cursor = source.find("\n  ").unwrap() as u32 + 2;
+    let tokens = lex(source);
+
+    let (scope, local_scope_start) = analyze_completion_scope(&tokens, cursor);
+    assert_eq!(scope, CompletionScope::CallableBody);
+    assert!(local_scope_start.is_some());
+  }
+
+  #[test]
+  fn test_scope_detection_at_global_level() {
+    let source = "const value: i32 = 1;\n";
+    let tokens = lex(source);
+    let cursor = source.len() as u32;
+
+    let (scope, local_scope_start) = analyze_completion_scope(&tokens, cursor);
+    assert_eq!(scope, CompletionScope::Global);
+    assert!(local_scope_start.is_none());
+  }
+
+  #[test]
+  fn test_type_body_snippets_only_include_member_modifiers() {
+    let source = "record Rc {\n  \n}";
+    let cursor = source.find("\n  ").unwrap() as u32 + 2;
+    let tokens = lex(source);
+    let mut candidates = Vec::new();
+
+    add_snippet_completions(&tokens, cursor, "", CompletionScope::TypeBody, &mut candidates);
+    let names = labels(&candidates);
+
+    assert!(names.contains(&"public".to_string()));
+    assert!(names.contains(&"private".to_string()));
+    assert!(names.contains(&"static".to_string()));
+    assert!(!names.contains(&"if".to_string()));
+    assert!(!names.contains(&"import".to_string()));
+  }
+
+  #[test]
+  fn test_callable_snippets_exclude_global_and_member_keywords() {
+    let source = "function f(): void {\n  \n}";
+    let cursor = source.find("\n  ").unwrap() as u32 + 2;
+    let tokens = lex(source);
+    let mut candidates = Vec::new();
+
+    add_snippet_completions(&tokens, cursor, "", CompletionScope::CallableBody, &mut candidates);
+    let names = labels(&candidates);
+
+    assert!(names.contains(&"if".to_string()));
+    assert!(names.contains(&"let".to_string()));
+    assert!(!names.contains(&"public".to_string()));
+    assert!(!names.contains(&"namespace".to_string()));
+    assert!(!names.contains(&"import".to_string()));
+  }
+
+  #[test]
+  fn test_callable_scope_offers_builtins_without_at() {
+    let mut candidates = Vec::new();
+    add_at_item_completions("si", CompletionScope::CallableBody, &mut candidates);
+    let names = labels(&candidates);
+
+    assert!(names.contains(&"sizeOf".to_string()));
+    assert!(!names.contains(&"extension".to_string()));
+  }
+
+  #[test]
+  fn test_global_scope_offers_directives_without_at() {
+    let mut candidates = Vec::new();
+    add_at_item_completions("ex", CompletionScope::Global, &mut candidates);
+    let names = labels(&candidates);
+
+    assert!(names.contains(&"extension".to_string()));
+    assert!(!names.contains(&"sizeOf".to_string()));
+  }
+
+  #[test]
+  fn test_type_body_scope_does_not_offer_at_items_without_at() {
+    let mut candidates = Vec::new();
+    add_at_item_completions("", CompletionScope::TypeBody, &mut candidates);
+    assert!(candidates.is_empty());
   }
 
   #[test]
