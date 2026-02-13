@@ -5,6 +5,7 @@ pub mod display;
 pub mod expressions;
 pub mod generics;
 pub mod metadata;
+pub mod pattern;
 pub mod statements;
 pub mod type_;
 pub mod visitor;

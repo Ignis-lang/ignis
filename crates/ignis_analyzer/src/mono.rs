@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use ignis_hir::{HIR, HIRId, HIRKind, HIRNode, statement::LoopKind};
+use ignis_hir::{HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, statement::LoopKind};
 use ignis_type::definition::{
   Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef, FieldDefinition,
   FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, VariantDefinition,
@@ -959,6 +959,24 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::Trap => (HIRKind::Trap, None),
       HIRKind::BuiltinUnreachable => (HIRKind::BuiltinUnreachable, None),
+      HIRKind::Match { scrutinee, arms } => {
+        let new_scrutinee = self.clone_hir_tree(*scrutinee);
+        let new_arms: Vec<_> = arms
+          .iter()
+          .map(|arm| HIRMatchArm {
+            pattern: arm.pattern.clone(),
+            guard: arm.guard.map(|g| self.clone_hir_tree(g)),
+            body: self.clone_hir_tree(arm.body),
+          })
+          .collect();
+        (
+          HIRKind::Match {
+            scrutinee: new_scrutinee,
+            arms: new_arms,
+          },
+          None,
+        )
+      },
     }
   }
 
@@ -1208,6 +1226,15 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::TypeOf(expr) => {
         self.scan_hir(*expr);
+      },
+      HIRKind::Match { scrutinee, arms } => {
+        self.scan_hir(*scrutinee);
+        for arm in arms {
+          if let Some(g) = arm.guard {
+            self.scan_hir(g);
+          }
+          self.scan_hir(arm.body);
+        }
       },
       // Terminals
       HIRKind::Literal(_)
@@ -2054,6 +2081,21 @@ impl<'a> Monomorphizer<'a> {
         HIRKind::Loop {
           condition: new_cond,
           body: new_body,
+        }
+      },
+      HIRKind::Match { scrutinee, arms } => {
+        let new_scrutinee = self.substitute_hir(*scrutinee, subst);
+        let new_arms: Vec<_> = arms
+          .iter()
+          .map(|arm| HIRMatchArm {
+            pattern: arm.pattern.clone(),
+            guard: arm.guard.map(|g| self.substitute_hir(g, subst)),
+            body: self.substitute_hir(arm.body, subst),
+          })
+          .collect();
+        HIRKind::Match {
+          scrutinee: new_scrutinee,
+          arms: new_arms,
         }
       },
       HIRKind::Break => HIRKind::Break,

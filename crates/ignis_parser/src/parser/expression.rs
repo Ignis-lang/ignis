@@ -10,6 +10,7 @@ use ignis_ast::{
     dereference::ASTDereference,
     grouped::ASTGrouped,
     literal::ASTLiteral,
+    match_expression::{ASTMatch, ASTMatchArm},
     path::{ASTPath, ASTPathSegment},
     reference::ASTReference,
     ternary::ASTTernary,
@@ -18,6 +19,7 @@ use ignis_ast::{
     vector::ASTVector,
     vector_access::ASTVectorAccess,
   },
+  pattern::ASTPattern,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_token::{token::Token, token_types::TokenType};
@@ -513,6 +515,7 @@ impl IgnisParser {
           span,
         ))))
       },
+      TokenType::Match => self.parse_match_expression(&token),
       TokenType::At => self.parse_builtin_call(&token),
       TokenType::Colon => {
         let colon_span = token.span.clone();
@@ -532,6 +535,191 @@ impl IgnisParser {
       },
       _ => Err(DiagnosticMessage::ExpectedExpression(token.span.clone())),
     }
+  }
+
+  fn parse_match_expression(
+    &mut self,
+    match_token: &Token,
+  ) -> ParserResult<NodeId> {
+    self.expect(TokenType::LeftParen)?;
+    let scrutinee = self.parse_expression(0)?;
+    self.expect(TokenType::RightParen)?;
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut arms = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      let pattern = self.parse_pattern()?;
+
+      let guard = if self.eat(TokenType::If) {
+        Some(self.parse_expression(0)?)
+      } else {
+        None
+      };
+
+      self.expect(TokenType::Arrow)?;
+
+      let body = if self.at(TokenType::LeftBrace) {
+        self.parse_block()?
+      } else {
+        self.parse_expression(0)?
+      };
+
+      let arm_span = Span::merge(pattern.span(), self.get_span(&body));
+      arms.push(ASTMatchArm::new(pattern, guard, body, arm_span));
+
+      if !self.at(TokenType::RightBrace) {
+        self.expect(TokenType::Comma)?;
+      }
+    }
+
+    let right_brace = self.expect(TokenType::RightBrace)?.clone();
+    let span = Span::merge(&match_token.span, &right_brace.span);
+
+    Ok(self.allocate_expression(ASTExpression::Match(ASTMatch::new(scrutinee, arms, span))))
+  }
+
+  fn parse_pattern(&mut self) -> ParserResult<ASTPattern> {
+    self.parse_or_pattern()
+  }
+
+  fn parse_or_pattern(&mut self) -> ParserResult<ASTPattern> {
+    let first = self.parse_primary_pattern()?;
+    let mut patterns = vec![first];
+
+    while self.eat(TokenType::Pipe) {
+      patterns.push(self.parse_primary_pattern()?);
+    }
+
+    if patterns.len() == 1 {
+      Ok(patterns.pop().unwrap())
+    } else {
+      let span = Span::merge(patterns.first().unwrap().span(), patterns.last().unwrap().span());
+      Ok(ASTPattern::Or { patterns, span })
+    }
+  }
+
+  fn parse_primary_pattern(&mut self) -> ParserResult<ASTPattern> {
+    match self.peek().type_ {
+      TokenType::Int
+      | TokenType::Float
+      | TokenType::String
+      | TokenType::Char
+      | TokenType::Hex
+      | TokenType::Binary
+      | TokenType::True
+      | TokenType::False
+      | TokenType::Null => {
+        let token = self.bump().clone();
+        Ok(ASTPattern::Literal {
+          value: (&token).into(),
+          span: token.span,
+        })
+      },
+      TokenType::Colon => {
+        let colon = self.bump().clone();
+
+        if self.at(TokenType::Colon) {
+          return Err(DiagnosticMessage::UnexpectedToken {
+            at: self.peek().span.clone(),
+          });
+        }
+
+        let ident = self.expect(TokenType::Identifier)?.clone();
+        let symbol = self.insert_symbol(&ident);
+        let span = Span::merge(&colon.span, &ident.span);
+
+        Ok(ASTPattern::Literal {
+          value: IgnisLiteralValue::Atom(symbol),
+          span,
+        })
+      },
+      TokenType::Identifier => self.parse_path_or_wildcard_pattern(),
+      TokenType::LeftParen => self.parse_tuple_or_grouped_pattern(),
+      _ => Err(DiagnosticMessage::ExpectedExpression(self.peek().span.clone())),
+    }
+  }
+
+  fn parse_path_or_wildcard_pattern(&mut self) -> ParserResult<ASTPattern> {
+    let first = self.expect(TokenType::Identifier)?.clone();
+
+    if first.lexeme == "_" && !self.at(TokenType::DoubleColon) && !self.at(TokenType::LeftParen) {
+      return Ok(ASTPattern::Wildcard { span: first.span });
+    }
+
+    let start = first.span.clone();
+    let mut segments = vec![(self.insert_symbol(&first), first.span.clone())];
+
+    while self.eat(TokenType::DoubleColon) {
+      let segment = self.expect(TokenType::Identifier)?.clone();
+      segments.push((self.insert_symbol(&segment), segment.span.clone()));
+    }
+
+    let mut args = None;
+    let mut end = segments.last().unwrap().1.clone();
+
+    if self.eat(TokenType::LeftParen) {
+      let mut parsed_args = Vec::new();
+
+      if !self.at(TokenType::RightParen) {
+        parsed_args.push(self.parse_pattern()?);
+
+        while self.eat(TokenType::Comma) {
+          if self.at(TokenType::RightParen) {
+            break;
+          }
+
+          parsed_args.push(self.parse_pattern()?);
+        }
+      }
+
+      let right_paren = self.expect(TokenType::RightParen)?.clone();
+      end = right_paren.span;
+      args = Some(parsed_args);
+    }
+
+    let span = Span::merge(&start, &end);
+
+    Ok(ASTPattern::Path { segments, args, span })
+  }
+
+  fn parse_tuple_or_grouped_pattern(&mut self) -> ParserResult<ASTPattern> {
+    let left_paren = self.expect(TokenType::LeftParen)?.clone();
+
+    if self.at(TokenType::RightParen) {
+      let right_paren = self.expect(TokenType::RightParen)?.clone();
+      let span = Span::merge(&left_paren.span, &right_paren.span);
+      return Ok(ASTPattern::Tuple {
+        elements: Vec::new(),
+        span,
+      });
+    }
+
+    let first = self.parse_pattern()?;
+
+    if self.eat(TokenType::Comma) {
+      let mut elements = vec![first];
+
+      if !self.at(TokenType::RightParen) {
+        elements.push(self.parse_pattern()?);
+
+        while self.eat(TokenType::Comma) {
+          if self.at(TokenType::RightParen) {
+            break;
+          }
+
+          elements.push(self.parse_pattern()?);
+        }
+      }
+
+      let right_paren = self.expect(TokenType::RightParen)?.clone();
+      let span = Span::merge(&left_paren.span, &right_paren.span);
+
+      return Ok(ASTPattern::Tuple { elements, span });
+    }
+
+    self.expect(TokenType::RightParen)?;
+    Ok(first)
   }
 
   fn parse_literal(
@@ -670,6 +858,7 @@ mod tests {
   use ignis_ast::{
     ASTNode, NodeId,
     expressions::{ASTExpression, binary::ASTBinaryOperator, unary::UnaryOperator},
+    pattern::ASTPattern,
     statements::ASTStatement,
   };
   use ignis_type::{Store, file::SourceMap, symbol::SymbolTable, value::IgnisLiteralValue};
@@ -1446,6 +1635,89 @@ mod tests {
         assert_eq!(type_args.len(), 1);
       },
       other => panic!("expected call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_match_expression_with_literal_and_wildcard() {
+    let result = parse_expr("match (x) { 1 -> 10, _ -> 0 }");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Match(match_expr) => {
+        assert_eq!(match_expr.arms.len(), 2);
+
+        match &match_expr.arms[0].pattern {
+          ASTPattern::Literal { value, .. } => match value {
+            IgnisLiteralValue::Int32(v) => assert_eq!(*v, 1),
+            other => panic!("expected Int32 literal pattern, got {:?}", other),
+          },
+          other => panic!("expected literal pattern, got {:?}", other),
+        }
+
+        match &match_expr.arms[1].pattern {
+          ASTPattern::Wildcard { .. } => {},
+          other => panic!("expected wildcard pattern, got {:?}", other),
+        }
+      },
+      other => panic!("expected match expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_match_expression_with_guard() {
+    let result = parse_expr("match (x) { Some(value) if value > 0 -> value, _ -> 0 }");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Match(match_expr) => {
+        assert_eq!(match_expr.arms.len(), 2);
+        assert!(match_expr.arms[0].guard.is_some());
+        assert!(match_expr.arms[1].guard.is_none());
+      },
+      other => panic!("expected match expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_match_expression_with_or_pattern() {
+    let result = parse_expr("match (x) { 1 | 2 | 3 -> 1, _ -> 0 }");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Match(match_expr) => match &match_expr.arms[0].pattern {
+        ASTPattern::Or { patterns, .. } => {
+          assert_eq!(patterns.len(), 3);
+        },
+        other => panic!("expected or pattern, got {:?}", other),
+      },
+      other => panic!("expected match expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_match_expression_with_grouped_and_tuple_patterns() {
+    let result = parse_expr("match (x) { (a) -> 1, (b, c) -> 2, _ -> 0 }");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Match(match_expr) => {
+        match &match_expr.arms[0].pattern {
+          ASTPattern::Path { segments, args, .. } => {
+            assert_eq!(segments.len(), 1);
+            assert!(args.is_none());
+          },
+          other => panic!("expected grouped path pattern, got {:?}", other),
+        }
+
+        match &match_expr.arms[1].pattern {
+          ASTPattern::Tuple { elements, .. } => {
+            assert_eq!(elements.len(), 2);
+          },
+          other => panic!("expected tuple pattern, got {:?}", other),
+        }
+      },
+      other => panic!("expected match expression, got {:?}", other),
     }
   }
 }

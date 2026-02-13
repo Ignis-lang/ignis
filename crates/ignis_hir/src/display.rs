@@ -784,6 +784,35 @@ impl<'a> HIRPrinter<'a> {
         let name = self.symbols.get(&def.name);
         writeln!(self.output, "StaticAccess({}) : {}", name, type_str).unwrap();
       },
+      HIRKind::Match { scrutinee, arms } => {
+        writeln!(self.output, "Match : {}", type_str).unwrap();
+        self.indent += 1;
+        self.write_indent();
+        writeln!(self.output, "scrutinee:").unwrap();
+        self.indent += 1;
+        self.print_node(*scrutinee);
+        self.indent -= 1;
+        for (i, arm) in arms.iter().enumerate() {
+          self.write_indent();
+          writeln!(self.output, "arm[{}]:", i).unwrap();
+          self.indent += 1;
+          self.write_indent();
+          writeln!(self.output, "pattern: {:?}", arm.pattern).unwrap();
+          if let Some(g) = arm.guard {
+            self.write_indent();
+            writeln!(self.output, "guard:").unwrap();
+            self.indent += 1;
+            self.print_node(g);
+            self.indent -= 1;
+          }
+          self.write_indent();
+          writeln!(self.output, "body:").unwrap();
+          self.indent += 1;
+          self.print_node(arm.body);
+          self.indent -= 2;
+        }
+        self.indent -= 1;
+      },
     }
   }
 

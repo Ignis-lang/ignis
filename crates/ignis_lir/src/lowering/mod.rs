@@ -2,7 +2,9 @@ mod builder;
 
 use std::collections::{HashMap, HashSet};
 
-use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
+use ignis_hir::{
+  DropSchedules, ExitKey, HIR, HIRId, HIRKind, HIRMatchArm, HIRPattern, operation::BinaryOperation, statement::LoopKind,
+};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore, InlineMode},
   module::ModuleId,
@@ -444,6 +446,7 @@ impl<'a> LoweringContext<'a> {
         self.fn_builder().terminate(Terminator::Unreachable);
         None
       },
+      HIRKind::Match { scrutinee, arms } => self.lower_match(*scrutinee, arms, node.type_id, node.span),
     }
   }
 
@@ -1493,6 +1496,222 @@ impl<'a> LoweringContext<'a> {
       });
       Operand::Temp(temp)
     })
+  }
+
+  fn lower_match(
+    &mut self,
+    scrutinee: HIRId,
+    arms: &[HIRMatchArm],
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let scrutinee_val = self.lower_hir_node(scrutinee)?;
+    let scrutinee_ty = self.hir.get(scrutinee).type_id;
+
+    let scrut_local = self.fn_builder().alloc_local(LocalData {
+      def_id: None,
+      ty: scrutinee_ty,
+      mutable: false,
+      name: Some("match_scrutinee".to_string()),
+    });
+    self.fn_builder().emit(Instr::Store {
+      dest: scrut_local,
+      value: scrutinee_val,
+    });
+
+    let is_void = matches!(self.types.get(&result_ty), Type::Void);
+    let result_local = if !is_void {
+      Some(self.fn_builder().alloc_local(LocalData {
+        def_id: None,
+        ty: result_ty,
+        mutable: true,
+        name: Some("match_result".to_string()),
+      }))
+    } else {
+      None
+    };
+
+    let merge_block = self.fn_builder().create_block("match_merge");
+
+    let panic_block = self.fn_builder().create_block("match_panic");
+
+    let check_blocks: Vec<_> = (0..arms.len())
+      .map(|i| self.fn_builder().create_block(&format!("match_check_{}", i)))
+      .collect();
+
+    let arm_blocks: Vec<_> = (0..arms.len())
+      .map(|i| self.fn_builder().create_block(&format!("match_arm_{}", i)))
+      .collect();
+
+    if !self.fn_builder().is_terminated() {
+      self.fn_builder().terminate(Terminator::Goto(check_blocks[0]));
+    }
+
+    for (i, arm) in arms.iter().enumerate() {
+      self.fn_builder().switch_to_block(check_blocks[i]);
+
+      let matches = self.lower_pattern_check(scrut_local, &arm.pattern, scrutinee_ty, span.clone());
+
+      let else_block = if i + 1 < arms.len() {
+        check_blocks[i + 1]
+      } else {
+        panic_block
+      };
+
+      if let Some(guard) = arm.guard {
+        let guard_block = self.fn_builder().create_block(&format!("match_guard_{}", i));
+
+        self.fn_builder().terminate(Terminator::Branch {
+          condition: matches,
+          then_block: guard_block,
+          else_block,
+        });
+
+        self.fn_builder().switch_to_block(guard_block);
+        let guard_val = self.lower_hir_node(guard)?;
+
+        if !self.fn_builder().is_terminated() {
+          self.fn_builder().terminate(Terminator::Branch {
+            condition: guard_val,
+            then_block: arm_blocks[i],
+            else_block,
+          });
+        }
+      } else {
+        self.fn_builder().terminate(Terminator::Branch {
+          condition: matches,
+          then_block: arm_blocks[i],
+          else_block,
+        });
+      }
+
+      self.fn_builder().switch_to_block(arm_blocks[i]);
+      let body_val = self.lower_hir_node(arm.body);
+
+      if !self.fn_builder().is_terminated() {
+        if let (Some(local), Some(val)) = (result_local, body_val) {
+          self.fn_builder().emit(Instr::Store {
+            dest: local,
+            value: val,
+          });
+        }
+        self.fn_builder().terminate(Terminator::Goto(merge_block));
+      }
+    }
+
+    self.fn_builder().switch_to_block(panic_block);
+    if !self.fn_builder().is_terminated() {
+      self.fn_builder().emit(Instr::PanicMessage {
+        message: "non-exhaustive match".to_string(),
+        span: span.clone(),
+      });
+      self.fn_builder().terminate(Terminator::Unreachable);
+    }
+
+    self.fn_builder().switch_to_block(merge_block);
+
+    result_local.map(|local| {
+      let temp = self.fn_builder().alloc_temp(result_ty, span);
+      self.fn_builder().emit(Instr::Load {
+        dest: temp,
+        source: local,
+      });
+      Operand::Temp(temp)
+    })
+  }
+
+  fn lower_pattern_check(
+    &mut self,
+    scrut_local: LocalId,
+    pattern: &HIRPattern,
+    scrut_ty: TypeId,
+    span: Span,
+  ) -> Operand {
+    let bool_ty = self.types.boolean();
+
+    match pattern {
+      HIRPattern::Wildcard => {
+        let true_temp = self.fn_builder().alloc_temp(bool_ty, span);
+        self.fn_builder().emit(Instr::Copy {
+          dest: true_temp,
+          source: Operand::Const(ConstValue::Bool(true, bool_ty)),
+        });
+        Operand::Temp(true_temp)
+      },
+      HIRPattern::Literal { value } => {
+        let scrut_temp = self.fn_builder().alloc_temp(scrut_ty, span.clone());
+        self.fn_builder().emit(Instr::Load {
+          dest: scrut_temp,
+          source: scrut_local,
+        });
+
+        let lit_val = self.lower_literal(value, scrut_ty).unwrap();
+
+        let result_temp = self.fn_builder().alloc_temp(bool_ty, span);
+        self.fn_builder().emit(Instr::BinOp {
+          dest: result_temp,
+          op: BinaryOperation::Equal,
+          left: Operand::Temp(scrut_temp),
+          right: lit_val,
+        });
+        Operand::Temp(result_temp)
+      },
+      HIRPattern::Binding { def_id } => {
+        let scrut_temp = self.fn_builder().alloc_temp(scrut_ty, span.clone());
+        self.fn_builder().emit(Instr::Load {
+          dest: scrut_temp,
+          source: scrut_local,
+        });
+
+        let binding_local = self.fn_builder().alloc_local(LocalData {
+          def_id: Some(*def_id),
+          ty: scrut_ty,
+          mutable: false,
+          name: None,
+        });
+        self.fn_builder().emit(Instr::Store {
+          dest: binding_local,
+          value: Operand::Temp(scrut_temp),
+        });
+
+        let true_temp = self.fn_builder().alloc_temp(bool_ty, span);
+        self.fn_builder().emit(Instr::Copy {
+          dest: true_temp,
+          source: Operand::Const(ConstValue::Bool(true, bool_ty)),
+        });
+        Operand::Temp(true_temp)
+      },
+      HIRPattern::Or { patterns } => {
+        let mut result_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
+
+        self.fn_builder().emit(Instr::Copy {
+          dest: result_temp,
+          source: Operand::Const(ConstValue::Bool(false, bool_ty)),
+        });
+
+        for p in patterns {
+          let check = self.lower_pattern_check(scrut_local, p, scrut_ty, span.clone());
+          let new_result = self.fn_builder().alloc_temp(bool_ty, span.clone());
+          self.fn_builder().emit(Instr::BinOp {
+            dest: new_result,
+            op: BinaryOperation::Or,
+            left: Operand::Temp(result_temp),
+            right: check,
+          });
+          result_temp = new_result;
+        }
+
+        Operand::Temp(result_temp)
+      },
+      HIRPattern::Variant { .. } | HIRPattern::Tuple { .. } => {
+        let true_temp = self.fn_builder().alloc_temp(bool_ty, span);
+        self.fn_builder().emit(Instr::Copy {
+          dest: true_temp,
+          source: Operand::Const(ConstValue::Bool(true, bool_ty)),
+        });
+        Operand::Temp(true_temp)
+      },
+    }
   }
 
   fn lower_loop(
