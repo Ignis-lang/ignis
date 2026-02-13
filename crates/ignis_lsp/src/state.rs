@@ -110,7 +110,7 @@ impl OpenDoc {
   ) {
     // Update last_good_analysis only if analysis has type information
     // This ensures we don't lose good analysis when the user types incomplete code
-    if !output.node_types.is_empty() {
+    if output.has_type_information() {
       self.last_good_analysis = Some(Arc::clone(&output));
     }
 
@@ -164,7 +164,7 @@ impl OpenDoc {
     // Try cached analysis first
     if let Some(cached) = self.get_cached_analysis() {
       // If it has type info, use it
-      if !cached.node_types.is_empty() {
+      if cached.has_type_information() {
         return Some(cached);
       }
       // Otherwise fall through to last_good_analysis
