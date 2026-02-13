@@ -94,8 +94,19 @@ impl CompilationContext {
     self.discover_recursive(entry_path, None, config)
   }
 
-  /// Std modules implicitly available in every compilation (extension methods on primitives).
-  const PRELUDE_STD_MODULES: &'static [&'static str] = &["string", "number", "vector", "types"];
+  /// Fallback std modules implicitly available in every compilation when
+  /// manifest auto-load configuration is missing.
+  const DEFAULT_PRELUDE_STD_MODULES: &'static [&'static str] = &["string", "number", "vector", "types"];
+
+  fn prelude_std_modules<'a>(config: &'a IgnisConfig) -> Vec<&'a str> {
+    let mut modules = config.manifest.get_auto_load_modules();
+
+    if modules.is_empty() {
+      modules.extend(Self::DEFAULT_PRELUDE_STD_MODULES.iter().copied());
+    }
+
+    modules
+  }
 
   /// Discover prelude std modules and add implicit import edges from root.
   pub fn discover_prelude_modules(
@@ -106,7 +117,7 @@ impl CompilationContext {
     let root_file = self.module_graph.modules.get(&root_id).file_id;
     let dummy_span = Span::empty_at(root_file, BytePosition::default());
 
-    for module_name in Self::PRELUDE_STD_MODULES {
+    for module_name in Self::prelude_std_modules(config) {
       if let Ok(prelude_id) = self.discover_std_module(module_name, config) {
         self
           .module_graph
@@ -124,7 +135,7 @@ impl CompilationContext {
     let root_file = self.module_graph.modules.get(&root_id).file_id;
     let dummy_span = Span::empty_at(root_file, BytePosition::default());
 
-    for module_name in Self::PRELUDE_STD_MODULES {
+    for module_name in Self::prelude_std_modules(config) {
       if let Ok(prelude_id) = self.discover_std_module_lsp(module_name, config) {
         self
           .module_graph

@@ -3,7 +3,7 @@
 This directory contains the built-in modules shipped with the Ignis toolchain.
 They provide the low-level runtime surface (`memory`, `libc`, `ptr`) and a small
 set of high-level building blocks (`string`, `io`, `vector`, `number`, `math`,
-`types`).
+`types`, `option`, `result`).
 
 The design goal is to stay small, explicit and predictable.
 
@@ -13,7 +13,9 @@ The design goal is to stay small, explicit and predictable.
 - `std::string` - string primitives and conversion helpers.
 - `std::math` - `f64` math wrappers (libm-backed).
 - `std::number` - numeric utility helpers (`abs`, rounding wrappers).
-- `std::types` - `Option`, `Result`, and runtime type IDs.
+- `std::types` - runtime type IDs.
+- `std::option` - `Option<S>` (`SOME` / `NONE`).
+- `std::result` - `Result<T, E>` (`OK` / `ERROR`).
 - `std::memory` - allocation, reallocation, copy/move primitives.
 - `std::vector` - growable contiguous array.
 - `std::ptr` - raw pointer wrapper utilities.
@@ -28,7 +30,7 @@ User code
    |
    +--> std::vector / std::string / std::number / std::io
    |
-   +--> std::memory / std::ptr / std::types
+   +--> std::memory / std::ptr / std::types / std::option / std::result
    |
    +--> std::libc
    |
@@ -86,10 +88,17 @@ function main(): i32 {
 
 ### `std::types`
 
-- Defines:
-  - `Option<S>`: `SOME(S)` / `NONE`
-  - `Result<T, E>`: `OK(T)` / `ERROR(E)`
 - Includes runtime type ID constants under `Type::TypeId`.
+
+### `std::option`
+
+- Defines `Option<S>` with variants `SOME(S)` and `NONE`.
+- Provides helpers like `isSome`, `isNone`, `unwrap`, and `unwrapOr`.
+
+### `std::result`
+
+- Defines `Result<T, E>` with variants `OK(T)` and `ERROR(E)`.
+- Provides helpers like `isOk`, `isError`, `unwrap`, `unwrapErr`, and `unwrapOr`.
 
 ### `std::memory`
 

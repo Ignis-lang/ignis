@@ -1,0 +1,102 @@
+//!
+//! # Result Module
+//!
+//! Success/error sum type.
+//!
+//! `Result<T, E>` models operations that can produce a value or an error.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Result from "std::result";
+//!
+//! function parse(flag: boolean): Result<i32, string> {
+//!   if (flag) {
+//!     return Result::OK(10);
+//!   }
+//!
+//!   return Result::ERROR("invalid");
+//! }
+//! ```
+
+/// Result type that models either success (`OK`) or failure (`ERROR`).
+///
+/// Use this when an operation can fail and callers should handle both paths.
+///
+/// # Example
+///
+/// ```ignis
+/// import Result from "std::result";
+///
+/// function parse(flag: boolean): Result<i32, string> {
+///   if (flag) {
+///     return Result::OK(10);
+///   }
+///
+///   return Result::ERROR("invalid");
+/// }
+/// ```
+export enum Result<T, E> {
+  OK(T),
+  ERROR(E),
+
+  /**
+   * @brief Checks if the result is OK.
+   *
+   * @return True if the result is OK, false otherwise.
+   */
+  public isOk(&self): boolean {
+    return match (self) {
+      Result::OK(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /**
+   * @brief Checks if the result is an error.
+   *
+   * @return True if the result is an error, false otherwise.
+   */
+  public isError(&self): boolean {
+    return !self.isOk();
+  }
+
+  /**
+   * @brief Unwraps the result, assuming it's OK.
+   *
+   * @return The unwrapped value of type T.
+   * @throws Panic if the result is an error.
+   */
+  public unwrap(&self): T {
+    return match (self) {
+      Result::OK(t) -> t,
+      Result::ERROR(_) -> @panic("Result is an error"),
+    };
+  }
+
+  /**
+   * @brief Unwraps the error result.
+   *
+   * @return The unwrapped error value of type E.
+   * @throws Panic if the result is OK.
+   */
+  public unwrapErr(&self): E {
+    return match (self) {
+      Result::OK(_) -> @panic("Result is an OK"),
+      Result::ERROR(e) -> e,
+    };
+  }
+
+  /**
+   * @brief Unwraps the result or returns a default value.
+   *
+   * @param defaultValue A default value to return if the result is an error.
+   * @return The unwrapped value or the default value.
+   */
+  public unwrapOr(&self, defaultValue: T): T {
+    return match (self) {
+      Result::OK(t) -> t,
+      Result::ERROR(_) -> defaultValue,
+    };
+  }
+}

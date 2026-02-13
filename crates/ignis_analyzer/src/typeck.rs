@@ -363,6 +363,7 @@ impl<'a> Analyzer<'a> {
             let value_type = self.typecheck_node_with_infer(value, scope_kind, ctx, &infer);
 
             if !self.types.is_error(&value_type)
+              && !self.types.is_error(&expected_return_type)
               && !matches!(self.types.get(&value_type), Type::Never)
               && !self.types.types_equal(&expected_return_type, &value_type)
             {
@@ -3239,7 +3240,7 @@ impl<'a> Analyzer<'a> {
     if !skip_type_checking {
       let check_count = std::cmp::min(arg_types.len(), param_types.len());
       for i in 0..check_count {
-        if self.types.is_error(&arg_types[i]) {
+        if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
           continue;
         }
         if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -3542,7 +3543,7 @@ impl<'a> Analyzer<'a> {
               // Check argument types
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -3613,7 +3614,7 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -3740,7 +3741,7 @@ impl<'a> Analyzer<'a> {
               // Check argument types
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -3812,7 +3813,7 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -3943,7 +3944,7 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -4013,7 +4014,7 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -4148,7 +4149,7 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -4338,7 +4339,7 @@ impl<'a> Analyzer<'a> {
 
               let check_count = std::cmp::min(arg_types.len(), param_types.len());
               for i in 0..check_count {
-                if self.types.is_error(&arg_types[i]) {
+                if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
                 if !self.types.types_equal(&param_types[i], &arg_types[i]) {
@@ -4471,7 +4472,7 @@ impl<'a> Analyzer<'a> {
 
           let check_count = std::cmp::min(arg_types.len(), params.len());
           for i in 0..check_count {
-            if self.types.is_error(&arg_types[i]) {
+            if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
               continue;
             }
 
@@ -4677,7 +4678,7 @@ impl<'a> Analyzer<'a> {
 
         let check_count = std::cmp::min(arg_types.len(), params.len());
         for i in 0..check_count {
-          if self.types.is_error(&arg_types[i]) {
+          if self.types.is_error(&arg_types[i]) || self.types.is_error(&subst_params[i]) {
             continue;
           }
 
@@ -4745,7 +4746,7 @@ impl<'a> Analyzer<'a> {
     // Check argument types
     let check_count = std::cmp::min(arg_types.len(), params.len());
     for i in 0..check_count {
-      if self.types.is_error(&arg_types[i]) {
+      if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
         continue;
       }
 
@@ -7086,7 +7087,10 @@ impl<'a> Analyzer<'a> {
       Some(IgnisTypeSyntax::Reference { inner, mutable }) => {
         let inner_type = self.resolve_type_syntax(inner);
 
-        if !self.types.types_equal(&inner_type, &element_type) {
+        if !self.types.is_error(&inner_type)
+          && !self.types.is_error(&element_type)
+          && !self.types.types_equal(&inner_type, &element_type)
+        {
           self.add_diagnostic(
             DiagnosticMessage::AssignmentTypeMismatch {
               expected: self.format_type_for_error(&element_type),
@@ -7107,7 +7111,10 @@ impl<'a> Analyzer<'a> {
         // Annotated by value: T
         let annotated_type = self.resolve_type_syntax(type_syntax);
 
-        if !self.types.types_equal(&annotated_type, &element_type) {
+        if !self.types.is_error(&annotated_type)
+          && !self.types.is_error(&element_type)
+          && !self.types.types_equal(&annotated_type, &element_type)
+        {
           self.add_diagnostic(
             DiagnosticMessage::AssignmentTypeMismatch {
               expected: self.format_type_for_error(&element_type),
@@ -8221,7 +8228,7 @@ impl<'a> Analyzer<'a> {
 
       let check_count = std::cmp::min(arg_types.len(), param_types.len());
       for i in 0..check_count {
-        if self.types.is_error(&arg_types[i]) {
+        if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
           continue;
         }
         if !self.types.types_equal(&param_types[i], &arg_types[i]) {

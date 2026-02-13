@@ -163,7 +163,7 @@ fn invalid_binary_operand() {
   let result = common::analyze(
     r#"
 function main(): void {
-    let x: bool = true + false;
+    let x: boolean = true + false;
     return;
 }
 "#,

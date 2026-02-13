@@ -46,7 +46,7 @@ pub struct StdLinkingInfo {
 /// Configuration for auto-loading modules
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StdAutoLoad {
-  /// List of module names to auto-load (e.g., ["prelude"])
+  /// List of module names to auto-load (e.g., ["string", "number"])
   pub modules: Vec<String>,
 }
 
@@ -63,7 +63,7 @@ pub struct StdAutoLoad {
 /// object = "runtime/libio.o"
 ///
 /// [auto_load]
-/// modules = ["prelude"]
+/// modules = ["string", "number", "vector", "types"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IgnisSTDManifest {
