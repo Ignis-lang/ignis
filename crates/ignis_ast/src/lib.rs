@@ -16,6 +16,7 @@ use crate::expressions::ASTExpression;
 use crate::statements::ASTStatement;
 
 pub type NodeId = Id<ASTNode>;
+pub type ASTPatternId = Id<pattern::ASTPattern>;
 
 #[derive(Debug, PartialEq, Clone, Hash, Eq)]
 pub enum ASTNode {

@@ -3510,6 +3510,54 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_match_bool_literal() {
+  e2e_test(
+    "match_bool_literal",
+    r#"
+function main(): i32 {
+    let flag: boolean = true;
+    return match (flag) {
+        true -> 42,
+        false -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_null_literal() {
+  e2e_test(
+    "match_null_literal",
+    r#"
+function main(): i32 {
+    let ptr: *mut i32 = null;
+    return match (ptr) {
+        null -> 7,
+        _ -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_atom_literal() {
+  e2e_test(
+    "match_atom_literal",
+    r#"
+function main(): i32 {
+    let value: atom = :ok;
+    return match (value) {
+        :ok -> 42,
+        _ -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_match_binding() {
   e2e_test(
     "match_binding",
@@ -3521,5 +3569,163 @@ function main(): i32 {
     };
 }
 "#,
+  );
+}
+
+#[test]
+fn e2e_match_guard() {
+  e2e_test(
+    "match_guard",
+    r#"
+function main(): i32 {
+    let x: i32 = 3;
+    return match (x) {
+        y if y > 2 -> y,
+        _ -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_or_pattern() {
+  e2e_test(
+    "match_or_pattern",
+    r#"
+function main(): i32 {
+    let x: i32 = 2;
+    return match (x) {
+        1 | 2 | 3 -> 9,
+        _ -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_enum_payload() {
+  e2e_test(
+    "match_enum_payload",
+    r#"
+enum Option {
+    Some(i32),
+    None,
+}
+
+function main(): i32 {
+    let v: Option = Option::Some(42);
+
+    return match (v) {
+        Option::Some(x) -> x,
+        Option::None -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_enum_unit_variant() {
+  e2e_test(
+    "match_enum_unit_variant",
+    r#"
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+function main(): i32 {
+    let color: Color = Color::Green;
+    return match (color) {
+        Color::Red -> 1,
+        Color::Green -> 2,
+        Color::Blue -> 3,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_nested_destructuring() {
+  e2e_test(
+    "match_nested_destructuring",
+    r#"
+enum Option {
+    Some(i32),
+    None,
+}
+
+enum Wrapper {
+    Wrap(Option),
+    Empty,
+}
+
+function main(): i32 {
+    let value: Wrapper = Wrapper::Wrap(Option::Some(42));
+
+    return match (value) {
+        Wrapper::Wrap(Option::Some(x)) -> x,
+        _ -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_enum_reference_scrutinee() {
+  e2e_test(
+    "match_enum_reference_scrutinee",
+    r#"
+enum Option {
+    Some(i32),
+    None,
+
+    public isSome(&self): boolean {
+        return match (self) {
+            Option::Some(_) -> true,
+            Option::None -> false,
+        };
+    }
+}
+
+function main(): i32 {
+    let v: Option = Option::Some(42);
+
+    if (v.isSome()) {
+        return 1;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_non_exhaustive_runtime_panic() {
+  let result = common::compile_and_run(
+    r#"
+function main(): i32 {
+    let x: i32 = 3;
+
+    return match (x) {
+        1 -> 10,
+        2 -> 20,
+    };
+}
+"#,
+  )
+  .expect("Compilation of 'match_non_exhaustive_runtime_panic' failed");
+
+  assert_eq!(result.exit_code, 101);
+  assert!(
+    result.stderr.contains("panic: non-exhaustive match"),
+    "Expected stderr to contain 'panic: non-exhaustive match', got: {}",
+    result.stderr
   );
 }

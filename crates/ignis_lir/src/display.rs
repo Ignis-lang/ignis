@@ -299,6 +299,27 @@ impl<'a> LirPrinter<'a> {
         )
         .unwrap();
       },
+      Instr::EnumGetTag { dest, source } => {
+        let s = self.format_operand(func, source);
+        writeln!(self.output, "t{} = enum_get_tag {}", dest.index(), s).unwrap();
+      },
+      Instr::EnumGetPayloadField {
+        dest,
+        source,
+        variant_tag,
+        field_index,
+      } => {
+        let s = self.format_operand(func, source);
+        writeln!(
+          self.output,
+          "t{} = enum_get_payload {} [tag={}, field={}]",
+          dest.index(),
+          s,
+          variant_tag,
+          field_index
+        )
+        .unwrap();
+      },
       Instr::Trap { .. } => {
         writeln!(self.output, "    trap").unwrap();
       },

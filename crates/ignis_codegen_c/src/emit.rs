@@ -1193,6 +1193,27 @@ impl<'a> CEmitter<'a> {
           writeln!(self.output, "({})->payload.variant_{}.field_{} = {};", p, variant_tag, i, v).unwrap();
         }
       },
+      Instr::EnumGetTag { dest, source } => {
+        let s = self.format_operand(func, source);
+        writeln!(self.output, "t{} = {}.tag;", dest.index(), s).unwrap();
+      },
+      Instr::EnumGetPayloadField {
+        dest,
+        source,
+        variant_tag,
+        field_index,
+      } => {
+        let s = self.format_operand(func, source);
+        writeln!(
+          self.output,
+          "t{} = {}.payload.variant_{}.field_{};",
+          dest.index(),
+          s,
+          variant_tag,
+          field_index
+        )
+        .unwrap();
+      },
       Instr::Trap { .. } => {
         writeln!(self.output, "__builtin_trap();").unwrap();
       },

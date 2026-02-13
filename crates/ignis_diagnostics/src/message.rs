@@ -711,6 +711,44 @@ pub enum DiagnosticMessage {
     method_name: String,
     span: Span,
   },
+  MethodUsesSelfWithoutSelfParameter {
+    method_name: String,
+    span: Span,
+  },
+  NonExhaustiveMatch {
+    span: Span,
+  },
+  PatternTypeMismatch {
+    expected: String,
+    got: String,
+    span: Span,
+  },
+  UnknownVariant {
+    enum_name: String,
+    variant: String,
+    span: Span,
+  },
+  VariantPayloadArityMismatch {
+    variant: String,
+    expected: usize,
+    got: usize,
+    span: Span,
+  },
+  GuardNotBoolean {
+    got: String,
+    span: Span,
+  },
+  MatchArmTypeMismatch {
+    expected: String,
+    got: String,
+    span: Span,
+  },
+  UnreachableMatchArm {
+    span: Span,
+  },
+  MatchNeedsAtLeastOneArm {
+    span: Span,
+  },
   OrPatternBindingsDisallowed {
     span: Span,
   },
@@ -1412,6 +1450,39 @@ impl fmt::Display for DiagnosticMessage {
           method_name
         )
       },
+      DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { method_name, .. } => {
+        write!(
+          f,
+          "method '{}' uses 'self' but does not declare '&self' or '&mut self'",
+          method_name
+        )
+      },
+      DiagnosticMessage::NonExhaustiveMatch { .. } => {
+        write!(f, "non-exhaustive match")
+      },
+      DiagnosticMessage::PatternTypeMismatch { expected, got, .. } => {
+        write!(f, "pattern type mismatch: expected '{}', got '{}'", expected, got)
+      },
+      DiagnosticMessage::UnknownVariant { enum_name, variant, .. } => {
+        write!(f, "unknown variant '{}::{}'", enum_name, variant)
+      },
+      DiagnosticMessage::VariantPayloadArityMismatch {
+        variant, expected, got, ..
+      } => {
+        write!(f, "variant '{}' expects {} payload values, got {}", variant, expected, got)
+      },
+      DiagnosticMessage::GuardNotBoolean { got, .. } => {
+        write!(f, "match guard must be boolean, got '{}'", got)
+      },
+      DiagnosticMessage::MatchArmTypeMismatch { expected, got, .. } => {
+        write!(f, "match arm type mismatch: expected '{}', got '{}'", expected, got)
+      },
+      DiagnosticMessage::UnreachableMatchArm { .. } => {
+        write!(f, "unreachable match arm")
+      },
+      DiagnosticMessage::MatchNeedsAtLeastOneArm { .. } => {
+        write!(f, "match needs at least one arm")
+      },
       DiagnosticMessage::OrPatternBindingsDisallowed { .. } => {
         write!(f, "bindings are not allowed in OR patterns")
       },
@@ -1600,7 +1671,16 @@ impl DiagnosticMessage {
       | DiagnosticMessage::TraitMethodRequiresSelf { span, .. }
       | DiagnosticMessage::TraitFieldNotAllowed { span, .. }
       | DiagnosticMessage::TraitStaticMethodNotAllowed { span, .. }
-      | DiagnosticMessage::OrPatternBindingsDisallowed { span, .. } => span.clone(),
+      | DiagnosticMessage::NonExhaustiveMatch { span, .. }
+      | DiagnosticMessage::PatternTypeMismatch { span, .. }
+      | DiagnosticMessage::UnknownVariant { span, .. }
+      | DiagnosticMessage::VariantPayloadArityMismatch { span, .. }
+      | DiagnosticMessage::GuardNotBoolean { span, .. }
+      | DiagnosticMessage::MatchArmTypeMismatch { span, .. }
+      | DiagnosticMessage::UnreachableMatchArm { span, .. }
+      | DiagnosticMessage::MatchNeedsAtLeastOneArm { span, .. }
+      | DiagnosticMessage::OrPatternBindingsDisallowed { span, .. }
+      | DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { span, .. } => span.clone(),
     }
   }
 
@@ -1781,7 +1861,16 @@ impl DiagnosticMessage {
       DiagnosticMessage::TraitMethodRequiresSelf { .. } => "A0144",
       DiagnosticMessage::TraitFieldNotAllowed { .. } => "A0145",
       DiagnosticMessage::TraitStaticMethodNotAllowed { .. } => "A0146",
-      DiagnosticMessage::OrPatternBindingsDisallowed { .. } => "A0147",
+      DiagnosticMessage::OrPatternBindingsDisallowed { .. } => "A0157",
+      DiagnosticMessage::NonExhaustiveMatch { .. } => "A0158",
+      DiagnosticMessage::PatternTypeMismatch { .. } => "A0159",
+      DiagnosticMessage::UnknownVariant { .. } => "A0160",
+      DiagnosticMessage::VariantPayloadArityMismatch { .. } => "A0161",
+      DiagnosticMessage::GuardNotBoolean { .. } => "A0162",
+      DiagnosticMessage::MatchArmTypeMismatch { .. } => "A0163",
+      DiagnosticMessage::UnreachableMatchArm { .. } => "A0164",
+      DiagnosticMessage::MatchNeedsAtLeastOneArm { .. } => "A0165",
+      DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { .. } => "A0156",
     }
     .to_string()
   }
@@ -1796,6 +1885,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::DropOnComplexReceiver { .. }
       | DiagnosticMessage::InterproceduralDropOnComplexArgument { .. }
       | DiagnosticMessage::UnknownConfigFlag { .. }
+      | DiagnosticMessage::NonExhaustiveMatch { .. }
       | DiagnosticMessage::UnusedVariable { .. }
       | DiagnosticMessage::UnusedImport { .. }
       | DiagnosticMessage::DeprecatedCall { .. } => Severity::Warning,

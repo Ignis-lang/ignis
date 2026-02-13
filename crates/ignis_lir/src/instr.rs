@@ -192,6 +192,20 @@ pub enum Instr {
     payload: Vec<Operand>,
   },
 
+  /// Read enum tag from a value: `dest = source.tag`.
+  EnumGetTag {
+    dest: TempId,
+    source: Operand,
+  },
+
+  /// Read enum payload field from a value.
+  EnumGetPayloadField {
+    dest: TempId,
+    source: Operand,
+    variant_tag: u32,
+    field_index: u32,
+  },
+
   /// Run T's drop on the value at `ptr`. No-op when T doesn't need dropping.
   DropInPlace {
     ptr: Operand,
