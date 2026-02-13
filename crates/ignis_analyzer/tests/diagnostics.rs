@@ -370,6 +370,166 @@ function main(): void {
     let a: i32 = b.get();
     let c: i32 = b.get("x");
     return;
-}"#,
+    }"#,
+  );
+}
+
+#[test]
+fn enum_method_using_self_requires_explicit_self_param() {
+  common::assert_diagnostic_at_line(
+    r#"
+enum Option<T> {
+    Some(T),
+    None,
+
+    unwrap(): T {
+        return match (self) {
+            Option::Some(value) -> value,
+            Option::None -> @panic("Option is None"),
+        };
+    }
+}
+"#,
+    "A0156", // MethodUsesSelfWithoutSelfParameter
+    7,
+  );
+}
+
+#[test]
+fn match_guard_must_be_boolean() {
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): i32 {
+    let x: i32 = 1;
+    return match (x) {
+        y if y -> 1,
+        _ -> 0,
+    };
+}
+"#,
+    "A0162", // GuardNotBoolean
+    5,
+  );
+}
+
+#[test]
+fn match_or_pattern_disallows_bindings() {
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): i32 {
+    let x: i32 = 1;
+    return match (x) {
+        a | 2 -> 1,
+        _ -> 0,
+    };
+}
+"#,
+    "A0157", // OrPatternBindingsDisallowed
+    5,
+  );
+}
+
+#[test]
+fn match_unknown_multi_segment_variant_path() {
+  common::assert_diagnostic_at_line(
+    r#"
+enum Option {
+    Some(i32),
+    None,
+}
+
+function main(): i32 {
+    let x: Option = Option::Some(1);
+    return match (x) {
+        Unknown::Some(_) -> 1,
+        _ -> 0,
+    };
+}
+"#,
+    "A0160", // UnknownVariant
+    10,
+  );
+}
+
+#[test]
+fn match_arm_types_must_unify() {
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): i32 {
+    let x: i32 = 1;
+    return match (x) {
+        1 -> 1,
+        _ -> true,
+    };
+}
+"#,
+    "A0163", // MatchArmTypeMismatch
+    4,
+  );
+}
+
+#[test]
+fn match_bindings_are_scoped_to_arm() {
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): i32 {
+    let x: i32 = 1;
+    let y: i32 = match (x) {
+        value -> value,
+    };
+
+    return value;
+}
+"#,
+    "I0033", // UndeclaredVariable
+    8,
+  );
+}
+
+#[test]
+fn match_guard_can_use_pattern_binding() {
+  common::assert_ok(
+    r#"
+function main(): i32 {
+    let x: i32 = 3;
+    return match (x) {
+        value if value > 2 -> value,
+        _ -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn match_non_exhaustive_reports_warning_diagnostic() {
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): i32 {
+    let x: boolean = true;
+    return match (x) {
+        true -> 1,
+    };
+}
+"#,
+    "A0158", // NonExhaustiveMatch
+    4,
+  );
+}
+
+#[test]
+fn match_tuple_pattern_type_mismatch() {
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): i32 {
+    let x: i32 = 1;
+    return match (x) {
+        (a, b) -> 1,
+        _ -> 0,
+    };
+}
+"#,
+    "A0159", // PatternTypeMismatch
+    5,
   );
 }

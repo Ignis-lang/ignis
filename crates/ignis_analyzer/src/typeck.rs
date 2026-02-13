@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use ignis_ast::{
   expressions::{
     builtin_call::ASTBuiltinCall,
+    path::ASTPathSegment,
     member_access::{ASTAccessOp, ASTMemberAccess},
     record_init::ASTRecordInit,
     ASTCallExpression, ASTExpression, ASTLiteral,
@@ -27,6 +28,7 @@ use ignis_type::{
   definition::{
     ConstValue, Definition, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry, VariableDefinition, Visibility,
   },
+  symbol::SymbolId,
   span::Span,
   types::{Substitution, Type, TypeId},
   value::IgnisLiteralValue,
@@ -360,7 +362,10 @@ impl<'a> Analyzer<'a> {
             let infer = InferContext::expecting(expected_return_type);
             let value_type = self.typecheck_node_with_infer(value, scope_kind, ctx, &infer);
 
-            if !self.types.is_error(&value_type) && !self.types.types_equal(&expected_return_type, &value_type) {
+            if !self.types.is_error(&value_type)
+              && !matches!(self.types.get(&value_type), Type::Never)
+              && !self.types.types_equal(&expected_return_type, &value_type)
+            {
               let expected = self.format_type_for_error(&expected_return_type);
               let got = self.format_type_for_error(&value_type);
 
@@ -735,23 +740,63 @@ impl<'a> Analyzer<'a> {
       ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx, infer),
       ASTExpression::BuiltinCall(bc) => self.typecheck_builtin_call(node_id, bc, scope_kind, ctx),
       ASTExpression::Match(match_expr) => {
+        if match_expr.arms.is_empty() {
+          self.add_diagnostic(
+            DiagnosticMessage::MatchNeedsAtLeastOneArm {
+              span: match_expr.span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
+
         let scrutinee_type = self.typecheck_node(&match_expr.scrutinee, scope_kind, ctx);
 
+        if self.types.is_error(&scrutinee_type) {
+          return self.types.error();
+        }
+
         let mut arm_types = Vec::new();
+        let mut saw_irrefutable_arm = false;
 
         for arm in &match_expr.arms {
+          if saw_irrefutable_arm {
+            self.add_diagnostic(DiagnosticMessage::UnreachableMatchArm { span: arm.span.clone() }.report());
+          }
+
           self.scopes.push(ScopeKind::Block);
 
-          self.typecheck_pattern(&arm.pattern, &scrutinee_type);
+          let irrefutable = self.typecheck_pattern(&arm.pattern, &scrutinee_type);
 
           if let Some(guard) = arm.guard.as_ref() {
             let guard_type = self.typecheck_node(guard, ScopeKind::Block, ctx);
-            self.typecheck_assignment(&self.types.boolean(), &guard_type, &self.node_span(guard).clone());
+            if !self.types.types_equal(&guard_type, &self.types.boolean()) && !self.types.is_error(&guard_type) {
+              self.add_diagnostic(
+                DiagnosticMessage::GuardNotBoolean {
+                  got: self.format_type_for_error(&guard_type),
+                  span: self.node_span(guard).clone(),
+                }
+                .report(),
+              );
+            }
           }
 
           arm_types.push(self.typecheck_node(&arm.body, ScopeKind::Block, ctx));
 
           self.scopes.pop();
+
+          if irrefutable && arm.guard.is_none() {
+            saw_irrefutable_arm = true;
+          }
+        }
+
+        if !saw_irrefutable_arm && !self.is_match_exhaustive(scrutinee_type, &match_expr.arms) {
+          self.add_diagnostic(
+            DiagnosticMessage::NonExhaustiveMatch {
+              span: match_expr.span.clone(),
+            }
+            .report(),
+          );
         }
 
         let Some(first_type) = arm_types.first().copied() else {
@@ -759,6 +804,16 @@ impl<'a> Analyzer<'a> {
         };
 
         arm_types.iter().skip(1).fold(first_type, |current, next| {
+          if !self.types.types_equal(&current, next) && !self.types.is_error(&current) && !self.types.is_error(next) {
+            self.add_diagnostic(
+              DiagnosticMessage::MatchArmTypeMismatch {
+                expected: self.format_type_for_error(&current),
+                got: self.format_type_for_error(next),
+                span: match_expr.span.clone(),
+              }
+              .report(),
+            );
+          }
           self.typecheck_common_type(&current, next, &match_expr.span)
         })
       },
@@ -769,9 +824,9 @@ impl<'a> Analyzer<'a> {
     &mut self,
     pattern: &ASTPattern,
     expected_type: &TypeId,
-  ) {
+  ) -> bool {
     match pattern {
-      ASTPattern::Wildcard { .. } => {},
+      ASTPattern::Wildcard { .. } => true,
       ASTPattern::Literal { value, span } => {
         let literal_type = match value {
           IgnisLiteralValue::Int8(_) => self.types.i8(),
@@ -793,18 +848,106 @@ impl<'a> Analyzer<'a> {
           IgnisLiteralValue::Null => self.types.null_ptr(),
         };
         self.typecheck_assignment(expected_type, &literal_type, span);
+        false
       },
       ASTPattern::Path { segments, args, span } => {
+        let path_segments: Vec<ASTPathSegment> = segments
+          .iter()
+          .map(|(name, segment_span)| ASTPathSegment::new(*name, segment_span.clone()))
+          .collect();
+
+        if let Some(ResolvedPath::EnumVariant {
+          enum_def,
+          variant_index,
+        }) = self.resolve_qualified_path(&path_segments)
+        {
+          let expected_enum = self.resolve_expected_enum_for_pattern(expected_type);
+
+          if let Some((expected_enum_def, subst)) = expected_enum {
+            if expected_enum_def != enum_def {
+              let enum_name = self.get_symbol_name(&self.defs.get(&enum_def).name);
+              self.add_diagnostic(
+                DiagnosticMessage::PatternTypeMismatch {
+                  expected: self.format_type_for_error(expected_type),
+                  got: enum_name,
+                  span: span.clone(),
+                }
+                .report(),
+              );
+              return false;
+            }
+
+            if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def).kind {
+              let variant = &ed.variants[variant_index as usize];
+              let expected_payload: Vec<TypeId> = variant
+                .payload
+                .iter()
+                .map(|payload_ty| self.types.substitute(*payload_ty, &subst))
+                .collect();
+              let arg_count = args.as_ref().map_or(0, |patterns| patterns.len());
+
+              if arg_count != expected_payload.len() {
+                let enum_name = self.get_symbol_name(&self.defs.get(&enum_def).name);
+                let variant_name = format!("{}::{}", enum_name, self.get_symbol_name(&variant.name));
+                self.add_diagnostic(
+                  DiagnosticMessage::VariantPayloadArityMismatch {
+                    variant: variant_name,
+                    expected: expected_payload.len(),
+                    got: arg_count,
+                    span: span.clone(),
+                  }
+                  .report(),
+                );
+              }
+
+              if let Some(pattern_args) = args {
+                for (i, arg_pattern) in pattern_args.iter().enumerate() {
+                  if let Some(payload_ty) = expected_payload.get(i) {
+                    self.typecheck_pattern(arg_pattern, payload_ty);
+                  }
+                }
+              }
+            }
+            return false;
+          }
+
+          self.add_diagnostic(
+            DiagnosticMessage::PatternTypeMismatch {
+              expected: self.format_type_for_error(expected_type),
+              got: "enum variant".to_string(),
+              span: span.clone(),
+            }
+            .report(),
+          );
+          return false;
+        }
+
         if segments.len() == 1 && args.is_none() {
           let (name, _) = &segments[0];
           let name_str = self.symbols.borrow().get(name).to_string();
 
           if name_str == "_" {
-            return;
+            return true;
           }
 
           self.define_pattern_binding_if_absent(*name, span, *expected_type);
+          return true;
         }
+
+        if let Some((first, _)) = segments.first()
+          && let Some((last, _)) = segments.last()
+        {
+          self.add_diagnostic(
+            DiagnosticMessage::UnknownVariant {
+              enum_name: self.get_symbol_name(first),
+              variant: self.get_symbol_name(last),
+              span: span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        false
       },
       ASTPattern::Tuple { elements, .. } => {
         if let Type::Tuple(tuple_elements) = self.types.get(expected_type).clone() {
@@ -813,7 +956,17 @@ impl<'a> Analyzer<'a> {
               self.typecheck_pattern(elem_pattern, &tuple_elements[i]);
             }
           }
+        } else {
+          self.add_diagnostic(
+            DiagnosticMessage::PatternTypeMismatch {
+              expected: self.format_type_for_error(expected_type),
+              got: "tuple".to_string(),
+              span: pattern.span().clone(),
+            }
+            .report(),
+          );
         }
+        false
       },
       ASTPattern::Or { patterns, span } => {
         if patterns.iter().any(|p| self.pattern_has_bindings(p)) {
@@ -822,6 +975,7 @@ impl<'a> Analyzer<'a> {
         for p in patterns {
           self.typecheck_pattern(p, expected_type);
         }
+        patterns.iter().all(|p| matches!(p, ASTPattern::Wildcard { .. }))
       },
     }
   }
@@ -834,9 +988,14 @@ impl<'a> Analyzer<'a> {
       ASTPattern::Wildcard { .. } | ASTPattern::Literal { .. } => false,
       ASTPattern::Path { segments, args, .. } => {
         if segments.len() == 1 && args.is_none() {
-          let (name, _) = &segments[0];
+          let (name, segment_span) = &segments[0];
           let name_str = self.symbols.borrow().get(name).to_string();
-          name_str != "_"
+          if name_str == "_" {
+            false
+          } else {
+            let path = [ASTPathSegment::new(*name, segment_span.clone())];
+            !matches!(self.resolve_qualified_path(&path), Some(ResolvedPath::EnumVariant { .. }))
+          }
         } else {
           args
             .as_ref()
@@ -848,13 +1007,199 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  fn define_pattern_binding_if_absent(
+  fn resolve_expected_enum_for_pattern(
+    &self,
+    expected_type: &TypeId,
+  ) -> Option<(DefinitionId, Substitution)> {
+    let mut current_type = *expected_type;
+
+    loop {
+      match self.types.get(&current_type).clone() {
+        Type::Reference { inner, .. } => {
+          current_type = inner;
+        },
+        Type::Enum(def_id) => return Some((def_id, Substitution::new())),
+        Type::Instance { generic, args } => {
+          if let DefinitionKind::Enum(ed) = &self.defs.get(&generic).kind {
+            if ed.type_params.len() == args.len() {
+              return Some((generic, Substitution::for_generic(generic, &args)));
+            }
+
+            return Some((generic, Substitution::new()));
+          }
+
+          return None;
+        },
+        _ => return None,
+      }
+    }
+  }
+
+  fn is_match_exhaustive(
+    &self,
+    scrutinee_type: TypeId,
+    arms: &[ignis_ast::expressions::match_expression::ASTMatchArm],
+  ) -> bool {
+    let mut current_type = scrutinee_type;
+    loop {
+      let Type::Reference { inner, .. } = self.types.get(&current_type).clone() else {
+        break;
+      };
+      current_type = inner;
+    }
+
+    match self.types.get(&current_type).clone() {
+      Type::Boolean => {
+        let mut has_true = false;
+        let mut has_false = false;
+
+        for arm in arms {
+          if arm.guard.is_some() {
+            continue;
+          }
+
+          self.collect_bool_coverage(&arm.pattern, &mut has_true, &mut has_false);
+        }
+
+        has_true && has_false
+      },
+      Type::Enum(enum_def) => self.is_enum_match_exhaustive(enum_def, arms),
+      Type::Instance { generic, .. } => {
+        if matches!(self.defs.get(&generic).kind, DefinitionKind::Enum(_)) {
+          self.is_enum_match_exhaustive(generic, arms)
+        } else {
+          false
+        }
+      },
+      _ => false,
+    }
+  }
+
+  fn collect_bool_coverage(
+    &self,
+    pattern: &ASTPattern,
+    has_true: &mut bool,
+    has_false: &mut bool,
+  ) {
+    match pattern {
+      ASTPattern::Literal {
+        value: IgnisLiteralValue::Boolean(value),
+        ..
+      } => {
+        if *value {
+          *has_true = true;
+        } else {
+          *has_false = true;
+        }
+      },
+      ASTPattern::Or { patterns, .. } => {
+        for member in patterns {
+          self.collect_bool_coverage(member, has_true, has_false);
+        }
+      },
+      _ => {},
+    }
+  }
+
+  fn is_enum_match_exhaustive(
+    &self,
+    enum_def: DefinitionId,
+    arms: &[ignis_ast::expressions::match_expression::ASTMatchArm],
+  ) -> bool {
+    let DefinitionKind::Enum(enum_definition) = &self.defs.get(&enum_def).kind else {
+      return false;
+    };
+
+    let total_variants = enum_definition.variants.len();
+    if total_variants == 0 {
+      return false;
+    }
+
+    let mut covered = std::collections::HashSet::new();
+    for arm in arms {
+      if arm.guard.is_some() {
+        continue;
+      }
+
+      self.collect_enum_variant_coverage(&arm.pattern, enum_def, &mut covered);
+    }
+
+    covered.len() == total_variants
+  }
+
+  fn collect_enum_variant_coverage(
+    &self,
+    pattern: &ASTPattern,
+    enum_def: DefinitionId,
+    covered: &mut std::collections::HashSet<u32>,
+  ) {
+    match pattern {
+      ASTPattern::Path { segments, .. } => {
+        let path_segments: Vec<ASTPathSegment> = segments
+          .iter()
+          .map(|(name, span)| ASTPathSegment::new(*name, span.clone()))
+          .collect();
+
+        if let Some(ResolvedPath::EnumVariant {
+          enum_def: found_enum,
+          variant_index,
+        }) = self.resolve_qualified_path(&path_segments)
+          && found_enum == enum_def
+        {
+          covered.insert(variant_index);
+        }
+      },
+      ASTPattern::Or { patterns, .. } => {
+        for member in patterns {
+          self.collect_enum_variant_coverage(member, enum_def, covered);
+        }
+      },
+      _ => {},
+    }
+  }
+
+  pub(crate) fn define_pattern_binding_if_absent(
     &mut self,
     name: ignis_type::symbol::SymbolId,
     span: &Span,
     type_id: TypeId,
   ) {
-    if self.scopes.lookup(&name).is_some() {
+    let current_scope = *self.scopes.current();
+
+    if let Some(def_id) = self
+      .scopes
+      .get_scope(&current_scope)
+      .symbols
+      .get(&name)
+      .and_then(|entry| entry.as_single())
+      .copied()
+    {
+      if type_id != self.types.error()
+        && let DefinitionKind::Variable(var_def) = &mut self.defs.get_mut(&def_id).kind
+        && var_def.type_id == self.types.error()
+      {
+        var_def.type_id = type_id;
+      }
+      return;
+    }
+
+    let existing_def = self.defs.iter().find_map(|(def_id, def)| {
+      if matches!(def.kind, DefinitionKind::Variable(_)) && def.name == name && def.name_span == *span {
+        Some(def_id)
+      } else {
+        None
+      }
+    });
+
+    if let Some(def_id) = existing_def {
+      if type_id != self.types.error()
+        && let DefinitionKind::Variable(var_def) = &mut self.defs.get_mut(&def_id).kind
+        && var_def.type_id == self.types.error()
+      {
+        var_def.type_id = type_id;
+      }
+
+      let _ = self.scopes.define(&name, &def_id, false);
       return;
     }
 
@@ -1729,6 +2074,18 @@ impl<'a> Analyzer<'a> {
       // Add self to the method's params as the first parameter
       if let DefinitionKind::Method(md) = &mut self.defs.get_mut(method_def_id).kind {
         md.params.insert(0, self_def_id);
+      }
+    } else {
+      let self_symbol = self.symbols.borrow_mut().intern("self");
+
+      if let Some(span) = self.find_first_symbol_usage(method.body, self_symbol) {
+        self.add_diagnostic(
+          DiagnosticMessage::MethodUsesSelfWithoutSelfParameter {
+            method_name: self.get_symbol_name(&method.name),
+            span,
+          }
+          .report(),
+        );
       }
     }
 
@@ -6028,6 +6385,10 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     if self.types.types_equal(a, b) {
       *a
+    } else if matches!(self.types.get(a), Type::Never) {
+      *b
+    } else if matches!(self.types.get(b), Type::Never) {
+      *a
     } else if self.types.is_numeric(a) && self.types.is_numeric(b) {
       if self.types.is_float(a) || self.types.is_float(b) {
         if matches!(self.types.get(a), ignis_type::types::Type::F64)
@@ -6398,6 +6759,137 @@ impl<'a> Analyzer<'a> {
         }
       },
       _ => false,
+    }
+  }
+
+  fn find_first_symbol_usage(
+    &self,
+    node_id: NodeId,
+    symbol: SymbolId,
+  ) -> Option<Span> {
+    match self.ast.get(&node_id) {
+      ASTNode::Expression(expr) => self.find_first_symbol_usage_in_expr(expr, symbol),
+      ASTNode::Statement(stmt) => self.find_first_symbol_usage_in_stmt(stmt, symbol),
+    }
+  }
+
+  fn find_first_symbol_usage_in_stmt(
+    &self,
+    stmt: &ASTStatement,
+    symbol: SymbolId,
+  ) -> Option<Span> {
+    match stmt {
+      ASTStatement::Expression(expr) => self.find_first_symbol_usage_in_expr(expr, symbol),
+      ASTStatement::Variable(var) => var.value.and_then(|value| self.find_first_symbol_usage(value, symbol)),
+      ASTStatement::Constant(const_) => const_
+        .value
+        .and_then(|value| self.find_first_symbol_usage(value, symbol)),
+      ASTStatement::Block(block) => block
+        .statements
+        .iter()
+        .find_map(|stmt_id| self.find_first_symbol_usage(*stmt_id, symbol)),
+      ASTStatement::If(if_stmt) => self
+        .find_first_symbol_usage(if_stmt.condition, symbol)
+        .or_else(|| self.find_first_symbol_usage(if_stmt.then_block, symbol))
+        .or_else(|| {
+          if_stmt
+            .else_block
+            .and_then(|else_branch| self.find_first_symbol_usage(else_branch, symbol))
+        }),
+      ASTStatement::While(while_stmt) => self
+        .find_first_symbol_usage(while_stmt.condition, symbol)
+        .or_else(|| self.find_first_symbol_usage(while_stmt.body, symbol)),
+      ASTStatement::For(for_stmt) => self
+        .find_first_symbol_usage(for_stmt.initializer, symbol)
+        .or_else(|| self.find_first_symbol_usage(for_stmt.condition, symbol))
+        .or_else(|| self.find_first_symbol_usage(for_stmt.increment, symbol))
+        .or_else(|| self.find_first_symbol_usage(for_stmt.body, symbol)),
+      ASTStatement::ForOf(for_of) => self
+        .find_first_symbol_usage(for_of.iter, symbol)
+        .or_else(|| self.find_first_symbol_usage(for_of.body, symbol)),
+      ASTStatement::Return(ret) => ret
+        .expression
+        .and_then(|expr| self.find_first_symbol_usage(expr, symbol)),
+      ASTStatement::Function(func) => func
+        .body
+        .and_then(|body_id| self.find_first_symbol_usage(body_id, symbol)),
+      ASTStatement::Extern(extern_stmt) => extern_stmt
+        .items
+        .iter()
+        .find_map(|item| self.find_first_symbol_usage(*item, symbol)),
+      ASTStatement::Namespace(ns) => ns
+        .items
+        .iter()
+        .find_map(|item| self.find_first_symbol_usage(*item, symbol)),
+      ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
+        self.find_first_symbol_usage(*decl, symbol)
+      },
+      _ => None,
+    }
+  }
+
+  fn find_first_symbol_usage_in_expr(
+    &self,
+    expr: &ASTExpression,
+    symbol: SymbolId,
+  ) -> Option<Span> {
+    match expr {
+      ASTExpression::Variable(var) => {
+        if var.name == symbol {
+          Some(var.span.clone())
+        } else {
+          None
+        }
+      },
+      ASTExpression::Call(call) => self.find_first_symbol_usage(call.callee, symbol).or_else(|| {
+        call
+          .arguments
+          .iter()
+          .find_map(|arg| self.find_first_symbol_usage(*arg, symbol))
+      }),
+      ASTExpression::Binary(binary) => self
+        .find_first_symbol_usage(binary.left, symbol)
+        .or_else(|| self.find_first_symbol_usage(binary.right, symbol)),
+      ASTExpression::Ternary(ternary) => self
+        .find_first_symbol_usage(ternary.condition, symbol)
+        .or_else(|| self.find_first_symbol_usage(ternary.then_expr, symbol))
+        .or_else(|| self.find_first_symbol_usage(ternary.else_expr, symbol)),
+      ASTExpression::Unary(unary) => self.find_first_symbol_usage(unary.operand, symbol),
+      ASTExpression::Assignment(assign) => self
+        .find_first_symbol_usage(assign.target, symbol)
+        .or_else(|| self.find_first_symbol_usage(assign.value, symbol)),
+      ASTExpression::Cast(cast) => self.find_first_symbol_usage(cast.expression, symbol),
+      ASTExpression::Reference(reference) => self.find_first_symbol_usage(reference.inner, symbol),
+      ASTExpression::Dereference(deref) => self.find_first_symbol_usage(deref.inner, symbol),
+      ASTExpression::VectorAccess(access) => self
+        .find_first_symbol_usage(access.name, symbol)
+        .or_else(|| self.find_first_symbol_usage(access.index, symbol)),
+      ASTExpression::Grouped(grouped) => self.find_first_symbol_usage(grouped.expression, symbol),
+      ASTExpression::Vector(vector) => vector
+        .items
+        .iter()
+        .find_map(|item| self.find_first_symbol_usage(*item, symbol)),
+      ASTExpression::PostfixIncrement { expr, .. } | ASTExpression::PostfixDecrement { expr, .. } => {
+        self.find_first_symbol_usage(*expr, symbol)
+      },
+      ASTExpression::MemberAccess(access) => self.find_first_symbol_usage(access.object, symbol),
+      ASTExpression::RecordInit(record_init) => record_init
+        .fields
+        .iter()
+        .find_map(|field| self.find_first_symbol_usage(field.value, symbol)),
+      ASTExpression::BuiltinCall(builtin_call) => builtin_call
+        .args
+        .iter()
+        .find_map(|arg| self.find_first_symbol_usage(*arg, symbol)),
+      ASTExpression::Match(match_expr) => self.find_first_symbol_usage(match_expr.scrutinee, symbol).or_else(|| {
+        match_expr.arms.iter().find_map(|arm| {
+          arm
+            .guard
+            .and_then(|guard| self.find_first_symbol_usage(guard, symbol))
+            .or_else(|| self.find_first_symbol_usage(arm.body, symbol))
+        })
+      }),
+      ASTExpression::Literal(_) | ASTExpression::Path(_) => None,
     }
   }
 

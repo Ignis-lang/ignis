@@ -501,6 +501,17 @@ impl<'a> LoweringContext<'a> {
       self.load_alias_temps.insert(temp);
 
       Some(Operand::Temp(temp))
+    } else if let Some(local_id) = self.find_equivalent_binding_local(def_id) {
+      self.def_to_local.insert(def_id, local_id);
+
+      let temp = self.fn_builder().alloc_temp(ty, Span::default());
+      self.fn_builder().emit(Instr::Load {
+        dest: temp,
+        source: local_id,
+      });
+      self.load_alias_temps.insert(temp);
+
+      Some(Operand::Temp(temp))
     } else {
       // It's a global reference (constant or function)
       let def = self.defs.get(&def_id);
@@ -510,6 +521,26 @@ impl<'a> LoweringContext<'a> {
         _ => None,
       }
     }
+  }
+
+  fn find_equivalent_binding_local(
+    &self,
+    def_id: DefinitionId,
+  ) -> Option<LocalId> {
+    let def = self.defs.get(&def_id);
+    if !matches!(def.kind, DefinitionKind::Variable(_)) {
+      return None;
+    }
+
+    self.def_to_local.iter().find_map(|(other_def_id, local)| {
+      let other = self.defs.get(other_def_id);
+      if matches!(other.kind, DefinitionKind::Variable(_)) && other.name == def.name && other.name_span == def.name_span
+      {
+        Some(*local)
+      } else {
+        None
+      }
+    })
   }
 
   fn lower_binary(
@@ -1531,6 +1562,15 @@ impl<'a> LoweringContext<'a> {
       None
     };
 
+    if arms.is_empty() {
+      self.fn_builder().emit(Instr::PanicMessage {
+        message: "non-exhaustive match".to_string(),
+        span,
+      });
+      self.fn_builder().terminate(Terminator::Unreachable);
+      return None;
+    }
+
     let merge_block = self.fn_builder().create_block("match_merge");
 
     let panic_block = self.fn_builder().create_block("match_panic");
@@ -1550,7 +1590,13 @@ impl<'a> LoweringContext<'a> {
     for (i, arm) in arms.iter().enumerate() {
       self.fn_builder().switch_to_block(check_blocks[i]);
 
-      let matches = self.lower_pattern_check(scrut_local, &arm.pattern, scrutinee_ty, span.clone());
+      let scrut_temp = self.fn_builder().alloc_temp(scrutinee_ty, span.clone());
+      self.fn_builder().emit(Instr::Load {
+        dest: scrut_temp,
+        source: scrut_local,
+      });
+
+      let matches = self.lower_pattern_check(Operand::Temp(scrut_temp), scrutinee_ty, &arm.pattern, span.clone());
 
       let else_block = if i + 1 < arms.len() {
         check_blocks[i + 1]
@@ -1568,7 +1614,9 @@ impl<'a> LoweringContext<'a> {
         });
 
         self.fn_builder().switch_to_block(guard_block);
-        let guard_val = self.lower_hir_node(guard)?;
+        let Some(guard_val) = self.lower_hir_node(guard) else {
+          return None;
+        };
 
         if !self.fn_builder().is_terminated() {
           self.fn_builder().terminate(Terminator::Branch {
@@ -1622,9 +1670,9 @@ impl<'a> LoweringContext<'a> {
 
   fn lower_pattern_check(
     &mut self,
-    scrut_local: LocalId,
+    value: Operand,
+    value_ty: TypeId,
     pattern: &HIRPattern,
-    scrut_ty: TypeId,
     span: Span,
   ) -> Operand {
     let bool_ty = self.types.boolean();
@@ -1638,40 +1686,49 @@ impl<'a> LoweringContext<'a> {
         });
         Operand::Temp(true_temp)
       },
-      HIRPattern::Literal { value } => {
-        let scrut_temp = self.fn_builder().alloc_temp(scrut_ty, span.clone());
-        self.fn_builder().emit(Instr::Load {
-          dest: scrut_temp,
-          source: scrut_local,
-        });
-
-        let lit_val = self.lower_literal(value, scrut_ty).unwrap();
+      HIRPattern::Literal { value: literal_value } => {
+        let (match_value, match_value_ty) = self.materialize_pattern_value(value, value_ty, span.clone());
+        let lit_val = self.lower_literal(literal_value, match_value_ty).unwrap();
 
         let result_temp = self.fn_builder().alloc_temp(bool_ty, span);
         self.fn_builder().emit(Instr::BinOp {
           dest: result_temp,
           op: BinaryOperation::Equal,
-          left: Operand::Temp(scrut_temp),
+          left: match_value,
           right: lit_val,
         });
         Operand::Temp(result_temp)
       },
       HIRPattern::Binding { def_id } => {
-        let scrut_temp = self.fn_builder().alloc_temp(scrut_ty, span.clone());
-        self.fn_builder().emit(Instr::Load {
-          dest: scrut_temp,
-          source: scrut_local,
-        });
+        let binding_local = if let Some(&local) = self.def_to_local.get(def_id) {
+          local
+        } else {
+          let local = self.fn_builder().alloc_local(LocalData {
+            def_id: Some(*def_id),
+            ty: value_ty,
+            mutable: false,
+            name: None,
+          });
+          self.def_to_local.insert(*def_id, local);
 
-        let binding_local = self.fn_builder().alloc_local(LocalData {
-          def_id: Some(*def_id),
-          ty: scrut_ty,
-          mutable: false,
-          name: None,
-        });
+          let binding_def = self.defs.get(def_id);
+          if matches!(binding_def.kind, DefinitionKind::Variable(_)) {
+            for (other_def_id, other_def) in self.defs.iter() {
+              if matches!(other_def.kind, DefinitionKind::Variable(_))
+                && other_def.name == binding_def.name
+                && other_def.name_span == binding_def.name_span
+              {
+                self.def_to_local.insert(other_def_id, local);
+              }
+            }
+          }
+
+          local
+        };
+
         self.fn_builder().emit(Instr::Store {
           dest: binding_local,
-          value: Operand::Temp(scrut_temp),
+          value,
         });
 
         let true_temp = self.fn_builder().alloc_temp(bool_ty, span);
@@ -1680,6 +1737,102 @@ impl<'a> LoweringContext<'a> {
           source: Operand::Const(ConstValue::Bool(true, bool_ty)),
         });
         Operand::Temp(true_temp)
+      },
+      HIRPattern::Variant {
+        enum_def,
+        variant_tag,
+        args,
+      } => {
+        let (enum_value, enum_value_ty) = self.materialize_pattern_value(value, value_ty, span.clone());
+
+        let (tag_ty, payload_types) = match self.types.get(&enum_value_ty).clone() {
+          Type::Enum(def_id) if def_id == *enum_def => {
+            if let DefinitionKind::Enum(ed) = &self.defs.get(enum_def).kind {
+              let payload = ed.variants[*variant_tag as usize].payload.clone();
+              (ed.tag_type, payload)
+            } else {
+              let false_temp = self.fn_builder().alloc_temp(bool_ty, span);
+              self.fn_builder().emit(Instr::Copy {
+                dest: false_temp,
+                source: Operand::Const(ConstValue::Bool(false, bool_ty)),
+              });
+              return Operand::Temp(false_temp);
+            }
+          },
+          Type::Instance {
+            generic,
+            args: type_args,
+          } if generic == *enum_def => {
+            if let DefinitionKind::Enum(ed) = &self.defs.get(enum_def).kind {
+              let subst = if ed.type_params.len() == type_args.len() {
+                ignis_type::types::Substitution::for_generic(*enum_def, &type_args)
+              } else {
+                ignis_type::types::Substitution::new()
+              };
+              let payload = ed.variants[*variant_tag as usize]
+                .payload
+                .iter()
+                .map(|ty| self.types.substitute(*ty, &subst))
+                .collect();
+              (ed.tag_type, payload)
+            } else {
+              let false_temp = self.fn_builder().alloc_temp(bool_ty, span);
+              self.fn_builder().emit(Instr::Copy {
+                dest: false_temp,
+                source: Operand::Const(ConstValue::Bool(false, bool_ty)),
+              });
+              return Operand::Temp(false_temp);
+            }
+          },
+          _ => {
+            let false_temp = self.fn_builder().alloc_temp(bool_ty, span);
+            self.fn_builder().emit(Instr::Copy {
+              dest: false_temp,
+              source: Operand::Const(ConstValue::Bool(false, bool_ty)),
+            });
+            return Operand::Temp(false_temp);
+          },
+        };
+
+        let tag_temp = self.fn_builder().alloc_temp(tag_ty, span.clone());
+        self.fn_builder().emit(Instr::EnumGetTag {
+          dest: tag_temp,
+          source: enum_value.clone(),
+        });
+
+        let tag_match = self.fn_builder().alloc_temp(bool_ty, span.clone());
+        self.fn_builder().emit(Instr::BinOp {
+          dest: tag_match,
+          op: BinaryOperation::Equal,
+          left: Operand::Temp(tag_temp),
+          right: Operand::Const(ConstValue::UInt(*variant_tag as u64, tag_ty)),
+        });
+
+        let mut combined = Operand::Temp(tag_match);
+        let check_count = std::cmp::min(args.len(), payload_types.len());
+
+        for index in 0..check_count {
+          let field_ty = payload_types[index];
+          let field_temp = self.fn_builder().alloc_temp(field_ty, span.clone());
+          self.fn_builder().emit(Instr::EnumGetPayloadField {
+            dest: field_temp,
+            source: enum_value.clone(),
+            variant_tag: *variant_tag,
+            field_index: index as u32,
+          });
+
+          let nested = self.lower_pattern_check(Operand::Temp(field_temp), field_ty, &args[index], span.clone());
+          let and_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
+          self.fn_builder().emit(Instr::BinOp {
+            dest: and_temp,
+            op: BinaryOperation::And,
+            left: combined,
+            right: nested,
+          });
+          combined = Operand::Temp(and_temp);
+        }
+
+        combined
       },
       HIRPattern::Or { patterns } => {
         let mut result_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
@@ -1690,7 +1843,7 @@ impl<'a> LoweringContext<'a> {
         });
 
         for p in patterns {
-          let check = self.lower_pattern_check(scrut_local, p, scrut_ty, span.clone());
+          let check = self.lower_pattern_check(value.clone(), value_ty, p, span.clone());
           let new_result = self.fn_builder().alloc_temp(bool_ty, span.clone());
           self.fn_builder().emit(Instr::BinOp {
             dest: new_result,
@@ -1703,15 +1856,45 @@ impl<'a> LoweringContext<'a> {
 
         Operand::Temp(result_temp)
       },
-      HIRPattern::Variant { .. } | HIRPattern::Tuple { .. } => {
-        let true_temp = self.fn_builder().alloc_temp(bool_ty, span);
+      HIRPattern::Tuple { elements } => {
+        let matches_empty_tuple =
+          matches!(self.types.get(&value_ty), Type::Tuple(items) if items.is_empty()) && elements.is_empty();
+
+        let tuple_temp = self.fn_builder().alloc_temp(bool_ty, span);
         self.fn_builder().emit(Instr::Copy {
-          dest: true_temp,
-          source: Operand::Const(ConstValue::Bool(true, bool_ty)),
+          dest: tuple_temp,
+          source: Operand::Const(ConstValue::Bool(matches_empty_tuple, bool_ty)),
         });
-        Operand::Temp(true_temp)
+        Operand::Temp(tuple_temp)
       },
     }
+  }
+
+  fn materialize_pattern_value(
+    &mut self,
+    value: Operand,
+    value_ty: TypeId,
+    span: Span,
+  ) -> (Operand, TypeId) {
+    let mut current_value = value;
+    let mut current_type = value_ty;
+
+    loop {
+      let Type::Reference { inner, .. } = self.types.get(&current_type).clone() else {
+        break;
+      };
+
+      let loaded = self.fn_builder().alloc_temp(inner, span.clone());
+      self.fn_builder().emit(Instr::LoadPtr {
+        dest: loaded,
+        ptr: current_value,
+      });
+
+      current_value = Operand::Temp(loaded);
+      current_type = inner;
+    }
+
+    (current_value, current_type)
   }
 
   fn lower_loop(

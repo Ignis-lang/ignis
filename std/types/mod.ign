@@ -109,6 +109,66 @@ export namespace Type {
 export enum Result<T, E> {
   OK(T),
   ERROR(E),
+
+  /**
+   * @brief Checks if the result is OK.
+   *
+   * @return True if the result is OK, false otherwise.
+   */
+  public isOk(&self): boolean {
+    return match (self) {
+      Result::OK(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /**
+   * @brief Checks if the result is an error.
+   *
+   * @return True if the result is an error, false otherwise.
+   */
+  public isError(&self): boolean {
+    return !self.isOk();
+  }
+
+  /**
+   * @brief Unwraps the result, assuming it's OK.
+   *
+   * @return The unwrapped value of type T.
+   * @throws Panic if the result is an error.
+   */
+  public unwrap(&self): T {
+    return match (self) {
+      Result::OK(t) -> t,
+      Result::ERROR(_) -> @panic("Result is an error"),
+    };
+  }
+
+  /**
+   * @brief Unwraps the error result.
+   *
+   * @return The unwrapped error value of type E.
+   * @throws Panic if the result is OK.
+   */
+  public unwrapErr(&self): E {
+    return match (self) {
+      Result::OK(_) -> @panic("Result is an OK"),
+      Result::ERROR(e) -> e,
+    };
+  }
+
+  /**
+   * @brief Unwraps the result or returns a default value.
+   *
+   * @param defaultValue A default value to return if the result is an error.
+   * @return The unwrapped value or the default value.
+   */
+  public unwrapOr(&self, defaultValue: T): T {
+    return match (self) {
+      Result::OK(t) -> t,
+      Result::ERROR(_) -> defaultValue,
+    };
+  }
 }
 
 /// Option type that models presence (`SOME`) or absence (`NONE`).
@@ -131,6 +191,46 @@ export enum Result<T, E> {
 export enum Option<S> {
   SOME(S),
   NONE,
+
+  public isSome(&self): boolean {
+    return match (self) {
+      Option::SOME(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /**
+   * @brief Checks if the option is None.
+   *
+   * @return True if the option is None, false otherwise.
+   */
+  public isNone(&self): boolean {
+    return !self.isSome();
+  }
+
+  /**
+   * @brief Unwraps the value in the option.
+   *
+   * @return The unwrapped value of type S.
+   * @throws Panic if the option is None.
+   */
+  public unwrap(&self): S {
+    return match (self) {
+      Option::SOME(s) -> s,
+      Option::NONE -> @panic("Option is None"),
+    };
+  }
+
+  /**
+   * @brief Unwraps the value or returns a default value.
+   *
+   * @param defaultValue A default value to return if the option is None.
+   * @return The unwrapped value or the default value.
+   */
+  public unwrapOr(&self, defaultValue: S): S {
+    return match (self) {
+      Option::SOME(s) -> s,
+      Option::NONE -> defaultValue,
+    };
+  }
 }
-
-

@@ -289,6 +289,14 @@ impl<'a> LirVerifier<'a> {
           self.check_operand(func, func_name, block_name, p, defined_temps);
         }
       },
+      Instr::EnumGetTag { dest, source } => {
+        self.check_operand(func, func_name, block_name, source, defined_temps);
+        defined_temps.insert(*dest);
+      },
+      Instr::EnumGetPayloadField { dest, source, .. } => {
+        self.check_operand(func, func_name, block_name, source, defined_temps);
+        defined_temps.insert(*dest);
+      },
       Instr::Trap { .. } => {},
       Instr::PanicMessage { .. } => {},
       Instr::DropInPlace { ptr, .. } => {

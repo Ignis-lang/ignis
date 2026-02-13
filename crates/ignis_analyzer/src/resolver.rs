@@ -6,7 +6,7 @@ use ignis_ast::{
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
-use ignis_type::definition::{DefinitionId, DefinitionKind, SymbolEntry};
+use ignis_type::definition::{DefinitionId, SymbolEntry};
 
 /// Result of resolving a qualified path expression.
 ///

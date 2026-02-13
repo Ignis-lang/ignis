@@ -629,15 +629,16 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Variable(var) => {
-        let def_id = match self.scopes.lookup_def(&var.name) {
-          Some(id) => *id,
-          None => {
-            return hir.alloc(HIRNode {
-              kind: HIRKind::Error,
-              span: var.span.clone(),
-              type_id: self.types.error(),
-            });
-          },
+        let def_id = if let Some(def_id) = self.lookup_def(node_id).cloned() {
+          def_id
+        } else if let Some(def_id) = self.scopes.lookup_def(&var.name).cloned() {
+          def_id
+        } else {
+          return hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: var.span.clone(),
+            type_id: self.types.error(),
+          });
         };
 
         // Handle type parameters specially - they don't have a type_of in the usual sense
@@ -1106,7 +1107,7 @@ impl<'a> Analyzer<'a> {
           .arms
           .iter()
           .map(|arm| {
-            let pattern = self.lower_pattern(&arm.pattern);
+            let pattern = self.lower_pattern(&arm.pattern, arm.guard.as_ref(), &arm.body);
             let guard = arm.guard.as_ref().map(|g| self.lower_node_to_hir(g, hir, scope_kind));
             let body = self.lower_node_to_hir(&arm.body, hir, scope_kind);
             HIRMatchArm { pattern, guard, body }
@@ -1127,18 +1128,13 @@ impl<'a> Analyzer<'a> {
   fn lower_pattern(
     &mut self,
     pattern: &ASTPattern,
+    arm_guard: Option<&NodeId>,
+    arm_body: &NodeId,
   ) -> HIRPattern {
     match pattern {
       ASTPattern::Wildcard { .. } => HIRPattern::Wildcard,
       ASTPattern::Literal { value, .. } => HIRPattern::Literal { value: value.clone() },
       ASTPattern::Path { segments, args, .. } => {
-        if segments.len() == 1 && args.is_none() {
-          let (name, _) = &segments[0];
-          if let Some(def_id) = self.scopes.lookup_def(name).cloned() {
-            return HIRPattern::Binding { def_id };
-          }
-        }
-
         if let Some(ResolvedPath::EnumVariant {
           enum_def,
           variant_index,
@@ -1147,7 +1143,7 @@ impl<'a> Analyzer<'a> {
         {
           let variant_args = args
             .as_ref()
-            .map(|a| a.iter().map(|p| self.lower_pattern(p)).collect())
+            .map(|a| a.iter().map(|p| self.lower_pattern(p, arm_guard, arm_body)).collect())
             .unwrap_or_default();
           return HIRPattern::Variant {
             enum_def,
@@ -1157,7 +1153,16 @@ impl<'a> Analyzer<'a> {
         }
 
         if segments.len() == 1 {
-          let (name, _) = &segments[0];
+          let (name, segment_span) = &segments[0];
+
+          if let Some(def_id) = self.lookup_pattern_binding_def(*name, segment_span) {
+            return HIRPattern::Binding { def_id };
+          }
+
+          if let Some(def_id) = self.find_pattern_binding_def_in_arm(*name, arm_guard, arm_body) {
+            return HIRPattern::Binding { def_id };
+          }
+
           if let Some(def_id) = self.scopes.lookup_def(name).cloned() {
             return HIRPattern::Binding { def_id };
           }
@@ -1166,11 +1171,17 @@ impl<'a> Analyzer<'a> {
         HIRPattern::Wildcard
       },
       ASTPattern::Tuple { elements, .. } => {
-        let hir_elements: Vec<HIRPattern> = elements.iter().map(|e| self.lower_pattern(e)).collect();
+        let hir_elements: Vec<HIRPattern> = elements
+          .iter()
+          .map(|e| self.lower_pattern(e, arm_guard, arm_body))
+          .collect();
         HIRPattern::Tuple { elements: hir_elements }
       },
       ASTPattern::Or { patterns, .. } => {
-        let hir_patterns: Vec<HIRPattern> = patterns.iter().map(|p| self.lower_pattern(p)).collect();
+        let hir_patterns: Vec<HIRPattern> = patterns
+          .iter()
+          .map(|p| self.lower_pattern(p, arm_guard, arm_body))
+          .collect();
         HIRPattern::Or { patterns: hir_patterns }
       },
     }
@@ -1223,6 +1234,119 @@ impl<'a> Analyzer<'a> {
     }
 
     None
+  }
+
+  fn lookup_pattern_binding_def(
+    &self,
+    name: SymbolId,
+    name_span: &Span,
+  ) -> Option<DefinitionId> {
+    self.defs.iter().find_map(|(def_id, def)| {
+      if matches!(def.kind, DefinitionKind::Variable(_)) && def.name == name && def.name_span == *name_span {
+        Some(def_id)
+      } else {
+        None
+      }
+    })
+  }
+
+  fn find_pattern_binding_def_in_arm(
+    &self,
+    name: SymbolId,
+    guard: Option<&NodeId>,
+    body: &NodeId,
+  ) -> Option<DefinitionId> {
+    if let Some(g) = guard
+      && let Some(def_id) = self.find_binding_def_in_node(*g, name)
+    {
+      return Some(def_id);
+    }
+
+    self.find_binding_def_in_node(*body, name)
+  }
+
+  fn find_binding_def_in_node(
+    &self,
+    node_id: NodeId,
+    name: SymbolId,
+  ) -> Option<DefinitionId> {
+    let node = self.ast.get(&node_id);
+
+    match node {
+      ASTNode::Expression(expr) => match expr {
+        ASTExpression::Variable(var) if var.name == name => self.lookup_def(&node_id).cloned(),
+        ASTExpression::Path(path) if path.segments.len() == 1 && path.segments[0].name == name => {
+          self.lookup_def(&node_id).cloned()
+        },
+        ASTExpression::Binary(binary) => self
+          .find_binding_def_in_node(binary.left, name)
+          .or_else(|| self.find_binding_def_in_node(binary.right, name)),
+        ASTExpression::Unary(unary) => self.find_binding_def_in_node(unary.operand, name),
+        ASTExpression::Grouped(grouped) => self.find_binding_def_in_node(grouped.expression, name),
+        ASTExpression::Assignment(assign) => self
+          .find_binding_def_in_node(assign.target, name)
+          .or_else(|| self.find_binding_def_in_node(assign.value, name)),
+        ASTExpression::Call(call) => {
+          if let Some(def_id) = self.find_binding_def_in_node(call.callee, name) {
+            return Some(def_id);
+          }
+          for arg in &call.arguments {
+            if let Some(def_id) = self.find_binding_def_in_node(*arg, name) {
+              return Some(def_id);
+            }
+          }
+          None
+        },
+        ASTExpression::Ternary(ternary) => self
+          .find_binding_def_in_node(ternary.condition, name)
+          .or_else(|| self.find_binding_def_in_node(ternary.then_expr, name))
+          .or_else(|| self.find_binding_def_in_node(ternary.else_expr, name)),
+        ASTExpression::MemberAccess(access) => self.find_binding_def_in_node(access.object, name),
+        ASTExpression::RecordInit(record_init) => {
+          for field in &record_init.fields {
+            if let Some(def_id) = self.find_binding_def_in_node(field.value, name) {
+              return Some(def_id);
+            }
+          }
+          None
+        },
+        ASTExpression::Match(match_expr) => {
+          if let Some(def_id) = self.find_binding_def_in_node(match_expr.scrutinee, name) {
+            return Some(def_id);
+          }
+
+          for arm in &match_expr.arms {
+            if let Some(g) = arm.guard
+              && let Some(def_id) = self.find_binding_def_in_node(g, name)
+            {
+              return Some(def_id);
+            }
+
+            if let Some(def_id) = self.find_binding_def_in_node(arm.body, name) {
+              return Some(def_id);
+            }
+          }
+
+          None
+        },
+        _ => None,
+      },
+      ASTNode::Statement(stmt) => match stmt {
+        ASTStatement::Expression(_) => None,
+        ASTStatement::Return(ret) => ret
+          .expression
+          .and_then(|expr| self.find_binding_def_in_node(expr, name)),
+        ASTStatement::Block(block) => {
+          for stmt_id in &block.statements {
+            if let Some(def_id) = self.find_binding_def_in_node(*stmt_id, name) {
+              return Some(def_id);
+            }
+          }
+          None
+        },
+        _ => None,
+      },
+    }
   }
 
   fn lower_member_access(
