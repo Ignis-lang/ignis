@@ -947,6 +947,74 @@ impl<'a> LoweringContext<'a> {
         }
       },
 
+      // Field access: &obj.field -> pointer to field lvalue
+      HIRKind::FieldAccess { base, field_index } => {
+        let base = *base;
+        let field_index = *field_index;
+        let field_ty = node.type_id;
+
+        let base_node = self.hir.get(base);
+        let base_ty = base_node.type_id;
+        let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. });
+
+        let base_ptr = if base_is_ptr {
+          self.lower_hir_node(base)?
+        } else if let HIRKind::Dereference(inner) = &base_node.kind.clone() {
+          let inner_node = self.hir.get(*inner);
+          let inner_ty = inner_node.type_id;
+
+          if matches!(self.types.get(&inner_ty), Type::Pointer { .. } | Type::Reference { .. }) {
+            self.lower_hir_node(*inner)?
+          } else {
+            let base_val = self.lower_hir_node(base)?;
+            let temp_local = self.alloc_synthetic_local(base_ty, false);
+
+            self.fn_builder().emit(Instr::Store {
+              dest: temp_local,
+              value: base_val,
+            });
+
+            let base_ptr_ty = self.types.pointer(base_ty, mutable);
+            let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
+            self.fn_builder().emit(Instr::AddrOfLocal {
+              dest: base_ptr_temp,
+              local: temp_local,
+              mutable,
+            });
+
+            Operand::Temp(base_ptr_temp)
+          }
+        } else {
+          let base_val = self.lower_hir_node(base)?;
+          let temp_local = self.alloc_synthetic_local(base_ty, false);
+
+          self.fn_builder().emit(Instr::Store {
+            dest: temp_local,
+            value: base_val,
+          });
+
+          let base_ptr_ty = self.types.pointer(base_ty, mutable);
+          let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
+          self.fn_builder().emit(Instr::AddrOfLocal {
+            dest: base_ptr_temp,
+            local: temp_local,
+            mutable,
+          });
+
+          Operand::Temp(base_ptr_temp)
+        };
+
+        let field_ref = self.fn_builder().alloc_temp(ref_ty, span);
+        self.fn_builder().emit(Instr::GetFieldPtr {
+          dest: field_ref,
+          base: base_ptr,
+          field_index,
+          field_type: field_ty,
+        });
+
+        Some(Operand::Temp(field_ref))
+      },
+
       // Index expression: &arr[i] → GEP
       HIRKind::Index { base, index } => {
         let base = *base;

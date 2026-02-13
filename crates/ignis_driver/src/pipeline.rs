@@ -252,11 +252,10 @@ pub fn compile_project(
     },
   };
 
-  let should_load_prelude =
-    config.std && config.auto_load_std && !is_file_inside_std_path(entry_path, &config.std_path);
+  let should_load_prelude = config.std && config.auto_load_std;
 
   if should_load_prelude {
-    ctx.discover_prelude_modules(root_id, &config);
+    ctx.discover_prelude_modules_for_all(&config);
   }
 
   let std_module_names: Vec<String> = ctx
@@ -1752,25 +1751,4 @@ fn normalize_path_for_include(path: &Path) -> String {
     .filter(|c| !matches!(c, std::path::Component::CurDir))
     .collect();
   normalized.display().to_string().replace('\\', "/")
-}
-
-fn is_file_inside_std_path(
-  file_path: &str,
-  std_path: &str,
-) -> bool {
-  if std_path.is_empty() {
-    return false;
-  }
-
-  let std_canon = match Path::new(std_path).canonicalize() {
-    Ok(path) => path,
-    Err(_) => return false,
-  };
-
-  let file_canon = match Path::new(file_path).canonicalize() {
-    Ok(path) => path,
-    Err(_) => return false,
-  };
-
-  file_canon.starts_with(std_canon)
 }

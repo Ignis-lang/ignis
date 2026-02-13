@@ -99,6 +99,7 @@ pub struct Analyzer<'a> {
   diagnostics: Vec<Diagnostic>,
   export_table: ExportTable,
   module_for_path: HashMap<String, ModuleId>,
+  implicit_imports: Vec<ModuleId>,
   path_to_file: HashMap<String, ignis_type::file::FileId>,
   current_module: ModuleId,
   current_namespace: Option<NamespaceId>,
@@ -190,6 +191,7 @@ impl<'a> Analyzer<'a> {
       diagnostics: Vec::new(),
       export_table: HashMap::new(),
       module_for_path: HashMap::new(),
+      implicit_imports: Vec::new(),
       path_to_file: HashMap::new(),
       current_module,
       current_namespace: None,
@@ -276,6 +278,7 @@ impl<'a> Analyzer<'a> {
     shared_namespaces: &mut NamespaceStore,
     shared_extension_methods: &mut HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
     current_module: ModuleId,
+    implicit_imports: Vec<ModuleId>,
   ) -> AnalyzerOutput {
     let symbols_clone = symbols.clone();
 
@@ -291,6 +294,7 @@ impl<'a> Analyzer<'a> {
       diagnostics: Vec::new(),
       export_table: export_table.clone(),
       module_for_path: module_for_path.clone(),
+      implicit_imports,
       path_to_file: path_to_file.clone(),
       current_module,
       current_namespace: None,
@@ -577,6 +581,7 @@ impl<'a> Analyzer<'a> {
     let export_table = self.export_table.clone();
     let module_for_path = self.module_for_path.clone();
     self.import_phase(roots, &export_table, &module_for_path);
+    self.process_implicit_imports();
   }
 
   fn define_root(
