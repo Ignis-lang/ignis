@@ -620,7 +620,10 @@ mod tests {
   #[test]
   fn test_atom_type_keyword_classified_as_type() {
     let result = classify_source("let value: atom = :ok;");
-    let atom_entry = result.iter().find(|(_, lex)| lex == "atom").expect("expected atom token");
+    let atom_entry = result
+      .iter()
+      .find(|(_, lex)| lex == "atom")
+      .expect("expected atom token");
     assert_eq!(atom_entry.0, TokenTypeIndex::Type as u32);
   }
 

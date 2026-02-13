@@ -1019,13 +1019,13 @@ pub fn complete_double_colon(
   // Resolve the path to a definition
   let target_def_id = resolve_path_to_def(path_segments, output, file_id);
 
-    let Some(def_id) = target_def_id else {
-      // Try resolving as namespace
-      if let Some(ns_id) = resolve_path_to_namespace(path_segments, output) {
-        add_namespace_members(&ns_id, prefix, output, &mut candidates);
-      }
-      return candidates;
-    };
+  let Some(def_id) = target_def_id else {
+    // Try resolving as namespace
+    if let Some(ns_id) = resolve_path_to_namespace(path_segments, output) {
+      add_namespace_members(&ns_id, prefix, output, &mut candidates);
+    }
+    return candidates;
+  };
 
   let def = output.defs.get(&def_id);
 
@@ -1797,9 +1797,7 @@ fn resolve_path_to_namespace(
     }
   }
 
-  if all_segments_known
-    && let Some(ns_id) = output.namespaces.lookup(&sym_path)
-  {
+  if all_segments_known && let Some(ns_id) = output.namespaces.lookup(&sym_path) {
     return Some(ns_id);
   }
 

@@ -8,6 +8,7 @@ use ignis_ast::{
     record_init::ASTRecordInit,
     ASTCallExpression, ASTExpression, ASTLiteral,
   },
+  pattern::ASTPattern,
   statements::{
     enum_::{ASTEnum, ASTEnumItem},
     record::{ASTRecord, ASTRecordItem},
@@ -23,7 +24,9 @@ use ignis_diagnostics::{
 };
 use ignis_type::{
   attribute::FunctionAttr,
-  definition::{ConstValue, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry, Visibility},
+  definition::{
+    ConstValue, Definition, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry, VariableDefinition, Visibility,
+  },
   span::Span,
   types::{Substitution, Type, TypeId},
   value::IgnisLiteralValue,
@@ -731,12 +734,161 @@ impl<'a> Analyzer<'a> {
       ASTExpression::MemberAccess(ma) => self.typecheck_member_access(ma, scope_kind, ctx, infer),
       ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx, infer),
       ASTExpression::BuiltinCall(bc) => self.typecheck_builtin_call(node_id, bc, scope_kind, ctx),
+      ASTExpression::Match(match_expr) => {
+        let scrutinee_type = self.typecheck_node(&match_expr.scrutinee, scope_kind, ctx);
+
+        let mut arm_types = Vec::new();
+
+        for arm in &match_expr.arms {
+          self.scopes.push(ScopeKind::Block);
+
+          self.typecheck_pattern(&arm.pattern, &scrutinee_type);
+
+          if let Some(guard) = arm.guard.as_ref() {
+            let guard_type = self.typecheck_node(guard, ScopeKind::Block, ctx);
+            self.typecheck_assignment(&self.types.boolean(), &guard_type, &self.node_span(guard).clone());
+          }
+
+          arm_types.push(self.typecheck_node(&arm.body, ScopeKind::Block, ctx));
+
+          self.scopes.pop();
+        }
+
+        let Some(first_type) = arm_types.first().copied() else {
+          return self.types.void();
+        };
+
+        arm_types.iter().skip(1).fold(first_type, |current, next| {
+          self.typecheck_common_type(&current, next, &match_expr.span)
+        })
+      },
     }
   }
 
-  // ========================================================================
-  // Type Alias Typechecking
-  // ========================================================================
+  fn typecheck_pattern(
+    &mut self,
+    pattern: &ASTPattern,
+    expected_type: &TypeId,
+  ) {
+    match pattern {
+      ASTPattern::Wildcard { .. } => {},
+      ASTPattern::Literal { value, span } => {
+        let literal_type = match value {
+          IgnisLiteralValue::Int8(_) => self.types.i8(),
+          IgnisLiteralValue::Int16(_) => self.types.i16(),
+          IgnisLiteralValue::Int32(_) => self.types.i32(),
+          IgnisLiteralValue::Int64(_) => self.types.i64(),
+          IgnisLiteralValue::UnsignedInt8(_) => self.types.u8(),
+          IgnisLiteralValue::UnsignedInt16(_) => self.types.u16(),
+          IgnisLiteralValue::UnsignedInt32(_) => self.types.u32(),
+          IgnisLiteralValue::UnsignedInt64(_) => self.types.u64(),
+          IgnisLiteralValue::Float32(_) => self.types.f32(),
+          IgnisLiteralValue::Float64(_) => self.types.f64(),
+          IgnisLiteralValue::Boolean(_) => self.types.boolean(),
+          IgnisLiteralValue::Char(_) => self.types.char(),
+          IgnisLiteralValue::String(_) => self.types.string(),
+          IgnisLiteralValue::Atom(_) => self.types.atom(),
+          IgnisLiteralValue::Hex(_) => self.types.u32(),
+          IgnisLiteralValue::Binary(_) => self.types.u8(),
+          IgnisLiteralValue::Null => self.types.null_ptr(),
+        };
+        self.typecheck_assignment(expected_type, &literal_type, span);
+      },
+      ASTPattern::Path { segments, args, span } => {
+        if segments.len() == 1 && args.is_none() {
+          let (name, _) = &segments[0];
+          let name_str = self.symbols.borrow().get(name).to_string();
+
+          if name_str == "_" {
+            return;
+          }
+
+          self.define_pattern_binding_if_absent(*name, span, *expected_type);
+        }
+      },
+      ASTPattern::Tuple { elements, .. } => {
+        if let Type::Tuple(tuple_elements) = self.types.get(expected_type).clone() {
+          for (i, elem_pattern) in elements.iter().enumerate() {
+            if i < tuple_elements.len() {
+              self.typecheck_pattern(elem_pattern, &tuple_elements[i]);
+            }
+          }
+        }
+      },
+      ASTPattern::Or { patterns, span } => {
+        if patterns.iter().any(|p| self.pattern_has_bindings(p)) {
+          self.add_diagnostic(DiagnosticMessage::OrPatternBindingsDisallowed { span: span.clone() }.report());
+        }
+        for p in patterns {
+          self.typecheck_pattern(p, expected_type);
+        }
+      },
+    }
+  }
+
+  fn pattern_has_bindings(
+    &self,
+    pattern: &ASTPattern,
+  ) -> bool {
+    match pattern {
+      ASTPattern::Wildcard { .. } | ASTPattern::Literal { .. } => false,
+      ASTPattern::Path { segments, args, .. } => {
+        if segments.len() == 1 && args.is_none() {
+          let (name, _) = &segments[0];
+          let name_str = self.symbols.borrow().get(name).to_string();
+          name_str != "_"
+        } else {
+          args
+            .as_ref()
+            .is_some_and(|a| a.iter().any(|p| self.pattern_has_bindings(p)))
+        }
+      },
+      ASTPattern::Tuple { elements, .. } => elements.iter().any(|e| self.pattern_has_bindings(e)),
+      ASTPattern::Or { patterns, .. } => patterns.iter().any(|p| self.pattern_has_bindings(p)),
+    }
+  }
+
+  fn define_pattern_binding_if_absent(
+    &mut self,
+    name: ignis_type::symbol::SymbolId,
+    span: &Span,
+    type_id: TypeId,
+  ) {
+    if self.scopes.lookup(&name).is_some() {
+      return;
+    }
+
+    let var_def = VariableDefinition {
+      type_id,
+      mutable: false,
+    };
+
+    let def = Definition {
+      kind: DefinitionKind::Variable(var_def),
+      name,
+      span: span.clone(),
+      name_span: span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+      doc: None,
+    };
+
+    let def_id = self.defs.alloc(def);
+
+    if let Err(existing) = self.scopes.define(&name, &def_id, false) {
+      let existing_def = self.defs.get(&existing);
+      let symbol = self.get_symbol_name(&existing_def.name);
+      self.add_diagnostic(
+        DiagnosticMessage::VariableAlreadyDefined {
+          name: symbol,
+          span: span.clone(),
+          previous_span: existing_def.span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
 
   fn typecheck_type_alias(
     &mut self,
@@ -5552,9 +5704,7 @@ impl<'a> Analyzer<'a> {
           return self.types.boolean();
         }
 
-        if matches!(self.types.get(&left_type), Type::Atom)
-          && matches!(self.types.get(&right_type), Type::Atom)
-        {
+        if matches!(self.types.get(&left_type), Type::Atom) && matches!(self.types.get(&right_type), Type::Atom) {
           return self.types.boolean();
         }
 

@@ -711,6 +711,9 @@ pub enum DiagnosticMessage {
     method_name: String,
     span: Span,
   },
+  OrPatternBindingsDisallowed {
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1409,6 +1412,9 @@ impl fmt::Display for DiagnosticMessage {
           method_name
         )
       },
+      DiagnosticMessage::OrPatternBindingsDisallowed { .. } => {
+        write!(f, "bindings are not allowed in OR patterns")
+      },
     }
   }
 }
@@ -1593,7 +1599,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::TraitInExternBlock { span, .. }
       | DiagnosticMessage::TraitMethodRequiresSelf { span, .. }
       | DiagnosticMessage::TraitFieldNotAllowed { span, .. }
-      | DiagnosticMessage::TraitStaticMethodNotAllowed { span, .. } => span.clone(),
+      | DiagnosticMessage::TraitStaticMethodNotAllowed { span, .. }
+      | DiagnosticMessage::OrPatternBindingsDisallowed { span, .. } => span.clone(),
     }
   }
 
@@ -1774,6 +1781,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::TraitMethodRequiresSelf { .. } => "A0144",
       DiagnosticMessage::TraitFieldNotAllowed { .. } => "A0145",
       DiagnosticMessage::TraitStaticMethodNotAllowed { .. } => "A0146",
+      DiagnosticMessage::OrPatternBindingsDisallowed { .. } => "A0147",
     }
     .to_string()
   }

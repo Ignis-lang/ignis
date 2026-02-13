@@ -1,5 +1,5 @@
 use crate::{Analyzer, ResolvedPath, ScopeKind};
-use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, expressions::ASTExpression};
+use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, expressions::ASTExpression, pattern::ASTPattern};
 use ignis_ast::expressions::binary::ASTBinaryOperator;
 use ignis_ast::expressions::builtin_call::ASTBuiltinCall;
 use ignis_ast::expressions::assignment::ASTAssignmentOperator;
@@ -9,12 +9,13 @@ use ignis_ast::statements::record::{ASTMethod, ASTRecord, ASTRecordItem};
 use ignis_ast::statements::enum_::{ASTEnum, ASTEnumItem};
 use ignis_ast::statements::for_of::ASTForOf;
 use ignis_hir::{
-  HIR, HIRNode, HIRKind, HIRId,
+  HIR, HIRNode, HIRKind, HIRId, HIRMatchArm, HIRPattern,
   operation::{BinaryOperation, UnaryOperation},
   statement::LoopKind,
 };
 use ignis_type::definition::{DefinitionId, DefinitionKind, SymbolEntry};
 use ignis_type::span::Span;
+use ignis_type::symbol::SymbolId;
 use ignis_type::types::{Substitution, Type, TypeId};
 
 struct ForOfContext<'a> {
@@ -1098,7 +1099,130 @@ impl<'a> Analyzer<'a> {
       ASTExpression::MemberAccess(ma) => self.lower_member_access(node_id, ma, hir, scope_kind),
       ASTExpression::RecordInit(ri) => self.lower_record_init(node_id, ri, hir, scope_kind),
       ASTExpression::BuiltinCall(bc) => self.lower_builtin_call(bc, hir, scope_kind),
+      ASTExpression::Match(match_expr) => {
+        let scrutinee = self.lower_node_to_hir(&match_expr.scrutinee, hir, scope_kind);
+
+        let arms: Vec<HIRMatchArm> = match_expr
+          .arms
+          .iter()
+          .map(|arm| {
+            let pattern = self.lower_pattern(&arm.pattern);
+            let guard = arm.guard.as_ref().map(|g| self.lower_node_to_hir(g, hir, scope_kind));
+            let body = self.lower_node_to_hir(&arm.body, hir, scope_kind);
+            HIRMatchArm { pattern, guard, body }
+          })
+          .collect();
+
+        let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::Match { scrutinee, arms },
+          span: match_expr.span.clone(),
+          type_id: result_type,
+        })
+      },
     }
+  }
+
+  fn lower_pattern(
+    &mut self,
+    pattern: &ASTPattern,
+  ) -> HIRPattern {
+    match pattern {
+      ASTPattern::Wildcard { .. } => HIRPattern::Wildcard,
+      ASTPattern::Literal { value, .. } => HIRPattern::Literal { value: value.clone() },
+      ASTPattern::Path { segments, args, .. } => {
+        if segments.len() == 1 && args.is_none() {
+          let (name, _) = &segments[0];
+          if let Some(def_id) = self.scopes.lookup_def(name).cloned() {
+            return HIRPattern::Binding { def_id };
+          }
+        }
+
+        if let Some(ResolvedPath::EnumVariant {
+          enum_def,
+          variant_index,
+        }) =
+          self.resolve_qualified_path_from_symbols(segments.iter().map(|(s, _)| *s).collect::<Vec<_>>().as_slice())
+        {
+          let variant_args = args
+            .as_ref()
+            .map(|a| a.iter().map(|p| self.lower_pattern(p)).collect())
+            .unwrap_or_default();
+          return HIRPattern::Variant {
+            enum_def,
+            variant_tag: variant_index,
+            args: variant_args,
+          };
+        }
+
+        if segments.len() == 1 {
+          let (name, _) = &segments[0];
+          if let Some(def_id) = self.scopes.lookup_def(name).cloned() {
+            return HIRPattern::Binding { def_id };
+          }
+        }
+
+        HIRPattern::Wildcard
+      },
+      ASTPattern::Tuple { elements, .. } => {
+        let hir_elements: Vec<HIRPattern> = elements.iter().map(|e| self.lower_pattern(e)).collect();
+        HIRPattern::Tuple { elements: hir_elements }
+      },
+      ASTPattern::Or { patterns, .. } => {
+        let hir_patterns: Vec<HIRPattern> = patterns.iter().map(|p| self.lower_pattern(p)).collect();
+        HIRPattern::Or { patterns: hir_patterns }
+      },
+    }
+  }
+
+  fn resolve_qualified_path_from_symbols(
+    &self,
+    segments: &[SymbolId],
+  ) -> Option<ResolvedPath> {
+    if segments.is_empty() {
+      return None;
+    }
+
+    if segments.len() == 1 {
+      return self.scopes.lookup(&segments[0]).cloned().map(ResolvedPath::Entry);
+    }
+
+    let ns_path = &segments[..segments.len() - 1];
+    let def_name = &segments[segments.len() - 1];
+
+    if let Some(def_id) = self.scopes.lookup_def(&ns_path[0]) {
+      let def = self.defs.get(def_id);
+
+      match &def.kind {
+        DefinitionKind::Namespace(ns_def) => {
+          let mut current_ns = ns_def.namespace_id;
+
+          for segment in &ns_path[1..] {
+            current_ns = self.namespaces.lookup_child(current_ns, segment)?;
+          }
+
+          return self
+            .namespaces
+            .lookup_def(current_ns, def_name)
+            .cloned()
+            .map(ResolvedPath::Entry);
+        },
+
+        DefinitionKind::Enum(ed) if ns_path.len() == 1 => {
+          if let Some(&tag) = ed.variants_by_name.get(def_name) {
+            return Some(ResolvedPath::EnumVariant {
+              enum_def: *def_id,
+              variant_index: tag,
+            });
+          }
+        },
+
+        _ => {},
+      }
+    }
+
+    None
   }
 
   fn lower_member_access(

@@ -61,6 +61,7 @@ use crate::{
     cast::ASTCast,
     grouped::ASTGrouped,
     literal::ASTLiteral,
+    match_expression::ASTMatch,
     path::ASTPath,
     ternary::ASTTernary,
     unary::{ASTUnary, UnaryOperator},
@@ -88,6 +89,7 @@ use crate::{
   },
   type_::IgnisTypeSyntax,
   metadata::ASTMetadata,
+  pattern::ASTPattern,
 };
 
 /// Trait for converting AST nodes to Lisp-style S-expression format
@@ -256,6 +258,7 @@ impl DisplayLisp for ASTExpression {
       },
       ASTExpression::Unary(expr) => expr.to_lisp(formatter),
       ASTExpression::Literal(expr) => expr.to_lisp(formatter),
+      ASTExpression::Match(expr) => expr.to_lisp(formatter),
       ASTExpression::Variable(expr) => expr.to_lisp(formatter),
       ASTExpression::Vector(expr) => expr.to_lisp(formatter),
       ASTExpression::VectorAccess(expr) => expr.to_lisp(formatter),
@@ -511,6 +514,69 @@ impl DisplayLisp for ASTPath {
       .collect();
 
     format!("(Path \"{}\")", segments.join("::"))
+  }
+}
+
+impl DisplayLisp for ASTMatch {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let scrutinee = formatter.format_node(&self.scrutinee);
+
+    if self.arms.is_empty() {
+      return format!("(Match {})", scrutinee);
+    }
+
+    let arms: Vec<String> = self
+      .arms
+      .iter()
+      .map(|arm| {
+        let pattern = arm.pattern.to_lisp(formatter);
+
+        let guard = match arm.guard {
+          Some(ref guard) => format!(" if {}", formatter.format_node(guard)),
+          None => String::new(),
+        };
+
+        let body = formatter.format_node(&arm.body);
+        format!("(Arm {}{} -> {})", pattern, guard, body)
+      })
+      .collect();
+
+    format!("(Match {} {})", scrutinee, arms.join(" "))
+  }
+}
+
+impl DisplayLisp for ASTPattern {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    match self {
+      ASTPattern::Wildcard { .. } => "_".to_string(),
+      ASTPattern::Literal { value, .. } => value.to_string(),
+      ASTPattern::Path { segments, args, .. } => {
+        let path: Vec<String> = segments.iter().map(|(sym, _)| formatter.resolve_symbol(sym)).collect();
+        let path = path.join("::");
+
+        match args {
+          Some(args) => {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_lisp(formatter)).collect();
+            format!("(PathPattern \"{}\" ({}))", path, args.join(" "))
+          },
+          None => format!("(PathPattern \"{}\")", path),
+        }
+      },
+      ASTPattern::Tuple { elements, .. } => {
+        let elements: Vec<String> = elements.iter().map(|element| element.to_lisp(formatter)).collect();
+        format!("(TuplePattern {})", elements.join(" "))
+      },
+      ASTPattern::Or { patterns, .. } => {
+        let patterns: Vec<String> = patterns.iter().map(|pattern| pattern.to_lisp(formatter)).collect();
+        format!("(OrPattern {})", patterns.join(" "))
+      },
+    }
   }
 }
 

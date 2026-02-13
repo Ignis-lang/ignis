@@ -165,6 +165,17 @@ fn collect_expression_children(
         stack.push(*arg_id);
       }
     },
+    ASTExpression::Match(match_expr) => {
+      stack.push(match_expr.scrutinee);
+
+      for arm in &match_expr.arms {
+        if let Some(guard) = arm.guard {
+          stack.push(guard);
+        }
+
+        stack.push(arm.body);
+      }
+    },
   }
 }
 

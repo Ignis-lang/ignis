@@ -1,7 +1,10 @@
 pub mod display;
 pub mod drop_schedule;
 pub mod operation;
+pub mod pattern;
 pub mod statement;
+
+pub use pattern::HIRPattern;
 
 pub use drop_schedule::{DropSchedules, ExitKey};
 
@@ -132,8 +135,20 @@ pub enum HIRKind {
   Return(Option<HIRId>),
   ExpressionStatement(HIRId),
 
+  Match {
+    scrutinee: HIRId,
+    arms: Vec<HIRMatchArm>,
+  },
+
   // Error recovery
   Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HIRMatchArm {
+  pub pattern: HIRPattern,
+  pub guard: Option<HIRId>,
+  pub body: HIRId,
 }
 
 impl HIRKind {
@@ -271,6 +286,15 @@ impl HIRKind {
       },
       HIRKind::ExpressionStatement(id) => {
         *id = HIRId::new(id.index() + offset);
+      },
+      HIRKind::Match { scrutinee, arms } => {
+        *scrutinee = HIRId::new(scrutinee.index() + offset);
+        for arm in arms {
+          if let Some(g) = &mut arm.guard {
+            *g = HIRId::new(g.index() + offset);
+          }
+          arm.body = HIRId::new(arm.body.index() + offset);
+        }
       },
     }
   }

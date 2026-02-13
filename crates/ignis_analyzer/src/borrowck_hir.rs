@@ -322,6 +322,16 @@ impl<'a> HirBorrowChecker<'a> {
         self.reachable = false;
       },
 
+      HIRKind::Match { scrutinee, arms } => {
+        self.check_node(scrutinee);
+        for arm in arms {
+          if let Some(g) = arm.guard {
+            self.check_node(g);
+          }
+          self.check_node(arm.body);
+        }
+      },
+
       // Leaf nodes
       HIRKind::Literal(_)
       | HIRKind::Variable(_)

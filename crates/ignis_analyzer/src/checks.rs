@@ -1,6 +1,7 @@
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
   expressions::ASTExpression,
+  pattern::ASTPattern,
   statements::{
     enum_::{ASTEnum, ASTEnumItem},
     record::{ASTMethod, ASTRecord, ASTRecordItem},
@@ -408,6 +409,55 @@ impl<'a> Analyzer<'a> {
       ASTExpression::BuiltinCall(bc) => {
         for arg_id in &bc.args {
           self.extra_checks_node(arg_id, scope_kind, in_loop, in_function);
+        }
+      },
+      ASTExpression::Match(match_expr) => {
+        self.extra_checks_node(&match_expr.scrutinee, scope_kind, in_loop, in_function);
+
+        for arm in &match_expr.arms {
+          self.scopes.push(ScopeKind::Block);
+          self.register_pattern_bindings(&arm.pattern);
+
+          if let Some(guard) = arm.guard.as_ref() {
+            self.extra_checks_node(guard, scope_kind, in_loop, in_function);
+          }
+
+          self.extra_checks_node(&arm.body, scope_kind, in_loop, in_function);
+          self.scopes.pop();
+        }
+      },
+    }
+  }
+
+  fn register_pattern_bindings(
+    &mut self,
+    pattern: &ASTPattern,
+  ) {
+    match pattern {
+      ASTPattern::Wildcard { .. } | ASTPattern::Literal { .. } => {},
+      ASTPattern::Path { segments, args, .. } => {
+        if segments.len() == 1 && args.is_none() {
+          let (name, span) = &segments[0];
+          let name_str = self.symbols.borrow().get(name).to_string();
+
+          if name_str != "_" {
+            self.define_pattern_binding_if_absent(*name, span, self.types.error());
+          }
+        }
+        if let Some(pattern_args) = args {
+          for arg in pattern_args {
+            self.register_pattern_bindings(arg);
+          }
+        }
+      },
+      ASTPattern::Tuple { elements, .. } => {
+        for elem in elements {
+          self.register_pattern_bindings(elem);
+        }
+      },
+      ASTPattern::Or { patterns, .. } => {
+        for p in patterns {
+          self.register_pattern_bindings(p);
         }
       },
     }

@@ -1,11 +1,12 @@
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
   expressions::{ASTExpression, ASTPathSegment},
+  pattern::ASTPattern,
   statements::ASTStatement,
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
-use ignis_type::definition::{DefinitionId, SymbolEntry};
+use ignis_type::definition::{DefinitionId, DefinitionKind, SymbolEntry};
 
 /// Result of resolving a qualified path expression.
 ///
@@ -354,13 +355,58 @@ impl<'a> Analyzer<'a> {
           self.resolve_node(arg_id, scope_kind);
         }
       },
+      ASTExpression::Match(match_expr) => {
+        self.resolve_node(&match_expr.scrutinee, scope_kind);
+
+        for arm in &match_expr.arms {
+          self.scopes.push(ScopeKind::Block);
+          self.resolve_pattern(&arm.pattern);
+
+          if let Some(guard) = arm.guard.as_ref() {
+            self.resolve_node(guard, scope_kind);
+          }
+
+          self.resolve_node(&arm.body, scope_kind);
+          self.scopes.pop();
+        }
+      },
     }
   }
 
-  /// Resolve a qualified path (`Math::add`) or simple name (`add`).
-  ///
-  /// Returns `ResolvedPath::Def` for definitions and `ResolvedPath::EnumVariant`
-  /// for enum variants (which are not stored as separate definitions).
+  fn resolve_pattern(
+    &mut self,
+    pattern: &ASTPattern,
+  ) {
+    match pattern {
+      ASTPattern::Wildcard { .. } | ASTPattern::Literal { .. } => {},
+      ASTPattern::Path { segments, args, .. } => {
+        if segments.len() == 1 && args.is_none() {
+          let (name, span) = &segments[0];
+          let name_str = self.symbols.borrow().get(name).to_string();
+
+          if name_str != "_" {
+            self.define_pattern_binding_if_absent(*name, span, self.types.error());
+          }
+        }
+        if let Some(pattern_args) = args {
+          for arg in pattern_args {
+            self.resolve_pattern(arg);
+          }
+        }
+      },
+      ASTPattern::Tuple { elements, .. } => {
+        for elem in elements {
+          self.resolve_pattern(elem);
+        }
+      },
+      ASTPattern::Or { patterns, .. } => {
+        for p in patterns {
+          self.resolve_pattern(p);
+        }
+      },
+    }
+  }
+
   pub fn resolve_qualified_path(
     &self,
     segments: &[ASTPathSegment],

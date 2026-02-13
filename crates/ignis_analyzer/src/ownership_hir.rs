@@ -404,6 +404,16 @@ impl<'a> HirOwnershipChecker<'a> {
         dropped.extend(self.summary_must_drops(*message, tracked_params, summaries));
       },
 
+      HIRKind::Match { scrutinee, arms } => {
+        dropped.extend(self.summary_must_drops(*scrutinee, tracked_params, summaries));
+        for arm in arms {
+          if let Some(g) = arm.guard {
+            dropped.extend(self.summary_must_drops(g, tracked_params, summaries));
+          }
+          dropped.extend(self.summary_must_drops(arm.body, tracked_params, summaries));
+        }
+      },
+
       HIRKind::Variable(_)
       | HIRKind::Literal(_)
       | HIRKind::SizeOf(_)
@@ -758,6 +768,16 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::Panic(msg) => {
         self.check_node(msg);
         self.reachable = false;
+      },
+
+      HIRKind::Match { scrutinee, arms } => {
+        self.check_node(scrutinee);
+        for arm in arms {
+          if let Some(g) = arm.guard {
+            self.check_node(g);
+          }
+          self.check_node(arm.body);
+        }
       },
 
       HIRKind::Trap | HIRKind::BuiltinUnreachable => {

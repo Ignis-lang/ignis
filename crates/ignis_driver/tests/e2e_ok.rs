@@ -3491,3 +3491,35 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_match_literal() {
+  e2e_test(
+    "match_literal",
+    r#"
+function main(): i32 {
+    let x: i32 = 2;
+    return match (x) {
+        1 -> 10,
+        2 -> 20,
+        _ -> 0,
+    };
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_binding() {
+  e2e_test(
+    "match_binding",
+    r#"
+function main(): i32 {
+    let x: i32 = 5;
+    return match (x) {
+        y -> y,
+    };
+}
+"#,
+  );
+}
