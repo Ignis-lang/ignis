@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Write;
 
 use ignis_config::CHeader;
@@ -33,6 +35,9 @@ pub struct CEmitter<'a> {
   module_paths: Option<&'a HashMap<ModuleId, ModulePath>>,
   /// Std path for classifying std internal files as Std instead of User
   std_path: Option<&'a std::path::Path>,
+  /// Extra function definitions that must be emitted in user module mode
+  /// (typically monomorphized generic callees owned by other modules).
+  forced_emit_defs: HashSet<DefinitionId>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -56,6 +61,7 @@ impl<'a> CEmitter<'a> {
       target: None,
       module_paths: None,
       std_path: None,
+      forced_emit_defs: HashSet::new(),
     }
   }
 
@@ -83,6 +89,7 @@ impl<'a> CEmitter<'a> {
       target: Some(target),
       module_paths: Some(module_paths),
       std_path: None,
+      forced_emit_defs: HashSet::new(),
     }
   }
 
@@ -111,14 +118,25 @@ impl<'a> CEmitter<'a> {
       target: Some(target),
       module_paths: Some(module_paths),
       std_path: Some(std_path),
+      forced_emit_defs: HashSet::new(),
     }
   }
 
   pub fn emit(mut self) -> String {
+    if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
+      self.forced_emit_defs = self.collect_forced_emit_defs(module_id);
+    }
+
     self.emit_implicit_headers();
     self.emit_headers();
-    self.emit_type_forward_declarations();
-    self.emit_type_definitions();
+
+    let uses_module_headers = matches!(self.target, Some(EmitTarget::UserModule(_)) | Some(EmitTarget::StdModule(_)));
+
+    if !uses_module_headers {
+      self.emit_type_forward_declarations();
+      self.emit_type_definitions();
+    }
+
     self.emit_static_constants();
     self.emit_extern_declarations();
     self.emit_drop_glue_helpers();
@@ -195,6 +213,10 @@ impl<'a> CEmitter<'a> {
         let kind = self.classify(def_id);
 
         if let Some(target_module_id) = target.target_user_module() {
+          if self.forced_emit_defs.contains(&def_id) {
+            return true;
+          }
+
           let def = self.defs.get(&def_id);
 
           if def.owner_module == target_module_id {
@@ -221,6 +243,56 @@ impl<'a> CEmitter<'a> {
       },
       None => true, // Legacy mode: emit everything
     }
+  }
+
+  fn collect_forced_emit_defs(
+    &self,
+    target_module_id: ModuleId,
+  ) -> HashSet<DefinitionId> {
+    let mut reachable: HashSet<DefinitionId> = HashSet::new();
+    let mut queue: VecDeque<DefinitionId> = VecDeque::new();
+
+    for (def_id, function) in &self.program.functions {
+      if function.is_extern {
+        continue;
+      }
+
+      if self.defs.get(def_id).owner_module == target_module_id {
+        reachable.insert(*def_id);
+        queue.push_back(*def_id);
+      }
+    }
+
+    while let Some(current) = queue.pop_front() {
+      let Some(function) = self.program.functions.get(&current) else {
+        continue;
+      };
+
+      for (_, block) in function.blocks.iter() {
+        for instruction in &block.instructions {
+          if let Instr::Call { callee, .. } = instruction
+            && reachable.insert(*callee)
+          {
+            queue.push_back(*callee);
+          }
+        }
+      }
+    }
+
+    reachable
+      .into_iter()
+      .filter(|def_id| {
+        if self.defs.get(def_id).owner_module == target_module_id {
+          return false;
+        }
+
+        let Some(function) = self.program.functions.get(def_id) else {
+          return false;
+        };
+
+        !function.is_extern && self.is_function_signature_monomorphized(function)
+      })
+      .collect()
   }
 
   /// Check if an extern declaration should be emitted for a definition.
@@ -785,7 +857,15 @@ impl<'a> CEmitter<'a> {
 
     // Public functions must not be `static` -- conflicts with the header declaration.
     if !is_entry_main && !func.is_extern {
-      let is_public = self.defs.get(&def_id).visibility == Visibility::Public;
+      let mut is_public = self.defs.get(&def_id).visibility == Visibility::Public;
+
+      // In per-user-module emission, helper definitions forced from other modules
+      // are implementation details of this translation unit.
+      if let Some(target_module_id) = self.target.as_ref().and_then(|target| target.target_user_module())
+        && self.defs.get(&def_id).owner_module != target_module_id
+      {
+        is_public = false;
+      }
 
       let func_attrs = self.get_function_attrs(def_id);
       if func_attrs.iter().any(|a| matches!(a, FunctionAttr::Cold)) {
@@ -2356,10 +2436,11 @@ where
     .collect();
 
   // Emit forward declarations for external struct types (not defined in this module)
-  let external_structs: Vec<_> = struct_forward_decls
+  let mut external_structs: Vec<_> = struct_forward_decls
     .iter()
     .filter(|name| !module_type_names.contains(*name))
     .collect();
+  external_structs.sort();
 
   if !external_structs.is_empty() {
     for name in external_structs {
@@ -2395,6 +2476,34 @@ where
   }
 
   if !module_enums.is_empty() || !module_records.is_empty() {
+    writeln!(output).unwrap();
+  }
+
+  // Emit complete definitions for external, concrete struct types used by this module.
+  // This is required for by-value usage in signatures (e.g. Option<TokenType>), where
+  // forward declarations alone are insufficient.
+  let external_definition_ids =
+    collect_external_type_definition_ids(defs, types, symbols, namespaces, &module_type_names, &struct_forward_decls);
+
+  for def_id in external_definition_ids {
+    let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
+    let guard_name = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
+
+    writeln!(output, "#ifndef {}", guard_name).unwrap();
+    writeln!(output, "#define {}", guard_name).unwrap();
+
+    let def = defs.get(&def_id);
+    match &def.kind {
+      DefinitionKind::Record(rd) => {
+        emit_record_definition_standalone(def_id, rd, defs, types, symbols, namespaces, &mut output);
+      },
+      DefinitionKind::Enum(ed) => {
+        emit_enum_definition_standalone(def_id, ed, defs, symbols, namespaces, types, &mut output);
+      },
+      _ => {},
+    }
+
+    writeln!(output, "#endif // {}", guard_name).unwrap();
     writeln!(output).unwrap();
   }
 
@@ -2457,9 +2566,11 @@ fn emit_enum_definition_standalone(
 ) {
   let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
 
-  // Emit struct with tag field
+  // Keep header enum layout identical to source emission (`payload.variant_<tag>`)
+  // so generated .c can include the module header without type redefinition.
   writeln!(output, "struct {} {{", name).unwrap();
-  writeln!(output, "    u32 tag;").unwrap();
+  let tag_type = format_c_type(types.get(&ed.tag_type), types, defs, symbols, namespaces);
+  writeln!(output, "    {} tag;", tag_type).unwrap();
 
   // Check if any variant has payload
   let has_payloads = ed.variants.iter().any(|v| !v.payload.is_empty());
@@ -2468,16 +2579,15 @@ fn emit_enum_definition_standalone(
     writeln!(output, "    union {{").unwrap();
     for variant in &ed.variants {
       if !variant.payload.is_empty() {
-        let variant_name = symbols.get(&variant.name);
         writeln!(output, "        struct {{").unwrap();
         for (i, &payload_type_id) in variant.payload.iter().enumerate() {
           let payload_type = format_c_type(types.get(&payload_type_id), types, defs, symbols, namespaces);
           writeln!(output, "            {} field_{};", payload_type, i).unwrap();
         }
-        writeln!(output, "        }} {};", variant_name).unwrap();
+        writeln!(output, "        }} variant_{};", variant.tag_value).unwrap();
       }
     }
-    writeln!(output, "    }} data;").unwrap();
+    writeln!(output, "    }} payload;").unwrap();
   }
 
   write!(output, "}}").unwrap();
@@ -2513,6 +2623,170 @@ fn format_field_attrs_standalone(attrs: &[FieldAttr]) -> String {
     }
   }
   result
+}
+
+fn sanitize_macro_name(name: &str) -> String {
+  name
+    .chars()
+    .map(|character| {
+      if character.is_ascii_alphanumeric() {
+        character.to_ascii_uppercase()
+      } else {
+        '_'
+      }
+    })
+    .collect()
+}
+
+fn is_type_fully_monomorphized_standalone(
+  type_id: TypeId,
+  types: &TypeStore,
+) -> bool {
+  match types.get(&type_id) {
+    Type::Param { .. } | Type::Instance { .. } | Type::Infer => false,
+    Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
+      is_type_fully_monomorphized_standalone(*inner, types)
+    },
+    Type::Vector { element, .. } => is_type_fully_monomorphized_standalone(*element, types),
+    Type::Function { params, ret, .. } => {
+      params
+        .iter()
+        .all(|parameter| is_type_fully_monomorphized_standalone(*parameter, types))
+        && is_type_fully_monomorphized_standalone(*ret, types)
+    },
+    _ => true,
+  }
+}
+
+fn collect_struct_dependencies_from_type(
+  type_id: TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  out: &mut std::collections::HashSet<String>,
+) {
+  match types.get(&type_id) {
+    Type::Record(def_id) | Type::Enum(def_id) => {
+      out.insert(build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types));
+    },
+    Type::Tuple(elements) => {
+      for element in elements {
+        collect_struct_dependencies_from_type(*element, types, defs, symbols, namespaces, out);
+      }
+    },
+    Type::Pointer { .. } | Type::Reference { .. } | Type::Vector { .. } | Type::Function { .. } => {
+      // Pointers/function pointers do not require complete by-value definitions.
+    },
+    _ => {},
+  }
+}
+
+fn collect_external_type_definition_ids(
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  module_type_names: &std::collections::HashSet<String>,
+  referenced_struct_names: &std::collections::HashSet<String>,
+) -> Vec<DefinitionId> {
+  let mut referenced_definitions: std::collections::HashMap<String, DefinitionId> = std::collections::HashMap::new();
+
+  for (def_id, def) in defs.iter() {
+    let is_candidate = match &def.kind {
+      DefinitionKind::Record(record_definition) => {
+        record_definition.type_params.is_empty()
+          && record_definition
+            .fields
+            .iter()
+            .all(|field| is_type_fully_monomorphized_standalone(field.type_id, types))
+      },
+      DefinitionKind::Enum(enum_definition) => {
+        enum_definition.type_params.is_empty()
+          && enum_definition.variants.iter().all(|variant| {
+            variant
+              .payload
+              .iter()
+              .all(|payload| is_type_fully_monomorphized_standalone(*payload, types))
+          })
+      },
+      _ => false,
+    };
+
+    if !is_candidate {
+      continue;
+    }
+
+    let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
+
+    if referenced_struct_names.contains(&name) && !module_type_names.contains(&name) {
+      referenced_definitions.insert(name, def_id);
+    }
+  }
+
+  if referenced_definitions.is_empty() {
+    return Vec::new();
+  }
+
+  let mut unresolved: std::collections::HashSet<String> = referenced_definitions.keys().cloned().collect();
+  let mut resolved: std::collections::HashSet<String> = module_type_names.clone();
+  let mut ordered = Vec::new();
+
+  while !unresolved.is_empty() {
+    let mut progressed = false;
+    let mut names: Vec<String> = unresolved.iter().cloned().collect();
+    names.sort();
+
+    for name in names {
+      let Some(def_id) = referenced_definitions.get(&name).copied() else {
+        continue;
+      };
+
+      let def = defs.get(&def_id);
+      let mut dependencies = std::collections::HashSet::new();
+
+      match &def.kind {
+        DefinitionKind::Record(record_definition) => {
+          for field in &record_definition.fields {
+            collect_struct_dependencies_from_type(field.type_id, types, defs, symbols, namespaces, &mut dependencies);
+          }
+        },
+        DefinitionKind::Enum(enum_definition) => {
+          for variant in &enum_definition.variants {
+            for payload in &variant.payload {
+              collect_struct_dependencies_from_type(*payload, types, defs, symbols, namespaces, &mut dependencies);
+            }
+          }
+        },
+        _ => {},
+      }
+
+      dependencies.remove(&name);
+
+      if dependencies
+        .iter()
+        .all(|dependency| resolved.contains(dependency) || !unresolved.contains(dependency))
+      {
+        ordered.push(def_id);
+        unresolved.remove(&name);
+        resolved.insert(name);
+        progressed = true;
+      }
+    }
+
+    if !progressed {
+      let mut remaining: Vec<String> = unresolved.into_iter().collect();
+      remaining.sort();
+      for name in remaining {
+        if let Some(def_id) = referenced_definitions.get(&name).copied() {
+          ordered.push(def_id);
+        }
+      }
+      break;
+    }
+  }
+
+  ordered
 }
 
 /// Collect struct type names used in a function/method signature.

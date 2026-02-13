@@ -62,7 +62,7 @@ impl<'a> Analyzer<'a> {
 
       // Map the import path string span to the file of the imported module
       if let Some(file_id) = self.path_to_file.get(&import_path) {
-        self.import_module_files.insert(from_span, *file_id);
+        self.import_module_files.insert(from_span.clone(), *file_id);
       }
 
       let export_data = match export_table.get(&source_module) {
@@ -117,6 +117,35 @@ impl<'a> Analyzer<'a> {
               .report(),
             );
           },
+        }
+      }
+    }
+  }
+
+  pub(crate) fn process_implicit_imports(&mut self) {
+    let implicit_imports = self.implicit_imports.clone();
+
+    for source_module in implicit_imports {
+      let Some(export_data) = self.export_table.get(&source_module) else {
+        continue;
+      };
+
+      let exports: Vec<(SymbolId, DefinitionId)> = export_data
+        .exports
+        .iter()
+        .map(|(name, def_id)| (*name, *def_id))
+        .collect();
+
+      for (name, def_id) in exports {
+        if self.scopes.lookup_def(&name).is_some() {
+          continue;
+        }
+
+        let def_kind = self.defs.get(&def_id).kind.clone();
+        if let DefinitionKind::Namespace(ns_def) = &def_kind {
+          self.import_namespace(def_id, ns_def);
+        } else {
+          let _ = self.scopes.define(&name, &def_id, false);
         }
       }
     }

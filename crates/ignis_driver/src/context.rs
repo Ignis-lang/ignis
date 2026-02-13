@@ -128,9 +128,39 @@ impl CompilationContext {
 
     for module_name in Self::prelude_std_modules(config) {
       if let Ok(prelude_id) = self.discover_std_module(module_name, config) {
-        self
-          .module_graph
-          .add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
+        self.add_prelude_import_if_needed(root_id, prelude_id, dummy_span.clone());
+      }
+    }
+  }
+
+  pub fn discover_prelude_modules_for_all(
+    &mut self,
+    config: &IgnisConfig,
+  ) {
+    let mut prelude_ids = Vec::new();
+    for module_name in Self::prelude_std_modules(config) {
+      if let Ok(prelude_id) = self.discover_std_module(module_name, config) {
+        prelude_ids.push(prelude_id);
+      }
+    }
+
+    let module_ids: Vec<ModuleId> = self
+      .module_graph
+      .modules
+      .iter()
+      .map(|(module_id, _)| module_id)
+      .collect();
+
+    for module_id in module_ids {
+      if prelude_ids.contains(&module_id) {
+        continue;
+      }
+
+      let file_id = self.module_graph.modules.get(&module_id).file_id;
+      let dummy_span = Span::empty_at(file_id, BytePosition::default());
+
+      for prelude_id in &prelude_ids {
+        self.add_prelude_import_if_needed(module_id, *prelude_id, dummy_span.clone());
       }
     }
   }
@@ -146,11 +176,66 @@ impl CompilationContext {
 
     for module_name in Self::prelude_std_modules(config) {
       if let Ok(prelude_id) = self.discover_std_module_lsp(module_name, config) {
-        self
-          .module_graph
-          .add_import(root_id, Vec::new(), prelude_id, dummy_span.clone());
+        self.add_prelude_import_if_needed(root_id, prelude_id, dummy_span.clone());
       }
     }
+  }
+
+  pub fn discover_prelude_modules_for_all_lsp(
+    &mut self,
+    config: &IgnisConfig,
+  ) {
+    let mut prelude_ids = Vec::new();
+    for module_name in Self::prelude_std_modules(config) {
+      if let Ok(prelude_id) = self.discover_std_module_lsp(module_name, config) {
+        prelude_ids.push(prelude_id);
+      }
+    }
+
+    let module_ids: Vec<ModuleId> = self
+      .module_graph
+      .modules
+      .iter()
+      .map(|(module_id, _)| module_id)
+      .collect();
+
+    for module_id in module_ids {
+      if prelude_ids.contains(&module_id) {
+        continue;
+      }
+
+      let file_id = self.module_graph.modules.get(&module_id).file_id;
+      let dummy_span = Span::empty_at(file_id, BytePosition::default());
+
+      for prelude_id in &prelude_ids {
+        self.add_prelude_import_if_needed(module_id, *prelude_id, dummy_span.clone());
+      }
+    }
+  }
+
+  fn add_prelude_import_if_needed(
+    &mut self,
+    root_id: ModuleId,
+    prelude_id: ModuleId,
+    span: Span,
+  ) {
+    if root_id == prelude_id {
+      return;
+    }
+
+    let already_imported = self
+      .module_graph
+      .modules
+      .get(&root_id)
+      .imports
+      .iter()
+      .any(|import| import.items.is_empty() && import.source_module() == prelude_id);
+
+    if already_imported {
+      return;
+    }
+
+    self.module_graph.add_import(root_id, Vec::new(), prelude_id, span);
   }
 
   /// Discover a std module by name (e.g., "io", "string").
@@ -686,6 +771,16 @@ impl CompilationContext {
         log_dbg!(config, "analyzing module {:?}", module_path);
       }
 
+      let implicit_imports: Vec<ModuleId> = self
+        .module_graph
+        .modules
+        .get(&module_id)
+        .imports
+        .iter()
+        .filter(|import| import.items.is_empty())
+        .map(|import| import.source_module())
+        .collect();
+
       let output = ignis_analyzer::Analyzer::analyze_with_shared_stores(
         &parsed.nodes,
         &parsed.roots,
@@ -698,6 +793,7 @@ impl CompilationContext {
         &mut shared_namespaces,
         &mut shared_extension_methods,
         module_id,
+        implicit_imports,
       );
 
       if render_diagnostics && !config.quiet {

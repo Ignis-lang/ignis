@@ -688,7 +688,30 @@ impl<'a> Analyzer<'a> {
               self.types.error()
             }
           },
-          None => self.types.error(),
+          None => {
+            if path.segments.len() == 2
+              && let Some(enum_def_id) = self.scopes.lookup_def(&path.segments[0].name).cloned()
+              && matches!(self.defs.get(&enum_def_id).kind, DefinitionKind::Enum(_))
+            {
+              let already_reported = self
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.error_code == "A0059" && diagnostic.primary_span == path.span);
+
+              if !already_reported {
+                self.add_diagnostic(
+                  DiagnosticMessage::EnumVariantNotFound {
+                    enum_name: self.get_symbol_name(&path.segments[0].name),
+                    variant: self.get_symbol_name(&path.segments[1].name),
+                    span: path.span.clone(),
+                  }
+                  .report(),
+                );
+              }
+            }
+
+            self.types.error()
+          },
         }
       },
       ASTExpression::PostfixIncrement { expr, span } => {
@@ -782,7 +805,7 @@ impl<'a> Analyzer<'a> {
             }
           }
 
-          arm_types.push(self.typecheck_node(&arm.body, ScopeKind::Block, ctx));
+          arm_types.push(self.typecheck_node_with_infer(&arm.body, ScopeKind::Block, ctx, infer));
 
           self.scopes.pop();
 
@@ -1278,6 +1301,8 @@ impl<'a> Analyzer<'a> {
       return;
     };
 
+    self.define_decl_in_current_scope(node_id);
+
     // Push generic scope BEFORE resolving types so type params are visible
     self.enter_type_params_scope(&record_def_id);
 
@@ -1402,8 +1427,6 @@ impl<'a> Analyzer<'a> {
 
     // Pop generic scope if it was pushed
     self.exit_type_params_scope(&record_def_id);
-
-    self.define_decl_in_current_scope(node_id);
   }
 
   // ========================================================================
@@ -1420,6 +1443,8 @@ impl<'a> Analyzer<'a> {
     let Some(enum_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    self.define_decl_in_current_scope(node_id);
 
     // Push generic scope BEFORE resolving types so type params are visible
     self.enter_type_params_scope(&enum_def_id);
@@ -1537,8 +1562,6 @@ impl<'a> Analyzer<'a> {
 
     // Pop generic scope if it was pushed
     self.exit_type_params_scope(&enum_def_id);
-
-    self.define_decl_in_current_scope(node_id);
   }
 
   // ========================================================================
@@ -6654,6 +6677,10 @@ impl<'a> Analyzer<'a> {
         }
 
         let base_type = self.resolve_type_syntax_impl(base, span);
+
+        if self.types.is_error(&base_type) {
+          return self.types.error();
+        }
 
         // The base must resolve to a Record or Enum type
         match self.types.get(&base_type).clone() {

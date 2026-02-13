@@ -26,6 +26,28 @@ fn analyze_with_imports(
   shared_namespaces: &mut NamespaceStore,
   symbols: Rc<RefCell<SymbolTable>>,
 ) -> AnalyzerOutput {
+  analyze_with_imports_and_implicit_modules(
+    src,
+    export_table,
+    module_for_path,
+    shared_types,
+    shared_defs,
+    shared_namespaces,
+    symbols,
+    Vec::new(),
+  )
+}
+
+fn analyze_with_imports_and_implicit_modules(
+  src: &str,
+  export_table: &ExportTable,
+  module_for_path: &HashMap<String, ModuleId>,
+  shared_types: &mut TypeStore,
+  shared_defs: &mut DefinitionStore,
+  shared_namespaces: &mut NamespaceStore,
+  symbols: Rc<RefCell<SymbolTable>>,
+  implicit_imports: Vec<ModuleId>,
+) -> AnalyzerOutput {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
@@ -48,6 +70,7 @@ fn analyze_with_imports(
     shared_namespaces,
     &mut HashMap::new(), // extension_methods - not needed for these tests
     ModuleId::new(1),    // Different module ID from library
+    implicit_imports,
   )
 }
 
@@ -81,6 +104,7 @@ fn analyze_library_with_shared_stores(
     shared_namespaces,
     &mut HashMap::new(), // extension_methods - not needed for these tests
     ModuleId::new(0),
+    Vec::new(),
   )
 }
 
@@ -604,6 +628,65 @@ fn analyze_without_imports_works() {
   assert_eq!(error_count(&result.output), 0);
 }
 
+#[test]
+fn implicit_module_imports_make_exported_types_available() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let prelude_src = r#"
+    export enum Option<T> {
+      SOME(T),
+      NONE,
+    }
+  "#;
+
+  let prelude_output = analyze_library_with_shared_stores(
+    prelude_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&prelude_output), 0, "Prelude module should have no errors");
+
+  let prelude_module_id = ModuleId::new(0);
+  let prelude_exports = prelude_output.collect_exports();
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(prelude_module_id, prelude_exports);
+
+  let main_src = r#"
+    function makeValue(): Option<i32> {
+      return Option::SOME(10);
+    }
+
+    function main(): i32 {
+      let value: Option<i32> = makeValue();
+      return 0;
+    }
+  "#;
+
+  let output = analyze_with_imports_and_implicit_modules(
+    main_src,
+    &export_table,
+    &HashMap::new(),
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+    vec![prelude_module_id],
+  );
+
+  assert_eq!(
+    error_count(&output),
+    0,
+    "Implicit imports should make Option available without explicit import: {:?}",
+    output.diagnostics
+  );
+}
+
 // ============================================================================
 // Integration Tests with Real Std Library
 // ============================================================================
@@ -614,6 +697,7 @@ mod std_imports {
 
   use ignis_config::{IgnisConfig, IgnisSTDManifest};
   use ignis_driver::CompilationContext;
+  use ignis_type::module::ModulePath;
   use tempfile::TempDir;
 
   fn get_std_path() -> PathBuf {
@@ -643,6 +727,7 @@ mod std_imports {
     IgnisConfig {
       quiet,
       std_path: std_path.to_string_lossy().to_string(),
+      auto_load_std: true,
       manifest,
       ..Default::default()
     }
@@ -814,5 +899,51 @@ mod std_imports {
     // io/string use ignis_rt, no separate linking
     assert!(manifest.get_linking_info("io").is_none());
     assert!(manifest.get_linking_info("string").is_none());
+  }
+
+  #[test]
+  fn test_prelude_loaded_for_std_non_prelude_module() {
+    let std_path = get_std_path();
+    let io_path = std_path.join("io/mod.ign");
+
+    if !io_path.exists() {
+      eprintln!("Skipping test: std/io/mod.ign not found at {:?}", std_path);
+      return;
+    }
+
+    let config = create_test_config(std_path, true);
+    let mut ctx = CompilationContext::new(&config);
+
+    let root_id = ctx
+      .discover_modules(io_path.to_str().unwrap(), &config)
+      .expect("Module discovery should succeed");
+
+    ctx.discover_prelude_modules_for_all(&config);
+
+    let option_module_id = *ctx
+      .module_graph
+      .by_path
+      .iter()
+      .find_map(|(path, module_id)| {
+        if matches!(path, ModulePath::Std(name) if name == "option") {
+          Some(module_id)
+        } else {
+          None
+        }
+      })
+      .expect("std::option should be discovered as prelude module");
+
+    let has_option_import = ctx
+      .module_graph
+      .modules
+      .get(&root_id)
+      .imports
+      .iter()
+      .any(|import| import.items.is_empty() && import.source_module() == option_module_id);
+
+    assert!(
+      has_option_import,
+      "std::io should receive implicit prelude import to std::option"
+    );
   }
 }

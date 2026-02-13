@@ -502,6 +502,25 @@ function main(): i32 {
 }
 
 #[test]
+fn match_arm_inference_propagates_expected_type_to_generic_enum_variants() {
+  common::assert_ok(
+    r#"
+enum Option<T> {
+    Some(T),
+    None,
+}
+
+function fromBool(flag: boolean): Option<i32> {
+    return match (flag) {
+        true -> Option::Some(1),
+        false -> Option::None,
+    };
+}
+"#,
+  );
+}
+
+#[test]
 fn match_non_exhaustive_reports_warning_diagnostic() {
   common::assert_diagnostic_at_line(
     r#"

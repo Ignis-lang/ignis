@@ -412,15 +412,8 @@ pub fn analyze_project_with_options(
   // Discover all modules using LSP mode (collects diagnostics, doesn't fail early)
   let root_id = ctx.discover_modules_lsp(entry_path, config).ok();
 
-  if let Some(root_id) = root_id
-    && config.std
-    && config.auto_load_std
-  {
-    let root_is_std_file = is_file_inside_std_path(entry_path, &config.std_path);
-
-    if !root_is_std_file {
-      ctx.discover_prelude_modules_lsp(root_id, config);
-    }
+  if root_id.is_some() && config.std && config.auto_load_std {
+    ctx.discover_prelude_modules_for_all_lsp(config);
   }
 
   // Collect discovery diagnostics (lex/parse errors)
@@ -610,25 +603,4 @@ fn extract_symbol_names(symbols: &Rc<RefCell<SymbolTable>>) -> HashMap<SymbolId,
   }
 
   names
-}
-
-fn is_file_inside_std_path(
-  file_path: &str,
-  std_path: &str,
-) -> bool {
-  if std_path.is_empty() {
-    return false;
-  }
-
-  let std_canon = match std::path::Path::new(std_path).canonicalize() {
-    Ok(path) => path,
-    Err(_) => return false,
-  };
-
-  let file_canon = match std::path::Path::new(file_path).canonicalize() {
-    Ok(path) => path,
-    Err(_) => return false,
-  };
-
-  file_canon.starts_with(std_canon)
 }
