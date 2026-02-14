@@ -298,6 +298,17 @@ impl<'a> CEmitter<'a> {
           return false;
         }
 
+        // Public inline functions from other user modules already have a
+        // definition in their owner's .c file and a declaration in the .h
+        // header. Re-emitting them as `static inline` here would conflict
+        // with the header's external-linkage declaration.
+        let def = self.defs.get(def_id);
+        if def.visibility == Visibility::Public
+          && matches!(function.inline_mode, InlineMode::Inline | InlineMode::Always)
+        {
+          return false;
+        }
+
         // Non-user definitions (Std/Runtime) are only force-emitted when they
         // are monomorphized specializations (name contains `__`). Regular std
         // functions already exist in precompiled std object files.
