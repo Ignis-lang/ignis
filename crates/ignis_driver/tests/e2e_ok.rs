@@ -3820,3 +3820,318 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_if_let_chain_and() {
+  e2e_test(
+    "if_let_chain_and",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+    return Maybe::None;
+}
+
+function main(): i32 {
+    if (let Maybe::Some(x) = maybePositive(7) && x > 3) {
+        return x;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_if_let_none() {
+  e2e_test(
+    "if_let_none",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+    return Maybe::None;
+}
+
+function main(): i32 {
+    if (let Maybe::Some(x) = maybePositive(0)) {
+        return x;
+    } else {
+        return 7;
+    }
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_if_let_multi_chain() {
+  e2e_test(
+    "if_let_multi_chain",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function halfIfEven(value: i32): Maybe {
+    if (value % 2 == 0) {
+        return Maybe::Some(value / 2);
+    }
+    return Maybe::None;
+}
+
+function main(): i32 {
+    if (let Maybe::Some(x) = Maybe::Some(8) && let Maybe::Some(y) = halfIfEven(x) && y > 3) {
+        return y;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_while_let_option() {
+  e2e_test(
+    "while_let_option",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function nextValue(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+
+    return Maybe::None;
+}
+
+function main(): i32 {
+    let mut current: i32 = 3;
+    let mut total: i32 = 0;
+
+    while (let Maybe::Some(x) = nextValue(current)) {
+        total += x;
+        current -= 1;
+    }
+
+    return total;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_let_else_return() {
+  e2e_test(
+    "let_else_return",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+
+    return Maybe::None;
+}
+
+function unwrapPositive(value: i32): i32 {
+    let Maybe::Some(v) = maybePositive(value) else {
+        return -1;
+    };
+
+    return v;
+}
+
+function main(): i32 {
+    return unwrapPositive(4) + unwrapPositive(0);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_let_else_break() {
+  e2e_test(
+    "let_else_break",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+
+    return Maybe::None;
+}
+
+function main(): i32 {
+    let mut index: i32 = 4;
+    let mut total: i32 = 0;
+
+    while (true) {
+        let Maybe::Some(v) = maybePositive(index) else {
+            break;
+        };
+
+        total += v;
+        index -= 1;
+    }
+
+    return total;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_if_let_some() {
+  e2e_test(
+    "if_let_some",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+    return Maybe::None;
+}
+
+function main(): i32 {
+    if (let Maybe::Some(x) = maybePositive(5)) {
+        return x;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_if_let_nested_pattern() {
+  e2e_test(
+    "if_let_nested_pattern",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+enum Nested {
+    Wrap(Maybe),
+    Empty,
+}
+
+function makeNested(value: i32): Nested {
+    if (value > 0) {
+        return Nested::Wrap(Maybe::Some(value));
+    }
+
+    return Nested::Empty;
+}
+
+function main(): i32 {
+    if (let Nested::Wrap(Maybe::Some(x)) = makeNested(42)) {
+        return x;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_while_let() {
+  e2e_test(
+    "while_let",
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function nextValue(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+
+    return Maybe::None;
+}
+
+function main(): i32 {
+    let mut current: i32 = 4;
+    let mut total: i32 = 0;
+
+    while (let Maybe::Some(x) = nextValue(current)) {
+        total += x;
+        current -= 1;
+    }
+
+    return total;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_let_else_variant() {
+  e2e_test(
+    "let_else_variant",
+    r#"
+enum Outcome {
+    Ok(i32),
+    Err,
+}
+
+function toOutcome(value: i32): Outcome {
+    if (value > 0) {
+        return Outcome::Ok(value);
+    }
+
+    return Outcome::Err;
+}
+
+function unwrapOutcome(value: i32): i32 {
+    let Outcome::Ok(v) = toOutcome(value) else {
+        return -1;
+    };
+
+    return v;
+}
+
+function main(): i32 {
+    return unwrapOutcome(9) + unwrapOutcome(0);
+}
+"#,
+  );
+}

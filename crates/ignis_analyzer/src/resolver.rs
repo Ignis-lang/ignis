@@ -60,6 +60,14 @@ impl<'a> Analyzer<'a> {
         }
         self.define_decl_in_current_scope(node_id);
       },
+      ASTStatement::LetElse(let_else) => {
+        self.resolve_node(&let_else.value, scope_kind);
+        self.resolve_pattern(&let_else.pattern);
+
+        self.scopes.push(ScopeKind::Block);
+        self.resolve_node(&let_else.else_block, scope_kind);
+        self.scopes.pop();
+      },
       ASTStatement::Function(func) => {
         let def_id = self.define_decl_in_current_scope(node_id);
         let mut pushed_generic = false;
@@ -105,8 +113,11 @@ impl<'a> Analyzer<'a> {
         self.scopes.pop();
       },
       ASTStatement::If(if_stmt) => {
+        self.scopes.push(ScopeKind::Block);
         self.resolve_node(&if_stmt.condition, scope_kind);
         self.resolve_node(&if_stmt.then_block, ScopeKind::Block);
+        self.scopes.pop();
+
         if let Some(else_branch) = &if_stmt.else_block {
           self.resolve_node(else_branch, ScopeKind::Block);
         }
@@ -114,8 +125,10 @@ impl<'a> Analyzer<'a> {
       ASTStatement::While(while_stmt) => {
         self.scopes.push(ScopeKind::Loop);
 
+        self.scopes.push(ScopeKind::Block);
         self.resolve_node(&while_stmt.condition, ScopeKind::Loop);
         self.resolve_node(&while_stmt.body, ScopeKind::Loop);
+        self.scopes.pop();
 
         self.scopes.pop();
       },
@@ -354,6 +367,10 @@ impl<'a> Analyzer<'a> {
         for arg_id in &bc.args {
           self.resolve_node(arg_id, scope_kind);
         }
+      },
+      ASTExpression::LetCondition(let_condition) => {
+        self.resolve_node(&let_condition.value, scope_kind);
+        self.resolve_pattern(&let_condition.pattern);
       },
       ASTExpression::Match(match_expr) => {
         self.resolve_node(&match_expr.scrutinee, scope_kind);

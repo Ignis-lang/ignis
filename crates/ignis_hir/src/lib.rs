@@ -126,6 +126,11 @@ pub enum HIRKind {
     then_branch: HIRId,
     else_branch: Option<HIRId>,
   },
+  LetElse {
+    pattern: HIRPattern,
+    value: HIRId,
+    else_block: HIRId,
+  },
   Loop {
     condition: statement::LoopKind,
     body: HIRId,
@@ -274,6 +279,10 @@ impl HIRKind {
         if let Some(eb) = else_branch {
           *eb = HIRId::new(eb.index() + offset);
         }
+      },
+      HIRKind::LetElse { value, else_block, .. } => {
+        *value = HIRId::new(value.index() + offset);
+        *else_block = HIRId::new(else_block.index() + offset);
       },
       HIRKind::Loop { condition, body } => {
         condition.offset_ids(offset);

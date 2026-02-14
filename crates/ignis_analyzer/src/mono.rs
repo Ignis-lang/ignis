@@ -917,6 +917,22 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
+      HIRKind::LetElse {
+        pattern,
+        value,
+        else_block,
+      } => {
+        let new_value = self.clone_hir_tree(*value);
+        let new_else_block = self.clone_hir_tree(*else_block);
+        (
+          HIRKind::LetElse {
+            pattern: pattern.clone(),
+            value: new_value,
+            else_block: new_else_block,
+          },
+          None,
+        )
+      },
       HIRKind::Loop { condition, body } => {
         let new_cond = match condition {
           LoopKind::While { condition: c } => LoopKind::While {
@@ -1153,6 +1169,10 @@ impl<'a> Monomorphizer<'a> {
         if let Some(e) = else_branch {
           self.scan_hir(*e);
         }
+      },
+      HIRKind::LetElse { value, else_block, .. } => {
+        self.scan_hir(*value);
+        self.scan_hir(*else_block);
       },
       HIRKind::Loop { condition, body } => {
         match condition {
@@ -2067,6 +2087,19 @@ impl<'a> Monomorphizer<'a> {
           condition: new_cond,
           then_branch: new_then,
           else_branch: new_else,
+        }
+      },
+      HIRKind::LetElse {
+        pattern,
+        value,
+        else_block,
+      } => {
+        let new_value = self.substitute_hir(*value, subst);
+        let new_else_block = self.substitute_hir(*else_block, subst);
+        HIRKind::LetElse {
+          pattern: pattern.clone(),
+          value: new_value,
+          else_block: new_else_block,
         }
       },
       HIRKind::Loop { condition, body } => {

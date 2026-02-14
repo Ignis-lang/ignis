@@ -358,6 +358,14 @@ impl<'a> LoweringContext<'a> {
         then_branch,
         else_branch,
       } => self.lower_if(*condition, *then_branch, else_branch.as_ref().copied(), node.type_id, node.span),
+      HIRKind::LetElse {
+        pattern,
+        value,
+        else_block,
+      } => {
+        self.lower_let_else(pattern, *value, *else_block, node.span);
+        None
+      },
       HIRKind::Loop { condition, body } => {
         self.lower_loop(condition, *body);
         None
@@ -1214,6 +1222,52 @@ impl<'a> LoweringContext<'a> {
         });
       }
     }
+  }
+
+  fn lower_let_else(
+    &mut self,
+    pattern: &HIRPattern,
+    value: HIRId,
+    else_block: HIRId,
+    span: Span,
+  ) {
+    let value_ty = self.hir.get(value).type_id;
+
+    let Some(value_op) = self.lower_hir_node(value) else {
+      return;
+    };
+
+    let scrutinee_local = self.fn_builder().alloc_local(LocalData {
+      def_id: None,
+      ty: value_ty,
+      mutable: false,
+      name: None,
+    });
+
+    self.fn_builder().emit(Instr::Store {
+      dest: scrutinee_local,
+      value: value_op,
+    });
+
+    let matches = self.lower_pattern_check(Operand::Local(scrutinee_local), value_ty, pattern, span.clone());
+
+    let continue_block = self.fn_builder().create_block("let_else_ok");
+    let fail_block = self.fn_builder().create_block("let_else_fail");
+
+    self.fn_builder().terminate(Terminator::Branch {
+      condition: matches,
+      then_block: continue_block,
+      else_block: fail_block,
+    });
+
+    self.fn_builder().switch_to_block(fail_block);
+    self.lower_hir_node(else_block);
+
+    if !self.fn_builder().is_terminated() {
+      self.fn_builder().terminate(Terminator::Unreachable);
+    }
+
+    self.fn_builder().switch_to_block(continue_block);
   }
 
   fn lower_assign(

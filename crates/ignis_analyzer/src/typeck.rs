@@ -163,6 +163,23 @@ impl<'a> Analyzer<'a> {
 
         self.types.void()
       },
+      ASTStatement::LetElse(let_else) => {
+        let value_type = self.typecheck_node(&let_else.value, scope_kind, ctx);
+
+        let irrefutable = self.typecheck_pattern(&let_else.pattern, &value_type);
+        if irrefutable {
+          self.add_diagnostic(
+            DiagnosticMessage::IrrefutableLetElsePattern {
+              span: let_else.pattern.span().clone(),
+            }
+            .report(),
+          );
+        }
+
+        self.typecheck_node(&let_else.else_block, ScopeKind::Block, ctx);
+
+        self.types.void()
+      },
       ASTStatement::Function(func) => {
         let def_id = self.define_decl_in_current_scope(node_id);
 
@@ -254,13 +271,22 @@ impl<'a> Analyzer<'a> {
         last_type
       },
       ASTStatement::If(if_stmt) => {
+        self.scopes.push(ScopeKind::Block);
+        self.conditional_let_context_depth += 1;
+
         let cond_type = self.typecheck_node(&if_stmt.condition, scope_kind, ctx);
+
+        self.conditional_let_context_depth -= 1;
+
         let boolean_type = self.types.boolean();
         let conditional_span = self.node_span(&if_stmt.condition).clone();
 
         self.typecheck_assignment(&boolean_type, &cond_type, &conditional_span);
 
         let then_type = self.typecheck_node(&if_stmt.then_block, ScopeKind::Block, ctx);
+
+        self.scopes.pop();
+
         let else_type = if let Some(else_branch) = &if_stmt.else_block {
           self.typecheck_node(else_branch, ScopeKind::Block, ctx)
         } else {
@@ -271,12 +297,21 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::While(while_stmt) => {
         self.scopes.push(ScopeKind::Loop);
+
+        self.scopes.push(ScopeKind::Block);
+        self.conditional_let_context_depth += 1;
+
         let cond_type = self.typecheck_node(&while_stmt.condition, ScopeKind::Loop, ctx);
+
+        self.conditional_let_context_depth -= 1;
+
         let boolean_type = self.types.boolean();
         let conditional_span = self.node_span(&while_stmt.condition).clone();
 
         self.typecheck_assignment(&boolean_type, &cond_type, &conditional_span);
         self.typecheck_node(&while_stmt.body, ScopeKind::Loop, ctx);
+
+        self.scopes.pop();
 
         self.scopes.pop();
 
@@ -763,6 +798,26 @@ impl<'a> Analyzer<'a> {
       ASTExpression::MemberAccess(ma) => self.typecheck_member_access(ma, scope_kind, ctx, infer),
       ASTExpression::RecordInit(ri) => self.typecheck_record_init(ri, scope_kind, ctx, infer),
       ASTExpression::BuiltinCall(bc) => self.typecheck_builtin_call(node_id, bc, scope_kind, ctx),
+      ASTExpression::LetCondition(let_condition) => {
+        let value_type = self.typecheck_node(&let_condition.value, scope_kind, ctx);
+
+        if self.conditional_let_context_depth == 0 {
+          self.add_diagnostic(
+            DiagnosticMessage::LetConditionOutsideConditional {
+              span: let_condition.span.clone(),
+            }
+            .report(),
+          );
+
+          self.scopes.push(ScopeKind::Block);
+          self.typecheck_pattern(&let_condition.pattern, &value_type);
+          self.scopes.pop();
+        } else {
+          self.typecheck_pattern(&let_condition.pattern, &value_type);
+        }
+
+        self.types.boolean()
+      },
       ASTExpression::Match(match_expr) => {
         if match_expr.arms.is_empty() {
           self.add_diagnostic(
@@ -6134,7 +6189,27 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
-      ASTBinaryOperator::And | ASTBinaryOperator::Or => {
+      ASTBinaryOperator::And => {
+        let boolean_type = self.types.boolean();
+
+        let left_span = self.node_span(&binary.left).clone();
+        let right_span = self.node_span(&binary.right).clone();
+
+        self.typecheck_assignment(&boolean_type, &left_type, &left_span);
+        self.typecheck_assignment(&boolean_type, &right_type, &right_span);
+
+        self.types.boolean()
+      },
+      ASTBinaryOperator::Or => {
+        if self.node_contains_let_condition(&binary.left) || self.node_contains_let_condition(&binary.right) {
+          self.add_diagnostic(
+            DiagnosticMessage::LetConditionInOrExpression {
+              span: binary.span.clone(),
+            }
+            .report(),
+          );
+        }
+
         let boolean_type = self.types.boolean();
 
         let left_span = self.node_span(&binary.left).clone();
@@ -6168,6 +6243,76 @@ impl<'a> Analyzer<'a> {
           self.types.error()
         }
       },
+    }
+  }
+
+  fn node_contains_let_condition(
+    &self,
+    node_id: &NodeId,
+  ) -> bool {
+    let ASTNode::Expression(expr) = self.ast.get(node_id) else {
+      return false;
+    };
+
+    self.expression_contains_let_condition(expr)
+  }
+
+  fn expression_contains_let_condition(
+    &self,
+    expr: &ASTExpression,
+  ) -> bool {
+    match expr {
+      ASTExpression::LetCondition(_) => true,
+      ASTExpression::Assignment(assign) => {
+        self.node_contains_let_condition(&assign.target) || self.node_contains_let_condition(&assign.value)
+      },
+      ASTExpression::Binary(binary) => {
+        self.node_contains_let_condition(&binary.left) || self.node_contains_let_condition(&binary.right)
+      },
+      ASTExpression::Ternary(ternary) => {
+        self.node_contains_let_condition(&ternary.condition)
+          || self.node_contains_let_condition(&ternary.then_expr)
+          || self.node_contains_let_condition(&ternary.else_expr)
+      },
+      ASTExpression::Call(call) => {
+        self.node_contains_let_condition(&call.callee)
+          || call
+            .arguments
+            .iter()
+            .any(|argument| self.node_contains_let_condition(argument))
+      },
+      ASTExpression::Cast(cast) => self.node_contains_let_condition(&cast.expression),
+      ASTExpression::Dereference(deref) => self.node_contains_let_condition(&deref.inner),
+      ASTExpression::Grouped(grouped) => self.node_contains_let_condition(&grouped.expression),
+      ASTExpression::Reference(reference) => self.node_contains_let_condition(&reference.inner),
+      ASTExpression::Unary(unary) => self.node_contains_let_condition(&unary.operand),
+      ASTExpression::Vector(vector) => vector.items.iter().any(|item| self.node_contains_let_condition(item)),
+      ASTExpression::VectorAccess(access) => {
+        self.node_contains_let_condition(&access.name) || self.node_contains_let_condition(&access.index)
+      },
+      ASTExpression::PostfixIncrement { expr, .. } | ASTExpression::PostfixDecrement { expr, .. } => {
+        self.node_contains_let_condition(expr)
+      },
+      ASTExpression::MemberAccess(member_access) => self.node_contains_let_condition(&member_access.object),
+      ASTExpression::RecordInit(record_init) => record_init
+        .fields
+        .iter()
+        .any(|field| self.node_contains_let_condition(&field.value)),
+      ASTExpression::BuiltinCall(builtin_call) => builtin_call
+        .args
+        .iter()
+        .any(|argument| self.node_contains_let_condition(argument)),
+      ASTExpression::Match(match_expr) => {
+        self.node_contains_let_condition(&match_expr.scrutinee)
+          || match_expr.arms.iter().any(|arm| {
+            arm
+              .guard
+              .as_ref()
+              .is_some_and(|guard| self.node_contains_let_condition(guard))
+              || self.node_contains_let_condition(&arm.body)
+          })
+      },
+      ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) => false,
     }
   }
 
@@ -6935,6 +7080,7 @@ impl<'a> Analyzer<'a> {
             .or_else(|| self.find_first_symbol_usage(arm.body, symbol))
         })
       }),
+      ASTExpression::LetCondition(let_condition) => self.find_first_symbol_usage(let_condition.value, symbol),
       ASTExpression::Literal(_) | ASTExpression::Path(_) => None,
     }
   }

@@ -112,6 +112,7 @@ impl<'a> Analyzer<'a> {
     match stmt {
       ASTStatement::Function(func) => self.bind_function(node_id, func, scope_kind),
       ASTStatement::Variable(var) => self.bind_variable(node_id, var),
+      ASTStatement::LetElse(let_else) => self.bind_let_else(let_else),
       ASTStatement::Constant(const_) => self.bind_constant(node_id, const_),
       ASTStatement::Block(block) => self.bind_block(block),
       ASTStatement::If(if_stmt) => self.bind_if(if_stmt),
@@ -1159,6 +1160,14 @@ impl<'a> Analyzer<'a> {
     if let Some(else_branch) = &if_stmt.else_block {
       self.bind_complete(else_branch, ScopeKind::Block);
     }
+  }
+
+  fn bind_let_else(
+    &mut self,
+    let_else: &ignis_ast::statements::ASTLetElse,
+  ) {
+    self.bind_complete(&let_else.value, ScopeKind::Block);
+    self.bind_complete(&let_else.else_block, ScopeKind::Block);
   }
 
   fn bind_while(

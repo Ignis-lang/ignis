@@ -2,8 +2,8 @@ use ignis_ast::{
   NodeId,
   statements::{
     ASTStatement, ASTForOf, ForOfBinding, block::ASTBlock, break_statement::ASTBreak, continue_statement::ASTContinue,
-    for_statement::ASTFor, function::ASTParameter, if_statement::ASTIf, return_statement::ASTReturn,
-    variable::ASTVariable, while_statement::ASTWhile,
+    for_statement::ASTFor, function::ASTParameter, if_statement::ASTIf, let_else::ASTLetElse,
+    return_statement::ASTReturn, variable::ASTVariable, while_statement::ASTWhile,
   },
 };
 use ignis_token::token_types::TokenType;
@@ -114,6 +114,11 @@ impl super::IgnisParser {
     let doc = self.take_pending_doc();
 
     let keyword = self.expect(TokenType::Let)?.clone();
+
+    if !self.is_typed_let_declaration_start() {
+      return self.parse_let_else_statement(keyword);
+    }
+
     let is_mutable = self.eat(TokenType::Mut);
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
@@ -139,6 +144,30 @@ impl super::IgnisParser {
 
     let variable = ASTVariable::new(name, initializer, type_annotation, span, metadata, doc);
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
+  }
+
+  fn is_typed_let_declaration_start(&self) -> bool {
+    if self.at(TokenType::Mut) {
+      return true;
+    }
+
+    self.at(TokenType::Identifier) && self.peek_nth(1).type_ == TokenType::Colon
+  }
+
+  fn parse_let_else_statement(
+    &mut self,
+    keyword: ignis_token::token::Token,
+  ) -> ParserResult<NodeId> {
+    let pattern = self.parse_pattern()?;
+    self.expect(TokenType::Equal)?;
+    let value = self.parse_expression(0)?;
+    self.expect(TokenType::Else)?;
+    let else_block = self.parse_block()?;
+    let semicolon = self.expect(TokenType::SemiColon)?.clone();
+
+    let span = Span::merge(&keyword.span, &semicolon.span);
+    let let_else = ASTLetElse::new(pattern, value, else_block, span);
+    Ok(self.allocate_statement(ASTStatement::LetElse(let_else)))
   }
 
   /// if (condition) block (else block)?

@@ -250,6 +250,21 @@ impl<'a> Analyzer<'a> {
 
         hir.alloc(hir_node)
       },
+      ASTStatement::LetElse(let_else) => {
+        let value = self.lower_node_to_hir(&let_else.value, hir, scope_kind);
+        let else_block = self.lower_node_to_hir(&let_else.else_block, hir, ScopeKind::Block);
+        let pattern = self.lower_pattern(&let_else.pattern, None, None);
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::LetElse {
+            pattern,
+            value,
+            else_block,
+          },
+          span: let_else.span.clone(),
+          type_id: self.types.void(),
+        })
+      },
       ASTStatement::While(while_stmt) => {
         self.scopes.push(ScopeKind::Loop);
         let condition_id = self.lower_node_to_hir(&while_stmt.condition, hir, ScopeKind::Loop);
@@ -1100,6 +1115,42 @@ impl<'a> Analyzer<'a> {
       ASTExpression::MemberAccess(ma) => self.lower_member_access(node_id, ma, hir, scope_kind),
       ASTExpression::RecordInit(ri) => self.lower_record_init(node_id, ri, hir, scope_kind),
       ASTExpression::BuiltinCall(bc) => self.lower_builtin_call(bc, hir, scope_kind),
+      ASTExpression::LetCondition(let_condition) => {
+        let scrutinee = self.lower_node_to_hir(&let_condition.value, hir, scope_kind);
+        let pattern = self.lower_pattern(&let_condition.pattern, None, None);
+
+        let true_node = hir.alloc(HIRNode {
+          kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::Boolean(true)),
+          span: let_condition.span.clone(),
+          type_id: self.types.boolean(),
+        });
+
+        let false_node = hir.alloc(HIRNode {
+          kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::Boolean(false)),
+          span: let_condition.span.clone(),
+          type_id: self.types.boolean(),
+        });
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::Match {
+            scrutinee,
+            arms: vec![
+              HIRMatchArm {
+                pattern,
+                guard: None,
+                body: true_node,
+              },
+              HIRMatchArm {
+                pattern: HIRPattern::Wildcard,
+                guard: None,
+                body: false_node,
+              },
+            ],
+          },
+          span: let_condition.span.clone(),
+          type_id: self.types.boolean(),
+        })
+      },
       ASTExpression::Match(match_expr) => {
         let scrutinee = self.lower_node_to_hir(&match_expr.scrutinee, hir, scope_kind);
 
@@ -1107,7 +1158,7 @@ impl<'a> Analyzer<'a> {
           .arms
           .iter()
           .map(|arm| {
-            let pattern = self.lower_pattern(&arm.pattern, arm.guard.as_ref(), &arm.body);
+            let pattern = self.lower_pattern(&arm.pattern, arm.guard.as_ref(), Some(&arm.body));
             let guard = arm.guard.as_ref().map(|g| self.lower_node_to_hir(g, hir, scope_kind));
             let body = self.lower_node_to_hir(&arm.body, hir, scope_kind);
             HIRMatchArm { pattern, guard, body }
@@ -1129,7 +1180,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     pattern: &ASTPattern,
     arm_guard: Option<&NodeId>,
-    arm_body: &NodeId,
+    arm_body: Option<&NodeId>,
   ) -> HIRPattern {
     match pattern {
       ASTPattern::Wildcard { .. } => HIRPattern::Wildcard,
@@ -1159,7 +1210,9 @@ impl<'a> Analyzer<'a> {
             return HIRPattern::Binding { def_id };
           }
 
-          if let Some(def_id) = self.find_pattern_binding_def_in_arm(*name, arm_guard, arm_body) {
+          if let Some(arm_body) = arm_body
+            && let Some(def_id) = self.find_pattern_binding_def_in_arm(*name, arm_guard, arm_body)
+          {
             return HIRPattern::Binding { def_id };
           }
 

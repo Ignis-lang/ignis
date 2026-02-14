@@ -2334,3 +2334,104 @@ function main(): void {
     &["O0011"],
   );
 }
+
+#[test]
+fn let_condition_in_or_expression() {
+  common::assert_err(
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+    return Maybe::None;
+}
+
+function main(): i32 {
+    if (let Maybe::Some(x) = maybePositive(3) || x > 0) {
+        return 1;
+    }
+    return 0;
+}
+"#,
+    &["A0167"],
+  );
+}
+
+#[test]
+fn let_condition_outside_conditional() {
+  common::assert_err(
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+    return Maybe::None;
+}
+
+function main(): i32 {
+    let cond: boolean = let Maybe::Some(x) = maybePositive(3);
+    return 0;
+}
+"#,
+    &["A0166"],
+  );
+}
+
+#[test]
+fn let_else_requires_diverging_else() {
+  common::assert_err(
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function maybePositive(value: i32): Maybe {
+    if (value > 0) {
+        return Maybe::Some(value);
+    }
+    return Maybe::None;
+}
+
+function main(): i32 {
+    let Maybe::Some(v) = maybePositive(2) else {
+        let fallback: i32 = 0;
+    };
+
+    return v;
+}
+"#,
+    &["A0168"],
+  );
+}
+
+#[test]
+fn let_else_irrefutable_pattern_warns() {
+  let result = common::analyze(
+    r#"
+function main(): i32 {
+    let value: i32 = 5;
+    let bound = value else {
+        return 0;
+    };
+
+    return bound;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "A0169"),
+    "Expected irrefutable let-else warning A0169"
+  );
+}
