@@ -15,9 +15,10 @@ crates/
   ignis_hir/          # High-level IR (tree-based, typed)
   ignis_lir/          # Low-level IR (TAC / basic blocks), HIR->LIR lowering, verification
   ignis_codegen_c/    # LIR -> C emission (structs, tagged unions, functions)
-  ignis_ast/          # AST node types (statements, expressions, types, attributes)
+  ignis_ast/          # AST node types (statements, expressions, types, attributes, patterns)
   ignis_type/         # Type system (Type, TypeStore, Definition, DefinitionStore, SymbolTable)
   ignis_token/        # Token types and lexer
+  ignis_config/       # Build configuration types (std manifest, linking info)
   ignis_diagnostics/  # Diagnostic messages, severity, rendering
   ignis_log/          # Build output macros (cmd_header!, phase_log!, cmd_ok!, cmd_fail!)
   ignis_lsp/          # Language Server (tower-lsp): diagnostics, hover, goto-def, completions
@@ -121,14 +122,14 @@ Analyzer (crates/ignis_analyzer/src/lib.rs)
   1. bind_phase()        → DefinitionStore (two-pass: predeclare types, then complete)
   2. resolve_phase()     → node_defs, scopes (name → DefinitionId)
   3. typecheck_phase()   → node_types, TypeStore (bidirectional inference)
-  4. borrowcheck_phase() → ownership analysis
-  5. const_eval_phase()  → compile-time constant values
-  6. extra_checks_phase()→ control flow, never-typed expressions
-  7. lint_phase()        → unused variables/imports, deprecated calls
-  8. lower_to_hir()      → HIR
+  4. const_eval_phase()  → compile-time constant values
+  5. extra_checks_phase()→ control flow, never-typed expressions
+  6. lint_phase()        → unused variables/imports, deprecated calls
+  7. lower_to_hir()      → HIR
 
 Post-analysis (crates/ignis_driver/src/pipeline.rs)
   → Monomorphizer::run()              # Specialize generics to concrete types
+  → HirBorrowChecker::check()         # HIR-level borrow checking
   → HirOwnershipChecker::check()      # Produce DropSchedules
   → ignis_lir::lowering::lower_and_verify()  # HIR → LIR (basic blocks, TAC)
   → ignis_codegen_c::emit_*()         # LIR → C source code
@@ -151,6 +152,7 @@ Linking (crates/ignis_driver/src/link.rs)
 | `DefinitionStore` | ignis_type | All definitions indexed by DefinitionId |
 | `SymbolId` / `SymbolTable` | ignis_type | Interned identifiers for cheap comparisons |
 | `HIRNode` (HIRId) / `HIRKind` | ignis_hir | High-level IR (typed, resolved, tree-based) |
+| `HIRPattern` / `HIRMatchArm` | ignis_hir | Pattern matching in HIR (match, if let, let else) |
 | `DropSchedules` | ignis_hir | When/where to emit drop calls for owned types |
 | `Instr` / `Operand` / `Block` | ignis_lir | Low-level IR (TAC, basic blocks, terminators) |
 | `FunctionLir` / `LirProgram` | ignis_lir | Per-function LIR with locals, temps, blocks |
@@ -174,8 +176,8 @@ Linking (crates/ignis_driver/src/link.rs)
    - `binder.rs` — if the node creates a definition.
    - `resolver.rs` — if the node needs name resolution.
    - `typeck.rs` — if the node produces or consumes types.
-   - `borrowck.rs` — if the node affects ownership.
    - `lowering.rs` — convert to HIR.
+   - Post-HIR: `borrowck_hir.rs` — if the node affects ownership or borrowing.
 
 6. **Handle in LIR lowering** (`crates/ignis_lir/src/lowering/mod.rs`) — convert HIR to LIR instructions.
 
@@ -205,7 +207,25 @@ Builtins use `@name(args)` or `@name<Type>(args)` syntax in Ignis source.
 5. **Emit C** in `crates/ignis_codegen_c/src/emit.rs`:
    - Handle the new LIR instruction or HIR-level construct.
 
-Existing builtins: `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `panic`, `trap`, `unreachable`, `configFlag`, `compileError`.
+Existing builtins: `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `read`, `write`, `dropInPlace`, `dropGlue`, `maxOf`, `minOf`, `panic`, `trap`, `unreachable`, `configFlag`, `compileError`.
+
+### Adding a New Pattern Form
+
+Patterns are used by `match`, `if let`, `while let`, and `let else`.
+
+1. **Add variant** to `ASTPattern` enum in `crates/ignis_ast/src/pattern.rs`.
+
+2. **Parse it** in `crates/ignis_parser/src/parser/expression.rs` in the pattern parsing methods.
+
+3. **Handle in typechecking** (`typeck.rs`) — validate the pattern against the scrutinee type.
+
+4. **Add variant** to `HIRPattern` in `crates/ignis_hir/src/pattern.rs`.
+
+5. **Lower AST pattern to HIR pattern** in `crates/ignis_analyzer/src/lowering.rs`.
+
+6. **Handle in LIR lowering** (`crates/ignis_lir/src/lowering/mod.rs`) — generate condition checks and bindings.
+
+Existing patterns: `Wildcard`, `Literal`, `Binding`, `Variant` (with destructure), `Tuple`, `Or`.
 
 ### Adding a New Lint
 
@@ -256,7 +276,7 @@ Attributes use `@name` or `@name(args)` syntax on declarations.
 3. **Handle in codegen** (`crates/ignis_codegen_c/src/emit.rs`):
    - Emit the appropriate C `__attribute__` or equivalent.
 
-Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `@deprecated`, `@deprecated("message")`, `@inline`, `@inline(always)`, `@inline(never)`, `@allow(lint)`, `@warn(lint)`, `@deny(lint)`.
+Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `@deprecated`, `@deprecated("message")`, `@inline`, `@inline(always)`, `@inline(never)`, `@allow(lint)`, `@warn(lint)`, `@deny(lint)`, `@implements(Drop)`, `@implements(Clone)`, `@implements(Copy)`, `@implements(TraitName)`, `@extension(Type)`, `@extension(Type, mut)`, `@langHook("name")`, `@takes` (parameter attribute).
 
 ## Testing
 
@@ -329,7 +349,7 @@ fn my_semantic_check() {
 
 ## Common Pitfalls
 
-1. **Forgetting to handle a new AST variant in all analyzer phases.** The Rust compiler will not warn you about non-exhaustive matches if a catch-all `_` arm exists. Grep for existing variant names to find all match sites.
+1. **Forgetting to handle a new AST variant in all analyzer phases.** The Rust compiler will not warn you about non-exhaustive matches if a catch-all `_` arm exists. Grep for existing variant names to find all match sites. Similarly for new `HIRKind` variants in LIR lowering and codegen.
 
 2. **Forgetting to update `offset_ids()` in HIR.** When adding a new `HIRKind` variant that contains `HIRId` fields, update the `offset_ids()` method or monomorphization will silently produce wrong references.
 
@@ -358,7 +378,7 @@ fn my_semantic_check() {
 | `crates/ignis_driver/src/pipeline.rs` | Build pipeline: analysis → mono → LIR → codegen → link |
 | `crates/ignis_driver/src/context.rs` | Module discovery, import resolution, per-module parsing |
 | `crates/ignis_driver/src/link.rs` | GCC compilation, archive creation, executable linking |
-| `crates/ignis_parser/src/parser/declarations.rs` | Top-level parsing (functions, records, enums, imports) |
+| `crates/ignis_parser/src/parser/declarations.rs` | Top-level parsing (functions, records, enums, traits, imports) |
 | `crates/ignis_parser/src/parser/expression.rs` | Expression parsing with Pratt precedence |
 | `crates/ignis_parser/src/parser/statement.rs` | Statement parsing |
 | `crates/ignis_parser/src/parser/type_syntax.rs` | Type annotation parsing |
@@ -366,12 +386,13 @@ fn my_semantic_check() {
 | `crates/ignis_analyzer/src/binder.rs` | Binding phase (two-pass: predecl + complete) |
 | `crates/ignis_analyzer/src/resolver.rs` | Name resolution phase |
 | `crates/ignis_analyzer/src/typeck.rs` | Type checking phase (bidirectional inference) |
-| `crates/ignis_analyzer/src/borrowck.rs` | Borrow checking phase |
+| `crates/ignis_analyzer/src/borrowck_hir.rs` | HIR-level borrow checking (replaces old AST-level borrowck) |
 | `crates/ignis_analyzer/src/lowering.rs` | AST → HIR lowering |
 | `crates/ignis_analyzer/src/mono.rs` | Monomorphization (generic specialization) |
 | `crates/ignis_analyzer/src/lint.rs` | Lint infrastructure and checks |
 | `crates/ignis_analyzer/src/scope.rs` | Scope tree management |
 | `crates/ignis_hir/src/lib.rs` | HIR types: HIRNode, HIRKind, HIR store |
+| `crates/ignis_hir/src/pattern.rs` | HIRPattern, HIRMatchArm for pattern matching |
 | `crates/ignis_hir/src/drop_schedule.rs` | Drop scheduling for ownership |
 | `crates/ignis_lir/src/instr.rs` | LIR instructions (Load, Store, BinOp, Call, etc.) |
 | `crates/ignis_lir/src/program.rs` | FunctionLir, LirProgram |
@@ -382,6 +403,7 @@ fn my_semantic_check() {
 | `crates/ignis_ast/src/statements/mod.rs` | ASTStatement enum and all statement types |
 | `crates/ignis_ast/src/expressions/mod.rs` | ASTExpression enum and all expression types |
 | `crates/ignis_ast/src/type_.rs` | IgnisTypeSyntax (parsed type annotations) |
+| `crates/ignis_ast/src/pattern.rs` | ASTPattern (Wildcard, Literal, Path, Tuple, Or) |
 | `crates/ignis_ast/src/attribute.rs` | ASTAttribute (parsed `@` annotations) |
 | `crates/ignis_type/src/types.rs` | Type enum, TypeStore, Substitution |
 | `crates/ignis_type/src/definition.rs` | Definition, DefinitionKind, DefinitionStore |

@@ -8,8 +8,8 @@ Every value in Ignis has exactly one owner. When the owner goes out of scope, th
 
 ```ignis
 function main(): void {
-    let name: string = "hello";  // main owns `name`
-    let other: string = name;    // ownership moves to `other`
+    let name: str = "hello";  // main owns `name`
+    let other: str = name;    // ownership moves to `other`
     // `name` is no longer valid here
     return;
     // `other` is dropped at end of scope
@@ -27,7 +27,7 @@ All primitive types are Copy by default:
 - Integers: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
 - Floats: `f32`, `f64`
 - `boolean`, `char`, `void`
-- Pointers: `*const T`, `*mut T` (always Copy regardless of inner type)
+- Pointers: `*T`, `*mut T` (always Copy regardless of inner type)
 - References: `&T`, `&mut T` (always Copy)
 - Function types
 
@@ -72,11 +72,11 @@ record Rect {
 // Rect is Copy because Vec2 is Copy, because i32 is Copy
 ```
 
-A record with any non-Copy field (like `string`) is **not** Copy:
+A record with any non-Copy field (like `str`) is **not** Copy:
 
 ```ignis
 record Named {
-    public name: string;  // string is not Copy (owns heap data)
+    public name: str;  // str is not Copy (owns heap data)
     public value: i32;
 }
 
@@ -115,7 +115,7 @@ Copy and Drop are mutually exclusive -- a type cannot be both.
 
 These types own resources and are moved (not copied) on assignment:
 
-- `string` -- owns a heap-allocated character buffer
+- `str` -- owns a heap-allocated character buffer
 - Dynamic vectors `[T]` -- own a heap-allocated element buffer
 - `Rc<T>` -- shared ownership handle with retain/release semantics
 - Records with any non-Copy field
@@ -132,7 +132,7 @@ These types own resources and are moved (not copied) on assignment:
 - `a.get()` returns `&T`
 - `a.getMut()` returns `*mut T` when `strongCount == 1`, otherwise `null`
 
-`getMut` currently returns a raw pointer because pattern matching is not available yet for ergonomic `Option<&mut T>` handling.
+`getMut` currently returns a raw pointer. With pattern matching (`match`, `if let`) now available, this could be changed to return `Option<&mut T>` in the future.
 
 ## Drop
 
@@ -144,8 +144,8 @@ For types without an explicit `drop` method, the compiler generates field-by-fie
 
 ```ignis
 record Person {
-    public first: string;
-    public last: string;
+    public first: str;
+    public last: str;
     public age: i32;
 }
 
@@ -192,10 +192,10 @@ The compiler schedules drops at three kinds of program points:
 
 ```ignis
 function example(): void {
-    let mut s: string = "first";
+    let mut s: str = "first";
     s = "second";              // "first" is dropped here
     if (true) {
-        let inner: string = "temporary";
+        let inner: str = "temporary";
         return;                // "temporary" dropped, then "second" dropped
     }
     // "second" would be dropped here in the normal path
@@ -209,7 +209,7 @@ The `needs_drop` analysis is transitive:
 | Type | Needs drop? |
 |------|:-----------:|
 | Primitives, pointers, references | No |
-| `string` | Yes (always) |
+| `str` | Yes (always) |
 | Dynamic `[T]` | Yes (always) |
 | Record with `@implements(Drop)` | Yes |
 | Record with any field that needs drop | Yes |
@@ -226,13 +226,13 @@ Ignis enforces borrow rules at compile time to prevent use-after-move and aliasi
 References borrow a value without taking ownership:
 
 ```ignis
-function length(s: &string): i32 {
-    // s borrows the string, does not own it
+function length(s: &str): i32 {
+    // s borrows the str, does not own it
     return 5;
 }
 
 function main(): void {
-    let name: string = "hello";
+    let name: str = "hello";
     let len: i32 = length(&name);  // borrow, name stays valid
     return;
 }
@@ -276,7 +276,7 @@ Borrows are released at the end of their enclosing block scope.
 
 ## Raw Pointers
 
-Raw pointers (`*const T`, `*mut T`) bypass borrow checking entirely. They are always Copy and carry no ownership semantics.
+Raw pointers (`*T`, `*mut T`) bypass borrow checking entirely. They are always Copy and carry no ownership semantics.
 
 ```ignis
 function main(): i32 {
@@ -291,12 +291,12 @@ Pointer operations:
 
 | Operation | Syntax | Description |
 |-----------|--------|-------------|
-| Address-of | `(&expr) as *const T` | Create pointer from reference |
+| Address-of | `(&expr) as *T` | Create pointer from reference |
 | Dereference | `*ptr` | Read/write through pointer |
 | Arithmetic | `ptr + N` | Offset pointer by N elements |
-| Cast | `@pointerCast<*const U>(ptr)` | Convert between pointer types |
+| Cast | `@pointerCast<*U>(ptr)` | Convert between pointer types |
 | To integer | `@integerFromPointer(ptr)` | Get numeric address |
-| From integer | `@pointerFromInteger<*const T>(addr)` | Create pointer from address |
+| From integer | `@pointerFromInteger<*T>(addr)` | Create pointer from address |
 
 ## Copy vs Drop Interaction
 

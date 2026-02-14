@@ -37,15 +37,17 @@ crates/
     src/binder.rs                 # Phase 1: definition creation (two-pass)
     src/resolver.rs               # Phase 2: name resolution, scope building
     src/typeck.rs                 # Phase 3: type inference and checking
-    src/borrowck.rs               # Phase 4: ownership and borrowing analysis
-    src/const_eval.rs             # Phase 5: compile-time constant evaluation
-    src/checks.rs                 # Phase 6: extra semantic checks (control flow, etc.)
-    src/lint.rs                   # Phase 7: lint warnings
+    src/const_eval.rs             # Phase 4: compile-time constant evaluation
+    src/checks.rs                 # Phase 5: extra semantic checks (control flow, etc.)
+    src/lint.rs                   # Phase 6: lint warnings
     src/lowering.rs               # AST → HIR conversion
     src/mono.rs                   # Monomorphization (generic specialization)
     src/scope.rs                  # Scope tree (Global, Function, Block, Generic, Loop)
     src/imports.rs                # Module import/export handling
+    src/modules.rs                # Module graph management, cycle detection
+    src/borrowck_hir.rs           # HIR-level borrow checking
     src/ownership_hir.rs          # HirOwnershipChecker, drop schedule generation
+    src/dump.rs                   # Debug dump utilities for types and definitions
     tests/golden_ok.rs            # Analyzer snapshot tests (valid programs)
     tests/golden_err.rs           # Analyzer snapshot tests (error programs)
     tests/golden_hir.rs           # HIR output snapshots
@@ -54,6 +56,7 @@ crates/
     tests/properties.rs           # Property-based fuzz tests (proptest)
   ignis_hir/                      # High-level IR
     src/lib.rs                    # HIRNode, HIRKind, HIR store
+    src/pattern.rs                # HIRPattern, HIRMatchArm (match, if let, let else)
     src/statement.rs              # Loop condition types
     src/operation.rs              # BinaryOperation, UnaryOperation
     src/drop_schedule.rs          # DropSchedules, ExitKey
@@ -71,24 +74,27 @@ crates/
     src/classify.rs               # Definition classification (User/Std/Runtime)
     tests/golden_c.rs             # C codegen snapshot tests
   ignis_ast/                      # AST node types
-    src/statements/mod.rs         # ASTStatement enum (Variable, Function, Record, Enum, etc.)
-    src/expressions/mod.rs        # ASTExpression enum (Binary, Call, MemberAccess, etc.)
+    src/statements/mod.rs         # ASTStatement enum (Variable, Function, Record, Enum, Trait, LetElse, etc.)
+    src/expressions/mod.rs        # ASTExpression enum (Binary, Call, Match, LetCondition, etc.)
     src/type_.rs                  # IgnisTypeSyntax (parsed type annotations)
+    src/pattern.rs                # ASTPattern (Wildcard, Literal, Path, Tuple, Or)
     src/attribute.rs              # ASTAttribute, ASTAttributeArg
     src/metadata.rs               # ASTMetadata bitflags (STATIC, MUTABLE, EXPORT, etc.)
     src/generics.rs               # ASTGenericParams, ASTGenericParam
   ignis_type/                     # Type system and definitions
     src/types.rs                  # Type enum, TypeId, TypeStore, Substitution
-    src/definition.rs             # Definition, DefinitionKind, DefinitionId, DefinitionStore
+    src/definition.rs             # Definition, DefinitionKind (incl. Trait), DefinitionId, DefinitionStore
     src/symbol.rs                 # SymbolId, SymbolTable (interned identifiers)
-    src/attribute.rs              # RecordAttr, FunctionAttr, FieldAttr
+    src/attribute.rs              # RecordAttr, FunctionAttr, FieldAttr, ParamAttr, NamespaceAttr
     src/lint.rs                   # LintId, LintLevel
     src/span.rs                   # Source locations
-    src/module.rs                 # ModuleId, module metadata
+    src/module.rs                 # ModuleId, ModulePath, ModuleStore
     src/namespace.rs              # NamespaceId, NamespaceStore
     src/value.rs                  # Literal values (IgnisLiteralValue)
   ignis_token/                    # Token types
     src/token_types.rs            # Token enum (keywords, punctuation, literals)
+  ignis_config/                   # Build configuration types
+    src/lib.rs                    # IgnisSTDManifest, CHeader, StdToolchainConfig, StdLinkingInfo
   ignis_diagnostics/              # Error reporting
     src/message.rs                # DiagnosticMessage enum (450+ variants)
     src/diagnostic_report.rs      # Diagnostic, Severity, Label
@@ -112,23 +118,33 @@ std/                              # Ignis standard library
   memory/layout.ign               # Memory layout
   vector/mod.ign                  # Vector<T> (growable array with push, pop, at, etc.)
   math/mod.ign                    # Math functions (sin, cos, sqrt, pow, floor, ceil, etc.)
-  types/mod.ign                   # Option<T>, Result<T, E>
+  number/mod.ign                  # Numeric helpers (abs, toFixed, round, floor, ceil)
+  types/mod.ign                   # Runtime type IDs
+  option/mod.ign                  # Option<S> (SOME/NONE)
+  result/mod.ign                  # Result<T, E> (OK/ERROR)
+  rc/mod.ign                      # Rc<T> and Weak<T> (reference-counted pointers)
   libc/mod.ign                    # C standard library wrappers
   ptr/mod.ign                     # Pointer utilities
   runtime/                        # C runtime implementation
-    ignis_rt.h                    # Runtime API header
+    ignis_rt.h                    # Runtime API header (types, strings, Rc, memory)
     libignis_rt.a                 # Precompiled runtime archive
     Makefile                      # Runtime build system
     internal/rt_memory.c          # malloc/free/realloc wrappers
     internal/rt_string.c          # IgnisString operations
     internal/rt_io.c              # stdout/stderr printing
+    internal/rt_rc.c              # Reference counting (Rc/Weak)
 test_cases/analyzer/              # Ignis fixture files organized by feature
   borrows/                        # Borrow checking tests
   casts/                          # Cast validation tests
+  extern/                         # Extern block tests
+  for_of/                         # For-of iteration tests
   generics/                       # Generic type tests
+  lang_traits/                    # Drop, Clone, Copy trait validation
   missing_return/                 # Return path analysis tests
   mutability/                     # Mutability checks
+  overloads/                      # Function overloading tests
   ownership/                      # Ownership transfer tests
+  type_errors/                    # Type error tests
   unreachable/                    # Unreachable code tests
 example/                          # Example Ignis programs
 docs/                             # Language reference and ABI docs
@@ -188,10 +204,9 @@ Seven sequential phases over the AST:
 | 1. Binding | `binder.rs` | Two-pass: predeclare types (pass 1), then complete all definitions (pass 2). Enables forward references. |
 | 2. Resolution | `resolver.rs` | Resolve identifiers to `DefinitionId` via scope lookup. Build scope tree. |
 | 3. Type Checking | `typeck.rs` | Bidirectional type inference. Propagates expected types downward via `InferContext`. Handles overload resolution. |
-| 4. Borrow Checking | `borrowck.rs` | Validate ownership, moves, borrows. Detect use-after-move and conflicting borrows. |
-| 5. Const Eval | `const_eval.rs` | Evaluate constant expressions at compile time. Populate `ConstantDefinition::value`. |
-| 6. Extra Checks | `checks.rs` | Control flow analysis (missing returns, unreachable code, never-typed expressions). |
-| 7. Lints | `lint.rs` | `UnusedVariable`, `UnusedImport`, `Deprecated`. Respects `@allow`/`@warn`/`@deny` directives. |
+| 4. Const Eval | `const_eval.rs` | Evaluate constant expressions at compile time. Populate `ConstantDefinition::value`. |
+| 5. Extra Checks | `checks.rs` | Control flow analysis (missing returns, unreachable code, never-typed expressions). |
+| 6. Lints | `lint.rs` | `UnusedVariable`, `UnusedImport`, `Deprecated`. Respects `@allow`/`@warn`/`@deny` directives. |
 
 After all phases, `lower_to_hir()` converts the typed AST into HIR.
 
@@ -210,11 +225,17 @@ Transforms generic HIR into concrete HIR with all type parameters resolved:
 
 **Invariant:** post-mono, no `Type::Param` or `Type::Instance` should exist. Debug builds verify with `verify_no_generics()`.
 
+### Borrow Checking
+
+**Entry:** `crates/ignis_analyzer/src/borrowck_hir.rs` → `HirBorrowChecker`
+
+Runs on monomorphized HIR. Tracks borrow states per variable (None, Imm(count), Mut), validates that mutable borrows are exclusive, and detects use-after-move and conflicting borrows. Borrow lifetimes are scope-based.
+
 ### Ownership Analysis
 
 **Entry:** `crates/ignis_analyzer/src/ownership_hir.rs` → `HirOwnershipChecker`
 
-Runs on monomorphized HIR. Validates move semantics and reference rules. Produces `DropSchedules` that map HIR nodes to their exit points where cleanup code should be emitted (end of block, break, continue, return).
+Runs on monomorphized HIR after borrow checking. Validates move semantics and reference rules. Produces `DropSchedules` that map HIR nodes to their exit points where cleanup code should be emitted (end of block, break, continue, return).
 
 ### HIR
 
@@ -223,9 +244,10 @@ Runs on monomorphized HIR. Validates move semantics and reference rules. Produce
 Tree-based intermediate representation preserving program structure. Each `HIRNode` has a `HIRKind` (operation), `Span` (source location), and `TypeId` (inferred type). Uses `DefinitionId` references instead of names.
 
 Key `HIRKind` categories:
-- **Expressions:** `Literal`, `Variable`, `Binary`, `Unary`, `Call`, `Cast`, `Reference`, `Dereference`, `Index`, `FieldAccess`, `MethodCall`, `EnumVariant`, `RecordInit`.
-- **Statements:** `Let`, `Assign`, `Block`, `If`, `Loop`, `Break`, `Continue`, `Return`.
-- **Builtins:** `SizeOf`, `AlignOf`, `Panic`, `Trap`, `BuiltinUnreachable`, `BuiltinLoad`, `BuiltinStore`.
+- **Expressions:** `Literal`, `Variable`, `Binary`, `Unary`, `Call`, `Cast`, `Reference`, `Dereference`, `Index`, `FieldAccess`, `MethodCall`, `EnumVariant`, `RecordInit`, `Match`, `StaticAccess`.
+- **Statements:** `Let`, `LetElse`, `Assign`, `Block`, `If`, `Loop`, `Break`, `Continue`, `Return`.
+- **Patterns:** `HIRPattern` (Wildcard, Literal, Binding, Variant, Tuple, Or) used by `Match`, `LetElse`, and let-conditions in `If`/`Loop`.
+- **Builtins:** `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `Panic`, `Trap`, `BuiltinUnreachable`, `BuiltinLoad`, `BuiltinStore`, `BuiltinDropInPlace`, `BuiltinDropGlue`.
 
 ### LIR
 
@@ -233,7 +255,7 @@ Key `HIRKind` categories:
 
 Three-address code (TAC) with basic block structure. Each instruction has at most one operation with results stored in temporaries (`TempId`) or locals (`LocalId`).
 
-- **Instructions:** `Load`, `Store`, `LoadPtr`, `StorePtr`, `Copy`, `BinOp`, `UnaryOp`, `Cast`, `BitCast`, `Call`, `RuntimeCall`, `GetElementPtr`, `InitVector`, `SizeOf`, `AlignOf`, `AddrOfLocal`.
+- **Instructions:** `Load`, `Store`, `LoadPtr`, `StorePtr`, `BuiltinLoad`, `BuiltinStore`, `Copy`, `BinOp`, `UnaryOp`, `Cast`, `BitCast`, `Call`, `RuntimeCall`, `GetElementPtr`, `InitVector`, `InitRecord`, `InitEnumVariant`, `EnumGetTag`, `EnumGetPayloadField`, `GetFieldPtr`, `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `AddrOfLocal`, `Drop`, `DropInPlace`, `DropGlue`, `Trap`, `PanicMessage`.
 - **Terminators:** `Jump`, `CondJump`, `Return`, `Unreachable`.
 - **Program structure:** `LirProgram` contains `HashMap<DefinitionId, FunctionLir>`. Each `FunctionLir` has an entry block, a store of `Block`s, `LocalData`, and `TempData`.
 
@@ -306,9 +328,13 @@ Key modules:
 | `io` | `println`, `print`, `eprintln`, `eprint` |
 | `string` | `length`, `concat`, `substring`, `contains`, `toUpperCase`, `toLowerCase`, `toString` overloads |
 | `memory` | `allocate<T>`, `free<T>`, `reallocate<T>`, `copy<T>`, `move<T>`, `Layout`, `Align` |
-| `vector` | `Vector<T>` with `init`, `push`, `pop`, `at`, `free`, `clear`, `shrink` |
+| `vector` | `Vector<T>` with `init`, `push`, `pop`, `at`, `clear`, `shrink` (implements `Drop`) |
 | `math` | `sin`, `cos`, `sqrt`, `pow`, `floor`, `ceil`, `round`, constants (`PI`, `E`, `TAU`) |
-| `types` | `Option<T>` |
+| `number` | Numeric helpers (`abs`, `toFixed`, rounding wrappers via extensions) |
+| `types` | Runtime type IDs |
+| `option` | `Option<S>` with `SOME`/`NONE`, helpers (`isSome`, `isNone`, `unwrap`, `unwrapOr`) |
+| `result` | `Result<T, E>` with `OK`/`ERROR`, helpers (`isOk`, `isError`, `unwrap`, `unwrapOr`) |
+| `rc` | `Rc<T>` (shared ownership), `Weak<T>` (non-owning observer) |
 | `libc` | C standard library wrappers |
 | `ptr` | Pointer utilities |
 
@@ -320,9 +346,11 @@ Std modules use `extern namespace` declarations backed by C runtime functions.
 
 Provides:
 - **Memory:** `ignis_alloc`, `ignis_free`, `ignis_realloc`, `ignis_calloc`, `ignis_memcpy`, `ignis_memmove`.
-- **Strings:** `IgnisString` heap type with `ignis_string_new`, `ignis_string_from_cstr`, `ignis_string_concat`, `ignis_string_substring`, etc.
+- **Strings:** `IgnisString` heap type with `ignis_string_new`, `ignis_string_from_cstr`, `ignis_string_concat`, `ignis_string_substring`, etc. Output-pointer `_init_` variants for safe struct return.
 - **I/O:** `ignis_print`, `ignis_eprint`.
+- **Reference counting:** `IgnisRcBox` with `ignis_rc_alloc`, `ignis_rc_retain`, `ignis_rc_release`, `ignis_rc_get`, weak references.
 - **Type conversions:** `ignis_i32_to_string`, `ignis_f64_to_string`, etc.
+- **Atoms:** `ignis_atom_t` (`u32`) type alias.
 
 Built via `Makefile` → `libignis_rt.a`.
 
@@ -334,21 +362,22 @@ CLI args → IgnisConfig
      CompilationContext
        discover_modules()         → ModuleGraph + ParsedModules (AST per file)
              ↓
-     Analyzer (per module, topological order)
-       bind_phase()               → DefinitionStore
-       resolve_phase()            → node_defs, ScopeTree
-       typecheck_phase()          → node_types, TypeStore
-       borrowcheck_phase()        → ownership diagnostics
-       const_eval_phase()         → ConstantDefinition::value
-       extra_checks_phase()       → control flow diagnostics
-       lint_phase()               → lint diagnostics
-       lower_to_hir()             → HIR
-             ↓
-     AnalyzerOutput (types, defs, hir, diagnostics, lookup maps)
-             ↓
-     Monomorphizer::run()         → concrete HIR (no Type::Param/Instance)
-             ↓
-     HirOwnershipChecker::check() → DropSchedules
+      Analyzer (per module, topological order)
+        bind_phase()               → DefinitionStore
+        resolve_phase()            → node_defs, ScopeTree
+        typecheck_phase()          → node_types, TypeStore
+        const_eval_phase()         → ConstantDefinition::value
+        extra_checks_phase()       → control flow diagnostics
+        lint_phase()               → lint diagnostics
+        lower_to_hir()             → HIR
+              ↓
+      AnalyzerOutput (types, defs, hir, diagnostics, lookup maps)
+              ↓
+      Monomorphizer::run()         → concrete HIR (no Type::Param/Instance)
+              ↓
+      HirBorrowChecker::check()    → borrow diagnostics
+              ↓
+      HirOwnershipChecker::check() → DropSchedules
              ↓
      lower_and_verify()           → LirProgram (basic blocks, TAC)
              ↓
@@ -385,7 +414,7 @@ build/user/     # User modules (module-based compilation)
 | File | Purpose |
 | --- | --- |
 | `Cargo.toml` | Workspace members, shared dependencies |
-| `ignis.toml` | Project config: `std_path`, `source_dir`, `target`, `optimize`, `output_dir` |
+| `ignis.toml` | Project config: `std_path`, `source_dir`, `target`, `optimize`, `out_dir` |
 | `std/manifest.toml` | Std module registry, linking config (headers, archives, `-l` flags) |
 | `IGNIS_STD_PATH` env | Overrides standard library root path |
 | `.rustfmt.toml` | 2-space indent, 120 width, no import reorder, vertical params |

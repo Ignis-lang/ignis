@@ -7,21 +7,24 @@
 Ignis is a general-purpose programming language with strong, static typing, and immutability by default.
 Inspired by TypeScript and Rust, Ignis compiles to C and produces native executables via GCC.
 
-## Features (v0.2)
+## Features (v0.3)
 
-- **Strong static typing**: `i8`-`i64`, `u8`-`u64`, `f32`, `f64`, `boolean`, `char`, `string`
+- **Strong static typing**: `i8`-`i64`, `u8`-`u64`, `f32`, `f64`, `boolean`, `char`, `str`, `atom`
 - **Immutability by default**: `let` for immutable, `let mut` for mutable
 - **Generics**: Type parameters for functions, records, enums, and type aliases
 - **Records and enums**: User-defined types with fields, methods, and variants
+- **Traits**: Lang traits (`Drop`, `Clone`, `Copy`) and user-defined traits
+- **Pattern matching**: `match` expressions, `if let`, `while let`, `let else`
 - **Namespaces**: Module-level organization with `::` access
-- **References and pointers**: `&T`, `&mut T`, `*T`
+- **References and pointers**: `&T`, `&mut T`, `*T`, `*mut T`
 - **Control flow**: `if`/`else`, `while`, `for`, `for-of`, `break`, `continue`
+- **Extension methods**: `@extension(Type)` for adding methods to existing types
 - **Function overloading**: Multiple functions with the same name, different signatures
 - **Modules**: `import`/`export` for multi-file projects
 - **FFI**: `extern` blocks for C interop
 - **Borrow checking**: Rust-style borrow analysis
 
-See [docs/LANGUAGE_REFERENCE_v0.2.md](docs/LANGUAGE_REFERENCE_v0.2.md) for full language documentation.
+See [docs/LANGUAGE_REFERENCE_CURRENT.md](docs/LANGUAGE_REFERENCE_CURRENT.md) for full language documentation.
 
 ## Installation
 
@@ -178,7 +181,7 @@ version = "0.1.0"
 
 [build]
 source_dir = "src"
-output_dir = "build"
+out_dir = "build"
 ```
 
 ## Contributions

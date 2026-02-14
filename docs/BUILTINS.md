@@ -78,7 +78,7 @@ If the key does not match any known pattern, the compiler emits a warning and th
 #### Platform-Conditional Code
 
 ```ignis
-function getPlatformName(): string {
+function getPlatformName(): str {
     if (@configFlag("os.linux")) {
         return "Linux";
     }
@@ -173,11 +173,11 @@ Returns a human-readable string representation of a type name. Resolved at compi
 |---|---|
 | **Type arguments** | 1 type |
 | **Arguments** | none |
-| **Returns** | `string` |
+| **Returns** | `str` |
 
 ```ignis
 function main(): void {
-    let name: string = @typeName<i32>(); // "i32"
+    let name: str = @typeName<i32>(); // "i32"
     return;
 }
 ```
@@ -215,8 +215,8 @@ Converts between pointer types. Both the argument and the type argument must be 
 | **Returns** | `T` |
 
 ```ignis
-function toBytePtr(ptr: *const i32): *const u8 {
-    return @pointerCast<*const u8>(ptr);
+function toBytePtr(ptr: *i32): *u8 {
+    return @pointerCast<*u8>(ptr);
 }
 ```
 
@@ -232,7 +232,7 @@ Converts a pointer to its integer address representation.
 | **Returns** | `u64` |
 
 ```ignis
-function getAddress(ptr: *const i32): u64 {
+function getAddress(ptr: *i32): u64 {
     return @integerFromPointer(ptr);
 }
 ```
@@ -250,8 +250,8 @@ Converts an integer address to a pointer. The type argument must be a pointer ty
 | **Returns** | `T` |
 
 ```ignis
-function fromAddress(addr: u64): *const i32 {
-    return @pointerFromInteger<*const i32>(addr);
+function fromAddress(addr: u64): *i32 {
+    return @pointerFromInteger<*i32>(addr);
 }
 ```
 
@@ -495,7 +495,7 @@ For unsigned types, `minOf` returns `0`.
 | `@compileError("msg")` | 1 string literal | `Never` | No (compile error) |
 | `@sizeOf<T>()` | 1 type arg | `u64` | Yes (`sizeof`) |
 | `@alignOf<T>()` | 1 type arg | `u64` | Yes (`_Alignof`) |
-| `@typeName<T>()` | 1 type arg | `string` | No (resolved to literal) |
+| `@typeName<T>()` | 1 type arg | `str` | No (resolved to literal) |
 | `@bitCast<T>(expr)` | 1 type arg + 1 expr | `T` | Yes (`memcpy`) |
 | `@pointerCast<T>(ptr)` | 1 type arg + 1 expr | `T` | Yes (C cast) |
 | `@integerFromPointer(ptr)` | 1 pointer expr | `u64` | Yes (C cast) |

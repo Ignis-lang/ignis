@@ -5,7 +5,7 @@ The runtime is a small C library that defines core types and the C-facing API
 used by the Ignis standard library. It provides memory allocation, strings,
 dynamic buffers, and small I/O helpers.
 
-**Note**: v0.2 features (records, enums, generics, type aliases) compile to
+**Note**: Language features (records, enums, generics, traits, type aliases) compile to
 standard C constructs and do not require additional runtime support.
 
 ## Build
@@ -64,7 +64,7 @@ Numeric helpers and conversions used by `std/number` and `std/string`.
 - Boolean to string: `booleanToString`
 - Utility: `stringEmpty`
 
-All string conversion helpers return heap-allocated `string` and must be
+All string conversion helpers return heap-allocated `IgnisString` and must be
 released with `ignis_string_drop`.
 
 ### `std/runtime/string/string.h` and `std/runtime/string/string.c`

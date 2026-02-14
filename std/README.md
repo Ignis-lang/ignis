@@ -56,7 +56,7 @@ function main(): i32 {
 
   Io::println(String::concat("len=", String::toString(values.length())));
 
-  values.free();
+  // Vector implements Drop; it is freed automatically at end of scope
   return 0;
 }
 ```
@@ -114,7 +114,7 @@ function main(): i32 {
 
 - Growable contiguous storage of `T`.
 - Uses geometric growth (`capacity *= 2`, minimum 1).
-- Requires explicit `free()` to release backing memory.
+- Implements `@implements(Drop)` for automatic cleanup at end of scope.
 
 ### `std::ptr`
 
