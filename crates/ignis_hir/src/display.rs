@@ -564,6 +564,28 @@ impl<'a> HIRPrinter<'a> {
         }
         self.indent -= 1;
       },
+      HIRKind::LetElse {
+        pattern,
+        value,
+        else_block,
+      } => {
+        writeln!(self.output, "LetElse : {}", type_str).unwrap();
+        self.indent += 1;
+        self.write_indent();
+        writeln!(self.output, "pattern: {:?}", pattern).unwrap();
+
+        self.write_indent();
+        writeln!(self.output, "value:").unwrap();
+        self.indent += 1;
+        self.print_node(*value);
+        self.indent -= 1;
+
+        self.write_indent();
+        writeln!(self.output, "else:").unwrap();
+        self.indent += 1;
+        self.print_node(*else_block);
+        self.indent -= 2;
+      },
       HIRKind::Loop { condition, body } => {
         let loop_kind = match condition {
           LoopKind::Infinite => "infinite",

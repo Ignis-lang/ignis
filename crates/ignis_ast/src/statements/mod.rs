@@ -15,6 +15,7 @@ pub mod for_statement;
 pub mod function;
 pub mod if_statement;
 pub mod import_statement;
+pub mod let_else;
 pub mod namespace_statement;
 pub mod record;
 pub mod return_statement;
@@ -36,6 +37,7 @@ pub use for_statement::ASTFor;
 pub use function::ASTFunction;
 pub use if_statement::ASTIf;
 pub use import_statement::{ASTImport, ASTImportItem};
+pub use let_else::ASTLetElse;
 pub use namespace_statement::ASTNamespace;
 pub use record::{ASTMethod, ASTRecord, ASTRecordField, ASTRecordItem};
 pub use return_statement::ASTReturn;
@@ -48,6 +50,7 @@ pub use while_statement::ASTWhile;
 pub enum ASTStatement {
   Expression(ASTExpression),
   Variable(ASTVariable),
+  LetElse(ASTLetElse),
   Function(ASTFunction),
   Block(ASTBlock),
   If(ASTIf),
@@ -74,6 +77,7 @@ impl ASTStatement {
     match self {
       ASTStatement::Expression(expr) => expr.span(),
       ASTStatement::Variable(var) => &var.span,
+      ASTStatement::LetElse(let_else) => &let_else.span,
       ASTStatement::Function(func) => &func.signature.span,
       ASTStatement::Block(block) => &block.span,
       ASTStatement::If(if_stmt) => &if_stmt.span,

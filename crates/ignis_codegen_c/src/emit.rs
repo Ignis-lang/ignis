@@ -1379,6 +1379,11 @@ impl<'a> CEmitter<'a> {
           };
           writeln!(self.output, "({})->payload.variant_{}.field_{} = {};", p, variant_tag, i, v).unwrap();
         }
+
+        if self.resolve_droppable_record(*enum_type).is_some() {
+          write!(self.output, "    ").unwrap();
+          writeln!(self.output, "({})->__ignis_drop_state = 0;", p).unwrap();
+        }
       },
       Instr::EnumGetTag { dest, source } => {
         let s = self.format_operand(func, source);

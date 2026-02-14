@@ -230,6 +230,11 @@ impl<'a> HirBorrowChecker<'a> {
         self.check_if(condition, then_branch, else_branch);
       },
 
+      HIRKind::LetElse { value, else_block, .. } => {
+        self.check_node(value);
+        self.check_node(else_block);
+      },
+
       HIRKind::Loop { condition, body } => {
         self.check_loop(condition, body);
       },

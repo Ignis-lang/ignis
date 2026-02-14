@@ -761,6 +761,18 @@ pub enum DiagnosticMessage {
   OrPatternBindingsDisallowed {
     span: Span,
   },
+  LetConditionOutsideConditional {
+    span: Span,
+  },
+  LetConditionInOrExpression {
+    span: Span,
+  },
+  LetElseMustDiverge {
+    span: Span,
+  },
+  IrrefutableLetElsePattern {
+    span: Span,
+  },
   // #endregion Analyzer
 }
 
@@ -1549,6 +1561,18 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::OrPatternBindingsDisallowed { .. } => {
         write!(f, "bindings are not allowed in OR patterns")
       },
+      DiagnosticMessage::LetConditionOutsideConditional { .. } => {
+        write!(f, "`let` condition is only allowed in if/while conditions")
+      },
+      DiagnosticMessage::LetConditionInOrExpression { .. } => {
+        write!(f, "`let` condition is not allowed in `||` expressions")
+      },
+      DiagnosticMessage::LetElseMustDiverge { .. } => {
+        write!(f, "`let else` requires an else block that always diverges")
+      },
+      DiagnosticMessage::IrrefutableLetElsePattern { .. } => {
+        write!(f, "irrefutable pattern in `let else`")
+      },
     }
   }
 }
@@ -1743,6 +1767,10 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UnreachableMatchArm { span, .. }
       | DiagnosticMessage::MatchNeedsAtLeastOneArm { span, .. }
       | DiagnosticMessage::OrPatternBindingsDisallowed { span, .. }
+      | DiagnosticMessage::LetConditionOutsideConditional { span, .. }
+      | DiagnosticMessage::LetConditionInOrExpression { span, .. }
+      | DiagnosticMessage::LetElseMustDiverge { span, .. }
+      | DiagnosticMessage::IrrefutableLetElsePattern { span, .. }
       | DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { span, .. } => span.clone(),
     }
   }
@@ -1933,6 +1961,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::MatchArmTypeMismatch { .. } => "A0163",
       DiagnosticMessage::UnreachableMatchArm { .. } => "A0164",
       DiagnosticMessage::MatchNeedsAtLeastOneArm { .. } => "A0165",
+      DiagnosticMessage::LetConditionOutsideConditional { .. } => "A0166",
+      DiagnosticMessage::LetConditionInOrExpression { .. } => "A0167",
+      DiagnosticMessage::LetElseMustDiverge { .. } => "A0168",
+      DiagnosticMessage::IrrefutableLetElsePattern { .. } => "A0169",
       DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { .. } => "A0156",
     }
     .to_string()
@@ -1949,6 +1981,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::InterproceduralDropOnComplexArgument { .. }
       | DiagnosticMessage::UnknownConfigFlag { .. }
       | DiagnosticMessage::NonExhaustiveMatch { .. }
+      | DiagnosticMessage::IrrefutableLetElsePattern { .. }
       | DiagnosticMessage::UnusedVariable { .. }
       | DiagnosticMessage::UnusedImport { .. }
       | DiagnosticMessage::DeprecatedCall { .. } => Severity::Warning,

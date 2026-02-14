@@ -128,6 +128,23 @@ impl<'a> Analyzer<'a> {
         }
         self.define_decl_in_current_scope(node_id);
       },
+      ASTStatement::LetElse(let_else) => {
+        self.extra_checks_node(&let_else.value, scope_kind, in_loop, in_function);
+        self.register_pattern_bindings(&let_else.pattern);
+
+        self.scopes.push(ScopeKind::Block);
+        self.extra_checks_node(&let_else.else_block, ScopeKind::Block, in_loop, in_function);
+        self.scopes.pop();
+
+        if self.check_termination(let_else.else_block) != Termination::Always {
+          self.add_diagnostic(
+            DiagnosticMessage::LetElseMustDiverge {
+              span: self.node_span(&let_else.else_block).clone(),
+            }
+            .report(),
+          );
+        }
+      },
       ASTStatement::Constant(const_) => {
         // Only check value if it exists (not for extern const)
         if let Some(value_id) = &const_.value {
@@ -160,8 +177,10 @@ impl<'a> Analyzer<'a> {
         self.scopes.pop();
       },
       ASTStatement::If(if_stmt) => {
+        self.scopes.push(ScopeKind::Block);
         self.extra_checks_node(&if_stmt.condition, scope_kind, in_loop, in_function);
         self.extra_checks_node(&if_stmt.then_block, ScopeKind::Block, in_loop, in_function);
+        self.scopes.pop();
 
         if let Some(else_branch) = &if_stmt.else_block {
           self.extra_checks_node(else_branch, ScopeKind::Block, in_loop, in_function);
@@ -170,8 +189,10 @@ impl<'a> Analyzer<'a> {
       ASTStatement::While(while_stmt) => {
         self.scopes.push(ScopeKind::Loop);
 
+        self.scopes.push(ScopeKind::Block);
         self.extra_checks_node(&while_stmt.condition, ScopeKind::Loop, true, in_function);
         self.extra_checks_node(&while_stmt.body, ScopeKind::Loop, true, in_function);
+        self.scopes.pop();
 
         self.scopes.pop();
       },
@@ -410,6 +431,10 @@ impl<'a> Analyzer<'a> {
         for arg_id in &bc.args {
           self.extra_checks_node(arg_id, scope_kind, in_loop, in_function);
         }
+      },
+      ASTExpression::LetCondition(let_condition) => {
+        self.extra_checks_node(&let_condition.value, scope_kind, in_loop, in_function);
+        self.register_pattern_bindings(&let_condition.pattern);
       },
       ASTExpression::Match(match_expr) => {
         self.extra_checks_node(&match_expr.scrutinee, scope_kind, in_loop, in_function);

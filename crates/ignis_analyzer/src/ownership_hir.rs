@@ -289,6 +289,11 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       },
 
+      HIRKind::LetElse { value, else_block, .. } => {
+        dropped.extend(self.summary_must_drops(*value, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*else_block, tracked_params, summaries));
+      },
+
       HIRKind::Loop { condition, .. } => {
         // Body execution is not guaranteed for while/for loops, so only account
         // for effects that always happen before first iteration.
@@ -632,6 +637,11 @@ impl<'a> HirOwnershipChecker<'a> {
         else_branch,
       } => {
         self.check_if(condition, then_branch, else_branch, span);
+      },
+
+      HIRKind::LetElse { value, else_block, .. } => {
+        self.check_node(value);
+        self.check_node(else_block);
       },
 
       HIRKind::Loop { condition, body } => {

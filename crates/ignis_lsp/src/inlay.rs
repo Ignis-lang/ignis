@@ -182,6 +182,9 @@ fn collect_expression_children(
         stack.push(*arg_id);
       }
     },
+    ASTExpression::LetCondition(let_condition) => {
+      stack.push(let_condition.value);
+    },
     ASTExpression::Match(match_expr) => {
       stack.push(match_expr.scrutinee);
       for arm in &match_expr.arms {
@@ -203,6 +206,10 @@ fn collect_statement_children(
       if let Some(value) = &v.value {
         stack.push(*value);
       }
+    },
+    ASTStatement::LetElse(let_else) => {
+      stack.push(let_else.value);
+      stack.push(let_else.else_block);
     },
     ASTStatement::Expression(e) => {
       collect_expression_children(e, stack);

@@ -7,6 +7,7 @@ pub mod call;
 pub mod cast;
 pub mod dereference;
 pub mod grouped;
+pub mod let_condition;
 pub mod literal;
 pub mod match_expression;
 pub mod member_access;
@@ -26,6 +27,7 @@ pub use call::ASTCallExpression;
 pub use cast::ASTCast;
 pub use dereference::ASTDereference;
 pub use grouped::ASTGrouped;
+pub use let_condition::ASTLetCondition;
 pub use literal::ASTLiteral;
 pub use match_expression::{ASTMatch, ASTMatchArm};
 pub use member_access::{ASTAccessOp, ASTMemberAccess};
@@ -47,6 +49,7 @@ pub enum ASTExpression {
   Call(ASTCallExpression),
   Dereference(ASTDereference),
   Grouped(ASTGrouped),
+  LetCondition(ASTLetCondition),
   Reference(ASTReference),
   Unary(ASTUnary),
   Literal(ASTLiteral),
@@ -72,6 +75,7 @@ impl ASTExpression {
       ASTExpression::Call(expr) => &expr.span,
       ASTExpression::Dereference(expr) => &expr.span,
       ASTExpression::Grouped(expr) => &expr.span,
+      ASTExpression::LetCondition(expr) => &expr.span,
       ASTExpression::Reference(expr) => &expr.span,
       ASTExpression::Unary(expr) => &expr.span,
       ASTExpression::Literal(expr) => &expr.span,

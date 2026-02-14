@@ -60,6 +60,7 @@ use crate::{
     call::ASTCallExpression,
     cast::ASTCast,
     grouped::ASTGrouped,
+    let_condition::ASTLetCondition,
     literal::ASTLiteral,
     match_expression::ASTMatch,
     path::ASTPath,
@@ -82,6 +83,7 @@ use crate::{
     function::{ASTFunction, ASTFunctionSignature, ASTParameter},
     if_statement::ASTIf,
     import_statement::ASTImport,
+    let_else::ASTLetElse,
     namespace_statement::ASTNamespace,
     return_statement::ASTReturn,
     variable::ASTVariable,
@@ -248,6 +250,7 @@ impl DisplayLisp for ASTExpression {
         format!("(*{})", inner)
       },
       ASTExpression::Grouped(expr) => expr.to_lisp(formatter),
+      ASTExpression::LetCondition(expr) => expr.to_lisp(formatter),
       ASTExpression::Reference(expr) => {
         let inner = formatter.format_node(&expr.inner);
         if expr.mutable {
@@ -287,6 +290,7 @@ impl DisplayLisp for ASTStatement {
     match self {
       ASTStatement::Expression(expression) => expression.to_lisp(formatter),
       ASTStatement::Variable(statement) => statement.to_lisp(formatter),
+      ASTStatement::LetElse(statement) => statement.to_lisp(formatter),
       ASTStatement::Function(statement) => statement.to_lisp(formatter),
       ASTStatement::Block(statement) => statement.to_lisp(formatter),
       ASTStatement::If(statement) => statement.to_lisp(formatter),
@@ -472,6 +476,17 @@ impl DisplayLisp for ASTGrouped {
   }
 }
 
+impl DisplayLisp for ASTLetCondition {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let pattern = self.pattern.to_lisp(formatter);
+    let value = formatter.format_node(&self.value);
+    format!("(LetCondition {} {})", pattern, value)
+  }
+}
+
 // Vector Expression
 impl DisplayLisp for ASTVector {
   fn to_lisp(
@@ -625,6 +640,18 @@ impl DisplayLisp for ASTVariable {
         format!("(Variable \"{}\" {} {})", name, type_str, metadata_str)
       },
     }
+  }
+}
+
+impl DisplayLisp for ASTLetElse {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let pattern = self.pattern.to_lisp(formatter);
+    let value = formatter.format_node(&self.value);
+    let else_block = formatter.format_node(&self.else_block);
+    format!("(LetElse {} {} {})", pattern, value, else_block)
   }
 }
 

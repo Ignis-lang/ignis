@@ -9,6 +9,7 @@ use ignis_ast::{
     cast::ASTCast,
     dereference::ASTDereference,
     grouped::ASTGrouped,
+    let_condition::ASTLetCondition,
     literal::ASTLiteral,
     match_expression::{ASTMatch, ASTMatchArm},
     path::{ASTPath, ASTPathSegment},
@@ -518,6 +519,7 @@ impl IgnisParser {
         ))))
       },
       TokenType::Match => self.parse_match_expression(&token),
+      TokenType::Let => self.parse_let_condition_expression(&token),
       TokenType::At => self.parse_builtin_call(&token),
       TokenType::Colon => {
         let colon_span = token.span.clone();
@@ -581,7 +583,20 @@ impl IgnisParser {
     Ok(self.allocate_expression(ASTExpression::Match(ASTMatch::new(scrutinee, arms, span))))
   }
 
-  fn parse_pattern(&mut self) -> ParserResult<ASTPattern> {
+  fn parse_let_condition_expression(
+    &mut self,
+    let_token: &Token,
+  ) -> ParserResult<NodeId> {
+    let pattern = self.parse_pattern()?;
+    self.expect(TokenType::Equal)?;
+
+    let value = self.parse_expression(31)?;
+    let span = Span::merge(&let_token.span, self.get_span(&value));
+
+    Ok(self.allocate_expression(ASTExpression::LetCondition(ASTLetCondition::new(pattern, value, span))))
+  }
+
+  pub(crate) fn parse_pattern(&mut self) -> ParserResult<ASTPattern> {
     self.parse_or_pattern()
   }
 
