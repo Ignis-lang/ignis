@@ -70,7 +70,6 @@ pub enum TokenType {
 
   // Types
   StrType,           // str
-  StringType,        // string
   Int8Type,          // i8
   Int16Type,         // i16
   Int32Type,         // i32
@@ -186,7 +185,6 @@ impl TokenType {
       "return" => Some(TokenType::Return),
       "static" => Some(TokenType::Static),
       "str" => Some(TokenType::StrType),
-      "string" => Some(TokenType::StringType),
       "this" => Some(TokenType::This),
       "self" => Some(TokenType::Self_),
       "trait" => Some(TokenType::Trait),
@@ -220,7 +218,6 @@ impl TokenType {
         | TokenType::CharType
         | TokenType::AtomType
         | TokenType::StrType
-        | TokenType::StringType
     )
   }
 
@@ -270,7 +267,6 @@ impl TokenType {
       TokenType::Return,
       TokenType::Self_,
       TokenType::StrType,
-      TokenType::StringType,
       TokenType::This,
       TokenType::True,
       TokenType::Type,
@@ -395,7 +391,6 @@ impl Display for TokenType {
       TokenType::Static => write!(f, "Static"),
       TokenType::StrType => write!(f, "StrType"),
       TokenType::String => write!(f, "String"),
-      TokenType::StringType => write!(f, "StringType"),
       TokenType::SubtractAssign => write!(f, "SubtractAssign"),
       TokenType::Self_ => write!(f, "Self"),
       TokenType::This => write!(f, "This"),

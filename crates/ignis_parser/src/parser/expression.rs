@@ -218,7 +218,6 @@ impl IgnisParser {
         | TokenType::BooleanType
         | TokenType::AtomType
         | TokenType::StrType
-        | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void => {},
         // If we hit these, it's likely a comparison not type args
@@ -315,7 +314,6 @@ impl IgnisParser {
         | TokenType::BooleanType
         | TokenType::AtomType
         | TokenType::StrType
-        | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void => {},
         // If we hit these, it's likely a comparison not type args

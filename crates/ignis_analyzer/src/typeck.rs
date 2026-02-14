@@ -6609,24 +6609,6 @@ impl<'a> Analyzer<'a> {
       IgnisTypeSyntax::F32 => self.types.f32(),
       IgnisTypeSyntax::F64 => self.types.f64(),
       IgnisTypeSyntax::Str => self.types.str(),
-      IgnisTypeSyntax::String => {
-        // Resolve `string` keyword to the `String` record from std/string via scope lookup.
-        let sym = self.symbols.borrow_mut().intern("String");
-        if let Some(def_id) = self.scopes.lookup_def(&sym).cloned() {
-          self.mark_referenced(def_id);
-          *self.type_of(&def_id)
-        } else {
-          if let Some(s) = span {
-            self.add_diagnostic(Diagnostic::new(
-              Severity::Error,
-              "Type 'string' requires the 'String' record (import std/string)".to_string(),
-              "I0043".to_string(),
-              s.clone(),
-            ));
-          }
-          self.types.error()
-        }
-      },
       IgnisTypeSyntax::Boolean => self.types.boolean(),
       IgnisTypeSyntax::Atom => self.types.atom(),
       IgnisTypeSyntax::Void => self.types.void(),
