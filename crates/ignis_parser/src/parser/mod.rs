@@ -30,6 +30,13 @@ pub struct IgnisParser {
   recovery: bool,
   recursion_depth: usize,
 
+  /// When the parser splits a `>>` (RightShift) token to consume the first `>`
+  /// in a generic context, this flag is set so that the next `>` consumption
+  /// reads from the split remainder instead of advancing the cursor.
+  pending_greater: bool,
+  /// Span of the pending `>` half when `pending_greater` is true.
+  pending_greater_span: Option<Span>,
+
   /// Pending outer doc comment (`///`) to be attached to the next declaration.
   pending_doc: Option<String>,
   /// Pending inner doc comment (`//!`) to be attached to the enclosing item.
@@ -53,6 +60,8 @@ impl IgnisParser {
       symbols,
       recovery: true,
       recursion_depth: 0,
+      pending_greater: false,
+      pending_greater_span: None,
       pending_doc: None,
       pending_inner_doc: None,
       pending_attrs: Vec::new(),
@@ -190,6 +199,76 @@ impl IgnisParser {
 
     Err(DiagnosticMessage::ExpectedToken {
       expected: Expected::Token(token_type),
+      at: self.peek().span.clone(),
+    })
+  }
+
+  /// Checks whether a `>` is available, considering the pending split state
+  /// and `>>` tokens that could be split.
+  fn at_greater(&self) -> bool {
+    if self.pending_greater {
+      return true;
+    }
+
+    let ty = self.peek().type_;
+    ty == TokenType::Greater || ty == TokenType::RightShift
+  }
+
+  /// Consumes a single `>` if available, handling three cases:
+  /// 1. A pending `>` from a previous `>>` split
+  /// 2. A normal `>` token
+  /// 3. A `>>` token — consumes it and sets `pending_greater` for the second `>`
+  #[allow(dead_code)]
+  fn eat_greater(&mut self) -> bool {
+    if self.pending_greater {
+      self.pending_greater = false;
+      self.pending_greater_span = None;
+      return true;
+    }
+
+    if self.at(TokenType::Greater) {
+      self.bump();
+      return true;
+    }
+
+    if self.at(TokenType::RightShift) {
+      let span = self.peek().span.clone();
+      self.bump();
+      self.pending_greater = true;
+      self.pending_greater_span = Some(span);
+      return true;
+    }
+
+    false
+  }
+
+  /// Like `expect(TokenType::Greater)` but handles `>>` splitting for nested generics.
+  fn expect_greater(&mut self) -> ParserResult<Span> {
+    if self.pending_greater {
+      self.pending_greater = false;
+      let span = self
+        .pending_greater_span
+        .take()
+        .unwrap_or_else(|| self.peek().span.clone());
+      return Ok(span);
+    }
+
+    if self.at(TokenType::Greater) {
+      let span = self.peek().span.clone();
+      self.bump();
+      return Ok(span);
+    }
+
+    if self.at(TokenType::RightShift) {
+      let span = self.peek().span.clone();
+      self.bump();
+      self.pending_greater = true;
+      self.pending_greater_span = Some(span.clone());
+      return Ok(span);
+    }
+
+    Err(DiagnosticMessage::ExpectedToken {
+      expected: Expected::Token(TokenType::Greater),
       at: self.peek().span.clone(),
     })
   }

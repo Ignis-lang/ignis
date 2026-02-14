@@ -1113,14 +1113,12 @@ impl<'a> CEmitter<'a> {
             // structurally identical to compiler-generated record structs but have a
             // different C tag.  Cast pointer/reference args through void* so C
             // doesn't warn about incompatible pointer types.
-            if callee_is_extern {
-              if let Some(op_ty) = self.operand_type(func, a) {
-                match self.types.get(&op_ty) {
-                  Type::Reference { .. } | Type::Pointer { .. } => {
-                    return format!("(void*){}", formatted);
-                  },
-                  _ => {},
-                }
+            if callee_is_extern && let Some(op_ty) = self.operand_type(func, a) {
+              match self.types.get(&op_ty) {
+                Type::Reference { .. } | Type::Pointer { .. } => {
+                  return format!("(void*){}", formatted);
+                },
+                _ => {},
               }
             }
 
@@ -1325,10 +1323,7 @@ impl<'a> CEmitter<'a> {
           if field_idx > &0 {
             write!(self.output, "    ").unwrap();
           }
-          let field_ty = field_types
-            .iter()
-            .find(|(idx, _)| idx == field_idx)
-            .map(|(_, ty)| *ty);
+          let field_ty = field_types.iter().find(|(idx, _)| idx == field_idx).map(|(_, ty)| *ty);
 
           let v = if let Some(ft) = field_ty {
             self.format_operand_coerced(func, field_value, ft)
@@ -2546,6 +2541,15 @@ where
         collect_struct_types_from_type(&field.type_id, types, defs, symbols, namespaces, &mut struct_forward_decls);
       }
     }
+
+    // Also collect types used in enum variant payloads
+    if let DefinitionKind::Enum(ed) = &def.kind {
+      for variant in &ed.variants {
+        for payload_ty in &variant.payload {
+          collect_struct_types_from_type(payload_ty, types, defs, symbols, namespaces, &mut struct_forward_decls);
+        }
+      }
+    }
   }
 
   // Get names of types defined in this module
@@ -2569,7 +2573,9 @@ where
     writeln!(output).unwrap();
   }
 
-  // Emit full struct definitions for enums first (they may be used as fields in records)
+  // Emit full struct definitions for enums first (they may be used as fields in records).
+  // Each definition is wrapped in an include guard so that if another module header
+  // also emits the same type (as an external dependency), the second definition is skipped.
   if !module_enums.is_empty() {
     let mut sorted_enums: Vec<_> = module_enums.iter().collect();
     sorted_enums.sort_by_key(|id| id.index());
@@ -2577,12 +2583,17 @@ where
     for &def_id in sorted_enums {
       let def = defs.get(&def_id);
       if let DefinitionKind::Enum(ed) = &def.kind {
+        let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
+        let type_guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
+        writeln!(output, "#ifndef {}", type_guard).unwrap();
+        writeln!(output, "#define {}", type_guard).unwrap();
         emit_enum_definition_standalone(def_id, ed, defs, symbols, namespaces, types, &mut output);
+        writeln!(output, "#endif // {}", type_guard).unwrap();
       }
     }
   }
 
-  // Emit full struct definitions for records defined in this module
+  // Emit full struct definitions for records defined in this module (also guarded).
   if !module_records.is_empty() {
     let mut sorted_records: Vec<_> = module_records.iter().collect();
     sorted_records.sort_by_key(|id| id.index());
@@ -2590,7 +2601,12 @@ where
     for &def_id in sorted_records {
       let def = defs.get(&def_id);
       if let DefinitionKind::Record(rd) = &def.kind {
+        let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
+        let type_guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
+        writeln!(output, "#ifndef {}", type_guard).unwrap();
+        writeln!(output, "#define {}", type_guard).unwrap();
         emit_record_definition_standalone(def_id, rd, defs, types, symbols, namespaces, &mut output);
+        writeln!(output, "#endif // {}", type_guard).unwrap();
       }
     }
   }

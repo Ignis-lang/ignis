@@ -20,12 +20,8 @@ static void ignis_string_grow(IgnisString *s, size_t min_cap) {
     new_cap *= 2;
   }
 
-  char *new_data = (char *)ignis_realloc(s->data, new_cap);
-  if (new_data == NULL) {
-    return;
-  }
-
-  s->data = new_data;
+  // ignis_realloc aborts on OOM, so no null check needed.
+  s->data = (char *)ignis_realloc(s->data, new_cap);
   s->cap = new_cap;
 }
 
@@ -44,13 +40,8 @@ IgnisString ignis_string_with_capacity(size_t cap) {
     cap = 1;
   }
 
+  // ignis_alloc aborts on OOM, so data is always valid.
   s.data = (char *)ignis_alloc(cap);
-  if (s.data == NULL) {
-    s.len = 0;
-    s.cap = 0;
-    return s;
-  }
-
   s.data[0] = '\0';
   s.len = 0;
   s.cap = cap;
@@ -70,9 +61,6 @@ IgnisString ignis_string_from_cstr(const char *cstr) {
 IgnisString ignis_string_from_len(const char *s, size_t len) {
   size_t cap = len + 1;
   IgnisString str = ignis_string_with_capacity(cap);
-  if (str.data == NULL) {
-    return str;
-  }
 
   if (s != NULL && len > 0) {
     memcpy(str.data, s, len);
@@ -100,9 +88,6 @@ void ignis_string_push_char(IgnisString *s, char c) {
   size_t required = s->len + 2;
   if (required > s->cap) {
     ignis_string_grow(s, required);
-    if (s->cap < required) {
-      return;
-    }
   }
 
   s->data[s->len] = c;
@@ -123,9 +108,6 @@ void ignis_string_push_cstr(IgnisString *s, const char *cstr) {
   size_t required = s->len + cstr_len + 1;
   if (required > s->cap) {
     ignis_string_grow(s, required);
-    if (s->cap < required) {
-      return;
-    }
   }
 
   memcpy(s->data + s->len, cstr, cstr_len);
@@ -141,9 +123,6 @@ void ignis_string_push_str(IgnisString *s, const IgnisString *other) {
   size_t required = s->len + other->len + 1;
   if (required > s->cap) {
     ignis_string_grow(s, required);
-    if (s->cap < required) {
-      return;
-    }
   }
 
   memcpy(s->data + s->len, other->data, other->len);
@@ -297,9 +276,6 @@ IgnisString ignis_string_to_upper(const IgnisString *s) {
   const char *data = ignis_string_cstr(s);
 
   IgnisString result = ignis_string_with_capacity(len + 1);
-  if (result.data == NULL) {
-    return result;
-  }
 
   for (size_t i = 0; i < len; i++) {
     ignis_string_push_char(&result, (char)toupper((unsigned char)data[i]));
@@ -317,9 +293,6 @@ IgnisString ignis_string_to_lower(const IgnisString *s) {
   const char *data = ignis_string_cstr(s);
 
   IgnisString result = ignis_string_with_capacity(len + 1);
-  if (result.data == NULL) {
-    return result;
-  }
 
   for (size_t i = 0; i < len; i++) {
     ignis_string_push_char(&result, (char)tolower((unsigned char)data[i]));

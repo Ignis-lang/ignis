@@ -3787,3 +3787,36 @@ function main(): i32 {
     result.stderr
   );
 }
+
+// =========================================================================
+// Nested generics (>> splitting)
+// =========================================================================
+
+#[test]
+fn e2e_nested_generics_option_option() {
+  e2e_test(
+    "nested_generics_option_option",
+    r#"
+enum Option<S> {
+    SOME(S),
+    NONE,
+}
+
+function main(): i32 {
+    let inner: Option<i32> = Option::SOME(42);
+    let outer: Option<Option<i32>> = Option::SOME(inner);
+
+    let isSome: boolean = match (outer) {
+        Option::SOME(_) -> true,
+        Option::NONE -> false,
+    };
+
+    if (isSome) {
+      return 42;
+    }
+
+    return 1;
+}
+"#,
+  );
+}

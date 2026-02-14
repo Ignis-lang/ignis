@@ -18,7 +18,6 @@ use ignis_type::module::{Module, ModuleId, ModulePath};
 use ignis_type::span::Span;
 use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::types::TypeStore;
-use ignis_type::BytePosition;
 use ignis_type::Store;
 
 /// Parsed module data
@@ -45,6 +44,12 @@ pub struct CompilationContext {
   pub module_graph: ModuleGraph,
   pub(crate) parsed_modules: HashMap<ModuleId, ParsedModule>,
   module_for_path: HashMap<String, ModuleId>,
+
+  /// Prelude module IDs discovered via auto_load. Stored separately from
+  /// the module graph to avoid polluting the import DAG with back-edges
+  /// that would create cycles. The analyzer receives these as
+  /// `implicit_imports` for each module being analyzed.
+  prelude_module_ids: Vec<ModuleId>,
 
   /// Diagnostics collected during module discovery (lex/parse errors).
   /// Used by LSP mode to collect all errors without failing early.
@@ -76,6 +81,7 @@ impl CompilationContext {
       module_graph,
       parsed_modules: HashMap::new(),
       module_for_path: HashMap::new(),
+      prelude_module_ids: Vec::new(),
       discovery_diagnostics: Vec::new(),
       preloaded_files: HashMap::new(),
     }
@@ -107,7 +113,7 @@ impl CompilationContext {
   /// manifest auto-load configuration is missing.
   const DEFAULT_PRELUDE_STD_MODULES: &'static [&'static str] = &["string", "number", "vector", "types"];
 
-  fn prelude_std_modules<'a>(config: &'a IgnisConfig) -> Vec<&'a str> {
+  fn prelude_std_modules(config: &IgnisConfig) -> Vec<&str> {
     let mut modules = config.manifest.get_auto_load_modules();
 
     if modules.is_empty() {
@@ -117,125 +123,127 @@ impl CompilationContext {
     modules
   }
 
-  /// Discover prelude std modules and add implicit import edges from root.
+  /// Discover prelude std modules and add safe DAG edges for ordering.
+  ///
+  /// Prelude IDs go into `prelude_module_ids` for implicit-import injection.
+  /// Edges `M → P` are added only where they don't create cycles (checked
+  /// against a snapshot of the explicit-only DAG).
   pub fn discover_prelude_modules(
     &mut self,
-    root_id: ModuleId,
+    _root_id: ModuleId,
     config: &IgnisConfig,
   ) {
-    let root_file = self.module_graph.modules.get(&root_id).file_id;
-    let dummy_span = Span::empty_at(root_file, BytePosition::default());
-
-    for module_name in Self::prelude_std_modules(config) {
-      if let Ok(prelude_id) = self.discover_std_module(module_name, config) {
-        self.add_prelude_import_if_needed(root_id, prelude_id, dummy_span.clone());
-      }
-    }
+    self.discover_and_register_preludes(config, false);
+    self.add_safe_prelude_edges();
   }
 
+  /// Variant for the std-library build (no root module).
   pub fn discover_prelude_modules_for_all(
     &mut self,
     config: &IgnisConfig,
   ) {
-    let mut prelude_ids = Vec::new();
-    for module_name in Self::prelude_std_modules(config) {
-      if let Ok(prelude_id) = self.discover_std_module(module_name, config) {
-        prelude_ids.push(prelude_id);
-      }
-    }
-
-    let module_ids: Vec<ModuleId> = self
-      .module_graph
-      .modules
-      .iter()
-      .map(|(module_id, _)| module_id)
-      .collect();
-
-    for module_id in module_ids {
-      if prelude_ids.contains(&module_id) {
-        continue;
-      }
-
-      let file_id = self.module_graph.modules.get(&module_id).file_id;
-      let dummy_span = Span::empty_at(file_id, BytePosition::default());
-
-      for prelude_id in &prelude_ids {
-        self.add_prelude_import_if_needed(module_id, *prelude_id, dummy_span.clone());
-      }
-    }
+    self.discover_and_register_preludes(config, false);
+    self.add_safe_prelude_edges();
   }
 
-  /// LSP variant of `discover_prelude_modules`.
+  /// LSP variant.
   pub fn discover_prelude_modules_lsp(
     &mut self,
-    root_id: ModuleId,
+    _root_id: ModuleId,
     config: &IgnisConfig,
   ) {
-    let root_file = self.module_graph.modules.get(&root_id).file_id;
-    let dummy_span = Span::empty_at(root_file, BytePosition::default());
-
-    for module_name in Self::prelude_std_modules(config) {
-      if let Ok(prelude_id) = self.discover_std_module_lsp(module_name, config) {
-        self.add_prelude_import_if_needed(root_id, prelude_id, dummy_span.clone());
-      }
-    }
+    self.discover_and_register_preludes(config, true);
+    self.add_safe_prelude_edges();
   }
 
+  /// LSP variant (all modules).
   pub fn discover_prelude_modules_for_all_lsp(
     &mut self,
     config: &IgnisConfig,
   ) {
-    let mut prelude_ids = Vec::new();
+    self.discover_and_register_preludes(config, true);
+    self.add_safe_prelude_edges();
+  }
+
+  fn discover_and_register_preludes(
+    &mut self,
+    config: &IgnisConfig,
+    lsp: bool,
+  ) {
     for module_name in Self::prelude_std_modules(config) {
-      if let Ok(prelude_id) = self.discover_std_module_lsp(module_name, config) {
-        prelude_ids.push(prelude_id);
-      }
-    }
+      let result = if lsp {
+        self.discover_std_module_lsp(module_name, config)
+      } else {
+        self.discover_std_module(module_name, config)
+      };
 
-    let module_ids: Vec<ModuleId> = self
-      .module_graph
-      .modules
-      .iter()
-      .map(|(module_id, _)| module_id)
-      .collect();
-
-    for module_id in module_ids {
-      if prelude_ids.contains(&module_id) {
-        continue;
-      }
-
-      let file_id = self.module_graph.modules.get(&module_id).file_id;
-      let dummy_span = Span::empty_at(file_id, BytePosition::default());
-
-      for prelude_id in &prelude_ids {
-        self.add_prelude_import_if_needed(module_id, *prelude_id, dummy_span.clone());
+      if let Ok(prelude_id) = result
+        && !self.prelude_module_ids.contains(&prelude_id)
+      {
+        self.prelude_module_ids.push(prelude_id);
       }
     }
   }
 
-  fn add_prelude_import_if_needed(
-    &mut self,
-    root_id: ModuleId,
-    prelude_id: ModuleId,
-    span: Span,
-  ) {
-    if root_id == prelude_id {
-      return;
-    }
+  /// Add prelude import edges to the module DAG without creating cycles.
+  ///
+  /// For each (module M, prelude P) pair, adds `M → P` only if P does
+  /// not already transitively depend on M via existing explicit edges.
+  /// Reachability is checked against a snapshot of the pre-prelude graph
+  /// so that the result is independent of insertion order.
+  fn add_safe_prelude_edges(&mut self) {
+    use std::collections::HashSet;
+    use ignis_type::BytePosition;
 
-    let already_imported = self
-      .module_graph
-      .modules
-      .get(&root_id)
-      .imports
+    // Snapshot: for each prelude module, compute which modules it can reach
+    // via existing (explicit) edges. This snapshot is frozen before we
+    // start adding prelude edges.
+    let prelude_reachable: HashMap<ModuleId, HashSet<ModuleId>> = self
+      .prelude_module_ids
       .iter()
-      .any(|import| import.items.is_empty() && import.source_module() == prelude_id);
+      .map(|&pid| {
+        let deps: HashSet<ModuleId> = self.module_graph.transitive_deps(pid).into_iter().collect();
+        (pid, deps)
+      })
+      .collect();
 
-    if already_imported {
-      return;
+    let all_module_ids: Vec<ModuleId> = self.module_graph.modules.iter().map(|(mid, _)| mid).collect();
+
+    for module_id in all_module_ids {
+      let file_id = self.module_graph.modules.get(&module_id).file_id;
+      let dummy_span = Span::empty_at(file_id, BytePosition::default());
+
+      for &prelude_id in &self.prelude_module_ids {
+        if module_id == prelude_id {
+          continue;
+        }
+
+        // Would adding module_id → prelude_id create a cycle?
+        // That happens iff prelude_id already reaches module_id.
+        if let Some(reachable) = prelude_reachable.get(&prelude_id)
+          && reachable.contains(&module_id)
+        {
+          continue;
+        }
+
+        // Don't add duplicate edges.
+        let already = self
+          .module_graph
+          .modules
+          .get(&module_id)
+          .imports
+          .iter()
+          .any(|imp| imp.items.is_empty() && imp.source_module() == prelude_id);
+
+        if already {
+          continue;
+        }
+
+        self
+          .module_graph
+          .add_import(module_id, Vec::new(), prelude_id, dummy_span.clone());
+      }
     }
-
-    self.module_graph.add_import(root_id, Vec::new(), prelude_id, span);
   }
 
   /// Discover a std module by name (e.g., "io", "string").
@@ -771,14 +779,15 @@ impl CompilationContext {
         log_dbg!(config, "analyzing module {:?}", module_path);
       }
 
+      // Prelude modules whose exports have already been analyzed are available
+      // as implicit imports. Skip the module itself and any prelude module not
+      // yet in the export table (it sits later in topo order, meaning it depends
+      // on the current module — injecting it would be premature).
       let implicit_imports: Vec<ModuleId> = self
-        .module_graph
-        .modules
-        .get(&module_id)
-        .imports
+        .prelude_module_ids
         .iter()
-        .filter(|import| import.items.is_empty())
-        .map(|import| import.source_module())
+        .copied()
+        .filter(|&pid| pid != module_id && export_table.contains_key(&pid))
         .collect();
 
       let output = ignis_analyzer::Analyzer::analyze_with_shared_stores(

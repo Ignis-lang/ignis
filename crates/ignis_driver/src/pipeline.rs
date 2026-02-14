@@ -1008,13 +1008,19 @@ pub fn build_std(
 
   let mut ctx = CompilationContext::new(&config);
 
-  for module_name in config.manifest.modules.keys() {
+  // Sort module names for deterministic discovery order (HashMap iteration is random).
+  let mut module_names: Vec<&str> = config.manifest.modules.keys().map(|s| s.as_str()).collect();
+  module_names.sort();
+
+  for module_name in &module_names {
     if let Err(()) = ctx.discover_std_module(module_name, &config) {
       cmd_fail!(&config, "Build failed", start.elapsed());
       eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
       return Err(());
     }
   }
+
+  ctx.discover_prelude_modules_for_all(&config);
 
   section!(&config, "Analyzing");
 
@@ -1330,13 +1336,18 @@ pub fn check_std(
 
   let mut ctx = CompilationContext::new(&config);
 
-  for module_name in config.manifest.modules.keys() {
+  let mut module_names: Vec<&str> = config.manifest.modules.keys().map(|s| s.as_str()).collect();
+  module_names.sort();
+
+  for module_name in &module_names {
     if let Err(()) = ctx.discover_std_module(module_name, &config) {
       cmd_fail!(&config, "Check failed", start.elapsed());
       eprintln!("{} Failed to discover std module '{}'", "Error:".red().bold(), module_name);
       return Err(());
     }
   }
+
+  ctx.discover_prelude_modules_for_all(&config);
 
   section!(&config, "Analyzing");
 

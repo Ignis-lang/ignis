@@ -1495,7 +1495,15 @@ impl<'a> Monomorphizer<'a> {
       .variants
       .iter()
       .map(|v| {
-        let substituted_payload: Vec<_> = v.payload.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
+        let substituted_payload: Vec<_> = v
+          .payload
+          .iter()
+          .map(|ty| {
+            let substituted = self.types.substitute(*ty, subst);
+            self.concretize_type(substituted)
+          })
+          .collect();
+
         let variant_def = Definition {
           kind: DefinitionKind::Variant(VariantDefinition {
             payload: substituted_payload.clone(),
