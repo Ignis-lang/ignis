@@ -6496,6 +6496,8 @@ impl<'a> Analyzer<'a> {
       return;
     }
 
+    // Type inference for generic calls happens during lowering, so we can't
+    // verify types that still contain unsubstituted type parameters.
     if self.types.contains_type_param(target_type) || self.types.contains_type_param(value_type) {
       return;
     }
@@ -8594,7 +8596,6 @@ impl<'a> Analyzer<'a> {
     self.zonk_node_types();
   }
 
-  /// Resolve all InferVar types in the node_types map so none escape to HIR lowering.
   fn zonk_node_types(&mut self) {
     let node_ids: Vec<NodeId> = self.node_types.keys().copied().collect();
 
