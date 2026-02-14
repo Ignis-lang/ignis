@@ -2711,6 +2711,38 @@ function main(): i32 {
 }
 
 // =========================================================================
+// Overwrite-drop ordering
+// =========================================================================
+
+#[test]
+fn e2e_reassign_self_ref_droppable() {
+  e2e_test(
+    "reassign_self_ref_droppable",
+    r#"
+@implements(Drop)
+record Acc {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+
+    combine(&self, other: &Acc): Acc {
+        return Acc { value: self.value + other.value };
+    }
+}
+
+function main(): i32 {
+    let mut a: Acc = Acc { value: 10 };
+    let b: Acc = Acc { value: 32 };
+    a = a.combine(&b);
+    return a.value;
+}
+"#,
+  );
+}
+
+// =========================================================================
 // Enum Drop
 // =========================================================================
 

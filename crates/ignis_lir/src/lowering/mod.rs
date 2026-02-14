@@ -1223,8 +1223,6 @@ impl<'a> LoweringContext<'a> {
     value: HIRId,
     operation: Option<ignis_hir::operation::BinaryOperation>,
   ) {
-    self.emit_overwrite_drops(hir_id);
-
     if let Some(local) = self.lower_to_local(target) {
       if let Some(op) = operation {
         // Compound assignment: target op= value
@@ -1247,6 +1245,10 @@ impl<'a> LoweringContext<'a> {
             right: rhs_op,
           });
 
+          // Drop old value *after* RHS evaluation so `x = x.method()` can
+          // still read from x before the overwrite.
+          self.emit_overwrite_drops(hir_id);
+
           self.fn_builder().emit(Instr::Store {
             dest: local,
             value: Operand::Temp(result),
@@ -1255,6 +1257,8 @@ impl<'a> LoweringContext<'a> {
       } else {
         // Simple assignment
         if let Some(val) = self.lower_hir_node(value) {
+          self.emit_overwrite_drops(hir_id);
+
           self.fn_builder().emit(Instr::Store {
             dest: local,
             value: val,
