@@ -210,7 +210,7 @@
 <primitive> ::= "void"
   | "boolean"
   | "char"
-  | "string"
+  | "str"
   | "i8" | "i16" | "i32" | "i64"
   | "u8" | "u16" | "u32" | "u64"
   | "f32" | "f64"
@@ -235,6 +235,7 @@
   | <const>
   | <record>
   | <enum>
+  | <trait>
   | <type-alias>
   | <extern>
   | <namespace>
@@ -306,7 +307,14 @@
                       "(" <parameters>? ")" ":" <type> ";"
 
 <namespace> ::= <directive-attrs>? "namespace" <qualified-identifier> "{" <namespace-item>* "}"
-<namespace-item> ::= <function> | <const> | <record> | <enum> | <type-alias> | <extern> | <directive-statement> | <directive> | <use> | <namespace>
+<namespace-item> ::= <function> | <const> | <record> | <enum> | <trait> | <type-alias> | <extern> | <directive-statement> | <directive> | <use> | <namespace>
+
+<trait> ::= <directive-attrs>? "trait" <identifier> <generic-type>?
+            "{" <trait-method>* "}"
+
+<trait-method> ::= <method-modifier>* "function"? <identifier> <generic-type>?
+                   "(" <parameters>? ")" ":" <type>
+                   (<block> | ";")
 
 <use> ::= "use" <use-path> <use-alias>? ";"
 
@@ -323,15 +331,21 @@
   | <continue>
   | <block>
   | <variable>
+  | <let-else>
   | <expression> ";"
 
-<if> ::= "if" "(" <expression> ")" <block>
-         ("else if" "(" <expression> ")" <block>)*
+<if> ::= "if" "(" <condition> ")" <block>
+         ("else if" "(" <condition> ")" <block>)*
          ("else" <block>)?
+
+<condition> ::= <let-condition> ( "&&" <expression> )*
+              | <expression>
+
+<let-condition> ::= "let" <pattern> "=" <expression>
 
 <for> ::= "for" "(" "let" <identifier> "=" <expression> ";" <expression> ";" <expression> ")" <block>
 <for-of> ::= "for" "(" ("let" <identifier> | <identifier>) "of" <expression> ")" <block>
-<while> ::= "while" "(" <expression> ")" <block>
+<while> ::= "while" "(" <condition> ")" <block>
 
 <return> ::= "return" <expression>? ";"
 <break> ::= "break" ";"
@@ -339,6 +353,7 @@
 
 <block> ::= "{" <statement>* "}"
 <variable> ::= <directive-attrs>? "let" "mut"? <identifier> ":" <type> ("=" <expression>)? ";"
+<let-else> ::= "let" <pattern> "=" <expression> "else" <block> ";"
 
 <expression> ::= <assignment> | <match>
 
@@ -485,7 +500,7 @@
 <primitive> ::= "void"
   | "boolean"
   | "char"
-  | "string"
+  | "str"
   | "atom"
   | "i8" | "i16" | "i32" | "i64"
   | "u8" | "u16" | "u32" | "u64"

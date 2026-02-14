@@ -50,7 +50,7 @@ Declares that a type can be explicitly duplicated. The type must define a `clone
 ```ignis
 @implements(Clone)
 record Buffer {
-    public data: string;
+    public data: str;
     public size: i32;
 
     clone(&self): Buffer {
@@ -293,7 +293,7 @@ Extension methods can be defined on primitive types:
 
 - Integer types: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
 - Float types: `f32`, `f64`
-- `boolean`, `char`, `string`
+- `boolean`, `char`, `str`
 
 Attempting to extend a user-defined record or an unknown type is a compile error.
 
