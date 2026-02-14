@@ -19,12 +19,13 @@
 //!
 //! ```ignis
 //! import Rc, Weak from "std::rc";
+//! import Option from "std::option";
 //!
 //! function main(): i32 {
 //!   let a: Rc<i32> = Rc::new<i32>(42);
 //!   let b: Rc<i32> = a.clone();
 //!   let w: Weak<i32> = a.downgrade();
-//!   let h: *mut void = w.upgrade();  // non-null while a or b is alive
+//!   let upgraded: Option<Rc<i32>> = w.upgrade(); // SOME while a or b is alive
 //!   return 0;
 //! }
 //! ```
@@ -154,26 +155,25 @@ export record Rc<T> {
     return (payload as *mut T) as &T;
   }
 
-  /// Returns a mutable pointer to the inner value if `strongCount == 1`,
-  /// or null otherwise.
-  ///
-  /// TODO: return `Option<&mut T>` once pattern matching is available.
+  /// Returns a mutable pointer to the inner value if this `Rc` is the
+  /// sole owner (`strongCount == 1`), or `NONE` otherwise.
   ///
   /// # Example
   ///
   /// ```ignis
   /// import Rc from "std::rc";
+  /// import Option from "std::option";
   ///
   /// let mut a: Rc<i32> = Rc::new<i32>(10);
-  /// let ptr: *mut i32 = a.getMut(); // non-null (unique owner)
+  /// let ptr: Option<*mut i32> = a.getMut(); // SOME (unique owner)
   /// ```
-  public getMut(&mut self): *mut T {
+  public getMut(&mut self): Option<*mut T> {
     if (__rc_ffi::ignis_rc_count(self.handle) == 1) {
       let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-      return payload as *mut T;
+      return Option::SOME(payload as *mut T);
     }
 
-    return 0 as *mut T;
+    return Option::NONE;
   }
 
   /// Increments the strong count and returns a new `Rc` sharing the allocation.
@@ -209,24 +209,31 @@ export record Rc<T> {
 export record Weak<T> {
   handle: *mut void;
 
-  /// Returns a handle to the value if it is still alive, or null.
+  /// Attempts to promote this weak reference to a strong `Rc<T>`.
   ///
-  /// When successful the strong count is incremented; the caller must
-  /// release the returned handle to avoid leaking a reference.
+  /// Returns `SOME(Rc<T>)` if the value is still alive (strong count > 0),
+  /// or `NONE` if all strong references have been dropped.
   ///
-  /// TODO: return `Option<Rc<T>>` once pattern matching is available.
+  /// When successful, the strong count is incremented.
   ///
   /// # Example
   ///
   /// ```ignis
   /// import Rc, Weak from "std::rc";
+  /// import Option from "std::option";
   ///
   /// let a: Rc<i32> = Rc::new<i32>(42);
   /// let w: Weak<i32> = a.downgrade();
-  /// let h: *mut void = w.upgrade(); // non-null
+  /// let upgraded: Option<Rc<i32>> = w.upgrade(); // SOME while a is alive
   /// ```
-  public upgrade(&self): *mut void {
-    return __rc_ffi::ignis_rc_upgrade(self.handle);
+  public upgrade(&self): Option<Rc<T>> {
+    let result: *mut void = __rc_ffi::ignis_rc_upgrade(self.handle);
+
+    if (result as u64 != 0) {
+      return Option::SOME(Rc { handle: result });
+    }
+
+    return Option::NONE;
   }
 
   /// Returns the number of live weak references.

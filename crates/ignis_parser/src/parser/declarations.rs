@@ -249,14 +249,14 @@ impl super::IgnisParser {
     // Parse remaining parameters
     while self.eat(TokenType::Comma) {
       // Allow trailing comma
-      if self.at(TokenType::Greater) {
+      if self.at_greater() {
         break;
       }
       let param_token = self.expect(TokenType::Identifier)?.clone();
       params.push(ASTGenericParam::new(self.insert_symbol(&param_token), param_token.span.clone()));
     }
 
-    let end = self.expect(TokenType::Greater)?.span.clone();
+    let end = self.expect_greater()?;
     let span = Span::merge(&start, &end);
 
     Ok(Some(ASTGenericParams::new(params, span)))
@@ -282,13 +282,13 @@ impl super::IgnisParser {
     // Parse remaining type arguments
     while self.eat(TokenType::Comma) {
       // Allow trailing comma
-      if self.at(TokenType::Greater) {
+      if self.at_greater() {
         break;
       }
       args.push(self.parse_type_syntax()?);
     }
 
-    self.expect(TokenType::Greater)?;
+    self.expect_greater()?;
 
     Ok(Some(args))
   }
@@ -1094,7 +1094,21 @@ impl super::IgnisParser {
             // Found the matching > - next should be (
             let after = self.peek_nth(i + 1).type_;
             if after == TokenType::LeftParen {
-              // Now scan from ( to see if it looks like a method
+              return self.is_method_ahead_from(i + 1);
+            }
+            return false;
+          }
+        },
+        TokenType::RightShift => {
+          // >> closes two levels of nesting at once
+          if depth >= 2 {
+            depth -= 2;
+          } else {
+            depth = 0;
+          }
+          if depth == 0 {
+            let after = self.peek_nth(i + 1).type_;
+            if after == TokenType::LeftParen {
               return self.is_method_ahead_from(i + 1);
             }
             return false;

@@ -1760,10 +1760,10 @@ fn add_heuristic_locals(
   for i in (0..cursor_idx).rev() {
     let tok = &tokens[i];
 
-    if let Some(local_scope_start) = local_scope_start {
-      if tok.span.start.0 < local_scope_start {
-        break;
-      }
+    if let Some(local_scope_start) = local_scope_start
+      && tok.span.start.0 < local_scope_start
+    {
+      break;
     }
 
     // Look for: let/const <IDENT>

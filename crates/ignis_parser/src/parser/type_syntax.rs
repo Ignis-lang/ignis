@@ -110,7 +110,11 @@ impl super::IgnisParser {
     }
   }
 
-  /// Parse type arguments: <T, U, V>
+  /// Parse type arguments: `<T, U, V>`
+  ///
+  /// Handles nested generics like `Option<Rc<T>>` by splitting `>>` tokens:
+  /// the lexer greedily produces a single `RightShift` for `>>`, but in type
+  /// contexts the parser treats it as two consecutive `>` closings.
   fn parse_type_args(&mut self) -> ParserResult<Vec<IgnisTypeSyntax>> {
     self.expect(TokenType::Less)?;
     let mut args = Vec::new();
@@ -121,13 +125,13 @@ impl super::IgnisParser {
     // Parse remaining type arguments
     while self.eat(TokenType::Comma) {
       // Allow trailing comma
-      if self.at(TokenType::Greater) {
+      if self.at_greater() {
         break;
       }
       args.push(self.parse_type_syntax()?);
     }
 
-    self.expect(TokenType::Greater)?;
+    self.expect_greater()?;
     Ok(args)
   }
 

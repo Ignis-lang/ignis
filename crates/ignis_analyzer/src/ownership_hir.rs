@@ -1798,57 +1798,53 @@ impl<'a> HirOwnershipChecker<'a> {
   ) {
     let type_name = format_type_name(ty, self.types, self.defs, self.symbols);
 
-    match self.types.get(ty) {
-      ignis_type::types::Type::Record(def_id) => {
-        let def = self.defs.get(def_id);
-        if let DefinitionKind::Record(rd) = &def.kind {
-          if rd.lang_traits.drop {
-            diag
-              .notes
-              .push(format!("'{}' implements Drop, which makes it non-Copy", type_name));
-          } else if let Some(field) = rd
+    if let ignis_type::types::Type::Record(def_id) = self.types.get(ty) {
+      let def = self.defs.get(def_id);
+      if let DefinitionKind::Record(rd) = &def.kind {
+        if rd.lang_traits.drop {
+          diag
+            .notes
+            .push(format!("'{}' implements Drop, which makes it non-Copy", type_name));
+        } else if let Some(field) = rd
+          .fields
+          .iter()
+          .find(|f| !self.types.is_copy_with_defs(&f.type_id, self.defs))
+        {
+          let field_name = self.symbols.get(&field.name);
+          let field_type = format_type_name(&field.type_id, self.types, self.defs, self.symbols);
+          diag.notes.push(format!(
+            "'{}' is non-Copy because field '{}' has type '{}' which is non-Copy",
+            type_name, field_name, field_type
+          ));
+        } else {
+          // All fields are structurally Copy but the record is still non-Copy.
+          // Shouldn't happen after Copy structural validation, but be defensive.
+          diag
+            .notes
+            .push(format!("'{}' is non-Copy; consider adding '@implements(Copy)'", type_name));
+        }
+
+        if rd.lang_traits.clone {
+          diag
+            .notes
+            .push("help: consider using '.clone()' to create an explicit copy".to_string());
+        } else if !rd.lang_traits.drop
+          && rd
             .fields
             .iter()
-            .find(|f| !self.types.is_copy_with_defs(&f.type_id, self.defs))
-          {
-            let field_name = self.symbols.get(&field.name);
-            let field_type = format_type_name(&field.type_id, self.types, self.defs, self.symbols);
-            diag.notes.push(format!(
-              "'{}' is non-Copy because field '{}' has type '{}' which is non-Copy",
-              type_name, field_name, field_type
-            ));
-          } else {
-            // All fields are structurally Copy but the record is still non-Copy.
-            // Shouldn't happen after Copy structural validation, but be defensive.
-            diag
-              .notes
-              .push(format!("'{}' is non-Copy; consider adding '@implements(Copy)'", type_name));
-          }
-
-          if rd.lang_traits.clone {
-            diag
-              .notes
-              .push("help: consider using '.clone()' to create an explicit copy".to_string());
-          } else if !rd.lang_traits.drop
-            && rd
-              .fields
-              .iter()
-              .all(|f| self.types.is_copy_with_defs(&f.type_id, self.defs))
-          {
-            diag.notes.push(format!(
-              "help: consider adding '@implements(Copy)' to '{}' since all its fields are Copy",
-              type_name
-            ));
-          } else {
-            diag.notes.push(format!(
-              "help: consider adding '@implements(Clone)' to '{}' and implementing a 'clone' method",
-              type_name
-            ));
-          }
+            .all(|f| self.types.is_copy_with_defs(&f.type_id, self.defs))
+        {
+          diag.notes.push(format!(
+            "help: consider adding '@implements(Copy)' to '{}' since all its fields are Copy",
+            type_name
+          ));
+        } else {
+          diag.notes.push(format!(
+            "help: consider adding '@implements(Clone)' to '{}' and implementing a 'clone' method",
+            type_name
+          ));
         }
-      },
-
-      _ => {},
+      }
     }
   }
 }

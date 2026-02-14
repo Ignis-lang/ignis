@@ -62,7 +62,8 @@ void ignis_mem_reset_stats(void) {
 void *ignis_alloc(size_t size) {
   AllocHeader *hdr = (AllocHeader *)malloc(sizeof(AllocHeader) + size);
   if (IGNIS_UNLIKELY(hdr == NULL)) {
-    return NULL;
+    fprintf(stderr, "ignis: out of memory (alloc %zu bytes)\n", size);
+    abort();
   }
 
   hdr->size = size;
@@ -80,7 +81,8 @@ void *ignis_realloc(void *ptr, size_t size) {
 
   AllocHeader *new_hdr = (AllocHeader *)realloc(old_hdr, sizeof(AllocHeader) + size);
   if (IGNIS_UNLIKELY(new_hdr == NULL)) {
-    return NULL;
+    fprintf(stderr, "ignis: out of memory (realloc %zu bytes)\n", size);
+    abort();
   }
 
   stats_bytes_live = stats_bytes_live - old_size + size;

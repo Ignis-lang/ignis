@@ -190,11 +190,13 @@ void ignis_mem_reset_stats(void);
 
 /**
  * Allocates `size` bytes with the runtime allocator.
+ * Aborts the process on allocation failure (OOM).
  */
 void *ignis_alloc(size_t size);
 
 /**
  * Resizes a previously allocated block.
+ * Aborts the process on allocation failure (OOM).
  */
 void *ignis_realloc(void *ptr, size_t size);
 
