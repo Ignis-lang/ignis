@@ -736,3 +736,62 @@ function main(): void {
   );
   assert_snapshot!("trait_in_namespace_hir", common::format_hir(&result));
 }
+
+// ── Type Inference ──────────────────────────────────────────
+
+#[test]
+fn infer_from_initializer() {
+  let result = common::analyze(
+    r#"
+function main(): i32 {
+    let x = 42;
+    return x;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "infer_from_initializer_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("infer_from_initializer_hir", common::format_hir(&result));
+}
+
+#[test]
+fn infer_deferred_from_assignment() {
+  let result = common::analyze(
+    r#"
+function main(): i32 {
+    let mut x;
+    x = 10;
+    return x;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "infer_deferred_from_assignment_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("infer_deferred_from_assignment_hir", common::format_hir(&result));
+}
+
+#[test]
+fn infer_multiple_variables() {
+  let result = common::analyze(
+    r#"
+function main(): i32 {
+    let a = 10;
+    let b = 20;
+    let c = a + b;
+    return c;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "infer_multiple_variables_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("infer_multiple_variables_hir", common::format_hir(&result));
+}

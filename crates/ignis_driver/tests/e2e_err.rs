@@ -799,3 +799,33 @@ function main(): i32 {
 "#,
   );
 }
+
+// ── Type Inference Errors ──────────────────────────────────
+
+#[test]
+fn e2e_err_cannot_infer_type() {
+  e2e_error_test(
+    "err_cannot_infer_type",
+    r#"
+function main(): void {
+    let x;
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_conflicting_inferred_types() {
+  e2e_error_test(
+    "err_conflicting_inferred_types",
+    r#"
+function main(): void {
+    let mut x;
+    x = 42;
+    x = true;
+    return;
+}
+"#,
+  );
+}

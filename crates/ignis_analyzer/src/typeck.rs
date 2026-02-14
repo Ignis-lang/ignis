@@ -28,6 +28,7 @@ use ignis_type::{
   definition::{
     ConstValue, Definition, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry, VariableDefinition, Visibility,
   },
+  inference::ConstraintReason,
   symbol::SymbolId,
   span::Span,
   types::{Substitution, Type, TypeId},
@@ -51,6 +52,8 @@ impl<'a> Analyzer<'a> {
     self.check_duplicate_signatures();
 
     self.report_unresolved_nulls();
+
+    self.zonk_all_inference_vars();
   }
 
   fn typecheck_node(
@@ -114,31 +117,24 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Variable(var) => {
         let declared_type = self.resolve_type_syntax_with_span(&var.type_, &var.span);
 
-        let mut var_type = if self.types.is_infer(&declared_type) {
+        let var_type = if self.types.is_infer(&declared_type) {
           if let Some(value_id) = &var.value {
-            self.typecheck_node(value_id, scope_kind, ctx)
+            let value_type = self.typecheck_node(value_id, scope_kind, ctx);
+
+            if self.types.is_null_ptr(&value_type) {
+              let span = self.node_span(value_id).clone();
+              self.add_diagnostic(DiagnosticMessage::CannotInferNullType { span }.report());
+              self.set_type(value_id, &self.types.error());
+              self.types.error()
+            } else {
+              value_type
+            }
           } else {
-            self.types.error()
+            self.infer_ctx.fresh_var(&mut self.types, var.span.clone())
           }
         } else {
           declared_type
         };
-
-        if self.types.is_null_ptr(&var_type) {
-          let span = var
-            .value
-            .as_ref()
-            .map(|value_id| self.node_span(value_id).clone())
-            .unwrap_or_else(|| var.span.clone());
-
-          self.add_diagnostic(DiagnosticMessage::CannotInferNullType { span }.report());
-
-          if let Some(value_id) = &var.value {
-            self.set_type(value_id, &self.types.error());
-          }
-
-          var_type = self.types.error();
-        }
 
         let lookedup_def = self.lookup_def(node_id);
 
@@ -149,6 +145,13 @@ impl<'a> Analyzer<'a> {
             type_id: var_type,
             mutable: var.metadata.is_mutable(),
           });
+
+          if let Some(infer_var_id) = self.types.as_infer_var(&var_type) {
+            self.scope_infer_vars
+              .entry(*self.scopes.current())
+              .or_default()
+              .push((def_id, infer_var_id));
+          }
         }
 
         if let Some(value_id) = &var.value
@@ -490,7 +493,23 @@ impl<'a> Analyzer<'a> {
         match entry {
           Some(SymbolEntry::Single(def_id)) => {
             self.mark_referenced(def_id);
-            self.get_definition_type(&def_id)
+            let var_type = self.get_definition_type(&def_id);
+
+            if self.types.is_infer_var(&var_type)
+              && let Some(expected) = infer.expected
+            {
+              let _ = self.infer_ctx.unify(
+                var_type,
+                expected,
+                &var.span,
+                ConstraintReason::Argument { param_idx: 0 },
+                &mut self.types,
+              );
+
+              return self.infer_ctx.resolve(var_type, &mut self.types);
+            }
+
+            var_type
           },
           Some(SymbolEntry::Overload(_)) => {
             self.add_diagnostic(
@@ -3321,6 +3340,19 @@ impl<'a> Analyzer<'a> {
         if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
           continue;
         }
+
+        if self.types.is_infer_var(&arg_types[i]) {
+          let span = self.node_span(&call.arguments[i]).clone();
+          let _ = self.infer_ctx.unify(
+            arg_types[i],
+            param_types[i],
+            &span,
+            ConstraintReason::Argument { param_idx: i },
+            &mut self.types,
+          );
+          continue;
+        }
+
         if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
           // Special case: deallocate accepts any *mut T, coercing to *mut u8
           if func_name == "deallocate" && i == 0 && self.is_ptr_coercion(&arg_types[i], &param_types[i]) {
@@ -6464,10 +6496,18 @@ impl<'a> Analyzer<'a> {
       return;
     }
 
-    // Skip type checking if either type contains unsubstituted type parameters.
-    // Type inference for generic calls happens during lowering, so we can't
-    // verify the types at this stage.
     if self.types.contains_type_param(target_type) || self.types.contains_type_param(value_type) {
+      return;
+    }
+
+    if self.types.is_infer_var(target_type) {
+      let _ = self.infer_ctx.unify(
+        *target_type,
+        *value_type,
+        span,
+        ConstraintReason::Assignment,
+        &mut self.types,
+      );
       return;
     }
 
@@ -7217,6 +7257,8 @@ impl<'a> Analyzer<'a> {
         let arg_strs: Vec<_> = args.iter().map(|a| self.format_type_for_error(a)).collect();
         format!("{}<{}>", name, arg_strs.join(", "))
       },
+      Type::InferVar(id) => format!("?{}", id.0),
+      Type::Unknown => "unknown".to_string(),
     }
   }
 
@@ -7232,7 +7274,14 @@ impl<'a> Analyzer<'a> {
           .types
           .function(param_types, func_def.return_type, func_def.is_variadic)
       },
-      _ => *self.type_of(def_id),
+      _ => {
+        let ty = *self.type_of(def_id);
+        if self.types.is_infer_var(&ty) {
+          self.infer_ctx.resolve(ty, &mut self.types)
+        } else {
+          ty
+        }
+      },
     }
   }
 
@@ -8493,6 +8542,80 @@ impl<'a> Analyzer<'a> {
         }
         .report(),
       );
+    }
+  }
+
+  fn zonk_all_inference_vars(&mut self) {
+    let all_vars: Vec<(DefinitionId, ignis_type::types::InferVarId)> = self
+      .scope_infer_vars
+      .values()
+      .flat_map(|v| v.iter().copied())
+      .collect();
+
+    let error_type = self.types.error();
+
+    for (def_id, _infer_var_id) in all_vars {
+      let var_type = *self.defs.type_of(&def_id);
+      let resolved = self.infer_ctx.resolve(var_type, &mut self.types);
+
+      match self.infer_ctx.zonk(resolved, &mut self.types) {
+        Ok(concrete_type) => {
+          let def = self.defs.get_mut(&def_id);
+          if let DefinitionKind::Variable(ref mut v) = def.kind {
+            v.type_id = concrete_type;
+          }
+        }
+        Err(unresolved_var) => {
+          let var_name = self.symbols.borrow().get(&self.defs.get(&def_id).name).to_string();
+          let def_span = self.defs.get(&def_id).span.clone();
+
+          let origin_span = self
+            .infer_ctx
+            .get_origin(unresolved_var)
+            .cloned()
+            .unwrap_or(def_span);
+
+          self.add_diagnostic(
+            DiagnosticMessage::CannotInferVariableType {
+              var_name,
+              span: origin_span,
+            }
+            .report(),
+          );
+
+          let def = self.defs.get_mut(&def_id);
+          if let DefinitionKind::Variable(ref mut v) = def.kind {
+            v.type_id = error_type;
+          }
+        }
+      }
+    }
+
+    self.zonk_node_types();
+  }
+
+  /// Resolve all InferVar types in the node_types map so none escape to HIR lowering.
+  fn zonk_node_types(&mut self) {
+    let node_ids: Vec<NodeId> = self.node_types.keys().copied().collect();
+
+    let error_type = self.types.error();
+
+    for node_id in node_ids {
+      let ty = self.node_types[&node_id];
+      let resolved = self.infer_ctx.resolve(ty, &mut self.types);
+
+      if resolved == ty {
+        continue;
+      }
+
+      match self.infer_ctx.zonk(resolved, &mut self.types) {
+        Ok(concrete_type) => {
+          self.node_types.insert(node_id, concrete_type);
+        }
+        Err(_) => {
+          self.node_types.insert(node_id, error_type);
+        }
+      }
     }
   }
 }

@@ -2459,6 +2459,8 @@ impl<'a> Monomorphizer<'a> {
       },
       Type::Param { owner, index } => format!("T{}__{}", index, owner.index()),
       Type::Infer => "infer".into(),
+      Type::InferVar(id) => format!("?{}", id.0),
+      Type::Unknown => "unknown".into(),
       Type::NullPtr => "null".into(),
       Type::Error => "error".into(),
     }

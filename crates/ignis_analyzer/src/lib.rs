@@ -34,6 +34,7 @@ use std::cell::RefCell;
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
 use ignis_type::{
   compilation_context::CompilationContext,
+  inference::InferCtx,
   symbol::{SymbolId, SymbolTable},
   Store as ASTStore,
 };
@@ -94,6 +95,8 @@ pub struct Analyzer<'a> {
   defs: DefinitionStore,
   namespaces: NamespaceStore,
   scopes: ScopeTree,
+  infer_ctx: InferCtx,
+  scope_infer_vars: HashMap<crate::scope::ScopeId, Vec<(DefinitionId, ignis_type::types::InferVarId)>>,
   node_defs: HashMap<NodeId, DefinitionId>,
   node_types: HashMap<NodeId, TypeId>,
   diagnostics: Vec<Diagnostic>,
@@ -187,6 +190,8 @@ impl<'a> Analyzer<'a> {
       defs: DefinitionStore::new(),
       namespaces: NamespaceStore::new(),
       scopes: ScopeTree::new(),
+      infer_ctx: InferCtx::new(),
+      scope_infer_vars: HashMap::new(),
       node_defs: HashMap::new(),
       node_types: HashMap::new(),
       diagnostics: Vec::new(),
@@ -291,6 +296,8 @@ impl<'a> Analyzer<'a> {
       defs: std::mem::replace(shared_defs, DefinitionStore::new()),
       namespaces: std::mem::replace(shared_namespaces, NamespaceStore::new()),
       scopes: ScopeTree::new(),
+      infer_ctx: InferCtx::new(),
+      scope_infer_vars: HashMap::new(),
       node_defs: HashMap::new(),
       node_types: HashMap::new(),
       diagnostics: Vec::new(),

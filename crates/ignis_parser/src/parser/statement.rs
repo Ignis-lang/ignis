@@ -108,14 +108,16 @@ impl super::IgnisParser {
     }
   }
 
-  /// let name: type (= init)?;
+  /// let name (: type)? (= init)?;
+  /// let pattern = expr else block; (let-else)
   fn parse_let_statement(&mut self) -> ParserResult<NodeId> {
-    // Capture doc comment before the variable declaration
     let doc = self.take_pending_doc();
 
     let keyword = self.expect(TokenType::Let)?.clone();
 
-    if !self.is_typed_let_declaration_start() {
+    let is_complex_pattern = self.looks_like_complex_pattern();
+
+    if is_complex_pattern {
       return self.parse_let_else_statement(keyword);
     }
 
@@ -123,14 +125,48 @@ impl super::IgnisParser {
     let name_token = self.expect(TokenType::Identifier)?.clone();
     let name = self.insert_symbol(&name_token);
 
-    self.expect(TokenType::Colon)?;
-
-    let type_annotation = self.parse_type_syntax()?;
-
-    let mut initializer: Option<NodeId> = None;
+    let type_annotation = if self.eat(TokenType::Colon) {
+      self.parse_type_syntax()?
+    } else {
+      ignis_ast::type_::IgnisTypeSyntax::Implicit
+    };
 
     if self.eat(TokenType::Equal) {
-      initializer = Some(self.parse_expression(0)?);
+      let initializer = self.parse_expression(0)?;
+
+      if self.eat(TokenType::Else) {
+        let else_block = self.parse_block()?;
+        let semicolon = self.expect(TokenType::SemiColon)?.clone();
+        let span = Span::merge(&keyword.span, &semicolon.span);
+
+        let pattern = ignis_ast::pattern::ASTPattern::Path {
+          segments: vec![(name, name_token.span.clone())],
+          args: None,
+          span: name_token.span,
+        };
+        let let_else = ASTLetElse::new(pattern, initializer, else_block, span);
+        return Ok(self.allocate_statement(ASTStatement::LetElse(let_else)));
+      }
+
+      let semicolon = self.expect(TokenType::SemiColon)?.clone();
+      let span = Span::merge(&keyword.span, &semicolon.span);
+
+      let metadata = if is_mutable {
+        ignis_ast::metadata::ASTMetadata::VARIABLE | ignis_ast::metadata::ASTMetadata::MUTABLE
+      } else {
+        ignis_ast::metadata::ASTMetadata::VARIABLE
+      };
+
+      let variable = ASTVariable::new(
+        name,
+        name_token.span.clone(),
+        Some(initializer),
+        type_annotation,
+        span,
+        metadata,
+        doc,
+      );
+      return Ok(self.allocate_statement(ASTStatement::Variable(variable)));
     }
 
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
@@ -142,16 +178,20 @@ impl super::IgnisParser {
       ignis_ast::metadata::ASTMetadata::VARIABLE
     };
 
-    let variable = ASTVariable::new(name, initializer, type_annotation, span, metadata, doc);
+    let variable = ASTVariable::new(name, name_token.span.clone(), None, type_annotation, span, metadata, doc);
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
   }
 
-  fn is_typed_let_declaration_start(&self) -> bool {
-    if self.at(TokenType::Mut) {
+  fn looks_like_complex_pattern(&self) -> bool {
+    let offset = if self.at(TokenType::Mut) { 1 } else { 0 };
+
+    let first = &self.peek_nth(offset).type_;
+    if *first != TokenType::Identifier {
       return true;
     }
 
-    self.at(TokenType::Identifier) && self.peek_nth(1).type_ == TokenType::Colon
+    let second = &self.peek_nth(offset + 1).type_;
+    *second == TokenType::DoubleColon || *second == TokenType::LeftParen
   }
 
   fn parse_let_else_statement(
@@ -375,8 +415,7 @@ impl super::IgnisParser {
 
     let metadata = ignis_ast::metadata::ASTMetadata::VARIABLE | ignis_ast::metadata::ASTMetadata::MUTABLE;
 
-    // For loop initializer variables don't have doc comments
-    let variable = ASTVariable::new(name, Some(initializer), type_annotation, span, metadata, None);
+    let variable = ASTVariable::new(name, name_token.span, Some(initializer), type_annotation, span, metadata, None);
 
     Ok(self.allocate_statement(ASTStatement::Variable(variable)))
   }

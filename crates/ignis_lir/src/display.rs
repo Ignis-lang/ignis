@@ -474,6 +474,8 @@ impl<'a> LirPrinter<'a> {
         let arg_strs: Vec<_> = args.iter().map(|a| self.format_type(*a)).collect();
         format!("{}#{}<{}>", "generic", generic.index(), arg_strs.join(", "))
       },
+      Type::InferVar(id) => format!("?{}", id.0),
+      Type::Unknown => "unknown".to_string(),
     }
   }
 
