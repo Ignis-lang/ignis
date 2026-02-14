@@ -2384,7 +2384,7 @@ impl<'a> Monomorphizer<'a> {
       Type::F64 => "f64".into(),
       Type::Boolean => "bool".into(),
       Type::Char => "char".into(),
-      Type::String => "string".into(),
+      Type::Str => "str".into(),
       Type::Atom => "atom".into(),
       Type::Void => "void".into(),
       Type::Never => "never".into(),

@@ -188,6 +188,7 @@ impl super::IgnisParser {
       TokenType::Float32Type => IgnisTypeSyntax::F32,
       TokenType::Float64Type => IgnisTypeSyntax::F64,
       TokenType::BooleanType => IgnisTypeSyntax::Boolean,
+      TokenType::StrType => IgnisTypeSyntax::Str,
       TokenType::StringType => IgnisTypeSyntax::String,
       TokenType::AtomType => IgnisTypeSyntax::Atom,
       TokenType::CharType => IgnisTypeSyntax::Char,
@@ -215,6 +216,7 @@ impl super::IgnisParser {
         | TokenType::Float64Type
         | TokenType::BooleanType
         | TokenType::AtomType
+        | TokenType::StrType
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void
@@ -281,7 +283,7 @@ mod tests {
   }
 
   #[test]
-  fn parses_primitive_string() {
+  fn parses_type_keyword_string() {
     let ty = parse_type("string");
     assert_eq!(ty, IgnisTypeSyntax::String);
   }
@@ -431,7 +433,7 @@ mod tests {
 
   #[test]
   fn parses_applied_type_multiple_args() {
-    // Map<K, V> is a user-defined generic record
+    // Map<K, V> is a user-defined generic record; `string` is a type keyword alias for `String`
     let ty = parse_type("Map<string, i32>");
     match ty {
       IgnisTypeSyntax::Applied { args, .. } => {

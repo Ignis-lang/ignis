@@ -1,13 +1,19 @@
-// Test: Record with a String field is NOT structurally Copy
+// Test: Record with a non-Copy field is NOT structurally Copy
 // Expected: use-after-move error on `h`
 
-record Handle {
-  public name: string;
+@implements(Drop)
+record Owned {
   public id: i32;
+  drop(&mut self): void { return; }
+}
+
+record Handle {
+  public inner: Owned;
+  public tag: i32;
 }
 
 function main(): i32 {
-  let h: Handle = Handle { name: "hello", id: 1 };
+  let h: Handle = Handle { inner: Owned { id: 1 }, tag: 1 };
   let h2: Handle = h;
-  return h.id;
+  return h.tag;
 }

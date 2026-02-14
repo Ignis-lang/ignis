@@ -2,18 +2,24 @@
 // Expected: OK - temps passed to extern are dropped after call
 // Note: This tests runtime behavior (no leaks), not static analysis
 
-extern io {
-    function print(s: string): void;
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
 }
 
-function createString(): string {
-    return "dynamic string";
+extern io {
+    function print(s: Owned): void;
+}
+
+function createOwned(): Owned {
+    return Owned { id: 1 };
 }
 
 function main(): void {
     // Passing temp directly to extern - should be dropped after call
-    io::print(createString());
-    io::print(createString());
-    
+    io::print(createOwned());
+    io::print(createOwned());
+
     return;
 }

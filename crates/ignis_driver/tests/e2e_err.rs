@@ -726,8 +726,13 @@ fn e2e_err_use_after_move_noncopy_field() {
   e2e_ownership_error_test(
     "err_use_after_move_noncopy_field",
     r#"
+@implements(Drop)
 record Named {
-    public name: string;
+    public id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
 }
 
 function consume(n: Named): i32 {
@@ -735,7 +740,7 @@ function consume(n: Named): i32 {
 }
 
 function main(): i32 {
-    let n: Named = Named { name: "hello" };
+    let n: Named = Named { id: 1 };
     let x: i32 = consume(n);
     return consume(n);
 }

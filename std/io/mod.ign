@@ -9,7 +9,7 @@
 //! - `print` / `println` write to stdout
 //! - `eprint` / `eprintln` write to stderr
 //!
-//! All APIs are string-based and intentionally minimal.
+//! All APIs consume the `String` by value (move).
 //!
 //! ## Example
 //!
@@ -18,9 +18,7 @@
 //! import String from "std::string";
 //!
 //! function main(): i32 {
-//!   Io::print("progress: ");
-//!   Io::println(String::toString(42));
-//!   Io::eprintln("done");
+//!   Io::println(String::create("hello"));
 //!   return 0;
 //! }
 //! ```
@@ -28,73 +26,30 @@
 import String from "std::string";
 
 extern __io {
-  function ignis_print(message: string): void;
-  function ignis_eprint(message: string): void;
+  function ignis_print(message: &String): void;
+  function ignis_println(message: &String): void;
+  function ignis_eprint(message: &String): void;
+  function ignis_eprintln(message: &String): void;
 }
 
 export namespace Io {
   /// Prints `message` to stdout and appends `\n`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import Io from "std::io";
-  ///
-  /// function main(): i32 {
-  ///   Io::println("hello");
-  ///   return 0;
-  /// }
-  /// ```
-  function println(message: string): void {
-    __io::ignis_print(String::concat(message, "\n"));
+  function println(message: String): void {
+    __io::ignis_println(&message);
   }
 
   /// Prints `message` to stderr and appends `\n`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import Io from "std::io";
-  ///
-  /// function main(): i32 {
-  ///   Io::eprintln("error");
-  ///   return 0;
-  /// }
-  /// ```
-  function eprintln(message: string): void {
-    __io::ignis_eprint(String::concat(message, "\n"));
+  function eprintln(message: String): void {
+    __io::ignis_eprintln(&message);
   }
 
   /// Prints `message` to stdout without appending a newline.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import Io from "std::io";
-  ///
-  /// function main(): i32 {
-  ///   Io::print("loading...");
-  ///   return 0;
-  /// }
-  /// ```
-  function print(message: string): void {
-    __io::ignis_print(message);
+  function print(message: String): void {
+    __io::ignis_print(&message);
   }
 
   /// Prints `message` to stderr without appending a newline.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import Io from "std::io";
-  ///
-  /// function main(): i32 {
-  ///   Io::eprint("warning: ");
-  ///   Io::eprintln("low memory");
-  ///   return 0;
-  /// }
-  /// ```
-  function eprint(message: string): void {
-    __io::ignis_eprint(message);
+  function eprint(message: String): void {
+    __io::ignis_eprint(&message);
   }
 }

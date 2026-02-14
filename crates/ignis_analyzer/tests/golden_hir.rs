@@ -132,7 +132,7 @@ fn hir_multiple_declarations() {
   let result = common::analyze(
     r#"
 extern io {
-    function print(s: string): void;
+    function print(s: str): void;
 }
 
 function helper(): i32 {

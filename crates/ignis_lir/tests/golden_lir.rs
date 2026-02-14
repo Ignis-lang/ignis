@@ -266,7 +266,7 @@ fn lir_extern_function() {
   let result = common::lower_to_lir(
     r#"
 extern io {
-    function print(msg: string): void;
+    function print(msg: str): void;
 }
 
 function greet(): void {
@@ -313,25 +313,37 @@ function do_nothing(): void {
 }
 
 #[test]
-fn lir_drop_string_at_scope_end() {
+fn lir_drop_owned_at_scope_end() {
   let result = common::lower_to_lir(
     r#"
-function with_string(): i32 {
-    let s: string = "hello";
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+function with_owned(): i32 {
+    let s: Owned = Owned { id: 1 };
     return 0;
 }
 "#,
   );
 
-  assert_snapshot!("lir_drop_string_at_scope_end", common::format_lir(&result));
+  assert_snapshot!("lir_drop_owned_at_scope_end", common::format_lir(&result));
 }
 
 #[test]
 fn lir_drop_on_early_return() {
   let result = common::lower_to_lir(
     r#"
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
 function early_exit(flag: boolean): i32 {
-    let s: string = "hello";
+    let s: Owned = Owned { id: 1 };
     if (flag) {
         return 1;
     }
@@ -347,8 +359,14 @@ function early_exit(flag: boolean): i32 {
 fn lir_no_drop_if_returned() {
   let result = common::lower_to_lir(
     r#"
-function return_string(): string {
-    let s: string = "hello";
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+function return_owned(): Owned {
+    let s: Owned = Owned { id: 1 };
     return s;
 }
 "#,
@@ -361,9 +379,15 @@ function return_string(): string {
 fn lir_drop_before_overwrite() {
   let result = common::lower_to_lir(
     r#"
-function overwrite_string(): i32 {
-    let mut s: string = "hello";
-    s = "world";
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+function overwrite_owned(): i32 {
+    let mut s: Owned = Owned { id: 1 };
+    s = Owned { id: 2 };
     return 0;
 }
 "#,
@@ -376,9 +400,15 @@ function overwrite_string(): i32 {
 fn lir_drop_on_break() {
   let result = common::lower_to_lir(
     r#"
-function break_with_string(): i32 {
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+function break_with_owned(): i32 {
     while (true) {
-        let s: string = "hello";
+        let s: Owned = Owned { id: 1 };
         break;
     }
     return 0;
@@ -393,10 +423,16 @@ function break_with_string(): i32 {
 fn lir_drop_on_continue() {
   let result = common::lower_to_lir(
     r#"
-function continue_with_string(): i32 {
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+function continue_with_owned(): i32 {
     let mut i: i32 = 0;
     while (i < 10) {
-        let s: string = "hello";
+        let s: Owned = Owned { id: 1 };
         i = i + 1;
         continue;
     }
@@ -412,10 +448,16 @@ function continue_with_string(): i32 {
 fn lir_drop_in_loop_scope_end() {
   let result = common::lower_to_lir(
     r#"
-function loop_with_string(): i32 {
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+function loop_with_owned(): i32 {
     let mut i: i32 = 0;
     while (i < 3) {
-        let s: string = "hello";
+        let s: Owned = Owned { id: 1 };
         i = i + 1;
     }
     return 0;

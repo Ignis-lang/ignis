@@ -613,7 +613,7 @@ impl<'a> Analyzer<'a> {
           ignis_type::value::IgnisLiteralValue::Float64(_) => self.types.f64(),
           ignis_type::value::IgnisLiteralValue::Boolean(_) => self.types.boolean(),
           ignis_type::value::IgnisLiteralValue::Char(_) => self.types.char(),
-          ignis_type::value::IgnisLiteralValue::String(_) => self.types.string(),
+          ignis_type::value::IgnisLiteralValue::String(_) => self.types.str(),
           ignis_type::value::IgnisLiteralValue::Atom(_) => self.types.atom(),
           ignis_type::value::IgnisLiteralValue::Hex(_) => self.types.u32(),
           ignis_type::value::IgnisLiteralValue::Binary(_) => self.types.u8(),
@@ -2073,7 +2073,7 @@ impl<'a> Analyzer<'a> {
     hir.alloc(HIRNode {
       kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::String(name)),
       span: bc.span.clone(),
-      type_id: self.types.string(),
+      type_id: self.types.str(),
     })
   }
 

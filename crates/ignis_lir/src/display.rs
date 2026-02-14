@@ -420,7 +420,7 @@ impl<'a> LirPrinter<'a> {
       Type::F64 => "f64".to_string(),
       Type::Boolean => "bool".to_string(),
       Type::Char => "char".to_string(),
-      Type::String => "string".to_string(),
+      Type::Str => "str".to_string(),
       Type::Atom => "atom".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "!".to_string(),

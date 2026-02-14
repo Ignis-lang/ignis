@@ -170,7 +170,7 @@ impl super::IgnisParser {
         let sym = self.symbols.borrow_mut().intern("mut");
         Ok(ASTAttributeArg::Identifier(sym, token.span))
       },
-      tt if tt.is_primitive_type_keyword() => {
+      tt if tt.is_type_keyword() => {
         self.bump();
         let sym = self.symbols.borrow_mut().intern(&token.lexeme);
         Ok(ASTAttributeArg::Identifier(sym, token.span))

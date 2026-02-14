@@ -1848,12 +1848,6 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       },
 
-      ignis_type::types::Type::String => {
-        diag
-          .notes
-          .push("'string' is non-Copy because it owns heap-allocated memory".to_string());
-      },
-
       _ => {},
     }
   }

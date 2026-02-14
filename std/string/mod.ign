@@ -1,16 +1,17 @@
 //!
 //! # String Module
 //!
-//! Runtime-backed string utilities.
+//! Owned, heap-backed string type and related utilities.
 //!
 //! ## Overview
 //!
-//! This module wraps the string operations provided by the Ignis runtime:
-//! - Length and comparison
-//! - Concatenation and slicing
-//! - Search helpers
-//! - Case conversion
-//! - Primitive-to-string conversion overloads
+//! `String` is a value-type record whose `data` buffer lives on the heap.
+//! It implements `Drop` so the buffer is freed automatically when the
+//! owning binding goes out of scope.
+//!
+//! `str` is the primitive immutable string-slice type (`const char*` in C).
+//! String literals have type `str`.  Use `String::create(s)` to create an
+//! owned copy from a `str`.
 //!
 //! ## Example
 //!
@@ -19,314 +20,327 @@
 //! import Io from "std::io";
 //!
 //! function main(): i32 {
-//!   let greeting: string = String::concat("hello", " world");
-//!   let upper: string = String::toUpperCase(greeting);
+//!   let greeting: String = String::create("hello");
+//!   let world: String = String::create(" world");
+//!   let msg: String = greeting.concat(&world);
 //!
-//!   Io::println(upper);
-//!   Io::println(String::toString(String::contains(greeting, "world")));
-//!   Io::println(String::toString(String::length(greeting)));
+//!   Io::println(msg);
 //!   return 0;
 //! }
 //! ```
 
 extern __string {
-  function ignis_string_len(s: string): u64;
-  function ignis_string_compare(a: string, b: string): i32;
-  function ignis_string_concat(a: string, b: string): string;
-  function ignis_string_substring(s: string, start: i64, len: i64): string;
-  function ignis_string_char_at(s: string, idx: u64): char;
-  function ignis_string_index_of(haystack: string, needle: string): i64;
-  function ignis_string_contains(haystack: string, needle: string): boolean;
-  function ignis_string_to_upper(s: string): string;
-  function ignis_string_to_lower(s: string): string;
-  function ignis_string_push_char(s: string, c: char): void;
+  // Init functions (write into &mut String, never return by value)
+  function ignis_string_init_new(out: &mut String): void;
+  function ignis_string_init_with_capacity(out: &mut String, cap: u64): void;
+  function ignis_string_init_from_cstr(out: &mut String, s: str): void;
+  function ignis_string_init_clone(out: &mut String, s: &String): void;
+  function ignis_string_init_concat(out: &mut String, a: &String, b: &String): void;
+  function ignis_string_init_substring(out: &mut String, s: &String, start: i64, len: i64): void;
+  function ignis_string_init_to_upper(out: &mut String, s: &String): void;
+  function ignis_string_init_to_lower(out: &mut String, s: &String): void;
 
-  function ignis_i8_to_string(value: i8): string;
-  function ignis_i16_to_string(value: i16): string;
-  function ignis_i32_to_string(value: i32): string;
-  function ignis_i64_to_string(value: i64): string;
-  function ignis_u8_to_string(value: u8): string;
-  function ignis_u16_to_string(value: u16): string;
-  function ignis_u32_to_string(value: u32): string;
-  function ignis_u64_to_string(value: u64): string;
-  function ignis_f32_to_string(value: f32): string;
-  function ignis_f64_to_string(value: f64): string;
+  // Read operations
+  function ignis_string_len(s: &String): u64;
+  function ignis_string_compare(a: &String, b: &String): i32;
+  function ignis_string_char_at(s: &String, idx: u64): char;
+  function ignis_string_index_of(haystack: &String, needle: &String): i64;
+  function ignis_string_contains(haystack: &String, needle: &String): boolean;
+  function ignis_string_cstr(s: &String): str;
+
+  // Mutating operations
+  function ignis_string_push_char(s: &mut String, c: char): void;
+  function ignis_string_push_cstr(s: &mut String, cstr: str): void;
+  function ignis_string_push_str(s: &mut String, other: &String): void;
+  function ignis_string_clear(s: &mut String): void;
+  function ignis_string_reserve(s: &mut String, additional: u64): void;
+  function ignis_string_drop(s: &mut String): void;
+
+  // Number-to-string init functions
+  function ignis_string_init_from_i8(out: &mut String, value: i8): void;
+  function ignis_string_init_from_i16(out: &mut String, value: i16): void;
+  function ignis_string_init_from_i32(out: &mut String, value: i32): void;
+  function ignis_string_init_from_i64(out: &mut String, value: i64): void;
+  function ignis_string_init_from_u8(out: &mut String, value: u8): void;
+  function ignis_string_init_from_u16(out: &mut String, value: u16): void;
+  function ignis_string_init_from_u32(out: &mut String, value: u32): void;
+  function ignis_string_init_from_u64(out: &mut String, value: u64): void;
+  function ignis_string_init_from_f32(out: &mut String, value: f32): void;
+  function ignis_string_init_from_f64(out: &mut String, value: f64): void;
 }
 
-export namespace String {
+/// Owned, heap-backed string.
+///
+/// The `data` buffer is heap-allocated and freed when the String is dropped.
+/// Fields mirror the C runtime's `IgnisString` layout exactly.
+///
+/// # Example
+///
+/// ```ignis
+/// import String from "std::string";
+///
+/// let s: String = String::create("ignis");
+/// let len: u64 = s.length();
+/// ```
+@implements(Drop, Clone)
+export record String {
+  data: *mut u8;
+  len: u64;
+  cap: u64;
+
+  // ---------------------------------------------------------------------------
+  // Static constructors
+  // ---------------------------------------------------------------------------
+
+  /// Creates a new empty string with default capacity.
+  public static new(): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_new(&mut result);
+    return result;
+  }
+
+  /// Creates a new empty string with at least `capacity` bytes reserved.
+  public static withCapacity(capacity: u64): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_with_capacity(&mut result, capacity);
+    return result;
+  }
+
+  /// Creates an owned String from an immutable `str` slice.
+  public static create(s: str): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_cstr(&mut result, s);
+    return result;
+  }
+
+  /// Creates an owned String from an `i8`.
+  public static create(value: i8): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_i8(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from an `i16`.
+  public static create(value: i16): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_i16(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from an `i32`.
+  public static create(value: i32): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_i32(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from an `i64`.
+  public static create(value: i64): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_i64(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from a `u8`.
+  public static create(value: u8): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_u8(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from a `u16`.
+  public static create(value: u16): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_u16(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from a `u32`.
+  public static create(value: u32): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_u32(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from a `u64`.
+  public static create(value: u64): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_u64(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from an `f32`.
+  public static create(value: f32): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_f32(&mut result, value);
+    return result;
+  }
+
+  /// Creates an owned String from an `f64`.
+  public static create(value: f64): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_f64(&mut result, value);
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Instance methods — read-only
+  // ---------------------------------------------------------------------------
+
   /// Returns the string length in bytes.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let n: u64 = String::length("abc");
-  /// ```
-  @extension(string)
-  function length(s: string): u64 {
-    return __string::ignis_string_len(s);
+  public length(&self): u64 {
+    return __string::ignis_string_len(self);
   }
 
-  /// Lexicographically compares `a` and `b`.
+  /// Lexicographically compares this string with `other`.
   ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let cmp: i32 = String::compare("abc", "abd");
-  /// ```
-  @extension(string)
-  function compare(a: string, b: string): i32 {
-    return __string::ignis_string_compare(a, b);
+  /// Returns negative if `self < other`, zero if equal, positive if `self > other`.
+  public compare(&self, other: &String): i32 {
+    return __string::ignis_string_compare(self, other);
   }
 
-  /// Concatenates two strings and returns a new string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::concat("hello", " world");
-  /// ```
-  @extension(string)
-  function concat(a: string, b: string): string {
-    return __string::ignis_string_concat(a, b);
+  /// Returns the character at `index`, or `'\0'` if out of range.
+  public charAt(&self, index: u64): char {
+    return __string::ignis_string_char_at(self, index);
   }
 
-  /// Returns a substring starting at `start` with length `len`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::substring("ignis", 0, 3);
-  /// ```
-  @extension(string)
-  function substring(s: string, start: i64, len: i64): string {
-    return __string::ignis_string_substring(s, start, len);
+  /// Returns the index of the first occurrence of `needle`, or `-1`.
+  public indexOf(&self, needle: &String): i64 {
+    return __string::ignis_string_index_of(self, needle);
   }
 
-  /// Returns the character at `index`, or `0` if out of range.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let c: char = String::charAt("ignis", 1);
-  /// ```
-  @extension(string)
-  function charAt(s: string, index: u64): char {
-    return __string::ignis_string_char_at(s, index);
+  /// Returns whether `needle` appears in this string.
+  public contains(&self, needle: &String): boolean {
+    return __string::ignis_string_contains(self, needle);
   }
 
-  /// Returns the index of the first `needle` match, or `-1`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let idx: i64 = String::indexOf("hello", "ll");
-  /// ```
-  @extension(string)
-  function indexOf(haystack: string, needle: string): i64 {
-    return __string::ignis_string_index_of(haystack, needle);
+  /// Returns an immutable `str` view of this string's data.
+  public toStr(&self): str {
+    return __string::ignis_string_cstr(self);
   }
 
-  /// Returns whether `needle` appears in `haystack`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let ok: boolean = String::contains("hello", "he");
-  /// ```
-  @extension(string)
-  function contains(haystack: string, needle: string): boolean {
-    return __string::ignis_string_contains(haystack, needle);
+  // ---------------------------------------------------------------------------
+  // Instance methods — creating new strings
+  // ---------------------------------------------------------------------------
+
+  /// Returns a new string that is the concatenation of `self` and `other`.
+  public concat(&self, other: &String): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_concat(&mut result, self, other);
+    return result;
   }
 
-  /// Returns an uppercase copy of `s`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toUpperCase("ignis");
-  /// ```
-  @extension(string)
-  function toUpperCase(s: string): string {
-    return __string::ignis_string_to_upper(s);
+  /// Returns a substring starting at `start` with length `length`.
+  public substring(&self, start: i64, length: i64): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_substring(&mut result, self, start, length);
+    return result;
   }
 
-  /// Returns a lowercase copy of `s`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toLowerCase("IGNIS");
-  /// ```
-  @extension(string)
-  function toLowerCase(s: string): string {
-    return __string::ignis_string_to_lower(s);
+  /// Returns a new uppercase copy of this string.
+  public toUpperCase(&self): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_to_upper(&mut result, self);
+    return result;
   }
 
-  /// Appends a character to `s` in place.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = "ig";
-  /// String::pushChar(s, 'n');
-  /// String::pushChar(s, 'i');
-  /// String::pushChar(s, 's');
-  /// ```
-  @extension(string, mut)
-  function pushChar(s: string, c: char): void {
-    __string::ignis_string_push_char(s, c);
+  /// Returns a new lowercase copy of this string.
+  public toLowerCase(&self): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_to_lower(&mut result, self);
+    return result;
   }
 
-  /// Converts an `i8` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(-1 as i8);
-  /// ```
-  @extension(i8)
-  function toString(value: i8): string { return __string::ignis_i8_to_string(value); }
+  /// Creates a deep copy of this string.
+  public clone(&self): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_clone(&mut result, self);
+    return result;
+  }
 
-  /// Converts an `i16` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(-12 as i16);
-  /// ```
-  @extension(i16)
-  function toString(value: i16): string { return __string::ignis_i16_to_string(value); }
+  // ---------------------------------------------------------------------------
+  // Instance methods — mutating
+  // ---------------------------------------------------------------------------
 
-  /// Converts an `i32` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(42 as i32);
-  /// ```
-  @extension(i32)
-  function toString(value: i32): string { return __string::ignis_i32_to_string(value); }
+  /// Appends a character to this string.
+  public pushChar(&mut self, c: char): void {
+    __string::ignis_string_push_char(self, c);
+  }
 
-  /// Converts an `i64` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(-42 as i64);
-  /// ```
-  @extension(i64)
-  function toString(value: i64): string { return __string::ignis_i64_to_string(value); }
+  /// Appends a `str` slice to this string.
+  public pushStr(&mut self, s: str): void {
+    __string::ignis_string_push_cstr(self, s);
+  }
 
-  /// Converts a `u8` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(10 as u8);
-  /// ```
-  @extension(u8)
-  function toString(value: u8): string { return __string::ignis_u8_to_string(value); }
+  /// Appends another String to this string.
+  public push(&mut self, other: &String): void {
+    __string::ignis_string_push_str(self, other);
+  }
 
-  /// Converts a `u16` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(100 as u16);
-  /// ```
-  @extension(u16)
-  function toString(value: u16): string { return __string::ignis_u16_to_string(value); }
+  /// Clears the string to length 0 without releasing capacity.
+  public clear(&mut self): void {
+    __string::ignis_string_clear(self);
+  }
 
-  /// Converts a `u32` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(1000 as u32);
-  /// ```
-  @extension(u32)
-  function toString(value: u32): string { return __string::ignis_u32_to_string(value); }
+  /// Ensures capacity for `additional` bytes beyond current length.
+  public reserve(&mut self, additional: u64): void {
+    __string::ignis_string_reserve(self, additional);
+  }
 
-  /// Converts a `u64` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(10000 as u64);
-  /// ```
-  @extension(u64)
-  function toString(value: u64): string { return __string::ignis_u64_to_string(value); }
+  // ---------------------------------------------------------------------------
+  // Drop
+  // ---------------------------------------------------------------------------
 
-  /// Converts an `f32` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(1.5 as f32);
-  /// ```
-  @extension(f32)
-  function toString(value: f32): string { return __string::ignis_f32_to_string(value); }
-
-  /// Converts an `f64` to string.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let s: string = String::toString(1.5);
-  /// ```
-  @extension(f64)
-  function toString(value: f64): string { return __string::ignis_f64_to_string(value); }
-
-  /// Converts a boolean to `"true"` or `"false"`.
-  ///
-  /// # Example
-  ///
-  /// ```ignis
-  /// import String from "std::string";
-  ///
-  /// let a: string = String::toString(true);
-  /// let b: string = String::toString(false);
-  /// ```
-  @extension(boolean)
-  function toString(value: boolean): string { return value ? "true" : "false"; }
+  /// Releases the data buffer.
+  public drop(&mut self): void {
+    __string::ignis_string_drop(self);
+  }
 }
+
+// =============================================================================
+// Extension methods — toString on primitive types
+// =============================================================================
+
+/// Converts an `i8` to an owned String.
+@extension(i8)
+function toString(value: i8): String { return String::create(value); }
+
+/// Converts an `i16` to an owned String.
+@extension(i16)
+function toString(value: i16): String { return String::create(value); }
+
+/// Converts an `i32` to an owned String.
+@extension(i32)
+function toString(value: i32): String { return String::create(value); }
+
+/// Converts an `i64` to an owned String.
+@extension(i64)
+function toString(value: i64): String { return String::create(value); }
+
+/// Converts a `u8` to an owned String.
+@extension(u8)
+function toString(value: u8): String { return String::create(value); }
+
+/// Converts a `u16` to an owned String.
+@extension(u16)
+function toString(value: u16): String { return String::create(value); }
+
+/// Converts a `u32` to an owned String.
+@extension(u32)
+function toString(value: u32): String { return String::create(value); }
+
+/// Converts a `u64` to an owned String.
+@extension(u64)
+function toString(value: u64): String { return String::create(value); }
+
+/// Converts an `f32` to an owned String.
+@extension(f32)
+function toString(value: f32): String { return String::create(value); }
+
+/// Converts an `f64` to an owned String.
+@extension(f64)
+function toString(value: f64): String { return String::create(value); }
+
+/// Converts a boolean to `"true"` or `"false"`.
+@extension(boolean)
+function toString(value: boolean): String { return value ? String::create("true") : String::create("false"); }

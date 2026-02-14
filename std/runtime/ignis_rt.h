@@ -60,31 +60,21 @@ typedef u32 IgnisTypeId;
 // =============================================================================
 
 /**
- * Header for heap-managed runtime objects.
- * `refcnt` is reserved for future reference counting.
- */
-typedef struct {
-  IgnisTypeId type_id;
-  u32 refcnt;
-} IgnisHeader;
-
-/**
- * Heap-managed string type.
+ * Value-type string with heap-managed character buffer.
+ *
+ * IgnisString is a value type: instances live inline (on the stack or inside
+ * other structs).  Only the `data` buffer is heap-allocated.  Functions that
+ * create new strings return IgnisString by value.  `ignis_string_drop` frees
+ * the data buffer and zeroes the struct, but does NOT free the struct itself.
  *
  * Invariant: data[len] == '\0'
  * Invariant: cap >= len + 1
  */
 typedef struct IgnisString {
-  IgnisHeader hdr;
   char *data;
   size_t len;
   size_t cap;
 } IgnisString;
-
-/**
- * `string` is an alias for a heap-managed IgnisString pointer.
- */
-typedef IgnisString *string;
 
 /**
  * Null pointer alias.
@@ -233,29 +223,29 @@ void ignis_memmove(void *dest, const void *src, size_t n);
 // =============================================================================
 
 /**
- * Creates a new empty string.
+ * Creates a new empty string with default capacity.
  */
-IgnisString *ignis_string_new(void);
+IgnisString ignis_string_new(void);
 
 /**
  * Creates a new empty string with at least `cap` capacity.
  */
-IgnisString *ignis_string_with_capacity(size_t cap);
+IgnisString ignis_string_with_capacity(size_t cap);
 
 /**
- * Creates a new string from a C string.
+ * Creates a new string from a null-terminated C string.
  */
-IgnisString *ignis_string_from_cstr(const char *s);
+IgnisString ignis_string_from_cstr(const char *s);
 
 /**
- * Creates a new string from a byte slice.
+ * Creates a new string from a byte slice of the given length.
  */
-IgnisString *ignis_string_from_len(const char *s, size_t len);
+IgnisString ignis_string_from_len(const char *s, size_t len);
 
 /**
- * Creates a clone of an existing string.
+ * Creates a deep copy of an existing string.
  */
-IgnisString *ignis_string_clone(const IgnisString *s);
+IgnisString ignis_string_clone(const IgnisString *s);
 
 /**
  * Appends a character to the string in place.
@@ -273,7 +263,7 @@ void ignis_string_push_cstr(IgnisString *s, const char *cstr);
 void ignis_string_push_str(IgnisString *s, const IgnisString *other);
 
 /**
- * Returns a null-terminated view of the string.
+ * Returns a null-terminated view of the string data.
  */
 const char *ignis_string_cstr(const IgnisString *s);
 
@@ -293,7 +283,7 @@ size_t ignis_string_cap(const IgnisString *s);
 char ignis_string_char_at(const IgnisString *s, size_t idx);
 
 /**
- * Clears the string to length 0.
+ * Clears the string to length 0 without releasing capacity.
  */
 void ignis_string_clear(IgnisString *s);
 
@@ -303,7 +293,8 @@ void ignis_string_clear(IgnisString *s);
 void ignis_string_reserve(IgnisString *s, size_t additional);
 
 /**
- * Releases the string and its storage.
+ * Releases the data buffer and zeroes the struct.
+ * Does NOT free the IgnisString struct itself (it is a value type).
  */
 void ignis_string_drop(IgnisString *s);
 
@@ -321,12 +312,12 @@ i32 ignis_string_compare(const IgnisString *a, const IgnisString *b);
 /**
  * Creates a new string by concatenating `a` and `b`.
  */
-IgnisString *ignis_string_concat(const IgnisString *a, const IgnisString *b);
+IgnisString ignis_string_concat(const IgnisString *a, const IgnisString *b);
 
 /**
  * Creates a substring from `start` with length `len`.
  */
-IgnisString *ignis_string_substring(const IgnisString *s, i64 start, i64 len);
+IgnisString ignis_string_substring(const IgnisString *s, i64 start, i64 len);
 
 /**
  * Returns the first index of `needle` in `haystack`, or -1 if not found.
@@ -341,29 +332,59 @@ boolean ignis_string_contains(const IgnisString *haystack, const IgnisString *ne
 /**
  * Returns a new string with all characters converted to uppercase.
  */
-IgnisString *ignis_string_to_upper(const IgnisString *s);
+IgnisString ignis_string_to_upper(const IgnisString *s);
 
 /**
  * Returns a new string with all characters converted to lowercase.
  */
-IgnisString *ignis_string_to_lower(const IgnisString *s);
+IgnisString ignis_string_to_lower(const IgnisString *s);
+
+// =============================================================================
+// String init functions (output-pointer variants)
+//
+// These write into a pre-allocated IgnisString through a pointer, avoiding
+// return-by-value ABI issues when the caller's struct has a different size
+// (e.g. the compiler-generated struct has an extra __ignis_drop_state field).
+// =============================================================================
+
+void ignis_string_init_new(IgnisString *out);
+void ignis_string_init_with_capacity(IgnisString *out, size_t cap);
+void ignis_string_init_from_cstr(IgnisString *out, const char *cstr);
+void ignis_string_init_from_len(IgnisString *out, const char *s, size_t len);
+void ignis_string_init_clone(IgnisString *out, const IgnisString *s);
+void ignis_string_init_concat(IgnisString *out, const IgnisString *a, const IgnisString *b);
+void ignis_string_init_substring(IgnisString *out, const IgnisString *s, i64 start, i64 len);
+void ignis_string_init_to_upper(IgnisString *out, const IgnisString *s);
+void ignis_string_init_to_lower(IgnisString *out, const IgnisString *s);
 
 // =============================================================================
 // Number to string conversions
 // =============================================================================
 
-IgnisString *ignis_i8_to_string(i8 value);
-IgnisString *ignis_i16_to_string(i16 value);
-IgnisString *ignis_i32_to_string(i32 value);
-IgnisString *ignis_i64_to_string(i64 value);
+IgnisString ignis_i8_to_string(i8 value);
+IgnisString ignis_i16_to_string(i16 value);
+IgnisString ignis_i32_to_string(i32 value);
+IgnisString ignis_i64_to_string(i64 value);
 
-IgnisString *ignis_u8_to_string(u8 value);
-IgnisString *ignis_u16_to_string(u16 value);
-IgnisString *ignis_u32_to_string(u32 value);
-IgnisString *ignis_u64_to_string(u64 value);
+IgnisString ignis_u8_to_string(u8 value);
+IgnisString ignis_u16_to_string(u16 value);
+IgnisString ignis_u32_to_string(u32 value);
+IgnisString ignis_u64_to_string(u64 value);
 
-IgnisString *ignis_f32_to_string(f32 value);
-IgnisString *ignis_f64_to_string(f64 value);
+IgnisString ignis_f32_to_string(f32 value);
+IgnisString ignis_f64_to_string(f64 value);
+
+// Output-pointer variants for number-to-string conversions.
+void ignis_string_init_from_i8(IgnisString *out, i8 value);
+void ignis_string_init_from_i16(IgnisString *out, i16 value);
+void ignis_string_init_from_i32(IgnisString *out, i32 value);
+void ignis_string_init_from_i64(IgnisString *out, i64 value);
+void ignis_string_init_from_u8(IgnisString *out, u8 value);
+void ignis_string_init_from_u16(IgnisString *out, u16 value);
+void ignis_string_init_from_u32(IgnisString *out, u32 value);
+void ignis_string_init_from_u64(IgnisString *out, u64 value);
+void ignis_string_init_from_f32(IgnisString *out, f32 value);
+void ignis_string_init_from_f64(IgnisString *out, f64 value);
 
 // =============================================================================
 // I/O
@@ -375,6 +396,16 @@ IgnisString *ignis_f64_to_string(f64 value);
 void ignis_print(const IgnisString *s);
 
 /**
+ * Writes the string to stdout followed by a newline.
+ */
+void ignis_println(const IgnisString *s);
+
+/**
  * Writes the string to stderr.
  */
 void ignis_eprint(const IgnisString *s);
+
+/**
+ * Writes the string to stderr followed by a newline.
+ */
+void ignis_eprintln(const IgnisString *s);

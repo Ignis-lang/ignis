@@ -587,10 +587,10 @@ mod tests {
   fn parses_line_doc_comments_with_line_breaks() {
     let source = r#"
 /// Concatenates two strings into a new string.
-/// @param {string} a - Prefix string.
-/// @param {string} b - Suffix string.
-/// @return {string} Newly allocated concatenation.
-function concat(a: string, b: string): string {
+/// @param {str} a - Prefix string.
+/// @param {str} b - Suffix string.
+/// @return {str} Newly allocated concatenation.
+function concat(a: str, b: str): str {
   return a;
 }
 "#;
@@ -612,9 +612,9 @@ function concat(a: string, b: string): string {
 
     // Should contain all the expected content
     assert!(doc.contains("Concatenates two strings"));
-    assert!(doc.contains("@param {string} a - Prefix string"));
-    assert!(doc.contains("@param {string} b - Suffix string"));
-    assert!(doc.contains("@return {string} Newly allocated"));
+    assert!(doc.contains("@param {str} a - Prefix string"));
+    assert!(doc.contains("@param {str} b - Suffix string"));
+    assert!(doc.contains("@return {str} Newly allocated"));
 
     // Lines should be separate (not run together)
     assert!(!doc.contains("new string.@param"), "lines should not run together");

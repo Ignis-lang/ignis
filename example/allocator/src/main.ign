@@ -14,49 +14,70 @@ import String from "std::string";
 import LibC from "std::libc";
 
 /// Prints the current program break (heap end address).
-function printProgramBreak(label: string): void {
+function printProgramBreak(label: str): void {
   let brk: *mut u8 = LibC::sbrk(0);
-  Io::print(label);
-  Io::print(": ");
-  Io::println(String::toString(brk as u64));
+  let labelStr: String = String::create(label);
+  let sep: String = String::create(": ");
+  let val: String = String::create(brk as u64);
+  let msg: String = labelStr.concat(&sep);
+  let msg2: String = msg.concat(&val);
+  Io::println(msg2);
 }
 
 /// Prints a test header.
-function printHeader(title: string): void {
-  Io::println("");
-  Io::println("========================================");
-  Io::println(title);
-  Io::println("========================================");
+function printHeader(title: str): void {
+  let empty: String = String::create("");
+  let bar: String = String::create("========================================");
+  let titleStr: String = String::create(title);
+  Io::println(empty);
+  Io::println(bar.clone());
+  Io::println(titleStr);
+  Io::println(bar);
 }
 
 /// Prints a sub-section.
-function printSection(title: string): void {
-  Io::println("");
-  Io::print("--- ");
-  Io::print(title);
-  Io::println(" ---");
+function printSection(title: str): void {
+  let empty: String = String::create("");
+  let prefix: String = String::create("--- ");
+  let suffix: String = String::create(" ---");
+  let titleStr: String = String::create(title);
+  let line: String = prefix.concat(&titleStr);
+  let line2: String = line.concat(&suffix);
+  Io::println(empty);
+  Io::println(line2);
 }
 
 /// Prints OK or FAIL based on condition.
-function check(name: string, condition: boolean): void {
-  Io::print("  ");
-  Io::print(name);
-  Io::print(": ");
+function check(name: str, condition: boolean): void {
+  let indent: String = String::create("  ");
+  let nameStr: String = String::create(name);
+  let sep: String = String::create(": ");
+  Io::print(indent);
+  Io::print(nameStr);
+  Io::print(sep);
   if (condition) {
-    Io::println("OK");
+    Io::println(String::create("OK"));
   } else {
-    Io::println("FAIL");
+    Io::println(String::create("FAIL"));
   }
 }
 
 /// Prints arena statistics.
 function printArenaStats(arena: &ArenaAllocator): void {
-  Io::print("  Capacity: ");
-  Io::println(String::toString(arena.capacity()));
-  Io::print("  Used: ");
-  Io::println(String::toString(arena.used()));
-  Io::print("  Available: ");
-  Io::println(String::toString(arena.available()));
+  let capLabel: String = String::create("  Capacity: ");
+  let capVal: String = String::create(arena.capacity());
+  Io::print(capLabel);
+  Io::println(capVal);
+
+  let usedLabel: String = String::create("  Used: ");
+  let usedVal: String = String::create(arena.used());
+  Io::print(usedLabel);
+  Io::println(usedVal);
+
+  let availLabel: String = String::create("  Available: ");
+  let availVal: String = String::create(arena.available());
+  Io::print(availLabel);
+  Io::println(availVal);
 }
 
 function testHeapAllocator(): void {
@@ -70,14 +91,22 @@ function testHeapAllocator(): void {
 
   printSection("Test 1: Allocate u32");
   let layoutU32: Layout = Layout::init<u32>();
-  Io::print("  Layout size: ");
-  Io::println(String::toString(layoutU32.size()));
-  Io::print("  Layout align: ");
-  Io::println(String::toString(layoutU32.align()));
+
+  let sizeLabel: String = String::create("  Layout size: ");
+  let sizeVal: String = String::create(layoutU32.size());
+  Io::print(sizeLabel);
+  Io::println(sizeVal);
+
+  let alignLabel: String = String::create("  Layout align: ");
+  let alignVal: String = String::create(layoutU32.align());
+  Io::print(alignLabel);
+  Io::println(alignVal);
 
   let ptrU32: *mut u8 = allocator.allocate(layoutU32);
-  Io::print("  Allocated at: ");
-  Io::println(String::toString(ptrU32 as u64));
+  let allocLabel: String = String::create("  Allocated at: ");
+  let allocVal: String = String::create(ptrU32 as u64);
+  Io::print(allocLabel);
+  Io::println(allocVal);
   check("Pointer not null", ptrU32 != null);
   check("4-byte aligned", Align::isAligned(ptrU32 as u64, 4));
 
@@ -91,8 +120,10 @@ function testHeapAllocator(): void {
   printSection("Test 2: Allocate u8 array (12 bytes)");
   let layoutU8Array: Layout = Layout::init(12 as u64, 1 as u64);
   let ptrU8Array: *mut u8 = allocator.allocate(layoutU8Array);
-  Io::print("  Allocated at: ");
-  Io::println(String::toString(ptrU8Array as u64));
+  let allocLabel2: String = String::create("  Allocated at: ");
+  let allocVal2: String = String::create(ptrU8Array as u64);
+  Io::print(allocLabel2);
+  Io::println(allocVal2);
   check("Pointer not null", ptrU8Array != null);
 
   // Write pattern to array
@@ -112,8 +143,10 @@ function testHeapAllocator(): void {
   printSection("Test 3: Allocate u64 (8-byte alignment)");
   let layoutU64: Layout = Layout::init<u64>();
   let ptrU64: *mut u8 = allocator.allocate(layoutU64);
-  Io::print("  Allocated at: ");
-  Io::println(String::toString(ptrU64 as u64));
+  let allocLabel3: String = String::create("  Allocated at: ");
+  let allocVal3: String = String::create(ptrU64 as u64);
+  Io::print(allocLabel3);
+  Io::println(allocVal3);
   check("Pointer not null", ptrU64 != null);
   check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8));
 
@@ -124,8 +157,10 @@ function testHeapAllocator(): void {
   printSection("Test 4: Allocate u16 array (32 bytes, 2-byte align)");
   let layoutU16Array: Layout = Layout::init(32 as u64, 2 as u64);
   let ptrU16Array: *mut u8 = allocator.allocate(layoutU16Array);
-  Io::print("  Allocated at: ");
-  Io::println(String::toString(ptrU16Array as u64));
+  let allocLabel4: String = String::create("  Allocated at: ");
+  let allocVal4: String = String::create(ptrU16Array as u64);
+  Io::print(allocLabel4);
+  Io::println(allocVal4);
   check("Pointer not null", ptrU16Array != null);
   check("2-byte aligned", Align::isAligned(ptrU16Array as u64, 2));
 
@@ -136,19 +171,25 @@ function testHeapAllocator(): void {
   printProgramBreak("After deallocating last block");
 
   printSection("Test 6: Deallocate middle allocation (u8 array)");
-  Io::println("  (Should only mark as free, not shrink heap)");
+  let note: String = String::create("  (Should only mark as free, not shrink heap)");
+  Io::println(note);
   allocator.deallocate(ptrU8Array);
   printProgramBreak("After deallocating middle block");
 
   printSection("Test 7: Large allocation (64KB)");
   let layoutLarge: Layout = Layout::init(65536 as u64, 8 as u64);
-  Io::print("  Requesting ");
-  Io::print(String::toString(layoutLarge.size()));
-  Io::println(" bytes");
+  let reqLabel: String = String::create("  Requesting ");
+  let reqVal: String = String::create(layoutLarge.size());
+  let reqSuffix: String = String::create(" bytes");
+  Io::print(reqLabel);
+  Io::print(reqVal);
+  Io::println(reqSuffix);
 
   let ptrLarge: *mut u8 = allocator.allocate(layoutLarge);
-  Io::print("  Allocated at: ");
-  Io::println(String::toString(ptrLarge as u64));
+  let allocLabel5: String = String::create("  Allocated at: ");
+  let allocVal5: String = String::create(ptrLarge as u64);
+  Io::print(allocLabel5);
+  Io::println(allocVal5);
   check("Pointer not null", ptrLarge != null);
   check("8-byte aligned", Align::isAligned(ptrLarge as u64, 8));
 
@@ -167,9 +208,11 @@ function testHeapAllocator(): void {
   printProgramBreak("After deallocating 64KB block");
 
   printSection("Test 9: Search mode change");
-  Io::println("  Changing to BestFit search mode");
+  let modeMsg: String = String::create("  Changing to BestFit search mode");
+  Io::println(modeMsg);
   allocator.setSearchMode(SearchMode::BestFit);
-  Io::println("  Search mode changed successfully");
+  let modeOk: String = String::create("  Search mode changed successfully");
+  Io::println(modeOk);
 }
 
 function testArenaAllocator(): void {
@@ -188,8 +231,10 @@ function testArenaAllocator(): void {
   printSection("Test 2: Allocate u64 (8-byte alignment)");
   let layoutU64: Layout = Layout::init<u64>();
   let ptrU64: *mut u8 = arena.allocate(layoutU64);
-  Io::print("  Allocated at: ");
-  Io::println(String::toString(ptrU64 as u64));
+  let allocLabel: String = String::create("  Allocated at: ");
+  let allocVal: String = String::create(ptrU64 as u64);
+  Io::print(allocLabel);
+  Io::println(allocVal);
   check("Pointer not null", ptrU64 != null);
   check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8));
 
@@ -213,10 +258,15 @@ function testArenaAllocator(): void {
   // Verify allocations are contiguous (no headers between them)
   let diff1: u64 = (ptr2 as u64) - (ptr1 as u64);
   let diff2: u64 = (ptr3 as u64) - (ptr2 as u64);
-  Io::print("  Distance ptr1->ptr2: ");
-  Io::println(String::toString(diff1));
-  Io::print("  Distance ptr2->ptr3: ");
-  Io::println(String::toString(diff2));
+  let distLabel1: String = String::create("  Distance ptr1->ptr2: ");
+  let distVal1: String = String::create(diff1);
+  Io::print(distLabel1);
+  Io::println(distVal1);
+
+  let distLabel2: String = String::create("  Distance ptr2->ptr3: ");
+  let distVal2: String = String::create(diff2);
+  Io::print(distLabel2);
+  Io::println(distVal2);
   check("Contiguous allocation (16 bytes apart)", diff1 == 16 && diff2 == 16);
 
   printArenaStats(&arena);
@@ -239,10 +289,15 @@ function testArenaAllocator(): void {
   let usedBefore: u64 = arena.used();
   let availableBefore: u64 = arena.available();
 
-  Io::print("  Used before: ");
-  Io::println(String::toString(usedBefore));
-  Io::print("  Available before: ");
-  Io::println(String::toString(availableBefore));
+  let usedLabel: String = String::create("  Used before: ");
+  let usedVal: String = String::create(usedBefore);
+  Io::print(usedLabel);
+  Io::println(usedVal);
+
+  let availLabel: String = String::create("  Available before: ");
+  let availVal: String = String::create(availableBefore);
+  Io::print(availLabel);
+  Io::println(availVal);
 
   // Allocate most of remaining space
   let largeLayout: Layout = Layout::init(3000 as u64, 8 as u64);
@@ -257,7 +312,8 @@ function testArenaAllocator(): void {
   check("Allocation failed (returned null)", ptrHuge == null);
 
   printSection("Test 7: Reset arena");
-  Io::println("  Resetting arena...");
+  let resetMsg: String = String::create("  Resetting arena...");
+  Io::println(resetMsg);
   arena.reset();
   check("Arena is empty after reset", arena.isEmpty());
   check("Used is 0", arena.used() == 0);
@@ -270,10 +326,15 @@ function testArenaAllocator(): void {
   check("Allocation after reset succeeded", ptrAfterReset != null);
 
   // Should be at the same address as the first allocation
-  Io::print("  First allocation was at: ");
-  Io::println(String::toString(ptrU64 as u64));
-  Io::print("  After reset allocated at: ");
-  Io::println(String::toString(ptrAfterReset as u64));
+  let firstLabel: String = String::create("  First allocation was at: ");
+  let firstVal: String = String::create(ptrU64 as u64);
+  Io::print(firstLabel);
+  Io::println(firstVal);
+
+  let afterLabel: String = String::create("  After reset allocated at: ");
+  let afterVal: String = String::create(ptrAfterReset as u64);
+  Io::print(afterLabel);
+  Io::println(afterVal);
   check("Same starting address", ptrAfterReset == ptrU64);
 
   printSection("Test 9: Destroy arena");

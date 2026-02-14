@@ -22,7 +22,7 @@ pub enum Type {
   F64,
   Boolean,
   Char,
-  String,
+  Str,
   Atom,
   Void,
   Never,
@@ -173,7 +173,7 @@ impl TypeStore {
       Type::F64,
       Type::Boolean,
       Type::Char,
-      Type::String,
+      Type::Str,
       Type::Atom,
       Type::Void,
       Type::Never,
@@ -388,8 +388,8 @@ impl TypeStore {
     self.primitives[&Type::Char]
   }
   #[inline]
-  pub fn string(&self) -> TypeId {
-    self.primitives[&Type::String]
+  pub fn str(&self) -> TypeId {
+    self.primitives[&Type::Str]
   }
   #[inline]
   pub fn atom(&self) -> TypeId {
@@ -433,7 +433,7 @@ impl TypeStore {
       "f64" => Some(self.f64()),
       "bool" | "boolean" => Some(self.boolean()),
       "char" => Some(self.char()),
-      "string" => Some(self.string()),
+      "str" => Some(self.str()),
       "atom" => Some(self.atom()),
       _ => None,
     }
@@ -538,6 +538,15 @@ impl TypeStore {
     false
   }
 
+  /// Currently equivalent to `types_equal`; will be extended with implicit coercions.
+  pub fn is_assignable(
+    &self,
+    target: &TypeId,
+    source: &TypeId,
+  ) -> bool {
+    self.types_equal(target, source)
+  }
+
   #[inline]
   pub fn is_error(
     &self,
@@ -583,6 +592,7 @@ impl TypeStore {
       | Type::Atom
       | Type::Void
       | Type::Never
+      | Type::Str
       | Type::NullPtr
       | Type::Error => true,
 
@@ -590,7 +600,7 @@ impl TypeStore {
 
       Type::Vector { element, .. } => self.is_copy(element),
 
-      Type::String | Type::Infer => false,
+      Type::Infer => false,
 
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy(e)),
 
@@ -610,7 +620,7 @@ impl TypeStore {
     &self,
     ty: &TypeId,
   ) -> bool {
-    matches!(self.get(ty), Type::String | Type::Infer)
+    matches!(self.get(ty), Type::Infer)
   }
 
   #[inline]
@@ -734,7 +744,6 @@ impl TypeStore {
   ///
   /// - `@implements(Drop)` on a record/enum means it needs dropping.
   /// - Otherwise, transitively needs drop if any field/payload needs dropping.
-  /// - String and dynamic Vector always need dropping.
   pub fn needs_drop_with_defs(
     &self,
     ty: &TypeId,
@@ -811,7 +820,7 @@ impl TypeStore {
         args.iter().any(|a| self.needs_drop_with_defs_inner(a, defs, visiting))
       },
 
-      Type::String | Type::Infer => true,
+      Type::Infer => true,
 
       Type::Tuple(elems) => {
         let elems = elems.clone();
@@ -1137,7 +1146,7 @@ pub fn format_type_name(
     Type::F64 => "f64".to_string(),
     Type::Boolean => "bool".to_string(),
     Type::Char => "char".to_string(),
-    Type::String => "string".to_string(),
+    Type::Str => "str".to_string(),
     Type::Atom => "atom".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "never".to_string(),

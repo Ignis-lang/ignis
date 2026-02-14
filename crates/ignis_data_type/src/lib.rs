@@ -79,7 +79,7 @@ impl DataType {
     match self {
       DataType::Hex => String::from("hex"),
       DataType::Binary => String::from("binary"),
-      DataType::String => String::from("string"),
+      DataType::String => String::from("str"),
       DataType::Int8 => String::from("i8"),
       DataType::Int16 => String::from("i16"),
       DataType::Int32 => String::from("i32"),
@@ -219,7 +219,7 @@ impl Display for DataType {
     match self {
       DataType::Hex => write!(f, "hex"),
       DataType::Binary => write!(f, "binary"),
-      DataType::String => write!(f, "string"),
+      DataType::String => write!(f, "str"),
       DataType::Int8 => write!(f, "i8"),
       DataType::Int16 => write!(f, "i16"),
       DataType::Int32 => write!(f, "i32"),

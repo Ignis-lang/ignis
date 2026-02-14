@@ -69,6 +69,7 @@ pub enum TokenType {
   Binary, // 0b0101
 
   // Types
+  StrType,           // str
   StringType,        // string
   Int8Type,          // i8
   Int16Type,         // i16
@@ -184,6 +185,7 @@ impl TokenType {
       "record" => Some(TokenType::Record),
       "return" => Some(TokenType::Return),
       "static" => Some(TokenType::Static),
+      "str" => Some(TokenType::StrType),
       "string" => Some(TokenType::StringType),
       "this" => Some(TokenType::This),
       "self" => Some(TokenType::Self_),
@@ -201,7 +203,7 @@ impl TokenType {
     }
   }
 
-  pub fn is_primitive_type_keyword(&self) -> bool {
+  pub fn is_type_keyword(&self) -> bool {
     matches!(
       self,
       TokenType::Int8Type
@@ -217,6 +219,7 @@ impl TokenType {
         | TokenType::BooleanType
         | TokenType::CharType
         | TokenType::AtomType
+        | TokenType::StrType
         | TokenType::StringType
     )
   }
@@ -266,6 +269,8 @@ impl TokenType {
       TokenType::Trait,
       TokenType::Return,
       TokenType::Self_,
+      TokenType::StrType,
+      TokenType::StringType,
       TokenType::This,
       TokenType::True,
       TokenType::Type,
@@ -388,6 +393,7 @@ impl Display for TokenType {
       TokenType::SemiColon => write!(f, "SemiColon"),
       TokenType::Slash => write!(f, "Slash"),
       TokenType::Static => write!(f, "Static"),
+      TokenType::StrType => write!(f, "StrType"),
       TokenType::String => write!(f, "String"),
       TokenType::StringType => write!(f, "StringType"),
       TokenType::SubtractAssign => write!(f, "SubtractAssign"),
