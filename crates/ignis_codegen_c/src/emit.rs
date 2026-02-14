@@ -290,7 +290,24 @@ impl<'a> CEmitter<'a> {
           return false;
         };
 
-        !function.is_extern && self.is_function_signature_monomorphized(function)
+        if function.is_extern {
+          return false;
+        }
+
+        if !self.is_function_signature_monomorphized(function) {
+          return false;
+        }
+
+        // Non-user definitions (Std/Runtime) are only force-emitted when they
+        // are monomorphized specializations (name contains `__`). Regular std
+        // functions already exist in precompiled std object files.
+        let kind = self.classify(*def_id);
+        if !kind.is_user() {
+          let name = self.symbols.get(&self.defs.get(def_id).name);
+          return name.contains("__") && !name.starts_with("__");
+        }
+
+        true
       })
       .collect()
   }
@@ -985,12 +1002,14 @@ impl<'a> CEmitter<'a> {
       },
       Instr::Store { dest, value } => {
         let local_info = func.locals.get(dest);
-        let val = self.format_operand(func, value);
+        let target_ty = local_info.ty;
 
-        if let Type::Vector { size: n, element } = self.types.get(&local_info.ty) {
+        if let Type::Vector { size: n, element } = self.types.get(&target_ty) {
+          let val = self.format_operand(func, value);
           let elem_size = self.sizeof_type(*element);
           writeln!(self.output, "memcpy(l{}, {}, {} * {});", dest.index(), val, n, elem_size).unwrap();
         } else {
+          let val = self.format_operand_coerced(func, value, target_ty);
           writeln!(self.output, "l{} = {};", dest.index(), val).unwrap();
         }
       },
@@ -1001,7 +1020,17 @@ impl<'a> CEmitter<'a> {
       },
       Instr::StorePtr { ptr, value } => {
         let p = self.format_operand(func, ptr);
-        let v = self.format_operand(func, value);
+
+        // Resolve pointee type so format_operand_coerced can apply future coercions.
+        let v = if let Some(ptr_ty) = self.operand_type(func, ptr) {
+          if let Type::Pointer { inner, .. } = self.types.get(&ptr_ty) {
+            self.format_operand_coerced(func, value, *inner)
+          } else {
+            self.format_operand(func, value)
+          }
+        } else {
+          self.format_operand(func, value)
+        };
 
         writeln!(self.output, "*{} = {};", p, v).unwrap();
       },
@@ -1054,7 +1083,50 @@ impl<'a> CEmitter<'a> {
         self.emit_method_receiver_drop_guard(func, *callee, args);
 
         let name = self.def_name(*callee);
-        let args_str: Vec<_> = args.iter().map(|a| self.format_operand(func, a)).collect();
+
+        // Get callee parameter types and extern flag
+        let (param_types, callee_is_extern): (Vec<TypeId>, bool) = {
+          let def = self.defs.get(callee);
+          let params = match &def.kind {
+            DefinitionKind::Function(fd) => fd.params.iter().map(|p| *self.defs.type_of(p)).collect(),
+            DefinitionKind::Method(md) => md.params.iter().map(|p| *self.defs.type_of(p)).collect(),
+            _ => Vec::new(),
+          };
+          let is_ext = match &def.kind {
+            DefinitionKind::Function(fd) => fd.is_extern,
+            _ => false,
+          };
+          (params, is_ext)
+        };
+
+        let args_str: Vec<_> = args
+          .iter()
+          .enumerate()
+          .map(|(i, a)| {
+            let formatted = if let Some(&pt) = param_types.get(i) {
+              self.format_operand_coerced(func, a, pt)
+            } else {
+              self.format_operand(func, a)
+            };
+
+            // Extern functions may use C-level types (e.g. IgnisString*) that are
+            // structurally identical to compiler-generated record structs but have a
+            // different C tag.  Cast pointer/reference args through void* so C
+            // doesn't warn about incompatible pointer types.
+            if callee_is_extern {
+              if let Some(op_ty) = self.operand_type(func, a) {
+                match self.types.get(&op_ty) {
+                  Type::Reference { .. } | Type::Pointer { .. } => {
+                    return format!("(void*){}", formatted);
+                  },
+                  _ => {},
+                }
+              }
+            }
+
+            formatted
+          })
+          .collect();
 
         if let Some(d) = dest {
           writeln!(self.output, "t{} = {}({});", d.index(), name, args_str.join(", ")).unwrap();
@@ -1180,9 +1252,6 @@ impl<'a> CEmitter<'a> {
         let ty = local_data.ty;
 
         match self.types.get(&ty) {
-          Type::String => {
-            writeln!(self.output, "ignis_string_drop(l{});", local.index()).unwrap();
-          },
           Type::Record(_) => {
             self.emit_field_drops(&format!("l{}", local.index()), ty);
           },
@@ -1240,11 +1309,32 @@ impl<'a> CEmitter<'a> {
       } => {
         let p = self.format_operand(func, dest_ptr);
 
+        // Resolve field types for format_operand_coerced.
+        let field_types: Vec<(u32, TypeId)> = match self.types.get(record_type) {
+          Type::Record(def_id) => {
+            let def = self.defs.get(def_id);
+            match &def.kind {
+              DefinitionKind::Record(rd) => rd.fields.iter().map(|f| (f.index, f.type_id)).collect(),
+              _ => Vec::new(),
+            }
+          },
+          _ => Vec::new(),
+        };
+
         for (field_idx, field_value) in fields {
           if field_idx > &0 {
             write!(self.output, "    ").unwrap();
           }
-          let v = self.format_operand(func, field_value);
+          let field_ty = field_types
+            .iter()
+            .find(|(idx, _)| idx == field_idx)
+            .map(|(_, ty)| *ty);
+
+          let v = if let Some(ft) = field_ty {
+            self.format_operand_coerced(func, field_value, ft)
+          } else {
+            self.format_operand(func, field_value)
+          };
           writeln!(self.output, "({})->field_{} = {};", p, field_idx, v).unwrap();
         }
 
@@ -1259,9 +1349,27 @@ impl<'a> CEmitter<'a> {
         dest_ptr,
         variant_tag,
         payload,
-        ..
+        enum_type,
       } => {
         let p = self.format_operand(func, dest_ptr);
+
+        // Resolve payload types for format_operand_coerced.
+        let payload_types: Vec<TypeId> = match self.types.get(enum_type) {
+          Type::Enum(def_id) => {
+            let def = self.defs.get(def_id);
+            match &def.kind {
+              DefinitionKind::Enum(ed) => {
+                if let Some(variant) = ed.variants.iter().find(|v| v.tag_value == *variant_tag) {
+                  variant.payload.clone()
+                } else {
+                  Vec::new()
+                }
+              },
+              _ => Vec::new(),
+            }
+          },
+          _ => Vec::new(),
+        };
 
         // Set the tag
         writeln!(self.output, "({})->tag = {};", p, variant_tag).unwrap();
@@ -1269,7 +1377,11 @@ impl<'a> CEmitter<'a> {
         // Set payload fields
         for (i, payload_value) in payload.iter().enumerate() {
           write!(self.output, "    ").unwrap();
-          let v = self.format_operand(func, payload_value);
+          let v = if let Some(&pt) = payload_types.get(i) {
+            self.format_operand_coerced(func, payload_value, pt)
+          } else {
+            self.format_operand(func, payload_value)
+          };
           writeln!(self.output, "({})->payload.variant_{}.field_{} = {};", p, variant_tag, i, v).unwrap();
         }
       },
@@ -1392,6 +1504,16 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  /// Placeholder: will apply implicit coercions (e.g. str -> String) when implemented.
+  fn format_operand_coerced(
+    &self,
+    func: &FunctionLir,
+    op: &Operand,
+    _target_ty: TypeId,
+  ) -> String {
+    self.format_operand(func, op)
+  }
+
   fn operand_type(
     &self,
     func: &FunctionLir,
@@ -1459,7 +1581,9 @@ impl<'a> CEmitter<'a> {
       },
       ConstValue::Bool(v, _) => format!("{}", v),
       ConstValue::Char(v, _) => format!("{}", *v as u32),
-      ConstValue::String(v, _) => format!("ignis_string_from_cstr(\"{}\")", Self::escape_string(v)),
+      ConstValue::String(v, _ty) => {
+        format!("\"{}\"", Self::escape_string(v))
+      },
       ConstValue::Atom(id, _) => format!("{}U", id),
       ConstValue::Null(ty) => format!("({})NULL", self.format_type(*ty)),
       ConstValue::Undef(_) => "/* undef */ 0".to_string(),
@@ -1658,7 +1782,7 @@ impl<'a> CEmitter<'a> {
       Type::F64 => "f64".to_string(),
       Type::Boolean => "boolean".to_string(),
       Type::Char => "char".to_string(),
-      Type::String => "string".to_string(),
+      Type::Str => "const char*".to_string(),
       Type::Atom => "ignis_atom_t".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "void".to_string(),
@@ -1756,10 +1880,6 @@ impl<'a> CEmitter<'a> {
     ty: TypeId,
   ) {
     match self.types.get(&ty).clone() {
-      Type::String => {
-        writeln!(self.output, "ignis_string_drop({});", expr).unwrap();
-      },
-
       Type::Record(def_id) => {
         let has_drop_trait = self.record_has_drop_trait(def_id);
 
@@ -2171,7 +2291,7 @@ impl<'a> CEmitter<'a> {
       Type::F64 => "f64".to_string(),
       Type::Boolean => "bool".to_string(),
       Type::Char => "char".to_string(),
-      Type::String => "str".to_string(),
+      Type::Str => "str".to_string(),
       Type::Atom => "atom".to_string(),
       Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: true } => format!("mutref_{}", self.format_type_for_mangling(inner)),
@@ -3093,7 +3213,7 @@ fn format_type_for_mangling_standalone(
     Type::F64 => "f64".to_string(),
     Type::Boolean => "bool".to_string(),
     Type::Char => "char".to_string(),
-    Type::String => "str".to_string(),
+    Type::Str => "str".to_string(),
     Type::Atom => "atom".to_string(),
     Type::Void => "void".to_string(),
     Type::Pointer { inner, .. } => {
@@ -3162,7 +3282,7 @@ pub fn format_c_type(
     Type::F64 => "f64".to_string(),
     Type::Boolean => "boolean".to_string(),
     Type::Char => "char".to_string(),
-    Type::String => "string".to_string(),
+    Type::Str => "const char*".to_string(),
     Type::Atom => "ignis_atom_t".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "void".to_string(),

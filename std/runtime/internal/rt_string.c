@@ -1,6 +1,4 @@
-/**
- * Ignis runtime: string management and conversions.
- */
+/* Ignis runtime: string management and conversions.  See ignis_rt.h for IgnisString semantics. */
 
 #include "../ignis_rt.h"
 #include "rt_internal.h"
@@ -13,10 +11,6 @@
 // =============================================================================
 
 static void ignis_string_grow(IgnisString *s, size_t min_cap) {
-  if (s == NULL) {
-    return;
-  }
-
   size_t new_cap = s->cap;
   if (new_cap == 0) {
     new_cap = 16;
@@ -39,37 +33,32 @@ static void ignis_string_grow(IgnisString *s, size_t min_cap) {
 // String base API
 // =============================================================================
 
-IgnisString *ignis_string_new(void) {
+IgnisString ignis_string_new(void) {
   return ignis_string_with_capacity(16);
 }
 
-IgnisString *ignis_string_with_capacity(size_t cap) {
-  IgnisString *s = (IgnisString *)ignis_alloc(sizeof(IgnisString));
-  if (s == NULL) {
-    return NULL;
-  }
+IgnisString ignis_string_with_capacity(size_t cap) {
+  IgnisString s;
 
   if (cap < 1) {
     cap = 1;
   }
 
-  s->hdr.type_id = IGNIS_TYPE_STRING_ID;
-  s->hdr.refcnt = 1;
-
-  s->data = (char *)ignis_alloc(cap);
-  if (s->data == NULL) {
-    ignis_free(s);
-    return NULL;
+  s.data = (char *)ignis_alloc(cap);
+  if (s.data == NULL) {
+    s.len = 0;
+    s.cap = 0;
+    return s;
   }
 
-  s->data[0] = '\0';
-  s->len = 0;
-  s->cap = cap;
+  s.data[0] = '\0';
+  s.len = 0;
+  s.cap = cap;
 
   return s;
 }
 
-IgnisString *ignis_string_from_cstr(const char *cstr) {
+IgnisString ignis_string_from_cstr(const char *cstr) {
   if (cstr == NULL) {
     return ignis_string_new();
   }
@@ -78,25 +67,25 @@ IgnisString *ignis_string_from_cstr(const char *cstr) {
   return ignis_string_from_len(cstr, len);
 }
 
-IgnisString *ignis_string_from_len(const char *s, size_t len) {
+IgnisString ignis_string_from_len(const char *s, size_t len) {
   size_t cap = len + 1;
-  IgnisString *str = ignis_string_with_capacity(cap);
-  if (str == NULL) {
-    return NULL;
+  IgnisString str = ignis_string_with_capacity(cap);
+  if (str.data == NULL) {
+    return str;
   }
 
   if (s != NULL && len > 0) {
-    memcpy(str->data, s, len);
+    memcpy(str.data, s, len);
   }
 
-  str->data[len] = '\0';
-  str->len = len;
+  str.data[len] = '\0';
+  str.len = len;
 
   return str;
 }
 
-IgnisString *ignis_string_clone(const IgnisString *s) {
-  if (s == NULL) {
+IgnisString ignis_string_clone(const IgnisString *s) {
+  if (s == NULL || s->data == NULL) {
     return ignis_string_new();
   }
 
@@ -223,13 +212,11 @@ void ignis_string_drop(IgnisString *s) {
 
   if (s->data != NULL) {
     ignis_free(s->data);
-    s->data = NULL;
   }
 
+  s->data = NULL;
   s->len = 0;
   s->cap = 0;
-
-  ignis_free(s);
 }
 
 // =============================================================================
@@ -243,24 +230,21 @@ i32 ignis_string_compare(const IgnisString *a, const IgnisString *b) {
   return (i32)strcmp(a_cstr, b_cstr);
 }
 
-IgnisString *ignis_string_concat(const IgnisString *a, const IgnisString *b) {
-  IgnisString *result = ignis_string_new();
-  if (result == NULL) {
-    return NULL;
-  }
+IgnisString ignis_string_concat(const IgnisString *a, const IgnisString *b) {
+  IgnisString result = ignis_string_new();
 
   if (a != NULL) {
-    ignis_string_push_str(result, a);
+    ignis_string_push_str(&result, a);
   }
 
   if (b != NULL) {
-    ignis_string_push_str(result, b);
+    ignis_string_push_str(&result, b);
   }
 
   return result;
 }
 
-IgnisString *ignis_string_substring(const IgnisString *s, i64 start, i64 len) {
+IgnisString ignis_string_substring(const IgnisString *s, i64 start, i64 len) {
   if (s == NULL || len <= 0) {
     return ignis_string_new();
   }
@@ -304,7 +288,7 @@ boolean ignis_string_contains(const IgnisString *haystack, const IgnisString *ne
   return ignis_string_index_of(haystack, needle) >= 0 ? TRUE : FALSE;
 }
 
-IgnisString *ignis_string_to_upper(const IgnisString *s) {
+IgnisString ignis_string_to_upper(const IgnisString *s) {
   if (s == NULL) {
     return ignis_string_new();
   }
@@ -312,19 +296,19 @@ IgnisString *ignis_string_to_upper(const IgnisString *s) {
   size_t len = ignis_string_len(s);
   const char *data = ignis_string_cstr(s);
 
-  IgnisString *result = ignis_string_with_capacity(len + 1);
-  if (result == NULL) {
-    return NULL;
+  IgnisString result = ignis_string_with_capacity(len + 1);
+  if (result.data == NULL) {
+    return result;
   }
 
   for (size_t i = 0; i < len; i++) {
-    ignis_string_push_char(result, (char)toupper((unsigned char)data[i]));
+    ignis_string_push_char(&result, (char)toupper((unsigned char)data[i]));
   }
 
   return result;
 }
 
-IgnisString *ignis_string_to_lower(const IgnisString *s) {
+IgnisString ignis_string_to_lower(const IgnisString *s) {
   if (s == NULL) {
     return ignis_string_new();
   }
@@ -332,13 +316,13 @@ IgnisString *ignis_string_to_lower(const IgnisString *s) {
   size_t len = ignis_string_len(s);
   const char *data = ignis_string_cstr(s);
 
-  IgnisString *result = ignis_string_with_capacity(len + 1);
-  if (result == NULL) {
-    return NULL;
+  IgnisString result = ignis_string_with_capacity(len + 1);
+  if (result.data == NULL) {
+    return result;
   }
 
   for (size_t i = 0; i < len; i++) {
-    ignis_string_push_char(result, (char)tolower((unsigned char)data[i]));
+    ignis_string_push_char(&result, (char)tolower((unsigned char)data[i]));
   }
 
   return result;
@@ -348,72 +332,127 @@ IgnisString *ignis_string_to_lower(const IgnisString *s) {
 // Number to string conversions
 // =============================================================================
 
-IgnisString *ignis_i8_to_string(i8 value) {
+IgnisString ignis_i8_to_string(i8 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%d", (int)value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_i16_to_string(i16 value) {
+IgnisString ignis_i16_to_string(i16 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%d", (int)value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_i32_to_string(i32 value) {
+IgnisString ignis_i32_to_string(i32 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%d", value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_i64_to_string(i64 value) {
+IgnisString ignis_i64_to_string(i64 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%ld", value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_u8_to_string(u8 value) {
+IgnisString ignis_u8_to_string(u8 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%u", (unsigned int)value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_u16_to_string(u16 value) {
+IgnisString ignis_u16_to_string(u16 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%u", (unsigned int)value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_u32_to_string(u32 value) {
+IgnisString ignis_u32_to_string(u32 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%u", value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_u64_to_string(u64 value) {
+IgnisString ignis_u64_to_string(u64 value) {
   char buf[INT_BUF_SIZE];
   int len = snprintf(buf, INT_BUF_SIZE, "%lu", value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_f32_to_string(f32 value) {
+IgnisString ignis_f32_to_string(f32 value) {
   char buf[FLOAT_BUF_SIZE];
   int len = snprintf(buf, FLOAT_BUF_SIZE, "%g", (double)value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
 
-IgnisString *ignis_f64_to_string(f64 value) {
+IgnisString ignis_f64_to_string(f64 value) {
   char buf[FLOAT_BUF_SIZE];
   int len = snprintf(buf, FLOAT_BUF_SIZE, "%g", value);
 
   return ignis_string_from_len(buf, (size_t)len);
 }
+
+// =============================================================================
+// Output-pointer init functions
+//
+// These write into a pre-allocated IgnisString through a pointer.  The caller
+// may have a struct with extra trailing fields (e.g. __ignis_drop_state) that
+// are not touched by these functions.
+// =============================================================================
+
+void ignis_string_init_new(IgnisString *out) {
+  *out = ignis_string_new();
+}
+
+void ignis_string_init_with_capacity(IgnisString *out, size_t cap) {
+  *out = ignis_string_with_capacity(cap);
+}
+
+void ignis_string_init_from_cstr(IgnisString *out, const char *cstr) {
+  *out = ignis_string_from_cstr(cstr);
+}
+
+void ignis_string_init_from_len(IgnisString *out, const char *s, size_t len) {
+  *out = ignis_string_from_len(s, len);
+}
+
+void ignis_string_init_clone(IgnisString *out, const IgnisString *s) {
+  *out = ignis_string_clone(s);
+}
+
+void ignis_string_init_concat(IgnisString *out, const IgnisString *a, const IgnisString *b) {
+  *out = ignis_string_concat(a, b);
+}
+
+void ignis_string_init_substring(IgnisString *out, const IgnisString *s, i64 start, i64 len) {
+  *out = ignis_string_substring(s, start, len);
+}
+
+void ignis_string_init_to_upper(IgnisString *out, const IgnisString *s) {
+  *out = ignis_string_to_upper(s);
+}
+
+void ignis_string_init_to_lower(IgnisString *out, const IgnisString *s) {
+  *out = ignis_string_to_lower(s);
+}
+
+void ignis_string_init_from_i8(IgnisString *out, i8 value) { *out = ignis_i8_to_string(value); }
+void ignis_string_init_from_i16(IgnisString *out, i16 value) { *out = ignis_i16_to_string(value); }
+void ignis_string_init_from_i32(IgnisString *out, i32 value) { *out = ignis_i32_to_string(value); }
+void ignis_string_init_from_i64(IgnisString *out, i64 value) { *out = ignis_i64_to_string(value); }
+void ignis_string_init_from_u8(IgnisString *out, u8 value) { *out = ignis_u8_to_string(value); }
+void ignis_string_init_from_u16(IgnisString *out, u16 value) { *out = ignis_u16_to_string(value); }
+void ignis_string_init_from_u32(IgnisString *out, u32 value) { *out = ignis_u32_to_string(value); }
+void ignis_string_init_from_u64(IgnisString *out, u64 value) { *out = ignis_u64_to_string(value); }
+void ignis_string_init_from_f32(IgnisString *out, f32 value) { *out = ignis_f32_to_string(value); }
+void ignis_string_init_from_f64(IgnisString *out, f64 value) { *out = ignis_f64_to_string(value); }

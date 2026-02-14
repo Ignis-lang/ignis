@@ -1,3 +1,5 @@
+import String from "std::string";
+
 export enum TokenType {
   // Single-character tokens
   Plus,
@@ -133,7 +135,7 @@ export enum TokenType {
   Whitespace,
   Eof,
 
-  public static getKeywordFromString(key: string): Option<TokenType> {
+  public static getKeywordFromString(key: str): Option<TokenType> {
     let value: Option<TokenType> = match (key) {
       "as" -> Option::SOME(TokenType::As),
       "atom" -> Option::SOME(TokenType::AtomType),
@@ -276,7 +278,7 @@ export enum TokenType {
     return keywords;
   }
 
-  public name(&self): string {
+  public name(&self): str {
     return match (self) {
       TokenType::AddAssign -> "AddAssign",
       TokenType::Ampersand -> "Ampersand",
@@ -421,12 +423,16 @@ export record Span {
     };
   }
 
-  public toString(&self): string {
-    let mut value: string = "[";
-    value = String::concat(value, String::toString(self.start));
-    value = String::concat(value, ", ");
-    value = String::concat(value, String::toString(self.end));
-    value = String::concat(value, "]");
+  public toString(&self): String {
+    let mut value: String = String::create("[");
+    let startStr: String = String::create(self.start);
+    let endStr: String = String::create(self.end);
+    value = value.concat(&startStr);
+    let comma: String = String::create(", ");
+    value = value.concat(&comma);
+    value = value.concat(&endStr);
+    let bracket: String = String::create("]");
+    value = value.concat(&bracket);
 
     return value;
   }
@@ -437,16 +443,16 @@ export enum LiteralValue {
   Int32(i32),
   Float64(f64),
   Char(char),
-  String(string),
+  String(str),
   Boolean(boolean),
-  Hex(string),
-  Binary(string),
+  Hex(str),
+  Binary(str),
   Null,
 }
 
 export record Token {
   type_: TokenType;
-  lexeme: string;
+  lexeme: str;
   span: Span;
 
   public static init(): Token {
@@ -457,7 +463,7 @@ export record Token {
     };
   }
 
-  public static init(type_: TokenType, lexeme: string, span: Span): Token {
+  public static init(type_: TokenType, lexeme: str, span: Span): Token {
     return Token {
       type_: type_,
       lexeme: lexeme,
@@ -465,19 +471,25 @@ export record Token {
     };
   }
 
-  public toString(&self): string {
-    let mut value: string = "(token type: ";
-    value = String::concat(value, self.type_.name());
-    value = String::concat(value, " lexeme: ");
-    value = String::concat(value, self.lexeme);
-    value = String::concat(value, " span: ");
-    value = String::concat(value, self.span.toString());
-    value = String::concat(value, ")");
+  public toString(&self): String {
+    let mut value: String = String::create("(token type: ");
+    let name: String = String::create(self.type_.name());
+    value = value.concat(&name);
+    let lexLabel: String = String::create(" lexeme: ");
+    value = value.concat(&lexLabel);
+    let lex: String = String::create(self.lexeme);
+    value = value.concat(&lex);
+    let spanLabel: String = String::create(" span: ");
+    value = value.concat(&spanLabel);
+    let spanStr: String = self.span.toString();
+    value = value.concat(&spanStr);
+    let close: String = String::create(")");
+    value = value.concat(&close);
 
     return value;
   }
 
-  public typeName(&self): string {
+  public typeName(&self): str {
     return self.type_.name();
   }
 

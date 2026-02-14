@@ -275,14 +275,20 @@ function main(): void {
 
 #[test]
 fn use_after_move() {
-  // Assigning an owned type (string) to another variable moves it.
+  // Assigning an owned type (Owned) to another variable moves it.
   // Using the original variable after the move is an error.
   let result = common::analyze(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 function main(): void {
-    let a: string = "hello";
-    let b: string = a;
-    let c: string = a;
+    let a: Owned = Owned { id: 1 };
+    let b: Owned = a;
+    let c: Owned = a;
     return;
 }
 "#,
@@ -290,10 +296,16 @@ function main(): void {
 
   common::assert_err(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 function main(): void {
-    let a: string = "hello";
-    let b: string = a;
-    let c: string = a;
+    let a: Owned = Owned { id: 1 };
+    let b: Owned = a;
+    let c: Owned = a;
     return;
 }
 "#,
@@ -309,12 +321,18 @@ fn move_in_function_call() {
   // Using the variable after the call is an error.
   let result = common::analyze(
     r#"
-function consume(s: string): void {
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): void {
     return;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     consume(a);
     consume(a);
     return;
@@ -324,12 +342,18 @@ function main(): void {
 
   common::assert_err(
     r#"
-function consume(s: string): void {
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): void {
     return;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     consume(a);
     consume(a);
     return;
@@ -347,12 +371,18 @@ fn inconsistent_move_in_branches() {
   // This requires an if-else where the variable is moved in one branch only.
   let result = common::analyze(
     r#"
-function consume(s: string): void {
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): void {
     return;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     let cond: boolean = true;
 
     if (cond) {
@@ -368,12 +398,18 @@ function main(): void {
 
   common::assert_err(
     r#"
-function consume(s: string): void {
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): void {
     return;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     let cond: boolean = true;
 
     if (cond) {
@@ -402,12 +438,18 @@ fn ffi_no_leak_for_named_vars() {
   // drops scheduled by DropSchedules, so no warning is needed.
   common::assert_ok(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 extern ffi {
-    function ffiConsume(s: string): void;
+    function ffiConsume(s: Owned): void;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     ffi::ffiConsume(a);
     return;
 }
@@ -421,12 +463,18 @@ fn extern_does_not_consume_ownership() {
   // This is valid because extern calls don't move the value.
   common::assert_ok(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 extern io {
-    function print(s: string): void;
+    function print(s: Owned): void;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     io::print(a);
     io::print(a);
     return;
@@ -441,12 +489,18 @@ fn non_extern_consumes_ownership() {
   // Using the variable after passing to an Ignis function is an error.
   common::assert_err(
     r#"
-function consume(s: string): void {
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): void {
     return;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     consume(a);
     consume(a);
     return;
@@ -462,16 +516,22 @@ fn extern_then_ignis_call() {
   // After Ignis call (consumes), variable is moved.
   common::assert_err(
     r#"
-extern io {
-    function print(s: string): void;
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
 }
 
-function consume(s: string): void {
+extern io {
+    function print(s: Owned): void;
+}
+
+function consume(s: Owned): void {
     return;
 }
 
 function main(): void {
-    let a: string = "hello";
+    let a: Owned = Owned { id: 1 };
     io::print(a);
     consume(a);
     io::print(a);
@@ -487,13 +547,19 @@ fn ffi_leak_warning_without_takes() {
   // Passing an owned type to an extern function without @takes emits O0004.
   common::assert_err(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 extern io {
-    function consumeString(s: string): void;
+    function consumeOwned(s: Owned): void;
 }
 
 function main(): void {
-    let a: string = "hello";
-    io::consumeString(a);
+    let a: Owned = Owned { id: 1 };
+    io::consumeOwned(a);
     return;
 }
 "#,
@@ -506,13 +572,19 @@ fn ffi_no_warning_with_takes() {
   // @takes suppresses the warning and consumes ownership instead.
   common::assert_ok(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 extern io {
-    function freeString(@takes s: string): void;
+    function freeOwned(@takes s: Owned): void;
 }
 
 function main(): void {
-    let a: string = "hello";
-    io::freeString(a);
+    let a: Owned = Owned { id: 1 };
+    io::freeOwned(a);
     return;
 }
 "#,
@@ -524,17 +596,23 @@ fn ffi_takes_consumes_ownership() {
   // After passing to a @takes extern param, the value is moved — using it again is O0001.
   common::assert_err(
     r#"
-extern io {
-    function freeString(@takes s: string): void;
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
 }
 
-function consume(s: string): void {
+extern io {
+    function freeOwned(@takes s: Owned): void;
+}
+
+function consume(s: Owned): void {
     return;
 }
 
 function main(): void {
-    let a: string = "hello";
-    io::freeString(a);
+    let a: Owned = Owned { id: 1 };
+    io::freeOwned(a);
     consume(a);
     return;
 }
@@ -602,9 +680,15 @@ function main(): void {
 fn copy_on_noncopy_field() {
   common::assert_err(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 @implements(Copy)
 record Bad {
-    name: string;
+    inner: Owned;
     id: i32;
 }
 
@@ -1539,13 +1623,13 @@ function main(): void {
 fn extension_mut_on_immutable() {
   common::assert_err(
     r#"
-@extension(string, mut)
-function append(s: string, suffix: string): void {
+@extension(str, mut)
+function append(s: str, suffix: str): void {
     return;
 }
 
 function main(): void {
-    let name: string = "hello";
+    let name: str = "hello";
     name.append(" world");
     return;
 }
@@ -1860,9 +1944,15 @@ function main(): void {
 fn enum_copy_noncopy_payload() {
   let result = common::analyze(
     r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
 @implements(Copy)
 enum MaybeMsg {
-    Some(string),
+    Some(Owned),
     None
 }
 

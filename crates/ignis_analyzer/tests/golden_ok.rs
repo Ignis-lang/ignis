@@ -38,7 +38,7 @@ fn extern_function() {
   let result = common::analyze(
     r#"
 extern C {
-    function puts(s: string): i32;
+    function puts(s: str): i32;
 }
 "#,
   );
@@ -471,16 +471,16 @@ function main(): i32 {
 }
 
 #[test]
-fn extension_method_string() {
+fn extension_method_str() {
   let result = common::analyze(
     r#"
-@extension(string)
-function isEmpty(value: string): boolean {
+@extension(str)
+function isEmpty(value: str): boolean {
     return false;
 }
 
 function main(): void {
-    let s: string = "hello";
+    let s: str = "hello";
     let result: boolean = s.isEmpty();
     return;
 }
@@ -488,10 +488,10 @@ function main(): void {
   );
 
   assert_snapshot!(
-    "extension_method_string_diags",
+    "extension_method_str_diags",
     common::format_diagnostics(&result.output.diagnostics)
   );
-  assert_snapshot!("extension_method_string_hir", common::format_hir(&result));
+  assert_snapshot!("extension_method_str_hir", common::format_hir(&result));
 }
 
 #[test]

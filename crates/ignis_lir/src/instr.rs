@@ -164,7 +164,7 @@ pub enum Instr {
   },
 
   /// Drop an owned value's resources.
-  /// The local must have a droppable type (string, dynamic vector, infer).
+  /// The local must have a droppable type (owned record, dynamic vector, etc.).
   Drop {
     local: LocalId,
   },

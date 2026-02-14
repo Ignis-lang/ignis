@@ -41,8 +41,8 @@ static AT_ITEMS: &[AtItemMeta] = &[
     name: "typeName",
     kind: AtItemKind::Builtin,
     syntax: "@typeName<T>()",
-    summary: "Returns the name of type `T` as a `string`.",
-    doc: Some("Resolved at compile time to a string literal. No runtime cost."),
+    summary: "Returns the name of type `T` as a `str`.",
+    doc: Some("Resolved at compile time to a string literal (`str`). No runtime cost."),
   },
   AtItemMeta {
     name: "bitCast",

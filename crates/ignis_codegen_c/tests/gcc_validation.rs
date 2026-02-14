@@ -150,16 +150,22 @@ function main(): void {
 }
 
 #[test]
-fn gcc_drop_glue_string_field() {
+fn gcc_drop_glue_owned_field() {
   gcc_compiles(
     r#"
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
 record Named {
-    name: string;
+    inner: Owned;
     value: i32;
 }
 
 function main(): void {
-    let n: Named = Named { name: "hello", value: 42 };
+    let n: Named = Named { inner: Owned { id: 1 }, value: 42 };
     return;
 }
 "#,
@@ -170,8 +176,10 @@ function main(): void {
 fn gcc_drop_glue_nested() {
   gcc_compiles(
     r#"
+@implements(Drop)
 record Inner {
-    label: string;
+    tag: i32;
+    drop(&mut self): void { return; }
 }
 
 record Outer {
@@ -180,7 +188,7 @@ record Outer {
 }
 
 function main(): void {
-    let o: Outer = Outer { inner: Inner { label: "test" }, code: 1 };
+    let o: Outer = Outer { inner: Inner { tag: 1 }, code: 1 };
     return;
 }
 "#,
@@ -226,17 +234,23 @@ function main(): void {
 }
 
 #[test]
-fn gcc_drop_glue_multiple_strings() {
+fn gcc_drop_glue_multiple_owned_fields() {
   gcc_compiles(
     r#"
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
 record Person {
-    first: string;
-    last: string;
+    first: Owned;
+    last: Owned;
     age: i32;
 }
 
 function main(): void {
-    let p: Person = Person { first: "John", last: "Doe", age: 30 };
+    let p: Person = Person { first: Owned { id: 1 }, last: Owned { id: 2 }, age: 30 };
     return;
 }
 "#,
@@ -298,12 +312,18 @@ function main(): void {
 }
 
 #[test]
-fn gcc_drop_glue_explicit_with_string() {
+fn gcc_drop_glue_explicit_with_owned_field() {
   gcc_compiles(
     r#"
 @implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+@implements(Drop)
 record Logger {
-    name: string;
+    inner: Owned;
     level: i32;
 
     drop(&mut self): void {
@@ -312,7 +332,7 @@ record Logger {
 }
 
 function main(): void {
-    let l: Logger = Logger { name: "app", level: 3 };
+    let l: Logger = Logger { inner: Owned { id: 1 }, level: 3 };
     return;
 }
 "#,

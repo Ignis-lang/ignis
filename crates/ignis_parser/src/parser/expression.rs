@@ -216,6 +216,7 @@ impl IgnisParser {
         | TokenType::Float64Type
         | TokenType::BooleanType
         | TokenType::AtomType
+        | TokenType::StrType
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void => {},
@@ -312,6 +313,7 @@ impl IgnisParser {
         | TokenType::Float64Type
         | TokenType::BooleanType
         | TokenType::AtomType
+        | TokenType::StrType
         | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void => {},

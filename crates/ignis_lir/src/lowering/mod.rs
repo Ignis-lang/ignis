@@ -914,7 +914,7 @@ impl<'a> LoweringContext<'a> {
       Type::F64 => 9,
       Type::Boolean => 10,
       Type::Char => 11,
-      Type::String => 12,
+      Type::Str => 12,
 
       Type::Pointer { .. } => 200,
       _ => 0xFFFFFFFF,

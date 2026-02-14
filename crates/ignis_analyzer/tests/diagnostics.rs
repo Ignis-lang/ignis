@@ -291,7 +291,7 @@ fn no_overload_matches() {
   common::assert_diagnostic_at_line(
     r#"
 function foo(x: i32): void { return; }
-function foo(x: string): void { return; }
+function foo(x: str): void { return; }
 
 function main(): void {
     foo(true);
@@ -325,7 +325,7 @@ fn overload_group_as_value() {
   common::assert_diagnostic_at_line(
     r#"
 function foo(x: i32): void { return; }
-function foo(x: string): void { return; }
+function foo(x: str): void { return; }
 
 function main(): void {
     let f: i32 = foo;
@@ -360,7 +360,7 @@ record Box {
         return self.value;
     }
 
-    get(label: string): i32 {
+    get(label: str): i32 {
         return self.value;
     }
 }

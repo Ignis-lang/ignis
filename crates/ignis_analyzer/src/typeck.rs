@@ -365,7 +365,7 @@ impl<'a> Analyzer<'a> {
             if !self.types.is_error(&value_type)
               && !self.types.is_error(&expected_return_type)
               && !matches!(self.types.get(&value_type), Type::Never)
-              && !self.types.types_equal(&expected_return_type, &value_type)
+              && !self.types.is_assignable(&expected_return_type, &value_type)
             {
               let expected = self.format_type_for_error(&expected_return_type);
               let got = self.format_type_for_error(&value_type);
@@ -865,7 +865,7 @@ impl<'a> Analyzer<'a> {
           IgnisLiteralValue::Float64(_) => self.types.f64(),
           IgnisLiteralValue::Boolean(_) => self.types.boolean(),
           IgnisLiteralValue::Char(_) => self.types.char(),
-          IgnisLiteralValue::String(_) => self.types.string(),
+          IgnisLiteralValue::String(_) => self.types.str(),
           IgnisLiteralValue::Atom(_) => self.types.atom(),
           IgnisLiteralValue::Hex(_) => self.types.u32(),
           IgnisLiteralValue::Binary(_) => self.types.u8(),
@@ -2893,7 +2893,7 @@ impl<'a> Analyzer<'a> {
 
       IgnisLiteralValue::Boolean(_) => self.types.boolean(),
       IgnisLiteralValue::Char(_) => self.types.char(),
-      IgnisLiteralValue::String(_) => self.types.string(),
+      IgnisLiteralValue::String(_) => self.types.str(),
       IgnisLiteralValue::Atom(_) => self.types.atom(),
       IgnisLiteralValue::Null => {
         if let Some(expected) = &infer.expected {
@@ -3266,7 +3266,7 @@ impl<'a> Analyzer<'a> {
         if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
           continue;
         }
-        if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+        if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
           // Special case: deallocate accepts any *mut T, coercing to *mut u8
           if func_name == "deallocate" && i == 0 && self.is_ptr_coercion(&arg_types[i], &param_types[i]) {
             continue;
@@ -3569,7 +3569,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -3640,7 +3640,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -3767,7 +3767,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -3839,7 +3839,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -3970,7 +3970,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -4040,7 +4040,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -4175,7 +4175,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -4283,7 +4283,7 @@ impl<'a> Analyzer<'a> {
             }
 
             let expected_type = self.types.substitute(variant.payload[i], &subst);
-            if !self.types.types_equal(&expected_type, arg_type) {
+            if !self.types.is_assignable(&expected_type, arg_type) {
               let expected = self.format_type_for_error(&expected_type);
               let got = self.format_type_for_error(arg_type);
               self.add_diagnostic(
@@ -4365,7 +4365,7 @@ impl<'a> Analyzer<'a> {
                 if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
                   continue;
                 }
-                if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+                if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
                   let expected = self.format_type_for_error(&param_types[i]);
                   let got = self.format_type_for_error(&arg_types[i]);
                   self.add_diagnostic(
@@ -4499,7 +4499,7 @@ impl<'a> Analyzer<'a> {
               continue;
             }
 
-            if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+            if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
               let expected = self.format_type_for_error(&param_types[i]);
               let got = self.format_type_for_error(&arg_types[i]);
               self.add_diagnostic(
@@ -4601,7 +4601,7 @@ impl<'a> Analyzer<'a> {
           }
 
           let expected_type = self.types.substitute(variant.payload[i], &subst);
-          if !self.types.types_equal(&expected_type, arg_type) {
+          if !self.types.is_assignable(&expected_type, arg_type) {
             let expected = self.format_type_for_error(&expected_type);
             let got = self.format_type_for_error(arg_type);
             self.add_diagnostic(
@@ -4705,7 +4705,7 @@ impl<'a> Analyzer<'a> {
             continue;
           }
 
-          if !self.types.types_equal(&subst_params[i], &arg_types[i]) {
+          if !self.types.is_assignable(&subst_params[i], &arg_types[i]) {
             let expected = self.format_type_for_error(&subst_params[i]);
             let got = self.format_type_for_error(&arg_types[i]);
             self.add_diagnostic(
@@ -4773,7 +4773,7 @@ impl<'a> Analyzer<'a> {
         continue;
       }
 
-      if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+      if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
         let expected = self.format_type_for_error(&param_types[i]);
         let got = self.format_type_for_error(&arg_types[i]);
         self.add_diagnostic(
@@ -5004,7 +5004,7 @@ impl<'a> Analyzer<'a> {
     let infer = InferContext::expecting(pointer_type);
     let arg_type = self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &infer);
 
-    if !self.types.types_equal(&arg_type, &pointer_type) {
+    if !self.types.is_assignable(&arg_type, &pointer_type) {
       let expected = self.format_type_for_error(&pointer_type);
       let got = self.format_type_for_error(&arg_type);
       self.add_diagnostic(
@@ -5108,7 +5108,7 @@ impl<'a> Analyzer<'a> {
     let ptr_infer = InferContext::expecting(pointer_type);
     let ptr_type = self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &ptr_infer);
 
-    if !self.types.types_equal(&ptr_type, &pointer_type) {
+    if !self.types.is_assignable(&ptr_type, &pointer_type) {
       let expected = self.format_type_for_error(&pointer_type);
       let got = self.format_type_for_error(&ptr_type);
       self.add_diagnostic(
@@ -5126,7 +5126,7 @@ impl<'a> Analyzer<'a> {
     let value_infer = InferContext::expecting(value_type);
     let arg_type = self.typecheck_node_with_infer(&bc.args[1], scope_kind, ctx, &value_infer);
 
-    if !self.types.types_equal(&arg_type, &value_type) {
+    if !self.types.is_assignable(&arg_type, &value_type) {
       let expected = self.format_type_for_error(&value_type);
       let got = self.format_type_for_error(&arg_type);
       self.add_diagnostic(
@@ -5230,7 +5230,7 @@ impl<'a> Analyzer<'a> {
     let infer = InferContext::expecting(pointer_type);
     let arg_type = self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &infer);
 
-    if !self.types.types_equal(&arg_type, &pointer_type) {
+    if !self.types.is_assignable(&arg_type, &pointer_type) {
       let expected = self.format_type_for_error(&pointer_type);
       let got = self.format_type_for_error(&arg_type);
       self.add_diagnostic(
@@ -5451,7 +5451,7 @@ impl<'a> Analyzer<'a> {
         self.typecheck_builtin_type_arg(bc, "alignOf", ty)
       },
       "typeName" => {
-        let ty = self.types.string();
+        let ty = self.types.str();
         self.typecheck_builtin_type_arg(bc, "typeName", ty)
       },
       "bitCast" => self.typecheck_builtin_bitcast(bc, scope_kind, ctx),
@@ -6335,7 +6335,7 @@ impl<'a> Analyzer<'a> {
       return;
     }
 
-    if !self.types.types_equal(target_type, value_type) {
+    if !self.types.is_assignable(target_type, value_type) {
       let target_name = self.format_type_for_error(target_type);
       let value_name = self.format_type_for_error(value_type);
 
@@ -6463,7 +6463,25 @@ impl<'a> Analyzer<'a> {
       IgnisTypeSyntax::U64 => self.types.u64(),
       IgnisTypeSyntax::F32 => self.types.f32(),
       IgnisTypeSyntax::F64 => self.types.f64(),
-      IgnisTypeSyntax::String => self.types.string(),
+      IgnisTypeSyntax::Str => self.types.str(),
+      IgnisTypeSyntax::String => {
+        // Resolve `string` keyword to the `String` record from std/string via scope lookup.
+        let sym = self.symbols.borrow_mut().intern("String");
+        if let Some(def_id) = self.scopes.lookup_def(&sym).cloned() {
+          self.mark_referenced(def_id);
+          *self.type_of(&def_id)
+        } else {
+          if let Some(s) = span {
+            self.add_diagnostic(Diagnostic::new(
+              Severity::Error,
+              "Type 'string' requires the 'String' record (import std/string)".to_string(),
+              "I0043".to_string(),
+              s.clone(),
+            ));
+          }
+          self.types.error()
+        }
+      },
       IgnisTypeSyntax::Boolean => self.types.boolean(),
       IgnisTypeSyntax::Atom => self.types.atom(),
       IgnisTypeSyntax::Void => self.types.void(),
@@ -7000,7 +7018,7 @@ impl<'a> Analyzer<'a> {
       Type::F64 => "f64".to_string(),
       Type::Boolean => "bool".to_string(),
       Type::Char => "char".to_string(),
-      Type::String => "string".to_string(),
+      Type::Str => "str".to_string(),
       Type::Atom => "atom".to_string(),
       Type::Void => "void".to_string(),
       Type::Never => "never".to_string(),
@@ -7810,19 +7828,30 @@ impl<'a> Analyzer<'a> {
     let has_generics = self.has_type_params(def_id);
     let mut inferred = Substitution::new();
 
+    let mut coercion_cost: u32 = 0;
+
     for (param_ty, arg_ty) in param_types.iter().zip(arg_types.iter()) {
-      if !self.types.types_equal(param_ty, arg_ty) {
-        if has_generics {
-          if !self.try_infer_type_param(param_ty, arg_ty, &mut inferred) {
-            return None;
-          }
-        } else {
+      if self.types.types_equal(param_ty, arg_ty) {
+        continue;
+      }
+
+      // Non-equal but assignable (future: implicit coercions) — match with extra cost.
+      if self.types.is_assignable(param_ty, arg_ty) {
+        coercion_cost += 2;
+        continue;
+      }
+
+      if has_generics {
+        if !self.try_infer_type_param(param_ty, arg_ty, &mut inferred) {
           return None;
         }
+      } else {
+        return None;
       }
     }
 
-    Some(if inferred.is_empty() { 0 } else { 1 })
+    let base_cost = if inferred.is_empty() { 0 } else { 1 };
+    Some(base_cost + coercion_cost)
   }
 
   fn get_param_types(
@@ -8258,7 +8287,7 @@ impl<'a> Analyzer<'a> {
         if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
           continue;
         }
-        if !self.types.types_equal(&param_types[i], &arg_types[i]) {
+        if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
           let expected = self.format_type_for_error(&param_types[i]);
           let got = self.format_type_for_error(&arg_types[i]);
           self.add_diagnostic(

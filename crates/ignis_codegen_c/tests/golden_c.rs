@@ -65,7 +65,7 @@ fn c_extern_declarations() {
   let c_code = common::compile_to_c(
     r#"
 extern libc {
-    function puts(s: string): i32;
+    function puts(s: str): i32;
 }
 
 function main(): void {
@@ -114,7 +114,7 @@ function main(): void {
 //   let c_code = common::compile_to_c(
 //     r#"
 // extern libc {
-//     function printf(format: string, ...args: u8[]): i32;
+//     function printf(format: str, ...args: u8[]): i32;
 // }
 //
 // function main(): void {
@@ -261,12 +261,12 @@ record Pair<A, B> {
 }
 
 function main(): void {
-    let p: Pair<string, i32> = Pair { first: "hello", second: 42 };
+    let p: Pair<str, i32> = Pair { first: "hello", second: 42 };
     return;
 }
 "#,
   );
-  assert!(c_code.contains("Pair____string____i32"));
+  assert!(c_code.contains("Pair____str____i32"));
   assert_snapshot!("c_multi_param_mangling", c_code);
 }
 
@@ -280,13 +280,13 @@ function identity<T>(x: T): T {
 
 function main(): void {
     let a: i32 = identity<i32>(42);
-    let b: string = identity<string>("hello");
+    let b: str = identity<str>("hello");
     return;
 }
 "#,
   );
   assert!(c_code.contains("identity____i32"));
-  assert!(c_code.contains("identity____string"));
+  assert!(c_code.contains("identity____str"));
   assert_snapshot!("c_generic_function_mangling", c_code);
 }
 
@@ -295,33 +295,38 @@ function main(): void {
 // =============================================================================
 
 #[test]
-fn c_drop_glue_string_field() {
+fn c_drop_glue_owned_field() {
   let c_code = common::compile_to_c(
     r#"
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
 record Named {
-    name: string;
+    inner: Owned;
     value: i32;
 }
 
 function main(): void {
-    let n: Named = Named { name: "hello", value: 42 };
+    let n: Named = Named { inner: Owned { id: 1 }, value: 42 };
     return;
 }
 "#,
   );
-  assert!(
-    c_code.contains("ignis_string_drop"),
-    "Expected ignis_string_drop call for string field"
-  );
-  assert_snapshot!("c_drop_glue_string_field", c_code);
+  assert!(c_code.contains("Owned_drop"), "Expected Owned_drop call for owned field");
+  assert_snapshot!("c_drop_glue_owned_field", c_code);
 }
 
 #[test]
 fn c_drop_glue_nested_record() {
   let c_code = common::compile_to_c(
     r#"
+@implements(Drop)
 record Inner {
-    label: string;
+    tag: i32;
+    drop(&mut self): void { return; }
 }
 
 record Outer {
@@ -330,14 +335,14 @@ record Outer {
 }
 
 function main(): void {
-    let o: Outer = Outer { inner: Inner { label: "test" }, code: 1 };
+    let o: Outer = Outer { inner: Inner { tag: 1 }, code: 1 };
     return;
 }
 "#,
   );
-  // Outer has no explicit drop, but Inner.label is a string, so codegen
-  // must recurse: Outer -> Inner -> ignis_string_drop
-  assert!(c_code.contains("ignis_string_drop"), "Expected nested ignis_string_drop");
+  // Outer has no explicit drop, but Inner has @implements(Drop), so codegen
+  // must recurse: Outer -> Inner -> Inner_drop
+  assert!(c_code.contains("Inner_drop"), "Expected nested Inner_drop");
   assert_snapshot!("c_drop_glue_nested_record", c_code);
 }
 
@@ -381,38 +386,37 @@ function main(): void {
 "#,
   );
   // All-primitive record: no drop calls at all
-  assert!(
-    !c_code.contains("ignis_string_drop"),
-    "No string drop expected for primitive record"
-  );
+  assert!(!c_code.contains("_drop"), "No drop expected for primitive record");
   assert!(!c_code.contains("ignis_buf_drop"), "No buf drop expected for primitive record");
   assert_snapshot!("c_no_drop_glue_primitive_record", c_code);
 }
 
 #[test]
-fn c_drop_glue_multiple_string_fields() {
+fn c_drop_glue_multiple_owned_fields() {
   let c_code = common::compile_to_c(
     r#"
+@implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
 record Person {
-    first: string;
-    last: string;
+    first: Owned;
+    second: Owned;
     age: i32;
 }
 
 function main(): void {
-    let p: Person = Person { first: "John", last: "Doe", age: 30 };
+    let p: Person = Person { first: Owned { id: 1 }, second: Owned { id: 2 }, age: 30 };
     return;
 }
 "#,
   );
-  // Both string fields must get drop calls
-  let drop_count = c_code.matches("ignis_string_drop").count();
-  assert!(
-    drop_count >= 2,
-    "Expected at least 2 ignis_string_drop calls, found {}",
-    drop_count
-  );
-  assert_snapshot!("c_drop_glue_multiple_string_fields", c_code);
+  // Both owned fields must get drop calls
+  let drop_count = c_code.matches("Owned_drop").count();
+  assert!(drop_count >= 2, "Expected at least 2 Owned_drop calls, found {}", drop_count);
+  assert_snapshot!("c_drop_glue_multiple_owned_fields", c_code);
 }
 
 #[test]
@@ -449,13 +453,19 @@ function main(): void {
 }
 
 #[test]
-fn c_drop_glue_explicit_with_string() {
+fn c_drop_glue_explicit_with_owned_field() {
   let c_code = common::compile_to_c(
     r#"
 @implements(Drop)
+record Owned {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+@implements(Drop)
 record Logger {
-    name: string;
-    level: i32;
+    inner: Owned;
+    tag: i32;
 
     drop(&mut self): void {
         return;
@@ -463,7 +473,7 @@ record Logger {
 }
 
 function main(): void {
-    let l: Logger = Logger { name: "app", level: 3 };
+    let l: Logger = Logger { inner: Owned { id: 1 }, tag: 3 };
     return;
 }
 "#,
@@ -471,7 +481,7 @@ function main(): void {
   // With explicit @implements(Drop), the drop method is called,
   // NOT field-by-field glue. The user's drop method is responsible for cleanup.
   assert!(c_code.contains("Logger_drop"), "Expected Logger_drop call");
-  assert_snapshot!("c_drop_glue_explicit_with_string", c_code);
+  assert_snapshot!("c_drop_glue_explicit_with_owned_field", c_code);
 }
 
 #[test]
@@ -498,12 +508,11 @@ function main(): void {
 "#,
   );
   // Nested all-primitive records: no drops at all
+  assert!(!c_code.contains("_drop"), "No drop expected for nested primitive records");
   assert!(
-    !c_code.contains("ignis_string_drop"),
-    "No string drop for nested primitive records"
+    !c_code.contains("ignis_buf_drop"),
+    "No buf drop expected for nested primitive records"
   );
-  assert!(!c_code.contains("ignis_buf_drop"), "No buf drop for nested primitive records");
-  assert!(!c_code.contains("_drop"), "No drop calls at all for nested primitive records");
   assert_snapshot!("c_no_drop_glue_nested_primitive", c_code);
 }
 

@@ -1570,7 +1570,7 @@ fn e2e_typename_i32() {
     "typename_i32",
     r#"
 function main(): i32 {
-    let name: string = @typeName<i32>();
+    let name: str = @typeName<i32>();
     return 0;
 }
 "#,
@@ -1588,7 +1588,7 @@ record Point {
 }
 
 function main(): i32 {
-    let name: string = @typeName<Point>();
+    let name: str = @typeName<Point>();
     return 0;
 }
 "#,
@@ -1900,13 +1900,18 @@ fn e2e_drop_glue() {
   e2e_test(
     "drop_glue",
     r#"
+@implements(Drop)
 record Named {
-  public name: string;
+  public tag: i32;
   public value: i32;
+
+  drop(&mut self): void {
+      return;
+  }
 }
 
 function main(): i32 {
-    let n: Named = Named { name: "hello", value: 42 };
+    let n: Named = Named { tag: 1, value: 42 };
     return n.value;
 }
 "#,
@@ -1918,8 +1923,13 @@ fn e2e_nested_drop_glue() {
   e2e_test(
     "nested_drop_glue",
     r#"
+@implements(Drop)
 record Inner {
-  public label: string;
+  public tag: i32;
+
+  drop(&mut self): void {
+      return;
+  }
 }
 
 record Outer {
@@ -1929,7 +1939,7 @@ record Outer {
 
 function main(): i32 {
     let o: Outer = Outer {
-        inner: Inner { label: "test" },
+        inner: Inner { tag: 1 },
         code: 42
     };
     return o.code;
@@ -1939,18 +1949,27 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_drop_glue_multiple_strings() {
+fn e2e_drop_glue_multiple_owned_fields() {
   e2e_test(
-    "drop_glue_multiple_strings",
+    "drop_glue_multiple_owned_fields",
     r#"
+@implements(Drop)
+record Handle {
+  public id: i32;
+
+  drop(&mut self): void {
+      return;
+  }
+}
+
 record Person {
-  public first: string;
-  public last: string;
+  public first: Handle;
+  public last: Handle;
   public age: i32;
 }
 
 function main(): i32 {
-    let p: Person = Person { first: "John", last: "Doe", age: 30 };
+    let p: Person = Person { first: Handle { id: 1 }, last: Handle { id: 2 }, age: 30 };
     return p.age;
 }
 "#,
@@ -2015,15 +2034,13 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_drop_glue_explicit_with_string() {
-  // The custom drop method intentionally does nothing, so the string field leaks.
-  // This tests that the user's drop is called (not that it's correct).
-  e2e_test_allow_leak(
-    "drop_glue_explicit_with_string",
+fn e2e_drop_glue_explicit_custom() {
+  e2e_test(
+    "drop_glue_explicit_custom",
     r#"
 @implements(Drop)
 record Logger {
-  public name: string;
+  public tag: i32;
   public level: i32;
 
   drop(&mut self): void {
@@ -2032,7 +2049,7 @@ record Logger {
 }
 
 function main(): i32 {
-    let l: Logger = Logger { name: "app", level: 3 };
+    let l: Logger = Logger { tag: 1, level: 3 };
     return l.level;
 }
 "#,
@@ -2749,13 +2766,22 @@ fn e2e_enum_drop_owned_payload() {
   e2e_test(
     "enum_drop_owned_payload",
     r#"
-enum MaybeMsg {
-    Some(string),
+@implements(Drop)
+record Handle {
+  public id: i32;
+
+  drop(&mut self): void {
+      return;
+  }
+}
+
+enum MaybeHandle {
+    Some(Handle),
     None
 }
 
 function main(): i32 {
-    let m: MaybeMsg = MaybeMsg::Some("hello");
+    let m: MaybeHandle = MaybeHandle::Some(Handle { id: 1 });
     return 0;
 }
 "#,
