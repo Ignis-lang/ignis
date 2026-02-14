@@ -1333,7 +1333,7 @@ mod tests {
 
   #[test]
   fn parses_extern_block_with_function() {
-    let result = parse("extern libc { function printf(fmt: string): void; }");
+    let result = parse("extern libc { function printf(fmt: str): void; }");
     let stmt = first_root(&result);
 
     match stmt {
@@ -1381,7 +1381,7 @@ mod tests {
 
   #[test]
   fn parses_extern_block_multiple_items() {
-    let result = parse("extern libc { function printf(fmt: string): i32; const BUFSIZ: i32; }");
+    let result = parse("extern libc { function printf(fmt: str): i32; const BUFSIZ: i32; }");
     let stmt = first_root(&result);
 
     match stmt {

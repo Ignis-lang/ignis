@@ -195,7 +195,6 @@ fn classify_token(
     TokenType::Void => (TokenTypeIndex::Type as u32, ModifierIndex::Readonly.bit()),
 
     TokenType::StrType
-    | TokenType::StringType
     | TokenType::Int8Type
     | TokenType::Int16Type
     | TokenType::Int32Type

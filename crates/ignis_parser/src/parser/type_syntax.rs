@@ -70,7 +70,7 @@ impl super::IgnisParser {
   }
 
   /// Parse qualified path with optional type arguments
-  /// Examples: Writer, io::Writer, Vec<i32>, Map<string, i32>, io::Reader<T>
+  /// Examples: Writer, io::Writer, Vec<i32>, Map<str, i32>, io::Reader<T>
   fn parse_type_path(&mut self) -> ParserResult<IgnisTypeSyntax> {
     let first = self.expect(TokenType::Identifier)?.clone();
     let first_span = first.span.clone();
@@ -193,7 +193,6 @@ impl super::IgnisParser {
       TokenType::Float64Type => IgnisTypeSyntax::F64,
       TokenType::BooleanType => IgnisTypeSyntax::Boolean,
       TokenType::StrType => IgnisTypeSyntax::Str,
-      TokenType::StringType => IgnisTypeSyntax::String,
       TokenType::AtomType => IgnisTypeSyntax::Atom,
       TokenType::CharType => IgnisTypeSyntax::Char,
       TokenType::Void => IgnisTypeSyntax::Void,
@@ -221,7 +220,6 @@ impl super::IgnisParser {
         | TokenType::BooleanType
         | TokenType::AtomType
         | TokenType::StrType
-        | TokenType::StringType
         | TokenType::CharType
         | TokenType::Void
     )
@@ -287,9 +285,9 @@ mod tests {
   }
 
   #[test]
-  fn parses_type_keyword_string() {
-    let ty = parse_type("string");
-    assert_eq!(ty, IgnisTypeSyntax::String);
+  fn parses_primitive_str() {
+    let ty = parse_type("str");
+    assert_eq!(ty, IgnisTypeSyntax::Str);
   }
 
   #[test]
@@ -437,12 +435,11 @@ mod tests {
 
   #[test]
   fn parses_applied_type_multiple_args() {
-    // Map<K, V> is a user-defined generic record; `string` is a type keyword alias for `String`
-    let ty = parse_type("Map<string, i32>");
+    let ty = parse_type("Map<str, i32>");
     match ty {
       IgnisTypeSyntax::Applied { args, .. } => {
         assert_eq!(args.len(), 2);
-        assert_eq!(args[0], IgnisTypeSyntax::String);
+        assert_eq!(args[0], IgnisTypeSyntax::Str);
         assert_eq!(args[1], IgnisTypeSyntax::I32);
       },
       other => panic!("expected applied type, got {:?}", other),

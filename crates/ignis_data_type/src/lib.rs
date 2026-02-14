@@ -189,7 +189,7 @@ impl DataType {
 impl From<&TokenType> for DataType {
   fn from(kind: &TokenType) -> Self {
     match kind {
-      TokenType::StringType => DataType::String,
+      TokenType::StrType => DataType::String,
       TokenType::Int8Type => DataType::Int8,
       TokenType::Int16Type => DataType::Int16,
       TokenType::Int32Type => DataType::Int32,
