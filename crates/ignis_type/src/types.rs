@@ -8,6 +8,9 @@ use crate::{
 
 pub type TypeId = Id<Type>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InferVarId(pub u32);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
   I8,
@@ -26,7 +29,13 @@ pub enum Type {
   Atom,
   Void,
   Never,
+
+  InferVar(InferVarId),
   Infer,
+
+  /// Must not escape to HIR/LIR.
+  Unknown,
+
   NullPtr,
 
   Pointer {
@@ -74,8 +83,6 @@ pub enum Type {
     args: Vec<TypeId>,
   },
 
-  // TODO: Implement Inferenced(InferenceVariable)
-  // Inferenced(InferenceVariable),
   Error,
 }
 
@@ -178,6 +185,7 @@ impl TypeStore {
       Type::Void,
       Type::Never,
       Type::Infer,
+      Type::Unknown,
       Type::NullPtr,
       Type::Error,
     ];
@@ -407,6 +415,14 @@ impl TypeStore {
   pub fn infer(&self) -> TypeId {
     self.primitives[&Type::Infer]
   }
+
+  pub fn infer_var(
+    &mut self,
+    id: InferVarId,
+  ) -> TypeId {
+    self.types.alloc(Type::InferVar(id))
+  }
+
   #[inline]
   pub fn error(&self) -> TypeId {
     self.primitives[&Type::Error]
@@ -560,7 +576,34 @@ impl TypeStore {
     &self,
     ty: &TypeId,
   ) -> bool {
-    matches!(self.get(ty), Type::Infer)
+    matches!(self.get(ty), Type::Infer | Type::InferVar(_))
+  }
+
+  #[inline]
+  pub fn is_infer_var(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(self.get(ty), Type::InferVar(_))
+  }
+
+  #[inline]
+  pub fn as_infer_var(
+    &self,
+    ty: &TypeId,
+  ) -> Option<InferVarId> {
+    match self.get(ty) {
+      Type::InferVar(id) => Some(*id),
+      _ => None,
+    }
+  }
+
+  #[inline]
+  pub fn is_unknown(
+    &self,
+    ty: &TypeId,
+  ) -> bool {
+    matches!(self.get(ty), Type::Unknown)
   }
 
   #[inline]
@@ -601,6 +644,8 @@ impl TypeStore {
       Type::Vector { element, .. } => self.is_copy(element),
 
       Type::Infer => false,
+      Type::InferVar(_) => false,
+      Type::Unknown => false,
 
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy(e)),
 
@@ -1151,6 +1196,8 @@ pub fn format_type_name(
     Type::Void => "void".to_string(),
     Type::Never => "never".to_string(),
     Type::Infer => "infer".to_string(),
+    Type::InferVar(id) => format!("?{}", id.0),
+    Type::Unknown => "unknown".to_string(),
     Type::NullPtr => "null".to_string(),
     Type::Error => "error".to_string(),
 

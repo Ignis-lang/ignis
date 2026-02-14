@@ -1816,6 +1816,12 @@ impl<'a> CEmitter<'a> {
       Type::Infer => {
         panic!("ICE: Type::Infer reached C codegen after implicit type removal")
       },
+      Type::InferVar(_) => {
+        panic!("ICE: Type::InferVar reached C codegen - zonking failed")
+      },
+      Type::Unknown => {
+        panic!("ICE: Type::Unknown reached C codegen")
+      },
     }
   }
 
@@ -3338,6 +3344,12 @@ pub fn format_c_type(
     },
     Type::Infer => {
       panic!("ICE: Type::Infer reached C codegen after implicit type removal")
+    },
+    Type::InferVar(_) => {
+      panic!("ICE: Type::InferVar reached C codegen - zonking failed")
+    },
+    Type::Unknown => {
+      panic!("ICE: Type::Unknown reached C codegen")
     },
   }
 }

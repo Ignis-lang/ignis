@@ -261,6 +261,10 @@ pub enum DiagnosticMessage {
   CannotInferNullType {
     span: Span,
   },
+  CannotInferVariableType {
+    var_name: String,
+    span: Span,
+  },
   NullDereference {
     span: Span,
   },
@@ -997,6 +1001,13 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::CannotInferNullType { .. } => {
         write!(f, "Cannot infer pointer type for null literal")
       },
+      DiagnosticMessage::CannotInferVariableType { var_name, .. } => {
+        write!(
+          f,
+          "Cannot infer type for variable '{}' - add a type annotation or initializer",
+          var_name
+        )
+      },
       DiagnosticMessage::NullDereference { .. } => {
         write!(f, "Cannot dereference null pointer")
       },
@@ -1653,6 +1664,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::InvalidUnaryOperandType { span, .. }
       | DiagnosticMessage::InvalidNullLiteral { span, .. }
       | DiagnosticMessage::CannotInferNullType { span, .. }
+      | DiagnosticMessage::CannotInferVariableType { span, .. }
       | DiagnosticMessage::NullDereference { span, .. }
       | DiagnosticMessage::InvalidPointerArithmetic { span, .. }
       | DiagnosticMessage::DereferenceNonPointer { span, .. }
@@ -1847,6 +1859,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::InvalidUnaryOperandType { .. } => "A0020",
       DiagnosticMessage::InvalidNullLiteral { .. } => "A0072",
       DiagnosticMessage::CannotInferNullType { .. } => "A0073",
+      DiagnosticMessage::CannotInferVariableType { .. } => "A0077",
       DiagnosticMessage::NullDereference { .. } => "A0074",
       DiagnosticMessage::InvalidPointerArithmetic { .. } => "A0075",
       DiagnosticMessage::DereferenceNonPointer { .. } => "A0021",

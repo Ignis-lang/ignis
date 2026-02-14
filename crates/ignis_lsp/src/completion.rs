@@ -2525,6 +2525,9 @@ fn format_type_brief(
         .collect();
       format!("{}<{}>", base, arg_strs.join(", "))
     },
+
+    Type::InferVar(id) => format!("?{}", id.0),
+    Type::Unknown => "unknown".to_string(),
   }
 }
 

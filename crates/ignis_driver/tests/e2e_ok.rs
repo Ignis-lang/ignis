@@ -4135,3 +4135,96 @@ function main(): i32 {
 "#,
   );
 }
+
+// ── Type Inference ──────────────────────────────────────────
+
+#[test]
+fn e2e_infer_from_initializer() {
+  e2e_test(
+    "infer_from_initializer",
+    r#"
+function main(): i32 {
+    let x = 42;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_infer_deferred_from_assignment() {
+  e2e_test(
+    "infer_deferred_from_assignment",
+    r#"
+function main(): i32 {
+    let mut x;
+    x = 10;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_infer_deferred_used_in_arithmetic() {
+  e2e_test(
+    "infer_deferred_used_in_arithmetic",
+    r#"
+function main(): i32 {
+    let x = 30;
+    let mut y;
+    y = 12;
+    return x + y;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_infer_from_function_argument() {
+  e2e_test(
+    "infer_from_function_argument",
+    r#"
+function doubleIt(n: i32): i32 {
+    return n * 2;
+}
+
+function main(): i32 {
+    let mut x;
+    x = 7;
+    return doubleIt(x);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_infer_bool_from_initializer() {
+  e2e_test(
+    "infer_bool_from_initializer",
+    r#"
+function main(): i32 {
+    let flag = true;
+    if (flag) {
+        return 1;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_infer_multiple_variables() {
+  e2e_test(
+    "infer_multiple_variables",
+    r#"
+function main(): i32 {
+    let a = 10;
+    let b = 20;
+    let c = a + b;
+    return c;
+}
+"#,
+  );
+}

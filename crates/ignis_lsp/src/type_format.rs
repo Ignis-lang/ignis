@@ -91,5 +91,7 @@ pub fn format_type(
       let arg_strs: Vec<_> = args.iter().map(|a| format_type(types, defs, symbol_names, a)).collect();
       format!("{}<{}>", base_name, arg_strs.join(", "))
     },
+    Type::InferVar(id) => format!("?{}", id.0),
+    Type::Unknown => "unknown".to_string(),
   }
 }

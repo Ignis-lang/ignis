@@ -2435,3 +2435,45 @@ function main(): i32 {
     "Expected irrefutable let-else warning A0169"
   );
 }
+
+// ── Type Inference Errors ──────────────────────────────────
+
+#[test]
+fn cannot_infer_variable_type() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let x;
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.iter().any(|d| d.error_code == "A0077"),
+    "Expected cannot-infer-type error A0077"
+  );
+}
+
+#[test]
+fn conflicting_inferred_types() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let mut x;
+    x = 42;
+    x = true;
+    return;
+}
+"#,
+  );
+
+  assert!(
+    result
+      .output
+      .diagnostics
+      .iter()
+      .any(|d| d.severity == ignis_diagnostics::diagnostic_report::Severity::Error),
+    "Expected a type mismatch error for conflicting inferred types"
+  );
+}

@@ -1058,7 +1058,7 @@ impl<'a> Analyzer<'a> {
       kind: DefinitionKind::Variable(var_def),
       name: var.name,
       span: span.clone(),
-      name_span: span.clone(),
+      name_span: var.name_span.clone(),
       visibility: if var.metadata.is_public() {
         Visibility::Public
       } else {

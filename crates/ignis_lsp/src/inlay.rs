@@ -3,11 +3,13 @@
 //! Provides:
 //! - Parameter name hints at call sites
 //! - Type hints for match scrutinees
+//! - Type hints for variables with inferred types
 
 use std::collections::HashMap;
 
 use ignis_ast::expressions::{ASTAccessOp, ASTExpression};
 use ignis_ast::statements::{ASTEnumItem, ASTRecordItem, ASTStatement};
+use ignis_ast::type_::IgnisTypeSyntax;
 use ignis_ast::{ASTNode, NodeId};
 use ignis_driver::PerFileAnalysis;
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore};
@@ -27,6 +29,10 @@ struct CallInfo {
 struct MatchScrutineeInfo {
   node_id: NodeId,
   span: ignis_type::span::Span,
+}
+
+struct InferredVariableInfo {
+  def_id: DefinitionId,
 }
 
 fn collect_calls(file: &PerFileAnalysis) -> Vec<CallInfo> {
@@ -114,6 +120,37 @@ fn collect_match_scrutinees(file: &PerFileAnalysis) -> Vec<MatchScrutineeInfo> {
   }
 
   scrutinees
+}
+
+fn collect_inferred_variables(file: &PerFileAnalysis) -> Vec<InferredVariableInfo> {
+  let mut results = Vec::new();
+  let mut stack: Vec<NodeId> = file.roots.clone();
+
+  while let Some(node_id) = stack.pop() {
+    let node = file.nodes.get(&node_id);
+
+    match &node {
+      ASTNode::Statement(ASTStatement::Variable(var)) => {
+        if matches!(var.type_, IgnisTypeSyntax::Implicit)
+          && let Some(def_id) = file.node_defs.get(&node_id)
+        {
+          results.push(InferredVariableInfo { def_id: *def_id });
+        }
+
+        if let Some(value) = &var.value {
+          stack.push(*value);
+        }
+      },
+      ASTNode::Expression(expr) => {
+        collect_expression_children(expr, &mut stack);
+      },
+      ASTNode::Statement(stmt) => {
+        collect_statement_children(stmt, &mut stack);
+      },
+    }
+  }
+
+  results
 }
 
 fn collect_expression_children(
@@ -306,6 +343,7 @@ pub fn generate_hints(
 ) -> Vec<InlayHint> {
   let mut hints = generate_parameter_hints(file, defs, symbol_names, line_index);
   hints.extend(generate_match_scrutinee_type_hints(file, defs, types, symbol_names, line_index));
+  hints.extend(generate_inferred_variable_type_hints(file, defs, types, symbol_names, line_index));
   hints
 }
 
@@ -409,6 +447,47 @@ fn generate_match_scrutinee_type_hints(
       text_edits: None,
       tooltip: None,
       padding_left: Some(true),
+      padding_right: None,
+      data: None,
+    });
+  }
+
+  hints
+}
+
+fn generate_inferred_variable_type_hints(
+  file: &PerFileAnalysis,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbol_names: &HashMap<SymbolId, String>,
+  line_index: &LineIndex,
+) -> Vec<InlayHint> {
+  let variables = collect_inferred_variables(file);
+  let mut hints = Vec::new();
+
+  for var_info in variables {
+    let def = defs.get(&var_info.def_id);
+
+    let type_id = match &def.kind {
+      DefinitionKind::Variable(v) => &v.type_id,
+      _ => continue,
+    };
+
+    let ty = types.get(type_id);
+    if matches!(ty, Type::Error | Type::Infer | Type::InferVar(_) | Type::Unknown) {
+      continue;
+    }
+
+    let type_label = crate::type_format::format_type(types, defs, symbol_names, type_id);
+    let (line, col) = line_index.line_col_utf16(def.name_span.end);
+
+    hints.push(InlayHint {
+      position: Position { line, character: col },
+      label: InlayHintLabel::String(format!(": {}", type_label)),
+      kind: Some(InlayHintKind::TYPE),
+      text_edits: None,
+      tooltip: None,
+      padding_left: None,
       padding_right: None,
       data: None,
     });
