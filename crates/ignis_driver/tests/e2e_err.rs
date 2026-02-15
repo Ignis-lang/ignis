@@ -829,3 +829,25 @@ function main(): void {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_closure_escapes_with_ref_capture() {
+  e2e_error_test(
+    "err_closure_escapes_with_ref_capture",
+    r#"
+function makeCounter(): () -> i32 {
+    let mut count: i32 = 0;
+    let inc = (): i32 -> {
+        count = count + 1;
+        return count;
+    };
+    return inc;
+}
+
+function main(): i32 {
+    let counter = makeCounter();
+    return counter();
+}
+"#,
+  );
+}

@@ -14,6 +14,23 @@ use ignis_type::{Id, Store, definition::DefinitionId, span::Span, types::TypeId,
 
 pub type HIRId = Id<HIRNode>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CaptureMode {
+  ByValue,
+  ByRef,
+  ByMutRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HIRCapture {
+  pub source_def: DefinitionId,
+  /// Position in the env struct.
+  pub field_index: u32,
+  pub mode: CaptureMode,
+  /// T for ByValue, *T for ByRef/ByMutRef.
+  pub type_in_env: TypeId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HIRKind {
   // Expression
@@ -31,6 +48,11 @@ pub enum HIRKind {
   Call {
     callee: DefinitionId,
     type_args: Vec<TypeId>,
+    args: Vec<HIRId>,
+  },
+  /// Indirect call through a closure value.
+  CallClosure {
+    callee: HIRId,
     args: Vec<HIRId>,
   },
   Cast {
@@ -145,6 +167,19 @@ pub enum HIRKind {
     arms: Vec<HIRMatchArm>,
   },
 
+  Closure {
+    params: Vec<DefinitionId>,
+    return_type: TypeId,
+    body: HIRId,
+    captures: Vec<HIRCapture>,
+    /// When true, env is heap-allocated (closure escapes its defining scope).
+    escapes: bool,
+    /// Thunk: `(env_ptr: *mut u8, params...) -> ret`. Populated by capture analysis.
+    thunk_def: Option<DefinitionId>,
+    /// Drop fn: `(env_ptr: *mut u8) -> void`. None if nothing needs dropping.
+    drop_def: Option<DefinitionId>,
+  },
+
   // Error recovery
   Error,
 }
@@ -197,6 +232,12 @@ impl HIRKind {
         *operand = HIRId::new(operand.index() + offset);
       },
       HIRKind::Call { args, type_args: _, .. } => {
+        for arg in args {
+          *arg = HIRId::new(arg.index() + offset);
+        }
+      },
+      HIRKind::CallClosure { callee, args } => {
+        *callee = HIRId::new(callee.index() + offset);
         for arg in args {
           *arg = HIRId::new(arg.index() + offset);
         }
@@ -305,6 +346,9 @@ impl HIRKind {
           arm.body = HIRId::new(arm.body.index() + offset);
         }
       },
+      HIRKind::Closure { body, .. } => {
+        *body = HIRId::new(body.index() + offset);
+      },
     }
   }
 }
@@ -354,6 +398,13 @@ impl HIR {
     id: HIRId,
   ) -> &HIRNode {
     self.nodes.get(&id)
+  }
+
+  pub fn get_mut(
+    &mut self,
+    id: HIRId,
+  ) -> &mut HIRNode {
+    self.nodes.get_mut(&id)
   }
 
   /// Merge another HIR into this one.

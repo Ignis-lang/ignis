@@ -305,6 +305,26 @@ impl<'a> LirVerifier<'a> {
       Instr::DropGlue { dest, .. } => {
         defined_temps.insert(*dest);
       },
+      Instr::MakeClosure { dest, captures, .. } => {
+        for cap in captures {
+          self.check_operand(func, func_name, block_name, cap, defined_temps);
+        }
+        defined_temps.insert(*dest);
+      },
+      Instr::CallClosure {
+        dest, closure, args, ..
+      } => {
+        self.check_operand(func, func_name, block_name, closure, defined_temps);
+        for arg in args {
+          self.check_operand(func, func_name, block_name, arg, defined_temps);
+        }
+        if let Some(d) = dest {
+          defined_temps.insert(*d);
+        }
+      },
+      Instr::DropClosure { closure, .. } => {
+        self.check_operand(func, func_name, block_name, closure, defined_temps);
+      },
     }
   }
 

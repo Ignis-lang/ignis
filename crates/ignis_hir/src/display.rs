@@ -217,6 +217,11 @@ impl<'a> HIRPrinter<'a> {
         let args_str: Vec<_> = args.iter().map(|a| self.format_node_compact(*a)).collect();
         format!("Call({}) {{ {} }}", name, args_str.join(", "))
       },
+      HIRKind::CallClosure { callee, args } => {
+        let callee_str = self.format_node_compact(*callee);
+        let args_str: Vec<_> = args.iter().map(|a| self.format_node_compact(*a)).collect();
+        format!("CallClosure({}) {{ {} }}", callee_str, args_str.join(", "))
+      },
       HIRKind::Binary { operation, left, right } => {
         let left_str = self.format_node_compact(*left);
         let right_str = self.format_node_compact(*right);
@@ -419,6 +424,29 @@ impl<'a> HIRPrinter<'a> {
           }
           self.indent -= 2;
         }
+      },
+      HIRKind::CallClosure { callee, args } => {
+        writeln!(self.output, "CallClosure : {}", type_str).unwrap();
+        self.indent += 1;
+        self.write_indent();
+        writeln!(self.output, "callee:").unwrap();
+        self.indent += 1;
+        self.print_node(*callee);
+        self.indent -= 1;
+        if !args.is_empty() {
+          self.write_indent();
+          writeln!(self.output, "args:").unwrap();
+          self.indent += 1;
+          for (i, arg) in args.iter().enumerate() {
+            self.write_indent();
+            writeln!(self.output, "[{}]:", i).unwrap();
+            self.indent += 1;
+            self.print_node(*arg);
+            self.indent -= 1;
+          }
+          self.indent -= 1;
+        }
+        self.indent -= 1;
       },
       HIRKind::Cast { expression, target } => {
         let target_str = self.format_type(target);
@@ -833,6 +861,35 @@ impl<'a> HIRPrinter<'a> {
           self.print_node(arm.body);
           self.indent -= 2;
         }
+        self.indent -= 1;
+      },
+      HIRKind::Closure {
+        params,
+        return_type,
+        body,
+        captures,
+        escapes,
+        ..
+      } => {
+        let ret_str = self.format_type(return_type);
+        let params_str = self.format_params(params);
+        writeln!(
+          self.output,
+          "Closure({}) -> {} [captures: {}, escapes: {}] : {}",
+          params_str,
+          ret_str,
+          captures.len(),
+          escapes,
+          type_str
+        )
+        .unwrap();
+
+        self.indent += 1;
+        self.write_indent();
+        writeln!(self.output, "body:").unwrap();
+        self.indent += 1;
+        self.print_node(*body);
+        self.indent -= 1;
         self.indent -= 1;
       },
     }

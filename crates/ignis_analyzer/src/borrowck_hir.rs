@@ -248,6 +248,14 @@ impl<'a> HirBorrowChecker<'a> {
         }
       },
 
+      HIRKind::CallClosure { callee, args } => {
+        self.check_node(callee);
+        for arg in args {
+          self.check_node(arg);
+          self.check_temporary_borrow(arg, &span);
+        }
+      },
+
       HIRKind::MethodCall { receiver, args, .. } => {
         if let Some(recv) = receiver {
           self.check_node(recv);
@@ -336,6 +344,9 @@ impl<'a> HirBorrowChecker<'a> {
           self.check_node(arm.body);
         }
       },
+
+      // Body checked separately as the thunk function.
+      HIRKind::Closure { .. } => {},
 
       // Leaf nodes
       HIRKind::Literal(_)

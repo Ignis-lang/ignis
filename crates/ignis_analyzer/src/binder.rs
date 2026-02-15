@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
   attribute::ASTAttribute,
+  expressions::{ASTExpression, lambda::LambdaBody},
   generics::ASTGenericParams,
   metadata::ASTMetadata,
   statements::{
@@ -99,7 +100,7 @@ impl<'a> Analyzer<'a> {
 
     match node {
       ASTNode::Statement(stmt) => self.bind_complete_statement(node_id, stmt, scope_kind),
-      ASTNode::Expression(_) => {},
+      ASTNode::Expression(expr) => self.bind_expression_lambdas(expr),
     }
   }
 
@@ -132,6 +133,95 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Export(export_stmt) => self.bind_export(export_stmt, scope_kind),
       ASTStatement::Expression(_) => {},
       _ => {},
+    }
+  }
+
+  /// Recursively bind declarations inside lambda bodies so they get `DefinitionId`s.
+  fn bind_expression_lambdas(
+    &mut self,
+    expr: &ASTExpression,
+  ) {
+    match expr {
+      ASTExpression::Lambda(lambda) => {
+        match &lambda.body {
+          LambdaBody::Block(block_id) => self.bind_complete(block_id, ScopeKind::Block),
+          LambdaBody::Expression(expr_id) => self.bind_complete(expr_id, ScopeKind::Block),
+        }
+      },
+
+      ASTExpression::Assignment(a) => {
+        self.bind_complete(&a.value, ScopeKind::Block);
+      },
+      ASTExpression::Binary(b) => {
+        self.bind_complete(&b.left, ScopeKind::Block);
+        self.bind_complete(&b.right, ScopeKind::Block);
+      },
+      ASTExpression::Ternary(t) => {
+        self.bind_complete(&t.condition, ScopeKind::Block);
+        self.bind_complete(&t.then_expr, ScopeKind::Block);
+        self.bind_complete(&t.else_expr, ScopeKind::Block);
+      },
+      ASTExpression::Cast(c) => {
+        self.bind_complete(&c.expression, ScopeKind::Block);
+      },
+      ASTExpression::Call(c) => {
+        self.bind_complete(&c.callee, ScopeKind::Block);
+        for arg in &c.arguments {
+          self.bind_complete(arg, ScopeKind::Block);
+        }
+      },
+      ASTExpression::Dereference(d) => {
+        self.bind_complete(&d.inner, ScopeKind::Block);
+      },
+      ASTExpression::Grouped(g) => {
+        self.bind_complete(&g.expression, ScopeKind::Block);
+      },
+      ASTExpression::Reference(r) => {
+        self.bind_complete(&r.inner, ScopeKind::Block);
+      },
+      ASTExpression::Unary(u) => {
+        self.bind_complete(&u.operand, ScopeKind::Block);
+      },
+      ASTExpression::Match(m) => {
+        self.bind_complete(&m.scrutinee, ScopeKind::Block);
+        for arm in &m.arms {
+          if let Some(g) = &arm.guard {
+            self.bind_complete(g, ScopeKind::Block);
+          }
+          self.bind_complete(&arm.body, ScopeKind::Block);
+        }
+      },
+      ASTExpression::Vector(v) => {
+        for elem in &v.items {
+          self.bind_complete(elem, ScopeKind::Block);
+        }
+      },
+      ASTExpression::VectorAccess(va) => {
+        self.bind_complete(&va.name, ScopeKind::Block);
+        self.bind_complete(&va.index, ScopeKind::Block);
+      },
+      ASTExpression::MemberAccess(ma) => {
+        self.bind_complete(&ma.object, ScopeKind::Block);
+      },
+      ASTExpression::RecordInit(ri) => {
+        for field in &ri.fields {
+          self.bind_complete(&field.value, ScopeKind::Block);
+        }
+      },
+      ASTExpression::BuiltinCall(bc) => {
+        for arg in &bc.args {
+          self.bind_complete(arg, ScopeKind::Block);
+        }
+      },
+      ASTExpression::PostfixIncrement { expr, .. } | ASTExpression::PostfixDecrement { expr, .. } => {
+        self.bind_complete(expr, ScopeKind::Block);
+      },
+      ASTExpression::LetCondition(lc) => {
+        self.bind_complete(&lc.value, ScopeKind::Block);
+      },
+
+      // Leaf expressions (no sub-expressions that could contain lambdas)
+      ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) => {},
     }
   }
 
@@ -1870,6 +1960,21 @@ impl<'a> Analyzer<'a> {
             );
           } else {
             attrs.push(ParamAttr::Takes);
+          }
+        },
+        "noescape" => {
+          if !attr.args.is_empty() {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 0,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else {
+            attrs.push(ParamAttr::NoEscape);
           }
         },
         _ => {

@@ -777,6 +777,15 @@ pub enum DiagnosticMessage {
   IrrefutableLetElsePattern {
     span: Span,
   },
+
+  // #region Closures
+  ClosureEscapesWithRefCapture {
+    closure_span: Span,
+    capture_name: String,
+    capture_span: Span,
+  },
+  // #endregion Closures
+
   // #endregion Analyzer
 }
 
@@ -1584,6 +1593,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::IrrefutableLetElsePattern { .. } => {
         write!(f, "irrefutable pattern in `let else`")
       },
+      DiagnosticMessage::ClosureEscapesWithRefCapture { capture_name, .. } => {
+        write!(f, "closure escapes its scope while capturing `{}` by reference", capture_name)
+      },
     }
   }
 }
@@ -1784,6 +1796,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LetElseMustDiverge { span, .. }
       | DiagnosticMessage::IrrefutableLetElsePattern { span, .. }
       | DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { span, .. } => span.clone(),
+      DiagnosticMessage::ClosureEscapesWithRefCapture { closure_span, .. } => closure_span.clone(),
     }
   }
 
@@ -1979,6 +1992,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::LetElseMustDiverge { .. } => "A0168",
       DiagnosticMessage::IrrefutableLetElsePattern { .. } => "A0169",
       DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { .. } => "A0156",
+      DiagnosticMessage::ClosureEscapesWithRefCapture { .. } => "A0170",
     }
     .to_string()
   }
@@ -2015,6 +2029,16 @@ impl DiagnosticMessage {
       },
       DiagnosticMessage::MissingReturnStatement { span, .. } => {
         vec![(span.clone(), "Function should return a value".to_string())]
+      },
+      DiagnosticMessage::ClosureEscapesWithRefCapture {
+        capture_span,
+        capture_name,
+        ..
+      } => {
+        vec![(
+          capture_span.clone(),
+          format!("`{}` is captured by reference here", capture_name),
+        )]
       },
       _ => vec![],
     }

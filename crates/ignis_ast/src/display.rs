@@ -277,6 +277,15 @@ impl DisplayLisp for ASTExpression {
       ASTExpression::MemberAccess(expr) => expr.to_lisp(formatter),
       ASTExpression::RecordInit(expr) => expr.to_lisp(formatter),
       ASTExpression::BuiltinCall(expr) => expr.to_lisp(formatter),
+      ASTExpression::Lambda(expr) => {
+        let params: Vec<String> = expr.params.iter().map(|p| p.to_lisp(formatter)).collect();
+        let ret = expr.return_type.to_lisp(formatter);
+        let body = match &expr.body {
+          crate::expressions::lambda::LambdaBody::Expression(id) => formatter.format_node(id),
+          crate::expressions::lambda::LambdaBody::Block(id) => formatter.format_node(id),
+        };
+        format!("(Lambda ({}) {} {})", params.join(" "), ret, body)
+      },
     }
   }
 }

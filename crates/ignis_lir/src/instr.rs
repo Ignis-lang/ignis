@@ -217,4 +217,32 @@ pub enum Instr {
     dest: TempId,
     ty: TypeId,
   },
+
+  // === Closure instructions ===
+  /// `dest = Closure { call: thunk, drop: drop_fn, env: env_ptr }`
+  MakeClosure {
+    dest: TempId,
+    thunk: DefinitionId,
+    drop_fn: Option<DefinitionId>,
+    captures: Vec<Operand>,
+    closure_type: TypeId,
+    /// When true, env is heap-allocated (escaping closure); otherwise stack.
+    heap_allocate: bool,
+  },
+
+  /// `dest = closure.call(closure.env, args...)`
+  CallClosure {
+    dest: Option<TempId>,
+    closure: Operand,
+    /// Arguments after the implicit env pointer.
+    args: Vec<Operand>,
+    return_type: TypeId,
+  },
+
+  /// Calls `closure.drop(closure.env)` if non-null, then frees heap env if applicable.
+  DropClosure {
+    closure: Operand,
+    closure_type: TypeId,
+    heap_allocated: bool,
+  },
 }

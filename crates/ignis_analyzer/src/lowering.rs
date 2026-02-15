@@ -768,6 +768,43 @@ impl<'a> Analyzer<'a> {
           }
         };
 
+        let is_closure_call = matches!(
+          &self.defs.get(&callee_def_id).kind,
+          DefinitionKind::Variable(_) | DefinitionKind::Parameter(_)
+        ) && matches!(
+          self.types.get(self.type_of(&callee_def_id)),
+          ignis_type::types::Type::Function { .. }
+        );
+
+        if is_closure_call {
+          let callee_ty = *self.type_of(&callee_def_id);
+          let callee_hir = hir.alloc(HIRNode {
+            kind: HIRKind::Variable(callee_def_id),
+            span: call.span.clone(),
+            type_id: callee_ty,
+          });
+          let args_hir: Vec<_> = call
+            .arguments
+            .iter()
+            .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
+            .collect();
+
+          let return_type = if let ignis_type::types::Type::Function { ret, .. } = self.types.get(&callee_ty).clone() {
+            ret
+          } else {
+            self.types.error()
+          };
+
+          return hir.alloc(HIRNode {
+            kind: HIRKind::CallClosure {
+              callee: callee_hir,
+              args: args_hir,
+            },
+            span: call.span.clone(),
+            type_id: return_type,
+          });
+        }
+
         let callee_type = self.get_definition_type(&callee_def_id);
         let callee_name = self
           .symbols
@@ -1173,6 +1210,7 @@ impl<'a> Analyzer<'a> {
           type_id: result_type,
         })
       },
+      ASTExpression::Lambda(lambda) => self.lower_lambda_to_hir(node_id, lambda, hir, scope_kind),
     }
   }
 
@@ -3825,5 +3863,63 @@ fn convert_assignment_op(op: &ASTAssignmentOperator) -> BinaryOperation {
     ASTAssignmentOperator::ShiftLeftAssign => BinaryOperation::BitShiftLeft,
     ASTAssignmentOperator::ShiftRightAssign => BinaryOperation::BitShiftRight,
     _ => BinaryOperation::Add,
+  }
+}
+
+impl Analyzer<'_> {
+  fn lower_lambda_to_hir(
+    &mut self,
+    node_id: &ignis_ast::NodeId,
+    lambda: &ignis_ast::expressions::lambda::ASTLambda,
+    hir: &mut ignis_hir::HIR,
+    _scope_kind: ScopeKind,
+  ) -> ignis_hir::HIRId {
+    use ignis_hir::{HIRKind, HIRNode};
+
+    let fn_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+
+    let param_defs = self.lambda_param_defs.get(node_id).cloned().unwrap_or_default();
+
+    let return_type = match self.types.get(&fn_type) {
+      ignis_type::types::Type::Function { ret, .. } => *ret,
+      _ => self.types.error(),
+    };
+
+    self.scopes.push(ScopeKind::Function);
+    for &param_id in &param_defs {
+      let name = &self.defs.get(&param_id).name;
+      let _ = self.scopes.define(name, &param_id, false);
+    }
+
+    // Expression bodies get an implicit Return so the thunk returns the value.
+    let body = match &lambda.body {
+      ignis_ast::expressions::lambda::LambdaBody::Expression(id) => {
+        let expr_hir = self.lower_node_to_hir(id, hir, ScopeKind::Function);
+        let span = hir.get(expr_hir).span.clone();
+        hir.alloc(HIRNode {
+          kind: HIRKind::Return(Some(expr_hir)),
+          span,
+          type_id: return_type,
+        })
+      },
+      ignis_ast::expressions::lambda::LambdaBody::Block(id) => self.lower_node_to_hir(id, hir, ScopeKind::Function),
+    };
+
+    self.scopes.pop();
+
+    // Captures and escape analysis will be filled in by a later pass.
+    hir.alloc(HIRNode {
+      kind: HIRKind::Closure {
+        params: param_defs,
+        return_type,
+        body,
+        captures: Vec::new(),
+        escapes: false,
+        thunk_def: None,
+        drop_def: None,
+      },
+      span: lambda.span.clone(),
+      type_id: fn_type,
+    })
   }
 }

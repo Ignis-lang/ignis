@@ -451,6 +451,37 @@ impl<'a> Analyzer<'a> {
           self.scopes.pop();
         }
       },
+      ASTExpression::Lambda(lambda) => {
+        self.scopes.push(ScopeKind::Function);
+
+        // Define lambda parameters in scope so the body's undeclared-variable check passes.
+        for param in &lambda.params {
+          let placeholder_type = self.types.error();
+          let param_def_id = self.defs.alloc(ignis_type::definition::Definition {
+            kind: ignis_type::definition::DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
+              type_id: placeholder_type,
+              mutable: false,
+              attrs: Vec::new(),
+            }),
+            name: param.name,
+            span: param.span.clone(),
+            name_span: param.span.clone(),
+            visibility: ignis_type::definition::Visibility::Private,
+            owner_module: self.current_module,
+            owner_namespace: self.current_namespace,
+            doc: None,
+          });
+          let _ = self.scopes.define(&param.name, &param_def_id, false);
+        }
+
+        let body_id = match &lambda.body {
+          ignis_ast::expressions::lambda::LambdaBody::Expression(id) => id,
+          ignis_ast::expressions::lambda::LambdaBody::Block(id) => id,
+        };
+        self.extra_checks_node(body_id, ScopeKind::Function, false, true);
+
+        self.scopes.pop();
+      },
     }
   }
 

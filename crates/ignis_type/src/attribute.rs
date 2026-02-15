@@ -15,6 +15,9 @@ pub enum FunctionAttr {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParamAttr {
   Takes,
+  /// The closure parameter does not escape the function call.
+  /// Prevents escape propagation through this call site during escape analysis.
+  NoEscape,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

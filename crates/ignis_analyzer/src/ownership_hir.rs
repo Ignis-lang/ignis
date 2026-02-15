@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
-use ignis_hir::{DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
+use ignis_hir::{CaptureMode, DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
 use ignis_type::{
   attribute::ParamAttr,
   definition::{DefinitionId, DefinitionKind, DefinitionStore, ParameterDefinition},
@@ -326,6 +326,13 @@ impl<'a> HirOwnershipChecker<'a> {
         dropped.extend(self.summary_callee_drops_to_tracked(*callee, None, args, tracked_params, summaries));
       },
 
+      HIRKind::CallClosure { callee, args } => {
+        dropped.extend(self.summary_must_drops(*callee, tracked_params, summaries));
+        for &arg in args {
+          dropped.extend(self.summary_must_drops(arg, tracked_params, summaries));
+        }
+      },
+
       HIRKind::MethodCall {
         receiver, method, args, ..
       } => {
@@ -418,6 +425,8 @@ impl<'a> HirOwnershipChecker<'a> {
           dropped.extend(self.summary_must_drops(arm.body, tracked_params, summaries));
         }
       },
+
+      HIRKind::Closure { .. } => {},
 
       HIRKind::Variable(_)
       | HIRKind::Literal(_)
@@ -652,6 +661,19 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_call(callee, &args, span);
       },
 
+      HIRKind::CallClosure { callee, args } => {
+        self.check_node(callee);
+        for &arg in &args {
+          self.check_node(arg);
+          if let Some(arg_def) = self.get_moved_var(arg) {
+            let arg_ty = self.defs.type_of(&arg_def);
+            if self.types.needs_drop_with_defs(arg_ty, self.defs) && !self.types.is_copy_with_defs(arg_ty, self.defs) {
+              self.try_consume(arg_def, span.clone());
+            }
+          }
+        }
+      },
+
       HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => {
         self.check_node(ptr);
       },
@@ -792,6 +814,17 @@ impl<'a> HirOwnershipChecker<'a> {
 
       HIRKind::Trap | HIRKind::BuiltinUnreachable => {
         self.reachable = false;
+      },
+
+      HIRKind::Closure { captures, .. } => {
+        for cap in captures {
+          if cap.mode == CaptureMode::ByValue {
+            let src_ty = self.defs.type_of(&cap.source_def);
+            if self.types.needs_drop_with_defs(src_ty, self.defs) && !self.types.is_copy_with_defs(src_ty, self.defs) {
+              self.try_consume(cap.source_def, span.clone());
+            }
+          }
+        }
       },
     }
   }

@@ -7,6 +7,7 @@ pub mod call;
 pub mod cast;
 pub mod dereference;
 pub mod grouped;
+pub mod lambda;
 pub mod let_condition;
 pub mod literal;
 pub mod match_expression;
@@ -27,6 +28,7 @@ pub use call::ASTCallExpression;
 pub use cast::ASTCast;
 pub use dereference::ASTDereference;
 pub use grouped::ASTGrouped;
+pub use lambda::ASTLambda;
 pub use let_condition::ASTLetCondition;
 pub use literal::ASTLiteral;
 pub use match_expression::{ASTMatch, ASTMatchArm};
@@ -63,6 +65,7 @@ pub enum ASTExpression {
   MemberAccess(ASTMemberAccess),
   RecordInit(ASTRecordInit),
   BuiltinCall(ASTBuiltinCall),
+  Lambda(ASTLambda),
 }
 
 impl ASTExpression {
@@ -89,6 +92,7 @@ impl ASTExpression {
       ASTExpression::MemberAccess(expr) => &expr.span,
       ASTExpression::RecordInit(expr) => &expr.span,
       ASTExpression::BuiltinCall(expr) => &expr.span,
+      ASTExpression::Lambda(expr) => &expr.span,
     }
   }
 }

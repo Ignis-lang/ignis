@@ -581,6 +581,17 @@ impl<'a> Monomorphizer<'a> {
           subst,
         )
       },
+      HIRKind::CallClosure { callee, args } => {
+        let new_callee = self.clone_hir_tree(*callee);
+        let new_args: Vec<_> = args.iter().map(|a| self.clone_hir_tree(*a)).collect();
+        (
+          HIRKind::CallClosure {
+            callee: new_callee,
+            args: new_args,
+          },
+          None,
+        )
+      },
       HIRKind::Cast { expression, target } => {
         let new_expr = self.clone_hir_tree(*expression);
         (
@@ -993,6 +1004,38 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
+      HIRKind::Closure {
+        params,
+        return_type,
+        body,
+        captures,
+        escapes,
+        thunk_def,
+        drop_def,
+      } => {
+        let new_body = self.clone_hir_tree(*body);
+
+        if let Some(id) = thunk_def {
+          self.copy_if_nongeneric(*id);
+        }
+
+        if let Some(id) = drop_def {
+          self.copy_if_nongeneric(*id);
+        }
+
+        (
+          HIRKind::Closure {
+            params: params.clone(),
+            return_type: *return_type,
+            body: new_body,
+            captures: captures.clone(),
+            escapes: *escapes,
+            thunk_def: *thunk_def,
+            drop_def: *drop_def,
+          },
+          None,
+        )
+      },
     }
   }
 
@@ -1079,6 +1122,12 @@ impl<'a> Monomorphizer<'a> {
             self.enqueue(InstanceKey::generic(*callee, type_args.clone()));
           }
         }
+        for arg in args {
+          self.scan_hir(*arg);
+        }
+      },
+      HIRKind::CallClosure { callee, args } => {
+        self.scan_hir(*callee);
         for arg in args {
           self.scan_hir(*arg);
         }
@@ -1272,6 +1321,26 @@ impl<'a> Monomorphizer<'a> {
       | HIRKind::BuiltinDropGlue { .. } => {},
       HIRKind::Panic(msg) => {
         self.scan_hir(*msg);
+      },
+      HIRKind::Closure {
+        body,
+        thunk_def,
+        drop_def,
+        ..
+      } => {
+        self.scan_hir(*body);
+
+        if let Some(id) = thunk_def
+          && let Some(&thunk_body) = self.input_hir.function_bodies.get(id)
+        {
+          self.scan_hir(thunk_body);
+        }
+
+        if let Some(id) = drop_def
+          && let Some(&drop_body) = self.input_hir.function_bodies.get(id)
+        {
+          self.scan_hir(drop_body);
+        }
       },
     }
   }
@@ -2156,6 +2225,37 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::Trap => HIRKind::Trap,
       HIRKind::BuiltinUnreachable => HIRKind::BuiltinUnreachable,
+
+      HIRKind::Closure {
+        params,
+        return_type,
+        body,
+        captures,
+        escapes,
+        thunk_def,
+        drop_def,
+      } => {
+        let new_body = self.substitute_hir(*body, subst);
+        let new_return_type = self.types.substitute(*return_type, subst);
+        HIRKind::Closure {
+          params: params.clone(),
+          return_type: new_return_type,
+          body: new_body,
+          captures: captures.clone(),
+          escapes: *escapes,
+          thunk_def: *thunk_def,
+          drop_def: *drop_def,
+        }
+      },
+
+      HIRKind::CallClosure { callee, args } => {
+        let new_callee = self.substitute_hir(*callee, subst);
+        let new_args: Vec<_> = args.iter().map(|a| self.substitute_hir(*a, subst)).collect();
+        HIRKind::CallClosure {
+          callee: new_callee,
+          args: new_args,
+        }
+      },
 
       // These are handled in substitute_hir directly
       HIRKind::Call { .. } | HIRKind::RecordInit { .. } | HIRKind::MethodCall { .. } | HIRKind::EnumVariant { .. } => {
