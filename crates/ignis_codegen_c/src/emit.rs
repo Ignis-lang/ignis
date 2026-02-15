@@ -446,7 +446,24 @@ impl<'a> CEmitter<'a> {
     let mut seen_thunks: HashSet<DefinitionId> = HashSet::new();
     let mut seen_sigs: HashSet<TypeId> = HashSet::new();
 
+    // Collect TypeIds that are raw function pointers (from DropGlue destinations).
+    // These must NOT be registered as closure structs — they represent bare C
+    // function pointers, not Ignis closures with environment.
+    let mut raw_fn_ptr_types: HashSet<TypeId> = HashSet::new();
+
     for func in self.program.functions.values() {
+      for block in func.blocks.get_all() {
+        for instr in &block.instructions {
+          if let Instr::DropGlue { dest, .. } = instr {
+            let ty = func.temp_type(*dest);
+            raw_fn_ptr_types.insert(ty);
+          }
+        }
+      }
+    }
+
+    for func in self.program.functions.values() {
+      // Scan MakeClosure instructions for thunk env types and closure signatures
       for block in func.blocks.get_all() {
         for instr in &block.instructions {
           if let Instr::MakeClosure {
@@ -471,6 +488,33 @@ impl<'a> CEmitter<'a> {
 
             seen_sigs.insert(*closure_type);
           }
+        }
+      }
+
+      // Scan non-extern function parameters and locals for closure types. Functions
+      // that *receive* closures as parameters (e.g. forEach, map) don't have
+      // MakeClosure instructions — the caller creates the closure. We still need the
+      // struct definition to emit the correct parameter type in the function signature.
+      //
+      // Extern functions are skipped: their Type::Function parameters represent raw C
+      // function pointers (e.g. IgnisDropFn), not Ignis closures with environment.
+      if !func.is_extern {
+        for param_id in func.params.iter() {
+          if let DefinitionKind::Parameter(param) = &self.defs.get(param_id).kind {
+            if matches!(self.types.get(&param.type_id), Type::Function { .. })
+              && !raw_fn_ptr_types.contains(&param.type_id)
+            {
+              seen_sigs.insert(param.type_id);
+            }
+          }
+        }
+      }
+
+      for local in func.locals.get_all() {
+        if matches!(self.types.get(&local.ty), Type::Function { .. })
+          && !raw_fn_ptr_types.contains(&local.ty)
+        {
+          seen_sigs.insert(local.ty);
         }
       }
     }
@@ -1608,7 +1652,10 @@ impl<'a> CEmitter<'a> {
 
       Instr::DropGlue { dest, ty } => {
         let glue_name = self.drop_glue_name(*ty);
-        writeln!(self.output, "t{} = (void(*)(u8*)){};", dest.index(), glue_name).unwrap();
+        // Cast to void* — drop glue functions are raw C function pointers passed
+        // through opaque void* parameters to extern runtime functions (e.g.
+        // ignis_rc_alloc). The runtime internally casts back to IgnisDropFn.
+        writeln!(self.output, "t{} = (void*){};", dest.index(), glue_name).unwrap();
       },
 
       Instr::MakeClosure {
@@ -3376,6 +3423,24 @@ fn emit_func_prototype(
   };
 
   if is_extern || !type_params_empty {
+    return None;
+  }
+
+  // Skip definitions whose signature still contains Type::Param. This happens when
+  // the monomorphizer creates "concrete" instantiations using Type::Param as the
+  // type argument (parasitic definitions from generic contexts that weren't fully
+  // resolved). The type_params field is empty but the actual types aren't concrete.
+  if !is_type_fully_monomorphized_standalone(*return_type, types) {
+    return None;
+  }
+  let has_unresolved_param = params_ids.iter().any(|param_id| {
+    if let DefinitionKind::Parameter(param) = &defs.get(param_id).kind {
+      !is_type_fully_monomorphized_standalone(param.type_id, types)
+    } else {
+      false
+    }
+  });
+  if has_unresolved_param {
     return None;
   }
 

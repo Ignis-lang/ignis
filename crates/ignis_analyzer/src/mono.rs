@@ -570,20 +570,27 @@ impl<'a> Monomorphizer<'a> {
         // Build substitution for the call's type parameters
         let subst = self.build_call_subst(*callee, type_args);
 
-        // Resolve generic calls to their concrete instantiation
-        let concrete_callee = if !type_args.is_empty() {
+        // Resolve generic calls to their concrete instantiation.
+        // Skip instantiation when type args contain Type::Param — this means we're
+        // inside a generic context that hasn't been fully concretized yet. The call
+        // will be properly instantiated when the enclosing generic is monomorphized.
+        let any_arg_is_param = type_args.iter().any(|ty| self.types.contains_type_param(ty));
+        let concrete_callee = if !type_args.is_empty() && !any_arg_is_param {
           let key = InstanceKey::generic(*callee, type_args.clone());
           self.ensure_instantiated(&key)
-        } else {
+        } else if type_args.is_empty() {
           // Non-generic call: ensure the callee is also copied to output
           self.copy_if_nongeneric(*callee);
+          *callee
+        } else {
+          // Generic call with unresolved params — keep original callee
           *callee
         };
         let new_args: Vec<_> = args.iter().map(|a| self.clone_hir_tree(*a)).collect();
         (
           HIRKind::Call {
             callee: concrete_callee,
-            type_args: vec![], // Clear type args for concrete instantiation
+            type_args: if any_arg_is_param { type_args.clone() } else { vec![] },
             args: new_args,
           },
           subst,
@@ -696,8 +703,10 @@ impl<'a> Monomorphizer<'a> {
         // Build substitution for the record's type parameters
         let subst = self.build_call_subst(*record_def, type_args);
 
-        // Resolve generic record init to concrete instantiation
-        let concrete_def = if !type_args.is_empty() {
+        // Resolve generic record init to concrete instantiation.
+        // Skip when type args contain Type::Param (unresolved generic context).
+        let any_arg_is_param = type_args.iter().any(|ty| self.types.contains_type_param(ty));
+        let concrete_def = if !type_args.is_empty() && !any_arg_is_param {
           let key = InstanceKey::generic(*record_def, type_args.clone());
           self.ensure_instantiated(&key)
         } else {
@@ -710,7 +719,7 @@ impl<'a> Monomorphizer<'a> {
         (
           HIRKind::RecordInit {
             record_def: concrete_def,
-            type_args: vec![], // Clear type args for concrete instantiation
+            type_args: if any_arg_is_param { type_args.clone() } else { vec![] },
             fields: new_fields,
           },
           subst,
@@ -833,6 +842,11 @@ impl<'a> Monomorphizer<'a> {
           );
         }
 
+        // Check if any args are unresolved — if so, resolve_concrete_method_with_args
+        // will return the original method and we preserve the type_args.
+        let all_args: Vec<_> = owner_args.iter().chain(method_type_args.iter()).cloned().collect();
+        let any_arg_is_param = all_args.iter().any(|ty| self.types.contains_type_param(ty));
+
         let concrete_method = self.resolve_concrete_method_with_args(*method, &method_type_args, &owner_args);
 
         if is_verbose() {
@@ -848,7 +862,7 @@ impl<'a> Monomorphizer<'a> {
           HIRKind::MethodCall {
             receiver: new_receiver,
             method: concrete_method,
-            type_args: vec![], // Clear type args for concrete instantiation
+            type_args: if any_arg_is_param { type_args.clone() } else { vec![] },
             args: new_args,
           },
           subst,
@@ -863,8 +877,10 @@ impl<'a> Monomorphizer<'a> {
         // Build substitution for the enum's type parameters
         let subst = self.build_call_subst(*enum_def, type_args);
 
-        // Resolve generic enum to concrete instantiation
-        let concrete_def = if !type_args.is_empty() {
+        // Resolve generic enum to concrete instantiation.
+        // Skip when type args contain Type::Param (unresolved generic context).
+        let any_arg_is_param = type_args.iter().any(|ty| self.types.contains_type_param(ty));
+        let concrete_def = if !type_args.is_empty() && !any_arg_is_param {
           let key = InstanceKey::generic(*enum_def, type_args.clone());
           self.ensure_instantiated(&key)
         } else {
@@ -874,7 +890,7 @@ impl<'a> Monomorphizer<'a> {
         (
           HIRKind::EnumVariant {
             enum_def: concrete_def,
-            type_args: vec![], // Clear type args for concrete instantiation
+            type_args: if any_arg_is_param { type_args.clone() } else { vec![] },
             variant_tag: *variant_tag,
             payload: new_payload,
           },
@@ -2442,6 +2458,13 @@ impl<'a> Monomorphizer<'a> {
   ) -> DefinitionId {
     // If no generic args, the method doesn't need instantiation
     if owner_args.is_empty() && method_type_args.is_empty() {
+      return method_generic;
+    }
+
+    // If any type args contain Type::Param, we're in an unresolved generic context.
+    // The method will be properly instantiated when the enclosing generic is monomorphized.
+    let has_param = owner_args.iter().chain(method_type_args.iter()).any(|ty| self.types.contains_type_param(ty));
+    if has_param {
       return method_generic;
     }
 
