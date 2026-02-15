@@ -371,23 +371,36 @@ impl super::IgnisParser {
   }
 
   /// import a, b, c from "path";
+  /// import _ from "path";
   fn parse_import_declaration(&mut self) -> ParserResult<NodeId> {
     let _attrs = self.take_pending_attrs();
 
     let keyword = self.expect(TokenType::Import)?.clone();
     let mut items = Vec::new();
 
-    loop {
-      let identifier = self.expect(TokenType::Identifier)?.clone();
-      let name = self.insert_symbol(&identifier);
-      let item = ASTImportItem::new(name, identifier.span.clone());
-      items.push(item);
+    if self.at(TokenType::Identifier) && self.peek().lexeme == "_" {
+      let underscore = self.bump().clone();
+      items.push(ASTImportItem::discard(underscore.span.clone()));
 
-      if !self.eat(TokenType::Comma) {
-        break;
+      // `_` must be the sole item — reject `import _, X from "..."`
+      if self.eat(TokenType::Comma) && !self.at(TokenType::From) {
+        self
+          .diagnostics
+          .push(DiagnosticMessage::DiscardImportMustBeSoleItem { at: underscore.span });
       }
-      if self.at(TokenType::From) {
-        break;
+    } else {
+      loop {
+        let identifier = self.expect(TokenType::Identifier)?.clone();
+        let name = self.insert_symbol(&identifier);
+        let item = ASTImportItem::named(name, identifier.span.clone());
+        items.push(item);
+
+        if !self.eat(TokenType::Comma) {
+          break;
+        }
+        if self.at(TokenType::From) {
+          break;
+        }
       }
     }
 
@@ -1221,6 +1234,7 @@ impl super::IgnisParser {
 mod tests {
   use std::{cell::RefCell, rc::Rc};
 
+  use ignis_ast::statements::import_statement::{ASTImportItem, ImportItemKind};
   use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
   use ignis_type::{Store, file::SourceMap, symbol::SymbolTable};
 
@@ -1260,6 +1274,16 @@ mod tests {
     result.symbols.borrow().get(id).to_string()
   }
 
+  fn item_name(
+    result: &ParseResult,
+    item: &ASTImportItem,
+  ) -> String {
+    match &item.kind {
+      ImportItemKind::Named(name) => symbol_name(result, name),
+      ImportItemKind::Discard => "_".to_string(),
+    }
+  }
+
   #[test]
   fn parses_import_single() {
     let result = parse("import foo from \"module\";");
@@ -1268,7 +1292,7 @@ mod tests {
     match stmt {
       ASTStatement::Import(imp) => {
         assert_eq!(imp.items.len(), 1);
-        assert_eq!(symbol_name(&result, &imp.items[0].name), "foo");
+        assert_eq!(item_name(&result, &imp.items[0]), "foo");
       },
       other => panic!("expected import, got {:?}", other),
     }
@@ -1282,9 +1306,9 @@ mod tests {
     match stmt {
       ASTStatement::Import(imp) => {
         assert_eq!(imp.items.len(), 3);
-        assert_eq!(symbol_name(&result, &imp.items[0].name), "foo");
-        assert_eq!(symbol_name(&result, &imp.items[1].name), "bar");
-        assert_eq!(symbol_name(&result, &imp.items[2].name), "baz");
+        assert_eq!(item_name(&result, &imp.items[0]), "foo");
+        assert_eq!(item_name(&result, &imp.items[1]), "bar");
+        assert_eq!(item_name(&result, &imp.items[2]), "baz");
       },
       other => panic!("expected import, got {:?}", other),
     }
@@ -1298,8 +1322,23 @@ mod tests {
     match stmt {
       ASTStatement::Import(imp) => {
         assert_eq!(imp.items.len(), 2);
-        assert_eq!(symbol_name(&result, &imp.items[0].name), "foo");
-        assert_eq!(symbol_name(&result, &imp.items[1].name), "bar");
+        assert_eq!(item_name(&result, &imp.items[0]), "foo");
+        assert_eq!(item_name(&result, &imp.items[1]), "bar");
+      },
+      other => panic!("expected import, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_import_discard() {
+    let result = parse("import _ from \"module\";");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Import(imp) => {
+        assert_eq!(imp.items.len(), 1);
+        assert!(matches!(imp.items[0].kind, ImportItemKind::Discard));
+        assert_eq!(imp.from, "module");
       },
       other => panic!("expected import, got {:?}", other),
     }

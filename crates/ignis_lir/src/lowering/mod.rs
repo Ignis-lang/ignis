@@ -1605,15 +1605,13 @@ impl<'a> LoweringContext<'a> {
           value: Operand::Temp(result),
         });
       }
-    } else {
-      if let Some(val) = self.lower_hir_node(value) {
-        self.emit_overwrite_drops(hir_id);
+    } else if let Some(val) = self.lower_hir_node(value) {
+      self.emit_overwrite_drops(hir_id);
 
-        self.fn_builder().emit(Instr::StorePtr {
-          ptr: Operand::Temp(ptr_temp),
-          value: val,
-        });
-      }
+      self.fn_builder().emit(Instr::StorePtr {
+        ptr: Operand::Temp(ptr_temp),
+        value: val,
+      });
     }
   }
 

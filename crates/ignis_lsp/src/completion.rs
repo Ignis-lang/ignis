@@ -22,6 +22,7 @@ pub fn log(msg: &str) {
   });
 }
 
+use ignis_ast::statements::import_statement::ImportItemKind;
 use ignis_ast::statements::{ASTExport, ASTStatement};
 use ignis_ast::ASTNode;
 use ignis_driver::AnalyzeProjectOutput;
@@ -1374,7 +1375,9 @@ fn collect_explicit_import_item_spans(file: &ignis_driver::PerFileAnalysis) -> H
     match file.nodes.get(&node_id) {
       ASTNode::Statement(ASTStatement::Import(import_stmt)) => {
         for item in &import_stmt.items {
-          spans.insert(item.span.clone());
+          if matches!(item.kind, ImportItemKind::Named(_)) {
+            spans.insert(item.span.clone());
+          }
         }
       },
       ASTNode::Statement(ASTStatement::Namespace(ns)) => {

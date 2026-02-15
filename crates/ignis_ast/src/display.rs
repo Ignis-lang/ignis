@@ -82,7 +82,7 @@ use crate::{
     for_statement::ASTFor,
     function::{ASTFunction, ASTFunctionSignature, ASTParameter},
     if_statement::ASTIf,
-    import_statement::ASTImport,
+    import_statement::{ASTImport, ImportItemKind},
     let_else::ASTLetElse,
     namespace_statement::ASTNamespace,
     return_statement::ASTReturn,
@@ -857,7 +857,10 @@ impl DisplayLisp for ASTImport {
     let items: Vec<String> = self
       .items
       .iter()
-      .map(|item| formatter.resolve_symbol(&item.name))
+      .map(|item| match &item.kind {
+        ImportItemKind::Named(name) => formatter.resolve_symbol(name),
+        ImportItemKind::Discard => "_".to_string(),
+      })
       .collect();
     // Remove surrounding quotes from the path string if present
     let path = self.from.trim_matches('"');

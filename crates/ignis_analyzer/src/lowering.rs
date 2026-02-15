@@ -1219,10 +1219,10 @@ impl<'a> Analyzer<'a> {
           ignis_ast::expressions::CaptureOverrideKind::RefMut => ignis_hir::CaptureMode::ByMutRef,
         };
 
-        if let Some(def_id) = self.lookup_def(&co.inner).cloned() {
-          if let Some(top) = self.capture_override_stack.last_mut() {
-            top.insert(def_id, mode);
-          }
+        if let Some(def_id) = self.lookup_def(&co.inner).cloned()
+          && let Some(top) = self.capture_override_stack.last_mut()
+        {
+          top.insert(def_id, mode);
         }
 
         self.lower_node_to_hir(&co.inner, hir, scope_kind)

@@ -500,20 +500,17 @@ impl<'a> CEmitter<'a> {
       // function pointers (e.g. IgnisDropFn), not Ignis closures with environment.
       if !func.is_extern {
         for param_id in func.params.iter() {
-          if let DefinitionKind::Parameter(param) = &self.defs.get(param_id).kind {
-            if matches!(self.types.get(&param.type_id), Type::Function { .. })
-              && !raw_fn_ptr_types.contains(&param.type_id)
-            {
-              seen_sigs.insert(param.type_id);
-            }
+          if let DefinitionKind::Parameter(param) = &self.defs.get(param_id).kind
+            && matches!(self.types.get(&param.type_id), Type::Function { .. })
+            && !raw_fn_ptr_types.contains(&param.type_id)
+          {
+            seen_sigs.insert(param.type_id);
           }
         }
       }
 
       for local in func.locals.get_all() {
-        if matches!(self.types.get(&local.ty), Type::Function { .. })
-          && !raw_fn_ptr_types.contains(&local.ty)
-        {
+        if matches!(self.types.get(&local.ty), Type::Function { .. }) && !raw_fn_ptr_types.contains(&local.ty) {
           seen_sigs.insert(local.ty);
         }
       }

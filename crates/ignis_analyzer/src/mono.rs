@@ -2463,7 +2463,10 @@ impl<'a> Monomorphizer<'a> {
 
     // If any type args contain Type::Param, we're in an unresolved generic context.
     // The method will be properly instantiated when the enclosing generic is monomorphized.
-    let has_param = owner_args.iter().chain(method_type_args.iter()).any(|ty| self.types.contains_type_param(ty));
+    let has_param = owner_args
+      .iter()
+      .chain(method_type_args.iter())
+      .any(|ty| self.types.contains_type_param(ty));
     if has_param {
       return method_generic;
     }
