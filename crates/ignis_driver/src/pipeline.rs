@@ -1681,7 +1681,7 @@ fn collect_mono_roots_for_std(defs: &DefinitionStore) -> Vec<DefinitionId> {
 
   for (def_id, def) in defs.iter() {
     match &def.kind {
-      DefinitionKind::Function(fd) if !fd.is_extern => {
+      DefinitionKind::Function(fd) if !fd.is_extern && fd.type_params.is_empty() => {
         roots.push(def_id);
       },
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
