@@ -4764,3 +4764,64 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_nested_namespace() {
+  e2e_test(
+    "nested_namespace",
+    r#"
+namespace Outer {
+    namespace Inner {
+        function add(a: i32, b: i32): i32 {
+            return a + b;
+        }
+    }
+}
+
+function main(): i32 {
+    return Outer::Inner::add(17, 25);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_nested_namespace_three_levels() {
+  e2e_test(
+    "nested_namespace_three_levels",
+    r#"
+namespace A {
+    namespace B {
+        namespace C {
+            function value(): i32 {
+                return 99;
+            }
+        }
+    }
+}
+
+function main(): i32 {
+    return A::B::C::value();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_nested_namespace_with_constants() {
+  e2e_test(
+    "nested_namespace_with_constants",
+    r#"
+namespace Config {
+    namespace Limits {
+        const MAX: i32 = 50;
+        const MIN: i32 = 8;
+    }
+}
+
+function main(): i32 {
+    return Config::Limits::MAX + Config::Limits::MIN;
+}
+"#,
+  );
+}
