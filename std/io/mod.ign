@@ -1,15 +1,41 @@
 //!
 //! # I/O Module
 //!
-//! Thin wrappers over the runtime printing functions.
+//! Standard output and error printing.
 //!
 //! ## Overview
 //!
-//! This module keeps output simple and explicit:
-//! - `print` / `println` write to stdout
-//! - `eprint` / `eprintln` write to stderr
+//! This module provides the primary mechanism for writing text output in
+//! Ignis programs. It wraps the C runtime's printing functions and exposes
+//! them as a simple, symmetric API:
 //!
-//! All APIs consume the `String` by value (move).
+//! | Function   | Stream   | Newline |
+//! |------------|----------|---------|
+//! | `print`    | stdout   | No      |
+//! | `println`  | stdout   | Yes     |
+//! | `eprint`   | stderr   | No      |
+//! | `eprintln` | stderr   | Yes     |
+//!
+//! ## Ownership
+//!
+//! All functions take `String` **by value** (move semantics). The String
+//! is dropped automatically after printing. If you need to keep the
+//! String, `.clone()` it before passing.
+//!
+//! ```text
+//!   Ownership Flow
+//!   ═══════════════════════════════════════════════
+//!
+//!   let msg: String = String::create("hello");
+//!                │
+//!                ▼
+//!   Io::println(msg);   ← msg is MOVED here
+//!                │
+//!                ▼
+//!        msg is DROPPED after print
+//!
+//!   // msg cannot be used after this point
+//! ```
 //!
 //! ## Example
 //!
@@ -18,7 +44,16 @@
 //! import String from "std::string";
 //!
 //! function main(): i32 {
-//!   Io::println(String::create("hello"));
+//!   Io::println(String::create("hello, world!"));
+//!
+//!   // Print without newline
+//!   Io::print(String::create("loading"));
+//!   Io::print(String::create("..."));
+//!   Io::println(String::create(" done!"));
+//!
+//!   // Error output
+//!   Io::eprintln(String::create("warning: something happened"));
+//!
 //!   return 0;
 //! }
 //! ```
@@ -32,23 +67,89 @@ extern __io {
   function ignis_eprintln(message: &String): void;
 }
 
+/// Standard I/O namespace.
+///
+/// All functions take `String` by value. The String is dropped after
+/// the print operation completes.
 export namespace Io {
-  /// Prints `message` to stdout and appends `\n`.
+  /// Prints `message` to stdout followed by a newline (`\n`).
+  ///
+  /// This is the most common way to produce output. The String is
+  /// moved into the function and dropped after printing.
+  ///
+  /// # Arguments
+  ///
+  /// * `message` - The String to print (consumed/moved).
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Io from "std::io";
+  /// import String from "std::string";
+  ///
+  /// Io::println(String::create("hello"));
+  /// Io::println(String::create(42));
+  /// ```
   function println(message: String): void {
     __io::ignis_println(&message);
   }
 
-  /// Prints `message` to stderr and appends `\n`.
+  /// Prints `message` to stderr followed by a newline (`\n`).
+  ///
+  /// Use this for error messages, warnings, and diagnostic output
+  /// that should not mix with normal stdout.
+  ///
+  /// # Arguments
+  ///
+  /// * `message` - The String to print (consumed/moved).
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Io from "std::io";
+  /// import String from "std::string";
+  ///
+  /// Io::eprintln(String::create("error: file not found"));
+  /// ```
   function eprintln(message: String): void {
     __io::ignis_eprintln(&message);
   }
 
-  /// Prints `message` to stdout without appending a newline.
+  /// Prints `message` to stdout without a trailing newline.
+  ///
+  /// Useful for building up output incrementally or printing prompts.
+  ///
+  /// # Arguments
+  ///
+  /// * `message` - The String to print (consumed/moved).
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Io from "std::io";
+  /// import String from "std::string";
+  ///
+  /// Io::print(String::create("Enter name: "));
+  /// ```
   function print(message: String): void {
     __io::ignis_print(&message);
   }
 
-  /// Prints `message` to stderr without appending a newline.
+  /// Prints `message` to stderr without a trailing newline.
+  ///
+  /// # Arguments
+  ///
+  /// * `message` - The String to print (consumed/moved).
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Io from "std::io";
+  /// import String from "std::string";
+  ///
+  /// Io::eprint(String::create("warning: "));
+  /// Io::eprintln(String::create("low disk space"));
+  /// ```
   function eprint(message: String): void {
     __io::ignis_eprint(&message);
   }

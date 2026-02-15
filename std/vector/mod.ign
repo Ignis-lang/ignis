@@ -12,7 +12,21 @@
 //! - `capacity` is the number of elements that can be stored without reallocating
 //! - `data` points to the first element (or `null` when empty)
 //!
+//! ## Memory Layout
+//!
+//! ```text
+//!   Vector<T>
+//!   ┌──────────────┐
+//!   │ data ────────┼──────► ┌───┬───┬───┬───┬───┬───┬───┬───┐
+//!   │ length: 5    │        │ 0 │ 1 │ 2 │ 3 │ 4 │   │   │   │
+//!   │ capacity: 8  │        └───┴───┴───┴───┴───┴───┴───┴───┘
+//!   └──────────────┘        ◄── initialized ──►◄─ reserved ─►
+//! ```
+//!
 //! ## Growth Strategy
+//!
+//! When `push()` is called and `length == capacity`, the vector doubles its
+//! backing storage (or allocates 1 slot if currently empty):
 //!
 //! ```text
 //!   push() when length == capacity
@@ -21,7 +35,34 @@
 //!   │ new capacity = max(1, N * 2)                                         │
 //!   │ reallocate buffer to new capacity                                    │
 //!   └──────────────────────────────────────────────────────────────────────┘
+//!
+//!   Example:
+//!     cap=0 → push → cap=1
+//!     cap=1 → push → cap=2
+//!     cap=2 → push → cap=4
+//!     cap=4 → push → cap=8
 //! ```
+//!
+//! ## Higher-Order Methods
+//!
+//! Vector provides callback-based operations for functional-style iteration,
+//! filtering, transformation, and aggregation:
+//!
+//! | Method       | Signature                                     | Description                           |
+//! |------------- |-----------------------------------------------|---------------------------------------|
+//! | `forEach`    | `(&T) -> void`                                | Iterate elements by immutable ref     |
+//! | `forEachMut` | `(&mut T) -> void`                            | Iterate elements by mutable ref       |
+//! | `filter`     | `(&T) -> boolean` → `Vector<T>`               | Keep matching elements                |
+//! | `any`        | `(&T) -> boolean` → `boolean`                 | Short-circuit existential check       |
+//! | `all`        | `(&T) -> boolean` → `boolean`                 | Short-circuit universal check         |
+//! | `findIndex`  | `(&T) -> boolean` → `Option<u64>`             | Index of first match                  |
+//! | `count`      | `(&T) -> boolean` → `u64`                     | Count matching elements               |
+//! | `reduce`     | `(T, &T) -> T` → `Option<T>`                 | Fold without initial value            |
+//! | `sort`       | `(&T, &T) -> i32`                             | In-place insertion sort               |
+//! | `map<U>`     | `(&T) -> U` → `Vector<U>`                    | Transform each element                |
+//! | `fold<U>`    | `U, (U, &T) -> U` → `U`                      | Fold with initial value               |
+//!
+//! All callbacks are `@noescape`: the closure must not outlive the method call.
 //!
 //! ## Safety Notes
 //!
@@ -42,11 +83,14 @@
 //!   let mut values: Vector<i32> = Vector::init<i32>();
 //!   values.push(10);
 //!   values.push(20);
+//!   values.push(30);
 //!
-//!   Io::println(String::concat("len=", String::toString(values.length())));
-//!   Io::println(String::concat("cap=", String::toString(values.capacity())));
+//!   // Functional-style: double every even element, then sum
+//!   let sum: i32 = values
+//!     .filter(|x: &i32| -> boolean { return *x % 2 == 0; })
+//!     .map<i32>(|x: &i32| -> i32 { return *x * 2; })
+//!     .fold<i32>(0, |acc: i32, x: &i32| -> i32 { return acc + *x; });
 //!
-//!   values.pop();
 //!   // Vector is automatically dropped here
 //!   return 0;
 //! }
@@ -173,7 +217,11 @@ export record Vector<T> {
     self.length = 0;
   }
 
-  /// Grows the backing storage using geometric growth.
+  /// Grows the backing storage using geometric doubling.
+  ///
+  /// If capacity is 0 it becomes 1, otherwise it doubles.
+  /// Allocates a new buffer (or reallocates the existing one) via
+  /// `Memory::allocateVector` / `Memory::reallocateVector`.
   private grow(&mut self): void {
     let mut newCapacity: u64 = self.capacity * 2;
     if (newCapacity == 0) {
@@ -298,6 +346,494 @@ export record Vector<T> {
   /// ```
   public asMutPtr(&mut self): *mut T {
     return self.data;
+  }
+
+  // ── Higher-order methods ──────────────────────────────────────────────
+
+  /// Calls `f` with an immutable reference to each element, in order.
+  ///
+  /// The callback receives `&T` (immutable reference), so the vector
+  /// cannot be modified during iteration.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback invoked once per element with `&T`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  /// import Io from "std::io";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(10);
+  /// v.push(20);
+  /// v.push(30);
+  ///
+  /// // Print each element
+  /// v.forEach(|x: &i32| -> void {
+  ///   Io::printI32(*x);
+  /// });
+  /// // Output: 10 20 30
+  /// ```
+  public forEach(&self, @noescape f: (&T) -> void): void {
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      f(&self.data[i]);
+      i += 1;
+    }
+  }
+
+  /// Calls `f` with a mutable reference to each element, in order.
+  ///
+  /// The callback receives `&mut T`, allowing in-place modification of
+  /// every element without allocating a new vector.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback invoked once per element with `&mut T`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(2);
+  /// v.push(3);
+  ///
+  /// // Double every element in-place
+  /// v.forEachMut(|x: &mut i32| -> void {
+  ///   *x = *x * 2;
+  /// });
+  /// // v is now [2, 4, 6]
+  /// ```
+  public forEachMut(&mut self, @noescape f: (&mut T) -> void): void {
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      f(&mut self.data[i]);
+      i += 1;
+    }
+  }
+
+  /// Returns a new vector containing only elements for which `predicate`
+  /// returns `true`.
+  ///
+  /// Elements are copied into the result; the original vector is unchanged.
+  /// Order is preserved.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives `&T` and returns `true` to keep
+  ///   the element, `false` to discard it.
+  ///
+  /// # Returns
+  ///
+  /// A new `Vector<T>` containing only the matching elements.
+  /// The caller owns the returned vector.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(2);
+  /// v.push(3);
+  /// v.push(4);
+  ///
+  /// let evens: Vector<i32> = v.filter(|x: &i32| -> boolean {
+  ///   return *x % 2 == 0;
+  /// });
+  /// // evens is [2, 4]
+  /// ```
+  public filter(&self, @noescape predicate: (&T) -> boolean): Vector<T> {
+    let mut result: Vector<T> = Vector::init<T>();
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      if (predicate(&self.data[i])) {
+        result.push(self.data[i]);
+      }
+      i += 1;
+    }
+    return result;
+  }
+
+  /// Returns `true` if `predicate` returns `true` for at least one element.
+  ///
+  /// Short-circuits: stops iterating as soon as a match is found.
+  /// Returns `false` for an empty vector.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives `&T` and returns `true`/`false`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(3);
+  /// v.push(5);
+  ///
+  /// let hasEven: boolean = v.any(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// // hasEven == false
+  ///
+  /// v.push(4);
+  /// let hasEven2: boolean = v.any(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// // hasEven2 == true (stops at 4, never checks beyond)
+  /// ```
+  public any(&self, @noescape predicate: (&T) -> boolean): boolean {
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      if (predicate(&self.data[i])) {
+        return true;
+      }
+      i += 1;
+    }
+    return false;
+  }
+
+  /// Returns `true` if `predicate` returns `true` for every element.
+  ///
+  /// Short-circuits: stops iterating as soon as a non-match is found.
+  /// Returns `true` for an empty vector (vacuous truth).
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives `&T` and returns `true`/`false`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(2);
+  /// v.push(4);
+  /// v.push(6);
+  ///
+  /// let allEven: boolean = v.all(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// // allEven == true
+  ///
+  /// v.push(7);
+  /// let stillAllEven: boolean = v.all(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// // stillAllEven == false (stops at 7)
+  /// ```
+  public all(&self, @noescape predicate: (&T) -> boolean): boolean {
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      if (!predicate(&self.data[i])) {
+        return false;
+      }
+      i += 1;
+    }
+    return true;
+  }
+
+  /// Returns the index of the first element for which `predicate` returns
+  /// `true`, or `Option::NONE` if no element matches.
+  ///
+  /// Short-circuits: stops iterating at the first match.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives `&T` and returns `true`/`false`.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(index)` for the first matching element, or `Option::NONE`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  /// import Option from "std::option";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(10);
+  /// v.push(20);
+  /// v.push(30);
+  ///
+  /// let idx: Option<u64> = v.findIndex(|x: &i32| -> boolean { return *x == 20; });
+  /// // idx == Option::SOME(1)
+  ///
+  /// let missing: Option<u64> = v.findIndex(|x: &i32| -> boolean { return *x == 99; });
+  /// // missing == Option::NONE
+  /// ```
+  public findIndex(&self, @noescape predicate: (&T) -> boolean): Option<u64> {
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      if (predicate(&self.data[i])) {
+        return Option::SOME(i);
+      }
+      i += 1;
+    }
+    return Option::NONE;
+  }
+
+  /// Returns the number of elements for which `predicate` returns `true`.
+  ///
+  /// Always iterates the entire vector.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives `&T` and returns `true`/`false`.
+  ///
+  /// # Returns
+  ///
+  /// The count of matching elements (0 if none match or the vector is empty).
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(2);
+  /// v.push(3);
+  /// v.push(4);
+  ///
+  /// let numEvens: u64 = v.count(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// // numEvens == 2
+  /// ```
+  public count(&self, @noescape predicate: (&T) -> boolean): u64 {
+    let mut n: u64 = 0;
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      if (predicate(&self.data[i])) {
+        n += 1;
+      }
+      i += 1;
+    }
+    return n;
+  }
+
+  /// Folds the vector left-to-right without an explicit initial value.
+  ///
+  /// The first element is **copied** as the initial accumulator. Then `f`
+  /// is called for each subsequent element with `(accumulator, &element)`,
+  /// and its return value becomes the new accumulator.
+  ///
+  /// Returns `Option::NONE` for an empty vector.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that takes the accumulator by value and the next
+  ///   element by reference, and returns the updated accumulator.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(result)` with the final accumulated value, or
+  /// `Option::NONE` if the vector is empty.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  /// import Option from "std::option";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(2);
+  /// v.push(3);
+  ///
+  /// // Sum all elements: 1 + 2 + 3 = 6
+  /// let sum: Option<i32> = v.reduce(|acc: i32, x: &i32| -> i32 {
+  ///   return acc + *x;
+  /// });
+  /// // sum == Option::SOME(6)
+  ///
+  /// // Empty vector returns NONE
+  /// let empty: Vector<i32> = Vector::init<i32>();
+  /// let result: Option<i32> = empty.reduce(|acc: i32, x: &i32| -> i32 {
+  ///   return acc + *x;
+  /// });
+  /// // result == Option::NONE
+  /// ```
+  ///
+  /// # See Also
+  ///
+  /// Use `fold<U>` if you need an explicit initial value or a different
+  /// return type.
+  public reduce(&self, @noescape f: (T, &T) -> T): Option<T> {
+    if (self.length == 0) {
+      return Option::NONE;
+    }
+
+    let mut acc: T = self.data[0];
+    let mut i: u64 = 1;
+    while (i < self.length) {
+      acc = f(acc, &self.data[i]);
+      i += 1;
+    }
+    return Option::SOME(acc);
+  }
+
+  /// Sorts the vector in-place using a comparator.
+  ///
+  /// Uses insertion sort, which is simple, stable, and efficient for
+  /// small-to-moderate sizes. For large vectors a different algorithm
+  /// may be preferable.
+  ///
+  /// # Arguments
+  ///
+  /// * `compare` - Comparator callback that receives two `&T` references
+  ///   and returns:
+  ///   - negative (`< 0`) if `a < b`
+  ///   - zero (`0`)       if `a == b`
+  ///   - positive (`> 0`) if `a > b`
+  ///
+  /// # Stability
+  ///
+  /// The sort is **stable**: elements that compare equal retain their
+  /// original relative order.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(30);
+  /// v.push(10);
+  /// v.push(20);
+  ///
+  /// // Sort ascending
+  /// v.sort(|a: &i32, b: &i32| -> i32 { return *a - *b; });
+  /// // v is now [10, 20, 30]
+  ///
+  /// // Sort descending
+  /// v.sort(|a: &i32, b: &i32| -> i32 { return *b - *a; });
+  /// // v is now [30, 20, 10]
+  /// ```
+  public sort(&mut self, @noescape compare: (&T, &T) -> i32): void {
+    // Insertion sort: simple, stable, good enough for moderate sizes.
+    let mut i: u64 = 1;
+    while (i < self.length) {
+      let key: T = self.data[i];
+      let mut j: i64 = i as i64 - 1;
+      while (j >= 0 && compare(&self.data[j as u64], &key) > 0) {
+        self.data[(j + 1) as u64] = self.data[j as u64];
+        j -= 1;
+      }
+      self.data[(j + 1) as u64] = key;
+      i += 1;
+    }
+  }
+
+  /// Returns a new vector by applying `f` to each element.
+  ///
+  /// Each element is passed by immutable reference (`&T`). The callback
+  /// returns a value of type `U`, which is pushed into the result vector.
+  /// The result is pre-allocated to `self.length()` capacity.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `U` - The element type of the output vector. Can be the same as `T`
+  ///   or a completely different type.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Transformation callback from `&T` to `U`.
+  ///
+  /// # Returns
+  ///
+  /// A new `Vector<U>` of the same length. The caller owns the result.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(2);
+  /// v.push(3);
+  ///
+  /// // Square each element (same type: i32 -> i32)
+  /// let squared: Vector<i32> = v.map<i32>(|x: &i32| -> i32 {
+  ///   return *x * *x;
+  /// });
+  /// // squared is [1, 4, 9]
+  ///
+  /// // Convert to booleans (different type: i32 -> boolean)
+  /// let isEven: Vector<boolean> = v.map<boolean>(|x: &i32| -> boolean {
+  ///   return *x % 2 == 0;
+  /// });
+  /// // isEven is [false, true, false]
+  /// ```
+  public map<U>(&self, @noescape f: (&T) -> U): Vector<U> {
+    let mut result: Vector<U> = Vector::init<U>(self.length);
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      result.push(f(&self.data[i]));
+      i += 1;
+    }
+    return result;
+  }
+
+  /// Folds the vector left-to-right starting from an explicit initial value.
+  ///
+  /// The accumulator starts at `initial`. For each element, `f` is called
+  /// with `(accumulator, &element)`, and its return value becomes the new
+  /// accumulator. The final accumulator is returned.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `U` - The type of the accumulator and the return value.
+  ///   Can differ from `T`.
+  ///
+  /// # Arguments
+  ///
+  /// * `initial` - Starting value for the accumulator.
+  /// * `f` - Callback that combines the accumulator with each element.
+  ///
+  /// # Returns
+  ///
+  /// The final accumulated value. Returns `initial` unchanged if the
+  /// vector is empty.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Vector from "std::vector";
+  ///
+  /// let mut v: Vector<i32> = Vector::init<i32>();
+  /// v.push(1);
+  /// v.push(2);
+  /// v.push(3);
+  ///
+  /// // Sum with explicit initial value
+  /// let sum: i32 = v.fold<i32>(0, |acc: i32, x: &i32| -> i32 {
+  ///   return acc + *x;
+  /// });
+  /// // sum == 6
+  ///
+  /// // Count elements as u64 (different accumulator type)
+  /// let count: u64 = v.fold<u64>(0, |acc: u64, _x: &i32| -> u64 {
+  ///   return acc + 1;
+  /// });
+  /// // count == 3
+  /// ```
+  ///
+  /// # See Also
+  ///
+  /// Use `reduce` when the accumulator type is the same as `T` and you
+  /// want to use the first element as the initial value.
+  public fold<U>(&self, initial: U, @noescape f: (U, &T) -> U): U {
+    let mut acc: U = initial;
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      acc = f(acc, &self.data[i]);
+      i += 1;
+    }
+    return acc;
   }
 
   /// Releases the backing storage and resets length/capacity to zero.

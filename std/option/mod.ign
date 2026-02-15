@@ -3,43 +3,109 @@
 //!
 //! Presence/absence sum type.
 //!
-//! `Option<S>` models values that may or may not exist.
+//! ## Overview
+//!
+//! `Option<S>` models values that may or may not exist. It is an enum with
+//! two variants:
+//!
+//! - `Option::SOME(value)` — the value is present
+//! - `Option::NONE`        — the value is absent
+//!
+//! Use `Option` instead of sentinel values (like `-1` or `null`) whenever
+//! a function might not produce a meaningful result.
+//!
+//! ## Variants
+//!
+//! ```text
+//!   Option<S>
+//!   ┌─────────────────────────────────────┐
+//!   │                                     │
+//!   │   SOME(S) ── carries a value of S   │
+//!   │                                     │
+//!   │   NONE    ── no value               │
+//!   │                                     │
+//!   └─────────────────────────────────────┘
+//! ```
+//!
+//! ## Higher-Order Methods
+//!
+//! Option provides callback-based methods for transforming and inspecting
+//! optional values without manual `match` boilerplate:
+//!
+//! | Method         | Signature                          | Description                        |
+//! |----------------|------------------------------------|------------------------------------|
+//! | `filter`       | `(S) -> boolean` → `Option<S>`     | Keep SOME only if predicate holds  |
+//! | `unwrapOrElse` | `() -> S` → `S`                    | Lazy default on NONE               |
+//! | `orElse`       | `() -> Option<S>` → `Option<S>`    | Lazy alternative on NONE           |
+//! | `inspect`      | `(S) -> void` → `Option<S>`        | Side-effect without consuming      |
+//! | `map<U>`       | `(S) -> U` → `Option<U>`           | Transform inner value              |
+//! | `andThen<U>`   | `(S) -> Option<U>` → `Option<U>`   | Chain fallible operations          |
+//!
+//! All callbacks are `@noescape`: the closure must not outlive the method call.
 //!
 //! ## Example
 //!
 //! ```ignis
 //! import Option from "std::option";
 //!
-//! function maybeName(flag: boolean): Option<str> {
-//!   if (flag) {
-//!     return Option::SOME("ignis");
+//! function findUser(id: i32): Option<str> {
+//!   if (id == 1) {
+//!     return Option::SOME("alice");
 //!   }
-//!
 //!   return Option::NONE;
+//! }
+//!
+//! function main(): i32 {
+//!   let name: str = findUser(1).unwrapOr("unknown");
+//!
+//!   // Chain: look up user, check name length, convert to uppercase
+//!   let result: Option<i32> = findUser(1)
+//!     .filter(|s: str| -> boolean { return s != ""; })
+//!     .map<i32>(|s: str| -> i32 { return 42; });
+//!
+//!   return 0;
 //! }
 //! ```
 
 /// Option type that models presence (`SOME`) or absence (`NONE`).
 ///
-/// Use this when a value may be missing and that state is expected.
+/// Use this when a value may be missing and that state is expected,
+/// rather than using sentinel values or null pointers.
+///
+/// # Variants
+///
+/// * `SOME(S)` - A value of type `S` is present.
+/// * `NONE`    - No value is present.
 ///
 /// # Example
 ///
 /// ```ignis
 /// import Option from "std::option";
 ///
-/// function maybeName(flag: boolean): Option<str> {
-///   if (flag) {
-///     return Option::SOME("ignis");
+/// function divide(a: i32, b: i32): Option<i32> {
+///   if (b == 0) {
+///     return Option::NONE;
 ///   }
-///
-///   return Option::NONE;
+///   return Option::SOME(a / b);
 /// }
 /// ```
 export enum Option<S> {
   SOME(S),
   NONE,
 
+  /// Returns `true` if the option contains a value (`SOME`).
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let x: Option<i32> = Option::SOME(42);
+  /// let y: Option<i32> = Option::NONE;
+  ///
+  /// x.isSome();  // true
+  /// y.isSome();  // false
+  /// ```
   public isSome(&self): boolean {
     return match (self) {
       Option::SOME(_) -> true,
@@ -47,21 +113,37 @@ export enum Option<S> {
     };
   }
 
-  /**
-    * @brief Checks if the option is None.
-    *
-    * @return True if the option is None, false otherwise.
-    */
+  /// Returns `true` if the option is `NONE`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let x: Option<i32> = Option::NONE;
+  /// x.isNone();  // true
+  /// ```
   public isNone(&self): boolean {
     return !self.isSome();
   }
 
-  /**
-    * @brief Unwraps the value in the option.
-    *
-    * @return The unwrapped value of type S.
-    * @throws Panic if the option is None.
-    */
+  /// Extracts the contained value, panicking if `NONE`.
+  ///
+  /// # Panics
+  ///
+  /// Panics with `"Option is None"` if the option is `NONE`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let x: Option<i32> = Option::SOME(42);
+  /// let val: i32 = x.unwrap();  // 42
+  ///
+  /// let y: Option<i32> = Option::NONE;
+  /// // y.unwrap();  // PANIC: "Option is None"
+  /// ```
   public unwrap(&self): S {
     return match (self) {
       Option::SOME(s) -> s,
@@ -69,16 +151,269 @@ export enum Option<S> {
     };
   }
 
-  /**
-    * @brief Unwraps the value or returns a default value.
-    *
-    * @param defaultValue A default value to return if the option is None.
-    * @return The unwrapped value or the default value.
-    */
+  /// Returns the contained value, or `defaultValue` if `NONE`.
+  ///
+  /// The default is always evaluated. Use `unwrapOrElse` for a lazy
+  /// alternative that only computes the default when needed.
+  ///
+  /// # Arguments
+  ///
+  /// * `defaultValue` - Value to return when the option is `NONE`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let x: Option<i32> = Option::SOME(42);
+  /// let a: i32 = x.unwrapOr(0);  // 42
+  ///
+  /// let y: Option<i32> = Option::NONE;
+  /// let b: i32 = y.unwrapOr(0);  // 0
+  /// ```
   public unwrapOr(&self, defaultValue: S): S {
     return match (self) {
       Option::SOME(s) -> s,
       Option::NONE -> defaultValue,
+    };
+  }
+
+  /// Returns the contained value, or calls `f` to produce a default.
+  ///
+  /// Unlike `unwrapOr`, the fallback is only evaluated when the option
+  /// is `NONE`. Use this when computing the default is expensive.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that produces a default value of type `S`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let x: Option<i32> = Option::NONE;
+  /// let val: i32 = x.unwrapOrElse(|| -> i32 { return 99; });
+  /// // val == 99 (callback was called)
+  ///
+  /// let y: Option<i32> = Option::SOME(42);
+  /// let val2: i32 = y.unwrapOrElse(|| -> i32 { return 99; });
+  /// // val2 == 42 (callback was NOT called)
+  /// ```
+  public unwrapOrElse(&self, @noescape f: () -> S): S {
+    return match (self) {
+      Option::SOME(s) -> s,
+      Option::NONE -> f(),
+    };
+  }
+
+  /// Returns `SOME(value)` if the option is `SOME` and `predicate(value)`
+  /// returns `true`. Returns `NONE` otherwise.
+  ///
+  /// Useful for adding a condition to an optional value without unwrapping
+  /// it manually.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that tests the inner value. Receives `S`
+  ///   by copy.
+  ///
+  /// # Returns
+  ///
+  /// The original `SOME` if the predicate passes, `NONE` otherwise.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let x: Option<i32> = Option::SOME(4);
+  ///
+  /// // Keep only even values
+  /// let even: Option<i32> = x.filter(|n: i32| -> boolean { return n % 2 == 0; });
+  /// // even == Option::SOME(4)
+  ///
+  /// let odd: Option<i32> = Option::SOME(3);
+  /// let filtered: Option<i32> = odd.filter(|n: i32| -> boolean { return n % 2 == 0; });
+  /// // filtered == Option::NONE
+  /// ```
+  public filter(&self, @noescape predicate: (S) -> boolean): Option<S> {
+    match (self) {
+      Option::SOME(s) -> {
+        if (predicate(s)) {
+          return Option::SOME(s);
+        }
+      },
+      _ -> {},
+    };
+    return Option::NONE;
+  }
+
+  /// Returns `self` if `SOME`, otherwise calls `f` to produce an
+  /// alternative `Option<S>`.
+  ///
+  /// The callback is only invoked when `self` is `NONE`.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that produces a fallback `Option<S>`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let primary: Option<i32> = Option::NONE;
+  /// let fallback: Option<i32> = primary.orElse(|| -> Option<i32> {
+  ///   return Option::SOME(99);
+  /// });
+  /// // fallback == Option::SOME(99)
+  ///
+  /// let present: Option<i32> = Option::SOME(1);
+  /// let result: Option<i32> = present.orElse(|| -> Option<i32> {
+  ///   return Option::SOME(99);
+  /// });
+  /// // result == Option::SOME(1)  (callback not called)
+  /// ```
+  public orElse(&self, @noescape f: () -> Option<S>): Option<S> {
+    return match (self) {
+      Option::SOME(s) -> Option::SOME(s),
+      Option::NONE -> f(),
+    };
+  }
+
+  /// Calls `f` with the inner value if `SOME` (for side effects),
+  /// then returns the original option unchanged.
+  ///
+  /// Useful for logging, debugging, or accumulating state while
+  /// passing the option through a chain.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback invoked with the inner value by copy. Its return
+  ///   value is discarded.
+  ///
+  /// # Returns
+  ///
+  /// The original `Option<S>`, unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  /// import Io from "std::io";
+  ///
+  /// let x: Option<i32> = Option::SOME(42);
+  ///
+  /// // Log the value mid-chain
+  /// let result: Option<i32> = x
+  ///   .inspect(|val: i32| -> void { Io::printI32(val); })
+  ///   .map<i32>(|val: i32| -> i32 { return val * 2; });
+  /// // Prints: 42
+  /// // result == Option::SOME(84)
+  /// ```
+  public inspect(&self, @noescape f: (S) -> void): Option<S> {
+    match (self) {
+      Option::SOME(s) -> f(s),
+      _ -> {},
+    };
+    return match (self) {
+      Option::SOME(s) -> Option::SOME(s),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  /// Transforms the inner value by applying `f`, producing an
+  /// `Option<U>`. Returns `NONE` if `self` is `NONE`.
+  ///
+  /// This is the fundamental "functor map" over Option: it lets you
+  /// transform the contained value without unwrapping.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `U` - The type produced by the transformation.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that transforms `S` into `U`.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(f(value))` if `self` is `SOME`, `Option::NONE` otherwise.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// let x: Option<i32> = Option::SOME(5);
+  ///
+  /// // Convert i32 to boolean
+  /// let isPositive: Option<boolean> = x.map<boolean>(|n: i32| -> boolean {
+  ///   return n > 0;
+  /// });
+  /// // isPositive == Option::SOME(true)
+  ///
+  /// // NONE maps to NONE
+  /// let y: Option<i32> = Option::NONE;
+  /// let result: Option<boolean> = y.map<boolean>(|n: i32| -> boolean {
+  ///   return n > 0;
+  /// });
+  /// // result == Option::NONE
+  /// ```
+  public map<U>(&self, @noescape f: (S) -> U): Option<U> {
+    return match (self) {
+      Option::SOME(s) -> Option::SOME(f(s)),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  /// Applies `f` to the inner value, where `f` itself returns an
+  /// `Option<U>`. Returns `NONE` if `self` is `NONE`.
+  ///
+  /// This is the monadic "bind" / "flatMap" over Option. Use it to chain
+  /// operations that each might fail (return `NONE`).
+  ///
+  /// # Type Parameters
+  ///
+  /// * `U` - The inner type of the Option returned by `f`.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that takes `S` and returns `Option<U>`.
+  ///
+  /// # Returns
+  ///
+  /// The `Option<U>` returned by `f`, or `NONE` if `self` was `NONE`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  ///
+  /// function safeDivide(a: i32, b: i32): Option<i32> {
+  ///   if (b == 0) { return Option::NONE; }
+  ///   return Option::SOME(a / b);
+  /// }
+  ///
+  /// let x: Option<i32> = Option::SOME(100);
+  ///
+  /// // Chain: divide by 2, then divide by 5
+  /// let result: Option<i32> = x
+  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 2); })
+  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 5); });
+  /// // result == Option::SOME(10)
+  ///
+  /// // Chain breaks on NONE
+  /// let bad: Option<i32> = x
+  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 0); })
+  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 5); });
+  /// // bad == Option::NONE (first andThen returned NONE)
+  /// ```
+  public andThen<U>(&self, @noescape f: (S) -> Option<U>): Option<U> {
+    return match (self) {
+      Option::SOME(s) -> f(s),
+      Option::NONE -> Option::NONE,
     };
   }
 }

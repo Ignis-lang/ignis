@@ -1,17 +1,59 @@
 //!
 //! # String Module
 //!
-//! Owned, heap-backed string type and related utilities.
+//! Owned, heap-backed byte string type and related utilities.
 //!
 //! ## Overview
 //!
 //! `String` is a value-type record whose `data` buffer lives on the heap.
 //! It implements `Drop` so the buffer is freed automatically when the
-//! owning binding goes out of scope.
+//! owning binding goes out of scope, and `Clone` for explicit deep copies.
 //!
 //! `str` is the primitive immutable string-slice type (`const char*` in C).
 //! String literals have type `str`.  Use `String::create(s)` to create an
 //! owned copy from a `str`.
+//!
+//! ## Memory Layout
+//!
+//! ```text
+//!   String
+//!   ┌──────────────┐
+//!   │ data ────────┼──────► ┌───┬───┬───┬───┬───┬───┬───┬───┐
+//!   │ len: 5       │        │ h │ e │ l │ l │ o │   │   │   │
+//!   │ cap: 8       │        └───┴───┴───┴───┴───┴───┴───┴───┘
+//!   └──────────────┘        ◄── used bytes ──►◄─ reserved ──►
+//! ```
+//!
+//! Fields mirror the C runtime's `IgnisString` layout exactly:
+//! - `data` — pointer to the backing byte buffer (or `null` before init)
+//! - `len`  — number of bytes currently stored
+//! - `cap`  — total bytes allocated
+//!
+//! ## Byte-Oriented Operations
+//!
+//! All operations in this module are **byte-oriented** (no UTF-8 awareness).
+//! Methods like `charAt`, `forEachByte`, `findByte`, `trimWhere`, and `split`
+//! work on individual bytes (`u8`), not Unicode code points.
+//!
+//! ## Higher-Order Byte Methods
+//!
+//! String provides callback-based operations for byte-level iteration,
+//! searching, trimming, and splitting:
+//!
+//! | Method        | Signature                              | Description                        |
+//! |---------------|----------------------------------------|------------------------------------|
+//! | `forEachByte` | `(u8) -> void`                         | Iterate over every byte            |
+//! | `findByte`    | `(u8) -> boolean` → `Option<u64>`      | Index of first matching byte       |
+//! | `trimWhere`   | `(u8) -> boolean` → `String`           | Strip leading/trailing bytes       |
+//! | `split`       | `(u8) -> boolean` → `Vector<String>`   | Split into segments                |
+//!
+//! All callbacks are `@noescape`: the closure must not outlive the method call.
+//!
+//! ## Numeric Conversions
+//!
+//! `String::create` is overloaded for all numeric primitives (`i8` through
+//! `f64`), plus `str`. Extension methods provide `.toString()` on every
+//! primitive type.
 //!
 //! ## Example
 //!
@@ -25,6 +67,13 @@
 //!   let msg: String = greeting.concat(&world);
 //!
 //!   Io::println(msg);
+//!
+//!   // Byte-level: trim whitespace and split on commas
+//!   let csv: String = String::create("  a,b,c  ");
+//!   let trimmed: String = csv.trimWhere(|b: u8| -> boolean { return b == 32; });
+//!   let parts: Vector<String> = trimmed.split(|b: u8| -> boolean { return b == 44; });
+//!   // parts: ["a", "b", "c"]
+//!
 //!   return 0;
 //! }
 //! ```
@@ -69,10 +118,18 @@ extern __string {
   function ignis_string_init_from_f64(out: &mut String, value: f64): void;
 }
 
-/// Owned, heap-backed string.
+/// Owned, heap-backed byte string.
 ///
 /// The `data` buffer is heap-allocated and freed when the String is dropped.
-/// Fields mirror the C runtime's `IgnisString` layout exactly.
+/// All operations are byte-oriented (no UTF-8 decoding).
+///
+/// Implements `Drop` for automatic cleanup and `Clone` for deep copies.
+///
+/// # Fields
+///
+/// * `data` - Raw pointer to the heap byte buffer (`null` when uninitialized).
+/// * `len`  - Number of bytes currently stored.
+/// * `cap`  - Total capacity of the buffer in bytes.
 ///
 /// # Example
 ///
@@ -80,12 +137,18 @@ extern __string {
 /// import String from "std::string";
 ///
 /// let s: String = String::create("ignis");
-/// let len: u64 = s.length();
+/// let len: u64 = s.length();  // 5
+/// let c: Option<char> = s.charAt(0);  // Option::SOME('i')
 /// ```
 @implements(Drop, Clone)
 export record String {
+  /// Raw pointer to the heap byte buffer (`null` when uninitialized).
   data: *mut u8;
+
+  /// Number of bytes currently stored.
   len: u64;
+
+  /// Total capacity of the buffer in bytes.
   cap: u64;
 
   // ---------------------------------------------------------------------------
@@ -93,6 +156,15 @@ export record String {
   // ---------------------------------------------------------------------------
 
   /// Creates a new empty string with default capacity.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let mut s: String = String::new();
+  /// s.pushStr("hello");
+  /// ```
   public static new(): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_new(&mut result);
@@ -100,20 +172,68 @@ export record String {
   }
 
   /// Creates a new empty string with at least `capacity` bytes reserved.
+  ///
+  /// Use this when you know roughly how many bytes the string will hold,
+  /// to avoid repeated reallocations during `push`/`pushStr`/`pushChar`.
+  ///
+  /// # Arguments
+  ///
+  /// * `capacity` - Minimum number of bytes to reserve.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let mut s: String = String::withCapacity(256);
+  /// s.pushStr("pre-allocated buffer");
+  /// ```
   public static withCapacity(capacity: u64): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_with_capacity(&mut result, capacity);
     return result;
   }
 
-  /// Creates an owned String from an immutable `str` slice.
+  /// Creates an owned String from an immutable `str` literal.
+  ///
+  /// Copies the bytes from the `str` slice into a new heap allocation.
+  /// This is the primary way to create a String from a string literal.
+  ///
+  /// # Arguments
+  ///
+  /// * `s` - The source `str` (immutable string slice / `const char*`).
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let greeting: String = String::create("hello world");
+  /// ```
   public static create(s: str): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_from_cstr(&mut result, s);
     return result;
   }
 
-  /// Creates an owned String from an `i8`.
+  /// Creates an owned String from an `i8` value.
+  ///
+  /// # Numeric Overloads
+  ///
+  /// `String::create` is overloaded for every numeric primitive:
+  /// `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`.
+  ///
+  /// Each converts the number to its decimal string representation.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let a: String = String::create(42 as i32);   // "42"
+  /// let b: String = String::create(3.14 as f64);  // "3.140000"
+  /// let c: String = String::create(255 as u8);    // "255"
+  /// ```
   public static create(value: i8): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_from_i8(&mut result, value);
@@ -188,18 +308,63 @@ export record String {
   // ---------------------------------------------------------------------------
 
   /// Returns the string length in bytes.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("hello");
+  /// let len: u64 = s.length();  // 5
+  /// ```
   public length(&self): u64 {
     return __string::ignis_string_len(self);
   }
 
-  /// Lexicographically compares this string with `other`.
+  /// Lexicographically compares this string with `other` byte-by-byte.
   ///
-  /// Returns negative if `self < other`, zero if equal, positive if `self > other`.
+  /// # Returns
+  ///
+  /// - Negative if `self < other`
+  /// - Zero if `self == other`
+  /// - Positive if `self > other`
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let a: String = String::create("apple");
+  /// let b: String = String::create("banana");
+  /// let cmp: i32 = a.compare(&b);  // negative (a < b)
+  /// ```
   public compare(&self, other: &String): i32 {
     return __string::ignis_string_compare(self, other);
   }
 
-  /// Returns the character at `index`, or `NONE` if out of range.
+  /// Returns the byte at `index` as a `char`, or `NONE` if out of range.
+  ///
+  /// This is a byte-level operation: the index is a byte offset, not a
+  /// Unicode code point index.
+  ///
+  /// # Arguments
+  ///
+  /// * `index` - Zero-based byte offset.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(c)` if `index < length`, `Option::NONE` otherwise.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  /// import Option from "std::option";
+  ///
+  /// let s: String = String::create("abc");
+  /// let c: Option<char> = s.charAt(1);  // Option::SOME('b')
+  /// let oob: Option<char> = s.charAt(99);  // Option::NONE
+  /// ```
   public charAt(&self, index: u64): Option<char> {
     if (index < self.len) {
       return Option::SOME(__string::ignis_string_char_at(self, index));
@@ -208,7 +373,27 @@ export record String {
     return Option::NONE;
   }
 
-  /// Returns the index of the first occurrence of `needle`, or `NONE`.
+  /// Returns the byte index of the first occurrence of `needle`, or `NONE`.
+  ///
+  /// # Arguments
+  ///
+  /// * `needle` - The substring to search for.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(index)` with the byte offset of the first match, or
+  /// `Option::NONE` if `needle` is not found.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  /// import Option from "std::option";
+  ///
+  /// let s: String = String::create("hello world");
+  /// let needle: String = String::create("world");
+  /// let idx: Option<u64> = s.indexOf(&needle);  // Option::SOME(6)
+  /// ```
   public indexOf(&self, needle: &String): Option<u64> {
     let result: i64 = __string::ignis_string_index_of(self, needle);
 
@@ -219,12 +404,38 @@ export record String {
     return Option::NONE;
   }
 
-  /// Returns whether `needle` appears in this string.
+  /// Returns `true` if `needle` appears anywhere in this string.
+  ///
+  /// # Arguments
+  ///
+  /// * `needle` - The substring to search for.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("hello world");
+  /// let needle: String = String::create("world");
+  /// let found: boolean = s.contains(&needle);  // true
+  /// ```
   public contains(&self, needle: &String): boolean {
     return __string::ignis_string_contains(self, needle);
   }
 
-  /// Returns an immutable `str` view of this string's data.
+  /// Returns an immutable `str` view (C `const char*`) of this string's data.
+  ///
+  /// The returned `str` borrows the String's buffer. It is valid as long
+  /// as the String is alive and not mutated.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("hello");
+  /// let view: str = s.toStr();  // "hello"
+  /// ```
   public toStr(&self): str {
     return __string::ignis_string_cstr(self);
   }
@@ -234,27 +445,78 @@ export record String {
   // ---------------------------------------------------------------------------
 
   /// Returns a new string that is the concatenation of `self` and `other`.
+  ///
+  /// Neither operand is modified. The caller owns the returned String.
+  ///
+  /// # Arguments
+  ///
+  /// * `other` - The string to append after `self`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let a: String = String::create("hello");
+  /// let b: String = String::create(" world");
+  /// let msg: String = a.concat(&b);  // "hello world"
+  /// ```
   public concat(&self, other: &String): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_concat(&mut result, self, other);
     return result;
   }
 
-  /// Returns a substring starting at `start` with length `length`.
+  /// Returns a new string containing `length` bytes starting at byte
+  /// offset `start`.
+  ///
+  /// # Arguments
+  ///
+  /// * `start`  - Zero-based byte offset to begin extraction.
+  /// * `length` - Number of bytes to extract.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("hello world");
+  /// let sub: String = s.substring(6, 5);  // "world"
+  /// ```
   public substring(&self, start: i64, length: i64): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_substring(&mut result, self, start, length);
     return result;
   }
 
-  /// Returns a new uppercase copy of this string.
+  /// Returns a new string with all ASCII lowercase bytes converted to
+  /// uppercase. Non-ASCII bytes are copied unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("Hello");
+  /// let upper: String = s.toUpperCase();  // "HELLO"
+  /// ```
   public toUpperCase(&self): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_to_upper(&mut result, self);
     return result;
   }
 
-  /// Returns a new lowercase copy of this string.
+  /// Returns a new string with all ASCII uppercase bytes converted to
+  /// lowercase. Non-ASCII bytes are copied unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("Hello");
+  /// let lower: String = s.toLowerCase();  // "hello"
+  /// ```
   public toLowerCase(&self): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_to_lower(&mut result, self);
@@ -262,6 +524,19 @@ export record String {
   }
 
   /// Creates a deep copy of this string.
+  ///
+  /// Allocates a new buffer and copies all bytes. The returned String
+  /// is completely independent from `self`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let original: String = String::create("hello");
+  /// let copy: String = original.clone();
+  /// // original and copy are independent heap allocations
+  /// ```
   public clone(&self): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_clone(&mut result, self);
@@ -272,36 +547,347 @@ export record String {
   // Instance methods — mutating
   // ---------------------------------------------------------------------------
 
-  /// Appends a character to this string.
+  /// Appends a single character (byte) to the end of this string.
+  ///
+  /// May trigger a reallocation if the buffer is full.
+  ///
+  /// # Arguments
+  ///
+  /// * `c` - The character to append.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let mut s: String = String::create("ab");
+  /// s.pushChar('c');  // s is now "abc"
+  /// ```
   public pushChar(&mut self, c: char): void {
     __string::ignis_string_push_char(self, c);
   }
 
-  /// Appends a `str` slice to this string.
+  /// Appends a `str` literal to the end of this string.
+  ///
+  /// # Arguments
+  ///
+  /// * `s` - The `str` slice to append.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let mut s: String = String::new();
+  /// s.pushStr("hello");
+  /// s.pushStr(" world");
+  /// // s is now "hello world"
+  /// ```
   public pushStr(&mut self, s: str): void {
     __string::ignis_string_push_cstr(self, s);
   }
 
-  /// Appends another String to this string.
+  /// Appends the contents of another `String` to this string.
+  ///
+  /// # Arguments
+  ///
+  /// * `other` - The String whose bytes are appended.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let mut s: String = String::create("hello");
+  /// let suffix: String = String::create(" world");
+  /// s.push(&suffix);
+  /// // s is now "hello world"
+  /// ```
   public push(&mut self, other: &String): void {
     __string::ignis_string_push_str(self, other);
   }
 
-  /// Clears the string to length 0 without releasing capacity.
+  /// Resets the string length to 0 without releasing the backing buffer.
+  ///
+  /// Subsequent pushes reuse the existing capacity.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let mut s: String = String::create("hello");
+  /// s.clear();
+  /// // s.length() == 0, but capacity is still available
+  /// ```
   public clear(&mut self): void {
     __string::ignis_string_clear(self);
   }
 
-  /// Ensures capacity for `additional` bytes beyond current length.
+  /// Ensures the buffer has room for at least `additional` more bytes
+  /// beyond the current length.
+  ///
+  /// If the current capacity is already sufficient, this is a no-op.
+  /// Otherwise the buffer is reallocated.
+  ///
+  /// # Arguments
+  ///
+  /// * `additional` - Number of extra bytes to guarantee.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let mut s: String = String::new();
+  /// s.reserve(1024);
+  /// // s can now hold at least 1024 bytes without reallocation
+  /// ```
   public reserve(&mut self, additional: u64): void {
     __string::ignis_string_reserve(self, additional);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Higher-order byte methods
+  // ---------------------------------------------------------------------------
+
+  /// Calls `callback` once for each byte in the string, in order.
+  ///
+  /// The callback receives the raw byte value (`u8`), not a character
+  /// reference. This is useful for byte-level inspection or accumulation.
+  ///
+  /// # Arguments
+  ///
+  /// * `callback` - Function invoked with each byte value.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("abc");
+  ///
+  /// // Print each byte value (97, 98, 99)
+  /// s.forEachByte(|b: u8| -> void {
+  ///   Io::printU8(b);
+  /// });
+  /// ```
+  public forEachByte(&self, @noescape callback: (u8) -> void): void {
+    let mut i: u64 = 0;
+
+    while (i < self.len) {
+      callback(self.data[i]);
+      i += 1;
+    }
+  }
+
+  /// Returns the byte index of the first byte for which `predicate`
+  /// returns `true`, or `Option::NONE` if no byte matches.
+  ///
+  /// Short-circuits: stops scanning at the first match.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives a byte and returns `true`
+  ///   to indicate a match.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(index)` for the first matching byte, or `Option::NONE`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  /// import Option from "std::option";
+  ///
+  /// let s: String = String::create("hello world");
+  ///
+  /// // Find the first space (byte 32)
+  /// let idx: Option<u64> = s.findByte(|b: u8| -> boolean { return b == 32; });
+  /// // idx == Option::SOME(5)
+  ///
+  /// // Find a byte that doesn't exist
+  /// let missing: Option<u64> = s.findByte(|b: u8| -> boolean { return b == 0; });
+  /// // missing == Option::NONE
+  /// ```
+  public findByte(&self, @noescape predicate: (u8) -> boolean): Option<u64> {
+    let mut i: u64 = 0;
+
+    while (i < self.len) {
+      if (predicate(self.data[i])) {
+        return Option::SOME(i);
+      }
+      i += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Returns a new string with leading and trailing bytes stripped
+  /// where `predicate` returns `true`.
+  ///
+  /// Scans inward from both ends, removing bytes as long as the predicate
+  /// matches. Returns an empty string if all bytes are stripped.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives a byte and returns `true` to
+  ///   strip it.
+  ///
+  /// # Returns
+  ///
+  /// A new `String` with the outer matching bytes removed. The original
+  /// string is unchanged.
+  ///
+  /// # How It Works
+  ///
+  /// ```text
+  ///   "  hello  "  with predicate: b == 32 (space)
+  ///
+  ///   Step 1 — scan from left:
+  ///   [ ][  ][h][e][l][l][o][ ][ ]
+  ///    ^  ^                          ← strip (space)
+  ///          ^                       ← stop (not space)
+  ///   start = 2
+  ///
+  ///   Step 2 — scan from right:
+  ///   [ ][ ][h][e][l][l][o][ ][ ]
+  ///                          ^  ^   ← strip (space)
+  ///                       ^         ← stop (not space)
+  ///   end = 6
+  ///
+  ///   Result: substring(2, 5) → "hello"
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  ///
+  /// let s: String = String::create("  hello  ");
+  ///
+  /// // Trim spaces (byte 32)
+  /// let trimmed: String = s.trimWhere(|b: u8| -> boolean { return b == 32; });
+  /// // trimmed == "hello"
+  ///
+  /// // Trim tabs and spaces
+  /// let mixed: String = String::create("\t hello \t");
+  /// let clean: String = mixed.trimWhere(|b: u8| -> boolean {
+  ///   return b == 32 || b == 9;
+  /// });
+  /// // clean == "hello"
+  /// ```
+  public trimWhere(&self, @noescape predicate: (u8) -> boolean): String {
+    let mut start: u64 = 0;
+    while (start < self.len && predicate(self.data[start])) {
+      start += 1;
+    }
+
+    let mut end: i64 = self.len as i64 - 1;
+    while (end >= start as i64 && predicate(self.data[end as u64])) {
+      end -= 1;
+    }
+
+    let trimLen: i64 = end - start as i64 + 1;
+    if (trimLen <= 0) {
+      return String::new();
+    }
+
+    return self.substring(start as i64, trimLen);
+  }
+
+  /// Splits the string at each byte where `predicate` returns `true`.
+  ///
+  /// The matching (separator) bytes are **not** included in the resulting
+  /// segments. Adjacent separators produce empty strings. A trailing
+  /// separator produces a trailing empty string.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives a byte and returns `true` at
+  ///   split points.
+  ///
+  /// # Returns
+  ///
+  /// A `Vector<String>` of segments. The caller owns the vector and all
+  /// the strings within it.
+  ///
+  /// # How It Works
+  ///
+  /// ```text
+  ///   "a,b,,c"  with predicate: b == 44 (comma)
+  ///
+  ///    a , b , , c
+  ///    ^         ← segment "a"
+  ///      ^       ← split
+  ///        ^     ← segment "b"
+  ///          ^   ← split
+  ///            ^ ← split (empty segment "")
+  ///              ^← segment "c"
+  ///
+  ///   Result: ["a", "b", "", "c"]
+  /// ```
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  /// import Vector from "std::vector";
+  ///
+  /// let csv: String = String::create("alice,bob,charlie");
+  ///
+  /// // Split on commas (byte 44)
+  /// let parts: Vector<String> = csv.split(|b: u8| -> boolean {
+  ///   return b == 44;
+  /// });
+  /// // parts: ["alice", "bob", "charlie"]
+  ///
+  /// // Split on spaces
+  /// let words: String = String::create("hello world foo");
+  /// let tokens: Vector<String> = words.split(|b: u8| -> boolean {
+  ///   return b == 32;
+  /// });
+  /// // tokens: ["hello", "world", "foo"]
+  /// ```
+  public split(&self, @noescape predicate: (u8) -> boolean): Vector<String> {
+    let mut result: Vector<String> = Vector::init<String>();
+    let mut start: u64 = 0;
+    let mut i: u64 = 0;
+
+    while (i < self.len) {
+      if (predicate(self.data[i])) {
+        if (i > start) {
+          result.push(self.substring(start as i64, (i - start) as i64));
+        } else {
+          result.push(String::new());
+        }
+        start = i + 1;
+      }
+      i += 1;
+    }
+
+    // Trailing segment
+    if (start <= self.len) {
+      if (start < self.len) {
+        result.push(self.substring(start as i64, (self.len - start) as i64));
+      } else {
+        result.push(String::new());
+      }
+    }
+
+    return result;
   }
 
   // ---------------------------------------------------------------------------
   // Drop
   // ---------------------------------------------------------------------------
 
-  /// Releases the data buffer.
+  /// Releases the backing byte buffer and resets all fields.
+  ///
+  /// Called automatically when the String goes out of scope via
+  /// `@implements(Drop)`. Can also be called manually to release
+  /// memory early.
   public drop(&mut self): void {
     __string::ignis_string_drop(self);
   }
