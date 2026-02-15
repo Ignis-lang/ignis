@@ -258,6 +258,17 @@ extern libc {
 }
 ```
 
+#### Side-Effect Imports
+
+`import _ from "..."` loads a module purely for its side effects (e.g., namespace contributions) without binding any name into the importing scope.
+
+```ignis
+import _ from "std::libc::memory";   // loads module, no binding
+import _ from "./sub_module";         // relative path works too
+```
+
+`_` must be the sole item in the import statement. Combining it with named items (`import _, X from "..."`) is an error.
+
 ### 4.9 Extension Methods
 
 ```ignis
