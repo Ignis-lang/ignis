@@ -4478,3 +4478,289 @@ function main(): i32 {
 "#,
   );
 }
+
+// ── Phase 0: method-level type params ─────────────────────────────────
+
+#[test]
+fn e2e_method_type_param_explicit() {
+  e2e_test(
+    "method_type_param_explicit",
+    r#"
+record Box<T> {
+    value: T;
+
+    transform<U>(f: (T) -> U): U {
+        return f(self.value);
+    }
+}
+
+function main(): i32 {
+    let b: Box<i32> = Box { value: 10 };
+    let result = b.transform<i64>((x: i32): i64 -> { return x as i64 + 32; });
+    return result as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_method_type_param_inferred() {
+  e2e_test(
+    "method_type_param_inferred",
+    r#"
+record Box<T> {
+    value: T;
+
+    transform<U>(f: (T) -> U): U {
+        return f(self.value);
+    }
+}
+
+function main(): i32 {
+    let b: Box<i32> = Box { value: 7 };
+    let result: i64 = b.transform((x: i32): i64 -> x as i64 * 6);
+    return result as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_method_type_param_closure_with_capture() {
+  e2e_test(
+    "method_type_param_closure_with_capture",
+    r#"
+record Box<T> {
+    value: T;
+
+    transform<U>(f: (T) -> U): U {
+        return f(self.value);
+    }
+}
+
+function main(): i32 {
+    let multiplier: i64 = 3;
+    let b: Box<i32> = Box { value: 14 };
+    let result: i64 = b.transform((x: i32): i64 -> x as i64 * multiplier);
+    return result as i32;
+}
+"#,
+  );
+}
+
+// ── Phase 1: Callback methods on generic records ──────────────────────
+
+#[test]
+fn e2e_callback_for_each_by_value() {
+  e2e_test(
+    "callback_for_each_by_value",
+    r#"
+function forEach(data: *i32, len: i32, @noescape f: (i32) -> void): void {
+    let mut i: i32 = 0;
+    while (i < len) {
+        f(data[i as u64]);
+        i = i + 1;
+    }
+}
+
+function main(): i32 {
+    let data: i32[3] = [10, 20, 12];
+    let ptr: *i32 = (&data[0]) as *i32;
+    let mut sum: i32 = 0;
+    forEach(ptr, 3, (x: i32): void -> { sum = sum + x; });
+    return sum;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_mutating_closure() {
+  e2e_test(
+    "callback_mutating_closure",
+    r#"
+function apply3(@noescape f: (i32) -> i32): i32 {
+    return f(1) + f(2) + f(3);
+}
+
+function main(): i32 {
+    let factor: i32 = 10;
+    return apply3((x: i32): i32 -> x * factor);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_count_if() {
+  e2e_test(
+    "callback_count_if",
+    r#"
+function countIf(data: *i32, len: i32, @noescape predicate: (i32) -> boolean): i32 {
+    let mut n: i32 = 0;
+    let mut i: i32 = 0;
+    while (i < len) {
+        if (predicate(data[i as u64])) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+function main(): i32 {
+    let data: i32[5] = [1, 2, 3, 4, 5];
+    let ptr: *i32 = (&data[0]) as *i32;
+    return countIf(ptr, 5, (x: i32): boolean -> x % 2 == 0);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_any_all() {
+  e2e_test(
+    "callback_any_all",
+    r#"
+function any(data: *i32, len: i32, @noescape predicate: (i32) -> boolean): boolean {
+    let mut i: i32 = 0;
+    while (i < len) {
+        if (predicate(data[i as u64])) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+function all(data: *i32, len: i32, @noescape predicate: (i32) -> boolean): boolean {
+    let mut i: i32 = 0;
+    while (i < len) {
+        if (!predicate(data[i as u64])) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+function main(): i32 {
+    let data: i32[3] = [2, 4, 6];
+    let ptr: *i32 = (&data[0]) as *i32;
+    let hasOdd = any(ptr, 3, (x: i32): boolean -> x % 2 != 0);
+    let allEven = all(ptr, 3, (x: i32): boolean -> x % 2 == 0);
+    let mut result: i32 = 0;
+    if (!hasOdd) { result = result + 10; }
+    if (allEven) { result = result + 20; }
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_reduce() {
+  e2e_test(
+    "callback_reduce",
+    r#"
+function reduce(data: *i32, len: i32, @noescape f: (i32, i32) -> i32): i32 {
+    let mut acc: i32 = data[0];
+    let mut i: i32 = 1;
+    while (i < len) {
+        acc = f(acc, data[i as u64]);
+        i = i + 1;
+    }
+    return acc;
+}
+
+function main(): i32 {
+    let data: i32[4] = [1, 2, 3, 4];
+    let ptr: *i32 = (&data[0]) as *i32;
+    return reduce(ptr, 4, (acc: i32, x: i32): i32 -> acc + x);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_comparator() {
+  e2e_test(
+    "callback_comparator",
+    r#"
+function minOf3(@noescape compare: (i32, i32) -> i32, a: i32, b: i32, c: i32): i32 {
+    let mut result: i32 = a;
+    if (compare(b, result) < 0) { result = b; }
+    if (compare(c, result) < 0) { result = c; }
+    return result;
+}
+
+function main(): i32 {
+    return minOf3((a: i32, b: i32): i32 -> a - b, 30, 10, 20);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_noescape_mutating_capture() {
+  e2e_test(
+    "callback_noescape_mutating_capture",
+    r#"
+function applyTwice(@noescape f: (i32) -> i32, x: i32): i32 {
+    return f(f(x));
+}
+
+function main(): i32 {
+    let mut counter: i32 = 0;
+    let result = applyTwice((x: i32): i32 -> {
+        counter = counter + 1;
+        return x + 10;
+    }, 0);
+    return result + counter;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_method_type_param_map() {
+  e2e_test(
+    "callback_method_type_param_map",
+    r#"
+record Wrapper<T> {
+    public value: T;
+
+    map<U>(@noescape f: (T) -> U): Wrapper<U> {
+        return Wrapper { value: f(self.value) };
+    }
+}
+
+function main(): i32 {
+    let w: Wrapper<i32> = Wrapper { value: 7 };
+    let mapped: Wrapper<i64> = w.map((x: i32): i64 -> x as i64 * 6);
+    return mapped.value as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_callback_fold() {
+  e2e_test(
+    "callback_fold",
+    r#"
+record Pair<T> {
+    a: T;
+    b: T;
+
+    fold<U>(&self, initial: U, @noescape f: (U, T) -> U): U {
+        let mut acc: U = f(initial, self.a);
+        acc = f(acc, self.b);
+        return acc;
+    }
+}
+
+function main(): i32 {
+    let p: Pair<i32> = Pair { a: 40, b: 60 };
+    let sum: i32 = p.fold<i32>(0, (acc: i32, x: i32): i32 -> acc + x);
+    return sum;
+}
+"#,
+  );
+}

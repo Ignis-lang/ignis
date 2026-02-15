@@ -3548,6 +3548,133 @@ impl<'a> Analyzer<'a> {
     Some((param_types, subst_return, subst))
   }
 
+  /// Build a combined `Substitution` for a method call on a `Type::Instance`.
+  ///
+  /// Binds the owner's type params (from the instance args) and, when the
+  /// method has its own type params with explicit call-site type args, also
+  /// binds those.
+  fn build_instance_method_subst(
+    &mut self,
+    owner_def: DefinitionId,
+    owner_args: &[TypeId],
+    method_id: DefinitionId,
+    method: &ignis_type::definition::MethodDefinition,
+    call: &ASTCallExpression,
+  ) -> Substitution {
+    let owner_subst = if !owner_args.is_empty() {
+      Substitution::for_generic(owner_def, owner_args)
+    } else {
+      Substitution::new()
+    };
+
+    if method.type_params.is_empty() {
+      return owner_subst;
+    }
+
+    // Method has its own type params — resolve explicit type args if provided
+    let Some(type_args_syntax) = call.type_args.as_ref() else {
+      // No explicit type args — inference will be attempted later
+      return owner_subst;
+    };
+
+    let method_type_args: Vec<TypeId> = type_args_syntax
+      .iter()
+      .map(|ty| self.resolve_type_syntax_with_span(ty, &call.span))
+      .collect();
+
+    if method_type_args.len() != method.type_params.len() {
+      self.add_diagnostic(Diagnostic {
+        severity: Severity::Error,
+        message: format!(
+          "Expected {} type argument(s) for method, got {}",
+          method.type_params.len(),
+          method_type_args.len()
+        ),
+        error_code: "A0050".to_string(),
+        primary_span: call.span.clone(),
+        labels: vec![],
+        notes: vec![],
+      });
+      return owner_subst;
+    }
+
+    Substitution::for_method(owner_def, owner_args, method_id, &method_type_args)
+  }
+
+  /// Infer method-level type params by matching actual argument types against
+  /// the method's parameter types (already partially substituted with the
+  /// owner's type params).
+  ///
+  /// For example, if param type is `(T) -> U` (with T already resolved to i32
+  /// via owner subst, giving `(i32) -> U`) and the actual arg type is
+  /// `fn(i32) -> i64`, we can infer U = i64.
+  fn infer_method_type_params_from_args(
+    &mut self,
+    owner_def: DefinitionId,
+    owner_args: &[TypeId],
+    method_id: DefinitionId,
+    explicit_params: &[DefinitionId],
+    arg_types: &[TypeId],
+  ) -> Substitution {
+    let mut inferred = Substitution::for_generic(owner_def, owner_args);
+
+    for (i, param_def) in explicit_params.iter().enumerate() {
+      let Some(arg_type) = arg_types.get(i) else { continue };
+      if self.types.is_error(arg_type) {
+        continue;
+      }
+
+      let raw_param_type = self.get_definition_type(param_def);
+      // Substitute owner params first so we only have method params left as Param
+      let partial = self.types.substitute(raw_param_type, &inferred);
+      self.collect_type_param_bindings(method_id, partial, *arg_type, &mut inferred);
+    }
+
+    inferred
+  }
+
+  /// Recursively match an expected type (which may contain `Type::Param` holes
+  /// owned by `target_def`) against an actual type to discover bindings.
+  fn collect_type_param_bindings(
+    &self,
+    target_def: DefinitionId,
+    expected: TypeId,
+    actual: TypeId,
+    subst: &mut Substitution,
+  ) {
+    let expected_ty = self.types.get(&expected).clone();
+    let actual_ty = self.types.get(&actual).clone();
+
+    match (&expected_ty, &actual_ty) {
+      (Type::Param { owner, index }, _) if *owner == target_def => {
+        subst.bind(target_def, *index, actual);
+      },
+      (
+        Type::Function {
+          params: ep, ret: er, ..
+        },
+        Type::Function {
+          params: ap, ret: ar, ..
+        },
+      ) => {
+        for (e, a) in ep.iter().zip(ap.iter()) {
+          self.collect_type_param_bindings(target_def, *e, *a, subst);
+        }
+        self.collect_type_param_bindings(target_def, *er, *ar, subst);
+      },
+      (Type::Reference { inner: ei, .. }, Type::Reference { inner: ai, .. })
+      | (Type::Pointer { inner: ei, .. }, Type::Pointer { inner: ai, .. }) => {
+        self.collect_type_param_bindings(target_def, *ei, *ai, subst);
+      },
+      (Type::Instance { generic: eg, args: ea }, Type::Instance { generic: ag, args: aa }) if eg == ag => {
+        for (e, a) in ea.iter().zip(aa.iter()) {
+          self.collect_type_param_bindings(target_def, *e, *a, subst);
+        }
+      },
+      _ => {},
+    }
+  }
+
   /// Typecheck a method call: obj.method(args) or Type::method(args)
   fn typecheck_method_call(
     &mut self,
@@ -3803,13 +3930,6 @@ impl<'a> Analyzer<'a> {
           return self.types.error();
         };
 
-        // Build substitution for type args
-        let subst = if !rd.type_params.is_empty() && args.len() == rd.type_params.len() {
-          Substitution::for_generic(generic, &args)
-        } else {
-          Substitution::new()
-        };
-
         // Check instance methods
         if let Some(entry) = rd.instance_methods.get(&ma.member) {
           match entry {
@@ -3823,16 +3943,40 @@ impl<'a> Analyzer<'a> {
                 method.clone()
               };
 
+              // Check if method requires &mut self but receiver is not mutable
+              if method.self_mutable {
+                let obj_node = self.ast.get(&ma.object);
+                if let ASTNode::Expression(obj_expr) = obj_node
+                  && !self.is_mutable_expression(obj_expr)
+                {
+                  let method_name = self.get_symbol_name(&ma.member);
+                  let var_name = self.get_var_name_from_expr(obj_expr);
+                  self.add_diagnostic(
+                    DiagnosticMessage::MutatingMethodOnImmutable {
+                      method: method_name,
+                      var_name,
+                      span: ma.span.clone(),
+                    }
+                    .report(),
+                  );
+                }
+              }
+
               // For instance methods, skip the first param (self) when checking explicit args
               let start = self.method_param_start(&method);
               let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-              // Get param types and substitute type params
+              // Build combined substitution: owner type params + method type params.
+              // The owner's params come from the Instance type args; the method's own
+              // params come from call-site type args (explicit or inferred).
+              let combined_subst = self.build_instance_method_subst(generic, &args, *method_id, &method, call);
+
+              // Get param types and substitute both owner and method type params
               let param_types: Vec<TypeId> = explicit_params
                 .iter()
                 .map(|p| {
                   let raw_type = self.get_definition_type(p);
-                  self.types.substitute(raw_type, &subst)
+                  self.types.substitute(raw_type, &combined_subst)
                 })
                 .collect();
 
@@ -3850,6 +3994,27 @@ impl<'a> Analyzer<'a> {
                   }
                 })
                 .collect();
+
+              // If method has type params but no explicit type args, try to infer
+              // from argument types (e.g., f: (T) -> U with arg fn(i32) -> i64 → U = i64).
+              let combined_subst = if !method.type_params.is_empty() && call.type_args.is_none() {
+                self.infer_method_type_params_from_args(generic, &args, *method_id, &explicit_params, &arg_types)
+              } else {
+                combined_subst
+              };
+
+              // Re-substitute param types with potentially-inferred substitution
+              let param_types: Vec<TypeId> = if !method.type_params.is_empty() && call.type_args.is_none() {
+                explicit_params
+                  .iter()
+                  .map(|p| {
+                    let raw_type = self.get_definition_type(p);
+                    self.types.substitute(raw_type, &combined_subst)
+                  })
+                  .collect()
+              } else {
+                param_types
+              };
 
               // Check argument count
               let method_name = self.get_symbol_name(&ma.member);
@@ -3886,8 +4051,8 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              // Substitute return type
-              return self.types.substitute(method.return_type, &subst);
+              // Substitute return type with combined substitution
+              return self.types.substitute(method.return_type, &combined_subst);
             },
             SymbolEntry::Overload(candidates) => {
               let arg_types: Vec<TypeId> = call
@@ -3917,11 +4082,14 @@ impl<'a> Analyzer<'a> {
               let start = self.method_param_start(&method);
               let explicit_params: Vec<_> = method.params[start..].to_vec();
 
+              // Build combined substitution for overloaded method on generic instance
+              let combined_subst = self.build_instance_method_subst(generic, &args, resolved_def_id, &method, call);
+
               let param_types: Vec<TypeId> = explicit_params
                 .iter()
                 .map(|p| {
                   let raw_type = self.get_definition_type(p);
-                  self.types.substitute(raw_type, &subst)
+                  self.types.substitute(raw_type, &combined_subst)
                 })
                 .collect();
 
@@ -3958,7 +4126,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              return self.types.substitute(method.return_type, &subst);
+              return self.types.substitute(method.return_type, &combined_subst);
             },
           }
         }

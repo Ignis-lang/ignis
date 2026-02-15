@@ -1382,6 +1382,7 @@ pub fn check_std(
     return Err(());
   }
 
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
   let all_module_ids = ctx.module_graph.all_modules_topological();
   let mut processed_modules: HashSet<String> = HashSet::new();
 
@@ -1442,13 +1443,17 @@ pub fn check_std(
       continue;
     }
 
-    let c_code = ignis_codegen_c::emit_c(
+    let c_code = ignis_codegen_c::emit_std_module_c(
+      &module_name,
       &lir_program,
       &types,
       &mono_output.defs,
       &output.namespaces,
       &sym_table,
       &link_plan.headers,
+      &module_paths,
+      None,
+      std_path,
     );
 
     let c_path = output_path.join(format!("{}.c", module_name));
