@@ -1,0 +1,99 @@
+import CType from "./primitives";
+
+extern __process {
+  function exit(status: CType::CInt): void;
+  function abort(): void;
+  function _exit(status: CType::CInt): void;
+  function system(command: CType::CConstStr): CType::CInt;
+  function getenv(name: CType::CConstStr): CType::CStr;
+}
+
+extern __unistd_proc {
+  function getpid(): CType::PidT;
+  function getppid(): CType::PidT;
+  function getuid(): CType::UidT;
+  function getgid(): CType::GidT;
+  function sleep(seconds: CType::CUInt): CType::CUInt;
+  function usleep(usec: CType::CUInt): CType::CInt;
+  function fork(): CType::PidT;
+  function pipe(pipefd: *mut CType::CInt): CType::CInt;
+}
+
+extern __signal {
+  function raise(sig: CType::CInt): CType::CInt;
+  function kill(pid: CType::PidT, sig: CType::CInt): CType::CInt;
+}
+
+extern __wait {
+  function wait(wstatus: *mut CType::CInt): CType::PidT;
+  function waitpid(pid: CType::PidT, wstatus: *mut CType::CInt, options: CType::CInt): CType::PidT;
+}
+
+/// Process control (stdlib.h, unistd.h)
+namespace LibC::Process {
+  /// Terminates the process with `status`. Does not return.
+  function exit(status: CType::CInt): void { __process::exit(status); }
+
+  /// Terminates the process abnormally. Does not return.
+  function abort(): void { __process::abort(); }
+
+  /// Terminates the process immediately without running atexit handlers.
+  function _exit(status: CType::CInt): void { __process::_exit(status); }
+
+  /// Executes `command` via the system shell. Returns the exit status.
+  function system(command: CType::CConstStr): CType::CInt { return __process::system(command); }
+
+  /// Returns the value of environment variable `name`, or null if unset.
+  function getenv(name: CType::CConstStr): CType::CStr { return __process::getenv(name); }
+
+  /// Returns the process ID of the calling process.
+  function getpid(): CType::PidT { return __unistd_proc::getpid(); }
+
+  /// Returns the parent process ID.
+  function getppid(): CType::PidT { return __unistd_proc::getppid(); }
+
+  /// Returns the real user ID of the calling process.
+  function getuid(): CType::UidT { return __unistd_proc::getuid(); }
+
+  /// Returns the real group ID of the calling process.
+  function getgid(): CType::GidT { return __unistd_proc::getgid(); }
+
+  /// Suspends execution for `seconds` seconds.
+  ///
+  /// Returns 0 on success, or the remaining seconds if interrupted.
+  function sleep(seconds: CType::CUInt): CType::CUInt { return __unistd_proc::sleep(seconds); }
+
+  /// Suspends execution for `usec` microseconds.
+  function usleep(usec: CType::CUInt): CType::CInt { return __unistd_proc::usleep(usec); }
+
+  /// Creates a new process by duplicating the calling process.
+  ///
+  /// Returns the child PID to the parent, 0 to the child, or -1 on error.
+  function fork(): CType::PidT { return __unistd_proc::fork(); }
+
+  /// Creates a unidirectional pipe. `pipefd[0]` is the read end,
+  /// `pipefd[1]` is the write end.
+  function pipe(pipefd: *mut CType::CInt): CType::CInt { return __unistd_proc::pipe(pipefd); }
+}
+
+/// Signals (signal.h)
+namespace LibC::Signals {
+  /// Sends signal `sig` to the calling process.
+  function raise(sig: CType::CInt): CType::CInt { return __signal::raise(sig); }
+
+  /// Sends signal `sig` to process `pid`.
+  function kill(pid: CType::PidT, sig: CType::CInt): CType::CInt { return __signal::kill(pid, sig); }
+}
+
+/// Wait (sys/wait.h)
+namespace LibC::Wait {
+  /// Waits for any child process to change state.
+  ///
+  /// Stores the status in `wstatus`. Returns the child PID.
+  function wait(wstatus: *mut CType::CInt): CType::PidT { return __wait::wait(wstatus); }
+
+  /// Waits for a specific child process `pid` to change state.
+  ///
+  /// `options` can be 0 or a combination of `WNOHANG`/`WUNTRACED`.
+  function waitpid(pid: CType::PidT, wstatus: *mut CType::CInt, options: CType::CInt): CType::PidT { return __wait::waitpid(pid, wstatus, options); }
+}

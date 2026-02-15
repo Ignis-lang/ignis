@@ -1,0 +1,84 @@
+import CType from "./primitives";
+
+extern __stdlib_alloc {
+  function malloc(size: CType::SizeT): CType::CVoidPtr;
+  function calloc(count: CType::SizeT, size: CType::SizeT): CType::CVoidPtr;
+  function realloc(ptr: CType::CVoidPtr, size: CType::SizeT): CType::CVoidPtr;
+  function free(ptr: CType::CVoidPtr): void;
+}
+
+extern __string_mem {
+  function memcpy(dest: CType::CVoidPtr, src: CType::CConstVoidPtr, n: CType::SizeT): CType::CVoidPtr;
+  function memmove(dest: CType::CVoidPtr, src: CType::CConstVoidPtr, n: CType::SizeT): CType::CVoidPtr;
+  function memset(dest: CType::CVoidPtr, c: CType::CInt, n: CType::SizeT): CType::CVoidPtr;
+  function memcmp(s1: CType::CConstVoidPtr, s2: CType::CConstVoidPtr, n: CType::SizeT): CType::CInt;
+}
+
+extern __unistd_mem {
+  function sbrk(increment: CType::IntPtrT): CType::CVoidPtr;
+  function brk(addr: CType::CVoidPtr): CType::CInt;
+}
+
+extern __mman {
+  function mmap(addr: CType::CVoidPtr, length: CType::SizeT, prot: CType::CInt, flags: CType::CInt, fd: CType::CInt, offset: CType::OffT): CType::CVoidPtr;
+  function munmap(addr: CType::CVoidPtr, length: CType::SizeT): CType::CInt;
+  function mprotect(addr: CType::CVoidPtr, len: CType::SizeT, prot: CType::CInt): CType::CInt;
+}
+
+/// Memory allocation (stdlib.h)
+namespace LibC::Allocator {
+  /// Allocates `size` bytes of uninitialized memory.
+  ///
+  /// Returns a pointer to the allocated block, or null on failure.
+  function malloc(size: CType::SizeT): CType::CVoidPtr { return __stdlib_alloc::malloc(size); }
+
+  /// Allocates zero-initialized memory for `count` objects of `size` bytes each.
+  ///
+  /// Returns a pointer to the allocated block, or null on failure.
+  function calloc(count: CType::SizeT, size: CType::SizeT): CType::CVoidPtr { return __stdlib_alloc::calloc(count, size); }
+
+  /// Changes the size of the allocation at `ptr` to `size` bytes.
+  ///
+  /// The contents are preserved up to the minimum of old and new sizes.
+  /// Returns a (possibly moved) pointer, or null on failure.
+  function realloc(ptr: CType::CVoidPtr, size: CType::SizeT): CType::CVoidPtr { return __stdlib_alloc::realloc(ptr, size); }
+
+  /// Frees memory previously returned by `malloc`, `calloc`, or `realloc`.
+  function free(ptr: CType::CVoidPtr): void { __stdlib_alloc::free(ptr); }
+}
+
+/// Memory operations (string.h)
+namespace LibC::MemoryOperations {
+  /// Copies `n` bytes from `src` to `dest`. Regions must not overlap.
+  function memcpy(dest: CType::CVoidPtr, src: CType::CConstVoidPtr, n: CType::SizeT): CType::CVoidPtr { return __string_mem::memcpy(dest, src, n); }
+
+  /// Copies `n` bytes from `src` to `dest`. Handles overlapping regions.
+  function memmove(dest: CType::CVoidPtr, src: CType::CConstVoidPtr, n: CType::SizeT): CType::CVoidPtr { return __string_mem::memmove(dest, src, n); }
+
+  /// Fills `n` bytes of `dest` with the byte value `c`.
+  function memset(dest: CType::CVoidPtr, c: CType::CInt, n: CType::SizeT): CType::CVoidPtr { return __string_mem::memset(dest, c, n); }
+
+  /// Compares `n` bytes of `s1` and `s2`. Returns 0 if equal.
+  function memcmp(s1: CType::CConstVoidPtr, s2: CType::CConstVoidPtr, n: CType::SizeT): CType::CInt { return __string_mem::memcmp(s1, s2, n); }
+}
+
+/// Low-level memory: sbrk, brk, mmap (sys/mman.h, unistd.h)
+namespace LibC::Memory {
+  /// Adjusts the program break by `increment` bytes. Low-level.
+  function sbrk(increment: CType::IntPtrT): CType::CVoidPtr { return __unistd_mem::sbrk(increment); }
+
+  /// Sets the program break to `addr`. Low-level.
+  function brk(addr: CType::CVoidPtr): CType::CInt { return __unistd_mem::brk(addr); }
+
+  /// Maps `length` bytes into the process address space.
+  ///
+  /// Use `PROT_*` for protection and `MAP_*` for flags. Pass `fd = -1` with
+  /// `MAP_ANONYMOUS` for anonymous mappings.
+  function mmap(addr: CType::CVoidPtr, length: CType::SizeT, prot: CType::CInt, flags: CType::CInt, fd: CType::CInt, offset: CType::OffT): CType::CVoidPtr { return __mman::mmap(addr, length, prot, flags, fd, offset); }
+
+  /// Unmaps `length` bytes starting at `addr`. Returns 0 on success.
+  function munmap(addr: CType::CVoidPtr, length: CType::SizeT): CType::CInt { return __mman::munmap(addr, length); }
+
+  /// Changes the protection on `len` bytes starting at `addr`.
+  function mprotect(addr: CType::CVoidPtr, len: CType::SizeT, prot: CType::CInt): CType::CInt { return __mman::mprotect(addr, len, prot); }
+}
