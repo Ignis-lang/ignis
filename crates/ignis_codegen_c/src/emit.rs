@@ -2856,17 +2856,66 @@ where
     .map(|&def_id| build_mangled_name_standalone(def_id, defs, namespaces, symbols, types))
     .collect();
 
-  // Emit forward declarations for external struct types (not defined in this module)
-  let mut external_structs: Vec<_> = struct_forward_decls
-    .iter()
-    .filter(|name| !module_type_names.contains(*name))
-    .collect();
-  external_structs.sort();
+  // Separate closure structs from regular external structs.
+  // Closure structs need full definitions (for by-value passing); others get forward decls.
+  let mut external_forward_decls: Vec<&String> = Vec::new();
+  let mut closure_struct_type_ids: Vec<TypeId> = Vec::new();
 
-  if !external_structs.is_empty() {
-    for name in external_structs {
+  for name in &struct_forward_decls {
+    if module_type_names.contains(name) {
+      continue;
+    }
+    if name.starts_with("__ignis_closure_") {
+      // Find the matching TypeId for this closure struct name
+      for (type_id, ty) in types.iter() {
+        if let Type::Function { params, ret, .. } = ty {
+          let cname = closure_struct_name_standalone(params, ret, types, defs, symbols, namespaces);
+          if &cname == name && !closure_struct_type_ids.contains(&type_id) {
+            closure_struct_type_ids.push(type_id);
+            break;
+          }
+        }
+      }
+    } else {
+      external_forward_decls.push(name);
+    }
+  }
+
+  external_forward_decls.sort();
+
+  if !external_forward_decls.is_empty() {
+    for name in &external_forward_decls {
       writeln!(output, "typedef struct {} {};", name, name).unwrap();
     }
+    writeln!(output).unwrap();
+  }
+
+  // Emit full closure struct definitions (guarded to avoid redefinition across headers).
+  closure_struct_type_ids.sort_by_key(|id| id.index());
+
+  for sig_type_id in &closure_struct_type_ids {
+    if let Type::Function { params, ret, .. } = types.get(sig_type_id) {
+      let struct_name = closure_struct_name_standalone(params, ret, types, defs, symbols, namespaces);
+      let guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&struct_name));
+
+      let ret_str = format_c_type(types.get(ret), types, defs, symbols, namespaces);
+      let mut call_params = vec!["u8*".to_string()];
+      for &p in params {
+        call_params.push(format_c_type(types.get(&p), types, defs, symbols, namespaces));
+      }
+
+      writeln!(output, "#ifndef {}", guard).unwrap();
+      writeln!(output, "#define {}", guard).unwrap();
+      writeln!(output, "struct {} {{", struct_name).unwrap();
+      writeln!(output, "    {} (*call)({});", ret_str, call_params.join(", ")).unwrap();
+      writeln!(output, "    void (*drop_fn)(u8*);").unwrap();
+      writeln!(output, "    u8* env;").unwrap();
+      writeln!(output, "}};").unwrap();
+      writeln!(output, "#endif // {}", guard).unwrap();
+    }
+  }
+
+  if !closure_struct_type_ids.is_empty() {
     writeln!(output).unwrap();
   }
 
@@ -3285,6 +3334,10 @@ fn collect_struct_types_from_type(
     Type::Vector { element, .. } => {
       collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
     },
+    Type::Function { params, ret, .. } => {
+      let name = closure_struct_name_standalone(params, ret, types, defs, symbols, namespaces);
+      out.insert(name);
+    },
     _ => {},
   }
 }
@@ -3574,6 +3627,54 @@ fn escape_ident(name: &str) -> String {
   name.replace('_', "__")
 }
 
+/// Build a deterministic closure struct name from a function signature (standalone version).
+fn closure_struct_name_standalone(
+  params: &[TypeId],
+  ret: &TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> String {
+  let mut parts = Vec::new();
+  for &p in params {
+    parts.push(format_type_for_name_standalone(p, types, defs, symbols, namespaces));
+  }
+  parts.push(format_type_for_name_standalone(*ret, types, defs, symbols, namespaces));
+  format!("__ignis_closure_{}", parts.join("_"))
+}
+
+/// Format a type as a simple identifier fragment for closure struct naming (standalone version).
+fn format_type_for_name_standalone(
+  ty: TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> String {
+  match types.get(&ty) {
+    Type::I8 => "i8".to_string(),
+    Type::I16 => "i16".to_string(),
+    Type::I32 => "i32".to_string(),
+    Type::I64 => "i64".to_string(),
+    Type::U8 => "u8".to_string(),
+    Type::U16 => "u16".to_string(),
+    Type::U32 => "u32".to_string(),
+    Type::U64 => "u64".to_string(),
+    Type::F32 => "f32".to_string(),
+    Type::F64 => "f64".to_string(),
+    Type::Boolean => "bool".to_string(),
+    Type::Char => "char".to_string(),
+    Type::Str => "str".to_string(),
+    Type::Void => "void".to_string(),
+    Type::Never => "never".to_string(),
+    Type::Pointer { inner, .. } => format!("ptr_{}", format_type_for_name_standalone(*inner, types, defs, symbols, namespaces)),
+    Type::Reference { inner, .. } => format!("ref_{}", format_type_for_name_standalone(*inner, types, defs, symbols, namespaces)),
+    Type::Record(def_id) | Type::Enum(def_id) => build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types),
+    _ => format!("ty{}", ty.index()),
+  }
+}
+
 /// Format a type as C type string using runtime type aliases.
 pub fn format_c_type(
   ty: &Type,
@@ -3611,7 +3712,10 @@ pub fn format_c_type(
       format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
     },
     Type::Tuple(_) => "void*".to_string(),
-    Type::Function { .. } => "void*".to_string(),
+    Type::Function { params, ret, .. } => {
+      let name = closure_struct_name_standalone(params, ret, types, defs, symbols, namespaces);
+      format!("struct {}", name)
+    },
     Type::Record(def_id) => {
       let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
       format!("struct {}", name)

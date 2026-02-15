@@ -1,0 +1,101 @@
+import Io from "std::io";
+
+// Module-level const lambda (no captures)
+const add: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> a + b;
+const mul: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> {
+  return a * b;
+};
+
+// Higher-order: takes a closure parameter and applies it
+function apply(f: (i32) -> i32, x: i32): i32 {
+  return f(x);
+}
+
+// Takes two closures
+function combine(f: (i32) -> i32, g: (i32) -> i32, x: i32): i32 {
+  return f(g(x));
+}
+
+function main(): i32 {
+  let mut r: i32 = 0;
+
+  // 1. Module-level const lambdas
+  r = add(2, 3);
+  Io::println(r.toString());               // 5
+  r = mul(4, 5);
+  Io::println(r.toString());               // 20
+
+  // 2. Local lambda, no capture, expression body
+  let square = (x: i32): i32 -> x * x;
+  r = square(7);
+  Io::println(r.toString());               // 49
+
+  // 3. Local lambda with capture (ByValue)
+  let offset: i32 = 100;
+  let addOffset = (x: i32): i32 -> x + offset;
+  r = addOffset(5);
+  Io::println(r.toString());               // 105
+
+  // 4. Lambda with mutable capture (ByMutRef), block body
+  let mut counter: i32 = 0;
+  let inc = (): void -> { counter = counter + 1; };
+  inc();
+  inc();
+  inc();
+  Io::println(counter.toString());         // 3
+
+  // 5. Pass closure as function parameter
+  let base: i32 = 10;
+  let addBase = (n: i32): i32 -> n + base;
+  r = apply(addBase, 42);
+  Io::println(r.toString());               // 52
+
+  // 6. Multiple calls to the same closure
+  let factor: i32 = 3;
+  let triple = (x: i32): i32 -> x * factor;
+  let a = triple(2);
+  let b = triple(5);
+  let c = triple(10);
+  r = a + b + c;
+  Io::println(r.toString());               // 6 + 15 + 30 = 51
+
+  // 7. Nested closures
+  let outerVal: i32 = 10;
+  let outer = (x: i32): i32 -> {
+    let inner = (y: i32): i32 -> outerVal + x + y;
+    return inner(5);
+  };
+  r = outer(20);
+  Io::println(r.toString());               // 10 + 20 + 5 = 35
+
+  // 8. Combine two closures
+  let doubleIt = (x: i32): i32 -> x * 2;
+  let addTen = (x: i32): i32 -> x + 10;
+  r = combine(addTen, doubleIt, 7);         // addTen(doubleIt(7)) = addTen(14) = 24
+  Io::println(r.toString());               // 24
+
+  // 9. Capture override with @move
+  let val: i32 = 42;
+  let moved = (): i32 -> @move val;
+  r = moved();
+  Io::println(r.toString());               // 42
+
+  // 10. Multiple captures
+  let x: i32 = 1;
+  let y: i32 = 2;
+  let z: i32 = 3;
+  let sum3 = (): i32 -> x + y + z;
+  r = sum3();
+  Io::println(r.toString());               // 6
+
+  // 11. Closure with both capture and local variable
+  let captured: i32 = 50;
+  let withLocal = (n: i32): i32 -> {
+    let local: i32 = n * 2;
+    return local + captured;
+  };
+  r = withLocal(10);
+  Io::println(r.toString());               // 70
+
+  return 0;
+}

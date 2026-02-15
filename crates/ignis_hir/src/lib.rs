@@ -31,7 +31,7 @@ pub struct HIRCapture {
   pub type_in_env: TypeId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HIRKind {
   // Expression
   Literal(IgnisLiteralValue),
@@ -178,6 +178,8 @@ pub enum HIRKind {
     thunk_def: Option<DefinitionId>,
     /// Drop fn: `(env_ptr: *mut u8) -> void`. None if nothing needs dropping.
     drop_def: Option<DefinitionId>,
+    /// User-specified capture mode overrides (`@move x`, `@ref x`, `@refMut x`).
+    capture_overrides: HashMap<DefinitionId, CaptureMode>,
   },
 
   // Error recovery
@@ -353,7 +355,7 @@ impl HIRKind {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HIRNode {
   pub kind: HIRKind,
   pub span: Span,

@@ -439,6 +439,11 @@ fn collect_closures_bottom_up(hir: &HIR) -> Vec<HIRId> {
     collect_closures_postorder(hir, body_id, &mut result, &mut visited);
   }
 
+  // Also scan module-level variable/constant init expressions (e.g. `const f = lambda`).
+  for &init_id in hir.variables_inits.values() {
+    collect_closures_postorder(hir, init_id, &mut result, &mut visited);
+  }
+
   result
 }
 
@@ -655,15 +660,22 @@ pub fn populate_closure_captures(
   let closure_ids = collect_closures_bottom_up(hir);
 
   for (closure_index, closure_id) in closure_ids.into_iter().enumerate() {
-    let (params, body, return_type, closure_span) = {
+    let (params, body, return_type, closure_span, overrides) = {
       let node = hir.get(closure_id);
       match &node.kind {
         HIRKind::Closure {
           params,
           body,
           return_type,
+          capture_overrides,
           ..
-        } => (params.clone(), *body, *return_type, node.span.clone()),
+        } => (
+          params.clone(),
+          *body,
+          *return_type,
+          node.span.clone(),
+          capture_overrides.clone(),
+        ),
         _ => unreachable!(),
       }
     };
@@ -692,7 +704,12 @@ pub fn populate_closure_captures(
 
         let mut usage = VarUsage::default();
         analyze_var_usage(hir, body, def_id, &mut usage, defs, types);
-        let mode = infer_capture_mode(&usage, var_type, types, defs);
+
+        let mode = if let Some(&override_mode) = overrides.get(&def_id) {
+          override_mode
+        } else {
+          infer_capture_mode(&usage, var_type, types, defs)
+        };
 
         let type_in_env = match mode {
           CaptureMode::ByValue => var_type,

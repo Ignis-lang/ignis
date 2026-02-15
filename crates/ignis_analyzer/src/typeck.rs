@@ -917,6 +917,7 @@ impl<'a> Analyzer<'a> {
         })
       },
       ASTExpression::Lambda(lambda) => self.typecheck_lambda(node_id, lambda, infer),
+      ASTExpression::CaptureOverride(co) => self.typecheck_node(&co.inner, scope_kind, ctx),
     }
   }
 
@@ -3238,8 +3239,8 @@ impl<'a> Analyzer<'a> {
             (params, ret, func_def.is_variadic, true)
           }
         },
-        // Variables/parameters of function type (closures) are callable.
-        DefinitionKind::Variable(_) | DefinitionKind::Parameter(_) => {
+        // Variables/parameters/constants of function type (closures) are callable.
+        DefinitionKind::Variable(_) | DefinitionKind::Parameter(_) | DefinitionKind::Constant(_) => {
           let var_ty = *self.defs.type_of(def_id);
           if let Type::Function {
             params,
@@ -6360,6 +6361,7 @@ impl<'a> Analyzer<'a> {
               || self.node_contains_let_condition(&arm.body)
           })
       },
+      ASTExpression::CaptureOverride(co) => self.node_contains_let_condition(&co.inner),
       ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Lambda(_) => {
         false
       },
@@ -7126,6 +7128,7 @@ impl<'a> Analyzer<'a> {
         };
         self.find_first_symbol_usage(body_id, symbol)
       },
+      ASTExpression::CaptureOverride(co) => self.find_first_symbol_usage(co.inner, symbol),
       ASTExpression::Literal(_) | ASTExpression::Path(_) => None,
     }
   }

@@ -220,6 +220,10 @@ impl<'a> Analyzer<'a> {
         self.bind_complete(&lc.value, ScopeKind::Block);
       },
 
+      ASTExpression::CaptureOverride(co) => {
+        self.bind_complete(&co.inner, ScopeKind::Block);
+      },
+
       // Leaf expressions (no sub-expressions that could contain lambdas)
       ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) => {},
     }

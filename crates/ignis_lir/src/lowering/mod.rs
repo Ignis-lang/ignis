@@ -81,6 +81,10 @@ pub struct LoweringContext<'a> {
   /// When a variable is in this set, its local holds a *pointer* to the original,
   /// and all reads/writes must go through pointer indirection.
   byref_captures: HashSet<DefinitionId>,
+
+  /// Definitions whose locals hold closure values. Maps to (closure_type, heap_allocated).
+  /// Used by `emit_drop_for_def` to emit `DropClosure` instead of `Drop`.
+  closure_locals: HashMap<DefinitionId, (TypeId, bool)>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -109,6 +113,7 @@ impl<'a> LoweringContext<'a> {
       thunk_captures: HashMap::new(),
       drop_fn_captures: HashMap::new(),
       byref_captures: HashSet::new(),
+      closure_locals: HashMap::new(),
     }
   }
 
@@ -671,7 +676,37 @@ impl<'a> LoweringContext<'a> {
       let def = self.defs.get(&def_id);
       match &def.kind {
         DefinitionKind::Function(_) => Some(Operand::FuncRef(def_id)),
-        DefinitionKind::Constant(_) => Some(Operand::GlobalRef(def_id)),
+
+        DefinitionKind::Constant(const_def) => {
+          // Try to inline the constant value directly.
+          if let Some(value) = &const_def.value {
+            return self.definition_const_to_lir_const(value, ty).map(Operand::Const);
+          }
+
+          // No compile-time value: check if the constant has a HIR init
+          // expression (e.g. a closure). Lower it in-place in the current function.
+          if let Some(&init_hir_id) = self.hir.variables_inits.get(&def_id) {
+            let init_node = self.hir.get(init_hir_id);
+
+            if let HIRKind::Closure {
+              thunk_def,
+              drop_def,
+              captures,
+              escapes,
+              ..
+            } = init_node.kind.clone()
+            {
+              let span = init_node.span.clone();
+              return self.lower_closure(&thunk_def, &drop_def, &captures, escapes, ty, span);
+            }
+
+            // Generic fallback: lower the init expression directly.
+            return self.lower_hir_node(init_hir_id);
+          }
+
+          Some(Operand::GlobalRef(def_id))
+        },
+
         _ => None,
       }
     }
@@ -1358,6 +1393,11 @@ impl<'a> LoweringContext<'a> {
     if let Some(value_id) = value {
       // Check for init-in-place opportunity
       let value_node = self.hir.get(value_id);
+
+      if let HIRKind::Closure { escapes, .. } = &value_node.kind {
+        self.closure_locals.insert(name, (ty, *escapes));
+      }
+
       if let HIRKind::RecordInit {
         record_def: _,
         fields,
@@ -2494,7 +2534,18 @@ impl<'a> LoweringContext<'a> {
     def_id: DefinitionId,
   ) {
     if let Some(&local) = self.def_to_local.get(&def_id) {
-      self.fn_builder().emit(Instr::Drop { local });
+      if let Some(&(closure_type, heap_allocated)) = self.closure_locals.get(&def_id) {
+        let ty = self.fn_builder().local_type(local);
+        let temp = self.fn_builder().alloc_temp(ty, Span::default());
+        self.fn_builder().emit(Instr::Load { dest: temp, source: local });
+        self.fn_builder().emit(Instr::DropClosure {
+          closure: Operand::Temp(temp),
+          closure_type,
+          heap_allocated,
+        });
+      } else {
+        self.fn_builder().emit(Instr::Drop { local });
+      }
     }
   }
 

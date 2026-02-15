@@ -770,7 +770,7 @@ impl<'a> Analyzer<'a> {
 
         let is_closure_call = matches!(
           &self.defs.get(&callee_def_id).kind,
-          DefinitionKind::Variable(_) | DefinitionKind::Parameter(_)
+          DefinitionKind::Variable(_) | DefinitionKind::Parameter(_) | DefinitionKind::Constant(_)
         ) && matches!(
           self.types.get(self.type_of(&callee_def_id)),
           ignis_type::types::Type::Function { .. }
@@ -1211,6 +1211,22 @@ impl<'a> Analyzer<'a> {
         })
       },
       ASTExpression::Lambda(lambda) => self.lower_lambda_to_hir(node_id, lambda, hir, scope_kind),
+
+      ASTExpression::CaptureOverride(co) => {
+        let mode = match co.kind {
+          ignis_ast::expressions::CaptureOverrideKind::Move => ignis_hir::CaptureMode::ByValue,
+          ignis_ast::expressions::CaptureOverrideKind::Ref => ignis_hir::CaptureMode::ByRef,
+          ignis_ast::expressions::CaptureOverrideKind::RefMut => ignis_hir::CaptureMode::ByMutRef,
+        };
+
+        if let Some(def_id) = self.lookup_def(&co.inner).cloned() {
+          if let Some(top) = self.capture_override_stack.last_mut() {
+            top.insert(def_id, mode);
+          }
+        }
+
+        self.lower_node_to_hir(&co.inner, hir, scope_kind)
+      },
     }
   }
 
@@ -3891,6 +3907,8 @@ impl Analyzer<'_> {
       let _ = self.scopes.define(name, &param_id, false);
     }
 
+    self.capture_override_stack.push(std::collections::HashMap::new());
+
     // Expression bodies get an implicit Return so the thunk returns the value.
     let body = match &lambda.body {
       ignis_ast::expressions::lambda::LambdaBody::Expression(id) => {
@@ -3905,6 +3923,8 @@ impl Analyzer<'_> {
       ignis_ast::expressions::lambda::LambdaBody::Block(id) => self.lower_node_to_hir(id, hir, ScopeKind::Function),
     };
 
+    let capture_overrides = self.capture_override_stack.pop().unwrap_or_default();
+
     self.scopes.pop();
 
     // Captures and escape analysis will be filled in by a later pass.
@@ -3917,6 +3937,7 @@ impl Analyzer<'_> {
         escapes: false,
         thunk_def: None,
         drop_def: None,
+        capture_overrides,
       },
       span: lambda.span.clone(),
       type_id: fn_type,

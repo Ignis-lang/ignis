@@ -4,6 +4,7 @@ pub mod assignment;
 pub mod binary;
 pub mod builtin_call;
 pub mod call;
+pub mod capture_override;
 pub mod cast;
 pub mod dereference;
 pub mod grouped;
@@ -25,6 +26,7 @@ pub use assignment::ASTAssignment;
 pub use binary::ASTBinary;
 pub use builtin_call::ASTBuiltinCall;
 pub use call::ASTCallExpression;
+pub use capture_override::{ASTCaptureOverride, CaptureOverrideKind};
 pub use cast::ASTCast;
 pub use dereference::ASTDereference;
 pub use grouped::ASTGrouped;
@@ -66,6 +68,7 @@ pub enum ASTExpression {
   RecordInit(ASTRecordInit),
   BuiltinCall(ASTBuiltinCall),
   Lambda(ASTLambda),
+  CaptureOverride(ASTCaptureOverride),
 }
 
 impl ASTExpression {
@@ -93,6 +96,7 @@ impl ASTExpression {
       ASTExpression::RecordInit(expr) => &expr.span,
       ASTExpression::BuiltinCall(expr) => &expr.span,
       ASTExpression::Lambda(expr) => &expr.span,
+      ASTExpression::CaptureOverride(expr) => &expr.span,
     }
   }
 }

@@ -482,6 +482,9 @@ impl<'a> Analyzer<'a> {
 
         self.scopes.pop();
       },
+      ASTExpression::CaptureOverride(co) => {
+        self.extra_checks_node(&co.inner, scope_kind, in_loop, in_function);
+      },
     }
   }
 

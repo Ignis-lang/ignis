@@ -4408,3 +4408,73 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_closure_capture_override_move() {
+  e2e_test(
+    "closure_capture_override_move",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 10;
+    let get_x = (): i32 -> @move x;
+    x = 99;
+    return get_x();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_capture_override_ref() {
+  e2e_test(
+    "closure_capture_override_ref",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 10;
+    let get_x = (): i32 -> @ref x;
+    x = 42;
+    return get_x();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_noescape_allows_ref_capture() {
+  e2e_test(
+    "closure_noescape_allows_ref_capture",
+    r#"
+function apply(@noescape f: (i32) -> i32, x: i32): i32 {
+    return f(x);
+}
+
+function main(): i32 {
+    let mut val: i32 = 10;
+    let inc = (n: i32): i32 -> {
+        val = val + 1;
+        return n + val;
+    };
+    return apply(inc, 5);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_const_module_level() {
+  e2e_test(
+    "closure_const_module_level",
+    r#"
+const add: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> a + b;
+const mul: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> {
+    return a * b;
+};
+
+function main(): i32 {
+    let r1 = add(2, 3);
+    let r2 = mul(4, 5);
+    return r1 + r2;
+}
+"#,
+  );
+}
