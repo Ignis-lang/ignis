@@ -1,50 +1,119 @@
 //!
 //! # Result Module
 //!
-//! Success/error sum type.
+//! Success/error sum type for fallible operations.
 //!
-//! `Result<T, E>` models operations that can produce a value or an error.
+//! ## Overview
+//!
+//! `Result<T, E>` models operations that can either produce a value (`T`)
+//! or an error (`E`). It is an enum with two variants:
+//!
+//! - `Result::OK(value)`  — the operation succeeded
+//! - `Result::ERROR(err)` — the operation failed
+//!
+//! Use `Result` when a function can fail in a recoverable way, forcing
+//! the caller to explicitly handle the error path.
+//!
+//! ## Variants
+//!
+//! ```text
+//!   Result<T, E>
+//!   ┌──────────────────────────────────────────┐
+//!   │                                          │
+//!   │   OK(T)    ── success value of type T    │
+//!   │                                          │
+//!   │   ERROR(E) ── error value of type E      │
+//!   │                                          │
+//!   └──────────────────────────────────────────┘
+//! ```
+//!
+//! ## Higher-Order Methods
+//!
+//! Result provides callback-based methods for transforming, inspecting,
+//! and chaining fallible operations:
+//!
+//! | Method           | Signature                              | Description                          |
+//! |------------------|----------------------------------------|--------------------------------------|
+//! | `unwrapOrElse`   | `(E) -> T` → `T`                      | Recover from error with callback     |
+//! | `inspect`        | `(T) -> void` → `Result<T, E>`         | Side-effect on OK value              |
+//! | `inspectErr`     | `(E) -> void` → `Result<T, E>`         | Side-effect on ERROR value           |
+//! | `map<U>`         | `(T) -> U` → `Result<U, E>`            | Transform OK value                   |
+//! | `mapErr<F>`      | `(E) -> F` → `Result<T, F>`            | Transform ERROR value                |
+//! | `andThen<U>`     | `(T) -> Result<U, E>` → `Result<U, E>` | Chain fallible OK operations         |
+//! | `orElse<F>`      | `(E) -> Result<T, F>` → `Result<T, F>` | Chain fallible ERROR recovery        |
+//!
+//! All callbacks are `@noescape`: the closure must not outlive the method call.
 //!
 //! ## Example
 //!
 //! ```ignis
 //! import Result from "std::result";
+//! import Io from "std::io";
 //!
-//! function parse(flag: boolean): Result<i32, str> {
-//!   if (flag) {
-//!     return Result::OK(10);
-//!   }
+//! function parseInt(s: str): Result<i32, str> {
+//!   // ... parsing logic ...
+//!   return Result::OK(42);
+//! }
 //!
-//!   return Result::ERROR("invalid");
+//! function main(): i32 {
+//!   let result: Result<i32, str> = parseInt("42");
+//!
+//!   // Chain: parse, double, inspect
+//!   let doubled: Result<i32, str> = result
+//!     .inspect(|val: i32| -> void { Io::printI32(val); })
+//!     .map<i32>(|val: i32| -> i32 { return val * 2; });
+//!
+//!   // Recover from error
+//!   let value: i32 = doubled.unwrapOrElse(|err: str| -> i32 { return 0; });
+//!
+//!   return 0;
 //! }
 //! ```
 
 /// Result type that models either success (`OK`) or failure (`ERROR`).
 ///
-/// Use this when an operation can fail and callers should handle both paths.
+/// Use this when an operation can fail and callers should handle both
+/// paths explicitly.
+///
+/// # Type Parameters
+///
+/// * `T` - The success value type.
+/// * `E` - The error value type.
+///
+/// # Variants
+///
+/// * `OK(T)`    - The operation succeeded with a value of type `T`.
+/// * `ERROR(E)` - The operation failed with an error of type `E`.
 ///
 /// # Example
 ///
 /// ```ignis
 /// import Result from "std::result";
 ///
-/// function parse(flag: boolean): Result<i32, str> {
-///   if (flag) {
-///     return Result::OK(10);
+/// function divide(a: i32, b: i32): Result<i32, str> {
+///   if (b == 0) {
+///     return Result::ERROR("division by zero");
 ///   }
-///
-///   return Result::ERROR("invalid");
+///   return Result::OK(a / b);
 /// }
 /// ```
 export enum Result<T, E> {
   OK(T),
   ERROR(E),
 
-  /**
-   * @brief Checks if the result is OK.
-   *
-   * @return True if the result is OK, false otherwise.
-   */
+  /// Returns `true` if the result is `OK`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::OK(42);
+  /// let y: Result<i32, str> = Result::ERROR("oops");
+  ///
+  /// x.isOk();     // true
+  /// y.isOk();     // false
+  /// ```
   public isOk(&self): boolean {
     return match (self) {
       Result::OK(_) -> true,
@@ -52,21 +121,37 @@ export enum Result<T, E> {
     };
   }
 
-  /**
-   * @brief Checks if the result is an error.
-   *
-   * @return True if the result is an error, false otherwise.
-   */
+  /// Returns `true` if the result is `ERROR`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::ERROR("fail");
+  /// x.isError();  // true
+  /// ```
   public isError(&self): boolean {
     return !self.isOk();
   }
 
-  /**
-   * @brief Unwraps the result, assuming it's OK.
-   *
-   * @return The unwrapped value of type T.
-   * @throws Panic if the result is an error.
-   */
+  /// Extracts the `OK` value, panicking if `ERROR`.
+  ///
+  /// # Panics
+  ///
+  /// Panics with `"Result is an error"` if the result is `ERROR`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::OK(42);
+  /// let val: i32 = x.unwrap();  // 42
+  ///
+  /// let y: Result<i32, str> = Result::ERROR("bad");
+  /// // y.unwrap();  // PANIC: "Result is an error"
+  /// ```
   public unwrap(&self): T {
     return match (self) {
       Result::OK(t) -> t,
@@ -74,12 +159,23 @@ export enum Result<T, E> {
     };
   }
 
-  /**
-   * @brief Unwraps the error result.
-   *
-   * @return The unwrapped error value of type E.
-   * @throws Panic if the result is OK.
-   */
+  /// Extracts the `ERROR` value, panicking if `OK`.
+  ///
+  /// # Panics
+  ///
+  /// Panics with `"Result is an OK"` if the result is `OK`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::ERROR("bad input");
+  /// let err: str = x.unwrapErr();  // "bad input"
+  ///
+  /// let y: Result<i32, str> = Result::OK(42);
+  /// // y.unwrapErr();  // PANIC: "Result is an OK"
+  /// ```
   public unwrapErr(&self): E {
     return match (self) {
       Result::OK(_) -> @panic("Result is an OK"),
@@ -87,16 +183,328 @@ export enum Result<T, E> {
     };
   }
 
-  /**
-   * @brief Unwraps the result or returns a default value.
-   *
-   * @param defaultValue A default value to return if the result is an error.
-   * @return The unwrapped value or the default value.
-   */
+  /// Returns the `OK` value, or `defaultValue` if `ERROR`.
+  ///
+  /// The default is always evaluated. Use `unwrapOrElse` for a lazy
+  /// alternative that only computes the fallback when needed.
+  ///
+  /// # Arguments
+  ///
+  /// * `defaultValue` - Value to return when the result is `ERROR`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::OK(42);
+  /// let a: i32 = x.unwrapOr(0);  // 42
+  ///
+  /// let y: Result<i32, str> = Result::ERROR("fail");
+  /// let b: i32 = y.unwrapOr(0);  // 0
+  /// ```
   public unwrapOr(&self, defaultValue: T): T {
     return match (self) {
       Result::OK(t) -> t,
       Result::ERROR(_) -> defaultValue,
+    };
+  }
+
+  /// Returns the `OK` value, or calls `f` with the error to produce
+  /// a fallback.
+  ///
+  /// Unlike `unwrapOr`, the fallback is only computed when the result is
+  /// `ERROR`. The error value is passed to `f`, allowing error-dependent
+  /// recovery.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that receives the error value `E` and returns a
+  ///   recovery value of type `T`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::ERROR("missing");
+  /// let val: i32 = x.unwrapOrElse(|err: str| -> i32 { return -1; });
+  /// // val == -1 (callback was called with "missing")
+  ///
+  /// let y: Result<i32, str> = Result::OK(42);
+  /// let val2: i32 = y.unwrapOrElse(|err: str| -> i32 { return -1; });
+  /// // val2 == 42 (callback was NOT called)
+  /// ```
+  public unwrapOrElse(&self, @noescape f: (E) -> T): T {
+    return match (self) {
+      Result::OK(t) -> t,
+      Result::ERROR(e) -> f(e),
+    };
+  }
+
+  /// Calls `f` with the `OK` value (for side effects), then returns the
+  /// original result unchanged.
+  ///
+  /// Useful for logging or debugging a value mid-chain without consuming
+  /// the result. If the result is `ERROR`, `f` is not called.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback invoked with the `OK` value by copy.
+  ///
+  /// # Returns
+  ///
+  /// The original `Result<T, E>`, unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  /// import Io from "std::io";
+  ///
+  /// let x: Result<i32, str> = Result::OK(42);
+  ///
+  /// let result: Result<i32, str> = x
+  ///   .inspect(|val: i32| -> void { Io::printI32(val); })
+  ///   .map<i32>(|val: i32| -> i32 { return val * 2; });
+  /// // Prints: 42
+  /// // result == Result::OK(84)
+  /// ```
+  public inspect(&self, @noescape f: (T) -> void): Result<T, E> {
+    match (self) {
+      Result::OK(t) -> f(t),
+      _ -> {},
+    };
+    return match (self) {
+      Result::OK(t) -> Result::OK(t),
+      Result::ERROR(e) -> Result::ERROR(e),
+    };
+  }
+
+  /// Calls `f` with the `ERROR` value (for side effects), then returns
+  /// the original result unchanged.
+  ///
+  /// The mirror of `inspect` for the error path. Useful for logging
+  /// errors mid-chain. If the result is `OK`, `f` is not called.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback invoked with the `ERROR` value by copy.
+  ///
+  /// # Returns
+  ///
+  /// The original `Result<T, E>`, unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  /// import Io from "std::io";
+  ///
+  /// let x: Result<i32, str> = Result::ERROR("timeout");
+  ///
+  /// let result: Result<i32, str> = x
+  ///   .inspectErr(|err: str| -> void { Io::println(err); });
+  /// // Prints: "timeout"
+  /// // result is still Result::ERROR("timeout")
+  /// ```
+  public inspectErr(&self, @noescape f: (E) -> void): Result<T, E> {
+    match (self) {
+      Result::ERROR(e) -> f(e),
+      _ -> {},
+    };
+    return match (self) {
+      Result::OK(t) -> Result::OK(t),
+      Result::ERROR(e) -> Result::ERROR(e),
+    };
+  }
+
+  /// Transforms the `OK` value by applying `f`, producing a
+  /// `Result<U, E>`. Preserves `ERROR` unchanged.
+  ///
+  /// This is the fundamental "functor map" over the success path.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `U` - The type produced by the transformation.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that transforms `T` into `U`.
+  ///
+  /// # Returns
+  ///
+  /// `Result::OK(f(value))` if `self` is `OK`,
+  /// `Result::ERROR(e)` unchanged otherwise.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::OK(5);
+  ///
+  /// // Convert i32 to boolean
+  /// let positive: Result<boolean, str> = x.map<boolean>(|n: i32| -> boolean {
+  ///   return n > 0;
+  /// });
+  /// // positive == Result::OK(true)
+  ///
+  /// // ERROR passes through unchanged
+  /// let y: Result<i32, str> = Result::ERROR("fail");
+  /// let result: Result<boolean, str> = y.map<boolean>(|n: i32| -> boolean {
+  ///   return n > 0;
+  /// });
+  /// // result == Result::ERROR("fail")
+  /// ```
+  public map<U>(&self, @noescape f: (T) -> U): Result<U, E> {
+    return match (self) {
+      Result::OK(t) -> Result::OK(f(t)),
+      Result::ERROR(e) -> Result::ERROR(e),
+    };
+  }
+
+  /// Transforms the `ERROR` value by applying `f`, producing a
+  /// `Result<T, F>`. Preserves `OK` unchanged.
+  ///
+  /// The mirror of `map` for the error path. Useful for converting
+  /// between error types (e.g., from a low-level error to an
+  /// application-level error).
+  ///
+  /// # Type Parameters
+  ///
+  /// * `F` - The new error type produced by the transformation.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that transforms `E` into `F`.
+  ///
+  /// # Returns
+  ///
+  /// `Result::OK(t)` unchanged if `self` is `OK`,
+  /// `Result::ERROR(f(e))` if `self` is `ERROR`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let x: Result<i32, str> = Result::ERROR("not found");
+  ///
+  /// // Convert str error to i32 error code
+  /// let coded: Result<i32, i32> = x.mapErr<i32>(|err: str| -> i32 {
+  ///   return 404;
+  /// });
+  /// // coded == Result::ERROR(404)
+  ///
+  /// // OK passes through unchanged
+  /// let y: Result<i32, str> = Result::OK(42);
+  /// let result: Result<i32, i32> = y.mapErr<i32>(|err: str| -> i32 {
+  ///   return 500;
+  /// });
+  /// // result == Result::OK(42)  (callback not called)
+  /// ```
+  public mapErr<F>(&self, @noescape f: (E) -> F): Result<T, F> {
+    return match (self) {
+      Result::OK(t) -> Result::OK(t),
+      Result::ERROR(e) -> Result::ERROR(f(e)),
+    };
+  }
+
+  /// Applies `f` to the `OK` value, where `f` itself returns a
+  /// `Result<U, E>`. Returns `ERROR` unchanged if `self` is `ERROR`.
+  ///
+  /// This is the monadic "bind" / "flatMap" over the success path.
+  /// Use it to chain operations that each might fail.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `U` - The success type of the Result returned by `f`.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that takes `T` and returns `Result<U, E>`.
+  ///
+  /// # Returns
+  ///
+  /// The `Result<U, E>` returned by `f`, or `ERROR(e)` if `self`
+  /// was already `ERROR`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// function safeDivide(a: i32, b: i32): Result<i32, str> {
+  ///   if (b == 0) { return Result::ERROR("division by zero"); }
+  ///   return Result::OK(a / b);
+  /// }
+  ///
+  /// let x: Result<i32, str> = Result::OK(100);
+  ///
+  /// // Chain: divide by 2, then divide by 5
+  /// let result: Result<i32, str> = x
+  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 2); })
+  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 5); });
+  /// // result == Result::OK(10)
+  ///
+  /// // Chain breaks on ERROR
+  /// let bad: Result<i32, str> = x
+  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 0); })
+  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 5); });
+  /// // bad == Result::ERROR("division by zero")
+  /// ```
+  public andThen<U>(&self, @noescape f: (T) -> Result<U, E>): Result<U, E> {
+    return match (self) {
+      Result::OK(t) -> f(t),
+      Result::ERROR(e) -> Result::ERROR(e),
+    };
+  }
+
+  /// Applies `f` to the `ERROR` value, where `f` itself returns a
+  /// `Result<T, F>`. Returns `OK` unchanged if `self` is `OK`.
+  ///
+  /// The mirror of `andThen` for error recovery. Use it to attempt
+  /// alternative strategies when the primary operation fails.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `F` - The new error type if recovery also fails.
+  ///
+  /// # Arguments
+  ///
+  /// * `f` - Callback that receives the error `E` and returns
+  ///   `Result<T, F>`.
+  ///
+  /// # Returns
+  ///
+  /// `Result::OK(t)` unchanged if `self` is `OK`, or the
+  /// `Result<T, F>` returned by `f` if `self` is `ERROR`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  ///
+  /// let primary: Result<i32, str> = Result::ERROR("cache miss");
+  ///
+  /// // Try fallback on error
+  /// let result: Result<i32, str> = primary.orElse<str>(|err: str| -> Result<i32, str> {
+  ///   return Result::OK(0);  // fallback value
+  /// });
+  /// // result == Result::OK(0)
+  ///
+  /// // OK passes through without calling f
+  /// let ok: Result<i32, str> = Result::OK(42);
+  /// let result2: Result<i32, str> = ok.orElse<str>(|err: str| -> Result<i32, str> {
+  ///   return Result::OK(0);
+  /// });
+  /// // result2 == Result::OK(42)  (callback not called)
+  /// ```
+  public orElse<F>(&self, @noescape f: (E) -> Result<T, F>): Result<T, F> {
+    return match (self) {
+      Result::OK(t) -> Result::OK(t),
+      Result::ERROR(e) -> f(e),
     };
   }
 }

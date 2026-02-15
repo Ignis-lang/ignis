@@ -63,6 +63,38 @@ extern __rc_ffi {
 }
 
 /// Reference-counted shared pointer.
+///
+/// ## Memory Layout
+///
+/// ```text
+///   Rc { handle } ──────┐
+///   Rc { handle } ──┐   │
+///                    │   │
+///                    v   v
+///                ┌───────────────────────┐
+///                │  strong: u32          │  reference counts
+///                │  weak:   u32          │
+///                │  drop_fn: fn ptr      │
+///                ├───────────────────────┤
+///                │  T payload            │  user data
+///                └───────────────────────┘
+/// ```
+///
+/// When `strong` reaches 0, `drop_fn` runs on the payload. The allocation
+/// is freed when both `strong` and `weak` reach 0.
+///
+/// ## Method Reference
+///
+/// | Method        | Signature                         | Description                    |
+/// |---------------|-----------------------------------|--------------------------------|
+/// | `new`         | `(T) -> Rc<T>`                    | Allocate with strong count 1   |
+/// | `strongCount` | `(&self) -> u32`                  | Current strong references      |
+/// | `weakCount`   | `(&self) -> u32`                  | Current weak references        |
+/// | `downgrade`   | `(&self) -> Weak<T>`              | Create a weak observer         |
+/// | `get`         | `(&self) -> &T`                   | Immutable ref to payload       |
+/// | `getMut`      | `(&mut self) -> Option<*mut T>`   | Mutable access if unique       |
+/// | `clone`       | `(&self) -> Rc<T>`                | Increment strong, share        |
+/// | `drop`        | `(&mut self) -> void`             | Decrement strong                |
 @implements(Drop, Clone)
 export record Rc<T> {
   handle: *mut void;
@@ -205,6 +237,30 @@ export record Rc<T> {
 ///
 /// Keeps the allocation header alive so `upgrade()` can check whether the
 /// value still exists. Use `Rc::downgrade()` to create one.
+///
+/// ## Lifecycle
+///
+/// ```text
+///   Rc::new(42)        strong=1  weak=0     payload alive
+///       │
+///   a.downgrade()      strong=1  weak=1     Weak created
+///       │
+///   drop(a)            strong=0  weak=1     payload destroyed
+///       │
+///   w.upgrade()        returns NONE         value gone
+///       │
+///   drop(w)            strong=0  weak=0     allocation freed
+/// ```
+///
+/// ## Method Reference
+///
+/// | Method        | Signature                       | Description                    |
+/// |---------------|---------------------------------|--------------------------------|
+/// | `upgrade`     | `(&self) -> Option<Rc<T>>`      | Promote to strong if alive     |
+/// | `weakCount`   | `(&self) -> u32`                | Current weak references        |
+/// | `strongCount` | `(&self) -> u32`                | Current strong references      |
+/// | `clone`       | `(&self) -> Weak<T>`            | Increment weak, share          |
+/// | `drop`        | `(&mut self) -> void`           | Decrement weak                 |
 @implements(Drop, Clone)
 export record Weak<T> {
   handle: *mut void;
