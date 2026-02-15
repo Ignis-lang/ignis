@@ -409,6 +409,12 @@ pub fn analyze_project_with_options(
     ctx.preload_file(path, text);
   }
 
+  // For std entries, discover all manifest modules up front (see pipeline.rs).
+  let entry_is_std = ctx.try_resolve_std_module_name(entry_path).is_some();
+  if entry_is_std && config.std {
+    ctx.discover_all_std_modules_lsp(config);
+  }
+
   // Discover all modules using LSP mode (collects diagnostics, doesn't fail early)
   let root_id = ctx.discover_modules_lsp(entry_path, config).ok();
 
@@ -451,11 +457,22 @@ pub fn analyze_project_with_options(
     };
   };
 
-  // Check for cycles (but don't fail - just note the error)
-  let has_cycle = ctx.module_graph.detect_cycles().is_err();
+  let root_is_std = ctx.module_graph.modules.get(&root_id).path.is_std();
+
+  // Prelude edges create cycles among std modules; skip for std roots.
+  let has_cycle = if root_is_std {
+    false
+  } else {
+    ctx.module_graph.detect_cycles().is_err()
+  };
 
   ctx.module_graph.root = Some(root_id);
-  let order = ctx.module_graph.topological_sort();
+
+  let order = if root_is_std {
+    ctx.module_graph.all_modules_topological()
+  } else {
+    ctx.module_graph.topological_sort()
+  };
 
   // Only run analyzer if we have modules to analyze and no critical errors
   if !order.is_empty() && !has_cycle {

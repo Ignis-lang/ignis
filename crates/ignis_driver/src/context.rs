@@ -87,6 +87,39 @@ impl CompilationContext {
     }
   }
 
+  /// If `fs_path` points to a file inside `std_path`, return the matching
+  /// manifest module name. Used to avoid registering the same file as both
+  /// `ModulePath::Project` and `ModulePath::Std`.
+  pub(crate) fn try_resolve_std_module_name(
+    &self,
+    fs_path: &str,
+  ) -> Option<String> {
+    let std_path = self.module_graph.std_path();
+    if std_path.as_os_str().is_empty() {
+      return None;
+    }
+
+    let std_canon = std_path.canonicalize().ok()?;
+    let file_canon = Path::new(fs_path).canonicalize().ok()?;
+
+    if !file_canon.starts_with(&std_canon) {
+      return None;
+    }
+
+    let manifest = self.module_graph.manifest.as_ref()?;
+
+    for (module_name, rel_path) in &manifest.modules {
+      let module_canon = std_canon.join(rel_path);
+      if let Ok(module_canon) = module_canon.canonicalize() {
+        if module_canon == file_canon {
+          return Some(module_name.clone());
+        }
+      }
+    }
+
+    None
+  }
+
   /// Pre-load a file's content for LSP mode.
   ///
   /// When discovering modules, this content will be used instead of reading from disk.
@@ -246,6 +279,37 @@ impl CompilationContext {
     }
   }
 
+  /// Discover every std module in the manifest (sorted by name).
+  ///
+  /// Called before entry-point discovery when the entry is itself a std
+  /// file, so the slotmap insertion order matches `check-std` and the
+  /// topological sort produces a valid analysis order despite
+  /// prelude-induced cycles.
+  pub fn discover_all_std_modules(
+    &mut self,
+    config: &IgnisConfig,
+  ) {
+    let mut module_names: Vec<String> = config.manifest.modules.keys().cloned().collect();
+    module_names.sort();
+
+    for module_name in &module_names {
+      let _ = self.discover_std_module(module_name, config);
+    }
+  }
+
+  /// LSP variant of [`Self::discover_all_std_modules`].
+  pub fn discover_all_std_modules_lsp(
+    &mut self,
+    config: &IgnisConfig,
+  ) {
+    let mut module_names: Vec<String> = config.manifest.modules.keys().cloned().collect();
+    module_names.sort();
+
+    for module_name in &module_names {
+      let _ = self.discover_std_module_lsp(module_name, config);
+    }
+  }
+
   /// Discover a std module by name (e.g., "io", "string").
   /// Creates `ModulePath::Std` entries for proper std/project distinction.
   pub fn discover_std_module(
@@ -293,6 +357,8 @@ impl CompilationContext {
           return Err(());
         },
       }
+    } else if let Some(std_name) = self.try_resolve_std_module_name(path) {
+      ModulePath::Std(std_name)
     } else {
       ModulePath::Project(PathBuf::from(path))
     };
@@ -303,15 +369,21 @@ impl CompilationContext {
 
     log_dbg!(config, "discovering module {:?}", module_path);
 
-    // Placeholder to prevent infinite recursion on cyclic imports
+    // Std modules use "std::name" keys so the analyzer's import resolution
+    // finds them under the same string the source code writes.
+    let path_key = match &module_path {
+      ModulePath::Std(name) => format!("std::{}", name),
+      ModulePath::Project(_) => path.to_string(),
+    };
+
     let placeholder_id = ModuleId::new(self.module_graph.modules.iter().count() as u32);
-    self.module_for_path.insert(path.to_string(), placeholder_id);
+    self.module_for_path.insert(path_key.clone(), placeholder_id);
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
     let parsed = match self.parse_file(&fs_path, config) {
       Ok(p) => p,
       Err(()) => {
-        self.module_for_path.remove(path);
+        self.module_for_path.remove(&path_key);
         return Err(());
       },
     };
@@ -320,7 +392,7 @@ impl CompilationContext {
 
     let module = Module::new(file_id, module_path.clone());
     let module_id = self.module_graph.register(module);
-    self.module_for_path.insert(path.to_string(), module_id);
+    self.module_for_path.insert(path_key, module_id);
     self.parsed_modules.insert(module_id, parsed);
 
     for (items, import_from, span) in import_paths {
@@ -451,6 +523,8 @@ impl CompilationContext {
           return Err(());
         },
       }
+    } else if let Some(std_name) = self.try_resolve_std_module_name(path) {
+      ModulePath::Std(std_name)
     } else {
       ModulePath::Project(PathBuf::from(path))
     };
@@ -461,16 +535,21 @@ impl CompilationContext {
 
     log_dbg!(config, "discovering module {:?} (LSP mode)", module_path);
 
+    let path_key = match &module_path {
+      ModulePath::Std(name) => format!("std::{}", name),
+      ModulePath::Project(_) => path.to_string(),
+    };
+
     // Placeholder to prevent infinite recursion on cyclic imports
     let placeholder_id = ModuleId::new(self.module_graph.modules.iter().count() as u32);
-    self.module_for_path.insert(path.to_string(), placeholder_id);
+    self.module_for_path.insert(path_key.clone(), placeholder_id);
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
 
     let parsed = match self.parse_file_lsp(&fs_path, config) {
       Ok(p) => p,
       Err(()) => {
-        self.module_for_path.remove(path);
+        self.module_for_path.remove(&path_key);
         return Err(());
       },
     };
@@ -480,7 +559,7 @@ impl CompilationContext {
 
     let module = Module::new(file_id, module_path.clone());
     let module_id = self.module_graph.register(module);
-    self.module_for_path.insert(path.to_string(), module_id);
+    self.module_for_path.insert(path_key, module_id);
     self.parsed_modules.insert(module_id, parsed);
 
     // Continue discovering imports even if this file had errors
@@ -630,23 +709,34 @@ impl CompilationContext {
     root_id: ModuleId,
     config: &IgnisConfig,
   ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
-    if let Err(err) = self.module_graph.detect_cycles() {
-      match err {
-        ModuleError::CircularDependency { cycle } => {
-          let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
-          eprintln!(
-            "{} Circular dependency detected: {}",
-            "Error:".red().bold(),
-            cycle_str.join(" -> ")
-          );
-        },
-        _ => eprintln!("{} Module error: {:?}", "Error:".red().bold(), err),
+    let root_is_std = self.module_graph.modules.get(&root_id).path.is_std();
+
+    // Prelude edges create cycles among std modules; skip cycle detection
+    // for std roots and use all_modules_topological (same as check-std).
+    if !root_is_std {
+      if let Err(err) = self.module_graph.detect_cycles() {
+        match err {
+          ModuleError::CircularDependency { cycle } => {
+            let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
+            eprintln!(
+              "{} Circular dependency detected: {}",
+              "Error:".red().bold(),
+              cycle_str.join(" -> ")
+            );
+          },
+          _ => eprintln!("{} Module error: {:?}", "Error:".red().bold(), err),
+        }
+        return Err(());
       }
-      return Err(());
     }
 
     self.module_graph.root = Some(root_id);
-    let order = self.module_graph.topological_sort();
+
+    let order = if root_is_std {
+      self.module_graph.all_modules_topological()
+    } else {
+      self.module_graph.topological_sort()
+    };
 
     log_dbg!(config, "compile order has {} modules", order.len());
 
