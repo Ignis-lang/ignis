@@ -235,6 +235,9 @@ fn collect_expression_children(
       ignis_ast::expressions::lambda::LambdaBody::Expression(id) => stack.push(*id),
       ignis_ast::expressions::lambda::LambdaBody::Block(id) => stack.push(*id),
     },
+    ASTExpression::CaptureOverride(co) => {
+      stack.push(co.inner);
+    },
   }
 }
 

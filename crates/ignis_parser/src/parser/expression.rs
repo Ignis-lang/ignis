@@ -523,7 +523,33 @@ impl IgnisParser {
       },
       TokenType::Match => self.parse_match_expression(&token),
       TokenType::Let => self.parse_let_condition_expression(&token),
-      TokenType::At => self.parse_builtin_call(&token),
+      TokenType::At => {
+        if self.at(TokenType::Identifier) {
+          let name = self.peek().lexeme.as_str();
+          let override_kind = match name {
+            "move" => Some(ignis_ast::expressions::capture_override::CaptureOverrideKind::Move),
+            "ref" => Some(ignis_ast::expressions::capture_override::CaptureOverrideKind::Ref),
+            "refMut" => Some(ignis_ast::expressions::capture_override::CaptureOverrideKind::RefMut),
+            _ => None,
+          };
+
+          if let Some(kind) = override_kind {
+            let peek_after = self.peek_nth(1);
+            let is_capture = peek_after.type_ != TokenType::LeftParen && peek_after.type_ != TokenType::Less;
+
+            if is_capture {
+              let _ = self.expect(TokenType::Identifier)?;
+              let inner = self.parse_expression(0)?;
+              let span = Span::merge(&token.span, self.get_span(&inner));
+              return Ok(self.allocate_expression(ASTExpression::CaptureOverride(
+                ignis_ast::expressions::ASTCaptureOverride::new(kind, inner, span),
+              )));
+            }
+          }
+        }
+
+        self.parse_builtin_call(&token)
+      },
       TokenType::Colon => {
         let colon_span = token.span.clone();
 

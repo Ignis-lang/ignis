@@ -851,3 +851,39 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_closure_borrow_conflict_mutref_capture() {
+  e2e_ownership_error_test(
+    "err_closure_borrow_conflict_mutref",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 0;
+    let f = (): void -> { x = 1; };
+    x = 2;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_closure_escapes_without_noescape() {
+  e2e_error_test(
+    "err_closure_escapes_without_noescape",
+    r#"
+function apply(f: (i32) -> i32, x: i32): i32 {
+    return f(x);
+}
+
+function main(): i32 {
+    let mut val: i32 = 10;
+    let inc = (n: i32): i32 -> {
+        val = val + 1;
+        return n + val;
+    };
+    return apply(inc, 5);
+}
+"#,
+  );
+}

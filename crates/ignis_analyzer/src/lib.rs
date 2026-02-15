@@ -129,6 +129,10 @@ pub struct Analyzer<'a> {
   /// Lambda parameter definitions created by the resolver, keyed by lambda expression NodeId.
   /// The typechecker reuses these definitions (updating their types) instead of creating new ones.
   lambda_param_defs: HashMap<NodeId, Vec<DefinitionId>>,
+
+  /// Stack of per-lambda capture override maps, built during HIR lowering.
+  /// Pushed when entering `lower_lambda_to_hir`, popped into the Closure node.
+  capture_override_stack: Vec<HashMap<DefinitionId, ignis_hir::CaptureMode>>,
 }
 
 pub struct AnalyzerOutput {
@@ -224,6 +228,7 @@ impl<'a> Analyzer<'a> {
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
       lambda_param_defs: HashMap::new(),
+      capture_override_stack: Vec::new(),
     }
   }
 
@@ -339,6 +344,7 @@ impl<'a> Analyzer<'a> {
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
       lambda_param_defs: HashMap::new(),
+      capture_override_stack: Vec::new(),
     };
 
     // Phase 1: Binding

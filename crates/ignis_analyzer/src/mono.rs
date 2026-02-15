@@ -371,6 +371,14 @@ impl<'a> Monomorphizer<'a> {
 
     // Copy entry point
     self.output_hir.entry_point = self.input_hir.entry_point;
+
+    // Copy variable/constant init expressions (e.g. module-level const bindings
+    // whose values aren't compile-time evaluable, such as closures).
+    let inits: Vec<_> = self.input_hir.variables_inits.iter().map(|(&k, &v)| (k, v)).collect();
+    for (def_id, init_hir_id) in inits {
+      let new_init = self.clone_hir_tree(init_hir_id);
+      self.output_hir.variables_inits.insert(def_id, new_init);
+    }
   }
 
   fn copy_if_nongeneric(
@@ -1012,6 +1020,7 @@ impl<'a> Monomorphizer<'a> {
         escapes,
         thunk_def,
         drop_def,
+        capture_overrides,
       } => {
         let new_body = self.clone_hir_tree(*body);
 
@@ -1032,6 +1041,7 @@ impl<'a> Monomorphizer<'a> {
             escapes: *escapes,
             thunk_def: *thunk_def,
             drop_def: *drop_def,
+            capture_overrides: capture_overrides.clone(),
           },
           None,
         )
@@ -2234,6 +2244,7 @@ impl<'a> Monomorphizer<'a> {
         escapes,
         thunk_def,
         drop_def,
+        capture_overrides,
       } => {
         let new_body = self.substitute_hir(*body, subst);
         let new_return_type = self.types.substitute(*return_type, subst);
@@ -2245,6 +2256,7 @@ impl<'a> Monomorphizer<'a> {
           escapes: *escapes,
           thunk_def: *thunk_def,
           drop_def: *drop_def,
+          capture_overrides: capture_overrides.clone(),
         }
       },
 

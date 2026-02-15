@@ -286,6 +286,14 @@ impl DisplayLisp for ASTExpression {
         };
         format!("(Lambda ({}) {} {})", params.join(" "), ret, body)
       },
+      ASTExpression::CaptureOverride(expr) => {
+        let kind = match expr.kind {
+          crate::expressions::capture_override::CaptureOverrideKind::Move => "move",
+          crate::expressions::capture_override::CaptureOverrideKind::Ref => "ref",
+          crate::expressions::capture_override::CaptureOverrideKind::RefMut => "refMut",
+        };
+        format!("(@{} {})", kind, formatter.format_node(&expr.inner))
+      },
     }
   }
 }

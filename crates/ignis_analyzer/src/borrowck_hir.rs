@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
-use ignis_hir::{HIR, HIRId, HIRKind, statement::LoopKind};
+use ignis_hir::{CaptureMode, HIR, HIRId, HIRKind, statement::LoopKind};
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore},
   file::SourceMap,
@@ -180,6 +180,10 @@ impl<'a> HirBorrowChecker<'a> {
 
           // If the value is a reference expression, record a named borrow
           self.try_record_let_borrow(name, val_id, &span);
+
+          // If the value is a closure with ByRef/ByMutRef captures, register
+          // borrows on the captured variables for the lifetime of this binding.
+          self.try_record_closure_capture_borrows(name, val_id, &span);
         }
       },
 
@@ -535,6 +539,42 @@ impl<'a> HirBorrowChecker<'a> {
         target: target_def,
         mutable,
       });
+    }
+  }
+
+  /// When a let-binding creates a closure with ByMutRef captures, register
+  /// mutable borrows on the captured variables for the lifetime of the binding.
+  ///
+  /// ByRef captures are intentionally excluded: they allow observing mutations
+  /// to the original variable (the closure reads through a pointer at call time).
+  /// Only ByMutRef creates a true mutable borrow that conflicts with other accesses.
+  fn try_record_closure_capture_borrows(
+    &mut self,
+    binder: DefinitionId,
+    value_id: HIRId,
+    span: &Span,
+  ) {
+    let node = self.hir.get(value_id);
+
+    let captures = match &node.kind {
+      HIRKind::Closure { captures, .. } => captures.clone(),
+      _ => return,
+    };
+
+    for cap in &captures {
+      if cap.mode != CaptureMode::ByMutRef {
+        continue;
+      }
+
+      self.try_borrow(cap.source_def, true, span);
+
+      if let Some(scope) = self.scope_stack.last_mut() {
+        scope.borrows.push(ActiveBorrow {
+          binder,
+          target: cap.source_def,
+          mutable: true,
+        });
+      }
     }
   }
 
