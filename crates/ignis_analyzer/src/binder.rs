@@ -19,6 +19,7 @@ use ignis_ast::{
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
+use ignis_type::symbol::SymbolId;
 use ignis_type::{
   attribute::{FieldAttr, FunctionAttr, NamespaceAttr, ParamAttr, RecordAttr},
   definition::{
@@ -903,12 +904,30 @@ impl<'a> Analyzer<'a> {
   // Namespace Predecl/Complete (for recursive type support in namespaces)
   // ========================================================================
 
+  /// Builds the full namespace path by prepending the current parent namespace's
+  /// path to the AST-level path. For `namespace Memory { ... }` nested inside
+  /// `namespace LibC { ... }`, this turns `[Memory]` into `[LibC, Memory]` so
+  /// that `get_or_create` registers the correct parent-child relationship.
+  fn build_full_namespace_path(
+    &self,
+    ast_path: &[SymbolId],
+  ) -> Vec<SymbolId> {
+    if let Some(parent_ns_id) = self.current_namespace {
+      let mut full = self.namespaces.full_path(parent_ns_id);
+      full.extend_from_slice(ast_path);
+      full
+    } else {
+      ast_path.to_vec()
+    }
+  }
+
   fn bind_namespace_predecl(
     &mut self,
     node_id: &NodeId,
     ns_stmt: &ignis_ast::statements::namespace_statement::ASTNamespace,
   ) {
-    let ns_id = self.namespaces.get_or_create(&ns_stmt.path, false);
+    let full_path = self.build_full_namespace_path(&ns_stmt.path);
+    let ns_id = self.namespaces.get_or_create(&full_path, false);
     let ns_name = *ns_stmt.path.last().expect("namespace path cannot be empty");
 
     // Check if namespace definition already exists (from a previous predecl)
@@ -960,7 +979,8 @@ impl<'a> Analyzer<'a> {
     _node_id: &NodeId,
     ns_stmt: &ignis_ast::statements::namespace_statement::ASTNamespace,
   ) {
-    let ns_id = self.namespaces.get_or_create(&ns_stmt.path, false);
+    let full_path = self.build_full_namespace_path(&ns_stmt.path);
+    let ns_id = self.namespaces.get_or_create(&full_path, false);
 
     let prev_ns = self.current_namespace;
     self.current_namespace = Some(ns_id);
@@ -1371,7 +1391,8 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     extern_stmt: &ignis_ast::statements::extern_statement::ASTExtern,
   ) {
-    let ns_id = self.namespaces.get_or_create(&extern_stmt.path, true);
+    let full_path = self.build_full_namespace_path(&extern_stmt.path);
+    let ns_id = self.namespaces.get_or_create(&full_path, true);
     let ns_name = *extern_stmt.path.last().expect("extern path cannot be empty");
     let namespace_attrs = self.bind_namespace_attrs(&extern_stmt.attrs, "extern namespace");
 
