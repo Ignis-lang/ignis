@@ -3668,9 +3668,17 @@ fn format_type_for_name_standalone(
     Type::Str => "str".to_string(),
     Type::Void => "void".to_string(),
     Type::Never => "never".to_string(),
-    Type::Pointer { inner, .. } => format!("ptr_{}", format_type_for_name_standalone(*inner, types, defs, symbols, namespaces)),
-    Type::Reference { inner, .. } => format!("ref_{}", format_type_for_name_standalone(*inner, types, defs, symbols, namespaces)),
-    Type::Record(def_id) | Type::Enum(def_id) => build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types),
+    Type::Pointer { inner, .. } => format!(
+      "ptr_{}",
+      format_type_for_name_standalone(*inner, types, defs, symbols, namespaces)
+    ),
+    Type::Reference { inner, .. } => format!(
+      "ref_{}",
+      format_type_for_name_standalone(*inner, types, defs, symbols, namespaces)
+    ),
+    Type::Record(def_id) | Type::Enum(def_id) => {
+      build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types)
+    },
     _ => format!("ty{}", ty.index()),
   }
 }

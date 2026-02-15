@@ -2537,7 +2537,10 @@ impl<'a> LoweringContext<'a> {
       if let Some(&(closure_type, heap_allocated)) = self.closure_locals.get(&def_id) {
         let ty = self.fn_builder().local_type(local);
         let temp = self.fn_builder().alloc_temp(ty, Span::default());
-        self.fn_builder().emit(Instr::Load { dest: temp, source: local });
+        self.fn_builder().emit(Instr::Load {
+          dest: temp,
+          source: local,
+        });
         self.fn_builder().emit(Instr::DropClosure {
           closure: Operand::Temp(temp),
           closure_type,

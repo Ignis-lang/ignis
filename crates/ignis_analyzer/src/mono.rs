@@ -29,9 +29,9 @@ use std::sync::OnceLock;
 
 use ignis_hir::{HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, statement::LoopKind};
 use ignis_type::definition::{
-  Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef, FieldDefinition,
-  FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, VariantDefinition,
-  Visibility,
+  ConstantDefinition, Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef,
+  FieldDefinition, FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
+  VariableDefinition, VariantDefinition, Visibility,
 };
 use ignis_type::symbol::SymbolTable;
 use ignis_type::types::{Substitution, Type, TypeId, TypeStore};
@@ -1737,6 +1737,67 @@ impl<'a> Monomorphizer<'a> {
     self.output_defs.alloc(new_def)
   }
 
+  /// Clone a local variable/constant definition with substituted types.
+  ///
+  /// Analogous to `instantiate_param` but for locals declared inside a generic
+  /// method body. Without this, locals typed as method-level type params
+  /// (e.g. `let acc: U`) would retain `Type::Param` post-mono.
+  fn instantiate_local(
+    &mut self,
+    local_id: DefinitionId,
+    subst: &Substitution,
+  ) -> DefinitionId {
+    if subst.is_empty() {
+      return local_id;
+    }
+
+    let def = self.input_defs.get(&local_id);
+
+    let new_kind = match &def.kind {
+      DefinitionKind::Variable(vd) => {
+        let substituted = self.types.substitute(vd.type_id, subst);
+        let new_type = self.concretize_type(substituted);
+        if new_type == vd.type_id {
+          // No change — reuse original definition
+          return local_id;
+        }
+        DefinitionKind::Variable(VariableDefinition {
+          type_id: new_type,
+          mutable: vd.mutable,
+        })
+      },
+      DefinitionKind::Constant(cd) => {
+        let substituted = self.types.substitute(cd.type_id, subst);
+        let new_type = self.concretize_type(substituted);
+        if new_type == cd.type_id {
+          return local_id;
+        }
+        DefinitionKind::Constant(ConstantDefinition {
+          type_id: new_type,
+          value: cd.value.clone(),
+          owner_type: cd.owner_type,
+        })
+      },
+      // Parameters are handled by instantiate_param; other kinds shouldn't appear here
+      _ => return local_id,
+    };
+
+    let new_def = Definition {
+      kind: new_kind,
+      name: def.name,
+      span: def.span.clone(),
+      name_span: def.name_span.clone(),
+      visibility: def.visibility,
+      owner_module: def.owner_module,
+      owner_namespace: def.owner_namespace,
+      doc: None,
+    };
+
+    let new_id = self.output_defs.alloc(new_def);
+    self.current_def_remap.insert(local_id, new_id);
+    new_id
+  }
+
   // === Body Substitution Phase ===
 
   fn substitute_body(
@@ -2128,8 +2189,14 @@ impl<'a> Monomorphizer<'a> {
       HIRKind::StaticAccess { def } => HIRKind::StaticAccess { def: *def },
       HIRKind::Let { name, value } => {
         let new_value = value.map(|v| self.substitute_hir(v, subst));
+
+        // Clone the local variable definition with substituted types, analogous to
+        // instantiate_param() for parameters. Without this, locals typed as method-
+        // level type params (e.g. `let acc: U`) would retain Type::Param post-mono.
+        let new_name = self.instantiate_local(*name, subst);
+
         HIRKind::Let {
-          name: *name,
+          name: new_name,
           value: new_value,
         }
       },

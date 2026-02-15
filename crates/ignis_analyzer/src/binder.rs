@@ -142,11 +142,9 @@ impl<'a> Analyzer<'a> {
     expr: &ASTExpression,
   ) {
     match expr {
-      ASTExpression::Lambda(lambda) => {
-        match &lambda.body {
-          LambdaBody::Block(block_id) => self.bind_complete(block_id, ScopeKind::Block),
-          LambdaBody::Expression(expr_id) => self.bind_complete(expr_id, ScopeKind::Block),
-        }
+      ASTExpression::Lambda(lambda) => match &lambda.body {
+        LambdaBody::Block(block_id) => self.bind_complete(block_id, ScopeKind::Block),
+        LambdaBody::Expression(expr_id) => self.bind_complete(expr_id, ScopeKind::Block),
       },
 
       ASTExpression::Assignment(a) => {
