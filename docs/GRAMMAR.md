@@ -23,7 +23,7 @@
 
 <import> ::= "import" <import-list> "from" <string> ";"
 <import-list> ::= <import-item> ("," <import-item>)*
-<import-item> ::= <identifier> | <identifier> "as" <identifier>
+<import-item> ::= "_" | <identifier> | <identifier> "as" <identifier>
 
 <export> ::= "export" (<function> | <const> | <record> | <enum> | <type-alias> )
 <inline> ::= "inline" (<function> | <const>)
@@ -251,7 +251,7 @@
 
 <import> ::= "import" <import-list> "from" <string> ";"
 <import-list> ::= <import-item> ("," <import-item>)*
-<import-item> ::= <identifier> | <identifier> "as" <identifier>
+<import-item> ::= "_" | <identifier> | <identifier> "as" <identifier>
 
 <export> ::= "export" (<function> | <const> | <record> | <enum> | <type-alias> | <directive-statement> | <directive>)
 <inline> ::= "inline" (<function> | <const>)
