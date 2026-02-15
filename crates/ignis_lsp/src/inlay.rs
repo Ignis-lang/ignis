@@ -231,6 +231,10 @@ fn collect_expression_children(
         stack.push(arm.body);
       }
     },
+    ASTExpression::Lambda(lambda) => match &lambda.body {
+      ignis_ast::expressions::lambda::LambdaBody::Expression(id) => stack.push(*id),
+      ignis_ast::expressions::lambda::LambdaBody::Block(id) => stack.push(*id),
+    },
   }
 }
 
@@ -343,7 +347,13 @@ pub fn generate_hints(
 ) -> Vec<InlayHint> {
   let mut hints = generate_parameter_hints(file, defs, symbol_names, line_index);
   hints.extend(generate_match_scrutinee_type_hints(file, defs, types, symbol_names, line_index));
-  hints.extend(generate_inferred_variable_type_hints(file, defs, types, symbol_names, line_index));
+  hints.extend(generate_inferred_variable_type_hints(
+    file,
+    defs,
+    types,
+    symbol_names,
+    line_index,
+  ));
   hints
 }
 

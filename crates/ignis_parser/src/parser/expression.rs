@@ -1,7 +1,7 @@
 use ignis_ast::{
   ASTNode, NodeId,
   expressions::{
-    ASTExpression, ASTAccessOp, ASTMemberAccess, ASTRecordInit, ASTRecordInitField,
+    ASTExpression, ASTAccessOp, ASTLambda, ASTMemberAccess, ASTRecordInit, ASTRecordInitField,
     assignment::{ASTAssignment, ASTAssignmentOperator},
     binary::{ASTBinary, ASTBinaryOperator},
     builtin_call::ASTBuiltinCall,
@@ -9,6 +9,7 @@ use ignis_ast::{
     cast::ASTCast,
     dereference::ASTDereference,
     grouped::ASTGrouped,
+    lambda::LambdaBody,
     let_condition::ASTLetCondition,
     literal::ASTLiteral,
     match_expression::{ASTMatch, ASTMatchArm},
@@ -458,6 +459,10 @@ impl IgnisParser {
         Ok(self.allocate_expression(ASTExpression::Variable(ASTVariableExpression::new(sym, span))))
       },
       TokenType::LeftParen => {
+        if self.looks_like_lambda() {
+          return self.parse_lambda(token.span.clone(), None);
+        }
+
         let expression = self.parse_expression(0)?;
         let left_span = self.get_span(&expression).clone();
         let right_paren = self.expect(TokenType::RightParen)?;
@@ -537,6 +542,144 @@ impl IgnisParser {
       },
       _ => Err(DiagnosticMessage::ExpectedExpression(token.span.clone())),
     }
+  }
+
+  /// Lookahead to determine if the current position (after `(`) is a lambda.
+  ///
+  /// Pattern: `(` params? `)` `:` type `->` body
+  ///
+  /// We scan forward for the matching `)`, then check for `:` ... `->`.
+  fn looks_like_lambda(&self) -> bool {
+    // Immediate ): i32 -> (empty params lambda)
+    if self.at(TokenType::RightParen) {
+      return self.peek_nth(1).type_ == TokenType::Colon;
+    }
+
+    // Scan for balanced `)`, then check for `:` ... `->`
+    let mut depth = 1;
+    let mut i = 0;
+
+    loop {
+      let tok = self.peek_nth(i).type_;
+
+      match tok {
+        TokenType::LeftParen => depth += 1,
+        TokenType::RightParen => {
+          depth -= 1;
+          if depth == 0 {
+            // Found matching `)`, check if followed by `:`
+            let after_paren = self.peek_nth(i + 1).type_;
+            if after_paren != TokenType::Colon {
+              return false;
+            }
+
+            // Scan past `:` <type> looking for `->`
+            let mut j = i + 2;
+            loop {
+              let t = self.peek_nth(j).type_;
+              if t == TokenType::Arrow {
+                return true;
+              }
+              // Tokens that can appear in a type annotation
+              if matches!(
+                t,
+                TokenType::Identifier
+                  | TokenType::Comma
+                  | TokenType::Ampersand
+                  | TokenType::Asterisk
+                  | TokenType::Mut
+                  | TokenType::DoubleColon
+                  | TokenType::LeftBrack
+                  | TokenType::RightBrack
+                  | TokenType::LeftParen
+                  | TokenType::RightParen
+                  | TokenType::Less
+                  | TokenType::Greater
+                  | TokenType::Int
+                  | TokenType::Int8Type
+                  | TokenType::Int16Type
+                  | TokenType::Int32Type
+                  | TokenType::Int64Type
+                  | TokenType::UnsignedInt8Type
+                  | TokenType::UnsignedInt16Type
+                  | TokenType::UnsignedInt32Type
+                  | TokenType::UnsignedInt64Type
+                  | TokenType::Float32Type
+                  | TokenType::Float64Type
+                  | TokenType::BooleanType
+                  | TokenType::AtomType
+                  | TokenType::StrType
+                  | TokenType::CharType
+                  | TokenType::Void
+              ) {
+                j += 1;
+              } else {
+                return false;
+              }
+              if j > i + 30 {
+                return false;
+              }
+            }
+          }
+        },
+        TokenType::Eof => return false,
+        _ => {},
+      }
+
+      i += 1;
+      if i > 100 {
+        return false;
+      }
+    }
+  }
+
+  /// Parse a lambda expression. The opening `(` has already been consumed.
+  ///
+  /// Grammar: `(` params? `)` `:` type `->` (expression | block)
+  fn parse_lambda(
+    &mut self,
+    start_span: Span,
+    type_params: Option<ignis_ast::generics::ASTGenericParams>,
+  ) -> ParserResult<NodeId> {
+    let mut params = Vec::new();
+
+    if !self.at(TokenType::RightParen) {
+      params.push(self.parse_parameter()?);
+
+      while self.eat(TokenType::Comma) {
+        if self.at(TokenType::RightParen) {
+          break;
+        }
+        params.push(self.parse_parameter()?);
+      }
+    }
+
+    self.expect(TokenType::RightParen)?;
+    self.expect(TokenType::Colon)?;
+    let return_type = self.parse_type_syntax()?;
+    self.expect(TokenType::Arrow)?;
+
+    let body = if self.at(TokenType::LeftBrace) {
+      let block = self.parse_block()?;
+      LambdaBody::Block(block)
+    } else {
+      let expr = self.parse_expression(0)?;
+      LambdaBody::Expression(expr)
+    };
+
+    let end_span = match &body {
+      LambdaBody::Expression(id) => self.get_span(id).clone(),
+      LambdaBody::Block(id) => self.get_span(id).clone(),
+    };
+    let span = Span::merge(&start_span, &end_span);
+
+    Ok(self.allocate_expression(ASTExpression::Lambda(ASTLambda::new(
+      type_params,
+      params,
+      return_type,
+      body,
+      span,
+    ))))
   }
 
   fn parse_match_expression(
@@ -1733,6 +1876,125 @@ mod tests {
         }
       },
       other => panic!("expected match expression, got {:?}", other),
+    }
+  }
+
+  // =========================================================================
+  // LAMBDA EXPRESSION TESTS
+  // =========================================================================
+
+  #[test]
+  fn parses_lambda_no_params() {
+    let result = parse_expr("(): i32 -> 42");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Lambda(lambda) => {
+        assert!(lambda.params.is_empty());
+        assert!(lambda.type_params.is_none());
+        assert!(matches!(
+          &lambda.body,
+          ignis_ast::expressions::lambda::LambdaBody::Expression(_)
+        ));
+      },
+      other => panic!("expected lambda, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_lambda_single_param() {
+    let result = parse_expr("(x: i32): i32 -> x + 1");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Lambda(lambda) => {
+        assert_eq!(lambda.params.len(), 1);
+        assert!(matches!(
+          &lambda.body,
+          ignis_ast::expressions::lambda::LambdaBody::Expression(_)
+        ));
+      },
+      other => panic!("expected lambda, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_lambda_multiple_params() {
+    let result = parse_expr("(x: i32, y: i32): i32 -> x + y");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Lambda(lambda) => {
+        assert_eq!(lambda.params.len(), 2);
+      },
+      other => panic!("expected lambda, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_lambda_block_body() {
+    let result = parse_expr("(x: i32): i32 -> { return x + 1; }");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Lambda(lambda) => {
+        assert_eq!(lambda.params.len(), 1);
+        assert!(matches!(&lambda.body, ignis_ast::expressions::lambda::LambdaBody::Block(_)));
+      },
+      other => panic!("expected lambda, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_lambda_void_return() {
+    let result = parse_expr("(): void -> {}");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Lambda(lambda) => {
+        assert!(lambda.params.is_empty());
+        assert!(matches!(&lambda.body, ignis_ast::expressions::lambda::LambdaBody::Block(_)));
+      },
+      other => panic!("expected lambda, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn grouped_expr_not_confused_with_lambda() {
+    // (1 + 2) should be a grouped expression, not a lambda
+    let result = parse_expr("(1 + 2)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Grouped(_) => {},
+      other => panic!("expected grouped expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_lambda_with_function_type_return() {
+    // Lambda returning a function type
+    let result = parse_expr("(a: i32): (i32) -> i32 -> (x: i32): i32 -> x + a");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Lambda(lambda) => {
+        assert_eq!(lambda.params.len(), 1);
+        // The body should be another lambda
+        match &lambda.body {
+          ignis_ast::expressions::lambda::LambdaBody::Expression(body_id) => {
+            let body_node = result.nodes.get(body_id);
+            match body_node {
+              ASTNode::Expression(ASTExpression::Lambda(inner)) => {
+                assert_eq!(inner.params.len(), 1);
+              },
+              other => panic!("expected inner lambda, got {:?}", other),
+            }
+          },
+          other => panic!("expected expression body, got {:?}", other),
+        }
+      },
+      other => panic!("expected lambda, got {:?}", other),
     }
   }
 }

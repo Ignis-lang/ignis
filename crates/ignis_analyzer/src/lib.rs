@@ -14,9 +14,11 @@ macro_rules! with_for_of_scope {
 
 mod binder;
 pub mod borrowck_hir;
+pub mod capture;
 mod checks;
 mod const_eval;
 pub mod dump;
+pub mod escape;
 pub mod imports;
 mod lint;
 mod lowering;
@@ -123,6 +125,10 @@ pub struct Analyzer<'a> {
   extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
   trait_default_bodies: HashMap<DefinitionId, NodeId>,
   trait_default_clones: HashMap<DefinitionId, NodeId>,
+
+  /// Lambda parameter definitions created by the resolver, keyed by lambda expression NodeId.
+  /// The typechecker reuses these definitions (updating their types) instead of creating new ones.
+  lambda_param_defs: HashMap<NodeId, Vec<DefinitionId>>,
 }
 
 pub struct AnalyzerOutput {
@@ -217,6 +223,7 @@ impl<'a> Analyzer<'a> {
       extension_methods: HashMap::new(),
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
+      lambda_param_defs: HashMap::new(),
     }
   }
 
@@ -249,7 +256,15 @@ impl<'a> Analyzer<'a> {
     analyzer.extra_checks_phase(roots);
     analyzer.lint_phase(roots);
 
-    let hir = analyzer.lower_to_hir(roots);
+    let mut hir = analyzer.lower_to_hir(roots);
+
+    let closure_diags = capture::populate_closure_captures(
+      &mut hir,
+      &mut analyzer.defs,
+      &mut analyzer.types,
+      &mut analyzer.symbols.borrow_mut(),
+    );
+    analyzer.diagnostics.extend(closure_diags);
 
     // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
     let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
@@ -323,15 +338,25 @@ impl<'a> Analyzer<'a> {
       extension_methods: std::mem::take(shared_extension_methods),
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
+      lambda_param_defs: HashMap::new(),
     };
 
+    // Phase 1: Binding
     analyzer.bind_phase(roots);
     analyzer.resolve_phase(roots);
     analyzer.typecheck_phase(roots);
     analyzer.const_eval_phase(roots);
     analyzer.extra_checks_phase(roots);
     analyzer.lint_phase(roots);
-    let hir = analyzer.lower_to_hir(roots);
+    let mut hir = analyzer.lower_to_hir(roots);
+
+    let closure_diags = capture::populate_closure_captures(
+      &mut hir,
+      &mut analyzer.defs,
+      &mut analyzer.types,
+      &mut analyzer.symbols.borrow_mut(),
+    );
+    analyzer.diagnostics.extend(closure_diags);
 
     *shared_types = std::mem::replace(&mut analyzer.types, TypeStore::new());
     *shared_defs = std::mem::replace(&mut analyzer.defs, DefinitionStore::new());

@@ -38,6 +38,13 @@ pub struct CEmitter<'a> {
   /// Extra function definitions that must be emitted in user module mode
   /// (typically monomorphized generic callees owned by other modules).
   forced_emit_defs: HashSet<DefinitionId>,
+
+  /// Maps `Type::Function` TypeId → emitted closure struct name.
+  /// Populated during `emit_closure_types()`, used by `format_type()`.
+  closure_struct_names: HashMap<TypeId, String>,
+
+  /// Maps thunk DefinitionId → env struct name. Populated during `emit_closure_types()`.
+  closure_env_names: HashMap<DefinitionId, String>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -62,6 +69,8 @@ impl<'a> CEmitter<'a> {
       module_paths: None,
       std_path: None,
       forced_emit_defs: HashSet::new(),
+      closure_struct_names: HashMap::new(),
+      closure_env_names: HashMap::new(),
     }
   }
 
@@ -90,6 +99,8 @@ impl<'a> CEmitter<'a> {
       module_paths: Some(module_paths),
       std_path: None,
       forced_emit_defs: HashSet::new(),
+      closure_struct_names: HashMap::new(),
+      closure_env_names: HashMap::new(),
     }
   }
 
@@ -119,6 +130,8 @@ impl<'a> CEmitter<'a> {
       module_paths: Some(module_paths),
       std_path: Some(std_path),
       forced_emit_defs: HashSet::new(),
+      closure_struct_names: HashMap::new(),
+      closure_env_names: HashMap::new(),
     }
   }
 
@@ -137,6 +150,7 @@ impl<'a> CEmitter<'a> {
       self.emit_type_definitions();
     }
 
+    self.emit_closure_types();
     self.emit_static_constants();
     self.emit_extern_declarations();
     self.emit_drop_glue_helpers();
@@ -422,6 +436,134 @@ impl<'a> CEmitter<'a> {
       }
     }
     writeln!(self.output).unwrap();
+  }
+
+  /// Scan LIR for closure instructions and emit the required C type definitions:
+  /// - An env struct per thunk (holding captured values)
+  /// - A closure struct per unique function signature
+  fn emit_closure_types(&mut self) {
+    let mut env_infos: Vec<(DefinitionId, Vec<TypeId>, TypeId)> = Vec::new();
+    let mut seen_thunks: HashSet<DefinitionId> = HashSet::new();
+    let mut seen_sigs: HashSet<TypeId> = HashSet::new();
+
+    for func in self.program.functions.values() {
+      for block in func.blocks.get_all() {
+        for instr in &block.instructions {
+          if let Instr::MakeClosure {
+            thunk,
+            captures,
+            closure_type,
+            ..
+          } = instr
+          {
+            if seen_thunks.insert(*thunk) {
+              let cap_types: Vec<TypeId> = captures
+                .iter()
+                .map(|op| match op {
+                  Operand::Temp(t) => func.temp_type(*t),
+                  Operand::Local(l) => func.locals.get(l).ty,
+                  Operand::Const(c) => c.type_id(),
+                  Operand::FuncRef(_) | Operand::GlobalRef(_) => self.types.void(),
+                })
+                .collect();
+              env_infos.push((*thunk, cap_types, *closure_type));
+            }
+
+            seen_sigs.insert(*closure_type);
+          }
+        }
+      }
+    }
+
+    if env_infos.is_empty() && seen_sigs.is_empty() {
+      return;
+    }
+
+    writeln!(self.output, "// Closure types").unwrap();
+
+    for (thunk_id, cap_types, _) in &env_infos {
+      let env_name = format!("__closure_env_{}", thunk_id.index());
+      writeln!(self.output, "struct {} {{", env_name).unwrap();
+
+      if cap_types.is_empty() {
+        writeln!(self.output, "    char _empty;").unwrap();
+      } else {
+        for (i, &ty) in cap_types.iter().enumerate() {
+          let ty_str = self.format_type(ty);
+          writeln!(self.output, "    {} field_{};", ty_str, i).unwrap();
+        }
+      }
+
+      writeln!(self.output, "}};").unwrap();
+      self.closure_env_names.insert(*thunk_id, env_name);
+    }
+
+    for &sig_type_id in &seen_sigs {
+      if let Type::Function { params, ret, .. } = self.types.get(&sig_type_id) {
+        let struct_name = self.closure_struct_name(sig_type_id);
+
+        let ret_str = self.format_type(*ret);
+        let mut call_params = vec!["u8*".to_string()];
+        for &p in params {
+          call_params.push(self.format_type(p));
+        }
+
+        writeln!(self.output, "struct {} {{", struct_name).unwrap();
+        writeln!(self.output, "    {} (*call)({});", ret_str, call_params.join(", ")).unwrap();
+        writeln!(self.output, "    void (*drop_fn)(u8*);").unwrap();
+        writeln!(self.output, "    u8* env;").unwrap();
+        writeln!(self.output, "}};").unwrap();
+
+        self.closure_struct_names.insert(sig_type_id, struct_name);
+      }
+    }
+
+    writeln!(self.output).unwrap();
+  }
+
+  /// Build a deterministic name for a closure struct based on function signature type.
+  fn closure_struct_name(
+    &self,
+    sig_type_id: TypeId,
+  ) -> String {
+    if let Type::Function { params, ret, .. } = self.types.get(&sig_type_id) {
+      let mut parts = Vec::new();
+      for &p in params {
+        parts.push(self.format_type_for_name(p));
+      }
+      parts.push(self.format_type_for_name(*ret));
+      format!("__ignis_closure_{}", parts.join("_"))
+    } else {
+      format!("__ignis_closure_{}", sig_type_id.index())
+    }
+  }
+
+  /// Format a type as a simple identifier fragment (for building closure struct names).
+  fn format_type_for_name(
+    &self,
+    ty: TypeId,
+  ) -> String {
+    match self.types.get(&ty) {
+      Type::I8 => "i8".to_string(),
+      Type::I16 => "i16".to_string(),
+      Type::I32 => "i32".to_string(),
+      Type::I64 => "i64".to_string(),
+      Type::U8 => "u8".to_string(),
+      Type::U16 => "u16".to_string(),
+      Type::U32 => "u32".to_string(),
+      Type::U64 => "u64".to_string(),
+      Type::F32 => "f32".to_string(),
+      Type::F64 => "f64".to_string(),
+      Type::Boolean => "bool".to_string(),
+      Type::Char => "char".to_string(),
+      Type::Str => "str".to_string(),
+      Type::Void => "void".to_string(),
+      Type::Never => "never".to_string(),
+      Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_name(*inner)),
+      Type::Reference { inner, .. } => format!("ref_{}", self.format_type_for_name(*inner)),
+      Type::Record(def_id) | Type::Enum(def_id) => self.build_mangled_name(*def_id),
+      _ => format!("ty{}", ty.index()),
+    }
   }
 
   /// Check if a type is fully monomorphized (no Type::Param or Type::Instance).
@@ -1305,8 +1447,29 @@ impl<'a> CEmitter<'a> {
           write!(self.output, "    ").unwrap();
         }
 
+        // If the base is a u8* env pointer in a thunk, cast to the env struct type.
+        let env_cast_base = self
+          .current_fn_id
+          .and_then(|fn_id| self.closure_env_names.get(&fn_id).cloned());
+
+        let is_env_ptr = is_pointer && base_ty.is_some_and(|ty| {
+          matches!(self.types.get(&ty), Type::Pointer { inner, .. } if matches!(self.types.get(inner), Type::U8))
+        });
+
         if is_pointer {
-          writeln!(self.output, "t{} = &(({})->field_{});", dest.index(), b, field_index).unwrap();
+          if is_env_ptr && let Some(env_name) = &env_cast_base {
+            writeln!(
+              self.output,
+              "t{} = &(((struct {}*){}))->field_{};",
+              dest.index(),
+              env_name,
+              b,
+              field_index
+            )
+            .unwrap();
+          } else {
+            writeln!(self.output, "t{} = &(({})->field_{});", dest.index(), b, field_index).unwrap();
+          }
         } else {
           writeln!(self.output, "t{} = &(({}).field_{});", dest.index(), b, field_index).unwrap();
         }
@@ -1446,6 +1609,112 @@ impl<'a> CEmitter<'a> {
       Instr::DropGlue { dest, ty } => {
         let glue_name = self.drop_glue_name(*ty);
         writeln!(self.output, "t{} = (void(*)(u8*)){};", dest.index(), glue_name).unwrap();
+      },
+
+      Instr::MakeClosure {
+        dest,
+        thunk,
+        drop_fn,
+        captures,
+        closure_type,
+        heap_allocate,
+      } => {
+        let env_name = self
+          .closure_env_names
+          .get(thunk)
+          .cloned()
+          .unwrap_or_else(|| format!("__closure_env_{}", thunk.index()));
+        let closure_ty = self.format_type(*closure_type);
+        let thunk_name = self.def_name(*thunk);
+
+        let env_ptr_expr = if *heap_allocate {
+          writeln!(
+            self.output,
+            "struct {}* __envp_t{} = (struct {}*)malloc(sizeof(struct {}));",
+            env_name,
+            dest.index(),
+            env_name,
+            env_name,
+          )
+          .unwrap();
+
+          for (i, cap_op) in captures.iter().enumerate() {
+            let v = self.format_operand(func, cap_op);
+            write!(self.output, "    ").unwrap();
+            writeln!(self.output, "__envp_t{}->field_{} = {};", dest.index(), i, v).unwrap();
+          }
+
+          format!("(u8*)__envp_t{}", dest.index())
+        } else {
+          writeln!(self.output, "struct {} __env_t{};", env_name, dest.index()).unwrap();
+
+          for (i, cap_op) in captures.iter().enumerate() {
+            let v = self.format_operand(func, cap_op);
+            write!(self.output, "    ").unwrap();
+            writeln!(self.output, "__env_t{}.field_{} = {};", dest.index(), i, v).unwrap();
+          }
+
+          format!("(u8*)&__env_t{}", dest.index())
+        };
+
+        let call_cast = if let Type::Function { params, ret, .. } = self.types.get(closure_type) {
+          let ret_str = self.format_type(*ret);
+          let mut param_strs = vec!["u8*".to_string()];
+          for &p in params {
+            param_strs.push(self.format_type(p));
+          }
+          format!("({}(*)({}))", ret_str, param_strs.join(", "))
+        } else {
+          String::new()
+        };
+
+        let drop_expr = match drop_fn {
+          Some(drop_id) => format!("(void(*)(u8*)){}", self.def_name(*drop_id)),
+          None => "NULL".to_string(),
+        };
+
+        write!(self.output, "    ").unwrap();
+        writeln!(
+          self.output,
+          "t{} = ({}){{ {}{}, {}, {} }};",
+          dest.index(),
+          closure_ty,
+          call_cast,
+          thunk_name,
+          drop_expr,
+          env_ptr_expr,
+        )
+        .unwrap();
+      },
+
+      Instr::CallClosure {
+        dest, closure, args, ..
+      } => {
+        let c = self.format_operand(func, closure);
+        let arg_strs: Vec<String> = args.iter().map(|a| self.format_operand(func, a)).collect();
+
+        let mut all_args = vec![format!("{}.env", c)];
+        all_args.extend(arg_strs);
+
+        if let Some(d) = dest {
+          writeln!(self.output, "t{} = {}.call({});", d.index(), c, all_args.join(", ")).unwrap();
+        } else {
+          writeln!(self.output, "{}.call({});", c, all_args.join(", ")).unwrap();
+        }
+      },
+
+      Instr::DropClosure {
+        closure,
+        heap_allocated,
+        ..
+      } => {
+        let c = self.format_operand(func, closure);
+        writeln!(self.output, "if ({}.drop_fn) {}.drop_fn({}.env);", c, c, c).unwrap();
+
+        if *heap_allocated {
+          write!(self.output, "    ").unwrap();
+          writeln!(self.output, "if ({}.env) free({}.env);", c, c).unwrap();
+        }
       },
     }
   }
@@ -1805,7 +2074,13 @@ impl<'a> CEmitter<'a> {
         format!("{}*", self.format_type(*element))
       },
       Type::Tuple(_) => "/* tuple */ void*".to_string(),
-      Type::Function { .. } => "/* fn */ void*".to_string(),
+      Type::Function { .. } => {
+        if let Some(name) = self.closure_struct_names.get(&ty) {
+          format!("struct {}", name)
+        } else {
+          "/* fn */ void*".to_string()
+        }
+      },
       Type::Record(def_id) => {
         // Use build_mangled_name for consistency with type_struct_name
         let name = self.build_mangled_name(*def_id);

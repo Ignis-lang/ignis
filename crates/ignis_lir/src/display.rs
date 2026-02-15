@@ -335,6 +335,73 @@ impl<'a> LirPrinter<'a> {
         let ty_str = self.format_type(*ty);
         writeln!(self.output, "    t{} = drop_glue<{}>()", dest.index(), ty_str).unwrap();
       },
+      Instr::MakeClosure {
+        dest,
+        thunk,
+        drop_fn,
+        captures,
+        closure_type,
+        heap_allocate,
+      } => {
+        let captures_str: Vec<_> = captures.iter().map(|c| self.format_operand(func, c)).collect();
+        let ty_str = self.format_type(*closure_type);
+        let drop_str = match drop_fn {
+          Some(d) => format!("def{}", d.index()),
+          None => "null".to_string(),
+        };
+        let alloc_str = if *heap_allocate { ", heap" } else { "" };
+        writeln!(
+          self.output,
+          "    t{} = make_closure(thunk=def{}, drop={}, captures=[{}]{}) : {}",
+          dest.index(),
+          thunk.index(),
+          drop_str,
+          captures_str.join(", "),
+          alloc_str,
+          ty_str,
+        )
+        .unwrap();
+      },
+      Instr::CallClosure {
+        dest,
+        closure,
+        args,
+        return_type,
+      } => {
+        let closure_str = self.format_operand(func, closure);
+        let args_str: Vec<_> = args.iter().map(|a| self.format_operand(func, a)).collect();
+        let ty_str = self.format_type(*return_type);
+        if let Some(d) = dest {
+          writeln!(
+            self.output,
+            "    t{} = call_closure {}({}) : {}",
+            d.index(),
+            closure_str,
+            args_str.join(", "),
+            ty_str,
+          )
+          .unwrap();
+        } else {
+          writeln!(
+            self.output,
+            "    call_closure {}({}) : {}",
+            closure_str,
+            args_str.join(", "),
+            ty_str,
+          )
+          .unwrap();
+        }
+      },
+      Instr::DropClosure {
+        closure,
+        closure_type,
+        heap_allocated,
+      } => {
+        let closure_str = self.format_operand(func, closure);
+        let ty_str = self.format_type(*closure_type);
+        let heap_str = if *heap_allocated { " [heap]" } else { "" };
+        writeln!(self.output, "    drop_closure {} : {}{}", closure_str, ty_str, heap_str).unwrap();
+      },
     }
   }
 

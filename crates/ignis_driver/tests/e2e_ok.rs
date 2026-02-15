@@ -4228,3 +4228,183 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_closure_capture_and_call() {
+  e2e_test(
+    "closure_capture_and_call",
+    r#"
+function main(): i32 {
+    let x: i32 = 10;
+    let add_x = (y: i32): i32 -> x + y;
+    let result = add_x(32);
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_capture_mutate() {
+  e2e_test(
+    "closure_capture_mutate",
+    r#"
+function main(): i32 {
+    let mut counter: i32 = 0;
+    let inc = (): void -> { counter = counter + 1; };
+    inc();
+    inc();
+    inc();
+    return counter;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_no_capture() {
+  e2e_test(
+    "closure_no_capture",
+    r#"
+function main(): i32 {
+    let double = (x: i32): i32 -> x * 2;
+    return double(21);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_multiple_captures() {
+  e2e_test(
+    "closure_multiple_captures",
+    r#"
+function main(): i32 {
+    let a: i32 = 10;
+    let b: i32 = 20;
+    let c: i32 = 5;
+    let sum_all = (x: i32): i32 -> a + b + c + x;
+    return sum_all(7);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_block_body() {
+  e2e_test(
+    "closure_block_body",
+    r#"
+function main(): i32 {
+    let compute = (x: i32): i32 -> {
+        let doubled = x * 2;
+        let result = doubled + 1;
+        return result;
+    };
+    return compute(10);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_as_parameter() {
+  e2e_test(
+    "closure_as_parameter",
+    r#"
+function apply(f: (i32) -> i32, x: i32): i32 {
+    return f(x);
+}
+
+function main(): i32 {
+    let offset: i32 = 30;
+    let add_offset = (n: i32): i32 -> n + offset;
+    return apply(add_offset, 12);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_void_return() {
+  e2e_test(
+    "closure_void_return",
+    r#"
+function main(): i32 {
+    let mut val: i32 = 0;
+    let set_val = (x: i32): void -> { val = x; };
+    set_val(99);
+    return val;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_capture_and_local() {
+  e2e_test(
+    "closure_capture_and_local",
+    r#"
+function main(): i32 {
+    let base: i32 = 100;
+    let calc = (x: i32): i32 -> {
+        let local_offset: i32 = 5;
+        return base + x + local_offset;
+    };
+    return calc(10);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_nested() {
+  e2e_test(
+    "closure_nested",
+    r#"
+function main(): i32 {
+    let a: i32 = 10;
+    let outer = (x: i32): i32 -> {
+        let inner = (y: i32): i32 -> a + x + y;
+        return inner(5);
+    };
+    return outer(20);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_multiple_calls() {
+  e2e_test(
+    "closure_multiple_calls",
+    r#"
+function main(): i32 {
+    let multiplier: i32 = 3;
+    let mul = (x: i32): i32 -> x * multiplier;
+    let a = mul(2);
+    let b = mul(5);
+    let c = mul(10);
+    return a + b + c;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_capture_pointer_write() {
+  e2e_test(
+    "closure_capture_pointer_write",
+    r#"
+function main(): i32 {
+    let mut value: i32 = 10;
+    let p: *mut i32 = (&mut value) as *mut i32;
+    let write_through = (x: i32): void -> {
+        @write<i32>(p, x);
+    };
+    write_through(42);
+    return @read<i32>(p);
+}
+"#,
+  );
+}

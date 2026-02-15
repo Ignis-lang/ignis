@@ -147,7 +147,8 @@ impl<'a> Analyzer<'a> {
           });
 
           if let Some(infer_var_id) = self.types.as_infer_var(&var_type) {
-            self.scope_infer_vars
+            self
+              .scope_infer_vars
               .entry(*self.scopes.current())
               .or_default()
               .push((def_id, infer_var_id));
@@ -915,6 +916,7 @@ impl<'a> Analyzer<'a> {
           self.typecheck_common_type(&current, next, &match_expr.span)
         })
       },
+      ASTExpression::Lambda(lambda) => self.typecheck_lambda(node_id, lambda, infer),
     }
   }
 
@@ -3234,6 +3236,20 @@ impl<'a> Analyzer<'a> {
             (subst_params, subst_ret, func_def.is_variadic, true)
           } else {
             (params, ret, func_def.is_variadic, true)
+          }
+        },
+        // Variables/parameters of function type (closures) are callable.
+        DefinitionKind::Variable(_) | DefinitionKind::Parameter(_) => {
+          let var_ty = *self.defs.type_of(def_id);
+          if let Type::Function {
+            params,
+            ret,
+            is_variadic,
+          } = self.types.get(&var_ty).clone()
+          {
+            (params, ret, is_variadic, true)
+          } else {
+            (vec![], self.types.error(), false, false)
           }
         },
         _ => (vec![], self.types.error(), false, false),
@@ -6344,7 +6360,9 @@ impl<'a> Analyzer<'a> {
               || self.node_contains_let_condition(&arm.body)
           })
       },
-      ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) => false,
+      ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Lambda(_) => {
+        false
+      },
     }
   }
 
@@ -6503,13 +6521,9 @@ impl<'a> Analyzer<'a> {
     }
 
     if self.types.is_infer_var(target_type) {
-      let _ = self.infer_ctx.unify(
-        *target_type,
-        *value_type,
-        span,
-        ConstraintReason::Assignment,
-        &mut self.types,
-      );
+      let _ = self
+        .infer_ctx
+        .unify(*target_type, *value_type, span, ConstraintReason::Assignment, &mut self.types);
       return;
     }
 
@@ -7105,6 +7119,13 @@ impl<'a> Analyzer<'a> {
         })
       }),
       ASTExpression::LetCondition(let_condition) => self.find_first_symbol_usage(let_condition.value, symbol),
+      ASTExpression::Lambda(lambda) => {
+        let body_id = match &lambda.body {
+          ignis_ast::expressions::lambda::LambdaBody::Expression(id) => *id,
+          ignis_ast::expressions::lambda::LambdaBody::Block(id) => *id,
+        };
+        self.find_first_symbol_usage(body_id, symbol)
+      },
       ASTExpression::Literal(_) | ASTExpression::Path(_) => None,
     }
   }
@@ -8548,11 +8569,8 @@ impl<'a> Analyzer<'a> {
   }
 
   fn zonk_all_inference_vars(&mut self) {
-    let all_vars: Vec<(DefinitionId, ignis_type::types::InferVarId)> = self
-      .scope_infer_vars
-      .values()
-      .flat_map(|v| v.iter().copied())
-      .collect();
+    let all_vars: Vec<(DefinitionId, ignis_type::types::InferVarId)> =
+      self.scope_infer_vars.values().flat_map(|v| v.iter().copied()).collect();
 
     let error_type = self.types.error();
 
@@ -8566,16 +8584,12 @@ impl<'a> Analyzer<'a> {
           if let DefinitionKind::Variable(ref mut v) = def.kind {
             v.type_id = concrete_type;
           }
-        }
+        },
         Err(unresolved_var) => {
           let var_name = self.symbols.borrow().get(&self.defs.get(&def_id).name).to_string();
           let def_span = self.defs.get(&def_id).span.clone();
 
-          let origin_span = self
-            .infer_ctx
-            .get_origin(unresolved_var)
-            .cloned()
-            .unwrap_or(def_span);
+          let origin_span = self.infer_ctx.get_origin(unresolved_var).cloned().unwrap_or(def_span);
 
           self.add_diagnostic(
             DiagnosticMessage::CannotInferVariableType {
@@ -8589,7 +8603,7 @@ impl<'a> Analyzer<'a> {
           if let DefinitionKind::Variable(ref mut v) = def.kind {
             v.type_id = error_type;
           }
-        }
+        },
       }
     }
 
@@ -8612,11 +8626,94 @@ impl<'a> Analyzer<'a> {
       match self.infer_ctx.zonk(resolved, &mut self.types) {
         Ok(concrete_type) => {
           self.node_types.insert(node_id, concrete_type);
-        }
+        },
         Err(_) => {
           self.node_types.insert(node_id, error_type);
-        }
+        },
       }
     }
+  }
+
+  fn typecheck_lambda(
+    &mut self,
+    node_id: &NodeId,
+    lambda: &ignis_ast::expressions::lambda::ASTLambda,
+    _ictx: &InferContext,
+  ) -> TypeId {
+    let mut param_types = Vec::new();
+    let mut param_defs = Vec::new();
+
+    self.scopes.push(ScopeKind::Function);
+
+    let resolver_param_defs = self.lambda_param_defs.get(node_id).cloned();
+
+    for (i, param) in lambda.params.iter().enumerate() {
+      let param_type = self.resolve_type_syntax(&param.type_);
+
+      let param_def_id = if let Some(ref defs) = resolver_param_defs
+        && let Some(&existing_id) = defs.get(i)
+      {
+        let def = self.defs.get_mut(&existing_id);
+        if let ignis_type::definition::DefinitionKind::Parameter(pd) = &mut def.kind {
+          pd.type_id = param_type;
+        }
+        let _ = self.scopes.define(&param.name, &existing_id, false);
+        existing_id
+      } else {
+        let new_id = self.defs.alloc(ignis_type::definition::Definition {
+          kind: ignis_type::definition::DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
+            type_id: param_type,
+            mutable: false,
+            attrs: Vec::new(),
+          }),
+          name: param.name,
+          span: param.span.clone(),
+          name_span: param.span.clone(),
+          visibility: ignis_type::definition::Visibility::Private,
+          owner_module: self.current_module,
+          owner_namespace: self.current_namespace,
+          doc: None,
+        });
+        let _ = self.scopes.define(&param.name, &new_id, false);
+        new_id
+      };
+
+      self.node_types.insert(*node_id, param_type);
+
+      param_types.push(param_type);
+      param_defs.push(param_def_id);
+    }
+
+    let return_type = self.resolve_type_syntax(&lambda.return_type);
+
+    let old_ctx = std::mem::take(&mut self.scope_infer_vars);
+    let body_node_id = match &lambda.body {
+      ignis_ast::expressions::lambda::LambdaBody::Expression(id) => *id,
+      ignis_ast::expressions::lambda::LambdaBody::Block(id) => *id,
+    };
+
+    let tc_ctx = TypecheckContext::with_return(return_type);
+    let body_type = self.typecheck_node(&body_node_id, ScopeKind::Function, &tc_ctx);
+
+    if let ignis_ast::expressions::lambda::LambdaBody::Expression(_) = &lambda.body
+      && !self.types.types_equal(&body_type, &return_type)
+      && !self.types.is_error(&body_type)
+      && !self.types.is_error(&return_type)
+      && !matches!(self.types.get(&body_type), Type::Never)
+    {
+      self.add_diagnostic(
+        DiagnosticMessage::ReturnTypeMismatch {
+          expected: self.format_type_for_error(&return_type),
+          got: self.format_type_for_error(&body_type),
+          span: lambda.span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    self.scope_infer_vars = old_ctx;
+    self.scopes.pop();
+
+    self.types.function(param_types, return_type, false)
   }
 }

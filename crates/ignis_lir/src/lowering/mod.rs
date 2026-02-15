@@ -3,7 +3,8 @@ mod builder;
 use std::collections::{HashMap, HashSet};
 
 use ignis_hir::{
-  DropSchedules, ExitKey, HIR, HIRId, HIRKind, HIRMatchArm, HIRPattern, operation::BinaryOperation, statement::LoopKind,
+  CaptureMode, DropSchedules, ExitKey, HIR, HIRCapture, HIRId, HIRKind, HIRMatchArm, HIRPattern,
+  operation::BinaryOperation, statement::LoopKind,
 };
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore, InlineMode},
@@ -72,6 +73,14 @@ pub struct LoweringContext<'a> {
   /// Temps loaded from locals (via `Instr::Load`). These are aliases and should
   /// not be spilled for synthetic drops - their source local has its own schedule.
   load_alias_temps: HashSet<TempId>,
+
+  thunk_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
+  drop_fn_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
+
+  /// Definitions of variables captured by mutable reference in the current thunk.
+  /// When a variable is in this set, its local holds a *pointer* to the original,
+  /// and all reads/writes must go through pointer indirection.
+  byref_captures: HashSet<DefinitionId>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -97,12 +106,17 @@ impl<'a> LoweringContext<'a> {
       emit_modules,
       synthetic_owned_stack: Vec::new(),
       load_alias_temps: HashSet::new(),
+      thunk_captures: HashMap::new(),
+      drop_fn_captures: HashMap::new(),
+      byref_captures: HashSet::new(),
     }
   }
 
   /// Lower the entire HIR to LIR.
   pub fn lower(mut self) -> LirProgram {
     self.program.entry_point = self.hir.entry_point;
+
+    self.collect_thunk_captures();
 
     for &def_id in &self.hir.items {
       let def = self.defs.get(&def_id);
@@ -198,6 +212,113 @@ impl<'a> LoweringContext<'a> {
         dest: local_id,
         value: Operand::Temp(param_temp),
       });
+    }
+
+    // If this is a closure thunk, extract captured variables from the env struct.
+    // The env_ptr is the first parameter (param index 0).
+    //
+    // Capture modes determine extraction:
+    //   ByValue:  GetFieldPtr → LoadPtr → store value into local
+    //   ByRef:    GetFieldPtr → LoadPtr → LoadPtr (deref pointer) → store value into local
+    //   ByMutRef: GetFieldPtr → LoadPtr → store pointer into local (tracked in byref_captures)
+    self.byref_captures.clear();
+
+    if let Some(captures) = self.thunk_captures.get(&def_id).cloned()
+      && !captures.is_empty()
+    {
+      let env_param_id = func_def.params[0];
+      let env_local = self.def_to_local[&env_param_id];
+
+      let env_ptr_ty = *self.defs.type_of(&env_param_id);
+      let env_ptr_temp = self.fn_builder().alloc_temp(env_ptr_ty, def.span.clone());
+      self.fn_builder().emit(Instr::Load {
+        dest: env_ptr_temp,
+        source: env_local,
+      });
+
+      for cap in &captures {
+        let field_ptr_ty = self.types.pointer(cap.type_in_env, false);
+        let field_ptr = self.fn_builder().alloc_temp(field_ptr_ty, def.span.clone());
+        self.fn_builder().emit(Instr::GetFieldPtr {
+          dest: field_ptr,
+          base: Operand::Temp(env_ptr_temp),
+          field_index: cap.field_index,
+          field_type: cap.type_in_env,
+        });
+
+        let field_val_temp = self.fn_builder().alloc_temp(cap.type_in_env, def.span.clone());
+        self.fn_builder().emit(Instr::LoadPtr {
+          dest: field_val_temp,
+          ptr: Operand::Temp(field_ptr),
+        });
+
+        match cap.mode {
+          CaptureMode::ByValue => {
+            let cap_local = self.fn_builder().alloc_local(LocalData {
+              def_id: Some(cap.source_def),
+              ty: cap.type_in_env,
+              mutable: false,
+              name: None,
+            });
+            self.fn_builder().emit(Instr::Store {
+              dest: cap_local,
+              value: Operand::Temp(field_val_temp),
+            });
+            self.def_to_local.insert(cap.source_def, cap_local);
+          },
+
+          CaptureMode::ByRef => {
+            let pointee_ty = match self.types.get(&cap.type_in_env) {
+              Type::Pointer { inner, .. } => *inner,
+              _ => cap.type_in_env,
+            };
+
+            let deref_temp = self.fn_builder().alloc_temp(pointee_ty, def.span.clone());
+            self.fn_builder().emit(Instr::LoadPtr {
+              dest: deref_temp,
+              ptr: Operand::Temp(field_val_temp),
+            });
+
+            let cap_local = self.fn_builder().alloc_local(LocalData {
+              def_id: Some(cap.source_def),
+              ty: pointee_ty,
+              mutable: false,
+              name: None,
+            });
+            self.fn_builder().emit(Instr::Store {
+              dest: cap_local,
+              value: Operand::Temp(deref_temp),
+            });
+            self.def_to_local.insert(cap.source_def, cap_local);
+          },
+
+          CaptureMode::ByMutRef => {
+            let cap_local = self.fn_builder().alloc_local(LocalData {
+              def_id: Some(cap.source_def),
+              ty: cap.type_in_env,
+              mutable: true,
+              name: None,
+            });
+            self.fn_builder().emit(Instr::Store {
+              dest: cap_local,
+              value: Operand::Temp(field_val_temp),
+            });
+            self.def_to_local.insert(cap.source_def, cap_local);
+            self.byref_captures.insert(cap.source_def);
+          },
+        }
+      }
+    }
+
+    // If this is a closure drop function, emit field-drop logic directly
+    // instead of lowering the dummy HIR body.
+    if let Some(captures) = self.drop_fn_captures.get(&def_id).cloned() {
+      self.emit_drop_fn_body(&func_def, &captures, &def.span);
+
+      self.ensure_return();
+      let func = self.current_fn.take().unwrap().finish();
+      self.program.functions.insert(def_id, func);
+      return;
     }
 
     // Lower the body
@@ -331,6 +452,7 @@ impl<'a> LoweringContext<'a> {
         args,
         type_args: _,
       } => self.lower_call(*callee, args, node.type_id, node.span),
+      HIRKind::CallClosure { callee, args } => self.lower_call_closure(*callee, args, node.type_id, node.span),
       HIRKind::Cast { expression, target } => self.lower_cast(*expression, *target, node.span),
       HIRKind::BitCast { expression, target } => self.lower_bitcast(*expression, *target, node.span),
       HIRKind::Reference { expression, mutable } => {
@@ -455,6 +577,13 @@ impl<'a> LoweringContext<'a> {
         None
       },
       HIRKind::Match { scrutinee, arms } => self.lower_match(*scrutinee, arms, node.type_id, node.span),
+      HIRKind::Closure {
+        thunk_def,
+        captures,
+        drop_def,
+        escapes,
+        ..
+      } => self.lower_closure(thunk_def, drop_def, captures, *escapes, node.type_id, node.span),
     }
   }
 
@@ -499,8 +628,25 @@ impl<'a> LoweringContext<'a> {
     def_id: DefinitionId,
     ty: TypeId,
   ) -> Option<Operand> {
-    // Check if it's a local variable
     if let Some(&local_id) = self.def_to_local.get(&def_id) {
+      // ByMutRef captures: local holds a pointer; load + deref to get the value.
+      if self.byref_captures.contains(&def_id) {
+        let ptr_ty = self.fn_builder().local_type(local_id);
+        let ptr_temp = self.fn_builder().alloc_temp(ptr_ty, Span::default());
+        self.fn_builder().emit(Instr::Load {
+          dest: ptr_temp,
+          source: local_id,
+        });
+
+        let val_temp = self.fn_builder().alloc_temp(ty, Span::default());
+        self.fn_builder().emit(Instr::LoadPtr {
+          dest: val_temp,
+          ptr: Operand::Temp(ptr_temp),
+        });
+
+        return Some(Operand::Temp(val_temp));
+      }
+
       let temp = self.fn_builder().alloc_temp(ty, Span::default());
       self.fn_builder().emit(Instr::Load {
         dest: temp,
@@ -711,6 +857,35 @@ impl<'a> LoweringContext<'a> {
       dest,
       callee,
       args: arg_ops,
+    });
+
+    dest.map(Operand::Temp)
+  }
+
+  fn lower_call_closure(
+    &mut self,
+    callee_hir: HIRId,
+    args: &[HIRId],
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let closure_op = self.lower_hir_node(callee_hir)?;
+
+    let arg_ops: Vec<_> = args.iter().filter_map(|&arg| self.lower_hir_node(arg)).collect();
+
+    let is_void = matches!(self.types.get(&result_ty), Type::Void);
+
+    let dest = if is_void {
+      None
+    } else {
+      Some(self.fn_builder().alloc_temp(result_ty, span))
+    };
+
+    self.fn_builder().emit(Instr::CallClosure {
+      dest,
+      closure: closure_op,
+      args: arg_ops,
+      return_type: result_ty,
     });
 
     dest.map(Operand::Temp)
@@ -1277,6 +1452,11 @@ impl<'a> LoweringContext<'a> {
     value: HIRId,
     operation: Option<ignis_hir::operation::BinaryOperation>,
   ) {
+    if let Some(def_id) = self.get_byref_target_def(target) {
+      self.lower_byref_assign(hir_id, def_id, target, value, operation);
+      return;
+    }
+
     if let Some(local) = self.lower_to_local(target) {
       if let Some(op) = operation {
         // Compound assignment: target op= value
@@ -1322,6 +1502,78 @@ impl<'a> LoweringContext<'a> {
     } else {
       // Complex assignment (dereference, index)
       self.lower_complex_assign(target, value, operation);
+    }
+  }
+
+  /// If the assign target is a variable captured by mutable reference,
+  /// return its DefinitionId.
+  fn get_byref_target_def(
+    &self,
+    target: HIRId,
+  ) -> Option<DefinitionId> {
+    let node = self.hir.get(target);
+    match &node.kind {
+      HIRKind::Variable(def_id) if self.byref_captures.contains(def_id) => Some(*def_id),
+      _ => None,
+    }
+  }
+
+  /// Lower an assignment where the target variable is captured by mutable reference.
+  /// The local holds a pointer to the original; we store through the pointer.
+  fn lower_byref_assign(
+    &mut self,
+    hir_id: HIRId,
+    def_id: DefinitionId,
+    _target: HIRId,
+    value: HIRId,
+    operation: Option<ignis_hir::operation::BinaryOperation>,
+  ) {
+    let local = self.def_to_local[&def_id];
+    let ptr_ty = self.fn_builder().local_type(local);
+
+    let ptr_temp = self.fn_builder().alloc_temp(ptr_ty, Span::default());
+    self.fn_builder().emit(Instr::Load {
+      dest: ptr_temp,
+      source: local,
+    });
+
+    let pointee_ty = match self.types.get(&ptr_ty) {
+      Type::Pointer { inner, .. } => *inner,
+      _ => ptr_ty,
+    };
+
+    if let Some(op) = operation {
+      let current = self.fn_builder().alloc_temp(pointee_ty, Span::default());
+      self.fn_builder().emit(Instr::LoadPtr {
+        dest: current,
+        ptr: Operand::Temp(ptr_temp),
+      });
+
+      if let Some(rhs) = self.lower_hir_node(value) {
+        let result = self.fn_builder().alloc_temp(pointee_ty, Span::default());
+        self.fn_builder().emit(Instr::BinOp {
+          dest: result,
+          op,
+          left: Operand::Temp(current),
+          right: rhs,
+        });
+
+        self.emit_overwrite_drops(hir_id);
+
+        self.fn_builder().emit(Instr::StorePtr {
+          ptr: Operand::Temp(ptr_temp),
+          value: Operand::Temp(result),
+        });
+      }
+    } else {
+      if let Some(val) = self.lower_hir_node(value) {
+        self.emit_overwrite_drops(hir_id);
+
+        self.fn_builder().emit(Instr::StorePtr {
+          ptr: Operand::Temp(ptr_temp),
+          value: val,
+        });
+      }
     }
   }
 
@@ -1740,9 +1992,7 @@ impl<'a> LoweringContext<'a> {
         });
 
         self.fn_builder().switch_to_block(guard_block);
-        let Some(guard_val) = self.lower_hir_node(guard) else {
-          return None;
-        };
+        let guard_val = self.lower_hir_node(guard)?;
 
         if !self.fn_builder().is_terminated() {
           self.fn_builder().terminate(Terminator::Branch {
@@ -2655,6 +2905,137 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Variable(def_id) => self.def_to_local.get(def_id).copied(),
       _ => None,
     }
+  }
+
+  // === Closure support ===
+
+  /// Emit the body of a closure drop function.
+  ///
+  /// The drop function takes a single `env_ptr: *mut u8` parameter. For each
+  /// ByValue capture that needs dropping, we emit GetFieldPtr + DropInPlace
+  /// to run the field's destructor.
+  fn emit_drop_fn_body(
+    &mut self,
+    func_def: &ignis_type::definition::FunctionDefinition,
+    captures: &[HIRCapture],
+    span: &Span,
+  ) {
+    let env_param_id = func_def.params[0];
+    let env_local = self.def_to_local[&env_param_id];
+
+    let env_ptr_ty = *self.defs.type_of(&env_param_id);
+    let env_ptr_temp = self.fn_builder().alloc_temp(env_ptr_ty, span.clone());
+    self.fn_builder().emit(Instr::Load {
+      dest: env_ptr_temp,
+      source: env_local,
+    });
+
+    for cap in captures {
+      if cap.mode != CaptureMode::ByValue {
+        continue;
+      }
+
+      if !self.types.needs_drop_with_defs(&cap.type_in_env, self.defs) {
+        continue;
+      }
+
+      let field_ptr_ty = self.types.pointer(cap.type_in_env, true);
+      let field_ptr = self.fn_builder().alloc_temp(field_ptr_ty, span.clone());
+      self.fn_builder().emit(Instr::GetFieldPtr {
+        dest: field_ptr,
+        base: Operand::Temp(env_ptr_temp),
+        field_index: cap.field_index,
+        field_type: cap.type_in_env,
+      });
+
+      self.fn_builder().emit(Instr::DropInPlace {
+        ptr: Operand::Temp(field_ptr),
+        ty: cap.type_in_env,
+      });
+    }
+  }
+
+  fn collect_thunk_captures(&mut self) {
+    for (_id, node) in self.hir.nodes.iter() {
+      if let HIRKind::Closure {
+        thunk_def,
+        drop_def,
+        captures,
+        ..
+      } = &node.kind
+      {
+        if let Some(thunk_id) = thunk_def {
+          self.thunk_captures.insert(*thunk_id, captures.clone());
+        }
+
+        if let Some(drop_id) = drop_def {
+          self.drop_fn_captures.insert(*drop_id, captures.clone());
+        }
+      }
+    }
+  }
+
+  /// Lower a closure expression to LIR.
+  ///
+  /// Emits a `MakeClosure` instruction that packs captured variables into an env
+  /// and produces a closure value (function pointer triple).
+  fn lower_closure(
+    &mut self,
+    thunk_def: &Option<DefinitionId>,
+    drop_def: &Option<DefinitionId>,
+    captures: &[HIRCapture],
+    escapes: bool,
+    closure_type: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let thunk_id = match thunk_def {
+      Some(id) => *id,
+      None => {
+        // No thunk was created (shouldn't happen after capture analysis)
+        return Some(Operand::Const(ConstValue::Null(closure_type)));
+      },
+    };
+
+    let mut capture_operands = Vec::new();
+    for cap in captures {
+      let local = self.def_to_local.get(&cap.source_def);
+      if let Some(&local_id) = local {
+        match cap.mode {
+          CaptureMode::ByValue => {
+            let temp = self.fn_builder().alloc_temp(cap.type_in_env, span.clone());
+            self.fn_builder().emit(Instr::Load {
+              dest: temp,
+              source: local_id,
+            });
+            capture_operands.push(Operand::Temp(temp));
+          },
+          CaptureMode::ByRef | CaptureMode::ByMutRef => {
+            let mutable = cap.mode == CaptureMode::ByMutRef;
+            let temp = self.fn_builder().alloc_temp(cap.type_in_env, span.clone());
+            self.fn_builder().emit(Instr::AddrOfLocal {
+              dest: temp,
+              local: local_id,
+              mutable,
+            });
+            capture_operands.push(Operand::Temp(temp));
+          },
+        }
+      } else {
+        capture_operands.push(Operand::Const(ConstValue::Undef(cap.type_in_env)));
+      }
+    }
+
+    let dest = self.fn_builder().alloc_temp(closure_type, span);
+    self.fn_builder().emit(Instr::MakeClosure {
+      dest,
+      thunk: thunk_id,
+      drop_fn: *drop_def,
+      captures: capture_operands,
+      closure_type,
+      heap_allocate: escapes,
+    });
+
+    Some(Operand::Temp(dest))
   }
 }
 
