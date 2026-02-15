@@ -1,18 +1,37 @@
 use ignis_type::{span::Span, symbol::SymbolId};
 
+/// Discriminates between a named import (`import X from "..."`) and a
+/// discard import (`import _ from "..."`) that loads a module purely for
+/// its side effects (e.g. namespace contributions).
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+pub enum ImportItemKind {
+  Named(SymbolId),
+  Discard,
+}
+
 /// A single item in an import statement with its span for hover support.
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTImportItem {
-  pub name: SymbolId,
+  pub kind: ImportItemKind,
   pub span: Span,
 }
 
 impl ASTImportItem {
-  pub fn new(
+  pub fn named(
     name: SymbolId,
     span: Span,
   ) -> Self {
-    Self { name, span }
+    Self {
+      kind: ImportItemKind::Named(name),
+      span,
+    }
+  }
+
+  pub fn discard(span: Span) -> Self {
+    Self {
+      kind: ImportItemKind::Discard,
+      span,
+    }
   }
 }
 

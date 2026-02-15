@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
+use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, statements::import_statement::ImportItemKind};
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, NamespaceDefinition},
@@ -79,10 +79,19 @@ impl<'a> Analyzer<'a> {
         },
       };
 
-      for item in items {
-        let item_name = self.get_symbol_name(&item.name);
+      // Discard imports (`import _ from "..."`) only load the module; no binding.
+      if items.len() == 1 && matches!(items[0].kind, ImportItemKind::Discard) {
+        return;
+      }
 
-        if let Some(existing_def_id) = self.scopes.lookup_def(&item.name) {
+      for item in items {
+        let ImportItemKind::Named(name) = &item.kind else {
+          continue;
+        };
+
+        let item_name = self.get_symbol_name(name);
+
+        if let Some(existing_def_id) = self.scopes.lookup_def(name) {
           let existing_def = self.defs.get(existing_def_id);
           self.add_diagnostic(
             DiagnosticMessage::ImportShadowsLocal {
@@ -95,7 +104,7 @@ impl<'a> Analyzer<'a> {
           continue;
         }
 
-        match export_data.exports.get(&item.name) {
+        match export_data.exports.get(name) {
           Some(&def_id) => {
             let def_kind = self.defs.get(&def_id).kind.clone();
             self.set_import_item_def(&item.span, &def_id);
@@ -104,7 +113,7 @@ impl<'a> Analyzer<'a> {
             if let DefinitionKind::Namespace(ns_def) = &def_kind {
               self.import_namespace(def_id, ns_def);
             } else {
-              let _ = self.scopes.define(&item.name, &def_id, false);
+              let _ = self.scopes.define(name, &def_id, false);
             }
           },
           None => {

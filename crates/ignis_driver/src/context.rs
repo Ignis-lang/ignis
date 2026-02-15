@@ -5,6 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use colored::*;
 use ignis_analyzer::imports::ExportTable;
 use ignis_analyzer::modules::{ModuleError, ModuleGraph};
+use ignis_ast::statements::import_statement::ImportItemKind;
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_config::{DebugTrace, IgnisConfig};
 use ignis_diagnostics::diagnostic_report::Diagnostic;
@@ -110,10 +111,10 @@ impl CompilationContext {
 
     for (module_name, rel_path) in &manifest.modules {
       let module_canon = std_canon.join(rel_path);
-      if let Ok(module_canon) = module_canon.canonicalize() {
-        if module_canon == file_canon {
-          return Some(module_name.clone());
-        }
+      if let Ok(module_canon) = module_canon.canonicalize()
+        && module_canon == file_canon
+      {
+        return Some(module_name.clone());
       }
     }
 
@@ -485,7 +486,14 @@ impl CompilationContext {
 
     for root in roots {
       if let ASTNode::Statement(ASTStatement::Import(import)) = nodes.get(root) {
-        let symbol_ids: Vec<SymbolId> = import.items.iter().map(|item| item.name).collect();
+        let symbol_ids: Vec<SymbolId> = import
+          .items
+          .iter()
+          .filter_map(|item| match &item.kind {
+            ImportItemKind::Named(name) => Some(*name),
+            ImportItemKind::Discard => None,
+          })
+          .collect();
         imports.push((symbol_ids, import.from.clone(), import.span.clone()));
       }
     }
@@ -713,21 +721,21 @@ impl CompilationContext {
 
     // Prelude edges create cycles among std modules; skip cycle detection
     // for std roots and use all_modules_topological (same as check-std).
-    if !root_is_std {
-      if let Err(err) = self.module_graph.detect_cycles() {
-        match err {
-          ModuleError::CircularDependency { cycle } => {
-            let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
-            eprintln!(
-              "{} Circular dependency detected: {}",
-              "Error:".red().bold(),
-              cycle_str.join(" -> ")
-            );
-          },
-          _ => eprintln!("{} Module error: {:?}", "Error:".red().bold(), err),
-        }
-        return Err(());
+    if !root_is_std
+      && let Err(err) = self.module_graph.detect_cycles()
+    {
+      match err {
+        ModuleError::CircularDependency { cycle } => {
+          let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
+          eprintln!(
+            "{} Circular dependency detected: {}",
+            "Error:".red().bold(),
+            cycle_str.join(" -> ")
+          );
+        },
+        _ => eprintln!("{} Module error: {:?}", "Error:".red().bold(), err),
       }
+      return Err(());
     }
 
     self.module_graph.root = Some(root_id);

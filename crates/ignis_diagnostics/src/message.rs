@@ -432,6 +432,9 @@ pub enum DiagnosticMessage {
     at: Span,
     previous_span: Span,
   },
+  DiscardImportMustBeSoleItem {
+    at: Span,
+  },
   CircularDependency {
     cycle: Vec<String>,
     at: Span,
@@ -1197,6 +1200,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::ImportShadowsLocal { name, .. } => {
         write!(f, "Import '{}' shadows a local definition", name)
       },
+      DiagnosticMessage::DiscardImportMustBeSoleItem { .. } => {
+        write!(f, "Discard import '_' must be the only item in an import statement")
+      },
       DiagnosticMessage::CircularDependency { cycle, .. } => {
         write!(f, "Circular dependency detected: {}", cycle.join(" -> "))
       },
@@ -1717,6 +1723,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ModuleNotFound { at, .. }
       | DiagnosticMessage::SymbolNotExported { at, .. }
       | DiagnosticMessage::ImportShadowsLocal { at, .. }
+      | DiagnosticMessage::DiscardImportMustBeSoleItem { at, .. }
       | DiagnosticMessage::CircularDependency { at, .. } => at.clone(),
 
       DiagnosticMessage::UseAfterMove { span, .. }
@@ -1917,6 +1924,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ModuleNotFound { .. } => "M0001",
       DiagnosticMessage::SymbolNotExported { .. } => "M0002",
       DiagnosticMessage::ImportShadowsLocal { .. } => "M0003",
+      DiagnosticMessage::DiscardImportMustBeSoleItem { .. } => "M0005",
       DiagnosticMessage::CircularDependency { .. } => "M0004",
       DiagnosticMessage::UseAfterMove { .. } => "O0001",
       DiagnosticMessage::UseAfterFree { .. } => "O0002",
