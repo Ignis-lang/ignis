@@ -240,6 +240,14 @@ pub fn compile_project(
   section!(&config, "Scanning & parsing");
 
   let mut ctx = CompilationContext::new(&config);
+
+  // For std entries, discover all manifest modules up front so the
+  // insertion order matches check-std (avoids prelude-cycle ordering issues).
+  let entry_is_std = ctx.try_resolve_std_module_name(entry_path).is_some();
+  if entry_is_std && config.std {
+    ctx.discover_all_std_modules(&config);
+  }
+
   let root_id = match ctx.discover_modules(entry_path, &config) {
     Ok(id) => id,
     Err(()) => {
