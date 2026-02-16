@@ -255,6 +255,7 @@ fn classify_token(
     | TokenType::RangeInclusive
     | TokenType::Ampersand
     | TokenType::Pipe
+    | TokenType::PipeForward
     | TokenType::Caret
     | TokenType::Tilde
     | TokenType::QuestionMark

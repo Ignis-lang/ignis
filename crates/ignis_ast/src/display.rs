@@ -294,6 +294,9 @@ impl DisplayLisp for ASTExpression {
         };
         format!("(@{} {})", kind, formatter.format_node(&expr.inner))
       },
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        format!("(|> {} {})", formatter.format_node(lhs), formatter.format_node(rhs))
+      },
     }
   }
 }

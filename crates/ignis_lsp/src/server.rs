@@ -13,8 +13,8 @@ use tower_lsp::{Client, LanguageServer};
 use url::Url;
 
 use crate::completion::{
-  CompletionContext, complete_at_items, complete_dot, complete_double_colon, complete_identifier, complete_import_path,
-  complete_record_init, detect_context, log, to_completion_items,
+  CompletionContext, complete_after_pipe, complete_at_items, complete_dot, complete_double_colon, complete_identifier,
+  complete_import_path, complete_record_init, detect_context, log, to_completion_items,
 };
 use crate::convert::{convert_diagnostic, LineIndex};
 use crate::project::ProjectContext;
@@ -1512,6 +1512,9 @@ impl LanguageServer for Server {
         } => complete_double_colon(path_segments, prefix, &output, &file_id),
         CompletionContext::Identifier { prefix, start_offset } => {
           complete_identifier(prefix, *start_offset, &tokens, Some(&output), &file_id)
+        },
+        CompletionContext::AfterPipe { prefix, start_offset } => {
+          complete_after_pipe(prefix, *start_offset, &tokens, Some(&output), &file_id)
         },
         CompletionContext::ImportPath { prefix } => complete_import_path(prefix, &config),
         CompletionContext::RecordInit {

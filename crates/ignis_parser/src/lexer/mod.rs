@@ -142,6 +142,7 @@ impl<'a> IgnisLexer<'a> {
       '>' if self.match_char('=') => Ok(TokenType::GreaterEqual),
       '>' => Ok(TokenType::Greater),
       '|' if self.match_char('|') => Ok(TokenType::Or),
+      '|' if self.match_char('>') => Ok(TokenType::PipeForward),
       '|' if self.match_char('=') => Ok(TokenType::OrAssign),
       '|' => Ok(TokenType::Pipe),
       '&' if self.match_char('&') => Ok(TokenType::And),
@@ -597,6 +598,24 @@ mod tests {
         (TokenType::Colon, ":"),
         (TokenType::DoubleColon, "::"),
         (TokenType::Arrow, "->"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn lexes_pipe_forward_and_preserves_other_pipe_tokens() {
+    let LexResult { tokens, diagnostics } = lex("|> || |= |");
+
+    assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::PipeForward, "|>"),
+        (TokenType::Or, "||"),
+        (TokenType::OrAssign, "|="),
+        (TokenType::Pipe, "|"),
         (TokenType::Eof, ""),
       ],
     );

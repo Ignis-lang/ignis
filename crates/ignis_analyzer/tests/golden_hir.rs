@@ -199,3 +199,20 @@ function logic(a: boolean, b: boolean): boolean {
 
   assert_snapshot!("hir_logical_operators", common::format_hir(&result));
 }
+
+#[test]
+fn hir_pipe_desugars_to_call() {
+  let result = common::analyze(
+    r#"
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return 5 |> add(7);
+}
+"#,
+  );
+
+  assert_snapshot!("hir_pipe_desugars_to_call", common::format_hir(&result));
+}

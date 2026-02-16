@@ -1,4 +1,4 @@
-use crate::{Analyzer, InferContext, ResolvedPath, ScopeKind, TypecheckContext};
+use crate::{Analyzer, InferContext, PipeResolution, ResolvedPath, ScopeKind, TypecheckContext};
 use std::collections::{HashMap, HashSet};
 
 use ignis_ast::{
@@ -918,6 +918,12 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Lambda(lambda) => self.typecheck_lambda(node_id, lambda, infer),
       ASTExpression::CaptureOverride(co) => self.typecheck_node(&co.inner, scope_kind, ctx),
+      ASTExpression::Pipe {
+        lhs,
+        rhs,
+        pipe_span,
+        span,
+      } => self.typecheck_pipe(node_id, lhs, rhs, pipe_span, span, scope_kind, ctx),
     }
   }
 
@@ -3393,6 +3399,615 @@ impl<'a> Analyzer<'a> {
     }
 
     ret_type
+  }
+
+  /// Typechecks `lhs |> rhs` and records how lowering should emit the call.
+  fn typecheck_pipe(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    rhs: &NodeId,
+    pipe_span: &ignis_type::span::Span,
+    _span: &ignis_type::span::Span,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let lhs_type = self.typecheck_node(lhs, scope_kind, ctx);
+
+    let rhs_node = self.ast.get(rhs).clone();
+    match rhs_node {
+      ASTNode::Expression(ASTExpression::Call(ref call)) => {
+        self.typecheck_pipe_call(node_id, lhs, &lhs_type, rhs, call, pipe_span, scope_kind, ctx)
+      },
+
+      ASTNode::Expression(ASTExpression::Variable(ref var)) => {
+        self.typecheck_pipe_bare_callee(node_id, lhs, &lhs_type, rhs, &var.name, pipe_span, scope_kind, ctx)
+      },
+
+      ASTNode::Expression(ASTExpression::Path(ref path)) => {
+        self.typecheck_pipe_path(node_id, lhs, &lhs_type, rhs, path, pipe_span, scope_kind, ctx)
+      },
+
+      ASTNode::Expression(ASTExpression::Lambda(_)) => {
+        self.typecheck_pipe_lambda(node_id, lhs, &lhs_type, rhs, pipe_span, scope_kind, ctx)
+      },
+
+      ASTNode::Expression(ASTExpression::MemberAccess(ref ma)) if ma.op == ignis_ast::expressions::ASTAccessOp::Dot => {
+        self.add_diagnostic(
+          DiagnosticMessage::PipeRhsInstanceMethod {
+            rhs_span: ma.span.clone(),
+            pipe_span: pipe_span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+
+      _ => {
+        let rhs_desc = self.describe_expression_kind(rhs);
+        self.add_diagnostic(
+          DiagnosticMessage::PipeRhsNotCallable {
+            rhs_span: self.node_span(rhs).clone(),
+            rhs_desc,
+            pipe_span: pipe_span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+    }
+  }
+
+  /// Handles `x |> f(a, b)`.
+  fn typecheck_pipe_call(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    lhs_type: &TypeId,
+    _rhs: &NodeId,
+    call: &ASTCallExpression,
+    pipe_span: &ignis_type::span::Span,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let callee_node = self.ast.get(&call.callee).clone();
+
+    let (callee_entry, callee_is_path) = match &callee_node {
+      ASTNode::Expression(ASTExpression::Variable(var)) => (self.scopes.lookup(&var.name).cloned(), false),
+      ASTNode::Expression(ASTExpression::Path(path)) => {
+        self.mark_path_prefix_referenced(&path.segments);
+        let entry = match self.resolve_qualified_path(&path.segments) {
+          Some(ResolvedPath::Entry(entry)) => Some(entry),
+          _ => None,
+        };
+        (entry, true)
+      },
+      _ => (None, false),
+    };
+
+    let mut extra_arg_types_for_resolution: Option<Vec<TypeId>> = None;
+
+    let def_id = match callee_entry.as_ref() {
+      Some(SymbolEntry::Overload(candidates)) if candidates.len() > 1 => {
+        let extra_arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+          .collect();
+
+        let mut arg_types = Vec::with_capacity(1 + extra_arg_types.len());
+        arg_types.push(*lhs_type);
+        arg_types.extend(extra_arg_types.iter().copied());
+
+        extra_arg_types_for_resolution = Some(extra_arg_types);
+
+        match self.resolve_overload(candidates, &arg_types, &call.span, None) {
+          Ok(def_id) => Some(def_id),
+          Err(()) => return self.types.error(),
+        }
+      },
+      Some(SymbolEntry::Overload(candidates)) => candidates.first().copied(),
+      _ => callee_entry.as_ref().and_then(|e| e.as_single().cloned()),
+    };
+
+    if let Some(def_id) = def_id {
+      self.set_resolved_call(node_id, def_id);
+      self.set_resolved_call(&call.callee, def_id);
+      self.mark_referenced(def_id);
+    }
+
+    let substitution = self.build_call_substitution(&def_id, call);
+
+    let (mut param_types, mut ret_type, is_closure) = if let Some(def_id) = &def_id {
+      self.pipe_callee_signature(def_id)
+    } else {
+      (vec![], self.types.error(), false)
+    };
+
+    if let (Some(def_id), Some(subst)) = (def_id.as_ref(), substitution.as_ref())
+      && matches!(
+        &self.defs.get(def_id).kind,
+        DefinitionKind::Function(_) | DefinitionKind::Method(_)
+      )
+    {
+      param_types = param_types.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
+      ret_type = self.types.substitute(ret_type, subst);
+    }
+
+    if param_types.is_empty() && def_id.is_none() {
+      for arg in &call.arguments {
+        self.typecheck_node(arg, scope_kind, ctx);
+      }
+      return self.types.error();
+    }
+
+    let extra_arg_types: Vec<TypeId> = if let Some(extra_arg_types) = extra_arg_types_for_resolution {
+      extra_arg_types
+    } else {
+      call
+        .arguments
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+          if let Some(param_type) = param_types.get(i + 1) {
+            self.typecheck_node_with_infer(arg, scope_kind, ctx, &InferContext::expecting(*param_type))
+          } else {
+            self.typecheck_node(arg, scope_kind, ctx)
+          }
+        })
+        .collect()
+    };
+
+    let total_args = 1 + extra_arg_types.len();
+    if total_args != param_types.len() {
+      let func_name = self.callee_name_for_diagnostics(&callee_node, callee_is_path);
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: param_types.len(),
+          got: total_args,
+          func_name,
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    if let Some(first_param) = param_types.first() {
+      self.check_pipe_arg_type(first_param, lhs_type, lhs, pipe_span);
+    }
+
+    let check_count = std::cmp::min(extra_arg_types.len(), param_types.len().saturating_sub(1));
+    for i in 0..check_count {
+      let param_type = &param_types[i + 1];
+      if !self.types.is_error(&extra_arg_types[i])
+        && !self.types.is_error(param_type)
+        && !self.types.is_assignable(param_type, &extra_arg_types[i])
+      {
+        self.add_diagnostic(
+          DiagnosticMessage::ArgumentTypeMismatch {
+            param_idx: i + 2,
+            expected: self.format_type_for_error(param_type),
+            got: self.format_type_for_error(&extra_arg_types[i]),
+            span: self.node_span(&call.arguments[i]).clone(),
+          }
+          .report(),
+        );
+      }
+    }
+
+    let type_args = self.resolve_pipe_type_args(&def_id, call);
+
+    if is_closure {
+      self.pipe_resolutions.insert(
+        *node_id,
+        PipeResolution::ClosureCall {
+          callee_node: call.callee,
+          extra_args: call.arguments.clone(),
+        },
+      );
+    } else if let Some(def_id) = def_id {
+      self.pipe_resolutions.insert(
+        *node_id,
+        PipeResolution::DirectCall {
+          def_id,
+          extra_args: call.arguments.clone(),
+          type_args,
+        },
+      );
+    }
+
+    ret_type
+  }
+
+  /// Handles `x |> f`.
+  fn typecheck_pipe_bare_callee(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    lhs_type: &TypeId,
+    rhs: &NodeId,
+    name: &ignis_type::symbol::SymbolId,
+    pipe_span: &ignis_type::span::Span,
+    scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) -> TypeId {
+    let entry = self.scopes.lookup(name).cloned();
+    let def_id = match entry.as_ref() {
+      Some(SymbolEntry::Overload(candidates)) if candidates.len() > 1 => {
+        let arg_types = vec![*lhs_type];
+        match self.resolve_overload(candidates, &arg_types, pipe_span, None) {
+          Ok(def_id) => Some(def_id),
+          Err(()) => return self.types.error(),
+        }
+      },
+      Some(SymbolEntry::Overload(candidates)) => candidates.first().copied(),
+      _ => entry.as_ref().and_then(|e| e.as_single().cloned()),
+    };
+
+    if def_id.is_none() {
+      let infer = InferContext::none();
+      self.typecheck_node_with_infer(rhs, scope_kind, _ctx, &infer);
+      return self.types.error();
+    }
+
+    let def_id = def_id.unwrap();
+    self.set_resolved_call(node_id, def_id);
+    self.set_resolved_call(rhs, def_id);
+    self.mark_referenced(def_id);
+
+    let (param_types, ret_type, is_closure) = self.pipe_callee_signature(&def_id);
+
+    if param_types.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 0,
+          got: 1,
+          func_name: self.get_symbol_name(name),
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if param_types.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: param_types.len(),
+          got: 1,
+          func_name: self.get_symbol_name(name),
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    self.check_pipe_arg_type(&param_types[0], lhs_type, lhs, pipe_span);
+
+    if is_closure {
+      self.pipe_resolutions.insert(
+        *node_id,
+        PipeResolution::ClosureCall {
+          callee_node: *rhs,
+          extra_args: vec![],
+        },
+      );
+    } else {
+      self.pipe_resolutions.insert(
+        *node_id,
+        PipeResolution::DirectCall {
+          def_id,
+          extra_args: vec![],
+          type_args: vec![],
+        },
+      );
+    }
+
+    ret_type
+  }
+
+  /// Handles `x |> Mod::func`.
+  fn typecheck_pipe_path(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    lhs_type: &TypeId,
+    rhs: &NodeId,
+    path: &ignis_ast::expressions::path::ASTPath,
+    pipe_span: &ignis_type::span::Span,
+    _scope_kind: ScopeKind,
+    _ctx: &TypecheckContext,
+  ) -> TypeId {
+    self.mark_path_prefix_referenced(&path.segments);
+
+    let entry = match self.resolve_qualified_path(&path.segments) {
+      Some(ResolvedPath::Entry(entry)) => Some(entry),
+      _ => None,
+    };
+
+    let def_id = match entry.as_ref() {
+      Some(SymbolEntry::Overload(candidates)) if candidates.len() > 1 => {
+        let arg_types = vec![*lhs_type];
+        match self.resolve_overload(candidates, &arg_types, pipe_span, None) {
+          Ok(def_id) => Some(def_id),
+          Err(()) => return self.types.error(),
+        }
+      },
+      Some(SymbolEntry::Overload(candidates)) => candidates.first().copied(),
+      _ => entry.as_ref().and_then(|e| e.as_single().cloned()),
+    };
+
+    if def_id.is_none() {
+      self.typecheck_node(rhs, _scope_kind, _ctx);
+      return self.types.error();
+    }
+
+    let def_id = def_id.unwrap();
+    self.set_resolved_call(node_id, def_id);
+    self.set_resolved_call(rhs, def_id);
+    self.mark_referenced(def_id);
+
+    let (param_types, ret_type, is_closure) = self.pipe_callee_signature(&def_id);
+
+    if param_types.is_empty() {
+      let path_name = path
+        .segments
+        .iter()
+        .map(|s| self.get_symbol_name(&s.name))
+        .collect::<Vec<_>>()
+        .join("::");
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 0,
+          got: 1,
+          func_name: path_name,
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if param_types.len() != 1 {
+      let path_name = path
+        .segments
+        .iter()
+        .map(|s| self.get_symbol_name(&s.name))
+        .collect::<Vec<_>>()
+        .join("::");
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: param_types.len(),
+          got: 1,
+          func_name: path_name,
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    self.check_pipe_arg_type(&param_types[0], lhs_type, lhs, pipe_span);
+
+    if is_closure {
+      self.pipe_resolutions.insert(
+        *node_id,
+        PipeResolution::ClosureCall {
+          callee_node: *rhs,
+          extra_args: vec![],
+        },
+      );
+    } else {
+      self.pipe_resolutions.insert(
+        *node_id,
+        PipeResolution::DirectCall {
+          def_id,
+          extra_args: vec![],
+          type_args: vec![],
+        },
+      );
+    }
+
+    ret_type
+  }
+
+  /// Handles `x |> (..lambda..)`.
+  fn typecheck_pipe_lambda(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    lhs_type: &TypeId,
+    rhs: &NodeId,
+    pipe_span: &ignis_type::span::Span,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let rhs_type = self.typecheck_node(rhs, scope_kind, ctx);
+
+    if self.types.is_error(&rhs_type) {
+      return self.types.error();
+    }
+
+    let (param_types, ret_type) = match self.types.get(&rhs_type).clone() {
+      Type::Function { params, ret, .. } => (params, ret),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::PipeRhsNotCallable {
+            rhs_span: self.node_span(rhs).clone(),
+            rhs_desc: "expression".to_string(),
+            pipe_span: pipe_span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if param_types.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: 0,
+          got: 1,
+          func_name: "<lambda>".to_string(),
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if param_types.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: param_types.len(),
+          got: 1,
+          func_name: "<lambda>".to_string(),
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    self.check_pipe_arg_type(&param_types[0], lhs_type, lhs, pipe_span);
+
+    self.pipe_resolutions.insert(
+      *node_id,
+      PipeResolution::ClosureCall {
+        callee_node: *rhs,
+        extra_args: vec![],
+      },
+    );
+
+    ret_type
+  }
+
+  /// Returns `(params, return_type, is_closure_call)` for a callable definition.
+  fn pipe_callee_signature(
+    &self,
+    def_id: &DefinitionId,
+  ) -> (Vec<TypeId>, TypeId, bool) {
+    match &self.defs.get(def_id).kind {
+      DefinitionKind::Function(func_def) => {
+        let params: Vec<TypeId> = func_def.params.iter().map(|p| self.defs.type_of(p)).cloned().collect();
+        (params, func_def.return_type, false)
+      },
+      DefinitionKind::Method(method_def) => {
+        let start = self.method_param_start(method_def);
+        let params: Vec<TypeId> = method_def.params[start..]
+          .iter()
+          .map(|p| self.defs.type_of(p))
+          .cloned()
+          .collect();
+        (params, method_def.return_type, false)
+      },
+      DefinitionKind::Variable(_) | DefinitionKind::Parameter(_) | DefinitionKind::Constant(_) => {
+        let var_ty = *self.defs.type_of(def_id);
+        if let Type::Function { params, ret, .. } = self.types.get(&var_ty).clone() {
+          (params, ret, true)
+        } else {
+          (vec![], self.types.error(), false)
+        }
+      },
+      _ => (vec![], self.types.error(), false),
+    }
+  }
+
+  /// Checks that the piped value matches the first parameter type.
+  fn check_pipe_arg_type(
+    &mut self,
+    param_type: &TypeId,
+    arg_type: &TypeId,
+    arg_node: &NodeId,
+    _pipe_span: &ignis_type::span::Span,
+  ) {
+    if self.types.is_error(arg_type) || self.types.is_error(param_type) {
+      return;
+    }
+
+    if !self.types.is_assignable(param_type, arg_type) {
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentTypeMismatch {
+          param_idx: 1,
+          expected: self.format_type_for_error(param_type),
+          got: self.format_type_for_error(arg_type),
+          span: self.node_span(arg_node).clone(),
+        }
+        .report(),
+      );
+    }
+  }
+
+  /// Resolves explicit type arguments for a pipe call.
+  fn resolve_pipe_type_args(
+    &mut self,
+    def_id: &Option<DefinitionId>,
+    call: &ASTCallExpression,
+  ) -> Vec<TypeId> {
+    let Some(def_id) = def_id else {
+      return vec![];
+    };
+    let Some(ref type_args_syntax) = call.type_args else {
+      return vec![];
+    };
+
+    let type_params = match &self.defs.get(def_id).kind {
+      DefinitionKind::Function(func_def) => {
+        if func_def.type_params.is_empty() {
+          return vec![];
+        }
+        func_def.type_params.clone()
+      },
+      DefinitionKind::Method(method_def) => {
+        if method_def.type_params.is_empty() {
+          return vec![];
+        }
+        method_def.type_params.clone()
+      },
+      _ => {
+        return vec![];
+      },
+    };
+
+    if type_args_syntax.len() != type_params.len() {
+      return vec![];
+    }
+
+    type_args_syntax
+      .iter()
+      .map(|syntax| self.resolve_type_syntax(syntax))
+      .collect()
+  }
+
+  fn describe_expression_kind(
+    &self,
+    node_id: &NodeId,
+  ) -> String {
+    match self.ast.get(node_id) {
+      ASTNode::Expression(ASTExpression::Literal(_)) => "literal".to_string(),
+      ASTNode::Expression(ASTExpression::Binary(_)) => "binary expression".to_string(),
+      ASTNode::Expression(ASTExpression::Unary(_)) => "unary expression".to_string(),
+      ASTNode::Expression(ASTExpression::Ternary(_)) => "ternary expression".to_string(),
+      ASTNode::Expression(ASTExpression::Assignment(_)) => "assignment".to_string(),
+      ASTNode::Expression(ASTExpression::RecordInit(_)) => "record initialization".to_string(),
+      ASTNode::Expression(ASTExpression::Vector(_)) => "vector literal".to_string(),
+      _ => "expression".to_string(),
+    }
+  }
+
+  fn callee_name_for_diagnostics(
+    &self,
+    callee_node: &ASTNode,
+    is_path: bool,
+  ) -> String {
+    match callee_node {
+      ASTNode::Expression(ASTExpression::Variable(var)) => self.get_symbol_name(&var.name),
+      ASTNode::Expression(ASTExpression::Path(path)) if is_path => path
+        .segments
+        .iter()
+        .map(|s| self.get_symbol_name(&s.name))
+        .collect::<Vec<_>>()
+        .join("::"),
+      _ => "<function>".to_string(),
+    }
   }
 
   /// Build a type substitution for a generic function call.
@@ -6530,6 +7145,9 @@ impl<'a> Analyzer<'a> {
           })
       },
       ASTExpression::CaptureOverride(co) => self.node_contains_let_condition(&co.inner),
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        self.node_contains_let_condition(lhs) || self.node_contains_let_condition(rhs)
+      },
       ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Lambda(_) => {
         false
       },
@@ -7297,6 +7915,9 @@ impl<'a> Analyzer<'a> {
         self.find_first_symbol_usage(body_id, symbol)
       },
       ASTExpression::CaptureOverride(co) => self.find_first_symbol_usage(co.inner, symbol),
+      ASTExpression::Pipe { lhs, rhs, .. } => self
+        .find_first_symbol_usage(*lhs, symbol)
+        .or_else(|| self.find_first_symbol_usage(*rhs, symbol)),
       ASTExpression::Literal(_) | ASTExpression::Path(_) => None,
     }
   }

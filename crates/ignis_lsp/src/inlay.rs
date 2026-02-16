@@ -238,6 +238,10 @@ fn collect_expression_children(
     ASTExpression::CaptureOverride(co) => {
       stack.push(co.inner);
     },
+    ASTExpression::Pipe { lhs, rhs, .. } => {
+      stack.push(*lhs);
+      stack.push(*rhs);
+    },
   }
 }
 

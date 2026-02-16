@@ -65,6 +65,14 @@ pub enum CompletionContext {
     start_offset: u32,
   },
 
+  /// After `|>` - callable target expected.
+  AfterPipe {
+    /// Partial identifier typed.
+    prefix: String,
+    /// Offset where the identifier starts.
+    start_offset: u32,
+  },
+
   /// Inside import path string: `from "std::..."`.
   ImportPath {
     /// Partial path typed.
@@ -207,6 +215,21 @@ pub fn detect_context(
       });
     }
 
+    if prev.type_ == TokenType::PipeForward {
+      let prefix = extract_prefix_at_cursor(current_token, cursor_offset);
+      let start_offset = if let Some(tok) = current_token {
+        if tok.type_ == TokenType::Identifier {
+          tok.span.start.0
+        } else {
+          cursor_offset
+        }
+      } else {
+        cursor_offset
+      };
+
+      return Some(CompletionContext::AfterPipe { prefix, start_offset });
+    }
+
     // Check for record initializer context: `RecordName { field: val, |`
     if (prev.type_ == TokenType::Comma || prev.type_ == TokenType::LeftBrace)
       && let Some(ctx) = detect_record_init_context(&meaningful, prev, current_token, cursor_offset, source_text)
@@ -264,6 +287,10 @@ pub fn detect_context(
         path_segments,
         prefix,
       });
+    }
+
+    if before_ident.type_ == TokenType::PipeForward {
+      return Some(CompletionContext::AfterPipe { prefix, start_offset });
     }
   }
 
@@ -1336,6 +1363,25 @@ pub fn complete_identifier(
 
   // Add keywords
   add_snippet_completions(tokens, start_offset, prefix, scope, &mut candidates);
+
+  candidates
+}
+
+pub fn complete_after_pipe(
+  prefix: &str,
+  start_offset: u32,
+  tokens: &[Token],
+  output: Option<&AnalyzeProjectOutput>,
+  file_id: &FileId,
+) -> Vec<CompletionCandidate> {
+  let mut candidates = complete_identifier(prefix, start_offset, tokens, output, file_id);
+
+  candidates.retain(|candidate| {
+    matches!(
+      candidate.kind,
+      CompletionKind::Function | CompletionKind::Variable | CompletionKind::Constant | CompletionKind::Namespace
+    )
+  });
 
   candidates
 }
@@ -2696,6 +2742,21 @@ mod tests {
         assert_eq!(prefix, "fo");
       },
       other => panic!("Expected Identifier context, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_detect_context_after_pipe() {
+    let source = "value |> do";
+    let tokens = lex(source);
+
+    let context = detect_context(&tokens, source.len() as u32, source);
+
+    match context {
+      Some(CompletionContext::AfterPipe { prefix, .. }) => {
+        assert_eq!(prefix, "do");
+      },
+      other => panic!("Expected AfterPipe context, got {:?}", other),
     }
   }
 

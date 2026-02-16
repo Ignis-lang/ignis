@@ -441,6 +441,14 @@ impl<'a> Analyzer<'a> {
       ASTExpression::CaptureOverride(co) => {
         self.resolve_node(&co.inner, scope_kind);
       },
+
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        self.resolve_node(lhs, scope_kind);
+        let prev = self.in_callee_context;
+        self.in_callee_context = true;
+        self.resolve_node(rhs, scope_kind);
+        self.in_callee_context = prev;
+      },
     }
   }
 
