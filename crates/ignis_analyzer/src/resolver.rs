@@ -2,7 +2,7 @@ use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
   expressions::{ASTExpression, ASTPathSegment},
   pattern::ASTPattern,
-  statements::ASTStatement,
+  statements::{ASTStatement, import_statement::ImportItemKind},
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
@@ -182,6 +182,16 @@ impl<'a> Analyzer<'a> {
               }
               .report(),
             );
+          }
+        },
+        ignis_ast::statements::ASTExport::ReExportFrom { items, .. } => {
+          for item in items {
+            let ImportItemKind::Named(name) = &item.kind else {
+              continue;
+            };
+            if let Some(def_id) = self.scopes.lookup_def(name).cloned() {
+              self.mark_referenced(def_id);
+            }
           }
         },
       },

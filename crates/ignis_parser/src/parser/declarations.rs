@@ -415,7 +415,7 @@ impl super::IgnisParser {
     Ok(self.allocate_statement(ASTStatement::Import(import_statement)))
   }
 
-  /// export <declaration> | export <identifier>;
+  /// export <declaration> | export <name>; | export <name-list> from "path";
   fn parse_export_declaration(&mut self) -> ParserResult<NodeId> {
     let keyword = self.expect(TokenType::Export)?.clone();
 
@@ -437,12 +437,47 @@ impl super::IgnisParser {
     } else {
       let _attrs = self.take_pending_attrs();
 
-      let name_token = self.expect(TokenType::Identifier)?.clone();
-      let semicolon = self.expect(TokenType::SemiColon)?.clone();
-      let span = Span::merge(&keyword.span, &semicolon.span);
-      let export_statement = ASTExport::name(self.insert_symbol(&name_token), span);
+      // Reject `export _ from "..."`
+      if self.at(TokenType::Identifier) && self.peek().lexeme == "_" {
+        let underscore = self.bump().clone();
+        return Err(DiagnosticMessage::DiscardExportFromNotAllowed { at: underscore.span });
+      }
 
-      Ok(self.allocate_statement(ASTStatement::Export(export_statement)))
+      let first_token = self.expect(TokenType::Identifier)?.clone();
+
+      // `export X from "...";` or `export X, Y from "...";`
+      if self.at(TokenType::From) || self.at(TokenType::Comma) {
+        let mut items = vec![ASTImportItem::named(
+          self.insert_symbol(&first_token),
+          first_token.span.clone(),
+        )];
+
+        while self.eat(TokenType::Comma) {
+          if self.at(TokenType::From) {
+            break;
+          }
+          let ident = self.expect(TokenType::Identifier)?.clone();
+          items.push(ASTImportItem::named(self.insert_symbol(&ident), ident.span.clone()));
+        }
+
+        self.expect(TokenType::From)?;
+        let path_token = self.expect(TokenType::String)?.clone();
+        let semicolon = self.expect(TokenType::SemiColon)?.clone();
+
+        let from = path_token.lexeme.trim_matches('"').to_string();
+        let from_span = path_token.span.clone();
+        let span = Span::merge(&keyword.span, &semicolon.span);
+        let export_statement = ASTExport::re_export_from(items, from, from_span, span);
+
+        Ok(self.allocate_statement(ASTStatement::Export(export_statement)))
+      } else {
+        // `export X;`
+        let semicolon = self.expect(TokenType::SemiColon)?.clone();
+        let span = Span::merge(&keyword.span, &semicolon.span);
+        let export_statement = ASTExport::name(self.insert_symbol(&first_token), span);
+
+        Ok(self.allocate_statement(ASTStatement::Export(export_statement)))
+      }
     }
   }
 
@@ -1236,6 +1271,7 @@ mod tests {
 
   use ignis_ast::statements::import_statement::{ASTImportItem, ImportItemKind};
   use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
+  use ignis_diagnostics::message::DiagnosticMessage;
   use ignis_type::{Store, file::SourceMap, symbol::SymbolTable};
 
   use crate::{lexer::IgnisLexer, parser::IgnisParser};
@@ -2001,5 +2037,76 @@ mod tests {
       },
       other => panic!("expected namespace, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn parses_export_from_single() {
+    use ignis_ast::statements::ASTExport;
+    let result = parse("export Foo from \"./lib\";");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Export(ASTExport::ReExportFrom { items, from, .. }) => {
+        assert_eq!(items.len(), 1);
+        assert_eq!(item_name(&result, &items[0]), "Foo");
+        assert_eq!(from, "./lib");
+      },
+      other => panic!("expected export-from, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_export_from_multiple() {
+    use ignis_ast::statements::ASTExport;
+    let result = parse("export Foo, Bar, Baz from \"./lib\";");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Export(ASTExport::ReExportFrom { items, from, .. }) => {
+        assert_eq!(items.len(), 3);
+        assert_eq!(item_name(&result, &items[0]), "Foo");
+        assert_eq!(item_name(&result, &items[1]), "Bar");
+        assert_eq!(item_name(&result, &items[2]), "Baz");
+        assert_eq!(from, "./lib");
+      },
+      other => panic!("expected export-from, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_export_from_trailing_comma() {
+    use ignis_ast::statements::ASTExport;
+    let result = parse("export Foo, Bar, from \"./lib\";");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Export(ASTExport::ReExportFrom { items, from, .. }) => {
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_name(&result, &items[0]), "Foo");
+        assert_eq!(item_name(&result, &items[1]), "Bar");
+        assert_eq!(from, "./lib");
+      },
+      other => panic!("expected export-from, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn export_discard_from_is_rejected() {
+    let source = "export _ from \"./lib\";";
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols);
+    let errs = parser.parse().expect_err("should reject export _ from");
+
+    assert!(
+      errs
+        .iter()
+        .any(|e| matches!(e, DiagnosticMessage::DiscardExportFromNotAllowed { .. }))
+    );
   }
 }

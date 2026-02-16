@@ -663,7 +663,7 @@ impl<'a> Analyzer<'a> {
         ignis_ast::statements::ASTExport::Declaration { decl, .. } => {
           self.define_root(decl);
         },
-        ignis_ast::statements::ASTExport::Name { .. } => {},
+        ignis_ast::statements::ASTExport::Name { .. } | ignis_ast::statements::ASTExport::ReExportFrom { .. } => {},
       },
       _ => {},
     }

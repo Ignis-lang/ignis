@@ -5,6 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use colored::*;
 use ignis_analyzer::imports::ExportTable;
 use ignis_analyzer::modules::{ModuleError, ModuleGraph};
+use ignis_ast::statements::export_statement::ASTExport;
 use ignis_ast::statements::import_statement::ImportItemKind;
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
 use ignis_config::{DebugTrace, IgnisConfig};
@@ -491,16 +492,29 @@ impl CompilationContext {
     let mut imports = Vec::new();
 
     for root in roots {
-      if let ASTNode::Statement(ASTStatement::Import(import)) = nodes.get(root) {
-        let symbol_ids: Vec<SymbolId> = import
-          .items
-          .iter()
-          .filter_map(|item| match &item.kind {
-            ImportItemKind::Named(name) => Some(*name),
-            ImportItemKind::Discard => None,
-          })
-          .collect();
-        imports.push((symbol_ids, import.from.clone(), import.span.clone()));
+      match nodes.get(root) {
+        ASTNode::Statement(ASTStatement::Import(import)) => {
+          let symbol_ids: Vec<SymbolId> = import
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+              ImportItemKind::Named(name) => Some(*name),
+              ImportItemKind::Discard => None,
+            })
+            .collect();
+          imports.push((symbol_ids, import.from.clone(), import.span.clone()));
+        },
+        ASTNode::Statement(ASTStatement::Export(ASTExport::ReExportFrom { items, from, span, .. })) => {
+          let symbol_ids: Vec<SymbolId> = items
+            .iter()
+            .filter_map(|item| match &item.kind {
+              ImportItemKind::Named(name) => Some(*name),
+              ImportItemKind::Discard => None,
+            })
+            .collect();
+          imports.push((symbol_ids, from.clone(), span.clone()));
+        },
+        _ => {},
       }
     }
 
