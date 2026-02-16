@@ -1,0 +1,270 @@
+//!
+//! # FFI CString
+//!
+//! Owned, NUL-terminated C-compatible string for FFI interop, exposed as
+//! `FFI::CString` and `FFI::NulError`.
+//!
+//! ## Types
+//!
+//! | Type       | Description                                              |
+//! |------------|----------------------------------------------------------|
+//! | `CString`  | Owned NUL-terminated buffer with RAII cleanup (Drop)     |
+//! | `NulError` | Error: input contained interior NUL bytes at `position`  |
+//!
+//! ## Construction
+//!
+//! | Method                          | Source          | Cost                    |
+//! |---------------------------------|-----------------|-------------------------|
+//! | `FFI::CString::new(s)`          | `str` literal   | `memchr` + `memcpy`     |
+//! | `FFI::CString::ofString(&s)`    | `&String`       | `memchr` + `memcpy`     |
+//! | `FFI::CString::fromRawOwned(p)` | Raw `*mut u8`   | `strlen` (no copy)      |
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import FFI from "std::ffi";
+//! import LibC from "std::libc";
+//! import Result from "std::result";
+//!
+//! function main(): i32 {
+//!   let result: Result<FFI::CString, FFI::NulError> = FFI::CString::new("hello");
+//!   if (result.isOk()) {
+//!     let cstr: FFI::CString = result.unwrap();
+//!     let ptr: LibC::CType::CConstStr = cstr.asStr();
+//!     return 0;
+//!   }
+//!   return 1;
+//! }
+//! ```
+
+import Result from "std::result";
+import Memory from "std::memory";
+import String from "std::string";
+import CType from "std::libc";
+
+extern __ffi_cstring {
+  function strlen(s: *u8): u64;
+  function memcpy(dest: *mut u8, src: *u8, n: u64): void;
+  function memchr(s: *u8, c: i32, n: u64): *u8;
+}
+
+export namespace FFI {
+  /// Error returned when a string contains interior NUL bytes.
+  ///
+  /// C strings cannot contain NUL bytes internally because NUL is the
+  /// terminator. When constructing a `CString` from data that might
+  /// contain NULs, this error indicates the position of the first NUL.
+  record NulError {
+    /// Byte position of the first NUL (0x00) found in the input.
+    position: u64;
+  }
+
+  /// Owned C-compatible NUL-terminated string.
+  ///
+  /// `CString` represents an owned string that is guaranteed to:
+  /// - Have no interior NUL bytes
+  /// - Be NUL-terminated
+  /// - Be allocated with the Ignis runtime allocator
+  ///
+  /// Use `CString` when passing strings to C functions that expect
+  /// `const char*` or `char*` arguments.
+  ///
+  /// # Memory Layout
+  ///
+  /// ```text
+  ///   CString { data: 0x1000, len: 5 }
+  ///
+  ///   Memory at 0x1000:
+  ///   ┌───┬───┬───┬───┬───┬───┐
+  ///   │ h │ e │ l │ l │ o │ 0 │
+  ///   └───┴───┴───┴───┴───┴───┘
+  ///     0   1   2   3   4   5
+  ///                   len NUL terminator
+  /// ```
+  ///
+  /// # Invariants
+  ///
+  /// - `data` points to a buffer of `len + 1` bytes allocated with `Memory::alloc`
+  /// - `data[0..len]` contains no NUL bytes (0x00)
+  /// - `data[len]` is NUL (0x00)
+  /// - `data` is owned: automatically freed in `drop`
+  ///
+  /// # Safety
+  ///
+  /// - `fromRawOwned()` only accepts pointers from `intoRaw()` or the same
+  ///   runtime allocator (`Memory::alloc` / `Memory::free`). Passing pointers
+  ///   from `malloc`, static storage, or any other allocator is undefined
+  ///   behavior.
+  /// - Do not call `asStr()` if `data == null` (empty CString from
+  ///   `fromRawOwned(null)`); passing a null pointer to C functions that
+  ///   expect a valid string is undefined behavior.
+  @implements(Drop)
+  record CString {
+    /// Owned pointer to the buffer. `char*` in C semantics.
+    data: CType::CStr;
+
+    /// Length in bytes excluding the NUL terminator.
+    len: u64;
+
+    /// Creates a `CString` from a `str` literal (`const char*`).
+    ///
+    /// Copies the bytes into a new owned buffer. Returns an error if the
+    /// string contains interior NUL bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - NUL-terminated string literal (caller guarantees NUL termination)
+    ///
+    /// # Returns
+    ///
+    /// - `Result::OK(CString)` if no interior NULs were found
+    /// - `Result::ERROR(NulError)` with the position of the first NUL byte
+    public static new(s: str): Result<CString, NulError> {
+      let len: u64 = __ffi_cstring::strlen(s as *u8);
+
+      if (len == 0) {
+        let buf: CType::CStr = Memory::allocateVector<u8>(1) as CType::CStr;
+        @write<u8>(buf, 0);
+        return Result::OK(CString { data: buf, len: 0 });
+      }
+
+      let nulPtr: *u8 = __ffi_cstring::memchr(s as *u8, 0, len);
+      if (nulPtr != null) {
+        let nulPos: u64 = @integerFromPointer(nulPtr) - @integerFromPointer(s as *u8);
+        return Result::ERROR(NulError { position: nulPos });
+      }
+
+      let buf: CType::CStr = Memory::allocateVector<u8>(len + 1) as CType::CStr;
+      __ffi_cstring::memcpy(buf, s as *u8, len);
+      @write<u8>(buf + len, 0);
+
+      return Result::OK(CString { data: buf, len: len });
+    }
+
+    /// Creates a `CString` from a `String` by reference.
+    ///
+    /// Gets the underlying `str` view from the `String` and scans for
+    /// interior NUL bytes with `memchr`. If none are found, copies the
+    /// bytes into a new owned buffer in a single `memcpy`.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - Reference to the source `String`
+    ///
+    /// # Returns
+    ///
+    /// - `Result::OK(CString)` if no interior NULs were found
+    /// - `Result::ERROR(NulError)` with the position of the first NUL byte
+    public static ofString(s: &String): Result<CString, NulError> {
+      let len: u64 = s.length();
+
+      if (len == 0) {
+        let buf: CType::CStr = Memory::allocateVector<u8>(1) as CType::CStr;
+        @write<u8>(buf, 0);
+        return Result::OK(CString { data: buf, len: 0 });
+      }
+
+      let raw: str = s.toStr();
+
+      let nulPtr: *u8 = __ffi_cstring::memchr(raw as *u8, 0, len);
+      if (nulPtr != null) {
+        let nulPos: u64 = @integerFromPointer(nulPtr) - @integerFromPointer(raw as *u8);
+        return Result::ERROR(NulError { position: nulPos });
+      }
+
+      let buf: CType::CStr = Memory::allocateVector<u8>(len + 1) as CType::CStr;
+      __ffi_cstring::memcpy(buf, raw as *u8, len);
+      @write<u8>(buf + len, 0);
+
+      return Result::OK(CString { data: buf, len: len });
+    }
+
+    /// Recovers ownership of a raw pointer previously obtained from `intoRaw()`.
+    ///
+    /// # Safety (hard rules)
+    ///
+    /// - `ptr` MUST have been returned by `intoRaw()` from a `CString`
+    /// - OR `ptr` MUST have been allocated with the same allocator as `Memory::alloc`
+    /// - `ptr` MUST be NUL-terminated with no interior NULs
+    /// - Passing pointers from `malloc`, static storage, or other allocators is UB
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - Owned pointer to the buffer, or `null` for an empty `CString`
+    ///
+    /// # Returns
+    ///
+    /// A `CString` taking ownership of the buffer. If `ptr == null`, returns
+    /// an empty `CString` with `data == null` and `len == 0`.
+    ///
+    /// # Warning
+    ///
+    /// Do not call `asStr()` on a `CString` created with `fromRawOwned(null)`.
+    public static fromRawOwned(ptr: CType::CStr): CString {
+      if (ptr == null) {
+        return CString { data: null, len: 0 };
+      }
+
+      let len: u64 = __ffi_cstring::strlen(ptr as *u8);
+      return CString { data: ptr, len: len };
+    }
+
+    /// Returns the contents as `const char*` for passing to C functions.
+    ///
+    /// The returned pointer is valid as long as the `CString` exists and
+    /// is not modified.
+    ///
+    /// # Safety
+    ///
+    /// Do not call this method if `data == null` (empty `CString` created
+    /// with `fromRawOwned(null)`). Passing a null pointer to C functions
+    /// that expect a valid string is undefined behavior.
+    ///
+    /// # Returns
+    ///
+    /// Pointer to the NUL-terminated buffer (`const char*`).
+    public asStr(&self): CType::CConstStr {
+      return self.data as CType::CConstStr;
+    }
+
+    /// Extracts the owned buffer pointer and leaves the `CString` empty.
+    ///
+    /// After calling this method, the caller is responsible for freeing the
+    /// buffer with `Memory::free`. The `CString` is left in an empty state.
+    ///
+    /// # Returns
+    ///
+    /// Owned pointer to the buffer (`char*`).
+    public intoRaw(&mut self): CType::CStr {
+      let ptr: CType::CStr = self.data;
+      self.data = null;
+      self.len = 0;
+      return ptr;
+    }
+
+    /// Returns the length in bytes excluding the NUL terminator.
+    public length(&self): u64 {
+      return self.len;
+    }
+
+    /// Releases the owned buffer.
+    ///
+    /// Called automatically when the `CString` goes out of scope via
+    /// `@implements(Drop)`. Can also be called manually to release
+    /// memory early.
+    ///
+    /// # Safety
+    ///
+    /// After calling `drop()`, the `CString` is empty and `asStr()` must
+    /// not be called.
+    public drop(&mut self): void {
+      if (self.data == null) {
+        return;
+      }
+
+      Memory::free(self.data);
+      self.data = null;
+      self.len = 0;
+    }
+  }
+}

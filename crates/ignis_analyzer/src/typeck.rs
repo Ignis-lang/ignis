@@ -922,7 +922,13 @@ impl<'a> Analyzer<'a> {
         };
 
         arm_types.iter().skip(1).fold(first_type, |current, next| {
-          if !self.types.types_equal(&current, next) && !self.types.is_error(&current) && !self.types.is_error(next) {
+          let is_compatible = self.types.types_equal(&current, next)
+            || self.types.is_error(&current)
+            || self.types.is_error(next)
+            || matches!(self.types.get(&current), Type::Never)
+            || matches!(self.types.get(next), Type::Never);
+
+          if !is_compatible {
             self.add_diagnostic(
               DiagnosticMessage::MatchArmTypeMismatch {
                 expected: self.format_type_for_error(&current),
@@ -1153,6 +1159,7 @@ impl<'a> Analyzer<'a> {
                 .iter()
                 .map(|payload_ty| self.types.substitute(*payload_ty, &subst))
                 .collect();
+
               let arg_count = args.as_ref().map_or(0, |patterns| patterns.len());
 
               if arg_count != expected_payload.len() {
@@ -1771,6 +1778,14 @@ impl<'a> Analyzer<'a> {
       }
     }
 
+    // Update enum definition with resolved variant payload types BEFORE
+    // typechecking method bodies — methods contain match patterns that read
+    // variant payloads from the EnumDefinition and need the resolved types,
+    // not the Error placeholders left by the binder.
+    if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
+      ed.variants = updated_variants;
+    }
+
     // Second pass: typecheck method bodies
     for item in &en.items {
       if let ASTEnumItem::Method(method) = item {
@@ -1796,11 +1811,6 @@ impl<'a> Analyzer<'a> {
           self.typecheck_method(&method_def_id, method, enum_def_id, scope_kind, ctx);
         }
       }
-    }
-
-    // Update enum definition with resolved variant payload types
-    if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
-      ed.variants = updated_variants;
     }
 
     self.validate_lang_trait_methods(&enum_def_id, &en.span);
@@ -5251,15 +5261,15 @@ impl<'a> Analyzer<'a> {
         self.types.error()
       },
       Type::Instance { generic, args } => {
-        // Instance of a generic record - look up method and substitute types
-        let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&generic).kind {
-          rd.clone()
-        } else {
-          return self.types.error();
+        // Instance of a generic record or enum - look up method and substitute types
+        let (instance_methods, fields) = match &self.defs.get(&generic).kind {
+          DefinitionKind::Record(rd) => (rd.instance_methods.clone(), Some(rd.fields.clone())),
+          DefinitionKind::Enum(ed) => (ed.instance_methods.clone(), None),
+          _ => return self.types.error(),
         };
 
         // Check instance methods
-        if let Some(entry) = rd.instance_methods.get(&ma.member) {
+        if let Some(entry) = instance_methods.get(&ma.member) {
           match entry {
             SymbolEntry::Single(method_id) => {
               self.set_import_item_def(&ma.member_span, method_id);
@@ -5459,18 +5469,20 @@ impl<'a> Analyzer<'a> {
           }
         }
 
-        // Not a method - check if it's a field being called (error)
-        if rd.fields.iter().any(|f| f.name == ma.member) {
-          let type_name = self.format_type_for_error(&obj_type);
-          let member_name = self.get_symbol_name(&ma.member);
-          self.add_diagnostic(
-            DiagnosticMessage::NotCallable {
-              type_name: format!("{}.{}", type_name, member_name),
-              span: call.span.clone(),
-            }
-            .report(),
-          );
-          return self.types.error();
+        // Not a method - check if it's a field being called (error, records only)
+        if let Some(ref flds) = fields {
+          if flds.iter().any(|f| f.name == ma.member) {
+            let type_name = self.format_type_for_error(&obj_type);
+            let member_name = self.get_symbol_name(&ma.member);
+            self.add_diagnostic(
+              DiagnosticMessage::NotCallable {
+                type_name: format!("{}.{}", type_name, member_name),
+                span: call.span.clone(),
+              }
+              .report(),
+            );
+            return self.types.error();
+          }
         }
 
         if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
@@ -7585,8 +7597,13 @@ impl<'a> Analyzer<'a> {
 
         let is_pointer_pair = self.is_pointer_type(&left_type) || self.is_pointer_type(&right_type);
 
-        if self.is_pointer_type(&left_type) && self.types.types_equal(&right_type, &self.types.i64()) {
+        // pointer + integer or integer + pointer -> returns pointer type
+        if self.is_pointer_type(&left_type) && self.types.is_integer(&right_type) {
           return left_type;
+        }
+
+        if self.is_pointer_type(&right_type) && self.types.is_integer(&left_type) {
+          return right_type;
         }
 
         if binary.operator == ASTBinaryOperator::Subtract
@@ -7655,6 +7672,12 @@ impl<'a> Analyzer<'a> {
           return self.types.boolean();
         }
 
+        if matches!(self.types.get(&left_type), Type::Char)
+          && matches!(self.types.get(&right_type), Type::Char)
+        {
+          return self.types.boolean();
+        }
+
         let mut resolved_left = left_type;
         let mut resolved_right = right_type;
 
@@ -7717,22 +7740,28 @@ impl<'a> Analyzer<'a> {
       | ASTBinaryOperator::GreaterThan
       | ASTBinaryOperator::GreaterThanOrEqual => {
         if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
-          self.types.boolean()
-        } else {
-          let operator = format!("{:?}", binary.operator);
-          let left = self.format_type_for_error(&left_type);
-          let right = self.format_type_for_error(&right_type);
-          self.add_diagnostic(
-            DiagnosticMessage::InvalidBinaryOperandType {
-              operator,
-              left_type: left,
-              right_type: right,
-              span: binary.span.clone(),
-            }
-            .report(),
-          );
-          self.types.error()
+          return self.types.boolean();
         }
+
+        if matches!(self.types.get(&left_type), Type::Char)
+          && matches!(self.types.get(&right_type), Type::Char)
+        {
+          return self.types.boolean();
+        }
+
+        let operator = format!("{:?}", binary.operator);
+        let left = self.format_type_for_error(&left_type);
+        let right = self.format_type_for_error(&right_type);
+        self.add_diagnostic(
+          DiagnosticMessage::InvalidBinaryOperandType {
+            operator,
+            left_type: left,
+            right_type: right,
+            span: binary.span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
       },
       ASTBinaryOperator::And => {
         let boolean_type = self.types.boolean();
@@ -8085,6 +8114,9 @@ impl<'a> Analyzer<'a> {
       // Pointer <-> integer casts (for low-level memory manipulation)
       (Type::Pointer { .. }, _) if self.types.is_integer(&target_type) => true,
       (_, Type::Pointer { .. }) if self.types.is_integer(&expr_type) => true,
+      // Pointer <-> str (str is const char*, pointer is char* or void*)
+      (Type::Pointer { .. }, Type::Str) => true,
+      (Type::Str, Type::Pointer { .. }) => true,
       (Type::Infer, _) => true,
       (Type::Reference { inner, .. }, _) if self.types.is_infer(inner) => true,
       (_, _) if self.types.types_equal(&expr_type, &target_type) => true,

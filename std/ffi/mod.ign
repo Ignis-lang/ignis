@@ -1,0 +1,53 @@
+//!
+//! # FFI
+//!
+//! Types for safe Foreign Function Interface interoperability.
+//!
+//! All types live under the `FFI` namespace (re-exported from `std::ffi/cstring`).
+//!
+//! ## Types
+//!
+//! | Type             | Source file  | Description                                       |
+//! |------------------|--------------|---------------------------------------------------|
+//! | `FFI::CString`   | cstring.ign  | Owned, NUL-terminated C string with RAII cleanup   |
+//! | `FFI::NulError`  | cstring.ign  | Error: input contained interior NUL bytes          |
+//!
+//! ## CString vs String vs str
+//!
+//! | Type           | Ownership | NUL-terminated | Interior NULs  | Use Case           |
+//! |----------------|-----------|----------------|----------------|--------------------|
+//! | `str`          | Borrowed  | Yes (contract) | Allowed        | String literals    |
+//! | `String`       | Owned     | Yes (runtime)  | Allowed        | General-purpose    |
+//! | `FFI::CString` | Owned     | Yes (guaranteed)| **Prohibited** | FFI, C interop     |
+//!
+//! ## Safety
+//!
+//! `FFI::CString` guarantees:
+//! - No interior NUL bytes (checked at construction)
+//! - Always NUL-terminated
+//! - Owned buffer freed automatically on drop
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import FFI from "std::ffi";
+//! import LibC from "std::libc";
+//! import Result from "std::result";
+//!
+//! function main(): i32 {
+//!   let result: Result<FFI::CString, FFI::NulError> = FFI::CString::new("/tmp/file.txt");
+//!
+//!   if (result.isOk()) {
+//!     let cstr: FFI::CString = result.unwrap();
+//!     let ptr: LibC::CType::CConstStr = cstr.asStr();
+//!     // Pass ptr to C function expecting const char*
+//!     return 0;
+//!   }
+//!
+//!   return 1;
+//! }
+//! ```
+
+import _ from "std::ffi::cstring";
+
+export namespace FFI {}
