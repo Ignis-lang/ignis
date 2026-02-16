@@ -1,75 +1,78 @@
 //!
-//! # LibC Module
+//! # LibC
 //!
-//! Raw bindings to a POSIX-oriented libc surface.
+//! Raw bindings to a POSIX-oriented subset of the C standard library.
 //!
-//! ## Overview
+//! All types use the `CType` namespace (re-exported from `std::libc/primitives`).
+//! No safety guarantees are added -- the caller is responsible for pointer
+//! validity, buffer sizes, and lifetime management.
 //!
-//! This module exposes a curated subset of POSIX/C standard library functions
-//! directly to Ignis code. Functions use C-compatible signatures and semantics,
-//! with all types coming from the `CType` namespace (see `std::libc/primitives`).
+//! ## Sub-namespaces
 //!
-//! No safety guarantees are added by this module. The caller is responsible
-//! for correct pointer usage, buffer sizes, and lifetime management.
-//!
-//! ## Organization
-//!
-//! The `LibC` namespace groups functions by category:
-//!
-//! | Category              | C Header        | Functions                                         |
-//! |-----------------------|-----------------|----------------------------------------------------|
-//! | Memory allocation     | `stdlib.h`      | `malloc`, `calloc`, `realloc`, `free`              |
-//! | Memory operations     | `string.h`      | `memcpy`, `memmove`, `memset`, `memcmp`            |
-//! | String operations     | `string.h`      | `strlen`, `strcmp`, `strcpy`, `strcat`, `strstr`... |
-//! | Process control       | `stdlib.h`      | `exit`, `abort`, `_exit`, `system`, `getenv`       |
-//! | Conversion            | `stdlib.h`      | `atoi`, `atol`, `atof`                             |
-//! | Integer math          | `stdlib.h`      | `abs`, `labs`                                      |
-//! | Character class       | `ctype.h`       | `isalnum`, `isdigit`, `toupper`, `tolower`...      |
-//! | Time                  | `time.h`        | `time`, `clock`                                    |
-//! | File descriptors      | `unistd.h`      | `read`, `write`, `open`, `close`, `lseek`...       |
-//! | Stdio streams         | `stdio.h`       | `fopen`, `fclose`, `fread`, `fwrite`, `fseek`...   |
-//! | Errno                 | `errno.h`       | `get`, `set` + POSIX error constants               |
-//! | Memory mapping        | `sys/mman.h`    | `mmap`, `munmap`, `mprotect`                       |
-//! | Signals               | `signal.h`      | `raise`, `kill`                                    |
-//! | Wait                  | `sys/wait.h`    | `wait`, `waitpid`                                  |
+//! | Namespace              | Source file  | C Headers                | Description                                    |
+//! |------------------------|--------------|--------------------------|------------------------------------------------|
+//! | `LibC::Allocator`      | memory.ign   | `stdlib.h`               | `malloc`, `calloc`, `realloc`, `free`          |
+//! | `LibC::MemoryOperations` | memory.ign | `string.h`               | `memcpy`, `memmove`, `memset`, `memcmp`        |
+//! | `LibC::Memory`         | memory.ign   | `sys/mman.h`, `unistd.h` | `mmap`, `munmap`, `mprotect`, `sbrk`, `brk`    |
+//! | `LibC::String`         | string.ign   | `string.h`               | `strlen`, `strcmp`, `strcpy`, `strcat`, ...     |
+//! | `LibC::File`           | io.ign       | `unistd.h`, `fcntl.h`    | `open`, `close`, `read`, `write`, `lseek`, ... |
+//! | `LibC::Stdio`          | stdio.ign    | `stdio.h`                | `fopen`, `fclose`, `fread`, `fwrite`, ...      |
+//! | `LibC::Errno`          | errno.ign    | `errno.h`                | `get`, `set` + 26 POSIX error constants        |
+//! | `LibC::Process`        | process.ign  | `stdlib.h`, `unistd.h`   | `exit`, `fork`, `getpid`, `sleep`, ...         |
+//! | `LibC::Signals`        | process.ign  | `signal.h`               | `raise`, `kill`                                |
+//! | `LibC::Wait`           | process.ign  | `sys/wait.h`             | `wait`, `waitpid`                              |
+//! | `LibC::Conversion`     | misc.ign     | `stdlib.h`               | `atoi`, `atol`, `atof`                         |
+//! | `LibC::Math`           | misc.ign     | `stdlib.h`               | `abs`, `labs`                                  |
+//! | `LibC::Character`      | misc.ign     | `ctype.h`                | `isalnum`, `isdigit`, `toupper`, `tolower`, ...|
+//! | `LibC::Time`           | misc.ign     | `time.h`                 | `time`, `clock`                                |
 //!
 //! ## Constants
 //!
-//! The `LibC` namespace also defines commonly used constants:
+//! Each sub-namespace exposes relevant C constants as `extern const`
+//! declarations. Values come from the C headers at compile time, not
+//! hardcoded in Ignis source.
 //!
-//! - **Seek**: `SEEK_SET`, `SEEK_CUR`, `SEEK_END`
-//! - **File descriptors**: `STDIN_FILENO`, `STDOUT_FILENO`, `STDERR_FILENO`
-//! - **Exit codes**: `EXIT_SUCCESS`, `EXIT_FAILURE`
-//! - **Open flags**: `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND`
-//! - **mmap**: `PROT_NONE/READ/WRITE/EXEC`, `MAP_SHARED/PRIVATE/ANONYMOUS`
-//! - **Signals**: `SIGINT`, `SIGKILL`, `SIGSEGV`, `SIGTERM`
-//! - **Clock**: `CLOCKS_PER_SEC`
-//! - **Errno**: `ENOENT`, `EACCES`, `EEXIST`, `EINVAL`, `ENOMEM`, `EAGAIN`, ...
+//! | Namespace          | Constants                                                        |
+//! |--------------------|------------------------------------------------------------------|
+//! | `LibC::File`       | `SEEK_SET`, `SEEK_CUR`, `SEEK_END`, `STDIN_FILENO`, `STDOUT_FILENO`, `STDERR_FILENO`, `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, `O_APPEND` |
+//! | `LibC::Stdio`      | `SEEK_SET`, `SEEK_CUR`, `SEEK_END`, `EOF`                        |
+//! | `LibC::Errno`      | `EPERM`, `ENOENT`, `EACCES`, `EINVAL`, `ENOMEM`, `EAGAIN`, ...  |
+//! | `LibC::Process`    | `EXIT_SUCCESS`, `EXIT_FAILURE`                                   |
+//! | `LibC::Signals`    | `SIGINT`, `SIGKILL`, `SIGSEGV`, `SIGTERM`                        |
+//! | `LibC::Memory`     | `PROT_NONE`, `PROT_READ`, `PROT_WRITE`, `PROT_EXEC`, `MAP_SHARED`, `MAP_PRIVATE`, `MAP_ANONYMOUS` |
+//! | `LibC::Time`       | `CLOCKS_PER_SEC`                                                 |
 //!
-//! ## Platform Assumptions
+//! ## Platform
 //!
-//! - LP64 type sizes (Linux/macOS 64-bit)
-//! - Linux `open()` flag values
-//! - Linux mmap and errno constant values
+//! Type sizes assume LP64 (Linux/macOS 64-bit). See `CType` for the
+//! full type mapping.
 //!
 //! ## Example
 //!
 //! ```ignis
 //! import LibC, CType from "std::libc";
-//! import Io from "std::io";
-//! import String from "std::string";
 //!
 //! function main(): i32 {
-//!   // Get process ID
-//!   let pid: CType::PidT = LibC::Process::getpid();
-//!   Io::println(String::create(pid as i32));
+//!   // Write to stdout via file descriptor
+//!   let msg: *u8 = "hello from libc\n";
+//!   LibC::File::write(LibC::File::STDOUT_FILENO, msg as CType::CConstVoidPtr, 16);
 //!
-//!   // Allocate and free memory
-//!   let buf: CType::CVoidPtr = LibC::Allocator::malloc(1024);
-//!   LibC::Allocator::free(buf);
+//!   // Open a file, write to it, close it
+//!   let fd: CType::CInt = LibC::File::open("out.txt", LibC::File::O_WRONLY | LibC::File::O_CREAT | LibC::File::O_TRUNC);
+//!   if fd != -1 {
+//!     let data: *u8 = "written via libc\n";
+//!     LibC::File::write(fd, data as CType::CConstVoidPtr, 17);
+//!     LibC::File::close(fd);
+//!   }
 //!
-//!   // Read environment variable
-//!   let home: CType::CStr = LibC::Process::getenv("HOME");
+//!   // Check errno after a failed operation
+//!   let bad: CType::CInt = LibC::File::open("/nonexistent", LibC::File::O_RDONLY);
+//!   if bad == -1 {
+//!     let err: CType::CInt = LibC::Errno::get();
+//!     if err == LibC::Errno::ENOENT {
+//!       LibC::Process::exit(LibC::Process::EXIT_SUCCESS);
+//!     }
+//!   }
 //!
 //!   return 0;
 //! }
@@ -79,7 +82,6 @@ export CType from "./primitives";
 
 // Each sub-file declares its own extern blocks and contributes
 // `namespace LibC::*` sub-namespaces to the shared NamespaceStore.
-import _ from "std::libc::constants";
 import _ from "std::libc::memory";
 import _ from "std::libc::string";
 import _ from "std::libc::process";
@@ -88,10 +90,4 @@ import _ from "std::libc::stdio";
 import _ from "std::libc::errno";
 import _ from "std::libc::misc";
 
-/// Curated POSIX/C standard library bindings.
-///
-/// Provides constants and functions grouped by category. All types use the
-/// `CType` namespace from `std::libc/primitives`. No safety guarantees are
-/// added — the caller is responsible for pointer validity, buffer sizes, and
-/// lifetime management.
 export namespace LibC { }
