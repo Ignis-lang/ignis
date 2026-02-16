@@ -589,6 +589,11 @@ impl<'a> LoweringContext<'a> {
         escapes,
         ..
       } => self.lower_closure(thunk_def, drop_def, captures, *escapes, node.type_id, node.span),
+
+      HIRKind::Defer { .. } => {
+        // No-op: deferred expressions are emitted at exit points by emit_scope_end_defers / emit_exit_defers
+        None
+      },
     }
   }
 
@@ -1856,6 +1861,7 @@ impl<'a> LoweringContext<'a> {
     let result = expression.and_then(|expr| self.lower_hir_node(expr));
 
     if !self.fn_builder().is_terminated() {
+      self.emit_scope_end_defers(block_hir_id);
       self.emit_scope_end_drops(block_hir_id);
       self.emit_current_synthetic_drops();
     }
@@ -2493,6 +2499,7 @@ impl<'a> LoweringContext<'a> {
     hir_id: HIRId,
   ) {
     let loop_ctx = self.loop_stack.last().expect("break outside of loop").clone();
+    self.emit_exit_defers(ExitKey::Break(hir_id));
     self.emit_exit_drops(ExitKey::Break(hir_id));
     self.emit_synthetic_drops_from_depth(loop_ctx.synthetic_stack_depth);
     self.fn_builder().terminate(Terminator::Goto(loop_ctx.break_block));
@@ -2503,6 +2510,7 @@ impl<'a> LoweringContext<'a> {
     hir_id: HIRId,
   ) {
     let loop_ctx = self.loop_stack.last().expect("continue outside of loop").clone();
+    self.emit_exit_defers(ExitKey::Continue(hir_id));
     self.emit_exit_drops(ExitKey::Continue(hir_id));
     self.emit_synthetic_drops_from_depth(loop_ctx.synthetic_stack_depth);
     self.fn_builder().terminate(Terminator::Goto(loop_ctx.continue_block));
@@ -2514,6 +2522,7 @@ impl<'a> LoweringContext<'a> {
     value: Option<HIRId>,
   ) {
     let val = value.and_then(|v| self.lower_hir_node(v)); // Don't spill - ownership transfers to caller
+    self.emit_exit_defers(ExitKey::Return(hir_id));
     self.emit_exit_drops(ExitKey::Return(hir_id));
     self.emit_all_synthetic_drops();
     self.fn_builder().terminate(Terminator::Return(val));
@@ -2522,6 +2531,7 @@ impl<'a> LoweringContext<'a> {
   fn ensure_return(&mut self) {
     if !self.fn_builder().is_terminated() {
       if let Some(fn_def_id) = self.current_fn_def_id {
+        self.emit_exit_defers(ExitKey::FnEnd(fn_def_id));
         self.emit_exit_drops(ExitKey::FnEnd(fn_def_id));
       }
 
@@ -2530,6 +2540,28 @@ impl<'a> LoweringContext<'a> {
         self.fn_builder().terminate(Terminator::Return(None));
       } else {
         self.fn_builder().terminate(Terminator::Unreachable);
+      }
+    }
+  }
+
+  fn emit_scope_end_defers(
+    &mut self,
+    block_hir_id: HIRId,
+  ) {
+    if let Some(defers) = self.drop_schedules.on_scope_end_defers.get(&block_hir_id).cloned() {
+      for defer_body_id in defers {
+        self.lower_hir_node(defer_body_id);
+      }
+    }
+  }
+
+  fn emit_exit_defers(
+    &mut self,
+    key: ExitKey,
+  ) {
+    if let Some(defers) = self.drop_schedules.on_exit_defers.get(&key).cloned() {
+      for defer_body_id in defers {
+        self.lower_hir_node(defer_body_id);
       }
     }
   }

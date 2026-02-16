@@ -153,6 +153,9 @@ impl<'a> Analyzer<'a> {
           self.resolve_node(value, scope_kind);
         }
       },
+      ASTStatement::Defer(d) => {
+        self.resolve_node(&d.expression, scope_kind);
+      },
       ASTStatement::Expression(expr) => {
         self.resolve_expression(None, expr, scope_kind);
       },

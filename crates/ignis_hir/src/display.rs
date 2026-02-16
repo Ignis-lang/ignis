@@ -681,6 +681,12 @@ impl<'a> HIRPrinter<'a> {
           self.indent -= 1;
         }
       },
+      HIRKind::Defer { body } => {
+        writeln!(self.output, "Defer : {}", type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*body);
+        self.indent -= 1;
+      },
       HIRKind::ExpressionStatement(expr) => {
         writeln!(self.output, "ExprStmt : {}", type_str).unwrap();
         self.indent += 1;

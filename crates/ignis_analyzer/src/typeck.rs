@@ -439,6 +439,25 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Expression(expr) => {
         self.typecheck_expression(node_id, expr, scope_kind, ctx, &InferContext::none())
       },
+      ASTStatement::Defer(d) => {
+        let expr_type = self.typecheck_node(&d.expression, scope_kind, ctx);
+
+        if expr_type != self.types.void()
+          && !self.types.is_error(&expr_type)
+          && !matches!(self.types.get(&expr_type), Type::Never)
+        {
+          let found_type = self.format_type_for_error(&expr_type);
+          self.add_diagnostic(
+            DiagnosticMessage::DeferExpressionMustBeVoid {
+              found_type,
+              span: d.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        self.types.void()
+      },
       ASTStatement::Break(_) | ASTStatement::Continue(_) => self.types.never(),
       ASTStatement::Extern(extern_stmt) => {
         for item in &extern_stmt.items {
@@ -8521,6 +8540,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::ForOf(for_of) => self
         .find_first_symbol_usage(for_of.iter, symbol)
         .or_else(|| self.find_first_symbol_usage(for_of.body, symbol)),
+      ASTStatement::Defer(d) => self.find_first_symbol_usage(d.expression, symbol),
       ASTStatement::Return(ret) => ret
         .expression
         .and_then(|expr| self.find_first_symbol_usage(expr, symbol)),

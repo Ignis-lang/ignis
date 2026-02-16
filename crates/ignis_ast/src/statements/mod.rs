@@ -7,6 +7,7 @@ pub mod break_statement;
 pub mod comment_statement;
 pub mod const_statement;
 pub mod continue_statement;
+pub mod defer_statement;
 pub mod enum_;
 pub mod export_statement;
 pub mod extern_statement;
@@ -29,6 +30,7 @@ pub use break_statement::ASTBreak;
 pub use comment_statement::ASTComment;
 pub use const_statement::ASTConstant;
 pub use continue_statement::ASTContinue;
+pub use defer_statement::ASTDefer;
 pub use enum_::{ASTEnum, ASTEnumField, ASTEnumItem, ASTEnumVariant};
 pub use export_statement::ASTExport;
 pub use extern_statement::ASTExtern;
@@ -60,6 +62,7 @@ pub enum ASTStatement {
   Return(ASTReturn),
   Continue(ASTContinue),
   Break(ASTBreak),
+  Defer(ASTDefer),
   Import(ASTImport),
   Extern(ASTExtern),
   Constant(ASTConstant),
@@ -87,6 +90,7 @@ impl ASTStatement {
       ASTStatement::Return(ret) => &ret.span,
       ASTStatement::Continue(cont) => &cont.span,
       ASTStatement::Break(brk) => &brk.span,
+      ASTStatement::Defer(d) => &d.span,
       ASTStatement::Import(imp) => &imp.span,
       ASTStatement::Extern(ext) => &ext.span,
       ASTStatement::Constant(const_) => &const_.span,

@@ -404,6 +404,15 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Trait(tr) => self.lower_trait_methods(tr, hir, scope_kind),
       ASTStatement::ForOf(for_of) => self.lower_for_of(node_id, for_of, hir),
+      ASTStatement::Defer(d) => {
+        let expr_id = self.lower_node_to_hir(&d.expression, hir, scope_kind);
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::Defer { body: expr_id },
+          span: d.span.clone(),
+          type_id: self.types.void(),
+        })
+      },
       _ => hir.alloc(HIRNode {
         kind: HIRKind::Block {
           statements: Vec::new(),
@@ -1662,6 +1671,7 @@ impl<'a> Analyzer<'a> {
           }
           None
         },
+        ASTStatement::Defer(_) => None,
         _ => None,
       },
     }

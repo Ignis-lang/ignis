@@ -49,7 +49,7 @@ impl<'a> Analyzer<'a> {
   ) {
     self.reset_scopes(roots);
     for root in roots {
-      self.extra_checks_node(root, ScopeKind::Global, false, false);
+      self.extra_checks_node(root, ScopeKind::Global, false, false, false);
     }
   }
 
@@ -59,12 +59,15 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     in_loop: bool,
     in_function: bool,
+    in_defer: bool,
   ) {
     let node = self.ast.get(node_id);
 
     match node {
-      ASTNode::Statement(stmt) => self.extra_checks_statement(node_id, stmt, scope_kind, in_loop, in_function),
-      ASTNode::Expression(expr) => self.extra_checks_expression(expr, scope_kind, in_loop, in_function),
+      ASTNode::Statement(stmt) => {
+        self.extra_checks_statement(node_id, stmt, scope_kind, in_loop, in_function, in_defer)
+      },
+      ASTNode::Expression(expr) => self.extra_checks_expression(expr, scope_kind, in_loop, in_function, in_defer),
     }
   }
 
@@ -75,6 +78,7 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     in_loop: bool,
     in_function: bool,
+    in_defer: bool,
   ) {
     match stmt {
       ASTStatement::Function(func) => {
@@ -114,7 +118,7 @@ impl<'a> Analyzer<'a> {
             self.define_function_params_in_scope(def_id);
           }
 
-          self.extra_checks_node(body_id, ScopeKind::Function, false, true);
+          self.extra_checks_node(body_id, ScopeKind::Function, false, true, false);
           self.scopes.pop();
 
           if pushed_generic {
@@ -124,16 +128,16 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Variable(var) => {
         if let Some(value_id) = &var.value {
-          self.extra_checks_node(value_id, scope_kind, in_loop, in_function);
+          self.extra_checks_node(value_id, scope_kind, in_loop, in_function, in_defer);
         }
         self.define_decl_in_current_scope(node_id);
       },
       ASTStatement::LetElse(let_else) => {
-        self.extra_checks_node(&let_else.value, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&let_else.value, scope_kind, in_loop, in_function, in_defer);
         self.register_pattern_bindings(&let_else.pattern);
 
         self.scopes.push(ScopeKind::Block);
-        self.extra_checks_node(&let_else.else_block, ScopeKind::Block, in_loop, in_function);
+        self.extra_checks_node(&let_else.else_block, ScopeKind::Block, in_loop, in_function, in_defer);
         self.scopes.pop();
 
         if self.check_termination(let_else.else_block) != Termination::Always {
@@ -148,7 +152,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Constant(const_) => {
         // Only check value if it exists (not for extern const)
         if let Some(value_id) = &const_.value {
-          self.extra_checks_node(value_id, scope_kind, in_loop, in_function);
+          self.extra_checks_node(value_id, scope_kind, in_loop, in_function, in_defer);
         }
 
         self.define_decl_in_current_scope(node_id);
@@ -166,7 +170,7 @@ impl<'a> Analyzer<'a> {
             self.add_diagnostic(DiagnosticMessage::UnreachableCode { span }.report());
           }
 
-          self.extra_checks_node(stmt_id, ScopeKind::Block, in_loop, in_function);
+          self.extra_checks_node(stmt_id, ScopeKind::Block, in_loop, in_function, in_defer);
 
           // Check if this statement is a terminator (return/break/continue)
           if self.is_terminator(*stmt_id) {
@@ -178,20 +182,20 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::If(if_stmt) => {
         self.scopes.push(ScopeKind::Block);
-        self.extra_checks_node(&if_stmt.condition, scope_kind, in_loop, in_function);
-        self.extra_checks_node(&if_stmt.then_block, ScopeKind::Block, in_loop, in_function);
+        self.extra_checks_node(&if_stmt.condition, scope_kind, in_loop, in_function, in_defer);
+        self.extra_checks_node(&if_stmt.then_block, ScopeKind::Block, in_loop, in_function, in_defer);
         self.scopes.pop();
 
         if let Some(else_branch) = &if_stmt.else_block {
-          self.extra_checks_node(else_branch, ScopeKind::Block, in_loop, in_function);
+          self.extra_checks_node(else_branch, ScopeKind::Block, in_loop, in_function, in_defer);
         }
       },
       ASTStatement::While(while_stmt) => {
         self.scopes.push(ScopeKind::Loop);
 
         self.scopes.push(ScopeKind::Block);
-        self.extra_checks_node(&while_stmt.condition, ScopeKind::Loop, true, in_function);
-        self.extra_checks_node(&while_stmt.body, ScopeKind::Loop, true, in_function);
+        self.extra_checks_node(&while_stmt.condition, ScopeKind::Loop, true, in_function, in_defer);
+        self.extra_checks_node(&while_stmt.body, ScopeKind::Loop, true, in_function, in_defer);
         self.scopes.pop();
 
         self.scopes.pop();
@@ -199,17 +203,17 @@ impl<'a> Analyzer<'a> {
       ASTStatement::For(for_stmt) => {
         self.scopes.push(ScopeKind::Loop);
 
-        self.extra_checks_node(&for_stmt.initializer, ScopeKind::Loop, true, in_function);
-        self.extra_checks_node(&for_stmt.condition, ScopeKind::Loop, true, in_function);
-        self.extra_checks_node(&for_stmt.increment, ScopeKind::Loop, true, in_function);
-        self.extra_checks_node(&for_stmt.body, ScopeKind::Loop, true, in_function);
+        self.extra_checks_node(&for_stmt.initializer, ScopeKind::Loop, true, in_function, in_defer);
+        self.extra_checks_node(&for_stmt.condition, ScopeKind::Loop, true, in_function, in_defer);
+        self.extra_checks_node(&for_stmt.increment, ScopeKind::Loop, true, in_function, in_defer);
+        self.extra_checks_node(&for_stmt.body, ScopeKind::Loop, true, in_function, in_defer);
 
         self.scopes.pop();
       },
       ASTStatement::ForOf(for_of) => {
         with_for_of_scope!(self, node_id, for_of, {
-          self.extra_checks_node(&for_of.iter, ScopeKind::Loop, true, in_function);
-          self.extra_checks_node(&for_of.body, ScopeKind::Loop, true, in_function);
+          self.extra_checks_node(&for_of.iter, ScopeKind::Loop, true, in_function, in_defer);
+          self.extra_checks_node(&for_of.body, ScopeKind::Loop, true, in_function, in_defer);
         });
       },
       ASTStatement::Break(brk) => {
@@ -232,11 +236,17 @@ impl<'a> Analyzer<'a> {
           self.add_diagnostic(DiagnosticMessage::ReturnOutsideFunction { span: ret.span.clone() }.report());
         }
         if let Some(value) = &ret.expression {
-          self.extra_checks_node(value, scope_kind, in_loop, in_function);
+          self.extra_checks_node(value, scope_kind, in_loop, in_function, in_defer);
         }
       },
+      ASTStatement::Defer(d) => {
+        if !in_function {
+          self.add_diagnostic(DiagnosticMessage::DeferOutsideFunction { span: d.span.clone() }.report());
+        }
+        self.extra_checks_node(&d.expression, scope_kind, in_loop, in_function, true);
+      },
       ASTStatement::Expression(expr) => {
-        self.extra_checks_expression(expr, scope_kind, in_loop, in_function);
+        self.extra_checks_expression(expr, scope_kind, in_loop, in_function, in_defer);
       },
       ASTStatement::Extern(extern_stmt) => {
         // Validate extern rules: no body for functions, no init for constants
@@ -284,16 +294,16 @@ impl<'a> Analyzer<'a> {
             _ => {},
           }
 
-          self.extra_checks_node(item, scope_kind, in_loop, in_function);
+          self.extra_checks_node(item, scope_kind, in_loop, in_function, in_defer);
         }
       },
       ASTStatement::Namespace(ns_stmt) => {
         for item in &ns_stmt.items {
-          self.extra_checks_node(item, scope_kind, in_loop, in_function);
+          self.extra_checks_node(item, scope_kind, in_loop, in_function, in_defer);
         }
       },
       ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
-        self.extra_checks_node(decl, scope_kind, in_loop, in_function);
+        self.extra_checks_node(decl, scope_kind, in_loop, in_function, in_defer);
       },
       ASTStatement::Record(rec) => {
         self.check_static_fields_init(rec);
@@ -351,49 +361,50 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     in_loop: bool,
     in_function: bool,
+    in_defer: bool,
   ) {
     match expr {
       ASTExpression::Call(call) => {
-        self.extra_checks_node(&call.callee, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&call.callee, scope_kind, in_loop, in_function, in_defer);
         for arg in &call.arguments {
-          self.extra_checks_node(arg, scope_kind, in_loop, in_function);
+          self.extra_checks_node(arg, scope_kind, in_loop, in_function, in_defer);
         }
       },
       ASTExpression::Binary(binary) => {
-        self.extra_checks_node(&binary.left, scope_kind, in_loop, in_function);
-        self.extra_checks_node(&binary.right, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&binary.left, scope_kind, in_loop, in_function, in_defer);
+        self.extra_checks_node(&binary.right, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Ternary(ternary) => {
-        self.extra_checks_node(&ternary.condition, scope_kind, in_loop, in_function);
-        self.extra_checks_node(&ternary.then_expr, scope_kind, in_loop, in_function);
-        self.extra_checks_node(&ternary.else_expr, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&ternary.condition, scope_kind, in_loop, in_function, in_defer);
+        self.extra_checks_node(&ternary.then_expr, scope_kind, in_loop, in_function, in_defer);
+        self.extra_checks_node(&ternary.else_expr, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Unary(unary) => {
-        self.extra_checks_node(&unary.operand, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&unary.operand, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Assignment(assign) => {
-        self.extra_checks_node(&assign.target, scope_kind, in_loop, in_function);
-        self.extra_checks_node(&assign.value, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&assign.target, scope_kind, in_loop, in_function, in_defer);
+        self.extra_checks_node(&assign.value, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Cast(cast) => {
-        self.extra_checks_node(&cast.expression, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&cast.expression, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Reference(ref_) => {
-        self.extra_checks_node(&ref_.inner, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&ref_.inner, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Dereference(deref) => {
-        self.extra_checks_node(&deref.inner, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&deref.inner, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::VectorAccess(access) => {
-        self.extra_checks_node(&access.name, scope_kind, in_loop, in_function);
-        self.extra_checks_node(&access.index, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&access.name, scope_kind, in_loop, in_function, in_defer);
+        self.extra_checks_node(&access.index, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Grouped(grouped) => {
-        self.extra_checks_node(&grouped.expression, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&grouped.expression, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::Vector(vector) => {
         for elem in &vector.items {
-          self.extra_checks_node(elem, scope_kind, in_loop, in_function);
+          self.extra_checks_node(elem, scope_kind, in_loop, in_function, in_defer);
         }
       },
       ASTExpression::Path(_) => {},
@@ -414,40 +425,40 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Literal(_) => {},
       ASTExpression::PostfixIncrement { expr, .. } => {
-        self.extra_checks_node(expr, scope_kind, in_loop, in_function);
+        self.extra_checks_node(expr, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::PostfixDecrement { expr, .. } => {
-        self.extra_checks_node(expr, scope_kind, in_loop, in_function);
+        self.extra_checks_node(expr, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::MemberAccess(ma) => {
-        self.extra_checks_node(&ma.object, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&ma.object, scope_kind, in_loop, in_function, in_defer);
       },
       ASTExpression::RecordInit(ri) => {
         for field in &ri.fields {
-          self.extra_checks_node(&field.value, scope_kind, in_loop, in_function);
+          self.extra_checks_node(&field.value, scope_kind, in_loop, in_function, in_defer);
         }
       },
       ASTExpression::BuiltinCall(bc) => {
         for arg_id in &bc.args {
-          self.extra_checks_node(arg_id, scope_kind, in_loop, in_function);
+          self.extra_checks_node(arg_id, scope_kind, in_loop, in_function, in_defer);
         }
       },
       ASTExpression::LetCondition(let_condition) => {
-        self.extra_checks_node(&let_condition.value, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&let_condition.value, scope_kind, in_loop, in_function, in_defer);
         self.register_pattern_bindings(&let_condition.pattern);
       },
       ASTExpression::Match(match_expr) => {
-        self.extra_checks_node(&match_expr.scrutinee, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&match_expr.scrutinee, scope_kind, in_loop, in_function, in_defer);
 
         for arm in &match_expr.arms {
           self.scopes.push(ScopeKind::Block);
           self.register_pattern_bindings(&arm.pattern);
 
           if let Some(guard) = arm.guard.as_ref() {
-            self.extra_checks_node(guard, scope_kind, in_loop, in_function);
+            self.extra_checks_node(guard, scope_kind, in_loop, in_function, in_defer);
           }
 
-          self.extra_checks_node(&arm.body, scope_kind, in_loop, in_function);
+          self.extra_checks_node(&arm.body, scope_kind, in_loop, in_function, in_defer);
           self.scopes.pop();
         }
       },
@@ -478,21 +489,24 @@ impl<'a> Analyzer<'a> {
           ignis_ast::expressions::lambda::LambdaBody::Expression(id) => id,
           ignis_ast::expressions::lambda::LambdaBody::Block(id) => id,
         };
-        self.extra_checks_node(body_id, ScopeKind::Function, false, true);
+        self.extra_checks_node(body_id, ScopeKind::Function, false, true, false);
 
         self.scopes.pop();
       },
       ASTExpression::CaptureOverride(co) => {
-        self.extra_checks_node(&co.inner, scope_kind, in_loop, in_function);
+        self.extra_checks_node(&co.inner, scope_kind, in_loop, in_function, in_defer);
       },
 
       ASTExpression::Pipe { lhs, rhs, .. } => {
-        self.extra_checks_node(lhs, scope_kind, in_loop, in_function);
-        self.extra_checks_node(rhs, scope_kind, in_loop, in_function);
+        self.extra_checks_node(lhs, scope_kind, in_loop, in_function, in_defer);
+        self.extra_checks_node(rhs, scope_kind, in_loop, in_function, in_defer);
       },
 
-      ASTExpression::Try { expr, .. } => {
-        self.extra_checks_node(expr, scope_kind, in_loop, in_function);
+      ASTExpression::Try { expr, span } => {
+        if in_defer {
+          self.add_diagnostic(DiagnosticMessage::TryOperatorInDefer { span: span.clone() }.report());
+        }
+        self.extra_checks_node(expr, scope_kind, in_loop, in_function, in_defer);
       },
 
       ASTExpression::PipePlaceholder { .. } => {},
