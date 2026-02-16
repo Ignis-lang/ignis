@@ -58,7 +58,9 @@ impl ModulePath {
   /// Resolve an import specifier to a canonical `ModulePath`.
   ///
   /// Resolution order:
-  /// 1. **Alias match** — first segment (before `::`) is looked up in `aliases`.
+  /// 1. **Alias match** — first segment (before `::`) is checked against `aliases`.
+  ///    Exact segment match is tried first (`"mylib"` in `"mylib::utils"`), then
+  ///    prefix match for shorter alias keys (`"@"` in `"@token::token"`).
   ///    `"std"` produces `ModulePath::Std`; other aliases produce `ModulePath::Project`
   ///    with `.ign` / `mod.ign` convention fallback.
   /// 2. **Relative path** (`./`, `../`) — resolved from `current_file`'s parent.
@@ -69,13 +71,32 @@ impl ModulePath {
     project_root: Option<&std::path::Path>,
     aliases: &HashMap<String, PathBuf>,
   ) -> Result<Self, ModulePathError> {
-    // 1. Alias match: split on first "::" and check the alias map
+    // 1. Alias match: split on first "::" and check the alias map.
+    //
+    // Two matching strategies:
+    //   a) Exact segment match — first segment == alias key (e.g. "mylib::utils" with alias "mylib")
+    //   b) Prefix match — alias key is a proper prefix of first segment (e.g. "@token::token"
+    //      with alias "@"). The remainder after stripping the prefix becomes an extra path segment.
     let (first_segment, rest) = match import_from.split_once("::") {
       Some((first, rest)) => (first, Some(rest)),
       None => (import_from, None),
     };
 
-    if let Some(base_path) = aliases.get(first_segment) {
+    // Try exact segment match first
+    let alias_match = aliases.get(first_segment).map(|base| (base, ""));
+
+    // If no exact match, try prefix match: find the longest alias key that is a
+    // proper prefix of first_segment. Longest-first avoids ambiguity when both
+    // "@" and "@token" exist as aliases.
+    let alias_match = alias_match.or_else(|| {
+      aliases
+        .iter()
+        .filter(|(key, _)| key.len() < first_segment.len() && first_segment.starts_with(key.as_str()))
+        .max_by_key(|(key, _)| key.len())
+        .map(|(key, base)| (base, &first_segment[key.len()..]))
+    });
+
+    if let Some((base_path, prefix_remainder)) = alias_match {
       // "std" alias preserves ModulePath::Std semantics
       if first_segment == "std" {
         let module_name = rest.ok_or(ModulePathError::EmptyStdModuleName)?;
@@ -85,10 +106,18 @@ impl ModulePath {
         return Ok(ModulePath::Std(module_name.to_string()));
       }
 
-      // Other aliases -> ModulePath::Project with convention fallback
-      let subpath = rest
-        .map(|r| r.replace("::", std::path::MAIN_SEPARATOR_STR))
-        .unwrap_or_default();
+      // Build the sub-path by combining the prefix remainder with the rest.
+      // For "@token::token" with alias "@" → prefix_remainder="token", rest="token"
+      // → segments = ["token", "token"] → subpath = "token/token"
+      let subpath = match (prefix_remainder.is_empty(), rest) {
+        (true, Some(r)) => r.replace("::", std::path::MAIN_SEPARATOR_STR),
+        (false, Some(r)) => {
+          let combined = format!("{}::{}", prefix_remainder, r);
+          combined.replace("::", std::path::MAIN_SEPARATOR_STR)
+        },
+        (true, None) => String::new(),
+        (false, None) => prefix_remainder.replace("::", std::path::MAIN_SEPARATOR_STR),
+      };
 
       let resolved = if subpath.is_empty() {
         let mod_path = base_path.join("mod.ign");
@@ -613,6 +642,69 @@ mod tests {
     match result.unwrap() {
       ModulePath::Project(path) => {
         assert!(path.ends_with("math.ign"));
+      },
+      _ => panic!("Expected Project path"),
+    }
+  }
+
+  #[test]
+  fn alias_prefix_match_single_char() {
+    let aliases = HashMap::from([("@".to_string(), PathBuf::from("/project/src"))]);
+    let result = ModulePath::from_import_path("@token::token", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => {
+        assert_eq!(path, PathBuf::from("/project/src/token/token.ign"));
+      },
+      _ => panic!("Expected Project path for prefix alias"),
+    }
+  }
+
+  #[test]
+  fn alias_prefix_match_no_rest() {
+    // "@token" with no further :: segments
+    let aliases = HashMap::from([("@".to_string(), PathBuf::from("/project/src"))]);
+    let result = ModulePath::from_import_path("@token", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => {
+        assert_eq!(path, PathBuf::from("/project/src/token.ign"));
+      },
+      _ => panic!("Expected Project path for prefix alias without rest"),
+    }
+  }
+
+  #[test]
+  fn alias_prefix_match_longest_wins() {
+    // Both "@" and "@lib" are aliases; "@lib" should win for "@lib::utils"
+    let aliases = HashMap::from([
+      ("@".to_string(), PathBuf::from("/project/src")),
+      ("@lib".to_string(), PathBuf::from("/project/libs")),
+    ]);
+    let result = ModulePath::from_import_path("@lib::utils", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => {
+        // Exact match on "@lib" should win, so base = /project/libs, subpath = utils
+        assert_eq!(path, PathBuf::from("/project/libs/utils.ign"));
+      },
+      _ => panic!("Expected Project path"),
+    }
+  }
+
+  #[test]
+  fn alias_exact_match_preferred_over_prefix() {
+    // "@token" as exact alias should take priority over "@" prefix match
+    let aliases = HashMap::from([
+      ("@".to_string(), PathBuf::from("/project/src")),
+      ("@token".to_string(), PathBuf::from("/project/tokens")),
+    ]);
+    let result = ModulePath::from_import_path("@token::lexer", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => {
+        // Exact match "@token" wins, base = /project/tokens, rest = lexer
+        assert_eq!(path, PathBuf::from("/project/tokens/lexer.ign"));
       },
       _ => panic!("Expected Project path"),
     }
