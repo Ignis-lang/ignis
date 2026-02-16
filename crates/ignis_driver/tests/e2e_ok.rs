@@ -4825,3 +4825,190 @@ function main(): i32 {
 "#,
   );
 }
+
+// ===========================================================================
+// Pipe Operator Tests
+// ===========================================================================
+
+#[test]
+fn e2e_pipe_basic() {
+  e2e_test(
+    "pipe_basic",
+    r#"
+function twice(x: i32): i32 {
+    return x * 2;
+}
+
+function main(): i32 {
+    return 21 |> twice;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_chain() {
+  e2e_test(
+    "pipe_chain",
+    r#"
+function add(x: i32, y: i32): i32 {
+    return x + y;
+}
+
+function twice(x: i32): i32 {
+    return x * 2;
+}
+
+function main(): i32 {
+    return 1 |> add(2) |> twice |> add(3);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_with_extra_args() {
+  e2e_test(
+    "pipe_with_extra_args",
+    r#"
+function add3(a: i32, b: i32, c: i32): i32 {
+    return a + b + c;
+}
+
+function main(): i32 {
+    return 10 |> add3(5, 3);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_lambda() {
+  e2e_test(
+    "pipe_lambda",
+    r#"
+function main(): i32 {
+    return 10 |> (x: i32): i32 -> x * 3;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_path() {
+  e2e_test(
+    "pipe_path",
+    r#"
+namespace Math {
+    function square(x: i32): i32 {
+        return x * x;
+    }
+}
+
+function main(): i32 {
+    return 7 |> Math::square;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_path_with_args() {
+  e2e_test(
+    "pipe_path_with_args",
+    r#"
+namespace Math {
+    function add(x: i32, y: i32): i32 {
+        return x + y;
+    }
+}
+
+function main(): i32 {
+    return 10 |> Math::add(5);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_closure_variable() {
+  e2e_test(
+    "pipe_closure_variable",
+    r#"
+function main(): i32 {
+    let f: (i32) -> i32 = (x: i32): i32 -> x + 100;
+    return 5 |> f;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_precedence() {
+  e2e_test(
+    "pipe_precedence",
+    r#"
+function twice(x: i32): i32 {
+    return x * 2;
+}
+
+function main(): i32 {
+    // a + b |> f  ->  a + (b |> f)
+    // 10 + 3 |> twice = 10 + 6 = 16
+    let result: i32 = 10 + 3 |> twice;
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_generic() {
+  e2e_test(
+    "pipe_generic",
+    r#"
+function identity<T>(x: T): T {
+    return x;
+}
+
+function main(): i32 {
+    return 55 |> identity<i32>();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_with_closure_capture() {
+  e2e_test(
+    "pipe_with_closure_capture",
+    r#"
+function main(): i32 {
+    let extra: i32 = 7;
+    return 5 |> (x: i32): i32 -> x + extra;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_evaluation_order() {
+  e2e_test(
+    "pipe_evaluation_order",
+    r#"
+function tick(counter: &mut i32): i32 {
+    *counter = *counter + 1;
+    return *counter;
+}
+
+function encode(a: i32, b: i32): i32 {
+    return a * 10 + b;
+}
+
+function main(): i32 {
+    let mut counter: i32 = 0;
+    return tick(&mut counter) |> encode(tick(&mut counter));
+}
+"#,
+  );
+}

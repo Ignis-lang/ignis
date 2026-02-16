@@ -1,4 +1,4 @@
-use crate::{Analyzer, ResolvedPath, ScopeKind};
+use crate::{Analyzer, PipeResolution, ResolvedPath, ScopeKind};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, expressions::ASTExpression, pattern::ASTPattern};
 use ignis_ast::expressions::binary::ASTBinaryOperator;
 use ignis_ast::expressions::builtin_call::ASTBuiltinCall;
@@ -1228,6 +1228,8 @@ impl<'a> Analyzer<'a> {
 
         self.lower_node_to_hir(&co.inner, hir, scope_kind)
       },
+
+      ASTExpression::Pipe { lhs, rhs, .. } => self.lower_pipe_to_hir(node_id, lhs, rhs, hir, scope_kind),
     }
   }
 
@@ -3884,6 +3886,68 @@ fn convert_assignment_op(op: &ASTAssignmentOperator) -> BinaryOperation {
 }
 
 impl Analyzer<'_> {
+  fn lower_pipe_to_hir(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    _rhs: &NodeId,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let lhs_hir = self.lower_node_to_hir(lhs, hir, scope_kind);
+    let pipe_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+    let span = self.node_span(node_id).clone();
+
+    let resolution = self.pipe_resolutions.get(node_id).cloned();
+
+    match resolution {
+      Some(PipeResolution::DirectCall {
+        def_id,
+        extra_args,
+        type_args,
+      }) => {
+        let mut all_args = vec![lhs_hir];
+        for arg in &extra_args {
+          all_args.push(self.lower_node_to_hir(arg, hir, scope_kind));
+        }
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::Call {
+            callee: def_id,
+            type_args,
+            args: all_args,
+          },
+          span,
+          type_id: pipe_type,
+        })
+      },
+      Some(PipeResolution::ClosureCall {
+        callee_node,
+        extra_args,
+      }) => {
+        let callee_hir = self.lower_node_to_hir(&callee_node, hir, scope_kind);
+        let mut all_args = vec![lhs_hir];
+        for arg in &extra_args {
+          all_args.push(self.lower_node_to_hir(arg, hir, scope_kind));
+        }
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::CallClosure {
+            callee: callee_hir,
+            args: all_args,
+          },
+          span,
+          type_id: pipe_type,
+        })
+      },
+      None => hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span,
+        type_id: self.types.error(),
+      }),
+    }
+  }
+
   fn lower_lambda_to_hir(
     &mut self,
     node_id: &ignis_ast::NodeId,

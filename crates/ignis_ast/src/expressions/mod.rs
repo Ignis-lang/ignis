@@ -62,13 +62,25 @@ pub enum ASTExpression {
   Vector(ASTVector),
   VectorAccess(ASTVectorAccess),
   Path(ASTPath),
-  PostfixIncrement { expr: crate::NodeId, span: Span },
-  PostfixDecrement { expr: crate::NodeId, span: Span },
+  PostfixIncrement {
+    expr: crate::NodeId,
+    span: Span,
+  },
+  PostfixDecrement {
+    expr: crate::NodeId,
+    span: Span,
+  },
   MemberAccess(ASTMemberAccess),
   RecordInit(ASTRecordInit),
   BuiltinCall(ASTBuiltinCall),
   Lambda(ASTLambda),
   CaptureOverride(ASTCaptureOverride),
+  Pipe {
+    lhs: crate::NodeId,
+    rhs: crate::NodeId,
+    pipe_span: Span,
+    span: Span,
+  },
 }
 
 impl ASTExpression {
@@ -97,6 +109,7 @@ impl ASTExpression {
       ASTExpression::BuiltinCall(expr) => &expr.span,
       ASTExpression::Lambda(expr) => &expr.span,
       ASTExpression::CaptureOverride(expr) => &expr.span,
+      ASTExpression::Pipe { span, .. } => span,
     }
   }
 }

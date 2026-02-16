@@ -224,6 +224,11 @@ impl<'a> Analyzer<'a> {
         self.bind_complete(&co.inner, ScopeKind::Block);
       },
 
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        self.bind_complete(lhs, ScopeKind::Block);
+        self.bind_complete(rhs, ScopeKind::Block);
+      },
+
       // Leaf expressions (no sub-expressions that could contain lambdas)
       ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) => {},
     }

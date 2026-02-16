@@ -887,3 +887,84 @@ function main(): i32 {
 "#,
   );
 }
+
+// ===========================================================================
+// Pipe Operator Error Tests
+// ===========================================================================
+
+#[test]
+fn e2e_err_pipe_invalid_rhs_literal() {
+  e2e_error_test(
+    "err_pipe_invalid_rhs_literal",
+    r#"
+function main(): i32 {
+    return 10 |> 42;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_invalid_rhs_binary() {
+  e2e_error_test(
+    "err_pipe_invalid_rhs_binary",
+    r#"
+function main(): i32 {
+    return 10 |> 1 + 2;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_type_mismatch() {
+  e2e_error_test(
+    "err_pipe_type_mismatch",
+    r#"
+function doubleInt(x: i32): i32 {
+    return x * 2;
+}
+
+function main(): i32 {
+    return "hello" |> doubleInt;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_wrong_arity() {
+  e2e_error_test(
+    "err_pipe_wrong_arity",
+    r#"
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return 10 |> add;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_instance_method_rhs() {
+  e2e_error_test(
+    "err_pipe_instance_method_rhs",
+    r#"
+record Box {
+    public value: i32;
+
+    getValue(&self): i32 {
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let b: Box = Box { value: 10 };
+    return 5 |> b.getValue;
+}
+"#,
+  );
+}

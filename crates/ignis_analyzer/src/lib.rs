@@ -90,6 +90,22 @@ impl InferContext {
   }
 }
 
+/// How a pipe expression `lhs |> rhs` desugars. Set by typeck, read by lowering.
+#[derive(Debug, Clone)]
+pub enum PipeResolution {
+  /// `x |> f` or `x |> f(a, b)` — callee is a known function definition.
+  DirectCall {
+    def_id: DefinitionId,
+    extra_args: Vec<NodeId>,
+    type_args: Vec<TypeId>,
+  },
+  /// `x |> closureVar` or `x |> (n: i32): i32 -> n * 2` — callee is a closure/function-typed value.
+  ClosureCall {
+    callee_node: NodeId,
+    extra_args: Vec<NodeId>,
+  },
+}
+
 pub struct Analyzer<'a> {
   ast: &'a ASTStore<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
@@ -133,6 +149,9 @@ pub struct Analyzer<'a> {
   /// Stack of per-lambda capture override maps, built during HIR lowering.
   /// Pushed when entering `lower_lambda_to_hir`, popped into the Closure node.
   capture_override_stack: Vec<HashMap<DefinitionId, ignis_hir::CaptureMode>>,
+
+  /// Pipe operator resolutions. Set by typeck, read by lowering.
+  pipe_resolutions: HashMap<NodeId, PipeResolution>,
 }
 
 pub struct AnalyzerOutput {
@@ -229,6 +248,7 @@ impl<'a> Analyzer<'a> {
       trait_default_clones: HashMap::new(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
+      pipe_resolutions: HashMap::new(),
     }
   }
 
@@ -345,6 +365,7 @@ impl<'a> Analyzer<'a> {
       trait_default_clones: HashMap::new(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
+      pipe_resolutions: HashMap::new(),
     };
 
     // Phase 1: Binding

@@ -46,6 +46,7 @@ pub enum TokenType {
   RightShift,       // >>
   NotAssign,        // ~=
   XorAssign,        // ^=
+  PipeForward,      // |>
   OrAssign,         // |=
   AndAssign,        // &=
   LeftShiftAssign,  // <<=
@@ -373,6 +374,7 @@ impl Display for TokenType {
       TokenType::Or => write!(f, "Or"),
       TokenType::OrAssign => write!(f, "OrAssign"),
       TokenType::Pipe => write!(f, "Pipe"),
+      TokenType::PipeForward => write!(f, "PipeForward"),
       TokenType::Plus => write!(f, "Plus"),
       TokenType::Private => write!(f, "Private"),
       TokenType::Public => write!(f, "Public"),

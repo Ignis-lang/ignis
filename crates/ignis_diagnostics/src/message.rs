@@ -792,6 +792,18 @@ pub enum DiagnosticMessage {
   },
   // #endregion Closures
 
+  // #region Pipe Operator
+  PipeRhsNotCallable {
+    rhs_span: Span,
+    rhs_desc: String,
+    pipe_span: Span,
+  },
+  PipeRhsInstanceMethod {
+    rhs_span: Span,
+    pipe_span: Span,
+  },
+  // #endregion Pipe Operator
+
   // #endregion Analyzer
 }
 
@@ -1608,6 +1620,12 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::ClosureEscapesWithRefCapture { capture_name, .. } => {
         write!(f, "closure escapes its scope while capturing `{}` by reference", capture_name)
       },
+      DiagnosticMessage::PipeRhsNotCallable { rhs_desc, .. } => {
+        write!(f, "invalid pipe RHS: {} is not callable", rhs_desc)
+      },
+      DiagnosticMessage::PipeRhsInstanceMethod { .. } => {
+        write!(f, "instance method access is not supported as pipe RHS")
+      },
     }
   }
 }
@@ -1811,6 +1829,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::IrrefutableLetElsePattern { span, .. }
       | DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { span, .. } => span.clone(),
       DiagnosticMessage::ClosureEscapesWithRefCapture { closure_span, .. } => closure_span.clone(),
+      DiagnosticMessage::PipeRhsNotCallable { rhs_span, .. } => rhs_span.clone(),
+      DiagnosticMessage::PipeRhsInstanceMethod { rhs_span, .. } => rhs_span.clone(),
     }
   }
 
@@ -2009,6 +2029,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::IrrefutableLetElsePattern { .. } => "A0169",
       DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { .. } => "A0156",
       DiagnosticMessage::ClosureEscapesWithRefCapture { .. } => "A0170",
+      DiagnosticMessage::PipeRhsNotCallable { .. } => "A0171",
+      DiagnosticMessage::PipeRhsInstanceMethod { .. } => "A0172",
     }
     .to_string()
   }
@@ -2055,6 +2077,12 @@ impl DiagnosticMessage {
           capture_span.clone(),
           format!("`{}` is captured by reference here", capture_name),
         )]
+      },
+      DiagnosticMessage::PipeRhsNotCallable { pipe_span, .. } => {
+        vec![(pipe_span.clone(), "help: use a lambda instead".to_string())]
+      },
+      DiagnosticMessage::PipeRhsInstanceMethod { pipe_span, .. } => {
+        vec![(pipe_span.clone(), "help: use the static form: `x |> Type::method`".to_string())]
       },
       _ => vec![],
     }

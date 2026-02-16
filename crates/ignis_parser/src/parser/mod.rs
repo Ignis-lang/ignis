@@ -504,6 +504,9 @@ impl IgnisParser {
       TokenType::And => (30, 31),
       TokenType::Or => (29, 30),
 
+      // pipe forward (left)
+      TokenType::PipeForward => (27, 28),
+
       // ternary (right-assoc)
       TokenType::QuestionMark => (20, 19),
 

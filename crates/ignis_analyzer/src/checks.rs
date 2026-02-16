@@ -485,6 +485,11 @@ impl<'a> Analyzer<'a> {
       ASTExpression::CaptureOverride(co) => {
         self.extra_checks_node(&co.inner, scope_kind, in_loop, in_function);
       },
+
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        self.extra_checks_node(lhs, scope_kind, in_loop, in_function);
+        self.extra_checks_node(rhs, scope_kind, in_loop, in_function);
+      },
     }
   }
 

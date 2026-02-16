@@ -173,6 +173,23 @@ function main(): void {
 }
 
 #[test]
+fn pipe_invalid_rhs_not_callable() {
+  let source = r#"
+function main(): i32 {
+    return 10 |> 1 + 2;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0171"]);
+  assert_snapshot!(
+    "pipe_invalid_rhs_not_callable",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn argument_count_mismatch() {
   let result = common::analyze(
     r#"

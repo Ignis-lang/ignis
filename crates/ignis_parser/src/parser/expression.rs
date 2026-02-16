@@ -111,6 +111,19 @@ impl IgnisParser {
 
       self.bump();
 
+      if op == TokenType::PipeForward {
+        let pipe_span = self.previous().span.clone();
+        let rhs = self.parse_expression(rbp)?;
+        let span = Span::merge(self.get_span(&left), self.get_span(&rhs));
+        left = self.allocate_expression(ASTExpression::Pipe {
+          lhs: left,
+          rhs,
+          pipe_span,
+          span,
+        });
+        continue;
+      }
+
       if op == TokenType::As {
         let type_start = self.peek().span.clone();
         let target_type = self.parse_type_syntax()?;
@@ -2021,6 +2034,135 @@ mod tests {
         }
       },
       other => panic!("expected lambda, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pipe_basic() {
+    let result = parse_expr("1 |> double");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        match result.nodes.get(lhs) {
+          ASTNode::Expression(ASTExpression::Literal(_)) => {},
+          other => panic!("expected literal lhs, got {:?}", other),
+        }
+
+        match result.nodes.get(rhs) {
+          ASTNode::Expression(ASTExpression::Variable(_)) => {},
+          other => panic!("expected variable rhs, got {:?}", other),
+        }
+      },
+      other => panic!("expected pipe expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pipe_left_associative() {
+    let result = parse_expr("a |> f |> g");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        match result.nodes.get(lhs) {
+          ASTNode::Expression(ASTExpression::Pipe { .. }) => {},
+          other => panic!("expected nested pipe lhs, got {:?}", other),
+        }
+
+        match result.nodes.get(rhs) {
+          ASTNode::Expression(ASTExpression::Variable(_)) => {},
+          other => panic!("expected variable rhs, got {:?}", other),
+        }
+      },
+      other => panic!("expected pipe expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pipe_into_call_with_extra_args() {
+    let result = parse_expr("x |> add(1, 2)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { rhs, .. } => match result.nodes.get(rhs) {
+        ASTNode::Expression(ASTExpression::Call(call)) => {
+          assert_eq!(call.arguments.len(), 2);
+        },
+        other => panic!("expected call rhs, got {:?}", other),
+      },
+      other => panic!("expected pipe expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pipe_into_path() {
+    let result = parse_expr("x |> Math::square");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { rhs, .. } => match result.nodes.get(rhs) {
+        ASTNode::Expression(ASTExpression::Path(path)) => {
+          assert_eq!(path.segments.len(), 2);
+        },
+        other => panic!("expected path rhs, got {:?}", other),
+      },
+      other => panic!("expected pipe expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pipe_into_lambda() {
+    let result = parse_expr("x |> (n: i32): i32 -> n + 1");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { rhs, .. } => match result.nodes.get(rhs) {
+        ASTNode::Expression(ASTExpression::Lambda(_)) => {},
+        other => panic!("expected lambda rhs, got {:?}", other),
+      },
+      other => panic!("expected pipe expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pipe_precedence_with_or() {
+    let result = parse_expr("a || b |> f");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { lhs, rhs, .. } => {
+        match result.nodes.get(lhs) {
+          ASTNode::Expression(ASTExpression::Binary(bin)) => {
+            assert_eq!(bin.operator, ASTBinaryOperator::Or);
+          },
+          other => panic!("expected || expression on lhs, got {:?}", other),
+        }
+
+        match result.nodes.get(rhs) {
+          ASTNode::Expression(ASTExpression::Variable(_)) => {},
+          other => panic!("expected variable rhs, got {:?}", other),
+        }
+      },
+      other => panic!("expected pipe expression, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_pipe_into_generic_path_call() {
+    let result = parse_expr("x |> Math::identity<i32>()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { rhs, .. } => match result.nodes.get(rhs) {
+        ASTNode::Expression(ASTExpression::Call(call)) => {
+          let type_args = call.type_args.as_ref().expect("expected type args");
+          assert_eq!(type_args.len(), 1);
+          assert!(call.arguments.is_empty());
+        },
+        other => panic!("expected call rhs, got {:?}", other),
+      },
+      other => panic!("expected pipe expression, got {:?}", other),
     }
   }
 }
