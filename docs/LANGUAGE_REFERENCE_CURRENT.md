@@ -69,6 +69,7 @@ namespace Math {
 - `atom`
 - `str`
 - `void`
+- `never`
 
 ### 3.2 `str`
 
@@ -87,7 +88,33 @@ function status(ok: boolean): atom {
 }
 ```
 
-### 3.4 References and Pointers
+### 3.4 `null`
+
+`null` is a literal of type `NullPtr`. It coerces to any pointer type when the context provides one.
+
+```ignis
+let p: *i32 = null;          // coerces to *i32
+let q: *mut u8 = null;       // coerces to *mut u8
+
+if (p == null) {              // pointer comparison
+    return -1;
+}
+```
+
+Using `null` where a non-pointer type is expected is a compile-time error. Dereferencing `null` and arithmetic on `null` are also rejected at compile time. `null` can appear as a match pattern on pointer-typed scrutinees.
+
+### 3.5 `never`
+
+`never` is the bottom type. It is the type of expressions that never produce a value: `@panic(...)`, `@trap()`, `@unreachable()`. It is compatible with any other type, so a function that always panics satisfies any return type.
+
+```ignis
+function fail(): i32 {
+    @panic("fatal");
+    // no return needed: @panic has type never
+}
+```
+
+### 3.6 References and Pointers
 
 ```ignis
 function main(): i32 {
@@ -104,7 +131,7 @@ function main(): i32 {
 }
 ```
 
-### 3.5 Arrays and Function Types
+### 3.7 Arrays and Function Types
 
 ```ignis
 type Mapper = (i32) -> i32;
@@ -117,7 +144,7 @@ function main(): i32 {
 
 Note: fixed-size arrays (`T[N]`) are supported. Dynamic array type syntax (`T[]`) is parsed but currently rejected by semantic analysis.
 
-### 3.6 Generic Type Use
+### 3.8 Generic Type Use
 
 ```ignis
 record Box<T> {
@@ -144,6 +171,12 @@ inline(always) function hotPath(x: i32): i32 {
 }
 ```
 
+The `inline` modifier comes before `function`. Three variants exist:
+
+- `inline function f() { ... }` -- hint to inline
+- `inline(always) function f() { ... }` -- force inline
+- `inline(never) function f() { ... }` -- prevent inline
+
 Generic functions:
 
 ```ignis
@@ -152,28 +185,55 @@ function identity<T>(value: T): T {
 }
 ```
 
+Generic type arguments can be inferred from call arguments:
+
+```ignis
+let x = identity(42);       // T inferred as i32
+let y = identity<i64>(42);  // T explicitly i64
+```
+
 Function overloading is supported by signature differences.
 
 ### 4.2 Variables and Constants
 
-Variable declarations are typed:
+Variable declarations support optional type annotations. When the type is omitted, it is inferred from the initializer or from later usage.
 
 ```ignis
-let x: i32 = 10;
-let mut y: i32 = 20;
-const LIMIT: i32 = 100;
+let x: i32 = 10;       // explicit type
+let y = 20;             // inferred as i32 from literal
+let mut z = x + y;      // inferred as i32 from expression
+const LIMIT: i32 = 100; // constants require a type annotation
 ```
 
-Regular `let` declarations require an explicit type annotation.
+Deferred inference is also supported. A variable can be declared without type or initializer and resolved when first assigned:
 
-### 4.3 Type Aliases
+```ignis
+let mut value;           // type unknown here
+value = computeResult(); // type inferred from assignment
+```
+
+If an inference variable is never constrained, the compiler reports an error.
+
+### 4.3 Literal Coercion
+
+Numeric literals adapt to the expected type from context. A plain integer literal like `42` defaults to `i32`, but coerces to `i8`, `u16`, `i64`, etc. if the target type requires it and the value fits within the target range. Float literals coerce similarly between `f32` and `f64`.
+
+```ignis
+let a: u8 = 255;        // 255 fits in u8, coerced
+let b: i64 = 1000000;   // coerced to i64
+let c: f32 = 3.14;      // coerced to f32
+```
+
+Overflow is a compile-time error: `let x: u8 = 256;` fails.
+
+### 4.4 Type Aliases
 
 ```ignis
 type Id = i32;
 type Pair<T> = (T, T);
 ```
 
-### 4.4 Records
+### 4.5 Records
 
 Fields and methods are private by default.
 
@@ -196,7 +256,21 @@ record Counter {
 }
 ```
 
-### 4.5 Enums
+Records support static fields and static methods:
+
+```ignis
+record Config {
+    static MAX_SIZE: i32 = 1024;
+
+    public static default(): Config {
+        return Config {};
+    }
+}
+
+let max = Config::MAX_SIZE;
+```
+
+### 4.6 Enums
 
 ```ignis
 enum Option<T> {
@@ -205,9 +279,25 @@ enum Option<T> {
 }
 ```
 
-Enums can also include methods and fields.
+Enums can include methods, static methods, and static fields:
 
-### 4.6 Traits
+```ignis
+enum Priority {
+    LOW,
+    HIGH,
+
+    DEFAULT_LEVEL: i32 = 1;
+
+    static fromInt(n: i32): Priority {
+        if (n > 0) {
+            return Priority::HIGH;
+        }
+        return Priority::LOW;
+    }
+}
+```
+
+### 4.7 Traits
 
 ```ignis
 trait Describable {
@@ -228,7 +318,7 @@ record Item {
 }
 ```
 
-### 4.7 Namespaces
+### 4.8 Namespaces
 
 ```ignis
 namespace Math {
@@ -242,7 +332,7 @@ function main(): i32 {
 }
 ```
 
-### 4.8 Imports, Exports, Extern
+### 4.9 Imports, Exports, Extern
 
 ```ignis
 import Io from "std::io";
@@ -255,6 +345,20 @@ export function run(): void {
 
 extern libc {
     function puts(s: str): i32;
+    const BUFSIZ: i32;
+}
+```
+
+Extern blocks support qualified paths and can contain both function signatures and constant declarations (without initializers):
+
+```ignis
+extern std::io {
+    function write(fd: i32, buf: *u8, count: u64): i64;
+}
+
+extern __errno {
+    const ENOENT: i32;
+    const EACCES: i32;
 }
 ```
 
@@ -278,32 +382,35 @@ export CType from "./primitives";
 export Foo, Bar from "./lib";
 ```
 
-The re-exported symbols are available both in the current module's scope and to consumers that import from this module. `export _ from "..."` is not allowed — use `import _ from "..."` instead.
+The re-exported symbols are available both in the current module's scope and to consumers that import from this module. `export _ from "..."` is not allowed -- use `import _ from "..."` instead.
 
 #### Import Path Resolution
 
 The `from` string is resolved in this order:
 
-1. **Alias match** — The first segment (before `::`) is looked up in the project's `[aliases]` table from `ignis.toml`. The `"std"` alias is always present and maps to the standard library. Other aliases resolve to the target directory, trying `<dir>/mod.ign` first and falling back to `<dir>.ign`.
+1. **Alias match** -- The first segment (before `::`) is checked against the project's `[aliases]` table from `ignis.toml`. Exact segment match is tried first, then prefix match for shorter alias keys. The `"std"` alias is always present and maps to the standard library. Other aliases resolve to the target directory, trying `<dir>/mod.ign` first and falling back to `<dir>.ign`.
 
-2. **Relative path** (`./`, `../`) — Resolved from the importing file's directory.
+2. **Relative path** (`./`, `../`) -- Resolved from the importing file's directory.
 
-3. **Bare path** — Resolved from the project root (source directory).
+3. **Bare path** -- Resolved from the project root (source directory).
 
 ```toml
 # ignis.toml
 [aliases]
 mylib = "libs/mylib"
+"@" = "./src"
 ```
 
 ```ignis
-import Utils from "mylib::utils";   // resolves to libs/mylib/utils.ign
-import Sub from "mylib::sub::mod";  // resolves to libs/mylib/sub/mod.ign
+import Utils from "mylib::utils";     // exact match: libs/mylib/utils.ign
+import Sub from "mylib::sub::mod";    // exact match: libs/mylib/sub/mod.ign
+import Token from "@token::token";    // prefix match: ./src/token/token.ign
+import Lexer from "@lexer";           // prefix match: ./src/lexer.ign
 ```
 
 The `"std"` alias is reserved and cannot be overridden in `[aliases]`.
 
-### 4.9 Extension Methods
+### 4.10 Extension Methods
 
 ```ignis
 @extension(i32)
@@ -323,41 +430,184 @@ function main(): i32 {
 }
 ```
 
-### 4.10 Lang Traits (`Drop`, `Clone`, `Copy`)
+## 5. Closures
+
+Closures are anonymous functions that can capture variables from their enclosing scope.
+
+### 5.1 Syntax
+
+```
+(params): ReturnType -> expression
+(params): ReturnType -> { block }
+```
 
 ```ignis
-@implements(Copy)
-record Point {
-    public x: i32;
-    public y: i32;
+let add = (a: i32, b: i32): i32 -> a + b;
+let greet = (): void -> { Io::println("hi"); };
+let double = (x: i32): i32 -> x * 2;
+```
+
+Closures can be passed as arguments, stored in variables, and used as module-level constants:
+
+```ignis
+const add: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> a + b;
+
+function apply(@noescape f: (i32) -> i32, x: i32): i32 {
+    return f(x);
 }
 
-@implements(Drop)
-record Resource {
-    public id: i32;
-
-    drop(&mut self): void {
-        return;
-    }
+function main(): i32 {
+    return apply((n: i32): i32 -> n * 2, 21);  // 42
 }
 ```
 
-## 5. Attributes
+### 5.2 Capture Modes
 
-Attributes use `@name` or `@name(args)` and are applied to declarations.
+Closures automatically capture referenced variables from the enclosing scope. The capture mode is inferred from usage:
 
-Common examples:
+| Usage inside closure | Inferred mode | Effect |
+|---|---|---|
+| Read-only, Copy type | By value | Copy of the value at creation |
+| Read-only, non-Copy type | By shared reference | `*T` pointer into enclosing scope |
+| Mutated | By mutable reference | `*mut T` pointer into enclosing scope |
+| Moved (non-Copy consumed) | By value | Ownership transferred at creation |
 
-- `@implements(...)`
-- `@packed`
-- `@aligned(N)`
-- `@cold`
-- `@externName("...")`
-- `@deprecated` / `@deprecated("...")`
-- `@allow(...)`, `@warn(...)`, `@deny(...)`
-- `@extension(Type)` / `@extension(Type, mut)`
+Manual overrides are available inside the closure body:
 
-Parameter attributes are also supported. Example:
+```ignis
+let mut x: i32 = 10;
+let get_x = (): i32 -> @move x;     // force by-value (snapshot)
+x = 99;
+return get_x();                       // 10, not 99
+
+let see_x = (): i32 -> @ref x;      // force shared reference
+let inc_x = (): void -> @refMut x;  // force mutable reference
+```
+
+### 5.3 Escape Analysis and `@noescape`
+
+When a closure is passed to a function parameter marked `@noescape`, the compiler guarantees the closure does not outlive the call. This allows safe by-reference captures without heap allocation.
+
+If a closure escapes (stored in a field, returned, passed to a non-`@noescape` parameter) while capturing variables by reference, the compiler reports an error to prevent dangling references.
+
+```ignis
+function forEach(data: *i32, len: i32, @noescape f: (i32) -> void): void {
+    let mut i: i32 = 0;
+    while (i < len) {
+        f(data[i as u64]);
+        i = i + 1;
+    }
+}
+
+function main(): i32 {
+    let arr: i32[3] = [10, 20, 12];
+    let mut sum: i32 = 0;
+    forEach((&arr[0]) as *i32, 3, (x: i32): void -> { sum = sum + x; });
+    return sum;  // 42
+}
+```
+
+## 6. Ownership and Borrowing
+
+Ignis tracks ownership of values that need cleanup (types with `@implements(Drop)` or containing such types). Non-Copy types are moved by default; using a value after it has been moved, dropped, or freed is a compile-time error.
+
+### 6.1 Move Semantics
+
+```ignis
+@implements(Drop)
+record Resource {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function main(): i32 {
+    let r = Resource { id: 1 };
+    let r2 = r;          // r is moved to r2
+    // return r.id;      // ERROR: use after move
+    return r2.id;
+}
+```
+
+Passing a non-Copy value to a function also moves it:
+
+```ignis
+function consume(r: Resource): i32 {
+    return r.id;
+}
+
+let r = Resource { id: 42 };
+let x = consume(r);
+// r is no longer valid here
+```
+
+Re-assigning to a moved variable makes it valid again:
+
+```ignis
+let mut r = Resource { id: 1 };
+let r2 = r;              // r moved
+r = Resource { id: 2 };  // r valid again
+```
+
+### 6.2 Copy and Structural Copy
+
+Primitive types (`i32`, `boolean`, `char`, pointers, references, etc.) are Copy -- assignment copies the value, and the original remains valid.
+
+Records and enums are structurally Copy if all their fields (or variant payloads) are recursively Copy. No annotation is needed:
+
+```ignis
+record Vec2 {
+    public x: f32;
+    public y: f32;
+}
+
+let a = Vec2 { x: 1.0, y: 2.0 };
+let b = a;     // copy, both a and b are valid
+```
+
+Explicit `@implements(Copy)` is also supported and validated (all fields must be Copy). A type with `@implements(Drop)` is never Copy, even if all fields are primitive.
+
+### 6.3 Clone
+
+`@implements(Clone)` requires a `clone(&self): Self` method. Calling `.clone()` produces an independent copy without moving the original:
+
+```ignis
+@implements(Drop, Clone)
+record Buffer {
+    public len: i32;
+    drop(&mut self): void { return; }
+    clone(&self): Buffer { return Buffer { len: self.len }; }
+}
+
+let a = Buffer { len: 10 };
+let b = a.clone();   // a is NOT moved
+// both a and b are valid
+```
+
+### 6.4 Drop
+
+Types with `@implements(Drop)` must provide a `drop(&mut self): void` method. The compiler automatically inserts drop calls at scope exits, early returns, `break`/`continue`, and before overwriting a live variable.
+
+Double-drop and use-after-drop are compile-time errors. A runtime drop guard provides defense-in-depth.
+
+### 6.5 Borrow Checking
+
+References follow exclusivity rules:
+
+- Multiple `&T` (shared references) are allowed simultaneously.
+- A single `&mut T` (mutable reference) is exclusive -- no other references may coexist.
+- Mutating a variable while any borrow is active is an error.
+- Returning a reference to a local variable is an error.
+
+```ignis
+let mut x: i32 = 10;
+let r1 = &x;
+let r2 = &x;          // OK: multiple shared refs
+// let m = &mut x;     // ERROR: mutable ref while shared refs exist
+```
+
+### 6.6 FFI Ownership
+
+Extern functions do not consume ownership by default. To indicate that an extern function takes ownership of a parameter, use `@takes`:
 
 ```ignis
 extern rt {
@@ -365,9 +615,41 @@ extern rt {
 }
 ```
 
-## 6. Statements and Control Flow
+Without `@takes`, passing a non-Copy owned value to an extern function produces a warning about potential memory leaks.
 
-### 6.1 `if` / `else`
+## 7. Attributes
+
+Attributes use `@name` or `@name(args)` and are applied to declarations.
+
+### Declaration attributes
+
+- `@implements(...)` -- lang traits (`Drop`, `Clone`, `Copy`) or user-defined traits
+- `@packed` -- remove struct padding
+- `@aligned(N)` -- set minimum alignment
+- `@cold` -- mark function as unlikely to execute
+- `@externName("...")` -- override the C symbol name for a function
+- `@deprecated` / `@deprecated("...")` -- mark as deprecated
+- `@allow(...)`, `@warn(...)`, `@deny(...)` -- lint level overrides
+- `@extension(Type)` / `@extension(Type, mut)` -- extension methods
+
+### Parameter attributes
+
+- `@takes` -- marks an extern function parameter as ownership-consuming
+- `@noescape` -- marks a closure parameter as non-escaping (enables safe ref captures)
+
+```ignis
+extern rt {
+    function release(@takes ptr: *mut void): void;
+}
+
+function forEach(@noescape f: (i32) -> void, data: *i32, len: i32): void {
+    // f is guaranteed not to escape this call
+}
+```
+
+## 8. Statements and Control Flow
+
+### 8.1 `if` / `else`
 
 Parentheses are required in conditions.
 
@@ -379,7 +661,7 @@ if (x > 0) {
 }
 ```
 
-### 6.2 `if let`
+### 8.2 `if let`
 
 `let PATTERN = EXPR` can be used as a condition.
 
@@ -397,7 +679,7 @@ if (let Option::SOME(x) = maybeX() && x > 10) {
 }
 ```
 
-### 6.3 `while` and `while let`
+### 8.3 `while` and `while let`
 
 ```ignis
 while (i < 10) {
@@ -409,7 +691,7 @@ while (let Option::SOME(v) = nextValue()) {
 }
 ```
 
-### 6.4 `let else`
+### 8.4 `let else`
 
 `let else` is a statement:
 
@@ -419,17 +701,23 @@ let Option::SOME(v) = maybeValue() else {
 };
 ```
 
-The `else` block must diverge (`return`, `break`, `continue`, `panic`, etc.).
+The `else` block must diverge (`return`, `break`, `continue`, `@panic`, etc.).
 
-### 6.5 `for` (C-style)
+### 8.5 `for` (C-style)
+
+The type annotation on the loop variable is optional (inferred from the initializer).
 
 ```ignis
 for (let i = 0; i < 10; i++) {
     sum += i;
 }
+
+for (let i: i32 = 0; i < 10; i++) {
+    sum += i;
+}
 ```
 
-### 6.6 `for of`
+### 8.6 `for of`
 
 ```ignis
 let arr: i32[3] = [1, 2, 3];
@@ -443,7 +731,7 @@ for (let x: &i32 of arr) {
 }
 ```
 
-### 6.7 Other statements
+### 8.7 Other statements
 
 ```ignis
 return;
@@ -453,9 +741,9 @@ break;
 continue;
 ```
 
-## 7. Expressions
+## 9. Expressions
 
-### 7.1 Literals
+### 9.1 Literals
 
 ```ignis
 42
@@ -471,7 +759,7 @@ null
 [1, 2, 3]
 ```
 
-### 7.2 Atoms
+### 9.2 Atoms
 
 An atom literal is `:` followed by an identifier.
 
@@ -485,22 +773,24 @@ match (state) {
 }
 ```
 
-### 7.3 Record initialization
+### 9.3 Record initialization
 
 ```ignis
 let p: Point = Point { x: 1, y: 2 };
+let p2 = Point { x: 3, y: 4 };     // type inferred
 ```
 
-### 7.4 Calls, paths, member access, indexing
+### 9.4 Calls, paths, member access, indexing
 
 ```ignis
 let n: i32 = Math::add(1, 2);
 let x: i32 = counter.get();
 let y: i32 = values[0];
 let z: i32 = identity<i32>(x);
+let w = identity(x);              // type arg inferred
 ```
 
-### 7.5 Operators
+### 9.5 Operators
 
 Arithmetic: `+ - * / %`
 
@@ -514,7 +804,7 @@ Assignment: `= += -= *= /= %= &= |= ^= <<= >>=`
 
 Other: cast `expr as Type`, postfix `x++`, `x--`, prefix `++x`, `--x`.
 
-### 7.6 Ternary operator
+### 9.6 Ternary operator
 
 Ignis supports `cond ? thenExpr : elseExpr`.
 
@@ -523,14 +813,14 @@ let x: i32 = isReady ? 1 : 0;
 let y: i32 = x > 10 ? x : 10;
 ```
 
-### 7.7 Cast operator
+### 9.7 Cast operator
 
 ```ignis
 let a: i64 = 42 as i64;
 let p: *i32 = &value as *i32;
 ```
 
-### 7.8 Match expressions
+### 9.8 Match expressions
 
 ```ignis
 let result: i32 = match (value) {
@@ -542,7 +832,11 @@ let result: i32 = match (value) {
 
 Arms accept expression bodies or block bodies.
 
-### 7.9 Builtin call expressions
+### 9.9 Closure expressions
+
+See [Section 5. Closures](#5-closures).
+
+### 9.10 Builtin call expressions
 
 Builtins with `@` are regular expressions and accept type args where applicable.
 
@@ -552,7 +846,7 @@ let ptr: *mut u8 = @pointerFromInteger<*mut u8>(addr);
 let ok: boolean = @configFlag("os.linux");
 ```
 
-## 8. Pattern Syntax
+## 10. Pattern Syntax
 
 Patterns are used by `match`, `if let`, `while let`, and `let else`.
 
@@ -576,7 +870,7 @@ match (v) {
 }
 ```
 
-## 9. Builtins and Compiler Directives
+## 11. Builtins and Compiler Directives
 
 Directive builtins use `@name(...)` syntax:
 
@@ -600,27 +894,25 @@ Common directive builtins:
 - `@read`, `@write`
 - `@dropInPlace`, `@dropGlue`
 - `@panic`, `@trap`, `@unreachable`
+- `@maxOf`, `@minOf`
 
-Function-style builtins are also supported:
-
-- `typeOf(expr)`
-- `maxOf<T>()`
-- `minOf<T>()`
-
-## 10. Semantics That Affect Syntax
+## 12. Semantics Summary
 
 - `if` and `while` conditions must be parenthesized.
 - `let` conditions are valid in conditional contexts and chain naturally with `&&`.
 - `let` conditions in `||` expressions are rejected.
 - `let else` requires an `else` branch that always diverges.
+- `let` declarations support type inference: `let x = expr;` infers the type from the initializer. Deferred inference (`let mut x;` resolved on first assignment) is also supported.
+- Numeric literals coerce to the expected type if the value fits.
 - Extension methods can be defined on supported target types with `@extension(...)`.
 - Calling mutating methods (or mut extensions) requires a mutable receiver.
+- Non-Copy types are moved on assignment and function call; use-after-move is a compile-time error.
+- `@implements(Drop)` types are automatically dropped at scope exit; double-drop is a compile-time error.
 - User-defined trait checks currently target records.
-- `let` declarations are typed (`let x: T = ...;`); untyped local `let` is not part of the current syntax.
 - `T[]` is parsed but rejected semantically (dynamic vectors are not enabled).
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.
 
-## 11. Minimal Complete Example
+## 13. Minimal Complete Example
 
 ```ignis
 import Io from "std::io";
@@ -637,12 +929,17 @@ function maybePositive(value: i32): Maybe {
     return Maybe::NONE;
 }
 
+function apply(@noescape f: (i32) -> i32, x: i32): i32 {
+    return f(x);
+}
+
 function main(): i32 {
-    let value: Maybe = maybePositive(42);
+    let value = maybePositive(42);
 
     if (let Maybe::SOME(v) = value && v > 0) {
+        let doubled = apply((n: i32): i32 -> n * 2, v);
         Io::println("ok");
-        return v;
+        return doubled;
     }
 
     return 0;
