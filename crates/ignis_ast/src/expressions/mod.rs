@@ -81,6 +81,9 @@ pub enum ASTExpression {
     pipe_span: Span,
     span: Span,
   },
+  PipePlaceholder {
+    span: Span,
+  },
 }
 
 impl ASTExpression {
@@ -110,6 +113,7 @@ impl ASTExpression {
       ASTExpression::Lambda(expr) => &expr.span,
       ASTExpression::CaptureOverride(expr) => &expr.span,
       ASTExpression::Pipe { span, .. } => span,
+      ASTExpression::PipePlaceholder { span, .. } => span,
     }
   }
 }

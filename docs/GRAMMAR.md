@@ -385,6 +385,8 @@
 <ternary-expression> ::= <pipe-expression> ( "?" <expression> ":" <expression> )?
 
 <pipe-expression> ::= <or-expression> ( "|>" <or-expression> )*
+// Note: `_` in expression context is parsed as a pipe placeholder.
+// It is only valid inside call arguments on the RHS of |>.
 
 <or-expression> ::= <and-expression> ( "||" <and-expression> )*
 <and-expression> ::= <bitwise-or-expression> ( "&&" <bitwise-or-expression> )*

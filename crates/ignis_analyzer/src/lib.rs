@@ -90,6 +90,13 @@ impl InferContext {
   }
 }
 
+/// Whether the piped LHS value is prepended or replaces a `_` placeholder.
+#[derive(Debug, Clone, Copy)]
+pub enum PipeArgInsertion {
+  Prepend,
+  ReplaceAt(usize),
+}
+
 /// How a pipe expression `lhs |> rhs` desugars. Set by typeck, read by lowering.
 #[derive(Debug, Clone)]
 pub enum PipeResolution {
@@ -98,11 +105,13 @@ pub enum PipeResolution {
     def_id: DefinitionId,
     extra_args: Vec<NodeId>,
     type_args: Vec<TypeId>,
+    insertion: PipeArgInsertion,
   },
   /// `x |> closureVar` or `x |> (n: i32): i32 -> n * 2` — callee is a closure/function-typed value.
   ClosureCall {
     callee_node: NodeId,
     extra_args: Vec<NodeId>,
+    insertion: PipeArgInsertion,
   },
 }
 

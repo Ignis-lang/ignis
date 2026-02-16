@@ -2494,3 +2494,56 @@ function main(): void {
     "Expected a type mismatch error for conflicting inferred types"
   );
 }
+
+// =========================================================================
+// PIPE PLACEHOLDER DIAGNOSTICS
+// =========================================================================
+
+#[test]
+fn pipe_multiple_placeholders() {
+  let src = r#"
+function f(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): void {
+    let x: i32 = 1 |> f(_, _);
+    return;
+}
+"#;
+
+  common::assert_err(src, &["A0174"]);
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "pipe_multiple_placeholders",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn pipe_member_callee_rejection() {
+  let src = r#"
+record Box {
+    public value: i32;
+
+    add(&self, x: i32): i32 {
+        return self.value + x;
+    }
+}
+
+function main(): void {
+    let b: Box = Box { value: 10 };
+    let x: i32 = 5 |> b.add(1);
+    return;
+}
+"#;
+
+  common::assert_err(src, &["A0176"]);
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "pipe_member_callee_rejection",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}

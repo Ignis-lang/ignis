@@ -490,6 +490,8 @@ impl<'a> Analyzer<'a> {
         self.extra_checks_node(lhs, scope_kind, in_loop, in_function);
         self.extra_checks_node(rhs, scope_kind, in_loop, in_function);
       },
+
+      ASTExpression::PipePlaceholder { .. } => {},
     }
   }
 

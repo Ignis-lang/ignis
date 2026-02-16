@@ -802,6 +802,22 @@ pub enum DiagnosticMessage {
     rhs_span: Span,
     pipe_span: Span,
   },
+  PipePlaceholderOutsidePipe {
+    span: Span,
+  },
+  PipeMultiplePlaceholders {
+    first: Span,
+    second: Span,
+    pipe_span: Span,
+  },
+  PipePlaceholderNotInCall {
+    span: Span,
+    pipe_span: Span,
+  },
+  PipeRhsUnsupportedCallee {
+    callee_span: Span,
+    pipe_span: Span,
+  },
   // #endregion Pipe Operator
 
   // #endregion Analyzer
@@ -1626,6 +1642,18 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::PipeRhsInstanceMethod { .. } => {
         write!(f, "instance method access is not supported as pipe RHS")
       },
+      DiagnosticMessage::PipePlaceholderOutsidePipe { .. } => {
+        write!(f, "`_` placeholder is only valid inside pipe (|>) call arguments")
+      },
+      DiagnosticMessage::PipeMultiplePlaceholders { .. } => {
+        write!(f, "only one `_` placeholder is allowed per pipe step")
+      },
+      DiagnosticMessage::PipePlaceholderNotInCall { .. } => {
+        write!(f, "`_` placeholder must appear inside a function call on the RHS of |>")
+      },
+      DiagnosticMessage::PipeRhsUnsupportedCallee { .. } => {
+        write!(f, "member call as pipe RHS callee is not supported")
+      },
     }
   }
 }
@@ -1831,6 +1859,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::ClosureEscapesWithRefCapture { closure_span, .. } => closure_span.clone(),
       DiagnosticMessage::PipeRhsNotCallable { rhs_span, .. } => rhs_span.clone(),
       DiagnosticMessage::PipeRhsInstanceMethod { rhs_span, .. } => rhs_span.clone(),
+      DiagnosticMessage::PipePlaceholderOutsidePipe { span, .. } => span.clone(),
+      DiagnosticMessage::PipeMultiplePlaceholders { first, .. } => first.clone(),
+      DiagnosticMessage::PipePlaceholderNotInCall { span, .. } => span.clone(),
+      DiagnosticMessage::PipeRhsUnsupportedCallee { callee_span, .. } => callee_span.clone(),
     }
   }
 
@@ -2031,6 +2063,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::ClosureEscapesWithRefCapture { .. } => "A0170",
       DiagnosticMessage::PipeRhsNotCallable { .. } => "A0171",
       DiagnosticMessage::PipeRhsInstanceMethod { .. } => "A0172",
+      DiagnosticMessage::PipePlaceholderOutsidePipe { .. } => "A0173",
+      DiagnosticMessage::PipeMultiplePlaceholders { .. } => "A0174",
+      DiagnosticMessage::PipePlaceholderNotInCall { .. } => "A0175",
+      DiagnosticMessage::PipeRhsUnsupportedCallee { .. } => "A0176",
     }
     .to_string()
   }
@@ -2083,6 +2119,18 @@ impl DiagnosticMessage {
       },
       DiagnosticMessage::PipeRhsInstanceMethod { pipe_span, .. } => {
         vec![(pipe_span.clone(), "help: use the static form: `x |> Type::method`".to_string())]
+      },
+      DiagnosticMessage::PipePlaceholderOutsidePipe { .. } => {
+        vec![]
+      },
+      DiagnosticMessage::PipeMultiplePlaceholders { second, .. } => {
+        vec![(second.clone(), "second placeholder here".to_string())]
+      },
+      DiagnosticMessage::PipePlaceholderNotInCall { pipe_span, .. } => {
+        vec![(pipe_span.clone(), "in this pipe expression".to_string())]
+      },
+      DiagnosticMessage::PipeRhsUnsupportedCallee { pipe_span, .. } => {
+        vec![(pipe_span.clone(), "help: use a lambda: `x |> (v) -> obj.method(v)`".to_string())]
       },
       _ => vec![],
     }

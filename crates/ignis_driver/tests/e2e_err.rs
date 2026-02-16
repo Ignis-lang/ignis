@@ -968,3 +968,85 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// PIPE PLACEHOLDER ERROR TESTS
+// =========================================================================
+
+#[test]
+fn e2e_err_pipe_multiple_placeholders() {
+  e2e_error_test(
+    "err_pipe_multiple_placeholders",
+    r#"
+function f(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return 1 |> f(_, _);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_placeholder_outside_pipe() {
+  e2e_error_test(
+    "err_pipe_placeholder_outside_pipe",
+    r#"
+function main(): i32 {
+    let y: i32 = _;
+    return y;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_placeholder_bare_rhs() {
+  e2e_error_test(
+    "err_pipe_placeholder_bare_rhs",
+    r#"
+function main(): i32 {
+    return 42 |> _;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_placeholder_arity() {
+  e2e_error_test(
+    "err_pipe_placeholder_arity",
+    r#"
+function f(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return 1 |> f(1, _, 3);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_pipe_member_callee() {
+  e2e_error_test(
+    "err_pipe_member_callee",
+    r#"
+record Box {
+    public value: i32;
+
+    add(&self, x: i32): i32 {
+        return self.value + x;
+    }
+}
+
+function main(): i32 {
+    let b: Box = Box { value: 10 };
+    return 5 |> b.add(1);
+}
+"#,
+  );
+}

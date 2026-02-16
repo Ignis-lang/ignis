@@ -1,4 +1,4 @@
-use crate::{Analyzer, PipeResolution, ResolvedPath, ScopeKind};
+use crate::{Analyzer, PipeArgInsertion, PipeResolution, ResolvedPath, ScopeKind};
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, expressions::ASTExpression, pattern::ASTPattern};
 use ignis_ast::expressions::binary::ASTBinaryOperator;
 use ignis_ast::expressions::builtin_call::ASTBuiltinCall;
@@ -1230,6 +1230,13 @@ impl<'a> Analyzer<'a> {
       },
 
       ASTExpression::Pipe { lhs, rhs, .. } => self.lower_pipe_to_hir(node_id, lhs, rhs, hir, scope_kind),
+
+      // PipePlaceholder nodes are substituted by lower_pipe_to_hir and should never be lowered directly.
+      ASTExpression::PipePlaceholder { span, .. } => hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: span.clone(),
+        type_id: self.types.error(),
+      }),
     }
   }
 
@@ -3905,11 +3912,9 @@ impl Analyzer<'_> {
         def_id,
         extra_args,
         type_args,
+        insertion,
       }) => {
-        let mut all_args = vec![lhs_hir];
-        for arg in &extra_args {
-          all_args.push(self.lower_node_to_hir(arg, hir, scope_kind));
-        }
+        let all_args = self.assemble_pipe_args(lhs_hir, &extra_args, insertion, hir, scope_kind);
 
         hir.alloc(HIRNode {
           kind: HIRKind::Call {
@@ -3924,12 +3929,10 @@ impl Analyzer<'_> {
       Some(PipeResolution::ClosureCall {
         callee_node,
         extra_args,
+        insertion,
       }) => {
         let callee_hir = self.lower_node_to_hir(&callee_node, hir, scope_kind);
-        let mut all_args = vec![lhs_hir];
-        for arg in &extra_args {
-          all_args.push(self.lower_node_to_hir(arg, hir, scope_kind));
-        }
+        let all_args = self.assemble_pipe_args(lhs_hir, &extra_args, insertion, hir, scope_kind);
 
         hir.alloc(HIRNode {
           kind: HIRKind::CallClosure {
@@ -3945,6 +3948,49 @@ impl Analyzer<'_> {
         span,
         type_id: self.types.error(),
       }),
+    }
+  }
+
+  /// Assembles the final argument list for a pipe call, respecting Prepend vs ReplaceAt.
+  fn assemble_pipe_args(
+    &mut self,
+    lhs_hir: ignis_hir::HIRId,
+    extra_args: &[NodeId],
+    insertion: PipeArgInsertion,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> Vec<ignis_hir::HIRId> {
+    match insertion {
+      PipeArgInsertion::Prepend => {
+        let mut all_args = vec![lhs_hir];
+        for arg in extra_args {
+          all_args.push(self.lower_node_to_hir(arg, hir, scope_kind));
+        }
+        all_args
+      },
+
+      PipeArgInsertion::ReplaceAt(index) => {
+        extra_args
+          .iter()
+          .enumerate()
+          .map(|(i, arg)| {
+            if i == index {
+              debug_assert!(
+                matches!(
+                  self.ast.get(arg),
+                  ASTNode::Expression(ASTExpression::PipePlaceholder { .. })
+                ),
+                "ReplaceAt({}) but extra_args[{}] is not PipePlaceholder — typeck/lowering desync",
+                index,
+                index
+              );
+              lhs_hir
+            } else {
+              self.lower_node_to_hir(arg, hir, scope_kind)
+            }
+          })
+          .collect()
+      },
     }
   }
 
