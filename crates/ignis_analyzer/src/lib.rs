@@ -113,6 +113,15 @@ pub enum PipeResolution {
     extra_args: Vec<NodeId>,
     insertion: PipeArgInsertion,
   },
+  /// `x |> obj.method(a, b)` or `x |> obj.method` — instance method call with receiver.
+  MethodCall {
+    receiver_node: NodeId,
+    method_id: DefinitionId,
+    extra_args: Vec<NodeId>,
+    type_args: Vec<TypeId>,
+    self_mutable: bool,
+    insertion: PipeArgInsertion,
+  },
 }
 
 pub struct Analyzer<'a> {

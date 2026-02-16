@@ -3943,6 +3943,48 @@ impl Analyzer<'_> {
           type_id: pipe_type,
         })
       },
+
+      Some(PipeResolution::MethodCall {
+        receiver_node,
+        method_id,
+        extra_args,
+        type_args,
+        self_mutable,
+        insertion,
+      }) => {
+        let base = self.lower_node_to_hir(&receiver_node, hir, scope_kind);
+        let base_type = hir.get(base).type_id;
+
+        let is_already_ref = matches!(self.types.get(&base_type).clone(), Type::Reference { .. });
+
+        let receiver_hir = if is_already_ref {
+          base
+        } else {
+          let ref_type = self.types.reference(base_type, self_mutable);
+          hir.alloc(HIRNode {
+            kind: HIRKind::Reference {
+              expression: base,
+              mutable: self_mutable,
+            },
+            span: span.clone(),
+            type_id: ref_type,
+          })
+        };
+
+        let all_args = self.assemble_pipe_args(lhs_hir, &extra_args, insertion, hir, scope_kind);
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::MethodCall {
+            receiver: Some(receiver_hir),
+            method: method_id,
+            type_args,
+            args: all_args,
+          },
+          span,
+          type_id: pipe_type,
+        })
+      },
+
       None => hir.alloc(HIRNode {
         kind: HIRKind::Error,
         span,
@@ -3969,28 +4011,23 @@ impl Analyzer<'_> {
         all_args
       },
 
-      PipeArgInsertion::ReplaceAt(index) => {
-        extra_args
-          .iter()
-          .enumerate()
-          .map(|(i, arg)| {
-            if i == index {
-              debug_assert!(
-                matches!(
-                  self.ast.get(arg),
-                  ASTNode::Expression(ASTExpression::PipePlaceholder { .. })
-                ),
-                "ReplaceAt({}) but extra_args[{}] is not PipePlaceholder — typeck/lowering desync",
-                index,
-                index
-              );
-              lhs_hir
-            } else {
-              self.lower_node_to_hir(arg, hir, scope_kind)
-            }
-          })
-          .collect()
-      },
+      PipeArgInsertion::ReplaceAt(index) => extra_args
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+          if i == index {
+            debug_assert!(
+              matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })),
+              "ReplaceAt({}) but extra_args[{}] is not PipePlaceholder — typeck/lowering desync",
+              index,
+              index
+            );
+            lhs_hir
+          } else {
+            self.lower_node_to_hir(arg, hir, scope_kind)
+          }
+        })
+        .collect(),
     }
   }
 
