@@ -1,0 +1,159 @@
+//!
+//! # LibC Stdio
+//!
+//! C standard I/O stream functions from `stdio.h`.
+//!
+//! These operate on opaque `FILE*` streams (`CType::FilePtr`), in contrast
+//! to the raw file-descriptor operations in `LibC::File` (unistd.h).
+//!
+//! ## Functions
+//!
+//! | Function   | Description                                      |
+//! |------------|--------------------------------------------------|
+//! | `fopen`    | Open file by pathname, returns stream             |
+//! | `fdopen`   | Associate stream with existing file descriptor    |
+//! | `fclose`   | Close stream                                     |
+//! | `fread`    | Read binary data from stream                     |
+//! | `fwrite`   | Write binary data to stream                      |
+//! | `fgets`    | Read line from stream                            |
+//! | `fputs`    | Write string to stream                           |
+//! | `fseek`    | Set stream position                              |
+//! | `ftell`    | Get current stream position                      |
+//! | `rewind`   | Reset stream to beginning                        |
+//! | `fflush`   | Flush stream buffers                             |
+//! | `feof`     | Test end-of-file indicator                       |
+//! | `ferror`   | Test error indicator                             |
+//! | `remove`   | Delete file by pathname                          |
+//! | `rename`   | Rename file                                      |
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import LibC, CType from "std::libc";
+//!
+//! function main(): i32 {
+//!   let fp: CType::FilePtr = LibC::Stdio::fopen("out.txt", "w");
+//!   if fp == null {
+//!     return 1;
+//!   }
+//!   let msg: *u8 = "hello\n";
+//!   LibC::Stdio::fputs(msg, fp);
+//!   LibC::Stdio::fclose(fp);
+//!   return 0;
+//! }
+//! ```
+
+import CType from "./primitives";
+
+extern __stdio {
+  function fopen(pathname: CType::CConstStr, mode: CType::CConstStr): CType::FilePtr;
+  function fdopen(fd: CType::CInt, mode: CType::CConstStr): CType::FilePtr;
+  function fclose(stream: CType::FilePtr): CType::CInt;
+  function fread(ptr: CType::CVoidPtr, size: CType::SizeT, nmemb: CType::SizeT, stream: CType::FilePtr): CType::SizeT;
+  function fwrite(ptr: CType::CConstVoidPtr, size: CType::SizeT, nmemb: CType::SizeT, stream: CType::FilePtr): CType::SizeT;
+  function fgets(s: CType::CStr, size: CType::CInt, stream: CType::FilePtr): CType::CStr;
+  function fputs(s: CType::CConstStr, stream: CType::FilePtr): CType::CInt;
+  function fseek(stream: CType::FilePtr, offset: CType::CLong, whence: CType::CInt): CType::CInt;
+  function ftell(stream: CType::FilePtr): CType::CLong;
+  function rewind(stream: CType::FilePtr): void;
+  function fflush(stream: CType::FilePtr): CType::CInt;
+  function feof(stream: CType::FilePtr): CType::CInt;
+  function ferror(stream: CType::FilePtr): CType::CInt;
+  function remove(pathname: CType::CConstStr): CType::CInt;
+  function rename(oldpath: CType::CConstStr, newpath: CType::CConstStr): CType::CInt;
+}
+
+/// C standard I/O streams (stdio.h)
+namespace LibC::Stdio {
+  /// Opens the file at `pathname` with the given `mode` ("r", "w", "a", etc.).
+  ///
+  /// Returns a `FilePtr`, or null on failure (check `LibC::Errno::get()`).
+  function fopen(pathname: CType::CConstStr, mode: CType::CConstStr): CType::FilePtr {
+    return __stdio::fopen(pathname, mode);
+  }
+
+  /// Associates a stream with an existing file descriptor `fd`.
+  ///
+  /// The `mode` must be compatible with the fd's open mode.
+  function fdopen(fd: CType::CInt, mode: CType::CConstStr): CType::FilePtr {
+    return __stdio::fdopen(fd, mode);
+  }
+
+  /// Closes `stream`. Returns 0 on success, EOF on error.
+  function fclose(stream: CType::FilePtr): CType::CInt {
+    return __stdio::fclose(stream);
+  }
+
+  /// Reads up to `nmemb` elements of `size` bytes each from `stream` into `ptr`.
+  ///
+  /// Returns the number of elements successfully read.
+  function fread(ptr: CType::CVoidPtr, size: CType::SizeT, nmemb: CType::SizeT, stream: CType::FilePtr): CType::SizeT {
+    return __stdio::fread(ptr, size, nmemb, stream);
+  }
+
+  /// Writes `nmemb` elements of `size` bytes each from `ptr` to `stream`.
+  ///
+  /// Returns the number of elements successfully written.
+  function fwrite(ptr: CType::CConstVoidPtr, size: CType::SizeT, nmemb: CType::SizeT, stream: CType::FilePtr): CType::SizeT {
+    return __stdio::fwrite(ptr, size, nmemb, stream);
+  }
+
+  /// Reads at most `size - 1` characters from `stream` into `s`, stopping at
+  /// newline or EOF. The buffer is null-terminated.
+  ///
+  /// Returns `s` on success, or null on error/EOF.
+  function fgets(s: CType::CStr, size: CType::CInt, stream: CType::FilePtr): CType::CStr {
+    return __stdio::fgets(s, size, stream);
+  }
+
+  /// Writes the string `s` to `stream` (without trailing newline).
+  ///
+  /// Returns a non-negative value on success, or EOF on error.
+  function fputs(s: CType::CConstStr, stream: CType::FilePtr): CType::CInt {
+    return __stdio::fputs(s, stream);
+  }
+
+  /// Sets the position of `stream`. `whence` is `SEEK_SET`, `SEEK_CUR`, or `SEEK_END`.
+  ///
+  /// Returns 0 on success, -1 on error.
+  function fseek(stream: CType::FilePtr, offset: CType::CLong, whence: CType::CInt): CType::CInt {
+    return __stdio::fseek(stream, offset, whence);
+  }
+
+  /// Returns the current position of `stream`, or -1 on error.
+  function ftell(stream: CType::FilePtr): CType::CLong {
+    return __stdio::ftell(stream);
+  }
+
+  /// Resets `stream` to the beginning and clears error/EOF indicators.
+  function rewind(stream: CType::FilePtr): void {
+    __stdio::rewind(stream);
+  }
+
+  /// Flushes buffered output to `stream`. Pass null to flush all open streams.
+  ///
+  /// Returns 0 on success, EOF on error.
+  function fflush(stream: CType::FilePtr): CType::CInt {
+    return __stdio::fflush(stream);
+  }
+
+  /// Returns non-zero if the end-of-file indicator is set on `stream`.
+  function feof(stream: CType::FilePtr): CType::CInt {
+    return __stdio::feof(stream);
+  }
+
+  /// Returns non-zero if the error indicator is set on `stream`.
+  function ferror(stream: CType::FilePtr): CType::CInt {
+    return __stdio::ferror(stream);
+  }
+
+  /// Deletes the file at `pathname`. Returns 0 on success.
+  function remove(pathname: CType::CConstStr): CType::CInt {
+    return __stdio::remove(pathname);
+  }
+
+  /// Renames `oldpath` to `newpath`. Returns 0 on success.
+  function rename(oldpath: CType::CConstStr, newpath: CType::CConstStr): CType::CInt {
+    return __stdio::rename(oldpath, newpath);
+  }
+}
