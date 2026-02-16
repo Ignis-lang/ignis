@@ -375,6 +375,8 @@ pub struct IgnisConfig {
   pub c_compiler: String,
   /// Additional C compiler/linker flags passed to the C toolchain invocation.
   pub cflags: Vec<String>,
+  /// Import path aliases from `[aliases]` in ignis.toml (resolved to absolute paths).
+  pub aliases: HashMap<String, std::path::PathBuf>,
 }
 
 impl IgnisConfig {
@@ -425,6 +427,7 @@ impl IgnisConfig {
       runtime_path_override,
       c_compiler,
       cflags,
+      aliases: HashMap::new(),
     }
   }
 

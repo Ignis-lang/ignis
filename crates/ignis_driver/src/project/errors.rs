@@ -35,6 +35,12 @@ pub enum ProjectError {
 
   /// Invalid emit value.
   InvalidEmit { value: String },
+
+  /// Alias key is reserved (e.g., "std").
+  ReservedAlias { name: String },
+
+  /// Alias path does not exist on disk.
+  AliasPathNotFound { alias: String, path: PathBuf },
 }
 
 impl fmt::Display for ProjectError {
@@ -81,6 +87,14 @@ impl fmt::Display for ProjectError {
 
       ProjectError::InvalidEmit { value } => {
         write!(f, "invalid emit value: '{}' (supported: 'c', 'obj')", value)
+      },
+
+      ProjectError::ReservedAlias { name } => {
+        write!(f, "alias '{}' is reserved and cannot be defined in [aliases]", name)
+      },
+
+      ProjectError::AliasPathNotFound { alias, path } => {
+        write!(f, "alias '{}' path not found: '{}'", alias, path.display())
       },
     }
   }

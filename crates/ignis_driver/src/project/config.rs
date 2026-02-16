@@ -4,6 +4,8 @@
 //! optional fields. The `resolve` module converts these into a fully resolved
 //! `Project` with validated absolute paths.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 /// Root structure of ignis.toml.
@@ -16,6 +18,10 @@ pub struct ProjectToml {
 
   #[serde(default)]
   pub build: BuildTomlConfig,
+
+  /// Import path aliases: first segment -> directory path (relative to project root).
+  #[serde(default)]
+  pub aliases: HashMap<String, String>,
 }
 
 /// The `[package]` section.
@@ -228,5 +234,35 @@ std = false
 
     assert!(!parsed.ignis.std);
     assert!(parsed.ignis.std_path.is_none());
+  }
+
+  #[test]
+  fn test_aliases_section() {
+    let toml_str = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[aliases]
+mylib = "libs/mylib"
+ext = "../external"
+"#;
+    let parsed: ProjectToml = toml::from_str(toml_str).unwrap();
+
+    assert_eq!(parsed.aliases.len(), 2);
+    assert_eq!(parsed.aliases["mylib"], "libs/mylib");
+    assert_eq!(parsed.aliases["ext"], "../external");
+  }
+
+  #[test]
+  fn test_aliases_defaults_to_empty() {
+    let toml_str = r#"
+[package]
+name = "test"
+version = "0.1.0"
+"#;
+    let parsed: ProjectToml = toml::from_str(toml_str).unwrap();
+
+    assert!(parsed.aliases.is_empty());
   }
 }

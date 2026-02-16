@@ -269,6 +269,29 @@ import _ from "./sub_module";         // relative path works too
 
 `_` must be the sole item in the import statement. Combining it with named items (`import _, X from "..."`) is an error.
 
+#### Import Path Resolution
+
+The `from` string is resolved in this order:
+
+1. **Alias match** — The first segment (before `::`) is looked up in the project's `[aliases]` table from `ignis.toml`. The `"std"` alias is always present and maps to the standard library. Other aliases resolve to the target directory, trying `<dir>/mod.ign` first and falling back to `<dir>.ign`.
+
+2. **Relative path** (`./`, `../`) — Resolved from the importing file's directory.
+
+3. **Bare path** — Resolved from the project root (source directory).
+
+```toml
+# ignis.toml
+[aliases]
+mylib = "libs/mylib"
+```
+
+```ignis
+import Utils from "mylib::utils";   // resolves to libs/mylib/utils.ign
+import Sub from "mylib::sub::mod";  // resolves to libs/mylib/sub/mod.ign
+```
+
+The `"std"` alias is reserved and cannot be overridden in `[aliases]`.
+
 ### 4.9 Extension Methods
 
 ```ignis

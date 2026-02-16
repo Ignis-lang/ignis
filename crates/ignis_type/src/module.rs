@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Component, PathBuf};
 
 use crate::{Id, Store, definition::DefinitionId, file::FileId, span::Span, symbol::SymbolId};
@@ -54,18 +55,57 @@ pub enum ModulePath {
 }
 
 impl ModulePath {
+  /// Resolve an import specifier to a canonical `ModulePath`.
+  ///
+  /// Resolution order:
+  /// 1. **Alias match** — first segment (before `::`) is looked up in `aliases`.
+  ///    `"std"` produces `ModulePath::Std`; other aliases produce `ModulePath::Project`
+  ///    with `.ign` / `mod.ign` convention fallback.
+  /// 2. **Relative path** (`./`, `../`) — resolved from `current_file`'s parent.
+  /// 3. **Bare path** — resolved from `project_root` (errors if absent).
   pub fn from_import_path(
     import_from: &str,
     current_file: &std::path::Path,
     project_root: Option<&std::path::Path>,
+    aliases: &HashMap<String, PathBuf>,
   ) -> Result<Self, ModulePathError> {
-    // 1. Standard library
-    if let Some(module_name) = import_from.strip_prefix("std::") {
-      // Reject empty module name (e.g., "std::" without a module name)
-      if module_name.is_empty() {
-        return Err(ModulePathError::EmptyStdModuleName);
+    // 1. Alias match: split on first "::" and check the alias map
+    let (first_segment, rest) = match import_from.split_once("::") {
+      Some((first, rest)) => (first, Some(rest)),
+      None => (import_from, None),
+    };
+
+    if let Some(base_path) = aliases.get(first_segment) {
+      // "std" alias preserves ModulePath::Std semantics
+      if first_segment == "std" {
+        let module_name = rest.ok_or(ModulePathError::EmptyStdModuleName)?;
+        if module_name.is_empty() {
+          return Err(ModulePathError::EmptyStdModuleName);
+        }
+        return Ok(ModulePath::Std(module_name.to_string()));
       }
-      return Ok(ModulePath::Std(module_name.to_string()));
+
+      // Other aliases -> ModulePath::Project with convention fallback
+      let subpath = rest
+        .map(|r| r.replace("::", std::path::MAIN_SEPARATOR_STR))
+        .unwrap_or_default();
+
+      let resolved = if subpath.is_empty() {
+        let mod_path = base_path.join("mod.ign");
+        if mod_path.exists() {
+          return Ok(ModulePath::Project(mod_path));
+        }
+        base_path.with_extension("ign")
+      } else {
+        let full = base_path.join(&subpath);
+        let mod_path = full.join("mod.ign");
+        if mod_path.exists() {
+          return Ok(ModulePath::Project(mod_path));
+        }
+        full.with_extension("ign")
+      };
+
+      return Ok(ModulePath::Project(normalize_path(resolved)));
     }
 
     // 2. Relative path (./ or ../)
@@ -82,7 +122,7 @@ impl ModulePath {
       return Ok(ModulePath::Project(normalize_path(with_ext)));
     }
 
-    // 3. Absolute from project root
+    // 3. Bare path from project root
     if let Some(root) = project_root {
       let resolved = root.join(import_from);
       let with_ext = if resolved.extension().is_none() {
@@ -303,23 +343,27 @@ mod tests {
   use super::*;
   use std::path::Path;
 
+  fn std_aliases() -> HashMap<String, PathBuf> {
+    HashMap::from([("std".to_string(), PathBuf::from("/usr/lib/ignis/std"))])
+  }
+
   #[test]
   fn std_path_parsing() {
-    let result = ModulePath::from_import_path("std::io", Path::new("/project/main.ign"), None);
+    let result = ModulePath::from_import_path("std::io", Path::new("/project/main.ign"), None, &std_aliases());
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), ModulePath::Std("io".to_string()));
   }
 
   #[test]
   fn std_nested_path_parsing() {
-    let result = ModulePath::from_import_path("std::io::file", Path::new("/project/main.ign"), None);
+    let result = ModulePath::from_import_path("std::io::file", Path::new("/project/main.ign"), None, &std_aliases());
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), ModulePath::Std("io::file".to_string()));
   }
 
   #[test]
   fn relative_path_current_dir() {
-    let result = ModulePath::from_import_path("./utils", Path::new("/project/src/main.ign"), None);
+    let result = ModulePath::from_import_path("./utils", Path::new("/project/src/main.ign"), None, &HashMap::new());
     assert!(result.is_ok());
     match result.unwrap() {
       ModulePath::Project(path) => {
@@ -332,7 +376,7 @@ mod tests {
 
   #[test]
   fn relative_path_parent_dir() {
-    let result = ModulePath::from_import_path("../lib", Path::new("/project/src/main.ign"), None);
+    let result = ModulePath::from_import_path("../lib", Path::new("/project/src/main.ign"), None, &HashMap::new());
     assert!(result.is_ok());
     match result.unwrap() {
       ModulePath::Project(path) => {
@@ -344,8 +388,12 @@ mod tests {
 
   #[test]
   fn absolute_path_with_project_root() {
-    let result =
-      ModulePath::from_import_path("utils/math", Path::new("/project/src/main.ign"), Some(Path::new("/project")));
+    let result = ModulePath::from_import_path(
+      "utils/math",
+      Path::new("/project/src/main.ign"),
+      Some(Path::new("/project")),
+      &HashMap::new(),
+    );
     assert!(result.is_ok());
     match result.unwrap() {
       ModulePath::Project(path) => {
@@ -358,7 +406,7 @@ mod tests {
 
   #[test]
   fn absolute_path_without_project_root_fails() {
-    let result = ModulePath::from_import_path("utils/math", Path::new("/project/src/main.ign"), None);
+    let result = ModulePath::from_import_path("utils/math", Path::new("/project/src/main.ign"), None, &HashMap::new());
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), ModulePathError::NoProjectRoot("utils/math".to_string()));
   }
@@ -388,7 +436,7 @@ mod tests {
 
   #[test]
   fn path_with_extension_preserved() {
-    let result = ModulePath::from_import_path("./utils.ign", Path::new("/project/src/main.ign"), None);
+    let result = ModulePath::from_import_path("./utils.ign", Path::new("/project/src/main.ign"), None, &HashMap::new());
     assert!(result.is_ok());
     match result.unwrap() {
       ModulePath::Project(path) => {
@@ -492,8 +540,9 @@ mod tests {
   #[test]
   fn relative_paths_with_parent_are_normalized() {
     // Two different import paths that should resolve to the same file
-    let path1 = ModulePath::from_import_path("./primitives", Path::new("/std/libc/mod.ign"), None);
-    let path2 = ModulePath::from_import_path("../libc/primitives", Path::new("/std/memory/mod.ign"), None);
+    let no_aliases = HashMap::new();
+    let path1 = ModulePath::from_import_path("./primitives", Path::new("/std/libc/mod.ign"), None, &no_aliases);
+    let path2 = ModulePath::from_import_path("../libc/primitives", Path::new("/std/memory/mod.ign"), None, &no_aliases);
 
     assert!(path1.is_ok());
     assert!(path2.is_ok());
@@ -504,6 +553,83 @@ mod tests {
         assert_eq!(p1, p2);
       },
       _ => panic!("Expected Project paths"),
+    }
+  }
+
+  #[test]
+  fn alias_resolves_to_project_path() {
+    let aliases = HashMap::from([("mylib".to_string(), PathBuf::from("/libs/mylib"))]);
+    let result = ModulePath::from_import_path("mylib::utils", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => {
+        assert_eq!(path, PathBuf::from("/libs/mylib/utils.ign"));
+      },
+      _ => panic!("Expected Project path for user alias"),
+    }
+  }
+
+  #[test]
+  fn alias_nested_subpath() {
+    let aliases = HashMap::from([("ext".to_string(), PathBuf::from("/ext/packages"))]);
+    let result = ModulePath::from_import_path("ext::net::http", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => {
+        // "net::http" -> "net/http" -> base.join("net/http").with_extension("ign")
+        assert!(path.to_string_lossy().contains("net"));
+        assert!(path.to_string_lossy().ends_with("http.ign"));
+      },
+      _ => panic!("Expected Project path"),
+    }
+  }
+
+  #[test]
+  fn std_alias_produces_std_path() {
+    let aliases = HashMap::from([("std".to_string(), PathBuf::from("/usr/lib/ignis/std"))]);
+    let result = ModulePath::from_import_path("std::io", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), ModulePath::Std("io".to_string()));
+  }
+
+  #[test]
+  fn std_alias_without_module_name_fails() {
+    let aliases = HashMap::from([("std".to_string(), PathBuf::from("/std"))]);
+    let result = ModulePath::from_import_path("std", Path::new("/project/main.ign"), None, &aliases);
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err(), ModulePathError::EmptyStdModuleName);
+  }
+
+  #[test]
+  fn unmatched_alias_falls_through_to_project_root() {
+    let aliases = HashMap::from([("std".to_string(), PathBuf::from("/std"))]);
+    let result = ModulePath::from_import_path(
+      "utils/math",
+      Path::new("/project/main.ign"),
+      Some(Path::new("/project")),
+      &aliases,
+    );
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => {
+        assert!(path.ends_with("math.ign"));
+      },
+      _ => panic!("Expected Project path"),
+    }
+  }
+
+  #[test]
+  fn relative_import_ignores_aliases() {
+    let aliases = HashMap::from([("mylib".to_string(), PathBuf::from("/libs/mylib"))]);
+    let result = ModulePath::from_import_path("./mylib", Path::new("/project/src/main.ign"), None, &aliases);
+    assert!(result.is_ok());
+    match result.unwrap() {
+      // "./mylib" is a relative path, NOT an alias lookup
+      ModulePath::Project(path) => {
+        assert!(path.ends_with("mylib.ign"));
+        assert!(path.to_string_lossy().contains("src"));
+      },
+      _ => panic!("Expected Project path from relative resolution"),
     }
   }
 }
