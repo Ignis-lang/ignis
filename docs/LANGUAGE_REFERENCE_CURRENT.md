@@ -802,6 +802,8 @@ Bitwise: `& | ^ ~ << >>`
 
 Assignment: `= += -= *= /= %= &= |= ^= <<= >>=`
 
+Pipe: `|>` (left-associative, see [Section 9.11](#911-pipe-operator))
+
 Other: cast `expr as Type`, postfix `x++`, `x--`, prefix `++x`, `--x`.
 
 ### 9.6 Ternary operator
@@ -844,6 +846,61 @@ Builtins with `@` are regular expressions and accept type args where applicable.
 let size: u64 = @sizeOf<i32>();
 let ptr: *mut u8 = @pointerFromInteger<*mut u8>(addr);
 let ok: boolean = @configFlag("os.linux");
+```
+
+### 9.11 Pipe Operator
+
+The pipe operator `|>` passes a value as the first argument to a function on the right-hand side. `lhs |> rhs` desugars to a call where `lhs` is prepended to the argument list.
+
+```ignis
+function double(x: i32): i32 {
+    return x * 2;
+}
+
+function add(x: i32, y: i32): i32 {
+    return x + y;
+}
+
+function main(): i32 {
+    return 10 |> double;           // double(10) = 20
+}
+```
+
+Pipes are left-associative and can be chained:
+
+```ignis
+let result = 1 |> add(2) |> add(3);  // add(add(1, 2), 3) = 6
+```
+
+#### Supported RHS forms
+
+| RHS form | Desugar | Example |
+|---|---|---|
+| Bare function | `f(lhs)` | `x \|> double` |
+| Namespace/static path | `Ns::f(lhs)` | `x \|> Math::square` |
+| Call with extra args | `f(lhs, a, b)` | `x \|> add(10)` |
+| Generic path call | `Ns::f<T>(lhs, a)` | `x \|> identity<i32>` |
+| Lambda | `((p): R -> body)(lhs)` | `x \|> (n: i32): i32 -> n * 2` |
+
+Instance method access (`obj.method`) as RHS is not supported to avoid ambiguity with receiver semantics. Use the static form `Type::method` instead.
+
+#### Precedence
+
+`|>` binds between `||` and the ternary `?`:
+
+```ignis
+a || b |> f       // a || (b |> f)
+a |> f ? x : y    // (a |> f) ? x : y
+```
+
+#### Evaluation order
+
+In `lhs |> f(extra1, extra2)`, `lhs` is evaluated first, then `extra1`, then `extra2`, then the call. This follows naturally from left-to-right argument evaluation.
+
+```ignis
+trace(0) |> f(trace(1)) |> g(trace(2))
+// Desugars to: g(f(trace(0), trace(1)), trace(2))
+// Order: trace(0), trace(1), f(...), trace(2), g(...)
 ```
 
 ## 10. Pattern Syntax
@@ -908,6 +965,7 @@ Common directive builtins:
 - Calling mutating methods (or mut extensions) requires a mutable receiver.
 - Non-Copy types are moved on assignment and function call; use-after-move is a compile-time error.
 - `@implements(Drop)` types are automatically dropped at scope exit; double-drop is a compile-time error.
+- The pipe operator `|>` desugars to a function call with the LHS as the first argument. It supports bare functions, namespace paths, calls with extra args, generic calls, and lambdas. Instance method access as RHS is rejected.
 - User-defined trait checks currently target records.
 - `T[]` is parsed but rejected semantically (dynamic vectors are not enabled).
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.
@@ -929,17 +987,17 @@ function maybePositive(value: i32): Maybe {
     return Maybe::NONE;
 }
 
-function apply(@noescape f: (i32) -> i32, x: i32): i32 {
-    return f(x);
+function double(x: i32): i32 {
+    return x * 2;
 }
 
 function main(): i32 {
     let value = maybePositive(42);
 
     if (let Maybe::SOME(v) = value && v > 0) {
-        let doubled = apply((n: i32): i32 -> n * 2, v);
+        let result = v |> double |> (n: i32): i32 -> n + 1;
         Io::println("ok");
-        return doubled;
+        return result;
     }
 
     return 0;
