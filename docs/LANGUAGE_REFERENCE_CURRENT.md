@@ -297,6 +297,26 @@ enum Priority {
 }
 ```
 
+#### Try-Capable Enums
+
+Enums marked with `@lang(try)` can use the try operator `!` for early return on failure:
+
+```ignis
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+@lang(try)
+enum Option<T> {
+    SOME(T),
+    NONE,
+}
+```
+
+The `@lang(try)` attribute requires exactly two variants. The first variant is treated as "success" and the second as "failure".
+
 ### 4.7 Traits
 
 ```ignis
@@ -631,6 +651,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@deprecated` / `@deprecated("...")` -- mark as deprecated
 - `@allow(...)`, `@warn(...)`, `@deny(...)` -- lint level overrides
 - `@extension(Type)` / `@extension(Type, mut)` -- extension methods
+- `@lang(try)` -- mark an enum as try-capable for use with the `!` operator
 
 ### Parameter attributes
 
@@ -806,7 +827,71 @@ Pipe: `|>` (left-associative, see [Section 9.11](#911-pipe-operator))
 
 Other: cast `expr as Type`, postfix `x++`, `x--`, prefix `++x`, `--x`.
 
-### 9.6 Ternary operator
+### 9.6 Try operator `!`
+
+The postfix `!` operator unwraps a try-capable enum or performs an early return with the error variant.
+
+```ignis
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function divide(a: i32, b: i32): Result<i32, str> {
+    if (b == 0) {
+        return Result::ERROR("division by zero");
+    }
+    return Result::OK(a / b);
+}
+
+function compute(): Result<i32, str> {
+    let x = divide(10, 2)!;   // unwrap OK value
+    let y = divide(20, 4)!;   // if ERROR, early returns Result::ERROR
+    return Result::OK(x + y);
+}
+```
+
+**Semantics:**
+
+`expr!` desugars to:
+
+```ignis
+match (expr) {
+    SuccessVariant(value) -> value,
+    FailureVariant(err) -> return FailureVariant(err),
+}
+```
+
+**Requirements:**
+
+- The expression type must be an enum marked with `@lang(try)`
+- The function return type must be compatible with the expression type
+- The error type must match exactly between the expression and the function's return type
+
+**Example with Option:**
+
+```ignis
+@lang(try)
+enum Option<T> {
+    SOME(T),
+    NONE,
+}
+
+function findUser(id: i32): Option<str> {
+    if (id == 1) {
+        return Option::SOME("Alice");
+    }
+    return Option::NONE;
+}
+
+function greetUser(id: i32): Option<str> {
+    let name = findUser(id)!;  // if NONE, early returns NONE
+    return Option::SOME("Hello, " + name);
+}
+```
+
+### 9.7 Ternary operator
 
 Ignis supports `cond ? thenExpr : elseExpr`.
 
@@ -982,6 +1067,7 @@ Common directive builtins:
 - Non-Copy types are moved on assignment and function call; use-after-move is a compile-time error.
 - `@implements(Drop)` types are automatically dropped at scope exit; double-drop is a compile-time error.
 - The pipe operator `|>` desugars to a function call with the LHS as the first argument. It supports bare functions, namespace paths, calls with extra args, generic calls, lambdas, and instance method calls. The `_` placeholder controls argument insertion position.
+- The try operator `expr!` unwraps a try-capable enum (marked with `@lang(try)`) or performs early return with the error variant. The function return type must be compatible.
 - User-defined trait checks currently target records.
 - `T[]` is parsed but rejected semantically (dynamic vectors are not enabled).
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.
@@ -991,6 +1077,7 @@ Common directive builtins:
 ```ignis
 import Io from "std::io";
 
+@lang(try)
 enum Maybe {
     SOME(i32),
     NONE,
@@ -1007,15 +1094,24 @@ function double(x: i32): i32 {
     return x * 2;
 }
 
+function process(value: i32): Maybe {
+    let v = maybePositive(value)!;  // unwrap or early return NONE
+    return Maybe::SOME(v * 2);
+}
+
 function main(): i32 {
-    let value = maybePositive(42);
-
-    if (let Maybe::SOME(v) = value && v > 0) {
-        let result = v |> double |> (n: i32): i32 -> n + 1;
-        Io::println("ok");
-        return result;
+    let result = process(42);
+    
+    match (result) {
+        Maybe::SOME(v) -> {
+            let final = v |> double |> (n: i32): i32 -> n + 1;
+            Io::println("ok");
+            return final;
+        },
+        Maybe::NONE -> {
+            Io::println("error");
+            return -1;
+        },
     }
-
-    return 0;
 }
 ```

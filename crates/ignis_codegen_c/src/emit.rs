@@ -742,6 +742,7 @@ impl<'a> CEmitter<'a> {
       match attr {
         RecordAttr::Packed => write!(self.output, " __attribute__((packed))").unwrap(),
         RecordAttr::Aligned(n) => write!(self.output, " __attribute__((aligned({})))", n).unwrap(),
+        RecordAttr::LangTry => {},
       }
     }
   }
@@ -3135,6 +3136,7 @@ fn emit_record_attrs_standalone(
     match attr {
       RecordAttr::Packed => write!(output, " __attribute__((packed))").unwrap(),
       RecordAttr::Aligned(n) => write!(output, " __attribute__((aligned({})))", n).unwrap(),
+      RecordAttr::LangTry => {},
     }
   }
 }

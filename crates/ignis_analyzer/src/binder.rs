@@ -26,8 +26,8 @@ use ignis_type::{
   definition::{
     ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
     FunctionDefinition, LangTraitSet, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition,
-    RecordFieldDef, SymbolEntry, TraitDefinition, TraitMethodEntry, TypeAliasDefinition, TypeParamDefinition,
-    VariableDefinition, VariantDefinition, Visibility,
+    RecordFieldDef, SymbolEntry, TraitDefinition, TraitMethodEntry, TryCapability, TypeAliasDefinition,
+    TypeParamDefinition, VariableDefinition, VariantDefinition, Visibility,
   },
 };
 
@@ -214,6 +214,9 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::PostfixIncrement { expr, .. } | ASTExpression::PostfixDecrement { expr, .. } => {
+        self.bind_complete(expr, ScopeKind::Block);
+      },
+      ASTExpression::Try { expr, .. } => {
         self.bind_complete(expr, ScopeKind::Block);
       },
       ASTExpression::LetCondition(lc) => {
@@ -496,6 +499,7 @@ impl<'a> Analyzer<'a> {
         static_fields: HashMap::new(),
         attrs: vec![],
         lang_traits: LangTraitSet::default(),
+        try_capable: None,
       }),
       name: en.name,
       span: en.span.clone(),
@@ -639,6 +643,28 @@ impl<'a> Analyzer<'a> {
     // Pop the generic scope
     self.pop_type_params_scope_if_generic(enum_def_id);
 
+    // Check for @lang(try) attribute
+    let try_capable = if enum_attrs.iter().any(|a| matches!(a, RecordAttr::LangTry)) {
+      if variants.len() != 2 {
+        self.add_diagnostic(
+          DiagnosticMessage::LangTryRequiresTwoVariants {
+            name: type_name.clone(),
+            count: variants.len(),
+            span: en.span.clone(),
+          }
+          .report(),
+        );
+        None
+      } else {
+        Some(TryCapability {
+          ok_variant: 0,
+          err_variant: 1,
+        })
+      }
+    } else {
+      None
+    };
+
     // Update the enum definition
     if let DefinitionKind::Enum(ed) = &mut self.defs.get_mut(&enum_def_id).kind {
       ed.type_id = type_id;
@@ -649,6 +675,7 @@ impl<'a> Analyzer<'a> {
       ed.static_fields = static_fields;
       ed.attrs = enum_attrs;
       ed.lang_traits = lang_traits;
+      ed.try_capable = try_capable;
     }
   }
 
@@ -1725,6 +1752,32 @@ impl<'a> Analyzer<'a> {
           let user_traits = self.bind_implements_attr(attr, &mut lang_traits, type_name);
           implemented_traits.extend(user_traits);
         },
+        "lang" => {
+          if attr.args.len() != 1 {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 1,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else if let Some(arg_name) = self.extract_ident_arg(&attr.args[0]) {
+            if arg_name == "try" {
+              attrs.push(RecordAttr::LangTry);
+            } else {
+              self.add_diagnostic(
+                DiagnosticMessage::UnknownAttribute {
+                  name: format!("lang({})", arg_name),
+                  target: "record".to_string(),
+                  span: attr.span.clone(),
+                }
+                .report(),
+              );
+            }
+          }
+        },
         "allow" | "warn" | "deny" => {},
         _ => {
           self.add_diagnostic(
@@ -2069,6 +2122,26 @@ impl<'a> Analyzer<'a> {
         self.add_diagnostic(
           DiagnosticMessage::AttributeExpectedInt {
             attr: attr_name.to_string(),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn extract_ident_arg(
+    &mut self,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<String> {
+    match arg {
+      ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _) => Some(self.get_symbol_name(sym).clone()),
+      ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span)
+      | ignis_ast::attribute::ASTAttributeArg::StringLiteral(_, span) => {
+        self.add_diagnostic(
+          DiagnosticMessage::AttributeExpectedIdentifier {
+            attr: "lang".to_string(),
             span: span.clone(),
           }
           .report(),

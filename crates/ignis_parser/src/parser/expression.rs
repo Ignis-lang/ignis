@@ -96,7 +96,7 @@ impl IgnisParser {
         continue;
       }
 
-      if self.at(TokenType::Increment) || self.at(TokenType::Decrement) {
+      if self.at(TokenType::Increment) || self.at(TokenType::Decrement) || self.at(TokenType::Bang) {
         left = self.parse_postfix(left)?;
         continue;
       }
@@ -411,6 +411,7 @@ impl IgnisParser {
     Ok(self.allocate_expression(match operator.type_ {
       TokenType::Increment => ASTExpression::PostfixIncrement { expr: left, span },
       TokenType::Decrement => ASTExpression::PostfixDecrement { expr: left, span },
+      TokenType::Bang => ASTExpression::Try { expr: left, span },
       _ => unreachable!(),
     }))
   }

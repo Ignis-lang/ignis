@@ -2173,6 +2173,46 @@ impl<'a> LoweringContext<'a> {
               return Operand::Temp(false_temp);
             }
           },
+          Type::Enum(value_def_id) => {
+            let pattern_enum = match &self.defs.get(enum_def).kind {
+              DefinitionKind::Enum(ed) => ed,
+              _ => {
+                let false_temp = self.fn_builder().alloc_temp(bool_ty, span);
+                self.fn_builder().emit(Instr::Copy {
+                  dest: false_temp,
+                  source: Operand::Const(ConstValue::Bool(false, bool_ty)),
+                });
+                return Operand::Temp(false_temp);
+              },
+            };
+
+            let value_enum = match &self.defs.get(&value_def_id).kind {
+              DefinitionKind::Enum(ed) => ed,
+              _ => {
+                let false_temp = self.fn_builder().alloc_temp(bool_ty, span);
+                self.fn_builder().emit(Instr::Copy {
+                  dest: false_temp,
+                  source: Operand::Const(ConstValue::Bool(false, bool_ty)),
+                });
+                return Operand::Temp(false_temp);
+              },
+            };
+
+            let pattern_try = pattern_enum.try_capable;
+            let value_try = value_enum.try_capable;
+
+            if pattern_try.is_some() && value_try.is_some() && pattern_try == value_try {
+              let payload = value_enum.variants[*variant_tag as usize].payload.clone();
+              (value_enum.tag_type, payload)
+            } else {
+              let false_temp = self.fn_builder().alloc_temp(bool_ty, span);
+              self.fn_builder().emit(Instr::Copy {
+                dest: false_temp,
+                source: Operand::Const(ConstValue::Bool(false, bool_ty)),
+              });
+              return Operand::Temp(false_temp);
+            }
+          },
           Type::Instance {
             generic,
             args: type_args,

@@ -84,6 +84,10 @@ pub enum ASTExpression {
   PipePlaceholder {
     span: Span,
   },
+  Try {
+    expr: crate::NodeId,
+    span: Span,
+  },
 }
 
 impl ASTExpression {
@@ -114,6 +118,7 @@ impl ASTExpression {
       ASTExpression::CaptureOverride(expr) => &expr.span,
       ASTExpression::Pipe { span, .. } => span,
       ASTExpression::PipePlaceholder { span, .. } => span,
+      ASTExpression::Try { span, .. } => span,
     }
   }
 }

@@ -243,6 +243,9 @@ fn collect_expression_children(
       stack.push(*rhs);
     },
     ASTExpression::PipePlaceholder { .. } => {},
+    ASTExpression::Try { expr, .. } => {
+      stack.push(*expr);
+    },
   }
 }
 
