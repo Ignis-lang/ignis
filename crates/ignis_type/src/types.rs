@@ -915,16 +915,7 @@ impl TypeStore {
     subst: &Substitution,
   ) -> TypeId {
     match self.get(&ty).clone() {
-      Type::Param { owner, index } => {
-        let result = subst.get(owner, index).unwrap_or(ty);
-        if std::env::var("IGNIS_VERBOSE").is_ok() && result == ty && !subst.is_empty() {
-          eprintln!(
-            "[TYPES] substitute: Type::Param {{ owner: {:?}, index: {} }} NOT found in subst {:?}, returning as-is",
-            owner, index, subst
-          );
-        }
-        result
-      },
+      Type::Param { owner, index } => subst.get(owner, index).unwrap_or(ty),
 
       Type::Instance { generic, args } => {
         let new_args: Vec<_> = args.iter().map(|a| self.substitute(*a, subst)).collect();
@@ -1116,16 +1107,7 @@ impl Substitution {
     owner: DefinitionId,
     index: u32,
   ) -> Option<TypeId> {
-    let result = self.bindings.get(&(owner, index)).copied();
-    if std::env::var("IGNIS_VERBOSE").is_ok() && result.is_none() && !self.bindings.is_empty() {
-      eprintln!(
-        "[SUBST] get({:?}, {}) returned None. bindings keys: {:?}",
-        owner,
-        index,
-        self.bindings.keys().collect::<Vec<_>>()
-      );
-    }
-    result
+    self.bindings.get(&(owner, index)).copied()
   }
 
   /// Create a substitution for a generic function, record, or enum.

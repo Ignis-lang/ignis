@@ -685,20 +685,6 @@ impl<'a> Analyzer<'a> {
         // Check for builtins BEFORE normal scope lookup
         let callee_node = self.ast.get(&call.callee);
 
-        if std::env::var("IGNIS_VERBOSE").is_ok() {
-          let callee_type = match callee_node {
-            ASTNode::Expression(ASTExpression::Variable(_)) => "Variable",
-            ASTNode::Expression(ASTExpression::MemberAccess(_)) => "MemberAccess",
-            ASTNode::Expression(ASTExpression::Path(_)) => "Path",
-            _ => "Other",
-          };
-          eprintln!(
-            "[LOWER] Call expression: callee_type={}, call.type_args={:?}",
-            callee_type,
-            call.type_args.as_ref().map(|v| v.len())
-          );
-        }
-
         if let ASTNode::Expression(ASTExpression::Variable(var)) = callee_node {
           let name = self.symbols.borrow().get(&var.name).to_string();
 
@@ -2774,14 +2760,6 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     result_type: TypeId,
   ) -> HIRId {
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
-      eprintln!(
-        "[LOWER] lower_static_call: member={}, call.type_args={:?}",
-        self.symbols.borrow().get(&ma.member),
-        call.type_args.as_ref().map(|v| v.len())
-      );
-    }
-
     let def_id = self.resolve_type_expression_for_lowering(&ma.object);
 
     let Some(def_id) = def_id else {
@@ -2920,23 +2898,7 @@ impl<'a> Analyzer<'a> {
     hir: &mut HIR,
     scope_kind: ScopeKind,
   ) -> Option<HIRId> {
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
-      let segments: Vec<_> = path
-        .segments
-        .iter()
-        .map(|s| self.symbols.borrow().get(&s.name).to_string())
-        .collect();
-      eprintln!(
-        "[LOWER] try_lower_path_call: segments={:?}, call.type_args={:?}",
-        segments,
-        call.type_args.as_ref().map(|v| v.len())
-      );
-    }
-
     if path.segments.len() != 2 {
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
-        eprintln!("[LOWER] try_lower_path_call: segments.len() != 2, returning None");
-      }
       return None;
     }
 
@@ -2946,9 +2908,6 @@ impl<'a> Analyzer<'a> {
     let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
 
     let Some(type_def_id) = self.scopes.lookup_def(&first_segment.name).cloned() else {
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
-        eprintln!("[LOWER] try_lower_path_call: lookup_def for first_segment returned None");
-      }
       return None;
     };
 
@@ -3010,16 +2969,6 @@ impl<'a> Analyzer<'a> {
         None
       },
       DefinitionKind::Record(rd) => {
-        if std::env::var("IGNIS_VERBOSE").is_ok() {
-          let type_name = self.symbols.borrow().get(&self.defs.get(&type_def_id).name).to_string();
-          let method_name = self.symbols.borrow().get(&second_segment.name).to_string();
-          let has_method = rd.static_methods.contains_key(&second_segment.name);
-          eprintln!(
-            "[LOWER] try_lower_path_call: Record type={}, looking for static method={}, has_method={}",
-            type_name, method_name, has_method
-          );
-        }
-
         // Static method call on record
         // First try to get resolved method from type checker (handles overloads)
         let method_id = self.lookup_resolved_call(node_id).cloned().or_else(|| {
@@ -3042,15 +2991,6 @@ impl<'a> Analyzer<'a> {
             .as_ref()
             .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
             .unwrap_or_default();
-
-          if std::env::var("IGNIS_VERBOSE").is_ok() {
-            let method_name = self.symbols.borrow().get(&self.defs.get(&method_id).name).to_string();
-            eprintln!(
-              "[LOWER] try_lower_path_call: Record static method={}, type_args.len()={}",
-              method_name,
-              type_args.len()
-            );
-          }
 
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
@@ -3766,18 +3706,6 @@ impl<'a> Analyzer<'a> {
     // If explicit type args provided, use them
     if let Some(explicit_args) = &call.type_args {
       let resolved: Vec<_> = explicit_args.iter().map(|t| self.resolve_type_syntax(t)).collect();
-      if std::env::var("IGNIS_VERBOSE").is_ok() {
-        let callee_name = self
-          .symbols
-          .borrow()
-          .get(&self.defs.get(callee_def_id).name)
-          .to_string();
-        eprintln!(
-          "[LOWER] resolve_or_infer_type_args (fn): callee={}, explicit_args resolved to {:?}",
-          callee_name,
-          resolved.iter().map(|ty| self.types.get(ty).clone()).collect::<Vec<_>>()
-        );
-      }
       return resolved;
     }
 
@@ -3848,22 +3776,6 @@ impl<'a> Analyzer<'a> {
       },
       _ => return vec![],
     };
-
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
-      let method_name = self
-        .symbols
-        .borrow()
-        .get(&self.defs.get(method_def_id).name)
-        .to_string();
-      eprintln!(
-        "[LOWER] resolve_or_infer_method_type_args: method={}, is_static={}, owner_params={}, method_params={}, call.type_args={:?}",
-        method_name,
-        is_static,
-        owner_type_params.len(),
-        method_type_params.len(),
-        call.type_args.as_ref().map(|v| v.len())
-      );
-    }
 
     // For static methods, we need both owner and method type params
     // For instance methods, only method type params (owner args come from receiver)

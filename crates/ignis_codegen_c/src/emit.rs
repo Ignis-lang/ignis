@@ -959,16 +959,6 @@ impl<'a> CEmitter<'a> {
     let mut funcs: Vec<_> = self.program.functions.iter().collect();
     funcs.sort_by_key(|(def_id, _)| def_id.index());
 
-    if std::env::var("IGNIS_VERBOSE").is_ok() {
-      eprintln!("[EMIT] emit_forward_declarations: {} functions in LIR", funcs.len());
-      for (def_id, _) in &funcs {
-        let name = self.def_name(**def_id);
-        if name.contains("init") || name.contains("Vector") {
-          eprintln!("[EMIT]   - {} (should_emit={})", name, self.should_emit(**def_id));
-        }
-      }
-    }
-
     // Only emit forward declarations for non-extern functions that match the target.
     // Extern functions are declared separately via emit_extern_declarations().
     // Skip functions with unmonomorphized signatures (generic functions that weren't instantiated).
@@ -994,10 +984,6 @@ impl<'a> CEmitter<'a> {
 
       // Skip functions with Type::Param or Type::Instance in their signature
       if !self.is_function_signature_monomorphized(func) {
-        if std::env::var("IGNIS_VERBOSE").is_ok() {
-          let name = self.def_name(**def_id);
-          eprintln!("[EMIT] Skipping forward decl for {} - signature not monomorphized", name);
-        }
         continue;
       }
 
@@ -2964,73 +2950,106 @@ where
     writeln!(output).unwrap();
   }
 
-  // Emit full struct definitions for enums first (they may be used as fields in records).
-  // Each definition is wrapped in an include guard so that if another module header
-  // also emits the same type (as an external dependency), the second definition is skipped.
-  if !module_enums.is_empty() {
-    let mut sorted_enums: Vec<_> = module_enums.iter().collect();
-    sorted_enums.sort_by_key(|id| id.index());
-
-    for &def_id in sorted_enums {
-      let def = defs.get(&def_id);
-      if let DefinitionKind::Enum(ed) = &def.kind {
-        let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
-        let type_guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
-        writeln!(output, "#ifndef {}", type_guard).unwrap();
-        writeln!(output, "#define {}", type_guard).unwrap();
-        emit_enum_definition_standalone(def_id, ed, defs, symbols, namespaces, types, &mut output);
-        writeln!(output, "#endif // {}", type_guard).unwrap();
-      }
-    }
-  }
-
-  // Emit full struct definitions for records defined in this module (also guarded).
-  if !module_records.is_empty() {
-    let mut sorted_records: Vec<_> = module_records.iter().collect();
-    sorted_records.sort_by_key(|id| id.index());
-
-    for &def_id in sorted_records {
-      let def = defs.get(&def_id);
-      if let DefinitionKind::Record(rd) = &def.kind {
-        let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
-        let type_guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
-        writeln!(output, "#ifndef {}", type_guard).unwrap();
-        writeln!(output, "#define {}", type_guard).unwrap();
-        emit_record_definition_standalone(def_id, rd, defs, types, symbols, namespaces, &mut output);
-        writeln!(output, "#endif // {}", type_guard).unwrap();
-      }
-    }
-  }
-
-  if !module_enums.is_empty() || !module_records.is_empty() {
-    writeln!(output).unwrap();
-  }
-
-  // Emit complete definitions for external, concrete struct types used by this module.
-  // This is required for by-value usage in signatures (e.g. Option<TokenType>), where
-  // forward declarations alone are insufficient.
+  // Collect external type definitions needed by this module (by-value usage).
   let external_definition_ids =
     collect_external_type_definition_ids(defs, types, symbols, namespaces, &module_type_names, &struct_forward_decls);
 
-  for def_id in external_definition_ids {
+  // Build a unified set of all type definitions: module enums + records + external deps.
+  // Then topologically sort them so that if type A contains type B by-value, B comes first.
+  let mut all_type_defs: std::collections::HashMap<String, DefinitionId> = std::collections::HashMap::new();
+
+  for &def_id in module_enums.iter().chain(module_records.iter()) {
     let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
-    let guard_name = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
+    all_type_defs.insert(name, def_id);
+  }
 
-    writeln!(output, "#ifndef {}", guard_name).unwrap();
-    writeln!(output, "#define {}", guard_name).unwrap();
+  for def_id in &external_definition_ids {
+    let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
+    all_type_defs.insert(name, *def_id);
+  }
 
-    let def = defs.get(&def_id);
+  // Topological sort: emit types whose by-value dependencies are already resolved first.
+  let mut unresolved: std::collections::HashSet<String> = all_type_defs.keys().cloned().collect();
+  let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+  let mut ordered_type_defs: Vec<DefinitionId> = Vec::new();
+
+  while !unresolved.is_empty() {
+    let mut progressed = false;
+    let mut names: Vec<String> = unresolved.iter().cloned().collect();
+    names.sort();
+
+    for name in names {
+      let Some(def_id) = all_type_defs.get(&name).copied() else {
+        continue;
+      };
+
+      let def = defs.get(&def_id);
+      let mut dependencies = std::collections::HashSet::new();
+
+      match &def.kind {
+        DefinitionKind::Record(rd) => {
+          for field in &rd.fields {
+            collect_struct_dependencies_from_type(field.type_id, types, defs, symbols, namespaces, &mut dependencies);
+          }
+        },
+        DefinitionKind::Enum(ed) => {
+          for variant in &ed.variants {
+            for payload in &variant.payload {
+              collect_struct_dependencies_from_type(*payload, types, defs, symbols, namespaces, &mut dependencies);
+            }
+          }
+        },
+        _ => {},
+      }
+
+      dependencies.remove(&name);
+
+      if dependencies
+        .iter()
+        .all(|dep| resolved.contains(dep) || !unresolved.contains(dep))
+      {
+        ordered_type_defs.push(def_id);
+        unresolved.remove(&name);
+        resolved.insert(name);
+        progressed = true;
+      }
+    }
+
+    if !progressed {
+      let mut remaining: Vec<String> = unresolved.into_iter().collect();
+      remaining.sort();
+      for name in remaining {
+        if let Some(def_id) = all_type_defs.get(&name).copied() {
+          ordered_type_defs.push(def_id);
+        }
+      }
+      break;
+    }
+  }
+
+  // Emit all type definitions in topological order (each guarded).
+  for def_id in &ordered_type_defs {
+    let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
+    let type_guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
+
+    writeln!(output, "#ifndef {}", type_guard).unwrap();
+    writeln!(output, "#define {}", type_guard).unwrap();
+
+    let def = defs.get(def_id);
     match &def.kind {
       DefinitionKind::Record(rd) => {
-        emit_record_definition_standalone(def_id, rd, defs, types, symbols, namespaces, &mut output);
+        emit_record_definition_standalone(*def_id, rd, defs, types, symbols, namespaces, &mut output);
       },
       DefinitionKind::Enum(ed) => {
-        emit_enum_definition_standalone(def_id, ed, defs, symbols, namespaces, types, &mut output);
+        emit_enum_definition_standalone(*def_id, ed, defs, symbols, namespaces, types, &mut output);
       },
       _ => {},
     }
 
-    writeln!(output, "#endif // {}", guard_name).unwrap();
+    writeln!(output, "#endif // {}", type_guard).unwrap();
+  }
+
+  if !ordered_type_defs.is_empty() {
     writeln!(output).unwrap();
   }
 

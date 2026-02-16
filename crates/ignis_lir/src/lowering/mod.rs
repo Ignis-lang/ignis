@@ -581,7 +581,9 @@ impl<'a> LoweringContext<'a> {
         self.fn_builder().terminate(Terminator::Unreachable);
         None
       },
-      HIRKind::Match { scrutinee, arms } => self.lower_match(*scrutinee, arms, node.type_id, node.span),
+      HIRKind::Match { scrutinee, arms } => {
+        self.lower_match(*scrutinee, arms, node.type_id, node.span)
+      },
       HIRKind::Closure {
         thunk_def,
         captures,
