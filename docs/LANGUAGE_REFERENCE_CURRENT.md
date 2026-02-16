@@ -269,6 +269,17 @@ import _ from "./sub_module";         // relative path works too
 
 `_` must be the sole item in the import statement. Combining it with named items (`import _, X from "..."`) is an error.
 
+#### Re-Export From
+
+`export X from "..."` imports a symbol and immediately re-exports it. Equivalent to `import X from "..."; export X;` but as a single statement.
+
+```ignis
+export CType from "./primitives";
+export Foo, Bar from "./lib";
+```
+
+The re-exported symbols are available both in the current module's scope and to consumers that import from this module. `export _ from "..."` is not allowed — use `import _ from "..."` instead.
+
 #### Import Path Resolution
 
 The `from` string is resolved in this order:

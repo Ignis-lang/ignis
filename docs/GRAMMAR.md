@@ -26,6 +26,8 @@
 <import-item> ::= "_" | <identifier> | <identifier> "as" <identifier>
 
 <export> ::= "export" (<function> | <const> | <record> | <enum> | <type-alias> )
+  | "export" <identifier> ";"
+  | "export" <import-list> "from" <string> ";"
 <inline> ::= "inline" (<function> | <const>)
 
 <const> ::= "const" <identifier> ":" <type> "=" <expression> ";"
@@ -254,6 +256,8 @@
 <import-item> ::= "_" | <identifier> | <identifier> "as" <identifier>
 
 <export> ::= "export" (<function> | <const> | <record> | <enum> | <type-alias> | <directive-statement> | <directive>)
+  | "export" <identifier> ";"
+  | "export" <import-list> "from" <string> ";"
 <inline> ::= "inline" (<function> | <const>)
 
 <const> ::= <directive-attrs>? "const" <identifier> ":" <type> "=" <expression> ";"
