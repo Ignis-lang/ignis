@@ -925,11 +925,149 @@ impl<'a> Analyzer<'a> {
         span,
       } => self.typecheck_pipe(node_id, lhs, rhs, pipe_span, span, scope_kind, ctx),
 
+      ASTExpression::Try { expr, span } => self.typecheck_try(node_id, expr, span, scope_kind, &ctx),
+
       ASTExpression::PipePlaceholder { span, .. } => {
         self.add_diagnostic(DiagnosticMessage::PipePlaceholderOutsidePipe { span: span.clone() }.report());
         self.types.error()
       },
     }
+  }
+
+  fn typecheck_try(
+    &mut self,
+    node_id: &NodeId,
+    expr: &NodeId,
+    span: &Span,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let expr_type = self.typecheck_node(expr, scope_kind, ctx);
+
+    let (enum_def, type_args, try_capable) = match self.types.get(&expr_type).clone() {
+      Type::Instance { generic, args } => {
+        let def = self.defs.get(&generic);
+        if let DefinitionKind::Enum(ed) = &def.kind {
+          if let Some(tc) = &ed.try_capable {
+            (generic, args, *tc)
+          } else {
+            self.add_diagnostic(
+              DiagnosticMessage::TryOperatorOnNonTryType {
+                type_name: self.format_type_for_error(&expr_type),
+                span: span.clone(),
+              }
+              .report(),
+            );
+            return self.types.error();
+          }
+        } else {
+          self.add_diagnostic(
+            DiagnosticMessage::TryOperatorOnNonTryType {
+              type_name: self.format_type_for_error(&expr_type),
+              span: span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        }
+      },
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::TryOperatorOnNonTryType {
+            type_name: self.format_type_for_error(&expr_type),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    let enum_def_data = match &self.defs.get(&enum_def).kind {
+      DefinitionKind::Enum(ed) => ed.clone(),
+      _ => unreachable!(),
+    };
+
+    let ok_variant = &enum_def_data.variants[try_capable.ok_variant as usize];
+    let err_variant = &enum_def_data.variants[try_capable.err_variant as usize];
+
+    let ok_inner_type = if ok_variant.payload.len() == 1 {
+      let raw = ok_variant.payload[0];
+      let subst = Substitution::for_generic(enum_def, &type_args);
+      self.types.substitute(raw, &subst)
+    } else {
+      self.types.void()
+    };
+
+    let err_inner_type = if err_variant.payload.len() == 1 {
+      let raw = err_variant.payload[0];
+      let subst = Substitution::for_generic(enum_def, &type_args);
+      self.types.substitute(raw, &subst)
+    } else {
+      self.types.void()
+    };
+
+    if let Some(expected_return) = ctx.expected_return {
+      match self.types.get(&expected_return).clone() {
+        Type::Instance {
+          generic: ret_enum,
+          args: ret_args,
+        } => {
+          if ret_enum != enum_def {
+            self.add_diagnostic(
+              DiagnosticMessage::TryOperatorReturnTypeMismatch {
+                expected: self.format_type_for_error(&expected_return),
+                got: self.format_type_for_error(&expr_type),
+                span: span.clone(),
+              }
+              .report(),
+            );
+          } else {
+            let ret_enum_def = match &self.defs.get(&ret_enum).kind {
+              DefinitionKind::Enum(ed) => ed.clone(),
+              _ => unreachable!(),
+            };
+
+            if let Some(ret_try) = &ret_enum_def.try_capable {
+              let ret_err_variant = &ret_enum_def.variants[ret_try.err_variant as usize];
+              let ret_err_type = if ret_err_variant.payload.len() == 1 {
+                let raw = ret_err_variant.payload[0];
+                let subst = Substitution::for_generic(ret_enum, &ret_args);
+                self.types.substitute(raw, &subst)
+              } else {
+                self.types.void()
+              };
+
+              if !self.types.types_equal(&err_inner_type, &ret_err_type) {
+                self.add_diagnostic(
+                  DiagnosticMessage::TryOperatorErrorTypeMismatch {
+                    expected: self.format_type_for_error(&ret_err_type),
+                    got: self.format_type_for_error(&err_inner_type),
+                    span: span.clone(),
+                  }
+                  .report(),
+                );
+              }
+            }
+          }
+        },
+        _ => {
+          self.add_diagnostic(
+            DiagnosticMessage::TryOperatorReturnTypeMismatch {
+              expected: self.format_type_for_error(&expected_return),
+              got: self.format_type_for_error(&expr_type),
+              span: span.clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    } else {
+      self.add_diagnostic(DiagnosticMessage::TryOperatorOutsideFunction { span: span.clone() }.report());
+    }
+
+    self.set_type(node_id, &ok_inner_type);
+    ok_inner_type
   }
 
   fn typecheck_pattern(
@@ -3830,9 +3968,8 @@ impl<'a> Analyzer<'a> {
     let explicit_params: Vec<_> = method.params[start..].to_vec();
 
     // Build substitution for owner type params (Instance<T> → concrete) + method type params
-    let (param_types, return_type) = self.pipe_method_param_types(
-      &obj_type, &method_id, &method, &explicit_params, call,
-    );
+    let (param_types, return_type) =
+      self.pipe_method_param_types(&obj_type, &method_id, &method, &explicit_params, call);
 
     // Arity and type checking — mirrors typecheck_pipe_call logic but against explicit params
     let method_name = self.get_symbol_name(&ma.member);
@@ -4098,9 +4235,8 @@ impl<'a> Analyzer<'a> {
     let start = self.method_param_start(&method);
     let explicit_params: Vec<_> = method.params[start..].to_vec();
 
-    let (param_types, return_type) = self.pipe_method_param_types(
-      &obj_type, &method_id, &method, &explicit_params, &synthetic_call,
-    );
+    let (param_types, return_type) =
+      self.pipe_method_param_types(&obj_type, &method_id, &method, &explicit_params, &synthetic_call);
 
     // Bare method pipe: LHS is the only arg
     if param_types.len() != 1 {
@@ -7706,6 +7842,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Pipe { lhs, rhs, .. } => {
         self.node_contains_let_condition(lhs) || self.node_contains_let_condition(rhs)
       },
+      ASTExpression::Try { expr, .. } => self.node_contains_let_condition(expr),
       ASTExpression::Literal(_)
       | ASTExpression::Variable(_)
       | ASTExpression::Path(_)
@@ -8478,6 +8615,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Pipe { lhs, rhs, .. } => self
         .find_first_symbol_usage(*lhs, symbol)
         .or_else(|| self.find_first_symbol_usage(*rhs, symbol)),
+      ASTExpression::Try { expr, .. } => self.find_first_symbol_usage(*expr, symbol),
       ASTExpression::Literal(_) | ASTExpression::Path(_) | ASTExpression::PipePlaceholder { .. } => None,
     }
   }

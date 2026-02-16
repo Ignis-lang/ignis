@@ -13,7 +13,7 @@ use ignis_hir::{
   operation::{BinaryOperation, UnaryOperation},
   statement::LoopKind,
 };
-use ignis_type::definition::{DefinitionId, DefinitionKind, SymbolEntry};
+use ignis_type::definition::{Definition, DefinitionId, DefinitionKind, SymbolEntry, VariableDefinition, Visibility};
 use ignis_type::span::Span;
 use ignis_type::symbol::SymbolId;
 use ignis_type::types::{Substitution, Type, TypeId};
@@ -1231,6 +1231,8 @@ impl<'a> Analyzer<'a> {
 
       ASTExpression::Pipe { lhs, rhs, .. } => self.lower_pipe_to_hir(node_id, lhs, rhs, hir, scope_kind),
 
+      ASTExpression::Try { expr, span } => self.lower_try_to_hir(node_id, expr, span, hir, scope_kind),
+
       // PipePlaceholder nodes are substituted by lower_pipe_to_hir and should never be lowered directly.
       ASTExpression::PipePlaceholder { span, .. } => hir.alloc(HIRNode {
         kind: HIRKind::Error,
@@ -1238,6 +1240,205 @@ impl<'a> Analyzer<'a> {
         type_id: self.types.error(),
       }),
     }
+  }
+
+  fn lower_try_to_hir(
+    &mut self,
+    node_id: &NodeId,
+    expr: &NodeId,
+    span: &Span,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let scrutinee = self.lower_node_to_hir(expr, hir, scope_kind);
+
+    let scrutinee_type = hir.get(scrutinee).type_id;
+
+    let (enum_def, type_args, try_capable) = match self.types.get(&scrutinee_type).clone() {
+      Type::Instance { generic, args } => {
+        if let DefinitionKind::Enum(ed) = &self.defs.get(&generic).kind {
+          if let Some(tc) = &ed.try_capable {
+            (generic, args, *tc)
+          } else {
+            return hir.alloc(HIRNode {
+              kind: HIRKind::Error,
+              span: span.clone(),
+              type_id: self.types.error(),
+            });
+          }
+        } else {
+          return hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: span.clone(),
+            type_id: self.types.error(),
+          });
+        }
+      },
+      Type::Enum(def_id) => {
+        if let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind {
+          if let Some(tc) = &ed.try_capable {
+            (def_id, vec![], *tc)
+          } else {
+            return hir.alloc(HIRNode {
+              kind: HIRKind::Error,
+              span: span.clone(),
+              type_id: self.types.error(),
+            });
+          }
+        } else {
+          return hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: span.clone(),
+            type_id: self.types.error(),
+          });
+        }
+      },
+      _ => {
+        return hir.alloc(HIRNode {
+          kind: HIRKind::Error,
+          span: span.clone(),
+          type_id: self.types.error(),
+        });
+      },
+    };
+
+    let enum_def_data = match &self.defs.get(&enum_def).kind {
+      DefinitionKind::Enum(ed) => ed.clone(),
+      _ => unreachable!(),
+    };
+
+    let ok_variant = &enum_def_data.variants[try_capable.ok_variant as usize];
+    let err_variant = &enum_def_data.variants[try_capable.err_variant as usize];
+
+    let ok_inner_type = if ok_variant.payload.len() == 1 {
+      let raw = ok_variant.payload[0];
+      let subst = Substitution::for_generic(enum_def, &type_args);
+      self.types.substitute(raw, &subst)
+    } else {
+      self.types.void()
+    };
+
+    let result_type = self.lookup_type(node_id).cloned().unwrap_or(ok_inner_type);
+
+    let ok_binding_name = self.symbols.borrow_mut().intern("_try_ok_value");
+    let ok_binding_def = Definition {
+      kind: DefinitionKind::Variable(VariableDefinition {
+        type_id: ok_inner_type,
+        mutable: false,
+      }),
+      name: ok_binding_name,
+      span: span.clone(),
+      name_span: span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+      doc: None,
+    };
+    let ok_binding_id = self.defs.alloc(ok_binding_def);
+
+    let ok_body = hir.alloc(HIRNode {
+      kind: HIRKind::Variable(ok_binding_id),
+      span: span.clone(),
+      type_id: ok_inner_type,
+    });
+
+    let err_inner_type = if err_variant.payload.len() == 1 {
+      let raw = err_variant.payload[0];
+      let subst = Substitution::for_generic(enum_def, &type_args);
+      self.types.substitute(raw, &subst)
+    } else {
+      self.types.void()
+    };
+
+    let err_binding_name = self.symbols.borrow_mut().intern("_try_err_value");
+    let err_binding_def = Definition {
+      kind: DefinitionKind::Variable(VariableDefinition {
+        type_id: err_inner_type,
+        mutable: false,
+      }),
+      name: err_binding_name,
+      span: span.clone(),
+      name_span: span.clone(),
+      visibility: Visibility::Private,
+      owner_module: self.current_module,
+      owner_namespace: self.current_namespace,
+      doc: None,
+    };
+    let err_binding_id = self.defs.alloc(err_binding_def);
+
+    let err_payload = if err_variant.payload.is_empty() {
+      vec![]
+    } else {
+      vec![hir.alloc(HIRNode {
+        kind: HIRKind::Variable(err_binding_id),
+        span: span.clone(),
+        type_id: err_inner_type,
+      })]
+    };
+
+    let err_return_value = hir.alloc(HIRNode {
+      kind: HIRKind::EnumVariant {
+        enum_def,
+        type_args: type_args.clone(),
+        variant_tag: try_capable.err_variant,
+        payload: err_payload,
+      },
+      span: span.clone(),
+      type_id: scrutinee_type,
+    });
+
+    let err_body = hir.alloc(HIRNode {
+      kind: HIRKind::Return(Some(err_return_value)),
+      span: span.clone(),
+      type_id: self.types.void(),
+    });
+
+    let ok_pattern = if ok_variant.payload.is_empty() {
+      HIRPattern::Variant {
+        enum_def,
+        variant_tag: try_capable.ok_variant,
+        args: vec![],
+      }
+    } else {
+      HIRPattern::Variant {
+        enum_def,
+        variant_tag: try_capable.ok_variant,
+        args: vec![HIRPattern::Binding { def_id: ok_binding_id }],
+      }
+    };
+
+    let err_pattern = if err_variant.payload.is_empty() {
+      HIRPattern::Variant {
+        enum_def,
+        variant_tag: try_capable.err_variant,
+        args: vec![],
+      }
+    } else {
+      HIRPattern::Variant {
+        enum_def,
+        variant_tag: try_capable.err_variant,
+        args: vec![HIRPattern::Binding { def_id: err_binding_id }],
+      }
+    };
+
+    let arms = vec![
+      HIRMatchArm {
+        pattern: ok_pattern,
+        guard: None,
+        body: ok_body,
+      },
+      HIRMatchArm {
+        pattern: err_pattern,
+        guard: None,
+        body: err_body,
+      },
+    ];
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Match { scrutinee, arms },
+      span: span.clone(),
+      type_id: result_type,
+    })
   }
 
   fn lower_pattern(

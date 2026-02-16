@@ -5210,3 +5210,31 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_try_operator_result() {
+  e2e_test(
+    "try_operator_result",
+    r#"
+@lang(try)
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+function okValue(): Result<i32, i32> {
+    return Result::Ok(42);
+}
+
+function process(): Result<i32, i32> {
+    let value = okValue()!;
+    return Result::Ok(value + 1);
+}
+
+function main(): i32 {
+    let result = process();
+    return 0;
+}
+"#,
+  );
+}

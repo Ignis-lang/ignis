@@ -298,6 +298,9 @@ impl DisplayLisp for ASTExpression {
         format!("(|> {} {})", formatter.format_node(lhs), formatter.format_node(rhs))
       },
       ASTExpression::PipePlaceholder { .. } => "_".to_string(),
+      ASTExpression::Try { expr, .. } => {
+        format!("(! {})", formatter.format_node(expr))
+      },
     }
   }
 }

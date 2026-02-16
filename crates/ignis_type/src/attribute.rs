@@ -2,6 +2,7 @@
 pub enum RecordAttr {
   Packed,
   Aligned(u64),
+  LangTry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -43,6 +43,13 @@ pub struct LangTraitSet {
   pub copy: bool,
 }
 
+/// Information about try capability for enums marked with `@lang(try)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TryCapability {
+  pub ok_variant: u32,
+  pub err_variant: u32,
+}
+
 pub type DefinitionId = Id<Definition>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -194,6 +201,7 @@ pub struct EnumDefinition {
   pub static_fields: HashMap<SymbolId, DefinitionId>,
   pub attrs: Vec<RecordAttr>,
   pub lang_traits: LangTraitSet,
+  pub try_capable: Option<TryCapability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

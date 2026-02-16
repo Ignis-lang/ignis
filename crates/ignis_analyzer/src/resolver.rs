@@ -450,6 +450,10 @@ impl<'a> Analyzer<'a> {
         self.in_callee_context = prev;
       },
 
+      ASTExpression::Try { expr, .. } => {
+        self.resolve_node(expr, scope_kind);
+      },
+
       ASTExpression::PipePlaceholder { .. } => {},
     }
   }

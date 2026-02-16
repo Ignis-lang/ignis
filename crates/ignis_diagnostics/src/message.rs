@@ -662,6 +662,28 @@ pub enum DiagnosticMessage {
     trait_name: String,
     span: Span,
   },
+  LangTryRequiresTwoVariants {
+    name: String,
+    count: usize,
+    span: Span,
+  },
+  TryOperatorOnNonTryType {
+    type_name: String,
+    span: Span,
+  },
+  TryOperatorOutsideFunction {
+    span: Span,
+  },
+  TryOperatorReturnTypeMismatch {
+    expected: String,
+    got: String,
+    span: Span,
+  },
+  TryOperatorErrorTypeMismatch {
+    expected: String,
+    got: String,
+    span: Span,
+  },
   CopyOnNonCopyField {
     type_name: String,
     field_name: String,
@@ -1469,6 +1491,36 @@ impl fmt::Display for DiagnosticMessage {
           trait_name
         )
       },
+      DiagnosticMessage::LangTryRequiresTwoVariants { name, count, .. } => {
+        write!(f, "@lang(try) on enum '{}' requires exactly 2 variants, found {}", name, count)
+      },
+      DiagnosticMessage::TryOperatorOnNonTryType { type_name, .. } => {
+        write!(
+          f,
+          "try operator `!` cannot be used on type '{}' (not marked with @lang(try))",
+          type_name
+        )
+      },
+      DiagnosticMessage::TryOperatorOutsideFunction { .. } => {
+        write!(
+          f,
+          "try operator `!` can only be used inside a function that returns a try-capable type"
+        )
+      },
+      DiagnosticMessage::TryOperatorReturnTypeMismatch { expected, got, .. } => {
+        write!(
+          f,
+          "try operator `!` type '{}' does not match function return type '{}'",
+          got, expected
+        )
+      },
+      DiagnosticMessage::TryOperatorErrorTypeMismatch { expected, got, .. } => {
+        write!(
+          f,
+          "try operator `!` error type '{}' does not match function's error type '{}'",
+          got, expected
+        )
+      },
       DiagnosticMessage::CopyOnNonCopyField {
         type_name,
         field_name,
@@ -1828,6 +1880,11 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
       | DiagnosticMessage::LangTraitInvalidSignature { span, .. }
       | DiagnosticMessage::LangTraitNotApplicable { span, .. }
+      | DiagnosticMessage::LangTryRequiresTwoVariants { span, .. }
+      | DiagnosticMessage::TryOperatorOnNonTryType { span, .. }
+      | DiagnosticMessage::TryOperatorOutsideFunction { span, .. }
+      | DiagnosticMessage::TryOperatorReturnTypeMismatch { span, .. }
+      | DiagnosticMessage::TryOperatorErrorTypeMismatch { span, .. }
       | DiagnosticMessage::CopyOnNonCopyField { span, .. }
       | DiagnosticMessage::CopyOnNonCopyVariantPayload { span, .. }
       | DiagnosticMessage::ExtensionInvalidTargetType { span, .. }
@@ -2032,6 +2089,11 @@ impl DiagnosticMessage {
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",
       DiagnosticMessage::LangTraitInvalidSignature { .. } => "A0133",
       DiagnosticMessage::LangTraitNotApplicable { .. } => "A0134",
+      DiagnosticMessage::LangTryRequiresTwoVariants { .. } => "A0177",
+      DiagnosticMessage::TryOperatorOnNonTryType { .. } => "A0178",
+      DiagnosticMessage::TryOperatorOutsideFunction { .. } => "A0179",
+      DiagnosticMessage::TryOperatorReturnTypeMismatch { .. } => "A0180",
+      DiagnosticMessage::TryOperatorErrorTypeMismatch { .. } => "A0181",
       DiagnosticMessage::CopyOnNonCopyField { .. } => "A0148",
       DiagnosticMessage::CopyOnNonCopyVariantPayload { .. } => "A0149",
       DiagnosticMessage::ExtensionInvalidTargetType { .. } => "A0135",
