@@ -913,6 +913,16 @@ impl DisplayLisp for ASTExport {
         let name_string = formatter.resolve_symbol(name);
         format!("(Export \"{}\")", name_string)
       },
+      ASTExport::ReExportFrom { items, from, .. } => {
+        let names: Vec<String> = items
+          .iter()
+          .filter_map(|item| match &item.kind {
+            ImportItemKind::Named(sym) => Some(formatter.resolve_symbol(sym)),
+            _ => None,
+          })
+          .collect();
+        format!("(ExportFrom [{}] \"{}\")", names.join(", "), from)
+      },
     }
   }
 }

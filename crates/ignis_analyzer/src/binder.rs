@@ -10,6 +10,7 @@ use ignis_ast::{
     const_statement::ASTConstant,
     enum_::{ASTEnum, ASTEnumItem},
     function::ASTFunction,
+    import_statement::ImportItemKind,
     record::{ASTMethod, ASTRecord, ASTRecordItem},
     trait_declaration::ASTTrait,
     type_alias::ASTTypeAlias,
@@ -1366,6 +1367,25 @@ impl<'a> Analyzer<'a> {
                 self.defs.get_mut(def_id).visibility = Visibility::Public;
               }
             },
+          }
+        }
+      },
+      ignis_ast::statements::ASTExport::ReExportFrom { items, .. } => {
+        for item in items {
+          let ImportItemKind::Named(name) = &item.kind else {
+            continue;
+          };
+          if let Some(entry) = self.scopes.lookup(name) {
+            match entry {
+              SymbolEntry::Single(def_id) => {
+                self.defs.get_mut(def_id).visibility = Visibility::Public;
+              },
+              SymbolEntry::Overload(group) => {
+                for def_id in group {
+                  self.defs.get_mut(def_id).visibility = Visibility::Public;
+                }
+              },
+            }
           }
         }
       },

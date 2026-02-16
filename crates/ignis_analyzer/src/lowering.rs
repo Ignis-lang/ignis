@@ -384,14 +384,15 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Export(exp) => match exp {
         ignis_ast::statements::ASTExport::Declaration { decl, .. } => self.lower_node_to_hir(decl, hir, scope_kind),
-        ignis_ast::statements::ASTExport::Name { .. } => hir.alloc(HIRNode {
-          kind: HIRKind::Block {
-            statements: Vec::new(),
-            expression: None,
-          },
-          span: exp.span().clone(),
-          type_id: self.types.void(),
-        }),
+        ignis_ast::statements::ASTExport::Name { .. } | ignis_ast::statements::ASTExport::ReExportFrom { .. } => hir
+          .alloc(HIRNode {
+            kind: HIRKind::Block {
+              statements: Vec::new(),
+              expression: None,
+            },
+            span: exp.span().clone(),
+            type_id: self.types.void(),
+          }),
       },
       ASTStatement::Record(record) => {
         // Lower record methods to HIR

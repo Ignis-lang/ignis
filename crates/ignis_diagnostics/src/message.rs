@@ -435,6 +435,9 @@ pub enum DiagnosticMessage {
   DiscardImportMustBeSoleItem {
     at: Span,
   },
+  DiscardExportFromNotAllowed {
+    at: Span,
+  },
   CircularDependency {
     cycle: Vec<String>,
     at: Span,
@@ -1203,6 +1206,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::DiscardImportMustBeSoleItem { .. } => {
         write!(f, "Discard import '_' must be the only item in an import statement")
       },
+      DiagnosticMessage::DiscardExportFromNotAllowed { .. } => {
+        write!(f, "Cannot use discard '_' in export-from; use 'import _ from ...' instead")
+      },
       DiagnosticMessage::CircularDependency { cycle, .. } => {
         write!(f, "Circular dependency detected: {}", cycle.join(" -> "))
       },
@@ -1724,6 +1730,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::SymbolNotExported { at, .. }
       | DiagnosticMessage::ImportShadowsLocal { at, .. }
       | DiagnosticMessage::DiscardImportMustBeSoleItem { at, .. }
+      | DiagnosticMessage::DiscardExportFromNotAllowed { at, .. }
       | DiagnosticMessage::CircularDependency { at, .. } => at.clone(),
 
       DiagnosticMessage::UseAfterMove { span, .. }
@@ -1925,6 +1932,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::SymbolNotExported { .. } => "M0002",
       DiagnosticMessage::ImportShadowsLocal { .. } => "M0003",
       DiagnosticMessage::DiscardImportMustBeSoleItem { .. } => "M0005",
+      DiagnosticMessage::DiscardExportFromNotAllowed { .. } => "M0006",
       DiagnosticMessage::CircularDependency { .. } => "M0004",
       DiagnosticMessage::UseAfterMove { .. } => "O0001",
       DiagnosticMessage::UseAfterFree { .. } => "O0002",
