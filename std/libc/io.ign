@@ -1,16 +1,34 @@
 //!
 //! # LibC I/O
 //!
-//! POSIX file descriptor operations from `unistd.h` and `fcntl.h`.
+//! POSIX file-descriptor operations from `unistd.h` and `fcntl.h`,
+//! exposed as `LibC::File`.
+//!
+//! ## Constants
+//!
+//! | Constant         | Description                       |
+//! |------------------|-----------------------------------|
+//! | `SEEK_SET`       | Seek from beginning of file       |
+//! | `SEEK_CUR`       | Seek from current position        |
+//! | `SEEK_END`       | Seek from end of file             |
+//! | `STDIN_FILENO`   | Standard input fd (0)             |
+//! | `STDOUT_FILENO`  | Standard output fd (1)            |
+//! | `STDERR_FILENO`  | Standard error fd (2)             |
+//! | `O_RDONLY`       | Open for reading only             |
+//! | `O_WRONLY`       | Open for writing only             |
+//! | `O_RDWR`         | Open for reading and writing      |
+//! | `O_CREAT`        | Create file if it does not exist  |
+//! | `O_TRUNC`        | Truncate file to zero length      |
+//! | `O_APPEND`       | Append on each write              |
 //!
 //! ## Functions
 //!
 //! | Function  | Description                                        |
 //! |-----------|----------------------------------------------------|
-//! | `read`    | Read bytes from file descriptor                    |
-//! | `write`   | Write bytes to file descriptor                     |
 //! | `open`    | Open file by pathname                              |
 //! | `close`   | Close file descriptor                              |
+//! | `read`    | Read bytes from file descriptor                    |
+//! | `write`   | Write bytes to file descriptor                     |
 //! | `lseek`   | Reposition file offset                             |
 //! | `unlink`  | Delete filesystem name                             |
 //! | `rmdir`   | Remove empty directory                             |
@@ -20,12 +38,38 @@
 //! | `dup2`    | Duplicate fd to specific number                    |
 //! | `isatty`  | Test if fd refers to a terminal                    |
 //!
-//! All functions use POSIX return conventions: -1 on error for most
-//! operations, 0 on EOF for `read`.
+//! Most functions return -1 on error. `read` returns 0 on EOF.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import LibC, CType from "std::libc";
+//!
+//! function main(): i32 {
+//!   let fd: CType::CInt = LibC::File::open(
+//!     "hello.txt",
+//!     LibC::File::O_WRONLY | LibC::File::O_CREAT | LibC::File::O_TRUNC,
+//!   );
+//!   if fd == -1 {
+//!     return 1;
+//!   }
+//!   let data: *u8 = "hello, world\n";
+//!   LibC::File::write(fd, data as CType::CConstVoidPtr, 13);
+//!   LibC::File::close(fd);
+//!   return 0;
+//! }
+//! ```
 
 import CType from "./primitives";
 
 extern __unistd_io {
+  const SEEK_SET: CType::CInt;
+  const SEEK_CUR: CType::CInt;
+  const SEEK_END: CType::CInt;
+  const STDIN_FILENO: CType::CInt;
+  const STDOUT_FILENO: CType::CInt;
+  const STDERR_FILENO: CType::CInt;
+
   function read(fd: CType::CInt, buf: CType::CVoidPtr, count: CType::SizeT): CType::SSizeT;
   function write(fd: CType::CInt, buf: CType::CConstVoidPtr, count: CType::SizeT): CType::SSizeT;
   function open(pathname: CType::CConstStr, flags: CType::CInt): CType::CInt;
@@ -40,8 +84,61 @@ extern __unistd_io {
   function isatty(fd: CType::CInt): CType::CInt;
 }
 
+extern __fcntl {
+  const O_RDONLY: CType::CInt;
+  const O_WRONLY: CType::CInt;
+  const O_RDWR: CType::CInt;
+  const O_CREAT: CType::CInt;
+  const O_TRUNC: CType::CInt;
+  const O_APPEND: CType::CInt;
+}
+
 /// POSIX file descriptors (unistd.h / fcntl.h)
 namespace LibC::File {
+  // ---- lseek whence values ----
+
+  /// Seek from beginning of file.
+  const SEEK_SET: CType::CInt = __unistd_io::SEEK_SET;
+
+  /// Seek from current position.
+  const SEEK_CUR: CType::CInt = __unistd_io::SEEK_CUR;
+
+  /// Seek from end of file.
+  const SEEK_END: CType::CInt = __unistd_io::SEEK_END;
+
+  // ---- standard file descriptors ----
+
+  /// Standard input file descriptor.
+  const STDIN_FILENO: CType::CInt = __unistd_io::STDIN_FILENO;
+
+  /// Standard output file descriptor.
+  const STDOUT_FILENO: CType::CInt = __unistd_io::STDOUT_FILENO;
+
+  /// Standard error file descriptor.
+  const STDERR_FILENO: CType::CInt = __unistd_io::STDERR_FILENO;
+
+  // ---- open() flags ----
+
+  /// Open for reading only.
+  const O_RDONLY: CType::CInt = __fcntl::O_RDONLY;
+
+  /// Open for writing only.
+  const O_WRONLY: CType::CInt = __fcntl::O_WRONLY;
+
+  /// Open for reading and writing.
+  const O_RDWR: CType::CInt = __fcntl::O_RDWR;
+
+  /// Create file if it does not exist.
+  const O_CREAT: CType::CInt = __fcntl::O_CREAT;
+
+  /// Truncate file to zero length.
+  const O_TRUNC: CType::CInt = __fcntl::O_TRUNC;
+
+  /// Append on each write.
+  const O_APPEND: CType::CInt = __fcntl::O_APPEND;
+
+  // ---- functions ----
+
   /// Reads up to `count` bytes from file descriptor `fd` into `buf`.
   ///
   /// Returns the number of bytes read, 0 on EOF, or -1 on error.

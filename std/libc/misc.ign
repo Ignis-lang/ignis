@@ -1,8 +1,7 @@
 //!
 //! # LibC Miscellaneous
 //!
-//! String-to-number conversion, integer math, character classification,
-//! and time functions.
+//! Conversion, integer math, character classification, and time.
 //!
 //! ## Sub-namespaces
 //!
@@ -10,8 +9,30 @@
 //! |----------------------|-------------|----------------------------------------|
 //! | `LibC::Conversion`   | `stdlib.h`  | `atoi`, `atol`, `atof`                 |
 //! | `LibC::Math`         | `stdlib.h`  | `abs`, `labs`                          |
-//! | `LibC::Character`    | `ctype.h`   | `isalnum`, `isdigit`, `toupper`, etc.  |
-//! | `LibC::Time`         | `time.h`    | `time`, `clock`                        |
+//! | `LibC::Character`    | `ctype.h`   | `isalnum`, `isdigit`, `toupper`, ...   |
+//! | `LibC::Time`         | `time.h`    | `time`, `clock`, `CLOCKS_PER_SEC`      |
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import LibC, CType from "std::libc";
+//!
+//! function main(): i32 {
+//!   // String-to-number conversion
+//!   let n: CType::CInt = LibC::Conversion::atoi("42");
+//!
+//!   // Character classification
+//!   let ch: CType::CInt = 65; // 'A'
+//!   let lower: CType::CInt = LibC::Character::tolower(ch);
+//!
+//!   // CPU time measurement
+//!   let start: CType::ClockT = LibC::Time::clock();
+//!   // ... work ...
+//!   let elapsed: CType::ClockT = LibC::Time::clock() - start;
+//!
+//!   return 0;
+//! }
+//! ```
 
 import CType from "./primitives";
 
@@ -43,6 +64,8 @@ extern __ctype {
 }
 
 extern __time_h {
+  const CLOCKS_PER_SEC: CType::ClockT;
+
   function time(tloc: *mut CType::TimeT): CType::TimeT;
   function clock(): CType::ClockT;
 }
@@ -112,6 +135,9 @@ namespace LibC::Character {
 
 /// Time (time.h)
 namespace LibC::Time {
+  /// `clock()` ticks per second (POSIX: 1,000,000).
+  const CLOCKS_PER_SEC: CType::ClockT = __time_h::CLOCKS_PER_SEC;
+
   /// Returns the current calendar time (seconds since epoch).
   ///
   /// If `tloc` is non-null, the result is also stored there.

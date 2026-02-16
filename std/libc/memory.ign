@@ -5,11 +5,47 @@
 //!
 //! ## Sub-namespaces
 //!
-//! | Namespace                    | C Header     | Description                          |
-//! |------------------------------|--------------|--------------------------------------|
-//! | `LibC::Allocator`            | `stdlib.h`   | `malloc`, `calloc`, `realloc`, `free`|
-//! | `LibC::MemoryOperations`     | `string.h`   | `memcpy`, `memmove`, `memset`, `memcmp` |
-//! | `LibC::Memory`               | `unistd.h`, `sys/mman.h` | `sbrk`, `brk`, `mmap`, `munmap`, `mprotect` |
+//! | Namespace                | C Header              | Description                                |
+//! |--------------------------|-----------------------|--------------------------------------------|
+//! | `LibC::Allocator`        | `stdlib.h`            | `malloc`, `calloc`, `realloc`, `free`      |
+//! | `LibC::MemoryOperations` | `string.h`            | `memcpy`, `memmove`, `memset`, `memcmp`    |
+//! | `LibC::Memory`           | `sys/mman.h`, `unistd.h` | `mmap`, `munmap`, `mprotect`, `sbrk`, `brk` |
+//!
+//! ## Constants (`LibC::Memory`)
+//!
+//! | Constant         | Description                          |
+//! |------------------|--------------------------------------|
+//! | `PROT_NONE`      | No access permitted                  |
+//! | `PROT_READ`      | Pages may be read                    |
+//! | `PROT_WRITE`     | Pages may be written                 |
+//! | `PROT_EXEC`      | Pages may be executed                |
+//! | `MAP_SHARED`     | Share mapping across processes       |
+//! | `MAP_PRIVATE`    | Private copy-on-write mapping        |
+//! | `MAP_ANONYMOUS`  | Mapping not backed by a file         |
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import LibC, CType from "std::libc";
+//!
+//! function main(): i32 {
+//!   // Heap allocation
+//!   let buf: CType::CVoidPtr = LibC::Allocator::malloc(256);
+//!   LibC::MemoryOperations::memset(buf, 0, 256);
+//!   LibC::Allocator::free(buf);
+//!
+//!   // Anonymous mmap
+//!   let page: CType::CVoidPtr = LibC::Memory::mmap(
+//!     null, 4096,
+//!     LibC::Memory::PROT_READ | LibC::Memory::PROT_WRITE,
+//!     LibC::Memory::MAP_PRIVATE | LibC::Memory::MAP_ANONYMOUS,
+//!     -1, 0,
+//!   );
+//!   LibC::Memory::munmap(page, 4096);
+//!
+//!   return 0;
+//! }
+//! ```
 
 import CType from "./primitives";
 
@@ -33,6 +69,14 @@ extern __unistd_mem {
 }
 
 extern __mman {
+  const PROT_NONE: CType::CInt;
+  const PROT_READ: CType::CInt;
+  const PROT_WRITE: CType::CInt;
+  const PROT_EXEC: CType::CInt;
+  const MAP_SHARED: CType::CInt;
+  const MAP_PRIVATE: CType::CInt;
+  const MAP_ANONYMOUS: CType::CInt;
+
   function mmap(addr: CType::CVoidPtr, length: CType::SizeT, prot: CType::CInt, flags: CType::CInt, fd: CType::CInt, offset: CType::OffT): CType::CVoidPtr;
   function munmap(addr: CType::CVoidPtr, length: CType::SizeT): CType::CInt;
   function mprotect(addr: CType::CVoidPtr, len: CType::SizeT, prot: CType::CInt): CType::CInt;
@@ -77,6 +121,27 @@ namespace LibC::MemoryOperations {
 
 /// Low-level memory: sbrk, brk, mmap (sys/mman.h, unistd.h)
 namespace LibC::Memory {
+  /// No access permitted.
+  const PROT_NONE: CType::CInt = __mman::PROT_NONE;
+
+  /// Pages may be read.
+  const PROT_READ: CType::CInt = __mman::PROT_READ;
+
+  /// Pages may be written.
+  const PROT_WRITE: CType::CInt = __mman::PROT_WRITE;
+
+  /// Pages may be executed.
+  const PROT_EXEC: CType::CInt = __mman::PROT_EXEC;
+
+  /// Share mapping across processes.
+  const MAP_SHARED: CType::CInt = __mman::MAP_SHARED;
+
+  /// Private copy-on-write mapping.
+  const MAP_PRIVATE: CType::CInt = __mman::MAP_PRIVATE;
+
+  /// Mapping is not backed by a file.
+  const MAP_ANONYMOUS: CType::CInt = __mman::MAP_ANONYMOUS;
+
   /// Adjusts the program break by `increment` bytes. Low-level.
   function sbrk(increment: CType::IntPtrT): CType::CVoidPtr { return __unistd_mem::sbrk(increment); }
 

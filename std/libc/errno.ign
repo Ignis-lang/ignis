@@ -1,27 +1,74 @@
 //!
 //! # LibC Errno
 //!
-//! Access to the thread-local `errno` value and standard POSIX error constants.
+//! Thread-local `errno` access and POSIX error constants, exposed as
+//! `LibC::Errno`.
 //!
-//! ## Usage
+//! ## Functions
 //!
-//! ```ignis
-//! import LibC, CType from "std::libc";
+//! | Function | Description                                         |
+//! |----------|-----------------------------------------------------|
+//! | `get`    | Read the current thread-local `errno` value         |
+//! | `set`    | Write a new value into thread-local `errno`         |
 //!
-//! let fd: CType::CInt = LibC::File::open("/nonexistent", 0);
-//! if fd == -1 {
-//!   let err: CType::CInt = LibC::Errno::get();
-//!   if err == LibC::Errno::ENOENT {
-//!     // file not found
-//!   }
-//! }
-//! ```
+//! ## Error Constants
+//!
+//! All error constants are `extern const` declarations resolved from
+//! `<errno.h>` at compile time.
+//!
+//! | Constant       | Description                        |
+//! |----------------|------------------------------------|
+//! | `EPERM`        | Operation not permitted            |
+//! | `ENOENT`       | No such file or directory          |
+//! | `ESRCH`        | No such process                    |
+//! | `EINTR`        | Interrupted system call            |
+//! | `EIO`          | I/O error                          |
+//! | `ENXIO`        | No such device or address          |
+//! | `E2BIG`        | Argument list too long             |
+//! | `EACCES`       | Permission denied                  |
+//! | `EBADF`        | Bad file descriptor                |
+//! | `EAGAIN`       | Resource temporarily unavailable   |
+//! | `ENOMEM`       | Cannot allocate memory             |
+//! | `EBUSY`        | Resource busy                      |
+//! | `EEXIST`       | File exists                        |
+//! | `ENOTDIR`      | Not a directory                    |
+//! | `EISDIR`       | Is a directory                     |
+//! | `EINVAL`       | Invalid argument                   |
+//! | `ENFILE`       | Too many open files in system      |
+//! | `EMFILE`       | Too many open files (per process)  |
+//! | `ENOSPC`       | No space left on device            |
+//! | `EROFS`        | Read-only file system              |
+//! | `EPIPE`        | Broken pipe                        |
+//! | `ERANGE`       | Result too large (math)            |
+//! | `ENOTEMPTY`    | Directory not empty                |
+//! | `ECONNREFUSED` | Connection refused                 |
+//! | `ECONNRESET`   | Connection reset by peer           |
+//! | `ETIMEDOUT`    | Connection timed out               |
+//! | `EWOULDBLOCK`  | Alias for `EAGAIN`                 |
 //!
 //! ## Platform Notes
 //!
 //! On Linux/glibc, `errno` is a macro expanding to `(*__errno_location())`.
-//! The `get` and `set` functions call `__errno_location` to access the
-//! thread-local value. Error code values are Linux-specific.
+//! The `get` and `set` functions call `__errno_location` to read/write the
+//! thread-local value.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import LibC, CType from "std::libc";
+//!
+//! function main(): i32 {
+//!   let fd: CType::CInt = LibC::File::open("/nonexistent", LibC::File::O_RDONLY);
+//!   if fd == -1 {
+//!     let err: CType::CInt = LibC::Errno::get();
+//!     if err == LibC::Errno::ENOENT {
+//!       // file not found -- expected
+//!       return 0;
+//!     }
+//!   }
+//!   return 1;
+//! }
+//! ```
 
 import CType from "./primitives";
 
@@ -29,6 +76,33 @@ extern __errno {
   /// Returns a pointer to the thread-local `errno` variable.
   @externName("__errno_location")
   function errno_location(): *mut CType::CInt;
+
+  const EPERM: CType::CInt;
+  const ENOENT: CType::CInt;
+  const ESRCH: CType::CInt;
+  const EINTR: CType::CInt;
+  const EIO: CType::CInt;
+  const ENXIO: CType::CInt;
+  const E2BIG: CType::CInt;
+  const EACCES: CType::CInt;
+  const EBADF: CType::CInt;
+  const EAGAIN: CType::CInt;
+  const ENOMEM: CType::CInt;
+  const EBUSY: CType::CInt;
+  const EEXIST: CType::CInt;
+  const ENOTDIR: CType::CInt;
+  const EISDIR: CType::CInt;
+  const EINVAL: CType::CInt;
+  const ENFILE: CType::CInt;
+  const EMFILE: CType::CInt;
+  const ENOSPC: CType::CInt;
+  const EROFS: CType::CInt;
+  const EPIPE: CType::CInt;
+  const ERANGE: CType::CInt;
+  const ENOTEMPTY: CType::CInt;
+  const ECONNREFUSED: CType::CInt;
+  const ECONNRESET: CType::CInt;
+  const ETIMEDOUT: CType::CInt;
 }
 
 /// Thread-local error number and POSIX error constants.
@@ -44,87 +118,87 @@ namespace LibC::Errno {
   }
 
   // =========================================================================
-  // POSIX error constants (Linux values)
+  // POSIX error constants
   // =========================================================================
 
   /// Operation not permitted.
-  const EPERM: CType::CInt = 1;
+  const EPERM: CType::CInt = __errno::EPERM;
 
   /// No such file or directory.
-  const ENOENT: CType::CInt = 2;
+  const ENOENT: CType::CInt = __errno::ENOENT;
 
   /// No such process.
-  const ESRCH: CType::CInt = 3;
+  const ESRCH: CType::CInt = __errno::ESRCH;
 
   /// Interrupted system call.
-  const EINTR: CType::CInt = 4;
+  const EINTR: CType::CInt = __errno::EINTR;
 
   /// I/O error.
-  const EIO: CType::CInt = 5;
+  const EIO: CType::CInt = __errno::EIO;
 
   /// No such device or address.
-  const ENXIO: CType::CInt = 6;
+  const ENXIO: CType::CInt = __errno::ENXIO;
 
   /// Argument list too long.
-  const E2BIG: CType::CInt = 7;
+  const E2BIG: CType::CInt = __errno::E2BIG;
 
   /// Permission denied.
-  const EACCES: CType::CInt = 13;
+  const EACCES: CType::CInt = __errno::EACCES;
 
   /// Bad file descriptor.
-  const EBADF: CType::CInt = 9;
+  const EBADF: CType::CInt = __errno::EBADF;
 
   /// Resource busy.
-  const EBUSY: CType::CInt = 16;
+  const EBUSY: CType::CInt = __errno::EBUSY;
 
   /// File exists.
-  const EEXIST: CType::CInt = 17;
+  const EEXIST: CType::CInt = __errno::EEXIST;
 
   /// Invalid argument.
-  const EINVAL: CType::CInt = 22;
+  const EINVAL: CType::CInt = __errno::EINVAL;
 
   /// Too many open files in system.
-  const ENFILE: CType::CInt = 23;
+  const ENFILE: CType::CInt = __errno::ENFILE;
 
   /// Too many open files (per process).
-  const EMFILE: CType::CInt = 24;
+  const EMFILE: CType::CInt = __errno::EMFILE;
 
   /// Not a directory.
-  const ENOTDIR: CType::CInt = 20;
+  const ENOTDIR: CType::CInt = __errno::ENOTDIR;
 
   /// Is a directory.
-  const EISDIR: CType::CInt = 21;
+  const EISDIR: CType::CInt = __errno::EISDIR;
 
   /// No space left on device.
-  const ENOSPC: CType::CInt = 28;
+  const ENOSPC: CType::CInt = __errno::ENOSPC;
 
   /// Read-only file system.
-  const EROFS: CType::CInt = 30;
+  const EROFS: CType::CInt = __errno::EROFS;
 
   /// Broken pipe.
-  const EPIPE: CType::CInt = 32;
+  const EPIPE: CType::CInt = __errno::EPIPE;
 
   /// Result too large (math).
-  const ERANGE: CType::CInt = 34;
+  const ERANGE: CType::CInt = __errno::ERANGE;
 
   /// Cannot allocate memory.
-  const ENOMEM: CType::CInt = 12;
+  const ENOMEM: CType::CInt = __errno::ENOMEM;
 
   /// Resource temporarily unavailable.
-  const EAGAIN: CType::CInt = 11;
+  const EAGAIN: CType::CInt = __errno::EAGAIN;
 
   /// Same as EAGAIN on Linux.
-  const EWOULDBLOCK: CType::CInt = 11;
+  const EWOULDBLOCK: CType::CInt = __errno::EAGAIN;
 
   /// Directory not empty.
-  const ENOTEMPTY: CType::CInt = 39;
+  const ENOTEMPTY: CType::CInt = __errno::ENOTEMPTY;
 
   /// Connection refused.
-  const ECONNREFUSED: CType::CInt = 111;
+  const ECONNREFUSED: CType::CInt = __errno::ECONNREFUSED;
 
   /// Connection reset by peer.
-  const ECONNRESET: CType::CInt = 104;
+  const ECONNRESET: CType::CInt = __errno::ECONNRESET;
 
   /// Connection timed out.
-  const ETIMEDOUT: CType::CInt = 110;
+  const ETIMEDOUT: CType::CInt = __errno::ETIMEDOUT;
 }

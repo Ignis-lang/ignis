@@ -5,15 +5,46 @@
 //!
 //! ## Sub-namespaces
 //!
-//! | Namespace          | C Header       | Description                              |
-//! |--------------------|----------------|------------------------------------------|
-//! | `LibC::Process`    | `stdlib.h`, `unistd.h` | Process lifecycle, environment, IPC |
-//! | `LibC::Signals`    | `signal.h`     | `raise`, `kill`                          |
-//! | `LibC::Wait`       | `sys/wait.h`   | `wait`, `waitpid`                        |
+//! | Namespace        | C Header               | Description                           |
+//! |------------------|------------------------|---------------------------------------|
+//! | `LibC::Process`  | `stdlib.h`, `unistd.h` | Process lifecycle, environment, IPC   |
+//! | `LibC::Signals`  | `signal.h`             | `raise`, `kill`                       |
+//! | `LibC::Wait`     | `sys/wait.h`           | `wait`, `waitpid`                     |
+//!
+//! ## Constants
+//!
+//! | Namespace        | Constant         | Description                       |
+//! |------------------|------------------|-----------------------------------|
+//! | `LibC::Process`  | `EXIT_SUCCESS`   | Successful exit status            |
+//! | `LibC::Process`  | `EXIT_FAILURE`   | Failure exit status               |
+//! | `LibC::Signals`  | `SIGINT`         | Interrupt from keyboard (Ctrl-C)  |
+//! | `LibC::Signals`  | `SIGKILL`        | Kill signal (cannot be caught)    |
+//! | `LibC::Signals`  | `SIGSEGV`        | Segmentation fault                |
+//! | `LibC::Signals`  | `SIGTERM`        | Termination signal                |
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import LibC, CType from "std::libc";
+//!
+//! function main(): i32 {
+//!   let pid: CType::PidT = LibC::Process::getpid();
+//!   let home: CType::CStr = LibC::Process::getenv("HOME");
+//!
+//!   if home == null {
+//!     LibC::Process::exit(LibC::Process::EXIT_FAILURE);
+//!   }
+//!
+//!   return 0;
+//! }
+//! ```
 
 import CType from "./primitives";
 
 extern __process {
+  const EXIT_SUCCESS: CType::CInt;
+  const EXIT_FAILURE: CType::CInt;
+
   function exit(status: CType::CInt): void;
   function abort(): void;
   function _exit(status: CType::CInt): void;
@@ -33,6 +64,11 @@ extern __unistd_proc {
 }
 
 extern __signal {
+  const SIGINT: CType::CInt;
+  const SIGKILL: CType::CInt;
+  const SIGSEGV: CType::CInt;
+  const SIGTERM: CType::CInt;
+
   function raise(sig: CType::CInt): CType::CInt;
   function kill(pid: CType::PidT, sig: CType::CInt): CType::CInt;
 }
@@ -44,6 +80,12 @@ extern __wait {
 
 /// Process control (stdlib.h, unistd.h)
 namespace LibC::Process {
+  /// Successful exit status.
+  const EXIT_SUCCESS: CType::CInt = __process::EXIT_SUCCESS;
+
+  /// Failure exit status.
+  const EXIT_FAILURE: CType::CInt = __process::EXIT_FAILURE;
+
   /// Terminates the process with `status`. Does not return.
   function exit(status: CType::CInt): void { __process::exit(status); }
 
@@ -91,6 +133,18 @@ namespace LibC::Process {
 
 /// Signals (signal.h)
 namespace LibC::Signals {
+  /// Interrupt from keyboard (Ctrl-C).
+  const SIGINT: CType::CInt = __signal::SIGINT;
+
+  /// Kill signal (cannot be caught).
+  const SIGKILL: CType::CInt = __signal::SIGKILL;
+
+  /// Segmentation fault.
+  const SIGSEGV: CType::CInt = __signal::SIGSEGV;
+
+  /// Termination signal.
+  const SIGTERM: CType::CInt = __signal::SIGTERM;
+
   /// Sends signal `sig` to the calling process.
   function raise(sig: CType::CInt): CType::CInt { return __signal::raise(sig); }
 
