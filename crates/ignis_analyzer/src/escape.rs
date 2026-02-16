@@ -296,6 +296,10 @@ fn scan_for_escapes(
       scan_for_escapes(hir, *ptr, defs, alias_to_closure, escaping);
     },
 
+    HIRKind::Defer { body } => {
+      scan_for_escapes(hir, *body, defs, alias_to_closure, escaping);
+    },
+
     // Leaf nodes
     HIRKind::Variable(_)
     | HIRKind::Literal(_)

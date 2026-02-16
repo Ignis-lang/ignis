@@ -42,6 +42,9 @@ struct ScopeEntry {
 
   /// Is this a loop scope? (for break/continue target calculation)
   is_loop: bool,
+
+  /// Deferred expression bodies registered in this scope (in declaration order)
+  deferred_bodies: Vec<HIRId>,
 }
 
 /// Summary of which parameters a function/method drops via `&mut` references.
@@ -428,6 +431,10 @@ impl<'a> HirOwnershipChecker<'a> {
 
       HIRKind::Closure { .. } => {},
 
+      HIRKind::Defer { body } => {
+        dropped.extend(self.summary_must_drops(*body, tracked_params, summaries));
+      },
+
       HIRKind::Variable(_)
       | HIRKind::Literal(_)
       | HIRKind::SizeOf(_)
@@ -559,6 +566,7 @@ impl<'a> HirOwnershipChecker<'a> {
       block_hir_id: None,
       owned_vars: Vec::new(),
       is_loop: false,
+      deferred_bodies: Vec::new(),
     });
 
     // Register owned parameters
@@ -572,10 +580,18 @@ impl<'a> HirOwnershipChecker<'a> {
     // Check the function body
     self.check_node(body_id);
 
-    // Calculate drops for implicit return at function end (FnEnd)
+    // Calculate drops and defers for implicit return at function end (FnEnd)
     let fn_end_drops = self.calculate_exit_drops(0);
     if !fn_end_drops.is_empty() {
       self.schedules.on_exit.insert(ExitKey::FnEnd(fn_def_id), fn_end_drops);
+    }
+
+    let fn_end_defers = self.calculate_exit_defers(0);
+    if !fn_end_defers.is_empty() {
+      self
+        .schedules
+        .on_exit_defers
+        .insert(ExitKey::FnEnd(fn_def_id), fn_end_defers);
     }
 
     // Pop function root scope (should be the only one left)
@@ -828,6 +844,13 @@ impl<'a> HirOwnershipChecker<'a> {
           }
         }
       },
+
+      HIRKind::Defer { body } => {
+        if let Some(scope) = self.scope_stack.last_mut() {
+          scope.deferred_bodies.push(body);
+        }
+        self.check_node(body);
+      },
     }
   }
 
@@ -842,6 +865,7 @@ impl<'a> HirOwnershipChecker<'a> {
       block_hir_id: Some(block_hir_id),
       owned_vars: Vec::new(),
       is_loop: false,
+      deferred_bodies: Vec::new(),
     });
 
     // Check statements, stopping after terminators
@@ -951,10 +975,15 @@ impl<'a> HirOwnershipChecker<'a> {
       }
     }
 
-    // Calculate drops for all scopes we're exiting (to function root)
+    // Calculate drops and defers for all scopes we're exiting (to function root)
     let drops = self.calculate_exit_drops(0);
     if !drops.is_empty() {
       self.schedules.on_exit.insert(ExitKey::Return(hir_id), drops);
+    }
+
+    let defers = self.calculate_exit_defers(0);
+    if !defers.is_empty() {
+      self.schedules.on_exit_defers.insert(ExitKey::Return(hir_id), defers);
     }
   }
 
@@ -968,6 +997,11 @@ impl<'a> HirOwnershipChecker<'a> {
       let drops = self.calculate_exit_drops(loop_idx + 1);
       if !drops.is_empty() {
         self.schedules.on_exit.insert(ExitKey::Break(hir_id), drops);
+      }
+
+      let defers = self.calculate_exit_defers(loop_idx + 1);
+      if !defers.is_empty() {
+        self.schedules.on_exit_defers.insert(ExitKey::Break(hir_id), defers);
       }
     }
     // If no loop found, semantic error should have been caught earlier
@@ -983,6 +1017,11 @@ impl<'a> HirOwnershipChecker<'a> {
       let drops = self.calculate_exit_drops(loop_idx + 1);
       if !drops.is_empty() {
         self.schedules.on_exit.insert(ExitKey::Continue(hir_id), drops);
+      }
+
+      let defers = self.calculate_exit_defers(loop_idx + 1);
+      if !defers.is_empty() {
+        self.schedules.on_exit_defers.insert(ExitKey::Continue(hir_id), defers);
       }
     }
   }
@@ -1077,6 +1116,7 @@ impl<'a> HirOwnershipChecker<'a> {
       block_hir_id: None,
       owned_vars: Vec::new(),
       is_loop: true,
+      deferred_bodies: Vec::new(),
     });
 
     // Push continue tracking for this loop
@@ -1377,6 +1417,14 @@ impl<'a> HirOwnershipChecker<'a> {
     {
       self.schedules.on_scope_end.insert(hir_id, drops);
     }
+
+    // Defers execute in LIFO order
+    if let Some(hir_id) = entry.block_hir_id
+      && !entry.deferred_bodies.is_empty()
+    {
+      let defers: Vec<_> = entry.deferred_bodies.into_iter().rev().collect();
+      self.schedules.on_scope_end_defers.insert(hir_id, defers);
+    }
   }
 
   /// Calculate drops for exiting from current scope to target scope index.
@@ -1399,6 +1447,23 @@ impl<'a> HirOwnershipChecker<'a> {
     }
 
     drops
+  }
+
+  /// Calculate defers for exiting from current scope to target scope index.
+  /// Returns deferred bodies in LIFO order (innermost scope first, reversed within each scope).
+  fn calculate_exit_defers(
+    &self,
+    exit_to_scope_idx: usize,
+  ) -> Vec<HIRId> {
+    let mut defers = Vec::new();
+
+    for scope in self.scope_stack[exit_to_scope_idx..].iter().rev() {
+      for body in scope.deferred_bodies.iter().rev() {
+        defers.push(*body);
+      }
+    }
+
+    defers
   }
 
   fn find_loop_scope_idx(&self) -> Option<usize> {

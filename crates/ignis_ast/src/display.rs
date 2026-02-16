@@ -77,6 +77,7 @@ use crate::{
     comment_statement::ASTComment,
     const_statement::ASTConstant,
     continue_statement::ASTContinue,
+    defer_statement::ASTDefer,
     export_statement::ASTExport,
     extern_statement::ASTExtern,
     for_statement::ASTFor,
@@ -324,6 +325,7 @@ impl DisplayLisp for ASTStatement {
       ASTStatement::Return(statement) => statement.to_lisp(formatter),
       ASTStatement::Continue(statement) => statement.to_lisp(formatter),
       ASTStatement::Break(statement) => statement.to_lisp(formatter),
+      ASTStatement::Defer(statement) => statement.to_lisp(formatter),
       ASTStatement::Import(statement) => statement.to_lisp(formatter),
       ASTStatement::Extern(statement) => statement.to_lisp(formatter),
       ASTStatement::Constant(statement) => statement.to_lisp(formatter),
@@ -852,6 +854,17 @@ impl DisplayLisp for ASTBreak {
     _formatter: &ASTFormatter,
   ) -> String {
     "(Break)".to_string()
+  }
+}
+
+// Defer Statement
+impl DisplayLisp for ASTDefer {
+  fn to_lisp(
+    &self,
+    formatter: &ASTFormatter,
+  ) -> String {
+    let expr_str = formatter.format_node(&self.expression);
+    format!("(Defer {})", expr_str)
   }
 }
 

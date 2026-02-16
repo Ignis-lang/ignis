@@ -1062,6 +1062,10 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
+      HIRKind::Defer { body } => {
+        let new_body = self.clone_hir_tree(*body);
+        (HIRKind::Defer { body: new_body }, None)
+      },
     }
   }
 
@@ -1367,6 +1371,9 @@ impl<'a> Monomorphizer<'a> {
         {
           self.scan_hir(drop_body);
         }
+      },
+      HIRKind::Defer { body } => {
+        self.scan_hir(*body);
       },
     }
   }
@@ -2342,6 +2349,11 @@ impl<'a> Monomorphizer<'a> {
           drop_def: *drop_def,
           capture_overrides: capture_overrides.clone(),
         }
+      },
+
+      HIRKind::Defer { body } => {
+        let new_body = self.substitute_hir(*body, subst);
+        HIRKind::Defer { body: new_body }
       },
 
       HIRKind::CallClosure { callee, args } => {

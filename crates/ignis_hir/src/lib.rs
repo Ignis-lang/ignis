@@ -160,6 +160,9 @@ pub enum HIRKind {
   Break,
   Continue,
   Return(Option<HIRId>),
+  Defer {
+    body: HIRId,
+  },
   ExpressionStatement(HIRId),
 
   Match {
@@ -335,6 +338,9 @@ impl HIRKind {
         if let Some(v) = value {
           *v = HIRId::new(v.index() + offset);
         }
+      },
+      HIRKind::Defer { body } => {
+        *body = HIRId::new(body.index() + offset);
       },
       HIRKind::ExpressionStatement(id) => {
         *id = HIRId::new(id.index() + offset);

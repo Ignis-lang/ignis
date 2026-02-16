@@ -1050,3 +1050,43 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Defer Statement Error Tests
+// =========================================================================
+
+#[test]
+fn e2e_err_defer_non_void_expression() {
+  e2e_error_test(
+    "err_defer_non_void_expression",
+    r#"
+function main(): i32 {
+    defer 42;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_defer_try_operator() {
+  e2e_error_test(
+    "err_defer_try_operator",
+    r#"
+@lang(try)
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+function fallible(): Result<i32, i32> {
+    return Result::Ok(1);
+}
+
+function main(): Result<i32, i32> {
+    defer fallible()!;
+    return Result::Ok(0);
+}
+"#,
+  );
+}

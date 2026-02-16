@@ -290,6 +290,10 @@ fn analyze_var_usage(
       analyze_var_usage(hir, *ptr, var_def, usage, defs, types);
     },
 
+    HIRKind::Defer { body } => {
+      analyze_var_usage(hir, *body, var_def, usage, defs, types);
+    },
+
     // Leaf nodes
     HIRKind::Literal(_)
     | HIRKind::StaticAccess { .. }
@@ -621,6 +625,10 @@ fn collect_closures_postorder(
 
     HIRKind::BuiltinDropInPlace { ptr, .. } => {
       collect_closures_postorder(hir, *ptr, result, visited);
+    },
+
+    HIRKind::Defer { body } => {
+      collect_closures_postorder(hir, *body, result, visited);
     },
 
     // Leaf nodes
@@ -1250,6 +1258,10 @@ fn collect_free_vars(
 
     HIRKind::BuiltinDropInPlace { ptr, .. } => {
       collect_free_vars(hir, *ptr, locals, defs, free_vars, seen);
+    },
+
+    HIRKind::Defer { body } => {
+      collect_free_vars(hir, *body, locals, defs, free_vars, seen);
     },
 
     // Leaf nodes: no children to recurse into

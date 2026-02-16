@@ -80,6 +80,10 @@ pub struct HirBorrowChecker<'a> {
 
   loop_continue_stack: Vec<bool>,
 
+  /// When true, temporary borrows are persisted to scope instead of released immediately
+  /// (the deferred expression executes at scope exit, so borrows must live that long).
+  in_defer_body: bool,
+
   diagnostics: Vec<Diagnostic>,
 }
 
@@ -101,6 +105,7 @@ impl<'a> HirBorrowChecker<'a> {
       branch_snapshots: Vec::new(),
       reachable: true,
       loop_continue_stack: Vec::new(),
+      in_defer_body: false,
       diagnostics: Vec::new(),
     }
   }
@@ -273,12 +278,21 @@ impl<'a> HirBorrowChecker<'a> {
       HIRKind::Reference { expression, mutable } => {
         self.check_node(expression);
 
-        // Standalone reference not captured by Let (e.g. in expression statement) —
-        // check for conflict but don't persist the borrow.
         if let Some(target_def) = self.extract_root_variable(expression) {
           self.try_borrow(target_def, mutable, &span);
-          // Release immediately since it's not bound to a Let
-          self.release_borrow(target_def, mutable);
+
+          if self.in_defer_body {
+            if let Some(scope) = self.scope_stack.last_mut() {
+              scope.borrows.push(ActiveBorrow {
+                binder: target_def,
+                target: target_def,
+                mutable,
+              });
+            }
+          } else {
+            // Release immediately since it's not bound to a Let
+            self.release_borrow(target_def, mutable);
+          }
         }
       },
 
@@ -362,6 +376,13 @@ impl<'a> HirBorrowChecker<'a> {
       | HIRKind::StaticAccess { .. }
       | HIRKind::BuiltinDropGlue { .. }
       | HIRKind::Error => {},
+
+      HIRKind::Defer { body } => {
+        let saved = self.in_defer_body;
+        self.in_defer_body = true;
+        self.check_node(body);
+        self.in_defer_body = saved;
+      },
     }
   }
 
@@ -599,8 +620,18 @@ impl<'a> HirBorrowChecker<'a> {
     // Check for conflict
     self.try_borrow(target_def, mutable, span);
 
-    // Release immediately — the borrow only lives for the call duration
-    self.release_borrow(target_def, mutable);
+    if self.in_defer_body {
+      if let Some(scope) = self.scope_stack.last_mut() {
+        scope.borrows.push(ActiveBorrow {
+          binder: target_def,
+          target: target_def,
+          mutable,
+        });
+      }
+    } else {
+      // Release immediately — the borrow only lives for the call duration
+      self.release_borrow(target_def, mutable);
+    }
   }
 
   /// Attempt to create a borrow on a variable. Emits a diagnostic on conflict.

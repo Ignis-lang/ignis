@@ -684,6 +684,16 @@ pub enum DiagnosticMessage {
     got: String,
     span: Span,
   },
+  DeferExpressionMustBeVoid {
+    found_type: String,
+    span: Span,
+  },
+  DeferOutsideFunction {
+    span: Span,
+  },
+  TryOperatorInDefer {
+    span: Span,
+  },
   CopyOnNonCopyField {
     type_name: String,
     field_name: String,
@@ -1521,6 +1531,15 @@ impl fmt::Display for DiagnosticMessage {
           got, expected
         )
       },
+      DiagnosticMessage::DeferExpressionMustBeVoid { found_type, .. } => {
+        write!(f, "deferred expression must be of type 'void', found '{}'", found_type)
+      },
+      DiagnosticMessage::DeferOutsideFunction { .. } => {
+        write!(f, "`defer` can only be used inside a function")
+      },
+      DiagnosticMessage::TryOperatorInDefer { .. } => {
+        write!(f, "try operator `!` cannot be used inside a `defer` expression")
+      },
       DiagnosticMessage::CopyOnNonCopyField {
         type_name,
         field_name,
@@ -1885,6 +1904,9 @@ impl DiagnosticMessage {
       | DiagnosticMessage::TryOperatorOutsideFunction { span, .. }
       | DiagnosticMessage::TryOperatorReturnTypeMismatch { span, .. }
       | DiagnosticMessage::TryOperatorErrorTypeMismatch { span, .. }
+      | DiagnosticMessage::DeferExpressionMustBeVoid { span, .. }
+      | DiagnosticMessage::DeferOutsideFunction { span, .. }
+      | DiagnosticMessage::TryOperatorInDefer { span, .. }
       | DiagnosticMessage::CopyOnNonCopyField { span, .. }
       | DiagnosticMessage::CopyOnNonCopyVariantPayload { span, .. }
       | DiagnosticMessage::ExtensionInvalidTargetType { span, .. }
@@ -2094,6 +2116,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::TryOperatorOutsideFunction { .. } => "A0179",
       DiagnosticMessage::TryOperatorReturnTypeMismatch { .. } => "A0180",
       DiagnosticMessage::TryOperatorErrorTypeMismatch { .. } => "A0181",
+      DiagnosticMessage::DeferExpressionMustBeVoid { .. } => "A0182",
+      DiagnosticMessage::DeferOutsideFunction { .. } => "A0183",
+      DiagnosticMessage::TryOperatorInDefer { .. } => "A0184",
       DiagnosticMessage::CopyOnNonCopyField { .. } => "A0148",
       DiagnosticMessage::CopyOnNonCopyVariantPayload { .. } => "A0149",
       DiagnosticMessage::ExtensionInvalidTargetType { .. } => "A0135",

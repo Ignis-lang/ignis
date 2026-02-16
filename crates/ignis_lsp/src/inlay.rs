@@ -338,6 +338,10 @@ fn collect_statement_children(
       }
     },
 
+    ASTStatement::Defer(d) => {
+      stack.push(d.expression);
+    },
+
     ASTStatement::Import(_)
     | ASTStatement::Export(_)
     | ASTStatement::Extern(_)

@@ -2,8 +2,8 @@ use ignis_ast::{
   NodeId,
   statements::{
     ASTStatement, ASTForOf, ForOfBinding, block::ASTBlock, break_statement::ASTBreak, continue_statement::ASTContinue,
-    for_statement::ASTFor, function::ASTParameter, if_statement::ASTIf, let_else::ASTLetElse,
-    return_statement::ASTReturn, variable::ASTVariable, while_statement::ASTWhile,
+    defer_statement::ASTDefer, for_statement::ASTFor, function::ASTParameter, if_statement::ASTIf,
+    let_else::ASTLetElse, return_statement::ASTReturn, variable::ASTVariable, while_statement::ASTWhile,
   },
 };
 use ignis_token::token_types::TokenType;
@@ -76,6 +76,7 @@ impl super::IgnisParser {
       TokenType::If => self.parse_if_statement(),
       TokenType::While => self.parse_while_statement(),
       TokenType::Return => self.parse_return_statement(),
+      TokenType::Defer => self.parse_defer_statement(),
       TokenType::For => self.parse_for_statement(),
       TokenType::Break => {
         let token = self.bump().clone();
@@ -435,6 +436,16 @@ impl super::IgnisParser {
     let return_statement = ASTReturn::new(value, span);
 
     Ok(self.allocate_statement(ASTStatement::Return(return_statement)))
+  }
+
+  fn parse_defer_statement(&mut self) -> ParserResult<NodeId> {
+    let keyword = self.expect(TokenType::Defer)?.clone();
+    let expression = self.parse_expression(0)?;
+    let semicolon = self.expect(TokenType::SemiColon)?;
+    let span = Span::merge(&keyword.span, &semicolon.span);
+    let defer = ASTDefer::new(expression, span);
+
+    Ok(self.allocate_statement(ASTStatement::Defer(defer)))
   }
 }
 

@@ -5238,3 +5238,206 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Defer Statement Tests
+// =========================================================================
+
+#[test]
+fn e2e_defer_simple_void_call() {
+  e2e_test(
+    "defer_simple_void_call",
+    r#"
+function track(r: *mut i32, val: i32): void {
+    @write<i32>(r, @read<i32>(r) * 10 + val);
+}
+
+function f(ptr: *mut i32): void {
+    defer track(ptr, 1);
+}
+
+function main(): i32 {
+    let mut result: i32 = 0;
+    let ptr: *mut i32 = (&mut result) as *mut i32;
+    f(ptr);
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_lifo_order() {
+  e2e_test(
+    "defer_lifo_order",
+    r#"
+function track(r: *mut i32, val: i32): void {
+    @write<i32>(r, @read<i32>(r) * 4 + val);
+}
+
+function f(ptr: *mut i32): void {
+    defer track(ptr, 1);
+    defer track(ptr, 2);
+    defer track(ptr, 3);
+}
+
+function main(): i32 {
+    let mut result: i32 = 0;
+    let ptr: *mut i32 = (&mut result) as *mut i32;
+    f(ptr);
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_early_return() {
+  e2e_test(
+    "defer_early_return",
+    r#"
+function track(r: *mut i32, val: i32): void {
+    @write<i32>(r, @read<i32>(r) * 10 + val);
+}
+
+function f(ptr: *mut i32, x: i32): void {
+    defer track(ptr, 9);
+    if (x == 0) { return; }
+    track(ptr, 1);
+}
+
+function main(): i32 {
+    let mut result: i32 = 0;
+    let ptr: *mut i32 = (&mut result) as *mut i32;
+    f(ptr, 0);
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_early_return_both_paths() {
+  e2e_test(
+    "defer_early_return_both_paths",
+    r#"
+function track(r: *mut i32, val: i32): void {
+    @write<i32>(r, @read<i32>(r) * 10 + val);
+}
+
+function f(ptr: *mut i32, x: i32): void {
+    defer track(ptr, 9);
+    if (x == 0) { return; }
+    track(ptr, 1);
+}
+
+function main(): i32 {
+    let mut r1: i32 = 0;
+    let mut r2: i32 = 0;
+    let p1: *mut i32 = (&mut r1) as *mut i32;
+    let p2: *mut i32 = (&mut r2) as *mut i32;
+    f(p1, 0);
+    f(p2, 1);
+    return r1 + r2;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_continue_in_loop() {
+  e2e_test(
+    "defer_continue_in_loop",
+    r#"
+function inc(r: *mut i32): void {
+    @write<i32>(r, @read<i32>(r) + 1);
+}
+
+function main(): i32 {
+    let mut count: i32 = 0;
+    let ptr: *mut i32 = (&mut count) as *mut i32;
+    let mut i: i32 = 0;
+    while (i < 3) {
+        defer inc(ptr);
+        i = i + 1;
+        if (i == 2) { continue; }
+    }
+    return count;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_break_in_loop() {
+  e2e_test(
+    "defer_break_in_loop",
+    r#"
+function inc(r: *mut i32): void {
+    @write<i32>(r, @read<i32>(r) + 1);
+}
+
+function main(): i32 {
+    let mut count: i32 = 0;
+    let ptr: *mut i32 = (&mut count) as *mut i32;
+    let mut i: i32 = 0;
+    while (i < 10) {
+        defer inc(ptr);
+        i = i + 1;
+        if (i == 2) { break; }
+    }
+    return count;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_nested_scopes() {
+  e2e_test(
+    "defer_nested_scopes",
+    r#"
+function track(r: *mut i32, val: i32): void {
+    @write<i32>(r, @read<i32>(r) * 10 + val);
+}
+
+function f(ptr: *mut i32): void {
+    defer track(ptr, 1);
+    {
+        defer track(ptr, 2);
+    }
+}
+
+function main(): i32 {
+    let mut result: i32 = 0;
+    let ptr: *mut i32 = (&mut result) as *mut i32;
+    f(ptr);
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_fn_end_void() {
+  e2e_test(
+    "defer_fn_end_void",
+    r#"
+function track(r: *mut i32, val: i32): void {
+    @write<i32>(r, @read<i32>(r) * 10 + val);
+}
+
+function f(ptr: *mut i32): void {
+    defer track(ptr, 9);
+    track(ptr, 1);
+}
+
+function main(): i32 {
+    let mut result: i32 = 0;
+    let ptr: *mut i32 = (&mut result) as *mut i32;
+    f(ptr);
+    return result;
+}
+"#,
+  );
+}

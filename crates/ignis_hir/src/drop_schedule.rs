@@ -24,6 +24,7 @@ pub enum ExitKey {
 
 /// Drop schedules produced by ownership analysis.
 /// All Vec<DefinitionId> are in drop order (reverse declaration, inner→outer).
+/// All Vec<HIRId> for defers are in LIFO order (last registered = first executed).
 #[derive(Debug, Default, Clone)]
 pub struct DropSchedules {
   /// Drops at block end, keyed by Block HIRId.
@@ -34,6 +35,12 @@ pub struct DropSchedules {
 
   /// Drops before overwriting an owned variable, keyed by Assign HIRId.
   pub on_overwrite: HashMap<HIRId, Vec<DefinitionId>>,
+
+  /// Deferred expression bodies at block end, keyed by Block HIRId.
+  pub on_scope_end_defers: HashMap<HIRId, Vec<HIRId>>,
+
+  /// Deferred expression bodies at early exits.
+  pub on_exit_defers: HashMap<ExitKey, Vec<HIRId>>,
 }
 
 impl DropSchedules {
@@ -41,8 +48,12 @@ impl DropSchedules {
     Self::default()
   }
 
-  /// Check if there are any drops scheduled anywhere.
+  /// Check if there are any drops or defers scheduled anywhere.
   pub fn is_empty(&self) -> bool {
-    self.on_scope_end.is_empty() && self.on_exit.is_empty() && self.on_overwrite.is_empty()
+    self.on_scope_end.is_empty()
+      && self.on_exit.is_empty()
+      && self.on_overwrite.is_empty()
+      && self.on_scope_end_defers.is_empty()
+      && self.on_exit_defers.is_empty()
   }
 }
