@@ -430,6 +430,11 @@ impl IgnisParser {
       | TokenType::Null => self.parse_literal(&token),
       TokenType::Identifier => {
         let first = token.clone();
+
+        if first.lexeme == "_" {
+          return Ok(self.allocate_expression(ASTExpression::PipePlaceholder { span: first.span }));
+        }
+
         let start = first.span.clone();
         let mut segments: Vec<(SymbolId, Span)> = vec![(self.insert_symbol(&first), first.span.clone())];
 
@@ -2164,5 +2169,61 @@ mod tests {
       },
       other => panic!("expected pipe expression, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn pipe_placeholder_middle() {
+    let result = parse_expr("a |> f(1, _, 2)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Pipe { rhs, .. } => match result.nodes.get(rhs) {
+        ASTNode::Expression(ASTExpression::Call(call)) => {
+          assert_eq!(call.arguments.len(), 3);
+          match result.nodes.get(&call.arguments[1]) {
+            ASTNode::Expression(ASTExpression::PipePlaceholder { .. }) => {},
+            other => panic!("expected PipePlaceholder at index 1, got {:?}", other),
+          }
+        },
+        other => panic!("expected call rhs, got {:?}", other),
+      },
+      other => panic!("expected pipe, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn if_let_wildcard_not_placeholder() {
+    // `_` in pattern context should parse as Wildcard, not PipePlaceholder
+    let program = "function test(): void { if (let _ = foo()) { return; } }";
+    let mut sm = ignis_type::file::SourceMap::new();
+    let file_id = sm.add_file("test.ign", program.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, program);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    // Walk into function -> block -> if -> condition -> LetCondition -> pattern
+    let root = nodes.get(&roots[0]);
+    let func = match root {
+      ASTNode::Statement(ASTStatement::Function(f)) => f,
+      _ => panic!("expected function"),
+    };
+    let body = func.body.as_ref().expect("no body");
+    let block = match nodes.get(body) {
+      ASTNode::Statement(ASTStatement::Block(b)) => b,
+      _ => panic!("expected block"),
+    };
+    let if_stmt = match nodes.get(&block.statements[0]) {
+      ASTNode::Statement(ASTStatement::If(i)) => i,
+      _ => panic!("expected if"),
+    };
+    let cond = match nodes.get(&if_stmt.condition) {
+      ASTNode::Expression(ASTExpression::LetCondition(lc)) => lc,
+      other => panic!("expected let condition, got {:?}", other),
+    };
+    assert!(matches!(cond.pattern, ASTPattern::Wildcard { .. }), "expected Wildcard pattern");
   }
 }

@@ -1,4 +1,4 @@
-use crate::{Analyzer, InferContext, PipeResolution, ResolvedPath, ScopeKind, TypecheckContext};
+use crate::{Analyzer, InferContext, PipeArgInsertion, PipeResolution, ResolvedPath, ScopeKind, TypecheckContext};
 use std::collections::{HashMap, HashSet};
 
 use ignis_ast::{
@@ -924,6 +924,13 @@ impl<'a> Analyzer<'a> {
         pipe_span,
         span,
       } => self.typecheck_pipe(node_id, lhs, rhs, pipe_span, span, scope_kind, ctx),
+
+      ASTExpression::PipePlaceholder { span, .. } => {
+        self.add_diagnostic(
+          DiagnosticMessage::PipePlaceholderOutsidePipe { span: span.clone() }.report(),
+        );
+        self.types.error()
+      },
     }
   }
 
@@ -3432,6 +3439,17 @@ impl<'a> Analyzer<'a> {
         self.typecheck_pipe_lambda(node_id, lhs, &lhs_type, rhs, pipe_span, scope_kind, ctx)
       },
 
+      ASTNode::Expression(ASTExpression::PipePlaceholder { ref span, .. }) => {
+        self.add_diagnostic(
+          DiagnosticMessage::PipePlaceholderNotInCall {
+            span: span.clone(),
+            pipe_span: pipe_span.clone(),
+          }
+          .report(),
+        );
+        self.types.error()
+      },
+
       ASTNode::Expression(ASTExpression::MemberAccess(ref ma)) if ma.op == ignis_ast::expressions::ASTAccessOp::Dot => {
         self.add_diagnostic(
           DiagnosticMessage::PipeRhsInstanceMethod {
@@ -3458,7 +3476,7 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  /// Handles `x |> f(a, b)`.
+  /// Handles `x |> f(a, b)` and `x |> f(a, _, b)`.
   fn typecheck_pipe_call(
     &mut self,
     node_id: &NodeId,
@@ -3470,7 +3488,66 @@ impl<'a> Analyzer<'a> {
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
   ) -> TypeId {
+    // --- Placeholder scan ---
+
+    let placeholder_positions: Vec<(usize, ignis_type::span::Span)> = call
+      .arguments
+      .iter()
+      .enumerate()
+      .filter_map(|(i, arg)| {
+        if let ASTNode::Expression(ASTExpression::PipePlaceholder { span, .. }) = self.ast.get(arg) {
+          Some((i, span.clone()))
+        } else {
+          None
+        }
+      })
+      .collect();
+
+    if placeholder_positions.len() > 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::PipeMultiplePlaceholders {
+          first: placeholder_positions[0].1.clone(),
+          second: placeholder_positions[1].1.clone(),
+          pipe_span: pipe_span.clone(),
+        }
+        .report(),
+      );
+      // Typecheck non-placeholder args to avoid cascading errors
+      for arg in &call.arguments {
+        if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
+          self.typecheck_node(arg, scope_kind, ctx);
+        }
+      }
+      return self.types.error();
+    }
+
+    let insertion = if let Some(&(index, _)) = placeholder_positions.first() {
+      PipeArgInsertion::ReplaceAt(index)
+    } else {
+      PipeArgInsertion::Prepend
+    };
+
+    // --- MemberAccess callee rejection ---
+
     let callee_node = self.ast.get(&call.callee).clone();
+
+    if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = &callee_node {
+      self.add_diagnostic(
+        DiagnosticMessage::PipeRhsUnsupportedCallee {
+          callee_span: ma.span.clone(),
+          pipe_span: pipe_span.clone(),
+        }
+        .report(),
+      );
+      for arg in &call.arguments {
+        if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
+          self.typecheck_node(arg, scope_kind, ctx);
+        }
+      }
+      return self.types.error();
+    }
+
+    // --- Callee resolution ---
 
     let (callee_entry, callee_is_path) = match &callee_node {
       ASTNode::Expression(ASTExpression::Variable(var)) => (self.scopes.lookup(&var.name).cloned(), false),
@@ -3492,12 +3569,25 @@ impl<'a> Analyzer<'a> {
         let extra_arg_types: Vec<TypeId> = call
           .arguments
           .iter()
-          .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+          .enumerate()
+          .map(|(i, arg)| {
+            if matches!(insertion, PipeArgInsertion::ReplaceAt(idx) if idx == i) {
+              *lhs_type
+            } else {
+              self.typecheck_node(arg, scope_kind, ctx)
+            }
+          })
           .collect();
 
-        let mut arg_types = Vec::with_capacity(1 + extra_arg_types.len());
-        arg_types.push(*lhs_type);
-        arg_types.extend(extra_arg_types.iter().copied());
+        let arg_types = match insertion {
+          PipeArgInsertion::Prepend => {
+            let mut all = Vec::with_capacity(1 + extra_arg_types.len());
+            all.push(*lhs_type);
+            all.extend(extra_arg_types.iter().copied());
+            all
+          },
+          PipeArgInsertion::ReplaceAt(_) => extra_arg_types.clone(),
+        };
 
         extra_arg_types_for_resolution = Some(extra_arg_types);
 
@@ -3536,64 +3626,138 @@ impl<'a> Analyzer<'a> {
 
     if param_types.is_empty() && def_id.is_none() {
       for arg in &call.arguments {
-        self.typecheck_node(arg, scope_kind, ctx);
+        if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
+          self.typecheck_node(arg, scope_kind, ctx);
+        }
       }
       return self.types.error();
     }
 
-    let extra_arg_types: Vec<TypeId> = if let Some(extra_arg_types) = extra_arg_types_for_resolution {
-      extra_arg_types
-    } else {
-      call
-        .arguments
-        .iter()
-        .enumerate()
-        .map(|(i, arg)| {
-          if let Some(param_type) = param_types.get(i + 1) {
-            self.typecheck_node_with_infer(arg, scope_kind, ctx, &InferContext::expecting(*param_type))
-          } else {
-            self.typecheck_node(arg, scope_kind, ctx)
-          }
-        })
-        .collect()
-    };
+    // --- Arity and type checking (mode-dependent) ---
 
-    let total_args = 1 + extra_arg_types.len();
-    if total_args != param_types.len() {
-      let func_name = self.callee_name_for_diagnostics(&callee_node, callee_is_path);
-      self.add_diagnostic(
-        DiagnosticMessage::ArgumentCountMismatch {
-          expected: param_types.len(),
-          got: total_args,
-          func_name,
-          span: pipe_span.clone(),
+    match insertion {
+      PipeArgInsertion::Prepend => {
+        let extra_arg_types: Vec<TypeId> = if let Some(extra_arg_types) = extra_arg_types_for_resolution {
+          extra_arg_types
+        } else {
+          call
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+              if let Some(param_type) = param_types.get(i + 1) {
+                self.typecheck_node_with_infer(arg, scope_kind, ctx, &InferContext::expecting(*param_type))
+              } else {
+                self.typecheck_node(arg, scope_kind, ctx)
+              }
+            })
+            .collect()
+        };
+
+        let total_args = 1 + extra_arg_types.len();
+        if total_args != param_types.len() {
+          let func_name = self.callee_name_for_diagnostics(&callee_node, callee_is_path);
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentCountMismatch {
+              expected: param_types.len(),
+              got: total_args,
+              func_name,
+              span: pipe_span.clone(),
+            }
+            .report(),
+          );
         }
-        .report(),
-      );
-    }
 
-    if let Some(first_param) = param_types.first() {
-      self.check_pipe_arg_type(first_param, lhs_type, lhs, pipe_span);
-    }
+        if let Some(first_param) = param_types.first() {
+          self.check_pipe_arg_type(first_param, lhs_type, lhs, pipe_span);
+        }
 
-    let check_count = std::cmp::min(extra_arg_types.len(), param_types.len().saturating_sub(1));
-    for i in 0..check_count {
-      let param_type = &param_types[i + 1];
-      if !self.types.is_error(&extra_arg_types[i])
-        && !self.types.is_error(param_type)
-        && !self.types.is_assignable(param_type, &extra_arg_types[i])
-      {
-        self.add_diagnostic(
-          DiagnosticMessage::ArgumentTypeMismatch {
-            param_idx: i + 2,
-            expected: self.format_type_for_error(param_type),
-            got: self.format_type_for_error(&extra_arg_types[i]),
-            span: self.node_span(&call.arguments[i]).clone(),
+        let check_count = std::cmp::min(extra_arg_types.len(), param_types.len().saturating_sub(1));
+        for i in 0..check_count {
+          let param_type = &param_types[i + 1];
+          if !self.types.is_error(&extra_arg_types[i])
+            && !self.types.is_error(param_type)
+            && !self.types.is_assignable(param_type, &extra_arg_types[i])
+          {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 2,
+                expected: self.format_type_for_error(param_type),
+                got: self.format_type_for_error(&extra_arg_types[i]),
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
           }
-          .report(),
-        );
-      }
+        }
+      },
+
+      PipeArgInsertion::ReplaceAt(placeholder_index) => {
+        let extra_arg_types: Vec<TypeId> = if let Some(extra_arg_types) = extra_arg_types_for_resolution {
+          extra_arg_types
+        } else {
+          call
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+              if i == placeholder_index {
+                // Placeholder position — LHS type goes here
+                *lhs_type
+              } else if let Some(param_type) = param_types.get(i) {
+                self.typecheck_node_with_infer(arg, scope_kind, ctx, &InferContext::expecting(*param_type))
+              } else {
+                self.typecheck_node(arg, scope_kind, ctx)
+              }
+            })
+            .collect()
+        };
+
+        let total_args = extra_arg_types.len();
+        if total_args != param_types.len() {
+          let func_name = self.callee_name_for_diagnostics(&callee_node, callee_is_path);
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentCountMismatch {
+              expected: param_types.len(),
+              got: total_args,
+              func_name,
+              span: pipe_span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        // Check LHS type against the placeholder's parameter slot
+        if let Some(param_type) = param_types.get(placeholder_index) {
+          self.check_pipe_arg_type(param_type, lhs_type, lhs, pipe_span);
+        }
+
+        // Check non-placeholder arguments
+        let check_count = std::cmp::min(extra_arg_types.len(), param_types.len());
+        for i in 0..check_count {
+          if i == placeholder_index {
+            continue;
+          }
+          let param_type = &param_types[i];
+          if !self.types.is_error(&extra_arg_types[i])
+            && !self.types.is_error(param_type)
+            && !self.types.is_assignable(param_type, &extra_arg_types[i])
+          {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 1,
+                expected: self.format_type_for_error(param_type),
+                got: self.format_type_for_error(&extra_arg_types[i]),
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
+          }
+        }
+      },
     }
+
+    // --- Record resolution ---
 
     let type_args = self.resolve_pipe_type_args(&def_id, call);
 
@@ -3603,6 +3767,7 @@ impl<'a> Analyzer<'a> {
         PipeResolution::ClosureCall {
           callee_node: call.callee,
           extra_args: call.arguments.clone(),
+          insertion,
         },
       );
     } else if let Some(def_id) = def_id {
@@ -3612,6 +3777,7 @@ impl<'a> Analyzer<'a> {
           def_id,
           extra_args: call.arguments.clone(),
           type_args,
+          insertion,
         },
       );
     }
@@ -3690,6 +3856,7 @@ impl<'a> Analyzer<'a> {
         PipeResolution::ClosureCall {
           callee_node: *rhs,
           extra_args: vec![],
+          insertion: PipeArgInsertion::Prepend,
         },
       );
     } else {
@@ -3699,6 +3866,7 @@ impl<'a> Analyzer<'a> {
           def_id,
           extra_args: vec![],
           type_args: vec![],
+          insertion: PipeArgInsertion::Prepend,
         },
       );
     }
@@ -3794,6 +3962,7 @@ impl<'a> Analyzer<'a> {
         PipeResolution::ClosureCall {
           callee_node: *rhs,
           extra_args: vec![],
+          insertion: PipeArgInsertion::Prepend,
         },
       );
     } else {
@@ -3803,6 +3972,7 @@ impl<'a> Analyzer<'a> {
           def_id,
           extra_args: vec![],
           type_args: vec![],
+          insertion: PipeArgInsertion::Prepend,
         },
       );
     }
@@ -3874,6 +4044,7 @@ impl<'a> Analyzer<'a> {
       PipeResolution::ClosureCall {
         callee_node: *rhs,
         extra_args: vec![],
+        insertion: PipeArgInsertion::Prepend,
       },
     );
 
@@ -7148,9 +7319,11 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Pipe { lhs, rhs, .. } => {
         self.node_contains_let_condition(lhs) || self.node_contains_let_condition(rhs)
       },
-      ASTExpression::Literal(_) | ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Lambda(_) => {
-        false
-      },
+      ASTExpression::Literal(_)
+      | ASTExpression::Variable(_)
+      | ASTExpression::Path(_)
+      | ASTExpression::Lambda(_)
+      | ASTExpression::PipePlaceholder { .. } => false,
     }
   }
 
@@ -7918,7 +8091,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Pipe { lhs, rhs, .. } => self
         .find_first_symbol_usage(*lhs, symbol)
         .or_else(|| self.find_first_symbol_usage(*rhs, symbol)),
-      ASTExpression::Literal(_) | ASTExpression::Path(_) => None,
+      ASTExpression::Literal(_) | ASTExpression::Path(_) | ASTExpression::PipePlaceholder { .. } => None,
     }
   }
 

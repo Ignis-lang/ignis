@@ -449,6 +449,8 @@ impl<'a> Analyzer<'a> {
         self.resolve_node(rhs, scope_kind);
         self.in_callee_context = prev;
       },
+
+      ASTExpression::PipePlaceholder { .. } => {},
     }
   }
 

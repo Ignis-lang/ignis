@@ -893,6 +893,20 @@ a || b |> f       // a || (b |> f)
 a |> f ? x : y    // (a |> f) ? x : y
 ```
 
+#### Placeholder
+
+When the RHS is a call expression, `_` can be used as a placeholder to indicate
+where the piped value is inserted:
+
+```ignis
+x |> f(1, _, 3)    // f(1, x, 3)
+x |> f(_, 1)        // f(x, 1) — equivalent to x |> f(1) without placeholder
+```
+
+Without a placeholder, the piped value is prepended as the first argument.
+Only one `_` per pipe step is allowed. `_` outside pipe call arguments is
+an error.
+
 #### Evaluation order
 
 In `lhs |> f(extra1, extra2)`, `lhs` is evaluated first, then `extra1`, then `extra2`, then the call. This follows naturally from left-to-right argument evaluation.

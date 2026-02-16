@@ -5012,3 +5012,91 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// PIPE PLACEHOLDER TESTS
+// =========================================================================
+
+#[test]
+fn e2e_pipe_placeholder_first() {
+  e2e_test(
+    "pipe_placeholder_first",
+    r#"
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return 42 |> add(_, 10);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_placeholder_middle() {
+  e2e_test(
+    "pipe_placeholder_middle",
+    r#"
+function f(a: i32, b: i32, c: i32): i32 {
+    return a * 100 + b * 10 + c;
+}
+
+function main(): i32 {
+    return 5 |> f(1, _, 3);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_placeholder_last() {
+  e2e_test(
+    "pipe_placeholder_last",
+    r#"
+function f(a: i32, b: i32, c: i32): i32 {
+    return a * 100 + b * 10 + c;
+}
+
+function main(): i32 {
+    return 3 |> f(1, 2, _);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_placeholder_chain() {
+  e2e_test(
+    "pipe_placeholder_chain",
+    r#"
+function sub(a: i32, b: i32): i32 {
+    return a - b;
+}
+
+function mul(a: i32, b: i32): i32 {
+    return a * b;
+}
+
+function main(): i32 {
+    return 10 |> sub(_, 3) |> mul(2, _);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_placeholder_single_arg() {
+  e2e_test(
+    "pipe_placeholder_single_arg",
+    r#"
+function twice(x: i32): i32 {
+    return x * 2;
+}
+
+function main(): i32 {
+    return 21 |> twice(_);
+}
+"#,
+  );
+}
