@@ -483,7 +483,7 @@ mod tests {
 
   #[test]
   fn test_link_plan_empty_modules_no_manifest() {
-    let graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
     let plan = LinkPlan::from_modules(&[], &graph, Path::new("/std"), Path::new("/build"), None);
 
     assert!(plan.headers.is_empty());
@@ -495,7 +495,7 @@ mod tests {
   #[test]
   fn test_link_plan_with_manifest_includes_base_header() {
     let manifest = create_test_manifest();
-    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone());
+    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone(), HashMap::new());
     let plan = LinkPlan::from_modules(&[], &graph, Path::new("/std"), Path::new("/build"), Some(&manifest));
 
     // Base header should be included even with no modules
@@ -508,7 +508,7 @@ mod tests {
   #[test]
   fn test_link_plan_single_std_module() {
     let manifest = create_test_manifest();
-    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone());
+    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone(), HashMap::new());
 
     let io_module = Module::new(dummy_file_id(), ModulePath::Std("io".to_string()));
     let io_id = graph.register(io_module);
@@ -527,7 +527,7 @@ mod tests {
   #[test]
   fn test_link_plan_multiple_std_modules() {
     let manifest = create_test_manifest();
-    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone());
+    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone(), HashMap::new());
 
     let io_module = Module::new(dummy_file_id(), ModulePath::Std("io".to_string()));
     let io_id = graph.register(io_module);
@@ -554,7 +554,7 @@ mod tests {
   #[test]
   fn test_link_plan_with_external_lib() {
     let manifest = create_test_manifest();
-    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone());
+    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone(), HashMap::new());
 
     let math_module = Module::new(dummy_file_id(), ModulePath::Std("math".to_string()));
     let math_id = graph.register(math_module);
@@ -573,8 +573,12 @@ mod tests {
   #[test]
   fn test_link_plan_project_module_ignored() {
     let manifest = create_test_manifest();
-    let mut graph =
-      ModuleGraph::with_manifest(Some(PathBuf::from("/project")), PathBuf::from("/std"), manifest.clone());
+    let mut graph = ModuleGraph::with_manifest(
+      Some(PathBuf::from("/project")),
+      PathBuf::from("/std"),
+      manifest.clone(),
+      HashMap::new(),
+    );
 
     let project_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/project/utils.ign")));
     let project_id = graph.register(project_module);
@@ -591,7 +595,7 @@ mod tests {
   #[test]
   fn test_link_plan_no_duplicates() {
     let manifest = create_test_manifest();
-    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone());
+    let mut graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest.clone(), HashMap::new());
 
     let io_module = Module::new(dummy_file_id(), ModulePath::Std("io".to_string()));
     let io_id = graph.register(io_module);

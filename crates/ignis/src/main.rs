@@ -169,6 +169,7 @@ fn build_config_from_project(
   config.manifest = load_manifest(&config.std_path);
   config.c_compiler = project.cc.clone();
   config.cflags = project.cflags.clone();
+  config.aliases = project.aliases.clone();
 
   // Determine emit paths
   let out_dir = &project.out_dir;
@@ -325,6 +326,7 @@ fn check_config_from_project(
   config.manifest = load_manifest(&config.std_path);
   config.c_compiler = project.cc.clone();
   config.cflags = project.cflags.clone();
+  config.aliases = project.aliases.clone();
 
   let out_dir = &project.out_dir;
   let emit_c = if project.emit.c {

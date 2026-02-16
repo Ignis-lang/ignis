@@ -65,6 +65,23 @@ If `runtime_path` is omitted, the resolver uses `std_path/runtime`.
 - `cflags` - Extra C compiler/linker flags.
 - `emit` - Extra artifacts (`"c"`, `"obj"`).
 
+### `[aliases]`
+
+Import path aliases. Each key is a first-segment prefix, each value is a directory path (relative to project root or absolute).
+
+```toml
+[aliases]
+mylib = "libs/mylib"
+ext = "../external/packages"
+```
+
+With this configuration, `import Foo from "mylib::utils"` resolves to `libs/mylib/utils.ign` (or `libs/mylib/utils/mod.ign` if that directory exists).
+
+- The `"std"` key is reserved and cannot be used in `[aliases]`.
+- Alias paths must point to existing directories.
+- Only the first segment of the import path is matched (e.g., `"mylib"` in `"mylib::sub::mod"`).
+- Single-file builds do not support user aliases (only the implicit `std` alias is available).
+
 ## Binary vs Library Projects
 
 Binary project:

@@ -4,6 +4,7 @@
 //! a `Project` with all paths resolved to absolute, canonicalized forms and
 //! all values validated.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::project::config::ProjectToml;
@@ -62,6 +63,9 @@ pub struct Project {
 
   /// Extra artifacts to emit.
   pub emit: EmitSet,
+
+  /// Import path aliases: first segment -> absolute directory path.
+  pub aliases: HashMap<String, PathBuf>,
 }
 
 /// Set of extra artifacts to emit during compilation.
@@ -227,6 +231,26 @@ pub fn resolve_project(
   let emit_values = overrides.emit.as_ref().unwrap_or(&toml.build.emit);
   let emit = parse_emit_set(emit_values)?;
 
+  // Resolve aliases
+  let mut aliases = HashMap::new();
+  for (key, value) in &toml.aliases {
+    if key == "std" {
+      return Err(ProjectError::ReservedAlias { name: key.clone() });
+    }
+    let path = resolve_path(&root, value);
+    if !path.exists() {
+      return Err(ProjectError::AliasPathNotFound {
+        alias: key.clone(),
+        path,
+      });
+    }
+    let canonical = path.canonicalize().map_err(|e| ProjectError::IoError {
+      path: path.clone(),
+      source: e,
+    })?;
+    aliases.insert(key.clone(), canonical);
+  }
+
   Ok(Project {
     toml_path,
     root,
@@ -243,6 +267,7 @@ pub fn resolve_project(
     cc,
     cflags,
     emit,
+    aliases,
   })
 }
 
@@ -312,6 +337,7 @@ mod tests {
         cflags: vec![],
         emit: vec![],
       },
+      aliases: HashMap::new(),
     }
   }
 
@@ -513,6 +539,57 @@ mod tests {
 
     let result = resolve_project(temp_dir.clone(), toml, &overrides);
     assert!(matches!(result, Err(ProjectError::StdPathNotFound { .. })));
+
+    fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_resolve_alias_reserved_std_rejected() {
+    let temp_dir = setup_project_dir("alias_reserved");
+
+    let mut toml = minimal_toml("test");
+    toml.aliases.insert("std".to_string(), "libs/std".to_string());
+
+    let overrides = CliOverrides::default();
+
+    let result = resolve_project(temp_dir.clone(), toml, &overrides);
+    assert!(matches!(result, Err(ProjectError::ReservedAlias { .. })));
+
+    fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_resolve_alias_path_not_found() {
+    let temp_dir = setup_project_dir("alias_not_found");
+
+    let mut toml = minimal_toml("test");
+    toml.aliases.insert("mylib".to_string(), "nonexistent_dir".to_string());
+
+    let overrides = CliOverrides::default();
+
+    let result = resolve_project(temp_dir.clone(), toml, &overrides);
+    assert!(matches!(result, Err(ProjectError::AliasPathNotFound { .. })));
+
+    fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_resolve_alias_valid() {
+    let temp_dir = setup_project_dir("alias_valid");
+
+    // Create the alias target directory
+    let libs_dir = temp_dir.join("libs");
+    fs::create_dir_all(&libs_dir).unwrap();
+
+    let mut toml = minimal_toml("test");
+    toml.aliases.insert("mylib".to_string(), "libs".to_string());
+
+    let overrides = CliOverrides::default();
+
+    let project = resolve_project(temp_dir.clone(), toml, &overrides).unwrap();
+    assert_eq!(project.aliases.len(), 1);
+    assert!(project.aliases.contains_key("mylib"));
+    assert!(project.aliases["mylib"].is_absolute());
 
     fs::remove_dir_all(&temp_dir).unwrap();
   }

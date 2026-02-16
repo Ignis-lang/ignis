@@ -37,12 +37,15 @@ pub struct ModuleGraph {
   pub std_path: PathBuf,
   /// Standard library manifest (for path resolution and linking info)
   pub manifest: Option<IgnisSTDManifest>,
+  /// Import path aliases: first segment -> absolute directory path.
+  pub aliases: HashMap<String, PathBuf>,
 }
 
 impl ModuleGraph {
   pub fn new(
     project_root: Option<PathBuf>,
     std_path: PathBuf,
+    aliases: HashMap<String, PathBuf>,
   ) -> Self {
     Self {
       modules: ModuleStore::new(),
@@ -51,6 +54,7 @@ impl ModuleGraph {
       project_root,
       std_path,
       manifest: None,
+      aliases,
     }
   }
 
@@ -58,6 +62,7 @@ impl ModuleGraph {
     project_root: Option<PathBuf>,
     std_path: PathBuf,
     manifest: IgnisSTDManifest,
+    aliases: HashMap<String, PathBuf>,
   ) -> Self {
     Self {
       modules: ModuleStore::new(),
@@ -66,6 +71,7 @@ impl ModuleGraph {
       project_root,
       std_path,
       manifest: Some(manifest),
+      aliases,
     }
   }
 
@@ -100,7 +106,7 @@ impl ModuleGraph {
     import_from: &str,
     current_file: &Path,
   ) -> Result<ModulePath, ModulePathError> {
-    ModulePath::from_import_path(import_from, current_file, self.project_root.as_deref())
+    ModulePath::from_import_path(import_from, current_file, self.project_root.as_deref(), &self.aliases)
   }
 
   /// Get the std_path for this module graph
@@ -293,6 +299,7 @@ impl ModuleGraph {
 mod tests {
   use super::*;
   use ignis_type::file::{FileId, SourceMap};
+  use std::collections::HashMap;
   use std::path::PathBuf;
 
   fn dummy_file_id() -> FileId {
@@ -300,9 +307,14 @@ mod tests {
     sm.add_file("test.ign", "".to_string())
   }
 
+  fn std_aliases(std_path: &str) -> HashMap<String, PathBuf> {
+    HashMap::from([("std".to_string(), PathBuf::from(std_path))])
+  }
+
   #[test]
   fn test_resolve_std_path() {
-    let graph = ModuleGraph::new(None, PathBuf::from("/usr/lib/ignis/std"));
+    let std_path = "/usr/lib/ignis/std";
+    let graph = ModuleGraph::new(None, PathBuf::from(std_path), std_aliases(std_path));
     let result = graph.resolve_import_path("std::io", Path::new("/project/main.ign"));
 
     assert!(result.is_ok());
@@ -314,7 +326,11 @@ mod tests {
 
   #[test]
   fn test_resolve_relative_path() {
-    let graph = ModuleGraph::new(Some(PathBuf::from("/project")), PathBuf::from("/usr/lib/ignis/std"));
+    let graph = ModuleGraph::new(
+      Some(PathBuf::from("/project")),
+      PathBuf::from("/usr/lib/ignis/std"),
+      HashMap::new(),
+    );
     let result = graph.resolve_import_path("./utils", Path::new("/project/src/main.ign"));
 
     assert!(result.is_ok());
@@ -328,7 +344,11 @@ mod tests {
 
   #[test]
   fn test_resolve_absolute_path() {
-    let graph = ModuleGraph::new(Some(PathBuf::from("/project")), PathBuf::from("/usr/lib/ignis/std"));
+    let graph = ModuleGraph::new(
+      Some(PathBuf::from("/project")),
+      PathBuf::from("/usr/lib/ignis/std"),
+      HashMap::new(),
+    );
     let result = graph.resolve_import_path("utils/math", Path::new("/project/src/main.ign"));
 
     assert!(result.is_ok());
@@ -343,7 +363,7 @@ mod tests {
 
   #[test]
   fn test_no_project_root_error() {
-    let graph = ModuleGraph::new(None, PathBuf::from("/usr/lib/ignis/std"));
+    let graph = ModuleGraph::new(None, PathBuf::from("/usr/lib/ignis/std"), HashMap::new());
     let result = graph.resolve_import_path("utils/math", Path::new("/some/file.ign"));
 
     assert!(result.is_err());
@@ -351,7 +371,7 @@ mod tests {
 
   #[test]
   fn test_topological_sort_simple() {
-    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     // Create modules: main -> lib
     let lib_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/lib.ign")));
@@ -375,7 +395,7 @@ mod tests {
 
   #[test]
   fn test_topological_sort_chain() {
-    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     // Create chain: main -> b -> c
     let c_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/c.ign")));
@@ -406,7 +426,7 @@ mod tests {
 
   #[test]
   fn test_topological_sort_diamond() {
-    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     // Diamond: main -> {a, b} -> c
     let c_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/c.ign")));
@@ -445,7 +465,7 @@ mod tests {
 
   #[test]
   fn test_detect_cycle_simple() {
-    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     // Cycle: a -> b -> a
     let a_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/a.ign")));
@@ -473,7 +493,7 @@ mod tests {
 
   #[test]
   fn test_detect_cycle_three_nodes() {
-    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     // Cycle: a -> b -> c -> a
     let a_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/a.ign")));
@@ -505,7 +525,7 @@ mod tests {
 
   #[test]
   fn test_no_cycle_with_shared_dependency() {
-    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     // Not a cycle: main -> {a, b}, both a and b -> c
     let c_module = Module::new(dummy_file_id(), ModulePath::Project(PathBuf::from("/c.ign")));
@@ -533,7 +553,7 @@ mod tests {
 
   #[test]
   fn test_module_deduplication() {
-    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let mut graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     let path = ModulePath::Project(PathBuf::from("/lib.ign"));
 
@@ -576,7 +596,7 @@ mod tests {
       auto_load: None,
     };
 
-    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest);
+    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest, HashMap::new());
 
     assert!(graph.manifest.is_some());
     assert_eq!(
@@ -601,7 +621,7 @@ mod tests {
       auto_load: None,
     };
 
-    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/usr/lib/ignis/std"), manifest);
+    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/usr/lib/ignis/std"), manifest, HashMap::new());
 
     // Test std path resolution with manifest
     let io_path = ModulePath::Std("io".to_string());
@@ -616,7 +636,7 @@ mod tests {
 
   #[test]
   fn test_to_fs_path_without_manifest_fallback() {
-    let graph = ModuleGraph::new(None, PathBuf::from("/usr/lib/ignis/std"));
+    let graph = ModuleGraph::new(None, PathBuf::from("/usr/lib/ignis/std"), HashMap::new());
 
     // Without manifest, should use convention (falls back to .ign)
     let io_path = ModulePath::Std("io".to_string());
@@ -660,7 +680,7 @@ mod tests {
       auto_load: None,
     };
 
-    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest);
+    let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest, HashMap::new());
 
     // Test io linking info
     let io_linking = graph.get_linking_info("io");
@@ -683,7 +703,7 @@ mod tests {
 
   #[test]
   fn test_get_linking_info_without_manifest() {
-    let graph = ModuleGraph::new(None, PathBuf::from("/std"));
+    let graph = ModuleGraph::new(None, PathBuf::from("/std"), HashMap::new());
 
     // Without manifest, should return None
     let result = graph.get_linking_info("io");

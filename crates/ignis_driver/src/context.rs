@@ -70,10 +70,16 @@ impl CompilationContext {
 
     let std_path = PathBuf::from(&config.std_path);
 
+    let mut aliases = HashMap::new();
+    if !config.std_path.is_empty() {
+      aliases.insert("std".to_string(), std_path.clone());
+    }
+    aliases.extend(config.aliases.iter().map(|(k, v)| (k.clone(), v.clone())));
+
     let module_graph = if config.manifest.modules.is_empty() {
-      ModuleGraph::new(project_root, std_path)
+      ModuleGraph::new(project_root, std_path, aliases)
     } else {
-      ModuleGraph::with_manifest(project_root, std_path, config.manifest.clone())
+      ModuleGraph::with_manifest(project_root, std_path, config.manifest.clone(), aliases)
     };
 
     Self {
@@ -721,9 +727,7 @@ impl CompilationContext {
 
     // Prelude edges create cycles among std modules; skip cycle detection
     // for std roots and use all_modules_topological (same as check-std).
-    if !root_is_std
-      && let Err(err) = self.module_graph.detect_cycles()
-    {
+    if !root_is_std && let Err(err) = self.module_graph.detect_cycles() {
       match err {
         ModuleError::CircularDependency { cycle } => {
           let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
