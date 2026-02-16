@@ -5100,3 +5100,113 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// PIPE METHOD CALL TESTS
+// =========================================================================
+
+#[test]
+fn e2e_pipe_method_call_prepend() {
+  e2e_test(
+    "pipe_method_call_prepend",
+    r#"
+record Acc {
+    public total: i32;
+
+    add(&self, x: i32): i32 {
+        return self.total + x;
+    }
+}
+
+function main(): i32 {
+    let a: Acc = Acc { total: 100 };
+    return 5 |> a.add();
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_method_bare() {
+  e2e_test(
+    "pipe_method_bare",
+    r#"
+record Acc {
+    public total: i32;
+
+    add(&self, x: i32): i32 {
+        return self.total + x;
+    }
+}
+
+function main(): i32 {
+    let a: Acc = Acc { total: 100 };
+    return 5 |> a.add;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_method_placeholder_last() {
+  e2e_test(
+    "pipe_method_placeholder_last",
+    r#"
+record Math {
+    public base: i32;
+
+    sub(&self, a: i32, b: i32): i32 {
+        return self.base + a - b;
+    }
+}
+
+function main(): i32 {
+    let m: Math = Math { base: 100 };
+    return 7 |> m.sub(3, _);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_method_placeholder_first() {
+  e2e_test(
+    "pipe_method_placeholder_first",
+    r#"
+record Math {
+    public base: i32;
+
+    sub(&self, a: i32, b: i32): i32 {
+        return self.base + a - b;
+    }
+}
+
+function main(): i32 {
+    let m: Math = Math { base: 100 };
+    return 7 |> m.sub(_, 3);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_method_mut_self() {
+  e2e_test(
+    "pipe_method_mut_self",
+    r#"
+record Counter {
+    public value: i32;
+
+    addTo(&mut self, x: i32): i32 {
+        self.value = self.value + x;
+        return self.value;
+    }
+}
+
+function main(): i32 {
+    let mut c: Counter = Counter { value: 10 };
+    return 5 |> c.addTo();
+}
+"#,
+  );
+}

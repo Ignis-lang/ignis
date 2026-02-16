@@ -2522,7 +2522,7 @@ function main(): void {
 }
 
 #[test]
-fn pipe_member_callee_rejection() {
+fn pipe_method_call_arity_error() {
   let src = r#"
 record Box {
     public value: i32;
@@ -2539,11 +2539,11 @@ function main(): void {
 }
 "#;
 
-  common::assert_err(src, &["A0176"]);
+  common::assert_err(src, &["A0017"]);
 
   let result = common::analyze(src);
   assert_snapshot!(
-    "pipe_member_callee_rejection",
+    "pipe_method_call_arity_error",
     common::format_diagnostics(&result.output.diagnostics)
   );
 }

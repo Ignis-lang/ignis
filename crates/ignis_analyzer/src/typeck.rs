@@ -926,9 +926,7 @@ impl<'a> Analyzer<'a> {
       } => self.typecheck_pipe(node_id, lhs, rhs, pipe_span, span, scope_kind, ctx),
 
       ASTExpression::PipePlaceholder { span, .. } => {
-        self.add_diagnostic(
-          DiagnosticMessage::PipePlaceholderOutsidePipe { span: span.clone() }.report(),
-        );
+        self.add_diagnostic(DiagnosticMessage::PipePlaceholderOutsidePipe { span: span.clone() }.report());
         self.types.error()
       },
     }
@@ -3451,14 +3449,7 @@ impl<'a> Analyzer<'a> {
       },
 
       ASTNode::Expression(ASTExpression::MemberAccess(ref ma)) if ma.op == ignis_ast::expressions::ASTAccessOp::Dot => {
-        self.add_diagnostic(
-          DiagnosticMessage::PipeRhsInstanceMethod {
-            rhs_span: ma.span.clone(),
-            pipe_span: pipe_span.clone(),
-          }
-          .report(),
-        );
-        self.types.error()
+        self.typecheck_pipe_bare_method(node_id, lhs, &lhs_type, ma, pipe_span, scope_kind, ctx)
       },
 
       _ => {
@@ -3527,24 +3518,16 @@ impl<'a> Analyzer<'a> {
       PipeArgInsertion::Prepend
     };
 
-    // --- MemberAccess callee rejection ---
+    // --- MemberAccess callee dispatch ---
 
     let callee_node = self.ast.get(&call.callee).clone();
 
     if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = &callee_node {
-      self.add_diagnostic(
-        DiagnosticMessage::PipeRhsUnsupportedCallee {
-          callee_span: ma.span.clone(),
-          pipe_span: pipe_span.clone(),
-        }
-        .report(),
-      );
-      for arg in &call.arguments {
-        if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
-          self.typecheck_node(arg, scope_kind, ctx);
-        }
+      if ma.op == ignis_ast::expressions::ASTAccessOp::Dot {
+        return self
+          .typecheck_pipe_method_call(node_id, lhs, lhs_type, call, &ma, insertion, pipe_span, scope_kind, ctx);
       }
-      return self.types.error();
+      // DoubleColon paths (Type::method) are handled below via Path resolution.
     }
 
     // --- Callee resolution ---
@@ -3783,6 +3766,373 @@ impl<'a> Analyzer<'a> {
     }
 
     ret_type
+  }
+
+  /// Handles `x |> obj.method(a, b)` and `x |> obj.method(a, _, b)`.
+  #[allow(clippy::too_many_arguments)]
+  fn typecheck_pipe_method_call(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    lhs_type: &TypeId,
+    call: &ASTCallExpression,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    insertion: PipeArgInsertion,
+    pipe_span: &ignis_type::span::Span,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let obj_type = self.typecheck_node(&ma.object, scope_kind, ctx);
+    let obj_type = self.auto_deref(obj_type);
+
+    if self.types.is_error(&obj_type) {
+      for arg in &call.arguments {
+        if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
+          self.typecheck_node(arg, scope_kind, ctx);
+        }
+      }
+      return self.types.error();
+    }
+
+    // Look up instance method on the receiver type
+    let (method_id, method) = match self.resolve_pipe_instance_method(&obj_type, ma, call, node_id, scope_kind, ctx) {
+      Some(result) => result,
+      None => {
+        for arg in &call.arguments {
+          if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
+            self.typecheck_node(arg, scope_kind, ctx);
+          }
+        }
+        return self.types.error();
+      },
+    };
+
+    // Mutability check
+    if method.self_mutable {
+      let obj_node = self.ast.get(&ma.object);
+      if let ASTNode::Expression(obj_expr) = obj_node
+        && !self.is_mutable_expression(obj_expr)
+      {
+        let method_name = self.get_symbol_name(&ma.member);
+        let var_name = self.get_var_name_from_expr(obj_expr);
+        self.add_diagnostic(
+          DiagnosticMessage::MutatingMethodOnImmutable {
+            method: method_name,
+            var_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+      }
+    }
+
+    let start = self.method_param_start(&method);
+    let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+    // Build substitution for owner type params (Instance<T> → concrete) + method type params
+    let (param_types, return_type) = self.pipe_method_param_types(
+      &obj_type, &method_id, &method, &explicit_params, call,
+    );
+
+    // Arity and type checking — mirrors typecheck_pipe_call logic but against explicit params
+    let method_name = self.get_symbol_name(&ma.member);
+
+    match insertion {
+      PipeArgInsertion::Prepend => {
+        let extra_arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .enumerate()
+          .map(|(i, arg)| {
+            if let Some(param_type) = param_types.get(i + 1) {
+              self.typecheck_node_with_infer(arg, scope_kind, ctx, &InferContext::expecting(*param_type))
+            } else {
+              self.typecheck_node(arg, scope_kind, ctx)
+            }
+          })
+          .collect();
+
+        let total_args = 1 + extra_arg_types.len();
+        if total_args != param_types.len() {
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentCountMismatch {
+              expected: param_types.len(),
+              got: total_args,
+              func_name: method_name,
+              span: pipe_span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        if let Some(first_param) = param_types.first() {
+          self.check_pipe_arg_type(first_param, lhs_type, lhs, pipe_span);
+        }
+
+        let check_count = std::cmp::min(extra_arg_types.len(), param_types.len().saturating_sub(1));
+        for i in 0..check_count {
+          let param_type = &param_types[i + 1];
+          if !self.types.is_error(&extra_arg_types[i])
+            && !self.types.is_error(param_type)
+            && !self.types.is_assignable(param_type, &extra_arg_types[i])
+          {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 2,
+                expected: self.format_type_for_error(param_type),
+                got: self.format_type_for_error(&extra_arg_types[i]),
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
+          }
+        }
+      },
+
+      PipeArgInsertion::ReplaceAt(placeholder_index) => {
+        let extra_arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .enumerate()
+          .map(|(i, arg)| {
+            if i == placeholder_index {
+              *lhs_type
+            } else if let Some(param_type) = param_types.get(i) {
+              self.typecheck_node_with_infer(arg, scope_kind, ctx, &InferContext::expecting(*param_type))
+            } else {
+              self.typecheck_node(arg, scope_kind, ctx)
+            }
+          })
+          .collect();
+
+        let total_args = extra_arg_types.len();
+        if total_args != param_types.len() {
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentCountMismatch {
+              expected: param_types.len(),
+              got: total_args,
+              func_name: method_name,
+              span: pipe_span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        if let Some(param_type) = param_types.get(placeholder_index) {
+          self.check_pipe_arg_type(param_type, lhs_type, lhs, pipe_span);
+        }
+
+        let check_count = std::cmp::min(extra_arg_types.len(), param_types.len());
+        for i in 0..check_count {
+          if i == placeholder_index {
+            continue;
+          }
+          let param_type = &param_types[i];
+          if !self.types.is_error(&extra_arg_types[i])
+            && !self.types.is_error(param_type)
+            && !self.types.is_assignable(param_type, &extra_arg_types[i])
+          {
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 1,
+                expected: self.format_type_for_error(param_type),
+                got: self.format_type_for_error(&extra_arg_types[i]),
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
+          }
+        }
+      },
+    }
+
+    self.pipe_resolutions.insert(
+      *node_id,
+      PipeResolution::MethodCall {
+        receiver_node: ma.object,
+        method_id,
+        extra_args: call.arguments.clone(),
+        type_args: vec![],
+        self_mutable: method.self_mutable,
+        insertion,
+      },
+    );
+
+    return_type
+  }
+
+  /// Resolves an instance method for pipe RHS. Returns the method DefinitionId and MethodDefinition.
+  fn resolve_pipe_instance_method(
+    &mut self,
+    obj_type: &TypeId,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    call: &ASTCallExpression,
+    node_id: &NodeId,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> Option<(DefinitionId, ignis_type::definition::MethodDefinition)> {
+    let def_id = match self.types.get(obj_type).clone() {
+      Type::Record(d) | Type::Enum(d) => d,
+      Type::Instance { generic, .. } => generic,
+      _ => {
+        let type_name = self.format_type_for_error(obj_type);
+        let method_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::FieldNotFound {
+            field: method_name,
+            type_name,
+            span: ma.member_span.clone(),
+          }
+          .report(),
+        );
+        return None;
+      },
+    };
+
+    let instance_methods = match &self.defs.get(&def_id).kind {
+      DefinitionKind::Record(rd) => rd.instance_methods.clone(),
+      DefinitionKind::Enum(ed) => ed.instance_methods.clone(),
+      _ => return None,
+    };
+
+    let entry = instance_methods.get(&ma.member);
+    let method_id = match entry {
+      Some(SymbolEntry::Single(id)) => *id,
+      Some(SymbolEntry::Overload(candidates)) if candidates.len() > 1 => {
+        let arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
+          .collect();
+        match self.resolve_overload(candidates, &arg_types, &call.span, None) {
+          Ok(id) => {
+            self.set_resolved_call(node_id, id);
+            self.set_resolved_call(&call.callee, id);
+            id
+          },
+          Err(()) => return None,
+        }
+      },
+      Some(SymbolEntry::Overload(candidates)) => match candidates.first() {
+        Some(id) => *id,
+        None => return None,
+      },
+      None => {
+        let type_name = self.format_type_for_error(obj_type);
+        let method_name = self.get_symbol_name(&ma.member);
+        self.add_diagnostic(
+          DiagnosticMessage::FieldNotFound {
+            field: method_name,
+            type_name,
+            span: ma.member_span.clone(),
+          }
+          .report(),
+        );
+        return None;
+      },
+    };
+
+    self.set_import_item_def(&ma.member_span, &method_id);
+    self.mark_referenced(method_id);
+
+    let method = match &self.defs.get(&method_id).kind {
+      DefinitionKind::Method(md) => md.clone(),
+      _ => return None,
+    };
+
+    Some((method_id, method))
+  }
+
+  /// Handles `x |> obj.method` (bare, no call parens). Desugars to `obj.method(x)`.
+  #[allow(clippy::too_many_arguments)]
+  fn typecheck_pipe_bare_method(
+    &mut self,
+    node_id: &NodeId,
+    lhs: &NodeId,
+    lhs_type: &TypeId,
+    ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
+    pipe_span: &ignis_type::span::Span,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let obj_type = self.typecheck_node(&ma.object, scope_kind, ctx);
+    let obj_type = self.auto_deref(obj_type);
+
+    if self.types.is_error(&obj_type) {
+      return self.types.error();
+    }
+
+    // Build a synthetic empty call for method resolution
+    let synthetic_call = ASTCallExpression {
+      callee: NodeId::new(0), // unused
+      type_args: None,
+      arguments: vec![],
+      span: ma.span.clone(),
+    };
+
+    let (method_id, method) =
+      match self.resolve_pipe_instance_method(&obj_type, ma, &synthetic_call, node_id, scope_kind, ctx) {
+        Some(result) => result,
+        None => return self.types.error(),
+      };
+
+    // Mutability check
+    if method.self_mutable {
+      let obj_node = self.ast.get(&ma.object);
+      if let ASTNode::Expression(obj_expr) = obj_node
+        && !self.is_mutable_expression(obj_expr)
+      {
+        let method_name = self.get_symbol_name(&ma.member);
+        let var_name = self.get_var_name_from_expr(obj_expr);
+        self.add_diagnostic(
+          DiagnosticMessage::MutatingMethodOnImmutable {
+            method: method_name,
+            var_name,
+            span: ma.span.clone(),
+          }
+          .report(),
+        );
+      }
+    }
+
+    let start = self.method_param_start(&method);
+    let explicit_params: Vec<_> = method.params[start..].to_vec();
+
+    let (param_types, return_type) = self.pipe_method_param_types(
+      &obj_type, &method_id, &method, &explicit_params, &synthetic_call,
+    );
+
+    // Bare method pipe: LHS is the only arg
+    if param_types.len() != 1 {
+      let method_name = self.get_symbol_name(&ma.member);
+      self.add_diagnostic(
+        DiagnosticMessage::ArgumentCountMismatch {
+          expected: param_types.len(),
+          got: 1,
+          func_name: method_name,
+          span: pipe_span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    if let Some(first_param) = param_types.first() {
+      self.check_pipe_arg_type(first_param, lhs_type, lhs, pipe_span);
+    }
+
+    self.pipe_resolutions.insert(
+      *node_id,
+      PipeResolution::MethodCall {
+        receiver_node: ma.object,
+        method_id,
+        extra_args: vec![],
+        type_args: vec![],
+        self_mutable: method.self_mutable,
+        insertion: PipeArgInsertion::Prepend,
+      },
+    );
+
+    return_type
   }
 
   /// Handles `x |> f`.
@@ -4105,6 +4455,43 @@ impl<'a> Analyzer<'a> {
         .report(),
       );
     }
+  }
+
+  /// Builds substituted param types and return type for a pipe method call.
+  /// Handles both plain records and generic instances (Type::Instance).
+  fn pipe_method_param_types(
+    &mut self,
+    obj_type: &TypeId,
+    method_id: &DefinitionId,
+    method: &ignis_type::definition::MethodDefinition,
+    explicit_params: &[DefinitionId],
+    call: &ASTCallExpression,
+  ) -> (Vec<TypeId>, TypeId) {
+    // Check if receiver is a generic instance — needs owner type param substitution
+    if let Type::Instance { generic, args } = self.types.get(obj_type).clone() {
+      let combined_subst = self.build_instance_method_subst(generic, &args, *method_id, method, call);
+
+      let param_types: Vec<TypeId> = explicit_params
+        .iter()
+        .map(|p| {
+          let raw_type = self.get_definition_type(p);
+          self.types.substitute(raw_type, &combined_subst)
+        })
+        .collect();
+
+      let return_type = self.types.substitute(method.return_type, &combined_subst);
+      return (param_types, return_type);
+    }
+
+    // Non-generic: try call-site type args via instantiate_callee_signature
+    if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(method_id, call) {
+      let start = self.method_param_start(method);
+      return (subst_params[start..].to_vec(), subst_ret);
+    }
+
+    // No substitution needed
+    let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+    (raw_params, method.return_type)
   }
 
   /// Resolves explicit type arguments for a pipe call.

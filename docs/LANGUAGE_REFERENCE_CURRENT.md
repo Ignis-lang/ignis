@@ -881,8 +881,10 @@ let result = 1 |> add(2) |> add(3);  // add(add(1, 2), 3) = 6
 | Call with extra args | `f(lhs, a, b)` | `x \|> add(10)` |
 | Generic path call | `Ns::f<T>(lhs, a)` | `x \|> identity<i32>` |
 | Lambda | `((p): R -> body)(lhs)` | `x \|> (n: i32): i32 -> n * 2` |
+| Bare method | `obj.m(lhs)` | `x \|> list.push` |
+| Method call | `obj.m(lhs, a)` | `x \|> list.insert(0)` |
 
-Instance method access (`obj.method`) as RHS is not supported to avoid ambiguity with receiver semantics. Use the static form `Type::method` instead.
+For method calls, the receiver (`obj`) is bound to `self` as usual, and the piped value is inserted into the explicit argument list (prepended or at the placeholder position). Placeholders work the same as with free function calls.
 
 #### Precedence
 
@@ -979,7 +981,7 @@ Common directive builtins:
 - Calling mutating methods (or mut extensions) requires a mutable receiver.
 - Non-Copy types are moved on assignment and function call; use-after-move is a compile-time error.
 - `@implements(Drop)` types are automatically dropped at scope exit; double-drop is a compile-time error.
-- The pipe operator `|>` desugars to a function call with the LHS as the first argument. It supports bare functions, namespace paths, calls with extra args, generic calls, and lambdas. Instance method access as RHS is rejected.
+- The pipe operator `|>` desugars to a function call with the LHS as the first argument. It supports bare functions, namespace paths, calls with extra args, generic calls, lambdas, and instance method calls. The `_` placeholder controls argument insertion position.
 - User-defined trait checks currently target records.
 - `T[]` is parsed but rejected semantically (dynamic vectors are not enabled).
 - Use `str` for primitive string slices; there is no `string` type keyword in current syntax.

@@ -949,9 +949,9 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_err_pipe_instance_method_rhs() {
+fn e2e_err_pipe_method_bare_arity() {
   e2e_error_test(
-    "err_pipe_instance_method_rhs",
+    "err_pipe_method_bare_arity",
     r#"
 record Box {
     public value: i32;
@@ -1031,9 +1031,9 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_err_pipe_member_callee() {
+fn e2e_err_pipe_method_call_arity() {
   e2e_error_test(
-    "err_pipe_member_callee",
+    "err_pipe_method_call_arity",
     r#"
 record Box {
     public value: i32;
