@@ -1156,3 +1156,34 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Unused Mut Lint Tests
+// =========================================================================
+
+#[test]
+fn e2e_warn_unused_mut() {
+  e2e_warning_test(
+    "warn_unused_mut",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 42;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_deny_unused_mut() {
+  e2e_error_test(
+    "err_deny_unused_mut",
+    r#"
+@deny(unused_mut)
+function main(): i32 {
+    let mut x: i32 = 42;
+    return x;
+}
+"#,
+  );
+}

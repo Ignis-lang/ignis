@@ -5616,3 +5616,142 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Unused Mut Lint - No Warning Tests
+// =========================================================================
+
+#[test]
+fn e2e_no_warn_mut_assigned() {
+  e2e_no_warnings(
+    "no_warn_mut_assigned",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 0;
+    x = 42;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_no_warn_mut_compound_assign() {
+  e2e_no_warnings(
+    "no_warn_mut_compound_assign",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 10;
+    x += 5;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_no_warn_mut_postfix_increment() {
+  e2e_no_warnings(
+    "no_warn_mut_postfix_increment",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 0;
+    x++;
+    return x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_no_warn_mut_borrow() {
+  e2e_no_warnings(
+    "no_warn_mut_borrow",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 42;
+    let ptr: *mut i32 = (&mut x) as *mut i32;
+    return @read<i32>(ptr);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_no_warn_mut_underscore() {
+  e2e_no_warnings(
+    "no_warn_mut_underscore",
+    r#"
+function main(): i32 {
+    let mut _x: i32 = 42;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_no_warn_mut_allow() {
+  e2e_no_warnings(
+    "no_warn_mut_allow",
+    r#"
+@allow(unused_mut)
+function main(): i32 {
+    let mut x: i32 = 42;
+    return x;
+}
+"#,
+  );
+}
+
+// =========================================================================
+// Return Match with Guard + Constants
+// =========================================================================
+
+#[test]
+fn e2e_return_match_guard_const() {
+  e2e_test(
+    "return_match_guard_const",
+    r#"
+const LIMIT: i32 = 10;
+const ZERO: i32 = 0;
+
+function classify(x: i32): i32 {
+    return match (x) {
+        k if k == ZERO -> 1,
+        k if k == LIMIT -> 2,
+        _ -> 0,
+    };
+}
+
+function main(): i32 {
+    return classify(10);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_return_match_guard_namespace_const() {
+  e2e_test(
+    "return_match_guard_namespace_const",
+    r#"
+namespace Config {
+    const LIMIT: i32 = 10;
+    const ZERO: i32 = 0;
+}
+
+function classify(x: i32): i32 {
+    return match (x) {
+        k if k == Config::ZERO -> 1,
+        k if k == Config::LIMIT -> 2,
+        _ -> 0,
+    };
+}
+
+function main(): i32 {
+    return classify(10);
+}
+"#,
+  );
+}

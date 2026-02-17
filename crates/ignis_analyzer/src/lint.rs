@@ -15,6 +15,7 @@ impl<'a> Analyzer<'a> {
   ) {
     self.collect_lint_directives(roots);
     self.lint_unused_variables();
+    self.lint_unused_mut();
     self.lint_unused_imports();
     self.lint_deprecated_calls();
   }
@@ -85,6 +86,69 @@ impl<'a> Analyzer<'a> {
 
       diagnostics.push(
         DiagnosticMessage::UnusedVariable {
+          name: name.to_string(),
+          span: def.span.clone(),
+        }
+        .report_with_severity(severity.clone()),
+      );
+    }
+
+    drop(symbols);
+    self.diagnostics.extend(diagnostics);
+  }
+
+  fn lint_unused_mut(&mut self) {
+    let level = self.effective_lint_level(LintId::UnusedMut);
+    if level == LintLevel::Allow {
+      return;
+    }
+
+    let severity = match level {
+      LintLevel::Warn => Severity::Warning,
+      LintLevel::Deny => Severity::Error,
+      LintLevel::Allow => unreachable!(),
+    };
+
+    let symbols = self.symbols.borrow();
+    let mut diagnostics = Vec::new();
+
+    for (def_id, def) in self.defs.iter() {
+      if def.owner_module != self.current_module {
+        continue;
+      }
+
+      let is_mutable = match &def.kind {
+        DefinitionKind::Variable(v) => v.mutable,
+        DefinitionKind::Parameter(p) => p.mutable,
+        _ => false,
+      };
+
+      if !is_mutable {
+        continue;
+      }
+
+      if def.span.file == FileId::SYNTHETIC {
+        continue;
+      }
+
+      let name = symbols.get(&def.name);
+
+      // `self` parameters are exempt: `&mut self` describes caller-side mutability,
+      // not whether the parameter itself is reassigned inside the method body.
+      if name == "self" {
+        continue;
+      }
+
+      if name.starts_with('_') {
+        continue;
+      }
+
+      if self.mutated_defs.contains(&def_id) {
+        continue;
+      }
+
+      diagnostics.push(
+        DiagnosticMessage::UnusedMut {
           name: name.to_string(),
           span: def.span.clone(),
         }
