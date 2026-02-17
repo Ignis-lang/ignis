@@ -154,6 +154,7 @@ pub struct Analyzer<'a> {
   import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
   compilation_ctx: Option<CompilationContext>,
   referenced_defs: HashSet<DefinitionId>,
+  mutated_defs: HashSet<DefinitionId>,
   imported_defs: HashMap<DefinitionId, ignis_type::span::Span>,
   lint_overrides: Vec<(LintId, LintLevel)>,
   extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
@@ -271,6 +272,7 @@ impl<'a> Analyzer<'a> {
       import_module_files: HashMap::new(),
       compilation_ctx: Some(CompilationContext::default()),
       referenced_defs: HashSet::new(),
+      mutated_defs: HashSet::new(),
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
       extension_methods: HashMap::new(),
@@ -391,6 +393,7 @@ impl<'a> Analyzer<'a> {
       import_module_files: HashMap::new(),
       compilation_ctx: Some(CompilationContext::default()),
       referenced_defs: HashSet::new(),
+      mutated_defs: HashSet::new(),
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
       extension_methods: std::mem::take(shared_extension_methods),
@@ -525,6 +528,13 @@ impl<'a> Analyzer<'a> {
     def_id: DefinitionId,
   ) {
     self.referenced_defs.insert(def_id);
+  }
+
+  fn mark_mutated(
+    &mut self,
+    def_id: DefinitionId,
+  ) {
+    self.mutated_defs.insert(def_id);
   }
 
   fn effective_lint_level(

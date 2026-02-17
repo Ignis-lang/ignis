@@ -2210,6 +2210,7 @@ impl<'a> Analyzer<'a> {
           match lint_name.as_str() {
             "unused_variable" => directives.push((LintId::UnusedVariable, level)),
             "unused_import" => directives.push((LintId::UnusedImport, level)),
+            "unused_mut" => directives.push((LintId::UnusedMut, level)),
             "deprecated" => directives.push((LintId::Deprecated, level)),
             _ => {
               self.add_diagnostic(

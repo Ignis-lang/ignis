@@ -2,6 +2,7 @@
 pub enum LintId {
   UnusedVariable,
   UnusedImport,
+  UnusedMut,
   Deprecated,
 }
 

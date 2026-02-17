@@ -2043,14 +2043,21 @@ impl<'a> LoweringContext<'a> {
         });
 
         self.fn_builder().switch_to_block(guard_block);
-        let guard_val = self.lower_hir_node(guard)?;
 
-        if !self.fn_builder().is_terminated() {
-          self.fn_builder().terminate(Terminator::Branch {
-            condition: guard_val,
-            then_block: arm_blocks[i],
-            else_block,
-          });
+        if let Some(guard_val) = self.lower_hir_node(guard) {
+          if !self.fn_builder().is_terminated() {
+            self.fn_builder().terminate(Terminator::Branch {
+              condition: guard_val,
+              then_block: arm_blocks[i],
+              else_block,
+            });
+          }
+        } else {
+          // Guard failed to lower; fall through to next arm so pre-created
+          // blocks don't get orphaned with Unreachable terminators.
+          if !self.fn_builder().is_terminated() {
+            self.fn_builder().terminate(Terminator::Goto(else_block));
+          }
         }
       } else {
         self.fn_builder().terminate(Terminator::Branch {
@@ -2980,18 +2987,24 @@ impl<'a> LoweringContext<'a> {
       self.fn_builder().emit(Instr::Load { dest, source: local });
       Some(Operand::Temp(dest))
     } else {
-      // Check if this is a constant with a known value
       let def_data = self.defs.get(&def);
-      if let DefinitionKind::Constant(const_def) = &def_data.kind
-        && let Some(value) = &const_def.value
-      {
-        // Convert ConstValue from definition to LIR ConstValue
-        if let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty) {
-          return Some(Operand::Const(lir_const));
-        }
+      match &def_data.kind {
+        DefinitionKind::Constant(const_def) => {
+          if let Some(value) = &const_def.value {
+            if let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty) {
+              return Some(Operand::Const(lir_const));
+            }
+          }
+
+          // No compile-time value (e.g. extern const): fall back to GlobalRef.
+          Some(Operand::GlobalRef(def))
+        },
+
+        DefinitionKind::Function(_) => Some(Operand::FuncRef(def)),
+
+        // Static field/method - return None so the caller handles it
+        _ => None,
       }
-      // Static field/method - for functions, just return None (call will handle it)
-      None
     }
   }
 

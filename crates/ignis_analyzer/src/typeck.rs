@@ -570,6 +570,10 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Reference(ref_) => {
         let expr_type = self.typecheck_node(&ref_.inner, scope_kind, ctx);
 
+        if ref_.mutable {
+          self.mark_mutation_target(&ref_.inner);
+        }
+
         let inner_node = self.ast.get(&ref_.inner);
         if let ASTNode::Expression(inner_expr) = inner_node {
           if !self.is_lvalue(inner_expr) {
@@ -793,6 +797,8 @@ impl<'a> Analyzer<'a> {
       ASTExpression::PostfixIncrement { expr, span } => {
         let expr_type = self.typecheck_node(expr, scope_kind, ctx);
 
+        self.mark_mutation_target(expr);
+
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
           && !self.is_mutable_expression(target_expr)
@@ -815,6 +821,8 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::PostfixDecrement { expr, span } => {
         let expr_type = self.typecheck_node(expr, scope_kind, ctx);
+
+        self.mark_mutation_target(expr);
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
@@ -4295,6 +4303,8 @@ impl<'a> Analyzer<'a> {
 
     // Mutability check
     if method.self_mutable {
+      self.mark_mutation_target(&ma.object);
+
       let obj_node = self.ast.get(&ma.object);
       if let ASTNode::Expression(obj_expr) = obj_node
         && !self.is_mutable_expression(obj_expr)
@@ -4563,6 +4573,8 @@ impl<'a> Analyzer<'a> {
 
     // Mutability check
     if method.self_mutable {
+      self.mark_mutation_target(&ma.object);
+
       let obj_node = self.ast.get(&ma.object);
       if let ASTNode::Expression(obj_expr) = obj_node
         && !self.is_mutable_expression(obj_expr)
@@ -5472,6 +5484,8 @@ impl<'a> Analyzer<'a> {
 
               // Check if method requires &mut self but receiver is not mutable
               if method.self_mutable {
+                self.mark_mutation_target(&ma.object);
+
                 let obj_node = self.ast.get(&ma.object);
                 if let ASTNode::Expression(obj_expr) = obj_node
                   && !self.is_mutable_expression(obj_expr)
@@ -5684,6 +5698,8 @@ impl<'a> Analyzer<'a> {
 
               // Check if method requires &mut self but receiver is not mutable
               if method.self_mutable {
+                self.mark_mutation_target(&ma.object);
+
                 let obj_node = self.ast.get(&ma.object);
                 if let ASTNode::Expression(obj_expr) = obj_node
                   && !self.is_mutable_expression(obj_expr)
@@ -5923,6 +5939,8 @@ impl<'a> Analyzer<'a> {
               };
 
               if method.self_mutable {
+                self.mark_mutation_target(&ma.object);
+
                 let obj_node = self.ast.get(&ma.object);
                 if let ASTNode::Expression(obj_expr) = obj_node
                   && !self.is_mutable_expression(obj_expr)
@@ -8397,6 +8415,8 @@ impl<'a> Analyzer<'a> {
     let infer = InferContext::expecting(target_type);
     let value_type = self.typecheck_node_with_infer(&assign.value, scope_kind, ctx, &infer);
 
+    self.mark_mutation_target(&assign.target);
+
     let target_node = self.ast.get(&assign.target);
     if let ASTNode::Expression(target_expr) = target_node
       && !self.is_mutable_expression(target_expr)
@@ -8928,6 +8948,75 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Walk an expression to find the root mutable variable/parameter being mutated.
+  /// Recurses through member access, indexing, deref, and grouping to the base binding.
+  fn def_id_of_mutable_root(
+    &self,
+    expr: &ASTExpression,
+  ) -> Option<DefinitionId> {
+    match expr {
+      ASTExpression::Variable(var) => {
+        let def_id = self.scopes.lookup_def(&var.name)?;
+        match &self.defs.get(def_id).kind {
+          DefinitionKind::Variable(v) if v.mutable => Some(*def_id),
+          DefinitionKind::Parameter(p) if p.mutable => Some(*def_id),
+          _ => None,
+        }
+      },
+
+      ASTExpression::MemberAccess(ma) => {
+        if ma.op == ASTAccessOp::Dot {
+          let node = self.ast.get(&ma.object);
+          if let ASTNode::Expression(base_expr) = node {
+            return self.def_id_of_mutable_root(base_expr);
+          }
+        }
+        None
+      },
+
+      ASTExpression::VectorAccess(access) => {
+        let node = self.ast.get(&access.name);
+        if let ASTNode::Expression(base_expr) = node {
+          self.def_id_of_mutable_root(base_expr)
+        } else {
+          None
+        }
+      },
+
+      ASTExpression::Dereference(deref) => {
+        let node = self.ast.get(&deref.inner);
+        if let ASTNode::Expression(inner_expr) = node {
+          self.def_id_of_mutable_root(inner_expr)
+        } else {
+          None
+        }
+      },
+
+      ASTExpression::Grouped(grouped) => {
+        let inner_node = self.ast.get(&grouped.expression);
+        if let ASTNode::Expression(inner_expr) = inner_node {
+          self.def_id_of_mutable_root(inner_expr)
+        } else {
+          None
+        }
+      },
+
+      _ => None,
+    }
+  }
+
+  fn mark_mutation_target(
+    &mut self,
+    target_node_id: &NodeId,
+  ) {
+    let target_node = self.ast.get(target_node_id);
+    if let ASTNode::Expression(target_expr) = target_node {
+      if let Some(def_id) = self.def_id_of_mutable_root(target_expr) {
+        self.mark_mutated(def_id);
+      }
+    }
+  }
+
   fn find_first_symbol_usage(
     &self,
     node_id: NodeId,
@@ -9369,6 +9458,8 @@ impl<'a> Analyzer<'a> {
     iter_node: &NodeId,
     span: &Span,
   ) {
+    self.mark_mutation_target(iter_node);
+
     let node = self.ast.get(iter_node);
     if let ASTNode::Expression(expr) = node
       && !self.is_mutable_expression(expr)
@@ -10493,6 +10584,8 @@ impl<'a> Analyzer<'a> {
     if !requires_mut {
       return;
     }
+
+    self.mark_mutation_target(&ma.object);
 
     let obj_node = self.ast.get(&ma.object);
     if let ASTNode::Expression(obj_expr) = obj_node

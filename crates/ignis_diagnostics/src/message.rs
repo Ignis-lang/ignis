@@ -623,6 +623,10 @@ pub enum DiagnosticMessage {
     name: String,
     span: Span,
   },
+  UnusedMut {
+    name: String,
+    span: Span,
+  },
   DeprecatedCall {
     name: String,
     message: String,
@@ -1456,6 +1460,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UnusedImport { name, .. } => {
         write!(f, "unused import '{}'", name)
       },
+      DiagnosticMessage::UnusedMut { name, .. } => {
+        write!(f, "variable '{}' does not need to be mutable", name)
+      },
       DiagnosticMessage::DeprecatedCall { name, message, .. } => {
         write!(f, "use of deprecated function '{}': {}", name, message)
       },
@@ -1899,6 +1906,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::AlignmentNotPowerOfTwo { span, .. }
       | DiagnosticMessage::UnusedVariable { span, .. }
       | DiagnosticMessage::UnusedImport { span, .. }
+      | DiagnosticMessage::UnusedMut { span, .. }
       | DiagnosticMessage::DeprecatedCall { span, .. }
       | DiagnosticMessage::UnknownLint { span, .. }
       | DiagnosticMessage::AttributeExpectedIdentifier { span, .. }
@@ -2112,6 +2120,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::AlignmentNotPowerOfTwo { .. } => "A0121",
       DiagnosticMessage::UnusedVariable { .. } => "A0122",
       DiagnosticMessage::UnusedImport { .. } => "A0123",
+      DiagnosticMessage::UnusedMut { .. } => "A0127",
       DiagnosticMessage::DeprecatedCall { .. } => "A0124",
       DiagnosticMessage::UnknownLint { .. } => "A0125",
       DiagnosticMessage::AttributeExpectedIdentifier { .. } => "A0126",
@@ -2182,6 +2191,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::IrrefutableLetElsePattern { .. }
       | DiagnosticMessage::UnusedVariable { .. }
       | DiagnosticMessage::UnusedImport { .. }
+      | DiagnosticMessage::UnusedMut { .. }
       | DiagnosticMessage::DeprecatedCall { .. } => Severity::Warning,
       _ => Severity::Error,
     }
