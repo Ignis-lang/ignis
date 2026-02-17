@@ -953,8 +953,12 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Try { expr, span } => self.typecheck_try(node_id, expr, span, scope_kind, &ctx),
 
       ASTExpression::PipePlaceholder { span, .. } => {
-        self.add_diagnostic(DiagnosticMessage::PipePlaceholderOutsidePipe { span: span.clone() }.report());
-        self.types.error()
+        if let Some(&lhs_type) = self.pipe_lhs_type_stack.last() {
+          lhs_type
+        } else {
+          self.add_diagnostic(DiagnosticMessage::PipePlaceholderOutsidePipe { span: span.clone() }.report());
+          self.types.error()
+        }
       },
     }
   }
@@ -3586,24 +3590,86 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     let lhs_type = self.typecheck_node(lhs, scope_kind, ctx);
 
+    // Global placeholder count across the entire RHS subtree (stops at Lambda/Pipe).
+    let placeholder_count = self.count_pipe_placeholders(rhs);
+
+    if placeholder_count > 1 {
+      let spans = self.collect_pipe_placeholder_spans(rhs, 2);
+      self.add_diagnostic(
+        DiagnosticMessage::PipeMultiplePlaceholders {
+          first: spans[0].clone(),
+          second: spans[1].clone(),
+          pipe_span: pipe_span.clone(),
+        }
+        .report(),
+      );
+      // Typecheck RHS with ambient LHS type to avoid cascading A0173 from each placeholder.
+      self.pipe_lhs_type_stack.push(lhs_type);
+      self.typecheck_node(rhs, scope_kind, ctx);
+      self.pipe_lhs_type_stack.pop();
+      return self.types.error();
+    }
+
     let rhs_node = self.ast.get(rhs).clone();
     match rhs_node {
+      // --- Call: top-level placeholder or no placeholder use existing specialized path;
+      //     deep placeholder (count==1 but not top-level) uses ambient path. ---
       ASTNode::Expression(ASTExpression::Call(ref call)) => {
-        self.typecheck_pipe_call(node_id, lhs, &lhs_type, rhs, call, pipe_span, scope_kind, ctx)
+        let has_top_level_placeholder = call.arguments.iter().any(|arg| {
+          matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. }))
+        });
+
+        if has_top_level_placeholder || placeholder_count == 0 {
+          self.typecheck_pipe_call(node_id, lhs, &lhs_type, rhs, call, pipe_span, scope_kind, ctx)
+        } else {
+          self.typecheck_pipe_ambient(lhs_type, rhs, scope_kind, ctx)
+        }
       },
 
-      ASTNode::Expression(ASTExpression::Variable(ref var)) => {
+      // --- Bare callee forms (no placeholder expected) ---
+      ASTNode::Expression(ASTExpression::Variable(ref var)) if placeholder_count == 0 => {
         self.typecheck_pipe_bare_callee(node_id, lhs, &lhs_type, rhs, &var.name, pipe_span, scope_kind, ctx)
       },
 
-      ASTNode::Expression(ASTExpression::Path(ref path)) => {
+      ASTNode::Expression(ASTExpression::Path(ref path)) if placeholder_count == 0 => {
         self.typecheck_pipe_path(node_id, lhs, &lhs_type, rhs, path, pipe_span, scope_kind, ctx)
       },
 
-      ASTNode::Expression(ASTExpression::Lambda(_)) => {
+      ASTNode::Expression(ASTExpression::Lambda(_)) if placeholder_count == 0 => {
         self.typecheck_pipe_lambda(node_id, lhs, &lhs_type, rhs, pipe_span, scope_kind, ctx)
       },
 
+      ASTNode::Expression(ASTExpression::MemberAccess(ref ma))
+        if ma.op == ignis_ast::expressions::ASTAccessOp::Dot && placeholder_count == 0 =>
+      {
+        self.typecheck_pipe_bare_method(node_id, lhs, &lhs_type, ma, pipe_span, scope_kind, ctx)
+      },
+
+      // --- Non-callable forms: require exactly 1 placeholder ---
+      ASTNode::Expression(ASTExpression::RecordInit(_)) if placeholder_count == 1 => {
+        self.typecheck_pipe_ambient(lhs_type, rhs, scope_kind, ctx)
+      },
+
+      ASTNode::Expression(ASTExpression::Vector(_)) if placeholder_count == 1 => {
+        self.typecheck_pipe_ambient(lhs_type, rhs, scope_kind, ctx)
+      },
+
+      ASTNode::Expression(ASTExpression::RecordInit(_) | ASTExpression::Vector(_)) => {
+        // placeholder_count == 0 (>1 already handled above)
+        let rhs_desc = self.describe_expression_kind(rhs);
+        self.add_diagnostic(
+          DiagnosticMessage::PipeRhsNonCallableNeedsPlaceholder {
+            rhs_span: self.node_span(rhs).clone(),
+            rhs_desc,
+            pipe_span: pipe_span.clone(),
+          }
+          .report(),
+        );
+        self.typecheck_node(rhs, scope_kind, ctx);
+        self.types.error()
+      },
+
+      // --- Bare `_` as RHS ---
       ASTNode::Expression(ASTExpression::PipePlaceholder { ref span, .. }) => {
         self.add_diagnostic(
           DiagnosticMessage::PipePlaceholderNotInCall {
@@ -3615,10 +3681,21 @@ impl<'a> Analyzer<'a> {
         self.types.error()
       },
 
-      ASTNode::Expression(ASTExpression::MemberAccess(ref ma)) if ma.op == ignis_ast::expressions::ASTAccessOp::Dot => {
-        self.typecheck_pipe_bare_method(node_id, lhs, &lhs_type, ma, pipe_span, scope_kind, ctx)
+      // --- Placeholder in a non-whitelisted form ---
+      _ if placeholder_count == 1 => {
+        let spans = self.collect_pipe_placeholder_spans(rhs, 1);
+        self.add_diagnostic(
+          DiagnosticMessage::PipePlaceholderNotInCall {
+            span: spans[0].clone(),
+            pipe_span: pipe_span.clone(),
+          }
+          .report(),
+        );
+        self.typecheck_node(rhs, scope_kind, ctx);
+        self.types.error()
       },
 
+      // --- Not callable and no placeholder ---
       _ => {
         let rhs_desc = self.describe_expression_kind(rhs);
         self.add_diagnostic(
@@ -3630,6 +3707,216 @@ impl<'a> Analyzer<'a> {
           .report(),
         );
         self.types.error()
+      },
+    }
+  }
+
+  /// Typechecks a pipe RHS via ambient context: pushes LHS type onto the stack
+  /// so that `_` placeholders resolve to the piped value's type, then typechecks
+  /// the RHS through normal expression dispatch.
+  fn typecheck_pipe_ambient(
+    &mut self,
+    lhs_type: TypeId,
+    rhs: &NodeId,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    self.pipe_lhs_type_stack.push(lhs_type);
+    let result = self.typecheck_node(rhs, scope_kind, ctx);
+    self.pipe_lhs_type_stack.pop();
+    result
+  }
+
+  /// Counts `_` placeholders in an AST subtree.
+  /// Does NOT recurse into Lambda or Pipe nodes (independent scopes).
+  fn count_pipe_placeholders(&self, node_id: &NodeId) -> usize {
+    let node = self.ast.get(node_id);
+
+    match node {
+      ASTNode::Expression(expr) => self.count_pipe_placeholders_expr(expr),
+      _ => 0,
+    }
+  }
+
+  fn count_pipe_placeholders_expr(&self, expr: &ASTExpression) -> usize {
+    match expr {
+      ASTExpression::PipePlaceholder { .. } => 1,
+
+      // Scope boundaries — don't recurse
+      ASTExpression::Lambda(_) => 0,
+      ASTExpression::Pipe { .. } => 0,
+
+      // Leaves
+      ASTExpression::Variable(_)
+      | ASTExpression::Path(_)
+      | ASTExpression::Literal(_) => 0,
+
+      // Recurse into children
+      ASTExpression::Call(call) => {
+        self.count_pipe_placeholders(&call.callee)
+          + call.arguments.iter().map(|a| self.count_pipe_placeholders(a)).sum::<usize>()
+      },
+      ASTExpression::Binary(bin) => {
+        self.count_pipe_placeholders(&bin.left) + self.count_pipe_placeholders(&bin.right)
+      },
+      ASTExpression::Unary(un) => self.count_pipe_placeholders(&un.operand),
+      ASTExpression::Ternary(tern) => {
+        self.count_pipe_placeholders(&tern.condition)
+          + self.count_pipe_placeholders(&tern.then_expr)
+          + self.count_pipe_placeholders(&tern.else_expr)
+      },
+      ASTExpression::Cast(cast) => self.count_pipe_placeholders(&cast.expression),
+      ASTExpression::Grouped(g) => self.count_pipe_placeholders(&g.expression),
+      ASTExpression::VectorAccess(va) => {
+        self.count_pipe_placeholders(&va.name) + self.count_pipe_placeholders(&va.index)
+      },
+      ASTExpression::Reference(r) => self.count_pipe_placeholders(&r.inner),
+      ASTExpression::Dereference(d) => self.count_pipe_placeholders(&d.inner),
+      ASTExpression::Assignment(a) => {
+        self.count_pipe_placeholders(&a.target) + self.count_pipe_placeholders(&a.value)
+      },
+      ASTExpression::MemberAccess(ma) => self.count_pipe_placeholders(&ma.object),
+      ASTExpression::RecordInit(ri) => {
+        ri.fields.iter().map(|f| self.count_pipe_placeholders(&f.value)).sum()
+      },
+      ASTExpression::Vector(v) => {
+        v.items.iter().map(|i| self.count_pipe_placeholders(i)).sum()
+      },
+      ASTExpression::Match(m) => {
+        let mut count = self.count_pipe_placeholders(&m.scrutinee);
+        for arm in &m.arms {
+          count += self.count_pipe_placeholders(&arm.body);
+          if let Some(guard) = &arm.guard {
+            count += self.count_pipe_placeholders(guard);
+          }
+        }
+        count
+      },
+      ASTExpression::BuiltinCall(bc) => {
+        bc.args.iter().map(|a| self.count_pipe_placeholders(a)).sum()
+      },
+      ASTExpression::LetCondition(lc) => self.count_pipe_placeholders(&lc.value),
+      ASTExpression::CaptureOverride(co) => self.count_pipe_placeholders(&co.inner),
+      ASTExpression::Try { expr, .. } => self.count_pipe_placeholders(expr),
+      ASTExpression::PostfixIncrement { expr, .. } => self.count_pipe_placeholders(expr),
+      ASTExpression::PostfixDecrement { expr, .. } => self.count_pipe_placeholders(expr),
+    }
+  }
+
+  /// Collects spans of the first `max` placeholders in an AST subtree (for diagnostics).
+  fn collect_pipe_placeholder_spans(
+    &self,
+    node_id: &NodeId,
+    max: usize,
+  ) -> Vec<ignis_type::span::Span> {
+    let mut spans = Vec::new();
+    self.collect_placeholder_spans_inner(node_id, max, &mut spans);
+    spans
+  }
+
+  fn collect_placeholder_spans_inner(
+    &self,
+    node_id: &NodeId,
+    max: usize,
+    spans: &mut Vec<ignis_type::span::Span>,
+  ) {
+    if spans.len() >= max {
+      return;
+    }
+
+    let node = self.ast.get(node_id);
+    let expr = match node {
+      ASTNode::Expression(e) => e,
+      _ => return,
+    };
+
+    match expr {
+      ASTExpression::PipePlaceholder { span, .. } => {
+        spans.push(span.clone());
+      },
+      ASTExpression::Lambda(_) | ASTExpression::Pipe { .. } => {},
+
+      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) => {},
+
+      ASTExpression::Call(call) => {
+        self.collect_placeholder_spans_inner(&call.callee, max, spans);
+        for arg in &call.arguments {
+          self.collect_placeholder_spans_inner(arg, max, spans);
+        }
+      },
+      ASTExpression::Binary(bin) => {
+        self.collect_placeholder_spans_inner(&bin.left, max, spans);
+        self.collect_placeholder_spans_inner(&bin.right, max, spans);
+      },
+      ASTExpression::Unary(un) => {
+        self.collect_placeholder_spans_inner(&un.operand, max, spans);
+      },
+      ASTExpression::Ternary(tern) => {
+        self.collect_placeholder_spans_inner(&tern.condition, max, spans);
+        self.collect_placeholder_spans_inner(&tern.then_expr, max, spans);
+        self.collect_placeholder_spans_inner(&tern.else_expr, max, spans);
+      },
+      ASTExpression::Cast(cast) => {
+        self.collect_placeholder_spans_inner(&cast.expression, max, spans);
+      },
+      ASTExpression::Grouped(g) => {
+        self.collect_placeholder_spans_inner(&g.expression, max, spans);
+      },
+      ASTExpression::VectorAccess(va) => {
+        self.collect_placeholder_spans_inner(&va.name, max, spans);
+        self.collect_placeholder_spans_inner(&va.index, max, spans);
+      },
+      ASTExpression::Reference(r) => {
+        self.collect_placeholder_spans_inner(&r.inner, max, spans);
+      },
+      ASTExpression::Dereference(d) => {
+        self.collect_placeholder_spans_inner(&d.inner, max, spans);
+      },
+      ASTExpression::Assignment(a) => {
+        self.collect_placeholder_spans_inner(&a.target, max, spans);
+        self.collect_placeholder_spans_inner(&a.value, max, spans);
+      },
+      ASTExpression::MemberAccess(ma) => {
+        self.collect_placeholder_spans_inner(&ma.object, max, spans);
+      },
+      ASTExpression::RecordInit(ri) => {
+        for f in &ri.fields {
+          self.collect_placeholder_spans_inner(&f.value, max, spans);
+        }
+      },
+      ASTExpression::Vector(v) => {
+        for i in &v.items {
+          self.collect_placeholder_spans_inner(i, max, spans);
+        }
+      },
+      ASTExpression::Match(m) => {
+        self.collect_placeholder_spans_inner(&m.scrutinee, max, spans);
+        for arm in &m.arms {
+          self.collect_placeholder_spans_inner(&arm.body, max, spans);
+          if let Some(guard) = &arm.guard {
+            self.collect_placeholder_spans_inner(guard, max, spans);
+          }
+        }
+      },
+      ASTExpression::BuiltinCall(bc) => {
+        for a in &bc.args {
+          self.collect_placeholder_spans_inner(a, max, spans);
+        }
+      },
+      ASTExpression::LetCondition(lc) => {
+        self.collect_placeholder_spans_inner(&lc.value, max, spans);
+      },
+      ASTExpression::CaptureOverride(co) => {
+        self.collect_placeholder_spans_inner(&co.inner, max, spans);
+      },
+      ASTExpression::Try { expr, .. } => {
+        self.collect_placeholder_spans_inner(expr, max, spans);
+      },
+      ASTExpression::PostfixIncrement { expr, .. } => {
+        self.collect_placeholder_spans_inner(expr, max, spans);
+      },
+      ASTExpression::PostfixDecrement { expr, .. } => {
+        self.collect_placeholder_spans_inner(expr, max, spans);
       },
     }
   }
@@ -3756,7 +4043,7 @@ impl<'a> Analyzer<'a> {
       self.mark_referenced(def_id);
     }
 
-    let substitution = self.build_call_substitution(&def_id, call);
+    let explicit_subst = self.build_call_substitution(&def_id, call);
 
     let (mut param_types, mut ret_type, is_closure) = if let Some(def_id) = &def_id {
       self.pipe_callee_signature(def_id)
@@ -3764,14 +4051,34 @@ impl<'a> Analyzer<'a> {
       (vec![], self.types.error(), false)
     };
 
-    if let (Some(def_id), Some(subst)) = (def_id.as_ref(), substitution.as_ref())
+    // Inferred type_args to store in PipeResolution (populated by either path)
+    let mut inferred_type_args: Vec<TypeId> = vec![];
+
+    if let (Some(def_id), Some(subst)) = (def_id.as_ref(), explicit_subst.as_ref())
       && matches!(
         &self.defs.get(def_id).kind,
         DefinitionKind::Function(_) | DefinitionKind::Method(_)
       )
     {
+      // Explicit type args provided — use them
       param_types = param_types.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
       ret_type = self.types.substitute(ret_type, subst);
+    } else if explicit_subst.is_none() {
+      // No explicit type args — try inference from LHS type against the insertion slot
+      if let Some(def_id) = def_id.as_ref() {
+        let infer_param_idx = match insertion {
+          PipeArgInsertion::Prepend => 0,
+          PipeArgInsertion::ReplaceAt(idx) => idx,
+        };
+
+        if let Some((subst_params, subst_ret, args)) =
+          self.infer_pipe_generic_subst_at(def_id, &param_types, ret_type, lhs_type, infer_param_idx)
+        {
+          param_types = subst_params;
+          ret_type = subst_ret;
+          inferred_type_args = args;
+        }
+      }
     }
 
     if param_types.is_empty() && def_id.is_none() {
@@ -3909,7 +4216,13 @@ impl<'a> Analyzer<'a> {
 
     // --- Record resolution ---
 
-    let type_args = self.resolve_pipe_type_args(&def_id, call);
+    // Prefer explicit type args; fall back to inferred ones
+    let explicit_type_args = self.resolve_pipe_type_args(&def_id, call);
+    let type_args = if !explicit_type_args.is_empty() {
+      explicit_type_args
+    } else {
+      inferred_type_args
+    };
 
     if is_closure {
       self.pipe_resolutions.insert(
@@ -4336,7 +4649,17 @@ impl<'a> Analyzer<'a> {
     self.set_resolved_call(rhs, def_id);
     self.mark_referenced(def_id);
 
-    let (param_types, ret_type, is_closure) = self.pipe_callee_signature(&def_id);
+    let (raw_params, raw_ret, is_closure) = self.pipe_callee_signature(&def_id);
+
+    // Infer generic type arguments from the LHS type
+    let (param_types, ret_type, type_args) =
+      if let Some((subst_params, subst_ret, inferred_args)) =
+        self.infer_pipe_generic_subst(&def_id, &raw_params, raw_ret, lhs_type)
+      {
+        (subst_params, subst_ret, inferred_args)
+      } else {
+        (raw_params, raw_ret, vec![])
+      };
 
     if param_types.is_empty() {
       self.add_diagnostic(
@@ -4380,7 +4703,7 @@ impl<'a> Analyzer<'a> {
         PipeResolution::DirectCall {
           def_id,
           extra_args: vec![],
-          type_args: vec![],
+          type_args,
           insertion: PipeArgInsertion::Prepend,
         },
       );
@@ -4430,7 +4753,17 @@ impl<'a> Analyzer<'a> {
     self.set_resolved_call(rhs, def_id);
     self.mark_referenced(def_id);
 
-    let (param_types, ret_type, is_closure) = self.pipe_callee_signature(&def_id);
+    let (raw_params, raw_ret, is_closure) = self.pipe_callee_signature(&def_id);
+
+    // Infer generic type arguments from the LHS type
+    let (param_types, ret_type, type_args) =
+      if let Some((subst_params, subst_ret, inferred_args)) =
+        self.infer_pipe_generic_subst(&def_id, &raw_params, raw_ret, lhs_type)
+      {
+        (subst_params, subst_ret, inferred_args)
+      } else {
+        (raw_params, raw_ret, vec![])
+      };
 
     if param_types.is_empty() {
       let path_name = path
@@ -4486,7 +4819,7 @@ impl<'a> Analyzer<'a> {
         PipeResolution::DirectCall {
           def_id,
           extra_args: vec![],
-          type_args: vec![],
+          type_args,
           insertion: PipeArgInsertion::Prepend,
         },
       );
@@ -4595,6 +4928,67 @@ impl<'a> Analyzer<'a> {
       },
       _ => (vec![], self.types.error(), false),
     }
+  }
+
+  /// Infer generic type arguments for a pipe callee by unifying the parameter
+  /// at `lhs_param_index` against the LHS type.
+  ///
+  /// Returns `Some((substituted_params, substituted_ret, inferred_type_args))` if
+  /// the callee is generic and inference succeeds; `None` if non-generic.
+  fn infer_pipe_generic_subst(
+    &mut self,
+    def_id: &DefinitionId,
+    param_types: &[TypeId],
+    ret_type: TypeId,
+    lhs_type: &TypeId,
+  ) -> Option<(Vec<TypeId>, TypeId, Vec<TypeId>)> {
+    self.infer_pipe_generic_subst_at(def_id, param_types, ret_type, lhs_type, 0)
+  }
+
+  fn infer_pipe_generic_subst_at(
+    &mut self,
+    def_id: &DefinitionId,
+    param_types: &[TypeId],
+    ret_type: TypeId,
+    lhs_type: &TypeId,
+    lhs_param_index: usize,
+  ) -> Option<(Vec<TypeId>, TypeId, Vec<TypeId>)> {
+    let type_params = match &self.defs.get(def_id).kind {
+      DefinitionKind::Function(f) if !f.type_params.is_empty() => f.type_params.clone(),
+      DefinitionKind::Method(m) if !m.type_params.is_empty() => m.type_params.clone(),
+      _ => return None,
+    };
+
+    let target_param = param_types.get(lhs_param_index)?;
+
+    if !self.types.contains_type_param(target_param) {
+      return None;
+    }
+
+    let mut subst = Substitution::new();
+    self.types.unify_for_inference(*target_param, *lhs_type, &mut subst);
+
+    // Extract inferred type args in declaration order
+    let type_args: Vec<TypeId> = type_params
+      .iter()
+      .enumerate()
+      .map(|(i, _)| {
+        subst
+          .get(*def_id, i as u32)
+          .unwrap_or_else(|| self.types.error())
+      })
+      .collect();
+
+    let full_subst = Substitution::for_generic(*def_id, &type_args);
+
+    let subst_params: Vec<TypeId> = param_types
+      .iter()
+      .map(|ty| self.types.substitute(*ty, &full_subst))
+      .collect();
+
+    let subst_ret = self.types.substitute(ret_type, &full_subst);
+
+    Some((subst_params, subst_ret, type_args))
   }
 
   /// Checks that the piped value matches the first parameter type.

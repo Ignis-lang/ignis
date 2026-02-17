@@ -968,8 +968,12 @@ let result = 1 |> add(2) |> add(3);  // add(add(1, 2), 3) = 6
 | Lambda | `((p): R -> body)(lhs)` | `x \|> (n: i32): i32 -> n * 2` |
 | Bare method | `obj.m(lhs)` | `x \|> list.push` |
 | Method call | `obj.m(lhs, a)` | `x \|> list.insert(0)` |
+| Record init (requires `_`) | `MyRec { field: lhs }` | `x \|> MyRec { value: _ }` |
+| Vector literal (requires `_`) | `[lhs, a, b]` | `x \|> [_, 20, 30]` |
 
 For method calls, the receiver (`obj`) is bound to `self` as usual, and the piped value is inserted into the explicit argument list (prepended or at the placeholder position). Placeholders work the same as with free function calls.
+
+Record initialization and vector literals are non-callable forms — they always require a `_` placeholder to indicate where the piped value goes (error A0177 if missing).
 
 #### Precedence
 
@@ -982,17 +986,22 @@ a |> f ? x : y    // (a |> f) ? x : y
 
 #### Placeholder
 
-When the RHS is a call expression, `_` can be used as a placeholder to indicate
-where the piped value is inserted:
+`_` marks where the piped value is inserted on the RHS. It can appear at
+any nesting depth within a call, record init, or vector literal:
 
 ```ignis
-x |> f(1, _, 3)    // f(1, x, 3)
-x |> f(_, 1)        // f(x, 1) — equivalent to x |> f(1) without placeholder
+x |> f(1, _, 3)           // f(1, x, 3) — top-level placeholder
+x |> f(g(_), 1)           // f(g(x), 1) — deep placeholder
+x |> MyRec { value: _ }   // MyRec { value: x }
+x |> [_, 20, 30]           // [x, 20, 30]
 ```
 
-Without a placeholder, the piped value is prepended as the first argument.
-Only one `_` per pipe step is allowed. `_` outside pipe call arguments is
-an error.
+Without a placeholder in a call, the piped value is prepended as the first argument.
+Only one `_` per pipe step is allowed (error A0174 if multiple). Record init and
+vector literal always require `_` (error A0177 if missing).
+
+`_` inside a lambda body or a nested pipe is not captured — it belongs to
+the inner scope:
 
 #### Evaluation order
 

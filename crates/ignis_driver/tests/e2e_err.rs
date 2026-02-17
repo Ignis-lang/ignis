@@ -1090,3 +1090,55 @@ function main(): Result<i32, i32> {
 "#,
   );
 }
+
+// --- Pipe operator error tests ---
+
+#[test]
+fn e2e_pipe_multiple_deep_placeholders() {
+  e2e_error_test(
+    "pipe_multiple_deep_placeholders",
+    r#"
+function f(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function g(x: i32): i32 {
+    return x;
+}
+
+function main(): i32 {
+    return 5 |> f(g(_), g(_));
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_record_init_no_placeholder() {
+  e2e_error_test(
+    "pipe_record_init_no_placeholder",
+    r#"
+record Wrapper {
+    public value: i32;
+}
+
+function main(): i32 {
+    let w = 42 |> Wrapper { value: 1 };
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_vector_no_placeholder() {
+  e2e_error_test(
+    "pipe_vector_no_placeholder",
+    r#"
+function main(): i32 {
+    let v: i32[3] = 10 |> [1, 2, 3];
+    return 0;
+}
+"#,
+  );
+}

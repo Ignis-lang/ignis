@@ -2547,3 +2547,52 @@ function main(): void {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+#[test]
+fn pipe_deep_placeholder_multiple() {
+  let src = r#"
+function f(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function g(x: i32): i32 {
+    return x;
+}
+
+function main(): void {
+    let x: i32 = 5 |> f(g(_), g(_));
+    return;
+}
+"#;
+
+  common::assert_err(src, &["A0174"]);
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "pipe_deep_placeholder_multiple",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn pipe_non_callable_rhs_no_placeholder() {
+  let src = r#"
+record Wrapper {
+    value: i32;
+}
+
+function main(): void {
+    let w = 42 |> Wrapper { value: 1 };
+    let v: i32[3] = 10 |> [1, 2, 3];
+    return;
+}
+"#;
+
+  common::assert_err(src, &["A0177"]);
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "pipe_non_callable_rhs_no_placeholder",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
