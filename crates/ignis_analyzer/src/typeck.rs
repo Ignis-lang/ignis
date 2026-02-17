@@ -3654,7 +3654,11 @@ impl<'a> Analyzer<'a> {
         self.typecheck_pipe_ambient(lhs_type, rhs, scope_kind, ctx)
       },
 
-      ASTNode::Expression(ASTExpression::RecordInit(_) | ASTExpression::Vector(_)) => {
+      ASTNode::Expression(ASTExpression::BuiltinCall(_)) if placeholder_count == 1 => {
+        self.typecheck_pipe_ambient(lhs_type, rhs, scope_kind, ctx)
+      },
+
+      ASTNode::Expression(ASTExpression::RecordInit(_) | ASTExpression::Vector(_) | ASTExpression::BuiltinCall(_)) => {
         // placeholder_count == 0 (>1 already handled above)
         let rhs_desc = self.describe_expression_kind(rhs);
         self.add_diagnostic(
@@ -5106,6 +5110,7 @@ impl<'a> Analyzer<'a> {
       ASTNode::Expression(ASTExpression::Assignment(_)) => "assignment".to_string(),
       ASTNode::Expression(ASTExpression::RecordInit(_)) => "record initialization".to_string(),
       ASTNode::Expression(ASTExpression::Vector(_)) => "vector literal".to_string(),
+      ASTNode::Expression(ASTExpression::BuiltinCall(_)) => "builtin call".to_string(),
       _ => "expression".to_string(),
     }
   }

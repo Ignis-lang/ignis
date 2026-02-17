@@ -2727,7 +2727,7 @@ pub fn emit_std_module_h(
 
   let filter = |_def_id: DefinitionId, def: &ignis_type::definition::Definition| -> bool {
     match module_paths.get(&def.owner_module) {
-      Some(ModulePath::Std(name)) => name == module_name,
+      Some(ModulePath::Std(name)) => name.replace("::", "_") == module_name,
       Some(ModulePath::Project(_)) => {
         // For std internal files (e.g., memory/layout.ign), check if module_name matches
         let path = module_paths.get(&def.owner_module).unwrap();
