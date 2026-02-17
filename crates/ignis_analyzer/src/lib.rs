@@ -45,7 +45,7 @@ use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Symb
 use ignis_type::lint::{LintId, LintLevel};
 use ignis_type::module::ModuleId;
 use ignis_type::namespace::{NamespaceId, NamespaceStore};
-use ignis_hir::HIR;
+use ignis_hir::{HIR, HIRId};
 use ignis_diagnostics::diagnostic_report::Diagnostic;
 
 use imports::ExportTable;
@@ -170,6 +170,14 @@ pub struct Analyzer<'a> {
 
   /// Pipe operator resolutions. Set by typeck, read by lowering.
   pipe_resolutions: HashMap<NodeId, PipeResolution>,
+
+  /// Ambient LHS type for deep-placeholder pipe typechecking.
+  /// Pushed when entering ambient-path pipe typecheck, read by PipePlaceholder arm.
+  pipe_lhs_type_stack: Vec<TypeId>,
+
+  /// Ambient LHS HIR for deep-placeholder pipe lowering.
+  /// Pushed when entering ambient-path pipe lowering, read by PipePlaceholder arm.
+  pipe_lhs_hir_stack: Vec<HIRId>,
 }
 
 pub struct AnalyzerOutput {
@@ -267,6 +275,8 @@ impl<'a> Analyzer<'a> {
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
+      pipe_lhs_type_stack: Vec::new(),
+      pipe_lhs_hir_stack: Vec::new(),
     }
   }
 
@@ -384,6 +394,8 @@ impl<'a> Analyzer<'a> {
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
+      pipe_lhs_type_stack: Vec::new(),
+      pipe_lhs_hir_stack: Vec::new(),
     };
 
     // Phase 1: Binding

@@ -5212,6 +5212,167 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_pipe_deep_placeholder_in_call() {
+  e2e_test(
+    "pipe_deep_placeholder_in_call",
+    r#"
+function multiply(a: i32, b: i32): i32 {
+    return a * b;
+}
+
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    let result = 5 |> add(multiply(_, 2), 3);
+    return result - 13;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_deep_placeholder_nested() {
+  e2e_test(
+    "pipe_deep_placeholder_nested",
+    r#"
+function negate(x: i32): i32 {
+    return 0 - x;
+}
+
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    let result = 7 |> add(negate(_), 7);
+    return result;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_record_init() {
+  e2e_test(
+    "pipe_record_init",
+    r#"
+record Wrapper {
+    public value: i32;
+}
+
+function main(): i32 {
+    let w = 42 |> Wrapper { value: _ };
+    return w.value - 42;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_vector_literal() {
+  e2e_test(
+    "pipe_vector_literal",
+    r#"
+function main(): i32 {
+    let v: i32[3] = 10 |> [_, 20, 30];
+    return v[0] + v[1] + v[2] - 60;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_deep_placeholder_in_chain() {
+  e2e_test(
+    "pipe_deep_placeholder_in_chain",
+    r#"
+function twice(x: i32): i32 {
+    return x * 2;
+}
+
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    let result = 3 |> add(twice(_), 1);
+    return result - 7;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_generic_infer_bare() {
+  e2e_test(
+    "pipe_generic_infer_bare",
+    r#"
+function identity<T>(x: T): T {
+    return x;
+}
+
+function main(): i32 {
+    return 42 |> identity;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_generic_infer_path() {
+  e2e_test(
+    "pipe_generic_infer_path",
+    r#"
+namespace Util {
+    function unwrap<T>(x: T): T {
+        return x;
+    }
+}
+
+function main(): i32 {
+    return 99 |> Util::unwrap;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_generic_infer_call() {
+  e2e_test(
+    "pipe_generic_infer_call",
+    r#"
+function pick<T>(a: T, b: T): T {
+    return b;
+}
+
+function main(): i32 {
+    return 10 |> pick(99);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_pipe_generic_infer_pointer() {
+  e2e_test(
+    "pipe_generic_infer_pointer",
+    r#"
+function deref<T>(ptr: *mut T): T {
+    return @read<T>(ptr);
+}
+
+function main(): i32 {
+    let mut x: i32 = 42;
+    let ptr: *mut i32 = (&mut x) as *mut i32;
+    return ptr |> deref;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_try_operator_result() {
   e2e_test(
     "try_operator_result",

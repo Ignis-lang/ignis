@@ -850,6 +850,11 @@ pub enum DiagnosticMessage {
     callee_span: Span,
     pipe_span: Span,
   },
+  PipeRhsNonCallableNeedsPlaceholder {
+    rhs_span: Span,
+    rhs_desc: String,
+    pipe_span: Span,
+  },
   // #endregion Pipe Operator
 
   // #endregion Analyzer
@@ -1725,6 +1730,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::PipeRhsUnsupportedCallee { .. } => {
         write!(f, "member call as pipe RHS callee is not supported")
       },
+      DiagnosticMessage::PipeRhsNonCallableNeedsPlaceholder { rhs_desc, .. } => {
+        write!(f, "{} as pipe RHS requires a `_` placeholder", rhs_desc)
+      },
     }
   }
 }
@@ -1942,6 +1950,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::PipeMultiplePlaceholders { first, .. } => first.clone(),
       DiagnosticMessage::PipePlaceholderNotInCall { span, .. } => span.clone(),
       DiagnosticMessage::PipeRhsUnsupportedCallee { callee_span, .. } => callee_span.clone(),
+      DiagnosticMessage::PipeRhsNonCallableNeedsPlaceholder { rhs_span, .. } => rhs_span.clone(),
     }
   }
 
@@ -2154,6 +2163,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::PipeMultiplePlaceholders { .. } => "A0174",
       DiagnosticMessage::PipePlaceholderNotInCall { .. } => "A0175",
       DiagnosticMessage::PipeRhsUnsupportedCallee { .. } => "A0176",
+      DiagnosticMessage::PipeRhsNonCallableNeedsPlaceholder { .. } => "A0177",
     }
     .to_string()
   }
@@ -2218,6 +2228,12 @@ impl DiagnosticMessage {
       },
       DiagnosticMessage::PipeRhsUnsupportedCallee { pipe_span, .. } => {
         vec![(pipe_span.clone(), "help: use a lambda: `x |> (v) -> obj.method(v)`".to_string())]
+      },
+      DiagnosticMessage::PipeRhsNonCallableNeedsPlaceholder { pipe_span, .. } => {
+        vec![(
+          pipe_span.clone(),
+          "help: insert `_` where the piped value should go".to_string(),
+        )]
       },
       _ => vec![],
     }

@@ -1228,12 +1228,20 @@ impl<'a> Analyzer<'a> {
 
       ASTExpression::Try { expr, span } => self.lower_try_to_hir(node_id, expr, span, hir, scope_kind),
 
-      // PipePlaceholder nodes are substituted by lower_pipe_to_hir and should never be lowered directly.
-      ASTExpression::PipePlaceholder { span, .. } => hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span: span.clone(),
-        type_id: self.types.error(),
-      }),
+      // In ambient-path pipe lowering, PipePlaceholder returns the LHS HIR node from the stack.
+      // In ReplaceAt mode, the placeholder is substituted by assemble_pipe_args instead.
+      // Outside any pipe context, falls back to Error (should not happen if typeck is correct).
+      ASTExpression::PipePlaceholder { span, .. } => {
+        if let Some(&lhs_hir) = self.pipe_lhs_hir_stack.last() {
+          lhs_hir
+        } else {
+          hir.alloc(HIRNode {
+            kind: HIRKind::Error,
+            span: span.clone(),
+            type_id: self.types.error(),
+          })
+        }
+      },
     }
   }
 
@@ -4020,7 +4028,7 @@ impl Analyzer<'_> {
     &mut self,
     node_id: &NodeId,
     lhs: &NodeId,
-    _rhs: &NodeId,
+    rhs: &NodeId,
     hir: &mut HIR,
     scope_kind: ScopeKind,
   ) -> HIRId {
@@ -4108,11 +4116,14 @@ impl Analyzer<'_> {
         })
       },
 
-      None => hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span,
-        type_id: self.types.error(),
-      }),
+      // Ambient path: deep placeholder or non-call RHS (RecordInit, Vector).
+      // Lower the entire RHS normally; PipePlaceholder nodes read lhs_hir from the stack.
+      None => {
+        self.pipe_lhs_hir_stack.push(lhs_hir);
+        let rhs_hir = self.lower_node_to_hir(rhs, hir, scope_kind);
+        self.pipe_lhs_hir_stack.pop();
+        rhs_hir
+      },
     }
   }
 
