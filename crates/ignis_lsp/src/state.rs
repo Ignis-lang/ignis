@@ -177,17 +177,14 @@ impl OpenDoc {
   /// Get or compute tokens for the current document version.
   ///
   /// Tokens are cached and reused if the version matches.
-  pub fn get_or_compute_tokens(
-    &mut self,
-    file_id: &FileId,
-  ) -> &[Token] {
+  pub fn get_or_compute_tokens(&mut self) -> &[Token] {
     // Check if we have cached tokens for the current version
     if self.cached_tokens.as_ref().map(|c| c.version) == Some(self.version) {
       return &self.cached_tokens.as_ref().unwrap().tokens;
     }
 
     // Compute tokens
-    let mut lexer = IgnisLexer::new(*file_id, &self.text);
+    let mut lexer = IgnisLexer::new(FileId::default(), &self.text);
     lexer.scan_tokens();
 
     self.cached_tokens = Some(CachedTokens {
@@ -216,6 +213,12 @@ pub struct LspState {
   /// URIs that had diagnostics in the last publish cycle.
   /// Used to clear stale diagnostics when files no longer have errors.
   pub previous_diagnostic_uris: RwLock<HashSet<Url>>,
+
+  /// Last successful whole-project analysis with usable type information.
+  ///
+  /// This is used as a completion fallback when the current document is in a
+  /// transient invalid state and per-file analysis cannot provide symbols.
+  pub global_last_good_analysis: RwLock<Option<Arc<AnalyzeProjectOutput>>>,
 }
 
 impl LspState {
@@ -227,7 +230,27 @@ impl LspState {
       open_files: RwLock::new(HashMap::new()),
       root: RwLock::new(None),
       previous_diagnostic_uris: RwLock::new(HashSet::new()),
+      global_last_good_analysis: RwLock::new(None),
     }
+  }
+
+  /// Store a global completion fallback analysis if it has type information.
+  pub async fn set_global_last_good_analysis(
+    &self,
+    output: Arc<AnalyzeProjectOutput>,
+  ) {
+    if !output.has_type_information() {
+      return;
+    }
+
+    let mut guard = self.global_last_good_analysis.write().await;
+    *guard = Some(output);
+  }
+
+  /// Get the last known global analysis with type information.
+  pub async fn get_global_last_good_analysis(&self) -> Option<Arc<AnalyzeProjectOutput>> {
+    let guard = self.global_last_good_analysis.read().await;
+    guard.clone()
   }
 
   /// Set the workspace root.

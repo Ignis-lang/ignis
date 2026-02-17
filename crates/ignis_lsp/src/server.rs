@@ -5,6 +5,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ignis_config::{IgnisConfig, IgnisSTDManifest};
+use ignis_driver::project::Project;
 use ignis_driver::{AnalysisOptions, AnalyzeProjectOutput};
 use ignis_type::file::FileId;
 use tower_lsp::jsonrpc::Result;
@@ -38,6 +40,85 @@ impl Server {
     Self { client, state }
   }
 
+  fn build_analysis_inputs(
+    &self,
+    path: &Path,
+    path_str: &str,
+    project_ctx: &ProjectContext,
+  ) -> (IgnisConfig, String, Option<Project>) {
+    let mut config;
+    let mut entry_path = path_str.to_string();
+    let mut project_opt: Option<Project> = None;
+
+    match project_ctx {
+      ProjectContext::Project(resolved) => {
+        config = (*resolved.config).clone();
+        entry_path = resolved.project.entry.to_string_lossy().to_string();
+        project_opt = Some(resolved.project.clone());
+      },
+      ProjectContext::NoProject | ProjectContext::Error { .. } => {
+        config = (*self.state.config).clone();
+      },
+    }
+
+    if config.std_path.is_empty()
+      && let Some(inferred_std_path) = infer_std_path_from_file(path)
+    {
+      config.std_path = inferred_std_path;
+      config.std = true;
+      config.auto_load_std = true;
+      config.manifest = load_std_manifest(&config.std_path);
+    }
+
+    if is_file_inside_std_path(path, &config.std_path) {
+      entry_path = std_module_entry_path(path, &config.std_path).unwrap_or_else(|| path_str.to_string());
+      project_opt = None;
+    }
+
+    (config, entry_path, project_opt)
+  }
+
+  async fn analyze_completion_without_current_override(
+    &self,
+    current_uri: &Url,
+    path: &Path,
+    path_str: &str,
+  ) -> Option<Arc<AnalyzeProjectOutput>> {
+    let project_ctx = self.state.project_manager.project_for_file(path).await;
+
+    let mut file_overrides = self.collect_file_overrides().await;
+    file_overrides.retain(|candidate_path, _| {
+      if candidate_path == path {
+        return false;
+      }
+
+      match (candidate_path.canonicalize(), path.canonicalize()) {
+        (Ok(candidate), Ok(current)) => candidate != current,
+        _ => true,
+      }
+    });
+
+    if let ProjectContext::Error { error, .. } = &project_ctx {
+      log(&format!(
+        "[completion fallback] project error while recovering {}: {}",
+        current_uri, error
+      ));
+    }
+
+    let (config, entry_path, project_opt) = self.build_analysis_inputs(path, path_str, &project_ctx);
+
+    let options = AnalysisOptions {
+      file_overrides,
+      project: project_opt,
+    };
+
+    Some(Arc::new(ignis_driver::analyze_project_with_options(
+      &config,
+      &entry_path,
+      options,
+    )))
+  }
+
   /// Analyze a document and publish diagnostics.
   ///
   /// Uses project-level analysis to resolve imports properly.
@@ -66,33 +147,12 @@ impl Server {
     // Collect file overrides from all open .ign files
     let file_overrides = self.collect_file_overrides().await;
 
-    // Build config and analysis options based on project context
-    let (config, entry_path, project_opt) = match &project_ctx {
-      ProjectContext::Project(resolved) => {
-        let config = (*resolved.config).clone();
-        let editing_std_file = is_file_inside_std_path(&path, &config.std_path);
+    if let ProjectContext::Error { root, error } = &project_ctx {
+      self.publish_toml_diagnostics(root).await;
+      log(&format!("[analyze] Project error: {}", error));
+    }
 
-        if editing_std_file {
-          let std_entry = std_module_entry_path(&path, &config.std_path).unwrap_or_else(|| path_str.clone());
-
-          (config, std_entry, None)
-        } else {
-          (
-            config,
-            resolved.project.entry.to_string_lossy().to_string(),
-            Some(resolved.project.clone()),
-          )
-        }
-      },
-      ProjectContext::NoProject => ((*self.state.config).clone(), path_str.clone(), None),
-      ProjectContext::Error { root, error } => {
-        // Publish TOML diagnostic
-        self.publish_toml_diagnostics(root).await;
-        log(&format!("[analyze] Project error: {}", error));
-        // Continue with fallback config
-        ((*self.state.config).clone(), path_str.clone(), None)
-      },
-    };
+    let (config, entry_path, project_opt) = self.build_analysis_inputs(&path, &path_str, &project_ctx);
 
     let options = AnalysisOptions {
       file_overrides,
@@ -127,6 +187,8 @@ impl Server {
         doc.set_cached_analysis(version, Arc::clone(&output));
       }
     }
+
+    self.state.set_global_last_good_analysis(Arc::clone(&output)).await;
 
     // Group diagnostics by file URI, caching LineIndex per file_id
     let diagnostics_by_uri = {
@@ -227,25 +289,11 @@ impl Server {
     let project_ctx = self.state.project_manager.project_for_file(&path).await;
     let file_overrides = self.collect_file_overrides().await;
 
-    let (config, entry_path, project_opt) = match &project_ctx {
-      ProjectContext::Project(resolved) => {
-        let config = (*resolved.config).clone();
-        let editing_std_file = is_file_inside_std_path(&path, &config.std_path);
+    if let ProjectContext::Error { error, .. } = &project_ctx {
+      log(&format!("[analysis cache miss] Project error: {}", error));
+    }
 
-        if editing_std_file {
-          let std_entry = std_module_entry_path(&path, &config.std_path).unwrap_or_else(|| path_str.clone());
-
-          (config, std_entry, None)
-        } else {
-          (
-            config,
-            resolved.project.entry.to_string_lossy().to_string(),
-            Some(resolved.project.clone()),
-          )
-        }
-      },
-      _ => ((*self.state.config).clone(), path_str.clone(), None),
-    };
+    let (config, entry_path, project_opt) = self.build_analysis_inputs(&path, &path_str, &project_ctx);
 
     let options = AnalysisOptions {
       file_overrides,
@@ -265,6 +313,8 @@ impl Server {
         }
       }
     }
+
+    self.state.set_global_last_good_analysis(Arc::clone(&output)).await;
 
     Some((output, path_str, version))
   }
@@ -393,6 +443,138 @@ fn std_module_entry_path(
   }
 
   Some(file_canon.to_string_lossy().to_string())
+}
+
+fn lookup_file_id_best_effort(
+  output: &AnalyzeProjectOutput,
+  path: &Path,
+  path_str: &str,
+) -> Option<FileId> {
+  if let Some(file_id) = output.source_map.lookup_by_path(path_str) {
+    return Some(file_id);
+  }
+
+  if let Some(file_id) = output.source_map.lookup_by_path(path) {
+    return Some(file_id);
+  }
+
+  if let Ok(canon_path) = path.canonicalize() {
+    if let Some(file_id) = output.source_map.lookup_by_path(&canon_path) {
+      return Some(file_id);
+    }
+  }
+
+  let target_name = path.file_name().and_then(|name| name.to_str());
+  if target_name.is_none() {
+    return None;
+  }
+
+  let mut by_name_matches: Vec<FileId> = output
+    .source_map
+    .iter_paths()
+    .filter_map(|(candidate, file_id)| {
+      candidate
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|candidate_name| Some(*candidate_name) == target_name)
+        .map(|_| *file_id)
+    })
+    .collect();
+
+  by_name_matches.sort_by_key(|file_id| file_id.index());
+  by_name_matches.dedup();
+
+  if by_name_matches.len() == 1 {
+    return by_name_matches.first().copied();
+  }
+
+  None
+}
+
+fn infer_std_path_from_file(file_path: &Path) -> Option<String> {
+  let file_canon = file_path.canonicalize().ok()?;
+  let mut current = file_canon.parent();
+
+  while let Some(dir) = current {
+    let has_manifest = dir.join("manifest.toml").is_file();
+    let has_runtime_header = dir.join("runtime").join("ignis_rt.h").is_file();
+
+    if has_manifest && has_runtime_header {
+      return Some(dir.to_string_lossy().to_string());
+    }
+
+    current = dir.parent();
+  }
+
+  None
+}
+
+fn load_std_manifest(std_path: &str) -> IgnisSTDManifest {
+  if std_path.is_empty() {
+    return IgnisSTDManifest::default();
+  }
+
+  let manifest_path = Path::new(std_path).join("manifest.toml");
+
+  std::fs::read_to_string(&manifest_path)
+    .ok()
+    .and_then(|content| toml::from_str(&content).ok())
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{infer_std_path_from_file, std_module_entry_path};
+  use std::path::PathBuf;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  fn unique_temp_dir(name: &str) -> PathBuf {
+    let timestamp = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("system time should be after epoch")
+      .as_nanos();
+
+    std::env::temp_dir().join(format!("ignis_lsp_{}_{}_{}", name, std::process::id(), timestamp))
+  }
+
+  #[test]
+  fn test_infer_std_path_from_file_finds_manifest_root() {
+    let root = unique_temp_dir("infer_std");
+    let std_root = root.join("std");
+    let file_path = std_root.join("fs").join("metadata.ign");
+
+    std::fs::create_dir_all(std_root.join("runtime")).expect("runtime directory should be created");
+    std::fs::create_dir_all(file_path.parent().expect("file path should have parent"))
+      .expect("fs directory should be created");
+    std::fs::write(std_root.join("manifest.toml"), "[modules]\nfs = \"fs/mod.ign\"\n")
+      .expect("manifest should be written");
+    std::fs::write(std_root.join("runtime").join("ignis_rt.h"), "// rt").expect("runtime header should be written");
+    std::fs::write(std_root.join("fs").join("mod.ign"), "").expect("mod file should be written");
+    std::fs::write(&file_path, "").expect("metadata file should be written");
+
+    let inferred = infer_std_path_from_file(&file_path);
+    assert_eq!(inferred, Some(std_root.to_string_lossy().to_string()));
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_std_module_entry_path_returns_nearest_mod_file() {
+    let root = unique_temp_dir("std_entry");
+    let std_root = root.join("std");
+    let fs_dir = std_root.join("fs");
+    let file_path = fs_dir.join("metadata.ign");
+    let mod_path = fs_dir.join("mod.ign");
+
+    std::fs::create_dir_all(&fs_dir).expect("fs directory should be created");
+    std::fs::write(&mod_path, "").expect("mod file should be written");
+    std::fs::write(&file_path, "").expect("metadata file should be written");
+
+    let entry = std_module_entry_path(&file_path, &std_root.to_string_lossy());
+    assert_eq!(entry, Some(mod_path.to_string_lossy().to_string()));
+
+    let _ = std::fs::remove_dir_all(root);
+  }
 }
 
 #[tower_lsp::async_trait]
@@ -1469,7 +1651,7 @@ impl LanguageServer for Server {
     let position = params.text_document_position.position;
 
     // Get document info (text, path, line_index, version)
-    let (text, path_str, line_index, version) = {
+    let (text, path, path_str, line_index, version) = {
       let guard = self.state.open_files.read().await;
 
       let Some(doc) = guard.get(uri) else {
@@ -1478,6 +1660,7 @@ impl LanguageServer for Server {
 
       (
         doc.text.clone(),
+        doc.path.clone(),
         doc.path.to_string_lossy().to_string(),
         doc.line_index.clone(),
         doc.version,
@@ -1500,34 +1683,68 @@ impl LanguageServer for Server {
         return Ok(None);
       }
 
-      // Get file_id for token computation
-      let config = (*self.state.config).clone();
-      let temp_output = ignis_driver::analyze_project_with_text(&config, &path_str, Some(doc.text.clone()));
-
-      let Some(file_id) = temp_output.source_map.lookup_by_path(&path_str) else {
-        return Ok(None);
-      };
-
-      doc.get_or_compute_tokens(&file_id).to_vec()
+      doc.get_or_compute_tokens().to_vec()
     };
 
-    // Get analysis for completions (use cache if available, fallback to last good)
-    let output = {
+    // Get analysis for completions (prefer current doc cache, then global, then fresh)
+    let mut analysis_source = "doc_cache";
+    let mut output = {
       let guard = self.state.open_files.read().await;
       guard.get(uri).and_then(|doc| doc.get_completion_analysis())
     };
 
-    // If no cached analysis, run a fresh one
-    let output = match output {
-      Some(o) => o,
-      None => match self.get_analysis(uri).await {
-        Some((fresh, _, _)) => fresh,
-        None => return Ok(None),
-      },
+    if output.is_none() {
+      analysis_source = "global_last_good";
+      output = self.state.get_global_last_good_analysis().await;
+    }
+
+    if output.is_none() {
+      analysis_source = "fresh";
+      output = self.get_analysis(uri).await.map(|(fresh, _, _)| fresh);
+    }
+
+    let mut output = match output {
+      Some(output) => output,
+      None => return Ok(None),
     };
 
-    // Get file_id for completion
-    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+    let mut file_id = lookup_file_id_best_effort(&output, &path, &path_str);
+
+    if file_id.is_none()
+      && let Some((fresh, _, _)) = self.get_analysis(uri).await
+    {
+      if let Some(resolved_file_id) = lookup_file_id_best_effort(&fresh, &path, &path_str) {
+        analysis_source = "fresh_relookup";
+        output = fresh;
+        file_id = Some(resolved_file_id);
+      }
+    }
+
+    if file_id.is_none()
+      && let Some(recovered) = self
+        .analyze_completion_without_current_override(uri, &path, &path_str)
+        .await
+      && let Some(resolved_file_id) = lookup_file_id_best_effort(&recovered, &path, &path_str)
+    {
+      analysis_source = "disk_fallback";
+      output = recovered;
+      file_id = Some(resolved_file_id);
+    }
+
+    if file_id.is_none()
+      && let Some(global) = self.state.get_global_last_good_analysis().await
+      && let Some(resolved_file_id) = lookup_file_id_best_effort(&global, &path, &path_str)
+    {
+      analysis_source = "global_relookup";
+      output = global;
+      file_id = Some(resolved_file_id);
+    }
+
+    let Some(file_id) = file_id else {
+      log(&format!(
+        "[completion] no file_id for path '{}' (source={})",
+        path_str, analysis_source
+      ));
       return Ok(None);
     };
 
@@ -1561,9 +1778,14 @@ impl LanguageServer for Server {
         CompletionContext::AfterAt { prefix } => complete_at_items(prefix),
       };
 
-      if candidates.is_empty() {
-        return None;
-      }
+      log(&format!(
+        "[completion] uri={} context={:?} source={} file={:?} candidates={}",
+        uri_str,
+        context,
+        analysis_source,
+        file_id,
+        candidates.len()
+      ));
 
       Some(to_completion_items(candidates))
     }));
