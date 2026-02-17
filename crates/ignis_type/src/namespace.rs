@@ -189,6 +189,28 @@ impl NamespaceStore {
   ) -> Option<NamespaceId> {
     self.root_children.get(name).copied()
   }
+
+  /// Return all (name, DefinitionId) pairs in a namespace, flattening overloads.
+  pub fn all_defs(
+    &self,
+    ns: NamespaceId,
+  ) -> Vec<(SymbolId, DefinitionId)> {
+    let namespace = self.namespaces.get(&ns);
+    let mut result = Vec::new();
+
+    for (&name, entry) in &namespace.definitions {
+      match entry {
+        SymbolEntry::Single(id) => result.push((name, *id)),
+        SymbolEntry::Overload(ids) => {
+          for id in ids {
+            result.push((name, *id));
+          }
+        },
+      }
+    }
+
+    result
+  }
 }
 
 #[cfg(test)]

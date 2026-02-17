@@ -178,6 +178,10 @@ pub struct Analyzer<'a> {
   /// Ambient LHS HIR for deep-placeholder pipe lowering.
   /// Pushed when entering ambient-path pipe lowering, read by PipePlaceholder arm.
   pipe_lhs_hir_stack: Vec<HIRId>,
+
+  /// When true, the resolver suppresses diagnostics for undeclared variables and identifiers.
+  /// Used when resolving method bodies for `node_defs` population only.
+  resolve_suppress_errors: bool,
 }
 
 pub struct AnalyzerOutput {
@@ -277,6 +281,7 @@ impl<'a> Analyzer<'a> {
       pipe_resolutions: HashMap::new(),
       pipe_lhs_type_stack: Vec::new(),
       pipe_lhs_hir_stack: Vec::new(),
+      resolve_suppress_errors: false,
     }
   }
 
@@ -396,6 +401,7 @@ impl<'a> Analyzer<'a> {
       pipe_resolutions: HashMap::new(),
       pipe_lhs_type_stack: Vec::new(),
       pipe_lhs_hir_stack: Vec::new(),
+      resolve_suppress_errors: false,
     };
 
     // Phase 1: Binding
