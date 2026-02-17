@@ -1,0 +1,128 @@
+//!
+//! # Directory Iteration
+//!
+//! Owned iterator over directory entries with automatic cleanup.
+//!
+//! `Fs::ReadDir` is an owned directory iterator that wraps `DIR*` and
+//! automatically calls `closedir` when dropped. Each call to `next()`
+//! returns an owned `DirEntry` with copied strings.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Fs from "std::fs";
+//! import Io from "std::io";
+//!
+//! function main(): i32 {
+//!   let result: Result<Fs::ReadDir, Io::IoError> = Fs::ReadDir::open("/tmp");
+//!   if (result.isError()) {
+//!     return 1;
+//!   }
+//!
+//!   let mut iter: Fs::ReadDir = result.unwrap();
+//!
+//!   loop {
+//!     let entry: Option<Fs::DirEntry> = iter.next();
+//!     if (entry.isNone()) {
+//!       break;
+//!     }
+//!
+//!     let e: Fs::DirEntry = entry.unwrap();
+//!     if (e.isDir()) {
+//!       Io::println(e.name);
+//!     }
+//!   }
+//!
+//!   return 0;
+//! }
+//! ```
+
+import Io from "std::io";
+import CType from "std::libc";
+
+/// Owned directory entry.
+export namespace Fs {
+  record DirEntry {
+    /// File name (owned).
+    public name: String;
+
+    /// Full path: baseDir + "/" + name (owned).
+    public path: String;
+
+    /// File type hint (DT_REG, DT_DIR, DT_LNK, etc.). 0 if unknown.
+    public fileType: u8;
+
+    /// Inode number.
+    public ino: u64;
+
+    /// Returns `true` if this entry is a directory.
+    public isDir(&self): boolean {
+      return self.fileType == Fs::Sys::Unix::DT_DIR;
+    }
+
+    /// Returns `true` if this entry is a regular file.
+    public isFile(&self): boolean {
+      return self.fileType == Fs::Sys::Unix::DT_REG;
+    }
+
+    /// Returns `true` if this entry is a symbolic link.
+    public isSymlink(&self): boolean {
+      return self.fileType == Fs::Sys::Unix::DT_LNK;
+    }
+  }
+
+  /// Owned directory iterator.
+  @implements(Drop)
+  record ReadDir {
+    dir: CType::DirPtr;
+    baseDir: String;
+
+    /// Opens a directory for iteration.
+    public static open(path: str): Result<Fs::ReadDir, Io::IoError> {
+      let result: Result<CType::DirPtr, Io::IoError> = Fs::Sys::Unix::opendir(path);
+
+      if (result.isError()) {
+        return Result::ERROR(result.unwrapErr());
+      }
+
+      return Result::OK(Fs::ReadDir {
+        dir: result.unwrap(),
+        baseDir: String::create(path),
+      });
+    }
+
+    /// Returns the next directory entry, or `NONE` at end of directory.
+    public next(&mut self): Option<Fs::DirEntry> {
+      let entry: Option<Fs::Sys::Unix::UnixDirEntry> = Fs::Sys::Unix::readdir(self.dir);
+
+      if (entry.isNone()) {
+        return Option::NONE;
+      }
+
+      let raw: Fs::Sys::Unix::UnixDirEntry = entry.unwrap();
+
+      let ownedName: String = String::create(raw.name);
+
+      let mut ownedPath: String = self.baseDir.clone();
+      ownedPath.pushChar('/');
+      ownedPath.push(&ownedName);
+
+      return Option::SOME(Fs::DirEntry {
+        name: ownedName,
+        path: ownedPath,
+        fileType: raw.fileType,
+        ino: raw.ino,
+      });
+    }
+
+    /// Closes the directory stream.
+    drop(&mut self): void {
+      if (self.dir != null) {
+        Fs::Sys::Unix::closedir(self.dir);
+        self.dir = null;
+      }
+
+      self.baseDir.drop();
+    }
+  }
+}

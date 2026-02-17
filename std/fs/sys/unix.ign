@@ -22,7 +22,7 @@
 //! | `rmdir`    | `rmdir(2)`         | `Result<boolean, IoError>`        |
 //! | `rename`   | `rename(2)`        | `Result<boolean, IoError>`        |
 //! | `opendir`  | `opendir(3)`       | `Result<DirPtr, IoError>`         |
-//! | `readdir`  | `readdir(3)`       | `Option<DirEntry>`                |
+//! | `readdir`  | `readdir(3)`       | `Option<UnixDirEntry>`            |
 //! | `closedir` | `closedir(3)`      | `void`                            |
 //!
 //! ## Types
@@ -30,7 +30,7 @@
 //! | Type       | Description                                                   |
 //! |------------|---------------------------------------------------------------|
 //! | `Stat`     | File metadata: dev, ino, mode, nlink, uid, gid, size, times   |
-//! | `DirEntry` | Directory entry: name (borrowed `str`), ino, fileType         |
+//! | `UnixDirEntry` | Directory entry: name (borrowed `str`), ino, fileType     |
 //!
 //! ## Constants
 //!
@@ -94,20 +94,11 @@
 import CType from "std::libc::primitives";
 import Io from "std::io";
 
-// =============================================================================
-// Extern blocks — direct C symbols
-//
-// These extern blocks re-declare libc functions locally instead of calling
-// them through `LibC::*`.  This is a workaround for a codegen bug where
-// cross-module namespace function calls emit wrong C symbols
-// (e.g. `LibC_File_read` instead of `read`).
-//
-// TODO(codegen): Once cross-module extern calls emit correct symbols,
-// remove these blocks and call LibC::File / LibC::Errno directly.
-// =============================================================================
+// Extern blocks — direct C symbols.
+// Local declarations are used as a workaround for cross-module symbol mangling
+// in codegen (`LibC_File_read` instead of `read`).
 
-// POSIX file I/O primitives and related constants (fcntl.h, unistd.h,
-// sys/stat.h).  Every symbol here is a real C name resolved by the linker.
+// POSIX file I/O primitives and related constants (fcntl.h, unistd.h, sys/stat.h).
 extern __fs_io {
   function read(fd: i32, buf: *mut void, count: u64): i64;
   function write(fd: i32, buf: *mut void, count: u64): i64;
@@ -161,9 +152,8 @@ extern __fs_dir {
   function readdir(dirp: CType::DirPtr): *mut void;
 }
 
-// errno access and strerror.  Duplicated here (same as io/error.ign's
-// __io_error block) because cross-module extern calls are subject to the
-// same codegen symbol-mangling bug described above.
+// errno access and strerror.
+// Duplicated from io/error.ign for the same symbol-mangling workaround.
 extern __fs_errno {
   @externName("__errno_location")
   function errno_location(): *mut i32;
@@ -180,13 +170,7 @@ extern __fs_errno {
 }
 
 // C runtime helpers implemented in std/runtime/internal/rt_fs.c.
-//
-// These exist because:
-//   - ignis_stat_call / ignis_fstat_call: `struct stat` layout is
-//     platform-dependent; Ignis records cannot safely mirror it.
-//   - ignis_open3: `open(2)` is variadic; Ignis has no variadic calls.
-//   - ignis_dirent_name/ino/type: `struct dirent` layout is
-//     platform-dependent (same reason as stat).
+// Needed for platform-dependent structs (`stat`, `dirent`) and `open(2)` variadics.
 extern __fs_rt {
   function ignis_stat_call(
     path: *u8,
@@ -239,13 +223,13 @@ export namespace Fs::Sys::Unix {
     public blocks: i64;
   }
 
-  // ---- DirEntry record ----
+  // ---- UnixDirEntry record ----
 
   /// Single entry read from a directory stream via `readdir`.
   ///
   /// The `name` field is borrowed from the internal C dirent buffer —
   /// valid only until the next `readdir` call or `closedir`.
-  record DirEntry {
+  record UnixDirEntry {
     /// File name (borrowed — valid until next readdir/closedir).
     public name: str;
 
@@ -309,7 +293,7 @@ export namespace Fs::Sys::Unix {
     let rawErrno: i32 = @read<i32>(__fs_errno::errno_location());
     let msg: str = __fs_errno::strerror(rawErrno) as str;
 
-    let mut kind: Io::ErrorKind = match (rawErrno)  {
+    let kind: Io::ErrorKind = match (rawErrno) {
       k if k == __fs_errno::ENOENT -> Io::ErrorKind::NOT_FOUND,
       k if k == __fs_errno::EACCES -> Io::ErrorKind::PERMISSION_DENIED,
       k if k == __fs_errno::EEXIST -> Io::ErrorKind::ALREADY_EXISTS,
@@ -502,13 +486,13 @@ export namespace Fs::Sys::Unix {
   /// Reads the next entry from a directory stream.
   ///
   /// Returns `Option::NONE` when the end of the directory is reached.
-  /// The returned `DirEntry` borrows its `name` from the internal
+  /// The returned `UnixDirEntry` borrows its `name` from the internal
   /// dirent buffer — valid only until the next `readdir` or `closedir`.
   ///
   /// Note: this does not distinguish "end of directory" from "error".
   /// For fine-grained error checking, clear errno before calling and
   /// check it after getting `NONE`.
-  function readdir(dirp: CType::DirPtr): Option<DirEntry> {
+  function readdir(dirp: CType::DirPtr): Option<UnixDirEntry> {
     let entry: *mut void = __fs_dir::readdir(dirp);
     if (entry == null) {
       return Option::NONE;
@@ -518,7 +502,7 @@ export namespace Fs::Sys::Unix {
     let ino: u64 = __fs_rt::ignis_dirent_ino(entry);
     let fileType: u8 = __fs_rt::ignis_dirent_type(entry);
 
-    return Option::SOME(DirEntry { name: name, ino: ino, fileType: fileType });
+    return Option::SOME(UnixDirEntry { name: name, ino: ino, fileType: fileType });
   }
 
   /// Closes a directory stream opened with `opendir`.

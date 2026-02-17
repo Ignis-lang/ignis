@@ -555,8 +555,15 @@ impl<'a> Analyzer<'a> {
 
         self.typecheck_assignment(&boolean_type, &cond_type, &conditional_span);
 
-        let then_type = self.typecheck_node(&ternary.then_expr, scope_kind, ctx);
-        let else_type = self.typecheck_node(&ternary.else_expr, scope_kind, ctx);
+        let then_type = self.typecheck_node_with_infer(&ternary.then_expr, scope_kind, ctx, infer);
+        let else_type = self.typecheck_node_with_infer(&ternary.else_expr, scope_kind, ctx, infer);
+
+        if let Some(expected) = infer.expected
+          && self.types.is_assignable(&expected, &then_type)
+          && self.types.is_assignable(&expected, &else_type)
+        {
+          return expected;
+        }
 
         self.typecheck_common_type(&then_type, &else_type, &ternary.span)
       },
@@ -8741,16 +8748,24 @@ impl<'a> Analyzer<'a> {
             return self.types.error();
           }
 
-          self.resolve_type_definition_or_error(&def_id, span)
+          self.resolve_type_definition_or_error(&def_id, Some(name_span))
         } else {
           let name = self.symbols.borrow().get(symbol).to_string();
-          if let Some(s) = span {
-            self.add_diagnostic(DiagnosticMessage::UndefinedType { name, span: s.clone() }.report());
-          }
+          self.add_diagnostic(
+            DiagnosticMessage::UndefinedType {
+              name,
+              span: name_span.clone(),
+            }
+            .report(),
+          );
           self.types.error()
         }
       },
-      IgnisTypeSyntax::Path { segments, args, .. } => {
+      IgnisTypeSyntax::Path {
+        segments,
+        args,
+        span: path_span,
+      } => {
         if segments.is_empty() {
           return self.types.error();
         }
@@ -8763,9 +8778,13 @@ impl<'a> Analyzer<'a> {
             .map(|(sym, _)| self.symbols.borrow().get(sym).to_string())
             .collect::<Vec<_>>()
             .join("::");
-          if let Some(s) = span {
-            self.add_diagnostic(DiagnosticMessage::UndefinedType { name, span: s.clone() }.report());
-          }
+          self.add_diagnostic(
+            DiagnosticMessage::UndefinedType {
+              name,
+              span: path_span.clone(),
+            }
+            .report(),
+          );
           return self.types.error();
         };
 
@@ -8779,9 +8798,13 @@ impl<'a> Analyzer<'a> {
             .map(|(sym, _)| self.symbols.borrow().get(sym).to_string())
             .collect::<Vec<_>>()
             .join("::");
-          if let Some(s) = span {
-            self.add_diagnostic(DiagnosticMessage::TypeAliasCycle { name, span: s.clone() }.report());
-          }
+          self.add_diagnostic(
+            DiagnosticMessage::TypeAliasCycle {
+              name,
+              span: path_span.clone(),
+            }
+            .report(),
+          );
           return self.types.error();
         }
 
@@ -9502,30 +9525,50 @@ impl<'a> Analyzer<'a> {
       return None;
     }
 
-    // Start with first segment in scope
-    let (first_sym, _) = &segments[0];
-    let mut current_def = self.scopes.lookup_def(first_sym).cloned()?;
+    // First try resolution through scope bindings.
+    if let Some((first_sym, _)) = segments.first()
+      && let Some(current_def) = self.scopes.lookup_def(first_sym).cloned()
+    {
+      if segments.len() == 1 {
+        return Some(current_def);
+      }
 
-    // Walk through remaining segments
-    for (segment_sym, _) in segments.iter().skip(1) {
-      match &self.defs.get(&current_def).kind {
-        DefinitionKind::Namespace(ns_def) => {
-          if let Some(entry) = self.namespaces.lookup_def(ns_def.namespace_id, segment_sym) {
-            if let Some(def_id) = entry.as_single() {
-              current_def = *def_id;
-            } else {
-              // Overloaded functions cannot be used as types
-              return None;
-            }
+      if let DefinitionKind::Namespace(ns_def) = &self.defs.get(&current_def).kind {
+        let mut current_ns = ns_def.namespace_id;
+        let mut resolved = true;
+
+        // Intermediate segments are namespace children.
+        for (segment_sym, _) in segments.iter().skip(1).take(segments.len() - 2) {
+          if let Some(child_ns) = self.namespaces.lookup_child(current_ns, segment_sym) {
+            current_ns = child_ns;
           } else {
-            return None;
+            resolved = false;
+            break;
           }
-        },
-        _ => return None,
+        }
+
+        if resolved {
+          // Final segment is a definition in the resolved namespace.
+          if let Some((final_sym, _)) = segments.last()
+            && let Some(entry) = self.namespaces.lookup_def(current_ns, final_sym)
+            && let Some(def_id) = entry.as_single()
+          {
+            return Some(*def_id);
+          }
+        }
       }
     }
 
-    Some(current_def)
+    // Fallback: resolve from global namespace path.
+    if segments.len() == 1 {
+      return None;
+    }
+
+    let ns_syms: Vec<_> = segments[..segments.len() - 1].iter().map(|(sym, _)| *sym).collect();
+    let def_name = segments.last().map(|(sym, _)| *sym)?;
+    let ns_id = self.namespaces.lookup(&ns_syms)?;
+    let entry = self.namespaces.lookup_def(ns_id, &def_name)?;
+    entry.as_single().copied()
   }
 
   /// Register spans for each segment in a type path for hover/goto-definition.
