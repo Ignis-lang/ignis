@@ -1,64 +1,56 @@
 //!
-//! # I/O Module
+//! # I/O
 //!
-//! Standard output and error printing.
+//! Standard output, error printing, and structured I/O error types.
 //!
-//! ## Overview
+//! All types and functions live under the `Io` namespace.
 //!
-//! This module provides the primary mechanism for writing text output in
-//! Ignis programs. It wraps the C runtime's printing functions and exposes
-//! them as a simple, symmetric API:
+//! ## Printing
 //!
-//! | Function   | Stream   | Newline |
-//! |------------|----------|---------|
-//! | `print`    | stdout   | No      |
-//! | `println`  | stdout   | Yes     |
-//! | `eprint`   | stderr   | No      |
-//! | `eprintln` | stderr   | Yes     |
+//! | Function        | Stream   | Newline |
+//! |-----------------|----------|---------|
+//! | `Io::print`     | stdout   | No      |
+//! | `Io::println`   | stdout   | Yes     |
+//! | `Io::eprint`    | stderr   | No      |
+//! | `Io::eprintln`  | stderr   | Yes     |
 //!
-//! ## Ownership
+//! Print functions take `String` **by value** (move semantics). The String
+//! is dropped automatically after printing. Clone before passing if you
+//! need to keep the String.
 //!
-//! All functions take `String` **by value** (move semantics). The String
-//! is dropped automatically after printing. If you need to keep the
-//! String, `.clone()` it before passing.
+//! ## Error Types
 //!
-//! ```text
-//!   Ownership Flow
-//!   ═══════════════════════════════════════════════
-//!
-//!   let msg: String = String::create("hello");
-//!                │
-//!                ▼
-//!   Io::println(msg);   ← msg is MOVED here
-//!                │
-//!                ▼
-//!        msg is DROPPED after print
-//!
-//!   // msg cannot be used after this point
-//! ```
+//! | Type              | Source file | Description                                      |
+//! |-------------------|------------|--------------------------------------------------|
+//! | `Io::ErrorKind`   | error.ign  | Category of the I/O error (8 variants)           |
+//! | `Io::IoError`     | error.ign  | Full error: kind + raw errno + strerror message  |
 //!
 //! ## Example
 //!
 //! ```ignis
 //! import Io from "std::io";
+//! import LibC from "std::libc";
 //! import String from "std::string";
 //!
 //! function main(): i32 {
 //!   Io::println(String::create("hello, world!"));
 //!
-//!   // Print without newline
-//!   Io::print(String::create("loading"));
-//!   Io::print(String::create("..."));
-//!   Io::println(String::create(" done!"));
-//!
-//!   // Error output
-//!   Io::eprintln(String::create("warning: something happened"));
+//!   // I/O error from a failed syscall
+//!   let fd: i32 = LibC::File::open("/nonexistent", LibC::File::O_RDONLY);
+//!   if (fd == -1) {
+//!     let err: Io::IoError = Io::IoError::lastError();
+//!     // err.kind == Io::ErrorKind::NOT_FOUND
+//!     // err.message == "No such file or directory"
+//!     return 1;
+//!   }
 //!
 //!   return 0;
 //! }
 //! ```
 
 import String from "std::string";
+
+import _ from "std::io::error";
 
 extern __io {
   function ignis_print(message: &String): void;
