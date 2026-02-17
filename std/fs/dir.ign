@@ -38,6 +38,7 @@
 //! ```
 
 import Io from "std::io";
+import Path from "std::path";
 import CType from "std::libc";
 
 /// Owned directory entry.
@@ -47,27 +48,27 @@ export namespace Fs {
     public name: String;
 
     /// Full path: baseDir + "/" + name (owned).
-    public path: String;
+    public path: Path::PathBuf;
 
-    /// File type hint (DT_REG, DT_DIR, DT_LNK, etc.). 0 if unknown.
-    public fileType: u8;
+    /// Classified file type.
+    public fileType: Fs::FileType;
 
     /// Inode number.
     public ino: u64;
 
     /// Returns `true` if this entry is a directory.
     public isDir(&self): boolean {
-      return self.fileType == Fs::Sys::Unix::DT_DIR;
+      return self.fileType == Fs::FileType::DIRECTORY;
     }
 
     /// Returns `true` if this entry is a regular file.
     public isFile(&self): boolean {
-      return self.fileType == Fs::Sys::Unix::DT_REG;
+      return self.fileType == Fs::FileType::FILE;
     }
 
     /// Returns `true` if this entry is a symbolic link.
     public isSymlink(&self): boolean {
-      return self.fileType == Fs::Sys::Unix::DT_LNK;
+      return self.fileType == Fs::FileType::SYMLINK;
     }
   }
 
@@ -79,38 +80,26 @@ export namespace Fs {
 
     /// Opens a directory for iteration.
     public static open(path: str): Result<Fs::ReadDir, Io::IoError> {
-      let result: Result<CType::DirPtr, Io::IoError> = Fs::Sys::Unix::opendir(path);
-
-      if (result.isError()) {
-        return Result::ERROR(result.unwrapErr());
-      }
-
       return Result::OK(Fs::ReadDir {
-        dir: result.unwrap(),
+        dir: Fs::Sys::Unix::opendir(path)!,
         baseDir: String::create(path),
       });
     }
 
     /// Returns the next directory entry, or `NONE` at end of directory.
     public next(&mut self): Option<Fs::DirEntry> {
-      let entry: Option<Fs::Sys::Unix::UnixDirEntry> = Fs::Sys::Unix::readdir(self.dir);
-
-      if (entry.isNone()) {
-        return Option::NONE;
-      }
-
-      let raw: Fs::Sys::Unix::UnixDirEntry = entry.unwrap();
+      let raw: Fs::Sys::Unix::UnixDirEntry = Fs::Sys::Unix::readdir(self.dir)!;
 
       let ownedName: String = String::create(raw.name);
 
-      let mut ownedPath: String = self.baseDir.clone();
-      ownedPath.pushChar('/');
-      ownedPath.push(&ownedName);
+      let base: String = self.baseDir.clone();
+      let mut ownedPath: Path::PathBuf = Path::PathBuf::fromString(&base);
+      ownedPath.push(ownedName.toStr());
 
       return Option::SOME(Fs::DirEntry {
         name: ownedName,
         path: ownedPath,
-        fileType: raw.fileType,
+        fileType: Fs::fileTypeFromDirent(raw.fileType),
         ino: raw.ino,
       });
     }

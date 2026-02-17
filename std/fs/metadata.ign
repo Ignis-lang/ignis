@@ -1,0 +1,164 @@
+//!
+//! # File Metadata
+//!
+//! Platform-independent file metadata and file type classification.
+//!
+//! `Fs::Metadata` wraps the raw POSIX `Stat` record and exposes a
+//! portable API. `Fs::FileType` is an enum that classifies entries
+//! as regular files, directories, or symlinks without requiring
+//! callers to know about `S_IFMT` masks or `DT_*` constants.
+//!
+//! ## Types
+//!
+//! | Type       | Description                                          |
+//! |------------|------------------------------------------------------|
+//! | `Metadata` | File size, timestamps, permissions, and file type    |
+//! | `FileType` | Classification: `FILE`, `DIRECTORY`, `SYMLINK`, `OTHER` |
+//!
+//! ## Construction
+//!
+//! Users do not create `Metadata` directly. Instead, obtain it from:
+//! - `Fs::metadata(path)` (stat by path)
+//! - `file.metadata()` (fstat on open file)
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Fs from "std::fs";
+//! import Io from "std::io";
+//!
+//! function main(): i32 {
+//!   let result: Result<Fs::Metadata, Io::IoError> = Fs::metadata("/etc/hosts");
+//!   if (result.isError()) {
+//!     return 1;
+//!   }
+//!
+//!   let meta: Fs::Metadata = result.unwrap();
+//!   if (meta.isFile()) {
+//!     let size: i64 = meta.len();
+//!     return 0;
+//!   }
+//!
+//!   return 1;
+//! }
+//! ```
+
+export namespace Fs {
+
+  /// Classification of a filesystem entry.
+  enum FileType {
+    /// Regular file.
+    FILE,
+    /// Directory.
+    DIRECTORY,
+    /// Symbolic link.
+    SYMLINK,
+    /// Anything else (socket, FIFO, block/char device, unknown).
+    OTHER,
+  }
+
+  /// Platform-independent file metadata.
+  ///
+  /// Wraps the raw POSIX `Stat` and provides portable accessors.
+  /// Obtained via `Fs::metadata(path)` or `file.metadata()`.
+  record Metadata {
+    /// File size in bytes.
+    size: i64;
+
+    /// POSIX mode bits (permissions + file type mask).
+    mode: u32;
+
+    /// Last access time (seconds since Unix epoch).
+    atime: i64;
+
+    /// Last modification time (seconds since Unix epoch).
+    mtime: i64;
+
+    /// Last status change time (seconds since Unix epoch).
+    ctime: i64;
+
+    /// Classified file type.
+    fileType: Fs::FileType;
+
+    /// Returns the file size in bytes.
+    public len(&self): i64 {
+      return self.size;
+    }
+
+    /// Returns the classified file type.
+    public fileType(&self): Fs::FileType {
+      return self.fileType;
+    }
+
+    /// Returns `true` if this is a regular file.
+    public isFile(&self): boolean {
+      return self.fileType == Fs::FileType::FILE;
+    }
+
+    /// Returns `true` if this is a directory.
+    public isDir(&self): boolean {
+      return self.fileType == Fs::FileType::DIRECTORY;
+    }
+
+    /// Returns `true` if this is a symbolic link.
+    public isSymlink(&self): boolean {
+      return self.fileType == Fs::FileType::SYMLINK;
+    }
+
+    /// Returns the raw POSIX permission bits (lower 12 bits of mode).
+    public permissions(&self): u32 {
+      return self.mode & 4095;
+    }
+
+    /// Returns the last modification time in seconds since Unix epoch.
+    public modifiedTime(&self): i64 {
+      return self.mtime;
+    }
+
+    /// Returns the last access time in seconds since Unix epoch.
+    public accessedTime(&self): i64 {
+      return self.atime;
+    }
+
+    /// Returns the last status change time in seconds since Unix epoch.
+    public createdTime(&self): i64 {
+      return self.ctime;
+    }
+  }
+
+  /// Classifies a POSIX mode value into a `FileType`.
+  ///
+  /// Uses the `S_IFMT` mask to extract the file type bits.
+  function fileTypeFromMode(mode: u32): Fs::FileType {
+    let masked: u32 = mode & Fs::Sys::Unix::S_IFMT;
+
+    return match (masked) {
+      Fs::Sys::Unix::S_IFREG -> Fs::FileType::FILE,
+      Fs::Sys::Unix::S_IFDIR -> Fs::FileType::DIRECTORY,
+      Fs::Sys::Unix::S_IFLNK -> Fs::FileType::SYMLINK,
+      _ -> Fs::FileType::OTHER,
+    };
+  }
+
+  /// Classifies a dirent `d_type` value into a `FileType`.
+  function fileTypeFromDirent(dtype: u8): Fs::FileType {
+    return match (dtype) {
+      Fs::Sys::Unix::DT_REG -> Fs::FileType::FILE,
+      Fs::Sys::Unix::DT_DIR -> Fs::FileType::DIRECTORY,
+      Fs::Sys::Unix::DT_LNK -> Fs::FileType::SYMLINK,
+      _ -> Fs::FileType::OTHER,
+    };
+  }
+
+  /// Converts a raw `Stat` into a high-level `Metadata`.
+  function metadataFromStat(st: &Fs::Sys::Unix::Stat): Fs::Metadata {
+    return Fs::Metadata {
+      size: st.size,
+      mode: st.mode,
+      atime: st.atime,
+      mtime: st.mtime,
+      ctime: st.ctime,
+      fileType: Fs::fileTypeFromMode(st.mode),
+    };
+  }
+}

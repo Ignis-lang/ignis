@@ -1068,7 +1068,9 @@ fn collect_pattern_bindings(
         collect_pattern_bindings(pat, locals);
       }
     },
-    ignis_hir::HIRPattern::Wildcard | ignis_hir::HIRPattern::Literal { .. } => {},
+    ignis_hir::HIRPattern::Wildcard
+    | ignis_hir::HIRPattern::Literal { .. }
+    | ignis_hir::HIRPattern::Constant { .. } => {},
   }
 }
 

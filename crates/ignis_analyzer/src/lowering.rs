@@ -36,6 +36,8 @@ impl<'a> Analyzer<'a> {
   ) -> HIR {
     let mut hir = HIR::new();
 
+    self.lowering_return_type_stack.clear();
+
     for root in roots {
       self.lower_node_to_hir(root, &mut hir, ScopeKind::Global);
     }
@@ -48,7 +50,18 @@ impl<'a> Analyzer<'a> {
       self.scopes.push(ScopeKind::Function);
       self.define_function_params_in_scope(&cloned_id);
 
+      let has_return_context = if let Some(return_type) = self.callable_return_type(&cloned_id) {
+        self.lowering_return_type_stack.push(return_type);
+        true
+      } else {
+        false
+      };
+
       let body_hir_id = self.lower_node_to_hir(&body_node, &mut hir, ScopeKind::Function);
+
+      if has_return_context {
+        self.lowering_return_type_stack.pop();
+      }
 
       self.scopes.pop();
       self.exit_type_params_scope_for_method(&cloned_id);
@@ -58,6 +71,21 @@ impl<'a> Analyzer<'a> {
     }
 
     hir
+  }
+
+  fn callable_return_type(
+    &self,
+    def_id: &DefinitionId,
+  ) -> Option<TypeId> {
+    match &self.defs.get(def_id).kind {
+      DefinitionKind::Function(fd) => Some(fd.return_type),
+      DefinitionKind::Method(md) => Some(md.return_type),
+      _ => None,
+    }
+  }
+
+  fn current_lowering_return_type(&self) -> Option<TypeId> {
+    self.lowering_return_type_stack.last().copied()
   }
 
   fn lower_node_to_hir(
@@ -138,11 +166,20 @@ impl<'a> Analyzer<'a> {
           self.enter_type_params_scope_for_function(&def_id);
           self.scopes.push(ScopeKind::Function);
 
-          if let Some(def_id_val) = self.lookup_def(node_id).cloned() {
-            self.define_function_params_in_scope(&def_id_val);
-          }
+          self.define_function_params_in_scope(&def_id);
+
+          let has_return_context = if let Some(return_type) = self.callable_return_type(&def_id) {
+            self.lowering_return_type_stack.push(return_type);
+            true
+          } else {
+            false
+          };
 
           let body_hir_id = self.lower_node_to_hir(&body_id, hir, ScopeKind::Function);
+
+          if has_return_context {
+            self.lowering_return_type_stack.pop();
+          }
 
           self.scopes.pop();
           self.exit_type_params_scope_for_function(&def_id);
@@ -523,7 +560,18 @@ impl<'a> Analyzer<'a> {
         self.scopes.push(ScopeKind::Function);
         self.define_function_params_in_scope(&method_def_id);
 
+        let has_return_context = if let Some(return_type) = self.callable_return_type(&method_def_id) {
+          self.lowering_return_type_stack.push(return_type);
+          true
+        } else {
+          false
+        };
+
         let body_hir_id = self.lower_node_to_hir(&method.body, hir, ScopeKind::Function);
+
+        if has_return_context {
+          self.lowering_return_type_stack.pop();
+        }
 
         self.scopes.pop();
         self.exit_type_params_scope_for_method(&method_def_id);
@@ -588,7 +636,18 @@ impl<'a> Analyzer<'a> {
         self.scopes.push(ScopeKind::Function);
         self.define_function_params_in_scope(&method_def_id);
 
+        let has_return_context = if let Some(return_type) = self.callable_return_type(&method_def_id) {
+          self.lowering_return_type_stack.push(return_type);
+          true
+        } else {
+          false
+        };
+
         let body_hir_id = self.lower_node_to_hir(&method.body, hir, ScopeKind::Function);
+
+        if has_return_context {
+          self.lowering_return_type_stack.pop();
+        }
 
         self.scopes.pop();
         self.exit_type_params_scope_for_method(&method_def_id);
@@ -1399,7 +1458,14 @@ impl<'a> Analyzer<'a> {
         payload: err_payload,
       },
       span: span.clone(),
-      type_id: scrutinee_type,
+      type_id: self
+        .current_lowering_return_type()
+        .filter(|ret_type| match self.types.get(ret_type) {
+          Type::Instance { generic, .. } => *generic == enum_def,
+          Type::Enum(def_id) => *def_id == enum_def,
+          _ => false,
+        })
+        .unwrap_or(scrutinee_type),
     });
 
     let err_body = hir.alloc(HIRNode {
@@ -1483,6 +1549,17 @@ impl<'a> Analyzer<'a> {
           };
         }
 
+        if segments.len() > 1 {
+          let syms: Vec<_> = segments.iter().map(|(s, _)| *s).collect();
+          if let Some(ResolvedPath::Entry(SymbolEntry::Single(def_id))) =
+            self.resolve_qualified_path_from_symbols(&syms)
+          {
+            if matches!(self.defs.get(&def_id).kind, DefinitionKind::Constant(_)) {
+              return HIRPattern::Constant { def_id };
+            }
+          }
+        }
+
         if segments.len() == 1 {
           let (name, segment_span) = &segments[0];
 
@@ -1564,6 +1641,16 @@ impl<'a> Analyzer<'a> {
 
         _ => {},
       }
+    }
+
+    // Fallback: namespace defined in the current module (e.g. `__fs_errno`)
+    // but not imported into scope — look up through the global namespace tree.
+    if let Some(ns_id) = self.namespaces.lookup(ns_path) {
+      return self
+        .namespaces
+        .lookup_def(ns_id, def_name)
+        .cloned()
+        .map(ResolvedPath::Entry);
     }
 
     None
@@ -4242,6 +4329,8 @@ impl Analyzer<'_> {
       let _ = self.scopes.define(name, &param_id, false);
     }
 
+    self.lowering_return_type_stack.push(return_type);
+
     self.capture_override_stack.push(std::collections::HashMap::new());
 
     // Expression bodies get an implicit Return so the thunk returns the value.
@@ -4259,6 +4348,8 @@ impl Analyzer<'_> {
     };
 
     let capture_overrides = self.capture_override_stack.pop().unwrap_or_default();
+
+    self.lowering_return_type_stack.pop();
 
     self.scopes.pop();
 

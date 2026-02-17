@@ -180,6 +180,10 @@ pub struct Analyzer<'a> {
   /// Pushed when entering ambient-path pipe lowering, read by PipePlaceholder arm.
   pipe_lhs_hir_stack: Vec<HIRId>,
 
+  /// Return type context while lowering callable bodies.
+  /// Used by `expr!` lowering to synthesize early returns with the callable return type.
+  lowering_return_type_stack: Vec<TypeId>,
+
   /// When true, the resolver suppresses diagnostics for undeclared variables and identifiers.
   /// Used when resolving method bodies for `node_defs` population only.
   resolve_suppress_errors: bool,
@@ -283,6 +287,7 @@ impl<'a> Analyzer<'a> {
       pipe_resolutions: HashMap::new(),
       pipe_lhs_type_stack: Vec::new(),
       pipe_lhs_hir_stack: Vec::new(),
+      lowering_return_type_stack: Vec::new(),
       resolve_suppress_errors: false,
     }
   }
@@ -404,6 +409,7 @@ impl<'a> Analyzer<'a> {
       pipe_resolutions: HashMap::new(),
       pipe_lhs_type_stack: Vec::new(),
       pipe_lhs_hir_stack: Vec::new(),
+      lowering_return_type_stack: Vec::new(),
       resolve_suppress_errors: false,
     };
 

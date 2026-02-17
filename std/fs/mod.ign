@@ -83,6 +83,7 @@
 //! ```
 
 import _ from "std::fs::sys";
+import _ from "std::fs::metadata";
 import _ from "std::fs::file";
 import _ from "std::fs::dir";
 
@@ -92,29 +93,30 @@ import Memory from "std::memory";
 export namespace Fs {
   const DEFAULT_CREATE_DIR_MODE: u32 = 493;
 
-  /// Reads an entire file into a byte vector.
+  /// Reads an entire file into a byte vector (4 KiB buffered reads).
   function read(path: str): Result<Vector<u8>, Io::IoError> {
-    let fileResult: Result<Fs::File, Io::IoError> = Fs::File::open(path);
-    if (fileResult.isError()) {
-      return Result::ERROR(fileResult.unwrapErr());
-    }
-
-    let mut file: Fs::File = fileResult.unwrap();
+    let mut file: Fs::File = Fs::File::open(path)!;
     let mut output: Vector<u8> = Vector::init<u8>();
-    let mut byte: u8 = 0;
+
+    let bufSize: u64 = 4096;
+    let buf: *mut u8 = Memory::allocateVector<u8>(bufSize);
+
+    defer Memory::free(buf);
 
     while (true) {
-      let readResult: Result<i64, Io::IoError> = file.read((&mut byte) as *mut u8 as *mut void, 1);
-      if (readResult.isError()) {
-        return Result::ERROR(readResult.unwrapErr());
-      }
-
-      let count: i64 = readResult.unwrap();
+      let count: i64 = file.read(buf as *mut void, bufSize)!;
       if (count == 0) {
         break;
       }
 
-      output.push(byte);
+      let mut i: i64 = 0;
+      while (i < count) {
+        @integerFromPointer(buf) + i
+          |> @pointerFromInteger<*mut u8>(_)
+          |> @read<u8>(_)
+          |> output.push();
+        i += 1;
+      }
     }
 
     return Result::OK(output);
@@ -122,41 +124,30 @@ export namespace Fs {
 
   /// Reads a full file and returns it as a String.
   function readToString(path: str): Result<String, Io::IoError> {
-    let bytesResult: Result<Vector<u8>, Io::IoError> = Fs::read(path);
-    if (bytesResult.isError()) {
-      return Result::ERROR(bytesResult.unwrapErr());
-    }
-
-    let bytes: Vector<u8> = bytesResult.unwrap();
+    let bytes: Vector<u8> = Fs::read(path)!;
     let len: u64 = bytes.length();
 
     let raw: *mut u8 = Memory::allocateVector<u8>(len + 1);
+
+    defer Memory::free(raw);
+
     if (len > 0) {
-      Memory::copy<u8>(raw, bytes.asPtr() as *u8, len);
+      Memory::copy<u8>(raw, bytes.asPtr(), len);
     }
-    let endPtr: *mut u8 = @pointerFromInteger<*mut u8>(@integerFromPointer(raw) + len);
-    @write<u8>(endPtr, 0);
 
-    let out: String = String::create(raw as str);
-    Memory::free(raw);
+    @integerFromPointer(raw) + len
+      |> @pointerFromInteger<*mut u8>(_)
+      |> @write<u8>(_, 0);
 
-    return Result::OK(out);
+    return Result::OK(String::create(raw as str));
   }
 
   /// Creates/truncates a file and writes all bytes from `data`.
   function write(path: str, data: *void, len: u64): Result<boolean, Io::IoError> {
-    let fileResult: Result<Fs::File, Io::IoError> = Fs::File::create(path);
-    if (fileResult.isError()) {
-      return Result::ERROR(fileResult.unwrapErr());
-    }
+    let mut file: Fs::File = Fs::File::create(path)!;
+    let writeResult: i64 = file.write(data, len)!;
 
-    let mut file: Fs::File = fileResult.unwrap();
-    let writeResult: Result<i64, Io::IoError> = file.write(data, len);
-    if (writeResult.isError()) {
-      return Result::ERROR(writeResult.unwrapErr());
-    }
-
-    return Result::OK(writeResult.unwrap() == len as i64);
+    return Result::OK(writeResult == len);
   }
 
   /// Creates/truncates a file and writes an entire String.
@@ -171,8 +162,9 @@ export namespace Fs {
   }
 
   /// Reads metadata for `path`.
-  function metadata(path: str): Result<Fs::Sys::Unix::Stat, Io::IoError> {
-    return Fs::Sys::Unix::stat(path);
+  function metadata(path: str): Result<Fs::Metadata, Io::IoError> {
+    let stat: Fs::Sys::Unix::Stat = Fs::Sys::Unix::stat(path)!;
+    return Result::OK(Fs::metadataFromStat(&stat));
   }
 
   /// Creates a single directory.
@@ -200,12 +192,11 @@ export namespace Fs {
     let mut segmentStart: u64 = isAbsolute ? 1 : 0;
     let mut index: u64 = segmentStart;
     while (index <= len) {
-      let mut isSeparator: boolean = false;
-      if (index == len) {
-        isSeparator = true;
-      } else {
-        let ptr: *mut u8 = @pointerFromInteger<*mut u8>(@integerFromPointer(rawPath) + index);
-        let b: u8 = @read<u8>(ptr);
+      let mut isSeparator: boolean = index == len;
+      if (!isSeparator) {
+        let b: u8 = @integerFromPointer(rawPath) + index
+          |> @pointerFromInteger<*mut u8>(_)
+          |> @read<u8>(_);
         isSeparator = b == 47;
       }
 
@@ -221,10 +212,7 @@ export namespace Fs {
           current.push(&segment);
 
           if (!Fs::exists(current.toStr())) {
-            let mkdirResult: Result<boolean, Io::IoError> = Fs::Sys::Unix::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE);
-            if (mkdirResult.isError()) {
-              return Result::ERROR(mkdirResult.unwrapErr());
-            }
+            let _ = Fs::Sys::Unix::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE)!;
           }
         }
 
