@@ -411,3 +411,27 @@ void ignis_eprint(const IgnisString *s);
  * Writes the string to stderr followed by a newline.
  */
 void ignis_eprintln(const IgnisString *s);
+
+// =============================================================================
+// Filesystem helpers (rt_fs.c)
+// =============================================================================
+
+int ignis_stat_call(
+    const char *path,
+    u64 *out_dev, u64 *out_ino, u32 *out_mode, u64 *out_nlink,
+    u32 *out_uid, u32 *out_gid, i64 *out_size,
+    i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
+    i64 *out_blksize, i64 *out_blocks);
+
+int ignis_fstat_call(
+    int fd,
+    u64 *out_dev, u64 *out_ino, u32 *out_mode, u64 *out_nlink,
+    u32 *out_uid, u32 *out_gid, i64 *out_size,
+    i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
+    i64 *out_blksize, i64 *out_blocks);
+
+int ignis_open3(const char *pathname, int flags, u32 mode);
+
+const char *ignis_dirent_name(void *entry);
+u64 ignis_dirent_ino(void *entry);
+u8 ignis_dirent_type(void *entry);

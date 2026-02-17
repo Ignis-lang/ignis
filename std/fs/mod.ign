@@ -1,0 +1,87 @@
+//!
+//! # Filesystem
+//!
+//! Filesystem operations with structured error handling.
+//!
+//! All fallible operations return `Result<T, Io::IoError>` instead of
+//! raw errno codes. Import `Io` alongside `Fs` to inspect errors.
+//!
+//! ## Module Tree
+//!
+//! ```
+//! std::fs                     (this file — hub, re-exports Fs namespace)
+//!   std::fs::sys::mod         (platform dispatch layer)
+//!     std::fs::sys::unix      (POSIX syscall wrappers — Linux/glibc)
+//! ```
+//!
+//! ## Sub-namespaces
+//!
+//! | Namespace           | Source file   | Description                                |
+//! |---------------------| -------------|------------------------------------------  |
+//! | `Fs::Sys::Unix`     | sys/unix.ign | 1:1 POSIX syscall wrappers returning Result |
+//!
+//! ## Types
+//!
+//! | Type                       | Description                                         |
+//! |----------------------------|-----------------------------------------------------|
+//! | `Fs::Sys::Unix::Stat`      | File metadata from `stat(2)` / `fstat(2)`           |
+//! | `Fs::Sys::Unix::DirEntry`  | Single directory entry from `readdir(3)`            |
+//!
+//! ## Constants
+//!
+//! Open flags, seek modes, permission bits, and dirent type constants
+//! are available under `Fs::Sys::Unix`. See `sys/unix.ign` for the
+//! full list.
+//!
+//! ## Platform
+//!
+//! Currently Linux/glibc only. The `Fs::Sys` layer is designed so
+//! future targets (musl, macOS, Windows) can add sibling modules
+//! (`sys/macos.ign`, `sys/windows.ign`) and the dispatch hub
+//! (`sys/mod.ign`) can select at compile time via `@platform` /
+//! `@target` once those attributes exist.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Fs from "std::fs";
+//! import Io from "std::io";
+//!
+//! function main(): i32 {
+//!   // stat a file
+//!   let result: Result<Fs::Sys::Unix::Stat, Io::IoError> =
+//!     Fs::Sys::Unix::stat("/etc/hosts");
+//!
+//!   if result.isOk() {
+//!     let st: Fs::Sys::Unix::Stat = result.unwrap();
+//!     // st.size, st.mode, st.uid, st.gid, ...
+//!     return 0;
+//!   }
+//!   return 1;
+//! }
+//! ```
+//!
+//! ```ignis
+//! import Fs from "std::fs";
+//! import Io from "std::io";
+//!
+//! function main(): i32 {
+//!   // write a file
+//!   let fd: Result<i32, Io::IoError> = Fs::Sys::Unix::open(
+//!     "/tmp/hello.txt",
+//!     Fs::Sys::Unix::O_WRONLY | Fs::Sys::Unix::O_CREAT | Fs::Sys::Unix::O_TRUNC,
+//!     438,
+//!   );
+//!   if fd.isError() { return 1; }
+//!
+//!   let rawFd: i32 = fd.unwrap();
+//!   let msg: *u8 = "hello\n";
+//!   Fs::Sys::Unix::write(rawFd, msg as *mut void, 6);
+//!   Fs::Sys::Unix::close(rawFd);
+//!   return 0;
+//! }
+//! ```
+
+import _ from "std::fs::sys";
+
+export namespace Fs {}

@@ -1,0 +1,528 @@
+//!
+//! # Unix Filesystem Syscall Layer
+//!
+//! Thin 1:1 wrappers around POSIX filesystem syscalls, returning
+//! `Result<T, Io::IoError>` instead of raw errno-based error codes.
+//!
+//! All public API lives under the `Fs::Sys::Unix` namespace.
+//!
+//! ## Functions
+//!
+//! | Function   | Wraps              | Returns                           |
+//! |------------|--------------------|-----------------------------------|
+//! | `open`     | `open(2)` 3-arg    | `Result<i32, IoError>`            |
+//! | `close`    | `close(2)`         | `Result<boolean, IoError>`        |
+//! | `read`     | `read(2)`          | `Result<i64, IoError>`            |
+//! | `write`    | `write(2)`         | `Result<i64, IoError>`            |
+//! | `lseek`    | `lseek(2)`         | `Result<i64, IoError>`            |
+//! | `stat`     | `stat(2)`          | `Result<Stat, IoError>`           |
+//! | `fstat`    | `fstat(2)`         | `Result<Stat, IoError>`           |
+//! | `mkdir`    | `mkdir(2)`         | `Result<boolean, IoError>`        |
+//! | `unlink`   | `unlink(2)`        | `Result<boolean, IoError>`        |
+//! | `rmdir`    | `rmdir(2)`         | `Result<boolean, IoError>`        |
+//! | `rename`   | `rename(2)`        | `Result<boolean, IoError>`        |
+//! | `opendir`  | `opendir(3)`       | `Result<DirPtr, IoError>`         |
+//! | `readdir`  | `readdir(3)`       | `Option<DirEntry>`                |
+//! | `closedir` | `closedir(3)`      | `void`                            |
+//!
+//! ## Types
+//!
+//! | Type       | Description                                                   |
+//! |------------|---------------------------------------------------------------|
+//! | `Stat`     | File metadata: dev, ino, mode, nlink, uid, gid, size, times   |
+//! | `DirEntry` | Directory entry: name (borrowed `str`), ino, fileType         |
+//!
+//! ## Constants
+//!
+//! | Group          | Constants                                                    |
+//! |----------------|--------------------------------------------------------------|
+//! | Open flags     | `O_RDONLY`, `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, ... |
+//! | Seek modes     | `SEEK_SET`, `SEEK_CUR`, `SEEK_END`                           |
+//! | File type mask | `S_IFMT`, `S_IFREG`, `S_IFDIR`, `S_IFLNK`                   |
+//! | Permission bits| `S_IRWXU`, `S_IRUSR`, `S_IWUSR`, ... (user/group/other)      |
+//! | Dirent types   | `DT_UNKNOWN`, `DT_REG`, `DT_DIR`, `DT_LNK`                  |
+//!
+//! ## Design Notes
+//!
+//! Functions that succeed without a meaningful value (close, mkdir, etc.)
+//! return `Result<boolean, Io::IoError>` with `Result::OK(true)` because
+//! `void` is not a value in Ignis (`Result<void, E>` is a parse error).
+//!
+//! ## C Runtime Dependency
+//!
+//! Six functions live in C (`std/runtime/internal/rt_fs.c`) because they
+//! cannot be expressed in pure Ignis today:
+//!
+//! | C function          | Why C is needed                                    |
+//! |---------------------|----------------------------------------------------|
+//! | `ignis_stat_call`   | `struct stat` layout is platform-dependent          |
+//! | `ignis_fstat_call`  | same                                                |
+//! | `ignis_open3`       | `open(2)` is variadic; Ignis has no variadic calls  |
+//! | `ignis_dirent_name` | `struct dirent` layout is platform-dependent        |
+//! | `ignis_dirent_ino`  | same                                                |
+//! | `ignis_dirent_type` | same                                                |
+//!
+//! Everything else (`read`, `write`, `close`, `lseek`, `unlink`, `rmdir`,
+//! `rename`, `mkdir`, `opendir`, `closedir`, `readdir`) calls libc
+//! directly through Ignis `extern` blocks.
+//!
+//! When `@platform` / `@target` / `@feature` attributes land, the C
+//! helpers can be replaced with platform-conditional Ignis code.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Fs from "std::fs";
+//! import Io from "std::io";
+//!
+//! function main(): i32 {
+//!   let fd: Result<i32, Io::IoError> = Fs::Sys::Unix::open(
+//!     "/tmp/test.txt",
+//!     Fs::Sys::Unix::O_WRONLY | Fs::Sys::Unix::O_CREAT | Fs::Sys::Unix::O_TRUNC,
+//!     438,  // 0o666
+//!   );
+//!   if fd.isError() { return 1; }
+//!
+//!   let rawFd: i32 = fd.unwrap();
+//!   let msg: *u8 = "hello from Ignis\n";
+//!   let n: Result<i64, Io::IoError> = Fs::Sys::Unix::write(rawFd, msg as *mut void, 17);
+//!   Fs::Sys::Unix::close(rawFd);
+//!   return 0;
+//! }
+//! ```
+
+import CType from "std::libc::primitives";
+import Io from "std::io";
+
+// =============================================================================
+// Extern blocks — direct C symbols
+//
+// These extern blocks re-declare libc functions locally instead of calling
+// them through `LibC::*`.  This is a workaround for a codegen bug where
+// cross-module namespace function calls emit wrong C symbols
+// (e.g. `LibC_File_read` instead of `read`).
+//
+// TODO(codegen): Once cross-module extern calls emit correct symbols,
+// remove these blocks and call LibC::File / LibC::Errno directly.
+// =============================================================================
+
+// POSIX file I/O primitives and related constants (fcntl.h, unistd.h,
+// sys/stat.h).  Every symbol here is a real C name resolved by the linker.
+extern __fs_io {
+  function read(fd: i32, buf: *mut void, count: u64): i64;
+  function write(fd: i32, buf: *mut void, count: u64): i64;
+  function close(fd: i32): i32;
+  function lseek(fd: i32, offset: i64, whence: i32): i64;
+  function unlink(pathname: *u8): i32;
+  function rmdir(pathname: *u8): i32;
+  function rename(oldpath: *u8, newpath: *u8): i32;
+  function mkdir(pathname: *u8, mode: u32): i32;
+
+  const SEEK_SET: i32;
+  const SEEK_CUR: i32;
+  const SEEK_END: i32;
+
+  const O_RDONLY: i32;
+  const O_WRONLY: i32;
+  const O_RDWR: i32;
+  const O_CREAT: i32;
+  const O_TRUNC: i32;
+  const O_APPEND: i32;
+  const O_EXCL: i32;
+
+  // S_IS* mode test macros are not available as extern consts.
+  // We expose the raw bit masks instead.
+  const S_IFMT: u32;
+  const S_IFREG: u32;
+  const S_IFDIR: u32;
+  const S_IFLNK: u32;
+
+  const S_IRWXU: u32;
+  const S_IRUSR: u32;
+  const S_IWUSR: u32;
+  const S_IXUSR: u32;
+  const S_IRWXG: u32;
+  const S_IRGRP: u32;
+  const S_IWGRP: u32;
+  const S_IXGRP: u32;
+  const S_IRWXO: u32;
+  const S_IROTH: u32;
+  const S_IWOTH: u32;
+  const S_IXOTH: u32;
+}
+
+// POSIX directory stream operations (dirent.h).
+extern __fs_dir {
+  function opendir(name: *u8): CType::DirPtr;
+  function closedir(dirp: CType::DirPtr): i32;
+
+  // readdir returns a pointer to an internal dirent struct.
+  // We treat it as *mut void and use C helpers to extract fields.
+  function readdir(dirp: CType::DirPtr): *mut void;
+}
+
+// errno access and strerror.  Duplicated here (same as io/error.ign's
+// __io_error block) because cross-module extern calls are subject to the
+// same codegen symbol-mangling bug described above.
+extern __fs_errno {
+  @externName("__errno_location")
+  function errno_location(): *mut i32;
+
+  function strerror(errnum: i32): *u8;
+
+  const ENOENT: i32;
+  const EACCES: i32;
+  const EEXIST: i32;
+  const EINVAL: i32;
+  const EINTR: i32;
+  const EAGAIN: i32;
+  const ETIMEDOUT: i32;
+}
+
+// C runtime helpers implemented in std/runtime/internal/rt_fs.c.
+//
+// These exist because:
+//   - ignis_stat_call / ignis_fstat_call: `struct stat` layout is
+//     platform-dependent; Ignis records cannot safely mirror it.
+//   - ignis_open3: `open(2)` is variadic; Ignis has no variadic calls.
+//   - ignis_dirent_name/ino/type: `struct dirent` layout is
+//     platform-dependent (same reason as stat).
+extern __fs_rt {
+  function ignis_stat_call(
+    path: *u8,
+    outDev: &mut u64, outIno: &mut u64, outMode: &mut u32, outNlink: &mut u64,
+    outUid: &mut u32, outGid: &mut u32, outSize: &mut i64,
+    outAtime: &mut i64, outMtime: &mut i64, outCtime: &mut i64,
+    outBlksize: &mut i64, outBlocks: &mut i64,
+  ): i32;
+
+  function ignis_fstat_call(
+    fd: i32,
+    outDev: &mut u64, outIno: &mut u64, outMode: &mut u32, outNlink: &mut u64,
+    outUid: &mut u32, outGid: &mut u32, outSize: &mut i64,
+    outAtime: &mut i64, outMtime: &mut i64, outCtime: &mut i64,
+    outBlksize: &mut i64, outBlocks: &mut i64,
+  ): i32;
+
+  function ignis_open3(pathname: *u8, flags: i32, mode: u32): i32;
+
+  function ignis_dirent_name(entry: *mut void): *u8;
+  function ignis_dirent_ino(entry: *mut void): u64;
+  function ignis_dirent_type(entry: *mut void): u8;
+}
+
+// =============================================================================
+// Public types and namespace
+// =============================================================================
+
+export namespace Fs::Sys::Unix {
+
+  // ---- Stat record ----
+
+  /// File metadata returned by `stat` and `fstat`.
+  ///
+  /// Fields correspond to POSIX `struct stat` members. Times are
+  /// seconds since the Unix epoch (tv_sec only; sub-second precision
+  /// is not exposed).
+  record Stat {
+    public dev: u64;
+    public ino: u64;
+    public mode: u32;
+    public nlink: u64;
+    public uid: u32;
+    public gid: u32;
+    public size: i64;
+    public atime: i64;
+    public mtime: i64;
+    public ctime: i64;
+    public blksize: i64;
+    public blocks: i64;
+  }
+
+  // ---- DirEntry record ----
+
+  /// Single entry read from a directory stream via `readdir`.
+  ///
+  /// The `name` field is borrowed from the internal C dirent buffer —
+  /// valid only until the next `readdir` call or `closedir`.
+  record DirEntry {
+    /// File name (borrowed — valid until next readdir/closedir).
+    public name: str;
+
+    /// Inode number.
+    public ino: u64;
+
+    /// File type hint (DT_REG, DT_DIR, etc.). 0 if unknown.
+    public fileType: u8;
+  }
+
+  // ---- Open flags (re-exported from extern consts) ----
+
+  const SEEK_SET: i32 = __fs_io::SEEK_SET;
+  const SEEK_CUR: i32 = __fs_io::SEEK_CUR;
+  const SEEK_END: i32 = __fs_io::SEEK_END;
+
+  const O_RDONLY: i32 = __fs_io::O_RDONLY;
+  const O_WRONLY: i32 = __fs_io::O_WRONLY;
+  const O_RDWR: i32 = __fs_io::O_RDWR;
+  const O_CREAT: i32 = __fs_io::O_CREAT;
+  const O_TRUNC: i32 = __fs_io::O_TRUNC;
+  const O_APPEND: i32 = __fs_io::O_APPEND;
+  const O_EXCL: i32 = __fs_io::O_EXCL;
+
+  // ---- Mode bits ----
+
+  const S_IFMT: u32 = __fs_io::S_IFMT;
+  const S_IFREG: u32 = __fs_io::S_IFREG;
+  const S_IFDIR: u32 = __fs_io::S_IFDIR;
+  const S_IFLNK: u32 = __fs_io::S_IFLNK;
+
+  const S_IRWXU: u32 = __fs_io::S_IRWXU;
+  const S_IRUSR: u32 = __fs_io::S_IRUSR;
+  const S_IWUSR: u32 = __fs_io::S_IWUSR;
+  const S_IXUSR: u32 = __fs_io::S_IXUSR;
+  const S_IRWXG: u32 = __fs_io::S_IRWXG;
+  const S_IRGRP: u32 = __fs_io::S_IRGRP;
+  const S_IWGRP: u32 = __fs_io::S_IWGRP;
+  const S_IXGRP: u32 = __fs_io::S_IXGRP;
+  const S_IRWXO: u32 = __fs_io::S_IRWXO;
+  const S_IROTH: u32 = __fs_io::S_IROTH;
+  const S_IWOTH: u32 = __fs_io::S_IWOTH;
+  const S_IXOTH: u32 = __fs_io::S_IXOTH;
+
+  // ---- dirent type constants ----
+
+  /// Unknown file type.
+  const DT_UNKNOWN: u8 = 0;
+  /// Regular file.
+  const DT_REG: u8 = 8;
+  /// Directory.
+  const DT_DIR: u8 = 4;
+  /// Symbolic link.
+  const DT_LNK: u8 = 10;
+
+  // =========================================================================
+  // errno helper (private)
+  // =========================================================================
+
+  function lastError(): Io::IoError {
+    let rawErrno: i32 = @read<i32>(__fs_errno::errno_location());
+    let msg: str = __fs_errno::strerror(rawErrno) as str;
+
+    let mut kind: Io::ErrorKind = match (rawErrno)  {
+      k if k == __fs_errno::ENOENT -> Io::ErrorKind::NOT_FOUND,
+      k if k == __fs_errno::EACCES -> Io::ErrorKind::PERMISSION_DENIED,
+      k if k == __fs_errno::EEXIST -> Io::ErrorKind::ALREADY_EXISTS,
+      k if k == __fs_errno::EINVAL -> Io::ErrorKind::INVALID_INPUT,
+      k if k == __fs_errno::EINTR -> Io::ErrorKind::INTERRUPTED,
+      k if k == __fs_errno::EAGAIN -> Io::ErrorKind::WOULD_BLOCK,
+      k if k == __fs_errno::ETIMEDOUT -> Io::ErrorKind::TIMED_OUT,
+      _ -> Io::ErrorKind::OTHER,
+    };
+
+
+    return Io::IoError { kind: kind, raw: rawErrno, message: msg };
+  }
+
+  // =========================================================================
+  // Syscall wrappers
+  // =========================================================================
+
+  /// Opens `path` with `flags` and `mode`. Returns the fd on success.
+  ///
+  /// Uses the 3-argument `open(2)` so `mode` is always available for
+  /// `O_CREAT`. Pass 0 for `mode` when not creating.
+  function open(path: str, flags: i32, mode: u32): Result<i32, Io::IoError> {
+    let fd: i32 = __fs_rt::ignis_open3(path as *u8, flags, mode);
+    if (fd == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(fd);
+  }
+
+  /// Closes file descriptor `fd`.
+  function close(fd: i32): Result<boolean, Io::IoError> {
+    let rc: i32 = __fs_io::close(fd);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Reads up to `count` bytes from `fd` into `buf`.
+  ///
+  /// Returns the number of bytes actually read (0 means EOF).
+  function read(fd: i32, buf: *mut void, count: u64): Result<i64, Io::IoError> {
+    let n: i64 = __fs_io::read(fd, buf, count);
+    if (n == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(n);
+  }
+
+  /// Writes up to `count` bytes from `buf` to `fd`.
+  ///
+  /// Returns the number of bytes actually written.
+  function write(fd: i32, buf: *mut void, count: u64): Result<i64, Io::IoError> {
+    let n: i64 = __fs_io::write(fd, buf, count);
+    if (n == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(n);
+  }
+
+  /// Repositions the file offset of `fd`.
+  ///
+  /// `whence` is `SEEK_SET`, `SEEK_CUR`, or `SEEK_END`.
+  function lseek(fd: i32, offset: i64, whence: i32): Result<i64, Io::IoError> {
+    let pos: i64 = __fs_io::lseek(fd, offset, whence);
+    if (pos == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(pos);
+  }
+
+  /// Returns file metadata for `path`.
+  function stat(path: str): Result<Stat, Io::IoError> {
+    let mut dev: u64 = 0;
+    let mut ino: u64 = 0;
+    let mut mode: u32 = 0;
+    let mut nlink: u64 = 0;
+    let mut uid: u32 = 0;
+    let mut gid: u32 = 0;
+    let mut size: i64 = 0;
+    let mut atime: i64 = 0;
+    let mut mtime: i64 = 0;
+    let mut ctime: i64 = 0;
+    let mut blksize: i64 = 0;
+    let mut blocks: i64 = 0;
+
+    let rc: i32 = __fs_rt::ignis_stat_call(
+      path as *u8,
+      &mut dev, &mut ino, &mut mode, &mut nlink,
+      &mut uid, &mut gid, &mut size,
+      &mut atime, &mut mtime, &mut ctime,
+      &mut blksize, &mut blocks,
+    );
+
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+
+    return Result::OK(Stat {
+      dev: dev, ino: ino, mode: mode, nlink: nlink,
+      uid: uid, gid: gid, size: size,
+      atime: atime, mtime: mtime, ctime: ctime,
+      blksize: blksize, blocks: blocks,
+    });
+  }
+
+  /// Returns file metadata for open file descriptor `fd`.
+  function fstat(fd: i32): Result<Stat, Io::IoError> {
+    let mut dev: u64 = 0;
+    let mut ino: u64 = 0;
+    let mut mode: u32 = 0;
+    let mut nlink: u64 = 0;
+    let mut uid: u32 = 0;
+    let mut gid: u32 = 0;
+    let mut size: i64 = 0;
+    let mut atime: i64 = 0;
+    let mut mtime: i64 = 0;
+    let mut ctime: i64 = 0;
+    let mut blksize: i64 = 0;
+    let mut blocks: i64 = 0;
+
+    let rc: i32 = __fs_rt::ignis_fstat_call(
+      fd,
+      &mut dev, &mut ino, &mut mode, &mut nlink,
+      &mut uid, &mut gid, &mut size,
+      &mut atime, &mut mtime, &mut ctime,
+      &mut blksize, &mut blocks,
+    );
+
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+
+    return Result::OK(Stat {
+      dev: dev, ino: ino, mode: mode, nlink: nlink,
+      uid: uid, gid: gid, size: size,
+      atime: atime, mtime: mtime, ctime: ctime,
+      blksize: blksize, blocks: blocks,
+    });
+  }
+
+  /// Creates a directory at `path` with the given permission `mode`.
+  function mkdir(path: str, mode: u32): Result<boolean, Io::IoError> {
+    let rc: i32 = __fs_io::mkdir(path as *u8, mode);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Removes the file at `path`.
+  function unlink(path: str): Result<boolean, Io::IoError> {
+    let rc: i32 = __fs_io::unlink(path as *u8);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Removes the empty directory at `path`.
+  function rmdir(path: str): Result<boolean, Io::IoError> {
+    let rc: i32 = __fs_io::rmdir(path as *u8);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Renames `oldPath` to `newPath`.
+  function rename(oldPath: str, newPath: str): Result<boolean, Io::IoError> {
+    let rc: i32 = __fs_io::rename(oldPath as *u8, newPath as *u8);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Opens a directory stream for reading entries.
+  ///
+  /// The returned `DirPtr` must be closed with `closedir` when done.
+  function opendir(path: str): Result<CType::DirPtr, Io::IoError> {
+    let dirp: CType::DirPtr = __fs_dir::opendir(path as *u8);
+    if (dirp == null) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(dirp);
+  }
+
+  /// Reads the next entry from a directory stream.
+  ///
+  /// Returns `Option::NONE` when the end of the directory is reached.
+  /// The returned `DirEntry` borrows its `name` from the internal
+  /// dirent buffer — valid only until the next `readdir` or `closedir`.
+  ///
+  /// Note: this does not distinguish "end of directory" from "error".
+  /// For fine-grained error checking, clear errno before calling and
+  /// check it after getting `NONE`.
+  function readdir(dirp: CType::DirPtr): Option<DirEntry> {
+    let entry: *mut void = __fs_dir::readdir(dirp);
+    if (entry == null) {
+      return Option::NONE;
+    }
+
+    let name: str = __fs_rt::ignis_dirent_name(entry) as str;
+    let ino: u64 = __fs_rt::ignis_dirent_ino(entry);
+    let fileType: u8 = __fs_rt::ignis_dirent_type(entry);
+
+    return Option::SOME(DirEntry { name: name, ino: ino, fileType: fileType });
+  }
+
+  /// Closes a directory stream opened with `opendir`.
+  function closedir(dirp: CType::DirPtr): void {
+    __fs_dir::closedir(dirp);
+  }
+}

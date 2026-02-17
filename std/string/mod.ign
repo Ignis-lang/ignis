@@ -44,6 +44,7 @@
 //! |---------------|----------------------------------------|------------------------------------|
 //! | `forEachByte` | `(u8) -> void`                         | Iterate over every byte            |
 //! | `findByte`    | `(u8) -> boolean` → `Option<u64>`      | Index of first matching byte       |
+//! | `findLastByte`| `(u8) -> boolean` → `Option<u64>`      | Index of last matching byte        |
 //! | `trimWhere`   | `(u8) -> boolean` → `String`           | Strip leading/trailing bytes       |
 //! | `split`       | `(u8) -> boolean` → `Vector<String>`   | Split into segments                |
 //!
@@ -719,6 +720,45 @@ export record String {
         return Option::SOME(i);
       }
       i += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Returns the byte index of the **last** byte matching `predicate`,
+  /// or `Option::NONE` if no byte matches.
+  ///
+  /// Scans the string from back to front.
+  ///
+  /// # Arguments
+  ///
+  /// * `predicate` - Callback that receives a byte and returns `true` if
+  ///   it matches the search criterion.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import String from "std::string";
+  /// import Option from "std::option";
+  ///
+  /// let s: String = String::create("/usr/local/bin");
+  ///
+  /// // Find the last slash (byte 47)
+  /// let idx: Option<u64> = s.findLastByte(|b: u8| -> boolean { return b == 47; });
+  /// // idx == Option::SOME(10)
+  ///
+  /// // Find a byte that doesn't exist
+  /// let missing: Option<u64> = s.findLastByte(|b: u8| -> boolean { return b == 0; });
+  /// // missing == Option::NONE
+  /// ```
+  public findLastByte(&self, @noescape predicate: (u8) -> boolean): Option<u64> {
+    let mut i: i64 = (self.len as i64) - 1;
+
+    while (i >= 0) {
+      if (predicate(self.data[i as u64])) {
+        return Option::SOME(i as u64);
+      }
+      i -= 1;
     }
 
     return Option::NONE;

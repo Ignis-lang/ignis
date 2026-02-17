@@ -1,0 +1,186 @@
+//!
+//! # I/O Error Types
+//!
+//! Structured error types for I/O operations, exposed as `Io::ErrorKind`
+//! and `Io::IoError`.
+//!
+//! ## Types
+//!
+//! | Type             | Description                                          |
+//! |------------------|------------------------------------------------------|
+//! | `Io::ErrorKind`  | Category of the I/O error (enum, 8 variants)         |
+//! | `Io::IoError`    | Full error: kind + raw errno + human-readable message |
+//!
+//! ## ErrorKind Variants
+//!
+//! | Variant             | Errno            | Description                          |
+//! |---------------------|------------------|--------------------------------------|
+//! | `NOT_FOUND`         | `ENOENT`         | No such file or directory            |
+//! | `PERMISSION_DENIED` | `EACCES`         | Permission denied                    |
+//! | `ALREADY_EXISTS`    | `EEXIST`         | File or resource already exists      |
+//! | `INVALID_INPUT`     | `EINVAL`         | Invalid argument                     |
+//! | `INTERRUPTED`       | `EINTR`          | Operation interrupted by signal      |
+//! | `WOULD_BLOCK`       | `EAGAIN`         | Resource temporarily unavailable     |
+//! | `TIMED_OUT`         | `ETIMEDOUT`      | Connection or operation timed out    |
+//! | `OTHER`             | anything else    | Unmapped errno value                 |
+//!
+//! ## Construction
+//!
+//! | Method                         | Description                              |
+//! |--------------------------------|------------------------------------------|
+//! | `Io::IoError::fromErrno(raw)`  | Map raw errno to kind + strerror message |
+//! | `Io::IoError::lastError()`     | Read thread-local errno, then fromErrno  |
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Io from "std::io";
+//! import LibC from "std::libc";
+//!
+//! function main(): i32 {
+//!   let fd: i32 = LibC::File::open("/nonexistent", LibC::File::O_RDONLY);
+//!   if (fd == -1) {
+//!     let err: Io::IoError = Io::IoError::lastError();
+//!     // err.kind == Io::ErrorKind::NOT_FOUND
+//!     // err.raw  == 2  (ENOENT)
+//!     // err.message == "No such file or directory"
+//!     return 1;
+//!   }
+//!   return 0;
+//! }
+//! ```
+
+extern __io_error {
+  @externName("__errno_location")
+  function errno_location(): *mut i32;
+
+  function strerror(errnum: i32): *u8;
+
+  const ENOENT: i32;
+  const EACCES: i32;
+  const EEXIST: i32;
+  const EINVAL: i32;
+  const EINTR: i32;
+  const EAGAIN: i32;
+  const ETIMEDOUT: i32;
+}
+
+export namespace Io {
+  /// Category of an I/O error.
+  ///
+  /// Each variant maps to one or more POSIX errno values. The `OTHER`
+  /// variant is the catch-all for errno values not explicitly mapped.
+  enum ErrorKind {
+    /// No such file or directory (`ENOENT`).
+    NOT_FOUND,
+
+    /// Permission denied (`EACCES`).
+    PERMISSION_DENIED,
+
+    /// File or resource already exists (`EEXIST`).
+    ALREADY_EXISTS,
+
+    /// Invalid argument (`EINVAL`).
+    INVALID_INPUT,
+
+    /// Operation interrupted by signal (`EINTR`).
+    INTERRUPTED,
+
+    /// Resource temporarily unavailable (`EAGAIN` / `EWOULDBLOCK`).
+    WOULD_BLOCK,
+
+    /// Connection or operation timed out (`ETIMEDOUT`).
+    TIMED_OUT,
+
+    /// Unmapped errno value.
+    OTHER,
+  }
+
+  /// Structured error from an I/O operation.
+  ///
+  /// Wraps a raw POSIX `errno` value with a categorized `ErrorKind`
+  /// and a human-readable message from `strerror(3)`.
+  ///
+  /// # Fields
+  ///
+  /// - `kind`    -- categorized error (for programmatic branching)
+  /// - `raw`     -- raw errno value (for logging or OS-specific checks)
+  /// - `message` -- human-readable description from `strerror`
+  ///
+  /// # Construction
+  ///
+  /// Use `fromErrno` when you already captured the errno value, or
+  /// `lastError` to read the thread-local errno automatically:
+  ///
+  /// ```ignis
+  /// // After a failed syscall:
+  /// let err: Io::IoError = Io::IoError::lastError();
+  ///
+  /// // Or with an explicit errno:
+  /// let err: Io::IoError = Io::IoError::fromErrno(2);
+  /// ```
+  record IoError {
+    /// Categorized error kind.
+    kind: ErrorKind;
+
+    /// Raw POSIX errno value.
+    raw: i32;
+
+    /// Human-readable error description from `strerror(3)`.
+    ///
+    /// Points to a static buffer managed by the C runtime. Valid for
+    /// the program's lifetime; no allocation or deallocation needed.
+    message: str;
+
+    /// Creates an `IoError` from a raw POSIX errno value.
+    ///
+    /// Maps the errno to an `ErrorKind` and calls `strerror(3)` to
+    /// obtain the human-readable message.
+    ///
+    /// # Arguments
+    ///
+    /// * `rawErrno` - Raw POSIX errno value (e.g. from `LibC::Errno::get()`)
+    ///
+    /// # Returns
+    ///
+    /// Fully populated `IoError` with kind, raw value, and message.
+    public static fromErrno(rawErrno: i32): IoError {
+      let msg: str = __io_error::strerror(rawErrno) as str;
+
+      let mut kind: ErrorKind = match (rawErrno) {
+        k if k == __io_error::ENOENT -> ErrorKind::NOT_FOUND,
+        k if k == __io_error::EACCES -> ErrorKind::PERMISSION_DENIED,
+        k if k == __io_error::EEXIST -> ErrorKind::ALREADY_EXISTS,
+        k if k == __io_error::EINVAL -> ErrorKind::INVALID_INPUT,
+        k if k == __io_error::EINTR  -> ErrorKind::INTERRUPTED,
+        k if k == __io_error::EAGAIN -> ErrorKind::WOULD_BLOCK,
+        k if k == __io_error::ETIMEDOUT -> ErrorKind::TIMED_OUT,
+        _ -> ErrorKind::OTHER,
+      };
+
+      return IoError { kind: kind, raw: rawErrno, message: msg };
+    }
+
+
+    /// Reads the thread-local `errno` and creates an `IoError`.
+    ///
+    /// Convenience wrapper: reads `errno` via `__errno_location()`,
+    /// then delegates to `fromErrno`.
+    ///
+    /// # When to use
+    ///
+    /// Call this immediately after a failed syscall, before any other
+    /// call that might overwrite `errno`:
+    ///
+    /// ```ignis
+    /// let fd: i32 = LibC::File::open("/missing", LibC::File::O_RDONLY);
+    /// if (fd == -1) {
+    ///   let err: Io::IoError = Io::IoError::lastError();  // reads errno NOW
+    /// }
+    /// ```
+    public static lastError(): IoError {
+      let rawErrno: i32 = @read<i32>(__io_error::errno_location());
+      return IoError::fromErrno(rawErrno);
+    }
+  }
+}

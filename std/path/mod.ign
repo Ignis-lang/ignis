@@ -1,0 +1,427 @@
+//!
+//! # Filesystem Paths
+//!
+//! Owned, mutable filesystem path type for building, inspecting, and
+//! decomposing POSIX paths.
+//!
+//! All public API lives under the `Path` namespace (imported as
+//! `Path` from `"std::path"`).
+//!
+//! ## Types
+//!
+//! | Type       | Description                                        |
+//! |------------|----------------------------------------------------|
+//! | `PathBuf`  | Owned path backed by a `String` — the main type    |
+//!
+//! ## Constructors
+//!
+//! | Method                   | Source        | Cost               |
+//! |--------------------------|---------------|--------------------|
+//! | `PathBuf::new()`         | (empty)       | One String alloc   |
+//! | `PathBuf::create(s)`     | `str` literal | Copy into String   |
+//! | `PathBuf::fromString(s)` | `&String`     | Clone the String   |
+//!
+//! ## Query Methods
+//!
+//! | Method        | Returns          | Description                             |
+//! |---------------|------------------|-----------------------------------------|
+//! | `isEmpty`     | `boolean`        | True if the path has no bytes           |
+//! | `isAbsolute`  | `boolean`        | True if the path starts with `/`        |
+//! | `asStr`       | `str`            | Borrow as `const char*` (NUL-terminated)|
+//! | `toString`    | `String`         | Clone the inner String                  |
+//! | `fileName`    | `Option<String>` | Last component after final `/`          |
+//! | `extension`   | `Option<String>` | After last `.` in fileName              |
+//! | `parent`      | `Option<PathBuf>`| Everything before last component        |
+//!
+//! ## Mutation Methods
+//!
+//! | Method   | Signature                          | Description                    |
+//! |----------|------------------------------------|--------------------------------|
+//! | `push`   | `push(&mut self, part: str): void` | Append a path component        |
+//! | `pop`    | `pop(&mut self): boolean`          | Remove the last component      |
+//!
+//! ## Operations (return new PathBuf)
+//!
+//! | Method   | Signature                           | Description                   |
+//! |----------|-------------------------------------|-------------------------------|
+//! | `join`   | `join(&self, part: str): PathBuf`   | Clone self, then push `part`  |
+//!
+//! ## Platform Notes
+//!
+//! This module is **POSIX-oriented**: the separator is `/` and there is
+//! no drive-letter or UNC prefix handling.  Windows support will be added
+//! when `@platform` attributes land.
+//!
+//! ## Design Decisions
+//!
+//! - **No `Path` (borrowed view) type yet.**  Ignis `str` is `const char*`
+//!   with no length — it cannot represent a sub-range without copying.
+//!   A borrowed `Path` will be added when string slices land.
+//! - `fileName`, `extension`, and `parent` return **owned** values
+//!   (String / PathBuf) because there is no zero-copy substring today.
+//! - `push` with an absolute path (`/...`) **replaces** self entirely,
+//!   matching POSIX `join` semantics (and Rust's `PathBuf::push`).
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Path from "std::path";
+//! import Option from "std::option";
+//!
+//! function main(): i32 {
+//!   let mut p: Path::PathBuf = Path::PathBuf::create("/usr/local");
+//!   p.push("bin");
+//!   p.push("ignis");
+//!
+//!   // p.asStr() == "/usr/local/bin/ignis"
+//!
+//!   let name: Option<String> = p.fileName();
+//!   // name == Option::SOME("ignis")
+//!
+//!   let ext: Option<String> = p.extension();
+//!   // ext == Option::NONE (no extension)
+//!
+//!   let par: Option<Path::PathBuf> = p.parent();
+//!   // par.unwrap().asStr() == "/usr/local/bin"
+//!
+//!   p.pop();
+//!   // p.asStr() == "/usr/local/bin"
+//!
+//!   let joined: Path::PathBuf = p.join("rustc");
+//!   // joined.asStr() == "/usr/local/bin/rustc"
+//!
+//!   return 0;
+//! }
+//! ```
+
+import String from "std::string";
+import Option from "std::option";
+
+// POSIX separator constant.
+// When @platform attributes land, this can become conditional.
+const SEP: char = '/';
+const DOT_BYTE: u8 = 46;
+
+export namespace Path {
+
+  /// Owned, mutable filesystem path.
+  ///
+  /// Backed by a `String` — all mutation goes through String methods.
+  /// Drop frees the underlying String buffer.
+  @implements(Drop, Clone)
+  record PathBuf {
+    public data: String;
+
+    // -----------------------------------------------------------------------
+    // Static constructors
+    // -----------------------------------------------------------------------
+
+    /// Creates an empty path.
+    public static new(): PathBuf {
+      return PathBuf { data: String::new() };
+    }
+
+    /// Creates a path from a `str` literal.
+    ///
+    /// Copies the bytes into a new owned String.
+    public static create(s: str): PathBuf {
+      return PathBuf { data: String::create(s) };
+    }
+
+    /// Creates a path by cloning an existing String.
+    public static fromString(s: &String): PathBuf {
+      return PathBuf { data: s.clone() };
+    }
+
+    // -----------------------------------------------------------------------
+    // Queries — cheap
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` if the path contains no bytes.
+    public isEmpty(&self): boolean {
+      return self.data.length() == 0;
+    }
+
+    /// Returns `true` if the path starts with `/`.
+    public isAbsolute(&self): boolean {
+      let first: Option<char> = self.data.charAt(0);
+
+      if (let Option::SOME(c) = first) {
+       return c == SEP;
+      }
+
+      return false;
+    }
+
+    /// Borrows the path as a `str` (`const char*`).
+    ///
+    /// The returned pointer is valid for the lifetime of this PathBuf.
+    /// Suitable for passing to libc functions that expect C strings.
+    public asStr(&self): str {
+      return self.data.toStr();
+    }
+
+    /// Returns a clone of the inner String.
+    public toString(&self): String {
+      return self.data.clone();
+    }
+
+    // -----------------------------------------------------------------------
+    // Queries — decomposition (all return owned values)
+    // -----------------------------------------------------------------------
+
+    /// Returns the final component of the path, or `NONE` if the path
+    /// is empty or consists entirely of separators (i.e. root `/`).
+    ///
+    /// Trailing separators are ignored:
+    /// - `"/usr/bin/"` → `SOME("bin")`
+    /// - `"/usr/bin"` → `SOME("bin")`
+    /// - `"/"` → `NONE`
+    /// - `""` → `NONE`
+    public fileName(&self): Option<String> {
+      // Strip trailing separators to find effective length.
+      let effLen: u64 = self.stripTrailingLen();
+      if (effLen == 0) {
+        return Option::NONE;
+      }
+
+      // Find last separator within effective range.
+      let lastSep: u64 = self.lastSepBefore(effLen);
+
+      // lastSep == effLen means "no separator found".
+      if (lastSep == effLen) {
+        return Option::SOME(self.data.substring(0, effLen as i64));
+      }
+
+      let start: u64 = lastSep + 1;
+      let nameLen: u64 = effLen - start;
+
+      if (nameLen == 0) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(self.data.substring(start as i64, nameLen as i64));
+    }
+
+    /// Returns the extension of the file name, or `NONE` if there is
+    /// no file name or no extension.
+    ///
+    /// The extension is the portion after the **last** `.` in the
+    /// file name.  A leading dot (`.bashrc`, `.gitignore`) is **not**
+    /// treated as an extension separator — those files have no extension.
+    ///
+    /// - `"photo.tar.gz"` → `SOME("gz")`
+    /// - `".bashrc"` → `NONE`
+    /// - `"Makefile"` → `NONE`
+    /// - `"archive.tar"` → `SOME("tar")`
+    public extension(&self): Option<String> {
+      let name: Option<String> = self.fileName();
+
+      if (let Option::SOME(n) = name) {
+          let dotIdx: Option<u64> = n.findLastByte((b: u8): boolean -> b == DOT_BYTE);
+
+          if (let Option::SOME(pos) = dotIdx) {
+            // Leading dot (pos == 0) means dotfile, not an extension.
+            // Dot at the very end means no extension either.
+            if (pos > 0 && pos < n.length() - 1) {
+              return Option::SOME(n.substring((pos + 1) as i64, (n.length() - pos - 1) as i64));
+            }
+          }
+      }
+
+      return Option::NONE;
+    }
+
+    /// Returns the parent directory, or `NONE` if the path has no
+    /// parent (empty path, single component, or root `/`).
+    ///
+    /// - `"/usr/local/bin"` → `SOME("/usr/local")`
+    /// - `"/usr/local/bin/"` → `SOME("/usr/local")`
+    /// - `"/foo"` → `SOME("/")`
+    /// - `"/"` → `NONE`
+    /// - `"foo"` → `NONE`
+    /// - `""` → `NONE`
+    public parent(&self): Option<PathBuf> {
+      let effLen: u64 = self.stripTrailingLen();
+      if (effLen == 0) { return Option::NONE; }
+
+      let lastSep: u64 = self.lastSepBefore(effLen);
+
+      // No separator found — single component with no parent.
+      if (lastSep == effLen) { return Option::NONE; }
+
+      if (lastSep == 0) {
+        // Parent is the root "/".
+        return Option::SOME(PathBuf::create("/"));
+      }
+
+      return Option::SOME(PathBuf {
+        data: self.data.substring(0, lastSep as i64),
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Mutation
+    // -----------------------------------------------------------------------
+
+    /// Appends a path component to this path.
+    ///
+    /// POSIX join semantics:
+    /// - If `part` starts with `/`, it is absolute and **replaces** the
+    ///   entire path.
+    /// - If `self` is empty, `self` becomes `part`.
+    /// - If `self` already ends with `/`, `part` is concatenated directly.
+    /// - Otherwise a `/` separator is inserted between `self` and `part`.
+    public push(&mut self, part: str): void {
+      let partStr: String = String::create(part);
+      let partLen: u64 = partStr.length();
+
+      if (partLen == 0) { return; }
+
+      // Absolute part replaces everything.
+      let firstChar: Option<char> = partStr.charAt(0);
+      let isPartAbsolute: boolean = match (firstChar) {
+        Option::SOME(c) -> c == SEP,
+        Option::NONE -> false,
+      };
+
+      if (isPartAbsolute) {
+        self.data.clear();
+        self.data.pushStr(part);
+        return;
+      }
+
+      // Empty self — just copy part in.
+      if (self.data.length() == 0) {
+        self.data.pushStr(part);
+        return;
+      }
+
+      // Check if self already ends with separator.
+      let lastChar: Option<char> = self.data.charAt(self.data.length() - 1);
+      let endsWithSep: boolean = match (lastChar) {
+        Option::SOME(c) -> c == SEP,
+        Option::NONE -> false,
+      };
+
+      if (!endsWithSep) {
+        self.data.pushChar(SEP);
+      }
+
+      self.data.pushStr(part);
+    }
+
+    /// Removes the last component from the path.
+    ///
+    /// Returns `true` if a component was removed, `false` if the path
+    /// has no parent (and was left unchanged).
+    ///
+    /// After `pop`, the path equals what `parent()` would have returned.
+    public pop(&mut self): boolean {
+      let effLen: u64 = self.stripTrailingLen();
+      if (effLen == 0) {
+        return false;
+      }
+
+      let lastSep: u64 = self.lastSepBefore(effLen);
+
+      // No separator — single component, nothing to pop.
+      if (lastSep == effLen) {
+        return false;
+      }
+
+      if (lastSep == 0) {
+        // Truncate to just the root "/".
+        self.data.clear();
+        self.data.pushChar(SEP);
+      } else {
+        // Truncate to everything before the last separator.
+        let truncated: String = self.data.substring(0, lastSep as i64);
+        self.data.clear();
+        self.data.push(&truncated);
+      }
+
+      return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // Operations (return new PathBuf)
+    // -----------------------------------------------------------------------
+
+    /// Returns a new PathBuf with `part` joined onto `self`.
+    ///
+    /// Equivalent to cloning self and calling `push(part)`.
+    public join(&self, part: str): PathBuf {
+      let mut result: PathBuf = PathBuf { data: self.data.clone() };
+      result.push(part);
+      return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /// Effective length ignoring trailing `/`.
+    ///
+    /// `"/foo/bar/"` → 8, `"/"` → 0, `""` → 0.
+    stripTrailingLen(&self): u64 {
+      let mut end: i64 = (self.data.length() as i64) - 1;
+
+      while (end >= 0) {
+        let ch: Option<char> = self.data.charAt(end as u64);
+        let isSep: boolean = match (ch) {
+          Option::SOME(c) -> c == SEP,
+          Option::NONE -> false,
+        };
+
+        if (!isSep) {
+          return (end + 1) as u64;
+        }
+
+        end -= 1;
+      }
+
+      return 0;
+    }
+
+    /// Index of the last `/` within bytes `0..limit`.
+    ///
+    /// Returns `limit` (an impossible index) if no separator is found,
+    /// to avoid `Option` overhead in internal helpers.
+    lastSepBefore(&self, limit: u64): u64 {
+      let mut i: i64 = (limit as i64) - 1;
+
+      while (i >= 0) {
+        let ch: Option<char> = self.data.charAt(i as u64);
+        let isSep: boolean = match (ch) {
+          Option::SOME(c) -> c == SEP,
+          Option::NONE -> false,
+        };
+
+        if (isSep) {
+          return i as u64;
+        }
+
+        i -= 1;
+      }
+
+      return limit;
+    }
+
+    // -----------------------------------------------------------------------
+    // Drop / Clone
+    // -----------------------------------------------------------------------
+
+    /// Releases the backing String buffer.
+    ///
+    /// Called automatically when the PathBuf goes out of scope.
+    public drop(&mut self): void {
+      self.data.drop();
+    }
+
+    /// Returns a deep copy of this PathBuf.
+    public clone(&self): PathBuf {
+      return PathBuf { data: self.data.clone() };
+    }
+  }
+}
