@@ -754,8 +754,13 @@ impl<'a> LoweringContext<'a> {
       return self.lower_short_circuit(op, left, right, result_ty, span);
     }
 
-    let left_op = self.lower_hir_node(left)?;
-    let right_op = self.lower_hir_node(right)?;
+    let left_op = self.lower_hir_node(left);
+    let right_op = self.lower_hir_node(right);
+
+    let (left_op, right_op) = match (left_op, right_op) {
+      (Some(l), Some(r)) => (l, r),
+      _ => return None,
+    };
 
     let dest = self.fn_builder().alloc_temp(result_ty, span);
 
@@ -2182,18 +2187,10 @@ impl<'a> LoweringContext<'a> {
             }
           },
           Type::Enum(value_def_id) => {
-            let pattern_enum = match &self.defs.get(enum_def).kind {
-              DefinitionKind::Enum(ed) => ed,
-              _ => {
-                let false_temp = self.fn_builder().alloc_temp(bool_ty, span);
-                self.fn_builder().emit(Instr::Copy {
-                  dest: false_temp,
-                  source: Operand::Const(ConstValue::Bool(false, bool_ty)),
-                });
-                return Operand::Temp(false_temp);
-              },
-            };
-
+            // The pattern's enum_def may differ from the value's enum def when monomorphization
+            // produces a concrete enum (e.g., Option_i32) while the pattern still references the
+            // generic enum (Option). Use the value's concrete enum def to look up variant info
+            // since variant_tag indices are stable across instantiations.
             let value_enum = match &self.defs.get(&value_def_id).kind {
               DefinitionKind::Enum(ed) => ed,
               _ => {
@@ -2206,10 +2203,7 @@ impl<'a> LoweringContext<'a> {
               },
             };
 
-            let pattern_try = pattern_enum.try_capable;
-            let value_try = value_enum.try_capable;
-
-            if pattern_try.is_some() && value_try.is_some() && pattern_try == value_try {
+            if (*variant_tag as usize) < value_enum.variants.len() {
               let payload = value_enum.variants[*variant_tag as usize].payload.clone();
               (value_enum.tag_type, payload)
             } else {

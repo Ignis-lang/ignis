@@ -1063,6 +1063,7 @@ pub fn build_std(
     processed_modules.insert(module_name.clone());
 
     let single_module_set: HashSet<ModuleId> = [*module_id].into_iter().collect();
+
     let mut types = output.types.clone();
 
     let mono_roots = collect_mono_roots_for_std(&output.defs);

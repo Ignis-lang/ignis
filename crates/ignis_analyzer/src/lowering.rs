@@ -368,11 +368,23 @@ impl<'a> Analyzer<'a> {
         })
       },
       ASTStatement::Namespace(ns) => {
-        // Lower all items in namespace block
+        // Push a scope containing the namespace's definitions so that
+        // record/enum lowering inside the namespace can find their own
+        // DefinitionIds (e.g., PathBuf inside `namespace Path { ... }`).
+        let ns_defs = self.collect_namespace_defs(&ns.path);
+
+        self.scopes.push(ScopeKind::Block);
+        for (sym, def_id) in &ns_defs {
+          let _ = self.scopes.define(sym, def_id, true);
+        }
+
         let mut hir_ids = Vec::new();
         for item in &ns.items {
           hir_ids.push(self.lower_node_to_hir(item, hir, scope_kind));
         }
+
+        self.scopes.pop();
+
         hir.alloc(HIRNode {
           kind: HIRKind::Block {
             statements: hir_ids,
@@ -428,7 +440,7 @@ impl<'a> Analyzer<'a> {
   ///
   /// For `SymbolEntry::Single`, returns the single definition.
   /// For `SymbolEntry::Overload`, matches by parameter count first, then by span if needed.
-  fn find_method_def_for_ast_method(
+  pub(crate) fn find_method_def_for_ast_method(
     &self,
     entry: &SymbolEntry,
     ast_method: &ASTMethod,
@@ -1974,6 +1986,46 @@ impl<'a> Analyzer<'a> {
     Some(current_def)
   }
 
+  /// Collect all definitions inside a namespace, navigating through nested namespace segments.
+  /// Returns pairs of (SymbolId, DefinitionId) for each definition in the namespace.
+  fn collect_namespace_defs(
+    &self,
+    ns_path: &[SymbolId],
+  ) -> Vec<(SymbolId, DefinitionId)> {
+    if ns_path.is_empty() {
+      return Vec::new();
+    }
+
+    // Navigate through the namespace path segments
+    let Some(mut current_def) = self.scopes.lookup_def(&ns_path[0]).cloned() else {
+      return Vec::new();
+    };
+
+    for segment in &ns_path[1..] {
+      match &self.defs.get(&current_def).kind {
+        DefinitionKind::Namespace(ns_def) => {
+          let Some(next) = self
+            .namespaces
+            .lookup_def(ns_def.namespace_id, segment)
+            .and_then(|e| e.as_single())
+            .cloned()
+          else {
+            return Vec::new();
+          };
+          current_def = next;
+        },
+        _ => return Vec::new(),
+      }
+    }
+
+    // current_def should now be the namespace definition
+    let DefinitionKind::Namespace(ns_def) = &self.defs.get(&current_def).kind else {
+      return Vec::new();
+    };
+
+    self.namespaces.all_defs(ns_def.namespace_id)
+  }
+
   fn lower_typeof_builtin(
     &mut self,
     call: &ignis_ast::expressions::call::ASTCallExpression,
@@ -2896,8 +2948,9 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  /// Try to lower a path-based call as an enum variant constructor.
-  /// Returns None if not an enum variant, so caller can fall through to normal call.
+  /// Try to lower a path-based call as an enum variant constructor or static method call.
+  /// Handles paths of any depth: `Type::method()`, `Ns::Type::method()`, `Ns1::Ns2::Type::method()`, etc.
+  /// Returns None if not an enum variant or static method, so caller can fall through to normal call.
   fn try_lower_path_call(
     &mut self,
     node_id: &NodeId,
@@ -2906,23 +2959,26 @@ impl<'a> Analyzer<'a> {
     hir: &mut HIR,
     scope_kind: ScopeKind,
   ) -> Option<HIRId> {
-    if path.segments.len() != 2 {
+    if path.segments.len() < 2 {
       return None;
     }
 
-    let first_segment = &path.segments[0];
-    let second_segment = &path.segments[1];
-
     let result_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
 
-    let Some(type_def_id) = self.scopes.lookup_def(&first_segment.name).cloned() else {
-      return None;
-    };
+    // All segments except the last form the path to the type (possibly through namespaces).
+    // The last segment is the method or variant name.
+    let type_path: Vec<(SymbolId, Span)> = path.segments[..path.segments.len() - 1]
+      .iter()
+      .map(|s| (s.name, s.span.clone()))
+      .collect();
+    let member_segment = &path.segments[path.segments.len() - 1];
+
+    let type_def_id = self.resolve_record_path_for_lowering(&type_path)?;
 
     match &self.defs.get(&type_def_id).kind.clone() {
       DefinitionKind::Enum(ed) => {
         // Enum variant with payload
-        if let Some(&tag) = ed.variants_by_name.get(&second_segment.name) {
+        if let Some(&tag) = ed.variants_by_name.get(&member_segment.name) {
           let payload_hir: Vec<HIRId> = call
             .arguments
             .iter()
@@ -2948,24 +3004,26 @@ impl<'a> Analyzer<'a> {
         }
 
         // Static method call on enum
-        if let Some(method_id) = ed.static_methods.get(&second_segment.name).and_then(|e| e.as_single()) {
+        let method_id = self.lookup_resolved_call(node_id).cloned().or_else(|| {
+          ed.static_methods
+            .get(&member_segment.name)
+            .and_then(|e| e.as_single())
+            .cloned()
+        });
+
+        if let Some(method_id) = method_id {
           let args_hir: Vec<HIRId> = call
             .arguments
             .iter()
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
-          // Resolve explicit type arguments for the method if present
-          let type_args: Vec<TypeId> = call
-            .type_args
-            .as_ref()
-            .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
-            .unwrap_or_default();
+          let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
 
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
               receiver: None,
-              method: *method_id,
+              method: method_id,
               type_args,
               args: args_hir,
             },
@@ -2981,7 +3039,7 @@ impl<'a> Analyzer<'a> {
         // First try to get resolved method from type checker (handles overloads)
         let method_id = self.lookup_resolved_call(node_id).cloned().or_else(|| {
           rd.static_methods
-            .get(&second_segment.name)
+            .get(&member_segment.name)
             .and_then(|e| e.as_single())
             .cloned()
         });
@@ -2993,12 +3051,7 @@ impl<'a> Analyzer<'a> {
             .map(|arg| self.lower_node_to_hir(arg, hir, scope_kind))
             .collect();
 
-          // Resolve explicit type arguments for the method if present
-          let type_args: Vec<TypeId> = call
-            .type_args
-            .as_ref()
-            .map(|args| args.iter().map(|t| self.resolve_type_syntax(t)).collect())
-            .unwrap_or_default();
+          let type_args = self.resolve_or_infer_method_type_args(&method_id, call, &args_hir, hir);
 
           return Some(hir.alloc(HIRNode {
             kind: HIRKind::MethodCall {
@@ -3868,7 +3921,7 @@ impl<'a> Analyzer<'a> {
 
   /// Pushes a generic scope and registers type params for an owner definition.
   /// Used when lowering method bodies to make type params visible for type resolution.
-  fn enter_type_params_scope_for_method(
+  pub(crate) fn enter_type_params_scope_for_method(
     &mut self,
     method_def_id: &DefinitionId,
   ) {
@@ -3912,7 +3965,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Pops the generic scope if the method or its owner has type params.
-  fn exit_type_params_scope_for_method(
+  pub(crate) fn exit_type_params_scope_for_method(
     &mut self,
     method_def_id: &DefinitionId,
   ) {

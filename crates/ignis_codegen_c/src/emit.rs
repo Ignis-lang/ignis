@@ -3237,7 +3237,9 @@ fn collect_external_type_definition_ids(
   module_type_names: &std::collections::HashSet<String>,
   referenced_struct_names: &std::collections::HashSet<String>,
 ) -> Vec<DefinitionId> {
-  let mut referenced_definitions: std::collections::HashMap<String, DefinitionId> = std::collections::HashMap::new();
+  // Build a map of ALL monomorphized record/enum definitions (name → def_id).
+  // This serves as the universe from which transitive dependencies can be discovered.
+  let mut all_candidates: std::collections::HashMap<String, DefinitionId> = std::collections::HashMap::new();
 
   for (def_id, def) in defs.iter() {
     let is_candidate = match &def.kind {
@@ -3266,7 +3268,60 @@ fn collect_external_type_definition_ids(
 
     let name = build_mangled_name_standalone(def_id, defs, namespaces, symbols, types);
 
-    if referenced_struct_names.contains(&name) && !module_type_names.contains(&name) {
+    if !module_type_names.contains(&name) {
+      all_candidates.insert(name, def_id);
+    }
+  }
+
+  // Start with directly referenced types, then transitively expand.
+  let mut referenced_definitions: std::collections::HashMap<String, DefinitionId> = std::collections::HashMap::new();
+
+  for (name, &def_id) in &all_candidates {
+    if referenced_struct_names.contains(name) {
+      referenced_definitions.insert(name.clone(), def_id);
+    }
+  }
+
+  // Transitively discover by-value dependencies.
+  // Each iteration scans fields/payloads of newly-added types and adds any
+  // new dependencies from the candidate universe.
+  loop {
+    let mut newly_discovered: Vec<(String, DefinitionId)> = Vec::new();
+
+    for (_, &def_id) in referenced_definitions.iter() {
+      let def = defs.get(&def_id);
+      let mut deps = std::collections::HashSet::new();
+
+      match &def.kind {
+        DefinitionKind::Record(rd) => {
+          for field in &rd.fields {
+            collect_struct_dependencies_from_type(field.type_id, types, defs, symbols, namespaces, &mut deps);
+          }
+        },
+        DefinitionKind::Enum(ed) => {
+          for variant in &ed.variants {
+            for payload in &variant.payload {
+              collect_struct_dependencies_from_type(*payload, types, defs, symbols, namespaces, &mut deps);
+            }
+          }
+        },
+        _ => {},
+      }
+
+      for dep_name in deps {
+        if !referenced_definitions.contains_key(&dep_name) {
+          if let Some(&dep_def_id) = all_candidates.get(&dep_name) {
+            newly_discovered.push((dep_name, dep_def_id));
+          }
+        }
+      }
+    }
+
+    if newly_discovered.is_empty() {
+      break;
+    }
+
+    for (name, def_id) in newly_discovered {
       referenced_definitions.insert(name, def_id);
     }
   }
@@ -3275,6 +3330,7 @@ fn collect_external_type_definition_ids(
     return Vec::new();
   }
 
+  // Topological sort: emit types whose by-value dependencies are already resolved first.
   let mut unresolved: std::collections::HashSet<String> = referenced_definitions.keys().cloned().collect();
   let mut resolved: std::collections::HashSet<String> = module_type_names.clone();
   let mut ordered = Vec::new();

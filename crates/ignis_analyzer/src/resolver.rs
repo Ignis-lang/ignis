@@ -2,11 +2,11 @@ use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
   expressions::{ASTExpression, ASTPathSegment},
   pattern::ASTPattern,
-  statements::{ASTStatement, import_statement::ImportItemKind},
+  statements::{ASTStatement, import_statement::ImportItemKind, record::ASTRecordItem, enum_::ASTEnumItem},
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
-use ignis_type::definition::{DefinitionId, SymbolEntry};
+use ignis_type::definition::{DefinitionId, DefinitionKind, SymbolEntry};
 
 /// Result of resolving a qualified path expression.
 ///
@@ -32,6 +32,7 @@ impl<'a> Analyzer<'a> {
     for root in roots {
       self.resolve_node(root, ScopeKind::Global);
     }
+
   }
 
   fn resolve_node(
@@ -198,6 +199,106 @@ impl<'a> Analyzer<'a> {
           }
         },
       },
+      ASTStatement::Record(rec) => {
+        let record_def_id = self.lookup_def(node_id).cloned();
+
+        if let Some(record_def_id) = record_def_id {
+          self.enter_type_params_scope(&record_def_id);
+
+          // Resolve static field initializers
+          for item in &rec.items {
+            if let ASTRecordItem::Field(field) = item {
+              if let Some(value_id) = &field.value {
+                self.resolve_node(value_id, scope_kind);
+              }
+            }
+          }
+
+          // Resolve method bodies (with error suppression since the typechecker
+          // handles full method body resolution including namespace-qualified paths)
+          for item in &rec.items {
+            if let ASTRecordItem::Method(method) = item {
+              let method_def_id = self.resolve_method_def_id(&record_def_id, method);
+
+              if let Some(method_def_id) = method_def_id {
+                self.enter_type_params_scope_for_method(&method_def_id);
+                self.scopes.push(ScopeKind::Function);
+                self.define_function_params_in_scope(&method_def_id);
+
+                self.resolve_suppress_errors = true;
+                self.resolve_node(&method.body, ScopeKind::Function);
+                self.resolve_suppress_errors = false;
+
+                self.scopes.pop();
+                self.exit_type_params_scope_for_method(&method_def_id);
+              }
+            }
+          }
+
+          self.exit_type_params_scope(&record_def_id);
+        }
+      },
+
+      ASTStatement::Enum(en) => {
+        let enum_def_id = self.lookup_def(node_id).cloned();
+
+        if let Some(enum_def_id) = enum_def_id {
+          self.enter_type_params_scope(&enum_def_id);
+
+          // Resolve method bodies (with error suppression)
+          for item in &en.items {
+            if let ASTEnumItem::Method(method) = item {
+              let method_def_id = self.resolve_method_def_id(&enum_def_id, method);
+
+              if let Some(method_def_id) = method_def_id {
+                self.enter_type_params_scope_for_method(&method_def_id);
+                self.scopes.push(ScopeKind::Function);
+                self.define_function_params_in_scope(&method_def_id);
+
+                self.resolve_suppress_errors = true;
+                self.resolve_node(&method.body, ScopeKind::Function);
+                self.resolve_suppress_errors = false;
+
+                self.scopes.pop();
+                self.exit_type_params_scope_for_method(&method_def_id);
+              }
+            }
+          }
+
+          self.exit_type_params_scope(&enum_def_id);
+        }
+      },
+
+      ASTStatement::Trait(tr) => {
+        let trait_def_id = self.lookup_def(node_id).cloned();
+
+        if let Some(trait_def_id) = trait_def_id {
+          self.enter_type_params_scope(&trait_def_id);
+
+          // Resolve method bodies (with error suppression for default method bodies)
+          for method in &tr.methods {
+            let method_def_id = self.resolve_trait_method_def_id(&trait_def_id, &method.name);
+
+            if let Some(method_def_id) = method_def_id {
+              self.enter_type_params_scope_for_method(&method_def_id);
+              self.scopes.push(ScopeKind::Function);
+              self.define_function_params_in_scope(&method_def_id);
+
+              if let Some(body_id) = &method.body {
+                self.resolve_suppress_errors = true;
+                self.resolve_node(body_id, ScopeKind::Function);
+                self.resolve_suppress_errors = false;
+              }
+
+              self.scopes.pop();
+              self.exit_type_params_scope_for_method(&method_def_id);
+            }
+          }
+
+          self.exit_type_params_scope(&trait_def_id);
+        }
+      },
+
       _ => {},
     }
   }
@@ -225,13 +326,15 @@ impl<'a> Analyzer<'a> {
           },
           Some(SymbolEntry::Overload(_)) => {},
           None => {
-            self.add_diagnostic(
-              DiagnosticMessage::UndeclaredVariable {
-                name: self.get_symbol_name(&var_expr.name),
-                span: var_expr.span.clone(),
-              }
-              .report(),
-            );
+            if !self.resolve_suppress_errors {
+              self.add_diagnostic(
+                DiagnosticMessage::UndeclaredVariable {
+                  name: self.get_symbol_name(&var_expr.name),
+                  span: var_expr.span.clone(),
+                }
+                .report(),
+              );
+            }
           },
         }
       },
@@ -355,9 +458,10 @@ impl<'a> Analyzer<'a> {
             // Enum variants are valid path expressions, no def to set
           },
           None => {
-            // Emit more specific errors for enum-related path failures
-            let diagnostic = self.diagnose_path_failure(&path.segments, &path.span, full_path);
-            self.add_diagnostic(diagnostic.report());
+            if !self.resolve_suppress_errors {
+              let diagnostic = self.diagnose_path_failure(&path.segments, &path.span, full_path);
+              self.add_diagnostic(diagnostic.report());
+            }
           },
         }
       },
@@ -495,6 +599,45 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  fn resolve_method_def_id(
+    &self,
+    owner_def_id: &DefinitionId,
+    method: &ignis_ast::statements::record::ASTMethod,
+  ) -> Option<DefinitionId> {
+    let def = self.defs.get(owner_def_id);
+
+    let (instance_methods, static_methods) = match &def.kind {
+      DefinitionKind::Record(rd) => (&rd.instance_methods, &rd.static_methods),
+      DefinitionKind::Enum(ed) => (&ed.instance_methods, &ed.static_methods),
+      _ => return None,
+    };
+
+    let entry = if method.is_static() {
+      static_methods.get(&method.name)
+    } else {
+      instance_methods.get(&method.name)
+    };
+
+    entry.and_then(|e| self.find_method_def_for_ast_method(e, method))
+  }
+
+  fn resolve_trait_method_def_id(
+    &self,
+    trait_def_id: &DefinitionId,
+    method_name: &ignis_type::symbol::SymbolId,
+  ) -> Option<DefinitionId> {
+    let def = self.defs.get(trait_def_id);
+
+    let DefinitionKind::Trait(td) = &def.kind else {
+      return None;
+    };
+
+    td.methods
+      .iter()
+      .find(|entry| entry.name == *method_name)
+      .map(|entry| entry.method_def_id)
+  }
+
   pub fn resolve_qualified_path(
     &self,
     segments: &[ASTPathSegment],
@@ -520,8 +663,55 @@ impl<'a> Analyzer<'a> {
         DefinitionKind::Namespace(ns_def) => {
           let mut current_ns = ns_def.namespace_id;
 
-          for segment in &ns_path[1..] {
-            current_ns = self.namespaces.lookup_child(current_ns, &segment.name)?;
+          for (i, segment) in ns_path[1..].iter().enumerate() {
+            match self.namespaces.lookup_child(current_ns, &segment.name) {
+              Some(child_ns) => current_ns = child_ns,
+              None => {
+                // The segment might be an enum/record defined in the current namespace
+                // (e.g. Io::ErrorKind::NOT_FOUND where ErrorKind is an enum in namespace Io).
+                // All remaining ns_path segments after this one must have been consumed,
+                // and def_name is the final member/variant name.
+                if i != ns_path.len() - 2 {
+                  return None;
+                }
+
+                if let Some(entry) = self.namespaces.lookup_def(current_ns, &segment.name) {
+                  let inner_def_id = match entry {
+                    SymbolEntry::Single(id) => *id,
+                    SymbolEntry::Overload(ids) => ids[0],
+                  };
+                  let inner_def = self.defs.get(&inner_def_id);
+
+                  match &inner_def.kind {
+                    DefinitionKind::Enum(ed) => {
+                      if let Some(entry) = ed.static_methods.get(def_name) {
+                        return Some(ResolvedPath::Entry(entry.clone()));
+                      }
+                      if let Some(&field_id) = ed.static_fields.get(def_name) {
+                        return Some(ResolvedPath::Entry(SymbolEntry::Single(field_id)));
+                      }
+                      if let Some(&tag) = ed.variants_by_name.get(def_name) {
+                        return Some(ResolvedPath::EnumVariant {
+                          enum_def: inner_def_id,
+                          variant_index: tag,
+                        });
+                      }
+                    },
+                    DefinitionKind::Record(rd) => {
+                      if let Some(entry) = rd.static_methods.get(def_name) {
+                        return Some(ResolvedPath::Entry(entry.clone()));
+                      }
+                      if let Some(&field_id) = rd.static_fields.get(def_name) {
+                        return Some(ResolvedPath::Entry(SymbolEntry::Single(field_id)));
+                      }
+                    },
+                    _ => {},
+                  }
+                }
+
+                return None;
+              },
+            }
           }
 
           return self

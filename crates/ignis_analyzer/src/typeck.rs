@@ -541,7 +541,9 @@ impl<'a> Analyzer<'a> {
             );
             self.types.error()
           },
-          None => self.types.error(),
+          None => {
+            self.types.error()
+          },
         }
       },
       ASTExpression::Call(call) => self.typecheck_call(node_id, call, scope_kind, ctx, infer),
@@ -9555,7 +9557,7 @@ impl<'a> Analyzer<'a> {
 
   /// Pushes a generic scope and registers type params for an owner definition.
   /// Used when typechecking function bodies to make type params visible.
-  fn enter_type_params_scope(
+  pub(crate) fn enter_type_params_scope(
     &mut self,
     owner_def_id: &ignis_type::definition::DefinitionId,
   ) {
@@ -9581,7 +9583,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Pops the generic scope if the owner definition has type params.
-  fn exit_type_params_scope(
+  pub(crate) fn exit_type_params_scope(
     &mut self,
     owner_def_id: &ignis_type::definition::DefinitionId,
   ) {
