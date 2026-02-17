@@ -25,7 +25,7 @@
 //! | Type                       | Description                                         |
 //! |----------------------------|-----------------------------------------------------|
 //! | `Fs::Sys::Unix::Stat`      | File metadata from `stat(2)` / `fstat(2)`           |
-//! | `Fs::Sys::Unix::DirEntry`  | Single directory entry from `readdir(3)`            |
+//! | `Fs::Sys::Unix::UnixDirEntry`  | Single directory entry from `readdir(3)`        |
 //!
 //! ## Constants
 //!
@@ -83,5 +83,167 @@
 //! ```
 
 import _ from "std::fs::sys";
+import _ from "std::fs::file";
+import _ from "std::fs::dir";
 
-export namespace Fs {}
+import Io from "std::io";
+import Memory from "std::memory";
+
+export namespace Fs {
+  const DEFAULT_CREATE_DIR_MODE: u32 = 493;
+
+  /// Reads an entire file into a byte vector.
+  function read(path: str): Result<Vector<u8>, Io::IoError> {
+    let fileResult: Result<Fs::File, Io::IoError> = Fs::File::open(path);
+    if (fileResult.isError()) {
+      return Result::ERROR(fileResult.unwrapErr());
+    }
+
+    let mut file: Fs::File = fileResult.unwrap();
+    let mut output: Vector<u8> = Vector::init<u8>();
+    let mut byte: u8 = 0;
+
+    while (true) {
+      let readResult: Result<i64, Io::IoError> = file.read((&mut byte) as *mut u8 as *mut void, 1);
+      if (readResult.isError()) {
+        return Result::ERROR(readResult.unwrapErr());
+      }
+
+      let count: i64 = readResult.unwrap();
+      if (count == 0) {
+        break;
+      }
+
+      output.push(byte);
+    }
+
+    return Result::OK(output);
+  }
+
+  /// Reads a full file and returns it as a String.
+  function readToString(path: str): Result<String, Io::IoError> {
+    let bytesResult: Result<Vector<u8>, Io::IoError> = Fs::read(path);
+    if (bytesResult.isError()) {
+      return Result::ERROR(bytesResult.unwrapErr());
+    }
+
+    let bytes: Vector<u8> = bytesResult.unwrap();
+    let len: u64 = bytes.length();
+
+    let raw: *mut u8 = Memory::allocateVector<u8>(len + 1);
+    if (len > 0) {
+      Memory::copy<u8>(raw, bytes.asPtr() as *u8, len);
+    }
+    let endPtr: *mut u8 = @pointerFromInteger<*mut u8>(@integerFromPointer(raw) + len);
+    @write<u8>(endPtr, 0);
+
+    let out: String = String::create(raw as str);
+    Memory::free(raw);
+
+    return Result::OK(out);
+  }
+
+  /// Creates/truncates a file and writes all bytes from `data`.
+  function write(path: str, data: *void, len: u64): Result<boolean, Io::IoError> {
+    let fileResult: Result<Fs::File, Io::IoError> = Fs::File::create(path);
+    if (fileResult.isError()) {
+      return Result::ERROR(fileResult.unwrapErr());
+    }
+
+    let mut file: Fs::File = fileResult.unwrap();
+    let writeResult: Result<i64, Io::IoError> = file.write(data, len);
+    if (writeResult.isError()) {
+      return Result::ERROR(writeResult.unwrapErr());
+    }
+
+    return Result::OK(writeResult.unwrap() == len as i64);
+  }
+
+  /// Creates/truncates a file and writes an entire String.
+  function writeString(path: str, s: &String): Result<boolean, Io::IoError> {
+    return Fs::write(path, s.toStr() as *void, s.length());
+  }
+
+  /// Returns true when `path` exists.
+  function exists(path: str): boolean {
+    let statResult: Result<Fs::Sys::Unix::Stat, Io::IoError> = Fs::Sys::Unix::stat(path);
+    return statResult.isOk();
+  }
+
+  /// Reads metadata for `path`.
+  function metadata(path: str): Result<Fs::Sys::Unix::Stat, Io::IoError> {
+    return Fs::Sys::Unix::stat(path);
+  }
+
+  /// Creates a single directory.
+  function createDir(path: str, mode: u32): Result<boolean, Io::IoError> {
+    return Fs::Sys::Unix::mkdir(path, mode);
+  }
+
+  /// Recursively creates directories for `path` (mkdir -p behavior).
+  function createDirAll(path: str): Result<boolean, Io::IoError> {
+    let pathString: String = String::create(path);
+    if (pathString.length() == 0) {
+      return Result::OK(true);
+    }
+
+    let mut current: String = String::new();
+    let len: u64 = pathString.length();
+    let rawPath: *mut u8 = pathString.toStr() as *mut u8;
+    let firstByte: u8 = @read<u8>(rawPath);
+    let isAbsolute: boolean = firstByte == 47;
+
+    if (isAbsolute) {
+      current.pushChar('/');
+    }
+
+    let mut segmentStart: u64 = isAbsolute ? 1 : 0;
+    let mut index: u64 = segmentStart;
+    while (index <= len) {
+      let mut isSeparator: boolean = false;
+      if (index == len) {
+        isSeparator = true;
+      } else {
+        let ptr: *mut u8 = @pointerFromInteger<*mut u8>(@integerFromPointer(rawPath) + index);
+        let b: u8 = @read<u8>(ptr);
+        isSeparator = b == 47;
+      }
+
+      if (isSeparator) {
+        let segmentLen: u64 = index - segmentStart;
+        if (segmentLen > 0) {
+          let segment: String = pathString.substring(segmentStart as i64, segmentLen as i64);
+
+          if (current.length() > 0 && !(isAbsolute && current.length() == 1)) {
+            current.pushChar('/');
+          }
+
+          current.push(&segment);
+
+          if (!Fs::exists(current.toStr())) {
+            let mkdirResult: Result<boolean, Io::IoError> = Fs::Sys::Unix::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE);
+            if (mkdirResult.isError()) {
+              return Result::ERROR(mkdirResult.unwrapErr());
+            }
+          }
+        }
+
+        segmentStart = index + 1;
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(true);
+  }
+
+  /// Removes a file.
+  function removeFile(path: str): Result<boolean, Io::IoError> {
+    return Fs::Sys::Unix::unlink(path);
+  }
+
+  /// Removes an empty directory.
+  function removeDir(path: str): Result<boolean, Io::IoError> {
+    return Fs::Sys::Unix::rmdir(path);
+  }
+}

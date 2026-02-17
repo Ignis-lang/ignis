@@ -73,7 +73,13 @@ impl Server {
         let editing_std_file = is_file_inside_std_path(&path, &config.std_path);
 
         if editing_std_file {
-          (config, path_str.clone(), None)
+          let std_entry = std_module_entry_path(&path, &config.std_path).unwrap_or_else(|| path_str.clone());
+
+          (
+            config,
+            std_entry,
+            None,
+          )
         } else {
           (
             config,
@@ -231,7 +237,13 @@ impl Server {
         let editing_std_file = is_file_inside_std_path(&path, &config.std_path);
 
         if editing_std_file {
-          (config, path_str.clone(), None)
+          let std_entry = std_module_entry_path(&path, &config.std_path).unwrap_or_else(|| path_str.clone());
+
+          (
+            config,
+            std_entry,
+            None,
+          )
         } else {
           (
             config,
@@ -357,6 +369,38 @@ fn is_file_inside_std_path(
   };
 
   file_canon.starts_with(std_canon)
+}
+
+fn std_module_entry_path(
+  file_path: &Path,
+  std_path: &str,
+) -> Option<String> {
+  let std_canon = Path::new(std_path).canonicalize().ok()?;
+  let file_canon = file_path.canonicalize().ok()?;
+
+  if !file_canon.starts_with(&std_canon) {
+    return None;
+  }
+
+  if file_canon.file_name().and_then(|n| n.to_str()) == Some("mod.ign") {
+    return Some(file_canon.to_string_lossy().to_string());
+  }
+
+  let mut current = file_canon.parent();
+  while let Some(dir) = current {
+    if !dir.starts_with(&std_canon) {
+      break;
+    }
+
+    let candidate = dir.join("mod.ign");
+    if candidate.exists() {
+      return Some(candidate.to_string_lossy().to_string());
+    }
+
+    current = dir.parent();
+  }
+
+  Some(file_canon.to_string_lossy().to_string())
 }
 
 #[tower_lsp::async_trait]
