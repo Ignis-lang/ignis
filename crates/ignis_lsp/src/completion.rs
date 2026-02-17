@@ -1828,25 +1828,34 @@ fn add_heuristic_locals(
         continue;
       }
 
-      // Check previous token
-      if i > 0 {
+      // Check declaration form before identifier:
+      // - let name
+      // - const name
+      // - let mut name
+      let declared_local = if i > 0 {
         let prev = &tokens[i - 1];
-        match prev.type_ {
-          TokenType::Let | TokenType::Const => {
-            if seen.insert(name.clone()) {
-              candidates.push(CompletionCandidate {
-                label: name.clone(),
-                kind: CompletionKind::Variable,
-                detail: Some("(local)".to_string()),
-                documentation: None,
-                insert_text: None,
-                insert_text_format: None,
-                sort_priority: 10, // Highest priority
-              });
-            }
-          },
-          _ => {},
+
+        if matches!(prev.type_, TokenType::Let | TokenType::Const) {
+          true
+        } else if prev.type_ == TokenType::Mut && i > 1 {
+          tokens[i - 2].type_ == TokenType::Let
+        } else {
+          false
         }
+      } else {
+        false
+      };
+
+      if declared_local && seen.insert(name.clone()) {
+        candidates.push(CompletionCandidate {
+          label: name.clone(),
+          kind: CompletionKind::Variable,
+          detail: Some("(local)".to_string()),
+          documentation: None,
+          insert_text: None,
+          insert_text_format: None,
+          sort_priority: 10, // Highest priority
+        });
       }
     }
 
@@ -1855,6 +1864,85 @@ fn add_heuristic_locals(
       break;
     }
   }
+
+  if let Some(scope_start) = local_scope_start {
+    for param in collect_callable_parameter_names(tokens, scope_start) {
+      if !matches_prefix(&param, prefix) {
+        continue;
+      }
+
+      if already_seen.contains(&param) || seen.contains(&param) {
+        continue;
+      }
+
+      if seen.insert(param.clone()) {
+        candidates.push(CompletionCandidate {
+          label: param,
+          kind: CompletionKind::Variable,
+          detail: Some("(param)".to_string()),
+          documentation: None,
+          insert_text: None,
+          insert_text_format: None,
+          sort_priority: 10,
+        });
+      }
+    }
+  }
+}
+
+fn collect_callable_parameter_names(
+  tokens: &[Token],
+  scope_start: u32,
+) -> Vec<String> {
+  let Some(left_brace_idx) = tokens
+    .iter()
+    .position(|token| token.type_ == TokenType::LeftBrace && token.span.start.0 == scope_start)
+  else {
+    return Vec::new();
+  };
+
+  let Some(right_paren_idx) = (0..left_brace_idx)
+    .rev()
+    .find(|&idx| tokens[idx].type_ == TokenType::RightParen)
+  else {
+    return Vec::new();
+  };
+
+  let mut depth = 0i32;
+  let mut left_paren_idx = None;
+
+  for idx in (0..=right_paren_idx).rev() {
+    match tokens[idx].type_ {
+      TokenType::RightParen => depth += 1,
+      TokenType::LeftParen => {
+        depth -= 1;
+        if depth == 0 {
+          left_paren_idx = Some(idx);
+          break;
+        }
+      },
+      _ => {},
+    }
+  }
+
+  let Some(left_paren_idx) = left_paren_idx else {
+    return Vec::new();
+  };
+
+  let mut params = Vec::new();
+  for idx in (left_paren_idx + 1)..right_paren_idx {
+    if tokens[idx].type_ != TokenType::Identifier {
+      continue;
+    }
+
+    if idx + 1 >= right_paren_idx || tokens[idx + 1].type_ != TokenType::Colon {
+      continue;
+    }
+
+    params.push(tokens[idx].lexeme.clone());
+  }
+
+  params
 }
 
 pub fn complete_import_path(
@@ -1979,7 +2067,20 @@ fn matches_prefix(
   if prefix.is_empty() {
     return true;
   }
-  name.to_lowercase().starts_with(&prefix.to_lowercase())
+
+  let name_lower = name.to_lowercase();
+  let prefix_lower = prefix.to_lowercase();
+
+  if name_lower.starts_with(&prefix_lower) {
+    return true;
+  }
+
+  let normalized_prefix = prefix_lower.trim_end_matches('_');
+  if normalized_prefix != prefix_lower && !normalized_prefix.is_empty() {
+    return name_lower.starts_with(normalized_prefix);
+  }
+
+  false
 }
 
 /// Check if a definition is visible from the current file.
@@ -2003,6 +2104,31 @@ fn resolve_path_to_def(
 ) -> Option<DefinitionId> {
   if path.is_empty() {
     return None;
+  }
+
+  if path.len() > 1
+    && let Some(sym_path) = path
+      .iter()
+      .map(|segment| lookup_symbol_id_by_name(segment, output))
+      .collect::<Option<Vec<_>>>()
+  {
+    let ns_segments = &sym_path[..sym_path.len() - 1];
+    let last_segment = sym_path[sym_path.len() - 1];
+
+    if let Some(ns_id) = output.namespaces.lookup(ns_segments) {
+      if let Some(entry) = output.namespaces.lookup_def(ns_id, &last_segment) {
+        return match entry {
+          SymbolEntry::Single(id) => Some(*id),
+          SymbolEntry::Overload(ids) => ids.first().copied(),
+        };
+      }
+
+      if let Some(child_ns_id) = output.namespaces.lookup_child(ns_id, &last_segment) {
+        if let Some(def_id) = find_namespace_def_id(&child_ns_id, output, current_file) {
+          return Some(def_id);
+        }
+      }
+    }
   }
 
   // Find the first segment as a definition
@@ -2049,39 +2175,23 @@ fn resolve_path_to_def(
     let def_id = current_def_id?;
 
     let def = output.defs.get(&def_id);
+    let segment_sym = lookup_symbol_id_by_name(segment, output);
 
     current_def_id = match &def.kind {
       DefinitionKind::Namespace(ns_def) => {
         let ns = output.namespaces.get(&ns_def.namespace_id);
-        let mut next_def_id: Option<DefinitionId> = None;
-
-        // Look for child namespace
-        for (sym_id, child_ns_id) in &ns.children {
-          if let Some(name) = output.symbol_names.get(sym_id)
-            && name == segment
-          {
-            next_def_id = find_namespace_def_id(child_ns_id, output, current_file);
-            break;
-          }
-        }
-
-        if next_def_id.is_some() {
-          next_def_id
-        } else {
-          // Look for definition in namespace
-          for (sym_id, entry) in &ns.definitions {
-            if let Some(name) = output.symbol_names.get(sym_id)
-              && name == segment
-            {
-              next_def_id = match entry {
-                SymbolEntry::Single(id) => Some(*id),
-                SymbolEntry::Overload(ids) => ids.first().copied(),
-              };
-              break;
+        if let Some(segment_sym) = segment_sym {
+          if let Some(child_ns_id) = ns.children.get(&segment_sym) {
+            find_namespace_def_id(child_ns_id, output, current_file)
+          } else {
+            match ns.definitions.get(&segment_sym) {
+              Some(SymbolEntry::Single(id)) => Some(*id),
+              Some(SymbolEntry::Overload(ids)) => ids.first().copied(),
+              None => None,
             }
           }
-
-          next_def_id
+        } else {
+          None
         }
       },
       _ => None,
@@ -2089,6 +2199,17 @@ fn resolve_path_to_def(
   }
 
   current_def_id
+}
+
+fn lookup_symbol_id_by_name(
+  name: &str,
+  output: &AnalyzeProjectOutput,
+) -> Option<SymbolId> {
+  output
+    .symbol_names
+    .iter()
+    .find(|(_, candidate)| candidate.as_str() == name)
+    .map(|(id, _)| *id)
 }
 
 fn resolve_imported_path_head(
@@ -2166,12 +2287,7 @@ fn resolve_path_to_namespace(
   let mut sym_path = Vec::with_capacity(path.len());
   let mut all_segments_known = true;
   for segment in path {
-    if let Some(sym_id) = output
-      .symbol_names
-      .iter()
-      .find(|(_, n)| *n == segment)
-      .map(|(id, _)| *id)
-    {
+    if let Some(sym_id) = lookup_symbol_id_by_name(segment, output) {
       sym_path.push(sym_id);
     } else {
       all_segments_known = false;
@@ -2849,6 +2965,27 @@ mod tests {
       },
       other => panic!("Expected AfterDoubleColon context, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn test_complete_identifier_suggests_let_mut_local_with_trailing_underscore_prefix() {
+    let source = r#"function main(): void {
+  let mut isSeparator: boolean = false;
+  if (!isSeparator_) {
+  }
+}"#;
+
+    let tokens = lex(source);
+    let marker = "isSeparator_";
+    let cursor = (source.find(marker).unwrap() + marker.len()) as u32;
+
+    let Some(CompletionContext::Identifier { prefix, start_offset }) = detect_context(&tokens, cursor, source) else {
+      panic!("expected identifier completion context");
+    };
+    assert_eq!(prefix, "isSeparator_");
+
+    let candidates = complete_identifier(&prefix, start_offset, &tokens, None, &FileId::default());
+    assert!(candidates.iter().any(|candidate| candidate.label == "isSeparator"));
   }
 
   #[test]
