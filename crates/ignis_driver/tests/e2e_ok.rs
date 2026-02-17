@@ -5414,6 +5414,39 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_try_operator_result_different_ok_type() {
+  e2e_test(
+    "try_operator_result_different_ok_type",
+    r#"
+@lang(try)
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+record File {
+    public fd: i32;
+}
+
+function openFd(): Result<i32, i32> {
+    return Result::Ok(42);
+}
+
+function openFile(): Result<File, i32> {
+    let fd: i32 = openFd()!;
+    return Result::Ok(File { fd: fd });
+}
+
+function main(): i32 {
+    let result: Result<File, i32> = openFile();
+    let _ = result;
+    return 0;
+}
+"#,
+  );
+}
+
 // =========================================================================
 // Defer Statement Tests
 // =========================================================================

@@ -32,7 +32,6 @@ impl<'a> Analyzer<'a> {
     for root in roots {
       self.resolve_node(root, ScopeKind::Global);
     }
-
   }
 
   fn resolve_node(

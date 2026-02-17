@@ -28,8 +28,7 @@
 //!
 //!   let mut file: Fs::File = result.unwrap();
 //!
-//!   let mut buf: [u8; 256] = [0; 256];
-//!   let readResult: Result<i64, Io::IoError> = file.read(&mut buf as *mut void, 256);
+//!   let meta: Result<Fs::Metadata, Io::IoError> = file.metadata();
 //!
 //!   return 0;
 //! }
@@ -44,43 +43,27 @@ export namespace Fs {
 
     /// Opens an existing file for reading.
     public static open(path: str): Result<File, Io::IoError> {
-      let result: Result<i32, Io::IoError> = Fs::Sys::Unix::open(
-        path,
-        Fs::Sys::Unix::O_RDONLY,
-        0,
-      );
+      let result: i32 = Fs::Sys::Unix::open(path, Fs::Sys::Unix::O_RDONLY, 0)!;
 
-      if (result.isError()) {
-        return Result::ERROR(result.unwrapErr());
-      }
-
-      return Result::OK(Fs::File { fd: result.unwrap() });
+      return Result::OK(Fs::File { fd: result });
     }
 
     /// Creates or truncates a file for writing.
     public static create(path: str): Result<Fs::File, Io::IoError> {
-      let result: Result<i32, Io::IoError> = Fs::Sys::Unix::open(
+      let result: i32 = Fs::Sys::Unix::open(
         path,
         Fs::Sys::Unix::O_WRONLY | Fs::Sys::Unix::O_CREAT | Fs::Sys::Unix::O_TRUNC,
         438,
-      );
+      )!;
 
-      if (result.isError()) {
-        return Result::ERROR(result.unwrapErr());
-      }
-
-      return Result::OK(Fs::File { fd: result.unwrap() });
+      return Result::OK(Fs::File { fd: result });
     }
 
     /// Opens a file with full control over flags and mode.
     public static openWithFlags(path: str, flags: i32, mode: u32): Result<Fs::File, Io::IoError> {
-      let result: Result<i32, Io::IoError> = Fs::Sys::Unix::open(path, flags, mode);
+      let result: i32 = Fs::Sys::Unix::open(path, flags, mode)!;
 
-      if (result.isError()) {
-        return Result::ERROR(result.unwrapErr());
-      }
-
-      return Result::OK(Fs::File { fd: result.unwrap() });
+      return Result::OK(Fs::File { fd: result });
     }
 
     /// Reads up to `count` bytes into `buf`. Returns 0 on EOF.
@@ -99,8 +82,9 @@ export namespace Fs {
     }
 
     /// Returns file metadata via `fstat`.
-    public metadata(&self): Result<Fs::Sys::Unix::Stat, Io::IoError> {
-      return Fs::Sys::Unix::fstat(self.fd);
+    public metadata(&self): Result<Fs::Metadata, Io::IoError> {
+      let stat: Fs::Sys::Unix::Stat = Fs::Sys::Unix::fstat(self.fd)!;
+      return Result::OK(Fs::metadataFromStat(&stat));
     }
 
     /// Returns the raw file descriptor.

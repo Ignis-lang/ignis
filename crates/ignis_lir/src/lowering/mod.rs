@@ -581,9 +581,7 @@ impl<'a> LoweringContext<'a> {
         self.fn_builder().terminate(Terminator::Unreachable);
         None
       },
-      HIRKind::Match { scrutinee, arms } => {
-        self.lower_match(*scrutinee, arms, node.type_id, node.span)
-      },
+      HIRKind::Match { scrutinee, arms } => self.lower_match(*scrutinee, arms, node.type_id, node.span),
       HIRKind::Closure {
         thunk_def,
         captures,
@@ -2130,6 +2128,22 @@ impl<'a> LoweringContext<'a> {
           op: BinaryOperation::Equal,
           left: match_value,
           right: lit_val,
+        });
+        Operand::Temp(result_temp)
+      },
+      HIRPattern::Constant { def_id } => {
+        let (match_value, match_value_ty) = self.materialize_pattern_value(value, value_ty, span.clone());
+
+        let const_operand = self
+          .lower_variable(*def_id, match_value_ty)
+          .unwrap_or(Operand::GlobalRef(*def_id));
+
+        let result_temp = self.fn_builder().alloc_temp(bool_ty, span);
+        self.fn_builder().emit(Instr::BinOp {
+          dest: result_temp,
+          op: BinaryOperation::Equal,
+          left: match_value,
+          right: const_operand,
         });
         Operand::Temp(result_temp)
       },

@@ -75,11 +75,7 @@ impl Server {
         if editing_std_file {
           let std_entry = std_module_entry_path(&path, &config.std_path).unwrap_or_else(|| path_str.clone());
 
-          (
-            config,
-            std_entry,
-            None,
-          )
+          (config, std_entry, None)
         } else {
           (
             config,
@@ -239,11 +235,7 @@ impl Server {
         if editing_std_file {
           let std_entry = std_module_entry_path(&path, &config.std_path).unwrap_or_else(|| path_str.clone());
 
-          (
-            config,
-            std_entry,
-            None,
-          )
+          (config, std_entry, None)
         } else {
           (
             config,

@@ -20,4 +20,7 @@ pub enum HIRPattern {
   Or {
     patterns: Vec<HIRPattern>,
   },
+  Constant {
+    def_id: DefinitionId,
+  },
 }

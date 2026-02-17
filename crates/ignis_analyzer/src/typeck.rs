@@ -541,9 +541,7 @@ impl<'a> Analyzer<'a> {
             );
             self.types.error()
           },
-          None => {
-            self.types.error()
-          },
+          None => self.types.error(),
         }
       },
       ASTExpression::Call(call) => self.typecheck_call(node_id, call, scope_kind, ctx, infer),
@@ -1229,6 +1227,14 @@ impl<'a> Analyzer<'a> {
 
           self.define_pattern_binding_if_absent(*name, span, *expected_type);
           return true;
+        }
+
+        if let Some(ResolvedPath::Entry(SymbolEntry::Single(def_id))) = self.resolve_qualified_path(&path_segments) {
+          if let DefinitionKind::Constant(ref c) = self.defs.get(&def_id).kind {
+            let const_ty = c.type_id;
+            self.typecheck_assignment(expected_type, &const_ty, span);
+            return false;
+          }
         }
 
         if let Some((first, _)) = segments.first()
@@ -3632,9 +3638,10 @@ impl<'a> Analyzer<'a> {
       // --- Call: top-level placeholder or no placeholder use existing specialized path;
       //     deep placeholder (count==1 but not top-level) uses ambient path. ---
       ASTNode::Expression(ASTExpression::Call(ref call)) => {
-        let has_top_level_placeholder = call.arguments.iter().any(|arg| {
-          matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. }))
-        });
+        let has_top_level_placeholder = call
+          .arguments
+          .iter()
+          .any(|arg| matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })));
 
         if has_top_level_placeholder || placeholder_count == 0 {
           self.typecheck_pipe_call(node_id, lhs, &lhs_type, rhs, call, pipe_span, scope_kind, ctx)
@@ -3750,7 +3757,10 @@ impl<'a> Analyzer<'a> {
 
   /// Counts `_` placeholders in an AST subtree.
   /// Does NOT recurse into Lambda or Pipe nodes (independent scopes).
-  fn count_pipe_placeholders(&self, node_id: &NodeId) -> usize {
+  fn count_pipe_placeholders(
+    &self,
+    node_id: &NodeId,
+  ) -> usize {
     let node = self.ast.get(node_id);
 
     match node {
@@ -3759,7 +3769,10 @@ impl<'a> Analyzer<'a> {
     }
   }
 
-  fn count_pipe_placeholders_expr(&self, expr: &ASTExpression) -> usize {
+  fn count_pipe_placeholders_expr(
+    &self,
+    expr: &ASTExpression,
+  ) -> usize {
     match expr {
       ASTExpression::PipePlaceholder { .. } => 1,
 
@@ -3768,18 +3781,18 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Pipe { .. } => 0,
 
       // Leaves
-      ASTExpression::Variable(_)
-      | ASTExpression::Path(_)
-      | ASTExpression::Literal(_) => 0,
+      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) => 0,
 
       // Recurse into children
       ASTExpression::Call(call) => {
         self.count_pipe_placeholders(&call.callee)
-          + call.arguments.iter().map(|a| self.count_pipe_placeholders(a)).sum::<usize>()
+          + call
+            .arguments
+            .iter()
+            .map(|a| self.count_pipe_placeholders(a))
+            .sum::<usize>()
       },
-      ASTExpression::Binary(bin) => {
-        self.count_pipe_placeholders(&bin.left) + self.count_pipe_placeholders(&bin.right)
-      },
+      ASTExpression::Binary(bin) => self.count_pipe_placeholders(&bin.left) + self.count_pipe_placeholders(&bin.right),
       ASTExpression::Unary(un) => self.count_pipe_placeholders(&un.operand),
       ASTExpression::Ternary(tern) => {
         self.count_pipe_placeholders(&tern.condition)
@@ -3793,16 +3806,10 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Reference(r) => self.count_pipe_placeholders(&r.inner),
       ASTExpression::Dereference(d) => self.count_pipe_placeholders(&d.inner),
-      ASTExpression::Assignment(a) => {
-        self.count_pipe_placeholders(&a.target) + self.count_pipe_placeholders(&a.value)
-      },
+      ASTExpression::Assignment(a) => self.count_pipe_placeholders(&a.target) + self.count_pipe_placeholders(&a.value),
       ASTExpression::MemberAccess(ma) => self.count_pipe_placeholders(&ma.object),
-      ASTExpression::RecordInit(ri) => {
-        ri.fields.iter().map(|f| self.count_pipe_placeholders(&f.value)).sum()
-      },
-      ASTExpression::Vector(v) => {
-        v.items.iter().map(|i| self.count_pipe_placeholders(i)).sum()
-      },
+      ASTExpression::RecordInit(ri) => ri.fields.iter().map(|f| self.count_pipe_placeholders(&f.value)).sum(),
+      ASTExpression::Vector(v) => v.items.iter().map(|i| self.count_pipe_placeholders(i)).sum(),
       ASTExpression::Match(m) => {
         let mut count = self.count_pipe_placeholders(&m.scrutinee);
         for arm in &m.arms {
@@ -3813,9 +3820,7 @@ impl<'a> Analyzer<'a> {
         }
         count
       },
-      ASTExpression::BuiltinCall(bc) => {
-        bc.args.iter().map(|a| self.count_pipe_placeholders(a)).sum()
-      },
+      ASTExpression::BuiltinCall(bc) => bc.args.iter().map(|a| self.count_pipe_placeholders(a)).sum(),
       ASTExpression::LetCondition(lc) => self.count_pipe_placeholders(&lc.value),
       ASTExpression::CaptureOverride(co) => self.count_pipe_placeholders(&co.inner),
       ASTExpression::Try { expr, .. } => self.count_pipe_placeholders(expr),
@@ -4677,14 +4682,13 @@ impl<'a> Analyzer<'a> {
     let (raw_params, raw_ret, is_closure) = self.pipe_callee_signature(&def_id);
 
     // Infer generic type arguments from the LHS type
-    let (param_types, ret_type, type_args) =
-      if let Some((subst_params, subst_ret, inferred_args)) =
-        self.infer_pipe_generic_subst(&def_id, &raw_params, raw_ret, lhs_type)
-      {
-        (subst_params, subst_ret, inferred_args)
-      } else {
-        (raw_params, raw_ret, vec![])
-      };
+    let (param_types, ret_type, type_args) = if let Some((subst_params, subst_ret, inferred_args)) =
+      self.infer_pipe_generic_subst(&def_id, &raw_params, raw_ret, lhs_type)
+    {
+      (subst_params, subst_ret, inferred_args)
+    } else {
+      (raw_params, raw_ret, vec![])
+    };
 
     if param_types.is_empty() {
       self.add_diagnostic(
@@ -4781,14 +4785,13 @@ impl<'a> Analyzer<'a> {
     let (raw_params, raw_ret, is_closure) = self.pipe_callee_signature(&def_id);
 
     // Infer generic type arguments from the LHS type
-    let (param_types, ret_type, type_args) =
-      if let Some((subst_params, subst_ret, inferred_args)) =
-        self.infer_pipe_generic_subst(&def_id, &raw_params, raw_ret, lhs_type)
-      {
-        (subst_params, subst_ret, inferred_args)
-      } else {
-        (raw_params, raw_ret, vec![])
-      };
+    let (param_types, ret_type, type_args) = if let Some((subst_params, subst_ret, inferred_args)) =
+      self.infer_pipe_generic_subst(&def_id, &raw_params, raw_ret, lhs_type)
+    {
+      (subst_params, subst_ret, inferred_args)
+    } else {
+      (raw_params, raw_ret, vec![])
+    };
 
     if param_types.is_empty() {
       let path_name = path
@@ -4997,11 +5000,7 @@ impl<'a> Analyzer<'a> {
     let type_args: Vec<TypeId> = type_params
       .iter()
       .enumerate()
-      .map(|(i, _)| {
-        subst
-          .get(*def_id, i as u32)
-          .unwrap_or_else(|| self.types.error())
-      })
+      .map(|(i, _)| subst.get(*def_id, i as u32).unwrap_or_else(|| self.types.error()))
       .collect();
 
     let full_subst = Substitution::for_generic(*def_id, &type_args);
@@ -8098,9 +8097,7 @@ impl<'a> Analyzer<'a> {
           return self.types.boolean();
         }
 
-        if matches!(self.types.get(&left_type), Type::Char)
-          && matches!(self.types.get(&right_type), Type::Char)
-        {
+        if matches!(self.types.get(&left_type), Type::Char) && matches!(self.types.get(&right_type), Type::Char) {
           return self.types.boolean();
         }
 
@@ -8169,9 +8166,7 @@ impl<'a> Analyzer<'a> {
           return self.types.boolean();
         }
 
-        if matches!(self.types.get(&left_type), Type::Char)
-          && matches!(self.types.get(&right_type), Type::Char)
-        {
+        if matches!(self.types.get(&left_type), Type::Char) && matches!(self.types.get(&right_type), Type::Char) {
           return self.types.boolean();
         }
 
@@ -8632,12 +8627,14 @@ impl<'a> Analyzer<'a> {
       }
       .to_string();
 
-      self.add_diagnostic(DiagnosticMessage::ExpectedTypeDefinition {
-        name,
-        kind,
-        span: s.clone(),
-      }
-      .report());
+      self.add_diagnostic(
+        DiagnosticMessage::ExpectedTypeDefinition {
+          name,
+          kind,
+          span: s.clone(),
+        }
+        .report(),
+      );
     }
 
     self.types.error()
