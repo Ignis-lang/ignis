@@ -131,6 +131,11 @@ pub enum DiagnosticMessage {
     name: String,
     span: Span,
   },
+  ExpectedTypeDefinition {
+    name: String,
+    kind: String,
+    span: Span,
+  },
   // Generic type errors
   WrongNumberOfTypeArgs {
     expected: usize,
@@ -932,6 +937,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::TypeAlreadyDefined { name, .. } => write!(f, "Type '{}' is already defined", name),
       DiagnosticMessage::TypeAliasCycle { name, .. } => write!(f, "Type alias '{}' creates a cycle", name),
       DiagnosticMessage::UndefinedType { name, .. } => write!(f, "Undefined type '{}'", name),
+      DiagnosticMessage::ExpectedTypeDefinition { name, kind, .. } => {
+        write!(f, "Expected a type, but '{}' refers to a {}", name, kind)
+      },
 
       // Generic type errors
       DiagnosticMessage::WrongNumberOfTypeArgs {
@@ -1792,6 +1800,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::TypeAlreadyDefined { span, .. }
       | DiagnosticMessage::TypeAliasCycle { span, .. }
       | DiagnosticMessage::UndefinedType { span, .. }
+      | DiagnosticMessage::ExpectedTypeDefinition { span, .. }
       | DiagnosticMessage::WrongNumberOfTypeArgs { span, .. }
       | DiagnosticMessage::TypeParamCannotHaveArgs { span, .. }
       | DiagnosticMessage::TypeAliasCannotHaveArgs { span, .. }
@@ -2002,6 +2011,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::TypeAlreadyDefined { .. } => "A0052",
       DiagnosticMessage::TypeAliasCycle { .. } => "A0066",
       DiagnosticMessage::UndefinedType { .. } => "I0043",
+      DiagnosticMessage::ExpectedTypeDefinition { .. } => "A0185",
       DiagnosticMessage::WrongNumberOfTypeArgs { .. } => "A0070",
       DiagnosticMessage::TypeParamCannotHaveArgs { .. } => "A0071",
       DiagnosticMessage::TypeAliasCannotHaveArgs { .. } => "A0072",

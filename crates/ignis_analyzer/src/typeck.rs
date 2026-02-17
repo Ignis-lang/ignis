@@ -8605,6 +8605,37 @@ impl<'a> Analyzer<'a> {
     self.resolve_type_syntax_impl(ty, Some(span))
   }
 
+  fn resolve_type_definition_or_error(
+    &mut self,
+    def_id: &DefinitionId,
+    span: Option<&Span>,
+  ) -> TypeId {
+    if let Some(type_id) = self.defs.try_type_of(def_id).copied() {
+      return type_id;
+    }
+
+    if let Some(s) = span {
+      let def = self.defs.get(def_id);
+      let name = self.get_symbol_name(&def.name);
+      let kind = match &def.kind {
+        DefinitionKind::Namespace(_) => "namespace",
+        DefinitionKind::TypeParam(_) => "type parameter",
+        DefinitionKind::Placeholder => "placeholder",
+        _ => "definition",
+      }
+      .to_string();
+
+      self.add_diagnostic(DiagnosticMessage::ExpectedTypeDefinition {
+        name,
+        kind,
+        span: s.clone(),
+      }
+      .report());
+    }
+
+    self.types.error()
+  }
+
   fn resolve_type_syntax_impl(
     &mut self,
     ty: &IgnisTypeSyntax,
@@ -8710,16 +8741,11 @@ impl<'a> Analyzer<'a> {
             return self.types.error();
           }
 
-          *self.type_of(&def_id)
+          self.resolve_type_definition_or_error(&def_id, span)
         } else {
           let name = self.symbols.borrow().get(symbol).to_string();
           if let Some(s) = span {
-            self.add_diagnostic(Diagnostic::new(
-              Severity::Error,
-              format!("Undefined type '{}'", name),
-              "I0043".to_string(),
-              s.clone(),
-            ));
+            self.add_diagnostic(DiagnosticMessage::UndefinedType { name, span: s.clone() }.report());
           }
           self.types.error()
         }
@@ -8738,12 +8764,7 @@ impl<'a> Analyzer<'a> {
             .collect::<Vec<_>>()
             .join("::");
           if let Some(s) = span {
-            self.add_diagnostic(Diagnostic::new(
-              Severity::Error,
-              format!("Undefined type '{}'", name),
-              "I0043".to_string(),
-              s.clone(),
-            ));
+            self.add_diagnostic(DiagnosticMessage::UndefinedType { name, span: s.clone() }.report());
           }
           return self.types.error();
         };
@@ -9580,7 +9601,7 @@ impl<'a> Analyzer<'a> {
           }
           return self.types.error();
         }
-        return *self.type_of(&def_id);
+        return self.resolve_type_definition_or_error(&def_id, span);
       },
     };
 
@@ -9601,7 +9622,7 @@ impl<'a> Analyzer<'a> {
         }
         return self.types.error();
       }
-      return *self.type_of(&def_id);
+      return self.resolve_type_definition_or_error(&def_id, span);
     }
 
     // Generic type - resolve arguments
@@ -9634,7 +9655,7 @@ impl<'a> Analyzer<'a> {
       .collect();
 
     if is_type_alias {
-      let target_type = *self.type_of(&def_id);
+      let target_type = self.resolve_type_definition_or_error(&def_id, span);
       let subst = Substitution::for_generic(def_id, &resolved_args);
       return self.types.substitute(target_type, &subst);
     }
