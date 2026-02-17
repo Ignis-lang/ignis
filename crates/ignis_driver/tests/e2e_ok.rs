@@ -5373,6 +5373,20 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_pipe_builtin_with_placeholder() {
+  e2e_test(
+    "pipe_builtin_with_placeholder",
+    r#"
+function main(): i32 {
+    let mut x: i32 = 42;
+    let ptr: *mut i32 = (&mut x) as *mut i32;
+    return ptr |> @read<i32>(_);
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_try_operator_result() {
   e2e_test(
     "try_operator_result",
