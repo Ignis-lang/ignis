@@ -229,18 +229,24 @@ impl CompilationContext {
 
   /// Add prelude import edges to the module DAG without creating cycles.
   ///
-  /// For each (module M, prelude P) pair, adds `M → P` only if P does
-  /// not already transitively depend on M via existing explicit edges.
-  /// Reachability is checked against a snapshot of the pre-prelude graph
-  /// so that the result is independent of insertion order.
+  /// Uses a two-pass approach to prevent indirect cycles through prelude
+  /// chains. For example, if `vector → memory` is an explicit edge, a
+  /// naive single-pass could add both `memory → string` and
+  /// `string → vector` (each safe individually), creating the cycle
+  /// `vector → memory → string → vector`.
+  ///
+  /// Pass 1 adds prelude-to-prelude edges using the pre-prelude graph.
+  /// Pass 2 recomputes reachability (now including prelude chains) and
+  /// uses it to safely add non-prelude-to-prelude edges.
   fn add_safe_prelude_edges(&mut self) {
     use std::collections::HashSet;
     use ignis_type::BytePosition;
 
-    // Snapshot: for each prelude module, compute which modules it can reach
-    // via existing (explicit) edges. This snapshot is frozen before we
-    // start adding prelude edges.
-    let prelude_reachable: HashMap<ModuleId, HashSet<ModuleId>> = self
+    let prelude_set: HashSet<ModuleId> = self.prelude_module_ids.iter().copied().collect();
+    let all_module_ids: Vec<ModuleId> = self.module_graph.modules.iter().map(|(mid, _)| mid).collect();
+
+    // Pre-prelude reachability snapshot (explicit edges only).
+    let pre_prelude_reachable: HashMap<ModuleId, HashSet<ModuleId>> = self
       .prelude_module_ids
       .iter()
       .map(|&pid| {
@@ -249,9 +255,8 @@ impl CompilationContext {
       })
       .collect();
 
-    let all_module_ids: Vec<ModuleId> = self.module_graph.modules.iter().map(|(mid, _)| mid).collect();
-
-    for module_id in all_module_ids {
+    // Pass 1: prelude-to-prelude edges.
+    for &module_id in &self.prelude_module_ids {
       let file_id = self.module_graph.modules.get(&module_id).file_id;
       let dummy_span = Span::empty_at(file_id, BytePosition::default());
 
@@ -260,15 +265,57 @@ impl CompilationContext {
           continue;
         }
 
-        // Would adding module_id → prelude_id create a cycle?
-        // That happens iff prelude_id already reaches module_id.
-        if let Some(reachable) = prelude_reachable.get(&prelude_id)
+        if let Some(reachable) = pre_prelude_reachable.get(&prelude_id)
           && reachable.contains(&module_id)
         {
           continue;
         }
 
-        // Don't add duplicate edges.
+        let already = self
+          .module_graph
+          .modules
+          .get(&module_id)
+          .imports
+          .iter()
+          .any(|imp| imp.items.is_empty() && imp.source_module() == prelude_id);
+
+        if already {
+          continue;
+        }
+
+        self
+          .module_graph
+          .add_import(module_id, Vec::new(), prelude_id, dummy_span.clone());
+      }
+    }
+
+    // Pass 2: non-prelude-to-prelude edges.
+    // Recompute reachability now that prelude-to-prelude edges exist,
+    // so indirect cycles through prelude chains are detected.
+    let updated_reachable: HashMap<ModuleId, HashSet<ModuleId>> = self
+      .prelude_module_ids
+      .iter()
+      .map(|&pid| {
+        let deps: HashSet<ModuleId> = self.module_graph.transitive_deps(pid).into_iter().collect();
+        (pid, deps)
+      })
+      .collect();
+
+    for &module_id in &all_module_ids {
+      if prelude_set.contains(&module_id) {
+        continue;
+      }
+
+      let file_id = self.module_graph.modules.get(&module_id).file_id;
+      let dummy_span = Span::empty_at(file_id, BytePosition::default());
+
+      for &prelude_id in &self.prelude_module_ids {
+        if let Some(reachable) = updated_reachable.get(&prelude_id)
+          && reachable.contains(&module_id)
+        {
+          continue;
+        }
+
         let already = self
           .module_graph
           .modules
