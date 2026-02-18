@@ -60,11 +60,11 @@
 //!
 //!   // Chain: parse, double, inspect
 //!   let doubled: Result<i32, str> = result
-//!     .inspect(|val: i32| -> void { Io::printI32(val); })
-//!     .map<i32>(|val: i32| -> i32 { return val * 2; });
+//!     .inspect((val: i32): void -> { Io::printI32(val); })
+//!     .map<i32>((val: i32): i32 -> { return val * 2; });
 //!
 //!   // Recover from error
-//!   let value: i32 = doubled.unwrapOrElse(|err: str| -> i32 { return 0; });
+//!   let value: i32 = doubled.unwrapOrElse((err: str): i32 -> { return 0; });
 //!
 //!   return 0;
 //! }
@@ -229,11 +229,11 @@ export enum Result<T, E> {
   /// import Result from "std::result";
   ///
   /// let x: Result<i32, str> = Result::ERROR("missing");
-  /// let val: i32 = x.unwrapOrElse(|err: str| -> i32 { return -1; });
+  /// let val: i32 = x.unwrapOrElse((err: str): i32 -> { return -1; });
   /// // val == -1 (callback was called with "missing")
   ///
   /// let y: Result<i32, str> = Result::OK(42);
-  /// let val2: i32 = y.unwrapOrElse(|err: str| -> i32 { return -1; });
+  /// let val2: i32 = y.unwrapOrElse((err: str): i32 -> { return -1; });
   /// // val2 == 42 (callback was NOT called)
   /// ```
   public unwrapOrElse(&self, @noescape f: (E) -> T): T {
@@ -266,8 +266,8 @@ export enum Result<T, E> {
   /// let x: Result<i32, str> = Result::OK(42);
   ///
   /// let result: Result<i32, str> = x
-  ///   .inspect(|val: i32| -> void { Io::printI32(val); })
-  ///   .map<i32>(|val: i32| -> i32 { return val * 2; });
+  ///   .inspect((val: i32): void -> { Io::printI32(val); })
+  ///   .map<i32>((val: i32): i32 -> { return val * 2; });
   /// // Prints: 42
   /// // result == Result::OK(84)
   /// ```
@@ -305,7 +305,7 @@ export enum Result<T, E> {
   /// let x: Result<i32, str> = Result::ERROR("timeout");
   ///
   /// let result: Result<i32, str> = x
-  ///   .inspectErr(|err: str| -> void { Io::println(err); });
+  ///   .inspectErr((err: str): void -> { Io::println(err); });
   /// // Prints: "timeout"
   /// // result is still Result::ERROR("timeout")
   /// ```
@@ -346,14 +346,14 @@ export enum Result<T, E> {
   /// let x: Result<i32, str> = Result::OK(5);
   ///
   /// // Convert i32 to boolean
-  /// let positive: Result<boolean, str> = x.map<boolean>(|n: i32| -> boolean {
+  /// let positive: Result<boolean, str> = x.map<boolean>((n: i32): boolean -> {
   ///   return n > 0;
   /// });
   /// // positive == Result::OK(true)
   ///
   /// // ERROR passes through unchanged
   /// let y: Result<i32, str> = Result::ERROR("fail");
-  /// let result: Result<boolean, str> = y.map<boolean>(|n: i32| -> boolean {
+  /// let result: Result<boolean, str> = y.map<boolean>((n: i32): boolean -> {
   ///   return n > 0;
   /// });
   /// // result == Result::ERROR("fail")
@@ -393,14 +393,14 @@ export enum Result<T, E> {
   /// let x: Result<i32, str> = Result::ERROR("not found");
   ///
   /// // Convert str error to i32 error code
-  /// let coded: Result<i32, i32> = x.mapErr<i32>(|err: str| -> i32 {
+  /// let coded: Result<i32, i32> = x.mapErr<i32>((err: str): i32 -> {
   ///   return 404;
   /// });
   /// // coded == Result::ERROR(404)
   ///
   /// // OK passes through unchanged
   /// let y: Result<i32, str> = Result::OK(42);
-  /// let result: Result<i32, i32> = y.mapErr<i32>(|err: str| -> i32 {
+  /// let result: Result<i32, i32> = y.mapErr<i32>((err: str): i32 -> {
   ///   return 500;
   /// });
   /// // result == Result::OK(42)  (callback not called)
@@ -445,14 +445,14 @@ export enum Result<T, E> {
   ///
   /// // Chain: divide by 2, then divide by 5
   /// let result: Result<i32, str> = x
-  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 2); })
-  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 5); });
+  ///   .andThen<i32>((n: i32): Result<i32, str> -> { return safeDivide(n, 2); })
+  ///   .andThen<i32>((n: i32): Result<i32, str> -> { return safeDivide(n, 5); });
   /// // result == Result::OK(10)
   ///
   /// // Chain breaks on ERROR
   /// let bad: Result<i32, str> = x
-  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 0); })
-  ///   .andThen<i32>(|n: i32| -> Result<i32, str> { return safeDivide(n, 5); });
+  ///   .andThen<i32>((n: i32): Result<i32, str> -> { return safeDivide(n, 0); })
+  ///   .andThen<i32>((n: i32): Result<i32, str> -> { return safeDivide(n, 5); });
   /// // bad == Result::ERROR("division by zero")
   /// ```
   public andThen<U>(&self, @noescape f: (T) -> Result<U, E>): Result<U, E> {
@@ -490,14 +490,14 @@ export enum Result<T, E> {
   /// let primary: Result<i32, str> = Result::ERROR("cache miss");
   ///
   /// // Try fallback on error
-  /// let result: Result<i32, str> = primary.orElse<str>(|err: str| -> Result<i32, str> {
+  /// let result: Result<i32, str> = primary.orElse<str>((err: str): Result<i32, str> -> {
   ///   return Result::OK(0);  // fallback value
   /// });
   /// // result == Result::OK(0)
   ///
   /// // OK passes through without calling f
   /// let ok: Result<i32, str> = Result::OK(42);
-  /// let result2: Result<i32, str> = ok.orElse<str>(|err: str| -> Result<i32, str> {
+  /// let result2: Result<i32, str> = ok.orElse<str>((err: str): Result<i32, str> -> {
   ///   return Result::OK(0);
   /// });
   /// // result2 == Result::OK(42)  (callback not called)
