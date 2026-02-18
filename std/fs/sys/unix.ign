@@ -4,7 +4,7 @@
 //! Thin 1:1 wrappers around POSIX filesystem syscalls, returning
 //! `Result<T, Io::IoError>` instead of raw errno-based error codes.
 //!
-//! All public API lives under the `Fs::Sys::Unix` namespace.
+//! All public API lives under the `Fs::Sys` namespace.
 //!
 //! ## Functions
 //!
@@ -22,15 +22,15 @@
 //! | `rmdir`    | `rmdir(2)`         | `Result<boolean, IoError>`        |
 //! | `rename`   | `rename(2)`        | `Result<boolean, IoError>`        |
 //! | `opendir`  | `opendir(3)`       | `Result<DirPtr, IoError>`         |
-//! | `readdir`  | `readdir(3)`       | `Option<UnixDirEntry>`            |
+//! | `readdir`  | `readdir(3)`       | `Option<SysDirEntry>`            |
 //! | `closedir` | `closedir(3)`      | `void`                            |
 //!
 //! ## Types
 //!
 //! | Type       | Description                                                   |
 //! |------------|---------------------------------------------------------------|
-//! | `Stat`     | File metadata: dev, ino, mode, nlink, uid, gid, size, times   |
-//! | `UnixDirEntry` | Directory entry: name (borrowed `str`), ino, fileType     |
+//! | `Stat`         | File metadata: dev, ino, mode, nlink, uid, gid, size, times   |
+//! | `SysDirEntry`  | Directory entry: name (borrowed `str`), ino, fileType         |
 //!
 //! ## Constants
 //!
@@ -76,17 +76,17 @@
 //! import Io from "std::io";
 //!
 //! function main(): i32 {
-//!   let fd: Result<i32, Io::IoError> = Fs::Sys::Unix::open(
+//!   let fd: Result<i32, Io::IoError> = Fs::Sys::open(
 //!     "/tmp/test.txt",
-//!     Fs::Sys::Unix::O_WRONLY | Fs::Sys::Unix::O_CREAT | Fs::Sys::Unix::O_TRUNC,
+//!     Fs::Sys::O_WRONLY | Fs::Sys::O_CREAT | Fs::Sys::O_TRUNC,
 //!     438,  // 0o666
 //!   );
 //!   if fd.isError() { return 1; }
 //!
 //!   let rawFd: i32 = fd.unwrap();
 //!   let msg: *u8 = "hello from Ignis\n";
-//!   let n: Result<i64, Io::IoError> = Fs::Sys::Unix::write(rawFd, msg as *mut void, 17);
-//!   Fs::Sys::Unix::close(rawFd);
+//!   let n: Result<i64, Io::IoError> = Fs::Sys::write(rawFd, msg as *mut void, 17);
+//!   Fs::Sys::close(rawFd);
 //!   return 0;
 //! }
 //! ```
@@ -152,12 +152,21 @@ extern __fs_dir {
   function readdir(dirp: CType::DirPtr): *mut void;
 }
 
-// errno access and strerror.
-// Duplicated from io/error.ign for the same symbol-mangling workaround.
-extern __fs_errno {
+// errno access — platform-specific function name.
+@configFlag(@platform("linux"))
+extern __fs_errno_fn {
   @externName("__errno_location")
   function errno_location(): *mut i32;
+}
 
+@configFlag(@platform("macos"))
+extern __fs_errno_fn {
+  @externName("__error")
+  function errno_location(): *mut i32;
+}
+
+// strerror and errno constants (POSIX-standard).
+extern __fs_errno {
   function strerror(errnum: i32): *u8;
 
   const ENOENT: i32;
@@ -199,7 +208,7 @@ extern __fs_rt {
 // Public types and namespace
 // =============================================================================
 
-export namespace Fs::Sys::Unix {
+export namespace Fs::Sys {
 
   // ---- Stat record ----
 
@@ -223,13 +232,13 @@ export namespace Fs::Sys::Unix {
     public blocks: i64;
   }
 
-  // ---- UnixDirEntry record ----
+  // ---- SysDirEntry record ----
 
   /// Single entry read from a directory stream via `readdir`.
   ///
   /// The `name` field is borrowed from the internal C dirent buffer —
   /// valid only until the next `readdir` call or `closedir`.
-  record UnixDirEntry {
+  record SysDirEntry {
     /// File name (borrowed — valid until next readdir/closedir).
     public name: str;
 
@@ -290,7 +299,7 @@ export namespace Fs::Sys::Unix {
   // =========================================================================
 
   function lastError(): Io::IoError {
-    let rawErrno: i32 = @read<i32>(__fs_errno::errno_location());
+    let rawErrno: i32 = @read<i32>(__fs_errno_fn::errno_location());
     let msg: str = __fs_errno::strerror(rawErrno) as str;
 
     let kind: Io::ErrorKind = match (rawErrno) {
@@ -486,13 +495,13 @@ export namespace Fs::Sys::Unix {
   /// Reads the next entry from a directory stream.
   ///
   /// Returns `Option::NONE` when the end of the directory is reached.
-  /// The returned `UnixDirEntry` borrows its `name` from the internal
+  /// The returned `SysDirEntry` borrows its `name` from the internal
   /// dirent buffer — valid only until the next `readdir` or `closedir`.
   ///
   /// Note: this does not distinguish "end of directory" from "error".
   /// For fine-grained error checking, clear errno before calling and
   /// check it after getting `NONE`.
-  function readdir(dirp: CType::DirPtr): Option<UnixDirEntry> {
+  function readdir(dirp: CType::DirPtr): Option<SysDirEntry> {
     let entry: *mut void = __fs_dir::readdir(dirp);
     if (entry == null) {
       return Option::NONE;
@@ -502,7 +511,7 @@ export namespace Fs::Sys::Unix {
     let ino: u64 = __fs_rt::ignis_dirent_ino(entry);
     let fileType: u8 = __fs_rt::ignis_dirent_type(entry);
 
-    return Option::SOME(UnixDirEntry { name: name, ino: ino, fileType: fileType });
+    return Option::SOME(SysDirEntry { name: name, ino: ino, fileType: fileType });
   }
 
   /// Closes a directory stream opened with `opendir`.

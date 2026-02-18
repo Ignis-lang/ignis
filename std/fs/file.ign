@@ -43,16 +43,16 @@ export namespace Fs {
 
     /// Opens an existing file for reading.
     public static open(path: str): Result<File, Io::IoError> {
-      let result: i32 = Fs::Sys::Unix::open(path, Fs::Sys::Unix::O_RDONLY, 0)!;
+      let result: i32 = Fs::Sys::open(path, Fs::Sys::O_RDONLY, 0)!;
 
       return Result::OK(Fs::File { fd: result });
     }
 
     /// Creates or truncates a file for writing.
     public static create(path: str): Result<Fs::File, Io::IoError> {
-      let result: i32 = Fs::Sys::Unix::open(
+      let result: i32 = Fs::Sys::open(
         path,
-        Fs::Sys::Unix::O_WRONLY | Fs::Sys::Unix::O_CREAT | Fs::Sys::Unix::O_TRUNC,
+        Fs::Sys::O_WRONLY | Fs::Sys::O_CREAT | Fs::Sys::O_TRUNC,
         438,
       )!;
 
@@ -61,29 +61,29 @@ export namespace Fs {
 
     /// Opens a file with full control over flags and mode.
     public static openWithFlags(path: str, flags: i32, mode: u32): Result<Fs::File, Io::IoError> {
-      let result: i32 = Fs::Sys::Unix::open(path, flags, mode)!;
+      let result: i32 = Fs::Sys::open(path, flags, mode)!;
 
       return Result::OK(Fs::File { fd: result });
     }
 
     /// Reads up to `count` bytes into `buf`. Returns 0 on EOF.
     public read(&mut self, buf: *mut void, count: u64): Result<i64, Io::IoError> {
-      return Fs::Sys::Unix::read(self.fd, buf, count);
+      return Fs::Sys::read(self.fd, buf, count);
     }
 
     /// Writes up to `count` bytes from `buf`.
     public write(&mut self, buf: *void, count: u64): Result<i64, Io::IoError> {
-      return Fs::Sys::Unix::write(self.fd, buf as *mut void, count);
+      return Fs::Sys::write(self.fd, buf as *mut void, count);
     }
 
     /// Repositions the file offset.
     public seek(&mut self, offset: i64, whence: i32): Result<i64, Io::IoError> {
-      return Fs::Sys::Unix::lseek(self.fd, offset, whence);
+      return Fs::Sys::lseek(self.fd, offset, whence);
     }
 
     /// Returns file metadata via `fstat`.
     public metadata(&self): Result<Fs::Metadata, Io::IoError> {
-      let stat: Fs::Sys::Unix::Stat = Fs::Sys::Unix::fstat(self.fd)!;
+      let stat: Fs::Sys::Stat = Fs::Sys::fstat(self.fd)!;
       return Result::OK(Fs::metadataFromStat(&stat));
     }
 
@@ -95,7 +95,7 @@ export namespace Fs {
     /// Closes the file descriptor.
     drop(&mut self): void {
       if (self.fd >= 0) {
-        Fs::Sys::Unix::close(self.fd);
+        Fs::Sys::close(self.fd);
         self.fd = -1;
       }
     }

@@ -50,10 +50,19 @@
 //! }
 //! ```
 
-extern __io_error {
+@configFlag(@platform("linux"))
+extern __io_errno_fn {
   @externName("__errno_location")
   function errno_location(): *mut i32;
+}
 
+@configFlag(@platform("macos"))
+extern __io_errno_fn {
+  @externName("__error")
+  function errno_location(): *mut i32;
+}
+
+extern __io_error {
   function strerror(errnum: i32): *u8;
 
   const ENOENT: i32;
@@ -179,7 +188,7 @@ export namespace Io {
     /// }
     /// ```
     public static lastError(): IoError {
-      let rawErrno: i32 = @read<i32>(__io_error::errno_location());
+      let rawErrno: i32 = @read<i32>(__io_errno_fn::errno_location());
       return IoError::fromErrno(rawErrno);
     }
   }

@@ -453,6 +453,178 @@ fn e2e_compile_directive_orphan_else() {
   );
 }
 
+// =============================================================================
+// @configFlag — single-item cfg attribute
+// =============================================================================
+
+#[test]
+fn e2e_configflag_true_keeps_item() {
+  let source = r#"
+    @configFlag(@platform("linux"))
+    function getValue(): i32 { return 42; }
+
+    function main(): i32 {
+      return getValue();
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn e2e_configflag_false_removes_item() {
+  let source = r#"
+    @configFlag(@platform("macos"))
+    function getValue(): i32 { return 99; }
+
+    function getValue(): i32 { return 10; }
+
+    function main(): i32 {
+      return getValue();
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn e2e_configflag_skip_extern_block() {
+  let source = r#"
+    @configFlag(@platform("macos"))
+    extern __test_macos {
+      function getpid(): i32;
+    }
+
+    function main(): i32 {
+      return 0;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn e2e_configflag_keep_extern_block() {
+  let source = r#"
+    @configFlag(@platform("linux"))
+    extern __test_linux {
+      function getpid(): i32;
+    }
+
+    function main(): i32 {
+      let pid: i32 = __test_linux::getpid();
+      if (pid > 0) {
+        return 0;
+      }
+      return 1;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn e2e_configflag_platform_dispatch_extern() {
+  let source = r#"
+    @configFlag(@platform("linux"))
+    extern __pid_impl {
+      function getpid(): i32;
+    }
+
+    @configFlag(@platform("macos"))
+    extern __pid_impl {
+      function getpid(): i32;
+    }
+
+    function main(): i32 {
+      let pid: i32 = __pid_impl::getpid();
+      if (pid > 0) {
+        return 0;
+      }
+      return 1;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn e2e_configflag_namespace_item() {
+  let source = r#"
+    namespace Foo {
+      @configFlag(@platform("linux"))
+      function bar(): i32 { return 7; }
+
+      @configFlag(@platform("macos"))
+      function bar(): i32 { return 8; }
+    }
+
+    function main(): i32 {
+      return Foo::bar();
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 7);
+}
+
+#[test]
+fn e2e_configflag_block_statement() {
+  let source = r#"
+    function main(): i32 {
+      let mut x: i32 = 0;
+
+      @configFlag(@platform("linux"))
+      let y: i32 = 42;
+
+      @configFlag(@platform("macos"))
+      let y: i32 = 99;
+
+      x = y;
+      return x;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn e2e_configflag_boolean_combinators() {
+  let source = r#"
+    @configFlag(@platform("linux") && @arch("x86_64"))
+    function getValue(): i32 { return 64; }
+
+    function main(): i32 {
+      return getValue();
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 64);
+}
+
+#[test]
+fn e2e_configflag_skips_attributed_item() {
+  let source = r#"
+    @configFlag(@platform("windows"))
+    @externName("win_exit")
+    function winExit(): void { }
+
+    function main(): i32 {
+      return 0;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 0);
+}
+
 #[test]
 fn e2e_compile_directive_ifelse_missing_else() {
   let source = r#"
