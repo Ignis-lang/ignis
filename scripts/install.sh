@@ -48,7 +48,7 @@ Install Ignis on Linux.
 
 OPTIONS:
   --prefix PATH       Installation prefix (default: $DEFAULT_PREFIX)
-  --version VERSION   Install a specific version tag (example: v0.2.4)
+  --version VERSION   Install a specific version tag (example: v0.3.0)
   --build             Build from source instead of downloading release artifact
   --dry-run           Show what would be done without changing files
   --help              Show this help message
