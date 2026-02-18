@@ -8,6 +8,7 @@ use ignis_type::{
     Definition, DefinitionId, DefinitionKind, DefinitionStore, FunctionDefinition, InlineMode, ParameterDefinition,
     Visibility,
   },
+  module::ModuleId,
   span::Span,
   symbol::SymbolTable,
   types::TypeStore,
@@ -435,17 +436,22 @@ fn is_move_for_method_arg(
 ///
 /// Innermost closures must be processed first so their captures are populated
 /// before the enclosing closure's free-var scan propagates transitive captures.
-fn collect_closures_bottom_up(hir: &HIR) -> Vec<HIRId> {
+fn collect_closures_bottom_up(
+  hir: &HIR,
+  defs: &DefinitionStore,
+) -> Vec<(HIRId, ModuleId)> {
   let mut result = Vec::new();
   let mut visited = HashSet::new();
 
-  for &body_id in hir.function_bodies.values() {
-    collect_closures_postorder(hir, body_id, &mut result, &mut visited);
+  for (&def_id, &body_id) in &hir.function_bodies {
+    let owner_module = defs.get(&def_id).owner_module;
+    collect_closures_postorder(hir, body_id, owner_module, &mut result, &mut visited);
   }
 
   // Also scan module-level variable/constant init expressions (e.g. `const f = lambda`).
-  for &init_id in hir.variables_inits.values() {
-    collect_closures_postorder(hir, init_id, &mut result, &mut visited);
+  for (&def_id, &init_id) in &hir.variables_inits {
+    let owner_module = defs.get(&def_id).owner_module;
+    collect_closures_postorder(hir, init_id, owner_module, &mut result, &mut visited);
   }
 
   result
@@ -455,7 +461,8 @@ fn collect_closures_bottom_up(hir: &HIR) -> Vec<HIRId> {
 fn collect_closures_postorder(
   hir: &HIR,
   hir_id: HIRId,
-  result: &mut Vec<HIRId>,
+  owner_module: ModuleId,
+  result: &mut Vec<(HIRId, ModuleId)>,
   visited: &mut HashSet<HIRId>,
 ) {
   if !visited.insert(hir_id) {
@@ -466,28 +473,28 @@ fn collect_closures_postorder(
 
   match &node.kind {
     HIRKind::Closure { body, .. } => {
-      collect_closures_postorder(hir, *body, result, visited);
-      result.push(hir_id);
+      collect_closures_postorder(hir, *body, owner_module, result, visited);
+      result.push((hir_id, owner_module));
     },
 
     HIRKind::Block { statements, expression } => {
       for &s in statements {
-        collect_closures_postorder(hir, s, result, visited);
+        collect_closures_postorder(hir, s, owner_module, result, visited);
       }
       if let Some(e) = expression {
-        collect_closures_postorder(hir, *e, result, visited);
+        collect_closures_postorder(hir, *e, owner_module, result, visited);
       }
     },
 
     HIRKind::Let { value, .. } => {
       if let Some(v) = value {
-        collect_closures_postorder(hir, *v, result, visited);
+        collect_closures_postorder(hir, *v, owner_module, result, visited);
       }
     },
 
     HIRKind::LetElse { value, else_block, .. } => {
-      collect_closures_postorder(hir, *value, result, visited);
-      collect_closures_postorder(hir, *else_block, result, visited);
+      collect_closures_postorder(hir, *value, owner_module, result, visited);
+      collect_closures_postorder(hir, *else_block, owner_module, result, visited);
     },
 
     HIRKind::If {
@@ -495,17 +502,17 @@ fn collect_closures_postorder(
       then_branch,
       else_branch,
     } => {
-      collect_closures_postorder(hir, *condition, result, visited);
-      collect_closures_postorder(hir, *then_branch, result, visited);
+      collect_closures_postorder(hir, *condition, owner_module, result, visited);
+      collect_closures_postorder(hir, *then_branch, owner_module, result, visited);
       if let Some(e) = else_branch {
-        collect_closures_postorder(hir, *e, result, visited);
+        collect_closures_postorder(hir, *e, owner_module, result, visited);
       }
     },
 
     HIRKind::Loop { condition, body } => {
       match condition {
         ignis_hir::statement::LoopKind::While { condition: cond } => {
-          collect_closures_postorder(hir, *cond, result, visited);
+          collect_closures_postorder(hir, *cond, owner_module, result, visited);
         },
         ignis_hir::statement::LoopKind::For {
           init,
@@ -513,122 +520,122 @@ fn collect_closures_postorder(
           update,
         } => {
           if let Some(i) = init {
-            collect_closures_postorder(hir, *i, result, visited);
+            collect_closures_postorder(hir, *i, owner_module, result, visited);
           }
           if let Some(c) = cond {
-            collect_closures_postorder(hir, *c, result, visited);
+            collect_closures_postorder(hir, *c, owner_module, result, visited);
           }
           if let Some(u) = update {
-            collect_closures_postorder(hir, *u, result, visited);
+            collect_closures_postorder(hir, *u, owner_module, result, visited);
           }
         },
         ignis_hir::statement::LoopKind::Infinite => {},
       }
-      collect_closures_postorder(hir, *body, result, visited);
+      collect_closures_postorder(hir, *body, owner_module, result, visited);
     },
 
     HIRKind::Binary { left, right, .. } => {
-      collect_closures_postorder(hir, *left, result, visited);
-      collect_closures_postorder(hir, *right, result, visited);
+      collect_closures_postorder(hir, *left, owner_module, result, visited);
+      collect_closures_postorder(hir, *right, owner_module, result, visited);
     },
 
     HIRKind::Unary { operand, .. } => {
-      collect_closures_postorder(hir, *operand, result, visited);
+      collect_closures_postorder(hir, *operand, owner_module, result, visited);
     },
 
     HIRKind::Call { args, .. } => {
       for &a in args {
-        collect_closures_postorder(hir, a, result, visited);
+        collect_closures_postorder(hir, a, owner_module, result, visited);
       }
     },
 
     HIRKind::CallClosure { callee, args } => {
-      collect_closures_postorder(hir, *callee, result, visited);
+      collect_closures_postorder(hir, *callee, owner_module, result, visited);
       for &a in args {
-        collect_closures_postorder(hir, a, result, visited);
+        collect_closures_postorder(hir, a, owner_module, result, visited);
       }
     },
 
     HIRKind::MethodCall { receiver, args, .. } => {
       if let Some(r) = receiver {
-        collect_closures_postorder(hir, *r, result, visited);
+        collect_closures_postorder(hir, *r, owner_module, result, visited);
       }
       for &a in args {
-        collect_closures_postorder(hir, a, result, visited);
+        collect_closures_postorder(hir, a, owner_module, result, visited);
       }
     },
 
     HIRKind::Return(e) => {
       if let Some(e) = e {
-        collect_closures_postorder(hir, *e, result, visited);
+        collect_closures_postorder(hir, *e, owner_module, result, visited);
       }
     },
 
     HIRKind::ExpressionStatement(e) | HIRKind::Dereference(e) | HIRKind::TypeOf(e) | HIRKind::Panic(e) => {
-      collect_closures_postorder(hir, *e, result, visited);
+      collect_closures_postorder(hir, *e, owner_module, result, visited);
     },
 
     HIRKind::Cast { expression, .. } | HIRKind::BitCast { expression, .. } | HIRKind::Reference { expression, .. } => {
-      collect_closures_postorder(hir, *expression, result, visited);
+      collect_closures_postorder(hir, *expression, owner_module, result, visited);
     },
 
     HIRKind::Index { base, index } => {
-      collect_closures_postorder(hir, *base, result, visited);
-      collect_closures_postorder(hir, *index, result, visited);
+      collect_closures_postorder(hir, *base, owner_module, result, visited);
+      collect_closures_postorder(hir, *index, owner_module, result, visited);
     },
 
     HIRKind::FieldAccess { base, .. } => {
-      collect_closures_postorder(hir, *base, result, visited);
+      collect_closures_postorder(hir, *base, owner_module, result, visited);
     },
 
     HIRKind::Assign { target, value, .. } => {
-      collect_closures_postorder(hir, *target, result, visited);
-      collect_closures_postorder(hir, *value, result, visited);
+      collect_closures_postorder(hir, *target, owner_module, result, visited);
+      collect_closures_postorder(hir, *value, owner_module, result, visited);
     },
 
     HIRKind::Match { scrutinee, arms } => {
-      collect_closures_postorder(hir, *scrutinee, result, visited);
+      collect_closures_postorder(hir, *scrutinee, owner_module, result, visited);
       for arm in arms {
         if let Some(g) = arm.guard {
-          collect_closures_postorder(hir, g, result, visited);
+          collect_closures_postorder(hir, g, owner_module, result, visited);
         }
-        collect_closures_postorder(hir, arm.body, result, visited);
+        collect_closures_postorder(hir, arm.body, owner_module, result, visited);
       }
     },
 
     HIRKind::VectorLiteral { elements } => {
       for &e in elements {
-        collect_closures_postorder(hir, e, result, visited);
+        collect_closures_postorder(hir, e, owner_module, result, visited);
       }
     },
 
     HIRKind::RecordInit { fields, .. } => {
       for (_, v) in fields {
-        collect_closures_postorder(hir, *v, result, visited);
+        collect_closures_postorder(hir, *v, owner_module, result, visited);
       }
     },
 
     HIRKind::EnumVariant { payload, .. } => {
       for &p in payload {
-        collect_closures_postorder(hir, p, result, visited);
+        collect_closures_postorder(hir, p, owner_module, result, visited);
       }
     },
 
     HIRKind::BuiltinLoad { ptr, .. } => {
-      collect_closures_postorder(hir, *ptr, result, visited);
+      collect_closures_postorder(hir, *ptr, owner_module, result, visited);
     },
 
     HIRKind::BuiltinStore { ptr, value, .. } => {
-      collect_closures_postorder(hir, *ptr, result, visited);
-      collect_closures_postorder(hir, *value, result, visited);
+      collect_closures_postorder(hir, *ptr, owner_module, result, visited);
+      collect_closures_postorder(hir, *value, owner_module, result, visited);
     },
 
     HIRKind::BuiltinDropInPlace { ptr, .. } => {
-      collect_closures_postorder(hir, *ptr, result, visited);
+      collect_closures_postorder(hir, *ptr, owner_module, result, visited);
     },
 
     HIRKind::Defer { body } => {
-      collect_closures_postorder(hir, *body, result, visited);
+      collect_closures_postorder(hir, *body, owner_module, result, visited);
     },
 
     // Leaf nodes
@@ -665,9 +672,9 @@ pub fn populate_closure_captures(
 ) -> Vec<Diagnostic> {
   let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
-  let closure_ids = collect_closures_bottom_up(hir);
+  let closure_ids = collect_closures_bottom_up(hir, defs);
 
-  for (closure_index, closure_id) in closure_ids.into_iter().enumerate() {
+  for (closure_index, (closure_id, owner_module)) in closure_ids.into_iter().enumerate() {
     let (params, body, return_type, closure_span, overrides) = {
       let node = hir.get(closure_id);
       match &node.kind {
@@ -739,6 +746,7 @@ pub fn populate_closure_captures(
       &params,
       return_type,
       &closure_span,
+      owner_module,
       hir,
       body,
       defs,
@@ -747,7 +755,7 @@ pub fn populate_closure_captures(
     );
 
     let drop_def_id = if needs_drop_fn(&captures, types, defs) {
-      Some(create_drop_function(closure_index, &closure_span, hir, defs, types, symbols))
+      Some(create_drop_function(closure_index, &closure_span, owner_module, hir, defs, types, symbols))
     } else {
       None
     };
@@ -821,6 +829,7 @@ fn needs_drop_fn(
 fn create_drop_function(
   closure_index: usize,
   span: &Span,
+  owner_module: ModuleId,
   hir: &mut HIR,
   defs: &mut DefinitionStore,
   types: &mut TypeStore,
@@ -841,7 +850,7 @@ fn create_drop_function(
     span: span.clone(),
     name_span: span.clone(),
     visibility: Visibility::Private,
-    owner_module: Default::default(),
+    owner_module,
     owner_namespace: None,
     doc: None,
   });
@@ -861,7 +870,7 @@ fn create_drop_function(
     span: span.clone(),
     name_span: span.clone(),
     visibility: Visibility::Private,
-    owner_module: Default::default(),
+    owner_module,
     owner_namespace: None,
     doc: None,
   });
@@ -889,6 +898,7 @@ fn create_thunk_definition(
   original_params: &[DefinitionId],
   return_type: ignis_type::types::TypeId,
   span: &Span,
+  owner_module: ModuleId,
   hir: &mut HIR,
   body_hir_id: HIRId,
   defs: &mut DefinitionStore,
@@ -909,7 +919,7 @@ fn create_thunk_definition(
     span: span.clone(),
     name_span: span.clone(),
     visibility: Visibility::Private,
-    owner_module: Default::default(),
+    owner_module,
     owner_namespace: None,
     doc: None,
   });
@@ -932,7 +942,7 @@ fn create_thunk_definition(
     span: span.clone(),
     name_span: span.clone(),
     visibility: Visibility::Private,
-    owner_module: Default::default(),
+    owner_module,
     owner_namespace: None,
     doc: None,
   });

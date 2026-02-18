@@ -152,6 +152,51 @@ function main(): void {
 }
 
 #[test]
+fn c_main_i32_wrapper() {
+  let c_code = common::compile_to_c(
+    r#"
+function main(): i32 {
+    return 7;
+}
+"#,
+  );
+
+  assert_snapshot!("c_main_i32_wrapper", c_code);
+}
+
+#[test]
+fn c_main_result_i32_wrapper() {
+  let c_code = common::compile_to_c(
+    r#"
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function main(): Result<i32, str> {
+    return Result::OK(42);
+}
+"#,
+  );
+
+  assert_snapshot!("c_main_result_i32_wrapper", c_code);
+}
+
+#[test]
+fn c_main_with_args_wrapper() {
+  let c_code = common::compile_to_c(
+    r#"
+function main(argc: i32, argv: *str): i32 {
+    return argc;
+}
+"#,
+  );
+
+  assert_snapshot!("c_main_with_args_wrapper", c_code);
+}
+
+#[test]
 fn c_arithmetic_ops() {
   let c_code = common::compile_to_c(
     r#"

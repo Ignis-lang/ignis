@@ -16,6 +16,7 @@ use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Symb
 use ignis_type::file::SourceMap;
 use ignis_type::module::{ModuleId, ModulePath};
 use ignis_type::symbol::SymbolTable;
+use ignis_type::types::{Type, TypeId, TypeStore};
 use ignis_diagnostics::message::DiagnosticMessage;
 
 use crate::api::analyze_text;
@@ -46,6 +47,124 @@ fn warn_unsupported_dumps(config: &IgnisConfig) {
   if dump_requested(config, DumpKind::Ir) {
     eprintln!("{} Dump kind 'ir' is not supported yet.", "Warning:".yellow().bold());
   }
+}
+
+fn is_supported_entry_main_args(
+  params: &[DefinitionId],
+  defs: &DefinitionStore,
+  types: &TypeStore,
+) -> bool {
+  match params {
+    [] => true,
+    [argc_param, argv_param] => {
+      let argc_type = *defs.type_of(argc_param);
+      if argc_type != types.i32() {
+        return false;
+      }
+
+      let argv_type = *defs.type_of(argv_param);
+      matches!(types.get(&argv_type), Type::Pointer { inner, .. } if matches!(types.get(inner), Type::Str))
+    },
+    _ => false,
+  }
+}
+
+fn is_supported_entry_main_return(
+  return_type: TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+) -> bool {
+  match types.get(&return_type) {
+    Type::I32 | Type::Void => true,
+
+    // Post-monomorphization: concrete enum type.
+    Type::Enum(enum_def_id) => is_try_capable_with_i32_ok(*enum_def_id, types, defs, &[]),
+
+    // Pre-monomorphization: generic enum instance (e.g. Result<i32, IoError>).
+    Type::Instance { generic, args } => is_try_capable_with_i32_ok(*generic, types, defs, args),
+
+    _ => false,
+  }
+}
+
+fn is_try_capable_with_i32_ok(
+  enum_def_id: DefinitionId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  type_args: &[TypeId],
+) -> bool {
+  let DefinitionKind::Enum(enum_def) = &defs.get(&enum_def_id).kind else {
+    return false;
+  };
+
+  let Some(try_capability) = enum_def.try_capable else {
+    return false;
+  };
+
+  let Some(ok_variant) = enum_def
+    .variants
+    .iter()
+    .find(|variant| variant.tag_value == try_capability.ok_variant)
+  else {
+    return false;
+  };
+
+  let has_error_variant = enum_def
+    .variants
+    .iter()
+    .any(|variant| variant.tag_value == try_capability.err_variant);
+
+  if !has_error_variant || ok_variant.payload.len() != 1 {
+    return false;
+  }
+
+  let ok_type = resolve_type_param(types, ok_variant.payload[0], enum_def_id, type_args);
+  ok_type == types.i32()
+}
+
+fn resolve_type_param(
+  types: &TypeStore,
+  ty: TypeId,
+  owner: DefinitionId,
+  args: &[TypeId],
+) -> TypeId {
+  match types.get(&ty) {
+    Type::Param { owner: param_owner, index } if *param_owner == owner => {
+      args.get(*index as usize).copied().unwrap_or(ty)
+    },
+    _ => ty,
+  }
+}
+
+fn validate_entry_main_signature(
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  entry_def_id: DefinitionId,
+) -> Result<(), DiagnosticMessage> {
+  let entry_def = defs.get(&entry_def_id);
+
+  let DefinitionKind::Function(entry_function) = &entry_def.kind else {
+    return Err(DiagnosticMessage::CompileError {
+      message: "Internal error: entry point must be a function".to_string(),
+      span: entry_def.span.clone(),
+    });
+  };
+
+  if !is_supported_entry_main_args(&entry_function.params, defs, types) {
+    return Err(DiagnosticMessage::CompileError {
+      message: "Function 'main' parameters must be empty or (i32, *str)".to_string(),
+      span: entry_def.span.clone(),
+    });
+  }
+
+  if !is_supported_entry_main_return(entry_function.return_type, types, defs) {
+    return Err(DiagnosticMessage::CompileError {
+      message: "Function 'main' must return i32, void, or a try-capable enum with i32 ok variant".to_string(),
+      span: entry_def.span.clone(),
+    });
+  }
+
+  Ok(())
 }
 
 fn sanitize_dump_name(name: &str) -> String {
@@ -394,6 +513,15 @@ pub fn compile_project(
         &DiagnosticMessage::LibraryCannotHaveMainFunction { span }.report(),
         &ctx.source_map,
       );
+      return Err(());
+    }
+
+    if is_bin
+      && let Some(entry_def_id) = output.hir.entry_point
+      && let Err(diagnostic_message) = validate_entry_main_signature(&output.defs, &output.types, entry_def_id)
+    {
+      cmd_fail!(&config, "Build failed", start.elapsed());
+      ignis_diagnostics::render(&diagnostic_message.report(), &ctx.source_map);
       return Err(());
     }
 

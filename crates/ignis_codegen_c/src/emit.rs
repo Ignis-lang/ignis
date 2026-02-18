@@ -19,6 +19,32 @@ use ignis_type::{
 
 use crate::classify::{DefKind, EmitTarget};
 
+const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
+
+#[derive(Clone, Copy)]
+enum EntryMainReturn {
+  I32,
+  Void,
+  TryI32 {
+    ok_tag: u32,
+    err_tag: u32,
+    error_display: ErrorDisplay,
+  },
+}
+
+#[derive(Clone, Copy)]
+enum ErrorDisplay {
+  Str,
+  RecordStrField { field_index: u32 },
+  Opaque,
+}
+
+#[derive(Clone, Copy)]
+enum EntryMainArgs {
+  None,
+  ArgcArgv,
+}
+
 /// C code emitter for LIR programs.
 pub struct CEmitter<'a> {
   program: &'a LirProgram,
@@ -156,6 +182,7 @@ impl<'a> CEmitter<'a> {
     self.emit_drop_glue_helpers();
     self.emit_forward_declarations();
     self.emit_functions();
+    self.emit_entry_wrapper();
     self.output
   }
 
@@ -179,6 +206,10 @@ impl<'a> CEmitter<'a> {
           }
         }
       }
+    }
+
+    if matches!(self.entry_main_return_kind(), Some(EntryMainReturn::TryI32 { .. })) {
+      needs_stdio = true;
     }
 
     if needs_stdio {
@@ -237,16 +268,19 @@ impl<'a> CEmitter<'a> {
             return true;
           }
 
-          // Monomorphized functions (mangled names with __) are emitted only in the entry module
-          // to avoid duplicate definitions across user modules.
-          let name = self.symbols.get(&def.name);
-          if name.contains("__")
-            && !name.starts_with("__")
-            && let Some(entry_id) = self.program.entry_point
-          {
-            let entry_def = self.defs.get(&entry_id);
-            if entry_def.owner_module == target_module_id {
-              return true;
+          // Monomorphized user functions (mangled names with __) are emitted only in the entry module
+          // to avoid duplicate definitions across user modules. Std functions are excluded because
+          // they are already compiled in prebuilt std object files.
+          if kind.is_user() {
+            let name = self.symbols.get(&def.name);
+            if name.contains("__")
+              && !name.starts_with("__")
+              && let Some(entry_id) = self.program.entry_point
+            {
+              let entry_def = self.defs.get(&entry_id);
+              if entry_def.owner_module == target_module_id {
+                return true;
+              }
             }
           }
 
@@ -323,13 +357,10 @@ impl<'a> CEmitter<'a> {
           return false;
         }
 
-        // Non-user definitions (Std/Runtime) are only force-emitted when they
-        // are monomorphized specializations (name contains `__`). Regular std
-        // functions already exist in precompiled std object files.
+        // Std/Runtime definitions already exist in prebuilt std object files.
         let kind = self.classify(*def_id);
         if !kind.is_user() {
-          let name = self.symbols.get(&self.defs.get(def_id).name);
-          return name.contains("__") && !name.starts_with("__");
+          return false;
         }
 
         true
@@ -1020,20 +1051,197 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  fn emit_entry_wrapper(&mut self) {
+    let Some((entry_def_id, entry_return_type)) = self
+      .entry_main_def_and_func()
+      .map(|(def_id, entry_func)| (def_id, entry_func.return_type))
+    else {
+      return;
+    };
+
+    let Some(entry_args) = self.entry_main_args_kind() else {
+      writeln!(self.output, "int main(int argc, char** argv) {{").unwrap();
+      writeln!(self.output, "    (void)argc;").unwrap();
+      writeln!(self.output, "    (void)argv;").unwrap();
+      writeln!(self.output, "    return 1;").unwrap();
+      writeln!(self.output, "}}\n").unwrap();
+      return;
+    };
+
+    let user_main_name = self.def_name(entry_def_id);
+    let user_main_call = match entry_args {
+      EntryMainArgs::None => {
+        format!("{}()", user_main_name)
+      },
+      EntryMainArgs::ArgcArgv => {
+        format!("{}((i32)argc, (const char**)argv)", user_main_name)
+      },
+    };
+
+    writeln!(self.output, "int main(int argc, char** argv) {{").unwrap();
+
+    if matches!(entry_args, EntryMainArgs::None) {
+      writeln!(self.output, "    (void)argc;").unwrap();
+      writeln!(self.output, "    (void)argv;").unwrap();
+    }
+
+    match self.entry_main_return_kind() {
+      Some(EntryMainReturn::I32) => {
+        writeln!(self.output, "    return {};", user_main_call).unwrap();
+      },
+      Some(EntryMainReturn::Void) => {
+        writeln!(self.output, "    {};", user_main_call).unwrap();
+        writeln!(self.output, "    return 0;").unwrap();
+      },
+      Some(EntryMainReturn::TryI32 { ok_tag, err_tag, error_display }) => {
+        let result_ty = self.format_type(entry_return_type);
+
+        writeln!(
+          self.output,
+          "    {} __ignis_main_result = {};",
+          result_ty,
+          user_main_call
+        )
+        .unwrap();
+        writeln!(self.output, "    if (__ignis_main_result.tag == {}) {{", ok_tag).unwrap();
+        writeln!(
+          self.output,
+          "        return __ignis_main_result.payload.variant_{}.field_0;",
+          ok_tag
+        )
+        .unwrap();
+        writeln!(self.output, "    }}").unwrap();
+
+        let err_access = format!("__ignis_main_result.payload.variant_{}.field_0", err_tag);
+        let err_msg_expr = match error_display {
+          ErrorDisplay::Str => err_access.clone(),
+          ErrorDisplay::RecordStrField { field_index } => format!("{}.field_{}", err_access, field_index),
+          ErrorDisplay::Opaque => "\"(error)\"".to_string(),
+        };
+
+        writeln!(self.output, "    fprintf(stderr, \"Error: %s\\n\", {});", err_msg_expr).unwrap();
+        writeln!(self.output, "    exit(101);").unwrap();
+      },
+      None => {
+        writeln!(self.output, "    return 1;").unwrap();
+      },
+    }
+
+    writeln!(self.output, "}}\n").unwrap();
+  }
+
+  fn entry_main_def_and_func(&self) -> Option<(DefinitionId, &FunctionLir)> {
+    let entry_def_id = self.program.entry_point?;
+    let entry_func = self.program.functions.get(&entry_def_id)?;
+
+    if entry_func.is_extern || !self.should_emit(entry_def_id) || !self.is_function_signature_monomorphized(entry_func) {
+      return None;
+    }
+
+    Some((entry_def_id, entry_func))
+  }
+
+  fn entry_main_return_kind(&self) -> Option<EntryMainReturn> {
+    let (_, entry_func) = self.entry_main_def_and_func()?;
+
+    match self.types.get(&entry_func.return_type) {
+      Type::I32 => Some(EntryMainReturn::I32),
+      Type::Void => Some(EntryMainReturn::Void),
+      Type::Enum(enum_def_id) => {
+        self
+          .entry_try_i32_layout(*enum_def_id)
+          .map(|(ok_tag, err_tag, error_display)| EntryMainReturn::TryI32 { ok_tag, err_tag, error_display })
+      },
+      _ => None,
+    }
+  }
+
+  fn entry_main_args_kind(&self) -> Option<EntryMainArgs> {
+    let (_, entry_func) = self.entry_main_def_and_func()?;
+
+    match entry_func.params.as_slice() {
+      [] => Some(EntryMainArgs::None),
+      [argc_param, argv_param] => {
+        let argc_type = *self.defs.type_of(argc_param);
+        if argc_type != self.types.i32() {
+          return None;
+        }
+
+        let argv_type = *self.defs.type_of(argv_param);
+        match self.types.get(&argv_type) {
+          Type::Pointer { inner, .. } if matches!(self.types.get(inner), Type::Str) => Some(EntryMainArgs::ArgcArgv),
+          _ => None,
+        }
+      },
+      _ => None,
+    }
+  }
+
+  fn entry_try_i32_layout(
+    &self,
+    enum_def_id: DefinitionId,
+  ) -> Option<(u32, u32, ErrorDisplay)> {
+    let DefinitionKind::Enum(enum_def) = &self.defs.get(&enum_def_id).kind else {
+      return None;
+    };
+
+    let try_capability = enum_def.try_capable?;
+    let ok_variant = enum_def
+      .variants
+      .iter()
+      .find(|variant| variant.tag_value == try_capability.ok_variant)?;
+    let err_variant = enum_def
+      .variants
+      .iter()
+      .find(|variant| variant.tag_value == try_capability.err_variant)?;
+
+    if ok_variant.payload.len() != 1 || ok_variant.payload[0] != self.types.i32() {
+      return None;
+    }
+
+    let error_display = if err_variant.payload.len() == 1 {
+      self.error_display_for_type(err_variant.payload[0])
+    } else {
+      ErrorDisplay::Opaque
+    };
+
+    Some((try_capability.ok_variant, try_capability.err_variant, error_display))
+  }
+
+  fn error_display_for_type(
+    &self,
+    ty: TypeId,
+  ) -> ErrorDisplay {
+    match self.types.get(&ty) {
+      Type::Str => ErrorDisplay::Str,
+
+      Type::Record(def_id) => {
+        let DefinitionKind::Record(rd) = &self.defs.get(def_id).kind else {
+          return ErrorDisplay::Opaque;
+        };
+
+        let message_sym = self.symbols.map.get("message");
+        if let Some(&sym) = message_sym {
+          if let Some(field) = rd.fields.iter().find(|f| f.name == sym && f.type_id == self.types.str()) {
+            return ErrorDisplay::RecordStrField { field_index: field.index };
+          }
+        }
+
+        ErrorDisplay::Opaque
+      },
+
+      _ => ErrorDisplay::Opaque,
+    }
+  }
+
   fn emit_function_signature(
     &mut self,
     def_id: DefinitionId,
     func: &FunctionLir,
   ) {
     let name = self.def_name(def_id);
-
-    // C requires int main(void) for the entry point
-    let is_entry_main = Some(def_id) == self.program.entry_point && name == "main";
-    let ret_ty = if is_entry_main {
-      "int".to_string()
-    } else {
-      self.format_type(func.return_type)
-    };
+    let ret_ty = self.format_type(func.return_type);
+    let is_internal_closure_helper = self.is_internal_closure_helper(def_id);
 
     let params: Vec<_> = func
       .params
@@ -1054,7 +1262,7 @@ impl<'a> CEmitter<'a> {
     };
 
     // Public functions must not be `static` -- conflicts with the header declaration.
-    if !is_entry_main && !func.is_extern {
+    if !func.is_extern {
       let mut is_public = self.defs.get(&def_id).visibility == Visibility::Public;
 
       // In per-user-module emission, helper definitions forced from other modules
@@ -1063,6 +1271,14 @@ impl<'a> CEmitter<'a> {
         && self.defs.get(&def_id).owner_module != target_module_id
       {
         is_public = false;
+      }
+
+      if is_internal_closure_helper {
+        is_public = false;
+
+        if !matches!(func.inline_mode, InlineMode::Inline | InlineMode::Always) {
+          write!(self.output, "static ").unwrap();
+        }
       }
 
       let func_attrs = self.get_function_attrs(def_id);
@@ -1776,15 +1992,7 @@ impl<'a> CEmitter<'a> {
           let val = self.format_operand(func, v);
           writeln!(self.output, "return {};", val).unwrap();
         } else {
-          // C main must return int - if we're in main with void return, emit return 0
-          let is_main = self
-            .current_fn_id
-            .is_some_and(|id| Some(id) == self.program.entry_point && self.def_name(id) == "main");
-          if is_main {
-            writeln!(self.output, "return 0;").unwrap();
-          } else {
-            writeln!(self.output, "return;").unwrap();
-          }
+          writeln!(self.output, "return;").unwrap();
         }
       },
       Terminator::Unreachable => {
@@ -2352,11 +2560,22 @@ impl<'a> CEmitter<'a> {
       return raw_name;
     }
 
-    if def.owner_namespace.is_none() && raw_name == "main" {
-      return raw_name;
+    if Some(def_id) == self.program.entry_point
+      && def.owner_namespace.is_none()
+      && raw_name == "main"
+    {
+      return USER_MAIN_SYMBOL.to_string();
     }
 
     self.build_mangled_name(def_id)
+  }
+
+  fn is_internal_closure_helper(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
+    raw_name.starts_with("__closure_thunk_") || raw_name.starts_with("__closure_drop_")
   }
 
   /// Emit a receiver drop-state guard for non-static method calls.
@@ -3513,6 +3732,11 @@ fn emit_func_prototype(
     _ => return None,
   };
 
+  let raw_name = symbols.get(&def.name);
+  if raw_name.starts_with("__closure_thunk_") || raw_name.starts_with("__closure_drop_") {
+    return None;
+  }
+
   if is_extern || !type_params_empty {
     return None;
   }
@@ -3589,6 +3813,13 @@ fn build_mangled_name_standalone(
 
   if is_extern {
     return raw_name;
+  }
+
+  if def.owner_namespace.is_none()
+    && raw_name == "main"
+    && matches!(def.kind, DefinitionKind::Function(_))
+  {
+    return USER_MAIN_SYMBOL.to_string();
   }
 
   // Check for overloads to determine if we need a parameter suffix

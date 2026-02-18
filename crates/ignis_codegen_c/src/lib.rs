@@ -2,7 +2,7 @@ mod classify;
 mod emit;
 
 /// Bump this when the C output format changes in a way that requires rebuild.
-pub const CODEGEN_ABI_VERSION: u32 = 1;
+pub const CODEGEN_ABI_VERSION: u32 = 2;
 
 pub use classify::{build_module_paths, classify_def, DefKind, EmitTarget};
 pub use emit::{
