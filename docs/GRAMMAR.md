@@ -333,6 +333,7 @@
   | <return>
   | <break>
   | <continue>
+  | <defer>
   | <block>
   | <variable>
   | <let-else>
@@ -354,6 +355,7 @@
 <return> ::= "return" <expression>? ";"
 <break> ::= "break" ";"
 <continue> ::= "continue" ";"
+<defer> ::= "defer" <expression> ";"
 
 <block> ::= "{" <statement>* "}"
 <variable> ::= <directive-attrs>? "let" "mut"? <identifier> ":" <type> ("=" <expression>)? ";"
@@ -410,7 +412,7 @@
 
 <postfix> ::= <primary> ( <postfix-suffix> )*
 
-<postfix-suffix> ::= ("++" | "--")
+<postfix-suffix> ::= ("++" | "--" | "!")
   | <arguments>
   | "[" <expression> "]"
   | <member-access>
