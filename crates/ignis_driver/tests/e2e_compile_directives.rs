@@ -625,6 +625,93 @@ fn e2e_configflag_skips_attributed_item() {
   assert_eq!(result.exit_code, 0);
 }
 
+// =============================================================================
+// @abi predicate
+// =============================================================================
+
+#[test]
+fn e2e_abi_matches_gnu() {
+  let source = r#"
+    @if(@abi("gnu")) {
+      function main(): i32 {
+        return 10;
+      }
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn e2e_abi_no_match_msvc() {
+  let source = r#"
+    @ifelse(@abi("msvc")) {
+      function main(): i32 {
+        return 1;
+      }
+    } @else {
+      function main(): i32 {
+        return 20;
+      }
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 20);
+}
+
+#[test]
+fn e2e_abi_combined_with_platform() {
+  let source = r#"
+    @if(@platform("linux") && @abi("gnu")) {
+      function main(): i32 {
+        return 30;
+      }
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 30);
+}
+
+#[test]
+fn e2e_configflag_abi() {
+  let source = r#"
+    @configFlag(@abi("gnu"))
+    function getValue(): i32 { return 40; }
+
+    function main(): i32 {
+      return getValue();
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 40);
+}
+
+#[test]
+fn e2e_abi_darwin_has_no_abi() {
+  let source = r#"
+    @ifelse(@abi("gnu")) {
+      function main(): i32 {
+        return 1;
+      }
+    } @else {
+      function main(): i32 {
+        return 50;
+      }
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, macos_aarch64_ctx()).unwrap();
+  assert_eq!(result.exit_code, 50);
+}
+
+// =============================================================================
+// @ifelse error cases
+// =============================================================================
+
 #[test]
 fn e2e_compile_directive_ifelse_missing_else() {
   let source = r#"

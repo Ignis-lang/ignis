@@ -568,6 +568,7 @@ impl super::IgnisParser {
     match predicate_name {
       "platform" => Ok(self.compilation_ctx.target.os == arg_value.to_ascii_lowercase()),
       "arch" => Ok(self.compilation_ctx.target.arch == arg_value),
+      "abi" => Ok(self.compilation_ctx.target.abi == arg_value.to_ascii_lowercase()),
       "target" => Ok(self.compilation_ctx.target.triple == arg_value),
       "feature" => {
         if !self.compilation_ctx.is_known_feature(&arg_value) {
