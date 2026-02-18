@@ -940,25 +940,32 @@ impl<'a> Analyzer<'a> {
           return self.types.void();
         };
 
-        arm_types.iter().skip(1).fold(first_type, |current, next| {
-          let is_compatible = self.types.types_equal(&current, next)
-            || self.types.is_error(&current)
-            || self.types.is_error(next)
-            || matches!(self.types.get(&current), Type::Never)
-            || matches!(self.types.get(next), Type::Never);
+        // Only check arm type compatibility when match is used as an expression
+        // (i.e., when there's an expected type from context)
+        if infer.expected.is_some() {
+          arm_types.iter().skip(1).fold(first_type, |current, next| {
+            let is_compatible = self.types.types_equal(&current, next)
+              || self.types.is_error(&current)
+              || self.types.is_error(next)
+              || matches!(self.types.get(&current), Type::Never)
+              || matches!(self.types.get(next), Type::Never);
 
-          if !is_compatible {
-            self.add_diagnostic(
-              DiagnosticMessage::MatchArmTypeMismatch {
-                expected: self.format_type_for_error(&current),
-                got: self.format_type_for_error(next),
-                span: match_expr.span.clone(),
-              }
-              .report(),
-            );
-          }
-          self.typecheck_common_type(&current, next, &match_expr.span)
-        })
+            if !is_compatible {
+              self.add_diagnostic(
+                DiagnosticMessage::MatchArmTypeMismatch {
+                  expected: self.format_type_for_error(&current),
+                  got: self.format_type_for_error(next),
+                  span: match_expr.span.clone(),
+                }
+                .report(),
+              );
+            }
+            self.typecheck_common_type(&current, next, &match_expr.span)
+          })
+        } else {
+          // Match used as statement - no need to check arm compatibility
+          self.types.void()
+        }
       },
       ASTExpression::Lambda(lambda) => self.typecheck_lambda(node_id, lambda, infer),
       ASTExpression::CaptureOverride(co) => self.typecheck_node(&co.inner, scope_kind, ctx),
@@ -1225,25 +1232,29 @@ impl<'a> Analyzer<'a> {
     match pattern {
       ASTPattern::Wildcard { .. } => true,
       ASTPattern::Literal { value, span } => {
-        let literal_type = match value {
-          IgnisLiteralValue::Int8(_) => self.types.i8(),
-          IgnisLiteralValue::Int16(_) => self.types.i16(),
-          IgnisLiteralValue::Int32(_) => self.types.i32(),
-          IgnisLiteralValue::Int64(_) => self.types.i64(),
-          IgnisLiteralValue::UnsignedInt8(_) => self.types.u8(),
-          IgnisLiteralValue::UnsignedInt16(_) => self.types.u16(),
-          IgnisLiteralValue::UnsignedInt32(_) => self.types.u32(),
-          IgnisLiteralValue::UnsignedInt64(_) => self.types.u64(),
-          IgnisLiteralValue::Float32(_) => self.types.f32(),
-          IgnisLiteralValue::Float64(_) => self.types.f64(),
-          IgnisLiteralValue::Boolean(_) => self.types.boolean(),
-          IgnisLiteralValue::Char(_) => self.types.char(),
-          IgnisLiteralValue::String(_) => self.types.str(),
-          IgnisLiteralValue::Atom(_) => self.types.atom(),
-          IgnisLiteralValue::Hex(_) => self.types.u32(),
-          IgnisLiteralValue::Binary(_) => self.types.u8(),
-          IgnisLiteralValue::Null => self.types.null_ptr(),
-        };
+        // For integer literals, try to coerce to expected type
+        if self.types.is_integer(expected_type) {
+          if self.literal_fits_in_type(value, expected_type) {
+            // Literal fits in expected type - coercion successful
+            return false;
+          } else {
+            // Literal overflow - emit error
+            let target_name = self.format_type_for_error(expected_type);
+            if let Some(literal_value) = self.extract_literal_value(value) {
+              self.add_diagnostic(
+                DiagnosticMessage::IntegerOverflow {
+                  value: literal_value,
+                  target_type: target_name,
+                  span: span.clone(),
+                }
+                .report(),
+              );
+            }
+            return false;
+          }
+        }
+
+        let literal_type = self.infer_literal_type(value);
         self.typecheck_assignment(expected_type, &literal_type, span);
         false
       },
@@ -3420,6 +3431,97 @@ impl<'a> Analyzer<'a> {
       Type::U32 => value <= u32::MAX as u64,
       Type::U64 => true,
       _ => false,
+    }
+  }
+
+  fn literal_fits_in_type(
+    &self,
+    value: &IgnisLiteralValue,
+    ty: &TypeId,
+  ) -> bool {
+    match value {
+      IgnisLiteralValue::Int8(v) => self.signed_fits_in_type(*v as i64, ty),
+      IgnisLiteralValue::Int16(v) => self.signed_fits_in_type(*v as i64, ty),
+      IgnisLiteralValue::Int32(v) => self.signed_fits_in_type(*v as i64, ty),
+      IgnisLiteralValue::Int64(v) => self.signed_fits_in_type(*v, ty),
+      IgnisLiteralValue::UnsignedInt8(v) => self.unsigned_fits_in_type(*v as u64, ty),
+      IgnisLiteralValue::UnsignedInt16(v) => self.unsigned_fits_in_type(*v as u64, ty),
+      IgnisLiteralValue::UnsignedInt32(v) => self.unsigned_fits_in_type(*v as u64, ty),
+      IgnisLiteralValue::UnsignedInt64(v) => self.unsigned_fits_in_type(*v, ty),
+      IgnisLiteralValue::Hex(s) => {
+        let digits = s.trim_start_matches("0x").trim_start_matches("0X");
+        if let Ok(v) = u64::from_str_radix(digits, 16) {
+          self.unsigned_fits_in_type(v, ty)
+        } else {
+          false
+        }
+      },
+      IgnisLiteralValue::Binary(s) => {
+        let digits = s.trim_start_matches("0b").trim_start_matches("0B");
+        if let Ok(v) = u64::from_str_radix(digits, 2) {
+          self.unsigned_fits_in_type(v, ty)
+        } else {
+          false
+        }
+      },
+      _ => false,
+    }
+  }
+
+  fn infer_literal_type(
+    &self,
+    value: &IgnisLiteralValue,
+  ) -> TypeId {
+    match value {
+      IgnisLiteralValue::Int8(_) => self.types.i8(),
+      IgnisLiteralValue::Int16(_) => self.types.i16(),
+      IgnisLiteralValue::Int32(_) => self.types.i32(),
+      IgnisLiteralValue::Int64(_) => self.types.i64(),
+      IgnisLiteralValue::UnsignedInt8(_) => self.types.u8(),
+      IgnisLiteralValue::UnsignedInt16(_) => self.types.u16(),
+      IgnisLiteralValue::UnsignedInt32(_) => self.types.u32(),
+      IgnisLiteralValue::UnsignedInt64(_) => self.types.u64(),
+      IgnisLiteralValue::Float32(_) => self.types.f32(),
+      IgnisLiteralValue::Float64(_) => self.types.f64(),
+      IgnisLiteralValue::Boolean(_) => self.types.boolean(),
+      IgnisLiteralValue::Char(_) => self.types.char(),
+      IgnisLiteralValue::String(_) => self.types.str(),
+      IgnisLiteralValue::Atom(_) => self.types.atom(),
+      IgnisLiteralValue::Hex(_) => self.types.u32(),
+      IgnisLiteralValue::Binary(_) => self.types.u8(),
+      IgnisLiteralValue::Null => self.types.null_ptr(),
+    }
+  }
+
+  fn extract_literal_value(
+    &self,
+    value: &IgnisLiteralValue,
+  ) -> Option<i64> {
+    match value {
+      IgnisLiteralValue::Int8(v) => Some(*v as i64),
+      IgnisLiteralValue::Int16(v) => Some(*v as i64),
+      IgnisLiteralValue::Int32(v) => Some(*v as i64),
+      IgnisLiteralValue::Int64(v) => Some(*v),
+      IgnisLiteralValue::UnsignedInt8(v) => Some(*v as i64),
+      IgnisLiteralValue::UnsignedInt16(v) => Some(*v as i64),
+      IgnisLiteralValue::UnsignedInt32(v) => Some(*v as i64),
+      IgnisLiteralValue::UnsignedInt64(v) => {
+        // u64 might not fit in i64
+        if *v <= i64::MAX as u64 { Some(*v as i64) } else { None }
+      },
+      IgnisLiteralValue::Hex(s) => {
+        let digits = s.trim_start_matches("0x").trim_start_matches("0X");
+        u64::from_str_radix(digits, 16)
+          .ok()
+          .and_then(|v| if v <= i64::MAX as u64 { Some(v as i64) } else { None })
+      },
+      IgnisLiteralValue::Binary(s) => {
+        let digits = s.trim_start_matches("0b").trim_start_matches("0B");
+        u64::from_str_radix(digits, 2)
+          .ok()
+          .and_then(|v| if v <= i64::MAX as u64 { Some(v as i64) } else { None })
+      },
+      _ => None,
     }
   }
 
@@ -8091,6 +8193,29 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  fn try_coerce_integer_literal_to(
+    &mut self,
+    node_id: &NodeId,
+    target_type: &TypeId,
+  ) -> bool {
+    if !self.types.is_integer(target_type) {
+      return false;
+    }
+
+    let node = self.ast.get(node_id);
+    match node {
+      ASTNode::Expression(ASTExpression::Literal(lit)) => {
+        if self.literal_fits_in_type(&lit.value, target_type) {
+          self.set_type(node_id, target_type);
+          true
+        } else {
+          false
+        }
+      },
+      _ => false,
+    }
+  }
+
   fn typecheck_binary(
     &mut self,
     binary: &ignis_ast::expressions::ASTBinary,
@@ -8204,6 +8329,15 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTBinaryOperator::Equal | ASTBinaryOperator::NotEqual => {
+        // Try to coerce integer literals for numeric comparisons
+        if self.types.is_integer(&left_type) && self.types.is_integer(&right_type) {
+          if self.try_coerce_integer_literal_to(&binary.right, &left_type) {
+            return self.types.boolean();
+          } else if self.try_coerce_integer_literal_to(&binary.left, &right_type) {
+            return self.types.boolean();
+          }
+        }
+
         if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
           return self.types.boolean();
         }
@@ -8273,6 +8407,15 @@ impl<'a> Analyzer<'a> {
       | ASTBinaryOperator::LessThanOrEqual
       | ASTBinaryOperator::GreaterThan
       | ASTBinaryOperator::GreaterThanOrEqual => {
+        // Try to coerce integer literals for numeric comparisons
+        if self.types.is_integer(&left_type) && self.types.is_integer(&right_type) {
+          if self.try_coerce_integer_literal_to(&binary.right, &left_type) {
+            return self.types.boolean();
+          } else if self.try_coerce_integer_literal_to(&binary.left, &right_type) {
+            return self.types.boolean();
+          }
+        }
+
         if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
           return self.types.boolean();
         }
@@ -8696,7 +8839,13 @@ impl<'a> Analyzer<'a> {
       } else if self.types.is_float(a) {
         *a
       } else {
-        *b
+        // Both are integers: apply widening rules if possible
+        if let Some(common) = self.types.integer_common_type(a, b) {
+          common
+        } else {
+          // Mixed signed/unsigned or incompatible: fall back to original behavior
+          *b
+        }
       }
     } else {
       self.types.error()

@@ -795,3 +795,108 @@ function main(): i32 {
   );
   assert_snapshot!("infer_multiple_variables_hir", common::format_hir(&result));
 }
+
+// ============================================================================
+// Literal Coercion Tests
+// ============================================================================
+
+#[test]
+fn match_u8_with_literal() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let ch: u8 = 40;
+    match (ch) {
+        40 -> {},
+        _ -> {}
+    };
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "match_u8_with_literal_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("match_u8_with_literal_hir", common::format_hir(&result));
+}
+
+#[test]
+fn compare_u8_with_literal() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let ch: u8 = 40;
+    if (ch == 40) {
+        return;
+    }
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "compare_u8_with_literal_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("compare_u8_with_literal_hir", common::format_hir(&result));
+}
+
+#[test]
+fn widening_implicit_u8_to_u32() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let a: u8 = 10;
+    let b: u32 = a;  // Widening u8 -> u32
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "widening_implicit_u8_to_u32_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("widening_implicit_u8_to_u32_hir", common::format_hir(&result));
+}
+
+#[test]
+fn widening_implicit_i8_to_i64() {
+  let result = common::analyze(
+    r#"
+function main(): void {
+    let a: i8 = 10;
+    let b: i64 = a;  // Widening i8 -> i64
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "widening_implicit_i8_to_i64_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("widening_implicit_i8_to_i64_hir", common::format_hir(&result));
+}
+
+#[test]
+fn arithmetic_u8_plus_u32() {
+  let result = common::analyze(
+    r#"
+function main(): u32 {
+    let a: u8 = 10;
+    let b: u32 = 20;
+    let c: u32 = a + b;  // Should widen u8 to u32
+    return c;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "arithmetic_u8_plus_u32_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("arithmetic_u8_plus_u32_hir", common::format_hir(&result));
+}
