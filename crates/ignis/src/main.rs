@@ -135,6 +135,7 @@ fn build_cli_overrides(cmd: &BuildCommand) -> CliOverrides {
     },
     out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
     std_path: cmd.std_path.as_ref().map(PathBuf::from),
+    target_triple: cmd.target_triple.clone(),
     cc: cmd.cc.clone(),
     cflags: None,
     emit: if cmd.emit.is_empty() {
@@ -143,6 +144,17 @@ fn build_cli_overrides(cmd: &BuildCommand) -> CliOverrides {
       Some(cmd.emit.clone())
     },
   }
+}
+
+fn collect_cli_features(cmd_feature: &[String], cmd_features: &[String]) -> std::collections::HashSet<String> {
+  let mut set = std::collections::HashSet::new();
+  for f in cmd_feature {
+    set.insert(f.clone());
+  }
+  for f in cmd_features {
+    set.insert(f.clone());
+  }
+  set
 }
 
 fn build_config_from_project(
@@ -190,6 +202,21 @@ fn build_config_from_project(
   } else {
     None
   };
+
+  // Compile-time directives: target triple + features
+  if let Some(ref triple) = project.target_triple {
+    config.target_triple = triple.clone();
+  }
+
+  let mut features = collect_cli_features(&cmd.feature, &cmd.features);
+  for f in &project.default_features {
+    features.insert(f.clone());
+  }
+  config.enabled_features = features;
+
+  if !project.known_features.is_empty() {
+    config.known_features = Some(project.known_features.iter().cloned().collect());
+  }
 
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
@@ -244,6 +271,9 @@ fn build_config_for_single_file(
     Some(format!("{}/{}", out_dir, stem))
   };
 
+  // Compile-time directives: features from CLI
+  config.enabled_features = collect_cli_features(&cmd.feature, &cmd.features);
+
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(file_path.to_string_lossy().to_string()),
@@ -296,6 +326,7 @@ fn check_cli_overrides(cmd: &CheckCommand) -> CliOverrides {
     debug: None,
     out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
     std_path: cmd.std_path.as_ref().map(PathBuf::from),
+    target_triple: cmd.target_triple.clone(),
     cc: None,
     cflags: None,
     emit: if cmd.emit.is_empty() {
@@ -334,6 +365,21 @@ fn check_config_from_project(
   } else {
     None
   };
+
+  // Compile-time directives: target triple + features
+  if let Some(ref triple) = project.target_triple {
+    config.target_triple = triple.clone();
+  }
+
+  let mut features = collect_cli_features(&cmd.feature, &cmd.features);
+  for f in &project.default_features {
+    features.insert(f.clone());
+  }
+  config.enabled_features = features;
+
+  if !project.known_features.is_empty() {
+    config.known_features = Some(project.known_features.iter().cloned().collect());
+  }
 
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
@@ -376,6 +422,9 @@ fn check_config_for_single_file(
   config.manifest = load_manifest(&config.std_path);
 
   let out_dir = cmd.output_dir.as_deref().unwrap_or("build");
+
+  // Compile-time directives: features from CLI
+  config.enabled_features = collect_cli_features(&cmd.feature, &cmd.features);
 
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(

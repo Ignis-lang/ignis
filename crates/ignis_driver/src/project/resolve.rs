@@ -55,6 +55,15 @@ pub struct Project {
   /// Include debug information.
   pub debug: bool,
 
+  /// Target triple used for compile-time directives.
+  pub target_triple: Option<String>,
+
+  /// Declared feature catalog for strict unknown-feature validation.
+  pub known_features: Vec<String>,
+
+  /// Features enabled by default in this project.
+  pub default_features: Vec<String>,
+
   /// C compiler to use.
   pub cc: String,
 
@@ -91,6 +100,7 @@ pub struct CliOverrides {
   pub debug: Option<bool>,
   pub out_dir: Option<PathBuf>,
   pub std_path: Option<PathBuf>,
+  pub target_triple: Option<String>,
   pub cc: Option<String>,
   pub cflags: Option<Vec<String>>,
   pub emit: Option<Vec<String>>,
@@ -213,6 +223,13 @@ pub fn resolve_project(
   // Resolve debug
   let debug = overrides.debug.unwrap_or(toml.build.debug);
 
+  // Resolve target triple
+  let target_triple = overrides.target_triple.clone().or(toml.build.target_triple.clone());
+
+  // Feature sets from project config
+  let known_features = toml.build.known_features.clone();
+  let default_features = toml.build.default_features.clone();
+
   // Resolve cc
   let cc = overrides.cc.clone().unwrap_or(toml.build.cc);
 
@@ -264,6 +281,9 @@ pub fn resolve_project(
     bin: toml.build.bin,
     opt_level,
     debug,
+    target_triple,
+    known_features,
+    default_features,
     cc,
     cflags,
     emit,
@@ -333,6 +353,9 @@ mod tests {
         opt_level: None,
         debug: false,
         target: "c".to_string(),
+        target_triple: None,
+        known_features: Vec::new(),
+        default_features: Vec::new(),
         cc: "cc".to_string(),
         cflags: vec![],
         emit: vec![],
@@ -366,6 +389,9 @@ mod tests {
     assert!(project.bin);
     assert_eq!(project.opt_level, 0);
     assert!(!project.debug);
+    assert!(project.target_triple.is_none());
+    assert!(project.known_features.is_empty());
+    assert!(project.default_features.is_empty());
     assert_eq!(project.cc, "cc");
     assert!(project.cflags.is_empty());
     assert!(!project.emit.c);

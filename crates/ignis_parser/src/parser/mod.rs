@@ -10,6 +10,7 @@ use ignis_diagnostics::message::{DiagnosticMessage, Expected};
 use ignis_token::{token::Token, token_types::TokenType};
 use ignis_ast::{ASTNode, NodeId, attribute::ASTAttribute, statements::ASTStatement, expressions::ASTExpression};
 use ignis_type::{
+  compilation_context::CompilationContext,
   Store,
   span::Span,
   symbol::{SymbolId, SymbolTable},
@@ -43,6 +44,9 @@ pub struct IgnisParser {
   pending_inner_doc: Option<String>,
   /// Pending attributes (`@packed`, `@aligned(n)`, etc.) to be attached to the next declaration.
   pending_attrs: Vec<ASTAttribute>,
+
+  /// Compile-time context used by conditional directives (`@if/@else/@ifelse`).
+  compilation_ctx: CompilationContext,
 }
 
 pub(crate) const MAX_RECURSION_DEPTH: usize = 500;
@@ -51,6 +55,14 @@ impl IgnisParser {
   pub fn new(
     tokens: Vec<Token>,
     symbols: Rc<RefCell<SymbolTable>>,
+  ) -> Self {
+    Self::new_with_compilation_ctx(tokens, symbols, CompilationContext::default())
+  }
+
+  pub fn new_with_compilation_ctx(
+    tokens: Vec<Token>,
+    symbols: Rc<RefCell<SymbolTable>>,
+    compilation_ctx: CompilationContext,
   ) -> Self {
     let mut parser = IgnisParser {
       tokens,
@@ -65,6 +77,7 @@ impl IgnisParser {
       pending_doc: None,
       pending_inner_doc: None,
       pending_attrs: Vec::new(),
+      compilation_ctx,
     };
 
     parser.skip_comments();
@@ -175,6 +188,23 @@ impl IgnisParser {
     token_type: TokenType,
   ) -> bool {
     self.tokens.get(self.cursor).unwrap().type_ == token_type
+  }
+
+  pub(crate) fn is_compile_if_directive_start(&self) -> bool {
+    if !self.at(TokenType::At) {
+      return false;
+    }
+
+    let next = self.peek_nth(1);
+    next.type_ == TokenType::If || (next.type_ == TokenType::Identifier && next.lexeme == "ifelse")
+  }
+
+  pub(crate) fn is_compile_else_directive_start(&self) -> bool {
+    if !self.at(TokenType::At) {
+      return false;
+    }
+
+    self.peek_nth(1).type_ == TokenType::Else
   }
 
   fn eat(

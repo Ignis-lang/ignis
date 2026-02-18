@@ -140,6 +140,18 @@ pub struct BuildCommand {
   /// The target to compile to
   #[arg(short, long, value_enum, default_value = "c")]
   pub target: Target,
+
+  /// Override target triple used by compile-time directives
+  #[arg(long = "target-triple")]
+  pub target_triple: Option<String>,
+
+  /// Enable one feature (can be repeated)
+  #[arg(long = "feature", action = clap::ArgAction::Append)]
+  pub feature: Vec<String>,
+
+  /// Enable multiple features separated by commas
+  #[arg(long = "features", value_delimiter = ',')]
+  pub features: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -243,6 +255,18 @@ pub struct CheckCommand {
   /// The target to compile to
   #[arg(short, long, value_enum, default_value = "c")]
   pub target: Target,
+
+  /// Override target triple used by compile-time directives
+  #[arg(long = "target-triple")]
+  pub target_triple: Option<String>,
+
+  /// Enable one feature (can be repeated)
+  #[arg(long = "feature", action = clap::ArgAction::Append)]
+  pub feature: Vec<String>,
+
+  /// Enable multiple features separated by commas
+  #[arg(long = "features", value_delimiter = ',')]
+  pub features: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
