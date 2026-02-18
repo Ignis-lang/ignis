@@ -7,16 +7,18 @@
 //!
 //! ## Printing
 //!
-//! | Function        | Stream   | Newline |
-//! |-----------------|----------|---------|
-//! | `Io::print`     | stdout   | No      |
-//! | `Io::println`   | stdout   | Yes     |
-//! | `Io::eprint`    | stderr   | No      |
-//! | `Io::eprintln`  | stderr   | Yes     |
+//! | Function        | Stream   | Newline | Accepts          |
+//! |-----------------|----------|---------|------------------|
+//! | `Io::print`     | stdout   | No      | `String`         |
+//! | `Io::println`   | stdout   | Yes     | `String`, `str`  |
+//! | `Io::eprint`    | stderr   | No      | `String`         |
+//! | `Io::eprintln`  | stderr   | Yes     | `String`, `str`  |
 //!
-//! `println` / `eprintln` support both `String` and `str` overloads:
-//! - `String` variant: consumes/moves the value.
-//! - `str` variant: prints directly without allocating a temporary `String`.
+//! `println` and `eprintln` are overloaded for both `String` and `str`:
+//! - `String` overload: the value is consumed (moved) and dropped after printing.
+//! - `str` overload: writes the C string directly, no heap allocation.
+//!
+//! `print` and `eprint` only accept `String` (no `str` overload).
 //!
 //! ## Error Types
 //!
@@ -88,6 +90,12 @@ export namespace Io {
   }
 
   /// Prints a `str` message to stdout followed by a newline (`\n`).
+  ///
+  /// Writes the C string directly via `write(2)`, no heap allocation.
+  ///
+  /// # Arguments
+  ///
+  /// * `message` - The `str` literal or slice to print.
   function println(message: str): void {
     let len: u64 = LibC::String::strlen(message as *u8);
 
@@ -122,6 +130,12 @@ export namespace Io {
   }
 
   /// Prints a `str` message to stderr followed by a newline (`\n`).
+  ///
+  /// Writes the C string directly via `write(2)`, no heap allocation.
+  ///
+  /// # Arguments
+  ///
+  /// * `message` - The `str` literal or slice to print.
   function eprintln(message: str): void {
     let len: u64 = LibC::String::strlen(message as *u8);
 

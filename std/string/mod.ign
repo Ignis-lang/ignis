@@ -40,17 +40,22 @@
 //! String provides callback-based operations for byte-level iteration,
 //! searching, trimming, and splitting:
 //!
-//! | Method        | Signature                              | Description                        |
-//! |---------------|----------------------------------------|------------------------------------|
-//! | `forEachByte` | `(u8) -> void`                         | Iterate over every byte            |
-//! | `findByte`    | `(u8) -> boolean` → `Option<u64>`      | Index of first matching byte       |
-//! | `findLastByte`| `(u8) -> boolean` → `Option<u64>`      | Index of last matching byte        |
-//! | `trimWhere`   | `(u8) -> boolean` → `String`           | Strip leading/trailing bytes       |
-//! | `split`       | `(u8) -> boolean` → `Vector<String>`   | Split into segments                |
-//! | `toBytes`     | `() -> Vector<u8>`                     | Copy bytes into a byte vector      |
-//! | `toChars`     | `() -> Vector<char>`                   | Copy bytes into a char vector      |
+//! | Method        | Callback signature   | Returns            | Description                        |
+//! |---------------|----------------------|--------------------|------------------------------------| 
+//! | `forEachByte` | `(u8) -> void`       | `void`             | Iterate over every byte            |
+//! | `findByte`    | `(u8) -> boolean`    | `Option<u64>`      | Index of first matching byte       |
+//! | `findLastByte`| `(u8) -> boolean`    | `Option<u64>`      | Index of last matching byte        |
+//! | `trimWhere`   | `(u8) -> boolean`    | `String`           | Strip leading/trailing bytes       |
+//! | `split`       | `(u8) -> boolean`    | `Vector<String>`   | Split into segments                |
 //!
 //! All callbacks are `@noescape`: the closure must not outlive the method call.
+//!
+//! ## Byte Conversion
+//!
+//! | Method    | Returns         | Description                        |
+//! |-----------|-----------------|------------------------------------|
+//! | `toBytes` | `Vector<u8>`    | Copy bytes into a byte vector      |
+//! | `toChars` | `Vector<char>`  | Copy bytes into a char vector      |
 //!
 //! ## Numeric Conversions
 //!
@@ -470,6 +475,10 @@ export record String {
     return result;
   }
 
+  /// Returns a new string that is the concatenation of `self` and `other`.
+  ///
+  /// This overload takes `other` by value (moved). The caller does not
+  /// need to pass a reference.
   public concat(&self, other: String): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_concat(&mut result, self, &other);
