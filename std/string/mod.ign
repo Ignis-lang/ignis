@@ -47,6 +47,8 @@
 //! | `findLastByte`| `(u8) -> boolean` → `Option<u64>`      | Index of last matching byte        |
 //! | `trimWhere`   | `(u8) -> boolean` → `String`           | Strip leading/trailing bytes       |
 //! | `split`       | `(u8) -> boolean` → `Vector<String>`   | Split into segments                |
+//! | `toBytes`     | `() -> Vector<u8>`                     | Copy bytes into a byte vector      |
+//! | `toChars`     | `() -> Vector<char>`                   | Copy bytes into a char vector      |
 //!
 //! All callbacks are `@noescape`: the closure must not outlive the method call.
 //!
@@ -64,8 +66,8 @@
 //!
 //! function main(): i32 {
 //!   let greeting: String = String::create("hello");
-//!   let world: String = String::create(" world");
-//!   let msg: String = greeting.concat(&world);
+//!   let world: str = " world";
+//!   let msg: String = greeting.concat(world);
 //!
 //!   Io::println(msg);
 //!
@@ -468,6 +470,80 @@ export record String {
     return result;
   }
 
+  public concat(&self, other: String): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_concat(&mut result, self, &other);
+    return result;
+  }
+
+  /// Returns a new string that is the concatenation of `self` and `other`.
+  ///
+  /// This overload accepts a `str` slice directly.
+  public concat(&self, other: str): String {
+    let otherString: String = String::create(other);
+    return self.concat(&otherString);
+  }
+
+  /// Returns a new string that is the concatenation of `self` and `other`.
+  ///
+  /// This is a convenience alias for `concat(str)`.
+  public concatStr(&self, other: str): String {
+    return self.concat(other);
+  }
+
+  /// Returns a new string that is the concatenation of `self` and `value`.
+  ///
+  /// This overload converts `value` with `String::create(value)` first.
+  public concat(&self, value: i8): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: i16): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: i32): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: i64): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: u8): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: u16): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: u32): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: u64): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: f32): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
+  public concat(&self, value: f64): String {
+    let valueString: String = String::create(value);
+    return self.concat(&valueString);
+  }
+
   /// Returns a new string containing `length` bytes starting at byte
   /// offset `start`.
   ///
@@ -524,8 +600,24 @@ export record String {
     return result;
   }
 
-  public toVectorChars(&self): Vector<char> {
-     let mut result: Vector<char> = Vector::init<char>();
+  /// Copies the underlying bytes into a new `Vector<u8>`.
+  public toBytes(&self): Vector<u8> {
+    let mut result: Vector<u8> = Vector::init<u8>(self.len);
+
+    let mut i: u64 = 0;
+    while (i < self.len) {
+      result.push(self.data[i]);
+      i += 1;
+    }
+
+    return result;
+  }
+
+  /// Copies the underlying bytes into a new `Vector<char>`.
+  ///
+  /// This remains byte-oriented: each byte is cast to `char` directly.
+  public toChars(&self): Vector<char> {
+    let mut result: Vector<char> = Vector::init<char>(self.len);
 
     let mut i: u64 = 0;
     while (i < self.len) {
@@ -533,7 +625,12 @@ export record String {
       i += 1;
     }
 
-    return result;   
+    return result;
+  }
+
+  /// Compatibility alias for `toChars()`.
+  public toVectorChars(&self): Vector<char> {
+    return self.toChars();
   }
 
   /// Creates a deep copy of this string.
