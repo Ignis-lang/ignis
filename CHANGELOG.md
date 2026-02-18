@@ -2,6 +2,17 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## 0.3.1
+
+### Features
+- Integer literal coercion and safe widening: Integer literals now automatically coerce to larger integer types when
+  the target type is known (e.g., assigning 42 to a u64 variable). This enables safer and more ergonomic code without explicit casts.
+
+### Refactoring
+- Clippy cleanup: Applied clippy suggestions across analyzer, LIR lowering, C codegen, and LSP modules.
+    Simplified nested if statements using let chains, removed unnecessary references, and added allow attributes where needed.
+    No functional changes.
+
 ## [0.3.0] - 2026-02-18
 
 This release is a major language update focused on expressive control flow, stronger ownership guarantees, and richer functional syntax.
