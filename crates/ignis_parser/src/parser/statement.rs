@@ -6,6 +6,7 @@ use ignis_ast::{
     let_else::ASTLetElse, return_statement::ASTReturn, variable::ASTVariable, while_statement::ASTWhile,
   },
 };
+use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_token::token_types::TokenType;
 use ignis_type::span::Span;
 
@@ -41,6 +42,48 @@ impl super::IgnisParser {
     let mut items = Vec::new();
 
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      if self.is_compile_if_directive_start() {
+        match self.parse_compile_directive_block_items() {
+          Ok(expanded) => {
+            items.extend(expanded);
+          },
+          Err(diagnostic) => {
+            self.diagnostics.push(diagnostic);
+
+            if self.recovery {
+              self.synchronize_after_statement();
+
+              if self.at(TokenType::RightBrace) {
+                break;
+              }
+            } else {
+              return Err(self.diagnostics.last().unwrap().clone());
+            }
+          },
+        }
+
+        continue;
+      }
+
+      if self.is_compile_else_directive_start() {
+        self.diagnostics.push(DiagnosticMessage::CompileError {
+          message: "Unexpected '@else' without a matching '@if'".to_string(),
+          span: self.peek().span.clone(),
+        });
+
+        if self.recovery {
+          self.synchronize_after_statement();
+
+          if self.at(TokenType::RightBrace) {
+            break;
+          }
+
+          continue;
+        } else {
+          return Err(self.diagnostics.last().unwrap().clone());
+        }
+      }
+
       match self.parse_statement() {
         Ok(node_id) => {
           items.push(node_id);

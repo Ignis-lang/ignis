@@ -33,6 +33,36 @@ impl super::IgnisParser {
     }
 
     while !self.at(TokenType::Eof) {
+      if self.is_compile_if_directive_start() {
+        match self.parse_compile_directive_top_level() {
+          Ok(expanded) => items.extend(expanded),
+          Err(diagnostic) => {
+            self.diagnostics.push(diagnostic);
+
+            if self.recovery {
+              self.synchronize_after_declaration();
+            } else {
+              return Err(self.diagnostics.last().unwrap().clone());
+            }
+          },
+        }
+        continue;
+      }
+
+      if self.is_compile_else_directive_start() {
+        self.diagnostics.push(DiagnosticMessage::CompileError {
+          message: "Unexpected '@else' without a matching '@if'".to_string(),
+          span: self.peek().span.clone(),
+        });
+
+        if self.recovery {
+          self.synchronize_after_declaration();
+          continue;
+        } else {
+          return Err(self.diagnostics.last().unwrap().clone());
+        }
+      }
+
       match self.parse_declaration() {
         Ok(node_id) => {
           items.push(node_id);
@@ -50,6 +80,288 @@ impl super::IgnisParser {
     }
 
     Ok(items)
+  }
+
+  pub(crate) fn parse_compile_directive_block_items(&mut self) -> ParserResult<Vec<NodeId>> {
+    self.parse_compile_directive_with(Self::parse_compile_branch_block_items)
+  }
+
+  fn parse_compile_directive_top_level(&mut self) -> ParserResult<Vec<NodeId>> {
+    self.parse_compile_directive_with(Self::parse_compile_branch_top_level_items)
+  }
+
+  fn parse_compile_directive_namespace_items(&mut self) -> ParserResult<Vec<NodeId>> {
+    self.parse_compile_directive_with(Self::parse_compile_branch_namespace_items)
+  }
+
+  fn parse_compile_directive_with(
+    &mut self,
+    parse_branch: fn(&mut Self, bool) -> ParserResult<Vec<NodeId>>,
+  ) -> ParserResult<Vec<NodeId>> {
+    self.expect(TokenType::At)?;
+
+    let directive_token;
+    let directive_name: &str;
+
+    if self.at(TokenType::If) {
+      directive_token = self.bump().clone();
+      directive_name = "if";
+    } else if self.at(TokenType::Identifier) && self.peek().lexeme == "ifelse" {
+      directive_token = self.bump().clone();
+      directive_name = "ifelse";
+    } else {
+      let bad = self.bump().clone();
+      return Err(DiagnosticMessage::CompileError {
+        message: format!("Unknown compile-time directive '@{}'", bad.lexeme),
+        span: bad.span,
+      });
+    }
+
+    self.expect(TokenType::LeftParen)?;
+    let condition = self.parse_compile_condition_or()?;
+    self.expect(TokenType::RightParen)?;
+
+    let mut selected = parse_branch(self, condition)?;
+
+    if directive_name == "if" {
+      if self.is_compile_else_directive_start() {
+        self.consume_compile_else_directive()?;
+        let else_selected = parse_branch(self, !condition)?;
+        if !condition {
+          selected = else_selected;
+        }
+      }
+
+      return Ok(selected);
+    }
+
+    let else_selected = if self.is_compile_else_directive_start() {
+      self.consume_compile_else_directive()?;
+      parse_branch(self, !condition)?
+    } else if self.at(TokenType::LeftBrace) {
+      parse_branch(self, !condition)?
+    } else {
+      return Err(DiagnosticMessage::CompileError {
+        message: "'@ifelse' requires an else branch".to_string(),
+        span: directive_token.span,
+      });
+    };
+
+    if condition {
+      Ok(selected)
+    } else {
+      Ok(else_selected)
+    }
+  }
+
+  fn consume_compile_else_directive(&mut self) -> ParserResult<()> {
+    self.expect(TokenType::At)?;
+    self.expect(TokenType::Else)?;
+    Ok(())
+  }
+
+  fn parse_compile_branch_top_level_items(
+    &mut self,
+    selected: bool,
+  ) -> ParserResult<Vec<NodeId>> {
+    if !selected {
+      self.skip_compile_branch_body()?;
+      return Ok(Vec::new());
+    }
+
+    self.expect(TokenType::LeftBrace)?;
+    let mut items = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      if self.is_compile_if_directive_start() {
+        let expanded = self.parse_compile_directive_top_level()?;
+        items.extend(expanded);
+        continue;
+      }
+
+      if self.is_compile_else_directive_start() {
+        return Err(DiagnosticMessage::CompileError {
+          message: "Unexpected '@else' without a matching '@if'".to_string(),
+          span: self.peek().span.clone(),
+        });
+      }
+
+      let item = self.parse_declaration()?;
+      items.push(item);
+    }
+
+    self.expect(TokenType::RightBrace)?;
+    Ok(items)
+  }
+
+  fn parse_compile_branch_namespace_items(
+    &mut self,
+    selected: bool,
+  ) -> ParserResult<Vec<NodeId>> {
+    if !selected {
+      self.skip_compile_branch_body()?;
+      return Ok(Vec::new());
+    }
+
+    self.expect(TokenType::LeftBrace)?;
+    let mut items = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      if self.is_compile_if_directive_start() {
+        let expanded = self.parse_compile_directive_namespace_items()?;
+        items.extend(expanded);
+        continue;
+      }
+
+      if self.is_compile_else_directive_start() {
+        return Err(DiagnosticMessage::CompileError {
+          message: "Unexpected '@else' without a matching '@if'".to_string(),
+          span: self.peek().span.clone(),
+        });
+      }
+
+      let item = self.parse_namespace_item()?;
+      items.push(item);
+    }
+
+    self.expect(TokenType::RightBrace)?;
+    Ok(items)
+  }
+
+  fn parse_compile_branch_block_items(
+    &mut self,
+    selected: bool,
+  ) -> ParserResult<Vec<NodeId>> {
+    if !selected {
+      self.skip_compile_branch_body()?;
+      return Ok(Vec::new());
+    }
+
+    self.expect(TokenType::LeftBrace)?;
+    let mut items = Vec::new();
+
+    while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      if self.is_compile_if_directive_start() {
+        let expanded = self.parse_compile_directive_block_items()?;
+        items.extend(expanded);
+        continue;
+      }
+
+      if self.is_compile_else_directive_start() {
+        return Err(DiagnosticMessage::CompileError {
+          message: "Unexpected '@else' without a matching '@if'".to_string(),
+          span: self.peek().span.clone(),
+        });
+      }
+
+      let item = self.parse_statement()?;
+      items.push(item);
+    }
+
+    self.expect(TokenType::RightBrace)?;
+    Ok(items)
+  }
+
+  fn skip_compile_branch_body(&mut self) -> ParserResult<()> {
+    self.expect(TokenType::LeftBrace)?;
+
+    let mut depth = 1usize;
+    while depth > 0 {
+      if self.at(TokenType::Eof) {
+        return Err(DiagnosticMessage::CompileError {
+          message: "Unclosed compile-time directive branch".to_string(),
+          span: self.peek().span.clone(),
+        });
+      }
+
+      let token = self.bump().clone();
+      match token.type_ {
+        TokenType::LeftBrace => depth += 1,
+        TokenType::RightBrace => depth -= 1,
+        _ => {},
+      }
+    }
+
+    Ok(())
+  }
+
+  fn parse_compile_condition_or(&mut self) -> ParserResult<bool> {
+    let mut value = self.parse_compile_condition_and()?;
+
+    while self.eat(TokenType::Or) {
+      let rhs = self.parse_compile_condition_and()?;
+      value = value || rhs;
+    }
+
+    Ok(value)
+  }
+
+  fn parse_compile_condition_and(&mut self) -> ParserResult<bool> {
+    let mut value = self.parse_compile_condition_unary()?;
+
+    while self.eat(TokenType::And) {
+      let rhs = self.parse_compile_condition_unary()?;
+      value = value && rhs;
+    }
+
+    Ok(value)
+  }
+
+  fn parse_compile_condition_unary(&mut self) -> ParserResult<bool> {
+    if self.eat(TokenType::Bang) {
+      let inner = self.parse_compile_condition_unary()?;
+      return Ok(!inner);
+    }
+
+    self.parse_compile_condition_primary()
+  }
+
+  fn parse_compile_condition_primary(&mut self) -> ParserResult<bool> {
+    if self.eat(TokenType::LeftParen) {
+      let value = self.parse_compile_condition_or()?;
+      self.expect(TokenType::RightParen)?;
+      return Ok(value);
+    }
+
+    if self.at(TokenType::At) {
+      return self.parse_compile_predicate_call();
+    }
+
+    Err(DiagnosticMessage::CompileError {
+      message: "Invalid compile-time condition expression".to_string(),
+      span: self.peek().span.clone(),
+    })
+  }
+
+  fn parse_compile_predicate_call(&mut self) -> ParserResult<bool> {
+    let at_token = self.expect(TokenType::At)?.clone();
+    let predicate_token = self.expect(TokenType::Identifier)?.clone();
+    let predicate_name = predicate_token.lexeme.as_str();
+
+    self.expect(TokenType::LeftParen)?;
+    let arg_token = self.expect(TokenType::String)?.clone();
+    let arg_value = arg_token.lexeme.clone();
+    self.expect(TokenType::RightParen)?;
+
+    match predicate_name {
+      "platform" => Ok(self.compilation_ctx.target.os == arg_value.to_ascii_lowercase()),
+      "arch" => Ok(self.compilation_ctx.target.arch == arg_value),
+      "target" => Ok(self.compilation_ctx.target.triple == arg_value),
+      "feature" => {
+        if !self.compilation_ctx.is_known_feature(&arg_value) {
+          return Err(DiagnosticMessage::CompileError {
+            message: format!("Unknown feature '{}' in compile-time condition", arg_value),
+            span: arg_token.span,
+          });
+        }
+
+        Ok(self.compilation_ctx.features.contains(&arg_value))
+      },
+      _ => Err(DiagnosticMessage::CompileError {
+        message: format!("Unknown compile-time predicate '@{}'", predicate_name),
+        span: Span::merge(&at_token.span, &predicate_token.span),
+      }),
+    }
   }
 
   /// Parse `inline`, `inline(always)`, or `inline(never)`.
@@ -557,6 +869,19 @@ impl super::IgnisParser {
 
     let mut items = Vec::new();
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
+      if self.is_compile_if_directive_start() {
+        let expanded = self.parse_compile_directive_namespace_items()?;
+        items.extend(expanded);
+        continue;
+      }
+
+      if self.is_compile_else_directive_start() {
+        return Err(DiagnosticMessage::CompileError {
+          message: "Unexpected '@else' without a matching '@if'".to_string(),
+          span: self.peek().span.clone(),
+        });
+      }
+
       let item = self.parse_namespace_item()?;
       items.push(item);
     }

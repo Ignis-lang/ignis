@@ -2,17 +2,70 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct TargetInfo {
+  pub triple: String,
   pub os: String,
   pub arch: String,
 }
 
 impl Default for TargetInfo {
   fn default() -> Self {
+    let os = std::env::consts::OS.to_string();
+    let arch = std::env::consts::ARCH.to_string();
+
     Self {
-      os: std::env::consts::OS.to_string(),
-      arch: std::env::consts::ARCH.to_string(),
+      triple: format!("{}-unknown-{}", arch, os),
+      os,
+      arch,
     }
   }
+}
+
+impl TargetInfo {
+  pub fn from_triple(triple: &str) -> Self {
+    let trimmed = triple.trim();
+    if trimmed.is_empty() {
+      return Self::default();
+    }
+
+    let mut target = Self {
+      triple: trimmed.to_string(),
+      ..Self::default()
+    };
+
+    let parts: Vec<&str> = trimmed.split('-').collect();
+
+    if let Some(arch) = parts.first()
+      && !arch.is_empty()
+    {
+      target.arch = (*arch).to_string();
+    }
+
+    if parts.len() >= 3 {
+      target.os = normalize_platform(parts[2]);
+    } else if parts.len() == 2 {
+      target.os = normalize_platform(parts[1]);
+    }
+
+    target
+  }
+}
+
+fn normalize_platform(raw: &str) -> String {
+  let normalized = raw.to_ascii_lowercase();
+
+  if normalized.contains("darwin") || normalized.contains("macos") {
+    return "macos".to_string();
+  }
+
+  if normalized.contains("windows") || normalized.contains("mingw") || normalized.contains("msvc") {
+    return "windows".to_string();
+  }
+
+  if normalized.contains("linux") {
+    return "linux".to_string();
+  }
+
+  normalized
 }
 
 #[derive(Debug, Clone)]
@@ -20,6 +73,7 @@ pub struct CompilationContext {
   pub target: TargetInfo,
   pub debug: bool,
   pub features: HashSet<String>,
+  pub known_features: Option<HashSet<String>>,
 }
 
 impl Default for CompilationContext {
@@ -28,11 +82,29 @@ impl Default for CompilationContext {
       target: TargetInfo::default(),
       debug: cfg!(debug_assertions),
       features: HashSet::new(),
+      known_features: None,
     }
   }
 }
 
 impl CompilationContext {
+  pub fn from_target_triple(target_triple: &str) -> Self {
+    let mut ctx = Self::default();
+    ctx.target = TargetInfo::from_triple(target_triple);
+    ctx
+  }
+
+  pub fn is_known_feature(
+    &self,
+    feature: &str,
+  ) -> bool {
+    self
+      .known_features
+      .as_ref()
+      .map(|known| known.contains(feature))
+      .unwrap_or(true)
+  }
+
   pub fn resolve_flag(
     &self,
     key: &str,

@@ -1,6 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -364,6 +364,12 @@ pub struct IgnisConfig {
   pub init: bool,
   pub build_std: bool,
   pub build_std_output_dir: Option<String>,
+  /// Compilation target triple used by compile-time directives.
+  pub target_triple: String,
+  /// Enabled feature flags for compile-time directives.
+  pub enabled_features: HashSet<String>,
+  /// Declared feature catalog for strict unknown-feature validation.
+  pub known_features: Option<HashSet<String>>,
   pub std_path: String,
   pub std: bool,
   pub auto_load_std: bool,
@@ -418,6 +424,9 @@ impl IgnisConfig {
       init,
       build_std,
       build_std_output_dir,
+      target_triple: String::new(),
+      enabled_features: HashSet::new(),
+      known_features: None,
       std_path,
       std,
       auto_load_std,
@@ -445,12 +454,17 @@ impl IgnisConfig {
       OutputLevel::Detailed
     };
 
+    let host_arch = std::env::consts::ARCH;
+    let host_os = std::env::consts::OS;
+    let host_target = format!("{}-unknown-{}", host_arch, host_os);
+
     Self {
       debug,
       debug_trace,
       quiet,
       verbose,
       output_level,
+      target_triple: host_target,
       c_compiler: "gcc".to_string(),
       ..Self::default()
     }

@@ -14,6 +14,7 @@ use ignis_diagnostics::diagnostic_report::Diagnostic;
 use ignis_log::{log_dbg, log_trc, phase_log, trace_dbg};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_hir::HIR;
+use ignis_type::compilation_context::CompilationContext as TypeCompilationContext;
 use ignis_type::definition::{DefinitionKind, DefinitionStore};
 use ignis_type::file::{FileId, SourceMap};
 use ignis_type::module::{Module, ModuleId, ModulePath};
@@ -451,7 +452,8 @@ impl CompilationContext {
 
     log_dbg!(config, "parsing {}", path.display());
 
-    let mut parser = IgnisParser::new(lexer.tokens, self.symbol_table.clone());
+    let compilation_ctx = build_type_compilation_context(config);
+    let mut parser = IgnisParser::new_with_compilation_ctx(lexer.tokens, self.symbol_table.clone(), compilation_ctx);
     let parse_result = parser.parse();
 
     let (nodes, roots) = match parse_result {
@@ -654,7 +656,8 @@ impl CompilationContext {
     }
 
     // Parser phase
-    let mut parser = IgnisParser::new(lexer.tokens, self.symbol_table.clone());
+    let compilation_ctx = build_type_compilation_context(config);
+    let mut parser = IgnisParser::new_with_compilation_ctx(lexer.tokens, self.symbol_table.clone(), compilation_ctx);
     let parse_result = parser.parse();
 
     let (nodes, roots) = match parse_result {
@@ -990,4 +993,17 @@ impl CompilationContext {
 
     (output, has_errors, per_module_semantic)
   }
+}
+
+fn build_type_compilation_context(config: &IgnisConfig) -> TypeCompilationContext {
+  let mut ctx = if config.target_triple.is_empty() {
+    TypeCompilationContext::default()
+  } else {
+    TypeCompilationContext::from_target_triple(&config.target_triple)
+  };
+
+  ctx.debug = config.debug;
+  ctx.features = config.enabled_features.clone();
+  ctx.known_features = config.known_features.clone();
+  ctx
 }

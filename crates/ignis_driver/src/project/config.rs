@@ -101,6 +101,18 @@ pub struct BuildTomlConfig {
   #[serde(default = "default_target")]
   pub target: String,
 
+  /// Target triple used by compile-time directives.
+  /// Example: "x86_64-unknown-linux-gnu".
+  pub target_triple: Option<String>,
+
+  /// Declared feature catalog for strict unknown-feature validation.
+  #[serde(default)]
+  pub known_features: Vec<String>,
+
+  /// Features enabled by default for this project.
+  #[serde(default)]
+  pub default_features: Vec<String>,
+
   /// C compiler to use. Default: "cc".
   #[serde(default = "default_cc")]
   pub cc: String,
@@ -124,6 +136,9 @@ impl Default for BuildTomlConfig {
       opt_level: None,
       debug: false,
       target: default_target(),
+      target_triple: None,
+      known_features: Vec::new(),
+      default_features: Vec::new(),
       cc: default_cc(),
       cflags: Vec::new(),
       emit: Vec::new(),
@@ -204,6 +219,9 @@ out_dir = "build"
 opt_level = 2
 debug = true
 target = "c"
+target_triple = "x86_64-unknown-linux-gnu"
+known_features = ["qbe", "simd"]
+default_features = ["qbe"]
 cc = "gcc"
 cflags = ["-Wall", "-Wextra"]
 emit = ["c", "obj"]
@@ -215,6 +233,9 @@ emit = ["c", "obj"]
     assert_eq!(parsed.ignis.runtime_path, Some("../std/runtime".to_string()));
     assert_eq!(parsed.build.opt_level, Some(2));
     assert!(parsed.build.debug);
+    assert_eq!(parsed.build.target_triple, Some("x86_64-unknown-linux-gnu".to_string()));
+    assert_eq!(parsed.build.known_features, vec!["qbe", "simd"]);
+    assert_eq!(parsed.build.default_features, vec!["qbe"]);
     assert_eq!(parsed.build.cc, "gcc");
     assert_eq!(parsed.build.cflags, vec!["-Wall", "-Wextra"]);
     assert_eq!(parsed.build.emit, vec!["c", "obj"]);
