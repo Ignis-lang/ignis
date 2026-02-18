@@ -396,6 +396,43 @@ enum Option<T> {
 }
 
 #[test]
+fn cannot_move_out_of_borrowed_result_unwrap() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Box {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+
+    unwrap(&self): T {
+        return match (self) {
+            Result::OK(value) -> value,
+            Result::ERROR(_) -> @panic("boom"),
+        };
+    }
+}
+
+function main(): i32 {
+    let result: Result<Box, i32> = Result::OK(Box { value: 42 });
+    let value: Box = result.unwrap();
+    return value.value;
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    26,
+  );
+}
+
+#[test]
 fn match_guard_must_be_boolean() {
   common::assert_diagnostic_at_line(
     r#"

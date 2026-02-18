@@ -772,6 +772,121 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_err_match_scrutinee_move_consumes_owner() {
+  e2e_ownership_error_test(
+    "err_match_scrutinee_move_consumes_owner",
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum MaybeOwned {
+    Some(Owned),
+    None,
+}
+
+function main(): i32 {
+    let value: MaybeOwned = MaybeOwned::Some(Owned { id: 1 });
+
+    let extracted: Owned = match (value) {
+        MaybeOwned::Some(inner) -> inner,
+        MaybeOwned::None -> Owned { id: 0 },
+    };
+
+    let again: MaybeOwned = value;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_enum_variant_payload_move_consumes_owner() {
+  e2e_ownership_error_test(
+    "err_enum_variant_payload_move_consumes_owner",
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum MaybeOwned {
+    Some(Owned),
+    None,
+}
+
+function main(): i32 {
+    let value: Owned = Owned { id: 1 };
+    let wrapped: MaybeOwned = MaybeOwned::Some(value);
+    let again: Owned = value;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_record_field_move_consumes_owner() {
+  e2e_ownership_error_test(
+    "err_record_field_move_consumes_owner",
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Wrapper {
+    public item: Owned;
+}
+
+function main(): i32 {
+    let value: Owned = Owned { id: 1 };
+    let wrapped: Wrapper = Wrapper { item: value };
+    let again: Owned = value;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_vector_literal_move_consumes_owner() {
+  e2e_ownership_error_test(
+    "err_vector_literal_move_consumes_owner",
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): i32 {
+    let value: Owned = Owned { id: 1 };
+    let list: Owned[1] = [value];
+    let again: Owned = value;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_err_enum_drop_use_after_move() {
   e2e_ownership_error_test(
     "enum_drop_use_after_move",

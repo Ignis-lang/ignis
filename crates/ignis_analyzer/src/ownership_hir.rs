@@ -758,6 +758,10 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::VectorLiteral { elements } => {
         for elem in elements {
           self.check_node(elem);
+
+          if let Some(source_def) = self.get_moved_var(elem) {
+            self.try_consume(source_def, span.clone());
+          }
         }
       },
 
@@ -773,6 +777,10 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::RecordInit { fields, .. } => {
         for (_, field_value) in fields {
           self.check_node(field_value);
+
+          if let Some(source_def) = self.get_moved_var(field_value) {
+            self.try_consume(source_def, span.clone());
+          }
         }
       },
 
@@ -807,6 +815,10 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::EnumVariant { payload, .. } => {
         for &p in &payload {
           self.check_node(p);
+
+          if let Some(source_def) = self.get_moved_var(p) {
+            self.try_consume(source_def, span.clone());
+          }
         }
       },
 
@@ -821,13 +833,7 @@ impl<'a> HirOwnershipChecker<'a> {
       },
 
       HIRKind::Match { scrutinee, arms } => {
-        self.check_node(scrutinee);
-        for arm in arms {
-          if let Some(g) = arm.guard {
-            self.check_node(g);
-          }
-          self.check_node(arm.body);
-        }
+        self.check_match(scrutinee, &arms, span);
       },
 
       HIRKind::Trap | HIRKind::BuiltinUnreachable => {
@@ -1074,6 +1080,46 @@ impl<'a> HirOwnershipChecker<'a> {
 
       // No else means the "else" path always falls through → reachable
       self.reachable = then_reachable || pre_if_reachable;
+    }
+  }
+
+  fn check_match(
+    &mut self,
+    scrutinee: HIRId,
+    arms: &[ignis_hir::HIRMatchArm],
+    span: Span,
+  ) {
+    self.check_node(scrutinee);
+
+    if let Some(source_def) = self.get_moved_var(scrutinee) {
+      self.try_consume(source_def, span.clone());
+    }
+
+    let pre_match_reachable = self.reachable;
+    let pre_match_state = self.states.clone();
+
+    let mut arm_states = Vec::new();
+    let mut arm_reachability = Vec::new();
+
+    for arm in arms {
+      self.states = pre_match_state.clone();
+      self.reachable = pre_match_reachable;
+
+      if let Some(guard_id) = arm.guard {
+        self.check_node(guard_id);
+      }
+
+      if self.reachable {
+        self.check_node(arm.body);
+      }
+
+      arm_states.push(self.states.clone());
+      arm_reachability.push(self.reachable);
+    }
+
+    if !arm_states.is_empty() {
+      self.merge_branch_states(arm_states, span);
+      self.reachable = arm_reachability.into_iter().any(|reachable| reachable);
     }
   }
 
@@ -1762,7 +1808,7 @@ impl<'a> HirOwnershipChecker<'a> {
     match &node.kind {
       HIRKind::Variable(def_id) => {
         let ty = self.defs.type_of(def_id);
-        if self.types.needs_drop_with_defs(ty, self.defs) && !self.types.is_copy_with_defs(ty, self.defs) {
+        if self.types.needs_drop_with_defs(ty, self.defs) {
           Some(*def_id)
         } else {
           None

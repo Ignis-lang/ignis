@@ -5447,6 +5447,117 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_defer_runs_on_try_early_return() {
+  e2e_test(
+    "defer_runs_on_try_early_return",
+    r#"
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function stamp(ptr: *mut i32, digit: i32): void {
+    @write<i32>(ptr, @read<i32>(ptr) * 10 + digit);
+}
+
+function fallible(shouldFail: boolean): Result<i32, i32> {
+    if (shouldFail) {
+        return Result::ERROR(7);
+    }
+    return Result::OK(3);
+}
+
+function worker(ptr: *mut i32, shouldFail: boolean): Result<i32, i32> {
+    defer stamp(ptr, 9);
+    let value: i32 = fallible(shouldFail)!;
+    stamp(ptr, value);
+    return Result::OK(value);
+}
+
+function main(): i32 {
+    let mut failPath: i32 = 0;
+    let mut successPath: i32 = 0;
+    let failPtr: *mut i32 = (&mut failPath) as *mut i32;
+    let successPtr: *mut i32 = (&mut successPath) as *mut i32;
+
+    let r1: Result<i32, i32> = worker(failPtr, true);
+    let r2: Result<i32, i32> = worker(successPtr, false);
+    let _r1 = r1;
+    let _r2 = r2;
+
+    if (failPath != 9) {
+        return 1;
+    }
+
+    if (successPath != 39) {
+        return 2;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_defer_nested_scopes_on_try_early_return() {
+  e2e_test(
+    "defer_nested_scopes_on_try_early_return",
+    r#"
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function stamp(ptr: *mut i32, digit: i32): void {
+    @write<i32>(ptr, @read<i32>(ptr) * 10 + digit);
+}
+
+function fallible(shouldFail: boolean): Result<i32, i32> {
+    if (shouldFail) {
+        return Result::ERROR(1);
+    }
+    return Result::OK(0);
+}
+
+function worker(ptr: *mut i32, shouldFail: boolean): Result<i32, i32> {
+    defer stamp(ptr, 1);
+    {
+        defer stamp(ptr, 2);
+        fallible(shouldFail)!;
+        stamp(ptr, 3);
+    }
+    return Result::OK(0);
+}
+
+function main(): i32 {
+    let mut failPath: i32 = 0;
+    let mut successPath: i32 = 0;
+    let failPtr: *mut i32 = (&mut failPath) as *mut i32;
+    let successPtr: *mut i32 = (&mut successPath) as *mut i32;
+
+    let r1: Result<i32, i32> = worker(failPtr, true);
+    let r2: Result<i32, i32> = worker(successPtr, false);
+    let _r1 = r1;
+    let _r2 = r2;
+
+    if (failPath != 21) {
+        return 1;
+    }
+
+    if (successPath != 321) {
+        return 2;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
 // =========================================================================
 // Defer Statement Tests
 // =========================================================================

@@ -5574,6 +5574,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
+              self.check_borrowed_receiver_move_out(method_id, &method, ma.member, return_type, &call.span);
               return return_type;
             },
             SymbolEntry::Overload(candidates) => {
@@ -5645,6 +5646,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
+              self.check_borrowed_receiver_move_out(&resolved_def_id, &method, ma.member, return_type, &call.span);
               return return_type;
             },
           }
@@ -5813,7 +5815,9 @@ impl<'a> Analyzer<'a> {
               }
 
               // Substitute return type with combined substitution
-              return self.types.substitute(method.return_type, &combined_subst);
+              let return_type = self.types.substitute(method.return_type, &combined_subst);
+              self.check_borrowed_receiver_move_out(method_id, &method, ma.member, return_type, &call.span);
+              return return_type;
             },
             SymbolEntry::Overload(candidates) => {
               let arg_types: Vec<TypeId> = call
@@ -5887,7 +5891,9 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
-              return self.types.substitute(method.return_type, &combined_subst);
+              let return_type = self.types.substitute(method.return_type, &combined_subst);
+              self.check_borrowed_receiver_move_out(&resolved_def_id, &method, ma.member, return_type, &call.span);
+              return return_type;
             },
           }
         }
@@ -6022,6 +6028,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
+              self.check_borrowed_receiver_move_out(method_id, &method, ma.member, return_type, &call.span);
               return return_type;
             },
             SymbolEntry::Overload(candidates) => {
@@ -6092,6 +6099,7 @@ impl<'a> Analyzer<'a> {
                 }
               }
 
+              self.check_borrowed_receiver_move_out(&resolved_def_id, &method, ma.member, return_type, &call.span);
               return return_type;
             },
           }
@@ -10212,6 +10220,68 @@ impl<'a> Analyzer<'a> {
     let symbols = self.symbols.borrow();
     let first_name = symbols.get(&self.defs.get(first_param).name);
     if first_name == "self" { 1 } else { 0 }
+  }
+
+  fn check_borrowed_receiver_move_out(
+    &mut self,
+    _method_def_id: &DefinitionId,
+    method: &ignis_type::definition::MethodDefinition,
+    member_name: SymbolId,
+    return_type: TypeId,
+    span: &Span,
+  ) {
+    if !self.is_borrowed_move_checked_method(method.owner_type, member_name) {
+      return;
+    }
+
+    if method.is_static {
+      return;
+    }
+
+    let Some(self_param) = method.params.first() else {
+      return;
+    };
+
+    let self_ty = self.get_definition_type(self_param);
+    if !matches!(self.types.get(&self_ty), Type::Reference { .. }) {
+      return;
+    }
+
+    if !self.is_owned_non_copy_type(return_type) {
+      return;
+    }
+
+    self.add_diagnostic(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span: span.clone() }.report());
+  }
+
+  fn is_borrowed_move_checked_method(
+    &self,
+    owner_type: DefinitionId,
+    method_name: SymbolId,
+  ) -> bool {
+    let method_name = self.get_symbol_name(&method_name);
+    if method_name != "unwrap" && method_name != "unwrapErr" {
+      return false;
+    }
+
+    match &self.defs.get(&owner_type).kind {
+      DefinitionKind::Enum(enum_def) => enum_def.try_capable.is_some(),
+      _ => false,
+    }
+  }
+
+  fn is_owned_non_copy_type(
+    &self,
+    ty: TypeId,
+  ) -> bool {
+    if self.types.is_error(&ty) {
+      return false;
+    }
+
+    match self.types.get(&ty) {
+      Type::Void | Type::Never | Type::Reference { .. } | Type::Pointer { .. } => false,
+      _ => !self.types.is_copy_with_defs(&ty, &self.defs),
+    }
   }
 
   fn emit_no_overload_error(

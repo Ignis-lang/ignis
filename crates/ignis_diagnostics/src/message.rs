@@ -303,6 +303,9 @@ pub enum DiagnosticMessage {
     type_name: String,
     span: Span,
   },
+  CannotMoveOutOfBorrowedValue {
+    span: Span,
+  },
   // Control Flow & Semantic Errors
   UnreachableCode {
     span: Span,
@@ -1138,6 +1141,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::NotCallable { type_name, .. } => {
         write!(f, "Cannot call non-function type '{}'", display_type_name(type_name))
       },
+      DiagnosticMessage::CannotMoveOutOfBorrowedValue { .. } => {
+        write!(f, "cannot move out of borrowed value")
+      },
 
       // Control Flow & Semantic Errors
       DiagnosticMessage::UnreachableCode { .. } => write!(f, "Unreachable code detected"),
@@ -1838,6 +1844,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::IndexOutOfBounds { span, .. }
       | DiagnosticMessage::DynamicVectorsNotSupported { span, .. }
       | DiagnosticMessage::NotCallable { span, .. }
+      | DiagnosticMessage::CannotMoveOutOfBorrowedValue { span, .. }
       | DiagnosticMessage::UnreachableCode { span, .. }
       | DiagnosticMessage::ExternWithBody { span, .. }
       | DiagnosticMessage::ExternConstWithInitializer { span, .. }
@@ -2053,6 +2060,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::IndexOutOfBounds { .. } => "A0048",
       DiagnosticMessage::DynamicVectorsNotSupported { .. } => "A0147",
       DiagnosticMessage::NotCallable { .. } => "A0024",
+      DiagnosticMessage::CannotMoveOutOfBorrowedValue { .. } => "A0186",
       DiagnosticMessage::UnreachableCode { .. } => "A0025",
       DiagnosticMessage::ExternWithBody { .. } => "A0026",
       DiagnosticMessage::ExternConstWithInitializer { .. } => "A0027",
