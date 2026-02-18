@@ -87,9 +87,9 @@
 //!
 //!   // Functional-style: double every even element, then sum
 //!   let sum: i32 = values
-//!     .filter(|x: &i32| -> boolean { return *x % 2 == 0; })
-//!     .map<i32>(|x: &i32| -> i32 { return *x * 2; })
-//!     .fold<i32>(0, |acc: i32, x: &i32| -> i32 { return acc + *x; });
+//!     .filter((x: &i32): boolean -> { return *x % 2 == 0; })
+//!     .map<i32>((x: &i32): i32 -> { return *x * 2; })
+//!     .fold<i32>(0, (acc: i32, x: &i32): i32 -> { return acc + *x; });
 //!
 //!   // Vector is automatically dropped here
 //!   return 0;
@@ -371,7 +371,7 @@ export record Vector<T> {
   /// v.push(30);
   ///
   /// // Print each element
-  /// v.forEach(|x: &i32| -> void {
+  /// v.forEach((x: &i32): void -> {
   ///   Io::printI32(*x);
   /// });
   /// // Output: 10 20 30
@@ -404,7 +404,7 @@ export record Vector<T> {
   /// v.push(3);
   ///
   /// // Double every element in-place
-  /// v.forEachMut(|x: &mut i32| -> void {
+  /// v.forEachMut((x: &mut i32): void -> {
   ///   *x = *x * 2;
   /// });
   /// // v is now [2, 4, 6]
@@ -444,7 +444,7 @@ export record Vector<T> {
   /// v.push(3);
   /// v.push(4);
   ///
-  /// let evens: Vector<i32> = v.filter(|x: &i32| -> boolean {
+  /// let evens: Vector<i32> = v.filter((x: &i32): boolean -> {
   ///   return *x % 2 == 0;
   /// });
   /// // evens is [2, 4]
@@ -480,11 +480,11 @@ export record Vector<T> {
   /// v.push(3);
   /// v.push(5);
   ///
-  /// let hasEven: boolean = v.any(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// let hasEven: boolean = v.any((x: &i32): boolean -> { return *x % 2 == 0; });
   /// // hasEven == false
   ///
   /// v.push(4);
-  /// let hasEven2: boolean = v.any(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// let hasEven2: boolean = v.any((x: &i32): boolean -> { return *x % 2 == 0; });
   /// // hasEven2 == true (stops at 4, never checks beyond)
   /// ```
   public any(&self, @noescape predicate: (&T) -> boolean): boolean {
@@ -517,11 +517,11 @@ export record Vector<T> {
   /// v.push(4);
   /// v.push(6);
   ///
-  /// let allEven: boolean = v.all(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// let allEven: boolean = v.all((x: &i32): boolean -> { return *x % 2 == 0; });
   /// // allEven == true
   ///
   /// v.push(7);
-  /// let stillAllEven: boolean = v.all(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// let stillAllEven: boolean = v.all((x: &i32): boolean -> { return *x % 2 == 0; });
   /// // stillAllEven == false (stops at 7)
   /// ```
   public all(&self, @noescape predicate: (&T) -> boolean): boolean {
@@ -559,10 +559,10 @@ export record Vector<T> {
   /// v.push(20);
   /// v.push(30);
   ///
-  /// let idx: Option<u64> = v.findIndex(|x: &i32| -> boolean { return *x == 20; });
+  /// let idx: Option<u64> = v.findIndex((x: &i32): boolean -> { return *x == 20; });
   /// // idx == Option::SOME(1)
   ///
-  /// let missing: Option<u64> = v.findIndex(|x: &i32| -> boolean { return *x == 99; });
+  /// let missing: Option<u64> = v.findIndex((x: &i32): boolean -> { return *x == 99; });
   /// // missing == Option::NONE
   /// ```
   public findIndex(&self, @noescape predicate: (&T) -> boolean): Option<u64> {
@@ -599,7 +599,7 @@ export record Vector<T> {
   /// v.push(3);
   /// v.push(4);
   ///
-  /// let numEvens: u64 = v.count(|x: &i32| -> boolean { return *x % 2 == 0; });
+  /// let numEvens: u64 = v.count((x: &i32): boolean -> { return *x % 2 == 0; });
   /// // numEvens == 2
   /// ```
   public count(&self, @noescape predicate: (&T) -> boolean): u64 {
@@ -644,14 +644,14 @@ export record Vector<T> {
   /// v.push(3);
   ///
   /// // Sum all elements: 1 + 2 + 3 = 6
-  /// let sum: Option<i32> = v.reduce(|acc: i32, x: &i32| -> i32 {
+  /// let sum: Option<i32> = v.reduce((acc: i32, x: &i32): i32 -> {
   ///   return acc + *x;
   /// });
   /// // sum == Option::SOME(6)
   ///
   /// // Empty vector returns NONE
   /// let empty: Vector<i32> = Vector::init<i32>();
-  /// let result: Option<i32> = empty.reduce(|acc: i32, x: &i32| -> i32 {
+  /// let result: Option<i32> = empty.reduce((acc: i32, x: &i32): i32 -> {
   ///   return acc + *x;
   /// });
   /// // result == Option::NONE
@@ -705,11 +705,11 @@ export record Vector<T> {
   /// v.push(20);
   ///
   /// // Sort ascending
-  /// v.sort(|a: &i32, b: &i32| -> i32 { return *a - *b; });
+  /// v.sort((a: &i32, b: &i32): i32 -> { return *a - *b; });
   /// // v is now [10, 20, 30]
   ///
   /// // Sort descending
-  /// v.sort(|a: &i32, b: &i32| -> i32 { return *b - *a; });
+  /// v.sort((a: &i32, b: &i32): i32 -> { return *b - *a; });
   /// // v is now [30, 20, 10]
   /// ```
   public sort(&mut self, @noescape compare: (&T, &T) -> i32): void {
@@ -757,13 +757,13 @@ export record Vector<T> {
   /// v.push(3);
   ///
   /// // Square each element (same type: i32 -> i32)
-  /// let squared: Vector<i32> = v.map<i32>(|x: &i32| -> i32 {
+  /// let squared: Vector<i32> = v.map<i32>((x: &i32): i32 -> {
   ///   return *x * *x;
   /// });
   /// // squared is [1, 4, 9]
   ///
   /// // Convert to booleans (different type: i32 -> boolean)
-  /// let isEven: Vector<boolean> = v.map<boolean>(|x: &i32| -> boolean {
+  /// let isEven: Vector<boolean> = v.map<boolean>((x: &i32): boolean -> {
   ///   return *x % 2 == 0;
   /// });
   /// // isEven is [false, true, false]
@@ -810,13 +810,13 @@ export record Vector<T> {
   /// v.push(3);
   ///
   /// // Sum with explicit initial value
-  /// let sum: i32 = v.fold<i32>(0, |acc: i32, x: &i32| -> i32 {
+  /// let sum: i32 = v.fold<i32>(0, (acc: i32, x: &i32): i32 -> {
   ///   return acc + *x;
   /// });
   /// // sum == 6
   ///
   /// // Count elements as u64 (different accumulator type)
-  /// let count: u64 = v.fold<u64>(0, |acc: u64, _x: &i32| -> u64 {
+  /// let count: u64 = v.fold<u64>(0, (acc: u64, _x: &i32): u64 -> {
   ///   return acc + 1;
   /// });
   /// // count == 3

@@ -60,8 +60,8 @@
 //!
 //!   // Chain: look up user, check name length, convert to uppercase
 //!   let result: Option<i32> = findUser(1)
-//!     .filter(|s: str| -> boolean { return s != ""; })
-//!     .map<i32>(|s: str| -> i32 { return 42; });
+//!     .filter((s: str): boolean -> { return s != ""; })
+//!     .map<i32>((s: str): i32 -> { return 42; });
 //!
 //!   return 0;
 //! }
@@ -194,11 +194,11 @@ export enum Option<S> {
   /// import Option from "std::option";
   ///
   /// let x: Option<i32> = Option::NONE;
-  /// let val: i32 = x.unwrapOrElse(|| -> i32 { return 99; });
+  /// let val: i32 = x.unwrapOrElse((): i32 -> { return 99; });
   /// // val == 99 (callback was called)
   ///
   /// let y: Option<i32> = Option::SOME(42);
-  /// let val2: i32 = y.unwrapOrElse(|| -> i32 { return 99; });
+  /// let val2: i32 = y.unwrapOrElse((): i32 -> { return 99; });
   /// // val2 == 42 (callback was NOT called)
   /// ```
   public unwrapOrElse(&self, @noescape f: () -> S): S {
@@ -231,11 +231,11 @@ export enum Option<S> {
   /// let x: Option<i32> = Option::SOME(4);
   ///
   /// // Keep only even values
-  /// let even: Option<i32> = x.filter(|n: i32| -> boolean { return n % 2 == 0; });
+  /// let even: Option<i32> = x.filter((n: i32): boolean -> { return n % 2 == 0; });
   /// // even == Option::SOME(4)
   ///
   /// let odd: Option<i32> = Option::SOME(3);
-  /// let filtered: Option<i32> = odd.filter(|n: i32| -> boolean { return n % 2 == 0; });
+  /// let filtered: Option<i32> = odd.filter((n: i32): boolean -> { return n % 2 == 0; });
   /// // filtered == Option::NONE
   /// ```
   public filter(&self, @noescape predicate: (S) -> boolean): Option<S> {
@@ -265,13 +265,13 @@ export enum Option<S> {
   /// import Option from "std::option";
   ///
   /// let primary: Option<i32> = Option::NONE;
-  /// let fallback: Option<i32> = primary.orElse(|| -> Option<i32> {
+  /// let fallback: Option<i32> = primary.orElse((): Option<i32> -> {
   ///   return Option::SOME(99);
   /// });
   /// // fallback == Option::SOME(99)
   ///
   /// let present: Option<i32> = Option::SOME(1);
-  /// let result: Option<i32> = present.orElse(|| -> Option<i32> {
+  /// let result: Option<i32> = present.orElse((): Option<i32> -> {
   ///   return Option::SOME(99);
   /// });
   /// // result == Option::SOME(1)  (callback not called)
@@ -308,8 +308,8 @@ export enum Option<S> {
   ///
   /// // Log the value mid-chain
   /// let result: Option<i32> = x
-  ///   .inspect(|val: i32| -> void { Io::printI32(val); })
-  ///   .map<i32>(|val: i32| -> i32 { return val * 2; });
+  ///   .inspect((val: i32): void -> { Io::printI32(val); })
+  ///   .map<i32>((val: i32): i32 -> { return val * 2; });
   /// // Prints: 42
   /// // result == Option::SOME(84)
   /// ```
@@ -350,14 +350,14 @@ export enum Option<S> {
   /// let x: Option<i32> = Option::SOME(5);
   ///
   /// // Convert i32 to boolean
-  /// let isPositive: Option<boolean> = x.map<boolean>(|n: i32| -> boolean {
+  /// let isPositive: Option<boolean> = x.map<boolean>((n: i32): boolean -> {
   ///   return n > 0;
   /// });
   /// // isPositive == Option::SOME(true)
   ///
   /// // NONE maps to NONE
   /// let y: Option<i32> = Option::NONE;
-  /// let result: Option<boolean> = y.map<boolean>(|n: i32| -> boolean {
+  /// let result: Option<boolean> = y.map<boolean>((n: i32): boolean -> {
   ///   return n > 0;
   /// });
   /// // result == Option::NONE
@@ -401,14 +401,14 @@ export enum Option<S> {
   ///
   /// // Chain: divide by 2, then divide by 5
   /// let result: Option<i32> = x
-  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 2); })
-  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 5); });
+  ///   .andThen<i32>((n: i32): Option<i32> -> { return safeDivide(n, 2); })
+  ///   .andThen<i32>((n: i32): Option<i32> -> { return safeDivide(n, 5); });
   /// // result == Option::SOME(10)
   ///
   /// // Chain breaks on NONE
   /// let bad: Option<i32> = x
-  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 0); })
-  ///   .andThen<i32>(|n: i32| -> Option<i32> { return safeDivide(n, 5); });
+  ///   .andThen<i32>((n: i32): Option<i32> -> { return safeDivide(n, 0); })
+  ///   .andThen<i32>((n: i32): Option<i32> -> { return safeDivide(n, 5); });
   /// // bad == Option::NONE (first andThen returned NONE)
   /// ```
   public andThen<U>(&self, @noescape f: (S) -> Option<U>): Option<U> {
