@@ -493,15 +493,23 @@ impl<'a> Analyzer<'a> {
 
       SymbolEntry::Overload(group) => {
         let ast_param_count = ast_method.parameters.len();
+        let has_self = ast_method.self_param.is_some();
 
-        // First pass: find candidates with matching parameter count
+        // First pass: find candidates with matching parameter count.
+        // After typechecking, md.params includes the injected `self` parameter
+        // as the first element, but ast_method.parameters does not include self.
         let mut candidates: Vec<DefinitionId> = Vec::new();
         for &def_id in group {
           let def = self.defs.get(&def_id);
-          if let DefinitionKind::Method(md) = &def.kind
-            && md.params.len() == ast_param_count
-          {
-            candidates.push(def_id);
+          if let DefinitionKind::Method(md) = &def.kind {
+            let expected = if has_self && !md.is_static {
+              ast_param_count + 1
+            } else {
+              ast_param_count
+            };
+            if md.params.len() == expected {
+              candidates.push(def_id);
+            }
           }
         }
 
@@ -510,10 +518,10 @@ impl<'a> Analyzer<'a> {
           1 => Some(candidates[0]),
           _ => {
             // Multiple candidates with same param count - match by span
-            for def_id in candidates {
-              let def = self.defs.get(&def_id);
+            for def_id in &candidates {
+              let def = self.defs.get(def_id);
               if def.span == ast_method.span {
-                return Some(def_id);
+                return Some(*def_id);
               }
             }
             None

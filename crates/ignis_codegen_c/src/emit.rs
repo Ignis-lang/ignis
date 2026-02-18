@@ -2579,19 +2579,27 @@ impl<'a> CEmitter<'a> {
     def_id: DefinitionId,
   ) -> String {
     match &self.defs.get(&def_id).kind {
-      DefinitionKind::Function(fd) => fd
-        .params
-        .iter()
-        .map(|p| self.format_type_for_mangling(self.defs.type_of(p)))
-        .collect::<Vec<_>>()
-        .join("_"),
-      DefinitionKind::Method(md) => {
-        let start = if md.is_static { 0 } else { 1 };
-        md.params[start..]
+      DefinitionKind::Function(fd) => {
+        let mut parts: Vec<String> = fd
+          .params
           .iter()
           .map(|p| self.format_type_for_mangling(self.defs.type_of(p)))
-          .collect::<Vec<_>>()
-          .join("_")
+          .collect();
+
+        parts.push(self.format_type_for_mangling(&fd.return_type));
+
+        parts.join("_")
+      },
+      DefinitionKind::Method(md) => {
+        let start = if md.is_static { 0 } else { 1 };
+        let mut parts: Vec<String> = md.params[start..]
+          .iter()
+          .map(|p| self.format_type_for_mangling(self.defs.type_of(p)))
+          .collect();
+
+        parts.push(self.format_type_for_mangling(&md.return_type));
+
+        parts.join("_")
       },
       _ => String::new(),
     }
@@ -2616,9 +2624,18 @@ impl<'a> CEmitter<'a> {
       Type::Char => "char".to_string(),
       Type::Str => "str".to_string(),
       Type::Atom => "atom".to_string(),
+      Type::Void => "void".to_string(),
+      Type::Never => "never".to_string(),
       Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: true } => format!("mutref_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: false } => format!("ref_{}", self.format_type_for_mangling(inner)),
+      Type::Vector { element, .. } => {
+        format!("vec_{}", self.format_type_for_mangling(element))
+      },
+      Type::Tuple(elems) => {
+        let parts: Vec<_> = elems.iter().map(|e| self.format_type_for_mangling(e)).collect();
+        format!("tup_{}", parts.join("_"))
+      },
       Type::Record(def_id) => {
         let def = self.defs.get(def_id);
         self.symbols.get(&def.name).to_string()
@@ -3681,19 +3698,37 @@ fn format_param_types_for_mangling_standalone(
   symbols: &SymbolTable,
 ) -> String {
   match &defs.get(&def_id).kind {
-    DefinitionKind::Function(fd) => fd
-      .params
-      .iter()
-      .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
-      .collect::<Vec<_>>()
-      .join("_"),
-    DefinitionKind::Method(md) => {
-      let start = if md.is_static { 0 } else { 1 };
-      md.params[start..]
+    DefinitionKind::Function(fd) => {
+      let mut parts: Vec<String> = fd
+        .params
         .iter()
         .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
-        .collect::<Vec<_>>()
-        .join("_")
+        .collect();
+
+      parts.push(format_type_for_mangling_standalone(
+        &fd.return_type,
+        types,
+        defs,
+        symbols,
+      ));
+
+      parts.join("_")
+    },
+    DefinitionKind::Method(md) => {
+      let start = if md.is_static { 0 } else { 1 };
+      let mut parts: Vec<String> = md.params[start..]
+        .iter()
+        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
+        .collect();
+
+      parts.push(format_type_for_mangling_standalone(
+        &md.return_type,
+        types,
+        defs,
+        symbols,
+      ));
+
+      parts.join("_")
     },
     _ => String::new(),
   }
