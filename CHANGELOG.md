@@ -2,6 +2,49 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## [0.3.0] - 2026-02-18
+
+This release is a major language update focused on expressive control flow, stronger ownership guarantees, and richer functional syntax.
+
+### Breaking Changes
+
+- Removed the `string` keyword from the language; `str` is now the string primitive.
+- `let name = value else { ... };` is now reserved for try-capable values (`@lang(try)`) and reports `A0187` for non-try types.
+
+### Language Features
+
+- Added full pattern matching support with `match`, variant/tuple/literal/or patterns, and guards.
+- Added `if let`, `while let`, and `let else` control-flow forms.
+- Added try propagation with postfix `!` for enums marked with `@lang(try)`.
+- Added `defer` with correct execution on normal scope exit and early exits.
+- Added pipe operator `|>` with placeholder `_`, method/builtin RHS support, and improved generic inference.
+- Added lambda/closure expressions with capture analysis, capture overrides (`@move`, `@ref`, `@refMut`), and `@noescape` support.
+- Added declaration attributes and lint controls (`@allow`, `@warn`, `@deny`) plus extension methods via `@extension(...)`.
+
+### Type System and Ownership
+
+- Added traits with `@implements(...)`, including default methods and semantic checks.
+- Added structural `Copy` derivation and stricter `Drop`/`Copy` validation for records and enums.
+- Migrated ownership and borrow checking to post-monomorphization HIR for improved soundness.
+- Strengthened move tracking through match/aggregate flows and added `A0186` (`cannot move out of borrowed value`).
+- Added `@takes` for extern parameters to model ownership transfer across FFI boundaries.
+
+### Builtins and Directives
+
+- Unified compiler intrinsics under directive syntax (`@name(...)`, `@name<T>(...)`).
+- Added and stabilized builtins such as `@panic`, `@typeName`, `@bitCast`, pointer/integer cast helpers, `@read`, `@write`, `@dropInPlace`, and `@dropGlue`.
+
+### Standard Library
+
+- Added `std::rc` enhancements including `Weak<T>`, `downgrade/upgrade`, `strongCount`, `get`, and `getMut`.
+- Added `std::ffi::CString` for C interop.
+- Added high-level filesystem APIs (`std::fs::File`, `ReadDir`, convenience helpers), `std::path`, and improved I/O error surface.
+
+### Tooling
+
+- Improved LSP stability and completion quality across namespaces, member access, and standard-library files.
+- Expanded diagnostics for type positions, pattern control flow, and ownership errors.
+
 ## [0.2.4] - 2026-01-20
 
 This release introduces project-based compilation with `ignis.toml` configuration files, enabling multi-file projects with structured build settings.
