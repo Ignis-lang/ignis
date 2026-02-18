@@ -45,6 +45,45 @@ function main(): void {
 }
 
 #[test]
+fn gcc_main_i32_wrapper() {
+  gcc_compiles(
+    r#"
+function main(): i32 {
+    return 7;
+}
+"#,
+  );
+}
+
+#[test]
+fn gcc_main_result_i32_wrapper() {
+  gcc_compiles(
+    r#"
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function main(): Result<i32, str> {
+    return Result::OK(42);
+}
+"#,
+  );
+}
+
+#[test]
+fn gcc_main_with_args_wrapper() {
+  gcc_compiles(
+    r#"
+function main(argc: i32, argv: *str): i32 {
+    return argc;
+}
+"#,
+  );
+}
+
+#[test]
 fn gcc_pointer_deref() {
   gcc_compiles(
     r#"
