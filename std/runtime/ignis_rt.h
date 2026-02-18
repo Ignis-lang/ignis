@@ -6,7 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <float.h>
+
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 // =============================================================================
 // Primitive type aliases
@@ -389,8 +392,13 @@ void ignis_string_init_from_f32(IgnisString *out, f32 value);
 void ignis_string_init_from_f64(IgnisString *out, f64 value);
 
 // =============================================================================
-// Filesystem helpers (rt_fs.c)
+// Filesystem helpers
 // =============================================================================
+
+int ignis_open3(const char *pathname, int flags, u32 mode);
+
+#ifndef _WIN32
+// POSIX — rt_fs.c
 
 int ignis_stat_call(
     const char *path,
@@ -406,8 +414,16 @@ int ignis_fstat_call(
     i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
     i64 *out_blksize, i64 *out_blocks);
 
-int ignis_open3(const char *pathname, int flags, u32 mode);
-
 const char *ignis_dirent_name(void *entry);
 u64 ignis_dirent_ino(void *entry);
 u8 ignis_dirent_type(void *entry);
+
+#else
+// Windows — rt_fs_win.c
+
+int ignis_stat_win(
+    const char *path,
+    u32 *out_mode, i64 *out_size,
+    i64 *out_atime, i64 *out_mtime, i64 *out_ctime);
+
+#endif

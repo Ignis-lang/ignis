@@ -1,8 +1,10 @@
 //!
 //! # LibC I/O
 //!
-//! POSIX file-descriptor operations from `unistd.h` and `fcntl.h`,
-//! exposed as `LibC::File`.
+//! File-descriptor operations exposed as `LibC::File`.
+//!
+//! - **POSIX** (Linux / macOS): `unistd.h` and `fcntl.h`.
+//! - **Windows**: UCRT `_open`, `_read`, `_write`, etc. from `<io.h>` / `<fcntl.h>`.
 //!
 //! ## Constants
 //!
@@ -185,4 +187,121 @@ namespace LibC::File {
 
   /// Tests whether `fd` refers to a terminal. Returns 1 if true.
   function isatty(fd: CType::CInt): CType::CInt { return __unistd_io::isatty(fd); }
+}
+
+// ===========================================================================
+// Windows — UCRT (<io.h>, <fcntl.h>, <direct.h>)
+// ===========================================================================
+
+@configFlag(@platform("windows"))
+extern __ucrt_io {
+  @externName("_open")
+  function ucrt_open(pathname: CType::CConstStr, flags: CType::CInt): CType::CInt;
+
+  @externName("_close")
+  function ucrt_close(fd: CType::CInt): CType::CInt;
+
+  @externName("_read")
+  function ucrt_read(fd: CType::CInt, buf: CType::CVoidPtr, count: CType::CUInt): CType::CInt;
+
+  @externName("_write")
+  function ucrt_write(fd: CType::CInt, buf: CType::CConstVoidPtr, count: CType::CUInt): CType::CInt;
+
+  @externName("_lseeki64")
+  function ucrt_lseek(fd: CType::CInt, offset: i64, whence: CType::CInt): i64;
+
+  @externName("_unlink")
+  function ucrt_unlink(pathname: CType::CConstStr): CType::CInt;
+
+  @externName("_rmdir")
+  function ucrt_rmdir(pathname: CType::CConstStr): CType::CInt;
+
+  @externName("_getcwd")
+  function ucrt_getcwd(buf: CType::CStr, size: CType::CInt): CType::CStr;
+
+  @externName("_chdir")
+  function ucrt_chdir(path: CType::CConstStr): CType::CInt;
+
+  @externName("_dup")
+  function ucrt_dup(fd: CType::CInt): CType::CInt;
+
+  @externName("_dup2")
+  function ucrt_dup2(fd1: CType::CInt, fd2: CType::CInt): CType::CInt;
+
+  @externName("_isatty")
+  function ucrt_isatty(fd: CType::CInt): CType::CInt;
+}
+
+@configFlag(@platform("windows"))
+extern __ucrt_fcntl {
+  @externName("_O_RDONLY")
+  const O_RDONLY: CType::CInt;
+
+  @externName("_O_WRONLY")
+  const O_WRONLY: CType::CInt;
+
+  @externName("_O_RDWR")
+  const O_RDWR: CType::CInt;
+
+  @externName("_O_CREAT")
+  const O_CREAT: CType::CInt;
+
+  @externName("_O_TRUNC")
+  const O_TRUNC: CType::CInt;
+
+  @externName("_O_APPEND")
+  const O_APPEND: CType::CInt;
+}
+
+/// Windows UCRT file-descriptor operations (<io.h>, <fcntl.h>).
+@configFlag(@platform("windows"))
+namespace LibC::File {
+  const SEEK_SET: CType::CInt = 0;
+  const SEEK_CUR: CType::CInt = 1;
+  const SEEK_END: CType::CInt = 2;
+
+  const STDIN_FILENO: CType::CInt = 0;
+  const STDOUT_FILENO: CType::CInt = 1;
+  const STDERR_FILENO: CType::CInt = 2;
+
+  const O_RDONLY: CType::CInt = __ucrt_fcntl::O_RDONLY;
+  const O_WRONLY: CType::CInt = __ucrt_fcntl::O_WRONLY;
+  const O_RDWR: CType::CInt = __ucrt_fcntl::O_RDWR;
+  const O_CREAT: CType::CInt = __ucrt_fcntl::O_CREAT;
+  const O_TRUNC: CType::CInt = __ucrt_fcntl::O_TRUNC;
+  const O_APPEND: CType::CInt = __ucrt_fcntl::O_APPEND;
+
+  function read(fd: CType::CInt, buf: CType::CVoidPtr, count: CType::SizeT): CType::SSizeT {
+    return __ucrt_io::ucrt_read(fd, buf, count as CType::CUInt) as CType::SSizeT;
+  }
+
+  function write(fd: CType::CInt, buf: CType::CConstVoidPtr, count: CType::SizeT): CType::SSizeT {
+    return __ucrt_io::ucrt_write(fd, buf, count as CType::CUInt) as CType::SSizeT;
+  }
+
+  function open(pathname: CType::CConstStr, flags: CType::CInt): CType::CInt {
+    return __ucrt_io::ucrt_open(pathname, flags);
+  }
+
+  function close(fd: CType::CInt): CType::CInt { return __ucrt_io::ucrt_close(fd); }
+
+  function lseek(fd: CType::CInt, offset: i64, whence: CType::CInt): i64 {
+    return __ucrt_io::ucrt_lseek(fd, offset, whence);
+  }
+
+  function unlink(pathname: CType::CConstStr): CType::CInt { return __ucrt_io::ucrt_unlink(pathname); }
+
+  function rmdir(pathname: CType::CConstStr): CType::CInt { return __ucrt_io::ucrt_rmdir(pathname); }
+
+  function getcwd(buf: CType::CStr, size: CType::SizeT): CType::CStr {
+    return __ucrt_io::ucrt_getcwd(buf, size as CType::CInt);
+  }
+
+  function chdir(path: CType::CConstStr): CType::CInt { return __ucrt_io::ucrt_chdir(path); }
+
+  function dup(oldfd: CType::CInt): CType::CInt { return __ucrt_io::ucrt_dup(oldfd); }
+
+  function dup2(oldfd: CType::CInt, newfd: CType::CInt): CType::CInt { return __ucrt_io::ucrt_dup2(oldfd, newfd); }
+
+  function isatty(fd: CType::CInt): CType::CInt { return __ucrt_io::ucrt_isatty(fd); }
 }

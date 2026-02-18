@@ -1,6 +1,8 @@
 /*
  * Ignis runtime — filesystem helpers  (std/runtime/internal/rt_fs.c)
  *
+ * POSIX implementation — compiled only on non-Windows platforms.
+ *
  * Six thin C functions that cannot be expressed in pure Ignis today:
  *
  *   ignis_stat_call   — calls stat(2), extracts struct stat fields
@@ -19,6 +21,8 @@
  * Called from: std/fs/sys/unix.ign (Fs::Sys::Unix namespace).
  * Declared in: std/runtime/ignis_rt.h (bottom of file).
  */
+
+#ifndef _WIN32
 
 #include "../ignis_rt.h"
 #include "rt_internal.h"
@@ -149,3 +153,5 @@ u8 ignis_dirent_type(void *entry) {
 int ignis_open3(const char *pathname, int flags, u32 mode) {
     return open(pathname, flags, (mode_t)mode);
 }
+
+#endif /* !_WIN32 */

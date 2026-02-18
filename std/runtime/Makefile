@@ -2,7 +2,18 @@ CC ?= gcc
 AR ?= ar
 CFLAGS ?= -O2 -g -fPIC -I. -Wall -Wextra
 
-INTERNAL_SRCS = internal/rt_memory.c internal/rt_string.c internal/rt_rc.c internal/rt_fs.c
+# Platform-shared sources
+INTERNAL_SRCS_COMMON = internal/rt_memory.c internal/rt_string.c internal/rt_rc.c
+
+# Platform detection: use _WIN32 guard in the .c files, but only compile the
+# relevant source so we don't pull in missing headers.
+ifeq ($(OS),Windows_NT)
+INTERNAL_SRCS_PLAT = internal/rt_fs_win.c
+else
+INTERNAL_SRCS_PLAT = internal/rt_fs.c
+endif
+
+INTERNAL_SRCS = $(INTERNAL_SRCS_COMMON) $(INTERNAL_SRCS_PLAT)
 INTERNAL_OBJS = $(INTERNAL_SRCS:.c=.o)
 
 .PHONY: all clean test test-san

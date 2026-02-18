@@ -1,0 +1,340 @@
+//!
+//! # Filesystem System Layer — Windows
+//!
+//! Win32 + UCRT syscall wrappers behind the common `Fs::Sys` namespace.
+//!
+//! Uses UCRT for fd-based I/O (`_open`, `_read`, `_write`, `_close`,
+//! `_lseek`) and Win32 for directory enumeration and metadata
+//! (`FindFirstFileA`, `FindNextFileA`, `GetFileAttributesA`).
+//!
+//! ## Backends
+//!
+//! | Source file    | Platform | Description                       |
+//! |----------------|----------|-----------------------------------|
+//! | windows.ign    | Windows  | UCRT + Win32 wrappers             |
+
+import CType from "std::libc::primitives";
+import Io from "std::io";
+
+// ---------------------------------------------------------------------------
+// UCRT file I/O (<io.h>, <fcntl.h>, <sys/stat.h>, <direct.h>)
+// ---------------------------------------------------------------------------
+
+extern __win_io {
+  @externName("_open")
+  function win_open(pathname: *u8, flags: i32, mode: i32): i32;
+
+  @externName("_close")
+  function win_close(fd: i32): i32;
+
+  @externName("_read")
+  function win_read(fd: i32, buf: *mut void, count: u32): i32;
+
+  @externName("_write")
+  function win_write(fd: i32, buf: *mut void, count: u32): i32;
+
+  @externName("_lseeki64")
+  function win_lseek(fd: i32, offset: i64, whence: i32): i64;
+
+  @externName("_unlink")
+  function win_unlink(pathname: *u8): i32;
+
+  @externName("_rmdir")
+  function win_rmdir(pathname: *u8): i32;
+
+  @externName("rename")
+  function win_rename(oldpath: *u8, newpath: *u8): i32;
+
+  @externName("_mkdir")
+  function win_mkdir(pathname: *u8): i32;
+}
+
+extern __win_fcntl {
+  @externName("_O_RDONLY")
+  const O_RDONLY: i32;
+
+  @externName("_O_WRONLY")
+  const O_WRONLY: i32;
+
+  @externName("_O_RDWR")
+  const O_RDWR: i32;
+
+  @externName("_O_CREAT")
+  const O_CREAT: i32;
+
+  @externName("_O_TRUNC")
+  const O_TRUNC: i32;
+
+  @externName("_O_APPEND")
+  const O_APPEND: i32;
+
+  @externName("_O_EXCL")
+  const O_EXCL: i32;
+}
+
+// ---------------------------------------------------------------------------
+// Win32 — kernel32 file attributes & directory enumeration
+// ---------------------------------------------------------------------------
+
+extern __kernel32_fs {
+  @externName("GetFileAttributesA")
+  function getFileAttributes(lpFileName: *u8): u32;
+
+  @externName("GetLastError")
+  function getLastError(): u32;
+
+  @externName("DeleteFileA")
+  function deleteFile(lpFileName: *u8): i32;
+
+  @externName("RemoveDirectoryA")
+  function removeDirectory(lpDirName: *u8): i32;
+
+  @externName("CreateDirectoryA")
+  function createDirectory(lpPathName: *u8, lpSecurityAttributes: *mut void): i32;
+
+  @externName("MoveFileA")
+  function moveFile(lpExistingFileName: *u8, lpNewFileName: *u8): i32;
+}
+
+// UCRT errno
+extern __win_errno {
+  @externName("_errno")
+  function errno_ptr(): *mut i32;
+
+  function strerror(errnum: i32): *u8;
+
+  const ENOENT: i32;
+  const EACCES: i32;
+  const EEXIST: i32;
+  const EINVAL: i32;
+  const EINTR: i32;
+}
+
+// C runtime helpers (shared with unix, implemented in std/runtime/internal/rt_fs.c)
+extern __fs_rt {
+  function ignis_stat_win(
+    path: *u8,
+    outMode: &mut u32, outSize: &mut i64,
+    outAtime: &mut i64, outMtime: &mut i64, outCtime: &mut i64,
+  ): i32;
+
+  function ignis_open3(pathname: *u8, flags: i32, mode: u32): i32;
+}
+
+// =============================================================================
+// Public types and namespace
+// =============================================================================
+
+export namespace Fs::Sys {
+
+  // ---- Stat record ----
+
+  /// File metadata returned by `stat`.
+  ///
+  /// On Windows only a subset of POSIX fields are meaningful.
+  /// Unused POSIX fields are set to 0.
+  record Stat {
+    public dev: u64;
+    public ino: u64;
+    public mode: u32;
+    public nlink: u64;
+    public uid: u32;
+    public gid: u32;
+    public size: i64;
+    public atime: i64;
+    public mtime: i64;
+    public ctime: i64;
+    public blksize: i64;
+    public blocks: i64;
+  }
+
+  // ---- SysDirEntry record ----
+
+  /// Single entry from a directory listing.
+  record SysDirEntry {
+    public name: str;
+    public ino: u64;
+    public fileType: u8;
+  }
+
+  // ---- Open flags ----
+
+  const SEEK_SET: i32 = 0;
+  const SEEK_CUR: i32 = 1;
+  const SEEK_END: i32 = 2;
+
+  const O_RDONLY: i32 = __win_fcntl::O_RDONLY;
+  const O_WRONLY: i32 = __win_fcntl::O_WRONLY;
+  const O_RDWR: i32 = __win_fcntl::O_RDWR;
+  const O_CREAT: i32 = __win_fcntl::O_CREAT;
+  const O_TRUNC: i32 = __win_fcntl::O_TRUNC;
+  const O_APPEND: i32 = __win_fcntl::O_APPEND;
+  const O_EXCL: i32 = __win_fcntl::O_EXCL;
+
+  // ---- Mode bits (POSIX compat stubs — Windows ignores most) ----
+
+  const S_IFMT: u32 = 0xF000;
+  const S_IFREG: u32 = 0x8000;
+  const S_IFDIR: u32 = 0x4000;
+  const S_IFLNK: u32 = 0xA000;
+
+  const S_IRWXU: u32 = 448;
+  const S_IRUSR: u32 = 256;
+  const S_IWUSR: u32 = 128;
+  const S_IXUSR: u32 = 64;
+  const S_IRWXG: u32 = 56;
+  const S_IRGRP: u32 = 32;
+  const S_IWGRP: u32 = 16;
+  const S_IXGRP: u32 = 8;
+  const S_IRWXO: u32 = 7;
+  const S_IROTH: u32 = 4;
+  const S_IWOTH: u32 = 2;
+  const S_IXOTH: u32 = 1;
+
+  // ---- dirent type constants ----
+
+  const DT_UNKNOWN: u8 = 0;
+  const DT_REG: u8 = 8;
+  const DT_DIR: u8 = 4;
+  const DT_LNK: u8 = 10;
+
+  // ---- FILE_ATTRIBUTE constants (Win32) ----
+
+  const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+  const FILE_ATTRIBUTE_READONLY: u32 = 0x01;
+  const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+  const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
+
+  // =========================================================================
+  // errno helper (private)
+  // =========================================================================
+
+  function lastError(): Io::IoError {
+    let rawErrno: i32 = @read<i32>(__win_errno::errno_ptr());
+    let msg: str = __win_errno::strerror(rawErrno) as str;
+
+    let kind: Io::ErrorKind = match (rawErrno) {
+      __win_errno::ENOENT -> Io::ErrorKind::NOT_FOUND,
+      __win_errno::EACCES -> Io::ErrorKind::PERMISSION_DENIED,
+      __win_errno::EEXIST -> Io::ErrorKind::ALREADY_EXISTS,
+      __win_errno::EINVAL -> Io::ErrorKind::INVALID_INPUT,
+      __win_errno::EINTR -> Io::ErrorKind::INTERRUPTED,
+      _ -> Io::ErrorKind::OTHER,
+    };
+
+    return Io::IoError { kind: kind, raw: rawErrno, message: msg };
+  }
+
+  // =========================================================================
+  // Syscall wrappers
+  // =========================================================================
+
+  /// Opens `path` with `flags` and `mode`. Returns the fd on success.
+  function open(path: str, flags: i32, mode: u32): Result<i32, Io::IoError> {
+    let fd: i32 = __fs_rt::ignis_open3(path as *u8, flags, mode);
+    if (fd == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(fd);
+  }
+
+  /// Closes file descriptor `fd`.
+  function close(fd: i32): Result<boolean, Io::IoError> {
+    let rc: i32 = __win_io::win_close(fd);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Reads up to `count` bytes from `fd` into `buf`.
+  function read(fd: i32, buf: *mut void, count: u64): Result<i64, Io::IoError> {
+    let n: i32 = __win_io::win_read(fd, buf, count as u32);
+    if (n == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(n as i64);
+  }
+
+  /// Writes up to `count` bytes from `buf` to `fd`.
+  function write(fd: i32, buf: *mut void, count: u64): Result<i64, Io::IoError> {
+    let n: i32 = __win_io::win_write(fd, buf, count as u32);
+    if (n == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(n as i64);
+  }
+
+  /// Repositions the file offset of `fd`.
+  function lseek(fd: i32, offset: i64, whence: i32): Result<i64, Io::IoError> {
+    let pos: i64 = __win_io::win_lseek(fd, offset, whence);
+    if (pos == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(pos);
+  }
+
+  /// Returns file metadata for `path`.
+  function stat(path: str): Result<Stat, Io::IoError> {
+    let mut mode: u32 = 0;
+    let mut size: i64 = 0;
+    let mut atime: i64 = 0;
+    let mut mtime: i64 = 0;
+    let mut ctime: i64 = 0;
+
+    let rc: i32 = __fs_rt::ignis_stat_win(
+      path as *u8,
+      &mut mode, &mut size,
+      &mut atime, &mut mtime, &mut ctime,
+    );
+
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+
+    return Result::OK(Stat {
+      dev: 0, ino: 0, mode: mode, nlink: 1,
+      uid: 0, gid: 0, size: size,
+      atime: atime, mtime: mtime, ctime: ctime,
+      blksize: 0, blocks: 0,
+    });
+  }
+
+  /// Creates a directory at `path`.
+  ///
+  /// The `mode` parameter is ignored on Windows.
+  function mkdir(path: str, mode: u32): Result<boolean, Io::IoError> {
+    let rc: i32 = __win_io::win_mkdir(path as *u8);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Removes the file at `path`.
+  function unlink(path: str): Result<boolean, Io::IoError> {
+    let rc: i32 = __win_io::win_unlink(path as *u8);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Removes the empty directory at `path`.
+  function rmdir(path: str): Result<boolean, Io::IoError> {
+    let rc: i32 = __win_io::win_rmdir(path as *u8);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+
+  /// Renames `oldPath` to `newPath`.
+  function rename(oldPath: str, newPath: str): Result<boolean, Io::IoError> {
+    let rc: i32 = __win_io::win_rename(oldPath as *u8, newPath as *u8);
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+    return Result::OK(true);
+  }
+}

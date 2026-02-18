@@ -177,3 +177,42 @@ namespace LibC::Wait {
   /// `options` can be 0 or a combination of `WNOHANG`/`WUNTRACED`.
   function waitpid(pid: CType::PidT, wstatus: *mut CType::CInt, options: CType::CInt): CType::PidT { return __wait::waitpid(pid, wstatus, options); }
 }
+
+// ===========================================================================
+// Windows — kernel32 process functions
+// ===========================================================================
+
+@configFlag(@platform("windows"))
+extern __kernel32_proc {
+  @externName("GetCurrentProcessId")
+  function getCurrentProcessId(): CType::DWord;
+
+  @externName("ExitProcess")
+  function exitProcess(uExitCode: CType::CUInt): void;
+
+  @externName("Sleep")
+  function sleep(dwMilliseconds: CType::DWord): void;
+
+  @externName("GetEnvironmentVariableA")
+  function getEnvironmentVariable(lpName: CType::LpcStr, lpBuffer: CType::LpStr, nSize: CType::DWord): CType::DWord;
+}
+
+/// Win32 process functions — Windows only.
+@configFlag(@platform("windows"))
+namespace LibC::WinProcess {
+  /// Returns the current process ID.
+  function getCurrentProcessId(): CType::DWord { return __kernel32_proc::getCurrentProcessId(); }
+
+  /// Terminates the current process. Does not return.
+  function exitProcess(exitCode: CType::CUInt): void { __kernel32_proc::exitProcess(exitCode); }
+
+  /// Suspends execution for `milliseconds` milliseconds.
+  function sleep(milliseconds: CType::DWord): void { __kernel32_proc::sleep(milliseconds); }
+
+  /// Retrieves an environment variable into `buffer`.
+  ///
+  /// Returns the number of characters written (excluding NUL), or 0 on failure.
+  function getEnvironmentVariable(name: CType::LpcStr, buffer: CType::LpStr, size: CType::DWord): CType::DWord {
+    return __kernel32_proc::getEnvironmentVariable(name, buffer, size);
+  }
+}

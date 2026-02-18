@@ -163,3 +163,49 @@ namespace LibC::Memory {
   /// Changes the protection on `len` bytes starting at `addr`.
   function mprotect(addr: CType::CVoidPtr, len: CType::SizeT, prot: CType::CInt): CType::CInt { return __mman::mprotect(addr, len, prot); }
 }
+
+// ===========================================================================
+// Windows — kernel32 virtual memory
+// ===========================================================================
+
+@configFlag(@platform("windows"))
+extern __kernel32_mem {
+  @externName("VirtualAlloc")
+  function virtualAlloc(lpAddress: CType::LpVoid, dwSize: CType::SizeT, flAllocationType: CType::DWord, flProtect: CType::DWord): CType::LpVoid;
+
+  @externName("VirtualFree")
+  function virtualFree(lpAddress: CType::LpVoid, dwSize: CType::SizeT, dwFreeType: CType::DWord): CType::WinBool;
+
+  @externName("VirtualProtect")
+  function virtualProtect(lpAddress: CType::LpVoid, dwSize: CType::SizeT, flNewProtect: CType::DWord, lpflOldProtect: CType::LpDWord): CType::WinBool;
+}
+
+/// Win32 virtual memory (kernel32) — Windows only.
+@configFlag(@platform("windows"))
+namespace LibC::Memory {
+  const MEM_COMMIT: CType::DWord = 0x1000;
+  const MEM_RESERVE: CType::DWord = 0x2000;
+  const MEM_RELEASE: CType::DWord = 0x8000;
+
+  const PAGE_NOACCESS: CType::DWord = 0x01;
+  const PAGE_READONLY: CType::DWord = 0x02;
+  const PAGE_READWRITE: CType::DWord = 0x04;
+  const PAGE_EXECUTE: CType::DWord = 0x10;
+  const PAGE_EXECUTE_READ: CType::DWord = 0x20;
+  const PAGE_EXECUTE_READWRITE: CType::DWord = 0x40;
+
+  /// Reserves and/or commits virtual memory pages.
+  function virtualAlloc(lpAddress: CType::LpVoid, dwSize: CType::SizeT, flAllocationType: CType::DWord, flProtect: CType::DWord): CType::LpVoid {
+    return __kernel32_mem::virtualAlloc(lpAddress, dwSize, flAllocationType, flProtect);
+  }
+
+  /// Releases or decommits virtual memory pages.
+  function virtualFree(lpAddress: CType::LpVoid, dwSize: CType::SizeT, dwFreeType: CType::DWord): CType::WinBool {
+    return __kernel32_mem::virtualFree(lpAddress, dwSize, dwFreeType);
+  }
+
+  /// Changes the protection on a region of virtual memory.
+  function virtualProtect(lpAddress: CType::LpVoid, dwSize: CType::SizeT, flNewProtect: CType::DWord, lpflOldProtect: CType::LpDWord): CType::WinBool {
+    return __kernel32_mem::virtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
+  }
+}
