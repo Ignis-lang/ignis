@@ -2806,3 +2806,59 @@ function main(): void {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+// ============================================================================
+// Literal Coercion Error Tests
+// ============================================================================
+
+#[test]
+fn literal_overflow_u8() {
+  let src = r#"
+function main(): void {
+    let ch: u8 = 300;
+    return;
+}
+"#;
+
+  common::assert_err(src, &["A0046"]);
+
+  let result = common::analyze(src);
+  assert_snapshot!("literal_overflow_u8", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn narrowing_u64_to_u8() {
+  let src = r#"
+function main(): void {
+    let x: u64 = 999;
+    let y: u8 = x;
+    return;
+}
+"#;
+
+  common::assert_err(src, &["A0045", "A0122"]);
+
+  let result = common::analyze(src);
+  assert_snapshot!("narrowing_u64_to_u8", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn signed_unsigned_mixed_arithmetic() {
+  let src = r#"
+function main(): void {
+    let a: i32 = -1;
+    let b: u32 = 1;
+    let c = a + b;
+    return;
+}
+"#;
+
+  // Mixed signed/unsigned arithmetic produces type inference error
+  common::assert_err(src, &["A0122"]);
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "signed_unsigned_mixed_arithmetic",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}

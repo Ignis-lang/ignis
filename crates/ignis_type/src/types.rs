@@ -554,13 +554,82 @@ impl TypeStore {
     false
   }
 
-  /// Currently equivalent to `types_equal`; will be extended with implicit coercions.
+  /// Check if source type can be assigned to target type.
+  /// Allows implicit widening for same-sign integers (e.g., u8 -> u16, i8 -> i32).
   pub fn is_assignable(
     &self,
     target: &TypeId,
     source: &TypeId,
   ) -> bool {
-    self.types_equal(target, source)
+    if self.types_equal(target, source) {
+      return true;
+    }
+
+    // Allow implicit widening for same-sign integers
+    if self.is_integer(target) && self.is_integer(source) {
+      return self.is_implicit_widening(target, source);
+    }
+
+    false
+  }
+
+  /// Check if source is a valid widening conversion to target.
+  /// Only allows widening (smaller to larger) with same sign.
+  /// No implicit signed/unsigned conversions.
+  pub fn is_implicit_widening(
+    &self,
+    target: &TypeId,
+    source: &TypeId,
+  ) -> bool {
+    use Type::*;
+    match (self.get(target), self.get(source)) {
+      // Unsigned widening: u8 -> u16 -> u32 -> u64
+      (U16, U8) => true,
+      (U32, U8 | U16) => true,
+      (U64, U8 | U16 | U32) => true,
+      // Signed widening: i8 -> i16 -> i32 -> i64
+      (I16, I8) => true,
+      (I32, I8 | I16) => true,
+      (I64, I8 | I16 | I32) => true,
+      _ => false,
+    }
+  }
+
+  /// Returns the common type for two integer types, applying widening rules.
+  /// Same-sign integers widen to the larger type.
+  /// Mixed sign or incompatible types return None.
+  pub fn integer_common_type(
+    &self,
+    a: &TypeId,
+    b: &TypeId,
+  ) -> Option<TypeId> {
+    use Type::*;
+    match (self.get(a), self.get(b)) {
+      // Both unsigned: return larger
+      (U8, U8) => Some(*a),
+      (U16, U16) => Some(*a),
+      (U32, U32) => Some(*a),
+      (U64, U64) => Some(*a),
+      (U16, U8) | (U8, U16) => Some(self.u16()),
+      (U32, U8) | (U8, U32) => Some(self.u32()),
+      (U32, U16) | (U16, U32) => Some(self.u32()),
+      (U64, U8) | (U8, U64) => Some(self.u64()),
+      (U64, U16) | (U16, U64) => Some(self.u64()),
+      (U64, U32) | (U32, U64) => Some(self.u64()),
+      // Both signed: return larger
+      (I8, I8) => Some(*a),
+      (I16, I16) => Some(*a),
+      (I32, I32) => Some(*a),
+      (I64, I64) => Some(*a),
+      (I16, I8) | (I8, I16) => Some(self.i16()),
+      (I32, I8) | (I8, I32) => Some(self.i32()),
+      (I32, I16) | (I16, I32) => Some(self.i32()),
+      (I64, I8) | (I8, I64) => Some(self.i64()),
+      (I64, I16) | (I16, I64) => Some(self.i64()),
+      (I64, I32) | (I32, I64) => Some(self.i64()),
+      // Mixed sign: None (requires explicit cast)
+      _ => None,
+    }
   }
 
   #[inline]
