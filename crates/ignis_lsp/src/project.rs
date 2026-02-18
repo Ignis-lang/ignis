@@ -271,6 +271,18 @@ impl ProjectManager {
     config.auto_load_std = project.std_path.is_some();
     config.manifest = load_manifest(&config.std_path);
 
+    if let Some(ref triple) = project.target_triple {
+      config.target_triple = triple.clone();
+    }
+
+    let mut features: std::collections::HashSet<String> = project.default_features.iter().cloned().collect();
+    features.extend(config.enabled_features.drain());
+    config.enabled_features = features;
+
+    if !project.known_features.is_empty() {
+      config.known_features = Some(project.known_features.iter().cloned().collect());
+    }
+
     Arc::new(config)
   }
 }

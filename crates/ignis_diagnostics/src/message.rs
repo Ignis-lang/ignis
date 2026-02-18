@@ -595,10 +595,6 @@ pub enum DiagnosticMessage {
     constraint: String,
     span: Span,
   },
-  UnknownConfigFlag {
-    key: String,
-    span: Span,
-  },
   UnknownAttribute {
     name: String,
     target: String,
@@ -1452,9 +1448,6 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::BuiltinTypeConstraint { name, constraint, .. } => {
         write!(f, "@{}: {}", name, constraint)
       },
-      DiagnosticMessage::UnknownConfigFlag { key, .. } => {
-        write!(f, "Unknown config flag '{}'", key)
-      },
       DiagnosticMessage::UnknownAttribute { name, target, .. } => {
         write!(f, "unknown attribute '@{}' on {}", name, target)
       },
@@ -1925,7 +1918,6 @@ impl DiagnosticMessage {
       | DiagnosticMessage::BuiltinArgCount { span, .. }
       | DiagnosticMessage::BuiltinExpectedStringLiteral { span, .. }
       | DiagnosticMessage::BuiltinTypeConstraint { span, .. }
-      | DiagnosticMessage::UnknownConfigFlag { span, .. }
       | DiagnosticMessage::UnknownAttribute { span, .. }
       | DiagnosticMessage::AttributeArgCount { span, .. }
       | DiagnosticMessage::AttributeExpectedString { span, .. }
@@ -2142,7 +2134,6 @@ impl DiagnosticMessage {
       DiagnosticMessage::BuiltinArgCount { .. } => "A0112",
       DiagnosticMessage::BuiltinExpectedStringLiteral { .. } => "A0113",
       DiagnosticMessage::BuiltinTypeConstraint { .. } => "A0116",
-      DiagnosticMessage::UnknownConfigFlag { .. } => "A0115",
       DiagnosticMessage::UnknownAttribute { .. } => "A0117",
       DiagnosticMessage::AttributeArgCount { .. } => "A0118",
       DiagnosticMessage::AttributeExpectedString { .. } => "A0119",
@@ -2217,7 +2208,6 @@ impl DiagnosticMessage {
       | DiagnosticMessage::OwnershipEscapeToGlobal { .. }
       | DiagnosticMessage::DropOnComplexReceiver { .. }
       | DiagnosticMessage::InterproceduralDropOnComplexArgument { .. }
-      | DiagnosticMessage::UnknownConfigFlag { .. }
       | DiagnosticMessage::NonExhaustiveMatch { .. }
       | DiagnosticMessage::IrrefutableLetElsePattern { .. }
       | DiagnosticMessage::UnusedVariable { .. }

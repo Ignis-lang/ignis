@@ -211,25 +211,33 @@ function main(): i32 {
 
 #[test]
 fn e2e_err_config_flag_non_string() {
-  e2e_error_test(
-    "err_config_flag_non_string",
-    r#"
+  use ignis_type::compilation_context::CompilationContext;
+  let errors = common::parse_errors_with_ctx(r#"
 function main(): void {
     let flag: boolean = @configFlag(42);
 }
-"#,
+"#, CompilationContext::default());
+  assert!(!errors.is_empty(), "Expected parse error for invalid condition");
+  assert!(
+    errors.iter().any(|e| e.contains("condition")),
+    "Expected condition error, got: {:?}",
+    errors
   );
 }
 
 #[test]
 fn e2e_err_builtin_arg_count() {
-  e2e_error_test(
-    "err_builtin_arg_count",
-    r#"
+  use ignis_type::compilation_context::CompilationContext;
+  let errors = common::parse_errors_with_ctx(r#"
 function main(): void {
     let flag: boolean = @configFlag();
 }
-"#,
+"#, CompilationContext::default());
+  assert!(!errors.is_empty(), "Expected parse error for empty condition");
+  assert!(
+    errors.iter().any(|e| e.contains("condition")),
+    "Expected condition error, got: {:?}",
+    errors
   );
 }
 

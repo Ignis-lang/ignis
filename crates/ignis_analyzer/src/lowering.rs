@@ -2345,7 +2345,6 @@ impl<'a> Analyzer<'a> {
     let name = self.get_symbol_name(&bc.name);
 
     match name.as_str() {
-      "configFlag" => self.lower_builtin_config_flag(bc, hir),
       "compileError" => self.lower_builtin_compile_error(bc, hir),
       "sizeOf" => self.lower_builtin_sizeof_new(bc, hir),
       "alignOf" => self.lower_builtin_alignof_new(bc, hir),
@@ -2506,48 +2505,6 @@ impl<'a> Analyzer<'a> {
       kind: HIRKind::BuiltinDropGlue { ty: value_type },
       span: bc.span.clone(),
       type_id: fn_ptr_type,
-    })
-  }
-
-  fn lower_builtin_config_flag(
-    &mut self,
-    bc: &ASTBuiltinCall,
-    hir: &mut HIR,
-  ) -> HIRId {
-    if bc.args.is_empty() {
-      return hir.alloc(HIRNode {
-        kind: HIRKind::Error,
-        span: bc.span.clone(),
-        type_id: self.types.error(),
-      });
-    }
-
-    let key = self.extract_string_literal_for_lowering(&bc.args[0]);
-
-    let value = match key {
-      Some(ref k) => match &self.compilation_ctx {
-        Some(ctx) => {
-          let resolved = ctx.resolve_flag(k);
-          if resolved.is_none() {
-            self.add_diagnostic(
-              ignis_diagnostics::message::DiagnosticMessage::UnknownConfigFlag {
-                key: k.clone(),
-                span: bc.span.clone(),
-              }
-              .report(),
-            );
-          }
-          resolved.unwrap_or(false)
-        },
-        None => false,
-      },
-      None => false,
-    };
-
-    hir.alloc(HIRNode {
-      kind: HIRKind::Literal(ignis_type::value::IgnisLiteralValue::Boolean(value)),
-      span: bc.span.clone(),
-      type_id: self.types.boolean(),
     })
   }
 
@@ -2812,19 +2769,6 @@ impl<'a> Analyzer<'a> {
       span: bc.span.clone(),
       type_id: self.types.never(),
     })
-  }
-
-  fn extract_string_literal_for_lowering(
-    &self,
-    node_id: &NodeId,
-  ) -> Option<String> {
-    let node = self.ast.get(node_id);
-    if let ASTNode::Expression(ASTExpression::Literal(lit)) = node
-      && let ignis_type::value::IgnisLiteralValue::String(s) = &lit.value
-    {
-      return Some(s.clone());
-    }
-    None
   }
 
   /// Lower a method call: obj.method(args) or Type::method(args)

@@ -709,6 +709,86 @@ fn e2e_abi_darwin_has_no_abi() {
 }
 
 // =============================================================================
+// @configFlag as expression (boolean in if-conditions)
+// =============================================================================
+
+#[test]
+fn e2e_configflag_expression_true() {
+  let source = r#"
+    function main(): i32 {
+      if (@configFlag(@platform("linux"))) {
+        return 42;
+      }
+      return 0;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn e2e_configflag_expression_false() {
+  let source = r#"
+    function main(): i32 {
+      if (@configFlag(@platform("macos"))) {
+        return 1;
+      }
+      return 99;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 99);
+}
+
+#[test]
+fn e2e_configflag_expression_combinators() {
+  let source = r#"
+    function main(): i32 {
+      if (@configFlag(@platform("linux") && @arch("x86_64"))) {
+        return 64;
+      }
+      return 0;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 64);
+}
+
+#[test]
+fn e2e_configflag_expression_negation() {
+  let source = r#"
+    function main(): i32 {
+      if (@configFlag(!@platform("windows"))) {
+        return 1;
+      }
+      return 0;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn e2e_configflag_expression_let_binding() {
+  let source = r#"
+    function main(): i32 {
+      let isLinux: boolean = @configFlag(@platform("linux"));
+      if (isLinux) {
+        return 10;
+      }
+      return 20;
+    }
+  "#;
+
+  let result = common::compile_and_run_with_ctx(source, linux_x86_ctx()).unwrap();
+  assert_eq!(result.exit_code, 10);
+}
+
+// =============================================================================
 // @ifelse error cases
 // =============================================================================
 

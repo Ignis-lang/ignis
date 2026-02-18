@@ -35,7 +35,6 @@ use std::cell::RefCell;
 
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement, type_::IgnisTypeSyntax};
 use ignis_type::{
-  compilation_context::CompilationContext,
   inference::InferCtx,
   symbol::{SymbolId, SymbolTable},
   Store as ASTStore,
@@ -152,7 +151,6 @@ pub struct Analyzer<'a> {
 
   import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
   import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
-  compilation_ctx: Option<CompilationContext>,
   referenced_defs: HashSet<DefinitionId>,
   mutated_defs: HashSet<DefinitionId>,
   imported_defs: HashMap<DefinitionId, ignis_type::span::Span>,
@@ -274,7 +272,6 @@ impl<'a> Analyzer<'a> {
       resolved_calls: HashMap::new(),
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
-      compilation_ctx: Some(CompilationContext::default()),
       referenced_defs: HashSet::new(),
       mutated_defs: HashSet::new(),
       imported_defs: HashMap::new(),
@@ -396,7 +393,6 @@ impl<'a> Analyzer<'a> {
       resolved_calls: HashMap::new(),
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
-      compilation_ctx: Some(CompilationContext::default()),
       referenced_defs: HashSet::new(),
       mutated_defs: HashSet::new(),
       imported_defs: HashMap::new(),
