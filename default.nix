@@ -1,7 +1,7 @@
 {
   pkgs ? import <nixpkgs> { },
   rustPlatform ? pkgs.rustPlatform,
-  version ? "0.3.0",
+  version ? "0.3.2",
 }:
 
 let

@@ -2,6 +2,21 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## 0.3.2
+
+### Fixes
+- Fixed method overload handling across analyzer lowering and monomorphization, including correct codegen behavior.
+- Fixed overloaded method resolution in pipe expressions by considering the pipe left-hand side type.
+- Fixed manual drop checks to allow variable field accesses.
+- Fixed manual drop checks to allow complex receivers inside drop methods.
+
+### Standard Library
+- Refactored runtime I/O implementation to use direct LibC calls and removed the internal `rt_io.c` runtime file.
+
+### Documentation
+- Clarified `String`/`str` overload behavior and improved standard-library method documentation.
+- Normalized lambda examples in std docs to canonical syntax.
+
 ## 0.3.1
 
 ### Features
