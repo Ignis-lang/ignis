@@ -5448,6 +5448,36 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_let_else_try_shorthand_binding() {
+  e2e_test(
+    "let_else_try_shorthand_binding",
+    r#"
+@lang(try)
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function parse(ok: boolean): Result<i32, i32> {
+    if (ok) {
+        return Result::OK(7);
+    }
+
+    return Result::ERROR(1);
+}
+
+function main(): i32 {
+    let value: i32 = parse(true) else {
+        return 1;
+    };
+
+    return value;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_defer_runs_on_try_early_return() {
   e2e_test(
     "defer_runs_on_try_early_return",

@@ -170,14 +170,18 @@ impl<'a> Analyzer<'a> {
       ASTStatement::LetElse(let_else) => {
         let value_type = self.typecheck_node(&let_else.value, scope_kind, ctx);
 
-        let irrefutable = self.typecheck_pattern(&let_else.pattern, &value_type);
-        if irrefutable {
-          self.add_diagnostic(
-            DiagnosticMessage::IrrefutableLetElsePattern {
-              span: let_else.pattern.span().clone(),
-            }
-            .report(),
-          );
+        if let Some(binding_type_syntax) = &let_else.binding_type {
+          self.typecheck_shorthand_let_else_pattern(&let_else.pattern, binding_type_syntax, value_type);
+        } else {
+          let irrefutable = self.typecheck_pattern(&let_else.pattern, &value_type);
+          if irrefutable {
+            self.add_diagnostic(
+              DiagnosticMessage::IrrefutableLetElsePattern {
+                span: let_else.pattern.span().clone(),
+              }
+              .report(),
+            );
+          }
         }
 
         self.typecheck_node(&let_else.else_block, ScopeKind::Block, ctx);
@@ -1112,6 +1116,105 @@ impl<'a> Analyzer<'a> {
 
     self.set_type(node_id, &ok_inner_type);
     ok_inner_type
+  }
+
+  fn typecheck_shorthand_let_else_pattern(
+    &mut self,
+    pattern: &ASTPattern,
+    binding_type_syntax: &IgnisTypeSyntax,
+    value_type: TypeId,
+  ) {
+    let Some((binding_name, binding_span)) = self.shorthand_let_else_binding(pattern) else {
+      let irrefutable = self.typecheck_pattern(pattern, &value_type);
+      if irrefutable {
+        self.add_diagnostic(
+          DiagnosticMessage::IrrefutableLetElsePattern {
+            span: pattern.span().clone(),
+          }
+          .report(),
+        );
+      }
+      return;
+    };
+
+    let Some(ok_payload_type) = self.resolve_try_ok_payload_type(value_type) else {
+      self.add_diagnostic(
+        DiagnosticMessage::LetElseBindingRequiresTryType {
+          type_name: self.format_type_for_error(&value_type),
+          span: pattern.span().clone(),
+        }
+        .report(),
+      );
+      return;
+    };
+
+    let binding_type = if matches!(binding_type_syntax, IgnisTypeSyntax::Implicit) {
+      ok_payload_type
+    } else {
+      let declared_type = self.resolve_type_syntax_with_span(binding_type_syntax, &binding_span);
+      self.typecheck_assignment(&declared_type, &ok_payload_type, &binding_span);
+      declared_type
+    };
+
+    let is_wildcard = {
+      let symbols = self.symbols.borrow();
+      symbols.get(&binding_name) == "_"
+    };
+
+    if !is_wildcard {
+      self.define_pattern_binding_if_absent(binding_name, &binding_span, binding_type);
+    }
+  }
+
+  fn shorthand_let_else_binding(
+    &self,
+    pattern: &ASTPattern,
+  ) -> Option<(SymbolId, Span)> {
+    match pattern {
+      ASTPattern::Path { segments, args, .. } if segments.len() == 1 && args.is_none() => {
+        let (name, span) = &segments[0];
+        Some((*name, span.clone()))
+      },
+      _ => None,
+    }
+  }
+
+  fn resolve_try_ok_payload_type(
+    &mut self,
+    value_type: TypeId,
+  ) -> Option<TypeId> {
+    let (enum_def, type_args, ok_variant_index) = match self.types.get(&value_type).clone() {
+      Type::Instance { generic, args } => {
+        let DefinitionKind::Enum(ed) = &self.defs.get(&generic).kind else {
+          return None;
+        };
+
+        let try_capable = ed.try_capable?;
+        (generic, args, try_capable.ok_variant as usize)
+      },
+      Type::Enum(def_id) => {
+        let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind else {
+          return None;
+        };
+
+        let try_capable = ed.try_capable?;
+        (def_id, vec![], try_capable.ok_variant as usize)
+      },
+      _ => return None,
+    };
+
+    let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def).kind else {
+      return None;
+    };
+
+    let ok_variant = ed.variants.get(ok_variant_index)?;
+
+    if ok_variant.payload.len() == 1 {
+      let subst = Substitution::for_generic(enum_def, &type_args);
+      Some(self.types.substitute(ok_variant.payload[0], &subst))
+    } else {
+      Some(self.types.void())
+    }
   }
 
   fn typecheck_pattern(
