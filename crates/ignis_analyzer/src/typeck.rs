@@ -4507,7 +4507,7 @@ impl<'a> Analyzer<'a> {
     }
 
     // Look up instance method on the receiver type
-    let (method_id, method) = match self.resolve_pipe_instance_method(&obj_type, ma, call, node_id, scope_kind, ctx) {
+    let (method_id, method) = match self.resolve_pipe_instance_method(&obj_type, ma, call, None, node_id, scope_kind, ctx) {
       Some(result) => result,
       None => {
         for arg in &call.arguments {
@@ -4680,6 +4680,7 @@ impl<'a> Analyzer<'a> {
     obj_type: &TypeId,
     ma: &ignis_ast::expressions::member_access::ASTMemberAccess,
     call: &ASTCallExpression,
+    pipe_lhs_type: Option<&TypeId>,
     node_id: &NodeId,
     scope_kind: ScopeKind,
     ctx: &TypecheckContext,
@@ -4712,11 +4713,14 @@ impl<'a> Analyzer<'a> {
     let method_id = match entry {
       Some(SymbolEntry::Single(id)) => *id,
       Some(SymbolEntry::Overload(candidates)) if candidates.len() > 1 => {
-        let arg_types: Vec<TypeId> = call
+        let mut arg_types: Vec<TypeId> = call
           .arguments
           .iter()
           .map(|arg| self.typecheck_node(arg, scope_kind, ctx))
           .collect();
+        if let Some(lhs_ty) = pipe_lhs_type {
+          arg_types.insert(0, *lhs_ty);
+        }
         match self.resolve_overload(candidates, &arg_types, &call.span, None) {
           Ok(id) => {
             self.set_resolved_call(node_id, id);
@@ -4784,7 +4788,7 @@ impl<'a> Analyzer<'a> {
     };
 
     let (method_id, method) =
-      match self.resolve_pipe_instance_method(&obj_type, ma, &synthetic_call, node_id, scope_kind, ctx) {
+      match self.resolve_pipe_instance_method(&obj_type, ma, &synthetic_call, Some(lhs_type), node_id, scope_kind, ctx) {
         Some(result) => result,
         None => return self.types.error(),
       };
