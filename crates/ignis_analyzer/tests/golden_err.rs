@@ -2643,7 +2643,7 @@ function main(): i32 {
 }
 
 #[test]
-fn let_else_irrefutable_pattern_warns() {
+fn let_else_binding_requires_try_type() {
   let result = common::analyze(
     r#"
 function main(): i32 {
@@ -2658,8 +2658,8 @@ function main(): i32 {
   );
 
   assert!(
-    result.output.diagnostics.iter().any(|d| d.error_code == "A0169"),
-    "Expected irrefutable let-else warning A0169"
+    result.output.diagnostics.iter().any(|d| d.error_code == "A0187"),
+    "Expected shorthand let-else non-try error A0187"
   );
 }
 

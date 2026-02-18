@@ -192,6 +192,24 @@ function main(): void {
 }
 
 #[test]
+fn e2e_err_let_else_binding_requires_try_type() {
+  e2e_error_test(
+    "err_let_else_binding_requires_try_type",
+    r#"
+function main(): i32 {
+    let value: i32 = 5;
+
+    let bound = value else {
+        return 1;
+    };
+
+    return bound;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_err_config_flag_non_string() {
   e2e_error_test(
     "err_config_flag_non_string",

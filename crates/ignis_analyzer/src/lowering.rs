@@ -290,7 +290,13 @@ impl<'a> Analyzer<'a> {
       ASTStatement::LetElse(let_else) => {
         let value = self.lower_node_to_hir(&let_else.value, hir, scope_kind);
         let else_block = self.lower_node_to_hir(&let_else.else_block, hir, ScopeKind::Block);
-        let pattern = self.lower_pattern(&let_else.pattern, None, None);
+        let pattern = if let_else.binding_type.is_some() {
+          self
+            .lower_shorthand_let_else_pattern(&let_else.pattern, value, hir)
+            .unwrap_or_else(|| self.lower_pattern(&let_else.pattern, None, None))
+        } else {
+          self.lower_pattern(&let_else.pattern, None, None)
+        };
 
         hir.alloc(HIRNode {
           kind: HIRKind::LetElse {
@@ -1520,6 +1526,90 @@ impl<'a> Analyzer<'a> {
       span: span.clone(),
       type_id: result_type,
     })
+  }
+
+  fn lower_shorthand_let_else_pattern(
+    &mut self,
+    pattern: &ASTPattern,
+    value: HIRId,
+    hir: &HIR,
+  ) -> Option<HIRPattern> {
+    let ASTPattern::Path { segments, args, .. } = pattern else {
+      return None;
+    };
+
+    if segments.len() != 1 || args.is_some() {
+      return None;
+    }
+
+    let (binding_name, binding_span) = &segments[0];
+
+    let value_type = hir.get(value).type_id;
+    let (enum_def, ok_variant_tag) = self.resolve_try_ok_variant(value_type)?;
+
+    let payload_len = match &self.defs.get(&enum_def).kind {
+      DefinitionKind::Enum(ed) => ed
+        .variants
+        .get(ok_variant_tag as usize)
+        .map(|variant| variant.payload.len())
+        .unwrap_or(0),
+      _ => 0,
+    };
+
+    let is_wildcard = {
+      let symbols = self.symbols.borrow();
+      symbols.get(binding_name) == "_"
+    };
+
+    let mut pattern_args = Vec::new();
+    if payload_len > 0 {
+      if is_wildcard {
+        pattern_args.push(HIRPattern::Wildcard);
+      } else {
+        let binding_pattern = self
+          .lookup_pattern_binding_def(*binding_name, binding_span)
+          .or_else(|| self.scopes.lookup_def(binding_name).copied())
+          .map(|def_id| HIRPattern::Binding { def_id })
+          .unwrap_or(HIRPattern::Wildcard);
+
+        pattern_args.push(binding_pattern);
+      }
+
+      for _ in 1..payload_len {
+        pattern_args.push(HIRPattern::Wildcard);
+      }
+    }
+
+    Some(HIRPattern::Variant {
+      enum_def,
+      variant_tag: ok_variant_tag,
+      args: pattern_args,
+    })
+  }
+
+  fn resolve_try_ok_variant(
+    &self,
+    value_type: TypeId,
+  ) -> Option<(DefinitionId, u32)> {
+    match self.types.get(&value_type).clone() {
+      Type::Instance { generic, .. } => {
+        let DefinitionKind::Enum(ed) = &self.defs.get(&generic).kind else {
+          return None;
+        };
+
+        let try_capable = ed.try_capable?;
+        Some((generic, try_capable.ok_variant))
+      },
+      Type::Enum(def_id) => {
+        let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind else {
+          return None;
+        };
+
+        let try_capable = ed.try_capable?;
+        Some((def_id, try_capable.ok_variant))
+      },
+      _ => None,
+    }
   }
 
   fn lower_pattern(

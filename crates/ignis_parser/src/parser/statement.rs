@@ -145,7 +145,7 @@ impl super::IgnisParser {
           args: None,
           span: name_token.span,
         };
-        let let_else = ASTLetElse::new(pattern, initializer, else_block, span);
+        let let_else = ASTLetElse::new(pattern, Some(type_annotation), initializer, else_block, span);
         return Ok(self.allocate_statement(ASTStatement::LetElse(let_else)));
       }
 
@@ -207,7 +207,7 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
 
     let span = Span::merge(&keyword.span, &semicolon.span);
-    let let_else = ASTLetElse::new(pattern, value, else_block, span);
+    let let_else = ASTLetElse::new(pattern, None, value, else_block, span);
     Ok(self.allocate_statement(ASTStatement::LetElse(let_else)))
   }
 

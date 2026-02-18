@@ -675,9 +675,14 @@ impl DisplayLisp for ASTLetElse {
     formatter: &ASTFormatter,
   ) -> String {
     let pattern = self.pattern.to_lisp(formatter);
+    let binding_type = self
+      .binding_type
+      .as_ref()
+      .map(|ty| ty.to_lisp(formatter))
+      .unwrap_or_else(|| "implicit".to_string());
     let value = formatter.format_node(&self.value);
     let else_block = formatter.format_node(&self.else_block);
-    format!("(LetElse {} {} {})", pattern, value, else_block)
+    format!("(LetElse {} {} {} {})", pattern, binding_type, value, else_block)
   }
 }
 

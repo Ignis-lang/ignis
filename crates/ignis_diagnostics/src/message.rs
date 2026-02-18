@@ -827,6 +827,10 @@ pub enum DiagnosticMessage {
   IrrefutableLetElsePattern {
     span: Span,
   },
+  LetElseBindingRequiresTryType {
+    type_name: String,
+    span: Span,
+  },
 
   // #region Closures
   ClosureEscapesWithRefCapture {
@@ -1730,6 +1734,13 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::IrrefutableLetElsePattern { .. } => {
         write!(f, "irrefutable pattern in `let else`")
       },
+      DiagnosticMessage::LetElseBindingRequiresTryType { type_name, .. } => {
+        write!(
+          f,
+          "`let name = value else` requires a @lang(try) value, got {}",
+          display_type_name(type_name)
+        )
+      },
       DiagnosticMessage::ClosureEscapesWithRefCapture { capture_name, .. } => {
         write!(f, "closure escapes its scope while capturing `{}` by reference", capture_name)
       },
@@ -1966,6 +1977,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LetConditionInOrExpression { span, .. }
       | DiagnosticMessage::LetElseMustDiverge { span, .. }
       | DiagnosticMessage::IrrefutableLetElsePattern { span, .. }
+      | DiagnosticMessage::LetElseBindingRequiresTryType { span, .. }
       | DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { span, .. } => span.clone(),
       DiagnosticMessage::ClosureEscapesWithRefCapture { closure_span, .. } => closure_span.clone(),
       DiagnosticMessage::PipeRhsNotCallable { rhs_span, .. } => rhs_span.clone(),
@@ -2182,6 +2194,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::LetConditionInOrExpression { .. } => "A0167",
       DiagnosticMessage::LetElseMustDiverge { .. } => "A0168",
       DiagnosticMessage::IrrefutableLetElsePattern { .. } => "A0169",
+      DiagnosticMessage::LetElseBindingRequiresTryType { .. } => "A0187",
       DiagnosticMessage::MethodUsesSelfWithoutSelfParameter { .. } => "A0156",
       DiagnosticMessage::ClosureEscapesWithRefCapture { .. } => "A0170",
       DiagnosticMessage::PipeRhsNotCallable { .. } => "A0171",
@@ -2261,6 +2274,12 @@ impl DiagnosticMessage {
         vec![(
           pipe_span.clone(),
           "help: insert `_` where the piped value should go".to_string(),
+        )]
+      },
+      DiagnosticMessage::LetElseBindingRequiresTryType { span, .. } => {
+        vec![(
+          span.clone(),
+          "help: use `let Pattern = value else { ... };` or `let name = value!;`".to_string(),
         )]
       },
       _ => vec![],
