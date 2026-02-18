@@ -14,9 +14,9 @@
 //! | `Io::eprint`    | stderr   | No      |
 //! | `Io::eprintln`  | stderr   | Yes     |
 //!
-//! Print functions take `String` **by value** (move semantics). The String
-//! is dropped automatically after printing. Clone before passing if you
-//! need to keep the String.
+//! `println` / `eprintln` support both `String` and `str` overloads:
+//! - `String` variant: consumes/moves the value.
+//! - `str` variant: prints directly without allocating a temporary `String`.
 //!
 //! ## Error Types
 //!
@@ -49,20 +49,16 @@
 //! ```
 
 import String from "std::string";
+import LibC from "std::libc";
 
 import _ from "std::io::error";
 
-extern __io {
-  function ignis_print(message: &String): void;
-  function ignis_println(message: &String): void;
-  function ignis_eprint(message: &String): void;
-  function ignis_eprintln(message: &String): void;
-}
-
 /// Standard I/O namespace.
 ///
-/// All functions take `String` by value. The String is dropped after
-/// the print operation completes.
+/// `println` and `eprintln` have overloads for both `String` and `str`.
+///
+/// `String` overloads consume/move the value. `str` overloads forward the
+/// C string directly.
 export namespace Io {
   /// Prints `message` to stdout followed by a newline (`\n`).
   ///
@@ -80,10 +76,23 @@ export namespace Io {
   /// import String from "std::string";
   ///
   /// Io::println(String::create("hello"));
+  /// Io::println("hello from str");
   /// Io::println(String::create(42));
   /// ```
   function println(message: String): void {
-    __io::ignis_println(&message);
+    let s: str = message.toStr();
+    let len: u64 = message.length();
+
+    LibC::File::write(LibC::File::STDOUT_FILENO, s as *void, len);
+    LibC::File::write(LibC::File::STDOUT_FILENO, "\n" as *void, 1);
+  }
+
+  /// Prints a `str` message to stdout followed by a newline (`\n`).
+  function println(message: str): void {
+    let len: u64 = LibC::String::strlen(message as *u8);
+
+    LibC::File::write(LibC::File::STDOUT_FILENO, message as *void, len);
+    LibC::File::write(LibC::File::STDOUT_FILENO, "\n" as *void, 1);
   }
 
   /// Prints `message` to stderr followed by a newline (`\n`).
@@ -102,9 +111,22 @@ export namespace Io {
   /// import String from "std::string";
   ///
   /// Io::eprintln(String::create("error: file not found"));
+  /// Io::eprintln("error from str");
   /// ```
   function eprintln(message: String): void {
-    __io::ignis_eprintln(&message);
+    let s: str = message.toStr();
+    let len: u64 = message.length();
+
+    LibC::File::write(LibC::File::STDERR_FILENO, s as *void, len);
+    LibC::File::write(LibC::File::STDERR_FILENO, "\n" as *void, 1);
+  }
+
+  /// Prints a `str` message to stderr followed by a newline (`\n`).
+  function eprintln(message: str): void {
+    let len: u64 = LibC::String::strlen(message as *u8);
+
+    LibC::File::write(LibC::File::STDERR_FILENO, message as *void, len);
+    LibC::File::write(LibC::File::STDERR_FILENO, "\n" as *void, 1);
   }
 
   /// Prints `message` to stdout without a trailing newline.
@@ -124,7 +146,10 @@ export namespace Io {
   /// Io::print(String::create("Enter name: "));
   /// ```
   function print(message: String): void {
-    __io::ignis_print(&message);
+    let s: str = message.toStr();
+    let len: u64 = message.length();
+
+    LibC::File::write(LibC::File::STDOUT_FILENO, s as *void, len);
   }
 
   /// Prints `message` to stderr without a trailing newline.
@@ -143,6 +168,9 @@ export namespace Io {
   /// Io::eprintln(String::create("low disk space"));
   /// ```
   function eprint(message: String): void {
-    __io::ignis_eprint(&message);
+    let s: str = message.toStr();
+    let len: u64 = message.length();
+
+    LibC::File::write(LibC::File::STDERR_FILENO, s as *void, len);
   }
 }

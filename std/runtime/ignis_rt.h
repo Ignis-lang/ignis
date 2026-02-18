@@ -389,30 +389,6 @@ void ignis_string_init_from_f32(IgnisString *out, f32 value);
 void ignis_string_init_from_f64(IgnisString *out, f64 value);
 
 // =============================================================================
-// I/O
-// =============================================================================
-
-/**
- * Writes the string to stdout.
- */
-void ignis_print(const IgnisString *s);
-
-/**
- * Writes the string to stdout followed by a newline.
- */
-void ignis_println(const IgnisString *s);
-
-/**
- * Writes the string to stderr.
- */
-void ignis_eprint(const IgnisString *s);
-
-/**
- * Writes the string to stderr followed by a newline.
- */
-void ignis_eprintln(const IgnisString *s);
-
-// =============================================================================
 // Filesystem helpers (rt_fs.c)
 // =============================================================================
 
