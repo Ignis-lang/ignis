@@ -1276,8 +1276,27 @@ impl<'a> LoweringContext<'a> {
         self.lower_hir_node(inner)
       },
 
-      // Other expressions not supported as lvalues
-      _ => None,
+      // Other expressions: spill into a synthetic local, then take its address.
+      _ => {
+        let value = self.lower_hir_node(expr)?;
+        let value_ty = node.type_id;
+
+        let temp_local = self.alloc_synthetic_local(value_ty, false);
+
+        self.fn_builder().emit(Instr::Store {
+          dest: temp_local,
+          value,
+        });
+
+        let dest = self.fn_builder().alloc_temp(ref_ty, span);
+        self.fn_builder().emit(Instr::AddrOfLocal {
+          dest,
+          local: temp_local,
+          mutable,
+        });
+
+        Some(Operand::Temp(dest))
+      },
     }
   }
 

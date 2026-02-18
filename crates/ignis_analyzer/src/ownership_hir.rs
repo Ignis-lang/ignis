@@ -666,9 +666,14 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_if(condition, then_branch, else_branch, span);
       },
 
-      HIRKind::LetElse { value, else_block, .. } => {
+      HIRKind::LetElse { pattern, value, else_block } => {
         self.check_node(value);
+
+        let saved_reachable = self.reachable;
         self.check_node(else_block);
+        self.reachable = saved_reachable;
+
+        self.declare_owned_pattern_bindings(&pattern);
       },
 
       HIRKind::Loop { condition, body } => {
@@ -1440,6 +1445,38 @@ impl<'a> HirOwnershipChecker<'a> {
 
     if let Some(scope) = self.scope_stack.last_mut() {
       scope.owned_vars.push(def_id);
+    }
+  }
+
+  fn declare_owned_pattern_bindings(
+    &mut self,
+    pattern: &ignis_hir::HIRPattern,
+  ) {
+    match pattern {
+      ignis_hir::HIRPattern::Binding { def_id } => {
+        let var_ty = self.defs.type_of(def_id);
+        if self.types.needs_drop_with_defs(var_ty, self.defs) {
+          self.declare_owned(*def_id);
+        }
+      },
+      ignis_hir::HIRPattern::Variant { args, .. } => {
+        for arg in args {
+          self.declare_owned_pattern_bindings(arg);
+        }
+      },
+      ignis_hir::HIRPattern::Tuple { elements } => {
+        for elem in elements {
+          self.declare_owned_pattern_bindings(elem);
+        }
+      },
+      ignis_hir::HIRPattern::Or { patterns } => {
+        for pat in patterns {
+          self.declare_owned_pattern_bindings(pat);
+        }
+      },
+      ignis_hir::HIRPattern::Wildcard
+      | ignis_hir::HIRPattern::Literal { .. }
+      | ignis_hir::HIRPattern::Constant { .. } => {},
     }
   }
 

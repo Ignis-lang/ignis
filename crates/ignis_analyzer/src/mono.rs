@@ -31,7 +31,7 @@ use ignis_hir::{HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, statement::LoopKind};
 use ignis_type::definition::{
   ConstantDefinition, Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef,
   FieldDefinition, FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
-  VariableDefinition, VariantDefinition, Visibility,
+  SymbolEntry, VariableDefinition, VariantDefinition, Visibility,
 };
 use ignis_type::symbol::SymbolTable;
 use ignis_type::types::{Substitution, Type, TypeId, TypeStore};
@@ -421,13 +421,27 @@ impl<'a> Monomorphizer<'a> {
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
         // Non-generic record: copy method bodies
         for method_entry in rd.instance_methods.values() {
-          if let Some(method_id) = method_entry.as_single() {
-            self.copy_if_nongeneric(*method_id);
+          match method_entry {
+            SymbolEntry::Single(method_id) => {
+              self.copy_if_nongeneric(*method_id);
+            },
+            SymbolEntry::Overload(method_ids) => {
+              for method_id in method_ids {
+                self.copy_if_nongeneric(*method_id);
+              }
+            },
           }
         }
         for method_entry in rd.static_methods.values() {
-          if let Some(method_id) = method_entry.as_single() {
-            self.copy_if_nongeneric(*method_id);
+          match method_entry {
+            SymbolEntry::Single(method_id) => {
+              self.copy_if_nongeneric(*method_id);
+            },
+            SymbolEntry::Overload(method_ids) => {
+              for method_id in method_ids {
+                self.copy_if_nongeneric(*method_id);
+              }
+            },
           }
         }
       },
@@ -442,6 +456,7 @@ impl<'a> Monomorphizer<'a> {
 
         if !owner_is_generic {
           if let Some(&body_id) = self.input_hir.function_bodies.get(&def_id) {
+            self.output_hir.function_bodies.insert(def_id, body_id);
             let new_body = self.clone_hir_tree(body_id);
             self.output_hir.function_bodies.insert(def_id, new_body);
           }
@@ -452,13 +467,27 @@ impl<'a> Monomorphizer<'a> {
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
         for method_entry in ed.instance_methods.values() {
-          if let Some(method_id) = method_entry.as_single() {
-            self.copy_if_nongeneric(*method_id);
+          match method_entry {
+            SymbolEntry::Single(method_id) => {
+              self.copy_if_nongeneric(*method_id);
+            },
+            SymbolEntry::Overload(method_ids) => {
+              for method_id in method_ids {
+                self.copy_if_nongeneric(*method_id);
+              }
+            },
           }
         }
         for method_entry in ed.static_methods.values() {
-          if let Some(method_id) = method_entry.as_single() {
-            self.copy_if_nongeneric(*method_id);
+          match method_entry {
+            SymbolEntry::Single(method_id) => {
+              self.copy_if_nongeneric(*method_id);
+            },
+            SymbolEntry::Overload(method_ids) => {
+              for method_id in method_ids {
+                self.copy_if_nongeneric(*method_id);
+              }
+            },
           }
         }
       },
