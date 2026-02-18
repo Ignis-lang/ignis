@@ -798,7 +798,7 @@ impl<'a> HirOwnershipChecker<'a> {
           if is_drop {
             if let Some(recv_def) = self.extract_receiver_variable(recv) {
               self.handle_manual_drop(recv_def, span.clone());
-            } else {
+            } else if !self.is_field_drop_on_variable(recv) {
               self
                 .diagnostics
                 .push(DiagnosticMessage::DropOnComplexReceiver { span: span.clone() }.report());
@@ -1907,6 +1907,32 @@ impl<'a> HirOwnershipChecker<'a> {
   /// `array[i].drop()`). These cases are not tracked at compile time — the runtime
   /// `__ignis_drop_state` guard in the generated C code handles double-drop prevention
   /// for them instead.
+  fn is_field_drop_on_variable(
+    &self,
+    recv_hir: HIRId,
+  ) -> bool {
+    let node = self.hir.get(recv_hir);
+    match &node.kind {
+      HIRKind::Reference { expression, .. } => self.is_field_drop_on_variable(*expression),
+      HIRKind::FieldAccess { base, .. } => self.hir_roots_at_variable(*base),
+      _ => false,
+    }
+  }
+
+  fn hir_roots_at_variable(
+    &self,
+    hir_id: HIRId,
+  ) -> bool {
+    let node = self.hir.get(hir_id);
+    match &node.kind {
+      HIRKind::Variable(_) => true,
+      HIRKind::Reference { expression, .. } => self.hir_roots_at_variable(*expression),
+      HIRKind::Dereference(inner) => self.hir_roots_at_variable(*inner),
+      HIRKind::FieldAccess { base, .. } => self.hir_roots_at_variable(*base),
+      _ => false,
+    }
+  }
+
   fn extract_receiver_variable(
     &self,
     recv_hir: HIRId,
