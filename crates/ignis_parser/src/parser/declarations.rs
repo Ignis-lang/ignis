@@ -507,7 +507,7 @@ impl super::IgnisParser {
     Ok(())
   }
 
-  fn parse_compile_condition_or(&mut self) -> ParserResult<bool> {
+  pub(crate) fn parse_compile_condition_or(&mut self) -> ParserResult<bool> {
     let mut value = self.parse_compile_condition_and()?;
 
     while self.eat(TokenType::Or) {
@@ -560,6 +560,22 @@ impl super::IgnisParser {
     let predicate_token = self.expect(TokenType::Identifier)?.clone();
     let predicate_name = predicate_token.lexeme.as_str();
 
+    // No-arg predicates: @debug(), @release()
+    match predicate_name {
+      "debug" => {
+        self.expect(TokenType::LeftParen)?;
+        self.expect(TokenType::RightParen)?;
+        return Ok(self.compilation_ctx.debug);
+      },
+      "release" => {
+        self.expect(TokenType::LeftParen)?;
+        self.expect(TokenType::RightParen)?;
+        return Ok(!self.compilation_ctx.debug);
+      },
+      _ => {},
+    }
+
+    // String-arg predicates: @platform("..."), @arch("..."), etc.
     self.expect(TokenType::LeftParen)?;
     let arg_token = self.expect(TokenType::String)?.clone();
     let arg_value = arg_token.lexeme.clone();

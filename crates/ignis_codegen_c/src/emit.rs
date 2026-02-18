@@ -1221,11 +1221,10 @@ impl<'a> CEmitter<'a> {
         };
 
         let message_sym = self.symbols.map.get("message");
-        if let Some(&sym) = message_sym {
-          if let Some(field) = rd.fields.iter().find(|f| f.name == sym && f.type_id == self.types.str()) {
+        if let Some(&sym) = message_sym
+          && let Some(field) = rd.fields.iter().find(|f| f.name == sym && f.type_id == self.types.str()) {
             return ErrorDisplay::RecordStrField { field_index: field.index };
           }
-        }
 
         ErrorDisplay::Opaque
       },

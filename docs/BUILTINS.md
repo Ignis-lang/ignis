@@ -33,7 +33,6 @@ Builtin arguments come in two forms:
 
 ```ignis
 @sizeOf<i32>()                 // type argument
-@configFlag("os.linux")        // expression argument (string literal)
 @panic("something went wrong") // expression argument
 maxOf<i32>()                   // function builtin with type argument
 ```
@@ -41,57 +40,6 @@ maxOf<i32>()                   // function builtin with type argument
 ---
 
 ## Directive Builtins (`@` prefix)
-
-### `@configFlag(key)`
-
-Queries a compile-time configuration flag and returns a boolean literal.
-
-| | |
-|---|---|
-| **Arguments** | 1 string literal |
-| **Returns** | `boolean` |
-
-The flag is resolved at compile time against the compilation context. The result is a literal `true` or `false` in the generated code -- no runtime comparison is emitted.
-
-```ignis
-function main(): i32 {
-    let flag: boolean = @configFlag("feature.nonexistent");
-    if (flag) {
-        return 1;
-    }
-    return 0;
-}
-```
-
-#### Supported Keys
-
-| Pattern | Example | Meaning |
-|---------|---------|---------|
-| `os.<name>` | `"os.linux"`, `"os.macos"`, `"os.windows"` | True if the target OS matches |
-| `arch.<name>` | `"arch.x86_64"`, `"arch.aarch64"` | True if the target architecture matches |
-| `build.debug` | `"build.debug"` | True in debug builds |
-| `build.release` | `"build.release"` | True in release builds |
-| `feature.<name>` | `"feature.logging"` | True if the named feature is enabled |
-
-If the key does not match any known pattern, the compiler emits a warning and the value resolves to `false`.
-
-#### Platform-Conditional Code
-
-```ignis
-function getPlatformName(): str {
-    if (@configFlag("os.linux")) {
-        return "Linux";
-    }
-    if (@configFlag("os.macos")) {
-        return "macOS";
-    }
-    return "unknown";
-}
-```
-
-Since `@configFlag` resolves to a literal boolean, untaken branches become `if (false) { ... }` in the intermediate representation.
-
----
 
 ### `@compileError(message)`
 
@@ -108,18 +56,16 @@ function main(): void {
 }
 ```
 
-Intended for guarding against invalid configurations:
+Use inside a `@configFlag` or `@if` false branch to reject unsupported configurations:
 
 ```ignis
-function setup(): void {
-    if (!@configFlag("os.linux")) {
-        @compileError("This module only supports Linux");
-    }
-    // ... initialization
+@configFlag(!@platform("linux"))
+function linuxOnly(): void {
+    @compileError("This module only supports Linux");
 }
 ```
 
-> **Note**: In the current implementation, `@compileError` emits its diagnostic during type checking, which runs unconditionally on all AST nodes. This means the error fires even inside dead branches like `if (false) { @compileError(...) }`. Conditional compile-error suppression requires const-evaluation before type checking, which is not yet implemented.
+> **Note**: `@compileError` emits its diagnostic during type checking, which runs on all reachable AST nodes. Items excluded by `@configFlag` or `@if` are stripped at parse time and never reach the analyzer, so the error only fires when the item is actually included.
 
 ---
 
@@ -491,7 +437,6 @@ For unsigned types, `minOf` returns `0`.
 
 | Builtin | Arguments | Return type | Emits runtime code |
 |---------|-----------|:---:|:---:|
-| `@configFlag("key")` | 1 string literal | `boolean` | No (resolved to literal) |
 | `@compileError("msg")` | 1 string literal | `Never` | No (compile error) |
 | `@sizeOf<T>()` | 1 type arg | `u64` | Yes (`sizeof`) |
 | `@alignOf<T>()` | 1 type arg | `u64` | Yes (`_Alignof`) |
@@ -516,6 +461,109 @@ For unsigned types, `minOf` returns `0`.
 | `maxOf<T>()` | 1 type arg | `T` | Yes (C constant) |
 | `minOf<T>()` | 1 type arg | `T` | Yes (C constant) |
 
+## Compile-Time Directives
+
+These are parser-level constructs that conditionally include or exclude declarations and statements. They are resolved at parse time based on the compilation context (target triple, features, build mode).
+
+### `@configFlag(condition)`
+
+Works in two contexts:
+
+**Item attribute** — conditionally includes the next declaration. If the condition is false, the item is entirely skipped at parse time.
+
+```ignis
+@configFlag(@platform("linux"))
+extern __errno {
+  @externName("__errno_location")
+  function errno_location(): *mut i32;
+}
+
+@configFlag(@platform("macos"))
+extern __errno {
+  @externName("__error")
+  function errno_location(): *mut i32;
+}
+```
+
+Valid on: any top-level declaration, namespace item, or block statement.
+
+**Expression** — evaluates to a `boolean` literal (`true` or `false`) at parse time. Useful for conditional logic inside function bodies.
+
+```ignis
+function getPlatformName(): str {
+    if (@configFlag(@platform("linux"))) {
+        return "Linux";
+    }
+    if (@configFlag(@platform("macos"))) {
+        return "macOS";
+    }
+    return "unknown";
+}
+```
+
+Since the result is a literal boolean, untaken branches become `if (false) { ... }` in the generated code.
+
+### `@if(condition) { ... } @else { ... }`
+
+Conditionally includes one of two blocks of declarations/statements.
+
+```ignis
+@if(@platform("linux") && @arch("x86_64")) {
+  function getPageSize(): u64 { return 4096; }
+} @else {
+  function getPageSize(): u64 { return 16384; }
+}
+```
+
+The `@else` branch is optional. Without it, the block is simply omitted when the condition is false.
+
+### `@ifelse(condition) { ... } @else { ... }`
+
+Same as `@if`, but the `@else` branch is **mandatory**. Compile error if omitted.
+
+### Condition Predicates
+
+| Predicate | Example | Matches |
+|-----------|---------|----------|
+| `@platform("name")` | `@platform("linux")` | Target OS |
+| `@arch("name")` | `@arch("x86_64")` | Target architecture |
+| `@abi("name")` | `@abi("gnu")` | Target ABI/environment |
+| `@target("triple")` | `@target("x86_64-unknown-linux-gnu")` | Exact target triple match |
+| `@feature("name")` | `@feature("simd")` | Enabled feature flag |
+| `@debug()` | `@debug()` | True in debug builds |
+| `@release()` | `@release()` | True in release builds |
+
+### Boolean Combinators
+
+Conditions support `&&`, `||`, `!`, and parentheses:
+
+```ignis
+@configFlag(@platform("linux") && @arch("x86_64"))
+function optimized(): void { }
+
+@if(!@platform("windows") || @feature("force_posix")) {
+  function usePosixApi(): void { }
+}
+```
+
+### Feature Validation
+
+If `known_features` is declared in `ignis.toml`, using an undeclared feature name in `@feature("...")` is a compile error. Without `known_features`, any name is accepted.
+
+```toml
+[build]
+known_features = ["simd", "logging"]
+default_features = ["logging"]
+```
+
+Features are enabled via CLI: `ignis build --feature simd` or `--features simd,logging`.
+
+### Target Triple Priority
+
+The target triple used by predicates follows: **CLI** (`--target-triple`) > **ignis.toml** (`target_triple`) > **host** (auto-detected).
+
+---
+
 ## Diagnostics
 
 | Code | Message | Severity |
@@ -525,4 +573,3 @@ For unsigned types, `minOf` returns `0`.
 | A0112 | @name expects N argument(s), got M | Error |
 | A0113 | @name expects a string literal argument | Error |
 | A0070 | Wrong number of type arguments for '@name': expected N, got M | Error |
-| A0115 | Unknown config flag 'key' | Warning |

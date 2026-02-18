@@ -4675,6 +4675,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Resolves an instance method for pipe RHS. Returns the method DefinitionId and MethodDefinition.
+  #[allow(clippy::too_many_arguments)]
   fn resolve_pipe_instance_method(
     &mut self,
     obj_type: &TypeId,
@@ -7698,7 +7699,6 @@ impl<'a> Analyzer<'a> {
     let name = self.get_symbol_name(&bc.name);
 
     match name.as_str() {
-      "configFlag" => self.typecheck_builtin_config_flag(bc),
       "compileError" => self.typecheck_builtin_compile_error(bc),
       "sizeOf" => {
         let ty = self.types.u64();
@@ -7734,50 +7734,6 @@ impl<'a> Analyzer<'a> {
         self.types.error()
       },
     }
-  }
-
-  fn typecheck_builtin_config_flag(
-    &mut self,
-    bc: &ASTBuiltinCall,
-  ) -> TypeId {
-    if bc.type_args.is_some() {
-      self.add_diagnostic(
-        DiagnosticMessage::WrongNumberOfTypeArgs {
-          expected: 0,
-          got: bc.type_args.as_ref().map_or(0, |ta| ta.len()),
-          type_name: "@configFlag".to_string(),
-          span: bc.span.clone(),
-        }
-        .report(),
-      );
-      return self.types.error();
-    }
-
-    if bc.args.len() != 1 {
-      self.add_diagnostic(
-        DiagnosticMessage::BuiltinArgCount {
-          name: "configFlag".to_string(),
-          expected: 1,
-          got: bc.args.len(),
-          span: bc.span.clone(),
-        }
-        .report(),
-      );
-      return self.types.error();
-    }
-
-    if self.extract_string_literal(&bc.args[0]).is_none() {
-      self.add_diagnostic(
-        DiagnosticMessage::BuiltinExpectedStringLiteral {
-          name: "configFlag".to_string(),
-          span: bc.span.clone(),
-        }
-        .report(),
-      );
-      return self.types.error();
-    }
-
-    self.types.boolean()
   }
 
   fn typecheck_builtin_compile_error(

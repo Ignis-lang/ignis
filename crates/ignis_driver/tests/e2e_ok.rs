@@ -1518,7 +1518,7 @@ fn e2e_config_flag_false() {
     "config_flag_false",
     r#"
 function main(): i32 {
-    let flag: boolean = @configFlag("feature.nonexistent");
+    let flag: boolean = @configFlag(@feature("nonexistent"));
     if (flag) {
         return 1;
     }
@@ -1534,7 +1534,7 @@ fn e2e_config_flag_build_debug() {
     "config_flag_build_debug",
     r#"
 function main(): i32 {
-    let debug: boolean = @configFlag("build.debug");
+    let debug: boolean = @configFlag(@debug());
     if (debug) {
         return 42;
     }
@@ -1550,7 +1550,7 @@ fn e2e_config_flag_os() {
     "config_flag_os",
     r#"
 function main(): i32 {
-    let isLinux: boolean = @configFlag("os.linux");
+    let isLinux: boolean = @configFlag(@platform("linux"));
     if (isLinux) {
         return 1;
     }

@@ -102,11 +102,14 @@ static AT_ITEMS: &[AtItemMeta] = &[
   },
   AtItemMeta {
     name: "configFlag",
-    kind: AtItemKind::Builtin,
-    syntax: "@configFlag(\"key\")",
-    summary: "Returns a compile-time boolean for the given configuration key.",
+    kind: AtItemKind::Directive,
+    syntax: "@configFlag(@platform(\"linux\"))",
+    summary: "Compile-time condition: as item attribute strips the next declaration; as expression evaluates to `boolean`.",
     doc: Some(
-      "Resolved during type checking to a literal `true` or `false`. Keys like `\"os.linux\"`, `\"os.macos\"`, etc.",
+      "**Item attribute**: applied before a declaration, includes/excludes it at parse time.\n\
+       **Expression**: evaluates to a literal `true` or `false` for use in `if` conditions.\n\n\
+       Predicates: `@platform(\"linux\")`, `@arch(\"x86_64\")`, `@abi(\"gnu\")`, `@target(\"triple\")`, `@feature(\"name\")`, `@debug()`, `@release()`.\n\
+       Combinators: `&&`, `||`, `!`, parentheses.",
     ),
   },
   AtItemMeta {
@@ -276,7 +279,6 @@ pub fn snippet_for(item: &AtItemMeta) -> Option<String> {
     "pointerFromInteger" => Some(format!("{}<${{1:*const T}}>(${{2:addr}})", item.name)),
     "write" => Some(format!("{}<${{1:T}}>(${{2:ptr}}, ${{3:value}})", item.name)),
     "integerFromPointer" => Some(format!("{}(${{1:ptr}})", item.name)),
-    "configFlag" => Some(format!("{}(\"${{1:key}}\")", item.name)),
     "compileError" => Some(format!("{}(\"${{1:message}}\")", item.name)),
     "panic" => Some(format!("{}(\"${{1:message}}\")", item.name)),
     "trap" | "unreachable" => Some(format!("{}()", item.name)),

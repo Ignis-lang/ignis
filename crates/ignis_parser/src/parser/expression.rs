@@ -1036,6 +1036,18 @@ impl IgnisParser {
     at_token: &Token,
   ) -> ParserResult<NodeId> {
     let name_token = self.expect(TokenType::Identifier)?.clone();
+
+    // @configFlag(condition) in expression position: evaluate at parse time → boolean literal.
+    if name_token.lexeme == "configFlag" {
+      self.expect(TokenType::LeftParen)?;
+      let value = self.parse_compile_condition_or()?;
+      let right_paren = self.expect(TokenType::RightParen)?.clone();
+
+      let span = Span::merge(&at_token.span, &right_paren.span);
+      let lit = ASTLiteral::new(IgnisLiteralValue::Boolean(value), span);
+      return Ok(self.allocate_expression(ASTExpression::Literal(lit)));
+    }
+
     let name = self.insert_symbol(&name_token);
 
     let type_args = if self.at(TokenType::Less) && self.looks_like_type_args() {

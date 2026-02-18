@@ -116,9 +116,10 @@ impl Default for CompilationContext {
 
 impl CompilationContext {
   pub fn from_target_triple(target_triple: &str) -> Self {
-    let mut ctx = Self::default();
-    ctx.target = TargetInfo::from_triple(target_triple);
-    ctx
+    Self {
+      target: TargetInfo::from_triple(target_triple),
+      ..Self::default()
+    }
   }
 
   pub fn is_known_feature(
@@ -132,28 +133,4 @@ impl CompilationContext {
       .unwrap_or(true)
   }
 
-  pub fn resolve_flag(
-    &self,
-    key: &str,
-  ) -> Option<bool> {
-    if let Some(rest) = key.strip_prefix("os.") {
-      return Some(self.target.os == rest);
-    }
-
-    if let Some(rest) = key.strip_prefix("arch.") {
-      return Some(self.target.arch == rest);
-    }
-
-    if let Some(rest) = key.strip_prefix("abi.") {
-      return Some(self.target.abi == rest);
-    }
-
-    match key {
-      "build.debug" => Some(self.debug),
-      "build.release" => Some(!self.debug),
-      _ => key
-        .strip_prefix("feature.")
-        .map(|feature| self.features.contains(feature)),
-    }
-  }
 }
