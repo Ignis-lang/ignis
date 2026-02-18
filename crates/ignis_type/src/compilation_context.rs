@@ -5,17 +5,26 @@ pub struct TargetInfo {
   pub triple: String,
   pub os: String,
   pub arch: String,
+  pub abi: String,
 }
 
 impl Default for TargetInfo {
   fn default() -> Self {
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
+    let abi = host_abi().to_string();
+
+    let triple = if abi.is_empty() {
+      format!("{}-unknown-{}", arch, os)
+    } else {
+      format!("{}-unknown-{}-{}", arch, os, abi)
+    };
 
     Self {
-      triple: format!("{}-unknown-{}", arch, os),
+      triple,
       os,
       arch,
+      abi,
     }
   }
 }
@@ -46,7 +55,25 @@ impl TargetInfo {
       target.os = normalize_platform(parts[1]);
     }
 
+    if parts.len() >= 4 {
+      target.abi = parts[3].to_ascii_lowercase();
+    } else {
+      target.abi = String::new();
+    }
+
     target
+  }
+}
+
+fn host_abi() -> &'static str {
+  if cfg!(target_env = "gnu") {
+    "gnu"
+  } else if cfg!(target_env = "musl") {
+    "musl"
+  } else if cfg!(target_env = "msvc") {
+    "msvc"
+  } else {
+    ""
   }
 }
 
@@ -115,6 +142,10 @@ impl CompilationContext {
 
     if let Some(rest) = key.strip_prefix("arch.") {
       return Some(self.target.arch == rest);
+    }
+
+    if let Some(rest) = key.strip_prefix("abi.") {
+      return Some(self.target.abi == rest);
     }
 
     match key {
