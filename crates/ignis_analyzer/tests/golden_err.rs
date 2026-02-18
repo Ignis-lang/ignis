@@ -383,6 +383,216 @@ function main(): void {
 }
 
 #[test]
+fn match_scrutinee_move_consumes_owner() {
+  let result = common::analyze(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+enum MaybeOwned {
+    Some(Owned),
+    None,
+}
+
+function main(): void {
+    let value: MaybeOwned = MaybeOwned::Some(Owned { id: 1 });
+
+    let extracted: Owned = match (value) {
+        MaybeOwned::Some(inner) -> inner,
+        MaybeOwned::None -> Owned { id: 0 },
+    };
+
+    let again: MaybeOwned = value;
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+enum MaybeOwned {
+    Some(Owned),
+    None,
+}
+
+function main(): void {
+    let value: MaybeOwned = MaybeOwned::Some(Owned { id: 1 });
+
+    let extracted: Owned = match (value) {
+        MaybeOwned::Some(inner) -> inner,
+        MaybeOwned::None -> Owned { id: 0 },
+    };
+
+    let again: MaybeOwned = value;
+    return;
+}
+"#,
+    &["O0001"],
+  );
+
+  assert_snapshot!(
+    "match_scrutinee_move_consumes_owner",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn enum_variant_payload_move_consumes_owner() {
+  let result = common::analyze(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+enum MaybeOwned {
+    Some(Owned),
+    None,
+}
+
+function main(): void {
+    let value: Owned = Owned { id: 1 };
+    let wrapped: MaybeOwned = MaybeOwned::Some(value);
+    let again: Owned = value;
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+enum MaybeOwned {
+    Some(Owned),
+    None,
+}
+
+function main(): void {
+    let value: Owned = Owned { id: 1 };
+    let wrapped: MaybeOwned = MaybeOwned::Some(value);
+    let again: Owned = value;
+    return;
+}
+"#,
+    &["O0001"],
+  );
+
+  assert_snapshot!(
+    "enum_variant_payload_move_consumes_owner",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn record_field_move_consumes_owner() {
+  let result = common::analyze(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+record Wrapper {
+    public item: Owned;
+}
+
+function main(): void {
+    let value: Owned = Owned { id: 1 };
+    let wrapped: Wrapper = Wrapper { item: value };
+    let again: Owned = value;
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+record Wrapper {
+    public item: Owned;
+}
+
+function main(): void {
+    let value: Owned = Owned { id: 1 };
+    let wrapped: Wrapper = Wrapper { item: value };
+    let again: Owned = value;
+    return;
+}
+"#,
+    &["O0001"],
+  );
+
+  assert_snapshot!(
+    "record_field_move_consumes_owner",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn vector_literal_move_consumes_owner() {
+  let result = common::analyze(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function main(): void {
+    let value: Owned = Owned { id: 1 };
+    let list: Owned[1] = [value];
+    let again: Owned = value;
+    return;
+}
+"#,
+  );
+
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function main(): void {
+    let value: Owned = Owned { id: 1 };
+    let list: Owned[1] = [value];
+    let again: Owned = value;
+    return;
+}
+"#,
+    &["O0001"],
+  );
+
+  assert_snapshot!(
+    "vector_literal_move_consumes_owner",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn inconsistent_move_in_branches() {
   // Moving in one branch but not the other is an error.
   // This requires an if-else where the variable is moved in one branch only.
