@@ -13,6 +13,11 @@ This document describes the Application Binary Interface for the current Ignis c
 - **Use-after-drop guards**: Runtime checks on field access and method calls for droppable types.
 - **Module-level emission**: Each module is compiled to its own `.c` / `.o` file with a generated header.
 - **Name mangling updated**: Monomorphization uses `__` separator; codegen escapes underscores by doubling.
+- **Entry point wrapper**: `main` is renamed to `__ignis_user_main`; the compiler generates a C `main(int argc, char** argv)` wrapper that handles `void`, `i32`, and try-capable enum returns.
+- **`defer` statement**: Deferred expressions execute at scope exits in LIFO order before automatic drops. Implementation uses static duplication (no runtime defer stack).
+- **Implicit integer widening**: Same-sign integers widen implicitly (`u8` → `u32`, `i8` → `i64`). Mixed-sign still requires an explicit cast.
+- **Overload mangling**: Return types are now included in the disambiguation suffix when parameter types are identical.
+- **New std modules**: `path`, `ffi`, `fs`.
 
 ## Type Mapping
 
@@ -229,11 +234,11 @@ When emitting C identifiers, the codegen applies its own mangling. Underscores i
 
 Rules:
 
-1. **`main`** at top level keeps its raw name.
+1. **`main`** at top level is renamed to `__ignis_user_main` (the compiler generates a C `main` wrapper).
 2. **Extern functions** use their raw name, or `@externName("name")` if specified.
 3. **Namespaced functions**: `{ns1}_{ns2}_..._{escaped_name}`.
 4. **Methods**: `{escaped_owner}_{escaped_method}`.
-5. **Overloaded functions**: When multiple functions share the same name, a parameter-type suffix is appended: `{name}_{type1}_{type2}_...`.
+5. **Overloaded functions**: When multiple functions share the same name, a parameter-type suffix is appended: `{name}_{type1}_{type2}_...`. If two overloads have identical parameter types but different return types, the return type is also appended: `{name}_{param_types}_{return_type}`.
 
 ```ignis
 namespace Math {
@@ -275,7 +280,42 @@ Functions with no parameters use `(void)` in C. Variadic functions use `(params.
 
 ### Entry Point
 
-The `main` function always emits `int main(void)`. If the Ignis function returns `void`, an implicit `return 0;` is appended.
+The user's `main` function is renamed to `__ignis_user_main`. The compiler generates a C `main` wrapper that calls it.
+
+Supported Ignis `main` signatures:
+
+| Ignis Signature | Wrapper Behavior |
+|-----------------|-----------------|
+| `main(): void` | Calls `__ignis_user_main()`, returns 0 |
+| `main(): i32` | Returns the i32 value directly |
+| `main(): Result<i32, E>` | Returns OK payload; on ERROR prints the error message and exits 101 |
+| `main(argc: i32, argv: *str): ...` | Forwards `(i32)argc, (const char**)argv` |
+
+The wrapper signature is always `int main(int argc, char** argv)`. When `main` takes no parameters, `argc` and `argv` are cast to `(void)`.
+
+```c
+// Ignis: function main(): Result<i32, IoError>
+struct Result____i32____IoError __ignis_user_main(void);
+
+int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+    struct Result____i32____IoError __ignis_main_result = __ignis_user_main();
+    if (__ignis_main_result.tag == 0) {
+        return __ignis_main_result.payload.variant_0.field_0;
+    }
+    fprintf(stderr, "Error: %s\n", __ignis_main_result.payload.variant_1.field_0.field_2);
+    exit(101);
+}
+```
+
+Error display for try-capable returns:
+
+| Error Type | Display |
+|------------|---------|
+| `str` | Printed directly |
+| Record with `message: str` field | Accesses the field |
+| Other | Prints `(error)` |
 
 ### Visibility
 
@@ -316,6 +356,15 @@ The compiler schedules drops at three kinds of program points:
 1. **Scope end**: When a block ends, all owned variables are dropped in reverse declaration order.
 2. **Early exits**: `return`, `break`, and `continue` drop all owned variables in abandoned scopes before exiting.
 3. **Reassignment**: When an owned variable is reassigned, the old value is dropped first.
+
+### Defer Scheduling
+
+`defer` expressions are executed at scope exits **before** automatic drops. Multiple defers in the same scope run in LIFO order (last registered first). The implementation uses static duplication — deferred HIR bodies are re-lowered at each exit point (return, break, continue, scope end), requiring no runtime defer stack.
+
+Execution order at a scope exit:
+
+1. Deferred expressions (LIFO)
+2. Drop calls (reverse declaration order)
 
 ### Drop Emission
 
@@ -407,6 +456,7 @@ The generated C file is structured in this order:
 7. **Drop glue helpers** (`static void ignis_drop_glue_<type>(u8*)`)
 8. **Forward declarations** (function prototypes)
 9. **Function bodies**
+10. **Entry point wrapper** (`int main(int argc, char** argv)` — only in the entry module)
 
 All definitions are sorted by `DefinitionId` index for deterministic output.
 
@@ -454,7 +504,7 @@ The linker checks for `build/std/include/ignis_std.h` and `build/std/lib/libigni
 
 The module registry at `std/manifest.toml` declares:
 
-- **Modules**: `libc`, `io`, `math`, `string`, `number`, `types`, `option`, `result`, `memory`, `vector`, `ptr`, `rc`
+- **Modules**: `libc`, `io`, `math`, `string`, `number`, `types`, `option`, `result`, `memory`, `vector`, `ptr`, `rc`, `path`, `ffi`, `fs`
 - **Auto-loaded modules** (imported implicitly): `string`, `number`, `vector`, `types`, `option`, `result`
 - **Runtime linking**: `runtime/libignis_rt.a` with header `runtime/ignis_rt.h`
 - **System libraries**: `math` links `-lm`
@@ -483,7 +533,7 @@ The following are considered stable:
 
 - Type mappings in the runtime header
 - Calling convention (C ABI)
-- Entry point signature (`int main(void)`)
+- Entry point wrapper (`int main(int argc, char** argv)` calling `__ignis_user_main`)
 - Record struct layout (`field_N` naming)
 - Enum tagged union layout (tag + payload union)
 - Drop state field placement (`__ignis_drop_state`)

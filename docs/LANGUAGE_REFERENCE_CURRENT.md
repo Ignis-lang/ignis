@@ -226,14 +226,33 @@ let c: f32 = 3.14;      // coerced to f32
 
 Overflow is a compile-time error: `let x: u8 = 256;` fails.
 
-### 4.4 Type Aliases
+### 4.4 Implicit Integer Widening
+
+Same-sign integers implicitly widen to a larger type when assigned or compared. No explicit cast is needed.
+
+```ignis
+let a: u8 = 10;
+let b: u32 = a;       // u8 -> u32, implicit widening
+
+let x: i8 = -5;
+let y: i64 = x;       // i8 -> i64, implicit widening
+```
+
+Allowed widening chains:
+
+- **Unsigned**: `u8` → `u16` → `u32` → `u64`
+- **Signed**: `i8` → `i16` → `i32` → `i64`
+
+Mixed-sign conversions (`u8` → `i32`, `i8` → `u32`) still require an explicit `as` cast.
+
+### 4.5 Type Aliases
 
 ```ignis
 type Id = i32;
 type Pair<T> = (T, T);
 ```
 
-### 4.5 Records
+### 4.6 Records
 
 Fields and methods are private by default.
 
@@ -270,7 +289,7 @@ record Config {
 let max = Config::MAX_SIZE;
 ```
 
-### 4.6 Enums
+### 4.7 Enums
 
 ```ignis
 enum Option<T> {
@@ -317,7 +336,7 @@ enum Option<T> {
 
 The `@lang(try)` attribute requires exactly two variants. The first variant is treated as "success" and the second as "failure".
 
-### 4.7 Traits
+### 4.8 Traits
 
 ```ignis
 trait Describable {
@@ -338,7 +357,7 @@ record Item {
 }
 ```
 
-### 4.8 Namespaces
+### 4.9 Namespaces
 
 ```ignis
 namespace Math {
@@ -352,7 +371,7 @@ function main(): i32 {
 }
 ```
 
-### 4.9 Imports, Exports, Extern
+### 4.10 Imports, Exports, Extern
 
 ```ignis
 import Io from "std::io";
@@ -430,7 +449,7 @@ import Lexer from "@lexer";           // prefix match: ./src/lexer.ign
 
 The `"std"` alias is reserved and cannot be overridden in `[aliases]`.
 
-### 4.10 Extension Methods
+### 4.11 Extension Methods
 
 ```ignis
 @extension(i32)
@@ -764,7 +783,41 @@ for (let x: &i32 of arr) {
 }
 ```
 
-### 8.7 Other statements
+### 8.7 `defer`
+
+`defer` schedules an expression to run at scope exit. Multiple defers in the same scope execute in LIFO order (last registered, first executed). Deferred expressions run before automatic drops.
+
+```ignis
+function readFile(path: str): i32 {
+    let fd: i32 = LibC::File::open(path, LibC::File::O_RDONLY);
+    if (fd == -1) {
+        return -1;
+    }
+    defer LibC::File::close(fd);
+
+    // ... use fd ...
+    return 0;
+    // LibC::File::close(fd) runs here, before scope drops
+}
+```
+
+Defers fire at every exit point: `return`, `break`, `continue`, and the natural end of the block.
+
+```ignis
+function example(): void {
+    defer Io::println("third");
+    defer Io::println("second");
+    defer Io::println("first");
+    // prints: first, second, third
+}
+```
+
+**Restrictions:**
+
+- The deferred expression must be `void`-typed.
+- The try operator `!` is not allowed inside a deferred expression.
+
+### 8.8 Other statements
 
 ```ignis
 return;
@@ -1084,6 +1137,8 @@ Common directive builtins:
 - `let name = value else` is shorthand for try-capable enums only; non-try values are rejected (`A0187`).
 - `let` declarations support type inference: `let x = expr;` infers the type from the initializer. Deferred inference (`let mut x;` resolved on first assignment) is also supported.
 - Numeric literals coerce to the expected type if the value fits.
+- Same-sign integers widen implicitly (`u8` → `u32`, `i8` → `i64`). Mixed-sign requires an explicit cast.
+- `defer expr;` schedules `expr` to run at scope exit in LIFO order, before automatic drops. The expression must be `void`-typed and cannot use the try operator.
 - Extension methods can be defined on supported target types with `@extension(...)`.
 - Calling mutating methods (or mut extensions) requires a mutable receiver.
 - Non-Copy types are moved on assignment and function call; use-after-move is a compile-time error.
