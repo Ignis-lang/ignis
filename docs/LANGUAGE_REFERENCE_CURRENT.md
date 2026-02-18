@@ -720,9 +720,21 @@ while (let Option::SOME(v) = nextValue()) {
 let Option::SOME(v) = maybeValue() else {
     return -1;
 };
+
+let value: i32 = parseNumber() else {
+    return -1;
+};
 ```
 
 The `else` block must diverge (`return`, `break`, `continue`, `@panic`, etc.).
+
+Shorthand form (`let name = value else`) is try-aware sugar:
+
+- `value` must be a `@lang(try)` enum.
+- `name` binds the success payload (`ok` variant payload).
+- on failure variant, control jumps to the `else` block.
+
+If shorthand is used with a non-try value, the compiler reports `A0187`.
 
 ### 8.5 `for` (C-style)
 
@@ -1069,6 +1081,7 @@ Common directive builtins:
 - `let` conditions are valid in conditional contexts and chain naturally with `&&`.
 - `let` conditions in `||` expressions are rejected.
 - `let else` requires an `else` branch that always diverges.
+- `let name = value else` is shorthand for try-capable enums only; non-try values are rejected (`A0187`).
 - `let` declarations support type inference: `let x = expr;` infers the type from the initializer. Deferred inference (`let mut x;` resolved on first assignment) is also supported.
 - Numeric literals coerce to the expected type if the value fits.
 - Extension methods can be defined on supported target types with `@extension(...)`.

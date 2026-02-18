@@ -4,7 +4,7 @@ Ignis uses a compile-time ownership model inspired by Rust, with automatic drop 
 
 ## Ownership
 
-Every value in Ignis has exactly one owner. When the owner goes out of scope, the value is dropped (cleaned up). Ownership can be transferred via assignment or function calls, but never duplicated unless the type is Copy or explicitly cloned.
+Every value in Ignis has exactly one owner. When the owner goes out of scope, the value is dropped (cleaned up). Ownership can be transferred via assignment, function calls, aggregate construction (record/enum/vector literals), and pattern matching that moves payloads, but never duplicated unless the type is Copy or explicitly cloned.
 
 ```ignis
 function main(): void {
@@ -186,7 +186,7 @@ The compiler schedules drops at three kinds of program points:
 
 1. **Scope end**: When a block `{ ... }` ends, all owned variables declared in that block are dropped in reverse order.
 
-2. **Early exits**: When `return`, `break`, or `continue` exits a scope, all owned variables in the abandoned scopes are dropped before the exit.
+2. **Early exits**: When `return`, `break`, `continue`, try-operator early return (`expr!`), or `let else` failure path exits a scope, all owned variables in the abandoned scopes are dropped before the exit.
 
 3. **Reassignment**: When an owned variable is reassigned, the old value is dropped before the new value is stored.
 
@@ -334,3 +334,5 @@ For a record type `R`:
 | A0134 | Lang trait not applicable to this type | Error |
 | A0148 | Type declares `@implements(Copy)` but a record field is non-Copy | Error |
 | A0149 | Type declares `@implements(Copy)` but an enum payload is non-Copy | Error |
+| A0186 | cannot move out of borrowed value | Error |
+| A0187 | `let name = value else` requires a @lang(try) value | Error |

@@ -358,6 +358,7 @@
 <block> ::= "{" <statement>* "}"
 <variable> ::= <directive-attrs>? "let" "mut"? <identifier> ":" <type> ("=" <expression>)? ";"
 <let-else> ::= "let" <pattern> "=" <expression> "else" <block> ";"
+  | "let" "mut"? <identifier> (":" <type>)? "=" <expression> "else" <block> ";"
 
 <expression> ::= <assignment> | <match>
 
