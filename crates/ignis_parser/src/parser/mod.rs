@@ -199,6 +199,15 @@ impl IgnisParser {
     next.type_ == TokenType::If || (next.type_ == TokenType::Identifier && next.lexeme == "ifelse")
   }
 
+  pub(crate) fn is_configflag_start(&self) -> bool {
+    if !self.at(TokenType::At) {
+      return false;
+    }
+
+    let next = self.peek_nth(1);
+    next.type_ == TokenType::Identifier && next.lexeme == "configFlag"
+  }
+
   pub(crate) fn is_compile_else_directive_start(&self) -> bool {
     if !self.at(TokenType::At) {
       return false;

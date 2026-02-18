@@ -49,6 +49,22 @@ impl super::IgnisParser {
         continue;
       }
 
+      if self.is_configflag_start() {
+        match self.parse_configflag_top_level() {
+          Ok(expanded) => items.extend(expanded),
+          Err(diagnostic) => {
+            self.diagnostics.push(diagnostic);
+
+            if self.recovery {
+              self.synchronize_after_declaration();
+            } else {
+              return Err(self.diagnostics.last().unwrap().clone());
+            }
+          },
+        }
+        continue;
+      }
+
       if self.is_compile_else_directive_start() {
         self.diagnostics.push(DiagnosticMessage::CompileError {
           message: "Unexpected '@else' without a matching '@if'".to_string(),
@@ -179,6 +195,12 @@ impl super::IgnisParser {
         continue;
       }
 
+      if self.is_configflag_start() {
+        let expanded = self.parse_configflag_top_level()?;
+        items.extend(expanded);
+        continue;
+      }
+
       if self.is_compile_else_directive_start() {
         return Err(DiagnosticMessage::CompileError {
           message: "Unexpected '@else' without a matching '@if'".to_string(),
@@ -209,6 +231,12 @@ impl super::IgnisParser {
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
       if self.is_compile_if_directive_start() {
         let expanded = self.parse_compile_directive_namespace_items()?;
+        items.extend(expanded);
+        continue;
+      }
+
+      if self.is_configflag_start() {
+        let expanded = self.parse_configflag_namespace_item()?;
         items.extend(expanded);
         continue;
       }
@@ -247,6 +275,12 @@ impl super::IgnisParser {
         continue;
       }
 
+      if self.is_configflag_start() {
+        let expanded = self.parse_configflag_block_item()?;
+        items.extend(expanded);
+        continue;
+      }
+
       if self.is_compile_else_directive_start() {
         return Err(DiagnosticMessage::CompileError {
           message: "Unexpected '@else' without a matching '@if'".to_string(),
@@ -280,6 +314,194 @@ impl super::IgnisParser {
         TokenType::RightBrace => depth -= 1,
         _ => {},
       }
+    }
+
+    Ok(())
+  }
+
+  /// Parses `@configFlag(cond)` header — consumes `@`, `configFlag`, `(`, condition, `)`.
+  /// Returns the evaluated boolean.
+  fn parse_configflag_condition(&mut self) -> ParserResult<bool> {
+    self.expect(TokenType::At)?;
+
+    let name_token = self.expect(TokenType::Identifier)?;
+    if name_token.lexeme != "configFlag" {
+      return Err(DiagnosticMessage::CompileError {
+        message: format!("Expected 'configFlag', found '{}'", name_token.lexeme),
+        span: name_token.span.clone(),
+      });
+    }
+
+    self.expect(TokenType::LeftParen)?;
+    let condition = self.parse_compile_condition_or()?;
+    self.expect(TokenType::RightParen)?;
+
+    Ok(condition)
+  }
+
+  /// `@configFlag(cond)` applied to the **next top-level item**.
+  pub(crate) fn parse_configflag_top_level(&mut self) -> ParserResult<Vec<NodeId>> {
+    let selected = self.parse_configflag_condition()?;
+
+    if selected {
+      let item = self.parse_declaration()?;
+      Ok(vec![item])
+    } else {
+      self.skip_single_declaration()?;
+      Ok(vec![])
+    }
+  }
+
+  /// `@configFlag(cond)` applied to the **next namespace item**.
+  fn parse_configflag_namespace_item(&mut self) -> ParserResult<Vec<NodeId>> {
+    let selected = self.parse_configflag_condition()?;
+
+    if selected {
+      let item = self.parse_namespace_item()?;
+      Ok(vec![item])
+    } else {
+      self.skip_single_declaration()?;
+      Ok(vec![])
+    }
+  }
+
+  /// `@configFlag(cond)` applied to the **next block statement**.
+  pub(crate) fn parse_configflag_block_item(&mut self) -> ParserResult<Vec<NodeId>> {
+    let selected = self.parse_configflag_condition()?;
+
+    if selected {
+      let item = self.parse_statement()?;
+      Ok(vec![item])
+    } else {
+      self.skip_single_declaration()?;
+      Ok(vec![])
+    }
+  }
+
+  /// Skips one complete declaration/statement without parsing it.
+  ///
+  /// Handles braced items (extern, namespace, function, record, enum, trait)
+  /// and simple items (const, import, type alias, let) that end with `;`.
+  fn skip_single_declaration(&mut self) -> ParserResult<()> {
+    // Skip any leading attributes on the item being skipped.
+    while self.at(TokenType::At) && !self.is_configflag_start() && !self.is_compile_if_directive_start() {
+      self.bump(); // @
+      self.bump(); // name
+
+      if self.at(TokenType::LeftParen) {
+        self.skip_balanced_parens()?;
+      }
+    }
+
+    // `export` is a prefix — skip it and recurse for the inner item.
+    if self.at(TokenType::Export) {
+      self.bump();
+
+      // `export X from "...";` or `export X;` — simple item without inner decl.
+      if self.at(TokenType::Identifier) {
+        while !self.at(TokenType::SemiColon) && !self.at(TokenType::Eof) {
+          self.bump();
+        }
+
+        if self.at(TokenType::SemiColon) {
+          self.bump();
+        }
+
+        return Ok(());
+      }
+
+      return self.skip_single_declaration();
+    }
+
+    // Items that have a braced body.
+    let has_body = matches!(
+      self.peek().type_,
+      TokenType::Extern
+        | TokenType::Namespace
+        | TokenType::Function
+        | TokenType::Record
+        | TokenType::Enum
+        | TokenType::Trait
+    );
+
+    if has_body {
+      // Skip tokens until the opening `{`.
+      while !self.at(TokenType::LeftBrace) && !self.at(TokenType::Eof) {
+        self.bump();
+      }
+
+      self.skip_braced_block()?;
+    } else {
+      // Simple item — skip until `;`.
+      while !self.at(TokenType::SemiColon) && !self.at(TokenType::Eof) {
+        if self.at(TokenType::LeftBrace) {
+          self.skip_braced_block()?;
+        } else {
+          self.bump();
+        }
+      }
+
+      if self.at(TokenType::SemiColon) {
+        self.bump();
+      }
+    }
+
+    Ok(())
+  }
+
+  /// Skips a balanced `{ ... }` block (including nested braces).
+  fn skip_braced_block(&mut self) -> ParserResult<()> {
+    if !self.at(TokenType::LeftBrace) {
+      return Ok(());
+    }
+
+    self.bump(); // consume opening `{`
+    let mut depth = 1usize;
+
+    while depth > 0 {
+      if self.at(TokenType::Eof) {
+        return Err(DiagnosticMessage::CompileError {
+          message: "Unclosed block while skipping @configFlag-excluded item".to_string(),
+          span: self.peek().span.clone(),
+        });
+      }
+
+      match self.peek().type_ {
+        TokenType::LeftBrace => depth += 1,
+        TokenType::RightBrace => depth -= 1,
+        _ => {},
+      }
+
+      self.bump();
+    }
+
+    Ok(())
+  }
+
+  /// Skips a balanced `( ... )` group (including nested parens).
+  fn skip_balanced_parens(&mut self) -> ParserResult<()> {
+    if !self.at(TokenType::LeftParen) {
+      return Ok(());
+    }
+
+    self.bump(); // consume opening `(`
+    let mut depth = 1usize;
+
+    while depth > 0 {
+      if self.at(TokenType::Eof) {
+        return Err(DiagnosticMessage::CompileError {
+          message: "Unclosed parentheses while skipping attribute".to_string(),
+          span: self.peek().span.clone(),
+        });
+      }
+
+      match self.peek().type_ {
+        TokenType::LeftParen => depth += 1,
+        TokenType::RightParen => depth -= 1,
+        _ => {},
+      }
+
+      self.bump();
     }
 
     Ok(())
@@ -871,6 +1093,12 @@ impl super::IgnisParser {
     while !self.at(TokenType::RightBrace) && !self.at(TokenType::Eof) {
       if self.is_compile_if_directive_start() {
         let expanded = self.parse_compile_directive_namespace_items()?;
+        items.extend(expanded);
+        continue;
+      }
+
+      if self.is_configflag_start() {
+        let expanded = self.parse_configflag_namespace_item()?;
         items.extend(expanded);
         continue;
       }

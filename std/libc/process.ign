@@ -52,6 +52,7 @@ extern __process {
   function getenv(name: CType::CConstStr): CType::CStr;
 }
 
+@configFlag(@platform("linux") || @platform("macos"))
 extern __unistd_proc {
   function getpid(): CType::PidT;
   function getppid(): CType::PidT;
@@ -63,6 +64,7 @@ extern __unistd_proc {
   function pipe(pipefd: *mut CType::CInt): CType::CInt;
 }
 
+@configFlag(@platform("linux") || @platform("macos"))
 extern __signal {
   const SIGINT: CType::CInt;
   const SIGKILL: CType::CInt;
@@ -73,6 +75,7 @@ extern __signal {
   function kill(pid: CType::PidT, sig: CType::CInt): CType::CInt;
 }
 
+@configFlag(@platform("linux") || @platform("macos"))
 extern __wait {
   function wait(wstatus: *mut CType::CInt): CType::PidT;
   function waitpid(pid: CType::PidT, wstatus: *mut CType::CInt, options: CType::CInt): CType::PidT;
@@ -102,36 +105,45 @@ namespace LibC::Process {
   function getenv(name: CType::CConstStr): CType::CStr { return __process::getenv(name); }
 
   /// Returns the process ID of the calling process.
+  @configFlag(@platform("linux") || @platform("macos"))
   function getpid(): CType::PidT { return __unistd_proc::getpid(); }
 
   /// Returns the parent process ID.
+  @configFlag(@platform("linux") || @platform("macos"))
   function getppid(): CType::PidT { return __unistd_proc::getppid(); }
 
   /// Returns the real user ID of the calling process.
+  @configFlag(@platform("linux") || @platform("macos"))
   function getuid(): CType::UidT { return __unistd_proc::getuid(); }
 
   /// Returns the real group ID of the calling process.
+  @configFlag(@platform("linux") || @platform("macos"))
   function getgid(): CType::GidT { return __unistd_proc::getgid(); }
 
   /// Suspends execution for `seconds` seconds.
   ///
   /// Returns 0 on success, or the remaining seconds if interrupted.
+  @configFlag(@platform("linux") || @platform("macos"))
   function sleep(seconds: CType::CUInt): CType::CUInt { return __unistd_proc::sleep(seconds); }
 
   /// Suspends execution for `usec` microseconds.
+  @configFlag(@platform("linux") || @platform("macos"))
   function usleep(usec: CType::CUInt): CType::CInt { return __unistd_proc::usleep(usec); }
 
   /// Creates a new process by duplicating the calling process.
   ///
   /// Returns the child PID to the parent, 0 to the child, or -1 on error.
+  @configFlag(@platform("linux") || @platform("macos"))
   function fork(): CType::PidT { return __unistd_proc::fork(); }
 
   /// Creates a unidirectional pipe. `pipefd[0]` is the read end,
   /// `pipefd[1]` is the write end.
+  @configFlag(@platform("linux") || @platform("macos"))
   function pipe(pipefd: *mut CType::CInt): CType::CInt { return __unistd_proc::pipe(pipefd); }
 }
 
-/// Signals (signal.h)
+/// Signals (signal.h) — POSIX only.
+@configFlag(@platform("linux") || @platform("macos"))
 namespace LibC::Signals {
   /// Interrupt from keyboard (Ctrl-C).
   const SIGINT: CType::CInt = __signal::SIGINT;
@@ -152,7 +164,8 @@ namespace LibC::Signals {
   function kill(pid: CType::PidT, sig: CType::CInt): CType::CInt { return __signal::kill(pid, sig); }
 }
 
-/// Wait (sys/wait.h)
+/// Wait (sys/wait.h) — POSIX only.
+@configFlag(@platform("linux") || @platform("macos"))
 namespace LibC::Wait {
   /// Waits for any child process to change state.
   ///

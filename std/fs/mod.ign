@@ -16,30 +16,27 @@
 //!
 //! ## Sub-namespaces
 //!
-//! | Namespace           | Source file   | Description                                |
-//! |---------------------| -------------|------------------------------------------  |
-//! | `Fs::Sys::Unix`     | sys/unix.ign | 1:1 POSIX syscall wrappers returning Result |
+//! | Namespace       | Description                                |
+//! |-----------------|--------------------------------------------|
+//! | `Fs::Sys`       | Platform syscall wrappers (selected at compile time) |
 //!
 //! ## Types
 //!
-//! | Type                       | Description                                         |
-//! |----------------------------|-----------------------------------------------------|
-//! | `Fs::Sys::Unix::Stat`      | File metadata from `stat(2)` / `fstat(2)`           |
-//! | `Fs::Sys::Unix::UnixDirEntry`  | Single directory entry from `readdir(3)`        |
+//! | Type                    | Description                                         |
+//! |-------------------------|-----------------------------------------------------|
+//! | `Fs::Sys::Stat`         | File metadata from `stat(2)` / `fstat(2)`           |
+//! | `Fs::Sys::SysDirEntry`  | Single directory entry from `readdir(3)`            |
 //!
 //! ## Constants
 //!
 //! Open flags, seek modes, permission bits, and dirent type constants
-//! are available under `Fs::Sys::Unix`. See `sys/unix.ign` for the
-//! full list.
+//! are available under `Fs::Sys`. See `sys/unix.ign` for the full list.
 //!
 //! ## Platform
 //!
-//! Currently Linux/glibc only. The `Fs::Sys` layer is designed so
-//! future targets (musl, macOS, Windows) can add sibling modules
-//! (`sys/macos.ign`, `sys/windows.ign`) and the dispatch hub
-//! (`sys/mod.ign`) can select at compile time via `@platform` /
-//! `@target` once those attributes exist.
+//! Currently Linux and macOS (POSIX). The `Fs::Sys` layer is designed so
+//! future targets can add sibling backend modules and the dispatch hub
+//! (`sys/mod.ign`) selects at compile time via `@configFlag`.
 //!
 //! ## Example
 //!
@@ -49,11 +46,11 @@
 //!
 //! function main(): i32 {
 //!   // stat a file
-//!   let result: Result<Fs::Sys::Unix::Stat, Io::IoError> =
-//!     Fs::Sys::Unix::stat("/etc/hosts");
+//!   let result: Result<Fs::Sys::Stat, Io::IoError> =
+//!     Fs::Sys::stat("/etc/hosts");
 //!
 //!   if result.isOk() {
-//!     let st: Fs::Sys::Unix::Stat = result.unwrap();
+//!     let st: Fs::Sys::Stat = result.unwrap();
 //!     // st.size, st.mode, st.uid, st.gid, ...
 //!     return 0;
 //!   }
@@ -67,17 +64,17 @@
 //!
 //! function main(): i32 {
 //!   // write a file
-//!   let fd: Result<i32, Io::IoError> = Fs::Sys::Unix::open(
+//!   let fd: Result<i32, Io::IoError> = Fs::Sys::open(
 //!     "/tmp/hello.txt",
-//!     Fs::Sys::Unix::O_WRONLY | Fs::Sys::Unix::O_CREAT | Fs::Sys::Unix::O_TRUNC,
+//!     Fs::Sys::O_WRONLY | Fs::Sys::O_CREAT | Fs::Sys::O_TRUNC,
 //!     438,
 //!   );
 //!   if fd.isError() { return 1; }
 //!
 //!   let rawFd: i32 = fd.unwrap();
 //!   let msg: *u8 = "hello\n";
-//!   Fs::Sys::Unix::write(rawFd, msg as *mut void, 6);
-//!   Fs::Sys::Unix::close(rawFd);
+//!   Fs::Sys::write(rawFd, msg as *mut void, 6);
+//!   Fs::Sys::close(rawFd);
 //!   return 0;
 //! }
 //! ```
@@ -157,19 +154,19 @@ export namespace Fs {
 
   /// Returns true when `path` exists.
   function exists(path: str): boolean {
-    let statResult: Result<Fs::Sys::Unix::Stat, Io::IoError> = Fs::Sys::Unix::stat(path);
+    let statResult: Result<Fs::Sys::Stat, Io::IoError> = Fs::Sys::stat(path);
     return statResult.isOk();
   }
 
   /// Reads metadata for `path`.
   function metadata(path: str): Result<Fs::Metadata, Io::IoError> {
-    let stat: Fs::Sys::Unix::Stat = Fs::Sys::Unix::stat(path)!;
+    let stat: Fs::Sys::Stat = Fs::Sys::stat(path)!;
     return Result::OK(Fs::metadataFromStat(&stat));
   }
 
   /// Creates a single directory.
   function createDir(path: str, mode: u32): Result<boolean, Io::IoError> {
-    return Fs::Sys::Unix::mkdir(path, mode);
+    return Fs::Sys::mkdir(path, mode);
   }
 
   /// Recursively creates directories for `path` (mkdir -p behavior).
@@ -212,7 +209,7 @@ export namespace Fs {
           current.push(&segment);
 
           if (!Fs::exists(current.toStr())) {
-            let _ = Fs::Sys::Unix::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE)!;
+            let _ = Fs::Sys::mkdir(current.toStr(), DEFAULT_CREATE_DIR_MODE)!;
           }
         }
 
@@ -227,11 +224,11 @@ export namespace Fs {
 
   /// Removes a file.
   function removeFile(path: str): Result<boolean, Io::IoError> {
-    return Fs::Sys::Unix::unlink(path);
+    return Fs::Sys::unlink(path);
   }
 
   /// Removes an empty directory.
   function removeDir(path: str): Result<boolean, Io::IoError> {
-    return Fs::Sys::Unix::rmdir(path);
+    return Fs::Sys::rmdir(path);
   }
 }

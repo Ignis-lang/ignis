@@ -65,6 +65,29 @@ impl super::IgnisParser {
         continue;
       }
 
+      if self.is_configflag_start() {
+        match self.parse_configflag_block_item() {
+          Ok(expanded) => {
+            items.extend(expanded);
+          },
+          Err(diagnostic) => {
+            self.diagnostics.push(diagnostic);
+
+            if self.recovery {
+              self.synchronize_after_statement();
+
+              if self.at(TokenType::RightBrace) {
+                break;
+              }
+            } else {
+              return Err(self.diagnostics.last().unwrap().clone());
+            }
+          },
+        }
+
+        continue;
+      }
+
       if self.is_compile_else_directive_start() {
         self.diagnostics.push(DiagnosticMessage::CompileError {
           message: "Unexpected '@else' without a matching '@if'".to_string(),
