@@ -3309,10 +3309,10 @@ fn collect_external_type_definition_ids(
       }
 
       for dep_name in deps {
-        if !referenced_definitions.contains_key(&dep_name) {
-          if let Some(&dep_def_id) = all_candidates.get(&dep_name) {
-            newly_discovered.push((dep_name, dep_def_id));
-          }
+        if !referenced_definitions.contains_key(&dep_name)
+          && let Some(&dep_def_id) = all_candidates.get(&dep_name)
+        {
+          newly_discovered.push((dep_name, dep_def_id));
         }
       }
     }

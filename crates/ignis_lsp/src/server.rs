@@ -458,16 +458,14 @@ fn lookup_file_id_best_effort(
     return Some(file_id);
   }
 
-  if let Ok(canon_path) = path.canonicalize() {
-    if let Some(file_id) = output.source_map.lookup_by_path(&canon_path) {
-      return Some(file_id);
-    }
+  if let Ok(canon_path) = path.canonicalize()
+    && let Some(file_id) = output.source_map.lookup_by_path(&canon_path)
+  {
+    return Some(file_id);
   }
 
   let target_name = path.file_name().and_then(|name| name.to_str());
-  if target_name.is_none() {
-    return None;
-  }
+  target_name?;
 
   let mut by_name_matches: Vec<FileId> = output
     .source_map
@@ -1712,12 +1710,11 @@ impl LanguageServer for Server {
 
     if file_id.is_none()
       && let Some((fresh, _, _)) = self.get_analysis(uri).await
+      && let Some(resolved_file_id) = lookup_file_id_best_effort(&fresh, &path, &path_str)
     {
-      if let Some(resolved_file_id) = lookup_file_id_best_effort(&fresh, &path, &path_str) {
-        analysis_source = "fresh_relookup";
-        output = fresh;
-        file_id = Some(resolved_file_id);
-      }
+      analysis_source = "fresh_relookup";
+      output = fresh;
+      file_id = Some(resolved_file_id);
     }
 
     if file_id.is_none()

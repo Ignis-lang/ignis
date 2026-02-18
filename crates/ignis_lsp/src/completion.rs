@@ -2123,10 +2123,10 @@ fn resolve_path_to_def(
         };
       }
 
-      if let Some(child_ns_id) = output.namespaces.lookup_child(ns_id, &last_segment) {
-        if let Some(def_id) = find_namespace_def_id(&child_ns_id, output, current_file) {
-          return Some(def_id);
-        }
+      if let Some(child_ns_id) = output.namespaces.lookup_child(ns_id, &last_segment)
+        && let Some(def_id) = find_namespace_def_id(&child_ns_id, output, current_file)
+      {
+        return Some(def_id);
       }
     }
   }

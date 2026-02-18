@@ -976,7 +976,7 @@ impl<'a> Analyzer<'a> {
         span,
       } => self.typecheck_pipe(node_id, lhs, rhs, pipe_span, span, scope_kind, ctx),
 
-      ASTExpression::Try { expr, span } => self.typecheck_try(node_id, expr, span, scope_kind, &ctx),
+      ASTExpression::Try { expr, span } => self.typecheck_try(node_id, expr, span, scope_kind, ctx),
 
       ASTExpression::PipePlaceholder { span, .. } => {
         if let Some(&lhs_type) = self.pipe_lhs_type_stack.last() {
@@ -1343,12 +1343,12 @@ impl<'a> Analyzer<'a> {
           return true;
         }
 
-        if let Some(ResolvedPath::Entry(SymbolEntry::Single(def_id))) = self.resolve_qualified_path(&path_segments) {
-          if let DefinitionKind::Constant(ref c) = self.defs.get(&def_id).kind {
-            let const_ty = c.type_id;
-            self.typecheck_assignment(expected_type, &const_ty, span);
-            return false;
-          }
+        if let Some(ResolvedPath::Entry(SymbolEntry::Single(def_id))) = self.resolve_qualified_path(&path_segments)
+          && let DefinitionKind::Constant(ref c) = self.defs.get(&def_id).kind
+        {
+          let const_ty = c.type_id;
+          self.typecheck_assignment(expected_type, &const_ty, span);
+          return false;
         }
 
         if let Some((first, _)) = segments.first()
@@ -3806,6 +3806,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Typechecks `lhs |> rhs` and records how lowering should emit the call.
+  #[allow(clippy::too_many_arguments)]
   fn typecheck_pipe(
     &mut self,
     node_id: &NodeId,
@@ -4153,6 +4154,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Handles `x |> f(a, b)` and `x |> f(a, _, b)`.
+  #[allow(clippy::too_many_arguments)]
   fn typecheck_pipe_call(
     &mut self,
     node_id: &NodeId,
@@ -4207,13 +4209,12 @@ impl<'a> Analyzer<'a> {
 
     let callee_node = self.ast.get(&call.callee).clone();
 
-    if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = &callee_node {
-      if ma.op == ignis_ast::expressions::ASTAccessOp::Dot {
-        return self
-          .typecheck_pipe_method_call(node_id, lhs, lhs_type, call, &ma, insertion, pipe_span, scope_kind, ctx);
-      }
-      // DoubleColon paths (Type::method) are handled below via Path resolution.
+    if let ASTNode::Expression(ASTExpression::MemberAccess(ma)) = &callee_node
+      && ma.op == ignis_ast::expressions::ASTAccessOp::Dot
+    {
+      return self.typecheck_pipe_method_call(node_id, lhs, lhs_type, call, ma, insertion, pipe_span, scope_kind, ctx);
     }
+    // DoubleColon paths (Type::method) are handled below via Path resolution.
 
     // --- Callee resolution ---
 
@@ -4849,6 +4850,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Handles `x |> f`.
+  #[allow(clippy::too_many_arguments)]
   fn typecheck_pipe_bare_callee(
     &mut self,
     node_id: &NodeId,
@@ -4947,6 +4949,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Handles `x |> Mod::func`.
+  #[allow(clippy::too_many_arguments)]
   fn typecheck_pipe_path(
     &mut self,
     node_id: &NodeId,
@@ -5062,6 +5065,7 @@ impl<'a> Analyzer<'a> {
   }
 
   /// Handles `x |> (..lambda..)`.
+  #[allow(clippy::too_many_arguments)]
   fn typecheck_pipe_lambda(
     &mut self,
     node_id: &NodeId,
@@ -6104,19 +6108,19 @@ impl<'a> Analyzer<'a> {
         }
 
         // Not a method - check if it's a field being called (error, records only)
-        if let Some(ref flds) = fields {
-          if flds.iter().any(|f| f.name == ma.member) {
-            let type_name = self.format_type_for_error(&obj_type);
-            let member_name = self.get_symbol_name(&ma.member);
-            self.add_diagnostic(
-              DiagnosticMessage::NotCallable {
-                type_name: format!("{}.{}", type_name, member_name),
-                span: call.span.clone(),
-              }
-              .report(),
-            );
-            return self.types.error();
-          }
+        if let Some(ref flds) = fields
+          && flds.iter().any(|f| f.name == ma.member)
+        {
+          let type_name = self.format_type_for_error(&obj_type);
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::NotCallable {
+              type_name: format!("{}.{}", type_name, member_name),
+              span: call.span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
         }
 
         if let Some(result) = self.try_resolve_extension_method(node_id, &obj_type, ma, call, scope_kind, ctx) {
@@ -8330,12 +8334,12 @@ impl<'a> Analyzer<'a> {
       },
       ASTBinaryOperator::Equal | ASTBinaryOperator::NotEqual => {
         // Try to coerce integer literals for numeric comparisons
-        if self.types.is_integer(&left_type) && self.types.is_integer(&right_type) {
-          if self.try_coerce_integer_literal_to(&binary.right, &left_type) {
-            return self.types.boolean();
-          } else if self.try_coerce_integer_literal_to(&binary.left, &right_type) {
-            return self.types.boolean();
-          }
+        if self.types.is_integer(&left_type)
+          && self.types.is_integer(&right_type)
+          && (self.try_coerce_integer_literal_to(&binary.right, &left_type)
+            || self.try_coerce_integer_literal_to(&binary.left, &right_type))
+        {
+          return self.types.boolean();
         }
 
         if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
@@ -8408,12 +8412,12 @@ impl<'a> Analyzer<'a> {
       | ASTBinaryOperator::GreaterThan
       | ASTBinaryOperator::GreaterThanOrEqual => {
         // Try to coerce integer literals for numeric comparisons
-        if self.types.is_integer(&left_type) && self.types.is_integer(&right_type) {
-          if self.try_coerce_integer_literal_to(&binary.right, &left_type) {
-            return self.types.boolean();
-          } else if self.try_coerce_integer_literal_to(&binary.left, &right_type) {
-            return self.types.boolean();
-          }
+        if self.types.is_integer(&left_type)
+          && self.types.is_integer(&right_type)
+          && (self.try_coerce_integer_literal_to(&binary.right, &left_type)
+            || self.try_coerce_integer_literal_to(&binary.left, &right_type))
+        {
+          return self.types.boolean();
         }
 
         if self.types.is_numeric(&left_type) && self.types.is_numeric(&right_type) {
@@ -9311,10 +9315,10 @@ impl<'a> Analyzer<'a> {
     target_node_id: &NodeId,
   ) {
     let target_node = self.ast.get(target_node_id);
-    if let ASTNode::Expression(target_expr) = target_node {
-      if let Some(def_id) = self.def_id_of_mutable_root(target_expr) {
-        self.mark_mutated(def_id);
-      }
+    if let ASTNode::Expression(target_expr) = target_node
+      && let Some(def_id) = self.def_id_of_mutable_root(target_expr)
+    {
+      self.mark_mutated(def_id);
     }
   }
 

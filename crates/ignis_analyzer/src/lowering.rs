@@ -1643,10 +1643,9 @@ impl<'a> Analyzer<'a> {
           let syms: Vec<_> = segments.iter().map(|(s, _)| *s).collect();
           if let Some(ResolvedPath::Entry(SymbolEntry::Single(def_id))) =
             self.resolve_qualified_path_from_symbols(&syms)
+            && matches!(self.defs.get(&def_id).kind, DefinitionKind::Constant(_))
           {
-            if matches!(self.defs.get(&def_id).kind, DefinitionKind::Constant(_)) {
-              return HIRPattern::Constant { def_id };
-            }
+            return HIRPattern::Constant { def_id };
           }
         }
 

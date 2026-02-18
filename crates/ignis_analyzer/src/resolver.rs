@@ -206,10 +206,10 @@ impl<'a> Analyzer<'a> {
 
           // Resolve static field initializers
           for item in &rec.items {
-            if let ASTRecordItem::Field(field) = item {
-              if let Some(value_id) = &field.value {
-                self.resolve_node(value_id, scope_kind);
-              }
+            if let ASTRecordItem::Field(field) = item
+              && let Some(value_id) = &field.value
+            {
+              self.resolve_node(value_id, scope_kind);
             }
           }
 

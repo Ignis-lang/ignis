@@ -3004,10 +3004,10 @@ impl<'a> LoweringContext<'a> {
       let def_data = self.defs.get(&def);
       match &def_data.kind {
         DefinitionKind::Constant(const_def) => {
-          if let Some(value) = &const_def.value {
-            if let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty) {
-              return Some(Operand::Const(lir_const));
-            }
+          if let Some(value) = &const_def.value
+            && let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty)
+          {
+            return Some(Operand::Const(lir_const));
           }
 
           // No compile-time value (e.g. extern const): fall back to GlobalRef.
