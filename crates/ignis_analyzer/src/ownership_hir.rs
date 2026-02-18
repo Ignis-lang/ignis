@@ -798,7 +798,7 @@ impl<'a> HirOwnershipChecker<'a> {
           if is_drop {
             if let Some(recv_def) = self.extract_receiver_variable(recv) {
               self.handle_manual_drop(recv_def, span.clone());
-            } else if !self.is_field_drop_on_variable(recv) {
+            } else if !self.is_inside_drop_method() || !self.is_field_drop_on_variable(recv) {
               self
                 .diagnostics
                 .push(DiagnosticMessage::DropOnComplexReceiver { span: span.clone() }.report());
@@ -1907,6 +1907,16 @@ impl<'a> HirOwnershipChecker<'a> {
   /// `array[i].drop()`). These cases are not tracked at compile time — the runtime
   /// `__ignis_drop_state` guard in the generated C code handles double-drop prevention
   /// for them instead.
+  fn is_inside_drop_method(&self) -> bool {
+    if let Some(fn_def_id) = self.current_fn {
+      let def = self.defs.get(&fn_def_id);
+      if let DefinitionKind::Method(md) = &def.kind {
+        return !md.is_static && self.is_drop_method(fn_def_id);
+      }
+    }
+    false
+  }
+
   fn is_field_drop_on_variable(
     &self,
     recv_hir: HIRId,
