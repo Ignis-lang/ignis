@@ -24,9 +24,10 @@ use crate::build_layout::{
   hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp, write_std_stamp,
   BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
 };
+use crate::codegen_backend::{backend_for_target, BackendEmitContext};
 use crate::context::CompilationContext;
 use crate::link::{
-  compile_to_object, format_tool_error, link_executable, link_executable_multi, rebuild_std_runtime, LinkPlan,
+  compile_to_object, format_tool_error, link_executable_multi, rebuild_std_runtime, LinkPlan,
 };
 
 /// Compiler version for stamp file invalidation.
@@ -690,21 +691,12 @@ pub fn compile_project(
       let needs_emit = check_mode
         || dump_c_requested
         || bc.emit_c.is_some()
+        || bc.emit_qbe.is_some()
         || bc.emit_obj.is_some()
         || bc.emit_bin.is_some()
         || bc.lib;
       if needs_emit {
-        if matches!(bc.target, TargetBackend::Qbe) {
-          cmd_fail!(
-            &config,
-            if check_mode { "Check failed" } else { "Build failed" },
-            start.elapsed()
-          );
-          eprintln!("{} QBE backend not implemented yet", "Error:".red().bold());
-          return Err(());
-        }
-
-        trace_dbg!(&config, DebugTrace::Codegen, "emitting C code");
+        trace_dbg!(&config, DebugTrace::Codegen, "emitting backend code");
 
         if verify_result.is_err() {
           cmd_fail!(
@@ -712,7 +704,7 @@ pub fn compile_project(
             if check_mode { "Check failed" } else { "Build failed" },
             start.elapsed()
           );
-          eprintln!("{} Cannot emit C: LIR verification failed", "Error:".red().bold());
+          eprintln!("{} Cannot emit backend code: LIR verification failed", "Error:".red().bold());
           return Err(());
         }
 
@@ -723,9 +715,26 @@ pub fn compile_project(
           .and_then(|s| s.to_str())
           .unwrap_or("out");
 
+        let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+
+        let emit_context = BackendEmitContext {
+          program: &lir_program,
+          types: &types,
+          defs: &mono_output.defs,
+          namespaces: &output.namespaces,
+          symbols: &sym_table,
+          headers: &link_plan.headers,
+          module_paths: &module_paths,
+          emit_user_only: link_plan.std_archive.is_some(),
+        };
+
+        let backend = backend_for_target(bc.target);
+
         // Per-module compilation when precompiled std is available
-        if link_plan.std_archive.is_some() && bc.emit_bin.is_some() {
-          let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+        if matches!(bc.target, TargetBackend::C | TargetBackend::Iir | TargetBackend::None)
+          && link_plan.std_archive.is_some()
+          && bc.emit_bin.is_some()
+        {
 
           let out_dir_path = Path::new(&bc.output_dir);
           let project_root = if out_dir_path.is_absolute() {
@@ -997,63 +1006,68 @@ pub fn compile_project(
             return Ok(());
           }
         } else {
-          // Legacy single-file compilation (no precompiled std or no binary output)
-          let c_code = if link_plan.std_archive.is_some() {
-            let module_paths = build_module_paths_from_graph(&ctx.module_graph);
-            ignis_codegen_c::emit_user_c(
-              &lir_program,
-              &types,
-              &mono_output.defs,
-              &output.namespaces,
-              &sym_table,
-              &link_plan.headers,
-              &module_paths,
-            )
-          } else {
-            ignis_codegen_c::emit_c(
-              &lir_program,
-              &types,
-              &mono_output.defs,
-              &output.namespaces,
-              &sym_table,
-              &link_plan.headers,
-            )
+          // Backend-driven single-unit compilation.
+          let source_code = match backend.emit_program(&emit_context) {
+            Ok(code) => code,
+            Err(error) => {
+              cmd_fail!(&config, if check_mode { "Check failed" } else { "Build failed" }, start.elapsed());
+              eprintln!("{} {}", "Error:".red().bold(), error);
+              return Err(());
+            },
           };
 
-          if dump_c_requested {
-            write_dump_output(&config, "dump-c.c", &c_code)?;
+          if dump_c_requested && backend.source_extension() == "c" {
+            write_dump_output(&config, "dump-c.c", &source_code)?;
           }
 
-          let c_path = if let Some(path) = &bc.emit_c {
+          let explicit_emit_path = match backend.source_extension() {
+            "c" => bc.emit_c.as_ref(),
+            "qbe" => bc.emit_qbe.as_ref(),
+            _ => None,
+          };
+
+          let source_path = if let Some(path) = explicit_emit_path {
             PathBuf::from(path)
           } else {
             let output_dir = Path::new(&bc.output_dir);
-            if !output_dir.exists()
-              && let Err(e) = std::fs::create_dir_all(output_dir)
-            {
-              cmd_fail!(&config, "Build failed", start.elapsed());
+            output_dir.join(format!("{}.{}", base_name, backend.source_extension()))
+          };
+
+          if let Some(parent) = source_path.parent()
+            && !parent.exists()
+            && let Err(error) = std::fs::create_dir_all(parent)
+          {
+            cmd_fail!(&config, if check_mode { "Check failed" } else { "Build failed" }, start.elapsed());
+            eprintln!(
+              "{} Failed to create output directory '{}': {}",
+              "Error:".red().bold(),
+              parent.display(),
+              error
+            );
+            return Err(());
+          }
+
+          let should_write_source = explicit_emit_path.is_some()
+            || !check_mode
+            || bc.emit_obj.is_some()
+            || bc.emit_bin.is_some()
+            || bc.lib
+            || matches!(bc.target, TargetBackend::Qbe);
+
+          if should_write_source {
+            if let Err(error) = std::fs::write(&source_path, &source_code) {
+              cmd_fail!(&config, if check_mode { "Check failed" } else { "Build failed" }, start.elapsed());
               eprintln!(
-                "{} Failed to create output directory '{}': {}",
+                "{} Failed to write source file '{}': {}",
                 "Error:".red().bold(),
-                bc.output_dir,
-                e
+                source_path.display(),
+                error
               );
               return Err(());
             }
-            output_dir.join(format!("{}.c", base_name))
-          };
 
-          let should_write_c =
-            bc.emit_c.is_some() || !check_mode || bc.emit_obj.is_some() || bc.emit_bin.is_some() || bc.lib;
-          if should_write_c {
-            if let Err(e) = std::fs::write(&c_path, &c_code) {
-              cmd_fail!(&config, "Build failed", start.elapsed());
-              eprintln!("{} Failed to write C file '{}': {}", "Error:".red().bold(), c_path.display(), e);
-              return Err(());
-            }
-
-            if (bc.emit_c.is_some() || !check_mode) && ignis_log::show_verbose(&config) {
-              eprintln!("    {} Emitted C code to {}", "-->".bright_green().bold(), c_path.display());
+            if ignis_log::show_verbose(&config) {
+              eprintln!("    {} Emitted {} to {}", "-->".bright_green().bold(), backend.source_extension(), source_path.display());
             }
           }
 
@@ -1064,21 +1078,78 @@ pub fn compile_project(
               PathBuf::from(format!("{}/{}.o", bc.output_dir, base_name))
             };
 
-            trace_dbg!(&config, DebugTrace::Link, "compiling object file");
+            trace_dbg!(&config, DebugTrace::Link, "compiling backend object file");
 
             let suppress_link_logs = !ignis_log::show_verbose(&config);
-            if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, suppress_link_logs) {
+            if let Err(error) = backend.compile_source_to_object(&source_path, &obj_path, &link_plan, suppress_link_logs) {
               cmd_fail!(&config, "Build failed", start.elapsed());
-              eprintln!("{} {}", "Error:".red().bold(), e);
+              eprintln!("{} {}", "Error:".red().bold(), error);
               return Err(());
+            }
+
+            let mut link_objects = vec![obj_path.clone()];
+
+            if matches!(bc.target, TargetBackend::Qbe) {
+              match backend.emit_entry_wrapper(&emit_context) {
+                Ok(Some(wrapper_code)) => {
+                  let wrapper_c_path = PathBuf::from(format!("{}/{}.entry_wrapper.c", bc.output_dir, base_name));
+                  if let Some(parent) = wrapper_c_path.parent()
+                    && !parent.exists()
+                    && let Err(error) = std::fs::create_dir_all(parent)
+                  {
+                    cmd_fail!(&config, "Build failed", start.elapsed());
+                    eprintln!(
+                      "{} Failed to create wrapper directory '{}': {}",
+                      "Error:".red().bold(),
+                      parent.display(),
+                      error
+                    );
+                    return Err(());
+                  }
+
+                  if let Err(error) = std::fs::write(&wrapper_c_path, wrapper_code) {
+                    cmd_fail!(&config, "Build failed", start.elapsed());
+                    eprintln!(
+                      "{} Failed to write entry wrapper '{}': {}",
+                      "Error:".red().bold(),
+                      wrapper_c_path.display(),
+                      error
+                    );
+                    return Err(());
+                  }
+
+                  let wrapper_obj_path = PathBuf::from(format!("{}/{}.entry_wrapper.o", bc.output_dir, base_name));
+                  if let Err(error) = ignis_codegen_c::compile_c_to_object(
+                    &wrapper_c_path,
+                    &wrapper_obj_path,
+                    &link_plan.cc,
+                    &link_plan.cflags,
+                    &link_plan.include_dirs,
+                    suppress_link_logs,
+                  ) {
+                    cmd_fail!(&config, "Build failed", start.elapsed());
+                    eprintln!("{} {}", "Error:".red().bold(), error);
+                    return Err(());
+                  }
+
+                  link_objects.push(wrapper_obj_path);
+                },
+                Ok(None) => {},
+                Err(error) => {
+                  cmd_fail!(&config, "Build failed", start.elapsed());
+                  eprintln!("{} {}", "Error:".red().bold(), error);
+                  return Err(());
+                },
+              }
             }
 
             if let Some(bin_path) = &bc.emit_bin {
               trace_dbg!(&config, DebugTrace::Link, "linking executable");
 
-              if let Err(e) = link_executable(&obj_path, Path::new(bin_path), &link_plan, suppress_link_logs) {
+              if let Err(error) = link_executable_multi(&link_objects, Path::new(bin_path), &link_plan, suppress_link_logs)
+              {
                 cmd_fail!(&config, "Build failed", start.elapsed());
-                eprintln!("{} {}", "Error:".red().bold(), e);
+                eprintln!("{} {}", "Error:".red().bold(), error);
                 return Err(());
               }
 

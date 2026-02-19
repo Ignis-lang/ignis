@@ -502,6 +502,177 @@ pub fn parse_errors_with_ctx(
   }
 }
 
+pub fn compile_to_qbe(source: &str) -> Result<String, String> {
+  let source = source.to_string();
+
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("test.ign", source);
+  let src = &sm.get(&file_id).text;
+
+  let mut lexer = IgnisLexer::new(file_id, src);
+  lexer.scan_tokens();
+  if !lexer.diagnostics.is_empty() {
+    return Err(format!("Lexer errors: {:?}", lexer.diagnostics));
+  }
+
+  let symbol_table = Rc::new(RefCell::new(SymbolTable::new()));
+  let mut parser = IgnisParser::new(lexer.tokens, symbol_table.clone());
+  let (nodes, roots) = parser.parse().map_err(|e| format!("Parse errors: {:?}", e))?;
+
+  let result = Analyzer::analyze(&nodes, &roots, symbol_table);
+  let has_errors = result
+    .diagnostics
+    .iter()
+    .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
+  if has_errors {
+    return Err(format!("Analyzer errors: {:?}", result.diagnostics));
+  }
+
+  let mut types = result.types.clone();
+
+  let mono_roots = {
+    let sym_table = result.symbols.borrow();
+    collect_mono_roots(&result.defs, &sym_table)
+  };
+  let mono_output =
+    ignis_analyzer::mono::Monomorphizer::new(&result.hir, &result.defs, &mut types, result.symbols.clone())
+      .run(&mono_roots);
+
+  let sym_table = result.symbols.borrow();
+
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
+  let (drop_schedules, _) = ownership_checker.check();
+
+  let borrow_checker = ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table);
+  let borrow_diagnostics = borrow_checker.check();
+  if borrow_diagnostics
+    .iter()
+    .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+  {
+    return Err(format!("Borrow check errors: {:?}", borrow_diagnostics));
+  }
+
+  let (lir, verify) = ignis_lir::lowering::lower_and_verify(
+    &mono_output.hir,
+    &mut types,
+    &mono_output.defs,
+    &sym_table,
+    &drop_schedules,
+    None,
+  );
+  if let Err(e) = verify {
+    return Err(format!("LIR verification errors: {:?}", e));
+  }
+
+  ignis_codegen_qbe::emit_qbe(
+    &lir,
+    &types,
+    &mono_output.defs,
+    &result.namespaces,
+    &sym_table,
+    &ignis_codegen_qbe::QbeEmitOptions::default(),
+  )
+  .map_err(|e| e.to_string())
+}
+
+pub fn compile_and_run_qbe(source: &str) -> Result<E2EResult, String> {
+  let qbe_code = compile_to_qbe(source)?;
+
+  let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+  let qbe_path = temp_dir.path().join("test.qbe");
+  let asm_path = temp_dir.path().join("test.s");
+  let obj_path = temp_dir.path().join("test.o");
+  let wrapper_c_path = temp_dir.path().join("wrapper.c");
+  let wrapper_obj_path = temp_dir.path().join("wrapper.o");
+  let bin_path = temp_dir.path().join("test");
+
+  std::fs::write(&qbe_path, &qbe_code).map_err(|e| format!("Failed to write QBE file: {}", e))?;
+
+  let qbe_output = Command::new("qbe")
+    .arg(&qbe_path)
+    .arg("-o")
+    .arg(&asm_path)
+    .output()
+    .map_err(|e| format!("Failed to run qbe: {}", e))?;
+
+  if !qbe_output.status.success() {
+    return Err(format!(
+      "qbe compilation failed:\nQBE IL:\n{}\n\nstderr:\n{}",
+      qbe_code,
+      String::from_utf8_lossy(&qbe_output.stderr)
+    ));
+  }
+
+  let asm_compile = Command::new("gcc")
+    .arg("-c")
+    .arg(&asm_path)
+    .arg("-o")
+    .arg(&obj_path)
+    .output()
+    .map_err(|e| format!("Failed to assemble: {}", e))?;
+
+  if !asm_compile.status.success() {
+    return Err(format!(
+      "Assembly failed:\nstderr:\n{}",
+      String::from_utf8_lossy(&asm_compile.stderr)
+    ));
+  }
+
+  let wrapper_c = "\
+#include <stdio.h>\n\
+#include <stdlib.h>\n\
+extern int __ignis_user_main(void);\n\
+int main(int argc, char** argv) {\n\
+    (void)argc; (void)argv;\n\
+    return __ignis_user_main();\n\
+}\n";
+
+  std::fs::write(&wrapper_c_path, wrapper_c).map_err(|e| format!("Failed to write wrapper: {}", e))?;
+
+  let wrapper_compile = Command::new("gcc")
+    .arg("-c")
+    .arg(&wrapper_c_path)
+    .arg("-o")
+    .arg(&wrapper_obj_path)
+    .output()
+    .map_err(|e| format!("Failed to compile wrapper: {}", e))?;
+
+  if !wrapper_compile.status.success() {
+    return Err(format!(
+      "Wrapper compilation failed:\nstderr:\n{}",
+      String::from_utf8_lossy(&wrapper_compile.stderr)
+    ));
+  }
+
+  let link = Command::new("gcc")
+    .arg(&obj_path)
+    .arg(&wrapper_obj_path)
+    .arg("-o")
+    .arg(&bin_path)
+    .output()
+    .map_err(|e| format!("Failed to link: {}", e))?;
+
+  if !link.status.success() {
+    return Err(format!(
+      "Linking failed:\nstderr:\n{}",
+      String::from_utf8_lossy(&link.stderr)
+    ));
+  }
+
+  let run = Command::new(&bin_path)
+    .output()
+    .map_err(|e| format!("Failed to run binary: {}", e))?;
+
+  Ok(E2EResult {
+    exit_code: run.status.code().unwrap_or(-1),
+    stdout: String::from_utf8_lossy(&run.stdout).to_string(),
+    stderr: String::from_utf8_lossy(&run.stderr).to_string(),
+    leaked: false,
+    leak_report: String::new(),
+  })
+}
+
 /// Collect root definitions for monomorphization.
 fn collect_mono_roots(
   defs: &DefinitionStore,

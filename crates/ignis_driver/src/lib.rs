@@ -2,6 +2,7 @@
 
 mod api;
 mod build_layout;
+mod codegen_backend;
 mod context;
 pub mod link;
 mod pipeline;

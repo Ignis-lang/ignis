@@ -90,7 +90,7 @@ impl fmt::Display for ProjectError {
       },
 
       ProjectError::InvalidEmit { value } => {
-        write!(f, "invalid emit value: '{}' (supported: 'c', 'obj')", value)
+        write!(f, "invalid emit value: '{}' (supported: 'c', 'qbe', 'obj')", value)
       },
 
       ProjectError::ReservedAlias { name } => {

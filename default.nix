@@ -9,6 +9,7 @@ let
     gcc
     binutils
     gnumake
+    qbe
   ];
 
   runtimeToolsPath = pkgs.lib.makeBinPath runtimeTools;

@@ -2896,6 +2896,46 @@ pub fn emit_c(
   CEmitter::new(program, types, defs, namespaces, symbols, headers).emit()
 }
 
+/// Emit only the C entry wrapper (`main`) and the minimum type/prototype context it needs.
+///
+/// This is used by alternative backends (e.g. QBE) to keep entrypoint ABI behavior
+/// identical to the C backend without duplicating wrapper logic.
+pub fn emit_entry_wrapper_c(
+  program: &LirProgram,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+) -> String {
+  let mut emitter = CEmitter::new(program, types, defs, namespaces, symbols, headers);
+
+  emitter.emit_implicit_headers();
+  emitter.emit_headers();
+  emitter.emit_type_forward_declarations();
+  emitter.emit_type_definitions();
+  emitter.emit_closure_types();
+  emitter.emit_extern_declarations();
+  emitter.emit_forward_declarations();
+  emitter.emit_entry_wrapper();
+
+  emitter.output
+}
+
+/// Build the canonical backend symbol name for a definition.
+///
+/// This uses the same mangling rules as C codegen, including the special-case
+/// mapping of user `main` to `__ignis_user_main`.
+pub fn mangle_symbol_name(
+  def_id: DefinitionId,
+  defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  types: &TypeStore,
+) -> String {
+  build_mangled_name_standalone(def_id, defs, namespaces, symbols, types)
+}
+
 /// Emit C for user definitions only (excludes std and runtime).
 pub fn emit_user_c(
   program: &LirProgram,

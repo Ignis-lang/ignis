@@ -118,6 +118,9 @@ pub struct EmitSet {
   /// Save generated C code to out_dir/c/.
   pub c: bool,
 
+  /// Save generated QBE IR to out_dir/qbe/.
+  pub qbe: bool,
+
   /// Save object files to out_dir/obj/ (build mode only).
   pub obj: bool,
 }
@@ -336,6 +339,7 @@ fn parse_emit_set(values: &[String]) -> Result<EmitSet, ProjectError> {
   for value in values {
     match value.to_lowercase().as_str() {
       "c" => set.c = true,
+      "qbe" => set.qbe = true,
       "obj" => set.obj = true,
       other => {
         return Err(ProjectError::InvalidEmit {
@@ -422,6 +426,7 @@ mod tests {
     assert_eq!(project.cc, "cc");
     assert!(project.cflags.is_empty());
     assert!(!project.emit.c);
+    assert!(!project.emit.qbe);
     assert!(!project.emit.obj);
 
     fs::remove_dir_all(&temp_dir).unwrap();
@@ -480,6 +485,7 @@ mod tests {
     assert_eq!(project.cc, "gcc");
     assert_eq!(project.cflags, vec!["-Wall"]);
     assert!(project.emit.c);
+    assert!(!project.emit.qbe);
     assert!(project.emit.obj);
 
     fs::remove_dir_all(&temp_dir).unwrap();
@@ -578,11 +584,18 @@ mod tests {
 
     let set = parse_emit_set(&["c".to_string()]).unwrap();
     assert!(set.c);
+    assert!(!set.qbe);
     assert!(!set.obj);
 
     let set = parse_emit_set(&["C".to_string(), "OBJ".to_string()]).unwrap();
     assert!(set.c);
+    assert!(!set.qbe);
     assert!(set.obj);
+
+    let set = parse_emit_set(&["qbe".to_string()]).unwrap();
+    assert!(!set.c);
+    assert!(set.qbe);
+    assert!(!set.obj);
   }
 
   #[test]

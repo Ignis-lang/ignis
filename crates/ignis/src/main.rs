@@ -161,6 +161,13 @@ fn collect_cli_features(
   set
 }
 
+fn has_emit_kind(
+  emit_values: &[String],
+  kind: &str,
+) -> bool {
+  emit_values.iter().any(|value| value.eq_ignore_ascii_case(kind))
+}
+
 fn build_config_from_project(
   project: &Project,
   cli: &Cli,
@@ -191,6 +198,24 @@ fn build_config_from_project(
   let out_dir = &project.out_dir;
   let emit_c = if project.emit.c {
     Some(out_dir.join("c").to_string_lossy().to_string())
+  } else {
+    None
+  };
+
+  let qbe_base_name = project
+    .entry
+    .file_stem()
+    .and_then(|stem| stem.to_str())
+    .unwrap_or("out");
+
+  let emit_qbe = if project.emit.qbe {
+    Some(
+      out_dir
+        .join("qbe")
+        .join(format!("{}.qbe", qbe_base_name))
+        .to_string_lossy()
+        .to_string(),
+    )
   } else {
     None
   };
@@ -233,6 +258,7 @@ fn build_config_from_project(
     cli.dump_dir.clone(),
     cli.dump_hir.clone(),
     emit_c,
+    emit_qbe,
     emit_obj,
     emit_bin,
     cmd.rebuild_std,
@@ -267,7 +293,14 @@ fn build_config_for_single_file(
   config.cflags = Vec::new();
 
   let out_dir = cmd.output_dir.as_deref().unwrap_or("build");
+
   let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+
+  let emit_qbe = if has_emit_kind(&cmd.emit, "qbe") {
+    Some(format!("{}/qbe/{}.qbe", out_dir, stem))
+  } else {
+    None
+  };
 
   let emit_bin = if cmd.lib || check_mode {
     None
@@ -289,6 +322,7 @@ fn build_config_for_single_file(
     cli.dump_dir.clone(),
     cli.dump_hir.clone(),
     None, // emit_c
+    emit_qbe,
     None, // emit_obj
     emit_bin,
     cmd.rebuild_std,
@@ -371,6 +405,24 @@ fn check_config_from_project(
     None
   };
 
+  let qbe_base_name = project
+    .entry
+    .file_stem()
+    .and_then(|stem| stem.to_str())
+    .unwrap_or("out");
+
+  let emit_qbe = if project.emit.qbe {
+    Some(
+      out_dir
+        .join("qbe")
+        .join(format!("{}.qbe", qbe_base_name))
+        .to_string_lossy()
+        .to_string(),
+    )
+  } else {
+    None
+  };
+
   // Compile-time directives: target triple + features
   if let Some(ref triple) = project.target_triple {
     config.target_triple = triple.clone();
@@ -397,6 +449,7 @@ fn check_config_from_project(
     cli.dump_dir.clone(),
     cli.dump_hir.clone(),
     emit_c,
+    emit_qbe,
     None, // emit_obj (not in check mode)
     None, // emit_bin (not in check mode)
     false,
@@ -427,6 +480,13 @@ fn check_config_for_single_file(
   config.manifest = load_manifest(&config.std_path);
 
   let out_dir = cmd.output_dir.as_deref().unwrap_or("build");
+  let stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+
+  let emit_qbe = if has_emit_kind(&cmd.emit, "qbe") {
+    Some(format!("{}/qbe/{}.qbe", out_dir, stem))
+  } else {
+    None
+  };
 
   // Compile-time directives: features from CLI
   config.enabled_features = collect_cli_features(&cmd.feature, &cmd.features);
@@ -442,6 +502,7 @@ fn check_config_for_single_file(
     cli.dump_dir.clone(),
     cli.dump_hir.clone(),
     None,
+    emit_qbe,
     None,
     None,
     false,
