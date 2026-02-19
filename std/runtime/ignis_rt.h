@@ -250,9 +250,9 @@ IgnisString ignis_string_from_len(const char *s, size_t len);
 IgnisString ignis_string_clone(const IgnisString *s);
 
 /**
- * Appends a character to the string in place.
+ * Appends a single byte to the string in place.
  */
-void ignis_string_push_char(IgnisString *s, char c);
+void ignis_string_push_char(IgnisString *s, u8 c);
 
 /**
  * Appends a C string to the string in place.
@@ -280,9 +280,9 @@ size_t ignis_string_len(const IgnisString *s);
 size_t ignis_string_cap(const IgnisString *s);
 
 /**
- * Returns the character at `idx`, or '\0' if out of range.
+ * Returns the byte at `idx`, or 0 if out of range.
  */
-char ignis_string_char_at(const IgnisString *s, size_t idx);
+u8 ignis_string_char_at(const IgnisString *s, size_t idx);
 
 /**
  * Clears the string to length 0 without releasing capacity.

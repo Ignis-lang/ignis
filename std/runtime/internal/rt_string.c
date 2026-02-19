@@ -80,7 +80,7 @@ IgnisString ignis_string_clone(const IgnisString *s) {
   return ignis_string_from_len(s->data, s->len);
 }
 
-void ignis_string_push_char(IgnisString *s, char c) {
+void ignis_string_push_char(IgnisString *s, u8 c) {
   if (s == NULL) {
     return;
   }
@@ -154,12 +154,12 @@ size_t ignis_string_cap(const IgnisString *s) {
   return s->cap;
 }
 
-char ignis_string_char_at(const IgnisString *s, size_t idx) {
+u8 ignis_string_char_at(const IgnisString *s, size_t idx) {
   if (s == NULL || idx >= s->len) {
-    return '\0';
+    return 0;
   }
 
-  return s->data[idx];
+  return (u8)s->data[idx];
 }
 
 void ignis_string_clear(IgnisString *s) {

@@ -295,13 +295,12 @@ impl<'a> Analyzer<'a> {
 
         self.scopes.pop();
 
-        let else_type = if let Some(else_branch) = &if_stmt.else_block {
-          self.typecheck_node(else_branch, ScopeKind::Block, ctx)
+        if let Some(else_branch) = &if_stmt.else_block {
+          let else_type = self.typecheck_node(else_branch, ScopeKind::Block, ctx);
+          self.typecheck_common_type(&then_type, &else_type, &if_stmt.span)
         } else {
           self.types.void()
-        };
-
-        self.typecheck_common_type(&then_type, &else_type, &if_stmt.span)
+        }
       },
       ASTStatement::While(while_stmt) => {
         self.scopes.push(ScopeKind::Loop);

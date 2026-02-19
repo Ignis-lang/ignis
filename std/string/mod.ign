@@ -35,14 +35,17 @@
 //! Methods like `charAt`, `forEachByte`, `findByte`, `trimWhere`, and `split`
 //! work on individual bytes (`u8`), not Unicode code points.
 //!
-//! ## Higher-Order Byte Methods
+//! ## Higher-Order Iteration Methods
 //!
-//! String provides callback-based operations for byte-level iteration,
+//! String provides callback-based operations for char/byte iteration,
 //! searching, trimming, and splitting:
 //!
 //! | Method        | Callback signature   | Returns            | Description                        |
 //! |---------------|----------------------|--------------------|------------------------------------|
+//! | `forEach`     | `(char) -> void`     | `void`             | Iterate bytes as `char` values     |
 //! | `forEachByte` | `(u8) -> void`       | `void`             | Iterate over every byte            |
+//! | `map`         | `(char) -> char`     | `String`           | Transform bytes as `char` values   |
+//! | `mapBytes`    | `(u8) -> u8`         | `String`           | Transform bytes directly           |
 //! | `findByte`    | `(u8) -> boolean`    | `Option<u64>`      | Index of first matching byte       |
 //! | `findLastByte`| `(u8) -> boolean`    | `Option<u64>`      | Index of last matching byte        |
 //! | `trimWhere`   | `(u8) -> boolean`    | `String`           | Strip leading/trailing bytes       |
@@ -760,8 +763,21 @@ export record String {
   }
 
   // ---------------------------------------------------------------------------
-  // Higher-order byte methods
+  // Higher-order iteration methods
   // ---------------------------------------------------------------------------
+
+  /// Calls `callback` once for each byte converted to `char`.
+  ///
+  /// This is byte-backed (`char` is one byte in v0.4): each callback value
+  /// maps to one raw byte.
+  public forEach(&self, @noescape callback: (char) -> void): void {
+    let mut i: u64 = 0;
+
+    while (i < self.len) {
+      callback(self.data[i] as char);
+      i += 1;
+    }
+  }
 
   /// Calls `callback` once for each byte in the string, in order.
   ///
@@ -791,6 +807,41 @@ export record String {
       callback(self.data[i]);
       i += 1;
     }
+  }
+
+  /// Compatibility alias for `forEach()`.
+  public forEachChar(&self, @noescape callback: (char) -> void): void {
+    self.forEach(callback);
+  }
+
+  /// Maps each byte (as `char`) through `mapper` and returns a new String.
+  ///
+  /// This remains byte-backed and does not perform UTF-8 decoding.
+  public map(&self, @noescape mapper: (char) -> char): String {
+    let mut result: String = String::withCapacity(self.len);
+
+    let mut i: u64 = 0;
+
+    while (i < self.len) {
+      result.pushChar(mapper(self.data[i] as char));
+      i += 1;
+    }
+
+    return result;
+  }
+
+  /// Maps each byte through `mapper` and returns a new String.
+  public mapBytes(&self, @noescape mapper: (u8) -> u8): String {
+    let mut result: String = String::withCapacity(self.len);
+
+    let mut i: u64 = 0;
+
+    while (i < self.len) {
+      result.pushChar(mapper(self.data[i]) as char);
+      i += 1;
+    }
+
+    return result;
   }
 
   /// Returns the byte index of the first byte for which `predicate`

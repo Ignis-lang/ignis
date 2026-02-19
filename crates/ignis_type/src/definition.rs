@@ -28,7 +28,7 @@ pub enum ConstValue {
   Int(i64),
   Float(ordered_float::OrderedFloat<f64>),
   Bool(bool),
-  Char(char),
+  Char(u8),
   String(String),
   Array(Vec<ConstValue>),
   Tuple(Vec<ConstValue>),
