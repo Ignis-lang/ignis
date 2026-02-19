@@ -65,7 +65,7 @@ namespace Math {
 - Unsigned integers: `u8`, `u16`, `u32`, `u64`
 - Floating point: `f32`, `f64`
 - `boolean`
-- `char`
+- `char` (single byte)
 - `atom`
 - `str`
 - `void`
@@ -73,9 +73,15 @@ namespace Math {
 
 ### 3.2 `str`
 
-- `str` is a primitive string-like type.
+- `str` is a primitive UTF-8 byte string slice type.
 
-### 3.3 `atom`
+### 3.3 `char`
+
+- `char` is byte-oriented in v0.4 (`0..=255`).
+- Character literals must resolve to a single byte.
+- Multi-byte literals (for example `'ñ'`) are rejected; use `str` instead.
+
+### 3.4 `atom`
 
 `atom` is a primitive type for interned labels. Atom literals use the `:` prefix.
 
@@ -88,7 +94,7 @@ function status(ok: boolean): atom {
 }
 ```
 
-### 3.4 `null`
+### 3.5 `null`
 
 `null` is a literal of type `NullPtr`. It coerces to any pointer type when the context provides one.
 
@@ -844,6 +850,12 @@ null
 :ok
 [1, 2, 3]
 ```
+
+Character literal notes:
+
+- `'a'` and escapes such as `'\n'` are valid.
+- Unicode escapes are valid only when the code point fits in one byte (`<= 0xFF`).
+- Multi-byte character literals are rejected with `multi-byte char literal; use str`.
 
 ### 9.2 Atoms
 

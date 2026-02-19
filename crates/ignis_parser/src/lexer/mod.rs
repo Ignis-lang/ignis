@@ -15,7 +15,7 @@ pub struct IgnisLexer<'a> {
   prev: char,
   pub diagnostics: Vec<DiagnosticMessage>,
   pending_string: Option<String>,
-  pending_char: Option<char>,
+  pending_char: Option<u8>,
 }
 
 impl<'a> IgnisLexer<'a> {
@@ -264,12 +264,12 @@ impl<'a> IgnisLexer<'a> {
     let c = if self.peek() == '\\' {
       self.advance();
       match self.peek() {
-        'n' => '\n',
-        'r' => '\r',
-        't' => '\t',
-        '0' => '\0',
-        '\\' => '\\',
-        '\'' => '\'',
+        'n' => b'\n',
+        'r' => b'\r',
+        't' => b'\t',
+        '0' => b'\0',
+        '\\' => b'\\',
+        '\'' => b'\'',
         'u' => {
           self.advance();
 
@@ -299,8 +299,21 @@ impl<'a> IgnisLexer<'a> {
             ))
           })?;
 
-          char::from_u32(code_point)
-            .ok_or_else(|| Box::new(DiagnosticMessage::InvalidCharacter(self.mk_span(char_start, self.current))))?
+          if code_point > u8::MAX as u32 {
+            if self.peek() == '}' {
+              self.advance();
+            }
+
+            if self.peek() == '\'' {
+              self.advance();
+            }
+
+            return Err(Box::new(DiagnosticMessage::MultiByteCharacterLiteral(
+              self.mk_span(char_start, self.current),
+            )));
+          }
+
+          code_point as u8
         },
         _ => {
           return Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
@@ -309,7 +322,21 @@ impl<'a> IgnisLexer<'a> {
         },
       }
     } else {
-      self.peek()
+      let value = self.peek();
+
+      if value.len_utf8() != 1 {
+        self.advance();
+
+        if self.peek() == '\'' {
+          self.advance();
+        }
+
+        return Err(Box::new(DiagnosticMessage::MultiByteCharacterLiteral(
+          self.mk_span(char_start, self.current),
+        )));
+      }
+
+      value as u8
     };
 
     self.advance();
@@ -743,5 +770,48 @@ mod tests {
         (TokenType::Eof, ""),
       ],
     );
+  }
+
+  #[test]
+  fn lexes_byte_char_literals() {
+    let LexResult { tokens, diagnostics } = lex("'a' '\\n' '\\u{41}'");
+
+    assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Char, "97"),
+        (TokenType::Char, "10"),
+        (TokenType::Char, "65"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn rejects_multi_byte_char_literal() {
+    let LexResult { tokens, diagnostics } = lex("'ñ'");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::MultiByteCharacterLiteral(_) => {},
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(&tokens, &[(TokenType::Eof, "")]);
+  }
+
+  #[test]
+  fn rejects_unicode_escape_above_byte_range() {
+    let LexResult { tokens, diagnostics } = lex("'\\u{2764}'");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::MultiByteCharacterLiteral(_) => {},
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(&tokens, &[(TokenType::Eof, "")]);
   }
 }

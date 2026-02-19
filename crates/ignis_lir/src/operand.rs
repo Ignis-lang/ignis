@@ -36,7 +36,7 @@ pub enum ConstValue {
   UInt(u64, TypeId),
   Float(ordered_float::OrderedFloat<f64>, TypeId),
   Bool(bool, TypeId),
-  Char(char, TypeId),
+  Char(u8, TypeId),
   String(String, TypeId),
   Atom(u32, TypeId),
   Null(TypeId),

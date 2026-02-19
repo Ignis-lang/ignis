@@ -652,13 +652,13 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_char_unicode() {
+fn e2e_char_unicode_escape_byte() {
   e2e_test(
-    "char_unicode",
+    "char_unicode_escape_byte",
     r#"
 function main(): i32 {
-    let heart: char = '\u{2764}';
-    return (heart as i32) % 256;
+    let value: char = '\u{00FF}';
+    return value as i32;
 }
 "#,
   );
