@@ -192,12 +192,22 @@ let hir_id = self.hir.alloc(HIRNode {
 LIR is built via `FunctionBuilder`:
 
 ```rust
-let dest = builder.new_temp(result_type);
-builder.emit_instr(Instr::BinOp {
+let dest = self.fn_builder().alloc_temp(result_type, span);
+self.fn_builder().emit(Instr::BinOp {
   dest,
-  op: BinOp::Add,
-  left: Operand::Temporary(left_temp),
-  right: Operand::Temporary(right_temp),
+  op: BinaryOperation::Add,
+  left: Operand::Temp(left_temp),
+  right: Operand::Temp(right_temp),
+});
+```
+
+Block terminators control flow exits:
+
+```rust
+self.fn_builder().terminate(Terminator::Branch {
+  condition: cond_operand,
+  then_block,
+  else_block,
 });
 ```
 
@@ -242,6 +252,7 @@ builder.emit_instr(Instr::BinOp {
 - Do use `TypeStore` creation methods (they deduplicate automatically).
 - Do collect diagnostics via `add_diagnostic()` instead of returning early on errors.
 - Do add snapshot tests for new features (E2E for behavior, golden for diagnostics/HIR).
+- Do use `@noescape` on closure parameters that must not outlive their call site.
 - Don't create `mod.rs` files; use flat module files.
 - Don't rely on implicit std path; prefer `IGNIS_STD_PATH` or `ignis.toml`.
 - Don't use `unwrap()` in compiler code; prefer `?` or diagnostic reporting.
