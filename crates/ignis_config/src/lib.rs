@@ -180,6 +180,7 @@ pub enum OutputLevel {
 pub enum TargetBackend {
   #[default]
   C,
+  Qbe,
   Iir,
   None,
 }

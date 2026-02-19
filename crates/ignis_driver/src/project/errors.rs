@@ -82,7 +82,11 @@ impl fmt::Display for ProjectError {
       },
 
       ProjectError::UnsupportedTarget { value } => {
-        write!(f, "unsupported target: '{}' (supported: 'c')", value)
+        write!(
+          f,
+          "unsupported target/backend: '{}' (supported: 'c', 'qbe', 'iir', 'none')",
+          value
+        )
       },
 
       ProjectError::InvalidEmit { value } => {

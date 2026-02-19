@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use colored::*;
 use ignis_ast::display::format_ast_nodes;
-use ignis_config::{DebugTrace, DumpKind, IgnisConfig};
+use ignis_config::{DebugTrace, DumpKind, IgnisConfig, TargetBackend};
 
 use ignis_log::{
   cmd_artifact, cmd_fail, cmd_header, cmd_ok, cmd_stats, log_dbg, log_phase, log_trc, phase_log, phase_ok, phase_warn,
@@ -129,9 +129,10 @@ fn resolve_type_param(
   args: &[TypeId],
 ) -> TypeId {
   match types.get(&ty) {
-    Type::Param { owner: param_owner, index } if *param_owner == owner => {
-      args.get(*index as usize).copied().unwrap_or(ty)
-    },
+    Type::Param {
+      owner: param_owner,
+      index,
+    } if *param_owner == owner => args.get(*index as usize).copied().unwrap_or(ty),
     _ => ty,
   }
 }
@@ -693,6 +694,16 @@ pub fn compile_project(
         || bc.emit_bin.is_some()
         || bc.lib;
       if needs_emit {
+        if matches!(bc.target, TargetBackend::Qbe) {
+          cmd_fail!(
+            &config,
+            if check_mode { "Check failed" } else { "Build failed" },
+            start.elapsed()
+          );
+          eprintln!("{} QBE backend not implemented yet", "Error:".red().bold());
+          return Err(());
+        }
+
         trace_dbg!(&config, DebugTrace::Codegen, "emitting C code");
 
         if verify_result.is_err() {

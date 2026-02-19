@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ignis_config::TargetBackend;
+
 use crate::project::config::ProjectToml;
 use crate::project::errors::ProjectError;
 
@@ -55,6 +57,9 @@ pub struct Project {
   /// Include debug information.
   pub debug: bool,
 
+  /// Selected compilation backend.
+  pub backend: TargetBackend,
+
   /// Target triple used for compile-time directives.
   pub target_triple: Option<String>,
 
@@ -75,6 +80,30 @@ pub struct Project {
 
   /// Import path aliases: first segment -> absolute directory path.
   pub aliases: HashMap<String, PathBuf>,
+}
+
+fn resolve_backend(
+  toml: &ProjectToml,
+  overrides: &CliOverrides,
+) -> Result<TargetBackend, ProjectError> {
+  if let Some(backend) = overrides.backend {
+    return Ok(backend);
+  }
+
+  let raw = toml
+    .build
+    .backend
+    .as_deref()
+    .unwrap_or(toml.build.target.as_str())
+    .to_ascii_lowercase();
+
+  match raw.as_str() {
+    "c" => Ok(TargetBackend::C),
+    "qbe" => Ok(TargetBackend::Qbe),
+    "iir" => Ok(TargetBackend::Iir),
+    "none" => Ok(TargetBackend::None),
+    _ => Err(ProjectError::UnsupportedTarget { value: raw }),
+  }
 }
 
 /// Set of extra artifacts to emit during compilation.
@@ -98,6 +127,7 @@ pub struct EmitSet {
 pub struct CliOverrides {
   pub opt_level: Option<u8>,
   pub debug: Option<bool>,
+  pub backend: Option<TargetBackend>,
   pub out_dir: Option<PathBuf>,
   pub std_path: Option<PathBuf>,
   pub target_triple: Option<String>,
@@ -223,6 +253,8 @@ pub fn resolve_project(
   // Resolve debug
   let debug = overrides.debug.unwrap_or(toml.build.debug);
 
+  let backend = resolve_backend(&toml, overrides)?;
+
   // Resolve target triple
   let target_triple = overrides.target_triple.clone().or(toml.build.target_triple.clone());
 
@@ -235,14 +267,6 @@ pub fn resolve_project(
 
   // Resolve cflags
   let cflags = overrides.cflags.clone().unwrap_or(toml.build.cflags);
-
-  // Validate target
-  let target_lower = toml.build.target.to_lowercase();
-  if target_lower != "c" {
-    return Err(ProjectError::UnsupportedTarget {
-      value: toml.build.target,
-    });
-  }
 
   // Resolve emit
   let emit_values = overrides.emit.as_ref().unwrap_or(&toml.build.emit);
@@ -281,6 +305,7 @@ pub fn resolve_project(
     bin: toml.build.bin,
     opt_level,
     debug,
+    backend,
     target_triple,
     known_features,
     default_features,
@@ -352,6 +377,7 @@ mod tests {
         out_dir: "build".to_string(),
         opt_level: None,
         debug: false,
+        backend: None,
         target: "c".to_string(),
         target_triple: None,
         known_features: Vec::new(),
@@ -389,6 +415,7 @@ mod tests {
     assert!(project.bin);
     assert_eq!(project.opt_level, 0);
     assert!(!project.debug);
+    assert_eq!(project.backend, TargetBackend::C);
     assert!(project.target_triple.is_none());
     assert!(project.known_features.is_empty());
     assert!(project.default_features.is_empty());
@@ -396,6 +423,37 @@ mod tests {
     assert!(project.cflags.is_empty());
     assert!(!project.emit.c);
     assert!(!project.emit.obj);
+
+    fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_resolve_backend_from_backend_field() {
+    let temp_dir = setup_project_dir("backend_field_qbe");
+    let mut toml = minimal_toml("test");
+    toml.build.backend = Some("qbe".to_string());
+
+    let overrides = CliOverrides::default();
+
+    let project = resolve_project(temp_dir.clone(), toml, &overrides).unwrap();
+    assert_eq!(project.backend, TargetBackend::Qbe);
+
+    fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_resolve_backend_override_takes_precedence() {
+    let temp_dir = setup_project_dir("backend_override_priority");
+    let mut toml = minimal_toml("test");
+    toml.build.backend = Some("qbe".to_string());
+
+    let overrides = CliOverrides {
+      backend: Some(TargetBackend::C),
+      ..Default::default()
+    };
+
+    let project = resolve_project(temp_dir.clone(), toml, &overrides).unwrap();
+    assert_eq!(project.backend, TargetBackend::C);
 
     fs::remove_dir_all(&temp_dir).unwrap();
   }

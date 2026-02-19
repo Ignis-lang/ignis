@@ -69,9 +69,34 @@ impl From<DebugTraceCli> for DebugTrace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-pub enum Target {
-  /// Transpile to C an compile to native code
+pub enum Backend {
+  /// Transpile to C and compile to native code
   C,
+  /// Lower to QBE IL and compile to native code
+  Qbe,
+  /// Export Intermediate Representation (legacy)
+  Iir,
+  /// No target (legacy)
+  None,
+}
+
+impl From<Backend> for TargetBackend {
+  fn from(value: Backend) -> Self {
+    match value {
+      Backend::C => TargetBackend::C,
+      Backend::Qbe => TargetBackend::Qbe,
+      Backend::Iir => TargetBackend::Iir,
+      Backend::None => TargetBackend::None,
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum Target {
+  /// Transpile to C and compile to native code
+  C,
+  /// Lower to QBE IL and compile to native code
+  Qbe,
   /// Export Intermediate Representation
   Iir,
   /// No target
@@ -82,6 +107,7 @@ impl From<Target> for TargetBackend {
   fn from(val: Target) -> Self {
     match val {
       Target::C => TargetBackend::C,
+      Target::Qbe => TargetBackend::Qbe,
       Target::Iir => TargetBackend::Iir,
       Target::None => TargetBackend::None,
     }
@@ -137,9 +163,13 @@ pub struct BuildCommand {
   #[arg(long = "lib", short = 'l', conflicts_with = "bin")]
   pub lib: bool,
 
-  /// The target to compile to
-  #[arg(short, long, value_enum, default_value = "c")]
-  pub target: Target,
+  /// Backend to compile with
+  #[arg(long, value_enum)]
+  pub backend: Option<Backend>,
+
+  /// Deprecated alias for --backend
+  #[arg(short, long, value_enum)]
+  pub target: Option<Target>,
 
   /// Override target triple used by compile-time directives
   #[arg(long = "target-triple")]
@@ -187,9 +217,13 @@ pub struct InitCommand {
   #[arg(short, long, default_value = "0.1.0")]
   pub project_version: String,
 
-  /// The target to compile to
-  #[arg(short, long, value_enum, default_value = "c")]
-  pub target: Target,
+  /// Backend to set in the generated project
+  #[arg(long, value_enum)]
+  pub backend: Option<Backend>,
+
+  /// Deprecated alias for --backend
+  #[arg(short, long, value_enum)]
+  pub target: Option<Target>,
 
   /// Entry file name (defaults to main.ign or lib.ign with --lib)
   #[arg(short, long)]
@@ -252,9 +286,13 @@ pub struct CheckCommand {
   #[arg(long = "lib", short = 'l', conflicts_with = "bin")]
   pub lib: bool,
 
-  /// The target to compile to
-  #[arg(short, long, value_enum, default_value = "c")]
-  pub target: Target,
+  /// Backend to compile with
+  #[arg(long, value_enum)]
+  pub backend: Option<Backend>,
+
+  /// Deprecated alias for --backend
+  #[arg(short, long, value_enum)]
+  pub target: Option<Target>,
 
   /// Override target triple used by compile-time directives
   #[arg(long = "target-triple")]

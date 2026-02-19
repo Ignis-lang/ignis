@@ -97,7 +97,13 @@ pub struct BuildTomlConfig {
   #[serde(default)]
   pub debug: bool,
 
-  /// Target backend. Default: "c".
+  /// Backend selector (preferred): "c" | "qbe" | legacy values.
+  /// If omitted, resolver falls back to `target` alias.
+  #[serde(default)]
+  pub backend: Option<String>,
+
+  /// Deprecated backend alias. Kept for backward compatibility.
+  /// Default: "c".
   #[serde(default = "default_target")]
   pub target: String,
 
@@ -135,6 +141,7 @@ impl Default for BuildTomlConfig {
       out_dir: default_out_dir(),
       opt_level: None,
       debug: false,
+      backend: None,
       target: default_target(),
       target_triple: None,
       known_features: Vec::new(),
@@ -190,6 +197,7 @@ version = "0.1.0"
     assert_eq!(parsed.build.source_dir, "src");
     assert_eq!(parsed.build.entry, "main.ign");
     assert_eq!(parsed.build.out_dir, "build");
+    assert_eq!(parsed.build.backend, None);
     assert_eq!(parsed.build.target, "c");
     assert_eq!(parsed.build.cc, "cc");
   }
@@ -218,6 +226,7 @@ entry = "main.ign"
 out_dir = "build"
 opt_level = 2
 debug = true
+backend = "qbe"
 target = "c"
 target_triple = "x86_64-unknown-linux-gnu"
 known_features = ["qbe", "simd"]
@@ -233,6 +242,8 @@ emit = ["c", "obj"]
     assert_eq!(parsed.ignis.runtime_path, Some("../std/runtime".to_string()));
     assert_eq!(parsed.build.opt_level, Some(2));
     assert!(parsed.build.debug);
+    assert_eq!(parsed.build.backend, Some("qbe".to_string()));
+    assert_eq!(parsed.build.target, "c");
     assert_eq!(parsed.build.target_triple, Some("x86_64-unknown-linux-gnu".to_string()));
     assert_eq!(parsed.build.known_features, vec!["qbe", "simd"]);
     assert_eq!(parsed.build.default_features, vec!["qbe"]);

@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use colored::*;
+use ignis_config::TargetBackend;
 use serde::Serialize;
 
-use crate::cli::{InitCommand, Target};
+use crate::cli::InitCommand;
 
 #[derive(Serialize)]
 struct ProjectTomlFile {
@@ -45,7 +46,11 @@ struct BuildSection {
   out_dir: String,
   opt_level: u8,
   debug: bool,
-  target: String,
+  backend: String,
+
+  #[serde(skip_serializing_if = "Option::is_none")]
+  target: Option<String>,
+
   cc: String,
   cflags: Vec<String>,
   emit: Vec<String>,
@@ -127,6 +132,7 @@ pub fn run_init(
   }
 
   let detected_std_paths = detect_std_paths(&project_root);
+  let backend = resolve_init_backend(cmd);
 
   let project_toml = ProjectTomlFile {
     package: PackageSection {
@@ -150,7 +156,8 @@ pub fn run_init(
       out_dir: cmd.output_dir.clone(),
       opt_level: 0,
       debug: false,
-      target: target_to_toml_value(&cmd.target),
+      backend: backend_to_toml_value(backend),
+      target: None,
       cc: "cc".to_string(),
       cflags: Vec::new(),
       emit: Vec::new(),
@@ -309,11 +316,24 @@ fn trim_and_filter(values: &[String]) -> Vec<String> {
     .collect()
 }
 
-fn target_to_toml_value(target: &Target) -> String {
-  match target {
-    Target::C => "c".to_string(),
-    Target::Iir => "iir".to_string(),
-    Target::None => "none".to_string(),
+fn resolve_init_backend(cmd: &InitCommand) -> TargetBackend {
+  if let Some(backend) = cmd.backend.clone() {
+    return backend.into();
+  }
+
+  if let Some(target) = cmd.target.clone() {
+    return target.into();
+  }
+
+  TargetBackend::C
+}
+
+fn backend_to_toml_value(backend: TargetBackend) -> String {
+  match backend {
+    TargetBackend::C => "c".to_string(),
+    TargetBackend::Qbe => "qbe".to_string(),
+    TargetBackend::Iir => "iir".to_string(),
+    TargetBackend::None => "none".to_string(),
   }
 }
 
@@ -398,7 +418,8 @@ mod tests {
       description: "A Ignis project".to_string(),
       license: "MIT".to_string(),
       project_version: "0.1.0".to_string(),
-      target: Target::C,
+      backend: None,
+      target: None,
       main_file: None,
       output_dir: "build".to_string(),
       source_dir: "src".to_string(),

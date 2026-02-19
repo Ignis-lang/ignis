@@ -7,8 +7,8 @@ use std::sync::Arc;
 use clap::Parser as ClapParser;
 use colored::*;
 
-use cli::{BuildCommand, CheckCommand, Cli, SubCommand};
-use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
+use cli::{Backend, BuildCommand, CheckCommand, Cli, SubCommand, Target};
+use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest, TargetBackend};
 use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
   CliOverrides, Project,
@@ -133,6 +133,7 @@ fn build_cli_overrides(cmd: &BuildCommand) -> CliOverrides {
     } else {
       None
     },
+    backend: resolve_backend_override(&cmd.backend, &cmd.target),
     out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
     std_path: cmd.std_path.as_ref().map(PathBuf::from),
     target_triple: cmd.target_triple.clone(),
@@ -146,7 +147,10 @@ fn build_cli_overrides(cmd: &BuildCommand) -> CliOverrides {
   }
 }
 
-fn collect_cli_features(cmd_feature: &[String], cmd_features: &[String]) -> std::collections::HashSet<String> {
+fn collect_cli_features(
+  cmd_feature: &[String],
+  cmd_features: &[String],
+) -> std::collections::HashSet<String> {
   let mut set = std::collections::HashSet::new();
   for f in cmd_feature {
     set.insert(f.clone());
@@ -221,7 +225,7 @@ fn build_config_from_project(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(project.entry.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    project.backend,
     true, // is_project
     project.opt_level > 0,
     project.out_dir.to_string_lossy().to_string(),
@@ -277,7 +281,7 @@ fn build_config_for_single_file(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(file_path.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    resolve_backend_or_default(&cmd.backend, &cmd.target),
     false, // is_project
     cmd.opt_level.unwrap_or(0) > 0,
     out_dir.to_string(),
@@ -324,6 +328,7 @@ fn check_cli_overrides(cmd: &CheckCommand) -> CliOverrides {
   CliOverrides {
     opt_level: None,
     debug: None,
+    backend: resolve_backend_override(&cmd.backend, &cmd.target),
     out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
     std_path: cmd.std_path.as_ref().map(PathBuf::from),
     target_triple: cmd.target_triple.clone(),
@@ -384,7 +389,7 @@ fn check_config_from_project(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(project.entry.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    project.backend,
     true,
     false, // optimize
     project.out_dir.to_string_lossy().to_string(),
@@ -429,7 +434,7 @@ fn check_config_for_single_file(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(file_path.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    resolve_backend_or_default(&cmd.backend, &cmd.target),
     false,
     false,
     out_dir.to_string(),
@@ -520,6 +525,24 @@ fn resolve_std_path(cli_override: Option<&str>) -> String {
   }
 
   std::env::var("IGNIS_STD_PATH").unwrap_or_default()
+}
+
+fn resolve_backend_override(
+  backend: &Option<Backend>,
+  legacy_target: &Option<Target>,
+) -> Option<TargetBackend> {
+  if let Some(backend) = backend.clone() {
+    return Some(backend.into());
+  }
+
+  legacy_target.clone().map(Into::into)
+}
+
+fn resolve_backend_or_default(
+  backend: &Option<Backend>,
+  legacy_target: &Option<Target>,
+) -> TargetBackend {
+  resolve_backend_override(backend, legacy_target).unwrap_or(TargetBackend::C)
 }
 
 /// Load the std manifest from std_path/manifest.toml.
