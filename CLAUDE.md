@@ -18,6 +18,7 @@ crates/
   ignis_ast/          # AST node types (statements, expressions, types, attributes, patterns)
   ignis_type/         # Type system (Type, TypeStore, Definition, DefinitionStore, SymbolTable)
   ignis_token/        # Token types and lexer
+  ignis_data_type/    # Legacy data type enum (used by ignis_token)
   ignis_config/       # Build configuration types (std manifest, linking info)
   ignis_diagnostics/  # Diagnostic messages, severity, rendering
   ignis_log/          # Build output macros (cmd_header!, phase_log!, cmd_ok!, cmd_fail!)
@@ -25,6 +26,11 @@ crates/
 std/                  # Ignis standard library sources (.ign) + C runtime
   manifest.toml       # Module registry and linking configuration
   runtime/            # C runtime (ignis_rt.h, libignis_rt.a)
+  fs/                 # Filesystem: readToString, writeString, Dir, File, Metadata
+  ffi/                # FFI utilities: CString
+  path/               # Path manipulation
+  io/                 # Print functions + IoError types
+  libc/               # C standard library wrappers (9 submodules)
 test_cases/           # Ignis fixture files for analyzer tests
 example/              # Example Ignis programs
 ```
@@ -124,8 +130,8 @@ Analyzer (crates/ignis_analyzer/src/lib.rs)
   3. typecheck_phase()   → node_types, TypeStore (bidirectional inference)
   4. const_eval_phase()  → compile-time constant values
   5. extra_checks_phase()→ control flow, never-typed expressions
-  6. lint_phase()        → unused variables/imports, deprecated calls
-  7. lower_to_hir()      → HIR
+  6. lint_phase()        → unused variables/imports/mut, deprecated calls
+  7. lower_to_hir()      → HIR (includes capture analysis + escape analysis for closures)
 
 Post-analysis (crates/ignis_driver/src/pipeline.rs)
   → Monomorphizer::run()              # Specialize generics to concrete types
@@ -133,6 +139,7 @@ Post-analysis (crates/ignis_driver/src/pipeline.rs)
   → HirOwnershipChecker::check()      # Produce DropSchedules
   → ignis_lir::lowering::lower_and_verify()  # HIR → LIR (basic blocks, TAC)
   → ignis_codegen_c::emit_*()         # LIR → C source code
+  → main wrapper generation            # __ignis_user_main + C main() wrapper
 
 Linking (crates/ignis_driver/src/link.rs)
   → gcc -c → object files (.o)
@@ -153,8 +160,10 @@ Linking (crates/ignis_driver/src/link.rs)
 | `SymbolId` / `SymbolTable` | ignis_type | Interned identifiers for cheap comparisons |
 | `HIRNode` (HIRId) / `HIRKind` | ignis_hir | High-level IR (typed, resolved, tree-based) |
 | `HIRPattern` / `HIRMatchArm` | ignis_hir | Pattern matching in HIR (match, if let, let else) |
+| `HIRCapture` / `CaptureMode` | ignis_hir | Closure capture descriptors (by ref, by move, etc.) |
 | `DropSchedules` | ignis_hir | When/where to emit drop calls for owned types |
 | `Instr` / `Operand` / `Block` | ignis_lir | Low-level IR (TAC, basic blocks, terminators) |
+| `Terminator` | ignis_lir | Block exit: `Goto`, `Branch`, `Return`, `Unreachable` |
 | `FunctionLir` / `LirProgram` | ignis_lir | Per-function LIR with locals, temps, blocks |
 | `Diagnostic` | ignis_diagnostics | Errors/warnings with spans, labels, notes |
 
@@ -225,7 +234,8 @@ Patterns are used by `match`, `if let`, `while let`, and `let else`.
 
 6. **Handle in LIR lowering** (`crates/ignis_lir/src/lowering/mod.rs`) — generate condition checks and bindings.
 
-Existing patterns: `Wildcard`, `Literal`, `Binding`, `Variant` (with destructure), `Tuple`, `Or`.
+AST patterns: `Wildcard`, `Literal`, `Path` (with optional destructure args), `Tuple`, `Or`.
+HIR patterns: `Wildcard`, `Literal`, `Binding`, `Variant` (with destructure), `Tuple`, `Or`, `Constant`.
 
 ### Adding a New Lint
 
@@ -241,7 +251,7 @@ Existing patterns: `Wildcard`, `Literal`, `Binding`, `Variant` (with destructure
 
 5. **Support `@allow`/`@warn`/`@deny`** — the directive system already maps attribute names to `LintId`.
 
-Existing lints: `UnusedVariable`, `UnusedImport`, `Deprecated`.
+Existing lints: `UnusedVariable`, `UnusedImport`, `UnusedMut`, `Deprecated`.
 
 ### Adding a New Type
 
@@ -276,7 +286,7 @@ Attributes use `@name` or `@name(args)` syntax on declarations.
 3. **Handle in codegen** (`crates/ignis_codegen_c/src/emit.rs`):
    - Emit the appropriate C `__attribute__` or equivalent.
 
-Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `@deprecated`, `@deprecated("message")`, `@inline`, `@inline(always)`, `@inline(never)`, `@allow(lint)`, `@warn(lint)`, `@deny(lint)`, `@implements(Drop)`, `@implements(Clone)`, `@implements(Copy)`, `@implements(TraitName)`, `@extension(Type)`, `@extension(Type, mut)`, `@langHook("name")`, `@takes` (parameter attribute).
+Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `@deprecated`, `@deprecated("message")`, `@inline`, `@inline(always)`, `@inline(never)`, `@allow(lint)`, `@warn(lint)`, `@deny(lint)`, `@implements(Drop)`, `@implements(Clone)`, `@implements(Copy)`, `@implements(TraitName)`, `@extension(Type)`, `@extension(Type, mut)`, `@langHook("name")` (namespace attribute), `@lang(try)` (record attribute for Result/Option), `@takes` (parameter attribute), `@noescape` (parameter attribute for closures).
 
 ## Testing
 
@@ -391,6 +401,8 @@ fn my_semantic_check() {
 | `crates/ignis_analyzer/src/mono.rs` | Monomorphization (generic specialization) |
 | `crates/ignis_analyzer/src/lint.rs` | Lint infrastructure and checks |
 | `crates/ignis_analyzer/src/scope.rs` | Scope tree management |
+| `crates/ignis_analyzer/src/capture.rs` | Closure capture analysis (determine what closures capture) |
+| `crates/ignis_analyzer/src/escape.rs` | Escape analysis (determine if closures outlive their defining scope) |
 | `crates/ignis_hir/src/lib.rs` | HIR types: HIRNode, HIRKind, HIR store |
 | `crates/ignis_hir/src/pattern.rs` | HIRPattern, HIRMatchArm for pattern matching |
 | `crates/ignis_hir/src/drop_schedule.rs` | Drop scheduling for ownership |
@@ -413,5 +425,47 @@ fn my_semantic_check() {
 | `crates/ignis_diagnostics/src/diagnostic_report.rs` | Diagnostic, Severity, Label |
 | `crates/ignis_lsp/src/server.rs` | LSP request handlers (hover, goto-def, completions) |
 | `crates/ignis_lsp/src/completion.rs` | Token-based completion (works without valid AST) |
+| `crates/ignis_lsp/src/at_items.rs` | Registry of `@`-prefixed builtins and directives |
+| `crates/ignis_lsp/src/type_format.rs` | Type formatting for LSP hover/display |
 | `std/manifest.toml` | Std module registry and linking config |
 | `std/runtime/ignis_rt.h` | C runtime API (memory, strings, I/O) |
+| `std/runtime/internal/rt_string.c` | IgnisString runtime implementation |
+
+## UTF-8 String/Char Semantics (v0.4)
+
+Ignis v0.4 defines string types as UTF-8 byte-backed:
+
+| Type | Representation | C equivalent |
+| --- | --- | --- |
+| `char` | Single byte (`u8`) | `u8` |
+| `str` | UTF-8 NUL-terminated byte slice | `const char*` |
+| `String` | Heap-backed UTF-8 byte buffer (data + len + cap) | `IgnisString` |
+
+Key rules:
+- Char literals (`'a'`) accept only single-byte ASCII or byte-range escapes (`\u{00}`–`\u{FF}`).
+- Multi-byte char literals (`'ñ'`, `'\u{100}'`+) produce a compile error (`MultiByteCharacterLiteral`).
+- `String::forEach` and `map` iterate over `char` by default; `forEachByte`/`mapBytes` for explicit `u8`.
+- `String → str` via `toStr()` (zero-copy view); `str → String` via `String::create(s)` (copy).
+
+## Main Wrapper
+
+The compiler generates a C `main()` wrapper around the user's `main` function:
+
+- User `main` is emitted as `__ignis_user_main`.
+- The wrapper calls it and handles the return value.
+
+Supported signatures:
+- `main(): i32` — exit code returned directly.
+- `main(): void` — wrapper returns 0.
+- `main(): Result<i32, E>` — OK unwraps the exit code; ERROR prints a panic message and calls `exit(101)`.
+- `main(argc: i32, argv: *str)` — argc/argv forwarded from C main.
+
+## Closures
+
+Closures compile through a multi-stage pipeline:
+
+1. **Capture analysis** (`capture.rs`) — determines which outer variables a closure captures and the capture mode (by ref, by move, by ref-mut).
+2. **Escape analysis** (`escape.rs`) — determines if a closure outlives its defining scope. `@noescape` on parameters prevents escape propagation.
+3. **HIR lowering** — `HIRKind::Closure` carries captures, thunk/drop definition IDs, and an `escapes` flag.
+4. **LIR lowering** — emits `MakeClosure` (captures → env struct), `CallClosure` (indirect call through thunk), `DropClosure` (cleanup).
+5. **C codegen** — non-escaping closures use stack-allocated env; escaping closures use heap-allocated env. Closure values are structs with `call` (thunk fn ptr), `drop` (optional drop fn ptr), and `env` (opaque `*u8`).

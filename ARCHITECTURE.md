@@ -45,6 +45,8 @@ crates/
     src/scope.rs                  # Scope tree (Global, Function, Block, Generic, Loop)
     src/imports.rs                # Module import/export handling
     src/modules.rs                # Module graph management, cycle detection
+    src/capture.rs                # Closure capture analysis (what closures capture and how)
+    src/escape.rs                 # Escape analysis (whether closures outlive their scope)
     src/borrowck_hir.rs           # HIR-level borrow checking
     src/ownership_hir.rs          # HirOwnershipChecker, drop schedule generation
     src/dump.rs                   # Debug dump utilities for types and definitions
@@ -93,6 +95,7 @@ crates/
     src/value.rs                  # Literal values (IgnisLiteralValue)
   ignis_token/                    # Token types
     src/token_types.rs            # Token enum (keywords, punctuation, literals)
+  ignis_data_type/                # Legacy data type enum (used by ignis_token)
   ignis_config/                   # Build configuration types
     src/lib.rs                    # IgnisSTDManifest, CHeader, StdToolchainConfig, StdLinkingInfo
   ignis_diagnostics/              # Error reporting
@@ -105,14 +108,17 @@ crates/
     src/server.rs                 # LanguageServer trait impl (hover, goto-def, refs, etc.)
     src/state.rs                  # Document state, project caching (RwLock)
     src/completion.rs             # Token-based completion (works without valid AST)
+    src/at_items.rs               # Registry of @-prefixed builtins and directives
+    src/type_format.rs            # Type formatting for LSP hover/display
     src/convert.rs                # UTF-16 position conversion
     src/semantic.rs               # Semantic token classification
     src/inlay.rs                  # Parameter name inlay hints
     src/project.rs                # ignis.toml discovery and project caching
 std/                              # Ignis standard library
   manifest.toml                   # Module registry and linking configuration
-  io/mod.ign                      # Print functions (println, print, eprintln, eprint)
-  string/mod.ign                  # String utilities (length, concat, substring, contains, etc.)
+  io/mod.ign                      # Print functions (println, print, eprintln, eprint) + IoError
+  io/error.ign                    # ErrorKind enum and IoError record
+  string/mod.ign                  # String utilities (length, concat, forEach, map, etc.)
   memory/mod.ign                  # Allocation (allocate, free, reallocate, copy, move)
   memory/align.ign                # Alignment utilities
   memory/layout.ign               # Memory layout
@@ -123,8 +129,11 @@ std/                              # Ignis standard library
   option/mod.ign                  # Option<S> (SOME/NONE)
   result/mod.ign                  # Result<T, E> (OK/ERROR)
   rc/mod.ign                      # Rc<T> and Weak<T> (reference-counted pointers)
-  libc/mod.ign                    # C standard library wrappers
+  libc/mod.ign                    # C standard library wrappers (9 submodules)
   ptr/mod.ign                     # Pointer utilities
+  ffi/mod.ign                     # FFI utilities (CString)
+  fs/mod.ign                      # Filesystem (readToString, writeString, Dir, File, Metadata)
+  path/mod.ign                    # Path manipulation utilities
   runtime/                        # C runtime implementation
     ignis_rt.h                    # Runtime API header (types, strings, Rc, memory)
     libignis_rt.a                 # Precompiled runtime archive
@@ -206,9 +215,9 @@ Seven sequential phases over the AST:
 | 3. Type Checking | `typeck.rs` | Bidirectional type inference. Propagates expected types downward via `InferContext`. Handles overload resolution. |
 | 4. Const Eval | `const_eval.rs` | Evaluate constant expressions at compile time. Populate `ConstantDefinition::value`. |
 | 5. Extra Checks | `checks.rs` | Control flow analysis (missing returns, unreachable code, never-typed expressions). |
-| 6. Lints | `lint.rs` | `UnusedVariable`, `UnusedImport`, `Deprecated`. Respects `@allow`/`@warn`/`@deny` directives. |
+| 6. Lints | `lint.rs` | `UnusedVariable`, `UnusedImport`, `UnusedMut`, `Deprecated`. Respects `@allow`/`@warn`/`@deny` directives. |
 
-After all phases, `lower_to_hir()` converts the typed AST into HIR.
+After all phases, `lower_to_hir()` converts the typed AST into HIR. This stage also runs **capture analysis** (`capture.rs`) and **escape analysis** (`escape.rs`) for closures.
 
 **Output:** `AnalyzerOutput` containing `TypeStore`, `DefinitionStore`, `HIR`, diagnostics, and lookup maps (`node_defs`, `node_types`, `node_spans`, `resolved_calls`) used by the LSP.
 
@@ -244,10 +253,11 @@ Runs on monomorphized HIR after borrow checking. Validates move semantics and re
 Tree-based intermediate representation preserving program structure. Each `HIRNode` has a `HIRKind` (operation), `Span` (source location), and `TypeId` (inferred type). Uses `DefinitionId` references instead of names.
 
 Key `HIRKind` categories:
-- **Expressions:** `Literal`, `Variable`, `Binary`, `Unary`, `Call`, `Cast`, `Reference`, `Dereference`, `Index`, `FieldAccess`, `MethodCall`, `EnumVariant`, `RecordInit`, `Match`, `StaticAccess`.
-- **Statements:** `Let`, `LetElse`, `Assign`, `Block`, `If`, `Loop`, `Break`, `Continue`, `Return`.
-- **Patterns:** `HIRPattern` (Wildcard, Literal, Binding, Variant, Tuple, Or) used by `Match`, `LetElse`, and let-conditions in `If`/`Loop`.
+- **Expressions:** `Literal`, `Variable`, `Binary`, `Unary`, `Call`, `CallClosure`, `Cast`, `BitCast`, `Reference`, `Dereference`, `Index`, `VectorLiteral`, `FieldAccess`, `MethodCall`, `EnumVariant`, `RecordInit`, `Match`, `StaticAccess`, `Closure`.
+- **Statements:** `Let`, `LetElse`, `Assign`, `Block`, `If`, `Loop`, `Break`, `Continue`, `Return`, `Defer`, `ExpressionStatement`.
+- **Patterns:** `HIRPattern` (Wildcard, Literal, Binding, Variant, Tuple, Or, Constant) used by `Match`, `LetElse`, and let-conditions in `If`/`Loop`.
 - **Builtins:** `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `Panic`, `Trap`, `BuiltinUnreachable`, `BuiltinLoad`, `BuiltinStore`, `BuiltinDropInPlace`, `BuiltinDropGlue`.
+- **Closures:** `HIRKind::Closure` carries params, captures (`HIRCapture`), thunk/drop definitions, escape flag, and capture mode overrides.
 
 ### LIR
 
@@ -255,8 +265,8 @@ Key `HIRKind` categories:
 
 Three-address code (TAC) with basic block structure. Each instruction has at most one operation with results stored in temporaries (`TempId`) or locals (`LocalId`).
 
-- **Instructions:** `Load`, `Store`, `LoadPtr`, `StorePtr`, `BuiltinLoad`, `BuiltinStore`, `Copy`, `BinOp`, `UnaryOp`, `Cast`, `BitCast`, `Call`, `RuntimeCall`, `GetElementPtr`, `InitVector`, `InitRecord`, `InitEnumVariant`, `EnumGetTag`, `EnumGetPayloadField`, `GetFieldPtr`, `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `AddrOfLocal`, `Drop`, `DropInPlace`, `DropGlue`, `Trap`, `PanicMessage`.
-- **Terminators:** `Jump`, `CondJump`, `Return`, `Unreachable`.
+- **Instructions:** `Load`, `Store`, `LoadPtr`, `StorePtr`, `BuiltinLoad`, `BuiltinStore`, `Copy`, `BinOp`, `UnaryOp`, `Cast`, `BitCast`, `Call`, `RuntimeCall`, `GetElementPtr`, `InitVector`, `InitRecord`, `InitEnumVariant`, `EnumGetTag`, `EnumGetPayloadField`, `GetFieldPtr`, `SizeOf`, `AlignOf`, `MaxOf`, `MinOf`, `AddrOfLocal`, `Drop`, `DropInPlace`, `DropGlue`, `Trap`, `PanicMessage`, `MakeClosure`, `CallClosure`, `DropClosure`, `TypeIdOf`, `Nop`.
+- **Terminators:** `Goto`, `Branch`, `Return`, `Unreachable`.
 - **Program structure:** `LirProgram` contains `HashMap<DefinitionId, FunctionLir>`. Each `FunctionLir` has an entry block, a store of `Block`s, `LocalData`, and `TempData`.
 
 **Lowering:** `LoweringContext` (in `lowering/mod.rs`) converts HIR to LIR, managing block creation, control flow, drop scheduling, and temporary allocation. `FunctionBuilder` (in `lowering/builder.rs`) emits instructions into blocks.
@@ -325,8 +335,8 @@ Key modules:
 
 | Module | Provides |
 | --- | --- |
-| `io` | `println`, `print`, `eprintln`, `eprint` |
-| `string` | `length`, `concat`, `substring`, `contains`, `toUpperCase`, `toLowerCase`, `toString` overloads |
+| `io` | `println`, `print`, `eprintln`, `eprint`, `IoError`, `ErrorKind` |
+| `string` | `length`, `concat`, `substring`, `contains`, `forEach`, `map`, `toUpperCase`, `toLowerCase`, `toString` overloads |
 | `memory` | `allocate<T>`, `free<T>`, `reallocate<T>`, `copy<T>`, `move<T>`, `Layout`, `Align` |
 | `vector` | `Vector<T>` with `init`, `push`, `pop`, `at`, `clear`, `shrink` (implements `Drop`) |
 | `math` | `sin`, `cos`, `sqrt`, `pow`, `floor`, `ceil`, `round`, constants (`PI`, `E`, `TAU`) |
@@ -335,8 +345,13 @@ Key modules:
 | `option` | `Option<S>` with `SOME`/`NONE`, helpers (`isSome`, `isNone`, `unwrap`, `unwrapOr`) |
 | `result` | `Result<T, E>` with `OK`/`ERROR`, helpers (`isOk`, `isError`, `unwrap`, `unwrapOr`) |
 | `rc` | `Rc<T>` (shared ownership), `Weak<T>` (non-owning observer) |
-| `libc` | C standard library wrappers |
+| `libc` | C standard library wrappers (memory, string, process, io, stdio, errno, misc, primitives) |
 | `ptr` | Pointer utilities |
+| `ffi` | FFI utilities: `CString` (owned NUL-terminated C string) |
+| `fs` | Filesystem: `readToString`, `writeString`, `Dir`, `File`, `Metadata` (returns `Result<T, Io::IoError>`) |
+| `path` | Path manipulation utilities |
+
+**Auto-loaded modules** (always available without explicit import): `string`, `number`, `vector`, `types`, `option`, `result`.
 
 Std modules use `extern namespace` declarations backed by C runtime functions.
 
@@ -408,6 +423,39 @@ build/user/     # User modules (module-based compilation)
   obj/          # Per-module .o files
   src/          # Per-module .c files
 ```
+
+### Main Wrapper
+
+The compiler generates a C `main()` wrapper around the user's `main` function:
+
+- User `main` is emitted as `__ignis_user_main`.
+- The wrapper calls it and handles the return value.
+
+Supported signatures:
+- `main(): i32` — exit code returned directly.
+- `main(): void` — wrapper returns 0.
+- `main(): Result<i32, E>` — OK unwraps the exit code; ERROR prints a panic message and calls `exit(101)`.
+- `main(argc: i32, argv: *str)` — argc/argv forwarded from C main.
+
+### UTF-8 String/Char Semantics (v0.4)
+
+| Type | Representation | C equivalent |
+| --- | --- | --- |
+| `char` | Single byte (`u8`) | `u8` |
+| `str` | UTF-8 NUL-terminated byte slice | `const char*` |
+| `String` | Heap-backed UTF-8 byte buffer (data + len + cap) | `IgnisString` |
+
+Char literals (`'a'`) accept only single-byte ASCII or byte-range escapes (`\u{00}`–`\u{FF}`). Multi-byte char literals produce a compile error.
+
+### Closures
+
+Closures compile through a multi-stage pipeline:
+
+1. **Capture analysis** (`capture.rs`) — determines which outer variables a closure captures and the capture mode (by ref, by move, by ref-mut).
+2. **Escape analysis** (`escape.rs`) — determines if a closure outlives its defining scope. `@noescape` on parameters prevents escape propagation.
+3. **HIR** — `HIRKind::Closure` carries captures, thunk/drop definition IDs, and an `escapes` flag.
+4. **LIR** — `MakeClosure` (captures → env struct), `CallClosure` (indirect call through thunk), `DropClosure` (cleanup).
+5. **C codegen** — non-escaping closures use stack-allocated env; escaping closures use heap-allocated env. Closure values are structs with `call` (thunk fn ptr), `drop` (optional drop fn ptr), and `env` (opaque `*u8`).
 
 ## Configuration
 
