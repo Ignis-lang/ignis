@@ -787,6 +787,20 @@ impl CompilationContext {
     root_id: ModuleId,
     config: &IgnisConfig,
   ) -> Result<ignis_analyzer::AnalyzerOutput, ()> {
+    let (output, has_errors) = self.compile_collect_all(root_id, config)?;
+
+    if has_errors {
+      return Err(());
+    }
+
+    Ok(output)
+  }
+
+  pub(crate) fn compile_collect_all(
+    &mut self,
+    root_id: ModuleId,
+    config: &IgnisConfig,
+  ) -> Result<(ignis_analyzer::AnalyzerOutput, bool), ()> {
     let root_is_std = self.module_graph.modules.get(&root_id).path.is_std();
 
     // Prelude edges create cycles among std modules; skip cycle detection
@@ -816,7 +830,7 @@ impl CompilationContext {
 
     log_dbg!(config, "compile order has {} modules", order.len());
 
-    let mut output = self.analyze_modules(&order, config)?;
+    let (mut output, has_errors, _) = self.analyze_modules_collect_all(&order, config, true);
 
     let entry_point = if order.contains(&root_id) {
       let symbols = output.symbols.borrow();
@@ -848,7 +862,7 @@ impl CompilationContext {
     };
     output.hir.entry_point = entry_point;
 
-    Ok(output)
+    Ok((output, has_errors))
   }
 
   /// Compile all modules in the graph (used for std library build).
