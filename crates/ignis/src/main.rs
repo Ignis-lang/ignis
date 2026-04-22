@@ -146,7 +146,10 @@ fn build_cli_overrides(cmd: &BuildCommand) -> CliOverrides {
   }
 }
 
-fn collect_cli_features(cmd_feature: &[String], cmd_features: &[String]) -> std::collections::HashSet<String> {
+fn collect_cli_features(
+  cmd_feature: &[String],
+  cmd_features: &[String],
+) -> std::collections::HashSet<String> {
   let mut set = std::collections::HashSet::new();
   for f in cmd_feature {
     set.insert(f.clone());

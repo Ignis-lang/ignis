@@ -204,6 +204,23 @@ export function add(a: i32, b: i32): i32 {
 }
 
 #[test]
+fn staged_export_function_matches_golden() {
+  let result = common::analyze_staged(
+    r#"
+export function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "staged_export_function_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!("staged_export_function_hir", common::format_hir(&result));
+}
+
+#[test]
 fn literal_adapts_to_expected_type() {
   let result = common::analyze(
     r#"

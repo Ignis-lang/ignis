@@ -163,11 +163,7 @@ impl super::IgnisParser {
       });
     };
 
-    if condition {
-      Ok(selected)
-    } else {
-      Ok(else_selected)
-    }
+    if condition { Ok(selected) } else { Ok(else_selected) }
   }
 
   fn consume_compile_else_directive(&mut self) -> ParserResult<()> {

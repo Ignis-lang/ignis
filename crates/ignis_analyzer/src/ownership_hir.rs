@@ -666,7 +666,11 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_if(condition, then_branch, else_branch, span);
       },
 
-      HIRKind::LetElse { pattern, value, else_block } => {
+      HIRKind::LetElse {
+        pattern,
+        value,
+        else_block,
+      } => {
         self.check_node(value);
 
         let saved_reachable = self.reachable;

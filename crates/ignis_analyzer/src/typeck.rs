@@ -4506,17 +4506,18 @@ impl<'a> Analyzer<'a> {
     }
 
     // Look up instance method on the receiver type
-    let (method_id, method) = match self.resolve_pipe_instance_method(&obj_type, ma, call, None, node_id, scope_kind, ctx) {
-      Some(result) => result,
-      None => {
-        for arg in &call.arguments {
-          if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
-            self.typecheck_node(arg, scope_kind, ctx);
+    let (method_id, method) =
+      match self.resolve_pipe_instance_method(&obj_type, ma, call, None, node_id, scope_kind, ctx) {
+        Some(result) => result,
+        None => {
+          for arg in &call.arguments {
+            if !matches!(self.ast.get(arg), ASTNode::Expression(ASTExpression::PipePlaceholder { .. })) {
+              self.typecheck_node(arg, scope_kind, ctx);
+            }
           }
-        }
-        return self.types.error();
-      },
-    };
+          return self.types.error();
+        },
+      };
 
     // Mutability check
     if method.self_mutable {
@@ -4788,7 +4789,8 @@ impl<'a> Analyzer<'a> {
     };
 
     let (method_id, method) =
-      match self.resolve_pipe_instance_method(&obj_type, ma, &synthetic_call, Some(lhs_type), node_id, scope_kind, ctx) {
+      match self.resolve_pipe_instance_method(&obj_type, ma, &synthetic_call, Some(lhs_type), node_id, scope_kind, ctx)
+      {
         Some(result) => result,
         None => return self.types.error(),
       };

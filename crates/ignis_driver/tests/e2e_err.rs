@@ -212,11 +212,14 @@ function main(): i32 {
 #[test]
 fn e2e_err_config_flag_non_string() {
   use ignis_type::compilation_context::CompilationContext;
-  let errors = common::parse_errors_with_ctx(r#"
+  let errors = common::parse_errors_with_ctx(
+    r#"
 function main(): void {
     let flag: boolean = @configFlag(42);
 }
-"#, CompilationContext::default());
+"#,
+    CompilationContext::default(),
+  );
   assert!(!errors.is_empty(), "Expected parse error for invalid condition");
   assert!(
     errors.iter().any(|e| e.contains("condition")),
@@ -228,11 +231,14 @@ function main(): void {
 #[test]
 fn e2e_err_builtin_arg_count() {
   use ignis_type::compilation_context::CompilationContext;
-  let errors = common::parse_errors_with_ctx(r#"
+  let errors = common::parse_errors_with_ctx(
+    r#"
 function main(): void {
     let flag: boolean = @configFlag();
 }
-"#, CompilationContext::default());
+"#,
+    CompilationContext::default(),
+  );
   assert!(!errors.is_empty(), "Expected parse error for empty condition");
   assert!(
     errors.iter().any(|e| e.contains("condition")),
@@ -245,16 +251,21 @@ function main(): void {
 fn e2e_err_multi_byte_char_literal() {
   use ignis_type::compilation_context::CompilationContext;
 
-  let errors = common::parse_errors_with_ctx(r#"
+  let errors = common::parse_errors_with_ctx(
+    r#"
 function main(): i32 {
     let c: char = 'ñ';
     return c as i32;
 }
-"#, CompilationContext::default());
+"#,
+    CompilationContext::default(),
+  );
 
   assert!(!errors.is_empty(), "Expected parse error for multi-byte char literal");
   assert!(
-    errors.iter().any(|error| error.contains("multi-byte char literal; use str")),
+    errors
+      .iter()
+      .any(|error| error.contains("multi-byte char literal; use str")),
     "Expected multi-byte char literal error, got: {:?}",
     errors
   );

@@ -1093,16 +1093,14 @@ impl<'a> CEmitter<'a> {
         writeln!(self.output, "    {};", user_main_call).unwrap();
         writeln!(self.output, "    return 0;").unwrap();
       },
-      Some(EntryMainReturn::TryI32 { ok_tag, err_tag, error_display }) => {
+      Some(EntryMainReturn::TryI32 {
+        ok_tag,
+        err_tag,
+        error_display,
+      }) => {
         let result_ty = self.format_type(entry_return_type);
 
-        writeln!(
-          self.output,
-          "    {} __ignis_main_result = {};",
-          result_ty,
-          user_main_call
-        )
-        .unwrap();
+        writeln!(self.output, "    {} __ignis_main_result = {};", result_ty, user_main_call).unwrap();
         writeln!(self.output, "    if (__ignis_main_result.tag == {}) {{", ok_tag).unwrap();
         writeln!(
           self.output,
@@ -1134,7 +1132,8 @@ impl<'a> CEmitter<'a> {
     let entry_def_id = self.program.entry_point?;
     let entry_func = self.program.functions.get(&entry_def_id)?;
 
-    if entry_func.is_extern || !self.should_emit(entry_def_id) || !self.is_function_signature_monomorphized(entry_func) {
+    if entry_func.is_extern || !self.should_emit(entry_def_id) || !self.is_function_signature_monomorphized(entry_func)
+    {
       return None;
     }
 
@@ -1147,11 +1146,13 @@ impl<'a> CEmitter<'a> {
     match self.types.get(&entry_func.return_type) {
       Type::I32 => Some(EntryMainReturn::I32),
       Type::Void => Some(EntryMainReturn::Void),
-      Type::Enum(enum_def_id) => {
-        self
-          .entry_try_i32_layout(*enum_def_id)
-          .map(|(ok_tag, err_tag, error_display)| EntryMainReturn::TryI32 { ok_tag, err_tag, error_display })
-      },
+      Type::Enum(enum_def_id) => self
+        .entry_try_i32_layout(*enum_def_id)
+        .map(|(ok_tag, err_tag, error_display)| EntryMainReturn::TryI32 {
+          ok_tag,
+          err_tag,
+          error_display,
+        }),
       _ => None,
     }
   }
@@ -1222,9 +1223,15 @@ impl<'a> CEmitter<'a> {
 
         let message_sym = self.symbols.map.get("message");
         if let Some(&sym) = message_sym
-          && let Some(field) = rd.fields.iter().find(|f| f.name == sym && f.type_id == self.types.str()) {
-            return ErrorDisplay::RecordStrField { field_index: field.index };
-          }
+          && let Some(field) = rd
+            .fields
+            .iter()
+            .find(|f| f.name == sym && f.type_id == self.types.str())
+        {
+          return ErrorDisplay::RecordStrField {
+            field_index: field.index,
+          };
+        }
 
         ErrorDisplay::Opaque
       },
@@ -2559,10 +2566,7 @@ impl<'a> CEmitter<'a> {
       return raw_name;
     }
 
-    if Some(def_id) == self.program.entry_point
-      && def.owner_namespace.is_none()
-      && raw_name == "main"
-    {
+    if Some(def_id) == self.program.entry_point && def.owner_namespace.is_none() && raw_name == "main" {
       return USER_MAIN_SYMBOL.to_string();
     }
 
@@ -3814,10 +3818,7 @@ fn build_mangled_name_standalone(
     return raw_name;
   }
 
-  if def.owner_namespace.is_none()
-    && raw_name == "main"
-    && matches!(def.kind, DefinitionKind::Function(_))
-  {
+  if def.owner_namespace.is_none() && raw_name == "main" && matches!(def.kind, DefinitionKind::Function(_)) {
     return USER_MAIN_SYMBOL.to_string();
   }
 
@@ -3935,12 +3936,7 @@ fn format_param_types_for_mangling_standalone(
         .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
         .collect();
 
-      parts.push(format_type_for_mangling_standalone(
-        &fd.return_type,
-        types,
-        defs,
-        symbols,
-      ));
+      parts.push(format_type_for_mangling_standalone(&fd.return_type, types, defs, symbols));
 
       parts.join("_")
     },
@@ -3951,12 +3947,7 @@ fn format_param_types_for_mangling_standalone(
         .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
         .collect();
 
-      parts.push(format_type_for_mangling_standalone(
-        &md.return_type,
-        types,
-        defs,
-        symbols,
-      ));
+      parts.push(format_type_for_mangling_standalone(&md.return_type, types, defs, symbols));
 
       parts.join("_")
     },
