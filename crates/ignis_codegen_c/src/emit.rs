@@ -2969,6 +2969,7 @@ pub fn emit_std_module_c(
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_std_module_c_from_input(
   module_name: &str,
   input: EmitInput<'_>,

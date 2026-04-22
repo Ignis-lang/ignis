@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 
 use ignis_analyzer::Analyzer;
 use ignis_config::{CHeader, IgnisBuildConfig, IgnisConfig, IgnisSTDManifest, StdToolchainConfig, TargetBackend};
-use ignis_driver::compile_project;
+use ignis_driver::{build_std, check_std, compile_project};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::compilation_context::CompilationContext;
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
@@ -30,6 +31,12 @@ pub struct E2EResult {
 pub struct DriverBuildAttempt {
   pub _temp_dir: TempDir,
   pub bin_path: PathBuf,
+  pub result: Result<(), ()>,
+}
+
+pub struct StdCommandAttempt {
+  pub _temp_dir: TempDir,
+  pub output_dir: PathBuf,
   pub result: Result<(), ()>,
 }
 
@@ -77,6 +84,55 @@ fn build_driver_test_config(
   Arc::new(config)
 }
 
+fn workspace_std_path() -> PathBuf {
+  PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std")
+}
+
+fn load_std_manifest(std_path: &Path) -> Result<IgnisSTDManifest, String> {
+  let manifest_path = std_path.join("manifest.toml");
+  let content = std::fs::read_to_string(&manifest_path)
+    .map_err(|error| format!("Failed to read std manifest '{}': {}", manifest_path.display(), error))?;
+
+  toml::from_str(&content)
+    .map_err(|error| format!("Failed to parse std manifest '{}': {}", manifest_path.display(), error))
+}
+
+fn build_std_test_config(
+  output_dir: &Path,
+  target: TargetBackend,
+) -> Result<Arc<IgnisConfig>, String> {
+  let std_path = workspace_std_path();
+  let manifest = load_std_manifest(&std_path)?;
+  let mut config = IgnisConfig::new_basic(false, Vec::new(), true, 0);
+
+  config.std_path = std_path.to_string_lossy().to_string();
+  config.std = true;
+  config.auto_load_std = true;
+  config.manifest = manifest;
+  config.build_std = true;
+  config.check_std = true;
+  config.build_config = Some(IgnisBuildConfig::new(
+    None,
+    target,
+    false,
+    false,
+    output_dir.to_string_lossy().to_string(),
+    Vec::new(),
+    None,
+    None,
+    None,
+    None,
+    None,
+    false,
+    false,
+    false,
+    false,
+    false,
+  ));
+
+  Ok(Arc::new(config))
+}
+
 pub fn compile_project_single_file(
   source: &str,
   target: TargetBackend,
@@ -94,6 +150,36 @@ pub fn compile_project_single_file(
   Ok(DriverBuildAttempt {
     _temp_dir: temp_dir,
     bin_path,
+    result,
+  })
+}
+
+pub fn build_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt, String> {
+  let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+  let output_dir = temp_dir.path().join("build-std");
+  std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
+
+  let config = build_std_test_config(&output_dir, target)?;
+  let result = build_std(config, output_dir.to_string_lossy().as_ref());
+
+  Ok(StdCommandAttempt {
+    _temp_dir: temp_dir,
+    output_dir,
+    result,
+  })
+}
+
+pub fn check_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt, String> {
+  let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+  let output_dir = temp_dir.path().join("check-std");
+  std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
+
+  let config = build_std_test_config(&output_dir, target)?;
+  let result = check_std(config, output_dir.to_string_lossy().as_ref());
+
+  Ok(StdCommandAttempt {
+    _temp_dir: temp_dir,
+    output_dir,
     result,
   })
 }

@@ -51,6 +51,28 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_err_build_std_unsupported_backend_iir() {
+  let attempt = common::build_std_with_target(TargetBackend::Iir).expect("temporary std build setup should succeed");
+
+  assert!(attempt.result.is_err(), "expected build_std to fail for unsupported backend");
+  assert!(
+    !attempt.output_dir.join("std/lib/libignis_std.a").exists(),
+    "unsupported backend should not emit a std archive"
+  );
+}
+
+#[test]
+fn e2e_err_check_std_unsupported_backend_iir() {
+  let attempt = common::check_std_with_target(TargetBackend::Iir).expect("temporary std check setup should succeed");
+
+  assert!(attempt.result.is_err(), "expected check_std to fail for unsupported backend");
+  assert!(
+    !attempt.output_dir.join("ignis_std.h").exists(),
+    "unsupported backend should not emit the umbrella std header"
+  );
+}
+
+#[test]
 fn e2e_err_index_out_of_bounds_positive() {
   e2e_error_test(
     "err_index_out_of_bounds_positive",
