@@ -25,6 +25,7 @@ mod lowering;
 pub mod modules;
 pub mod mono;
 pub mod ownership_hir;
+mod phases;
 mod resolver;
 mod scope;
 mod typeck;
@@ -368,14 +369,9 @@ impl<'a> Analyzer<'a> {
     analyzer.export_table = export_table.clone();
     analyzer.module_for_path = module_for_path.clone();
 
-    analyzer.bind_phase(roots);
-    analyzer.resolve_phase(roots);
-    analyzer.typecheck_phase(roots);
-    analyzer.const_eval_phase(roots);
-    analyzer.extra_checks_phase(roots);
-    analyzer.lint_phase(roots);
+    phases::run_semantic_passes(&mut analyzer, roots);
 
-    let mut hir = analyzer.lower_to_hir(roots);
+    let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
     let closure_diags = capture::populate_closure_captures(
       &mut hir,
@@ -385,23 +381,7 @@ impl<'a> Analyzer<'a> {
     );
     analyzer.diagnostics.extend(closure_diags);
 
-    // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
-    let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
-
-    let semantic = SemanticArtifacts {
-      types: analyzer.types,
-      defs: analyzer.defs,
-      namespaces: analyzer.namespaces,
-      diagnostics: analyzer.diagnostics,
-      symbols: symbols_clone,
-      node_defs: analyzer.node_defs,
-      node_types: analyzer.node_types,
-      node_spans,
-      resolved_calls: analyzer.resolved_calls,
-      import_item_defs: analyzer.import_item_defs,
-      import_module_files: analyzer.import_module_files,
-      extension_methods: analyzer.extension_methods,
-    };
+    let semantic = phases::build_semantic_artifacts(&analyzer, ast, symbols_clone);
 
     AnalyzerOutput::from_semantic_artifacts(semantic, hir)
   }
@@ -467,14 +447,8 @@ impl<'a> Analyzer<'a> {
       resolve_suppress_errors: false,
     };
 
-    // Phase 1: Binding
-    analyzer.bind_phase(roots);
-    analyzer.resolve_phase(roots);
-    analyzer.typecheck_phase(roots);
-    analyzer.const_eval_phase(roots);
-    analyzer.extra_checks_phase(roots);
-    analyzer.lint_phase(roots);
-    let mut hir = analyzer.lower_to_hir(roots);
+    phases::run_semantic_passes(&mut analyzer, roots);
+    let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
     let closure_diags = capture::populate_closure_captures(
       &mut hir,
@@ -489,23 +463,15 @@ impl<'a> Analyzer<'a> {
     *shared_namespaces = std::mem::replace(&mut analyzer.namespaces, NamespaceStore::new());
     *shared_extension_methods = std::mem::take(&mut analyzer.extension_methods);
 
-    // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
-    let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
-
-    let semantic = SemanticArtifacts {
-      types: shared_types.clone(),
-      defs: shared_defs.clone(),
-      namespaces: shared_namespaces.clone(),
-      diagnostics: analyzer.diagnostics,
-      symbols: symbols_clone,
-      node_defs: analyzer.node_defs,
-      node_types: analyzer.node_types,
-      node_spans,
-      resolved_calls: analyzer.resolved_calls,
-      import_item_defs: analyzer.import_item_defs,
-      import_module_files: analyzer.import_module_files,
-      extension_methods: shared_extension_methods.clone(),
-    };
+    let semantic = phases::build_shared_semantic_artifacts(
+      &analyzer,
+      ast,
+      symbols_clone,
+      shared_types,
+      shared_defs,
+      shared_namespaces,
+      shared_extension_methods,
+    );
 
     AnalyzerOutput::from_semantic_artifacts(semantic, hir)
   }
@@ -844,7 +810,9 @@ fn get_node_span(
 mod tests {
   use super::*;
 
+  use ignis_hir::display::print_hir;
   use ignis_hir::HIR;
+  use ignis_parser::{IgnisLexer, IgnisParser};
   use ignis_type::file::SourceMap;
   use ignis_type::span::Span;
 
@@ -913,6 +881,73 @@ mod tests {
     }
   }
 
+  fn analyze_via_legacy_sequence(src: &str) -> (SemanticArtifacts, HIR) {
+    let mut source_map = SourceMap::new();
+    let file_id = source_map.add_file("legacy.ign", src.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source_map.get(&file_id).text.as_str());
+    lexer.scan_tokens();
+    assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("Parse failed");
+
+    let mut analyzer = Analyzer::new(&nodes, symbols.clone(), ModuleId::new(0));
+    analyzer.bind_phase(&roots);
+    analyzer.resolve_phase(&roots);
+    analyzer.typecheck_phase(&roots);
+    analyzer.const_eval_phase(&roots);
+    analyzer.extra_checks_phase(&roots);
+    analyzer.lint_phase(&roots);
+
+    let mut hir = analyzer.lower_to_hir(&roots);
+    let closure_diags = capture::populate_closure_captures(
+      &mut hir,
+      &mut analyzer.defs,
+      &mut analyzer.types,
+      &mut analyzer.symbols.borrow_mut(),
+    );
+    analyzer.diagnostics.extend(closure_diags);
+
+    let node_spans = build_node_spans(&nodes, &analyzer.node_defs, &analyzer.node_types);
+    let semantic = SemanticArtifacts {
+      types: analyzer.types,
+      defs: analyzer.defs,
+      namespaces: analyzer.namespaces,
+      diagnostics: analyzer.diagnostics,
+      symbols,
+      node_defs: analyzer.node_defs,
+      node_types: analyzer.node_types,
+      node_spans,
+      resolved_calls: analyzer.resolved_calls,
+      import_item_defs: analyzer.import_item_defs,
+      import_module_files: analyzer.import_module_files,
+      extension_methods: analyzer.extension_methods,
+    };
+
+    (semantic, hir)
+  }
+
+  fn analyze_via_extracted_sequence(src: &str) -> (SemanticArtifacts, HIR) {
+    let mut source_map = SourceMap::new();
+    let file_id = source_map.add_file("extracted.ign", src.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source_map.get(&file_id).text.as_str());
+    lexer.scan_tokens();
+    assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("Parse failed");
+
+    let mut analyzer = Analyzer::new(&nodes, symbols.clone(), ModuleId::new(0));
+    let semantic = crate::phases::run_semantic_phases(&mut analyzer, &nodes, &roots, symbols);
+    let hir = crate::phases::run_lowering_phase(&mut analyzer, &roots);
+
+    (semantic, hir)
+  }
+
   #[test]
   fn semantic_artifacts_collect_only_public_exports() {
     let semantic = semantic_artifacts_fixture();
@@ -943,5 +978,52 @@ mod tests {
     assert_eq!(output.node_types, expected_node_types);
     assert_eq!(output.node_spans, expected_node_spans);
     assert_eq!(output.import_item_defs, expected_import_item_defs);
+  }
+
+  #[test]
+  fn extracted_semantic_phase_sequence_matches_legacy_semantic_results() {
+    let src = r#"
+      export function add(a: i32, b: i32): i32 {
+        let sum = a + b;
+        return sum;
+      }
+    "#;
+
+    let (legacy_semantic, _) = analyze_via_legacy_sequence(src);
+    let (extracted_semantic, _) = analyze_via_extracted_sequence(src);
+
+    assert_eq!(extracted_semantic.diagnostics.len(), legacy_semantic.diagnostics.len());
+    assert_eq!(extracted_semantic.node_defs, legacy_semantic.node_defs);
+    assert_eq!(extracted_semantic.node_types, legacy_semantic.node_types);
+    assert_eq!(
+      extracted_semantic.collect_exports().exports,
+      legacy_semantic.collect_exports().exports
+    );
+  }
+
+  #[test]
+  fn extracted_lowering_phase_matches_legacy_hir_output() {
+    let src = r#"
+      function main(): i32 {
+        let left = 20;
+        let right = 22;
+        return left + right;
+      }
+    "#;
+
+    let (legacy_semantic, legacy_hir) = analyze_via_legacy_sequence(src);
+    let (extracted_semantic, extracted_hir) = analyze_via_extracted_sequence(src);
+    let legacy_symbols = legacy_semantic.symbols.borrow();
+    let extracted_symbols = extracted_semantic.symbols.borrow();
+
+    assert_eq!(
+      print_hir(
+        &extracted_hir,
+        &extracted_semantic.types,
+        &extracted_semantic.defs,
+        &extracted_symbols
+      ),
+      print_hir(&legacy_hir, &legacy_semantic.types, &legacy_semantic.defs, &legacy_symbols)
+    );
   }
 }
