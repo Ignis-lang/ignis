@@ -521,6 +521,7 @@ fn load_std_manifest(std_path: &str) -> IgnisSTDManifest {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
   use super::{infer_std_path_from_file, std_module_entry_path};
   use std::path::PathBuf;

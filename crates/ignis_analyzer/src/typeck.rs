@@ -1457,10 +1457,7 @@ impl<'a> Analyzer<'a> {
     arms: &[ignis_ast::expressions::match_expression::ASTMatchArm],
   ) -> bool {
     let mut current_type = scrutinee_type;
-    loop {
-      let Type::Reference { inner, .. } = self.types.get(&current_type).clone() else {
-        break;
-      };
+    while let Type::Reference { inner, .. } = self.types.get(&current_type).clone() {
       current_type = inner;
     }
 
@@ -4731,9 +4728,9 @@ impl<'a> Analyzer<'a> {
           Err(()) => return None,
         }
       },
-      Some(SymbolEntry::Overload(candidates)) => match candidates.first() {
-        Some(id) => *id,
-        None => return None,
+      Some(SymbolEntry::Overload(candidates)) => {
+        let id = candidates.first()?;
+        *id
       },
       None => {
         let type_name = self.format_type_for_error(obj_type);
@@ -8169,13 +8166,9 @@ impl<'a> Analyzer<'a> {
 
     let node = self.ast.get(node_id);
     match node {
-      ASTNode::Expression(ASTExpression::Literal(lit)) => {
-        if self.literal_fits_in_type(&lit.value, target_type) {
-          self.set_type(node_id, target_type);
-          true
-        } else {
-          false
-        }
+      ASTNode::Expression(ASTExpression::Literal(lit)) if self.literal_fits_in_type(&lit.value, target_type) => {
+        self.set_type(node_id, target_type);
+        true
       },
       _ => false,
     }

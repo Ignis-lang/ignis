@@ -66,6 +66,13 @@
             export IGNIS_STD_PATH="$IGNIS_HOME/std"
             export RUST_BACKTRACE=1
 
+            if command -v rustc >/dev/null 2>&1; then
+              rustRelease="$(rustc -vV | sed -n 's/^release: //p')"
+              if [ -n "$rustRelease" ]; then
+                export CARGO_TARGET_DIR="$PWD/target/$rustRelease"
+              fi
+            fi
+
             echo "Ignis development environment loaded (Nix flake)"
           '';
         };

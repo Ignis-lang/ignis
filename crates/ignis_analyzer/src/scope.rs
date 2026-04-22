@@ -120,16 +120,13 @@ impl ScopeTree {
     &self,
     name: &SymbolId,
   ) -> Option<&SymbolEntry> {
-    let mut current = &self.current;
+    let mut current = self.current;
     loop {
-      let scope = self.scopes.get(current);
+      let scope = self.scopes.get(&current);
       if let Some(def) = scope.symbols.get(name) {
         return Some(def);
       }
-      match &scope.parent {
-        Some(parent) => current = parent,
-        None => return None,
-      }
+      current = scope.parent?
     }
   }
 
@@ -141,18 +138,15 @@ impl ScopeTree {
   }
 
   pub fn find_loop_scope(&self) -> Option<ScopeId> {
-    let mut current = &self.current;
+    let mut current = self.current;
     loop {
-      let scope = self.scopes.get(current);
+      let scope = self.scopes.get(&current);
 
       if scope.kind == ScopeKind::Loop {
-        return Some(*current);
+        return Some(current);
       }
 
-      match &scope.parent {
-        Some(parent) => current = parent,
-        None => return None,
-      }
+      current = scope.parent?
     }
   }
 

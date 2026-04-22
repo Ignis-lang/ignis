@@ -1100,7 +1100,7 @@ mod tests {
     ParseResult { nodes, roots }
   }
 
-  fn get_expr<'a>(result: &'a ParseResult) -> &'a ASTExpression {
+  fn get_expr(result: &ParseResult) -> &ASTExpression {
     let root = result.nodes.get(&result.roots[0]);
     let func = match root {
       ASTNode::Statement(ASTStatement::Function(f)) => f,
@@ -1139,7 +1139,7 @@ mod tests {
 
     match expr {
       ASTExpression::Literal(lit) => match &lit.value {
-        IgnisLiteralValue::Float64(v) => assert!((v.into_inner() - 3.14).abs() < 0.001),
+        IgnisLiteralValue::Float64(v) => assert!((v.into_inner() - (314_f64 / 100.0)).abs() < 0.001),
         other => panic!("expected Float64, got {:?}", other),
       },
       other => panic!("expected literal, got {:?}", other),

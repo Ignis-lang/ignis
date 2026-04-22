@@ -343,13 +343,8 @@ impl<'a> HIRPrinter<'a> {
         let name = self.symbols.get(&def.name);
 
         let metadata = match &def.kind {
-          DefinitionKind::Variable(var_def) => {
-            if var_def.mutable {
-              " [mut]"
-            } else {
-              ""
-            }
-          },
+          DefinitionKind::Variable(var_def) if var_def.mutable => " [mut]",
+          DefinitionKind::Variable(_) => "",
           DefinitionKind::Parameter(param_def) => {
             if param_def.mutable {
               " [param, mut]"

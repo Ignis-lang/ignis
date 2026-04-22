@@ -349,14 +349,15 @@ impl super::IgnisParser {
           // for-of without type: for (let x of ...)
           return self.parse_for_of(keyword);
         },
+        TokenType::Colon if self.is_for_of_with_type_annotation() => {
+          // Has type annotation - need to scan ahead to find '=' or 'of'
+          // Skip past the type to find the deciding token
+          return self.parse_for_of(keyword);
+        },
         TokenType::Colon => {
           // Has type annotation - need to scan ahead to find '=' or 'of'
           // Skip past the type to find the deciding token
-          if self.is_for_of_with_type_annotation() {
-            return self.parse_for_of(keyword);
-          } else {
-            return self.parse_for_c_style(keyword);
-          }
+          return self.parse_for_c_style(keyword);
         },
         _ => {
           // Error: expected '=', ':' or 'of' after identifier
@@ -396,10 +397,8 @@ impl super::IgnisParser {
         },
         TokenType::LeftParen => paren_depth += 1,
         TokenType::LeftBrack => bracket_depth += 1,
-        TokenType::RightBrack => {
-          if bracket_depth > 0 {
-            bracket_depth -= 1;
-          }
+        TokenType::RightBrack if bracket_depth > 0 => {
+          bracket_depth -= 1;
         },
         _ => {},
       }
@@ -545,10 +544,10 @@ mod tests {
     ParseResult { nodes, roots, symbols }
   }
 
-  fn get_stmt<'a>(
-    result: &'a ParseResult,
+  fn get_stmt(
+    result: &ParseResult,
     index: usize,
-  ) -> &'a ASTStatement {
+  ) -> &ASTStatement {
     let root = result.nodes.get(&result.roots[0]);
     let func = match root {
       ASTNode::Statement(ASTStatement::Function(f)) => f,
