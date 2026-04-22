@@ -1,9 +1,9 @@
 use std::fmt;
 
-use ignis_analyzer::AnalyzerOutput;
+use ignis_analyzer::{AnalyzerOutput, SemanticArtifacts};
 use ignis_config::IgnisConfig;
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
-use ignis_hir::DropSchedules;
+use ignis_hir::{DropSchedules, HIR};
 use ignis_lir::verify::VerifyResult;
 use ignis_lir::LirProgram;
 use ignis_type::definition::{DefinitionId, DefinitionStore};
@@ -17,6 +17,7 @@ pub enum StageError {
   MissingRootModule { root_id: ModuleId },
   MissingParsedModule { module_id: ModuleId },
   AnalysisFailed,
+  AnalysisDiagnostics { error_count: usize },
   MissingEntryDefinition { definition_id: DefinitionId },
   PostAnalysisErrors { error_count: usize },
   LirVerificationFailed { error_count: usize },
@@ -33,6 +34,9 @@ impl fmt::Display for StageError {
         write!(formatter, "parsed stage is missing parsed data for module {:?}", module_id)
       },
       Self::AnalysisFailed => write!(formatter, "analyzer stage failed before producing a verified artifact"),
+      Self::AnalysisDiagnostics { error_count } => {
+        write!(formatter, "analyzer stage contains {error_count} error diagnostics")
+      },
       Self::MissingEntryDefinition { definition_id } => {
         write!(
           formatter,
@@ -97,15 +101,11 @@ impl ParsedStage {
   ) -> Result<AnalyzedStage, StageError> {
     self.verify()?;
 
-    let output = self
+    let (output, has_errors) = self
       .ctx
-      .compile(self.root_id, config)
+      .compile_collect_all(self.root_id, config)
       .map_err(|_| StageError::AnalysisFailed)?;
-    let stage = AnalyzedStage {
-      ctx: self.ctx,
-      root_id: self.root_id,
-      output,
-    };
+    let stage = AnalyzedStage::from_output(self.ctx, self.root_id, output, has_errors)?;
 
     stage.verify()?;
     Ok(stage)
@@ -115,17 +115,44 @@ impl ParsedStage {
 pub struct AnalyzedStage {
   pub ctx: CompilationContext,
   pub root_id: ModuleId,
-  pub output: AnalyzerOutput,
+  pub semantic: SemanticArtifacts,
+  pub hir: HIR,
 }
 
 impl AnalyzedStage {
+  pub fn from_output(
+    ctx: CompilationContext,
+    root_id: ModuleId,
+    output: AnalyzerOutput,
+    has_errors: bool,
+  ) -> Result<Self, StageError> {
+    let (semantic, hir) = output.into_parts();
+
+    if has_errors {
+      let error_count = semantic
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.severity, Severity::Error))
+        .count();
+
+      return Err(StageError::AnalysisDiagnostics { error_count });
+    }
+
+    Ok(Self {
+      ctx,
+      root_id,
+      semantic,
+      hir,
+    })
+  }
+
   pub fn verify(&self) -> Result<(), StageError> {
     if self.ctx.module_graph.root != Some(self.root_id) {
       return Err(StageError::MissingRootModule { root_id: self.root_id });
     }
 
-    if let Some(definition_id) = self.output.hir.entry_point
-      && !has_definition(&self.output.defs, definition_id)
+    if let Some(definition_id) = self.hir.entry_point
+      && !has_definition(&self.semantic.defs, definition_id)
     {
       return Err(StageError::MissingEntryDefinition { definition_id });
     }
@@ -137,7 +164,8 @@ impl AnalyzedStage {
 pub struct CheckedStage {
   pub ctx: CompilationContext,
   pub root_id: ModuleId,
-  pub output: AnalyzerOutput,
+  pub semantic: SemanticArtifacts,
+  pub hir: HIR,
   pub types: TypeStore,
   pub mono_output: ignis_analyzer::mono::MonoOutput,
   pub drop_schedules: DropSchedules,
@@ -155,7 +183,8 @@ impl CheckedStage {
     Self {
       ctx: analyzed_stage.ctx,
       root_id: analyzed_stage.root_id,
-      output: analyzed_stage.output,
+      semantic: analyzed_stage.semantic,
+      hir: analyzed_stage.hir,
       types,
       mono_output,
       drop_schedules,
@@ -185,7 +214,8 @@ impl CheckedStage {
 pub struct LirStage {
   pub ctx: CompilationContext,
   pub root_id: ModuleId,
-  pub output: AnalyzerOutput,
+  pub semantic: SemanticArtifacts,
+  pub hir: HIR,
   pub types: TypeStore,
   pub mono_output: ignis_analyzer::mono::MonoOutput,
   pub drop_schedules: DropSchedules,
@@ -203,7 +233,8 @@ impl LirStage {
     Self {
       ctx: checked_stage.ctx,
       root_id: checked_stage.root_id,
-      output: checked_stage.output,
+      semantic: checked_stage.semantic,
+      hir: checked_stage.hir,
       types: checked_stage.types,
       mono_output: checked_stage.mono_output,
       drop_schedules: checked_stage.drop_schedules,
@@ -312,10 +343,10 @@ mod tests {
   fn analyzed_stage_fixture() -> AnalyzedStage {
     let parsed_stage = parsed_stage_fixture();
 
-    AnalyzedStage {
-      ctx: parsed_stage.ctx,
-      root_id: parsed_stage.root_id,
-      output: AnalyzerOutput {
+    AnalyzedStage::from_output(
+      parsed_stage.ctx,
+      parsed_stage.root_id,
+      AnalyzerOutput {
         types: TypeStore::new(),
         defs: DefinitionStore::new(),
         namespaces: NamespaceStore::new(),
@@ -330,7 +361,9 @@ mod tests {
         import_module_files: HashMap::new(),
         extension_methods: HashMap::new(),
       },
-    }
+      false,
+    )
+    .expect("analyzed stage fixture should succeed")
   }
 
   #[test]
@@ -356,7 +389,7 @@ mod tests {
   #[test]
   fn analyzed_stage_rejects_missing_entry_definition() {
     let mut stage = analyzed_stage_fixture();
-    stage.output.hir.entry_point = Some(ignis_type::definition::DefinitionId::new(99));
+    stage.hir.entry_point = Some(ignis_type::definition::DefinitionId::new(99));
 
     assert_eq!(
       stage.verify(),
@@ -364,6 +397,44 @@ mod tests {
         definition_id: ignis_type::definition::DefinitionId::new(99),
       })
     );
+  }
+
+  #[test]
+  fn analyzed_stage_surfaces_structured_analysis_diagnostics() {
+    let parsed_stage = parsed_stage_fixture();
+    let file_id = SourceMap::new().add_virtual("analyzer-stage", String::new());
+    let output = AnalyzerOutput {
+      types: TypeStore::new(),
+      defs: DefinitionStore::new(),
+      namespaces: NamespaceStore::new(),
+      hir: HIR::new(),
+      diagnostics: vec![Diagnostic::new(
+        Severity::Error,
+        "analysis error".to_string(),
+        "E-analyze".to_string(),
+        Span::empty_at(file_id, Default::default()),
+      )],
+      symbols: Rc::new(std::cell::RefCell::new(SymbolTable::new())),
+      node_defs: HashMap::new(),
+      node_types: HashMap::new(),
+      node_spans: HashMap::new(),
+      resolved_calls: HashMap::new(),
+      import_item_defs: HashMap::new(),
+      import_module_files: HashMap::new(),
+      extension_methods: HashMap::new(),
+    };
+
+    let result = AnalyzedStage::from_output(parsed_stage.ctx, parsed_stage.root_id, output, true);
+
+    assert!(matches!(result, Err(StageError::AnalysisDiagnostics { error_count: 1 })));
+  }
+
+  #[test]
+  fn analyzed_stage_splits_semantic_artifacts_from_hir() {
+    let stage = analyzed_stage_fixture();
+
+    assert!(stage.semantic.diagnostics.is_empty());
+    assert_eq!(stage.hir.entry_point, None);
   }
 
   #[test]

@@ -465,27 +465,27 @@ pub fn compile_project(
     &config,
     DebugTrace::Analyzer,
     "compilation produced {} diagnostics",
-    analyzed_stage.output.diagnostics.len()
+    analyzed_stage.semantic.diagnostics.len()
   );
 
   // Dump phase: use a scoped borrow that ends before monomorphization
   {
-    let sym_table = analyzed_stage.output.symbols.borrow();
+    let sym_table = analyzed_stage.semantic.symbols.borrow();
 
     if dump_requested(&config, DumpKind::Types) {
-      let types_dump = ignis_analyzer::dump::dump_types(&analyzed_stage.output.types);
+      let types_dump = ignis_analyzer::dump::dump_types(&analyzed_stage.semantic.types);
       write_dump_output(&config, "dump-types.txt", &types_dump)?;
     }
 
     if dump_requested(&config, DumpKind::Defs) {
       let defs_dump =
-        ignis_analyzer::dump::dump_defs(&analyzed_stage.output.defs, &analyzed_stage.output.types, &sym_table);
+        ignis_analyzer::dump::dump_defs(&analyzed_stage.semantic.defs, &analyzed_stage.semantic.types, &sym_table);
       write_dump_output(&config, "dump-defs.txt", &defs_dump)?;
     }
 
     if dump_requested(&config, DumpKind::HirSummary) {
       let summary_dump =
-        ignis_analyzer::dump::dump_hir_summary(&analyzed_stage.output.hir, &analyzed_stage.output.defs, &sym_table);
+        ignis_analyzer::dump::dump_hir_summary(&analyzed_stage.hir, &analyzed_stage.semantic.defs, &sym_table);
       write_dump_output(&config, "dump-hir-summary.txt", &summary_dump)?;
     }
 
@@ -493,8 +493,8 @@ pub fn compile_project(
       && let Some(func_name) = &build_config.dump_hir
     {
       match ignis_analyzer::dump::dump_hir_function(
-        &analyzed_stage.output.hir,
-        &analyzed_stage.output.defs,
+        &analyzed_stage.hir,
+        &analyzed_stage.semantic.defs,
         &sym_table,
         func_name,
       ) {
@@ -508,19 +508,24 @@ pub fn compile_project(
 
     if dump_requested(&config, DumpKind::Hir) {
       let hir_dump = ignis_analyzer::dump::dump_hir_complete(
-        &analyzed_stage.output.hir,
-        &analyzed_stage.output.types,
-        &analyzed_stage.output.defs,
+        &analyzed_stage.hir,
+        &analyzed_stage.semantic.types,
+        &analyzed_stage.semantic.defs,
         &sym_table,
       );
       write_dump_output(&config, "dump-hir.txt", &hir_dump)?;
     }
   }
 
-  let AnalyzedStage { ctx, root_id, output } = analyzed_stage;
+  let AnalyzedStage {
+    ctx,
+    root_id,
+    semantic,
+    hir,
+  } = analyzed_stage;
 
   if let Some(bc) = config.build_config.as_ref() {
-    let has_entry_point = output.hir.entry_point.is_some();
+    let has_entry_point = hir.entry_point.is_some();
     let is_lib = bc.lib;
     let is_bin = !is_lib;
     let check_mode = bc.check_mode;
@@ -545,8 +550,8 @@ pub fn compile_project(
     }
 
     if is_lib && has_entry_point {
-      let entry_def_id = output.hir.entry_point.unwrap();
-      let span = output.defs.get(&entry_def_id).span.clone();
+      let entry_def_id = hir.entry_point.unwrap();
+      let span = semantic.defs.get(&entry_def_id).span.clone();
       cmd_fail!(&config, "Build failed", start.elapsed());
       ignis_diagnostics::render(
         &DiagnosticMessage::LibraryCannotHaveMainFunction { span }.report(),
@@ -556,8 +561,8 @@ pub fn compile_project(
     }
 
     if is_bin
-      && let Some(entry_def_id) = output.hir.entry_point
-      && let Err(diagnostic_message) = validate_entry_main_signature(&output.defs, &output.types, entry_def_id)
+      && let Some(entry_def_id) = hir.entry_point
+      && let Err(diagnostic_message) = validate_entry_main_signature(&semantic.defs, &semantic.types, entry_def_id)
     {
       cmd_fail!(&config, "Build failed", start.elapsed());
       ignis_diagnostics::render(&diagnostic_message.report(), &ctx.source_map);
@@ -626,13 +631,13 @@ pub fn compile_project(
         }
       }
 
-      let mut types = output.types.clone();
+      let mut types = semantic.types.clone();
 
       // Monomorphization: transform generic HIR into concrete HIR
       // Use a temporary borrow for collect_mono_roots that drops before Monomorphizer::run()
-      let mono_roots = collect_mono_roots(&output.defs, &output.symbols.borrow());
+      let mono_roots = collect_mono_roots(&semantic.defs, &semantic.symbols.borrow());
       let mono_output =
-        ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+        ignis_analyzer::mono::Monomorphizer::new(&hir, &semantic.defs, &mut types, semantic.symbols.clone())
           .run(&mono_roots);
 
       trace_dbg!(&config, DebugTrace::Mono, "monomorphization completed");
@@ -642,7 +647,7 @@ pub fn compile_project(
       mono_output.verify_no_generics(&types);
 
       let (drop_schedules, ownership_diagnostics, borrow_diagnostics) = {
-        let sym_table = output.symbols.borrow();
+        let sym_table = semantic.symbols.borrow();
 
         let ownership_checker =
           ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
@@ -673,7 +678,12 @@ pub fn compile_project(
         }
       }
       let mut checked_stage = CheckedStage::new(
-        AnalyzedStage { ctx, root_id, output },
+        AnalyzedStage {
+          ctx,
+          root_id,
+          semantic,
+          hir,
+        },
         types,
         mono_output,
         drop_schedules,
@@ -706,7 +716,7 @@ pub fn compile_project(
       let used_module_set: std::collections::HashSet<ignis_type::module::ModuleId> =
         used_modules.iter().copied().collect();
 
-      let symbols = checked_stage.output.symbols.clone();
+      let symbols = checked_stage.semantic.symbols.clone();
       let sym_table = symbols.borrow();
       let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
         &checked_stage.mono_output.hir,
@@ -735,7 +745,8 @@ pub fn compile_project(
       let LirStage {
         ctx,
         root_id: _,
-        output,
+        semantic,
+        hir: _,
         types,
         mono_output,
         drop_schedules: _,
@@ -744,7 +755,7 @@ pub fn compile_project(
         verification: verify_result,
       } = lir_stage;
 
-      let sym_table = output.symbols.borrow();
+      let sym_table = semantic.symbols.borrow();
 
       trace_dbg!(&config, DebugTrace::Lir, "lowering completed");
 
@@ -891,7 +902,7 @@ pub fn compile_project(
               &mono_output.defs,
               &types,
               &sym_table,
-              &output.namespaces,
+              &semantic.namespaces,
             );
 
             let header_path = layout.user_module_header(&source_path);
@@ -998,7 +1009,7 @@ pub fn compile_project(
               &lir_program,
               &types,
               &mono_output.defs,
-              &output.namespaces,
+              &semantic.namespaces,
               &sym_table,
               &link_plan_with_user_includes.headers,
               &module_paths,
@@ -1077,7 +1088,7 @@ pub fn compile_project(
               &lir_program,
               &types,
               &mono_output.defs,
-              &output.namespaces,
+              &semantic.namespaces,
               &sym_table,
               &link_plan.headers,
               &module_paths,
@@ -1087,7 +1098,7 @@ pub fn compile_project(
               &lir_program,
               &types,
               &mono_output.defs,
-              &output.namespaces,
+              &semantic.namespaces,
               &sym_table,
               &link_plan.headers,
             )

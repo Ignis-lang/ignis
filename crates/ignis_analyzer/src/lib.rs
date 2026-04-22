@@ -257,6 +257,26 @@ impl SemanticArtifacts {
 }
 
 impl AnalyzerOutput {
+  pub fn into_parts(self) -> (SemanticArtifacts, HIR) {
+    let hir = self.hir;
+    let semantic = SemanticArtifacts {
+      types: self.types,
+      defs: self.defs,
+      namespaces: self.namespaces,
+      diagnostics: self.diagnostics,
+      symbols: self.symbols,
+      node_defs: self.node_defs,
+      node_types: self.node_types,
+      node_spans: self.node_spans,
+      resolved_calls: self.resolved_calls,
+      import_item_defs: self.import_item_defs,
+      import_module_files: self.import_module_files,
+      extension_methods: self.extension_methods,
+    };
+
+    (semantic, hir)
+  }
+
   pub fn from_semantic_artifacts(
     semantic: SemanticArtifacts,
     hir: HIR,
