@@ -375,6 +375,40 @@ impl<'a> Analyzer<'a> {
     Self::analyze_with_imports(ast, roots, symbols, &HashMap::new(), &HashMap::new())
   }
 
+  pub fn analyze_staged(
+    ast: &ASTStore<ASTNode>,
+    roots: &Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
+  ) -> AnalyzerOutput {
+    let (semantic, hir) = Self::analyze_to_artifacts(ast, roots, symbols);
+    AnalyzerOutput::from_semantic_artifacts(semantic, hir)
+  }
+
+  pub fn analyze_to_artifacts(
+    ast: &ASTStore<ASTNode>,
+    roots: &Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
+  ) -> (SemanticArtifacts, HIR) {
+    let symbols_clone = symbols.clone();
+    let mut analyzer = Analyzer::new(ast, symbols, ModuleId::new(0));
+
+    phases::run_semantic_passes(&mut analyzer, roots);
+
+    let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
+
+    let closure_diags = capture::populate_closure_captures(
+      &mut hir,
+      &mut analyzer.defs,
+      &mut analyzer.types,
+      &mut analyzer.symbols.borrow_mut(),
+    );
+    analyzer.diagnostics.extend(closure_diags);
+
+    let semantic = phases::build_semantic_artifacts(&analyzer, ast, symbols_clone);
+
+    (semantic, hir)
+  }
+
   /// Analyze with imports from other modules
   pub fn analyze_with_imports(
     ast: &ASTStore<ASTNode>,

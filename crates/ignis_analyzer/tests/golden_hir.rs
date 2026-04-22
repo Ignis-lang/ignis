@@ -216,3 +216,20 @@ function main(): i32 {
 
   assert_snapshot!("hir_pipe_desugars_to_call", common::format_hir(&result));
 }
+
+#[test]
+fn staged_hir_pipe_desugars_to_call() {
+  let result = common::analyze_staged(
+    r#"
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return 5 |> add(7);
+}
+"#,
+  );
+
+  assert_snapshot!("staged_hir_pipe_desugars_to_call", common::format_hir(&result));
+}

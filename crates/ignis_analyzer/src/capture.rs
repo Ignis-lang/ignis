@@ -755,7 +755,15 @@ pub fn populate_closure_captures(
     );
 
     let drop_def_id = if needs_drop_fn(&captures, types, defs) {
-      Some(create_drop_function(closure_index, &closure_span, owner_module, hir, defs, types, symbols))
+      Some(create_drop_function(
+        closure_index,
+        &closure_span,
+        owner_module,
+        hir,
+        defs,
+        types,
+        symbols,
+      ))
     } else {
       None
     };

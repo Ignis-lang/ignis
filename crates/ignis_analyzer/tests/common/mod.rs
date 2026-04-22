@@ -43,6 +43,32 @@ pub fn analyze(src: &str) -> AnalysisResult {
   AnalysisResult { output, source_map: sm }
 }
 
+pub fn analyze_staged(src: &str) -> AnalysisResult {
+  let mut sm = SourceMap::new();
+  let file_id = sm.add_file("test.ign", src.to_string());
+
+  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  lexer.scan_tokens();
+  assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
+
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+  let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+  let (nodes, roots) = parser.parse().expect("Parse failed");
+
+  let mut output = Analyzer::analyze_staged(&nodes, &roots, symbols.clone());
+
+  let symbols_ref = symbols.borrow();
+  let checker = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+  let (_, ownership_diags) = checker.check();
+  output.diagnostics.extend(ownership_diags);
+
+  let borrow_checker = HirBorrowChecker::new(&output.hir, &output.types, &output.defs, &symbols_ref);
+  let borrow_diags = borrow_checker.check();
+  output.diagnostics.extend(borrow_diags);
+
+  AnalysisResult { output, source_map: sm }
+}
+
 /// Run the full pipeline, allowing parse errors (for error case testing)
 pub fn analyze_with_errors(src: &str) -> Option<AnalysisResult> {
   let mut sm = SourceMap::new();

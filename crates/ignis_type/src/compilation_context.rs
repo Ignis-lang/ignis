@@ -20,12 +20,7 @@ impl Default for TargetInfo {
       format!("{}-unknown-{}-{}", arch, os, abi)
     };
 
-    Self {
-      triple,
-      os,
-      arch,
-      abi,
-    }
+    Self { triple, os, arch, abi }
   }
 }
 
@@ -132,5 +127,4 @@ impl CompilationContext {
       .map(|known| known.contains(feature))
       .unwrap_or(true)
   }
-
 }
