@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use colored::*;
 use ignis_ast::display::format_ast_nodes;
-use ignis_config::{DebugTrace, DumpKind, IgnisConfig};
+use ignis_config::{DebugTrace, DumpKind, IgnisConfig, TargetBackend};
 
 use ignis_log::{
   cmd_artifact, cmd_fail, cmd_header, cmd_ok, cmd_stats, log_dbg, log_phase, log_trc, phase_log, phase_ok, phase_warn,
@@ -20,8 +20,9 @@ use ignis_type::types::{Type, TypeId, TypeStore};
 use ignis_diagnostics::message::DiagnosticMessage;
 
 use crate::api::analyze_text;
-use crate::backend::c::CBackend;
-use crate::backend::{emit_text, select_backend, BackendRequest};
+use crate::backend::{
+  emit_text, select_backend, BackendRequest, HeaderBackendRequest, LoweredBackendRequest, SelectedBackend,
+};
 use crate::build_layout::{
   hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp, write_std_stamp,
   BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
@@ -50,6 +51,25 @@ fn warn_unsupported_dumps(config: &IgnisConfig) {
   if dump_requested(config, DumpKind::Ir) {
     eprintln!("{} Dump kind 'ir' is not supported yet.", "Warning:".yellow().bold());
   }
+}
+
+fn configured_backend_target(config: &IgnisConfig) -> TargetBackend {
+  config
+    .build_config
+    .as_ref()
+    .map(|build_config| build_config.target)
+    .unwrap_or(TargetBackend::C)
+}
+
+fn select_backend_or_report(
+  config: &IgnisConfig,
+  failure_label: &str,
+  start: Instant,
+) -> Result<SelectedBackend, ()> {
+  select_backend(configured_backend_target(config)).map_err(|stage_error| {
+    cmd_fail!(config, failure_label, start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), stage_error);
+  })
 }
 
 fn is_supported_entry_main_args(
@@ -735,17 +755,6 @@ pub fn compile_project(
 
       let lir_stage = LirStage::new(checked_stage, lir_program, verify_result);
 
-      let backend_input = BackendInput::from_lir(&lir_stage);
-      if let Err(stage_error) = backend_input.verify() {
-        cmd_fail!(
-          &config,
-          if check_mode { "Check failed" } else { "Build failed" },
-          start.elapsed()
-        );
-        eprintln!("{} {}", "Error:".red().bold(), stage_error);
-        return Err(());
-      }
-
       let LirStage {
         ctx,
         root_id: _,
@@ -793,18 +802,8 @@ pub fn compile_project(
         || bc.lib;
       if needs_emit {
         trace_dbg!(&config, DebugTrace::Codegen, "emitting C code");
-        let selected_backend = match select_backend(bc.target) {
-          Ok(backend) => backend,
-          Err(stage_error) => {
-            cmd_fail!(
-              &config,
-              if check_mode { "Check failed" } else { "Build failed" },
-              start.elapsed()
-            );
-            eprintln!("{} {}", "Error:".red().bold(), stage_error);
-            return Err(());
-          },
-        };
+        let selected_backend =
+          select_backend_or_report(&config, if check_mode { "Check failed" } else { "Build failed" }, start)?;
 
         if verify_result.is_err() {
           cmd_fail!(
@@ -914,18 +913,16 @@ pub fn compile_project(
             // Generate header
             let header_content = match emit_text(
               &selected_backend,
-              BackendInput {
-                root_id,
+              BackendInput::Header {
                 types: &types,
                 defs: &mono_output.defs,
-                program: &lir_program,
               },
-              BackendRequest::EmitUserModuleHeader {
+              BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
                 module_id: **module_id,
                 source_path: &source_path,
                 namespaces: &semantic.namespaces,
                 symbols: &sym_table,
-              },
+              }),
             ) {
               Ok(contents) => contents,
               Err(stage_error) => {
@@ -1036,20 +1033,20 @@ pub fn compile_project(
             // Generate C code for this module
             let c_code = match emit_text(
               &selected_backend,
-              BackendInput {
+              BackendInput::Lowered {
                 root_id,
                 types: &types,
                 defs: &mono_output.defs,
                 program: &lir_program,
               },
-              BackendRequest::EmitUserModule {
+              BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
                 module_id: **module_id,
                 namespaces: &semantic.namespaces,
                 symbols: &sym_table,
                 headers: &link_plan_with_user_includes.headers,
                 module_paths: &module_paths,
                 user_module_headers: &user_module_headers,
-              },
+              }),
             ) {
               Ok(contents) => contents,
               Err(stage_error) => {
@@ -1129,18 +1126,18 @@ pub fn compile_project(
             let module_paths = build_module_paths_from_graph(&ctx.module_graph);
             match emit_text(
               &selected_backend,
-              BackendInput {
+              BackendInput::Lowered {
                 root_id,
                 types: &types,
                 defs: &mono_output.defs,
                 program: &lir_program,
               },
-              BackendRequest::EmitUserCombined {
+              BackendRequest::Lowered(LoweredBackendRequest::EmitUserCombined {
                 namespaces: &semantic.namespaces,
                 symbols: &sym_table,
                 headers: &link_plan.headers,
                 module_paths: &module_paths,
-              },
+              }),
             ) {
               Ok(contents) => contents,
               Err(stage_error) => {
@@ -1152,17 +1149,17 @@ pub fn compile_project(
           } else {
             match emit_text(
               &selected_backend,
-              BackendInput {
+              BackendInput::Lowered {
                 root_id,
                 types: &types,
                 defs: &mono_output.defs,
                 program: &lir_program,
               },
-              BackendRequest::EmitCombined {
+              BackendRequest::Lowered(LoweredBackendRequest::EmitCombined {
                 namespaces: &semantic.namespaces,
                 symbols: &sym_table,
                 headers: &link_plan.headers,
-              },
+              }),
             ) {
               Ok(contents) => contents,
               Err(stage_error) => {
@@ -1337,7 +1334,7 @@ pub fn build_std(
   let module_paths = build_module_paths_from_graph(&ctx.module_graph);
 
   section!(&config, "Codegen & linking");
-  let c_backend = CBackend;
+  let selected_backend = select_backend_or_report(&config, "Build failed", start)?;
 
   let all_module_ids = ctx.module_graph.all_modules_topological();
   let mut processed_modules: HashSet<String> = HashSet::new();
@@ -1389,19 +1386,17 @@ pub fn build_std(
 
     // Generate module header
     let header_content = match emit_text(
-      &c_backend,
-      BackendInput {
-        root_id: *module_id,
+      &selected_backend,
+      BackendInput::Header {
         types: &types,
         defs: &mono_output.defs,
-        program: &lir_program,
       },
-      BackendRequest::EmitStdModuleHeader {
+      BackendRequest::Header(HeaderBackendRequest::EmitStdModuleHeader {
         module_name: &module_name,
         namespaces: &output.namespaces,
         symbols: &sym_table,
         module_paths: &module_paths,
-      },
+      }),
     ) {
       Ok(contents) => contents,
       Err(stage_error) => {
@@ -1516,14 +1511,14 @@ pub fn build_std(
     // Generate module C code with umbrella header for inter-module dependencies
     let umbrella_header = "ignis_std.h";
     let c_code = match emit_text(
-      &c_backend,
-      BackendInput {
+      &selected_backend,
+      BackendInput::Lowered {
         root_id: *module_id,
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
       },
-      BackendRequest::EmitStdModule {
+      BackendRequest::Lowered(LoweredBackendRequest::EmitStdModule {
         module_name: &module_name,
         namespaces: &output.namespaces,
         symbols: &sym_table,
@@ -1531,7 +1526,7 @@ pub fn build_std(
         module_paths: &module_paths,
         umbrella_header_path: Some(umbrella_header),
         std_path,
-      },
+      }),
     ) {
       Ok(contents) => contents,
       Err(stage_error) => {
@@ -1686,23 +1681,20 @@ pub fn check_std(
   link_plan.cflags = config.cflags.clone();
 
   section!(&config, "Codegen (check)");
-  let c_backend = CBackend;
+  let selected_backend = select_backend_or_report(&config, "Check failed", start)?;
 
   let header_content = {
     let sym_table = output.symbols.borrow();
-    let empty_program = ignis_lir::LirProgram::new();
     match emit_text(
-      &c_backend,
-      BackendInput {
-        root_id: ModuleId::new(0),
+      &selected_backend,
+      BackendInput::Header {
         types: &output.types,
         defs: &output.defs,
-        program: &empty_program,
       },
-      BackendRequest::EmitStdHeader {
+      BackendRequest::Header(HeaderBackendRequest::EmitStdHeader {
         namespaces: &output.namespaces,
         symbols: &sym_table,
-      },
+      }),
     ) {
       Ok(contents) => contents,
       Err(stage_error) => {
@@ -1786,14 +1778,14 @@ pub fn check_std(
     }
 
     let c_code = match emit_text(
-      &c_backend,
-      BackendInput {
+      &selected_backend,
+      BackendInput::Lowered {
         root_id: *module_id,
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
       },
-      BackendRequest::EmitStdModule {
+      BackendRequest::Lowered(LoweredBackendRequest::EmitStdModule {
         module_name: &module_name,
         namespaces: &output.namespaces,
         symbols: &sym_table,
@@ -1801,7 +1793,7 @@ pub fn check_std(
         module_paths: &module_paths,
         umbrella_header_path: None,
         std_path,
-      },
+      }),
     ) {
       Ok(contents) => contents,
       Err(stage_error) => {

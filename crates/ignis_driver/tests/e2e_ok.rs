@@ -1,6 +1,7 @@
 mod common;
 
 use insta::assert_snapshot;
+use ignis_config::TargetBackend;
 
 fn e2e_test(
   name: &str,
@@ -55,6 +56,28 @@ function main(): i32 {
     return 42;
 }
 "#,
+  );
+}
+
+#[test]
+fn e2e_build_std_c_backend_succeeds() {
+  let attempt = common::build_std_with_target(TargetBackend::C).expect("temporary std build setup should succeed");
+
+  assert!(attempt.result.is_ok(), "expected build_std to succeed for the C backend");
+  assert!(
+    attempt.output_dir.join("std/lib/libignis_std.a").exists(),
+    "expected build_std to emit the std archive"
+  );
+}
+
+#[test]
+fn e2e_check_std_c_backend_succeeds() {
+  let attempt = common::check_std_with_target(TargetBackend::C).expect("temporary std check setup should succeed");
+
+  assert!(attempt.result.is_ok(), "expected check_std to succeed for the C backend");
+  assert!(
+    attempt.output_dir.join("ignis_std.h").exists(),
+    "expected check_std to emit the umbrella std header"
   );
 }
 

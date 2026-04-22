@@ -10,6 +10,7 @@ use ignis_type::definition::{DefinitionId, DefinitionStore};
 use ignis_type::module::ModuleId;
 use ignis_type::types::TypeStore;
 
+use crate::backend::BackendRequest;
 use crate::context::CompilationContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,10 @@ pub enum StageError {
   MissingEntryDefinition { definition_id: DefinitionId },
   PostAnalysisErrors { error_count: usize },
   LirVerificationFailed { error_count: usize },
+  BackendRequestRequiresHeaderInput,
+  BackendRequestRequiresLoweredInput,
+  MissingBackendRootModule { root_id: ModuleId },
+  MissingBackendDefinition { definition_id: DefinitionId },
 }
 
 impl fmt::Display for StageError {
@@ -53,6 +58,18 @@ impl fmt::Display for StageError {
       },
       Self::LirVerificationFailed { error_count } => {
         write!(formatter, "lir stage contains {error_count} verification errors")
+      },
+      Self::BackendRequestRequiresHeaderInput => {
+        write!(formatter, "backend request requires header-only input")
+      },
+      Self::BackendRequestRequiresLoweredInput => {
+        write!(formatter, "backend request requires lowered input")
+      },
+      Self::MissingBackendRootModule { root_id } => {
+        write!(formatter, "backend input is missing artifacts for root module {:?}", root_id)
+      },
+      Self::MissingBackendDefinition { definition_id } => {
+        write!(formatter, "backend input references missing definition {:?}", definition_id)
       },
     }
   }
@@ -262,16 +279,22 @@ impl LirStage {
   }
 }
 
-pub struct BackendInput<'a> {
-  pub root_id: ModuleId,
-  pub types: &'a TypeStore,
-  pub defs: &'a DefinitionStore,
-  pub program: &'a LirProgram,
+pub enum BackendInput<'a> {
+  Header {
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+  },
+  Lowered {
+    root_id: ModuleId,
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+    program: &'a LirProgram,
+  },
 }
 
 impl<'a> BackendInput<'a> {
   pub fn from_lir(stage: &'a LirStage) -> Self {
-    Self {
+    Self::Lowered {
       root_id: stage.root_id,
       types: &stage.types,
       defs: &stage.mono_output.defs,
@@ -280,10 +303,77 @@ impl<'a> BackendInput<'a> {
   }
 
   pub fn verify(&self) -> Result<(), StageError> {
-    let _ = self.root_id;
-    let _ = self.types;
-    let _ = self.defs;
-    let _ = self.program;
+    match self {
+      Self::Header { types, defs } => Self::verify_header_artifacts(types, defs),
+      Self::Lowered {
+        root_id,
+        types,
+        defs,
+        program,
+      } => {
+        Self::verify_header_artifacts(types, defs)?;
+        Self::verify_lowered_root_module(defs, *root_id)?;
+        Self::verify_lowered_artifacts(defs, program)
+      },
+    }
+  }
+
+  pub fn verify_for(
+    &self,
+    request: &BackendRequest<'_>,
+  ) -> Result<(), StageError> {
+    match (self, request) {
+      (Self::Header { types, defs }, BackendRequest::Header(_)) => Self::verify_header_artifacts(types, defs),
+      (Self::Header { .. }, BackendRequest::Lowered(_)) => Err(StageError::BackendRequestRequiresLoweredInput),
+      (
+        Self::Lowered {
+          root_id,
+          types,
+          defs,
+          program,
+        },
+        BackendRequest::Lowered(_),
+      ) => {
+        Self::verify_header_artifacts(types, defs)?;
+        Self::verify_lowered_root_module(defs, *root_id)?;
+        Self::verify_lowered_artifacts(defs, program)
+      },
+      (Self::Lowered { .. }, BackendRequest::Header(_)) => Err(StageError::BackendRequestRequiresHeaderInput),
+    }
+  }
+
+  fn verify_header_artifacts(
+    types: &TypeStore,
+    defs: &DefinitionStore,
+  ) -> Result<(), StageError> {
+    let _ = types;
+    let _ = defs;
+
+    Ok(())
+  }
+
+  fn verify_lowered_root_module(
+    defs: &DefinitionStore,
+    root_id: ModuleId,
+  ) -> Result<(), StageError> {
+    if defs.iter().any(|(_, definition)| definition.owner_module == root_id) {
+      return Ok(());
+    }
+
+    Err(StageError::MissingBackendRootModule { root_id })
+  }
+
+  fn verify_lowered_artifacts(
+    defs: &DefinitionStore,
+    program: &LirProgram,
+  ) -> Result<(), StageError> {
+    for definition_id in program.functions.keys().chain(program.global_inits.keys()) {
+      if !has_definition(defs, *definition_id) {
+        return Err(StageError::MissingBackendDefinition {
+          definition_id: *definition_id,
+        });
+      }
+    }
 
     Ok(())
   }
@@ -308,7 +398,7 @@ mod tests {
   use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
   use ignis_hir::{DropSchedules, HIR};
   use ignis_lir::{LirProgram, VerifyError};
-  use ignis_type::definition::DefinitionStore;
+  use ignis_type::definition::{Definition, DefinitionKind, DefinitionStore, Visibility};
   use ignis_type::file::SourceMap;
   use ignis_type::module::{Module, ModulePath};
   use ignis_type::namespace::NamespaceStore;
@@ -318,6 +408,7 @@ mod tests {
   use ignis_type::Store;
 
   use crate::context::{CompilationContext, ParsedModule};
+  use crate::backend::{BackendRequest, HeaderBackendRequest, LoweredBackendRequest};
 
   fn parsed_stage_fixture() -> ParsedStage {
     let config = IgnisConfig::default();
@@ -368,6 +459,116 @@ mod tests {
       false,
     )
     .expect("analyzed stage fixture should succeed")
+  }
+
+  fn backend_header_input_fixture<'a>(
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+  ) -> BackendInput<'a> {
+    BackendInput::Header { types, defs }
+  }
+
+  fn backend_lowered_input_fixture<'a>(
+    root_id: ModuleId,
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+    program: &'a LirProgram,
+  ) -> BackendInput<'a> {
+    BackendInput::Lowered {
+      root_id,
+      types,
+      defs,
+      program,
+    }
+  }
+
+  fn alloc_placeholder_definition(
+    defs: &mut DefinitionStore,
+    owner_module: ModuleId,
+  ) -> DefinitionId {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Placeholder,
+      name: Default::default(),
+      span: Span::default(),
+      name_span: Span::default(),
+      visibility: Visibility::Private,
+      owner_module,
+      owner_namespace: None,
+      doc: None,
+    })
+  }
+
+  fn valid_lowered_backend_fixture(types: &TypeStore) -> (DefinitionStore, LirProgram, ModuleId) {
+    let root_id = ModuleId::new(11);
+    let mut defs = DefinitionStore::new();
+    let function_id = alloc_placeholder_definition(&mut defs, root_id);
+    let global_id = alloc_placeholder_definition(&mut defs, root_id);
+    let mut program = LirProgram::new();
+
+    program.entry_point = Some(function_id);
+    program.functions.insert(
+      function_id,
+      ignis_lir::FunctionLir {
+        def_id: function_id,
+        params: Vec::new(),
+        return_type: types.void(),
+        locals: Store::new(),
+        temps: Store::new(),
+        blocks: Store::new(),
+        entry_block: ignis_lir::BlockId::new(0),
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: Default::default(),
+        span: Span::default(),
+      },
+    );
+    program
+      .global_inits
+      .insert(global_id, ignis_lir::Operand::Const(ignis_lir::ConstValue::Int(0, types.i32())));
+
+    (defs, program, root_id)
+  }
+
+  fn lowered_fixture_with_missing_root_module(types: &TypeStore) -> (DefinitionStore, LirProgram, ModuleId) {
+    let wrong_root_id = ModuleId::new(77);
+    let actual_root_id = ModuleId::new(11);
+    let mut defs = DefinitionStore::new();
+    let function_id = alloc_placeholder_definition(&mut defs, actual_root_id);
+    let mut program = LirProgram::new();
+
+    program.entry_point = Some(function_id);
+    program.functions.insert(
+      function_id,
+      ignis_lir::FunctionLir {
+        def_id: function_id,
+        params: Vec::new(),
+        return_type: types.void(),
+        locals: Store::new(),
+        temps: Store::new(),
+        blocks: Store::new(),
+        entry_block: ignis_lir::BlockId::new(0),
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: Default::default(),
+        span: Span::default(),
+      },
+    );
+
+    (defs, program, wrong_root_id)
+  }
+
+  fn lowered_fixture_with_missing_global_init(
+    types: &TypeStore
+  ) -> (DefinitionStore, LirProgram, ModuleId, DefinitionId) {
+    let (defs, mut program, root_id) = valid_lowered_backend_fixture(types);
+    let missing_global_id = DefinitionId::new(99);
+
+    program.global_inits.insert(
+      missing_global_id,
+      ignis_lir::Operand::Const(ignis_lir::ConstValue::Int(1, types.i32())),
+    );
+
+    (defs, program, root_id, missing_global_id)
   }
 
   #[test]
@@ -491,5 +692,156 @@ mod tests {
     );
 
     assert_eq!(stage.verify(), Err(StageError::LirVerificationFailed { error_count: 1 }));
+  }
+
+  #[test]
+  fn backend_input_accepts_header_requests_without_lir() {
+    let types = TypeStore::new();
+    let defs = DefinitionStore::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let input = backend_header_input_fixture(&types, &defs);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Header(HeaderBackendRequest::EmitStdHeader {
+        namespaces: &namespaces,
+        symbols: &symbols,
+      })),
+      Ok(())
+    );
+  }
+
+  #[test]
+  fn backend_input_rejects_lowered_requests_without_lowered_artifacts() {
+    let types = TypeStore::new();
+    let defs = DefinitionStore::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let input = backend_header_input_fixture(&types, &defs);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Lowered(LoweredBackendRequest::EmitCombined {
+        namespaces: &namespaces,
+        symbols: &symbols,
+        headers: &[],
+      })),
+      Err(StageError::BackendRequestRequiresLoweredInput)
+    );
+  }
+
+  #[test]
+  fn backend_input_rejects_lowered_requests_with_missing_function_definition() {
+    let types = TypeStore::new();
+    let mut defs = DefinitionStore::new();
+    let mut program = LirProgram::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let root_id = ModuleId::new(7);
+    let root_def_id = alloc_placeholder_definition(&mut defs, root_id);
+    let missing_function_id = DefinitionId::new(root_def_id.index() + 1);
+
+    program.entry_point = Some(missing_function_id);
+    program.functions.insert(
+      missing_function_id,
+      ignis_lir::FunctionLir {
+        def_id: missing_function_id,
+        params: Vec::new(),
+        return_type: types.void(),
+        locals: Store::new(),
+        temps: Store::new(),
+        blocks: Store::new(),
+        entry_block: ignis_lir::BlockId::new(0),
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: Default::default(),
+        span: Span::default(),
+      },
+    );
+
+    let input = backend_lowered_input_fixture(root_id, &types, &defs, &program);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Lowered(LoweredBackendRequest::EmitCombined {
+        namespaces: &namespaces,
+        symbols: &symbols,
+        headers: &[],
+      })),
+      Err(StageError::MissingBackendDefinition {
+        definition_id: missing_function_id,
+      })
+    );
+  }
+
+  #[test]
+  fn backend_input_rejects_lowered_requests_with_missing_root_module_artifacts() {
+    let types = TypeStore::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let (defs, program, root_id) = lowered_fixture_with_missing_root_module(&types);
+    let input = backend_lowered_input_fixture(root_id, &types, &defs, &program);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Lowered(LoweredBackendRequest::EmitCombined {
+        namespaces: &namespaces,
+        symbols: &symbols,
+        headers: &[],
+      })),
+      Err(StageError::MissingBackendRootModule { root_id })
+    );
+  }
+
+  #[test]
+  fn backend_input_accepts_valid_lowered_requests_with_registered_artifacts() {
+    let types = TypeStore::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let (defs, program, root_id) = valid_lowered_backend_fixture(&types);
+    let input = backend_lowered_input_fixture(root_id, &types, &defs, &program);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Lowered(LoweredBackendRequest::EmitCombined {
+        namespaces: &namespaces,
+        symbols: &symbols,
+        headers: &[],
+      })),
+      Ok(())
+    );
+  }
+
+  #[test]
+  fn backend_input_rejects_header_requests_with_lowered_input() {
+    let types = TypeStore::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let (defs, program, root_id) = valid_lowered_backend_fixture(&types);
+    let input = backend_lowered_input_fixture(root_id, &types, &defs, &program);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Header(HeaderBackendRequest::EmitStdHeader {
+        namespaces: &namespaces,
+        symbols: &symbols,
+      })),
+      Err(StageError::BackendRequestRequiresHeaderInput)
+    );
+  }
+
+  #[test]
+  fn backend_input_rejects_lowered_requests_with_missing_global_init_definition() {
+    let types = TypeStore::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let (defs, program, root_id, missing_global_id) = lowered_fixture_with_missing_global_init(&types);
+    let input = backend_lowered_input_fixture(root_id, &types, &defs, &program);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Lowered(LoweredBackendRequest::EmitCombined {
+        namespaces: &namespaces,
+        symbols: &symbols,
+        headers: &[],
+      })),
+      Err(StageError::MissingBackendDefinition {
+        definition_id: missing_global_id,
+      })
+    );
   }
 }
