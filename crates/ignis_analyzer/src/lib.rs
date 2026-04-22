@@ -369,7 +369,7 @@ impl<'a> Analyzer<'a> {
 
   pub fn analyze(
     ast: &ASTStore<ASTNode>,
-    roots: &Vec<NodeId>,
+    roots: &[NodeId],
     symbols: Rc<RefCell<SymbolTable>>,
   ) -> AnalyzerOutput {
     Self::analyze_with_imports(ast, roots, symbols, &HashMap::new(), &HashMap::new())
@@ -377,7 +377,7 @@ impl<'a> Analyzer<'a> {
 
   pub fn analyze_staged(
     ast: &ASTStore<ASTNode>,
-    roots: &Vec<NodeId>,
+    roots: &[NodeId],
     symbols: Rc<RefCell<SymbolTable>>,
   ) -> AnalyzerOutput {
     let (semantic, hir) = Self::analyze_to_artifacts(ast, roots, symbols);
@@ -386,7 +386,7 @@ impl<'a> Analyzer<'a> {
 
   pub fn analyze_to_artifacts(
     ast: &ASTStore<ASTNode>,
-    roots: &Vec<NodeId>,
+    roots: &[NodeId],
     symbols: Rc<RefCell<SymbolTable>>,
   ) -> (SemanticArtifacts, HIR) {
     let symbols_clone = symbols.clone();
@@ -412,7 +412,7 @@ impl<'a> Analyzer<'a> {
   /// Analyze with imports from other modules
   pub fn analyze_with_imports(
     ast: &ASTStore<ASTNode>,
-    roots: &Vec<NodeId>,
+    roots: &[NodeId],
     symbols: Rc<RefCell<SymbolTable>>,
     export_table: &ExportTable,
     module_for_path: &HashMap<String, ModuleId>,
@@ -444,7 +444,7 @@ impl<'a> Analyzer<'a> {
   #[allow(clippy::too_many_arguments)]
   pub fn analyze_with_shared_stores(
     ast: &ASTStore<ASTNode>,
-    roots: &Vec<NodeId>,
+    roots: &[NodeId],
     symbols: Rc<RefCell<SymbolTable>>,
     export_table: &ExportTable,
     module_for_path: &HashMap<String, ModuleId>,

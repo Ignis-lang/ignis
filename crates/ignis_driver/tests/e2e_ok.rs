@@ -6,7 +6,7 @@ fn e2e_test(
   name: &str,
   source: &str,
 ) {
-  let result = common::compile_and_run(source).expect(&format!("Compilation of '{}' failed", name));
+  let result = common::compile_and_run(source).unwrap_or_else(|_| panic!("Compilation of '{}' failed", name));
 
   assert!(
     !result.leaked,
@@ -17,11 +17,12 @@ fn e2e_test(
   assert_snapshot!(name, common::format_e2e_result(&result));
 }
 
+#[expect(dead_code, reason = "helper is kept for leak-allowing e2e cases")]
 fn e2e_test_allow_leak(
   name: &str,
   source: &str,
 ) {
-  let result = common::compile_and_run_no_lsan(source).expect(&format!("Compilation of '{}' failed", name));
+  let result = common::compile_and_run_no_lsan(source).unwrap_or_else(|_| panic!("Compilation of '{}' failed", name));
   assert_snapshot!(name, common::format_e2e_result(&result));
 }
 
@@ -29,7 +30,7 @@ fn e2e_no_warnings(
   name: &str,
   source: &str,
 ) {
-  let warnings = common::compile_warnings(source).expect(&format!("Compilation of '{}' failed", name));
+  let warnings = common::compile_warnings(source).unwrap_or_else(|_| panic!("Compilation of '{}' failed", name));
   assert!(warnings.is_empty(), "expected no warnings for '{}', got: {:?}", name, warnings);
 }
 

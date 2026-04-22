@@ -38,6 +38,7 @@ fn analyze_with_imports(
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_with_imports_and_implicit_modules(
   src: &str,
   export_table: &ExportTable,
@@ -51,7 +52,7 @@ fn analyze_with_imports_and_implicit_modules(
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
   assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
@@ -85,7 +86,7 @@ fn analyze_library_with_shared_stores(
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("lib.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
   assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
@@ -113,7 +114,7 @@ fn analyze_library(src: &str) -> (AnalyzerOutput, Rc<RefCell<SymbolTable>>) {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("lib.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
   assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
@@ -604,7 +605,7 @@ fn module_exports_are_definition_ids() {
   let export_data = output.collect_exports();
 
   // Verify exports map to valid DefinitionIds that can be resolved
-  for (_, def_id) in &export_data.exports {
+  for def_id in export_data.exports.values() {
     // Verify we can access the definition through the shared store
     let def = output.defs.get(def_id);
     let _name = &def.name;

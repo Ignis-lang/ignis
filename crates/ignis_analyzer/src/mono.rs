@@ -2800,13 +2800,11 @@ impl MonoOutput {
         },
 
         // Methods: verify if non-generic AND owner is non-generic
-        DefinitionKind::Method(md) if md.type_params.is_empty() => {
-          if !self.is_owner_generic(md.owner_type) {
-            self.check_type_is_concrete(md.return_type, types, "method return", &mut warnings);
-            for param_id in &md.params {
-              let param_ty = self.defs.type_of(param_id);
-              self.check_type_is_concrete(*param_ty, types, "method param", &mut warnings);
-            }
+        DefinitionKind::Method(md) if md.type_params.is_empty() && !self.is_owner_generic(md.owner_type) => {
+          self.check_type_is_concrete(md.return_type, types, "method return", &mut warnings);
+          for param_id in &md.params {
+            let param_ty = self.defs.type_of(param_id);
+            self.check_type_is_concrete(*param_ty, types, "method param", &mut warnings);
           }
         },
 

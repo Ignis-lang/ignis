@@ -2994,10 +2994,12 @@ mod tests {
     let entry_path = repo_root.join("example/hello-world.ign");
     let source = std::fs::read_to_string(&entry_path).expect("example/hello-world.ign should exist");
 
-    let mut config = IgnisConfig::default();
-    config.std = true;
-    config.auto_load_std = true;
-    config.std_path = repo_root.join("std").to_string_lossy().to_string();
+    let config = IgnisConfig {
+      std: true,
+      auto_load_std: true,
+      std_path: repo_root.join("std").to_string_lossy().to_string(),
+      ..IgnisConfig::default()
+    };
 
     let output = ignis_driver::analyze_project_with_text(
       &config,
@@ -3055,12 +3057,9 @@ mod tests {
     let context = detect_context(&tokens, quote_pos, source);
 
     // Should not panic and should handle this edge case
-    match context {
-      Some(CompletionContext::ImportPath { prefix }) => {
-        // Cursor at quote start means empty or very short prefix
-        assert!(prefix.len() <= 10, "prefix at quote start should be short");
-      },
-      _ => {}, // Other contexts are acceptable
+    if let Some(CompletionContext::ImportPath { prefix }) = context {
+      // Cursor at quote start means empty or very short prefix
+      assert!(prefix.len() <= 10, "prefix at quote start should be short");
     }
   }
 

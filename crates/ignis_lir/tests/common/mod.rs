@@ -21,7 +21,7 @@ pub fn lower_to_lir(src: &str) -> LirResult {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
   assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 

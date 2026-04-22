@@ -67,8 +67,6 @@ in
   shell = pkgs.mkShell {
     nativeBuildInputs = with pkgs; [
       git
-      cargo
-      rustc
       rustup
       rust-analyzer
       pkg-config
@@ -87,6 +85,16 @@ in
       if command -v rustup >/dev/null 2>&1; then
         rustup default nightly >/dev/null 2>&1 || true
       fi
+
+      if command -v rustc >/dev/null 2>&1; then
+        rustRelease="$(rustc -vV | sed -n 's/^release: //p')"
+        if [ -n "$rustRelease" ]; then
+          export CARGO_TARGET_DIR="$PWD/target/$rustRelease"
+        fi
+      fi
+
+      echo "Ignis development environment loaded"
+      echo "Rust toolchain is provided via rustup to keep cargo, rustc, and cargo-clippy aligned"
     '';
   };
 }

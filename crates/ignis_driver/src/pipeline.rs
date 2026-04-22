@@ -20,6 +20,8 @@ use ignis_type::types::{Type, TypeId, TypeStore};
 use ignis_diagnostics::message::DiagnosticMessage;
 
 use crate::api::analyze_text;
+use crate::backend::c::CBackend;
+use crate::backend::{emit_text, BackendRequest};
 use crate::build_layout::{
   hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp, write_std_stamp,
   BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
@@ -789,6 +791,7 @@ pub fn compile_project(
         || bc.lib;
       if needs_emit {
         trace_dbg!(&config, DebugTrace::Codegen, "emitting C code");
+        let c_backend = CBackend;
 
         if verify_result.is_err() {
           cmd_fail!(
@@ -896,14 +899,28 @@ pub fn compile_project(
             }
 
             // Generate header
-            let header_content = ignis_codegen_c::emit_user_module_h(
-              **module_id,
-              &source_path,
-              &mono_output.defs,
-              &types,
-              &sym_table,
-              &semantic.namespaces,
-            );
+            let header_content = match emit_text(
+              &c_backend,
+              BackendInput {
+                root_id,
+                types: &types,
+                defs: &mono_output.defs,
+                program: &lir_program,
+              },
+              BackendRequest::EmitUserModuleHeader {
+                module_id: **module_id,
+                source_path: &source_path,
+                namespaces: &semantic.namespaces,
+                symbols: &sym_table,
+              },
+            ) {
+              Ok(contents) => contents,
+              Err(stage_error) => {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!("{} {}", "Error:".red().bold(), stage_error);
+                return Err(());
+              },
+            };
 
             let header_path = layout.user_module_header(&source_path);
             if let Err(e) = std::fs::write(&header_path, &header_content) {
@@ -1004,17 +1021,30 @@ pub fn compile_project(
             }
 
             // Generate C code for this module
-            let c_code = ignis_codegen_c::emit_user_module_c(
-              **module_id,
-              &lir_program,
-              &types,
-              &mono_output.defs,
-              &semantic.namespaces,
-              &sym_table,
-              &link_plan_with_user_includes.headers,
-              &module_paths,
-              &user_module_headers,
-            );
+            let c_code = match emit_text(
+              &c_backend,
+              BackendInput {
+                root_id,
+                types: &types,
+                defs: &mono_output.defs,
+                program: &lir_program,
+              },
+              BackendRequest::EmitUserModule {
+                module_id: **module_id,
+                namespaces: &semantic.namespaces,
+                symbols: &sym_table,
+                headers: &link_plan_with_user_includes.headers,
+                module_paths: &module_paths,
+                user_module_headers: &user_module_headers,
+              },
+            ) {
+              Ok(contents) => contents,
+              Err(stage_error) => {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!("{} {}", "Error:".red().bold(), stage_error);
+                return Err(());
+              },
+            };
 
             let c_path = layout.user_module_src(&source_path);
             if let Err(e) = write_if_changed(&c_path, &c_code) {
@@ -1084,24 +1114,50 @@ pub fn compile_project(
           // Legacy single-file compilation (no precompiled std or no binary output)
           let c_code = if link_plan.std_archive.is_some() {
             let module_paths = build_module_paths_from_graph(&ctx.module_graph);
-            ignis_codegen_c::emit_user_c(
-              &lir_program,
-              &types,
-              &mono_output.defs,
-              &semantic.namespaces,
-              &sym_table,
-              &link_plan.headers,
-              &module_paths,
-            )
+            match emit_text(
+              &c_backend,
+              BackendInput {
+                root_id,
+                types: &types,
+                defs: &mono_output.defs,
+                program: &lir_program,
+              },
+              BackendRequest::EmitUserCombined {
+                namespaces: &semantic.namespaces,
+                symbols: &sym_table,
+                headers: &link_plan.headers,
+                module_paths: &module_paths,
+              },
+            ) {
+              Ok(contents) => contents,
+              Err(stage_error) => {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!("{} {}", "Error:".red().bold(), stage_error);
+                return Err(());
+              },
+            }
           } else {
-            ignis_codegen_c::emit_c(
-              &lir_program,
-              &types,
-              &mono_output.defs,
-              &semantic.namespaces,
-              &sym_table,
-              &link_plan.headers,
-            )
+            match emit_text(
+              &c_backend,
+              BackendInput {
+                root_id,
+                types: &types,
+                defs: &mono_output.defs,
+                program: &lir_program,
+              },
+              BackendRequest::EmitCombined {
+                namespaces: &semantic.namespaces,
+                symbols: &sym_table,
+                headers: &link_plan.headers,
+              },
+            ) {
+              Ok(contents) => contents,
+              Err(stage_error) => {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!("{} {}", "Error:".red().bold(), stage_error);
+                return Err(());
+              },
+            }
           };
 
           if dump_c_requested {
@@ -1268,6 +1324,7 @@ pub fn build_std(
   let module_paths = build_module_paths_from_graph(&ctx.module_graph);
 
   section!(&config, "Codegen & linking");
+  let c_backend = CBackend;
 
   let all_module_ids = ctx.module_graph.all_modules_topological();
   let mut processed_modules: HashSet<String> = HashSet::new();
@@ -1318,14 +1375,28 @@ pub fn build_std(
     }
 
     // Generate module header
-    let header_content = ignis_codegen_c::emit_std_module_h(
-      &module_name,
-      &mono_output.defs,
-      &types,
-      &sym_table,
-      &output.namespaces,
-      &module_paths,
-    );
+    let header_content = match emit_text(
+      &c_backend,
+      BackendInput {
+        root_id: *module_id,
+        types: &types,
+        defs: &mono_output.defs,
+        program: &lir_program,
+      },
+      BackendRequest::EmitStdModuleHeader {
+        module_name: &module_name,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+        module_paths: &module_paths,
+      },
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Build failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
 
     let header_path = layout.std_module_header(&module_name);
     if let Err(e) = std::fs::write(&header_path, &header_content) {
@@ -1431,18 +1502,31 @@ pub fn build_std(
 
     // Generate module C code with umbrella header for inter-module dependencies
     let umbrella_header = "ignis_std.h";
-    let c_code = ignis_codegen_c::emit_std_module_c(
-      &module_name,
-      &lir_program,
-      &types,
-      &mono_output.defs,
-      &output.namespaces,
-      &sym_table,
-      &link_plan.headers,
-      &module_paths,
-      Some(umbrella_header),
-      std_path,
-    );
+    let c_code = match emit_text(
+      &c_backend,
+      BackendInput {
+        root_id: *module_id,
+        types: &types,
+        defs: &mono_output.defs,
+        program: &lir_program,
+      },
+      BackendRequest::EmitStdModule {
+        module_name: &module_name,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+        headers: &link_plan.headers,
+        module_paths: &module_paths,
+        umbrella_header_path: Some(umbrella_header),
+        std_path,
+      },
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Build failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
 
     let c_path = layout.std_module_src(&module_name);
     if let Err(e) = std::fs::write(&c_path, &c_code) {
@@ -1589,10 +1673,31 @@ pub fn check_std(
   link_plan.cflags = config.cflags.clone();
 
   section!(&config, "Codegen (check)");
+  let c_backend = CBackend;
 
   let header_content = {
     let sym_table = output.symbols.borrow();
-    ignis_codegen_c::emit_std_header(&output.defs, &output.types, &sym_table, &output.namespaces)
+    let empty_program = ignis_lir::LirProgram::new();
+    match emit_text(
+      &c_backend,
+      BackendInput {
+        root_id: ModuleId::new(0),
+        types: &output.types,
+        defs: &output.defs,
+        program: &empty_program,
+      },
+      BackendRequest::EmitStdHeader {
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+      },
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Check failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    }
   };
   let header_path = output_path.join("ignis_std.h");
   if let Err(e) = std::fs::write(&header_path, &header_content) {
@@ -1667,18 +1772,31 @@ pub fn check_std(
       continue;
     }
 
-    let c_code = ignis_codegen_c::emit_std_module_c(
-      &module_name,
-      &lir_program,
-      &types,
-      &mono_output.defs,
-      &output.namespaces,
-      &sym_table,
-      &link_plan.headers,
-      &module_paths,
-      None,
-      std_path,
-    );
+    let c_code = match emit_text(
+      &c_backend,
+      BackendInput {
+        root_id: *module_id,
+        types: &types,
+        defs: &mono_output.defs,
+        program: &lir_program,
+      },
+      BackendRequest::EmitStdModule {
+        module_name: &module_name,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+        headers: &link_plan.headers,
+        module_paths: &module_paths,
+        umbrella_header_path: None,
+        std_path,
+      },
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Check failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
 
     let c_path = output_path.join(format!("{}.c", module_name));
     if let Err(e) = std::fs::write(&c_path, &c_code) {

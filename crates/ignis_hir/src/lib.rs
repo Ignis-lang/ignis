@@ -236,7 +236,7 @@ impl HIRKind {
       HIRKind::Unary { operand, .. } => {
         *operand = HIRId::new(operand.index() + offset);
       },
-      HIRKind::Call { args, type_args: _, .. } => {
+      HIRKind::Call { args, .. } => {
         for arg in args {
           *arg = HIRId::new(arg.index() + offset);
         }
@@ -271,19 +271,12 @@ impl HIRKind {
       HIRKind::FieldAccess { base, .. } => {
         *base = HIRId::new(base.index() + offset);
       },
-      HIRKind::RecordInit {
-        fields, type_args: _, ..
-      } => {
+      HIRKind::RecordInit { fields, .. } => {
         for (_, value) in fields {
           *value = HIRId::new(value.index() + offset);
         }
       },
-      HIRKind::MethodCall {
-        receiver,
-        args,
-        type_args: _,
-        ..
-      } => {
+      HIRKind::MethodCall { receiver, args, .. } => {
         if let Some(recv) = receiver {
           *recv = HIRId::new(recv.index() + offset);
         }
@@ -291,9 +284,7 @@ impl HIRKind {
           *arg = HIRId::new(arg.index() + offset);
         }
       },
-      HIRKind::EnumVariant {
-        payload, type_args: _, ..
-      } => {
+      HIRKind::EnumVariant { payload, .. } => {
         for p in payload {
           *p = HIRId::new(p.index() + offset);
         }

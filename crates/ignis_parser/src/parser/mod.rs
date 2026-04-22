@@ -621,7 +621,7 @@ mod tests {
     result.symbols.borrow().get(id).to_string()
   }
 
-  fn get_function<'a>(node: &'a ASTNode) -> &'a ASTFunction {
+  fn get_function(node: &ASTNode) -> &ASTFunction {
     match node {
       ASTNode::Statement(ASTStatement::Function(func)) => func,
       _ => panic!("expected function, got {:?}", node),

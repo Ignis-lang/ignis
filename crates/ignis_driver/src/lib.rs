@@ -1,6 +1,7 @@
 #![allow(clippy::result_unit_err)]
 
 mod api;
+pub mod backend;
 mod build_layout;
 mod context;
 pub mod link;

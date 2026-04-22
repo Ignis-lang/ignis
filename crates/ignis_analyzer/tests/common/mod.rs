@@ -21,7 +21,7 @@ pub fn analyze(src: &str) -> AnalysisResult {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
   assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
@@ -47,7 +47,7 @@ pub fn analyze_staged(src: &str) -> AnalysisResult {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
   assert!(lexer.diagnostics.is_empty(), "Lexer errors: {:?}", lexer.diagnostics);
 
@@ -74,7 +74,7 @@ pub fn analyze_with_errors(src: &str) -> Option<AnalysisResult> {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
 
   if !lexer.diagnostics.is_empty() {
@@ -109,7 +109,7 @@ pub fn analyze_allowing_parse_errors(src: &str) -> AnalysisResult {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
-  let mut lexer = IgnisLexer::new(file_id.clone(), sm.get(&file_id).text.as_str());
+  let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
   lexer.scan_tokens();
 
   let symbols = Rc::new(RefCell::new(SymbolTable::new()));

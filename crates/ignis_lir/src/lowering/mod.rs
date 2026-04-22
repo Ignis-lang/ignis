@@ -2375,11 +2375,7 @@ impl<'a> LoweringContext<'a> {
     let mut current_value = value;
     let mut current_type = value_ty;
 
-    loop {
-      let Type::Reference { inner, .. } = self.types.get(&current_type).clone() else {
-        break;
-      };
-
+    while let Type::Reference { inner, .. } = self.types.get(&current_type).clone() {
       let loaded = self.fn_builder().alloc_temp(inner, span.clone());
       self.fn_builder().emit(Instr::LoadPtr {
         dest: loaded,
