@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ignis_config::TargetBackend;
+
 use crate::project::config::ProjectToml;
 use crate::project::errors::ProjectError;
 
@@ -55,6 +57,9 @@ pub struct Project {
   /// Include debug information.
   pub debug: bool,
 
+  /// Configured backend target.
+  pub target: TargetBackend,
+
   /// Target triple used for compile-time directives.
   pub target_triple: Option<String>,
 
@@ -100,6 +105,7 @@ pub struct CliOverrides {
   pub debug: Option<bool>,
   pub out_dir: Option<PathBuf>,
   pub std_path: Option<PathBuf>,
+  pub target: Option<TargetBackend>,
   pub target_triple: Option<String>,
   pub cc: Option<String>,
   pub cflags: Option<Vec<String>>,
@@ -237,12 +243,20 @@ pub fn resolve_project(
   let cflags = overrides.cflags.clone().unwrap_or(toml.build.cflags);
 
   // Validate target
-  let target_lower = toml.build.target.to_lowercase();
-  if target_lower != "c" {
-    return Err(ProjectError::UnsupportedTarget {
-      value: toml.build.target,
-    });
-  }
+  let target = if let Some(target) = overrides.target {
+    target
+  } else {
+    match toml.build.target.to_lowercase().as_str() {
+      "c" => TargetBackend::C,
+      "iir" => TargetBackend::Iir,
+      "none" => TargetBackend::None,
+      _ => {
+        return Err(ProjectError::UnsupportedTarget {
+          value: toml.build.target,
+        });
+      },
+    }
+  };
 
   // Resolve emit
   let emit_values = overrides.emit.as_ref().unwrap_or(&toml.build.emit);
@@ -281,6 +295,7 @@ pub fn resolve_project(
     bin: toml.build.bin,
     opt_level,
     debug,
+    target,
     target_triple,
     known_features,
     default_features,
@@ -325,6 +340,8 @@ fn parse_emit_set(values: &[String]) -> Result<EmitSet, ProjectError> {
 
 #[cfg(test)]
 mod tests {
+  use ignis_config::TargetBackend;
+
   use super::*;
   use crate::project::config::{BuildTomlConfig, IgnisTomlConfig, PackageConfig, ProjectToml};
   use std::fs;
@@ -389,6 +406,7 @@ mod tests {
     assert!(project.bin);
     assert_eq!(project.opt_level, 0);
     assert!(!project.debug);
+    assert_eq!(project.target, TargetBackend::C);
     assert!(project.target_triple.is_none());
     assert!(project.known_features.is_empty());
     assert!(project.default_features.is_empty());
@@ -411,12 +429,14 @@ mod tests {
       cc: Some("gcc".to_string()),
       cflags: Some(vec!["-Wall".to_string()]),
       emit: Some(vec!["c".to_string(), "obj".to_string()]),
+      target: Some(TargetBackend::Iir),
       ..Default::default()
     };
 
     let project = resolve_project(temp_dir.clone(), toml, &overrides).unwrap();
 
     assert_eq!(project.opt_level, 2);
+    assert_eq!(project.target, TargetBackend::Iir);
     assert!(project.debug);
     assert!(project.out_dir.ends_with("custom_build"));
     assert_eq!(project.cc, "gcc");
@@ -616,6 +636,19 @@ mod tests {
     assert_eq!(project.aliases.len(), 1);
     assert!(project.aliases.contains_key("mylib"));
     assert!(project.aliases["mylib"].is_absolute());
+
+    fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_resolve_accepts_iir_target() {
+    let temp_dir = setup_project_dir("iir_target");
+    let mut toml = minimal_toml("test");
+    toml.build.target = "iir".to_string();
+
+    let project = resolve_project(temp_dir.clone(), toml, &CliOverrides::default()).unwrap();
+
+    assert_eq!(project.target, TargetBackend::Iir);
 
     fs::remove_dir_all(&temp_dir).unwrap();
   }

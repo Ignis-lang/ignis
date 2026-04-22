@@ -18,6 +18,7 @@ use ignis_type::{
 };
 
 use crate::classify::{DefKind, EmitTarget};
+use crate::EmitInput;
 
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
 
@@ -2897,7 +2898,16 @@ pub fn emit_c(
   symbols: &SymbolTable,
   headers: &[CHeader],
 ) -> String {
-  CEmitter::new(program, types, defs, namespaces, symbols, headers).emit()
+  emit_c_from_input(EmitInput::new(program, types, defs), namespaces, symbols, headers)
+}
+
+pub fn emit_c_from_input(
+  input: EmitInput<'_>,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+) -> String {
+  CEmitter::new(input.program, input.types, input.defs, namespaces, symbols, headers).emit()
 }
 
 /// Emit C for user definitions only (excludes std and runtime).
@@ -2910,10 +2920,20 @@ pub fn emit_user_c(
   headers: &[CHeader],
   module_paths: &HashMap<ModuleId, ModulePath>,
 ) -> String {
+  emit_user_c_from_input(EmitInput::new(program, types, defs), namespaces, symbols, headers, module_paths)
+}
+
+pub fn emit_user_c_from_input(
+  input: EmitInput<'_>,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+  module_paths: &HashMap<ModuleId, ModulePath>,
+) -> String {
   CEmitter::with_target(
-    program,
-    types,
-    defs,
+    input.program,
+    input.types,
+    input.defs,
     namespaces,
     symbols,
     headers,
@@ -2937,11 +2957,33 @@ pub fn emit_std_module_c(
   umbrella_header_path: Option<&str>,
   std_path: &std::path::Path,
 ) -> String {
+  emit_std_module_c_from_input(
+    module_name,
+    EmitInput::new(program, types, defs),
+    namespaces,
+    symbols,
+    headers,
+    module_paths,
+    umbrella_header_path,
+    std_path,
+  )
+}
+
+pub fn emit_std_module_c_from_input(
+  module_name: &str,
+  input: EmitInput<'_>,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  umbrella_header_path: Option<&str>,
+  std_path: &std::path::Path,
+) -> String {
   let headers = prepend_umbrella_header(headers, umbrella_header_path);
   CEmitter::with_std_target(
-    program,
-    types,
-    defs,
+    input.program,
+    input.types,
+    input.defs,
     namespaces,
     symbols,
     &headers,
@@ -2961,6 +3003,22 @@ pub fn emit_std_module_h(
   namespaces: &NamespaceStore,
   module_paths: &HashMap<ModuleId, ModulePath>,
 ) -> String {
+  emit_std_module_h_from_input(
+    module_name,
+    EmitInput::new(&LirProgram::new(), types, defs),
+    symbols,
+    namespaces,
+    module_paths,
+  )
+}
+
+pub fn emit_std_module_h_from_input(
+  module_name: &str,
+  input: EmitInput<'_>,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  module_paths: &HashMap<ModuleId, ModulePath>,
+) -> String {
   let guard_name = format!("STD_{}_H", module_name.to_uppercase());
   let comment = format!("std::{}", module_name);
 
@@ -2976,7 +3034,7 @@ pub fn emit_std_module_h(
     }
   };
 
-  emit_module_header(&guard_name, &comment, defs, types, symbols, namespaces, filter)
+  emit_module_header(&guard_name, &comment, input.defs, input.types, symbols, namespaces, filter)
 }
 
 /// Emit C for a specific user module.
@@ -2995,13 +3053,33 @@ pub fn emit_user_module_c(
   module_paths: &HashMap<ModuleId, ModulePath>,
   user_module_headers: &[CHeader],
 ) -> String {
+  emit_user_module_c_from_input(
+    module_id,
+    EmitInput::new(program, types, defs),
+    namespaces,
+    symbols,
+    headers,
+    module_paths,
+    user_module_headers,
+  )
+}
+
+pub fn emit_user_module_c_from_input(
+  module_id: ModuleId,
+  input: EmitInput<'_>,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  user_module_headers: &[CHeader],
+) -> String {
   let mut all_headers = user_module_headers.to_vec();
   all_headers.extend(headers.iter().cloned());
 
   CEmitter::with_target(
-    program,
-    types,
-    defs,
+    input.program,
+    input.types,
+    input.defs,
     namespaces,
     symbols,
     &all_headers,
@@ -3020,6 +3098,22 @@ pub fn emit_user_module_h(
   symbols: &SymbolTable,
   namespaces: &NamespaceStore,
 ) -> String {
+  emit_user_module_h_from_input(
+    module_id,
+    source_path,
+    EmitInput::new(&LirProgram::new(), types, defs),
+    symbols,
+    namespaces,
+  )
+}
+
+pub fn emit_user_module_h_from_input(
+  module_id: ModuleId,
+  source_path: &std::path::Path,
+  input: EmitInput<'_>,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> String {
   let guard_name = source_path
     .with_extension("")
     .to_string_lossy()
@@ -3031,7 +3125,7 @@ pub fn emit_user_module_h(
   let filter =
     |_def_id: DefinitionId, def: &ignis_type::definition::Definition| -> bool { def.owner_module == module_id };
 
-  emit_module_header(&guard_name, &comment, defs, types, symbols, namespaces, filter)
+  emit_module_header(&guard_name, &comment, input.defs, input.types, symbols, namespaces, filter)
 }
 
 fn prepend_umbrella_header(
@@ -4154,6 +4248,14 @@ pub fn emit_std_header(
   symbols: &SymbolTable,
   namespaces: &NamespaceStore,
 ) -> String {
+  emit_std_header_from_input(EmitInput::new(&LirProgram::new(), types, defs), symbols, namespaces)
+}
+
+pub fn emit_std_header_from_input(
+  input: EmitInput<'_>,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> String {
   use ignis_type::definition::{DefinitionKind, Visibility};
   use std::collections::HashSet;
 
@@ -4168,7 +4270,7 @@ pub fn emit_std_header(
   writeln!(output, "// Auto-generated standard library prototypes").unwrap();
   writeln!(output).unwrap();
 
-  for def in defs.get_all() {
+  for def in input.defs.get_all() {
     if def.visibility != Visibility::Public {
       continue;
     }
@@ -4187,14 +4289,20 @@ pub fn emit_std_header(
       }
       emitted_names.insert(name.to_string());
 
-      let return_ty = format_c_type(types.get(&func_def.return_type), types, defs, symbols, namespaces);
+      let return_ty = format_c_type(
+        input.types.get(&func_def.return_type),
+        input.types,
+        input.defs,
+        symbols,
+        namespaces,
+      );
 
       let mut param_strs = Vec::new();
       for param_id in &func_def.params {
-        let param_def = defs.get(param_id);
+        let param_def = input.defs.get(param_id);
         if let DefinitionKind::Parameter(param) = &param_def.kind {
           let param_name = symbols.get(&param_def.name);
-          let param_ty = format_c_type(types.get(&param.type_id), types, defs, symbols, namespaces);
+          let param_ty = format_c_type(input.types.get(&param.type_id), input.types, input.defs, symbols, namespaces);
           param_strs.push(format!("{} {}", param_ty, param_name));
         }
       }

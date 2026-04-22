@@ -885,6 +885,43 @@ function main(): void {
 }
 
 #[test]
+fn unknown_param_attribute_renders_unified_contract_diagnostic() {
+  let result = common::analyze(
+    r#"
+function foo(@bogus x: i32): void {
+    return;
+}
+
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "unknown_param_attribute_renders_unified_contract_diagnostic",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn unknown_builtin_renders_unified_contract_diagnostic() {
+  let source = r#"
+function main(): void {
+    @bogus();
+}
+"#;
+
+  let result = common::analyze(source);
+  common::assert_err(source, &["A0110"]);
+
+  assert_snapshot!(
+    "unknown_builtin_renders_unified_contract_diagnostic",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn copy_type_no_move() {
   // Copy types (primitives) don't move - this should NOT produce an error
   common::assert_ok(

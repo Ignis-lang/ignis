@@ -738,7 +738,7 @@ impl<'a> Analyzer<'a> {
     let symbols = self.symbols.borrow();
     let name = symbols.get(symbol_id);
 
-    matches!(name, "typeOf" | "sizeOf" | "alignOf" | "maxOf" | "minOf")
+    ignis_type::at_items::is_builtin(name)
   }
 
   fn node_span(

@@ -2361,7 +2361,12 @@ impl<'a> Analyzer<'a> {
       "trap" => self.lower_builtin_trap(bc, hir),
       "unreachable" => self.lower_builtin_unreachable(bc, hir),
       _ => hir.alloc(HIRNode {
-        kind: HIRKind::Error,
+        // Typechecking already reports unknown builtin diagnostics; ensure the
+        // shared registry does not silently diverge from lowering dispatch.
+        kind: {
+          debug_assert!(!ignis_type::at_items::is_builtin(&name));
+          HIRKind::Error
+        },
         span: bc.span.clone(),
         type_id: self.types.error(),
       }),

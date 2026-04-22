@@ -91,6 +91,34 @@ function main(): void {
   );
 }
 
+#[test]
+fn unknown_builtin_at_correct_line() {
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): void {
+    @bogus();
+}"#,
+    "A0110",
+    3,
+  );
+}
+
+#[test]
+fn unknown_param_attribute_at_correct_line() {
+  common::assert_diagnostic_at_line(
+    r#"
+function foo(@bogus x: i32): void {
+    return;
+}
+
+function main(): void {
+    return;
+}"#,
+    "A0117",
+    2,
+  );
+}
+
 // ============================================================================
 // Record/Enum Type Error Tests
 // ============================================================================

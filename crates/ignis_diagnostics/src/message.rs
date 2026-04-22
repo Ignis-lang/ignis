@@ -1,6 +1,5 @@
 use std::fmt;
 
-use ignis_data_type::DataType;
 use ignis_token::token_types::TokenType;
 use ignis_type::span::Span;
 
@@ -90,12 +89,12 @@ pub enum DiagnosticMessage {
   },
   MissingArgument(Span),
   InvalidArgumentType {
-    expected: DataType,
+    expected: String,
     at: Span,
   },
   TypeMismatch {
-    expected: DataType,
-    got: DataType,
+    expected: String,
+    got: String,
     at: Span,
   },
   InvalidProperty(Span),
@@ -2304,6 +2303,32 @@ impl DiagnosticMessage {
 mod tests {
   use super::DiagnosticMessage;
   use ignis_type::span::Span;
+
+  #[test]
+  fn invalid_argument_type_hides_internal_error_type() {
+    let message = DiagnosticMessage::InvalidArgumentType {
+      expected: "error".to_string(),
+      at: Span::default(),
+    };
+
+    let rendered = message.to_string();
+    assert!(rendered.contains("<invalid>"));
+    assert!(!rendered.contains("'error'"));
+  }
+
+  #[test]
+  fn parser_type_mismatch_hides_internal_error_type() {
+    let message = DiagnosticMessage::TypeMismatch {
+      expected: "i32".to_string(),
+      got: "error".to_string(),
+      at: Span::default(),
+    };
+
+    let rendered = message.to_string();
+    assert!(rendered.contains("Expected 'i32'"));
+    assert!(rendered.contains("<invalid>"));
+    assert!(!rendered.contains("'error'"));
+  }
 
   #[test]
   fn assignment_type_mismatch_hides_internal_error_type() {

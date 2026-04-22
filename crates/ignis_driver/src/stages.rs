@@ -1,7 +1,7 @@
 use std::fmt;
 
 use ignis_analyzer::{AnalyzerOutput, SemanticArtifacts};
-use ignis_config::IgnisConfig;
+use ignis_config::{IgnisConfig, TargetBackend};
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
 use ignis_hir::{DropSchedules, HIR};
 use ignis_lir::verify::VerifyResult;
@@ -18,6 +18,7 @@ pub enum StageError {
   MissingParsedModule { module_id: ModuleId },
   AnalysisFailed,
   AnalysisDiagnostics { error_count: usize },
+  UnsupportedBackend { backend: TargetBackend },
   MissingEntryDefinition { definition_id: DefinitionId },
   PostAnalysisErrors { error_count: usize },
   LirVerificationFailed { error_count: usize },
@@ -36,6 +37,9 @@ impl fmt::Display for StageError {
       Self::AnalysisFailed => write!(formatter, "analyzer stage failed before producing a verified artifact"),
       Self::AnalysisDiagnostics { error_count } => {
         write!(formatter, "analyzer stage contains {error_count} error diagnostics")
+      },
+      Self::UnsupportedBackend { backend } => {
+        write!(formatter, "backend '{backend:?}' is not implemented")
       },
       Self::MissingEntryDefinition { definition_id } => {
         write!(
