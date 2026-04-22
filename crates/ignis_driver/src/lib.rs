@@ -6,6 +6,7 @@ mod context;
 pub mod link;
 mod pipeline;
 pub mod project;
+pub mod stages;
 
 pub use api::{
   analyze_project, analyze_project_with_options, analyze_project_with_text, analyze_text, AnalysisOptions,
