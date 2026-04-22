@@ -135,6 +135,7 @@ fn build_cli_overrides(cmd: &BuildCommand) -> CliOverrides {
     },
     out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
     std_path: cmd.std_path.as_ref().map(PathBuf::from),
+    target: Some(cmd.target.clone().into()),
     target_triple: cmd.target_triple.clone(),
     cc: cmd.cc.clone(),
     cflags: None,
@@ -224,7 +225,7 @@ fn build_config_from_project(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(project.entry.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    project.target,
     true, // is_project
     project.opt_level > 0,
     project.out_dir.to_string_lossy().to_string(),
@@ -280,7 +281,7 @@ fn build_config_for_single_file(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(file_path.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    cmd.target.clone().into(),
     false, // is_project
     cmd.opt_level.unwrap_or(0) > 0,
     out_dir.to_string(),
@@ -329,6 +330,7 @@ fn check_cli_overrides(cmd: &CheckCommand) -> CliOverrides {
     debug: None,
     out_dir: cmd.output_dir.as_ref().map(PathBuf::from),
     std_path: cmd.std_path.as_ref().map(PathBuf::from),
+    target: Some(cmd.target.clone().into()),
     target_triple: cmd.target_triple.clone(),
     cc: None,
     cflags: None,
@@ -387,7 +389,7 @@ fn check_config_from_project(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(project.entry.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    project.target,
     true,
     false, // optimize
     project.out_dir.to_string_lossy().to_string(),
@@ -432,7 +434,7 @@ fn check_config_for_single_file(
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(file_path.to_string_lossy().to_string()),
-    ignis_config::TargetBackend::C,
+    cmd.target.clone().into(),
     false,
     false,
     out_dir.to_string(),

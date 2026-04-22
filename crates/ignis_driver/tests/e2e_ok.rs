@@ -59,6 +59,24 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_staged_driver_single_file_parity() {
+  let result = common::compile_project_and_run(
+    r#"
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return add(19, 23);
+}
+"#,
+  )
+  .expect("staged driver build should succeed");
+
+  assert_snapshot!("staged_driver_single_file_parity", common::format_e2e_result(&result));
+}
+
+#[test]
 fn e2e_return_zero() {
   e2e_test(
     "return_zero",

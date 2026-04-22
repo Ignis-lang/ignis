@@ -1,5 +1,6 @@
 use ignis_codegen_c::{
-  emit_c, emit_std_header, emit_std_module_c, emit_std_module_h, emit_user_c, emit_user_module_c, emit_user_module_h,
+  emit_c_from_input, emit_std_header_from_input, emit_std_module_c_from_input, emit_std_module_h_from_input,
+  emit_user_c_from_input, emit_user_module_c_from_input, emit_user_module_h_from_input, EmitInput,
 };
 
 use super::{Backend, BackendRequest, BackendResult};
@@ -13,26 +14,20 @@ impl Backend for CBackend {
     input: BackendInput<'_>,
     request: BackendRequest<'_>,
   ) -> Result<BackendResult, StageError> {
+    let emit_input = EmitInput::new(input.program, input.types, input.defs);
+
     let contents = match request {
       BackendRequest::EmitCombined {
         namespaces,
         symbols,
         headers,
-      } => emit_c(input.program, input.types, input.defs, namespaces, symbols, headers),
+      } => emit_c_from_input(emit_input, namespaces, symbols, headers),
       BackendRequest::EmitUserCombined {
         namespaces,
         symbols,
         headers,
         module_paths,
-      } => emit_user_c(
-        input.program,
-        input.types,
-        input.defs,
-        namespaces,
-        symbols,
-        headers,
-        module_paths,
-      ),
+      } => emit_user_c_from_input(emit_input, namespaces, symbols, headers, module_paths),
       BackendRequest::EmitUserModule {
         module_id,
         namespaces,
@@ -40,11 +35,9 @@ impl Backend for CBackend {
         headers,
         module_paths,
         user_module_headers,
-      } => emit_user_module_c(
+      } => emit_user_module_c_from_input(
         module_id,
-        input.program,
-        input.types,
-        input.defs,
+        emit_input,
         namespaces,
         symbols,
         headers,
@@ -56,7 +49,7 @@ impl Backend for CBackend {
         source_path,
         namespaces,
         symbols,
-      } => emit_user_module_h(module_id, source_path, input.defs, input.types, symbols, namespaces),
+      } => emit_user_module_h_from_input(module_id, source_path, emit_input, symbols, namespaces),
       BackendRequest::EmitStdModule {
         module_name,
         namespaces,
@@ -65,11 +58,9 @@ impl Backend for CBackend {
         module_paths,
         umbrella_header_path,
         std_path,
-      } => emit_std_module_c(
+      } => emit_std_module_c_from_input(
         module_name,
-        input.program,
-        input.types,
-        input.defs,
+        emit_input,
         namespaces,
         symbols,
         headers,
@@ -82,9 +73,9 @@ impl Backend for CBackend {
         namespaces,
         symbols,
         module_paths,
-      } => emit_std_module_h(module_name, input.defs, input.types, symbols, namespaces, module_paths),
+      } => emit_std_module_h_from_input(module_name, emit_input, symbols, namespaces, module_paths),
       BackendRequest::EmitStdHeader { namespaces, symbols } => {
-        emit_std_header(input.defs, input.types, symbols, namespaces)
+        emit_std_header_from_input(emit_input, symbols, namespaces)
       },
     };
 
@@ -98,6 +89,7 @@ mod tests {
   use std::path::Path;
 
   use ignis_lir::LirProgram;
+  use ignis_codegen_c::{emit_c, emit_std_module_c, emit_user_module_h};
   use ignis_type::definition::DefinitionStore;
   use ignis_type::module::{ModuleId, ModulePath};
   use ignis_type::namespace::NamespaceStore;
@@ -135,6 +127,9 @@ mod tests {
     .expect("combined emission should succeed");
 
     assert_eq!(emitted, emit_c(&program, &types, &defs, &namespaces, &symbols, &[]));
+
+    let codegen_input = EmitInput::new(&program, &types, &defs);
+    assert_eq!(emitted, emit_c_from_input(codegen_input, &namespaces, &symbols, &[]));
   }
 
   #[test]
@@ -169,6 +164,12 @@ mod tests {
     assert_eq!(
       emitted,
       emit_user_module_h(ModuleId::new(1), source_path, &defs, &types, &symbols, &namespaces)
+    );
+
+    let codegen_input = EmitInput::new(&program, &types, &defs);
+    assert_eq!(
+      emitted,
+      emit_user_module_h_from_input(ModuleId::new(1), source_path, codegen_input, &symbols, &namespaces)
     );
   }
 
@@ -211,6 +212,21 @@ mod tests {
         &program,
         &types,
         &defs,
+        &namespaces,
+        &symbols,
+        &[],
+        &module_paths,
+        None,
+        Path::new("std"),
+      )
+    );
+
+    let codegen_input = EmitInput::new(&program, &types, &defs);
+    assert_eq!(
+      emitted,
+      emit_std_module_c_from_input(
+        "math",
+        codegen_input,
         &namespaces,
         &symbols,
         &[],

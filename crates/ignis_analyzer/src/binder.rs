@@ -1778,7 +1778,7 @@ impl<'a> Analyzer<'a> {
             }
           }
         },
-        "allow" | "warn" | "deny" => {},
+        name if ignis_type::at_items::is_lint_level_directive(name) => {},
         _ => {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
@@ -1911,7 +1911,7 @@ impl<'a> Analyzer<'a> {
             }
           }
         },
-        "allow" | "warn" | "deny" => {},
+        name if ignis_type::at_items::is_lint_level_directive(name) => {},
         _ => {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
@@ -2024,7 +2024,7 @@ impl<'a> Analyzer<'a> {
             }
           }
         },
-        "allow" | "warn" | "deny" => {},
+        name if ignis_type::at_items::is_lint_level_directive(name) => {},
         _ => {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {

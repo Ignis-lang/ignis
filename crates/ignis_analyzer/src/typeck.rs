@@ -7722,6 +7722,7 @@ impl<'a> Analyzer<'a> {
       "trap" => self.typecheck_builtin_no_args(bc, "trap"),
       "unreachable" => self.typecheck_builtin_no_args(bc, "unreachable"),
       _ => {
+        debug_assert!(!ignis_type::at_items::is_builtin(&name));
         self.add_diagnostic(
           DiagnosticMessage::UnknownBuiltin {
             name,

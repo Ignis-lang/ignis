@@ -4,9 +4,11 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ignis_analyzer::Analyzer;
-use ignis_config::CHeader;
+use ignis_config::{CHeader, IgnisBuildConfig, IgnisConfig, IgnisSTDManifest, StdToolchainConfig, TargetBackend};
+use ignis_driver::compile_project;
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::compilation_context::CompilationContext;
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
@@ -23,6 +25,96 @@ pub struct E2EResult {
   pub stderr: String,
   pub leaked: bool,
   pub leak_report: String,
+}
+
+pub struct DriverBuildAttempt {
+  pub _temp_dir: TempDir,
+  pub bin_path: PathBuf,
+  pub result: Result<(), ()>,
+}
+
+fn build_driver_test_config(
+  file_path: &std::path::Path,
+  output_dir: &std::path::Path,
+  target: TargetBackend,
+) -> Arc<IgnisConfig> {
+  let mut config = IgnisConfig::new_basic(false, Vec::new(), true, 0);
+  let bin_path = output_dir.join(file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("out"));
+  let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+
+  config.std = false;
+  config.auto_load_std = false;
+  config.std_path = fixtures_dir.to_string_lossy().to_string();
+  config.manifest = IgnisSTDManifest {
+    toolchain: StdToolchainConfig {
+      base_header: Some("types.h".to_string()),
+      base_header_quoted: Some(true),
+      include_dirs: vec![".".to_string()],
+    },
+    modules: std::collections::HashMap::from([("__test_base".to_string(), "types.h".to_string())]),
+    ..Default::default()
+  };
+  config.build = true;
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(file_path.to_string_lossy().to_string()),
+    target,
+    false,
+    false,
+    output_dir.to_string_lossy().to_string(),
+    Vec::new(),
+    None,
+    None,
+    None,
+    None,
+    Some(bin_path.to_string_lossy().to_string()),
+    false,
+    true,
+    false,
+    false,
+    false,
+  ));
+
+  Arc::new(config)
+}
+
+pub fn compile_project_single_file(
+  source: &str,
+  target: TargetBackend,
+) -> Result<DriverBuildAttempt, String> {
+  let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+  let source_path = temp_dir.path().join("main.ign");
+  let output_dir = temp_dir.path().join("build");
+  std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
+  std::fs::write(&source_path, source).map_err(|e| format!("Failed to write source file: {}", e))?;
+
+  let config = build_driver_test_config(&source_path, &output_dir, target);
+  let bin_path = output_dir.join("main");
+  let result = compile_project(config, source_path.to_string_lossy().as_ref());
+
+  Ok(DriverBuildAttempt {
+    _temp_dir: temp_dir,
+    bin_path,
+    result,
+  })
+}
+
+pub fn compile_project_and_run(source: &str) -> Result<E2EResult, String> {
+  let attempt = compile_project_single_file(source, TargetBackend::C)?;
+  attempt
+    .result
+    .map_err(|_| "compile_project failed for C backend".to_string())?;
+
+  let run = Command::new(&attempt.bin_path)
+    .output()
+    .map_err(|e| format!("Failed to run compiled binary: {}", e))?;
+
+  Ok(E2EResult {
+    exit_code: run.status.code().unwrap_or(-1),
+    stdout: String::from_utf8_lossy(&run.stdout).to_string(),
+    stderr: String::from_utf8_lossy(&run.stderr).to_string(),
+    leaked: false,
+    leak_report: String::new(),
+  })
 }
 
 fn compile_to_c(source: &str) -> Result<String, String> {

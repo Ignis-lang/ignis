@@ -21,7 +21,7 @@ use ignis_diagnostics::message::DiagnosticMessage;
 
 use crate::api::analyze_text;
 use crate::backend::c::CBackend;
-use crate::backend::{emit_text, BackendRequest};
+use crate::backend::{emit_text, select_backend, BackendRequest};
 use crate::build_layout::{
   hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp, write_std_stamp,
   BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
@@ -388,6 +388,8 @@ pub fn compile_project(
   if should_load_prelude {
     ctx.discover_prelude_modules_for_all(&config);
   }
+
+  ctx.module_graph.root = Some(root_id);
 
   let parsed_stage = ParsedStage::new(ctx, root_id);
 
@@ -791,7 +793,18 @@ pub fn compile_project(
         || bc.lib;
       if needs_emit {
         trace_dbg!(&config, DebugTrace::Codegen, "emitting C code");
-        let c_backend = CBackend;
+        let selected_backend = match select_backend(bc.target) {
+          Ok(backend) => backend,
+          Err(stage_error) => {
+            cmd_fail!(
+              &config,
+              if check_mode { "Check failed" } else { "Build failed" },
+              start.elapsed()
+            );
+            eprintln!("{} {}", "Error:".red().bold(), stage_error);
+            return Err(());
+          },
+        };
 
         if verify_result.is_err() {
           cmd_fail!(
@@ -900,7 +913,7 @@ pub fn compile_project(
 
             // Generate header
             let header_content = match emit_text(
-              &c_backend,
+              &selected_backend,
               BackendInput {
                 root_id,
                 types: &types,
@@ -1022,7 +1035,7 @@ pub fn compile_project(
 
             // Generate C code for this module
             let c_code = match emit_text(
-              &c_backend,
+              &selected_backend,
               BackendInput {
                 root_id,
                 types: &types,
@@ -1115,7 +1128,7 @@ pub fn compile_project(
           let c_code = if link_plan.std_archive.is_some() {
             let module_paths = build_module_paths_from_graph(&ctx.module_graph);
             match emit_text(
-              &c_backend,
+              &selected_backend,
               BackendInput {
                 root_id,
                 types: &types,
@@ -1138,7 +1151,7 @@ pub fn compile_project(
             }
           } else {
             match emit_text(
-              &c_backend,
+              &selected_backend,
               BackendInput {
                 root_id,
                 types: &types,

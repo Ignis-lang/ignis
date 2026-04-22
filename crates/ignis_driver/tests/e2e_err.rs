@@ -2,6 +2,8 @@ mod common;
 
 use insta::assert_snapshot;
 
+use ignis_config::TargetBackend;
+
 fn e2e_error_test(
   name: &str,
   source: &str,
@@ -27,6 +29,25 @@ fn e2e_warning_test(
   let warnings = common::compile_warnings(source).expect("lex/parse failed");
   assert!(!warnings.is_empty(), "expected warnings");
   assert_snapshot!(name, warnings.join("\n"));
+}
+
+#[test]
+fn e2e_err_unsupported_backend_iir() {
+  let attempt = common::compile_project_single_file(
+    r#"
+function main(): i32 {
+    return 0;
+}
+"#,
+    TargetBackend::Iir,
+  )
+  .expect("temporary project setup should succeed");
+
+  assert!(
+    attempt.result.is_err(),
+    "expected compile_project to fail for unsupported backend"
+  );
+  assert!(!attempt.bin_path.exists(), "unsupported backend should not emit a binary");
 }
 
 #[test]
