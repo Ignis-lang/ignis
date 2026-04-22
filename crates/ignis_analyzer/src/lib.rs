@@ -225,7 +225,23 @@ pub struct AnalyzerOutput {
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
 }
 
-impl AnalyzerOutput {
+pub struct SemanticArtifacts {
+  pub types: TypeStore,
+  pub defs: DefinitionStore,
+  pub namespaces: NamespaceStore,
+  pub diagnostics: Vec<Diagnostic>,
+  pub symbols: Rc<RefCell<SymbolTable>>,
+  pub node_defs: HashMap<NodeId, DefinitionId>,
+  pub node_types: HashMap<NodeId, TypeId>,
+  pub node_spans: HashMap<NodeId, ignis_type::span::Span>,
+  pub resolved_calls: HashMap<NodeId, DefinitionId>,
+  pub import_item_defs: HashMap<ignis_type::span::Span, DefinitionId>,
+  pub import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
+  pub extension_methods:
+    HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
+}
+
+impl SemanticArtifacts {
   pub fn collect_exports(&self) -> imports::ModuleExportData {
     let mut exports = HashMap::new();
 
@@ -236,6 +252,47 @@ impl AnalyzerOutput {
     }
 
     imports::ModuleExportData { exports }
+  }
+}
+
+impl AnalyzerOutput {
+  pub fn from_semantic_artifacts(
+    semantic: SemanticArtifacts,
+    hir: HIR,
+  ) -> Self {
+    Self {
+      types: semantic.types,
+      defs: semantic.defs,
+      namespaces: semantic.namespaces,
+      hir,
+      diagnostics: semantic.diagnostics,
+      symbols: semantic.symbols,
+      node_defs: semantic.node_defs,
+      node_types: semantic.node_types,
+      node_spans: semantic.node_spans,
+      resolved_calls: semantic.resolved_calls,
+      import_item_defs: semantic.import_item_defs,
+      import_module_files: semantic.import_module_files,
+      extension_methods: semantic.extension_methods,
+    }
+  }
+
+  pub fn collect_exports(&self) -> imports::ModuleExportData {
+    SemanticArtifacts {
+      types: self.types.clone(),
+      defs: self.defs.clone(),
+      namespaces: self.namespaces.clone(),
+      diagnostics: self.diagnostics.clone(),
+      symbols: self.symbols.clone(),
+      node_defs: self.node_defs.clone(),
+      node_types: self.node_types.clone(),
+      node_spans: self.node_spans.clone(),
+      resolved_calls: self.resolved_calls.clone(),
+      import_item_defs: self.import_item_defs.clone(),
+      import_module_files: self.import_module_files.clone(),
+      extension_methods: self.extension_methods.clone(),
+    }
+    .collect_exports()
   }
 }
 
@@ -331,11 +388,10 @@ impl<'a> Analyzer<'a> {
     // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
     let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
 
-    AnalyzerOutput {
+    let semantic = SemanticArtifacts {
       types: analyzer.types,
       defs: analyzer.defs,
       namespaces: analyzer.namespaces,
-      hir,
       diagnostics: analyzer.diagnostics,
       symbols: symbols_clone,
       node_defs: analyzer.node_defs,
@@ -345,7 +401,9 @@ impl<'a> Analyzer<'a> {
       import_item_defs: analyzer.import_item_defs,
       import_module_files: analyzer.import_module_files,
       extension_methods: analyzer.extension_methods,
-    }
+    };
+
+    AnalyzerOutput::from_semantic_artifacts(semantic, hir)
   }
 
   /// Analyze with shared stores, enabling cross-module compilation.
@@ -434,11 +492,10 @@ impl<'a> Analyzer<'a> {
     // Build node_spans by looking up spans from AST for all nodes in node_defs and node_types
     let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
 
-    AnalyzerOutput {
+    let semantic = SemanticArtifacts {
       types: shared_types.clone(),
       defs: shared_defs.clone(),
       namespaces: shared_namespaces.clone(),
-      hir,
       diagnostics: analyzer.diagnostics,
       symbols: symbols_clone,
       node_defs: analyzer.node_defs,
@@ -448,7 +505,9 @@ impl<'a> Analyzer<'a> {
       import_item_defs: analyzer.import_item_defs,
       import_module_files: analyzer.import_module_files,
       extension_methods: shared_extension_methods.clone(),
-    }
+    };
+
+    AnalyzerOutput::from_semantic_artifacts(semantic, hir)
   }
 
   fn add_diagnostic(
@@ -778,5 +837,111 @@ fn get_node_span(
     Some(ast.get(node_id).span().clone())
   } else {
     None
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  use ignis_hir::HIR;
+  use ignis_type::file::SourceMap;
+  use ignis_type::span::Span;
+
+  fn semantic_artifacts_fixture() -> SemanticArtifacts {
+    let file_id = SourceMap::new().add_virtual("semantic-artifacts", String::new());
+    let span = Span::empty_at(file_id, Default::default());
+    let mut symbols = SymbolTable::new();
+    let public_name = symbols.get_or_intern("publicValue");
+    let private_name = symbols.get_or_intern("privateValue");
+
+    let types = TypeStore::new();
+    let i32_type = types.i32();
+    let mut defs = DefinitionStore::new();
+    let public_def_id = defs.alloc(ignis_type::definition::Definition {
+      kind: DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
+        type_id: i32_type,
+        mutable: false,
+      }),
+      name: public_name,
+      span: span.clone(),
+      name_span: span.clone(),
+      visibility: Visibility::Public,
+      owner_module: ModuleId::new(0),
+      owner_namespace: None,
+      doc: None,
+    });
+    let private_def_id = defs.alloc(ignis_type::definition::Definition {
+      kind: DefinitionKind::Variable(ignis_type::definition::VariableDefinition {
+        type_id: i32_type,
+        mutable: false,
+      }),
+      name: private_name,
+      span: span.clone(),
+      name_span: span.clone(),
+      visibility: Visibility::Private,
+      owner_module: ModuleId::new(0),
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let mut node_defs = HashMap::new();
+    node_defs.insert(NodeId::new(1), public_def_id);
+
+    let mut node_types = HashMap::new();
+    node_types.insert(NodeId::new(2), i32_type);
+
+    let mut node_spans = HashMap::new();
+    node_spans.insert(NodeId::new(1), Span::empty_at(file_id, Default::default()));
+
+    let mut import_item_defs = HashMap::new();
+    import_item_defs.insert(Span::empty_at(file_id, Default::default()), private_def_id);
+
+    SemanticArtifacts {
+      types,
+      defs,
+      namespaces: NamespaceStore::new(),
+      diagnostics: Vec::new(),
+      symbols: Rc::new(RefCell::new(symbols)),
+      node_defs,
+      node_types,
+      node_spans,
+      resolved_calls: HashMap::new(),
+      import_item_defs,
+      import_module_files: HashMap::new(),
+      extension_methods: HashMap::new(),
+    }
+  }
+
+  #[test]
+  fn semantic_artifacts_collect_only_public_exports() {
+    let semantic = semantic_artifacts_fixture();
+
+    let exports = semantic.collect_exports();
+    let symbol_table = semantic.symbols.borrow();
+    let exported_names: Vec<_> = exports
+      .exports
+      .keys()
+      .map(|symbol_id| symbol_table.get(symbol_id).to_string())
+      .collect();
+
+    assert_eq!(exported_names, vec!["publicValue".to_string()]);
+  }
+
+  #[test]
+  fn analyzer_output_from_semantic_artifacts_preserves_semantic_maps() {
+    let semantic = semantic_artifacts_fixture();
+    let expected_node_defs = semantic.node_defs.clone();
+    let expected_node_types = semantic.node_types.clone();
+    let expected_node_spans = semantic.node_spans.clone();
+    let expected_import_item_defs = semantic.import_item_defs.clone();
+    let hir = HIR::new();
+
+    let output = AnalyzerOutput::from_semantic_artifacts(semantic, hir);
+
+    assert_eq!(output.node_defs, expected_node_defs);
+    assert_eq!(output.node_types, expected_node_types);
+    assert_eq!(output.node_spans, expected_node_spans);
+    assert_eq!(output.import_item_defs, expected_import_item_defs);
   }
 }
