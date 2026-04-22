@@ -28,6 +28,7 @@ use crate::context::CompilationContext;
 use crate::link::{
   compile_to_object, format_tool_error, link_executable, link_executable_multi, rebuild_std_runtime, LinkPlan,
 };
+use crate::stages::{AnalyzedStage, BackendInput, CheckedStage, LirStage, ParsedStage, StageError};
 
 /// Compiler version for stamp file invalidation.
 const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -129,9 +130,10 @@ fn resolve_type_param(
   args: &[TypeId],
 ) -> TypeId {
   match types.get(&ty) {
-    Type::Param { owner: param_owner, index } if *param_owner == owner => {
-      args.get(*index as usize).copied().unwrap_or(ty)
-    },
+    Type::Param {
+      owner: param_owner,
+      index,
+    } if *param_owner == owner => args.get(*index as usize).copied().unwrap_or(ty),
     _ => ty,
   }
 }
@@ -385,14 +387,28 @@ pub fn compile_project(
     ctx.discover_prelude_modules_for_all(&config);
   }
 
-  let std_module_names: Vec<String> = ctx
+  let parsed_stage = ParsedStage::new(ctx, root_id);
+
+  if let Err(stage_error) = parsed_stage.verify() {
+    cmd_fail!(
+      &config,
+      if is_check_mode { "Check failed" } else { "Build failed" },
+      start.elapsed()
+    );
+    eprintln!("{} {}", "Error:".red().bold(), stage_error);
+    return Err(());
+  }
+
+  let std_module_names: Vec<String> = parsed_stage
+    .ctx
     .module_graph
     .modules
     .iter()
     .filter(|(_, m)| m.path.is_std())
     .map(|(_, m)| m.path.module_name())
     .collect();
-  let user_module_names: Vec<String> = ctx
+  let user_module_names: Vec<String> = parsed_stage
+    .ctx
     .module_graph
     .modules
     .iter()
@@ -424,14 +440,23 @@ pub fn compile_project(
 
   section!(&config, "Analyzing");
 
-  let output = match ctx.compile(root_id, &config) {
-    Ok(o) => o,
-    Err(()) => {
+  let analyzed_stage = match parsed_stage.analyze(&config) {
+    Ok(stage) => stage,
+    Err(StageError::AnalysisFailed) => {
       cmd_fail!(
         &config,
         if is_check_mode { "Check failed" } else { "Build failed" },
         start.elapsed()
       );
+      return Err(());
+    },
+    Err(stage_error) => {
+      cmd_fail!(
+        &config,
+        if is_check_mode { "Check failed" } else { "Build failed" },
+        start.elapsed()
+      );
+      eprintln!("{} {}", "Error:".red().bold(), stage_error);
       return Err(());
     },
   };
@@ -440,32 +465,39 @@ pub fn compile_project(
     &config,
     DebugTrace::Analyzer,
     "compilation produced {} diagnostics",
-    output.diagnostics.len()
+    analyzed_stage.output.diagnostics.len()
   );
 
   // Dump phase: use a scoped borrow that ends before monomorphization
   {
-    let sym_table = output.symbols.borrow();
+    let sym_table = analyzed_stage.output.symbols.borrow();
 
     if dump_requested(&config, DumpKind::Types) {
-      let types_dump = ignis_analyzer::dump::dump_types(&output.types);
+      let types_dump = ignis_analyzer::dump::dump_types(&analyzed_stage.output.types);
       write_dump_output(&config, "dump-types.txt", &types_dump)?;
     }
 
     if dump_requested(&config, DumpKind::Defs) {
-      let defs_dump = ignis_analyzer::dump::dump_defs(&output.defs, &output.types, &sym_table);
+      let defs_dump =
+        ignis_analyzer::dump::dump_defs(&analyzed_stage.output.defs, &analyzed_stage.output.types, &sym_table);
       write_dump_output(&config, "dump-defs.txt", &defs_dump)?;
     }
 
     if dump_requested(&config, DumpKind::HirSummary) {
-      let summary_dump = ignis_analyzer::dump::dump_hir_summary(&output.hir, &output.defs, &sym_table);
+      let summary_dump =
+        ignis_analyzer::dump::dump_hir_summary(&analyzed_stage.output.hir, &analyzed_stage.output.defs, &sym_table);
       write_dump_output(&config, "dump-hir-summary.txt", &summary_dump)?;
     }
 
     if let Some(build_config) = config.build_config.as_ref()
       && let Some(func_name) = &build_config.dump_hir
     {
-      match ignis_analyzer::dump::dump_hir_function(&output.hir, &output.defs, &sym_table, func_name) {
+      match ignis_analyzer::dump::dump_hir_function(
+        &analyzed_stage.output.hir,
+        &analyzed_stage.output.defs,
+        &sym_table,
+        func_name,
+      ) {
         Ok(out) => {
           let file_name = format!("dump-hir-{}.txt", sanitize_dump_name(func_name));
           write_dump_output(&config, &file_name, &out)?;
@@ -475,10 +507,17 @@ pub fn compile_project(
     }
 
     if dump_requested(&config, DumpKind::Hir) {
-      let hir_dump = ignis_analyzer::dump::dump_hir_complete(&output.hir, &output.types, &output.defs, &sym_table);
+      let hir_dump = ignis_analyzer::dump::dump_hir_complete(
+        &analyzed_stage.output.hir,
+        &analyzed_stage.output.types,
+        &analyzed_stage.output.defs,
+        &sym_table,
+      );
       write_dump_output(&config, "dump-hir.txt", &hir_dump)?;
     }
   }
+
+  let AnalyzedStage { ctx, root_id, output } = analyzed_stage;
 
   if let Some(bc) = config.build_config.as_ref() {
     let has_entry_point = output.hir.entry_point.is_some();
@@ -602,18 +641,21 @@ pub fn compile_project(
       #[cfg(debug_assertions)]
       mono_output.verify_no_generics(&types);
 
-      // Re-borrow symbols for ownership checking and codegen
-      let sym_table = output.symbols.borrow();
+      let (drop_schedules, ownership_diagnostics, borrow_diagnostics) = {
+        let sym_table = output.symbols.borrow();
 
-      let ownership_checker =
-        ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
-          .with_source_map(&ctx.source_map);
-      let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
+        let ownership_checker =
+          ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+            .with_source_map(&ctx.source_map);
+        let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
 
-      let borrow_checker =
-        ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
-          .with_source_map(&ctx.source_map);
-      let borrow_diagnostics = borrow_checker.check();
+        let borrow_checker =
+          ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+            .with_source_map(&ctx.source_map);
+        let borrow_diagnostics = borrow_checker.check();
+
+        (drop_schedules, ownership_diagnostics, borrow_diagnostics)
+      };
 
       let mut post_mono_diagnostics = ownership_diagnostics;
       post_mono_diagnostics.extend(borrow_diagnostics);
@@ -630,37 +672,79 @@ pub fn compile_project(
           ignis_diagnostics::render(diag, &ctx.source_map);
         }
       }
+      let mut checked_stage = CheckedStage::new(
+        AnalyzedStage { ctx, root_id, output },
+        types,
+        mono_output,
+        drop_schedules,
+        post_mono_diagnostics,
+      );
 
-      let error_count = post_mono_diagnostics
+      let error_count = checked_stage
+        .diagnostics
         .iter()
         .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
         .count();
-      let warning_count = post_mono_diagnostics
+      let warning_count = checked_stage
+        .diagnostics
         .iter()
         .filter(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Warning))
         .count();
 
-      if error_count > 0 {
+      if let Err(stage_error) = checked_stage.verify() {
         cmd_fail!(
           &config,
           if check_mode { "Check failed" } else { "Build failed" },
           start.elapsed()
         );
         cmd_stats!(&config, error_count, warning_count);
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
         return Err(());
       }
 
       // TODO: Filter to project_modules only when std is pre-compiled
       let used_module_set: std::collections::HashSet<ignis_type::module::ModuleId> =
         used_modules.iter().copied().collect();
+
+      let symbols = checked_stage.output.symbols.clone();
+      let sym_table = symbols.borrow();
       let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
-        &mono_output.hir,
-        &mut types,
-        &mono_output.defs,
+        &checked_stage.mono_output.hir,
+        &mut checked_stage.types,
+        &checked_stage.mono_output.defs,
         &sym_table,
-        &drop_schedules,
+        &checked_stage.drop_schedules,
         Some(&used_module_set),
       );
+
+      drop(sym_table);
+
+      let lir_stage = LirStage::new(checked_stage, lir_program, verify_result);
+
+      let backend_input = BackendInput::from_lir(&lir_stage);
+      if let Err(stage_error) = backend_input.verify() {
+        cmd_fail!(
+          &config,
+          if check_mode { "Check failed" } else { "Build failed" },
+          start.elapsed()
+        );
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      }
+
+      let LirStage {
+        ctx,
+        root_id: _,
+        output,
+        types,
+        mono_output,
+        drop_schedules: _,
+        diagnostics: _,
+        program: lir_program,
+        verification: verify_result,
+      } = lir_stage;
+
+      let sym_table = output.symbols.borrow();
 
       trace_dbg!(&config, DebugTrace::Lir, "lowering completed");
 
