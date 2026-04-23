@@ -808,16 +808,24 @@ impl CompilationContext {
     if !root_is_std && let Err(err) = self.module_graph.detect_cycles() {
       match err {
         ModuleError::CircularDependency { cycle } => {
-          let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
-          eprintln!(
-            "{} Circular dependency detected: {}",
-            "Error:".red().bold(),
-            cycle_str.join(" -> ")
-          );
+          let std_root = std::path::Path::new(&config.std_path);
+          let cycle_is_std_only = !config.std_path.is_empty() && cycle.iter().skip(1).all(|path| path.starts_with(std_root));
+
+          if !cycle_is_std_only {
+            let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
+            eprintln!(
+              "{} Circular dependency detected: {}",
+              "Error:".red().bold(),
+              cycle_str.join(" -> ")
+            );
+            return Err(());
+          }
         },
-        _ => eprintln!("{} Module error: {:?}", "Error:".red().bold(), err),
+        _ => {
+          eprintln!("{} Module error: {:?}", "Error:".red().bold(), err);
+          return Err(());
+        },
       }
-      return Err(());
     }
 
     self.module_graph.root = Some(root_id);

@@ -1,0 +1,237 @@
+//!
+//! # Hash Module
+//!
+//! Deterministic hashing foundations for collections and user-defined keys.
+//!
+//! The default hasher uses 64-bit FNV-1a with a fixed offset basis and no
+//! randomized seeding. Hashes are therefore deterministic for a given stdlib
+//! and compiler version.
+
+const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
+extern __hash_rt {
+  function ignis_hash_fnv1a_cstr(state: u64, value: str): u64;
+}
+
+export trait Hash {
+  hash(&self, hasher: &mut Hasher): void;
+}
+
+export trait Eq {
+}
+
+export record Hasher {
+  state: u64;
+
+  public static new(): Hasher {
+    return Hasher { state: FNV_OFFSET_BASIS };
+  }
+
+  public reset(&mut self): void {
+    self.state = FNV_OFFSET_BASIS;
+  }
+
+  public writeByte(&mut self, value: u8): void {
+    self.state = (self.state ^ (value as u64)) * FNV_PRIME;
+  }
+
+  public writeBoolean(&mut self, value: boolean): void {
+    self.writeByte(value ? 1 : 0);
+  }
+
+  public writeChar(&mut self, value: char): void {
+    self.writeByte(value as u8);
+  }
+
+  public writeU16(&mut self, value: u16): void {
+    self.writeByte((value & 0x00ff) as u8);
+    self.writeByte(((value >> 8) & 0x00ff) as u8);
+  }
+
+  public writeU32(&mut self, value: u32): void {
+    self.writeByte((value & 0x000000ff) as u8);
+    self.writeByte(((value >> 8) & 0x000000ff) as u8);
+    self.writeByte(((value >> 16) & 0x000000ff) as u8);
+    self.writeByte(((value >> 24) & 0x000000ff) as u8);
+  }
+
+  public writeU64(&mut self, value: u64): void {
+    self.writeByte((value & 0x00000000000000ff) as u8);
+    self.writeByte(((value >> 8) & 0x00000000000000ff) as u8);
+    self.writeByte(((value >> 16) & 0x00000000000000ff) as u8);
+    self.writeByte(((value >> 24) & 0x00000000000000ff) as u8);
+    self.writeByte(((value >> 32) & 0x00000000000000ff) as u8);
+    self.writeByte(((value >> 40) & 0x00000000000000ff) as u8);
+    self.writeByte(((value >> 48) & 0x00000000000000ff) as u8);
+    self.writeByte(((value >> 56) & 0x00000000000000ff) as u8);
+  }
+
+  public writeI8(&mut self, value: i8): void {
+    self.writeByte(value as u8);
+  }
+
+  public writeI16(&mut self, value: i16): void {
+    self.writeU16(value as u16);
+  }
+
+  public writeI32(&mut self, value: i32): void {
+    self.writeU32(value as u32);
+  }
+
+  public writeI64(&mut self, value: i64): void {
+    self.writeU64(value as u64);
+  }
+
+  public writeStr(&mut self, value: str): void {
+    self.state = __hash_rt::ignis_hash_fnv1a_cstr(self.state, value);
+  }
+
+  public finish(&self): u64 {
+    return self.state;
+  }
+}
+
+@extension(boolean)
+function hash(value: boolean, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeBoolean(value);
+}
+
+@extension(boolean)
+function equals(value: boolean, other: boolean): boolean {
+  if (value) {
+    return other;
+  }
+
+  return !other;
+}
+
+@extension(char)
+function hash(value: char, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeChar(value);
+}
+
+@extension(char)
+function equals(value: char, other: char): boolean {
+  return value == other;
+}
+
+@extension(i8)
+function hash(value: i8, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeI8(value);
+}
+
+@extension(i8)
+function equals(value: i8, other: i8): boolean {
+  return value == other;
+}
+
+@extension(i16)
+function hash(value: i16, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeI16(value);
+}
+
+@extension(i16)
+function equals(value: i16, other: i16): boolean {
+  return value == other;
+}
+
+@extension(i32)
+function hash(value: i32, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeI32(value);
+}
+
+@extension(i32)
+function equals(value: i32, other: i32): boolean {
+  return value == other;
+}
+
+@extension(i64)
+function hash(value: i64, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeI64(value);
+}
+
+@extension(i64)
+function equals(value: i64, other: i64): boolean {
+  return value == other;
+}
+
+@extension(u8)
+function hash(value: u8, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeByte(value);
+}
+
+@extension(u8)
+function equals(value: u8, other: u8): boolean {
+  return value == other;
+}
+
+@extension(u16)
+function hash(value: u16, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeU16(value);
+}
+
+@extension(u16)
+function equals(value: u16, other: u16): boolean {
+  return value == other;
+}
+
+@extension(u32)
+function hash(value: u32, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeU32(value);
+}
+
+@extension(u32)
+function equals(value: u32, other: u32): boolean {
+  return value == other;
+}
+
+@extension(u64)
+function hash(value: u64, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeU64(value);
+}
+
+@extension(u64)
+function equals(value: u64, other: u64): boolean {
+  return value == other;
+}
+
+@extension(str)
+function hash(value: str, hasher: &mut Hasher): void {
+  let mut state: &mut Hasher = hasher;
+  state.writeStr(value);
+}
+
+@extension(str)
+function equals(value: str, other: str): boolean {
+  let left: *u8 = value as *u8;
+  let right: *u8 = other as *u8;
+  let mut index: u64 = 0;
+
+  while (true) {
+    let leftByte: u8 = *(left + index);
+    let rightByte: u8 = *(right + index);
+
+    if (leftByte != rightByte) {
+      return false;
+    }
+
+    if (leftByte == 0) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}

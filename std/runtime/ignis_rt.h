@@ -195,15 +195,38 @@ void ignis_mem_reset_stats(void);
 void *ignis_alloc(size_t size);
 
 /**
+ * Allocates `size` bytes with at least `alignment` alignment.
+ * `alignment` must be a non-zero power of two.
+ * Returns NULL only when `size == 0`.
+ * Aborts the process on allocation failure (OOM) or invalid alignment.
+ */
+void *ignis_alloc_aligned(size_t size, size_t alignment);
+
+/**
  * Resizes a previously allocated block.
  * Aborts the process on allocation failure (OOM).
  */
 void *ignis_realloc(void *ptr, size_t size);
 
 /**
+ * Reallocates a block so the resulting storage satisfies `alignment`.
+ * `alignment` must be a non-zero power of two.
+ * Returns NULL only when `size == 0`.
+ * Aborts the process on allocation failure (OOM) or invalid alignment.
+ */
+void *ignis_realloc_aligned(void *ptr, size_t size, size_t alignment);
+
+/**
  * Allocates `count` elements of `size` bytes, zero-initialized.
  */
 void *ignis_calloc(size_t count, size_t size);
+
+/**
+ * Allocates `count * size` bytes with `alignment` alignment and zero-fills them.
+ * Returns NULL only when the total size is 0.
+ * Aborts on overflow, allocation failure, or invalid alignment.
+ */
+void *ignis_calloc_aligned(size_t count, size_t size, size_t alignment);
 
 /**
  * Frees a previously allocated block.
@@ -219,6 +242,23 @@ void ignis_memcpy(void *dest, const void *src, size_t n);
  * Copies `n` bytes from `src` to `dest`. Handles overlapping regions.
  */
 void ignis_memmove(void *dest, const void *src, size_t n);
+
+// =============================================================================
+// Arena allocation
+// =============================================================================
+
+typedef struct IgnisArena IgnisArena;
+
+IgnisArena *ignis_arena_create(size_t block_size);
+void *ignis_arena_allocate(IgnisArena *arena, size_t size, size_t alignment);
+void ignis_arena_reset(IgnisArena *arena);
+void ignis_arena_destroy(IgnisArena *arena);
+
+// =============================================================================
+// Hashing
+// =============================================================================
+
+u64 ignis_hash_fnv1a_cstr(u64 state, const char *value);
 
 // =============================================================================
 // String base API

@@ -341,6 +341,14 @@ export record Layout {
     return (self.size + (self.alignment - 1)) & ~(self.alignment - 1);
   }
 
+  /// Returns the byte stride for repeated values of this layout.
+  ///
+  /// This is an alias for `paddedSize()` used to make array allocation
+  /// contracts explicit at the call site.
+  public stride(&self): u64 {
+    return self.paddedSize();
+  }
+
   /// Creates a `Layout` for a single value of type `T`.
   ///
   /// This method uses the compiler intrinsics `@sizeOf<T>()` and `@alignOf<T>()`
@@ -417,14 +425,22 @@ export record Layout {
   /// assert(empty.align() == 8);
   /// ```
   public static init<T>(count: u64): Layout {
-    let elemSize: u64 = @sizeOf<T>();
-    let total: u64 = count * elemSize;
+    return Layout::array(Layout::init<T>(), count);
+  }
 
-    // Overflow check: if count > 0 and total/count != elemSize, overflow occurred
-    if (count != 0 && total / count != elemSize) {
-      @panic("Layout::init<T>(count): total size overflow");
+  /// Creates an array layout from an element layout and element count.
+  ///
+  /// The total size is `elementLayout.stride() * count`, so every element slot
+  /// begins at an address that satisfies the element alignment.
+  public static array(elementLayout: Layout, count: u64): Layout {
+    let stride: u64 = elementLayout.stride();
+    let total: u64 = count * stride;
+
+    if (count != 0 && total / count != stride) {
+      @panic("Layout::array: total size overflow");
     }
 
-    return Layout::init(total, @alignOf<T>());
+    return Layout::init(total, elementLayout.align());
   }
+
 }
