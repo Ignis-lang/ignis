@@ -1,17 +1,104 @@
 //! # HashSet
 //!
 //! Deterministic hash set built on top of `HashMap<T, HashSetMarker>`.
+//!
+//! ## Overview
+//!
+//! `HashSet<T>` stores only keys. Internally it delegates storage, probing,
+//! resizing, and drop behavior to `HashMap<T, HashSetMarker>`.
+//!
+//! This means the set inherits the same deterministic hashing behavior as
+//! `HashMap` while exposing a simpler presence/absence API.
+//!
+//! ## Marker Payload
+//!
+//! `HashSetMarker` is a zero-sized marker payload used internally so the set
+//! can be implemented on top of `HashMap` without storing a meaningful value.
+//!
+//! ## How It Works
+//!
+//! `HashSet<T>` is intentionally thin. It does not reimplement probing,
+//! resizing, tombstones, or raw storage management.
+//!
+//! Instead, it delegates to `HashMap<T, HashSetMarker>` and translates the map
+//! API into set semantics:
+//!
+//! ```text
+//!   HashSet::insert(value)
+//!     -> HashMap::insert(value, HashSetMarker {})
+//!     -> returns true only when the key was absent
+//!
+//!   HashSet::contains(value)
+//!     -> HashMap::get(value)
+//!     -> presence/absence only
+//!
+//!   HashSet::remove(value)
+//!     -> HashMap::remove(value)
+//!     -> returns true only when the key existed
+//! ```
+//!
+//! This keeps the public API simple while reusing the proven `HashMap`
+//! implementation for all hash-table mechanics.
+//!
+//! ## Key Requirements
+//!
+//! Elements must satisfy `Hash & Eq`.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Eq from "std::collections";
+//! import Hash from "std::collections";
+//! import HashSet from "std::collections";
+//! import Hasher from "std::hash";
+//!
+//! @implements(Hash, Eq)
+//! record Key {
+//!   id: i32;
+//!
+//!   hash(&self, hasher: &mut Hasher): void {
+//!     let mut state: &mut Hasher = hasher;
+//!     state.writeI32(self.id);
+//!   }
+//!
+//!   equals(&self, other: &Key): boolean {
+//!     return self.id == other.id;
+//!   }
+//! }
+//!
+//! function main(): i32 {
+//!   let mut set: HashSet<Key> = HashSet::init<Key>();
+//!   set.insert(Key { id: 1 });
+//!
+//!   let lookup: Key = Key { id: 1 };
+//!   return set.contains(&lookup) ? 0 : 1;
+//! }
+//! ```
 
 import Eq from "./hash_map";
 import Hash from "./hash_map";
 import HashMap from "./hash_map";
 
+/// Zero-sized marker stored as the internal value payload of `HashSet`.
+///
+/// This is exported so low-level tests and examples can inspect its layout,
+/// but normal code should treat it as an implementation detail.
 export record HashSetMarker {}
 
 @implements(Drop)
+/// Deterministic set of unique values of type `T`.
 export record HashSet<T: Hash & Eq> {
   map: HashMap<T, HashSetMarker>;
 
+  /// Creates an empty set with no allocated buckets.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashSet from "std::collections";
+  ///
+  /// let set: HashSet<i32> = HashSet::init<i32>();
+  /// ```
   public static init(): HashSet<T> {
     return HashSet {
       map: HashMap {
@@ -26,24 +113,48 @@ export record HashSet<T: Hash & Eq> {
     };
   }
 
+  /// Creates an empty set with enough buckets for at least `capacity`
+  /// logical elements under the current load-factor policy.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashSet from "std::collections";
+  ///
+  /// let set: HashSet<i32> = HashSet::init<i32>(64);
+  /// ```
   public static init(capacity: u64): HashSet<T> {
     let mut set: HashSet<T> = HashSet::init<T>();
     set.reserve(capacity);
     return set;
   }
 
+  /// Returns the number of stored elements.
   public length(&self): u64 {
     return self.map.length();
   }
 
+  /// Returns the number of buckets currently allocated by the backing map.
   public capacity(&self): u64 {
     return self.map.capacity();
   }
 
+  /// Returns `true` when the set contains no elements.
   public isEmpty(&self): boolean {
     return self.map.isEmpty();
   }
 
+  /// Returns `true` if `value` is already present.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashSet from "std::collections";
+  ///
+  /// let mut set: HashSet<i32> = HashSet::init<i32>();
+  /// set.insert(7);
+  /// let found: boolean = set.contains(&7);
+  /// ```
   public contains(&self, value: &T): boolean {
     return match (self.map.get(value)) {
       Option::SOME(_) -> true,
@@ -51,6 +162,20 @@ export record HashSet<T: Hash & Eq> {
     };
   }
 
+  /// Inserts `value` if absent.
+  ///
+  /// Returns `true` when the value was newly inserted and `false` when it was
+  /// already present.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashSet from "std::collections";
+  ///
+  /// let mut set: HashSet<i32> = HashSet::init<i32>();
+  /// let first: boolean = set.insert(7);  // true
+  /// let second: boolean = set.insert(7); // false
+  /// ```
   public insert(&mut self, value: T): boolean {
     return match (self.map.insert(value, HashSetMarker {})) {
       Option::SOME(_) -> false,
@@ -58,6 +183,19 @@ export record HashSet<T: Hash & Eq> {
     };
   }
 
+  /// Removes `value` from the set.
+  ///
+  /// Returns `true` when the value existed and `false` otherwise.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashSet from "std::collections";
+  ///
+  /// let mut set: HashSet<i32> = HashSet::init<i32>();
+  /// set.insert(7);
+  /// let removed: boolean = set.remove(&7);
+  /// ```
   public remove(&mut self, value: &T): boolean {
     return match (self.map.remove(value)) {
       Option::SOME(_) -> true,
@@ -65,14 +203,37 @@ export record HashSet<T: Hash & Eq> {
     };
   }
 
+  /// Ensures the set can accommodate `additional` more elements without
+  /// immediate growth.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashSet from "std::collections";
+  ///
+  /// let mut set: HashSet<i32> = HashSet::init<i32>();
+  /// set.reserve(32);
+  /// ```
   public reserve(&mut self, additional: u64): void {
     self.map.reserve(additional);
   }
 
+  /// Removes all values while preserving the current bucket allocation.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashSet from "std::collections";
+  ///
+  /// let mut set: HashSet<i32> = HashSet::init<i32>();
+  /// set.insert(1);
+  /// set.clear();
+  /// ```
   public clear(&mut self): void {
     self.map.clear();
   }
 
+  /// Drops all values and releases backing storage.
   public drop(&mut self): void {
     self.map.drop();
   }

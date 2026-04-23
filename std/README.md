@@ -116,13 +116,19 @@ function main(): i32 {
 - Reallocation: `reallocate<T>`, `reallocateVector<T>`.
 - Deallocation: `free<T>`.
 - Data transfer: `copy<T>`, `move<T>`, `copyBytes`, `moveBytes`.
-- Submodules: `Layout` (size/alignment descriptors), `Align` (alignment utilities).
+- Submodules: `Layout` (size/alignment descriptors), `Align` (alignment utilities), `ArenaAllocator` (grouped-lifetime arena allocation).
 
 ### `std::vector`
 
 - `Vector<T>` — growable contiguous storage. Implements `Drop` and `Clone`.
 - Growth: geometric (`capacity *= 2`, minimum 1).
 - Higher-order: `forEach`, `forEachMut`, `filter`, `any`, `all`, `findIndex`, `count`, `reduce`, `map`, `flatMap`.
+
+### `std::collections`
+
+- `HashMap<K, V>` — deterministic hash table with open addressing, linear probing, and tombstones.
+- `HashSet<T>` — thin unique-value set built on top of `HashMap`.
+- Traits: `Hash`, `Eq`.
 
 ### `std::ptr`
 
