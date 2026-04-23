@@ -2146,6 +2146,86 @@ function main(): i32 {
 }
 
 #[test]
+fn collection_bounds_reject_missing_hash_key() {
+  let source = r#"
+trait Hash {
+    hash(&self): i32;
+}
+
+trait Eq {
+}
+
+@implements(Eq)
+record OnlyEq {
+    public value: i32;
+}
+
+record HashMap<K: Hash & Eq, V> {
+    public count: i32;
+
+    public static init(): HashMap<K, V> {
+        return HashMap { count: 0 };
+    }
+}
+
+function main(): i32 {
+    let map: HashMap<OnlyEq, i32> = HashMap::init<OnlyEq, i32>();
+    return map.count;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0190"]);
+  assert_snapshot!(
+    "collection_bounds_reject_missing_hash_key",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn collection_bounds_reject_missing_eq_key() {
+  let source = r#"
+trait Hash {
+    hash(&self): i32;
+}
+
+trait Eq {
+}
+
+@implements(Hash)
+record OnlyHash {
+    public value: i32;
+
+    hash(&self): i32 {
+        return self.value;
+    }
+}
+
+record HashSet<T: Hash & Eq> {
+    public count: i32;
+
+    public static init(): HashSet<T> {
+        return HashSet { count: 0 };
+    }
+}
+
+function main(): i32 {
+    let set: HashSet<OnlyHash> = HashSet::init<OnlyHash>();
+    return set.count;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0190"]);
+  assert_snapshot!(
+    "collection_bounds_reject_missing_eq_key",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn trait_with_field() {
   let result = common::analyze_allowing_parse_errors(
     r#"

@@ -99,6 +99,20 @@ static AT_ITEMS: &[AtItemMeta] = &[
     doc: Some("Returns `(*mut u8) -> void`. Used for passing drop functions to allocators and containers."),
   },
   AtItemMeta {
+    name: "hash",
+    kind: AtItemKind::Builtin,
+    syntax: "@hash<T>(value, hasher)",
+    summary: "Hashes `value` with the concrete `Hash` implementation for `T`.",
+    doc: Some("Used by std collections to force concrete hash dispatch after monomorphization."),
+  },
+  AtItemMeta {
+    name: "eq",
+    kind: AtItemKind::Builtin,
+    syntax: "@eq<T>(left, right)",
+    summary: "Compares two values with the concrete `Eq` implementation for `T`.",
+    doc: Some("Used by std collections to force concrete equality dispatch after monomorphization."),
+  },
+  AtItemMeta {
     name: "maxOf",
     kind: AtItemKind::Builtin,
     syntax: "@maxOf<T>()",

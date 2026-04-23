@@ -7679,6 +7679,116 @@ impl<'a> Analyzer<'a> {
     self.types.function(vec![u8_ptr], void_type, false)
   }
 
+  fn typecheck_builtin_hash(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let type_args = match &bc.type_args {
+      Some(args) if args.len() == 1 => args,
+      Some(args) => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: args.len(),
+            type_name: "@hash".to_string(),
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "@hash".to_string(),
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if bc.args.len() != 2 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: "hash".to_string(),
+          expected: 2,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&bc.span));
+    let value_ref_type = self.types.reference(value_type, false);
+    let infer = InferContext::expecting(value_ref_type);
+    self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &infer);
+    self.typecheck_node(&bc.args[1], scope_kind, ctx);
+    self.types.void()
+  }
+
+  fn typecheck_builtin_eq(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let type_args = match &bc.type_args {
+      Some(args) if args.len() == 1 => args,
+      Some(args) => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: args.len(),
+            type_name: "@eq".to_string(),
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "@eq".to_string(),
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if bc.args.len() != 2 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: "eq".to_string(),
+          expected: 2,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let value_type = self.resolve_type_syntax_impl(&type_args[0], Some(&bc.span));
+    let value_ref_type = self.types.reference(value_type, false);
+    let infer = InferContext::expecting(value_ref_type);
+    self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &infer);
+    self.typecheck_node_with_infer(&bc.args[1], scope_kind, ctx, &infer);
+    self.types.boolean()
+  }
+
   fn typecheck_maxof_builtin(
     &mut self,
     call: &ASTCallExpression,
@@ -7815,6 +7925,8 @@ impl<'a> Analyzer<'a> {
       "pointerFromInteger" => self.typecheck_builtin_pointer_from_integer(bc, scope_kind, ctx),
       "read" => self.typecheck_builtin_read(bc, scope_kind, ctx),
       "write" => self.typecheck_builtin_write(bc, scope_kind, ctx),
+      "hash" => self.typecheck_builtin_hash(bc, scope_kind, ctx),
+      "eq" => self.typecheck_builtin_eq(bc, scope_kind, ctx),
       "dropInPlace" => self.typecheck_builtin_drop_in_place(bc, scope_kind, ctx),
       "dropGlue" => self.typecheck_builtin_drop_glue(bc),
       "panic" => self.typecheck_builtin_panic(bc),

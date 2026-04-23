@@ -2997,6 +2997,7 @@ record Value {
 
 function main(): i32 {
     let mut keyDrops: i32 = 0;
+    let mut temporaryKeyDrops: i32 = 0;
     let mut valueDrops: i32 = 0;
 
     {
@@ -3011,9 +3012,8 @@ function main(): i32 {
             Value { marker: 5, counter: (&mut valueDrops) as *mut i32 },
         );
 
-        let replacementKey: Key = Key { id: 1, marker: 1, counter: (&mut keyDrops) as *mut i32 };
         let replaced: Option<Value> = map.insert(
-            replacementKey,
+            Key { id: 1, marker: 1, counter: (&mut keyDrops) as *mut i32 },
             Value { marker: 6, counter: (&mut valueDrops) as *mut i32 },
         );
         let replacedMissing: boolean = match (replaced) {
@@ -3024,7 +3024,7 @@ function main(): i32 {
             return 1;
         }
 
-        let lookupKey: Key = Key { id: 2, marker: 2, counter: (&mut keyDrops) as *mut i32 };
+        let lookupKey: Key = Key { id: 2, marker: 2, counter: (&mut temporaryKeyDrops) as *mut i32 };
         let removed: Option<Value> = map.remove(&lookupKey);
         let removedMissing: boolean = match (removed) {
             Option::SOME(_) -> false,
@@ -3077,6 +3077,7 @@ record Key {
 
 function main(): i32 {
     let mut drops: i32 = 0;
+    let mut temporaryDrops: i32 = 0;
 
     {
         let mut set: HashSet<Key> = HashSet::init<Key>();
@@ -3090,16 +3091,16 @@ function main(): i32 {
             return 2;
         }
 
-        if (set.insert(Key { id: 1, marker: 1, counter: (&mut drops) as *mut i32 })) {
+        if (set.insert(Key { id: 1, marker: 1, counter: (&mut temporaryDrops) as *mut i32 })) {
             return 3;
         }
 
-        let containsKey: Key = Key { id: 1, marker: 1, counter: (&mut drops) as *mut i32 };
+        let containsKey: Key = Key { id: 1, marker: 1, counter: (&mut temporaryDrops) as *mut i32 };
         if (!set.contains(&containsKey)) {
             return 4;
         }
 
-        let removeKey: Key = Key { id: 2, marker: 2, counter: (&mut drops) as *mut i32 };
+        let removeKey: Key = Key { id: 2, marker: 2, counter: (&mut temporaryDrops) as *mut i32 };
         if (!set.remove(&removeKey)) {
             return 5;
         }

@@ -186,6 +186,15 @@ impl<'a> LirVerifier<'a> {
         self.check_operand(func, func_name, block_name, ptr, defined_temps);
         self.check_operand(func, func_name, block_name, value, defined_temps);
       },
+      Instr::BuiltinHash { value, hasher, .. } => {
+        self.check_operand(func, func_name, block_name, value, defined_temps);
+        self.check_operand(func, func_name, block_name, hasher, defined_temps);
+      },
+      Instr::BuiltinEq { dest, left, right, .. } => {
+        self.check_operand(func, func_name, block_name, left, defined_temps);
+        self.check_operand(func, func_name, block_name, right, defined_temps);
+        defined_temps.insert(*dest);
+      },
       Instr::Copy { dest, source } => {
         self.check_operand(func, func_name, block_name, source, defined_temps);
         defined_temps.insert(*dest);

@@ -529,6 +529,11 @@ impl<'a> LoweringContext<'a> {
         self.lower_builtin_store(*ty, *ptr, *value, node.span);
         None
       },
+      HIRKind::BuiltinHash { ty, value, hasher } => {
+        self.lower_builtin_hash(*ty, *value, *hasher);
+        None
+      },
+      HIRKind::BuiltinEq { ty, left, right } => self.lower_builtin_eq(*ty, *left, *right, node.type_id, node.span),
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         self.lower_builtin_drop_in_place(*ty, *ptr);
         None
@@ -1086,6 +1091,51 @@ impl<'a> LoweringContext<'a> {
       value: value_op,
       ty,
     });
+  }
+
+  fn lower_builtin_hash(
+    &mut self,
+    ty: TypeId,
+    value: HIRId,
+    hasher: HIRId,
+  ) {
+    let value_op = match self.lower_hir_node(value) {
+      Some(op) => op,
+      None => return,
+    };
+
+    let hasher_op = match self.lower_hir_node(hasher) {
+      Some(op) => op,
+      None => return,
+    };
+
+    self.fn_builder().emit(Instr::BuiltinHash {
+      value: value_op,
+      hasher: hasher_op,
+      ty,
+    });
+  }
+
+  fn lower_builtin_eq(
+    &mut self,
+    ty: TypeId,
+    left: HIRId,
+    right: HIRId,
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let left_op = self.lower_hir_node(left)?;
+    let right_op = self.lower_hir_node(right)?;
+    let dest = self.fn_builder().alloc_temp(result_ty, span);
+
+    self.fn_builder().emit(Instr::BuiltinEq {
+      dest,
+      left: left_op,
+      right: right_op,
+      ty,
+    });
+
+    Some(Operand::Temp(dest))
   }
 
   fn lower_builtin_drop_in_place(

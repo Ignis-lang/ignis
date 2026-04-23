@@ -73,6 +73,7 @@ pub enum LoweredBackendRequest<'a> {
     headers: &'a [CHeader],
     module_paths: &'a HashMap<ModuleId, ModulePath>,
     user_module_headers: &'a [CHeader],
+    std_path: &'a Path,
   },
   EmitStdModule {
     module_name: &'a str,

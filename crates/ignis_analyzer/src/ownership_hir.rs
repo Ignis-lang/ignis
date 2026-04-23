@@ -415,6 +415,16 @@ impl<'a> HirOwnershipChecker<'a> {
         dropped.extend(self.summary_must_drops(*value, tracked_params, summaries));
       },
 
+      HIRKind::BuiltinHash { value, hasher, .. } => {
+        dropped.extend(self.summary_must_drops(*value, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*hasher, tracked_params, summaries));
+      },
+
+      HIRKind::BuiltinEq { left, right, .. } => {
+        dropped.extend(self.summary_must_drops(*left, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*right, tracked_params, summaries));
+      },
+
       HIRKind::Panic(message) => {
         dropped.extend(self.summary_must_drops(*message, tracked_params, summaries));
       },
@@ -708,6 +718,16 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::BuiltinStore { ptr, value, .. } => {
         self.check_node(ptr);
         self.check_node(value);
+      },
+
+      HIRKind::BuiltinHash { value, hasher, .. } => {
+        self.check_node(value);
+        self.check_node(hasher);
+      },
+
+      HIRKind::BuiltinEq { left, right, .. } => {
+        self.check_node(left);
+        self.check_node(right);
       },
 
       HIRKind::Variable(def_id) => {

@@ -131,6 +131,37 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  /// Create an emitter for a specific user module with std_path awareness.
+  #[allow(clippy::too_many_arguments)]
+  pub fn with_user_module_target(
+    program: &'a LirProgram,
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+    namespaces: &'a NamespaceStore,
+    symbols: &'a SymbolTable,
+    headers: &'a [CHeader],
+    module_id: ModuleId,
+    module_paths: &'a HashMap<ModuleId, ModulePath>,
+    std_path: &'a std::path::Path,
+  ) -> Self {
+    Self {
+      program,
+      types,
+      defs,
+      namespaces,
+      symbols,
+      headers,
+      output: String::new(),
+      current_fn_id: None,
+      target: Some(EmitTarget::UserModule(module_id)),
+      module_paths: Some(module_paths),
+      std_path: Some(std_path),
+      forced_emit_defs: HashSet::new(),
+      closure_struct_names: HashMap::new(),
+      closure_env_names: HashMap::new(),
+    }
+  }
+
   /// Create an emitter for std module emission with std_path awareness.
   #[allow(clippy::too_many_arguments)]
   pub fn with_std_target(
@@ -205,6 +236,7 @@ impl<'a> CEmitter<'a> {
               ..
             } => needs_math = true,
             Instr::BitCast { .. } => needs_string = true,
+            Instr::BuiltinEq { ty, .. } if matches!(self.types.get(ty), Type::Str) => needs_string = true,
             _ => {},
           }
         }
@@ -268,6 +300,14 @@ impl<'a> CEmitter<'a> {
           let def = self.defs.get(&def_id);
 
           if def.owner_module == target_module_id {
+            if should_defer_owner_module_emit_to_entry(
+              self.is_entry_user_module(target_module_id),
+              self.is_monomorphized_generic_def(def_id),
+              self.definition_depends_on_user_type(def_id),
+            ) {
+              return false;
+            }
+
             return true;
           }
 
@@ -380,6 +420,17 @@ impl<'a> CEmitter<'a> {
         kind.is_user() || (self.is_monomorphized_generic_def(*def_id) && self.definition_depends_on_user_type(*def_id))
       })
       .collect()
+  }
+
+  fn is_entry_user_module(
+    &self,
+    target_module_id: ModuleId,
+  ) -> bool {
+    let Some(entry_id) = self.program.entry_point else {
+      return false;
+    };
+
+    self.defs.get(&entry_id).owner_module == target_module_id
   }
 
   fn is_monomorphized_generic_def(
@@ -1672,6 +1723,12 @@ impl<'a> CEmitter<'a> {
 
         writeln!(self.output, "*({}*)({}) = {};", c_type, p, v).unwrap();
       },
+      Instr::BuiltinHash { value, hasher, ty } => {
+        self.emit_builtin_hash(func, value, hasher, *ty);
+      },
+      Instr::BuiltinEq { dest, left, right, ty } => {
+        self.emit_builtin_eq(func, *dest, left, right, *ty);
+      },
       Instr::Copy { dest, source } => {
         let s = self.format_operand(func, source);
 
@@ -1953,6 +2010,8 @@ impl<'a> CEmitter<'a> {
       } => {
         let p = self.format_operand(func, dest_ptr);
 
+        writeln!(self.output, "__builtin_memset((void*){}, 0, sizeof(*{}));", p, p).unwrap();
+
         // Resolve field types for format_operand_coerced.
         let field_types: Vec<(u32, TypeId)> = match self.types.get(record_type) {
           Type::Record(def_id) => {
@@ -1993,6 +2052,8 @@ impl<'a> CEmitter<'a> {
         enum_type,
       } => {
         let p = self.format_operand(func, dest_ptr);
+
+        writeln!(self.output, "__builtin_memset((void*){}, 0, sizeof(*{}));", p, p).unwrap();
 
         // Resolve payload types for format_operand_coerced.
         let payload_types: Vec<TypeId> = match self.types.get(enum_type) {
@@ -2629,6 +2690,149 @@ impl<'a> CEmitter<'a> {
     None
   }
 
+  fn find_named_instance_method(
+    &self,
+    def_id: DefinitionId,
+    method_name: &str,
+  ) -> Option<DefinitionId> {
+    let def = self.defs.get(&def_id);
+
+    let instance_methods = match &def.kind {
+      DefinitionKind::Record(rd) => &rd.instance_methods,
+      DefinitionKind::Enum(ed) => &ed.instance_methods,
+      _ => return None,
+    };
+
+    for (sym_id, entry) in instance_methods {
+      if self.symbols.get(sym_id) == method_name {
+        return match entry {
+          ignis_type::definition::SymbolEntry::Single(id) => Some(*id),
+          ignis_type::definition::SymbolEntry::Overload(ids) => ids.first().copied(),
+        };
+      }
+    }
+
+    for (method_def_id, method_def) in self.defs.iter() {
+      if let DefinitionKind::Method(md) = &method_def.kind
+        && md.owner_type == def_id
+      {
+        let candidate_name = self.symbols.get(&method_def.name);
+        if candidate_name == method_name || candidate_name.ends_with(&format!("__{}", method_name)) {
+          return Some(method_def_id);
+        }
+      }
+    }
+
+    None
+  }
+
+  fn emit_builtin_hash(
+    &mut self,
+    func: &FunctionLir,
+    value: &Operand,
+    hasher: &Operand,
+    ty: TypeId,
+  ) {
+    let value_expr = self.format_operand(func, value);
+    let hasher_expr = self.format_operand(func, hasher);
+
+    match self.types.get(&ty).clone() {
+      Type::Boolean => self.emit_hasher_write_call("writeBoolean", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::Char => self.emit_hasher_write_call("writeChar", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::I8 => self.emit_hasher_write_call("writeI8", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::I16 => self.emit_hasher_write_call("writeI16", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::I32 => self.emit_hasher_write_call("writeI32", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::I64 => self.emit_hasher_write_call("writeI64", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::U8 => self.emit_hasher_write_call("writeByte", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::U16 => self.emit_hasher_write_call("writeU16", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::U32 => self.emit_hasher_write_call("writeU32", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::U64 => self.emit_hasher_write_call("writeU64", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::Str => self.emit_hasher_write_call("writeStr", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::Record(def_id) | Type::Enum(def_id) => {
+        let Some(method_def_id) = self.find_named_instance_method(def_id, "hash") else {
+          panic!("ICE: missing hash method for builtin hash on {:?}", self.types.get(&ty));
+        };
+        let method_name = self.def_name(method_def_id);
+        writeln!(self.output, "{}({}, {});", method_name, value_expr, hasher_expr).unwrap();
+      },
+      other => panic!("ICE: builtin hash unsupported for {:?}", other),
+    }
+  }
+
+  fn emit_builtin_eq(
+    &mut self,
+    func: &FunctionLir,
+    dest: TempId,
+    left: &Operand,
+    right: &Operand,
+    ty: TypeId,
+  ) {
+    let left_expr = self.format_operand(func, left);
+    let right_expr = self.format_operand(func, right);
+
+    match self.types.get(&ty).clone() {
+      Type::Boolean
+      | Type::Char
+      | Type::I8
+      | Type::I16
+      | Type::I32
+      | Type::I64
+      | Type::U8
+      | Type::U16
+      | Type::U32
+      | Type::U64 => {
+        let left_value = self.format_builtin_ref_deref(&left_expr, ty);
+        let right_value = self.format_builtin_ref_deref(&right_expr, ty);
+        writeln!(self.output, "t{} = {} == {};", dest.index(), left_value, right_value).unwrap();
+      },
+      Type::Str => {
+        let left_value = self.format_builtin_ref_deref(&left_expr, ty);
+        let right_value = self.format_builtin_ref_deref(&right_expr, ty);
+        writeln!(self.output, "t{} = strcmp({}, {}) == 0;", dest.index(), left_value, right_value).unwrap();
+      },
+      Type::Record(def_id) | Type::Enum(def_id) => {
+        let Some(method_def_id) = self.find_named_instance_method(def_id, "equals") else {
+          panic!("ICE: missing equals method for builtin eq on {:?}", self.types.get(&ty));
+        };
+        let method_name = self.def_name(method_def_id);
+        writeln!(self.output, "t{} = {}({}, {});", dest.index(), method_name, left_expr, right_expr).unwrap();
+      },
+      other => panic!("ICE: builtin eq unsupported for {:?}", other),
+    }
+  }
+
+  fn emit_hasher_write_call(
+    &mut self,
+    method_name: &str,
+    hasher_expr: &str,
+    value_expr: &str,
+  ) {
+    let hasher_def_id = self.find_hasher_def_id().expect("ICE: missing std::hash::Hasher definition");
+    let method_def_id = self
+      .find_named_instance_method(hasher_def_id, method_name)
+      .unwrap_or_else(|| panic!("ICE: missing Hasher::{} method", method_name));
+    let method = self.def_name(method_def_id);
+    writeln!(self.output, "{}({}, {});", method, hasher_expr, value_expr).unwrap();
+  }
+
+  fn find_hasher_def_id(&self) -> Option<DefinitionId> {
+    for (def_id, def) in self.defs.iter() {
+      if matches!(def.kind, DefinitionKind::Record(_)) && self.symbols.get(&def.name) == "Hasher" {
+        return Some(def_id);
+      }
+    }
+    None
+  }
+
+  fn format_builtin_ref_deref(
+    &self,
+    expr: &str,
+    ty: TypeId,
+  ) -> String {
+    let c_type = self.format_type(ty);
+    format!("*({}*)({})", c_type, expr)
+  }
+
   /// Recursively emit drop calls for each droppable field of a value.
   ///
   /// For types with an explicit `drop` method, calls that method.
@@ -3110,6 +3314,14 @@ impl<'a> CEmitter<'a> {
   }
 }
 
+fn should_defer_owner_module_emit_to_entry(
+  is_entry_user_module: bool,
+  is_monomorphized_generic_def: bool,
+  depends_on_user_type: bool,
+) -> bool {
+  !is_entry_user_module && is_monomorphized_generic_def && depends_on_user_type
+}
+
 /// Legacy: emits everything (all modules combined).
 pub fn emit_c(
   program: &LirProgram,
@@ -3274,6 +3486,7 @@ pub fn emit_user_module_c(
   headers: &[CHeader],
   module_paths: &HashMap<ModuleId, ModulePath>,
   user_module_headers: &[CHeader],
+  std_path: &std::path::Path,
 ) -> String {
   emit_user_module_c_from_input(
     module_id,
@@ -3283,6 +3496,7 @@ pub fn emit_user_module_c(
     headers,
     module_paths,
     user_module_headers,
+    std_path,
   )
 }
 
@@ -3294,19 +3508,21 @@ pub fn emit_user_module_c_from_input(
   headers: &[CHeader],
   module_paths: &HashMap<ModuleId, ModulePath>,
   user_module_headers: &[CHeader],
+  std_path: &std::path::Path,
 ) -> String {
   let mut all_headers = user_module_headers.to_vec();
   all_headers.extend(headers.iter().cloned());
 
-  CEmitter::with_target(
+  CEmitter::with_user_module_target(
     input.program,
     input.types,
     input.defs,
     namespaces,
     symbols,
     &all_headers,
-    EmitTarget::UserModule(module_id),
+    module_id,
     module_paths,
+    std_path,
   )
   .emit()
 }
@@ -4577,6 +4793,14 @@ mod tests {
   use ignis_type::symbol::SymbolTable;
   use std::cell::RefCell;
   use std::rc::Rc;
+
+  #[test]
+  fn test_owner_module_emission_defers_user_specializations_to_entry_module() {
+    assert!(should_defer_owner_module_emit_to_entry(false, true, true));
+    assert!(!should_defer_owner_module_emit_to_entry(true, true, true));
+    assert!(!should_defer_owner_module_emit_to_entry(false, false, true));
+    assert!(!should_defer_owner_module_emit_to_entry(false, true, false));
+  }
 
   fn empty_program() -> (LirProgram, TypeStore, DefinitionStore, NamespaceStore, Rc<RefCell<SymbolTable>>) {
     let program = LirProgram::new();
