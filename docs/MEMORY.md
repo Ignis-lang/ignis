@@ -2,6 +2,13 @@
 
 Ignis uses a compile-time ownership model inspired by Rust, with automatic drop glue, structural Copy derivation, and borrow checking. There is no garbage collector -- the compiler inserts all allocation and deallocation code at compile time.
 
+This document covers the language-level ownership model first, then the
+standard-library memory building blocks that sit on top of it, especially
+`std::memory`, `Layout`, and `ArenaAllocator`.
+
+For higher-level container guidance (`String`, `Vector`, `HashMap`, `HashSet`,
+and fixed-size arrays), see `docs/STDLIB_DATA_STRUCTURES.md`.
+
 ## Ownership
 
 Every value in Ignis has exactly one owner. When the owner goes out of scope, the value is dropped (cleaned up). Ownership can be transferred via assignment, function calls, aggregate construction (record/enum/vector literals), and pattern matching that moves payloads, but never duplicated unless the type is Copy or explicitly cloned.
@@ -297,6 +304,126 @@ Pointer operations:
 | Cast | `@pointerCast<*U>(ptr)` | Convert between pointer types |
 | To integer | `@integerFromPointer(ptr)` | Get numeric address |
 | From integer | `@pointerFromInteger<*T>(addr)` | Create pointer from address |
+
+## Standard Library Memory Layer
+
+The ownership model is enforced by the compiler, but actual raw allocation
+primitives live in the standard library and runtime.
+
+The most important pieces are:
+
+- `std::memory::Layout` — describes size/alignment requirements
+- `std::memory` allocation helpers — typed and untyped allocation, reallocation, copy, move, free
+- `std::memory::ArenaAllocator` — fast block-based arena allocator for grouped lifetimes
+
+### `Layout`
+
+`Layout` is the bridge between semantic types and raw allocation.
+
+Use it when you need to describe:
+
+- one value of `T`
+- an array of `T`
+- a custom size/alignment pair
+
+Typical examples:
+
+```ignis
+import Layout from "std::memory";
+
+let oneI32: Layout = Layout::init<i32>();
+let manyI32: Layout = Layout::init<i32>(64);
+let custom: Layout = Layout::new(128, 16);
+```
+
+### `std::memory` helpers
+
+Use the plain `Memory` helpers when you need raw storage directly:
+
+```ignis
+import Memory from "std::memory";
+
+let numbers: *mut i32 = Memory::allocateVector<i32>(32);
+numbers = Memory::reallocateVector<i32>(numbers, 64);
+Memory::free(numbers);
+```
+
+These are low-level APIs. Application code should usually prefer higher-level
+containers such as `Vector<T>` or `String` unless it is implementing a data
+structure, an allocator, or an FFI boundary.
+
+## Arena Allocation
+
+`ArenaAllocator` is the main grouped-lifetime allocator currently exposed by
+the standard library.
+
+### Mental model
+
+An arena is useful when you allocate many values that all die together.
+
+Instead of tracking every allocation individually, the arena:
+
+- allocates from runtime-managed backing blocks
+- returns raw pointers for fast temporary storage
+- invalidates everything together on `reset()` or `destroy()`
+
+### When to use `ArenaAllocator`
+
+Good fits:
+
+- parser scratch allocations
+- compiler pass temporary nodes or tables
+- request-local or frame-local temporary buffers
+- batched work where all data becomes unreachable together
+
+Bad fits:
+
+- long-lived values with unrelated lifetimes
+- values that need precise per-object deallocation
+- APIs that expect ordinary ownership and `Drop` to run per inserted object
+
+### Basic usage
+
+```ignis
+import ArenaAllocator from "std::memory";
+
+function main(): i32 {
+    let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+
+    let buffer: *mut u8 = arena.allocate<u8>(256);
+    if (buffer == null) {
+        return 1;
+    }
+
+    arena.reset();
+    // buffer is now invalid
+
+    return 0;
+}
+```
+
+### `reset()` vs `destroy()`
+
+- `reset()`
+  - keeps backing blocks
+  - makes arena space reusable
+  - invalidates all previously returned pointers
+
+- `destroy()`
+  - releases all arena-owned backing blocks
+  - invalidates all pointers
+  - makes the allocator unusable until reinitialized
+
+### Important limitation
+
+Arena allocators are about memory reuse, not ownership-aware object cleanup.
+
+If you store values that logically need destructor-like cleanup, you must ensure
+your lifetime strategy is still valid. An arena does not individually walk every
+previous allocation and run `drop` for it.
+
+That is why arenas are best for plain temporary storage or values whose cleanup
+is intentionally batched outside the allocator itself.
 
 ## Copy vs Drop Interaction
 

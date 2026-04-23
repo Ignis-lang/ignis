@@ -150,6 +150,8 @@ function main(): i32 {
 
 Note: fixed-size arrays (`T[N]`) are supported. Dynamic array type syntax (`T[]`) is parsed but currently rejected by semantic analysis.
 
+For practical guidance on when to use fixed-size arrays versus `std::vector::Vector<T>`, and how they relate to `String`, `HashMap`, and `HashSet`, see `docs/STDLIB_DATA_STRUCTURES.md`.
+
 ### 3.8 Generic Type Use
 
 ```ignis

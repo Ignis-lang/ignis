@@ -1,6 +1,159 @@
 //! # HashMap
 //!
 //! Deterministic open-addressed hash map with linear probing.
+//!
+//! ## Overview
+//!
+//! `HashMap<K, V>` stores keys and values in parallel contiguous buffers.
+//! Lookup uses:
+//!
+//! - deterministic hashing via `std::hash::Hasher`
+//! - open addressing
+//! - linear probing
+//! - tombstones for removed entries
+//!
+//! The map grows when the configured load factor would be exceeded.
+//! Capacity is always managed in buckets, not bytes.
+//!
+//! ## Key Requirements
+//!
+//! Keys must satisfy `Hash & Eq`.
+//!
+//! In practice that means user-defined key types usually provide:
+//!
+//! - `@implements(Hash, Eq)` on the record
+//! - a `hash(&self, hasher: &mut Hasher): void` method
+//! - an `equals(&self, other: &K): boolean` method
+//!
+//! ## Bucket States
+//!
+//! ```text
+//!   state = 0  -> empty
+//!   state = 1  -> occupied
+//!   state = 2  -> tombstone
+//! ```
+//!
+//! Empty buckets stop probing. Tombstones preserve probe chains after remove.
+//!
+//! ## Memory Layout
+//!
+//! ```text
+//!   HashMap<K, V>
+//!   ┌────────────────────────────────────────────────────────────┐
+//!   │ states:  [E|O|T|O|...]                                    │
+//!   │ hashes:  [0|h|0|h|...]                                    │
+//!   │ keys:    [ |K| |K|...]                                    │
+//!   │ values:  [ |V| |V|...]                                    │
+//!   │ length: active occupied buckets                           │
+//!   │ tombstones: removed buckets still participating in probe  │
+//!   │ capacity: total bucket count                              │
+//!   └────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! `keys` and `values` are manual-storage buffers. Only buckets marked as
+//! occupied contain initialized logical elements.
+//!
+//! ## Probe Sequence
+//!
+//! A lookup starts at `hash % capacity` and advances one slot at a time until:
+//!
+//! - it finds an empty bucket (`not present`)
+//! - it finds a matching occupied bucket (`present`)
+//! - it has examined every bucket (`full-table miss`)
+//!
+//! ```text
+//!   capacity = 8
+//!   start = hash % 8 = 3
+//!
+//!   index:   0   1   2   3   4   5   6   7
+//!   state:   E   T   O   O   T   O   E   E
+//!                        ^
+//!                        start
+//!
+//!   probe order: 3 -> 4 -> 5 -> 6
+//!
+//!   - slot 3: occupied, different key
+//!   - slot 4: tombstone, continue
+//!   - slot 5: occupied, different key
+//!   - slot 6: empty, stop -> key does not exist
+//! ```
+//!
+//! ## Insert / Replace Rules
+//!
+//! Insert first reserves enough capacity, then probes exactly like lookup.
+//!
+//! During probing it tracks:
+//!
+//! - the first tombstone encountered
+//! - whether an existing matching key was found
+//!
+//! That gives three possible outcomes:
+//!
+//! 1. matching key found -> replace value
+//! 2. no key found, tombstone seen -> reuse first tombstone
+//! 3. no key found, no tombstone seen -> use first empty bucket
+//!
+//! ## Drop Behavior
+//!
+//! `HashMap` owns both the key and the value stored in an occupied bucket.
+//!
+//! That means:
+//!
+//! - replacing an entry drops the previous key and returns the previous value
+//! - removing an entry drops the key and returns the value
+//! - `clear()` drops every occupied key/value pair
+//! - `drop()` calls `clear()` and then frees the backing buffers
+//!
+//! Tombstones do not hold logical values anymore; they only preserve probing
+//! structure until the next rehash.
+//!
+//! ## Complexity
+//!
+//! Average-case complexity:
+//!
+//! - `insert`  -> `O(1)`
+//! - `get`     -> `O(1)`
+//! - `remove`  -> `O(1)`
+//! - `reserve` -> `O(n)` when rehashing occurs
+//!
+//! Worst-case probe chains are linear in the bucket count.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Eq from "std::collections";
+//! import Hash from "std::collections";
+//! import HashMap from "std::collections";
+//! import Hasher from "std::hash";
+//!
+//! @implements(Hash, Eq)
+//! record Key {
+//!   id: i32;
+//!
+//!   hash(&self, hasher: &mut Hasher): void {
+//!     let mut state: &mut Hasher = hasher;
+//!     state.writeI32(self.id);
+//!   }
+//!
+//!   equals(&self, other: &Key): boolean {
+//!     return self.id == other.id;
+//!   }
+//! }
+//!
+//! function main(): i32 {
+//!   let mut map: HashMap<Key, i32> = HashMap::init<Key, i32>();
+//!   map.insert(Key { id: 1 }, 10);
+//!   map.insert(Key { id: 2 }, 20);
+//!
+//!   let lookup: Key = Key { id: 2 };
+//!   let value: i32 = match (map.get(&lookup)) {
+//!     Option::SOME(found) -> *found,
+//!     Option::NONE -> -1,
+//!   };
+//!
+//!   return value;
+//! }
+//! ```
 
 import Hasher from "std::hash";
 import Memory from "std::memory";
@@ -12,12 +165,18 @@ const INITIAL_BUCKET_CAPACITY: u64 = 8;
 const MAX_LOAD_PERCENT: u64 = 70;
 
 export trait Hash {
+  /// Feeds a stable representation of `self` into the provided hasher.
   hash(&self, hasher: &mut Hasher): void;
 }
 
+/// Marker trait for equality-capable keys.
 export trait Eq {
 }
 
+/// Computes how many bytes must be reserved to store `count` elements of `T`.
+///
+/// Zero-sized element types still reserve one byte so pointer storage remains
+/// non-null and addressable by the implementation.
 function __hashMapStorageBytes<T>(count: u64): u64 {
   if (count == 0) {
     return 0;
@@ -28,6 +187,10 @@ function __hashMapStorageBytes<T>(count: u64): u64 {
 }
 
 @implements(Drop)
+/// Deterministic open-addressed map from `K` to `V`.
+///
+/// This container owns both keys and values. Replacing or removing an entry
+/// drops the previous key/value exactly once.
 export record HashMap<K: Hash & Eq, V> {
   states: *mut u8;
   hashes: *mut u64;
@@ -37,6 +200,15 @@ export record HashMap<K: Hash & Eq, V> {
   capacity: u64;
   tombstones: u64;
 
+  /// Creates an empty map with no allocated buckets.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// ```
   public static init(): HashMap<K, V> {
     return HashMap {
       states: null,
@@ -49,6 +221,16 @@ export record HashMap<K: Hash & Eq, V> {
     };
   }
 
+  /// Creates an empty map with enough buckets for at least `capacity`
+  /// logical entries at the current load-factor policy.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let map: HashMap<i32, i32> = HashMap::init<i32, i32>(64);
+  /// ```
   public static init(capacity: u64): HashMap<K, V> {
     let mut bucketCapacity: u64 = 0;
     if (capacity != 0) {
@@ -73,18 +255,34 @@ export record HashMap<K: Hash & Eq, V> {
     };
   }
 
+  /// Returns the number of occupied entries currently stored.
   public length(&self): u64 {
     return self.length;
   }
 
+  /// Returns the number of buckets currently allocated.
   public capacity(&self): u64 {
     return self.capacity;
   }
 
+  /// Returns `true` when the map contains no occupied entries.
   public isEmpty(&self): boolean {
     return self.length == 0;
   }
 
+  /// Returns `true` if `key` is present in the map.
+  ///
+  /// This probes directly without materializing an intermediate `Option<&V>`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// map.insert(1, 10);
+  /// let found: boolean = map.contains(&1);
+  /// ```
   public contains(&self, key: &K): boolean {
     let mut hasher: Hasher = Hasher::new();
     @hash<K>(key, (&mut hasher) as &mut Hasher);
@@ -116,10 +314,22 @@ export record HashMap<K: Hash & Eq, V> {
     return false;
   }
 
+  /// Compatibility alias for `contains`.
   public containsKey(&self, key: &K): boolean {
     return self.contains(key);
   }
 
+  /// Returns an immutable reference to the value for `key`, if present.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// map.insert(7, 99);
+  /// let value: Option<&i32> = map.get(&7);
+  /// ```
   public get(&self, key: &K): Option<&V> {
     let mut hasher: Hasher = Hasher::new();
     @hash<K>(key, (&mut hasher) as &mut Hasher);
@@ -151,6 +361,17 @@ export record HashMap<K: Hash & Eq, V> {
     return Option::NONE;
   }
 
+  /// Returns a mutable reference to the value for `key`, if present.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// map.insert(7, 99);
+  /// let value: Option<&mut i32> = map.getMut(&7);
+  /// ```
   public getMut(&mut self, key: &K): Option<&mut V> {
     let mut hasher: Hasher = Hasher::new();
     @hash<K>(key, (&mut hasher) as &mut Hasher);
@@ -182,6 +403,21 @@ export record HashMap<K: Hash & Eq, V> {
     return Option::NONE;
   }
 
+  /// Inserts or replaces the value for `key`.
+  ///
+  /// Returns:
+  /// - `Option::NONE` when the key was not present
+  /// - `Option::SOME(previous)` when an existing value was replaced
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let inserted: Option<i32> = map.insert(1, 10); // NONE
+  /// let replaced: Option<i32> = map.insert(1, 20); // SOME(10)
+  /// ```
   public insert(&mut self, key: K, value: V): Option<V> {
     self.reserve(1);
 
@@ -243,6 +479,19 @@ export record HashMap<K: Hash & Eq, V> {
     }
   }
 
+  /// Removes `key` from the map and returns its previous value, if present.
+  ///
+  /// Removal leaves a tombstone bucket behind so probe chains remain valid.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// map.insert(1, 10);
+  /// let removed: Option<i32> = map.remove(&1);
+  /// ```
   public remove(&mut self, key: &K): Option<V> {
     let mut hasher: Hasher = Hasher::new();
     @hash<K>(key, (&mut hasher) as &mut Hasher);
@@ -282,6 +531,17 @@ export record HashMap<K: Hash & Eq, V> {
     return Option::NONE;
   }
 
+  /// Ensures enough buckets exist to insert `additional` more entries without
+  /// violating the current load-factor policy.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// map.reserve(32);
+  /// ```
   public reserve(&mut self, additional: u64): void {
     let requiredEntries: u64 = self.length + self.tombstones + additional;
     let mut requiredCapacity: u64 = 0;
@@ -298,6 +558,17 @@ export record HashMap<K: Hash & Eq, V> {
     }
   }
 
+  /// Drops all occupied entries but keeps the bucket allocation for reuse.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import HashMap from "std::collections";
+  ///
+  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// map.insert(1, 10);
+  /// map.clear();
+  /// ```
   public clear(&mut self): void {
     let mut index: u64 = 0;
     while (index < self.capacity) {
@@ -321,11 +592,13 @@ export record HashMap<K: Hash & Eq, V> {
     self.tombstones = 0;
   }
 
+  /// Drops all entries and releases all backing storage.
   public drop(&mut self): void {
     self.clear();
     self.freeStorage();
   }
 
+  /// Rebuilds the table into a new bucket array.
   private rehash(&mut self, newCapacity: u64): void {
     if (newCapacity == self.capacity) {
       return;
@@ -367,6 +640,7 @@ export record HashMap<K: Hash & Eq, V> {
     self.tombstones = 0;
   }
 
+  /// Releases raw storage buffers and resets logical counters.
   private freeStorage(&mut self): void {
     if (self.states != null) {
       Memory::free(self.states as *mut u8);

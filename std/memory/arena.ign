@@ -1,3 +1,121 @@
+//!
+//! # Arena Allocator
+//!
+//! Growable block-based arena allocator backed by the runtime.
+//!
+//! ## Overview
+//!
+//! `ArenaAllocator` is designed for workloads where many allocations share the
+//! same lifetime. Instead of tracking every allocation separately, the arena
+//! allocates from larger backing blocks and invalidates everything together on
+//! `reset()` or `destroy()`.
+//!
+//! This makes it a good fit for:
+//!
+//! - parser and compiler temporary objects
+//! - short-lived request or frame allocations
+//! - scratch buffers built and discarded in batches
+//! - phase-local data where all values die together
+//!
+//! ## Core Behavior
+//!
+//! The arena has three important properties:
+//!
+//! 1. **Fast allocation**
+//!    - allocate from the current backing block
+//!    - if the block has no room, request or switch to another runtime block
+//!
+//! 2. **No individual deallocation**
+//!    - there is no per-allocation `free`
+//!    - memory stays owned by the arena until reset or destroy
+//!
+//! 3. **Bulk lifetime management**
+//!    - `reset()` keeps the arena but rewinds allocation state
+//!    - `destroy()` releases all arena-owned backing blocks
+//!
+//! ## Mental Model
+//!
+//! ```text
+//!   ArenaAllocator
+//!   ┌─────────────────────────────────────────────────────────────────┐
+//!   │ handle -> runtime arena state                                  │
+//!   │ blockSize -> preferred block size for future growth            │
+//!   └─────────────────────────────────────────────────────────────────┘
+//!
+//!   Runtime-owned backing blocks
+//!   ┌────────────────────────┐  ┌────────────────────────┐
+//!   │ [used][used][free...]  │  │ [used][free.........] │
+//!   └────────────────────────┘  └────────────────────────┘
+//! ```
+//!
+//! The exact block metadata lives in the runtime, not in this Ignis wrapper.
+//! At the stdlib level, `ArenaAllocator` is a lightweight handle over that
+//! runtime-managed arena state.
+//!
+//! ## Allocation Semantics
+//!
+//! - `allocate(layout)` returns a properly aligned pointer for `layout`
+//! - `allocate<T>()` allocates space for exactly one `T`
+//! - `allocate<T>(count)` allocates space for `count` contiguous `T` values
+//! - zero-sized requests return `null`
+//! - if the arena handle has been destroyed, allocation returns `null`
+//!
+//! ## Reset vs Destroy
+//!
+//! ```text
+//!   reset()
+//!     - keeps backing blocks
+//!     - invalidates all previously returned pointers
+//!     - makes arena space reusable
+//!
+//!   destroy()
+//!     - releases all backing blocks through the runtime
+//!     - sets handle to null
+//!     - allocator becomes unusable until reinitialized
+//! ```
+//!
+//! ## Safety Notes
+//!
+//! `ArenaAllocator` deliberately trades precision for speed.
+//!
+//! Callers must treat all pointers returned from the arena as invalid after:
+//!
+//! - `reset()`
+//! - `destroy()`
+//! - `drop()`
+//!
+//! Values allocated in the arena are not individually dropped by the allocator.
+//! If a stored type owns resources, the caller is responsible for ensuring the
+//! lifetime strategy is valid for arena allocation.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import ArenaAllocator from "std::memory";
+//! import Layout from "std::memory";
+//!
+//! function main(): i32 {
+//!   let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+//!
+//!   let numbers: *mut i32 = arena.allocate<i32>(16);
+//!   if (numbers == null) {
+//!     return 1;
+//!   }
+//!
+//!   numbers[0] = 42;
+//!   arena.reset();
+//!   // `numbers` is now invalid and must not be used.
+//!
+//!   let raw: *mut u8 = arena.allocate(Layout::init<u64>());
+//!   if (raw == null) {
+//!     return 2;
+//!   }
+//!
+//!   arena.destroy();
+//!   return 0;
+//! }
+//! ```
+
 import Layout from "./layout";
 
 extern __arena {
@@ -8,10 +126,30 @@ extern __arena {
 }
 
 @implements(Drop)
+/// Arena-style allocator backed by runtime-managed memory blocks.
+///
+/// This stdlib type is intentionally small: it stores only a runtime handle and
+/// the preferred block size used when the runtime grows the arena.
 export record ArenaAllocator {
+  /// Opaque runtime handle for the arena state.
   handle: *mut void;
+
+  /// Preferred backing block size used by the runtime arena implementation.
   blockSize: u64;
 
+  /// Creates a new arena allocator with the given preferred block size.
+  ///
+  /// # Arguments
+  ///
+  /// * `blockSize` - preferred growth size for runtime backing blocks.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import ArenaAllocator from "std::memory";
+  ///
+  /// let arena: ArenaAllocator = ArenaAllocator::init(4096);
+  /// ```
   public static init(blockSize: u64): ArenaAllocator {
     return ArenaAllocator {
       handle: __arena::ignis_arena_create(blockSize),
@@ -19,6 +157,10 @@ export record ArenaAllocator {
     };
   }
 
+  /// Allocates raw memory for `layout` from the arena.
+  ///
+  /// Returns `null` when the arena has been destroyed or when `layout`
+  /// represents a zero-sized allocation.
   public allocate(&mut self, layout: Layout): *mut u8 {
     if (self.handle == null) {
       return null;
@@ -31,20 +173,47 @@ export record ArenaAllocator {
     return __arena::ignis_arena_allocate(self.handle, layout.size(), layout.align());
   }
 
+  /// Allocates enough arena memory for a single value of type `T`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import ArenaAllocator from "std::memory";
+  ///
+  /// let mut arena: ArenaAllocator = ArenaAllocator::init(1024);
+  /// let point: *mut i32 = arena.allocate<i32>();
+  /// ```
   public allocate<T>(&mut self): *mut T {
     return self.allocate(Layout::init<T>()) as *mut T;
   }
 
+  /// Allocates enough arena memory for `count` contiguous values of type `T`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import ArenaAllocator from "std::memory";
+  ///
+  /// let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+  /// let buffer: *mut u8 = arena.allocate<u8>(256);
+  /// ```
   public allocate<T>(&mut self, count: u64): *mut T {
     return self.allocate(Layout::init<T>(count)) as *mut T;
   }
 
+  /// Rewinds allocation state so all arena space becomes reusable again.
+  ///
+  /// All previously returned pointers become invalid after this call.
   public reset(&mut self): void {
     if (self.handle != null) {
       __arena::ignis_arena_reset(self.handle);
     }
   }
 
+  /// Releases all runtime-managed backing blocks and invalidates the arena.
+  ///
+  /// After `destroy()`, further allocations return `null` until the allocator
+  /// is recreated with `init`.
   public destroy(&mut self): void {
     if (self.handle != null) {
       __arena::ignis_arena_destroy(self.handle);
@@ -52,6 +221,7 @@ export record ArenaAllocator {
     }
   }
 
+  /// Automatically destroys the arena when it goes out of scope.
   public drop(&mut self): void {
     self.destroy();
   }
