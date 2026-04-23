@@ -18,8 +18,6 @@ export trait Hash {
 export trait Eq {
 }
 
-const SET_PRESENT: boolean = true;
-
 @implements(Drop)
 export record HashMap<K: Hash & Eq, V> {
   states: *mut u8;
@@ -353,75 +351,5 @@ export record HashMap<K: Hash & Eq, V> {
     self.capacity = 0;
     self.length = 0;
     self.tombstones = 0;
-  }
-}
-
-@implements(Drop)
-export record HashSet<T: Hash & Eq> {
-  map: HashMap<T, boolean>;
-
-  public static init(): HashSet<T> {
-    return HashSet {
-      map: HashMap {
-        states: null,
-        hashes: null,
-        keys: null,
-        values: null,
-        length: 0,
-        capacity: 0,
-        tombstones: 0,
-      },
-    };
-  }
-
-  public static init(capacity: u64): HashSet<T> {
-    let mut set: HashSet<T> = HashSet::init<T>();
-    set.reserve(capacity);
-    return set;
-  }
-
-  public length(&self): u64 {
-    return self.map.length();
-  }
-
-  public capacity(&self): u64 {
-    return self.map.capacity();
-  }
-
-  public isEmpty(&self): boolean {
-    return self.map.isEmpty();
-  }
-
-  public contains(&self, value: &T): boolean {
-    return match (self.map.get(value)) {
-      Option::SOME(_) -> true,
-      Option::NONE -> false,
-    };
-  }
-
-  public insert(&mut self, value: T): boolean {
-    return match (self.map.insert(value, SET_PRESENT)) {
-      Option::SOME(_) -> false,
-      Option::NONE -> true,
-    };
-  }
-
-  public remove(&mut self, value: &T): boolean {
-    return match (self.map.remove(value)) {
-      Option::SOME(_) -> true,
-      Option::NONE -> false,
-    };
-  }
-
-  public reserve(&mut self, additional: u64): void {
-    self.map.reserve(additional);
-  }
-
-  public clear(&mut self): void {
-    self.map.clear();
-  }
-
-  public drop(&mut self): void {
-    self.map.drop();
   }
 }
