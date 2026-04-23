@@ -1046,6 +1046,7 @@ pub fn compile_project(
                 headers: &link_plan_with_user_includes.headers,
                 module_paths: &module_paths,
                 user_module_headers: &user_module_headers,
+                std_path: std_dir,
               }),
             ) {
               Ok(contents) => contents,

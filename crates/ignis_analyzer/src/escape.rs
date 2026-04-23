@@ -292,6 +292,16 @@ fn scan_for_escapes(
       scan_for_escapes(hir, *value, defs, alias_to_closure, escaping);
     },
 
+    HIRKind::BuiltinHash { value, hasher, .. } => {
+      scan_for_escapes(hir, *value, defs, alias_to_closure, escaping);
+      scan_for_escapes(hir, *hasher, defs, alias_to_closure, escaping);
+    },
+
+    HIRKind::BuiltinEq { left, right, .. } => {
+      scan_for_escapes(hir, *left, defs, alias_to_closure, escaping);
+      scan_for_escapes(hir, *right, defs, alias_to_closure, escaping);
+    },
+
     HIRKind::BuiltinDropInPlace { ptr, .. } => {
       scan_for_escapes(hir, *ptr, defs, alias_to_closure, escaping);
     },

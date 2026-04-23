@@ -672,6 +672,30 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
+      HIRKind::BuiltinHash { ty, value, hasher } => {
+        let new_value = self.clone_hir_tree(*value);
+        let new_hasher = self.clone_hir_tree(*hasher);
+        (
+          HIRKind::BuiltinHash {
+            ty: *ty,
+            value: new_value,
+            hasher: new_hasher,
+          },
+          None,
+        )
+      },
+      HIRKind::BuiltinEq { ty, left, right } => {
+        let new_left = self.clone_hir_tree(*left);
+        let new_right = self.clone_hir_tree(*right);
+        (
+          HIRKind::BuiltinEq {
+            ty: *ty,
+            left: new_left,
+            right: new_right,
+          },
+          None,
+        )
+      },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         let new_ptr = self.clone_hir_tree(*ptr);
         (HIRKind::BuiltinDropInPlace { ty: *ty, ptr: new_ptr }, None)
@@ -1209,6 +1233,14 @@ impl<'a> Monomorphizer<'a> {
       HIRKind::BuiltinStore { ptr, value, .. } => {
         self.scan_hir(*ptr);
         self.scan_hir(*value);
+      },
+      HIRKind::BuiltinHash { value, hasher, .. } => {
+        self.scan_hir(*value);
+        self.scan_hir(*hasher);
+      },
+      HIRKind::BuiltinEq { left, right, .. } => {
+        self.scan_hir(*left);
+        self.scan_hir(*right);
       },
       HIRKind::MethodCall {
         receiver,
@@ -2186,6 +2218,26 @@ impl<'a> Monomorphizer<'a> {
           ty: new_ty,
           ptr: new_ptr,
           value: new_value,
+        }
+      },
+      HIRKind::BuiltinHash { ty, value, hasher } => {
+        let new_value = self.substitute_hir(*value, subst);
+        let new_hasher = self.substitute_hir(*hasher, subst);
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::BuiltinHash {
+          ty: new_ty,
+          value: new_value,
+          hasher: new_hasher,
+        }
+      },
+      HIRKind::BuiltinEq { ty, left, right } => {
+        let new_left = self.substitute_hir(*left, subst);
+        let new_right = self.substitute_hir(*right, subst);
+        let new_ty = self.types.substitute(*ty, subst);
+        HIRKind::BuiltinEq {
+          ty: new_ty,
+          left: new_left,
+          right: new_right,
         }
       },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {

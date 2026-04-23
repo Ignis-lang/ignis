@@ -345,6 +345,14 @@ impl<'a> HirBorrowChecker<'a> {
         self.check_node(ptr);
         self.check_node(value);
       },
+      HIRKind::BuiltinHash { value, hasher, .. } => {
+        self.check_node(value);
+        self.check_node(hasher);
+      },
+      HIRKind::BuiltinEq { left, right, .. } => {
+        self.check_node(left);
+        self.check_node(right);
+      },
       HIRKind::Panic(msg) => {
         self.check_node(msg);
         self.reachable = false;

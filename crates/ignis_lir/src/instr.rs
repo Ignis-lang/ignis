@@ -48,6 +48,19 @@ pub enum Instr {
     ty: TypeId,
   },
 
+  BuiltinHash {
+    value: Operand,
+    hasher: Operand,
+    ty: TypeId,
+  },
+
+  BuiltinEq {
+    dest: TempId,
+    left: Operand,
+    right: Operand,
+    ty: TypeId,
+  },
+
   /// Copy/move a value to a new temporary.
   /// `dest = source`
   Copy {

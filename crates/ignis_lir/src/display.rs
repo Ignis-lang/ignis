@@ -156,6 +156,18 @@ impl<'a> LirPrinter<'a> {
         let ty_str = self.format_type(*ty);
         writeln!(self.output, "builtin_store {} <- {} : {}", p, v, ty_str).unwrap();
       },
+      Instr::BuiltinHash { value, hasher, ty } => {
+        let value_str = self.format_operand(func, value);
+        let hasher_str = self.format_operand(func, hasher);
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "builtin_hash {} -> {} : {}", value_str, hasher_str, ty_str).unwrap();
+      },
+      Instr::BuiltinEq { dest, left, right, ty } => {
+        let left_str = self.format_operand(func, left);
+        let right_str = self.format_operand(func, right);
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "t{} = builtin_eq {}, {} : {}", dest.index(), left_str, right_str, ty_str).unwrap();
+      },
       Instr::Copy { dest, source } => {
         let s = self.format_operand(func, source);
         let ty = self.format_type(func.temp_type(*dest));

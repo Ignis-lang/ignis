@@ -281,6 +281,18 @@ impl<'a> HIRPrinter<'a> {
         let value_str = self.format_node_compact(*value);
         format!("builtin_write<{}>({}, {})", ty_str, ptr_str, value_str)
       },
+      HIRKind::BuiltinHash { ty, value, hasher } => {
+        let ty_str = self.format_type(ty);
+        let value_str = self.format_node_compact(*value);
+        let hasher_str = self.format_node_compact(*hasher);
+        format!("builtin_hash<{}>({}, {})", ty_str, value_str, hasher_str)
+      },
+      HIRKind::BuiltinEq { ty, left, right } => {
+        let ty_str = self.format_type(ty);
+        let left_str = self.format_node_compact(*left);
+        let right_str = self.format_node_compact(*right);
+        format!("builtin_eq<{}>({}, {})", ty_str, left_str, right_str)
+      },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         let ty_str = self.format_type(ty);
         let ptr_str = self.format_node_compact(*ptr);
@@ -726,6 +738,22 @@ impl<'a> HIRPrinter<'a> {
         self.indent += 1;
         self.print_node(*ptr);
         self.print_node(*value);
+        self.indent -= 1;
+      },
+      HIRKind::BuiltinHash { ty, value, hasher } => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "BuiltinHash({}) : {}", ty_str, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*value);
+        self.print_node(*hasher);
+        self.indent -= 1;
+      },
+      HIRKind::BuiltinEq { ty, left, right } => {
+        let ty_str = self.format_type(ty);
+        writeln!(self.output, "BuiltinEq({}) : {}", ty_str, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*left);
+        self.print_node(*right);
         self.indent -= 1;
       },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {

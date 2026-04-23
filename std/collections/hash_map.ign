@@ -3,7 +3,6 @@
 //! Deterministic open-addressed hash map with linear probing.
 
 import Hasher from "std::hash";
-import LibC from "std::libc";
 import Memory from "std::memory";
 
 const EMPTY_STATE: u8 = 0;
@@ -18,6 +17,8 @@ export trait Hash {
 
 export trait Eq {
 }
+
+const SET_PRESENT: boolean = true;
 
 @implements(Drop)
 export record HashMap<K: Hash & Eq, V> {
@@ -42,7 +43,14 @@ export record HashMap<K: Hash & Eq, V> {
   }
 
   public static init(capacity: u64): HashMap<K, V> {
-    let bucketCapacity: u64 = HashMap::bucketCapacityFor(capacity);
+    let mut bucketCapacity: u64 = 0;
+    if (capacity != 0) {
+      bucketCapacity = INITIAL_BUCKET_CAPACITY;
+      while ((capacity * 100) >= (bucketCapacity * MAX_LOAD_PERCENT)) {
+        bucketCapacity *= 2;
+      }
+    }
+
     if (bucketCapacity == 0) {
       return HashMap::init<K, V>();
     }
@@ -76,7 +84,7 @@ export record HashMap<K: Hash & Eq, V> {
 
   public get(&self, key: &K): Option<&V> {
     let mut hasher: Hasher = Hasher::new();
-    key.hash(&mut hasher);
+    @hash<K>(key, (&mut hasher) as &mut Hasher);
     let hash: u64 = hasher.finish();
 
     if (self.capacity == 0) {
@@ -93,7 +101,7 @@ export record HashMap<K: Hash & Eq, V> {
       }
 
       if (state == OCCUPIED_STATE) {
-        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, key as *void, @sizeOf<K>()) == 0) {
+        if (self.hashes[slot] == hash && @eq<K>((&self.keys[slot]) as &K, key)) {
           return Option::SOME(&self.values[slot]);
         }
       }
@@ -107,7 +115,7 @@ export record HashMap<K: Hash & Eq, V> {
 
   public getMut(&mut self, key: &K): Option<&mut V> {
     let mut hasher: Hasher = Hasher::new();
-    key.hash(&mut hasher);
+    @hash<K>(key, (&mut hasher) as &mut Hasher);
     let hash: u64 = hasher.finish();
 
     if (self.capacity == 0) {
@@ -124,7 +132,7 @@ export record HashMap<K: Hash & Eq, V> {
       }
 
       if (state == OCCUPIED_STATE) {
-        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, key as *void, @sizeOf<K>()) == 0) {
+        if (self.hashes[slot] == hash && @eq<K>((&self.keys[slot]) as &K, key)) {
           return Option::SOME(&mut self.values[slot]);
         }
       }
@@ -140,11 +148,13 @@ export record HashMap<K: Hash & Eq, V> {
     self.reserve(1);
 
     let mut hasher: Hasher = Hasher::new();
-    key.hash(&mut hasher);
+    let keyRef: &K = &key;
+    @hash<K>(keyRef, (&mut hasher) as &mut Hasher);
     let hash: u64 = hasher.finish();
 
     let mut slot: u64 = hash % self.capacity;
     let mut firstTombstone: u64 = self.capacity;
+    let mut replacementSlot: u64 = self.capacity;
     let mut steps: u64 = 0;
 
     while (steps < self.capacity) {
@@ -155,15 +165,9 @@ export record HashMap<K: Hash & Eq, V> {
       }
 
       if (state == OCCUPIED_STATE) {
-        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, (&key) as *void, @sizeOf<K>()) == 0) {
-          @dropInPlace<K>((&mut self.keys[slot]) as *mut K);
-
-          let previous: V = self.values[slot];
-          self.keys[slot] = key;
-          self.values[slot] = value;
-          self.hashes[slot] = hash;
-
-          return Option::SOME(previous);
+        if (self.hashes[slot] == hash && @eq<K>((&self.keys[slot]) as &K, keyRef)) {
+          replacementSlot = slot;
+          break;
         }
       } else if (firstTombstone == self.capacity) {
         firstTombstone = slot;
@@ -173,26 +177,37 @@ export record HashMap<K: Hash & Eq, V> {
       steps += 1;
     }
 
-    if (firstTombstone != self.capacity) {
-      slot = firstTombstone;
+    if (replacementSlot != self.capacity) {
+      @dropInPlace<K>((&mut self.keys[replacementSlot]) as *mut K);
+
+      let previous: V = self.values[replacementSlot];
+      self.keys[replacementSlot] = key;
+      self.values[replacementSlot] = value;
+      self.hashes[replacementSlot] = hash;
+
+      return Option::SOME(previous);
+    } else {
+      if (firstTombstone != self.capacity) {
+        slot = firstTombstone;
+      }
+
+      if (self.states[slot] == TOMBSTONE_STATE) {
+        self.tombstones -= 1;
+      }
+
+      self.states[slot] = OCCUPIED_STATE;
+      self.hashes[slot] = hash;
+      self.keys[slot] = key;
+      self.values[slot] = value;
+      self.length += 1;
+
+      return Option::NONE;
     }
-
-    if (self.states[slot] == TOMBSTONE_STATE) {
-      self.tombstones -= 1;
-    }
-
-    self.states[slot] = OCCUPIED_STATE;
-    self.hashes[slot] = hash;
-    self.keys[slot] = key;
-    self.values[slot] = value;
-    self.length += 1;
-
-    return Option::NONE;
   }
 
   public remove(&mut self, key: &K): Option<V> {
     let mut hasher: Hasher = Hasher::new();
-    key.hash(&mut hasher);
+    @hash<K>(key, (&mut hasher) as &mut Hasher);
     let hash: u64 = hasher.finish();
 
     if (self.capacity == 0) {
@@ -210,7 +225,7 @@ export record HashMap<K: Hash & Eq, V> {
       }
 
       if (state == OCCUPIED_STATE) {
-        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, key as *void, @sizeOf<K>()) == 0) {
+        if (self.hashes[slot] == hash && @eq<K>((&self.keys[slot]) as &K, key)) {
           @dropInPlace<K>((&mut self.keys[slot]) as *mut K);
 
           self.states[slot] = TOMBSTONE_STATE;
@@ -231,7 +246,14 @@ export record HashMap<K: Hash & Eq, V> {
 
   public reserve(&mut self, additional: u64): void {
     let requiredEntries: u64 = self.length + self.tombstones + additional;
-    let requiredCapacity: u64 = HashMap::bucketCapacityFor(requiredEntries);
+    let mut requiredCapacity: u64 = 0;
+
+    if (requiredEntries != 0) {
+      requiredCapacity = INITIAL_BUCKET_CAPACITY;
+      while ((requiredEntries * 100) >= (requiredCapacity * MAX_LOAD_PERCENT)) {
+        requiredCapacity *= 2;
+      }
+    }
 
     if (requiredCapacity > self.capacity) {
       self.rehash(requiredCapacity);
@@ -266,23 +288,12 @@ export record HashMap<K: Hash & Eq, V> {
     self.freeStorage();
   }
 
-  private static bucketCapacityFor(requiredEntries: u64): u64 {
-    if (requiredEntries == 0) {
-      return 0;
-    }
-
-    let mut bucketCapacity: u64 = INITIAL_BUCKET_CAPACITY;
-    while ((requiredEntries * 100) >= (bucketCapacity * MAX_LOAD_PERCENT)) {
-      bucketCapacity *= 2;
-    }
-
-    return bucketCapacity;
-  }
-
   private rehash(&mut self, newCapacity: u64): void {
     if (newCapacity == self.capacity) {
       return;
     }
+
+    let preservedLength: u64 = self.length;
 
     let mut newStates: *mut u8 = Memory::allocateZeroedVector<u8>(newCapacity);
     let mut newHashes: *mut u64 = Memory::allocateZeroedVector<u8>(newCapacity * @sizeOf<u64>()) as *mut u64;
@@ -313,6 +324,7 @@ export record HashMap<K: Hash & Eq, V> {
     self.hashes = newHashes;
     self.keys = newKeys;
     self.values = newValues;
+    self.length = preservedLength;
     self.capacity = newCapacity;
     self.tombstones = 0;
   }
@@ -344,28 +356,28 @@ export record HashMap<K: Hash & Eq, V> {
   }
 }
 
-export record HashSetMarker {
-  present: boolean;
-
-  public static init(): HashSetMarker {
-    return HashSetMarker { present: true };
-  }
-}
-
 @implements(Drop)
 export record HashSet<T: Hash & Eq> {
-  map: HashMap<T, HashSetMarker>;
+  map: HashMap<T, boolean>;
 
   public static init(): HashSet<T> {
     return HashSet {
-      map: HashMap::init<T, HashSetMarker>(),
+      map: HashMap {
+        states: null,
+        hashes: null,
+        keys: null,
+        values: null,
+        length: 0,
+        capacity: 0,
+        tombstones: 0,
+      },
     };
   }
 
   public static init(capacity: u64): HashSet<T> {
-    return HashSet {
-      map: HashMap::init<T, HashSetMarker>(capacity),
-    };
+    let mut set: HashSet<T> = HashSet::init<T>();
+    set.reserve(capacity);
+    return set;
   }
 
   public length(&self): u64 {
@@ -381,15 +393,24 @@ export record HashSet<T: Hash & Eq> {
   }
 
   public contains(&self, value: &T): boolean {
-    return self.map.containsKey(value);
+    return match (self.map.get(value)) {
+      Option::SOME(_) -> true,
+      Option::NONE -> false,
+    };
   }
 
   public insert(&mut self, value: T): boolean {
-    return self.map.insert(value, HashSetMarker::init()).isNone();
+    return match (self.map.insert(value, SET_PRESENT)) {
+      Option::SOME(_) -> false,
+      Option::NONE -> true,
+    };
   }
 
   public remove(&mut self, value: &T): boolean {
-    return self.map.remove(value).isSome();
+    return match (self.map.remove(value)) {
+      Option::SOME(_) -> true,
+      Option::NONE -> false,
+    };
   }
 
   public reserve(&mut self, additional: u64): void {

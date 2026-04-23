@@ -287,6 +287,16 @@ fn analyze_var_usage(
       analyze_var_usage(hir, *value, var_def, usage, defs, types);
     },
 
+    HIRKind::BuiltinHash { value, hasher, .. } => {
+      analyze_var_usage(hir, *value, var_def, usage, defs, types);
+      analyze_var_usage(hir, *hasher, var_def, usage, defs, types);
+    },
+
+    HIRKind::BuiltinEq { left, right, .. } => {
+      analyze_var_usage(hir, *left, var_def, usage, defs, types);
+      analyze_var_usage(hir, *right, var_def, usage, defs, types);
+    },
+
     HIRKind::BuiltinDropInPlace { ptr, .. } => {
       analyze_var_usage(hir, *ptr, var_def, usage, defs, types);
     },
@@ -628,6 +638,16 @@ fn collect_closures_postorder(
     HIRKind::BuiltinStore { ptr, value, .. } => {
       collect_closures_postorder(hir, *ptr, owner_module, result, visited);
       collect_closures_postorder(hir, *value, owner_module, result, visited);
+    },
+
+    HIRKind::BuiltinHash { value, hasher, .. } => {
+      collect_closures_postorder(hir, *value, owner_module, result, visited);
+      collect_closures_postorder(hir, *hasher, owner_module, result, visited);
+    },
+
+    HIRKind::BuiltinEq { left, right, .. } => {
+      collect_closures_postorder(hir, *left, owner_module, result, visited);
+      collect_closures_postorder(hir, *right, owner_module, result, visited);
     },
 
     HIRKind::BuiltinDropInPlace { ptr, .. } => {
@@ -1274,6 +1294,16 @@ fn collect_free_vars(
     HIRKind::BuiltinStore { ptr, value, .. } => {
       collect_free_vars(hir, *ptr, locals, defs, free_vars, seen);
       collect_free_vars(hir, *value, locals, defs, free_vars, seen);
+    },
+
+    HIRKind::BuiltinHash { value, hasher, .. } => {
+      collect_free_vars(hir, *value, locals, defs, free_vars, seen);
+      collect_free_vars(hir, *hasher, locals, defs, free_vars, seen);
+    },
+
+    HIRKind::BuiltinEq { left, right, .. } => {
+      collect_free_vars(hir, *left, locals, defs, free_vars, seen);
+      collect_free_vars(hir, *right, locals, defs, free_vars, seen);
     },
 
     HIRKind::BuiltinDropInPlace { ptr, .. } => {

@@ -90,6 +90,16 @@ pub enum HIRKind {
     ptr: HIRId,
     value: HIRId,
   },
+  BuiltinHash {
+    ty: TypeId,
+    value: HIRId,
+    hasher: HIRId,
+  },
+  BuiltinEq {
+    ty: TypeId,
+    left: HIRId,
+    right: HIRId,
+  },
   /// `@dropInPlace<T>(ptr)` — runs T's drop on the pointed-to value.
   BuiltinDropInPlace {
     ty: TypeId,
@@ -228,6 +238,14 @@ impl HIRKind {
       HIRKind::BuiltinStore { ptr, value, .. } => {
         *ptr = HIRId::new(ptr.index() + offset);
         *value = HIRId::new(value.index() + offset);
+      },
+      HIRKind::BuiltinHash { value, hasher, .. } => {
+        *value = HIRId::new(value.index() + offset);
+        *hasher = HIRId::new(hasher.index() + offset);
+      },
+      HIRKind::BuiltinEq { left, right, .. } => {
+        *left = HIRId::new(left.index() + offset);
+        *right = HIRId::new(right.index() + offset);
       },
       HIRKind::Binary { left, right, .. } => {
         *left = HIRId::new(left.index() + offset);

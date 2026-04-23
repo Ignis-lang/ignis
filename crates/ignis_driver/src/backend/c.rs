@@ -83,6 +83,7 @@ impl Backend for CBackend {
             headers,
             module_paths,
             user_module_headers,
+            std_path,
           } => emit_user_module_c_from_input(
             module_id,
             emit_input,
@@ -91,6 +92,7 @@ impl Backend for CBackend {
             headers,
             module_paths,
             user_module_headers,
+            std_path,
           ),
           LoweredBackendRequest::EmitStdModule {
             module_name,
