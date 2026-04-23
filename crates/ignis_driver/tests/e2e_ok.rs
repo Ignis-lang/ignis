@@ -2949,7 +2949,11 @@ function main(): i32 {
         return 12;
     }
 
-    return map.length() as i32;
+    if (map.length() != 3) {
+        return 13;
+    }
+
+    return 0;
 }
 "#,
   );
@@ -3040,6 +3044,112 @@ function main(): i32 {
     }
 
     return valueDrops;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_hash_map_contains_get_mut_and_clear_preserve_capacity() {
+  e2e_std_test(
+    "hash_map_contains_get_mut_and_clear_preserve_capacity",
+    r#"
+import HashMap from "std::collections";
+import Eq from "std::collections";
+import Hash from "std::collections";
+import Hasher from "std::hash";
+
+@implements(Hash, Eq)
+record Key {
+    id: i32;
+
+    hash(&self, hasher: &mut Hasher): void {
+        let mut state: &mut Hasher = hasher;
+        state.writeI32(self.id);
+    }
+
+    equals(&self, other: &Key): boolean {
+        return self.id == other.id;
+    }
+}
+
+function main(): i32 {
+    let mut map: HashMap<Key, i32> = HashMap::init<Key, i32>();
+
+    map.insert(Key { id: 1 }, 10);
+    map.insert(Key { id: 2 }, 20);
+    map.reserve(16);
+
+    let preservedCapacity: u64 = map.capacity();
+    let lookup1: Key = Key { id: 1 };
+    let lookup2: Key = Key { id: 2 };
+    let lookup3: Key = Key { id: 3 };
+
+    if (!map.contains(&lookup1)) {
+        return 1;
+    }
+
+    if (map.contains(&lookup3)) {
+        return 2;
+    }
+
+    let updated: Option<&mut i32> = map.getMut(&lookup2);
+    match (updated) {
+        Option::SOME(value) -> {
+            *value = 25;
+        },
+        Option::NONE -> {
+            return 3;
+        },
+    };
+
+    let value2: i32 = match (map.get(&lookup2)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> -1,
+    };
+    if (value2 != 25) {
+        return 4;
+    }
+
+    map.clear();
+
+    if (!map.isEmpty()) {
+        return 5;
+    }
+
+    if (map.length() != 0) {
+        return 6;
+    }
+
+    if (map.capacity() != preservedCapacity) {
+        return 7;
+    }
+
+    if (map.contains(&lookup1)) {
+        return 8;
+    }
+
+    let insertedOld: boolean = match (map.insert(Key { id: 3 }, 30)) {
+        Option::SOME(_) -> true,
+        Option::NONE -> false,
+    };
+    if (insertedOld) {
+        return 9;
+    }
+
+    let value3: i32 = match (map.get(&lookup3)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> -1,
+    };
+    if (value3 != 30) {
+        return 10;
+    }
+
+    if (map.length() != 1) {
+        return 11;
+    }
+
+    return 0;
 }
 "#,
   );

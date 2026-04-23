@@ -76,8 +76,39 @@ export record HashMap<K: Hash & Eq, V> {
     return self.length == 0;
   }
 
+  public contains(&self, key: &K): boolean {
+    let mut hasher: Hasher = Hasher::new();
+    @hash<K>(key, (&mut hasher) as &mut Hasher);
+    let hash: u64 = hasher.finish();
+
+    if (self.capacity == 0) {
+      return false;
+    }
+
+    let mut slot: u64 = hash % self.capacity;
+    let mut steps: u64 = 0;
+
+    while (steps < self.capacity) {
+      let state: u8 = self.states[slot];
+      if (state == EMPTY_STATE) {
+        return false;
+      }
+
+      if (state == OCCUPIED_STATE) {
+        if (self.hashes[slot] == hash && @eq<K>((&self.keys[slot]) as &K, key)) {
+          return true;
+        }
+      }
+
+      slot = (slot + 1) % self.capacity;
+      steps += 1;
+    }
+
+    return false;
+  }
+
   public containsKey(&self, key: &K): boolean {
-    return self.get(key).isSome();
+    return self.contains(key);
   }
 
   public get(&self, key: &K): Option<&V> {
