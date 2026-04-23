@@ -2821,6 +2821,310 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_hash_map_reuses_tombstones_and_preserves_entries_across_reserve() {
+  e2e_std_test(
+    "hash_map_reuses_tombstones_and_preserves_entries_across_reserve",
+    r#"
+import HashMap from "std::collections";
+import Eq from "std::collections";
+import Hash from "std::collections";
+import Hasher from "std::hash";
+
+@implements(Hash, Eq)
+record Key {
+    id: i32;
+    bucket: u64;
+
+    hash(&self, hasher: &mut Hasher): void {
+        let mut state: &mut Hasher = hasher;
+        state.writeU64(self.bucket);
+    }
+
+    equals(&self, other: &Key): boolean {
+        return self.id == other.id;
+    }
+}
+
+function key(id: i32): Key {
+    return Key { id: id, bucket: 1 };
+}
+
+function main(): i32 {
+    let mut map: HashMap<Key, i32> = HashMap::init<Key, i32>();
+
+    let firstInsertedOld: boolean = match (map.insert(key(1), 10)) {
+        Option::SOME(_) -> true,
+        Option::NONE -> false,
+    };
+    if (firstInsertedOld) {
+        return 1;
+    }
+
+    let secondInsertedOld: boolean = match (map.insert(key(2), 20)) {
+        Option::SOME(_) -> true,
+        Option::NONE -> false,
+    };
+    if (secondInsertedOld) {
+        return 2;
+    }
+
+    let thirdInsertedOld: boolean = match (map.insert(key(3), 30)) {
+        Option::SOME(_) -> true,
+        Option::NONE -> false,
+    };
+    if (thirdInsertedOld) {
+        return 3;
+    }
+
+    let removedKey: Key = key(2);
+    let removed: i32 = match (map.remove(&removedKey)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> -1,
+    };
+    if (removed != 20) {
+        return 4;
+    }
+
+    let replaced: i32 = match (map.insert(key(1), 11)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> -1,
+    };
+    if (replaced != 10) {
+        return 5;
+    }
+
+    map.reserve(16);
+
+    let lookup1: Key = key(1);
+    let lookup2: Key = key(2);
+    let lookup3: Key = key(3);
+    let lookup4: Key = key(4);
+
+    if (map.length() != 2) {
+        return 6;
+    }
+
+    let value1: i32 = match (map.get(&lookup1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> -1,
+    };
+    if (value1 != 11) {
+        return 7;
+    }
+
+    let hasRemovedKey: boolean = match (map.get(&lookup2)) {
+        Option::SOME(_) -> true,
+        Option::NONE -> false,
+    };
+    if (hasRemovedKey) {
+        return 8;
+    }
+
+    let value3: i32 = match (map.get(&lookup3)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> -1,
+    };
+    if (value3 != 30) {
+        return 9;
+    }
+
+    let fourthInsertedOld: boolean = match (map.insert(key(4), 40)) {
+        Option::SOME(_) -> true,
+        Option::NONE -> false,
+    };
+    if (fourthInsertedOld) {
+        return 10;
+    }
+
+    let value4: i32 = match (map.get(&lookup4)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> -1,
+    };
+    if (value4 != 40) {
+        return 11;
+    }
+
+    if (map.capacity() < 18) {
+        return 12;
+    }
+
+    return map.length() as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_hash_map_replacement_remove_and_drop_are_exact_once() {
+  e2e_std_test(
+    "hash_map_replacement_remove_and_drop_are_exact_once",
+    r#"
+import HashMap from "std::collections";
+import Eq from "std::collections";
+import Hash from "std::collections";
+import Hasher from "std::hash";
+
+@implements(Drop, Hash, Eq)
+record Key {
+    id: i32;
+    marker: i32;
+    counter: *mut i32;
+
+    hash(&self, hasher: &mut Hasher): void {
+        let mut state: &mut Hasher = hasher;
+        state.writeI32(self.id);
+    }
+
+    equals(&self, other: &Key): boolean {
+        return self.id == other.id;
+    }
+
+    drop(&mut self): void {
+        *self.counter = *self.counter + self.marker;
+    }
+}
+
+@implements(Drop)
+record Value {
+    marker: i32;
+    counter: *mut i32;
+
+    drop(&mut self): void {
+        *self.counter = *self.counter + self.marker;
+    }
+}
+
+function main(): i32 {
+    let mut keyDrops: i32 = 0;
+    let mut valueDrops: i32 = 0;
+
+    {
+        let mut map: HashMap<Key, Value> = HashMap::init<Key, Value>();
+
+        map.insert(
+            Key { id: 1, marker: 1, counter: (&mut keyDrops) as *mut i32 },
+            Value { marker: 4, counter: (&mut valueDrops) as *mut i32 },
+        );
+        map.insert(
+            Key { id: 2, marker: 2, counter: (&mut keyDrops) as *mut i32 },
+            Value { marker: 5, counter: (&mut valueDrops) as *mut i32 },
+        );
+
+        let replacementKey: Key = Key { id: 1, marker: 1, counter: (&mut keyDrops) as *mut i32 };
+        let replaced: Option<Value> = map.insert(
+            replacementKey,
+            Value { marker: 6, counter: (&mut valueDrops) as *mut i32 },
+        );
+        let replacedMissing: boolean = match (replaced) {
+            Option::SOME(_) -> false,
+            Option::NONE -> true,
+        };
+        if (replacedMissing) {
+            return 1;
+        }
+
+        let lookupKey: Key = Key { id: 2, marker: 2, counter: (&mut keyDrops) as *mut i32 };
+        let removed: Option<Value> = map.remove(&lookupKey);
+        let removedMissing: boolean = match (removed) {
+            Option::SOME(_) -> false,
+            Option::NONE -> true,
+        };
+        if (removedMissing) {
+            return 2;
+        }
+    }
+
+    if (keyDrops != 4) {
+        return keyDrops;
+    }
+
+    return valueDrops;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_hash_set_membership_remove_clear_and_drop_are_exact_once() {
+  e2e_std_test(
+    "hash_set_membership_remove_clear_and_drop_are_exact_once",
+    r#"
+import HashSet from "std::collections";
+import Eq from "std::collections";
+import Hash from "std::collections";
+import Hasher from "std::hash";
+
+@implements(Drop, Hash, Eq)
+record Key {
+    id: i32;
+    marker: i32;
+    counter: *mut i32;
+
+    hash(&self, hasher: &mut Hasher): void {
+        let mut state: &mut Hasher = hasher;
+        state.writeU64(1);
+    }
+
+    equals(&self, other: &Key): boolean {
+        return self.id == other.id;
+    }
+
+    drop(&mut self): void {
+        *self.counter = *self.counter + self.marker;
+    }
+}
+
+function main(): i32 {
+    let mut drops: i32 = 0;
+
+    {
+        let mut set: HashSet<Key> = HashSet::init<Key>();
+        set.reserve(8);
+
+        if (!set.insert(Key { id: 1, marker: 1, counter: (&mut drops) as *mut i32 })) {
+            return 1;
+        }
+
+        if (!set.insert(Key { id: 2, marker: 2, counter: (&mut drops) as *mut i32 })) {
+            return 2;
+        }
+
+        if (set.insert(Key { id: 1, marker: 1, counter: (&mut drops) as *mut i32 })) {
+            return 3;
+        }
+
+        let containsKey: Key = Key { id: 1, marker: 1, counter: (&mut drops) as *mut i32 };
+        if (!set.contains(&containsKey)) {
+            return 4;
+        }
+
+        let removeKey: Key = Key { id: 2, marker: 2, counter: (&mut drops) as *mut i32 };
+        if (!set.remove(&removeKey)) {
+            return 5;
+        }
+
+        if (set.contains(&removeKey)) {
+            return 6;
+        }
+
+        if (set.length() != 1) {
+            return 7;
+        }
+
+        set.clear();
+
+        if (!set.isEmpty()) {
+            return 8;
+        }
+    }
+
+    return drops;
+}
+"#,
+  );
+}
+
 // =========================================================================
 // Clone: .clone() does not move the original
 // =========================================================================

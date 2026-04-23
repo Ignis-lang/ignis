@@ -5712,12 +5712,13 @@ impl<'a> Analyzer<'a> {
         };
 
         let explicit_params = method.params.clone();
-        let (param_types, return_type) = if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&method_id, call) {
-          (subst_params, subst_ret)
-        } else {
-          let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
-          (raw_params, method.return_type)
-        };
+        let (param_types, return_type) =
+          if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&method_id, call) {
+            (subst_params, subst_ret)
+          } else {
+            let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+            (raw_params, method.return_type)
+          };
 
         let arg_types: Vec<TypeId> = call
           .arguments

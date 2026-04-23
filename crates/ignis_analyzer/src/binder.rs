@@ -267,7 +267,7 @@ impl<'a> Analyzer<'a> {
     self.set_def(node_id, &def_id);
     self.type_alias_syntax.insert(def_id, ta.target.clone());
 
-    let type_param_defs = self.bind_type_params(ta.type_params.as_ref(), def_id);
+    let type_param_defs = self.bind_type_params(ta.type_params.as_ref(), def_id, false);
     self.pop_type_params_scope(ta.type_params.as_ref());
 
     if let DefinitionKind::TypeAlias(tad) = &mut self.defs.get_mut(&def_id).kind {
@@ -331,7 +331,7 @@ impl<'a> Analyzer<'a> {
     self.set_def(node_id, &def_id);
 
     // Bind type params now that we have the owner def_id
-    let type_param_defs = self.bind_type_params(rec.type_params.as_ref(), def_id);
+    let type_param_defs = self.bind_type_params(rec.type_params.as_ref(), def_id, false);
     self.pop_type_params_scope(rec.type_params.as_ref());
 
     // Update the record definition with type params
@@ -361,6 +361,8 @@ impl<'a> Analyzer<'a> {
     let Some(record_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    self.refresh_type_param_bounds(rec.type_params.as_ref(), record_def_id);
 
     let type_name = self.get_symbol_name(&rec.name);
     let (record_attrs, lang_traits, implemented_traits) = self.bind_record_attrs(&rec.attrs, &type_name);
@@ -514,7 +516,7 @@ impl<'a> Analyzer<'a> {
     self.set_def(node_id, &def_id);
 
     // Bind type params now that we have the owner def_id
-    let type_param_defs = self.bind_type_params(en.type_params.as_ref(), def_id);
+    let type_param_defs = self.bind_type_params(en.type_params.as_ref(), def_id, false);
     self.pop_type_params_scope(en.type_params.as_ref());
 
     // Update the enum definition with type params
@@ -544,6 +546,8 @@ impl<'a> Analyzer<'a> {
     let Some(enum_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    self.refresh_type_param_bounds(en.type_params.as_ref(), enum_def_id);
 
     let type_name = self.get_symbol_name(&en.name);
     let (enum_attrs, lang_traits, _implemented_traits) = self.bind_record_attrs(&en.attrs, &type_name);
@@ -744,7 +748,7 @@ impl<'a> Analyzer<'a> {
     self.set_import_item_def(&method.name_span, &method_def_id);
 
     // Bind method's own type params (in addition to owner's type params already in scope)
-    let type_param_defs = self.bind_type_params(method.type_params.as_ref(), method_def_id);
+    let type_param_defs = self.bind_type_params(method.type_params.as_ref(), method_def_id, true);
 
     // Update the method definition with type params
     if let DefinitionKind::Method(md) = &mut self.defs.get_mut(&method_def_id).kind {
@@ -796,7 +800,7 @@ impl<'a> Analyzer<'a> {
     let def_id = self.defs.alloc(def);
     self.set_def(node_id, &def_id);
 
-    let type_param_defs = self.bind_type_params(tr.type_params.as_ref(), def_id);
+    let type_param_defs = self.bind_type_params(tr.type_params.as_ref(), def_id, false);
     self.pop_type_params_scope(tr.type_params.as_ref());
 
     if let DefinitionKind::Trait(td) = &mut self.defs.get_mut(&def_id).kind {
@@ -825,6 +829,8 @@ impl<'a> Analyzer<'a> {
     let Some(trait_def_id) = self.lookup_def(node_id).cloned() else {
       return;
     };
+
+    self.refresh_type_param_bounds(tr.type_params.as_ref(), trait_def_id);
 
     let type_id = self.types.error();
 
@@ -913,7 +919,7 @@ impl<'a> Analyzer<'a> {
     let method_def_id = self.defs.alloc(method_def);
     self.set_import_item_def(&method.name_span, &method_def_id);
 
-    let type_param_defs = self.bind_type_params(method.type_params.as_ref(), method_def_id);
+    let type_param_defs = self.bind_type_params(method.type_params.as_ref(), method_def_id, true);
 
     if let DefinitionKind::Method(md) = &mut self.defs.get_mut(&method_def_id).kind {
       md.type_params = type_param_defs;
@@ -1120,7 +1126,7 @@ impl<'a> Analyzer<'a> {
     self.set_import_item_def(&func.signature.name_span, &def_id);
 
     // Bind type params now that we have the owner def_id
-    let type_param_defs = self.bind_type_params(func.signature.type_params.as_ref(), def_id);
+    let type_param_defs = self.bind_type_params(func.signature.type_params.as_ref(), def_id, true);
 
     // Update the function definition with type params
     if let DefinitionKind::Function(fd) = &mut self.defs.get_mut(&def_id).kind {
@@ -1508,6 +1514,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     type_params: Option<&ASTGenericParams>,
     owner: DefinitionId,
+    resolve_bounds: bool,
   ) -> Vec<DefinitionId> {
     let Some(params) = type_params else {
       return Vec::new();
@@ -1523,7 +1530,11 @@ impl<'a> Analyzer<'a> {
     let mut type_param_defs = Vec::with_capacity(params.len());
 
     for (index, param) in params.params.iter().enumerate() {
-      let bounds = self.bind_type_param_bounds(param);
+      let bounds = if resolve_bounds {
+        self.bind_type_param_bounds(param)
+      } else {
+        Vec::new()
+      };
 
       let def = Definition {
         kind: DefinitionKind::TypeParam(TypeParamDefinition {
@@ -1559,6 +1570,33 @@ impl<'a> Analyzer<'a> {
     }
 
     type_param_defs
+  }
+
+  fn refresh_type_param_bounds(
+    &mut self,
+    type_params: Option<&ASTGenericParams>,
+    owner: DefinitionId,
+  ) {
+    let Some(params) = type_params else {
+      return;
+    };
+
+    let param_defs = match &self.defs.get(&owner).kind {
+      DefinitionKind::TypeAlias(td) => td.type_params.clone(),
+      DefinitionKind::Record(rd) => rd.type_params.clone(),
+      DefinitionKind::Enum(ed) => ed.type_params.clone(),
+      DefinitionKind::Trait(td) => td.type_params.clone(),
+      DefinitionKind::Function(fd) => fd.type_params.clone(),
+      DefinitionKind::Method(md) => md.type_params.clone(),
+      _ => return,
+    };
+
+    for (param, param_def_id) in params.params.iter().zip(param_defs.iter()) {
+      let bounds = self.bind_type_param_bounds(param);
+      if let DefinitionKind::TypeParam(tp) = &mut self.defs.get_mut(param_def_id).kind {
+        tp.bounds = bounds;
+      }
+    }
   }
 
   fn bind_type_param_bounds(
@@ -1608,7 +1646,11 @@ impl<'a> Analyzer<'a> {
     bound: &ignis_ast::generics::ASTGenericBound,
   ) -> Option<DefinitionId> {
     let first = bound.segments.first()?;
-    let mut current_def = self.scopes.lookup_def(first).cloned()?;
+    let mut current_def = self
+      .scopes
+      .lookup_def(first)
+      .cloned()
+      .or_else(|| self.lookup_trait_def_by_name(first))?;
 
     for segment in bound.segments.iter().skip(1) {
       let DefinitionKind::Namespace(ns_def) = &self.defs.get(&current_def).kind else {
@@ -1620,6 +1662,19 @@ impl<'a> Analyzer<'a> {
     }
 
     Some(current_def)
+  }
+
+  fn lookup_trait_def_by_name(
+    &self,
+    symbol: &ignis_type::symbol::SymbolId,
+  ) -> Option<DefinitionId> {
+    self.defs.iter().filter_map(|(def_id, def)| {
+      if def.name == *symbol && matches!(def.kind, DefinitionKind::Trait(_)) {
+        Some(def_id)
+      } else {
+        None
+      }
+    }).last()
   }
 
   /// Pops the generic scope if type params were bound.
@@ -1903,6 +1958,8 @@ impl<'a> Analyzer<'a> {
                     .report(),
                   );
                 }
+              } else if let Some(def_id) = self.lookup_trait_def_by_name(sym) {
+                user_traits.push(def_id);
               } else {
                 self.add_diagnostic(
                   DiagnosticMessage::UnknownTraitInImplements {

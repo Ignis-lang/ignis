@@ -65,6 +65,23 @@ impl BuildLayout {
     {
       return rel.to_path_buf();
     }
+
+    if source_path.is_absolute() {
+      let mut rel = PathBuf::new();
+
+      for component in source_path.components() {
+        match component {
+          std::path::Component::Normal(part) => rel.push(part),
+          std::path::Component::Prefix(prefix) => rel.push(prefix.as_os_str()),
+          _ => {},
+        }
+      }
+
+      if !rel.as_os_str().is_empty() {
+        return rel;
+      }
+    }
+
     source_path.to_path_buf()
   }
 
@@ -739,28 +756,27 @@ mod tests {
 
   #[test]
   fn test_user_module_paths_without_project_root() {
-    // Without project_root, absolute paths are used as-is (bug case we're preventing)
     let layout = BuildLayout::new("allocator", Path::new("/home/user/allocator/build"));
 
-    // With no project_root, an absolute source path would go to wrong location
-    // This test documents the behavior (though it's not ideal)
     let rel_main = Path::new("src/main.ign");
     assert_eq!(
       layout.user_module_header(rel_main),
       PathBuf::from("/home/user/allocator/build/user/include/src/main.h")
     );
+
+    let abs_main = Path::new("/home/user/allocator/std/vector/mod.ign");
+    assert_eq!(
+      layout.user_module_src(abs_main),
+      PathBuf::from("/home/user/allocator/build/user/src/home/user/allocator/std/vector/mod.c")
+    );
   }
 
   #[test]
   fn test_relativize_with_non_matching_path() {
-    // If source path doesn't start with project_root, it's returned as-is
     let layout = BuildLayout::with_project_root("myapp", Path::new("/tmp/build"), Path::new("/home/user/myproject"));
 
-    // Path outside project root - returned as-is (will likely cause issues, but that's a usage error)
     let outside = Path::new("/other/path/file.ign");
-    // join with absolute path replaces base, so this is the "broken" behavior
-    // but relativize returns it as-is since it doesn't match project_root
-    assert_eq!(layout.relativize(outside), PathBuf::from("/other/path/file.ign"));
+    assert_eq!(layout.relativize(outside), PathBuf::from("other/path/file.ign"));
   }
 
   // -- Stamp v2 tests --

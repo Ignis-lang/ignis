@@ -64,6 +64,24 @@ pub struct CompilationContext {
 }
 
 impl CompilationContext {
+  fn normalize_discovered_module_path(
+    &self,
+    module_path: ModulePath,
+  ) -> ModulePath {
+    match module_path {
+      ModulePath::Project(path) => {
+        let path_string = path.to_string_lossy();
+
+        if let Some(std_name) = self.try_resolve_std_module_name(&path_string) {
+          ModulePath::Std(std_name)
+        } else {
+          ModulePath::Project(path)
+        }
+      },
+      other => other,
+    }
+  }
+
   pub fn new(config: &IgnisConfig) -> Self {
     let project_root = config
       .project_config
@@ -419,6 +437,8 @@ impl CompilationContext {
       ModulePath::Project(PathBuf::from(path))
     };
 
+    let module_path = self.normalize_discovered_module_path(module_path);
+
     if let Some(id) = self.module_graph.get_by_path(&module_path) {
       return Ok(id);
     }
@@ -605,6 +625,8 @@ impl CompilationContext {
     } else {
       ModulePath::Project(PathBuf::from(path))
     };
+
+    let module_path = self.normalize_discovered_module_path(module_path);
 
     if let Some(id) = self.module_graph.get_by_path(&module_path) {
       return Ok(id);
@@ -809,7 +831,12 @@ impl CompilationContext {
       match err {
         ModuleError::CircularDependency { cycle } => {
           let std_root = std::path::Path::new(&config.std_path);
-          let cycle_is_std_only = !config.std_path.is_empty() && cycle.iter().skip(1).all(|path| path.starts_with(std_root));
+          let canonical_std_root = std::fs::canonicalize(std_root).unwrap_or_else(|_| std_root.to_path_buf());
+          let cycle_is_std_only = !config.std_path.is_empty()
+            && cycle.iter().skip(1).all(|path| {
+              let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+              canonical_path.starts_with(&canonical_std_root)
+            });
 
           if !cycle_is_std_only {
             let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();

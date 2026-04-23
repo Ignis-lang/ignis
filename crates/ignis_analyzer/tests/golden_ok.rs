@@ -786,10 +786,7 @@ function main(): i32 {
     "generic_bounds_allow_trait_method_lookup_diags",
     common::format_diagnostics(&result.output.diagnostics)
   );
-  assert_snapshot!(
-    "generic_bounds_allow_trait_method_lookup_hir",
-    common::format_hir(&result)
-  );
+  assert_snapshot!("generic_bounds_allow_trait_method_lookup_hir", common::format_hir(&result));
 }
 
 // ── Type Inference ──────────────────────────────────────────
