@@ -10,7 +10,7 @@ use ignis_type::definition::{DefinitionId, DefinitionStore};
 use ignis_type::module::ModuleId;
 use ignis_type::types::TypeStore;
 
-use crate::backend::BackendRequest;
+use crate::backend::{BackendRequest, LoweredBackendRequest};
 use crate::context::CompilationContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -325,6 +325,18 @@ impl<'a> BackendInput<'a> {
     match (self, request) {
       (Self::Header { types, defs }, BackendRequest::Header(_)) => Self::verify_header_artifacts(types, defs),
       (Self::Header { .. }, BackendRequest::Lowered(_)) => Err(StageError::BackendRequestRequiresLoweredInput),
+      (
+        Self::Lowered {
+          root_id: _,
+          types,
+          defs,
+          program,
+        },
+        BackendRequest::Lowered(LoweredBackendRequest::EmitStdModule { .. }),
+      ) => {
+        Self::verify_header_artifacts(types, defs)?;
+        Self::verify_lowered_artifacts(defs, program)
+      },
       (
         Self::Lowered {
           root_id,
@@ -803,6 +815,29 @@ mod tests {
         namespaces: &namespaces,
         symbols: &symbols,
         headers: &[],
+      })),
+      Ok(())
+    );
+  }
+
+  #[test]
+  fn backend_input_allows_std_module_requests_without_root_module_artifacts() {
+    let types = TypeStore::new();
+    let symbols = SymbolTable::new();
+    let namespaces = NamespaceStore::new();
+    let module_paths = HashMap::new();
+    let (defs, program, root_id) = lowered_fixture_with_missing_root_module(&types);
+    let input = backend_lowered_input_fixture(root_id, &types, &defs, &program);
+
+    assert_eq!(
+      input.verify_for(&BackendRequest::Lowered(LoweredBackendRequest::EmitStdModule {
+        module_name: "collections",
+        namespaces: &namespaces,
+        symbols: &symbols,
+        headers: &[],
+        module_paths: &module_paths,
+        umbrella_header_path: Some("ignis_std.h"),
+        std_path: std::path::Path::new("/tmp/std"),
       })),
       Ok(())
     );

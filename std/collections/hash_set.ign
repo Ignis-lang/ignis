@@ -1,11 +1,79 @@
 //! # HashSet
 //!
-//! Re-export of the deterministic set built in `hash_map.ign`.
+//! Deterministic hash set built on top of `HashMap<T, boolean>`.
 
-import _ from "std::collections::hash_map";
+import Eq from "./hash_map";
+import Hash from "./hash_map";
+import HashMap from "./hash_map";
 
-export HashSet from "./hash_map";
+const SET_PRESENT: boolean = true;
 
-function __hashSetModuleRoot(): void {
-  return;
+@implements(Drop)
+export record HashSet<T: Hash & Eq> {
+  map: HashMap<T, boolean>;
+
+  public static init(): HashSet<T> {
+    return HashSet {
+      map: HashMap {
+        states: null,
+        hashes: null,
+        keys: null,
+        values: null,
+        length: 0,
+        capacity: 0,
+        tombstones: 0,
+      },
+    };
+  }
+
+  public static init(capacity: u64): HashSet<T> {
+    let mut set: HashSet<T> = HashSet::init<T>();
+    set.reserve(capacity);
+    return set;
+  }
+
+  public length(&self): u64 {
+    return self.map.length();
+  }
+
+  public capacity(&self): u64 {
+    return self.map.capacity();
+  }
+
+  public isEmpty(&self): boolean {
+    return self.map.isEmpty();
+  }
+
+  public contains(&self, value: &T): boolean {
+    return match (self.map.get(value)) {
+      Option::SOME(_) -> true,
+      Option::NONE -> false,
+    };
+  }
+
+  public insert(&mut self, value: T): boolean {
+    return match (self.map.insert(value, SET_PRESENT)) {
+      Option::SOME(_) -> false,
+      Option::NONE -> true,
+    };
+  }
+
+  public remove(&mut self, value: &T): boolean {
+    return match (self.map.remove(value)) {
+      Option::SOME(_) -> true,
+      Option::NONE -> false,
+    };
+  }
+
+  public reserve(&mut self, additional: u64): void {
+    self.map.reserve(additional);
+  }
+
+  public clear(&mut self): void {
+    self.map.clear();
+  }
+
+  public drop(&mut self): void {
+    self.map.drop();
+  }
 }

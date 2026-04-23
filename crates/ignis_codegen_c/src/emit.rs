@@ -330,6 +330,15 @@ impl<'a> CEmitter<'a> {
           return false;
         }
 
+        if matches!(target, EmitTarget::StdModule(_))
+          && should_defer_std_module_emit_for_user_specialization(
+            self.is_monomorphized_generic_def(def_id),
+            self.definition_depends_on_user_type(def_id),
+          )
+        {
+          return false;
+        }
+
         target.should_emit_def(&kind)
       },
       None => true, // Legacy mode: emit everything
@@ -1281,8 +1290,10 @@ impl<'a> CEmitter<'a> {
         }
       }
 
-      // Filter by target
-      if !self.should_emit(**def_id) {
+      let should_emit = self.should_emit(**def_id);
+      let should_forward_declare_external = !should_emit && self.should_forward_declare_external(**def_id, func);
+
+      if !should_emit && !should_forward_declare_external {
         continue;
       }
 
@@ -1299,6 +1310,25 @@ impl<'a> CEmitter<'a> {
     if emitted_any {
       writeln!(self.output).unwrap();
     }
+  }
+
+  fn should_forward_declare_external(
+    &self,
+    def_id: DefinitionId,
+    func: &FunctionLir,
+  ) -> bool {
+    if func.is_extern || !self.is_function_signature_monomorphized(func) {
+      return false;
+    }
+
+    let def = self.defs.get(&def_id);
+    let kind = self.classify(def_id);
+
+    if kind.is_runtime() {
+      return false;
+    }
+
+    kind.is_user() || self.definition_depends_on_user_type(def_id) || matches!(def.kind, DefinitionKind::Method(_))
   }
 
   fn emit_functions(&mut self) {
@@ -3322,6 +3352,13 @@ fn should_defer_owner_module_emit_to_entry(
   !is_entry_user_module && is_monomorphized_generic_def && depends_on_user_type
 }
 
+fn should_defer_std_module_emit_for_user_specialization(
+  is_monomorphized_generic_def: bool,
+  depends_on_user_type: bool,
+) -> bool {
+  is_monomorphized_generic_def && depends_on_user_type
+}
+
 /// Legacy: emits everything (all modules combined).
 pub fn emit_c(
   program: &LirProgram,
@@ -4800,6 +4837,13 @@ mod tests {
     assert!(!should_defer_owner_module_emit_to_entry(true, true, true));
     assert!(!should_defer_owner_module_emit_to_entry(false, false, true));
     assert!(!should_defer_owner_module_emit_to_entry(false, true, false));
+  }
+
+  #[test]
+  fn test_std_module_emission_skips_user_specializations() {
+    assert!(should_defer_std_module_emit_for_user_specialization(true, true));
+    assert!(!should_defer_std_module_emit_for_user_specialization(false, true));
+    assert!(!should_defer_std_module_emit_for_user_specialization(true, false));
   }
 
   fn empty_program() -> (LirProgram, TypeStore, DefinitionStore, NamespaceStore, Rc<RefCell<SymbolTable>>) {
