@@ -158,6 +158,26 @@ fn fixture_generic_type_alias() {
   test_fixture("test_cases/analyzer/generics/type_alias/generic_type_alias.ign");
 }
 
+#[test]
+fn fixture_generic_bounds_satisfied() {
+  test_fixture("test_cases/analyzer/generics/bounds/satisfied_bound.ign");
+}
+
+#[test]
+fn fixture_generic_bounds_unknown_trait() {
+  test_fixture("test_cases/analyzer/generics/bounds/unknown_trait_bound.ign");
+}
+
+#[test]
+fn fixture_generic_bounds_non_trait() {
+  test_fixture("test_cases/analyzer/generics/bounds/non_trait_bound.ign");
+}
+
+#[test]
+fn fixture_generic_bounds_unsatisfied() {
+  test_fixture("test_cases/analyzer/generics/bounds/unsatisfied_bound.ign");
+}
+
 // --- Lang Trait Tests ---
 
 #[test]

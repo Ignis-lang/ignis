@@ -1523,10 +1523,13 @@ impl<'a> Analyzer<'a> {
     let mut type_param_defs = Vec::with_capacity(params.len());
 
     for (index, param) in params.params.iter().enumerate() {
+      let bounds = self.bind_type_param_bounds(param);
+
       let def = Definition {
         kind: DefinitionKind::TypeParam(TypeParamDefinition {
           index: index as u32,
           owner,
+          bounds,
         }),
         name: param.name,
         span: param.span.clone(),
@@ -1556,6 +1559,67 @@ impl<'a> Analyzer<'a> {
     }
 
     type_param_defs
+  }
+
+  fn bind_type_param_bounds(
+    &mut self,
+    param: &ignis_ast::generics::ASTGenericParam,
+  ) -> Vec<DefinitionId> {
+    let mut bound_defs = Vec::with_capacity(param.bounds.len());
+
+    for bound in &param.bounds {
+      let bound_name = bound
+        .segments
+        .iter()
+        .map(|segment| self.get_symbol_name(segment))
+        .collect::<Vec<_>>()
+        .join("::");
+
+      let Some(def_id) = self.resolve_generic_bound(bound) else {
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownTraitInGenericBound {
+            name: bound_name,
+            span: bound.span.clone(),
+          }
+          .report(),
+        );
+        continue;
+      };
+
+      if !matches!(self.defs.get(&def_id).kind, DefinitionKind::Trait(_)) {
+        self.add_diagnostic(
+          DiagnosticMessage::GenericBoundMustBeTrait {
+            name: bound_name,
+            span: bound.span.clone(),
+          }
+          .report(),
+        );
+        continue;
+      }
+
+      bound_defs.push(def_id);
+    }
+
+    bound_defs
+  }
+
+  fn resolve_generic_bound(
+    &self,
+    bound: &ignis_ast::generics::ASTGenericBound,
+  ) -> Option<DefinitionId> {
+    let first = bound.segments.first()?;
+    let mut current_def = self.scopes.lookup_def(first).cloned()?;
+
+    for segment in bound.segments.iter().skip(1) {
+      let DefinitionKind::Namespace(ns_def) = &self.defs.get(&current_def).kind else {
+        return None;
+      };
+
+      let entry = self.namespaces.lookup_def(ns_def.namespace_id, segment)?;
+      current_def = *entry.as_single()?;
+    }
+
+    Some(current_def)
   }
 
   /// Pops the generic scope if type params were bound.
