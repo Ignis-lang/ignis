@@ -255,6 +255,8 @@ pub struct TypeParamDefinition {
   pub index: u32,
   /// The function/record/method that declares this type param
   pub owner: DefinitionId,
+  /// Resolved trait bounds declared inline on the type parameter.
+  pub bounds: Vec<DefinitionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

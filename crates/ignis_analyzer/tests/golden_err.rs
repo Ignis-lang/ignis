@@ -2078,6 +2078,71 @@ function main(): void {
 }
 
 #[test]
+fn generic_bounds_unknown_trait() {
+  let source = r#"
+function hashValue<T: MissingTrait>(value: T): i32 {
+    return 0;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0188"]);
+  assert_snapshot!("generic_bounds_unknown_trait", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn generic_bounds_reject_non_trait_bound() {
+  let source = r#"
+record NotATrait {
+    public value: i32;
+}
+
+function hashValue<T: NotATrait>(value: T): i32 {
+    return 0;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0189"]);
+  assert_snapshot!(
+    "generic_bounds_reject_non_trait_bound",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn generic_bounds_reject_unsatisfied_trait() {
+  let source = r#"
+trait Hash {
+    hash(&self): i32;
+}
+
+record MissingHash {
+    public value: i32;
+}
+
+function hashValue<T: Hash>(value: T): i32 {
+    return value.hash();
+}
+
+function main(): i32 {
+    let value: MissingHash = MissingHash { value: 1 };
+    return hashValue<MissingHash>(value);
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0190"]);
+  assert_snapshot!(
+    "generic_bounds_reject_unsatisfied_trait",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn trait_with_field() {
   let result = common::analyze_allowing_parse_errors(
     r#"

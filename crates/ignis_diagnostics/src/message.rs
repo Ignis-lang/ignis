@@ -756,6 +756,20 @@ pub enum DiagnosticMessage {
     name: String,
     span: Span,
   },
+  UnknownTraitInGenericBound {
+    name: String,
+    span: Span,
+  },
+  GenericBoundMustBeTrait {
+    name: String,
+    span: Span,
+  },
+  GenericBoundNotSatisfied {
+    param_name: String,
+    trait_name: String,
+    actual_type: String,
+    span: Span,
+  },
   TraitInExternBlock {
     span: Span,
   },
@@ -1650,6 +1664,26 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UnknownTraitInImplements { name, .. } => {
         write!(f, "unknown trait '{}' in @implements", name)
       },
+      DiagnosticMessage::UnknownTraitInGenericBound { name, .. } => {
+        write!(f, "unknown trait '{}' in generic bound", name)
+      },
+      DiagnosticMessage::GenericBoundMustBeTrait { name, .. } => {
+        write!(f, "generic bound '{}' must resolve to a trait", name)
+      },
+      DiagnosticMessage::GenericBoundNotSatisfied {
+        param_name,
+        trait_name,
+        actual_type,
+        ..
+      } => {
+        write!(
+          f,
+          "type '{}' does not satisfy bound '{}: {}'",
+          display_type_name(actual_type),
+          param_name,
+          trait_name
+        )
+      },
       DiagnosticMessage::TraitInExternBlock { .. } => {
         write!(f, "traits cannot be declared in extern blocks")
       },
@@ -1954,6 +1988,9 @@ impl DiagnosticMessage {
       | DiagnosticMessage::TraitMissingRequiredMethod { span, .. }
       | DiagnosticMessage::TraitMethodSignatureMismatch { span, .. }
       | DiagnosticMessage::UnknownTraitInImplements { span, .. }
+      | DiagnosticMessage::UnknownTraitInGenericBound { span, .. }
+      | DiagnosticMessage::GenericBoundMustBeTrait { span, .. }
+      | DiagnosticMessage::GenericBoundNotSatisfied { span, .. }
       | DiagnosticMessage::TraitInExternBlock { span, .. }
       | DiagnosticMessage::TraitMethodRequiresSelf { span, .. }
       | DiagnosticMessage::TraitFieldNotAllowed { span, .. }
@@ -2171,6 +2208,9 @@ impl DiagnosticMessage {
       DiagnosticMessage::TraitMissingRequiredMethod { .. } => "A0140",
       DiagnosticMessage::TraitMethodSignatureMismatch { .. } => "A0141",
       DiagnosticMessage::UnknownTraitInImplements { .. } => "A0142",
+      DiagnosticMessage::UnknownTraitInGenericBound { .. } => "A0188",
+      DiagnosticMessage::GenericBoundMustBeTrait { .. } => "A0189",
+      DiagnosticMessage::GenericBoundNotSatisfied { .. } => "A0190",
       DiagnosticMessage::TraitInExternBlock { .. } => "A0143",
       DiagnosticMessage::TraitMethodRequiresSelf { .. } => "A0144",
       DiagnosticMessage::TraitFieldNotAllowed { .. } => "A0145",

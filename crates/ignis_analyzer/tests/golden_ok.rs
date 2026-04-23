@@ -754,6 +754,44 @@ function main(): void {
   assert_snapshot!("trait_in_namespace_hir", common::format_hir(&result));
 }
 
+#[test]
+fn generic_bounds_allow_trait_method_lookup() {
+  let result = common::analyze(
+    r#"
+trait Hash {
+    hash(&self): i32;
+}
+
+@implements(Hash)
+record Key {
+    public value: i32;
+
+    hash(&self): i32 {
+        return self.value;
+    }
+}
+
+function hashValue<T: Hash>(value: T): i32 {
+    return value.hash();
+}
+
+function main(): i32 {
+    let key: Key = Key { value: 42 };
+    return hashValue<Key>(key);
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "generic_bounds_allow_trait_method_lookup_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!(
+    "generic_bounds_allow_trait_method_lookup_hir",
+    common::format_hir(&result)
+  );
+}
+
 // ── Type Inference ──────────────────────────────────────────
 
 #[test]

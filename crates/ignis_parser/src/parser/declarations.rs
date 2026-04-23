@@ -1,7 +1,7 @@
 use ignis_ast::{
   NodeId,
   attribute::{ASTAttribute, ASTAttributeArg},
-  generics::{ASTGenericParam, ASTGenericParams},
+  generics::{ASTGenericBound, ASTGenericParam, ASTGenericParams},
   metadata::ASTMetadata,
   statements::{
     ASTStatement, ASTEnum, ASTEnumField, ASTEnumItem, ASTEnumVariant, ASTMethod, ASTRecord, ASTRecordField,
@@ -775,12 +775,33 @@ impl super::IgnisParser {
   // GENERIC PARAMETERS PARSING
   // =========================================================================
 
+  fn parse_generic_param(&mut self) -> ParserResult<ASTGenericParam> {
+    let name_token = self.expect(TokenType::Identifier)?.clone();
+    let name = self.insert_symbol(&name_token);
+    let mut bounds = Vec::new();
+    let mut span = name_token.span.clone();
+
+    if self.eat(TokenType::Colon) {
+      let (segments, bound_span) = self.parse_qualified_identifier()?;
+      bounds.push(ASTGenericBound::new(segments, bound_span.clone()));
+      span = Span::merge(&span, &bound_span);
+
+      while self.eat(TokenType::Ampersand) {
+        let (segments, bound_span) = self.parse_qualified_identifier()?;
+        bounds.push(ASTGenericBound::new(segments, bound_span.clone()));
+        span = Span::merge(&span, &bound_span);
+      }
+    }
+
+    Ok(ASTGenericParam::new(name, bounds, span))
+  }
+
   /// Parse optional generic parameters: `<T, U, V>`
   ///
   /// Returns `None` if no `<` is found.
   /// Returns `Some(ASTGenericParams)` if generic params are present.
   ///
-  /// Grammar: `<` identifier (`,` identifier)* `>`
+  /// Grammar: `<` generic_param (`,` generic_param)* `>`
   fn parse_optional_generic_params(&mut self) -> ParserResult<Option<ASTGenericParams>> {
     if !self.at(TokenType::Less) {
       return Ok(None);
@@ -790,8 +811,7 @@ impl super::IgnisParser {
     let mut params = Vec::new();
 
     // Parse first parameter (required if < was consumed)
-    let first_token = self.expect(TokenType::Identifier)?.clone();
-    params.push(ASTGenericParam::new(self.insert_symbol(&first_token), first_token.span.clone()));
+    params.push(self.parse_generic_param()?);
 
     // Parse remaining parameters
     while self.eat(TokenType::Comma) {
@@ -799,8 +819,7 @@ impl super::IgnisParser {
       if self.at_greater() {
         break;
       }
-      let param_token = self.expect(TokenType::Identifier)?.clone();
-      params.push(ASTGenericParam::new(self.insert_symbol(&param_token), param_token.span.clone()));
+      params.push(self.parse_generic_param()?);
     }
 
     let end = self.expect_greater()?;
@@ -1876,6 +1895,24 @@ mod tests {
     result.symbols.borrow().get(id).to_string()
   }
 
+  fn generic_bound_names(
+    result: &ParseResult,
+    param: &ignis_ast::generics::ASTGenericParam,
+  ) -> Vec<String> {
+    param
+      .bounds
+      .iter()
+      .map(|bound| {
+        bound
+          .segments
+          .iter()
+          .map(|segment| symbol_name(result, segment))
+          .collect::<Vec<_>>()
+          .join("::")
+      })
+      .collect()
+  }
+
   fn item_name(
     result: &ParseResult,
     item: &ASTImportItem,
@@ -2144,9 +2181,28 @@ mod tests {
         let type_params = func.signature.type_params.as_ref().expect("should have type params");
         assert_eq!(type_params.len(), 1);
         assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+        assert!(type_params.params[0].bounds.is_empty());
 
         assert_eq!(func.signature.parameters.len(), 1);
         assert_eq!(symbol_name(&result, &func.signature.parameters[0].name), "x");
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_function_inline_bounds() {
+    let result = parse("function insert<K: Hash & Eq, V>(key: K, value: V): void { return; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        let type_params = func.signature.type_params.as_ref().expect("should have type params");
+
+        assert_eq!(type_params.len(), 2);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "K");
+        assert_eq!(generic_bound_names(&result, &type_params.params[0]), vec!["Hash", "Eq"]);
+        assert!(type_params.params[1].bounds.is_empty());
       },
       other => panic!("expected function, got {:?}", other),
     }
@@ -2211,8 +2267,27 @@ mod tests {
         let type_params = rec.type_params.as_ref().expect("should have type params");
         assert_eq!(type_params.len(), 1);
         assert_eq!(symbol_name(&result, &type_params.params[0].name), "T");
+        assert!(type_params.params[0].bounds.is_empty());
 
         assert_eq!(rec.items.len(), 1);
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_record_inline_bounds() {
+    let result = parse("record HashMap<K: Hash & Eq, V> { } ");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        let type_params = rec.type_params.as_ref().expect("should have type params");
+
+        assert_eq!(type_params.len(), 2);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "K");
+        assert_eq!(generic_bound_names(&result, &type_params.params[0]), vec!["Hash", "Eq"]);
+        assert!(type_params.params[1].bounds.is_empty());
       },
       other => panic!("expected record, got {:?}", other),
     }
@@ -2434,6 +2509,55 @@ mod tests {
         }
       },
       other => panic!("expected enum, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_generic_trait_inline_bounds() {
+    let result = parse("trait Lookup<K: Hash & Eq> { contains(&self, key: K): boolean; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Trait(tr) => {
+        let type_params = tr.type_params.as_ref().expect("should have type params");
+
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(symbol_name(&result, &type_params.params[0].name), "K");
+        assert_eq!(generic_bound_names(&result, &type_params.params[0]), vec!["Hash", "Eq"]);
+      },
+      other => panic!("expected trait, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn rejects_where_clause_after_generic_params() {
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file(
+      "test.ign",
+      "function bad<T>(value: T): void where T: Hash & Eq { return; }".to_string(),
+    );
+
+    let mut lexer = IgnisLexer::new(file_id, sm.get(&file_id).text.as_str());
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols);
+    parser.parse().expect_err("where clauses must be rejected");
+  }
+
+  #[test]
+  fn parses_generic_bounds_with_qualified_trait_names() {
+    let result = parse("function insert<K: hash::Hash & cmp::Eq>(key: K): void { return; }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        let type_params = func.signature.type_params.as_ref().expect("should have type params");
+
+        assert_eq!(type_params.len(), 1);
+        assert_eq!(generic_bound_names(&result, &type_params.params[0]), vec!["hash::Hash", "cmp::Eq"]);
+      },
+      other => panic!("expected function, got {:?}", other),
     }
   }
 

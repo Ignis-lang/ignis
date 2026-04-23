@@ -5410,6 +5410,10 @@ impl<'a> Analyzer<'a> {
       return None;
     }
 
+    if !self.validate_type_param_bounds(&type_params, &resolved_type_args, &call.span) {
+      return None;
+    }
+
     // Build the substitution: map each type param's (owner, index) to the resolved type arg
     Some(Substitution::for_generic(func_def_id, &resolved_type_args))
   }
@@ -5495,6 +5499,10 @@ impl<'a> Analyzer<'a> {
         labels: vec![],
         notes: vec![],
       });
+      return None;
+    }
+
+    if !self.validate_type_param_bounds(&effective_type_params, &resolved_type_args, &call.span) {
       return None;
     }
 
@@ -5680,6 +5688,86 @@ impl<'a> Analyzer<'a> {
     }
 
     match self.types.get(&obj_type).clone() {
+      Type::Param { owner, index } => {
+        let Some(method_id) = self.lookup_bound_method(owner, index, ma.member) else {
+          let type_name = self.format_type_for_error(&obj_type);
+          let member_name = self.get_symbol_name(&ma.member);
+          self.add_diagnostic(
+            DiagnosticMessage::FieldNotFound {
+              field: member_name,
+              type_name,
+              span: ma.member_span.clone(),
+            }
+            .report(),
+          );
+          return self.types.error();
+        };
+
+        self.set_import_item_def(&ma.member_span, &method_id);
+        self.mark_referenced(method_id);
+
+        let method = match &self.defs.get(&method_id).kind {
+          DefinitionKind::Method(md) => md.clone(),
+          _ => return self.types.error(),
+        };
+
+        let explicit_params = method.params.clone();
+        let (param_types, return_type) = if let Some((subst_params, subst_ret, _)) = self.instantiate_callee_signature(&method_id, call) {
+          (subst_params, subst_ret)
+        } else {
+          let raw_params: Vec<TypeId> = explicit_params.iter().map(|p| self.get_definition_type(p)).collect();
+          (raw_params, method.return_type)
+        };
+
+        let arg_types: Vec<TypeId> = call
+          .arguments
+          .iter()
+          .enumerate()
+          .map(|(i, arg)| {
+            if let Some(param_type) = param_types.get(i) {
+              let infer = InferContext::expecting(*param_type);
+              self.typecheck_node_with_infer(arg, scope_kind, ctx, &infer)
+            } else {
+              self.typecheck_node(arg, scope_kind, ctx)
+            }
+          })
+          .collect();
+
+        if arg_types.len() != explicit_params.len() {
+          self.add_diagnostic(
+            DiagnosticMessage::ArgumentCountMismatch {
+              expected: explicit_params.len(),
+              got: arg_types.len(),
+              func_name: self.get_symbol_name(&self.defs.get(&method_id).name),
+              span: call.span.clone(),
+            }
+            .report(),
+          );
+        }
+
+        let check_count = std::cmp::min(arg_types.len(), explicit_params.len());
+        for i in 0..check_count {
+          if self.types.is_error(&arg_types[i]) || self.types.is_error(&param_types[i]) {
+            continue;
+          }
+
+          if !self.types.is_assignable(&param_types[i], &arg_types[i]) {
+            let expected = self.format_type_for_error(&param_types[i]);
+            let got = self.format_type_for_error(&arg_types[i]);
+            self.add_diagnostic(
+              DiagnosticMessage::ArgumentTypeMismatch {
+                param_idx: i + 1,
+                expected,
+                got,
+                span: self.node_span(&call.arguments[i]).clone(),
+              }
+              .report(),
+            );
+          }
+        }
+
+        return_type
+      },
       Type::Record(def_id) => {
         let rd = if let DefinitionKind::Record(rd) = &self.defs.get(&def_id).kind {
           rd.clone()
@@ -6976,6 +7064,16 @@ impl<'a> Analyzer<'a> {
             );
           }
         }
+
+        let inferred_args: Vec<TypeId> = type_params
+          .iter()
+          .filter_map(|param_id| match &self.defs.get(param_id).kind {
+            DefinitionKind::TypeParam(tp) => inferred.get(tp.owner, tp.index),
+            _ => None,
+          })
+          .collect();
+
+        self.validate_type_param_bounds(&type_params, &inferred_args, &call.span);
 
         return subst_return;
       } else {
@@ -9559,6 +9657,7 @@ impl<'a> Analyzer<'a> {
           DefinitionKind::Record(rd) => &rd.type_params,
           DefinitionKind::Method(md) => &md.type_params,
           DefinitionKind::Enum(ed) => &ed.type_params,
+          DefinitionKind::Trait(td) => &td.type_params,
           _ => return format!("T{}", index),
         };
         if let Some(param_def_id) = type_params.get(*index as usize) {
@@ -9839,13 +9938,13 @@ impl<'a> Analyzer<'a> {
     args: &[IgnisTypeSyntax],
     span: Option<&Span>,
   ) -> TypeId {
-    let def = self.defs.get(&def_id);
+    let def = self.defs.get(&def_id).clone();
     let type_name = self.symbols.borrow().get(&def.name).to_string();
 
-    let (type_params_len, is_type_alias) = match &def.kind {
-      DefinitionKind::Record(rd) => (rd.type_params.len(), false),
-      DefinitionKind::Enum(ed) => (ed.type_params.len(), false),
-      DefinitionKind::TypeAlias(ta) => (ta.type_params.len(), true),
+    let (type_params, is_type_alias) = match &def.kind {
+      DefinitionKind::Record(rd) => (rd.type_params.clone(), false),
+      DefinitionKind::Enum(ed) => (ed.type_params.clone(), false),
+      DefinitionKind::TypeAlias(ta) => (ta.type_params.clone(), true),
       _ => {
         // Not a generic-capable type
         if !args.is_empty() {
@@ -9865,7 +9964,7 @@ impl<'a> Analyzer<'a> {
     };
 
     // Check if type arguments are needed
-    if type_params_len == 0 {
+    if type_params.is_empty() {
       // Non-generic type
       if !args.is_empty() {
         if let Some(s) = span {
@@ -9893,11 +9992,11 @@ impl<'a> Analyzer<'a> {
     }
 
     // Check arity
-    if args.len() != type_params_len {
+    if args.len() != type_params.len() {
       if let Some(s) = span {
         self.add_diagnostic(
           DiagnosticMessage::WrongNumberOfTypeArgs {
-            expected: type_params_len,
+            expected: type_params.len(),
             got: args.len(),
             type_name,
             span: s.clone(),
@@ -9913,6 +10012,12 @@ impl<'a> Analyzer<'a> {
       .map(|arg| self.resolve_type_syntax_impl(arg, span))
       .collect();
 
+    if let Some(s) = span
+      && !self.validate_type_param_bounds(&type_params, &resolved_args, s)
+    {
+      return self.types.error();
+    }
+
     if is_type_alias {
       let target_type = self.resolve_type_definition_or_error(&def_id, span);
       let subst = Substitution::for_generic(def_id, &resolved_args);
@@ -9920,6 +10025,122 @@ impl<'a> Analyzer<'a> {
     }
 
     self.types.instance(def_id, resolved_args)
+  }
+
+  fn validate_type_param_bounds(
+    &mut self,
+    type_params: &[DefinitionId],
+    type_args: &[TypeId],
+    span: &Span,
+  ) -> bool {
+    let mut is_valid = true;
+
+    for (param_id, actual_type) in type_params.iter().zip(type_args.iter()) {
+      let (param_name, bounds) = match &self.defs.get(param_id).kind {
+        DefinitionKind::TypeParam(tp) => (self.get_symbol_name(&self.defs.get(param_id).name), tp.bounds.clone()),
+        _ => continue,
+      };
+
+      for trait_def_id in bounds {
+        if self.type_satisfies_trait_bound(*actual_type, trait_def_id) {
+          continue;
+        }
+
+        let trait_name = self.get_symbol_name(&self.defs.get(&trait_def_id).name);
+        self.add_diagnostic(
+          DiagnosticMessage::GenericBoundNotSatisfied {
+            param_name: param_name.clone(),
+            trait_name,
+            actual_type: self.format_type_for_error(actual_type),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        is_valid = false;
+      }
+    }
+
+    is_valid
+  }
+
+  fn type_satisfies_trait_bound(
+    &self,
+    actual_type: TypeId,
+    trait_def_id: DefinitionId,
+  ) -> bool {
+    match self.types.get(&actual_type) {
+      Type::Record(def_id) | Type::Enum(def_id) => self.definition_satisfies_trait_bound(*def_id, trait_def_id),
+      Type::Instance { generic, .. } => self.definition_satisfies_trait_bound(*generic, trait_def_id),
+      Type::Param { owner, index } => self.type_param_has_trait_bound(*owner, *index, trait_def_id),
+      _ => false,
+    }
+  }
+
+  fn definition_satisfies_trait_bound(
+    &self,
+    type_def_id: DefinitionId,
+    trait_def_id: DefinitionId,
+  ) -> bool {
+    match &self.defs.get(&type_def_id).kind {
+      DefinitionKind::Record(rd) => rd.implemented_traits.contains(&trait_def_id),
+      _ => false,
+    }
+  }
+
+  fn type_param_has_trait_bound(
+    &self,
+    owner: DefinitionId,
+    index: u32,
+    trait_def_id: DefinitionId,
+  ) -> bool {
+    self
+      .lookup_type_param_def(owner, index)
+      .and_then(|param_def_id| match &self.defs.get(&param_def_id).kind {
+        DefinitionKind::TypeParam(tp) => Some(tp.bounds.contains(&trait_def_id)),
+        _ => None,
+      })
+      .unwrap_or(false)
+  }
+
+  fn lookup_type_param_def(
+    &self,
+    owner: DefinitionId,
+    index: u32,
+  ) -> Option<DefinitionId> {
+    let type_params = match &self.defs.get(&owner).kind {
+      DefinitionKind::Function(fd) => &fd.type_params,
+      DefinitionKind::Record(rd) => &rd.type_params,
+      DefinitionKind::Method(md) => &md.type_params,
+      DefinitionKind::Enum(ed) => &ed.type_params,
+      DefinitionKind::Trait(td) => &td.type_params,
+      _ => return None,
+    };
+
+    type_params.get(index as usize).copied()
+  }
+
+  fn lookup_bound_method(
+    &self,
+    owner: DefinitionId,
+    index: u32,
+    member: ignis_type::symbol::SymbolId,
+  ) -> Option<DefinitionId> {
+    let param_def_id = self.lookup_type_param_def(owner, index)?;
+    let DefinitionKind::TypeParam(tp) = &self.defs.get(&param_def_id).kind else {
+      return None;
+    };
+
+    for trait_def_id in &tp.bounds {
+      let DefinitionKind::Trait(td) = &self.defs.get(trait_def_id).kind else {
+        continue;
+      };
+
+      if let Some(entry) = td.methods.iter().find(|entry| entry.name == member) {
+        return Some(entry.method_def_id);
+      }
+    }
+
+    None
   }
 
   // ========================================================================
@@ -9938,6 +10159,7 @@ impl<'a> Analyzer<'a> {
       DefinitionKind::Function(fd) => fd.type_params.clone(),
       DefinitionKind::Method(md) => md.type_params.clone(),
       DefinitionKind::TypeAlias(ta) => ta.type_params.clone(),
+      DefinitionKind::Trait(td) => td.type_params.clone(),
       _ => Vec::new(),
     };
 
