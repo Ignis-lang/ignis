@@ -27,6 +27,7 @@ clean:
 test: libignis_rt.a
 	@mkdir -p tests
 	@if [ -f tests/test_smoke.c ]; then \
+		trap 'rm -f tests/test_smoke' EXIT; \
 		$(CC) $(CFLAGS) tests/test_smoke.c -L. -lignis_rt -o tests/test_smoke && \
 		./tests/test_smoke && \
 		echo "Tests passed"; \
@@ -38,6 +39,7 @@ test: libignis_rt.a
 test-san: libignis_rt.a
 	@mkdir -p tests
 	@if [ -f tests/test_smoke.c ]; then \
+		trap 'rm -f tests/test_smoke' EXIT; \
 		$(CC) $(CFLAGS) -fsanitize=leak tests/test_smoke.c -L. -lignis_rt -o tests/test_smoke && \
 		./tests/test_smoke && \
 		echo "Tests passed (with leak sanitizer)"; \
