@@ -18,6 +18,15 @@ export trait Hash {
 export trait Eq {
 }
 
+function __hashMapStorageBytes<T>(count: u64): u64 {
+  if (count == 0) {
+    return 0;
+  }
+
+  let elementSize: u64 = @sizeOf<T>();
+  return elementSize == 0 ? 1 : count * elementSize;
+}
+
 @implements(Drop)
 export record HashMap<K: Hash & Eq, V> {
   states: *mut u8;
@@ -56,8 +65,8 @@ export record HashMap<K: Hash & Eq, V> {
     return HashMap {
       states: Memory::allocateZeroedVector<u8>(bucketCapacity),
       hashes: Memory::allocateZeroedVector<u8>(bucketCapacity * @sizeOf<u64>()) as *mut u64,
-      keys: Memory::allocate<u8>(bucketCapacity * @sizeOf<K>()) as *mut K,
-      values: Memory::allocate<u8>(bucketCapacity * @sizeOf<V>()) as *mut V,
+      keys: Memory::allocate<u8>(__hashMapStorageBytes<K>(bucketCapacity)) as *mut K,
+      values: Memory::allocate<u8>(__hashMapStorageBytes<V>(bucketCapacity)) as *mut V,
       length: 0,
       capacity: bucketCapacity,
       tombstones: 0,
@@ -326,8 +335,8 @@ export record HashMap<K: Hash & Eq, V> {
 
     let mut newStates: *mut u8 = Memory::allocateZeroedVector<u8>(newCapacity);
     let mut newHashes: *mut u64 = Memory::allocateZeroedVector<u8>(newCapacity * @sizeOf<u64>()) as *mut u64;
-    let mut newKeys: *mut K = Memory::allocate<u8>(newCapacity * @sizeOf<K>()) as *mut K;
-    let mut newValues: *mut V = Memory::allocate<u8>(newCapacity * @sizeOf<V>()) as *mut V;
+    let mut newKeys: *mut K = Memory::allocate<u8>(__hashMapStorageBytes<K>(newCapacity)) as *mut K;
+    let mut newValues: *mut V = Memory::allocate<u8>(__hashMapStorageBytes<V>(newCapacity)) as *mut V;
 
     let mut index: u64 = 0;
     while (index < self.capacity) {

@@ -371,10 +371,8 @@ impl<'a> CEmitter<'a> {
       for (_, block) in function.blocks.iter() {
         for instruction in &block.instructions {
           match instruction {
-            Instr::Call { callee, .. } => {
-              if reachable.insert(*callee) {
-                queue.push_back(*callee);
-              }
+            Instr::Call { callee, .. } if reachable.insert(*callee) => {
+              queue.push_back(*callee);
             },
             Instr::Drop { local } => {
               let local_type = function.locals.get(local).ty;
@@ -3537,6 +3535,7 @@ pub fn emit_user_module_c(
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn emit_user_module_c_from_input(
   module_id: ModuleId,
   input: EmitInput<'_>,
