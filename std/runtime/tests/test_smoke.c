@@ -85,6 +85,57 @@ static void test_memory_alloc(void) {
   ignis_free(p2);
 }
 
+static void test_memory_aligned_alloc(void) {
+  void *zero = ignis_alloc_aligned(0, 8);
+  assert(zero == NULL);
+
+  void *ptr = ignis_alloc_aligned(24, 32);
+  assert(ptr != NULL);
+  assert(((uintptr_t)ptr % 32) == 0);
+
+  void *zeroed = ignis_calloc_aligned(4, sizeof(uint32_t), 16);
+  assert(zeroed != NULL);
+  assert(((uintptr_t)zeroed % 16) == 0);
+  for (size_t i = 0; i < 4; i++) {
+    assert(((uint32_t *)zeroed)[i] == 0);
+  }
+
+  ignis_free(ptr);
+  ignis_free(zeroed);
+}
+
+static void test_arena_allocator_reset_and_growth(void) {
+  IgnisArena *arena = ignis_arena_create(64);
+  assert(arena != NULL);
+
+  void *first = ignis_arena_allocate(arena, 24, 8);
+  void *second = ignis_arena_allocate(arena, 24, 8);
+  assert(first != NULL);
+  assert(second != NULL);
+  assert(first != second);
+
+  ignis_arena_reset(arena);
+
+  void *reused = ignis_arena_allocate(arena, 24, 8);
+  assert(reused == first);
+
+  void *large = ignis_arena_allocate(arena, 256, 16);
+  assert(large != NULL);
+  assert(((uintptr_t)large % 16) == 0);
+
+  ignis_arena_destroy(arena);
+}
+
+static void test_fnv_hash_cstr(void) {
+  u64 first = ignis_hash_fnv1a_cstr(14695981039346656037ULL, "abc");
+  u64 second = ignis_hash_fnv1a_cstr(14695981039346656037ULL, "abc");
+  u64 different = ignis_hash_fnv1a_cstr(14695981039346656037ULL, "abd");
+
+  assert(first == second);
+  assert(first != 14695981039346656037ULL);
+  assert(first != different);
+}
+
 static void test_memcpy_memmove(void) {
   char src[10] = "hello";
   char dest[10] = {0};
@@ -304,6 +355,9 @@ int main(void) {
   test_string_to_upper_lower();
   test_number_to_string();
   test_memory_alloc();
+  test_memory_aligned_alloc();
+  test_arena_allocator_reset_and_growth();
+  test_fnv_hash_cstr();
   test_memcpy_memmove();
   test_rc_alloc_and_get();
   test_rc_retain_release();

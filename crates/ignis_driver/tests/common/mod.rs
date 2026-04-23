@@ -84,6 +84,43 @@ fn build_driver_test_config(
   Arc::new(config)
 }
 
+fn build_workspace_std_driver_test_config(
+  file_path: &std::path::Path,
+  output_dir: &std::path::Path,
+  target: TargetBackend,
+) -> Result<Arc<IgnisConfig>, String> {
+  let std_path = workspace_std_path();
+  let manifest = load_std_manifest(&std_path)?;
+  let mut config = IgnisConfig::new_basic(false, Vec::new(), true, 0);
+  let bin_path = output_dir.join(file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("out"));
+
+  config.std_path = std_path.to_string_lossy().to_string();
+  config.std = true;
+  config.auto_load_std = true;
+  config.manifest = manifest;
+  config.build = true;
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(file_path.to_string_lossy().to_string()),
+    target,
+    false,
+    false,
+    output_dir.to_string_lossy().to_string(),
+    Vec::new(),
+    None,
+    None,
+    None,
+    None,
+    Some(bin_path.to_string_lossy().to_string()),
+    false,
+    true,
+    false,
+    false,
+    false,
+  ));
+
+  Ok(Arc::new(config))
+}
+
 fn workspace_std_path() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std")
 }
@@ -169,6 +206,27 @@ pub fn build_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt,
   })
 }
 
+pub fn compile_project_single_file_with_workspace_std(
+  source: &str,
+  target: TargetBackend,
+) -> Result<DriverBuildAttempt, String> {
+  let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+  let source_path = temp_dir.path().join("main.ign");
+  let output_dir = temp_dir.path().join("build");
+  std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
+  std::fs::write(&source_path, source).map_err(|e| format!("Failed to write source file: {}", e))?;
+
+  let config = build_workspace_std_driver_test_config(&source_path, &output_dir, target)?;
+  let bin_path = output_dir.join("main");
+  let result = compile_project(config, source_path.to_string_lossy().as_ref());
+
+  Ok(DriverBuildAttempt {
+    _temp_dir: temp_dir,
+    bin_path,
+    result,
+  })
+}
+
 pub fn check_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt, String> {
   let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
   let output_dir = temp_dir.path().join("check-std");
@@ -186,6 +244,25 @@ pub fn check_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt,
 
 pub fn compile_project_and_run(source: &str) -> Result<E2EResult, String> {
   let attempt = compile_project_single_file(source, TargetBackend::C)?;
+  attempt
+    .result
+    .map_err(|_| "compile_project failed for C backend".to_string())?;
+
+  let run = Command::new(&attempt.bin_path)
+    .output()
+    .map_err(|e| format!("Failed to run compiled binary: {}", e))?;
+
+  Ok(E2EResult {
+    exit_code: run.status.code().unwrap_or(-1),
+    stdout: String::from_utf8_lossy(&run.stdout).to_string(),
+    stderr: String::from_utf8_lossy(&run.stderr).to_string(),
+    leaked: false,
+    leak_report: String::new(),
+  })
+}
+
+pub fn compile_project_and_run_with_workspace_std(source: &str) -> Result<E2EResult, String> {
+  let attempt = compile_project_single_file_with_workspace_std(source, TargetBackend::C)?;
   attempt
     .result
     .map_err(|_| "compile_project failed for C backend".to_string())?;

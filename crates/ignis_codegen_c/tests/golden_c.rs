@@ -197,6 +197,30 @@ function main(argc: i32, argv: *str): i32 {
 }
 
 #[test]
+fn c_memory_global_allocator_uses_aligned_runtime() {
+  let c_code = common::compile_to_c(
+    r#"
+extern __rt {
+    function ignis_alloc_aligned(size: u64, alignment: u64): *mut u8;
+    function ignis_free(ptr: *mut u8): void;
+}
+
+function main(): void {
+    let ptr: *mut u8 = __rt::ignis_alloc_aligned(24, 8);
+    if (ptr != null) {
+        __rt::ignis_free(ptr);
+    }
+
+    return;
+}
+"#,
+  );
+
+  assert!(c_code.contains("ignis_alloc_aligned"), "expected aligned runtime allocation call");
+  assert_snapshot!("c_memory_global_allocator_uses_aligned_runtime", c_code);
+}
+
+#[test]
 fn c_arithmetic_ops() {
   let c_code = common::compile_to_c(
     r#"

@@ -175,9 +175,11 @@
 
 import Layout from "./layout";
 import Align from "./align";
+import ArenaAllocator from "./arena";
 
 export Layout;
 export Align;
+export ArenaAllocator;
 
 /// External declarations for the Ignis runtime memory functions.
 ///
@@ -192,11 +194,53 @@ export Align;
 /// - Proper alignment (handled by the runtime)
 extern __memory {
   function ignis_alloc(size: u64): *mut u8;
+  function ignis_alloc_aligned(size: u64, alignment: u64): *mut u8;
   function ignis_free(ptr: *mut u8): void;
   function ignis_realloc(ptr: *mut u8, size: u64): *mut u8;
+  function ignis_realloc_aligned(ptr: *mut u8, size: u64, alignment: u64): *mut u8;
   function ignis_calloc(count: u64, size: u64): *mut u8;
+  function ignis_calloc_aligned(count: u64, size: u64, alignment: u64): *mut u8;
   function ignis_memcpy(dest: *mut u8, src: *u8, n: u64): void;
   function ignis_memmove(dest: *mut u8, src: *u8, n: u64): void;
+}
+
+/// Layout-aware allocator contract used by the collections foundation.
+///
+/// Non-zero layouts are infallible from Ignis code: allocation failure traps
+/// in the runtime instead of returning `Option`, `Result`, or `null`.
+/// Zero-sized layouts return `null` because no backing storage is needed.
+export namespace GlobalAllocator {
+  function allocate(layout: Layout): *mut u8 {
+    if (layout.size() == 0) {
+      return null;
+    }
+
+    return __memory::ignis_alloc_aligned(layout.size(), layout.align());
+  }
+
+  function allocateZeroed(layout: Layout): *mut u8 {
+    if (layout.size() == 0) {
+      return null;
+    }
+
+    return __memory::ignis_calloc_aligned(1, layout.size(), layout.align());
+  }
+
+  function reallocate(pointer: *mut u8, layout: Layout): *mut u8 {
+    if (layout.size() == 0) {
+      if (pointer != null) {
+        __memory::ignis_free(pointer);
+      }
+
+      return null;
+    }
+
+    return __memory::ignis_realloc_aligned(pointer, layout.size(), layout.align());
+  }
+
+  function free(pointer: *mut u8): void {
+    __memory::ignis_free(pointer);
+  }
 }
 
 /// Memory allocation and manipulation namespace.
@@ -227,7 +271,7 @@ export namespace Memory {
   /// # Returns
   ///
   /// A pointer to the allocated memory, cast to `*mut T`.
-  /// Returns `null` if allocation fails.
+  /// Allocation failure aborts in the runtime; only size 0 may return `null`.
   ///
   /// # Memory State
   ///
@@ -258,7 +302,7 @@ export namespace Memory {
   /// let values: *mut u64 = Memory::allocate<u64>(24);  // 3 * 8 bytes
   /// ```
   function allocate<T>(size: u64): *mut T {
-    return __memory::ignis_alloc(size) as *mut T;
+    return __memory::ignis_alloc_aligned(size, @alignOf<T>()) as *mut T;
   }
 
   /// Allocates memory for `count` elements of type `T`.
@@ -277,7 +321,7 @@ export namespace Memory {
   /// # Returns
   ///
   /// A pointer to the allocated memory, typed as `*mut T`.
-  /// Returns `null` if allocation fails.
+  /// Allocation failure aborts in the runtime; only count 0 may return `null`.
   ///
   /// # Size Calculation
   ///
@@ -309,7 +353,7 @@ export namespace Memory {
   /// let points: *mut Point = Memory::allocateVector<Point>(50);
   /// ```
   function allocateVector<T>(count: u64): *mut T {
-    return __memory::ignis_alloc(count * @sizeOf<T>()) as *mut T;
+    return GlobalAllocator::allocate(Layout::init<T>(count)) as *mut T;
   }
 
   /// Allocates zero-initialized memory for `count` elements.
@@ -328,7 +372,7 @@ export namespace Memory {
   /// # Returns
   ///
   /// A pointer to zero-initialized memory, cast to `*mut T`.
-  /// Returns `null` if allocation fails.
+  /// Allocation failure aborts in the runtime; only count 0 may return `null`.
   ///
   /// # Memory State
   ///
@@ -356,7 +400,7 @@ export namespace Memory {
   /// assert(*zeros == 0);
   /// ```
   function allocateZeroed<T>(count: u64, elementSizeBytes: u64): *mut T {
-    return __memory::ignis_calloc(count, elementSizeBytes) as *mut T;
+    return __memory::ignis_calloc_aligned(count, elementSizeBytes, @alignOf<T>()) as *mut T;
   }
 
   /// Allocates zero-initialized memory for `count` elements of type `T`.
@@ -375,7 +419,7 @@ export namespace Memory {
   /// # Returns
   ///
   /// A pointer to zero-initialized memory, typed as `*mut T`.
-  /// Returns `null` if allocation fails.
+  /// Allocation failure aborts in the runtime; only count 0 may return `null`.
   ///
   /// # Example
   ///
@@ -389,7 +433,7 @@ export namespace Memory {
   /// }
   /// ```
   function allocateZeroedVector<T>(count: u64): *mut T {
-    return __memory::ignis_calloc(count, @sizeOf<T>()) as *mut T;
+    return __memory::ignis_calloc_aligned(count, @sizeOf<T>(), @alignOf<T>()) as *mut T;
   }
 
   /// Resizes a previously allocated memory block.
@@ -410,7 +454,7 @@ export namespace Memory {
   /// # Returns
   ///
   /// A pointer to the resized memory block. May be the same as `pointer`
-  /// or a new location. Returns `null` if reallocation fails.
+  /// or a new location. Reallocation failure aborts in the runtime.
   ///
   /// # Reallocation Behavior
   ///
@@ -458,7 +502,7 @@ export namespace Memory {
   /// buffer = Memory::reallocate<u8>(buffer as *mut u8, 200);
   /// ```
   function reallocate<T>(pointer: *mut u8, size: u64): *mut T {
-    return __memory::ignis_realloc(pointer, size) as *mut T;
+    return __memory::ignis_realloc_aligned(pointer, size, @alignOf<T>()) as *mut T;
   }
 
   /// Resizes an array to hold `count` elements of type `T`.
@@ -478,7 +522,7 @@ export namespace Memory {
   /// # Returns
   ///
   /// A pointer to the resized array. May be the same location or moved.
-  /// Returns `null` if reallocation fails.
+  /// Reallocation failure aborts in the runtime; count 0 returns `null`.
   ///
   /// # Example
   ///
@@ -493,7 +537,7 @@ export namespace Memory {
   /// // Elements 10-99 are uninitialized
   /// ```
   function reallocateVector<T>(pointer: *mut T, count: u64): *mut T {
-    return __memory::ignis_realloc(pointer as *mut u8, count * @sizeOf<T>()) as *mut T;
+    return GlobalAllocator::reallocate(pointer as *mut u8, Layout::init<T>(count)) as *mut T;
   }
 
   /// Frees a previously allocated memory block.

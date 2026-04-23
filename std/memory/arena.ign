@@ -1,0 +1,58 @@
+import Layout from "./layout";
+
+extern __arena {
+  function ignis_arena_create(blockSize: u64): *mut void;
+  function ignis_arena_allocate(handle: *mut void, size: u64, alignment: u64): *mut u8;
+  function ignis_arena_reset(handle: *mut void): void;
+  function ignis_arena_destroy(handle: *mut void): void;
+}
+
+@implements(Drop)
+export record ArenaAllocator {
+  handle: *mut void;
+  blockSize: u64;
+
+  public static init(blockSize: u64): ArenaAllocator {
+    return ArenaAllocator {
+      handle: __arena::ignis_arena_create(blockSize),
+      blockSize: blockSize,
+    };
+  }
+
+  public allocate(&mut self, layout: Layout): *mut u8 {
+    if (self.handle == null) {
+      return null;
+    }
+
+    if (layout.size() == 0) {
+      return null;
+    }
+
+    return __arena::ignis_arena_allocate(self.handle, layout.size(), layout.align());
+  }
+
+  public allocate<T>(&mut self): *mut T {
+    return self.allocate(Layout::init<T>()) as *mut T;
+  }
+
+  public allocate<T>(&mut self, count: u64): *mut T {
+    return self.allocate(Layout::init<T>(count)) as *mut T;
+  }
+
+  public reset(&mut self): void {
+    if (self.handle != null) {
+      __arena::ignis_arena_reset(self.handle);
+    }
+  }
+
+  public destroy(&mut self): void {
+    if (self.handle != null) {
+      __arena::ignis_arena_destroy(self.handle);
+      self.handle = null;
+    }
+  }
+
+  public drop(&mut self): void {
+    self.destroy();
+  }
+}

@@ -18,6 +18,22 @@ fn e2e_test(
   assert_snapshot!(name, common::format_e2e_result(&result));
 }
 
+fn e2e_std_test(
+  name: &str,
+  source: &str,
+) {
+  let result = common::compile_project_and_run_with_workspace_std(source)
+    .unwrap_or_else(|error| panic!("Compilation of '{}' failed: {}", name, error));
+
+  assert!(
+    !result.leaked,
+    "LeakSanitizer detected a memory leak in '{}':\n{}",
+    name, result.leak_report,
+  );
+
+  assert_snapshot!(name, common::format_e2e_result(&result));
+}
+
 #[expect(dead_code, reason = "helper is kept for leak-allowing e2e cases")]
 fn e2e_test_allow_leak(
   name: &str,
@@ -2712,6 +2728,94 @@ function main(): i32 {
     let mut c: Counter = Counter { value: 0 };
     c.drop();
     return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_vector_clear_drops_string_elements_before_reuse() {
+  e2e_std_test(
+    "vector_clear_drops_string_elements_before_reuse",
+    r#"
+import String from "std::string";
+import Vector from "std::vector";
+
+function main(): i32 {
+    let mut values: Vector<String> = Vector::init<String>();
+    values.push(String::create("alpha"));
+    values.push(String::create("beta"));
+
+    values.clear();
+
+    if (values.length() != 0) {
+        return 90;
+    }
+
+    values.push(String::create("gamma"));
+    return values.length() as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_vector_drop_drops_string_elements() {
+  e2e_std_test(
+    "vector_drop_drops_string_elements",
+    r#"
+import String from "std::string";
+import Vector from "std::vector";
+
+function main(): i32 {
+    {
+        let mut values: Vector<String> = Vector::init<String>();
+        values.push(String::create("alpha"));
+        values.push(String::create("beta"));
+    }
+
+    return 7;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_vector_clear_and_drop_run_element_drop_exactly_once() {
+  e2e_std_test(
+    "vector_clear_and_drop_run_element_drop_exactly_once",
+    r#"
+import String from "std::string";
+import Vector from "std::vector";
+
+@implements(Drop)
+record Tracker {
+    counter: *mut i32;
+    marker: i32;
+
+    drop(&mut self): void {
+        *self.counter = *self.counter * 10 + self.marker;
+    }
+}
+
+function main(): i32 {
+    let mut drops: i32 = 0;
+
+    {
+        let mut values: Vector<Tracker> = Vector::init<Tracker>();
+        values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 1 });
+        values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 2 });
+
+        values.clear();
+
+        if (drops != 12) {
+            return drops;
+        }
+
+        values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 3 });
+    }
+
+    return drops;
 }
 "#,
   );
