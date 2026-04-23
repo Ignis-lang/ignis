@@ -4,7 +4,12 @@
 
 #include "../ignis_rt.h"
 #include <assert.h>
+#include <signal.h>
+#include <stdint.h>
+#include <sys/resource.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static void test_string_basic(void) {
   IgnisString s = ignis_string_from_cstr("hello");
@@ -102,6 +107,28 @@ static void test_memory_aligned_alloc(void) {
 
   ignis_free(ptr);
   ignis_free(zeroed);
+}
+
+static void test_memory_alloc_oom_aborts(void) {
+  pid_t child = fork();
+  assert(child >= 0);
+
+  if (child == 0) {
+    struct rlimit limit = {
+      .rlim_cur = 1024 * 1024,
+      .rlim_max = 1024 * 1024,
+    };
+    assert(setrlimit(RLIMIT_AS, &limit) == 0);
+
+    (void)ignis_alloc(64 * 1024 * 1024);
+    _exit(0);
+  }
+
+  int status = 0;
+  pid_t waited = waitpid(child, &status, 0);
+  assert(waited == child);
+  assert(WIFSIGNALED(status));
+  assert(WTERMSIG(status) == SIGABRT);
 }
 
 static void test_arena_allocator_reset_and_growth(void) {
@@ -356,6 +383,7 @@ int main(void) {
   test_number_to_string();
   test_memory_alloc();
   test_memory_aligned_alloc();
+  test_memory_alloc_oom_aborts();
   test_arena_allocator_reset_and_growth();
   test_fnv_hash_cstr();
   test_memcpy_memmove();

@@ -3236,6 +3236,85 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_hash_set_uses_zero_sized_marker_payload() {
+  e2e_std_test(
+    "hash_set_uses_zero_sized_marker_payload",
+    r#"
+import HashSet from "std::collections";
+import HashSetMarker from "std::collections::hash_set";
+import Eq from "std::collections";
+import Hash from "std::collections";
+import Hasher from "std::hash";
+
+@implements(Hash, Eq)
+record Key {
+    id: i32;
+
+    hash(&self, hasher: &mut Hasher): void {
+        let mut state: &mut Hasher = hasher;
+        state.writeI32(self.id);
+    }
+
+    equals(&self, other: &Key): boolean {
+        return self.id == other.id;
+    }
+}
+
+function main(): i32 {
+    if (@sizeOf<HashSetMarker>() != 0) {
+        return 1;
+    }
+
+    let mut set: HashSet<Key> = HashSet::init<Key>();
+    if (!set.insert(Key { id: 7 })) {
+        return 2;
+    }
+
+    let lookup: Key = Key { id: 7 };
+    return set.contains(&lookup) ? 0 : 3;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_string_hash_equal_strings_match_and_different_strings_diverge() {
+  e2e_std_test(
+    "string_hash_equal_strings_match_and_different_strings_diverge",
+    r#"
+import Hasher from "std::hash";
+import String from "std::string";
+
+function hashString(value: &String): u64 {
+    let mut hasher: Hasher = Hasher::new();
+    value.hash(&mut hasher);
+    return hasher.finish();
+}
+
+function main(): i32 {
+    let first: String = String::create("alpha");
+    let second: String = String::create("alpha");
+    let third: String = String::create("beta");
+
+    let firstHash: u64 = hashString(&first);
+    let secondHash: u64 = hashString(&second);
+    let thirdHash: u64 = hashString(&third);
+
+    if (firstHash != secondHash) {
+        return 1;
+    }
+
+    if (firstHash == thirdHash) {
+        return 2;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
 // =========================================================================
 // Clone: .clone() does not move the original
 // =========================================================================
