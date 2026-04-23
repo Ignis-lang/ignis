@@ -214,7 +214,16 @@ export record Vector<T> {
   /// v.clear();
   /// ```
   public clear(&mut self): void {
+    self.dropElements();
     self.length = 0;
+  }
+
+  private dropElements(&mut self): void {
+    let mut i: u64 = 0;
+    while (i < self.length) {
+      @dropInPlace<T>((&mut self.data[i]) as *mut T);
+      i += 1;
+    }
   }
 
   /// Grows the backing storage using geometric doubling.
@@ -841,6 +850,8 @@ export record Vector<T> {
   /// Called automatically when the vector goes out of scope via `@implements(Drop)`.
   /// Can also be called manually to release resources early.
   public drop(&mut self): void {
+    self.dropElements();
+
     if (self.data != null) {
       Memory::free(self.data);
       self.data = null;

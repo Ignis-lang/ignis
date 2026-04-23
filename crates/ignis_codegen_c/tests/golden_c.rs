@@ -216,7 +216,10 @@ function main(): void {
 "#,
   );
 
-  assert!(c_code.contains("ignis_alloc_aligned"), "expected aligned runtime allocation call");
+  assert!(
+    c_code.contains("ignis_alloc_aligned"),
+    "expected aligned runtime allocation call"
+  );
   assert_snapshot!("c_memory_global_allocator_uses_aligned_runtime", c_code);
 }
 

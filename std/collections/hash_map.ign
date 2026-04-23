@@ -1,0 +1,406 @@
+//! # HashMap
+//!
+//! Deterministic open-addressed hash map with linear probing.
+
+import Hasher from "std::hash";
+import LibC from "std::libc";
+import Memory from "std::memory";
+
+const EMPTY_STATE: u8 = 0;
+const OCCUPIED_STATE: u8 = 1;
+const TOMBSTONE_STATE: u8 = 2;
+const INITIAL_BUCKET_CAPACITY: u64 = 8;
+const MAX_LOAD_PERCENT: u64 = 70;
+
+export trait Hash {
+  hash(&self, hasher: &mut Hasher): void;
+}
+
+export trait Eq {
+}
+
+@implements(Drop)
+export record HashMap<K: Hash & Eq, V> {
+  states: *mut u8;
+  hashes: *mut u64;
+  keys: *mut K;
+  values: *mut V;
+  length: u64;
+  capacity: u64;
+  tombstones: u64;
+
+  public static init(): HashMap<K, V> {
+    return HashMap {
+      states: null,
+      hashes: null,
+      keys: null,
+      values: null,
+      length: 0,
+      capacity: 0,
+      tombstones: 0,
+    };
+  }
+
+  public static init(capacity: u64): HashMap<K, V> {
+    let bucketCapacity: u64 = HashMap::bucketCapacityFor(capacity);
+    if (bucketCapacity == 0) {
+      return HashMap::init<K, V>();
+    }
+
+    return HashMap {
+      states: Memory::allocateZeroedVector<u8>(bucketCapacity),
+      hashes: Memory::allocateZeroedVector<u8>(bucketCapacity * @sizeOf<u64>()) as *mut u64,
+      keys: Memory::allocate<u8>(bucketCapacity * @sizeOf<K>()) as *mut K,
+      values: Memory::allocate<u8>(bucketCapacity * @sizeOf<V>()) as *mut V,
+      length: 0,
+      capacity: bucketCapacity,
+      tombstones: 0,
+    };
+  }
+
+  public length(&self): u64 {
+    return self.length;
+  }
+
+  public capacity(&self): u64 {
+    return self.capacity;
+  }
+
+  public isEmpty(&self): boolean {
+    return self.length == 0;
+  }
+
+  public containsKey(&self, key: &K): boolean {
+    return self.get(key).isSome();
+  }
+
+  public get(&self, key: &K): Option<&V> {
+    let mut hasher: Hasher = Hasher::new();
+    key.hash(&mut hasher);
+    let hash: u64 = hasher.finish();
+
+    if (self.capacity == 0) {
+      return Option::NONE;
+    }
+
+    let mut slot: u64 = hash % self.capacity;
+    let mut steps: u64 = 0;
+
+    while (steps < self.capacity) {
+      let state: u8 = self.states[slot];
+      if (state == EMPTY_STATE) {
+        return Option::NONE;
+      }
+
+      if (state == OCCUPIED_STATE) {
+        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, key as *void, @sizeOf<K>()) == 0) {
+          return Option::SOME(&self.values[slot]);
+        }
+      }
+
+      slot = (slot + 1) % self.capacity;
+      steps += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public getMut(&mut self, key: &K): Option<&mut V> {
+    let mut hasher: Hasher = Hasher::new();
+    key.hash(&mut hasher);
+    let hash: u64 = hasher.finish();
+
+    if (self.capacity == 0) {
+      return Option::NONE;
+    }
+
+    let mut slot: u64 = hash % self.capacity;
+    let mut steps: u64 = 0;
+
+    while (steps < self.capacity) {
+      let state: u8 = self.states[slot];
+      if (state == EMPTY_STATE) {
+        return Option::NONE;
+      }
+
+      if (state == OCCUPIED_STATE) {
+        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, key as *void, @sizeOf<K>()) == 0) {
+          return Option::SOME(&mut self.values[slot]);
+        }
+      }
+
+      slot = (slot + 1) % self.capacity;
+      steps += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public insert(&mut self, key: K, value: V): Option<V> {
+    self.reserve(1);
+
+    let mut hasher: Hasher = Hasher::new();
+    key.hash(&mut hasher);
+    let hash: u64 = hasher.finish();
+
+    let mut slot: u64 = hash % self.capacity;
+    let mut firstTombstone: u64 = self.capacity;
+    let mut steps: u64 = 0;
+
+    while (steps < self.capacity) {
+      let state: u8 = self.states[slot];
+
+      if (state == EMPTY_STATE) {
+        break;
+      }
+
+      if (state == OCCUPIED_STATE) {
+        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, (&key) as *void, @sizeOf<K>()) == 0) {
+          @dropInPlace<K>((&mut self.keys[slot]) as *mut K);
+
+          let previous: V = self.values[slot];
+          self.keys[slot] = key;
+          self.values[slot] = value;
+          self.hashes[slot] = hash;
+
+          return Option::SOME(previous);
+        }
+      } else if (firstTombstone == self.capacity) {
+        firstTombstone = slot;
+      }
+
+      slot = (slot + 1) % self.capacity;
+      steps += 1;
+    }
+
+    if (firstTombstone != self.capacity) {
+      slot = firstTombstone;
+    }
+
+    if (self.states[slot] == TOMBSTONE_STATE) {
+      self.tombstones -= 1;
+    }
+
+    self.states[slot] = OCCUPIED_STATE;
+    self.hashes[slot] = hash;
+    self.keys[slot] = key;
+    self.values[slot] = value;
+    self.length += 1;
+
+    return Option::NONE;
+  }
+
+  public remove(&mut self, key: &K): Option<V> {
+    let mut hasher: Hasher = Hasher::new();
+    key.hash(&mut hasher);
+    let hash: u64 = hasher.finish();
+
+    if (self.capacity == 0) {
+      return Option::NONE;
+    }
+
+    let mut slot: u64 = hash % self.capacity;
+    let mut steps: u64 = 0;
+
+    while (steps < self.capacity) {
+      let state: u8 = self.states[slot];
+
+      if (state == EMPTY_STATE) {
+        return Option::NONE;
+      }
+
+      if (state == OCCUPIED_STATE) {
+        if (self.hashes[slot] == hash && LibC::MemoryOperations::memcmp((&self.keys[slot]) as *void, key as *void, @sizeOf<K>()) == 0) {
+          @dropInPlace<K>((&mut self.keys[slot]) as *mut K);
+
+          self.states[slot] = TOMBSTONE_STATE;
+          self.hashes[slot] = 0;
+          self.length -= 1;
+          self.tombstones += 1;
+
+          return Option::SOME(self.values[slot]);
+        }
+      }
+
+      slot = (slot + 1) % self.capacity;
+      steps += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public reserve(&mut self, additional: u64): void {
+    let requiredEntries: u64 = self.length + self.tombstones + additional;
+    let requiredCapacity: u64 = HashMap::bucketCapacityFor(requiredEntries);
+
+    if (requiredCapacity > self.capacity) {
+      self.rehash(requiredCapacity);
+    }
+  }
+
+  public clear(&mut self): void {
+    let mut index: u64 = 0;
+    while (index < self.capacity) {
+      if (self.states[index] == OCCUPIED_STATE) {
+        @dropInPlace<K>((&mut self.keys[index]) as *mut K);
+        @dropInPlace<V>((&mut self.values[index]) as *mut V);
+      }
+
+      if (self.states[index] != EMPTY_STATE) {
+        self.states[index] = EMPTY_STATE;
+      }
+
+      if (self.hashes[index] != 0) {
+        self.hashes[index] = 0;
+      }
+
+      index += 1;
+    }
+
+    self.length = 0;
+    self.tombstones = 0;
+  }
+
+  public drop(&mut self): void {
+    self.clear();
+    self.freeStorage();
+  }
+
+  private static bucketCapacityFor(requiredEntries: u64): u64 {
+    if (requiredEntries == 0) {
+      return 0;
+    }
+
+    let mut bucketCapacity: u64 = INITIAL_BUCKET_CAPACITY;
+    while ((requiredEntries * 100) >= (bucketCapacity * MAX_LOAD_PERCENT)) {
+      bucketCapacity *= 2;
+    }
+
+    return bucketCapacity;
+  }
+
+  private rehash(&mut self, newCapacity: u64): void {
+    if (newCapacity == self.capacity) {
+      return;
+    }
+
+    let mut newStates: *mut u8 = Memory::allocateZeroedVector<u8>(newCapacity);
+    let mut newHashes: *mut u64 = Memory::allocateZeroedVector<u8>(newCapacity * @sizeOf<u64>()) as *mut u64;
+    let mut newKeys: *mut K = Memory::allocate<u8>(newCapacity * @sizeOf<K>()) as *mut K;
+    let mut newValues: *mut V = Memory::allocate<u8>(newCapacity * @sizeOf<V>()) as *mut V;
+
+    let mut index: u64 = 0;
+    while (index < self.capacity) {
+      if (self.states[index] == OCCUPIED_STATE) {
+        let hash: u64 = self.hashes[index];
+        let mut target: u64 = hash % newCapacity;
+        while (newStates[target] == OCCUPIED_STATE) {
+          target = (target + 1) % newCapacity;
+        }
+
+        newStates[target] = OCCUPIED_STATE;
+        newHashes[target] = hash;
+        newKeys[target] = self.keys[index];
+        newValues[target] = self.values[index];
+      }
+
+      index += 1;
+    }
+
+    self.freeStorage();
+
+    self.states = newStates;
+    self.hashes = newHashes;
+    self.keys = newKeys;
+    self.values = newValues;
+    self.capacity = newCapacity;
+    self.tombstones = 0;
+  }
+
+  private freeStorage(&mut self): void {
+    if (self.states != null) {
+      Memory::free(self.states as *mut u8);
+      self.states = null;
+    }
+
+    if (self.hashes != null) {
+      Memory::free(self.hashes as *mut u8);
+      self.hashes = null;
+    }
+
+    if (self.keys != null) {
+      Memory::free(self.keys as *mut u8);
+      self.keys = null;
+    }
+
+    if (self.values != null) {
+      Memory::free(self.values as *mut u8);
+      self.values = null;
+    }
+
+    self.capacity = 0;
+    self.length = 0;
+    self.tombstones = 0;
+  }
+}
+
+export record HashSetMarker {
+  present: boolean;
+
+  public static init(): HashSetMarker {
+    return HashSetMarker { present: true };
+  }
+}
+
+@implements(Drop)
+export record HashSet<T: Hash & Eq> {
+  map: HashMap<T, HashSetMarker>;
+
+  public static init(): HashSet<T> {
+    return HashSet {
+      map: HashMap::init<T, HashSetMarker>(),
+    };
+  }
+
+  public static init(capacity: u64): HashSet<T> {
+    return HashSet {
+      map: HashMap::init<T, HashSetMarker>(capacity),
+    };
+  }
+
+  public length(&self): u64 {
+    return self.map.length();
+  }
+
+  public capacity(&self): u64 {
+    return self.map.capacity();
+  }
+
+  public isEmpty(&self): boolean {
+    return self.map.isEmpty();
+  }
+
+  public contains(&self, value: &T): boolean {
+    return self.map.containsKey(value);
+  }
+
+  public insert(&mut self, value: T): boolean {
+    return self.map.insert(value, HashSetMarker::init()).isNone();
+  }
+
+  public remove(&mut self, value: &T): boolean {
+    return self.map.remove(value).isSome();
+  }
+
+  public reserve(&mut self, additional: u64): void {
+    self.map.reserve(additional);
+  }
+
+  public clear(&mut self): void {
+    self.map.clear();
+  }
+
+  public drop(&mut self): void {
+    self.map.drop();
+  }
+}

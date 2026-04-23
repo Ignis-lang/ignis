@@ -2088,7 +2088,10 @@ function hashValue<T: MissingTrait>(value: T): i32 {
   let result = common::analyze(source);
 
   common::assert_err(source, &["A0188"]);
-  assert_snapshot!("generic_bounds_unknown_trait", common::format_diagnostics(&result.output.diagnostics));
+  assert_snapshot!(
+    "generic_bounds_unknown_trait",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
 }
 
 #[test]

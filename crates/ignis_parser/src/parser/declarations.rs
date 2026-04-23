@@ -2555,7 +2555,10 @@ mod tests {
         let type_params = func.signature.type_params.as_ref().expect("should have type params");
 
         assert_eq!(type_params.len(), 1);
-        assert_eq!(generic_bound_names(&result, &type_params.params[0]), vec!["hash::Hash", "cmp::Eq"]);
+        assert_eq!(
+          generic_bound_names(&result, &type_params.params[0]),
+          vec!["hash::Hash", "cmp::Eq"]
+        );
       },
       other => panic!("expected function, got {:?}", other),
     }

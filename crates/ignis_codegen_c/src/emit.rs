@@ -175,6 +175,8 @@ impl<'a> CEmitter<'a> {
     if !uses_module_headers {
       self.emit_type_forward_declarations();
       self.emit_type_definitions();
+    } else if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
+      self.emit_forced_external_type_definitions(module_id);
     }
 
     self.emit_closure_types();
@@ -319,10 +321,22 @@ impl<'a> CEmitter<'a> {
 
       for (_, block) in function.blocks.iter() {
         for instruction in &block.instructions {
-          if let Instr::Call { callee, .. } = instruction
-            && reachable.insert(*callee)
-          {
-            queue.push_back(*callee);
+          match instruction {
+            Instr::Call { callee, .. } => {
+              if reachable.insert(*callee) {
+                queue.push_back(*callee);
+              }
+            },
+            Instr::Drop { local } => {
+              let local_type = function.locals.get(local).ty;
+              if let Some(owner_def_id) = self.resolve_droppable_record(local_type)
+                && let Some(drop_method_def_id) = self.find_drop_method(owner_def_id)
+                && reachable.insert(drop_method_def_id)
+              {
+                queue.push_back(drop_method_def_id);
+              }
+            },
+            _ => {},
           }
         }
       }
@@ -358,15 +372,222 @@ impl<'a> CEmitter<'a> {
           return false;
         }
 
-        // Std/Runtime definitions already exist in prebuilt std object files.
         let kind = self.classify(*def_id);
-        if !kind.is_user() {
+        if matches!(kind, DefKind::Runtime) {
           return false;
         }
 
-        true
+        kind.is_user() || (self.is_monomorphized_generic_def(*def_id) && self.definition_depends_on_user_type(*def_id))
       })
       .collect()
+  }
+
+  fn is_monomorphized_generic_def(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
+    raw_name.contains("__") && !raw_name.starts_with("__")
+  }
+
+  fn definition_depends_on_user_type(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let mut visited_types = HashSet::new();
+    let def = self.defs.get(&def_id);
+
+    match &def.kind {
+      DefinitionKind::Function(function_definition) => {
+        self.type_contains_user_definition(function_definition.return_type, &mut visited_types)
+          || function_definition.params.iter().any(|param_id| {
+            if let DefinitionKind::Parameter(parameter_definition) = &self.defs.get(param_id).kind {
+              self.type_contains_user_definition(parameter_definition.type_id, &mut visited_types)
+            } else {
+              false
+            }
+          })
+      },
+      DefinitionKind::Method(method_definition) => {
+        self.definition_tree_contains_user_definition(method_definition.owner_type, &mut visited_types)
+          || self.type_contains_user_definition(method_definition.return_type, &mut visited_types)
+          || method_definition.params.iter().any(|param_id| {
+            if let DefinitionKind::Parameter(parameter_definition) = &self.defs.get(param_id).kind {
+              self.type_contains_user_definition(parameter_definition.type_id, &mut visited_types)
+            } else {
+              false
+            }
+          })
+      },
+      _ => false,
+    }
+  }
+
+  fn definition_tree_contains_user_definition(
+    &self,
+    def_id: DefinitionId,
+    visited_types: &mut HashSet<TypeId>,
+  ) -> bool {
+    if self.classify(def_id).is_user() {
+      return true;
+    }
+
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Record(record_definition) => record_definition
+        .fields
+        .iter()
+        .any(|field| self.type_contains_user_definition(field.type_id, visited_types)),
+      DefinitionKind::Enum(enum_definition) => enum_definition.variants.iter().any(|variant| {
+        variant
+          .payload
+          .iter()
+          .any(|payload_type| self.type_contains_user_definition(*payload_type, visited_types))
+      }),
+      _ => false,
+    }
+  }
+
+  fn type_contains_user_definition(
+    &self,
+    ty: TypeId,
+    visited_types: &mut HashSet<TypeId>,
+  ) -> bool {
+    if !visited_types.insert(ty) {
+      return false;
+    }
+
+    match self.types.get(&ty) {
+      Type::Record(def_id) | Type::Enum(def_id) => {
+        self.definition_tree_contains_user_definition(*def_id, visited_types)
+      },
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
+        self.type_contains_user_definition(*inner, visited_types)
+      },
+      Type::Vector { element, .. } => self.type_contains_user_definition(*element, visited_types),
+      Type::Tuple(elements) => elements
+        .iter()
+        .any(|element_type| self.type_contains_user_definition(*element_type, visited_types)),
+      Type::Function { params, ret, .. } => {
+        params
+          .iter()
+          .any(|param_type| self.type_contains_user_definition(*param_type, visited_types))
+          || self.type_contains_user_definition(*ret, visited_types)
+      },
+      Type::Instance { generic, args } => {
+        self.classify(*generic).is_user()
+          || args
+            .iter()
+            .any(|arg_type| self.type_contains_user_definition(*arg_type, visited_types))
+      },
+      _ => false,
+    }
+  }
+
+  fn emit_forced_external_type_definitions(
+    &mut self,
+    target_module_id: ModuleId,
+  ) {
+    if self.forced_emit_defs.is_empty() {
+      return;
+    }
+
+    let module_type_names: std::collections::HashSet<String> = self
+      .defs
+      .iter()
+      .filter_map(|(def_id, def)| match &def.kind {
+        DefinitionKind::Record(record_definition)
+          if def.owner_module == target_module_id && record_definition.type_params.is_empty() =>
+        {
+          Some(build_mangled_name_standalone(
+            def_id,
+            self.defs,
+            self.namespaces,
+            self.symbols,
+            self.types,
+          ))
+        },
+        DefinitionKind::Enum(enum_definition)
+          if def.owner_module == target_module_id && enum_definition.type_params.is_empty() =>
+        {
+          Some(build_mangled_name_standalone(
+            def_id,
+            self.defs,
+            self.namespaces,
+            self.symbols,
+            self.types,
+          ))
+        },
+        _ => None,
+      })
+      .collect();
+
+    let mut referenced_struct_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for def_id in &self.forced_emit_defs {
+      let def = self.defs.get(def_id);
+      collect_struct_types_from_def(
+        *def_id,
+        def,
+        self.defs,
+        self.types,
+        self.symbols,
+        self.namespaces,
+        &mut referenced_struct_names,
+      );
+    }
+
+    referenced_struct_names.retain(|name| name.contains("__"));
+
+    let external_definition_ids = collect_external_type_definition_ids(
+      self.defs,
+      self.types,
+      self.symbols,
+      self.namespaces,
+      &module_type_names,
+      &referenced_struct_names,
+    );
+
+    if external_definition_ids.is_empty() {
+      return;
+    }
+
+    for def_id in external_definition_ids {
+      let name = build_mangled_name_standalone(def_id, self.defs, self.namespaces, self.symbols, self.types);
+      let type_guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&name));
+
+      writeln!(self.output, "#ifndef {}", type_guard).unwrap();
+      writeln!(self.output, "#define {}", type_guard).unwrap();
+
+      match &self.defs.get(&def_id).kind {
+        DefinitionKind::Record(record_definition) => {
+          emit_record_definition_standalone(
+            def_id,
+            record_definition,
+            self.defs,
+            self.types,
+            self.symbols,
+            self.namespaces,
+            &mut self.output,
+          );
+        },
+        DefinitionKind::Enum(enum_definition) => {
+          emit_enum_definition_standalone(
+            def_id,
+            enum_definition,
+            self.defs,
+            self.symbols,
+            self.namespaces,
+            self.types,
+            &mut self.output,
+          );
+        },
+        _ => continue,
+      }
+
+      writeln!(self.output, "#endif // {}", type_guard).unwrap();
+    }
+
+    writeln!(self.output).unwrap();
   }
 
   /// Check if an extern declaration should be emitted for a definition.
@@ -3179,10 +3400,24 @@ where
       continue;
     }
     match &def.kind {
-      DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
+      DefinitionKind::Record(rd)
+        if rd.type_params.is_empty()
+          && rd
+            .fields
+            .iter()
+            .all(|field| is_type_fully_monomorphized_standalone(field.type_id, types)) =>
+      {
         module_records.insert(def_id);
       },
-      DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+      DefinitionKind::Enum(ed)
+        if ed.type_params.is_empty()
+          && ed.variants.iter().all(|variant| {
+            variant
+              .payload
+              .iter()
+              .all(|payload_type| is_type_fully_monomorphized_standalone(*payload_type, types))
+          }) =>
+      {
         module_enums.insert(def_id);
       },
       _ => {},
@@ -3234,6 +3469,14 @@ where
       // Find the matching TypeId for this closure struct name
       for (type_id, ty) in types.iter() {
         if let Type::Function { params, ret, .. } = ty {
+          if !params
+            .iter()
+            .all(|param_type| is_type_fully_monomorphized_standalone(*param_type, types))
+            || !is_type_fully_monomorphized_standalone(*ret, types)
+          {
+            continue;
+          }
+
           let cname = closure_struct_name_standalone(params, ret, types, defs, symbols, namespaces);
           if &cname == name && !closure_struct_type_ids.contains(&type_id) {
             closure_struct_type_ids.push(type_id);
