@@ -3208,6 +3208,26 @@ function middle(): void {}
     assert!(details.contains("[truncated]"), "expected truncation marker in formatted failure details");
   }
 
+  #[test]
+  fn failed_test_details_lock_snapshot_mismatch_contract() {
+    let result = super::TestExecutionResult {
+      fq_name: "main::mismatchSnapshot".to_string(),
+      success: false,
+      exit_code: 101,
+      stdout: String::new(),
+      stderr: "snapshot mismatch\nsnapshot: /tmp/project/src/__snapshots__/main__rendered.snap.txt\nexpected-bytes: 12\nactual-bytes: 16\npanic: snapshot assertion failed\n".to_string(),
+    };
+
+    let details = format_failed_test_details(&result);
+
+    assert!(details.contains("main::mismatchSnapshot"), "expected test name in snapshot failure details");
+    assert!(details.contains("snapshot mismatch"), "expected mismatch reason in snapshot failure details");
+    assert!(details.contains("snapshot: /tmp/project/src/__snapshots__/main__rendered.snap.txt"));
+    assert!(details.contains("expected-bytes: 12"));
+    assert!(details.contains("actual-bytes: 16"));
+    assert!(details.contains("panic: snapshot assertion failed"));
+  }
+
   fn alloc_test_function(
     defs: &mut DefinitionStore,
     name: ignis_type::symbol::SymbolId,

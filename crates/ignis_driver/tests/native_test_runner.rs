@@ -28,6 +28,16 @@ fn write_test_project(source: &str) -> TempDir {
   temp_dir
 }
 
+fn write_project_module(
+  project_root: &Path,
+  relative_path: &str,
+  source: &str,
+) {
+  let module_path = project_root.join("src").join(relative_path);
+  fs::create_dir_all(module_path.parent().expect("module parent")).expect("create module dir");
+  fs::write(module_path, source).expect("write module source");
+}
+
 fn escape_snapshot_component(value: &str) -> String {
   let mut escaped = String::new();
 
@@ -347,4 +357,48 @@ function snapshotsFile(): void {
 
   assert!(result.is_ok(), "expected file snapshot helper to write file contents in update mode");
   assert_eq!(fs::read_to_string(&snapshot_path).expect("read snapshot file"), "file contents\n");
+}
+
+#[test]
+fn run_project_tests_keeps_same_snapshot_name_distinct_across_modules() {
+  let project = write_test_project(
+    r#"
+import MARKER from "./math";
+import Test from "std::test";
+
+@test
+function rootSnapshot(): void {
+    if (MARKER == 0) {
+        Test::fail();
+    }
+
+    Test::assertSnapshot("shared", "root contents\n");
+}
+"#,
+  );
+
+  write_project_module(
+    project.path(),
+    "math.ign",
+    r#"
+import Test from "std::test";
+
+export const MARKER: i32 = 1;
+
+@test
+function moduleSnapshot(): void {
+    Test::assertSnapshot("shared", "module contents\n");
+}
+"#,
+  );
+
+  let root_snapshot = snapshot_file_path(project.path(), "main::rootSnapshot", "shared");
+  let module_snapshot = snapshot_file_path(project.path(), "math::moduleSnapshot", "shared");
+
+  let result = run_project_tests(project.path(), None, true);
+
+  assert!(result.is_ok(), "expected update mode to create both module snapshots");
+  assert_eq!(fs::read_to_string(&root_snapshot).expect("read root snapshot"), "root contents\n");
+  assert_eq!(fs::read_to_string(&module_snapshot).expect("read module snapshot"), "module contents\n");
+  assert_ne!(root_snapshot, module_snapshot, "expected module snapshots to use distinct filenames");
 }
