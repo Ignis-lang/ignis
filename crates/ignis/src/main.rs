@@ -110,7 +110,7 @@ fn resolve_test_input(cmd: &TestCommand) -> Result<TestInput, ()> {
   if let Some(candidate) = &cmd.filter {
     let path = PathBuf::from(candidate);
 
-    if candidate.ends_with(".ign") || path.is_file() {
+    if candidate.ends_with(".ign") {
       return Ok(TestInput::DeferredSingleFile(path));
     }
   }
@@ -689,6 +689,36 @@ mod tests {
       TestInput::Project(project) => {
         assert_eq!(project.root, temp_dir.canonicalize().expect("canonical project root"));
         assert_eq!(cmd.filter.as_deref(), Some("math"));
+      },
+      other => panic!("expected project input, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+  }
+
+  #[test]
+  fn resolve_test_input_keeps_existing_non_ign_file_as_filter_text() {
+    let temp_dir = make_temp_dir("filter_file");
+    let filter_path = temp_dir.join("math_filter.txt");
+    std::fs::write(&filter_path, "math::adds").expect("write filter file");
+
+    std::fs::write(temp_dir.join("ignis.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n")
+      .expect("write ignis.toml");
+    std::fs::create_dir_all(temp_dir.join("src")).expect("create src dir");
+    std::fs::write(temp_dir.join("src").join("main.ign"), "function main(): void { return; }")
+      .expect("write entry file");
+
+    let cmd = TestCommand {
+      filter: Some(filter_path.to_string_lossy().into_owned()),
+      project: Some(temp_dir.to_string_lossy().into_owned()),
+    };
+
+    let resolved = resolve_test_input(&cmd).expect("resolve test input");
+
+    match resolved {
+      TestInput::Project(project) => {
+        assert_eq!(project.root, temp_dir.canonicalize().expect("canonical project root"));
+        assert_eq!(cmd.filter.as_deref(), Some(filter_path.to_string_lossy().as_ref()));
       },
       other => panic!("expected project input, got {:?}", other),
     }

@@ -161,11 +161,14 @@ mod tests {
 
   fn alloc_placeholder_definition(
     defs: &mut DefinitionStore,
+    symbols: &mut SymbolTable,
     owner_module: ModuleId,
   ) {
+    let name = symbols.intern("__test_placeholder");
+
     defs.alloc(Definition {
       kind: DefinitionKind::Placeholder,
-      name: Default::default(),
+      name,
       span: Span::default(),
       name_span: Span::default(),
       visibility: Visibility::Private,
@@ -181,10 +184,10 @@ mod tests {
     let types = TypeStore::new();
     let mut defs = DefinitionStore::new();
     let namespaces = NamespaceStore::new();
-    let symbols = SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let backend = CBackend;
 
-    alloc_placeholder_definition(&mut defs, ModuleId::new(0));
+    alloc_placeholder_definition(&mut defs, &mut symbols, ModuleId::new(0));
 
     let input = BackendInput::Lowered {
       root_id: ModuleId::new(0),
@@ -253,11 +256,11 @@ mod tests {
     let types = TypeStore::new();
     let mut defs = DefinitionStore::new();
     let namespaces = NamespaceStore::new();
-    let symbols = SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let backend = CBackend;
     let module_paths: HashMap<ModuleId, ModulePath> = HashMap::new();
 
-    alloc_placeholder_definition(&mut defs, ModuleId::new(0));
+    alloc_placeholder_definition(&mut defs, &mut symbols, ModuleId::new(0));
 
     let input = BackendInput::Lowered {
       root_id: ModuleId::new(0),

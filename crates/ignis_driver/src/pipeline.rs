@@ -1428,6 +1428,34 @@ fn build_test_harness_plan(
   }
 }
 
+#[cfg(test)]
+fn plan_project_tests_for_snapshot(
+  project_root: &Path,
+  filter: Option<&str>,
+) -> Result<crate::backend::TestHarnessPlan, ()> {
+  let (config, project) = build_test_driver_config(project_root)?;
+  let mut ctx = CompilationContext::new(&config);
+  let root_id = ctx.discover_modules(project.entry.to_string_lossy().as_ref(), &config)?;
+
+  if config.std && config.auto_load_std {
+    ctx.discover_prelude_modules_for_all(&config);
+  }
+
+  let (output, has_errors) = ctx.compile_collect_all(root_id, &config)?;
+
+  if has_errors {
+    return Err(());
+  }
+
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+  let discovered_tests = {
+    let symbols = output.symbols.borrow();
+    discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &project.source_dir)
+  };
+
+  Ok(build_test_harness_plan(discovered_tests, filter))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TestExecutionResult {
   fq_name: String,
@@ -2808,9 +2836,31 @@ mod tests {
 
   use super::{
     build_test_harness_plan, discover_test_cases, execute_test_harness_binary, format_test_plan_snapshot,
-    format_test_summary_snapshot,
+    format_test_summary_snapshot, plan_project_tests_for_snapshot,
   };
   use crate::backend::{TestCase, TestHarnessPlan};
+
+  fn workspace_std_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std")
+  }
+
+  fn write_test_project(source: &str) -> TempDir {
+    let temp_dir = TempDir::new().expect("temporary project dir");
+    let src_dir = temp_dir.path().join("src");
+
+    fs::create_dir_all(&src_dir).expect("create src dir");
+    fs::write(src_dir.join("main.ign"), source).expect("write main module");
+    fs::write(
+      temp_dir.path().join("ignis.toml"),
+      format!(
+        "[package]\nname = \"native_test_runner_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n",
+        workspace_std_path().display()
+      ),
+    )
+    .expect("write ignis.toml");
+
+    temp_dir
+  }
 
   #[test]
   fn discover_test_cases_collects_only_marked_functions_from_known_modules() {
@@ -2896,6 +2946,31 @@ mod tests {
     );
 
     assert_snapshot!("native_test_runner_plan_snapshot", format_test_plan_snapshot(&plan));
+  }
+
+  #[test]
+  fn project_test_planning_is_stable_across_repeated_runs() {
+    let project = write_test_project(
+      r#"
+@test
+function zebra(): void {}
+
+@test
+function alpha(): void {}
+
+@test
+function middle(): void {}
+"#,
+    );
+
+    let first = plan_project_tests_for_snapshot(project.path(), None).expect("first test plan");
+    let second = plan_project_tests_for_snapshot(project.path(), None).expect("second test plan");
+
+    let first_names: Vec<&str> = first.tests.iter().map(|test| test.fq_name.as_str()).collect();
+    let second_names: Vec<&str> = second.tests.iter().map(|test| test.fq_name.as_str()).collect();
+
+    assert_eq!(first_names, vec!["main::alpha", "main::middle", "main::zebra"]);
+    assert_eq!(first_names, second_names);
   }
 
   #[test]

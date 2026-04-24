@@ -496,11 +496,14 @@ mod tests {
 
   fn alloc_placeholder_definition(
     defs: &mut DefinitionStore,
+    symbols: &mut SymbolTable,
     owner_module: ModuleId,
   ) -> DefinitionId {
+    let name = symbols.intern("__test_placeholder");
+
     defs.alloc(Definition {
       kind: DefinitionKind::Placeholder,
-      name: Default::default(),
+      name,
       span: Span::default(),
       name_span: Span::default(),
       visibility: Visibility::Private,
@@ -513,8 +516,9 @@ mod tests {
   fn valid_lowered_backend_fixture(types: &TypeStore) -> (DefinitionStore, LirProgram, ModuleId) {
     let root_id = ModuleId::new(11);
     let mut defs = DefinitionStore::new();
-    let function_id = alloc_placeholder_definition(&mut defs, root_id);
-    let global_id = alloc_placeholder_definition(&mut defs, root_id);
+    let mut symbols = SymbolTable::new();
+    let function_id = alloc_placeholder_definition(&mut defs, &mut symbols, root_id);
+    let global_id = alloc_placeholder_definition(&mut defs, &mut symbols, root_id);
     let mut program = LirProgram::new();
 
     program.entry_point = Some(function_id);
@@ -545,7 +549,8 @@ mod tests {
     let wrong_root_id = ModuleId::new(77);
     let actual_root_id = ModuleId::new(11);
     let mut defs = DefinitionStore::new();
-    let function_id = alloc_placeholder_definition(&mut defs, actual_root_id);
+    let mut symbols = SymbolTable::new();
+    let function_id = alloc_placeholder_definition(&mut defs, &mut symbols, actual_root_id);
     let mut program = LirProgram::new();
 
     program.entry_point = Some(function_id);
@@ -746,10 +751,10 @@ mod tests {
     let types = TypeStore::new();
     let mut defs = DefinitionStore::new();
     let mut program = LirProgram::new();
-    let symbols = SymbolTable::new();
+    let mut symbols = SymbolTable::new();
     let namespaces = NamespaceStore::new();
     let root_id = ModuleId::new(7);
-    let root_def_id = alloc_placeholder_definition(&mut defs, root_id);
+    let root_def_id = alloc_placeholder_definition(&mut defs, &mut symbols, root_id);
     let missing_function_id = DefinitionId::new(root_def_id.index() + 1);
 
     program.entry_point = Some(missing_function_id);
