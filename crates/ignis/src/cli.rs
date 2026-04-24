@@ -291,6 +291,10 @@ pub struct TestCommand {
   /// Explicit project directory (overrides auto-detection)
   #[arg(long)]
   pub project: Option<String>,
+
+   /// Create or replace selected snapshots during the test run
+   #[arg(long)]
+   pub update_snapshots: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -382,6 +386,7 @@ mod tests {
       SubCommand::Test(cmd) => {
         assert_eq!(cmd.filter.as_deref(), Some("math"));
         assert_eq!(cmd.project.as_deref(), Some("demo"));
+        assert!(!cmd.update_snapshots);
       },
       other => panic!("expected test subcommand, got {:?}", other),
     }
@@ -395,6 +400,35 @@ mod tests {
       SubCommand::Test(cmd) => {
         assert_eq!(cmd.filter, None);
         assert_eq!(cmd.project, None);
+        assert!(!cmd.update_snapshots);
+      },
+      other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_test_subcommand_with_update_snapshots_flag() {
+    let cli = Cli::parse_from(["ignis", "test", "math", "--project", "demo", "--update-snapshots"]);
+
+    match cli.subcommand {
+      SubCommand::Test(cmd) => {
+        assert_eq!(cmd.filter.as_deref(), Some("math"));
+        assert_eq!(cmd.project.as_deref(), Some("demo"));
+        assert!(cmd.update_snapshots);
+      },
+      other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_test_subcommand_with_update_snapshots_flag_without_filter() {
+    let cli = Cli::parse_from(["ignis", "test", "--update-snapshots"]);
+
+    match cli.subcommand {
+      SubCommand::Test(cmd) => {
+        assert_eq!(cmd.filter, None);
+        assert_eq!(cmd.project, None);
+        assert!(cmd.update_snapshots);
       },
       other => panic!("expected test subcommand, got {:?}", other),
     }

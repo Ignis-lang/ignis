@@ -1,7 +1,7 @@
 pub mod c;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ignis_config::{CHeader, TargetBackend};
 use ignis_type::definition::DefinitionId;
@@ -35,6 +35,7 @@ pub struct BackendResult {
 pub struct TestCase {
   pub def_id: DefinitionId,
   pub fq_name: String,
+  pub source_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

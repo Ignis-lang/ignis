@@ -146,7 +146,7 @@ fn run_test(
       eprintln!("{}", format_deferred_test_input_error(&path));
       Err(())
     },
-    TestInput::Project(project) => run_project_tests(&project.root, cmd.filter.as_deref()),
+    TestInput::Project(project) => run_project_tests(&project.root, cmd.filter.as_deref(), cmd.update_snapshots),
   }
 }
 
@@ -659,6 +659,7 @@ mod tests {
     let cmd = TestCommand {
       filter: Some(file_path.to_string_lossy().into_owned()),
       project: None,
+      update_snapshots: true,
     };
 
     match resolve_test_input(&cmd).expect("resolve test input") {
@@ -681,6 +682,7 @@ mod tests {
     let cmd = TestCommand {
       filter: Some("math".to_string()),
       project: Some(temp_dir.to_string_lossy().into_owned()),
+      update_snapshots: true,
     };
 
     let resolved = resolve_test_input(&cmd).expect("resolve test input");
@@ -689,6 +691,7 @@ mod tests {
       TestInput::Project(project) => {
         assert_eq!(project.root, temp_dir.canonicalize().expect("canonical project root"));
         assert_eq!(cmd.filter.as_deref(), Some("math"));
+        assert!(cmd.update_snapshots);
       },
       other => panic!("expected project input, got {:?}", other),
     }
@@ -711,6 +714,7 @@ mod tests {
     let cmd = TestCommand {
       filter: Some(filter_path.to_string_lossy().into_owned()),
       project: Some(temp_dir.to_string_lossy().into_owned()),
+      update_snapshots: false,
     };
 
     let resolved = resolve_test_input(&cmd).expect("resolve test input");
@@ -719,6 +723,7 @@ mod tests {
       TestInput::Project(project) => {
         assert_eq!(project.root, temp_dir.canonicalize().expect("canonical project root"));
         assert_eq!(cmd.filter.as_deref(), Some(filter_path.to_string_lossy().as_ref()));
+        assert!(!cmd.update_snapshots);
       },
       other => panic!("expected project input, got {:?}", other),
     }

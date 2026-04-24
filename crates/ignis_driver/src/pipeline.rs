@@ -1403,10 +1403,15 @@ fn discover_test_cases(
         return None;
       }
 
+      let ModulePath::Project(source_path) = module_paths.get(&definition.owner_module)? else {
+        return None;
+      };
+
       format_test_name(definition_id, defs, namespaces, symbols, module_paths, source_dir).map(|fq_name| {
         crate::backend::TestCase {
           def_id: definition_id,
           fq_name,
+          source_path: source_path.clone(),
         }
       })
     })
@@ -1479,13 +1484,26 @@ fn test_harness_paths(project: &crate::project::Project) -> (PathBuf, PathBuf) {
 fn execute_test_harness_binary(
   binary_path: &Path,
   plan: &crate::backend::TestHarnessPlan,
+  update_snapshots: bool,
 ) -> Result<Vec<TestExecutionResult>, String> {
   let mut results = Vec::with_capacity(plan.tests.len());
 
   for test in &plan.tests {
+    let snapshot_dir = test
+      .source_path
+      .parent()
+      .map(|parent| parent.join("__snapshots__"))
+      .ok_or_else(|| format!("Test '{}' has no parent module directory", test.fq_name))?;
+
     let output = Command::new(binary_path)
       .arg("--ignis-test")
       .arg(&test.fq_name)
+      .env("IGNIS_TEST_NAME", &test.fq_name)
+      .env("IGNIS_TEST_SNAPSHOT_DIR", &snapshot_dir)
+      .env(
+        "IGNIS_TEST_UPDATE_SNAPSHOTS",
+        if update_snapshots { "1" } else { "0" },
+      )
       .output()
       .map_err(|error| format!("Failed to run test '{}': {}", test.fq_name, error))?;
 
@@ -1589,6 +1607,7 @@ fn format_test_summary_snapshot(results: &[TestExecutionResult]) -> String {
 pub fn run_project_tests(
   project_root: &Path,
   filter: Option<&str>,
+  update_snapshots: bool,
 ) -> Result<(), ()> {
   let start = Instant::now();
   let (config, project) = build_test_driver_config(project_root)?;
@@ -1958,7 +1977,7 @@ pub fn run_project_tests(
 
   section!(&config, "Running");
 
-  let results = match execute_test_harness_binary(&bin_path, &plan) {
+  let results = match execute_test_harness_binary(&bin_path, &plan, update_snapshots) {
     Ok(results) => results,
     Err(error) => {
       cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2961,6 +2980,8 @@ mod tests {
 
     let names: Vec<&str> = discovered.iter().map(|test| test.fq_name.as_str()).collect();
     assert_eq!(names, vec!["math::helpers::adds", "main::smoke"]);
+    assert_eq!(discovered[0].source_path, PathBuf::from("/tmp/project/src/math.ign"));
+    assert_eq!(discovered[1].source_path, PathBuf::from("/tmp/project/src/main.ign"));
   }
 
   #[test]
@@ -2969,14 +2990,17 @@ mod tests {
       TestCase {
         def_id: ignis_type::definition::DefinitionId::new(2),
         fq_name: "math::helpers::Adds".to_string(),
+        source_path: PathBuf::from("/tmp/project/src/math.ign"),
       },
       TestCase {
         def_id: ignis_type::definition::DefinitionId::new(1),
         fq_name: "io::writes".to_string(),
+        source_path: PathBuf::from("/tmp/project/src/io.ign"),
       },
       TestCase {
         def_id: ignis_type::definition::DefinitionId::new(0),
         fq_name: "math::adds".to_string(),
+        source_path: PathBuf::from("/tmp/project/src/math.ign"),
       },
     ];
 
@@ -2996,14 +3020,17 @@ mod tests {
         TestCase {
           def_id: ignis_type::definition::DefinitionId::new(2),
           fq_name: "math::helpers::adds".to_string(),
+          source_path: PathBuf::from("/tmp/project/src/math.ign"),
         },
         TestCase {
           def_id: ignis_type::definition::DefinitionId::new(1),
           fq_name: "io::writes".to_string(),
+          source_path: PathBuf::from("/tmp/project/src/io.ign"),
         },
         TestCase {
           def_id: ignis_type::definition::DefinitionId::new(0),
           fq_name: "math::adds".to_string(),
+          source_path: PathBuf::from("/tmp/project/src/math.ign"),
         },
       ],
       Some("adds"),
@@ -3064,17 +3091,21 @@ function middle(): void {}
           TestCase {
             def_id: ignis_type::definition::DefinitionId::new(0),
             fq_name: "math::pass".to_string(),
+            source_path: PathBuf::from("/tmp/project/src/math.ign"),
           },
           TestCase {
             def_id: ignis_type::definition::DefinitionId::new(1),
             fq_name: "math::fail".to_string(),
+            source_path: PathBuf::from("/tmp/project/src/math.ign"),
           },
           TestCase {
             def_id: ignis_type::definition::DefinitionId::new(2),
             fq_name: "math::later".to_string(),
+            source_path: PathBuf::from("/tmp/project/src/math.ign"),
           },
         ],
       },
+      false,
     )
     .expect("execute harness binary");
 
@@ -3086,6 +3117,48 @@ function middle(): void {}
     assert_eq!(results[0].stdout, "pass\n");
     assert_eq!(results[1].stderr, "boom\n");
     assert_eq!(results[2].stdout, "later\n");
+  }
+
+  #[test]
+  fn execute_test_harness_binary_injects_snapshot_context_env_vars() {
+    let temp_dir = TempDir::new().expect("temporary harness dir");
+    let harness_path = temp_dir.path().join("fake-harness.sh");
+
+    fs::write(
+      &harness_path,
+      "#!/bin/sh\nif [ \"$1\" != \"--ignis-test\" ]; then exit 2; fi\nprintf '%s|%s|%s\\n' \"$IGNIS_TEST_NAME\" \"$IGNIS_TEST_SNAPSHOT_DIR\" \"$IGNIS_TEST_UPDATE_SNAPSHOTS\"\n",
+    )
+    .expect("write harness script");
+
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+
+      let mut permissions = fs::metadata(&harness_path).expect("script metadata").permissions();
+      permissions.set_mode(0o755);
+      fs::set_permissions(&harness_path, permissions).expect("mark script executable");
+    }
+
+    let source_path = temp_dir.path().join("project/src/math.ign");
+    fs::create_dir_all(source_path.parent().expect("source dir")).expect("create source dir");
+    fs::write(&source_path, "@test\nfunction math(): void {}\n").expect("write source file");
+
+    let results = execute_test_harness_binary(
+      &harness_path,
+      &TestHarnessPlan {
+        tests: vec![TestCase {
+          def_id: ignis_type::definition::DefinitionId::new(0),
+          fq_name: "math::updatesSnapshot".to_string(),
+          source_path: source_path.clone(),
+        }],
+      },
+      true,
+    )
+    .expect("execute harness binary");
+
+    let snapshot_dir = source_path.parent().expect("module dir").join("__snapshots__");
+
+    assert_eq!(results[0].stdout, format!("math::updatesSnapshot|{}|1\n", snapshot_dir.display()));
   }
 
   #[test]

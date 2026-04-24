@@ -28,6 +28,34 @@ fn write_test_project(source: &str) -> TempDir {
   temp_dir
 }
 
+fn escape_snapshot_component(value: &str) -> String {
+  let mut escaped = String::new();
+
+  for byte in value.bytes() {
+    let ch = byte as char;
+    if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+      escaped.push(ch);
+    } else {
+      escaped.push('_');
+      escaped.push_str(&format!("{:02x}", byte));
+    }
+  }
+
+  escaped
+}
+
+fn snapshot_file_path(
+  project_root: &Path,
+  fq_name: &str,
+  snapshot_name: &str,
+) -> PathBuf {
+  project_root.join("src").join("__snapshots__").join(format!(
+    "{}__{}.snap.txt",
+    escape_snapshot_component(fq_name),
+    escape_snapshot_component(snapshot_name)
+  ))
+}
+
 fn harness_binary_path(project_root: &Path) -> PathBuf {
   project_root.join("build/bin/native_test_runner_fixture-tests")
 }
@@ -48,7 +76,7 @@ function fails(): void {
 "#,
   );
 
-  let result = run_project_tests(project.path(), Some("passes"));
+  let result = run_project_tests(project.path(), Some("passes"), false);
 
   assert!(result.is_ok(), "expected filtered passing test run to succeed");
   assert!(
@@ -75,7 +103,7 @@ function assertEqPasses(): void {
 "#,
   );
 
-  let result = run_project_tests(project.path(), None);
+  let result = run_project_tests(project.path(), None, false);
 
   assert!(result.is_ok(), "expected std assertions to pass");
   assert!(
@@ -103,7 +131,7 @@ function laterPass(): void {}
 "#,
   );
 
-  let result = run_project_tests(project.path(), None);
+  let result = run_project_tests(project.path(), None, false);
 
   assert!(result.is_err(), "expected mixed pass/fail test run to return an error");
   assert!(
@@ -121,7 +149,7 @@ function passes(): void {}
 "#,
   );
 
-  let result = run_project_tests(project.path(), Some("missing"));
+  let result = run_project_tests(project.path(), Some("missing"), false);
 
   assert!(result.is_ok(), "expected empty selection to succeed");
   assert!(
@@ -139,7 +167,7 @@ function invalid(value: i32): void {}
 "#,
   );
 
-  let result = run_project_tests(project.path(), None);
+  let result = run_project_tests(project.path(), None, false);
 
   assert!(result.is_err(), "expected invalid test shape to fail setup");
   assert!(
@@ -167,11 +195,156 @@ function invalidEq(): void {
 "#,
   );
 
-  let result = run_project_tests(project.path(), None);
+  let result = run_project_tests(project.path(), None, false);
 
   assert!(result.is_err(), "expected unsupported equality overload to fail test setup");
   assert!(
     !harness_binary_path(project.path()).exists(),
     "expected no harness binary when setup fails before codegen"
   );
+}
+
+#[test]
+fn run_project_tests_allows_matching_snapshot_without_update_mode() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function matchesSnapshot(): void {
+    Test::assertSnapshot("rendered", "hello snapshot\n");
+}
+"#,
+  );
+
+  let snapshot_path = snapshot_file_path(project.path(), "main::matchesSnapshot", "rendered");
+  fs::create_dir_all(snapshot_path.parent().expect("snapshot dir")).expect("create snapshot dir");
+  fs::write(&snapshot_path, "hello snapshot\n").expect("write snapshot file");
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(result.is_ok(), "expected matching snapshot to pass without update mode");
+}
+
+#[test]
+fn run_project_tests_missing_snapshot_fails_without_update_mode() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function missingSnapshot(): void {
+    Test::assertSnapshot("rendered", "hello snapshot\n");
+}
+"#,
+  );
+
+  let snapshot_path = snapshot_file_path(project.path(), "main::missingSnapshot", "rendered");
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(result.is_err(), "expected missing snapshot to fail without update mode");
+  assert!(!snapshot_path.exists(), "expected missing snapshot run to avoid creating a baseline");
+}
+
+#[test]
+fn run_project_tests_mismatched_snapshot_fails_without_update_mode() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function mismatchedSnapshot(): void {
+    Test::assertSnapshot("rendered", "new contents\n");
+}
+"#,
+  );
+
+  let snapshot_path = snapshot_file_path(project.path(), "main::mismatchedSnapshot", "rendered");
+  fs::create_dir_all(snapshot_path.parent().expect("snapshot dir")).expect("create snapshot dir");
+  fs::write(&snapshot_path, "old contents\n").expect("write snapshot file");
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(result.is_err(), "expected mismatched snapshot to fail without update mode");
+  assert_eq!(fs::read_to_string(&snapshot_path).expect("read snapshot file"), "old contents\n");
+}
+
+#[test]
+fn run_project_tests_creates_snapshot_in_update_mode() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function writesSnapshot(): void {
+    Test::assertSnapshot("rendered", "hello snapshot\n");
+}
+"#,
+  );
+
+  let snapshot_path = snapshot_file_path(project.path(), "main::writesSnapshot", "rendered");
+
+  let result = run_project_tests(project.path(), None, true);
+
+  assert!(result.is_ok(), "expected update mode to create a missing snapshot");
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read snapshot file"),
+    "hello snapshot\n"
+  );
+}
+
+#[test]
+fn run_project_tests_replaces_snapshot_in_update_mode() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function replacesSnapshot(): void {
+    Test::assertSnapshot("rendered", "new contents\n");
+}
+"#,
+  );
+
+  let snapshot_path = snapshot_file_path(project.path(), "main::replacesSnapshot", "rendered");
+  fs::create_dir_all(snapshot_path.parent().expect("snapshot dir")).expect("create snapshot dir");
+  fs::write(&snapshot_path, "old contents\n").expect("write snapshot file");
+
+  let result = run_project_tests(project.path(), None, true);
+
+  assert!(result.is_ok(), "expected update mode to replace a mismatched snapshot");
+  assert_eq!(fs::read_to_string(&snapshot_path).expect("read snapshot file"), "new contents\n");
+}
+
+#[test]
+fn run_project_tests_snapshots_utf8_file_contents() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function snapshotsFile(): void {
+    Test::assertFileSnapshot("artifact", "FILE_PLACEHOLDER");
+}
+"#,
+  );
+
+  let output_path = project.path().join("fixture-output.txt");
+  fs::write(&output_path, "file contents\n").expect("write fixture output");
+
+  let source_path = project.path().join("src/main.ign");
+  let source = fs::read_to_string(&source_path).expect("read source");
+  fs::write(
+    &source_path,
+    source.replace("FILE_PLACEHOLDER", output_path.to_string_lossy().as_ref()),
+  )
+  .expect("rewrite source");
+
+  let snapshot_path = snapshot_file_path(project.path(), "main::snapshotsFile", "artifact");
+
+  let result = run_project_tests(project.path(), None, true);
+
+  assert!(result.is_ok(), "expected file snapshot helper to write file contents in update mode");
+  assert_eq!(fs::read_to_string(&snapshot_path).expect("read snapshot file"), "file contents\n");
 }
