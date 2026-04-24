@@ -204,6 +204,13 @@ static AT_ITEMS: &[AtItemMeta] = &[
     doc: Some("Valid on: function. Overrides the default mangled name in the generated C code."),
   },
   AtItemMeta {
+    name: "test",
+    kind: AtItemKind::Directive,
+    syntax: "@test",
+    summary: "Marks a top-level function as a native test case.",
+    doc: Some("Valid on: top-level function. v0.5 tests must be non-generic, take zero parameters, return `void`, and not be extern."),
+  },
+  AtItemMeta {
     name: "cold",
     kind: AtItemKind::Directive,
     syntax: "@cold",
@@ -339,5 +346,20 @@ mod tests {
     assert!(is_directive("lang"));
     assert!(is_directive("noescape"));
     assert!(is_lint_level_directive("warn"));
+  }
+
+  #[test]
+  fn lookup_test_directive_metadata() {
+    let item = lookup("test").unwrap();
+
+    assert_eq!(item.kind, AtItemKind::Directive);
+    assert_eq!(item.syntax, "@test");
+  }
+
+  #[test]
+  fn completions_include_test_directive() {
+    let matches = completions_matching("te");
+
+    assert!(matches.iter().any(|item| item.name == "test"));
   }
 }

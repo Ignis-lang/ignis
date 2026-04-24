@@ -1252,6 +1252,18 @@ pub fn compile_project(
   Ok(())
 }
 
+pub fn run_project_tests(
+  _project_root: &Path,
+  _filter: Option<&str>,
+) -> Result<(), ()> {
+  eprintln!(
+    "{} project-mode 'ignis test' execution is deferred to a later implementation batch.",
+    "Error:".red().bold()
+  );
+
+  Err(())
+}
+
 /// Build the standard library into a static archive
 pub fn build_std(
   config: Arc<IgnisConfig>,

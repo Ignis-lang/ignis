@@ -7,11 +7,11 @@ use std::sync::Arc;
 use clap::Parser as ClapParser;
 use colored::*;
 
-use cli::{BuildCommand, CheckCommand, Cli, SubCommand};
+use cli::{BuildCommand, CheckCommand, Cli, SubCommand, TestCommand};
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
-  CliOverrides, Project,
+  run_project_tests, CliOverrides, Project,
 };
 use init::run_init;
 
@@ -27,6 +27,12 @@ enum CompileInput {
 
   /// Single-file mode: compile one file without project context.
   SingleFile(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+enum TestInput {
+  Project(Project),
+  DeferredSingleFile(PathBuf),
 }
 
 /// Resolve what to compile based on CLI arguments.
@@ -98,6 +104,51 @@ fn load_and_resolve_project(
   resolve_project(root.to_path_buf(), toml, overrides).map_err(|e| {
     eprintln!("{} {}", "Error:".red().bold(), e);
   })
+}
+
+fn resolve_test_input(cmd: &TestCommand) -> Result<TestInput, ()> {
+  if let Some(candidate) = &cmd.filter {
+    let path = PathBuf::from(candidate);
+
+    if candidate.ends_with(".ign") || path.is_file() {
+      return Ok(TestInput::DeferredSingleFile(path));
+    }
+  }
+
+  let overrides = CliOverrides::default();
+
+  if let Some(dir) = &cmd.project {
+    let root = PathBuf::from(dir);
+    let project = load_and_resolve_project(&root, &overrides)?;
+    return Ok(TestInput::Project(project));
+  }
+
+  let cwd = std::env::current_dir().map_err(|e| {
+    eprintln!("{} Failed to get current directory: {}", "Error:".red().bold(), e);
+  })?;
+
+  match find_project_root(&cwd) {
+    Some(root) => load_and_resolve_project(&root, &overrides).map(TestInput::Project),
+    None => {
+      eprintln!("{} No ignis.toml found", "Error:".red().bold());
+      eprintln!("Hint: Run 'ignis init' to create a project, or provide --project.");
+      Err(())
+    },
+  }
+}
+
+fn run_test(_cli: &Cli, cmd: &TestCommand) -> Result<(), ()> {
+  match resolve_test_input(cmd)? {
+    TestInput::DeferredSingleFile(path) => {
+      eprintln!(
+        "{} Single-file 'ignis test' is deferred for v0.5: '{}'",
+        "Error:".red().bold(),
+        path.display()
+      );
+      Err(())
+    },
+    TestInput::Project(project) => run_project_tests(&project.root, cmd.filter.as_deref()),
+  }
 }
 
 // =============================================================================
@@ -560,6 +611,8 @@ fn main() {
 
     SubCommand::Build(cmd) => run_build(&cli, cmd),
 
+    SubCommand::Test(cmd) => run_test(&cli, cmd),
+
     SubCommand::Check(cmd) => run_check(&cli, cmd),
 
     SubCommand::BuildStd(cmd) => run_build_std(&cli, &cmd.output_dir),
@@ -573,5 +626,72 @@ fn main() {
 
   if result.is_err() {
     std::process::exit(1);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn make_temp_dir(label: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .expect("system time")
+      .as_nanos();
+    let dir = std::env::temp_dir().join(format!("ignis_test_command_{label}_{nonce}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+  }
+
+  #[test]
+  fn resolve_test_input_rejects_single_file_mode() {
+    let temp_dir = make_temp_dir("single_file");
+    let file_path = temp_dir.join("single.ign");
+    std::fs::write(&file_path, "function main(): void { return; }").expect("write test file");
+
+    let cmd = TestCommand {
+      filter: Some(file_path.to_string_lossy().into_owned()),
+      project: None,
+    };
+
+    match resolve_test_input(&cmd).expect("resolve test input") {
+      TestInput::DeferredSingleFile(resolved_path) => assert_eq!(resolved_path, file_path),
+      other => panic!("expected deferred single-file input, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+  }
+
+  #[test]
+  fn resolve_test_input_uses_project_mode_for_filter_text() {
+    let temp_dir = make_temp_dir("project_mode");
+    std::fs::write(
+      temp_dir.join("ignis.toml"),
+      "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write ignis.toml");
+    std::fs::create_dir_all(temp_dir.join("src")).expect("create src dir");
+    std::fs::write(
+      temp_dir.join("src").join("main.ign"),
+      "function main(): void { return; }",
+    )
+    .expect("write entry file");
+
+    let cmd = TestCommand {
+      filter: Some("math".to_string()),
+      project: Some(temp_dir.to_string_lossy().into_owned()),
+    };
+
+    let resolved = resolve_test_input(&cmd).expect("resolve test input");
+
+    match resolved {
+      TestInput::Project(project) => {
+        assert_eq!(project.root, temp_dir.canonicalize().expect("canonical project root"));
+        assert_eq!(cmd.filter.as_deref(), Some("math"));
+      },
+      other => panic!("expected project input, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
   }
 }

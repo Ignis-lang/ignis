@@ -10,7 +10,7 @@ use ignis_ast::{
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
-use ignis_type::definition::DefinitionKind;
+use ignis_type::{attribute::FunctionAttr, definition::{DefinitionKind, FunctionDefinition}, types::Type};
 
 /// Control flow termination status.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -83,6 +83,18 @@ impl<'a> Analyzer<'a> {
     match stmt {
       ASTStatement::Function(func) => {
         let def_id = self.define_decl_in_current_scope(node_id);
+
+        if let Some(def_id) = &def_id {
+          let func_def = match &self.defs.get(def_id).kind {
+            DefinitionKind::Function(func_def) => Some(func_def.clone()),
+            _ => None,
+          };
+
+          if let Some(func_def) = func_def {
+            self.validate_test_function_shape(func, &func_def);
+          }
+        }
+
         if let Some(body_id) = &func.body {
           if let Some(def_id) = &def_id {
             let return_type = self.types.get(self.type_of(def_id));
@@ -682,6 +694,58 @@ impl<'a> Analyzer<'a> {
       self.add_diagnostic(
         DiagnosticMessage::MissingReturnStatement {
           span: method.span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
+}
+
+impl<'a> Analyzer<'a> {
+  fn validate_test_function_shape(
+    &mut self,
+    func: &ignis_ast::statements::function::ASTFunction,
+    func_def: &FunctionDefinition,
+  ) {
+    if !func_def.attrs.iter().any(|attr| matches!(attr, FunctionAttr::Test)) {
+      return;
+    }
+
+    if func_def.is_extern {
+      self.add_diagnostic(
+        DiagnosticMessage::CompileError {
+          message: "@test functions cannot be extern in v0.5".to_string(),
+          span: func.signature.span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    if !func_def.type_params.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::CompileError {
+          message: "@test functions cannot declare generic parameters in v0.5".to_string(),
+          span: func.signature.span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    if !func_def.params.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::CompileError {
+          message: "@test functions must not take parameters in v0.5".to_string(),
+          span: func.signature.span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    if !matches!(self.types.get(&func_def.return_type), Type::Void) {
+      self.add_diagnostic(
+        DiagnosticMessage::CompileError {
+          message: "@test functions must return void in v0.5".to_string(),
+          span: func.signature.span.clone(),
         }
         .report(),
       );

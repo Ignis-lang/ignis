@@ -3047,3 +3047,37 @@ function main(): void {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+#[test]
+fn test_attribute_rejects_method_placement() {
+  let src = r#"
+record Suite {
+    @test
+    run(): void {
+        return;
+    }
+}
+"#;
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "test_attribute_rejects_method_placement",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn test_attribute_rejects_invalid_signature_shape() {
+  let src = r#"
+@test
+function invalid<T>(value: i32): i32 {
+    return value;
+}
+"#;
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "test_attribute_rejects_invalid_signature_shape",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}

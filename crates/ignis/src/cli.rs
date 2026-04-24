@@ -284,16 +284,28 @@ pub struct CheckRuntimeCommand {
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
+pub struct TestCommand {
+  /// Optional substring filter for fully qualified test names
+  pub filter: Option<String>,
+
+  /// Explicit project directory (overrides auto-detection)
+  #[arg(long)]
+  pub project: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq)]
 pub struct LspCommand {
   /// Log file path for debug output
   #[arg(long)]
   pub log_file: Option<String>,
 }
 
-#[derive(Subcommand, Clone, PartialEq)]
+#[derive(Subcommand, Debug, Clone, PartialEq)]
 pub enum SubCommand {
   /// Build file or project
   Build(BuildCommand),
+  /// Run language-native tests for a project
+  Test(TestCommand),
   /// Initialize a new Ignis project
   Init(InitCommand),
   /// Build the standard library
@@ -355,4 +367,36 @@ pub struct Cli {
   /// Automatically load standard library
   #[arg(short, long, default_value = "false")]
   pub auto_load_std: bool,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use clap::Parser;
+
+  #[test]
+  fn parses_test_subcommand_with_filter_and_project() {
+    let cli = Cli::parse_from(["ignis", "test", "math", "--project", "demo"]);
+
+    match cli.subcommand {
+      SubCommand::Test(cmd) => {
+        assert_eq!(cmd.filter.as_deref(), Some("math"));
+        assert_eq!(cmd.project.as_deref(), Some("demo"));
+      },
+      other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_test_subcommand_without_filter() {
+    let cli = Cli::parse_from(["ignis", "test"]);
+
+    match cli.subcommand {
+      SubCommand::Test(cmd) => {
+        assert_eq!(cmd.filter, None);
+        assert_eq!(cmd.project, None);
+      },
+      other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
 }

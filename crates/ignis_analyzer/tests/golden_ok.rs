@@ -118,6 +118,39 @@ function count(): i32 {
 }
 
 #[test]
+fn test_attribute_marks_top_level_function() {
+  let result = common::analyze(
+    r#"
+@test
+function smoke(): void {
+    return;
+}
+"#,
+  );
+
+  let smoke_name = result.output.symbols.borrow_mut().intern("smoke");
+  let test_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == smoke_name).then_some(def))
+    .expect("smoke definition");
+
+  let has_test_attr = match &test_def.kind {
+    ignis_type::definition::DefinitionKind::Function(function) => {
+      function.attrs.iter().any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test))
+    },
+    other => panic!("expected function definition, got {:?}", other),
+  };
+
+  assert!(has_test_attr, "expected @test to be recorded on the function definition");
+  assert_snapshot!(
+    "test_attribute_marks_top_level_function_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn for_loop() {
   let result = common::analyze(
     r#"

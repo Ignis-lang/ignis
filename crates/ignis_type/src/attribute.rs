@@ -7,6 +7,7 @@ pub enum RecordAttr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FunctionAttr {
+  Test,
   ExternName(String),
   Cold,
   Deprecated(Option<String>),

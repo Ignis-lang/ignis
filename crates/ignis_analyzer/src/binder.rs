@@ -722,7 +722,7 @@ impl<'a> Analyzer<'a> {
       Visibility::Private
     };
 
-    let method_attrs = self.bind_function_attrs(&method.attrs);
+    let method_attrs = self.bind_function_attrs(&method.attrs, "method", false);
 
     let method_def = Definition {
       kind: DefinitionKind::Method(MethodDefinition {
@@ -894,7 +894,7 @@ impl<'a> Analyzer<'a> {
       param_defs.push(param_def_id);
     }
 
-    let method_attrs = self.bind_function_attrs(&method.attrs);
+    let method_attrs = self.bind_function_attrs(&method.attrs, "method", false);
 
     let method_def = Definition {
       kind: DefinitionKind::Method(MethodDefinition {
@@ -1093,7 +1093,7 @@ impl<'a> Analyzer<'a> {
       param_defs.push(def_id);
     }
 
-    let attrs = self.bind_function_attrs(&func.signature.attrs);
+    let attrs = self.bind_function_attrs(&func.signature.attrs, "function", true);
 
     // Create function definition first (without type params)
     let func_def = FunctionDefinition {
@@ -2056,6 +2056,8 @@ impl<'a> Analyzer<'a> {
   fn bind_function_attrs(
     &mut self,
     ast_attrs: &[ASTAttribute],
+    target: &str,
+    allow_test: bool,
   ) -> Vec<FunctionAttr> {
     let mut attrs = Vec::new();
 
@@ -2063,6 +2065,30 @@ impl<'a> Analyzer<'a> {
       let name = self.get_symbol_name(&attr.name);
 
       match name.as_str() {
+        "test" => {
+          if !allow_test {
+            self.add_diagnostic(
+              DiagnosticMessage::UnknownAttribute {
+                name,
+                target: target.to_string(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else if !attr.args.is_empty() {
+            self.add_diagnostic(
+              DiagnosticMessage::AttributeArgCount {
+                attr: name,
+                expected: 0,
+                got: attr.args.len(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else {
+            attrs.push(FunctionAttr::Test);
+          }
+        },
         "externName" => {
           if attr.args.len() != 1 {
             self.add_diagnostic(
@@ -2154,7 +2180,7 @@ impl<'a> Analyzer<'a> {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
               name,
-              target: "function".to_string(),
+              target: target.to_string(),
               span: attr.span.clone(),
             }
             .report(),
