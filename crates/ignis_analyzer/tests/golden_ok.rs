@@ -137,9 +137,10 @@ function smoke(): void {
     .expect("smoke definition");
 
   let has_test_attr = match &test_def.kind {
-    ignis_type::definition::DefinitionKind::Function(function) => {
-      function.attrs.iter().any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test))
-    },
+    ignis_type::definition::DefinitionKind::Function(function) => function
+      .attrs
+      .iter()
+      .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test)),
     other => panic!("expected function definition, got {:?}", other),
   };
 

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use ignis_config::{CHeader, TargetBackend};
+use ignis_type::definition::DefinitionId;
 use ignis_type::module::{ModuleId, ModulePath};
 use ignis_type::namespace::NamespaceStore;
 use ignis_type::symbol::SymbolTable;
@@ -28,6 +29,17 @@ impl Backend for SelectedBackend {
 
 pub struct BackendResult {
   pub contents: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestCase {
+  pub def_id: DefinitionId,
+  pub fq_name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestHarnessPlan {
+  pub tests: Vec<TestCase>,
 }
 
 pub enum BackendRequest<'a> {
@@ -65,6 +77,13 @@ pub enum LoweredBackendRequest<'a> {
     symbols: &'a SymbolTable,
     headers: &'a [CHeader],
     module_paths: &'a HashMap<ModuleId, ModulePath>,
+  },
+  EmitUserTestHarness {
+    namespaces: &'a NamespaceStore,
+    symbols: &'a SymbolTable,
+    headers: &'a [CHeader],
+    module_paths: &'a HashMap<ModuleId, ModulePath>,
+    plan: &'a TestHarnessPlan,
   },
   EmitUserModule {
     module_id: ModuleId,

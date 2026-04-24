@@ -10,7 +10,11 @@ use ignis_ast::{
   ASTNode, NodeId,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
-use ignis_type::{attribute::FunctionAttr, definition::{DefinitionKind, FunctionDefinition}, types::Type};
+use ignis_type::{
+  attribute::FunctionAttr,
+  definition::{DefinitionKind, FunctionDefinition},
+  types::Type,
+};
 
 /// Control flow termination status.
 #[derive(Clone, Copy, PartialEq, Debug)]

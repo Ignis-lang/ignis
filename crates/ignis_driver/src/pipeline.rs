@@ -6,7 +6,9 @@ use std::time::Instant;
 
 use colored::*;
 use ignis_ast::display::format_ast_nodes;
-use ignis_config::{DebugTrace, DumpKind, IgnisConfig, TargetBackend};
+use ignis_config::{
+  DebugTrace, DumpKind, IgnisBuildConfig, IgnisConfig, IgnisProjectConfig, IgnisSTDManifest, TargetBackend,
+};
 
 use ignis_log::{
   cmd_artifact, cmd_fail, cmd_header, cmd_ok, cmd_stats, log_dbg, log_phase, log_trc, phase_log, phase_ok, phase_warn,
@@ -31,6 +33,7 @@ use crate::context::CompilationContext;
 use crate::link::{
   compile_to_object, format_tool_error, link_executable, link_executable_multi, rebuild_std_runtime, LinkPlan,
 };
+use crate::project::{CliOverrides, load_project_toml, resolve_project};
 use crate::stages::{AnalyzedStage, BackendInput, CheckedStage, LirStage, ParsedStage, StageError};
 
 /// Compiler version for stamp file invalidation.
@@ -1252,14 +1255,233 @@ pub fn compile_project(
   Ok(())
 }
 
+fn load_manifest(std_path: &Path) -> IgnisSTDManifest {
+  let manifest_path = std_path.join("manifest.toml");
+
+  std::fs::read_to_string(&manifest_path)
+    .ok()
+    .and_then(|content| toml::from_str(&content).ok())
+    .unwrap_or_default()
+}
+
+fn build_test_driver_config(project_root: &Path) -> Result<(Arc<IgnisConfig>, crate::project::Project), ()> {
+  let toml_path = project_root.join("ignis.toml");
+  let project_toml = load_project_toml(&toml_path).map_err(|error| {
+    eprintln!("{} {}", "Error:".red().bold(), error);
+  })?;
+
+  let project =
+    resolve_project(project_root.to_path_buf(), project_toml, &CliOverrides::default()).map_err(|error| {
+      eprintln!("{} {}", "Error:".red().bold(), error);
+    })?;
+
+  let mut config = IgnisConfig::new_basic(false, Vec::new(), false, 0);
+
+  if let Some(std_path) = &project.std_path {
+    config.std_path = std_path.to_string_lossy().to_string();
+    config.manifest = load_manifest(std_path);
+  }
+
+  config.project_config = Some(IgnisProjectConfig::new(
+    project.name.clone(),
+    project.version.clone(),
+    Vec::new(),
+    String::new(),
+    Vec::new(),
+    String::new(),
+    String::new(),
+    project.target,
+    project.entry.to_string_lossy().to_string(),
+    project.out_dir.to_string_lossy().to_string(),
+    project.source_dir.to_string_lossy().to_string(),
+    project.opt_level > 0,
+    config.std_path.clone(),
+    project.std_path.is_some(),
+  ));
+  config.std = project.std_path.is_some();
+  config.auto_load_std = project.std_path.is_some();
+  config.test = true;
+  config.c_compiler = project.cc.clone();
+  config.cflags = project.cflags.clone();
+  config.aliases = project.aliases.clone();
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(project.entry.to_string_lossy().to_string()),
+    project.target,
+    true,
+    project.opt_level > 0,
+    project.out_dir.to_string_lossy().to_string(),
+    Vec::new(),
+    None,
+    None,
+    None,
+    None,
+    None,
+    false,
+    project.bin,
+    false,
+    true,
+    true,
+  ));
+
+  Ok((Arc::new(config), project))
+}
+
+fn module_segments(
+  module_path: &ModulePath,
+  source_dir: &Path,
+) -> Vec<String> {
+  match module_path {
+    ModulePath::Std(name) => name.split("::").map(str::to_string).collect(),
+    ModulePath::Project(path) => {
+      let relative = path.strip_prefix(source_dir).unwrap_or(path.as_path());
+      let mut segments: Vec<String> = relative
+        .iter()
+        .map(|segment| segment.to_string_lossy().to_string())
+        .collect();
+
+      if let Some(last) = segments.last_mut()
+        && let Some(file_stem) = last.strip_suffix(".ign")
+      {
+        *last = file_stem.to_string();
+      }
+
+      if matches!(segments.last(), Some(last) if last == "mod") {
+        segments.pop();
+      }
+
+      segments
+    },
+  }
+}
+
+fn format_test_name(
+  definition_id: DefinitionId,
+  defs: &DefinitionStore,
+  namespaces: &ignis_type::namespace::NamespaceStore,
+  symbols: &SymbolTable,
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  source_dir: &Path,
+) -> Option<String> {
+  let definition = defs.get(&definition_id);
+  let mut segments = module_paths
+    .get(&definition.owner_module)
+    .map(|module_path| module_segments(module_path, source_dir))?;
+
+  if let Some(namespace_id) = definition.owner_namespace {
+    segments.extend(
+      namespaces
+        .full_path(namespace_id)
+        .into_iter()
+        .map(|symbol_id| symbols.get(&symbol_id).to_string()),
+    );
+  }
+
+  segments.push(symbols.get(&definition.name).to_string());
+
+  Some(segments.join("::"))
+}
+
+fn discover_test_cases(
+  defs: &DefinitionStore,
+  namespaces: &ignis_type::namespace::NamespaceStore,
+  symbols: &SymbolTable,
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  source_dir: &Path,
+) -> Vec<crate::backend::TestCase> {
+  defs
+    .iter()
+    .filter_map(|(definition_id, definition)| {
+      let DefinitionKind::Function(function) = &definition.kind else {
+        return None;
+      };
+
+      if !function
+        .attrs
+        .iter()
+        .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test))
+      {
+        return None;
+      }
+
+      format_test_name(definition_id, defs, namespaces, symbols, module_paths, source_dir).map(|fq_name| {
+        crate::backend::TestCase {
+          def_id: definition_id,
+          fq_name,
+        }
+      })
+    })
+    .collect()
+}
+
+fn build_test_harness_plan(
+  mut discovered_tests: Vec<crate::backend::TestCase>,
+  filter: Option<&str>,
+) -> crate::backend::TestHarnessPlan {
+  discovered_tests.sort_by(|left, right| left.fq_name.cmp(&right.fq_name));
+
+  if let Some(filter) = filter {
+    discovered_tests.retain(|test| test.fq_name.contains(filter));
+  }
+
+  crate::backend::TestHarnessPlan {
+    tests: discovered_tests,
+  }
+}
+
 pub fn run_project_tests(
-  _project_root: &Path,
-  _filter: Option<&str>,
+  project_root: &Path,
+  filter: Option<&str>,
 ) -> Result<(), ()> {
+  let start = Instant::now();
+  let (config, project) = build_test_driver_config(project_root)?;
+
+  cmd_header!(&config, "Testing", project.entry.display());
+  section!(&config, "Scanning & parsing");
+
+  let mut ctx = CompilationContext::new(&config);
+  let root_id = ctx
+    .discover_modules(project.entry.to_string_lossy().as_ref(), &config)
+    .map_err(|()| {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+    })?;
+
+  if config.std && config.auto_load_std {
+    ctx.discover_prelude_modules_for_all(&config);
+  }
+
+  section!(&config, "Analyzing");
+
+  let (output, has_errors) = ctx.compile_collect_all(root_id, &config)?;
+  render_diagnostics(&output.diagnostics, &ctx.source_map, config.quiet);
+
+  if has_errors {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+  let symbols = output.symbols.borrow();
+  let discovered_tests =
+    discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &project.source_dir);
+  let plan = build_test_harness_plan(discovered_tests, filter);
+
+  section!(&config, "Planning");
+  if plan.tests.is_empty() {
+    section_item!(&config, "No tests selected");
+    cmd_ok!(&config, "No tests selected", start.elapsed());
+    return Ok(());
+  }
+
+  for test in &plan.tests {
+    section_item!(&config, "{}", test.fq_name);
+  }
+
   eprintln!(
-    "{} project-mode 'ignis test' execution is deferred to a later implementation batch.",
-    "Error:".red().bold()
+    "{} test harness execution is deferred for this implementation batch after planning {} test(s).",
+    "Error:".red().bold(),
+    plan.tests.len()
   );
+  cmd_fail!(&config, "Test execution deferred", start.elapsed());
 
   Err(())
 }
@@ -2135,4 +2357,138 @@ fn normalize_path_for_include(path: &Path) -> String {
     .filter(|c| !matches!(c, std::path::Component::CurDir))
     .collect();
   normalized.display().to_string().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::HashMap;
+  use std::path::{Path, PathBuf};
+
+  use ignis_type::attribute::FunctionAttr;
+  use ignis_type::definition::{Definition, DefinitionKind, DefinitionStore, FunctionDefinition, Visibility};
+  use ignis_type::module::{ModuleId, ModulePath};
+  use ignis_type::namespace::NamespaceStore;
+  use ignis_type::span::Span;
+  use ignis_type::symbol::SymbolTable;
+  use ignis_type::types::TypeStore;
+
+  use super::{build_test_harness_plan, discover_test_cases};
+  use crate::backend::TestCase;
+
+  #[test]
+  fn discover_test_cases_collects_only_marked_functions_from_known_modules() {
+    let mut symbols = SymbolTable::new();
+    let mut namespaces = NamespaceStore::new();
+    let types = TypeStore::new();
+    let mut defs = DefinitionStore::new();
+
+    let helpers_name = symbols.intern("helpers");
+    let adds_name = symbols.intern("adds");
+    let smoke_name = symbols.intern("smoke");
+    let ignored_name = symbols.intern("ignored");
+    let not_a_test_name = symbols.intern("helper");
+
+    let helpers_namespace = namespaces.get_or_create(&[helpers_name], false);
+
+    alloc_test_function(&mut defs, adds_name, ModuleId::new(1), Some(helpers_namespace), &types);
+    alloc_test_function(&mut defs, smoke_name, ModuleId::new(0), None, &types);
+    alloc_plain_function(&mut defs, not_a_test_name, ModuleId::new(0), None, &types);
+    alloc_test_function(&mut defs, ignored_name, ModuleId::new(9), None, &types);
+
+    let module_paths = HashMap::from([
+      (
+        ModuleId::new(0),
+        ModulePath::Project(PathBuf::from("/tmp/project/src/main.ign")),
+      ),
+      (
+        ModuleId::new(1),
+        ModulePath::Project(PathBuf::from("/tmp/project/src/math.ign")),
+      ),
+    ]);
+
+    let discovered = discover_test_cases(&defs, &namespaces, &symbols, &module_paths, Path::new("/tmp/project/src"));
+
+    let names: Vec<&str> = discovered.iter().map(|test| test.fq_name.as_str()).collect();
+    assert_eq!(names, vec!["math::helpers::adds", "main::smoke"]);
+  }
+
+  #[test]
+  fn build_test_harness_plan_sorts_and_filters_by_case_sensitive_substring() {
+    let discovered = vec![
+      TestCase {
+        def_id: ignis_type::definition::DefinitionId::new(2),
+        fq_name: "math::helpers::Adds".to_string(),
+      },
+      TestCase {
+        def_id: ignis_type::definition::DefinitionId::new(1),
+        fq_name: "io::writes".to_string(),
+      },
+      TestCase {
+        def_id: ignis_type::definition::DefinitionId::new(0),
+        fq_name: "math::adds".to_string(),
+      },
+    ];
+
+    let sorted = build_test_harness_plan(discovered.clone(), None);
+    let sorted_names: Vec<&str> = sorted.tests.iter().map(|test| test.fq_name.as_str()).collect();
+    assert_eq!(sorted_names, vec!["io::writes", "math::adds", "math::helpers::Adds"]);
+
+    let filtered = build_test_harness_plan(discovered, Some("adds"));
+    let filtered_names: Vec<&str> = filtered.tests.iter().map(|test| test.fq_name.as_str()).collect();
+    assert_eq!(filtered_names, vec!["math::adds"]);
+  }
+
+  fn alloc_test_function(
+    defs: &mut DefinitionStore,
+    name: ignis_type::symbol::SymbolId,
+    owner_module: ModuleId,
+    owner_namespace: Option<ignis_type::namespace::NamespaceId>,
+    types: &TypeStore,
+  ) {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Function(FunctionDefinition {
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type: types.void(),
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: Default::default(),
+        attrs: vec![FunctionAttr::Test],
+      }),
+      name,
+      span: Span::default(),
+      name_span: Span::default(),
+      visibility: Visibility::Private,
+      owner_module,
+      owner_namespace,
+      doc: None,
+    });
+  }
+
+  fn alloc_plain_function(
+    defs: &mut DefinitionStore,
+    name: ignis_type::symbol::SymbolId,
+    owner_module: ModuleId,
+    owner_namespace: Option<ignis_type::namespace::NamespaceId>,
+    types: &TypeStore,
+  ) {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Function(FunctionDefinition {
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type: types.void(),
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: Default::default(),
+        attrs: Vec::new(),
+      }),
+      name,
+      span: Span::default(),
+      name_span: Span::default(),
+      visibility: Visibility::Private,
+      owner_module,
+      owner_namespace,
+      doc: None,
+    });
+  }
 }

@@ -137,7 +137,10 @@ fn resolve_test_input(cmd: &TestCommand) -> Result<TestInput, ()> {
   }
 }
 
-fn run_test(_cli: &Cli, cmd: &TestCommand) -> Result<(), ()> {
+fn run_test(
+  _cli: &Cli,
+  cmd: &TestCommand,
+) -> Result<(), ()> {
   match resolve_test_input(cmd)? {
     TestInput::DeferredSingleFile(path) => {
       eprintln!(
@@ -665,17 +668,11 @@ mod tests {
   #[test]
   fn resolve_test_input_uses_project_mode_for_filter_text() {
     let temp_dir = make_temp_dir("project_mode");
-    std::fs::write(
-      temp_dir.join("ignis.toml"),
-      "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
-    )
-    .expect("write ignis.toml");
+    std::fs::write(temp_dir.join("ignis.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n")
+      .expect("write ignis.toml");
     std::fs::create_dir_all(temp_dir.join("src")).expect("create src dir");
-    std::fs::write(
-      temp_dir.join("src").join("main.ign"),
-      "function main(): void { return; }",
-    )
-    .expect("write entry file");
+    std::fs::write(temp_dir.join("src").join("main.ign"), "function main(): void { return; }")
+      .expect("write entry file");
 
     let cmd = TestCommand {
       filter: Some("math".to_string()),

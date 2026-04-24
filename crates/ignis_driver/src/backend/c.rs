@@ -76,6 +76,16 @@ impl Backend for CBackend {
             headers,
             module_paths,
           } => emit_user_c_from_input(emit_input, namespaces, symbols, headers, module_paths),
+          LoweredBackendRequest::EmitUserTestHarness {
+            namespaces,
+            symbols,
+            headers,
+            module_paths,
+            plan,
+          } => {
+            let _ = plan;
+            emit_user_c_from_input(emit_input, namespaces, symbols, headers, module_paths)
+          },
           LoweredBackendRequest::EmitUserModule {
             module_id,
             namespaces,

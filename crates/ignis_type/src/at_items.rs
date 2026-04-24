@@ -208,7 +208,9 @@ static AT_ITEMS: &[AtItemMeta] = &[
     kind: AtItemKind::Directive,
     syntax: "@test",
     summary: "Marks a top-level function as a native test case.",
-    doc: Some("Valid on: top-level function. v0.5 tests must be non-generic, take zero parameters, return `void`, and not be extern."),
+    doc: Some(
+      "Valid on: top-level function. v0.5 tests must be non-generic, take zero parameters, return `void`, and not be extern.",
+    ),
   },
   AtItemMeta {
     name: "cold",
