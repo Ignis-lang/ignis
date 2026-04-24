@@ -315,6 +315,33 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_err_multi_byte_char_literal_unicode_escape() {
+  use ignis_type::compilation_context::CompilationContext;
+
+  let errors = common::parse_errors_with_ctx(
+    r#"
+function main(): i32 {
+    let c: char = '\u{100}';
+    return c as i32;
+}
+"#,
+    CompilationContext::default(),
+  );
+
+  assert!(
+    !errors.is_empty(),
+    "Expected parse error for multi-byte char literal unicode escape"
+  );
+  assert!(
+    errors
+      .iter()
+      .any(|error| error.contains("multi-byte char literal; use str")),
+    "Expected multi-byte char literal error, got: {:?}",
+    errors
+  );
+}
+
+#[test]
 fn e2e_err_bitcast_missing_arg() {
   e2e_error_test(
     "err_bitcast_missing_arg",

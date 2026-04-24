@@ -18,6 +18,29 @@ static void test_string_basic(void) {
   ignis_string_drop(&s);
 }
 
+static void test_string_cstr_is_zero_copy_view(void) {
+  IgnisString s = ignis_string_from_cstr("hello");
+
+  assert(ignis_string_cstr(&s) == s.data);
+  assert(ignis_string_cstr(&s)[s.len] == '\0');
+
+  ignis_string_drop(&s);
+}
+
+static void test_string_from_cstr_copies_and_preserves_trailing_nul(void) {
+  char source[] = "hello";
+  IgnisString s = ignis_string_from_cstr(source);
+
+  assert(s.data != source);
+  assert(s.len == 5);
+  assert(s.data[s.len] == '\0');
+
+  source[0] = 'j';
+  assert(s.data[0] == 'h');
+
+  ignis_string_drop(&s);
+}
+
 static void test_string_concat(void) {
   IgnisString a = ignis_string_from_cstr("foo");
   IgnisString b = ignis_string_from_cstr("bar");
@@ -53,6 +76,24 @@ static void test_string_index_of(void) {
   ignis_string_drop(&needle);
 }
 
+static void test_string_search_uses_len_across_interior_nul(void) {
+  const char haystack_raw[] = {'a', 'b', '\0', 'c', 'd', '\0', 'e', 'f'};
+  const char needle_raw[] = {'\0', 'c', 'd', '\0'};
+  const char missing_raw[] = {'d', '\0', 'x'};
+  IgnisString haystack = ignis_string_from_len(haystack_raw, sizeof(haystack_raw));
+  IgnisString needle = ignis_string_from_len(needle_raw, sizeof(needle_raw));
+  IgnisString missing = ignis_string_from_len(missing_raw, sizeof(missing_raw));
+
+  assert(ignis_string_index_of(&haystack, &needle) == 2);
+  assert(ignis_string_contains(&haystack, &needle) == TRUE);
+  assert(ignis_string_index_of(&haystack, &missing) == -1);
+  assert(ignis_string_contains(&haystack, &missing) == FALSE);
+
+  ignis_string_drop(&haystack);
+  ignis_string_drop(&needle);
+  ignis_string_drop(&missing);
+}
+
 static void test_string_to_upper_lower(void) {
   IgnisString s = ignis_string_from_cstr("Hello");
   IgnisString upper = ignis_string_to_upper(&s);
@@ -64,6 +105,33 @@ static void test_string_to_upper_lower(void) {
   ignis_string_drop(&s);
   ignis_string_drop(&upper);
   ignis_string_drop(&lower);
+}
+
+static void test_string_from_len_preserves_trailing_nul_and_interior_nul(void) {
+  const char raw[] = {'a', '\0', 'b', 'c'};
+  IgnisString s = ignis_string_from_len(raw, sizeof(raw));
+
+  assert(ignis_string_len(&s) == sizeof(raw));
+  assert(memcmp(s.data, raw, sizeof(raw)) == 0);
+  assert(s.data[s.len] == '\0');
+
+  ignis_string_drop(&s);
+}
+
+static void test_string_compare_uses_len_across_interior_nul(void) {
+  const char lower_raw[] = {'a', '\0', 'b'};
+  const char higher_raw[] = {'a', '\0', 'c'};
+  IgnisString lower = ignis_string_from_len(lower_raw, sizeof(lower_raw));
+  IgnisString higher = ignis_string_from_len(higher_raw, sizeof(higher_raw));
+  IgnisString same = ignis_string_from_len(lower_raw, sizeof(lower_raw));
+
+  assert(ignis_string_compare(&lower, &higher) < 0);
+  assert(ignis_string_compare(&higher, &lower) > 0);
+  assert(ignis_string_compare(&lower, &same) == 0);
+
+  ignis_string_drop(&lower);
+  ignis_string_drop(&higher);
+  ignis_string_drop(&same);
 }
 
 static void test_number_to_string(void) {
@@ -376,10 +444,15 @@ static void test_rc_payload_alignment(void) {
 
 int main(void) {
   test_string_basic();
+  test_string_cstr_is_zero_copy_view();
+  test_string_from_cstr_copies_and_preserves_trailing_nul();
   test_string_concat();
   test_string_substring();
   test_string_index_of();
+  test_string_search_uses_len_across_interior_nul();
   test_string_to_upper_lower();
+  test_string_from_len_preserves_trailing_nul_and_interior_nul();
+  test_string_compare_uses_len_across_interior_nul();
   test_number_to_string();
   test_memory_alloc();
   test_memory_aligned_alloc();

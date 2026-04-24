@@ -120,6 +120,9 @@ export namespace Fs {
   }
 
   /// Reads a full file and returns it as a String.
+  ///
+  /// The resulting owned string preserves every byte in the file, including
+  /// interior NUL bytes.
   function readToString(path: str): Result<String, Io::IoError> {
     let bytes: Vector<u8> = Fs::read(path)!;
     let len: u64 = bytes.length();
@@ -136,7 +139,7 @@ export namespace Fs {
       |> @pointerFromInteger<*mut u8>(_)
       |> @write<u8>(_, 0);
 
-    return Result::OK(String::create(raw as str));
+    return Result::OK(String::create(raw, len));
   }
 
   /// Creates/truncates a file and writes all bytes from `data`.
@@ -148,6 +151,9 @@ export namespace Fs {
   }
 
   /// Creates/truncates a file and writes an entire String.
+  ///
+  /// This is byte-counted: it always writes `s.length()` bytes from the owned
+  /// buffer, even when interior NUL bytes exist.
   function writeString(path: str, s: &String): Result<boolean, Io::IoError> {
     return Fs::write(path, s.toStr() as *void, s.length());
   }

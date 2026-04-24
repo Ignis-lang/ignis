@@ -1,17 +1,23 @@
 //!
 //! # String Module
 //!
-//! Owned, heap-backed byte string type and related utilities.
+//! Owned, heap-backed UTF-8 byte string type and related utilities.
 //!
 //! ## Overview
 //!
 //! `String` is a value-type record whose `data` buffer lives on the heap.
 //! It implements `Drop` so the buffer is freed automatically when the
 //! owning binding goes out of scope, and `Clone` for explicit deep copies.
+//! Its storage is an owned UTF-8 byte buffer with a byte-counted `len` field.
 //!
 //! `str` is the primitive immutable string-slice type (`const char*` in C).
-//! String literals have type `str`.  Use `String::create(s)` to create an
+//! In v0.4 it remains a borrowed NUL-terminated UTF-8 byte view.
+//! String literals have type `str`. Use `String::create(s)` to create an
 //! owned copy from a `str`.
+//!
+//! Interior NUL bytes are preserved in owned storage.
+//! toStr() is a zero-copy interop view.
+//! C-string consumers may stop at the first interior NUL.
 //!
 //! ## Memory Layout
 //!
@@ -96,6 +102,7 @@ extern __string {
   function ignis_string_init_new(out: &mut String): void;
   function ignis_string_init_with_capacity(out: &mut String, cap: u64): void;
   function ignis_string_init_from_cstr(out: &mut String, s: str): void;
+  function ignis_string_init_from_len(out: &mut String, s: *mut u8, len: u64): void;
   function ignis_string_init_clone(out: &mut String, s: &String): void;
   function ignis_string_init_concat(out: &mut String, a: &String, b: &String): void;
   function ignis_string_init_substring(out: &mut String, s: &String, start: i64, len: i64): void;
@@ -131,10 +138,12 @@ extern __string {
   function ignis_string_init_from_f64(out: &mut String, value: f64): void;
 }
 
-/// Owned, heap-backed byte string.
+/// Owned, heap-backed UTF-8 byte string.
 ///
 /// The `data` buffer is heap-allocated and freed when the String is dropped.
-/// All operations are byte-oriented (no UTF-8 decoding).
+/// The record stores an owned UTF-8 byte buffer with byte-counted length and
+/// a trailing NUL byte for interop. All operations are byte-oriented (no UTF-8
+/// decoding).
 ///
 /// Implements `Drop` for automatic cleanup and `Clone` for deep copies.
 ///
@@ -226,6 +235,18 @@ export record String {
   public static create(s: str): String {
     let mut result: String = String { data: null, len: 0, cap: 0 };
     __string::ignis_string_init_from_cstr(&mut result, s);
+    return result;
+  }
+
+  /// Creates an owned String by copying exactly `len` bytes from `bytes`.
+  ///
+  /// This overload preserves interior NUL bytes in owned storage. It is for
+  /// len-aware byte sources such as file reads. `toStr()` is still only a
+  /// zero-copy interop view and C-string consumers may stop at the first
+  /// interior NUL.
+  public static create(bytes: *mut u8, len: u64): String {
+    let mut result: String = String { data: null, len: 0, cap: 0 };
+    __string::ignis_string_init_from_len(&mut result, bytes, len);
     return result;
   }
 
@@ -437,9 +458,10 @@ export record String {
   }
 
   /// Returns an immutable `str` view (C `const char*`) of this string's data.
-  ///
-  /// The returned `str` borrows the String's buffer. It is valid as long
-  /// as the String is alive and not mutated.
+///
+  /// `toStr()` is a zero-copy interop view. The returned `str` borrows the
+  /// String's buffer and is valid as long as the String is alive and not
+  /// mutated, but C-string consumers may stop at the first interior NUL byte.
   ///
   /// # Example
   ///
@@ -666,7 +688,30 @@ export record String {
 
   public hash(&self, hasher: &mut Hasher): void {
     let mut state: &mut Hasher = hasher;
-    state.writeStr(self.toStr());
+    // Keep owned-byte hashing on the stable writeStr path until direct
+    // writeByte hashing stops collapsing distinct byte sequences here.
+    let mut encoded: String = String::withCapacity(self.length() * 2);
+
+    let mut index: u64 = 0;
+    while (index < self.length()) {
+      let byte: u8 = __string::ignis_string_char_at(self, index) as u8;
+      let high: u8 = (byte >> 4) & 15;
+      let low: u8 = byte & 15;
+
+      encoded.pushChar(String::hexDigit(high));
+      encoded.pushChar(String::hexDigit(low));
+      index += 1;
+    }
+
+    state.writeStr(encoded.toStr());
+  }
+
+  private static hexDigit(value: u8): char {
+    if (value < 10) {
+      return (48 + value) as char;
+    }
+
+    return (87 + value) as char;
   }
 
   // ---------------------------------------------------------------------------

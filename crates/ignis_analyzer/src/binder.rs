@@ -1668,13 +1668,17 @@ impl<'a> Analyzer<'a> {
     &self,
     symbol: &ignis_type::symbol::SymbolId,
   ) -> Option<DefinitionId> {
-    self.defs.iter().filter_map(|(def_id, def)| {
-      if def.name == *symbol && matches!(def.kind, DefinitionKind::Trait(_)) {
-        Some(def_id)
-      } else {
-        None
-      }
-    }).last()
+    self
+      .defs
+      .iter()
+      .filter_map(|(def_id, def)| {
+        if def.name == *symbol && matches!(def.kind, DefinitionKind::Trait(_)) {
+          Some(def_id)
+        } else {
+          None
+        }
+      })
+      .last()
   }
 
   /// Pops the generic scope if type params were bound.

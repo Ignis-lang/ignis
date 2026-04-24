@@ -2765,17 +2765,37 @@ impl<'a> CEmitter<'a> {
     let hasher_expr = self.format_operand(func, hasher);
 
     match self.types.get(&ty).clone() {
-      Type::Boolean => self.emit_hasher_write_call("writeBoolean", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::Char => self.emit_hasher_write_call("writeChar", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::Boolean => {
+        self.emit_hasher_write_call("writeBoolean", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::Char => {
+        self.emit_hasher_write_call("writeChar", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
       Type::I8 => self.emit_hasher_write_call("writeI8", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::I16 => self.emit_hasher_write_call("writeI16", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::I32 => self.emit_hasher_write_call("writeI32", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::I64 => self.emit_hasher_write_call("writeI64", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::U8 => self.emit_hasher_write_call("writeByte", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::U16 => self.emit_hasher_write_call("writeU16", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::U32 => self.emit_hasher_write_call("writeU32", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::U64 => self.emit_hasher_write_call("writeU64", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
-      Type::Str => self.emit_hasher_write_call("writeStr", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty)),
+      Type::I16 => {
+        self.emit_hasher_write_call("writeI16", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::I32 => {
+        self.emit_hasher_write_call("writeI32", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::I64 => {
+        self.emit_hasher_write_call("writeI64", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::U8 => {
+        self.emit_hasher_write_call("writeByte", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::U16 => {
+        self.emit_hasher_write_call("writeU16", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::U32 => {
+        self.emit_hasher_write_call("writeU32", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::U64 => {
+        self.emit_hasher_write_call("writeU64", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
+      Type::Str => {
+        self.emit_hasher_write_call("writeStr", &hasher_expr, &self.format_builtin_ref_deref(&value_expr, ty))
+      },
       Type::Record(def_id) | Type::Enum(def_id) => {
         let Some(method_def_id) = self.find_named_instance_method(def_id, "hash") else {
           panic!("ICE: missing hash method for builtin hash on {:?}", self.types.get(&ty));
@@ -2823,7 +2843,15 @@ impl<'a> CEmitter<'a> {
           panic!("ICE: missing equals method for builtin eq on {:?}", self.types.get(&ty));
         };
         let method_name = self.def_name(method_def_id);
-        writeln!(self.output, "t{} = {}({}, {});", dest.index(), method_name, left_expr, right_expr).unwrap();
+        writeln!(
+          self.output,
+          "t{} = {}({}, {});",
+          dest.index(),
+          method_name,
+          left_expr,
+          right_expr
+        )
+        .unwrap();
       },
       other => panic!("ICE: builtin eq unsupported for {:?}", other),
     }
@@ -2835,7 +2863,9 @@ impl<'a> CEmitter<'a> {
     hasher_expr: &str,
     value_expr: &str,
   ) {
-    let hasher_def_id = self.find_hasher_def_id().expect("ICE: missing std::hash::Hasher definition");
+    let hasher_def_id = self
+      .find_hasher_def_id()
+      .expect("ICE: missing std::hash::Hasher definition");
     let method_def_id = self
       .find_named_instance_method(hasher_def_id, method_name)
       .unwrap_or_else(|| panic!("ICE: missing Hasher::{} method", method_name));
