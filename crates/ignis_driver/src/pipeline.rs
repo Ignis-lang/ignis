@@ -1512,6 +1512,47 @@ fn format_test_plan_snapshot(plan: &crate::backend::TestHarnessPlan) -> String {
   lines.join("\n")
 }
 
+const FAILED_TEST_OUTPUT_LIMIT: usize = 240;
+
+fn truncate_failed_test_output(output: &str) -> (String, bool) {
+  let trimmed = output.trim_end();
+
+  if trimmed.chars().count() <= FAILED_TEST_OUTPUT_LIMIT {
+    return (trimmed.to_string(), false);
+  }
+
+  let truncated: String = trimmed.chars().take(FAILED_TEST_OUTPUT_LIMIT).collect();
+  (truncated, true)
+}
+
+fn push_failed_test_stream(
+  lines: &mut Vec<String>,
+  label: &str,
+  output: &str,
+) {
+  if output.trim().is_empty() {
+    return;
+  }
+
+  let (display, was_truncated) = truncate_failed_test_output(output);
+
+  lines.push(format!("  {}:", label));
+  lines.extend(display.lines().map(|line| format!("    {}", line)));
+
+  if was_truncated {
+    lines.push("    [truncated]".to_string());
+  }
+}
+
+fn format_failed_test_details(result: &TestExecutionResult) -> String {
+  let mut lines = vec![format!("- {} (exit code {})", result.fq_name, result.exit_code)];
+
+  push_failed_test_stream(&mut lines, "stderr", &result.stderr);
+  push_failed_test_stream(&mut lines, "stdout", &result.stdout);
+
+  lines.join("\n")
+}
+
 #[cfg(test)]
 fn format_test_summary_snapshot(results: &[TestExecutionResult]) -> String {
   let total = results.len();
@@ -1526,6 +1567,18 @@ fn format_test_summary_snapshot(results: &[TestExecutionResult]) -> String {
   }
 
   lines.push(String::new());
+
+  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
+  if !failed_results.is_empty() {
+    lines.push("failures:".to_string());
+
+    for result in failed_results {
+      lines.push(format_failed_test_details(result));
+    }
+
+    lines.push(String::new());
+  }
+
   lines.push(format!("total: {}", total));
   lines.push(format!("passed: {}", passed));
   lines.push(format!("failed: {}", failed));
@@ -1610,8 +1663,6 @@ pub fn run_project_tests(
   );
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
-  link_plan.std_archive = None;
-
   let mut types = output.types.clone();
   let mono_output =
     ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
@@ -1927,6 +1978,19 @@ pub fn run_project_tests(
       "FAILED".red().bold()
     };
     section_item!(&config, "{} ... {}", result.fq_name, status);
+  }
+
+  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
+  if !failed_results.is_empty() {
+    section!(&config, "Failures");
+
+    for result in failed_results {
+      for line in format_failed_test_details(result).lines() {
+        println!("  {}", line);
+      }
+
+      println!();
+    }
   }
 
   section!(&config, "Summary");
@@ -2836,7 +2900,7 @@ mod tests {
 
   use super::{
     build_test_harness_plan, discover_test_cases, execute_test_harness_binary, format_test_plan_snapshot,
-    format_test_summary_snapshot, plan_project_tests_for_snapshot,
+    format_failed_test_details, format_test_summary_snapshot, plan_project_tests_for_snapshot,
   };
   use crate::backend::{TestCase, TestHarnessPlan};
 
@@ -3038,7 +3102,7 @@ function middle(): void {}
         fq_name: "main::fails".to_string(),
         success: false,
         exit_code: 101,
-        stdout: String::new(),
+        stdout: "stdout before panic\n".to_string(),
         stderr: "panic: boom\n".to_string(),
       },
       super::TestExecutionResult {
@@ -3051,6 +3115,24 @@ function middle(): void {}
     ];
 
     assert_snapshot!("native_test_runner_summary_snapshot", format_test_summary_snapshot(&results));
+  }
+
+  #[test]
+  fn failed_test_details_truncate_long_streams() {
+    let result = super::TestExecutionResult {
+      fq_name: "main::fails".to_string(),
+      success: false,
+      exit_code: 101,
+      stdout: "1234567890".repeat(20),
+      stderr: "abcdefghijklmnopqrstuvwxyz".repeat(20),
+    };
+
+    let details = format_failed_test_details(&result);
+
+    assert!(details.contains("main::fails"), "expected test name in formatted failure details");
+    assert!(details.contains("stderr:"), "expected stderr section in formatted failure details");
+    assert!(details.contains("stdout:"), "expected stdout section in formatted failure details");
+    assert!(details.contains("[truncated]"), "expected truncation marker in formatted failure details");
   }
 
   fn alloc_test_function(

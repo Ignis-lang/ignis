@@ -36,12 +36,14 @@ fn harness_binary_path(project_root: &Path) -> PathBuf {
 fn run_project_tests_returns_ok_when_filtered_tests_pass() {
   let project = write_test_project(
     r#"
+import Test from "std::test";
+
 @test
 function passes(): void {}
 
 @test
 function fails(): void {
-    @panic("boom");
+    Test::fail();
 }
 "#,
   );
@@ -56,15 +58,44 @@ function fails(): void {
 }
 
 #[test]
+fn run_project_tests_returns_ok_when_std_assertions_pass() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function assertPasses(): void {
+    Test::assert(true);
+}
+
+@test
+function assertEqPasses(): void {
+    Test::assertEq(7, 7);
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None);
+
+  assert!(result.is_ok(), "expected std assertions to pass");
+  assert!(
+    harness_binary_path(project.path()).exists(),
+    "expected test harness binary to be built"
+  );
+}
+
+#[test]
 fn run_project_tests_returns_err_when_any_selected_test_fails() {
   let project = write_test_project(
     r#"
+import Test from "std::test";
+
 @test
 function passes(): void {}
 
 @test
 function fails(): void {
-    @panic("boom");
+    Test::fail();
 }
 
 @test
@@ -111,6 +142,34 @@ function invalid(value: i32): void {}
   let result = run_project_tests(project.path(), None);
 
   assert!(result.is_err(), "expected invalid test shape to fail setup");
+  assert!(
+    !harness_binary_path(project.path()).exists(),
+    "expected no harness binary when setup fails before codegen"
+  );
+}
+
+#[test]
+fn run_project_tests_returns_err_when_assert_eq_uses_unsupported_equality() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+record Pair {
+    public value: i32;
+}
+
+@test
+function invalidEq(): void {
+    let left: Pair = Pair { value: 1 };
+    let right: Pair = Pair { value: 1 };
+    Test::assertEq(left, right);
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None);
+
+  assert!(result.is_err(), "expected unsupported equality to fail test setup");
   assert!(
     !harness_binary_path(project.path()).exists(),
     "expected no harness binary when setup fails before codegen"
