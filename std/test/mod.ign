@@ -30,45 +30,45 @@ import LibC from "std::libc";
 import Path from "std::path";
 
 /// Assertion helpers for `@test` bodies.
-export record Test {
+export namespace Test {
   /// Fails the current test when `condition` is false.
-  public static assert(condition: boolean): void {
+  function assert(condition: boolean): void {
     if (!condition) {
       @panic("assertion failed");
     }
   }
 
   /// Fails the current test unconditionally.
-  public static fail(): void {
+  function fail(): void {
     @panic("test failed");
   }
 
   /// Fails the current test when two `i32` values are not equal.
-  public static assertEq(left: i32, right: i32): void {
+  function assertEq(left: i32, right: i32): void {
     if (!(left == right)) {
       @panic("assertion failed: values are not equal");
     }
   }
 
   /// Fails the current test when the named text snapshot does not match.
-  public static assertSnapshot(name: str, actual: str): void {
+  function assertSnapshot(name: str, actual: str): void {
     let actualText: String = String::create(actual);
     Test::assertSnapshotText(name, &actualText);
   }
 
   /// Reads `filePath` as UTF-8 text before applying snapshot comparison.
-  public static assertFileSnapshot(name: str, filePath: str): void {
+  function assertFileSnapshot(name: str, filePath: str): void {
     match (Fs::readToString(filePath)) {
       Result::OK(actualText) -> Test::assertSnapshotText(name, &actualText),
-      Result::ERROR(error) -> Test::failSnapshotIo(
+      Result::ERROR(_) -> Test::failSnapshotIo(
         "snapshot input read failed",
-        String::create(filePath),
+        filePath,
         "io error",
       ),
     };
   }
 
-  static assertSnapshotText(name: str, actual: &String): void {
+  function assertSnapshotText(name: str, actual: &String): void {
     let testName: String = Test::requiredSnapshotEnv("IGNIS_TEST_NAME");
     let snapshotDir: String = Test::requiredSnapshotEnv("IGNIS_TEST_SNAPSHOT_DIR");
     let updateSnapshots: boolean = Test::snapshotUpdateModeEnabled();
@@ -98,21 +98,21 @@ export record Test {
 
         Test::failSnapshotMismatch(&snapshotPathStr, expectedText.length(), actual.length());
       },
-      Result::ERROR(_) -> Test::failSnapshotIo("snapshot read failed", snapshotPathStr, "io error"),
+      Result::ERROR(_) -> Test::failSnapshotIo("snapshot read failed", snapshotPathStr.toStr(), "io error"),
     };
   }
 
-  static requiredSnapshotEnv(name: str): String {
+  function requiredSnapshotEnv(name: str): String {
     let value: *mut u8 = LibC::Process::getenv(name as *u8);
     if (value == null) {
       let detail: String = String::create("missing test runner environment: ").concat(name);
-      Test::failSnapshotIo("snapshot context missing", String::create(name), detail.toStr());
+      Test::failSnapshotIo("snapshot context missing", name, detail.toStr());
     }
 
     return String::create(value as str);
   }
 
-  static snapshotUpdateModeEnabled(): boolean {
+  function snapshotUpdateModeEnabled(): boolean {
     let value: *mut u8 = LibC::Process::getenv("IGNIS_TEST_UPDATE_SNAPSHOTS" as *u8);
     if (value == null) {
       return false;
@@ -121,7 +121,7 @@ export record Test {
     return @read<u8>(value) == 49;
   }
 
-  static snapshotPath(
+  function snapshotPath(
     snapshotDir: &String,
     testName: &String,
     snapshotName: str,
@@ -132,7 +132,7 @@ export record Test {
     return path;
   }
 
-  static snapshotFileName(
+  function snapshotFileName(
     testName: &String,
     snapshotName: str,
   ): String {
@@ -147,7 +147,7 @@ export record Test {
     return fileName;
   }
 
-  static escapeSnapshotComponent(value: &String): String {
+  function escapeSnapshotComponent(value: &String): String {
     let mut escaped: String = String::withCapacity(value.length() * 3);
     let mut index: u64 = 0;
 
@@ -172,7 +172,7 @@ export record Test {
     return escaped;
   }
 
-  static isSafeSnapshotByte(byte: u8): boolean {
+  function isSafeSnapshotByte(byte: u8): boolean {
     let isNumber: boolean = byte >= 48 && byte <= 57;
     let isUpper: boolean = byte >= 65 && byte <= 90;
     let isLower: boolean = byte >= 97 && byte <= 122;
@@ -181,7 +181,7 @@ export record Test {
     return isNumber || isUpper || isLower || isPunctuation;
   }
 
-  static hexDigit(value: u8): char {
+  function hexDigit(value: u8): char {
     if (value < 10) {
       return (48 + value) as char;
     }
@@ -189,7 +189,7 @@ export record Test {
     return (87 + value) as char;
   }
 
-  static writeSnapshot(
+  function writeSnapshot(
     snapshotDir: &String,
     snapshotPath: &Path::PathBuf,
     actual: &String,
@@ -198,7 +198,7 @@ export record Test {
       Result::OK(_) -> {},
       Result::ERROR(_) -> Test::failSnapshotIo(
         "snapshot directory create failed",
-        snapshotDir.clone(),
+        snapshotDir.toStr(),
         "io error",
       ),
     };
@@ -208,26 +208,26 @@ export record Test {
         if (!wroteAll) {
           Test::failSnapshotIo(
             "snapshot write failed",
-            snapshotPath.toString(),
+            snapshotPath.asStr(),
             "short write",
           );
         }
       },
       Result::ERROR(_) -> Test::failSnapshotIo(
         "snapshot write failed",
-        snapshotPath.toString(),
+        snapshotPath.asStr(),
         "io error",
       ),
     };
   }
 
-  static failSnapshotMissing(snapshotPath: &String): void {
+  function failSnapshotMissing(snapshotPath: &String): void {
     Io::eprintln("snapshot missing");
     Test::printSnapshotPath(snapshotPath);
     @panic("snapshot assertion failed");
   }
 
-  static failSnapshotMismatch(
+  function failSnapshotMismatch(
     snapshotPath: &String,
     expectedBytes: u64,
     actualBytes: u64,
@@ -239,18 +239,20 @@ export record Test {
     @panic("snapshot assertion failed");
   }
 
-  static failSnapshotIo(
+  function failSnapshotIo(
     reason: str,
-    snapshotPath: String,
+    snapshotPath: str,
     detail: str,
   ): void {
+    let snapshotPathString: String = String::create(snapshotPath);
+
     Io::eprintln(reason);
-    Test::printSnapshotPath(&snapshotPath);
+    Test::printSnapshotPath(&snapshotPathString);
     Io::eprintln(String::create("detail: ").concat(detail));
     @panic("snapshot assertion failed");
   }
 
-  static printSnapshotPath(snapshotPath: &String): void {
+  function printSnapshotPath(snapshotPath: &String): void {
     Io::eprintln(String::create("snapshot: ").concat(snapshotPath));
   }
 }
