@@ -169,7 +169,7 @@ function invalidEq(): void {
 
   let result = run_project_tests(project.path(), None);
 
-  assert!(result.is_err(), "expected unsupported equality to fail test setup");
+  assert!(result.is_err(), "expected unsupported equality overload to fail test setup");
   assert!(
     !harness_binary_path(project.path()).exists(),
     "expected no harness binary when setup fails before codegen"
