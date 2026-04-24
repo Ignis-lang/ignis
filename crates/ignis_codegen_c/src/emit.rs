@@ -22,6 +22,12 @@ use crate::EmitInput;
 
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestHarnessEntry {
+  pub def_id: DefinitionId,
+  pub fq_name: String,
+}
+
 #[derive(Clone, Copy)]
 enum EntryMainReturn {
   I32,
@@ -72,6 +78,9 @@ pub struct CEmitter<'a> {
 
   /// Maps thunk DefinitionId → env struct name. Populated during `emit_closure_types()`.
   closure_env_names: HashMap<DefinitionId, String>,
+
+  /// Optional native test harness dispatch table.
+  test_harness: Option<&'a [TestHarnessEntry]>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -98,6 +107,7 @@ impl<'a> CEmitter<'a> {
       forced_emit_defs: HashSet::new(),
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
+      test_harness: None,
     }
   }
 
@@ -128,6 +138,7 @@ impl<'a> CEmitter<'a> {
       forced_emit_defs: HashSet::new(),
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
+      test_harness: None,
     }
   }
 
@@ -159,6 +170,7 @@ impl<'a> CEmitter<'a> {
       forced_emit_defs: HashSet::new(),
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
+      test_harness: None,
     }
   }
 
@@ -190,6 +202,37 @@ impl<'a> CEmitter<'a> {
       forced_emit_defs: HashSet::new(),
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
+      test_harness: None,
+    }
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn with_test_harness_target(
+    program: &'a LirProgram,
+    types: &'a TypeStore,
+    defs: &'a DefinitionStore,
+    namespaces: &'a NamespaceStore,
+    symbols: &'a SymbolTable,
+    headers: &'a [CHeader],
+    _module_paths: &'a HashMap<ModuleId, ModulePath>,
+    test_harness: &'a [TestHarnessEntry],
+  ) -> Self {
+    Self {
+      program,
+      types,
+      defs,
+      namespaces,
+      symbols,
+      headers,
+      output: String::new(),
+      current_fn_id: None,
+      target: None,
+      module_paths: None,
+      std_path: None,
+      forced_emit_defs: HashSet::new(),
+      closure_struct_names: HashMap::new(),
+      closure_env_names: HashMap::new(),
+      test_harness: Some(test_harness),
     }
   }
 
@@ -220,6 +263,27 @@ impl<'a> CEmitter<'a> {
     self.output
   }
 
+  pub fn emit_test_harness_only(
+    mut self,
+    test_harness: &'a [TestHarnessEntry],
+  ) -> String {
+    self.test_harness = Some(test_harness);
+
+    self.emit_implicit_headers();
+    self.emit_headers();
+
+    for test in test_harness {
+      writeln!(self.output, "extern void {}(void);", self.def_name(test.def_id)).unwrap();
+    }
+
+    if !test_harness.is_empty() {
+      writeln!(self.output).unwrap();
+    }
+
+    self.emit_test_harness_wrapper(test_harness);
+    self.output
+  }
+
   /// Emit C headers implied by instructions in the program (e.g. stdio for panic, math for pow).
   fn emit_implicit_headers(&mut self) {
     let mut needs_stdio = false;
@@ -245,6 +309,11 @@ impl<'a> CEmitter<'a> {
 
     if matches!(self.entry_main_return_kind(), Some(EntryMainReturn::TryI32 { .. })) {
       needs_stdio = true;
+    }
+
+    if self.test_harness.is_some() {
+      needs_stdio = true;
+      needs_string = true;
     }
 
     if needs_stdio {
@@ -1353,6 +1422,11 @@ impl<'a> CEmitter<'a> {
   }
 
   fn emit_entry_wrapper(&mut self) {
+    if let Some(test_harness) = self.test_harness {
+      self.emit_test_harness_wrapper(test_harness);
+      return;
+    }
+
     let Some((entry_def_id, entry_return_type)) = self
       .entry_main_def_and_func()
       .map(|(def_id, entry_func)| (def_id, entry_func.return_type))
@@ -1426,6 +1500,32 @@ impl<'a> CEmitter<'a> {
       },
     }
 
+    writeln!(self.output, "}}\n").unwrap();
+  }
+
+  fn emit_test_harness_wrapper(
+    &mut self,
+    test_harness: &[TestHarnessEntry],
+  ) {
+    writeln!(self.output, "int main(int argc, char** argv) {{").unwrap();
+    writeln!(self.output, "    if (argc != 3 || strcmp(argv[1], \"--ignis-test\") != 0) {{").unwrap();
+    writeln!(
+      self.output,
+      "        fprintf(stderr, \"Error: expected --ignis-test <name>\\n\");"
+    )
+    .unwrap();
+    writeln!(self.output, "        return 2;").unwrap();
+    writeln!(self.output, "    }}").unwrap();
+
+    for test in test_harness {
+      writeln!(self.output, "    if (strcmp(argv[2], {:?}) == 0) {{", test.fq_name).unwrap();
+      writeln!(self.output, "        {}();", self.def_name(test.def_id)).unwrap();
+      writeln!(self.output, "        return 0;").unwrap();
+      writeln!(self.output, "    }}").unwrap();
+    }
+
+    writeln!(self.output, "    fprintf(stderr, \"Error: unknown test %s\\n\", argv[2]);").unwrap();
+    writeln!(self.output, "    return 2;").unwrap();
     writeln!(self.output, "}}\n").unwrap();
   }
 
@@ -3439,6 +3539,27 @@ pub fn emit_user_c_from_input(
     module_paths,
   )
   .emit()
+}
+
+pub fn emit_user_test_harness_from_input(
+  input: EmitInput<'_>,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  headers: &[CHeader],
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  test_harness: &[TestHarnessEntry],
+) -> String {
+  CEmitter::with_test_harness_target(
+    input.program,
+    input.types,
+    input.defs,
+    namespaces,
+    symbols,
+    headers,
+    module_paths,
+    test_harness,
+  )
+  .emit_test_harness_only(test_harness)
 }
 
 /// Emit C for a specific std module. Prepends umbrella header if provided.

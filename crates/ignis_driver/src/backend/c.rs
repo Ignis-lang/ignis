@@ -2,7 +2,8 @@ use std::sync::OnceLock;
 
 use ignis_codegen_c::{
   emit_c_from_input, emit_std_header_from_input, emit_std_module_c_from_input, emit_std_module_h_from_input,
-  emit_user_c_from_input, emit_user_module_c_from_input, emit_user_module_h_from_input, EmitInput,
+  emit_user_c_from_input, emit_user_module_c_from_input, emit_user_module_h_from_input,
+  emit_user_test_harness_from_input, EmitInput, TestHarnessEntry,
 };
 use ignis_lir::LirProgram;
 use ignis_type::definition::DefinitionStore;
@@ -82,10 +83,21 @@ impl Backend for CBackend {
             headers,
             module_paths,
             plan,
-          } => {
-            let _ = plan;
-            emit_user_c_from_input(emit_input, namespaces, symbols, headers, module_paths)
-          },
+          } => emit_user_test_harness_from_input(
+            emit_input,
+            namespaces,
+            symbols,
+            headers,
+            module_paths,
+            &plan
+              .tests
+              .iter()
+              .map(|test| TestHarnessEntry {
+                def_id: test.def_id,
+                fq_name: test.fq_name.clone(),
+              })
+              .collect::<Vec<_>>(),
+          ),
           LoweredBackendRequest::EmitUserModule {
             module_id,
             namespaces,

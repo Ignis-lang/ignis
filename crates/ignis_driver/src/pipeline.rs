@@ -1428,6 +1428,51 @@ fn build_test_harness_plan(
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestExecutionResult {
+  fq_name: String,
+  success: bool,
+  exit_code: i32,
+  stdout: String,
+  stderr: String,
+}
+
+fn collect_test_mono_roots(plan: &crate::backend::TestHarnessPlan) -> Vec<DefinitionId> {
+  plan.tests.iter().map(|test| test.def_id).collect()
+}
+
+fn test_harness_paths(project: &crate::project::Project) -> (PathBuf, PathBuf) {
+  let layout = BuildLayout::with_project_root(&project.name, &project.out_dir, &project.root);
+  let bin_path = layout.bin_dir().join(format!("{}-tests", project.name));
+  let harness_c_path = project.out_dir.join(format!("{}-tests-harness.c", project.name));
+  (harness_c_path, bin_path)
+}
+
+fn execute_test_harness_binary(
+  binary_path: &Path,
+  plan: &crate::backend::TestHarnessPlan,
+) -> Result<Vec<TestExecutionResult>, String> {
+  let mut results = Vec::with_capacity(plan.tests.len());
+
+  for test in &plan.tests {
+    let output = Command::new(binary_path)
+      .arg("--ignis-test")
+      .arg(&test.fq_name)
+      .output()
+      .map_err(|error| format!("Failed to run test '{}': {}", test.fq_name, error))?;
+
+    results.push(TestExecutionResult {
+      fq_name: test.fq_name.clone(),
+      success: output.status.success(),
+      exit_code: output.status.code().unwrap_or(1),
+      stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+      stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    });
+  }
+
+  Ok(results)
+}
+
 pub fn run_project_tests(
   project_root: &Path,
   filter: Option<&str>,
@@ -1460,9 +1505,10 @@ pub fn run_project_tests(
   }
 
   let module_paths = build_module_paths_from_graph(&ctx.module_graph);
-  let symbols = output.symbols.borrow();
-  let discovered_tests =
-    discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &project.source_dir);
+  let discovered_tests = {
+    let symbols = output.symbols.borrow();
+    discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &project.source_dir)
+  };
   let plan = build_test_harness_plan(discovered_tests, filter);
 
   section!(&config, "Planning");
@@ -1476,14 +1522,364 @@ pub fn run_project_tests(
     section_item!(&config, "{}", test.fq_name);
   }
 
-  eprintln!(
-    "{} test harness execution is deferred for this implementation batch after planning {} test(s).",
-    "Error:".red().bold(),
-    plan.tests.len()
-  );
-  cmd_fail!(&config, "Test execution deferred", start.elapsed());
+  section!(&config, "Codegen & linking");
 
-  Err(())
+  let used_modules = ctx.module_graph.topological_sort();
+
+  if ensure_std_built(&used_modules, &ctx.module_graph, &config).is_err() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let manifest = if config.manifest.modules.is_empty() {
+    None
+  } else {
+    Some(&config.manifest)
+  };
+  let build_dir = config
+    .build_config
+    .as_ref()
+    .map(|build_config| build_config.output_dir.clone())
+    .unwrap_or_else(|| "build".to_string());
+  let mut link_plan = LinkPlan::from_modules(
+    &used_modules,
+    &ctx.module_graph,
+    Path::new(&config.std_path),
+    Path::new(&build_dir),
+    manifest,
+  );
+  link_plan.cc = config.c_compiler.clone();
+  link_plan.cflags = config.cflags.clone();
+  link_plan.std_archive = None;
+
+  let mut types = output.types.clone();
+  let mono_output =
+    ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+      .run(&collect_test_mono_roots(&plan));
+
+  #[cfg(debug_assertions)]
+  mono_output.verify_no_generics(&types);
+
+  let sym_table = output.symbols.borrow();
+
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+      .with_source_map(&ctx.source_map);
+  let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
+
+  let borrow_checker = ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+    .with_source_map(&ctx.source_map);
+  let borrow_diagnostics = borrow_checker.check();
+
+  for diagnostic in ownership_diagnostics.iter().chain(borrow_diagnostics.iter()) {
+    ignis_diagnostics::render(diagnostic, &ctx.source_map);
+  }
+
+  if ownership_diagnostics
+    .iter()
+    .chain(borrow_diagnostics.iter())
+    .any(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+  {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let used_module_set: std::collections::HashSet<ModuleId> = used_modules.iter().copied().collect();
+  let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
+    &mono_output.hir,
+    &mut types,
+    &mono_output.defs,
+    &sym_table,
+    &drop_schedules,
+    Some(&used_module_set),
+  );
+
+  if let Err(errors) = &verify_result {
+    eprintln!("{} Cannot execute tests: LIR verification failed", "Error:".red().bold());
+    for error in errors {
+      eprintln!("  {:?}", error);
+    }
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let selected_backend = select_backend_or_report(&config, "Test setup failed", start)?;
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+
+  let layout = BuildLayout::with_project_root(&project.name, &project.out_dir, &project.root);
+
+  if let Err(error) = layout.create_user_dirs() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} Failed to create user build directories: {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let std_dir = ctx.module_graph.std_path();
+  let user_modules: Vec<_> = used_modules
+    .iter()
+    .filter(|module_id| {
+      let module = ctx.module_graph.modules.get(module_id);
+      module.path.is_project() && !module.path.is_inside_dir(std_dir)
+    })
+    .collect();
+
+  if user_modules.is_empty() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} No user modules found", "Error:".red().bold());
+    return Err(());
+  }
+
+  for module_id in &user_modules {
+    let module = ctx.module_graph.modules.get(module_id);
+    let source_path = match &module.path {
+      ModulePath::Project(path) => path.clone(),
+      _ => continue,
+    };
+
+    if let Err(error) = layout.ensure_user_module_dirs(&source_path) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} Failed to create module directories: {}", "Error:".red().bold(), error);
+      return Err(());
+    }
+
+    let header_content = match emit_text(
+      &selected_backend,
+      BackendInput::Header {
+        types: &types,
+        defs: &mono_output.defs,
+      },
+      BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
+        module_id: **module_id,
+        source_path: &source_path,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+      }),
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
+
+    let header_path = layout.user_module_header(&source_path);
+    if let Err(error) = std::fs::write(&header_path, &header_content) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!(
+        "{} Failed to write header '{}': {}",
+        "Error:".red().bold(),
+        header_path.display(),
+        error
+      );
+      return Err(());
+    }
+  }
+
+  let mut link_plan_with_user_includes = link_plan.clone();
+  link_plan_with_user_includes
+    .include_dirs
+    .push(layout.user_include_dir());
+
+  let mut user_object_paths = Vec::with_capacity(user_modules.len());
+
+  for module_id in &user_modules {
+    let module = ctx.module_graph.modules.get(module_id);
+    let source_path = match &module.path {
+      ModulePath::Project(path) => path.clone(),
+      _ => continue,
+    };
+
+    let dep_ids = ctx.module_graph.transitive_deps(**module_id);
+    let mut user_module_headers = Vec::new();
+    let self_header_rel = layout.relativize(&source_path).with_extension("h");
+    user_module_headers.push(ignis_config::CHeader {
+      path: normalize_path_for_include(&self_header_rel),
+      quoted: true,
+    });
+
+    for dep_id in &dep_ids {
+      let dep_module = ctx.module_graph.modules.get(dep_id);
+      if let ModulePath::Project(dep_path) = &dep_module.path {
+        if dep_path.starts_with(std_dir) {
+          continue;
+        }
+
+        let dep_header_rel = layout.relativize(dep_path).with_extension("h");
+        user_module_headers.push(ignis_config::CHeader {
+          path: normalize_path_for_include(&dep_header_rel),
+          quoted: true,
+        });
+      }
+    }
+
+    let module_c_code = match emit_text(
+      &selected_backend,
+      BackendInput::Lowered {
+        root_id,
+        types: &types,
+        defs: &mono_output.defs,
+        program: &lir_program,
+      },
+      BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
+        module_id: **module_id,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+        headers: &link_plan_with_user_includes.headers,
+        module_paths: &module_paths,
+        user_module_headers: &user_module_headers,
+        std_path: std_dir,
+      }),
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
+
+    let module_c_path = layout.user_module_src(&source_path);
+    if let Err(error) = std::fs::write(&module_c_path, &module_c_code) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!(
+        "{} Failed to write module source '{}': {}",
+        "Error:".red().bold(),
+        module_c_path.display(),
+        error
+      );
+      return Err(());
+    }
+
+    let module_object_path = layout.user_module_obj(&source_path);
+    if let Err(error) = compile_to_object(
+      &module_c_path,
+      &module_object_path,
+      &link_plan_with_user_includes,
+      !ignis_log::show_verbose(&config),
+    ) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), error);
+      return Err(());
+    }
+
+    user_object_paths.push(module_object_path);
+  }
+
+  let harness_c_code = match emit_text(
+    &selected_backend,
+    BackendInput::Lowered {
+      root_id,
+      types: &types,
+      defs: &mono_output.defs,
+      program: &lir_program,
+    },
+    BackendRequest::Lowered(LoweredBackendRequest::EmitUserTestHarness {
+      namespaces: &output.namespaces,
+      symbols: &sym_table,
+      headers: &link_plan.headers,
+      module_paths: &module_paths,
+      plan: &plan,
+    }),
+  ) {
+    Ok(contents) => contents,
+    Err(stage_error) => {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), stage_error);
+      return Err(());
+    },
+  };
+
+  let (harness_c_path, bin_path) = test_harness_paths(&project);
+
+  if let Err(error) = std::fs::create_dir_all(&project.out_dir) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to create build directory '{}': {}",
+      "Error:".red().bold(),
+      project.out_dir.display(),
+      error
+    );
+    return Err(());
+  }
+
+  if let Some(parent) = bin_path.parent()
+    && let Err(error) = std::fs::create_dir_all(parent)
+  {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to create binary directory '{}': {}",
+      "Error:".red().bold(),
+      parent.display(),
+      error
+    );
+    return Err(());
+  }
+
+  if let Err(error) = std::fs::write(&harness_c_path, &harness_c_code) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to write harness source '{}': {}",
+      "Error:".red().bold(),
+      harness_c_path.display(),
+      error
+    );
+    return Err(());
+  }
+
+  let harness_object_path = harness_c_path.with_extension("o");
+  let suppress_link_logs = !ignis_log::show_verbose(&config);
+
+  if let Err(error) = compile_to_object(&harness_c_path, &harness_object_path, &link_plan, suppress_link_logs) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let mut executable_objects = user_object_paths;
+  executable_objects.push(harness_object_path);
+
+  if let Err(error) = link_executable_multi(&executable_objects, &bin_path, &link_plan, suppress_link_logs) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  section!(&config, "Running");
+
+  let results = match execute_test_harness_binary(&bin_path, &plan) {
+    Ok(results) => results,
+    Err(error) => {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), error);
+      return Err(());
+    },
+  };
+
+  let passed = results.iter().filter(|result| result.success).count();
+  let failed = results.len() - passed;
+
+  for result in &results {
+    let status = if result.success {
+      "ok".green()
+    } else {
+      "FAILED".red().bold()
+    };
+    section_item!(&config, "{} ... {}", result.fq_name, status);
+  }
+
+  section!(&config, "Summary");
+  section_item!(&config, "{} passed", passed);
+  section_item!(&config, "{} failed", failed);
+  cmd_artifact!(&config, "Test binary", bin_path.display());
+
+  if failed == 0 {
+    cmd_ok!(&config, "Tests passed", start.elapsed());
+    Ok(())
+  } else {
+    cmd_fail!(&config, "Tests failed", start.elapsed());
+    Err(())
+  }
 }
 
 /// Build the standard library into a static archive
@@ -2361,8 +2757,11 @@ fn normalize_path_for_include(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+  use std::fs;
   use std::collections::HashMap;
   use std::path::{Path, PathBuf};
+
+  use tempfile::TempDir;
 
   use ignis_type::attribute::FunctionAttr;
   use ignis_type::definition::{Definition, DefinitionKind, DefinitionStore, FunctionDefinition, Visibility};
@@ -2372,8 +2771,8 @@ mod tests {
   use ignis_type::symbol::SymbolTable;
   use ignis_type::types::TypeStore;
 
-  use super::{build_test_harness_plan, discover_test_cases};
-  use crate::backend::TestCase;
+  use super::{build_test_harness_plan, discover_test_cases, execute_test_harness_binary};
+  use crate::backend::{TestCase, TestHarnessPlan};
 
   #[test]
   fn discover_test_cases_collects_only_marked_functions_from_known_modules() {
@@ -2436,6 +2835,57 @@ mod tests {
     let filtered = build_test_harness_plan(discovered, Some("adds"));
     let filtered_names: Vec<&str> = filtered.tests.iter().map(|test| test.fq_name.as_str()).collect();
     assert_eq!(filtered_names, vec!["math::adds"]);
+  }
+
+  #[test]
+  fn execute_test_harness_binary_continues_after_failures() {
+    let temp_dir = TempDir::new().expect("temporary harness dir");
+    let harness_path = temp_dir.path().join("fake-harness.sh");
+
+    fs::write(
+      &harness_path,
+      "#!/bin/sh\nif [ \"$1\" != \"--ignis-test\" ]; then exit 2; fi\ncase \"$2\" in\n  \"math::pass\") printf \"pass\\n\"; exit 0 ;;&\n  \"math::fail\") printf \"boom\\n\" >&2; exit 101 ;;&\n  \"math::later\") printf \"later\\n\"; exit 0 ;;&\n  *) exit 2 ;;&\nesac\n",
+    )
+    .expect("write harness script");
+
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+
+      let mut permissions = fs::metadata(&harness_path).expect("script metadata").permissions();
+      permissions.set_mode(0o755);
+      fs::set_permissions(&harness_path, permissions).expect("mark script executable");
+    }
+
+    let results = execute_test_harness_binary(
+      &harness_path,
+      &TestHarnessPlan {
+        tests: vec![
+          TestCase {
+            def_id: ignis_type::definition::DefinitionId::new(0),
+            fq_name: "math::pass".to_string(),
+          },
+          TestCase {
+            def_id: ignis_type::definition::DefinitionId::new(1),
+            fq_name: "math::fail".to_string(),
+          },
+          TestCase {
+            def_id: ignis_type::definition::DefinitionId::new(2),
+            fq_name: "math::later".to_string(),
+          },
+        ],
+      },
+    )
+    .expect("execute harness binary");
+
+    let statuses: Vec<(bool, i32)> = results
+      .iter()
+      .map(|result| (result.success, result.exit_code))
+      .collect();
+    assert_eq!(statuses, vec![(true, 0), (false, 101), (true, 0)]);
+    assert_eq!(results[0].stdout, "pass\n");
+    assert_eq!(results[1].stderr, "boom\n");
+    assert_eq!(results[2].stdout, "later\n");
   }
 
   fn alloc_test_function(
