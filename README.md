@@ -7,7 +7,7 @@
 Ignis is a general-purpose programming language with strong, static typing, and immutability by default.
 Inspired by TypeScript and Rust, Ignis compiles to C and produces native executables via GCC.
 
-## Features (v0.3)
+## Features (v0.4.0)
 
 - **Strong static typing**: `i8`-`i64`, `u8`-`u64`, `f32`, `f64`, `boolean`, `char`, `str`, `atom`
 - **Immutability by default**: `let` for immutable, `let mut` for mutable
@@ -15,6 +15,7 @@ Inspired by TypeScript and Rust, Ignis compiles to C and produces native executa
 - **Records and enums**: User-defined types with fields, methods, and variants
 - **Traits**: Lang traits (`Drop`, `Clone`, `Copy`) and user-defined traits
 - **Pattern matching**: `match` expressions, `if let`, `while let`, `let else`
+- **Compile-time directives**: `@config(...)`, `@abi(...)`, and conditional item inclusion
 - **Namespaces**: Module-level organization with `::` access
 - **References and pointers**: `&T`, `&mut T`, `*T`, `*mut T`
 - **Control flow**: `if`/`else`, `while`, `for`, `for-of`, `break`, `continue`
@@ -23,6 +24,8 @@ Inspired by TypeScript and Rust, Ignis compiles to C and produces native executa
 - **Modules**: `import`/`export` for multi-file projects
 - **FFI**: `extern` blocks for C interop
 - **Borrow checking**: Rust-style borrow analysis
+- **Collections and memory foundations**: `HashMap`, `HashSet`, and low-level std memory helpers
+- **UTF-8 byte-backed strings**: `char` is a single byte and `str`/`String` use UTF-8 byte storage
 
 See [docs/LANGUAGE_REFERENCE_CURRENT.md](docs/LANGUAGE_REFERENCE_CURRENT.md) for full language documentation.
 

@@ -2,6 +2,34 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## [0.4.0] - 2026-04-24
+
+This release promotes the v0.4 language and standard-library work, including compile-time configuration directives,
+byte-backed UTF-8 string semantics, and the first collections foundation in the standard library.
+
+### Breaking Changes
+
+- `char` is now restricted to single-byte values and is emitted as `u8`, aligning the language with the v0.4 UTF-8 byte-backed string model.
+- The old `@configFlag(...)` builtin flow was replaced by compile-time directive expressions and conditional item support.
+
+### Features
+
+- Added compile-time configuration support for target triples, feature flags, `@config(...)`, and `@abi(...)` predicates.
+- Added inline generic trait bounds in the analyzer.
+- Added standard-library memory and hash foundations, plus `HashMap` and `HashSet` support and coverage.
+
+### Fixes
+
+- Fixed ownership tracking for closure-generated definitions across analyzer lowering and code generation.
+- Fixed indirect prelude cycle handling by switching the driver to a two-pass prelude edge insertion strategy.
+- Fixed rootless standard-library collection module support in the driver.
+- Fixed owned string byte semantics and related standard-library cleanup behavior.
+
+### Improvements
+
+- Refactored the compiler pipeline into more explicit staged boundaries between driver and analyzer phases.
+- Expanded documentation for v0.4 language behavior, closure lowering, standard-library modules, and byte-backed string semantics.
+
 ## 0.3.2
 
 ### Fixes
