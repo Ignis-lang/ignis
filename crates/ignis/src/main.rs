@@ -143,15 +143,19 @@ fn run_test(
 ) -> Result<(), ()> {
   match resolve_test_input(cmd)? {
     TestInput::DeferredSingleFile(path) => {
-      eprintln!(
-        "{} Single-file 'ignis test' is deferred for v0.5: '{}'",
-        "Error:".red().bold(),
-        path.display()
-      );
+      eprintln!("{}", format_deferred_test_input_error(&path));
       Err(())
     },
     TestInput::Project(project) => run_project_tests(&project.root, cmd.filter.as_deref()),
   }
+}
+
+fn format_deferred_test_input_error(path: &Path) -> String {
+  format!(
+    "{} Single-file 'ignis test' is deferred for v0.5: '{}'",
+    "Error:".red().bold(),
+    path.display()
+  )
 }
 
 // =============================================================================
@@ -690,5 +694,13 @@ mod tests {
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+  }
+
+  #[test]
+  fn deferred_single_file_test_message_mentions_v0_5_scope() {
+    let rendered = format_deferred_test_input_error(Path::new("sample.ign"));
+
+    assert!(rendered.contains("Single-file 'ignis test' is deferred for v0.5"));
+    assert!(rendered.contains("sample.ign"));
   }
 }

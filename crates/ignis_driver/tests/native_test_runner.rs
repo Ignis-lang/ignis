@@ -80,3 +80,39 @@ function laterPass(): void {}
     "expected test harness binary to be built"
   );
 }
+
+#[test]
+fn run_project_tests_returns_ok_when_filter_matches_no_tests() {
+  let project = write_test_project(
+    r#"
+@test
+function passes(): void {}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), Some("missing"));
+
+  assert!(result.is_ok(), "expected empty selection to succeed");
+  assert!(
+    !harness_binary_path(project.path()).exists(),
+    "expected no harness binary when no tests are selected"
+  );
+}
+
+#[test]
+fn run_project_tests_returns_err_when_test_setup_analysis_fails() {
+  let project = write_test_project(
+    r#"
+@test
+function invalid(value: i32): void {}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None);
+
+  assert!(result.is_err(), "expected invalid test shape to fail setup");
+  assert!(
+    !harness_binary_path(project.path()).exists(),
+    "expected no harness binary when setup fails before codegen"
+  );
+}

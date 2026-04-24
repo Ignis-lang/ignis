@@ -1473,6 +1473,38 @@ fn execute_test_harness_binary(
   Ok(results)
 }
 
+#[cfg(test)]
+fn format_test_plan_snapshot(plan: &crate::backend::TestHarnessPlan) -> String {
+  let mut lines = vec![format!("selected: {}", plan.tests.len())];
+
+  for test in &plan.tests {
+    lines.push(format!("- {}", test.fq_name));
+  }
+
+  lines.join("\n")
+}
+
+#[cfg(test)]
+fn format_test_summary_snapshot(results: &[TestExecutionResult]) -> String {
+  let total = results.len();
+  let passed = results.iter().filter(|result| result.success).count();
+  let failed = total - passed;
+
+  let mut lines = Vec::with_capacity(results.len() + 4);
+
+  for result in results {
+    let status = if result.success { "ok" } else { "FAILED" };
+    lines.push(format!("- {} ... {} ({})", result.fq_name, status, result.exit_code));
+  }
+
+  lines.push(String::new());
+  lines.push(format!("total: {}", total));
+  lines.push(format!("passed: {}", passed));
+  lines.push(format!("failed: {}", failed));
+
+  lines.join("\n")
+}
+
 pub fn run_project_tests(
   project_root: &Path,
   filter: Option<&str>,
@@ -1857,7 +1889,8 @@ pub fn run_project_tests(
   };
 
   let passed = results.iter().filter(|result| result.success).count();
-  let failed = results.len() - passed;
+  let total = results.len();
+  let failed = total - passed;
 
   for result in &results {
     let status = if result.success {
@@ -1869,6 +1902,7 @@ pub fn run_project_tests(
   }
 
   section!(&config, "Summary");
+  section_item!(&config, "{} total", total);
   section_item!(&config, "{} passed", passed);
   section_item!(&config, "{} failed", failed);
   cmd_artifact!(&config, "Test binary", bin_path.display());
@@ -2761,6 +2795,7 @@ mod tests {
   use std::collections::HashMap;
   use std::path::{Path, PathBuf};
 
+  use insta::assert_snapshot;
   use tempfile::TempDir;
 
   use ignis_type::attribute::FunctionAttr;
@@ -2771,7 +2806,10 @@ mod tests {
   use ignis_type::symbol::SymbolTable;
   use ignis_type::types::TypeStore;
 
-  use super::{build_test_harness_plan, discover_test_cases, execute_test_harness_binary};
+  use super::{
+    build_test_harness_plan, discover_test_cases, execute_test_harness_binary, format_test_plan_snapshot,
+    format_test_summary_snapshot,
+  };
   use crate::backend::{TestCase, TestHarnessPlan};
 
   #[test]
@@ -2838,6 +2876,29 @@ mod tests {
   }
 
   #[test]
+  fn test_plan_snapshot_reports_filtered_execution_order() {
+    let plan = build_test_harness_plan(
+      vec![
+        TestCase {
+          def_id: ignis_type::definition::DefinitionId::new(2),
+          fq_name: "math::helpers::adds".to_string(),
+        },
+        TestCase {
+          def_id: ignis_type::definition::DefinitionId::new(1),
+          fq_name: "io::writes".to_string(),
+        },
+        TestCase {
+          def_id: ignis_type::definition::DefinitionId::new(0),
+          fq_name: "math::adds".to_string(),
+        },
+      ],
+      Some("adds"),
+    );
+
+    assert_snapshot!("native_test_runner_plan_snapshot", format_test_plan_snapshot(&plan));
+  }
+
+  #[test]
   fn execute_test_harness_binary_continues_after_failures() {
     let temp_dir = TempDir::new().expect("temporary harness dir");
     let harness_path = temp_dir.path().join("fake-harness.sh");
@@ -2886,6 +2947,35 @@ mod tests {
     assert_eq!(results[0].stdout, "pass\n");
     assert_eq!(results[1].stderr, "boom\n");
     assert_eq!(results[2].stdout, "later\n");
+  }
+
+  #[test]
+  fn test_summary_snapshot_reports_project_results() {
+    let results = vec![
+      super::TestExecutionResult {
+        fq_name: "main::passes".to_string(),
+        success: true,
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+      },
+      super::TestExecutionResult {
+        fq_name: "main::fails".to_string(),
+        success: false,
+        exit_code: 101,
+        stdout: String::new(),
+        stderr: "panic: boom\n".to_string(),
+      },
+      super::TestExecutionResult {
+        fq_name: "main::laterPass".to_string(),
+        success: true,
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+      },
+    ];
+
+    assert_snapshot!("native_test_runner_summary_snapshot", format_test_summary_snapshot(&results));
   }
 
   fn alloc_test_function(
