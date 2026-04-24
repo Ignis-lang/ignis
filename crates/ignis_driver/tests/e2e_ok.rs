@@ -3315,6 +3315,190 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_string_hash_preserves_interior_nul_bytes() {
+  e2e_std_test(
+    "string_hash_preserves_interior_nul_bytes",
+    r#"
+import Hasher from "std::hash";
+import String from "std::string";
+
+function hashString(value: &String): u64 {
+    let mut hasher: Hasher = Hasher::new();
+    value.hash(&mut hasher);
+    return hasher.finish();
+}
+
+function buildString(last: char): String {
+    let mut value: String = String::new();
+    value.pushChar('a');
+    value.pushChar('\0');
+    value.pushChar(last);
+    return value;
+}
+
+function main(): i32 {
+    let first: String = buildString('b');
+    let second: String = buildString('b');
+    let third: String = buildString('c');
+
+    let firstHash: u64 = hashString(&first);
+    let secondHash: u64 = hashString(&second);
+    let thirdHash: u64 = hashString(&third);
+
+    if (firstHash != secondHash) {
+        return 1;
+    }
+
+    if (firstHash == thirdHash) {
+        return 2;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_fs_read_to_string_preserves_interior_nul_bytes() {
+  e2e_std_test(
+    "fs_read_to_string_preserves_interior_nul_bytes",
+    r#"
+import Fs from "std::fs";
+import Io from "std::io";
+import String from "std::string";
+
+function main(): Result<i32, Io::IoError> {
+    let path: str = "/tmp/ignis_utf8_string_redefinition.bin";
+
+    if (Fs::exists(path)) {
+        let _ = Fs::removeFile(path)!;
+    }
+
+    let mut payload: String = String::new();
+    payload.pushChar('A');
+    payload.pushChar('\0');
+    payload.pushChar('B');
+
+    let wrote: boolean = Fs::writeString(path, &payload)!;
+    if (!wrote) {
+        return Result::OK(1);
+    }
+
+    let readBack: String = Fs::readToString(path)!;
+    let _ = Fs::removeFile(path)!;
+
+    if (readBack.length() != 3) {
+        return Result::OK(2);
+    }
+
+    let firstByteMatches: boolean = match (readBack.charAt(0)) {
+        Option::SOME(value) -> value == 'A',
+        _ -> false,
+    };
+    if (!firstByteMatches) {
+        return Result::OK(3);
+    }
+
+    let middleByteMatches: boolean = match (readBack.charAt(1)) {
+        Option::SOME(value) -> value == '\0',
+        _ -> false,
+    };
+    if (!middleByteMatches) {
+        return Result::OK(4);
+    }
+
+    let lastByteMatches: boolean = match (readBack.charAt(2)) {
+        Option::SOME(value) -> value == 'B',
+        _ -> false,
+    };
+    if (!lastByteMatches) {
+        return Result::OK(5);
+    }
+
+    return Result::OK(0);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_string_to_str_is_zero_copy_borrowed_view() {
+  e2e_std_test(
+    "string_to_str_is_zero_copy_borrowed_view",
+    r#"
+import String from "std::string";
+
+function main(): i32 {
+    let owned: String = String::create("hello");
+    let view: str = owned.toStr();
+
+    let viewPtr: u64 = @integerFromPointer(view as *u8);
+    let selfPtr: u64 = @integerFromPointer(owned.toStr() as *u8);
+
+    if (viewPtr != selfPtr) {
+        return 1;
+    }
+
+    let trailing: u8 = @integerFromPointer(view as *u8) + owned.length()
+        |> @pointerFromInteger<*mut u8>(_)
+        |> @read<u8>(_);
+    if (trailing != 0) {
+        return 2;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_string_create_from_str_copies_and_preserves_trailing_nul() {
+  e2e_std_test(
+    "string_create_from_str_copies_and_preserves_trailing_nul",
+    r#"
+import Memory from "std::memory";
+import String from "std::string";
+
+function main(): i32 {
+    let raw: *mut u8 = Memory::allocateVector<u8>(6);
+
+    @write<u8>(raw, 'h' as u8);
+    @write<u8>(raw + 1, 'e' as u8);
+    @write<u8>(raw + 2, 'l' as u8);
+    @write<u8>(raw + 3, 'l' as u8);
+    @write<u8>(raw + 4, 'o' as u8);
+    @write<u8>(raw + 5, 0);
+
+    let owned: String = String::create(raw as str);
+    @write<u8>(raw, 'j' as u8);
+
+    let firstByteMatches: boolean = match (owned.charAt(0)) {
+        Option::SOME(value) -> value == 'h',
+        _ -> false,
+    };
+    if (!firstByteMatches) {
+        Memory::free(raw);
+        return 1;
+    }
+
+    let trailing: u8 = @integerFromPointer(owned.toStr() as *u8) + owned.length()
+        |> @pointerFromInteger<*mut u8>(_)
+        |> @read<u8>(_);
+    if (trailing != 0) {
+        Memory::free(raw);
+        return 2;
+    }
+
+    Memory::free(raw);
+    return 0;
+}
+"#,
+  );
+}
+
 // =========================================================================
 // Clone: .clone() does not move the original
 // =========================================================================

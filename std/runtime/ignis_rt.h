@@ -60,12 +60,16 @@ typedef u32 IgnisTypeId;
 // =============================================================================
 
 /**
- * Value-type string with heap-managed character buffer.
+ * Value-type UTF-8 byte buffer with heap-managed storage.
  *
  * IgnisString is a value type: instances live inline (on the stack or inside
- * other structs).  Only the `data` buffer is heap-allocated.  Functions that
- * create new strings return IgnisString by value.  `ignis_string_drop` frees
+ * other structs). Only the `data` buffer is heap-allocated. Functions that
+ * create new strings return IgnisString by value. `ignis_string_drop` frees
  * the data buffer and zeroes the struct, but does NOT free the struct itself.
+ *
+ * len is measured in bytes. Storage is owned and may contain interior NUL
+ * bytes; callers that need the full contents must honor `len` instead of
+ * stopping at the first interior NUL byte.
  *
  * Invariant: data[len] == '\0'
  * Invariant: cap >= len + 1
@@ -280,7 +284,10 @@ IgnisString ignis_string_with_capacity(size_t cap);
 IgnisString ignis_string_from_cstr(const char *s);
 
 /**
- * Creates a new string from a byte slice of the given length.
+ * Creates a new string from a UTF-8 byte slice of the given length.
+ *
+ * Copies exactly `len` bytes, preserves interior NUL bytes, and appends a
+ * trailing NUL terminator at `data[len]` for C interop.
  */
 IgnisString ignis_string_from_len(const char *s, size_t len);
 
@@ -305,7 +312,10 @@ void ignis_string_push_cstr(IgnisString *s, const char *cstr);
 void ignis_string_push_str(IgnisString *s, const IgnisString *other);
 
 /**
- * Returns a null-terminated view of the string data.
+ * Returns a null-terminated borrowed view of the string data.
+ *
+ * This view is suitable for C interop, but consumers that rely on C-string
+ * semantics may stop at the first interior NUL byte.
  */
 const char *ignis_string_cstr(const IgnisString *s);
 
@@ -345,7 +355,7 @@ void ignis_string_drop(IgnisString *s);
 // =============================================================================
 
 /**
- * Compares two strings lexicographically.
+ * Compares two strings lexicographically over all owned bytes.
  *
  * @return Negative if a < b, zero if equal, positive if a > b.
  */
@@ -362,7 +372,9 @@ IgnisString ignis_string_concat(const IgnisString *a, const IgnisString *b);
 IgnisString ignis_string_substring(const IgnisString *s, i64 start, i64 len);
 
 /**
- * Returns the first index of `needle` in `haystack`, or -1 if not found.
+ * Returns the first byte index of `needle` in `haystack`, or -1 if not found.
+ *
+ * Search is length-aware and does not stop at interior NUL bytes.
  */
 i64 ignis_string_index_of(const IgnisString *haystack, const IgnisString *needle);
 

@@ -166,7 +166,15 @@ impl<'a> LirPrinter<'a> {
         let left_str = self.format_operand(func, left);
         let right_str = self.format_operand(func, right);
         let ty_str = self.format_type(*ty);
-        writeln!(self.output, "t{} = builtin_eq {}, {} : {}", dest.index(), left_str, right_str, ty_str).unwrap();
+        writeln!(
+          self.output,
+          "t{} = builtin_eq {}, {} : {}",
+          dest.index(),
+          left_str,
+          right_str,
+          ty_str
+        )
+        .unwrap();
       },
       Instr::Copy { dest, source } => {
         let s = self.format_operand(func, source);

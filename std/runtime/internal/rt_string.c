@@ -25,6 +25,54 @@ static void ignis_string_grow(IgnisString *s, size_t min_cap) {
   s->cap = new_cap;
 }
 
+static i32 ignis_bytes_compare(
+  const char *left,
+  size_t left_len,
+  const char *right,
+  size_t right_len
+) {
+  size_t shared = left_len < right_len ? left_len : right_len;
+
+  for (size_t index = 0; index < shared; index++) {
+    unsigned char left_byte = (unsigned char)left[index];
+    unsigned char right_byte = (unsigned char)right[index];
+
+    if (left_byte != right_byte) {
+      return left_byte < right_byte ? -1 : 1;
+    }
+  }
+
+  if (left_len == right_len) {
+    return 0;
+  }
+
+  return left_len < right_len ? -1 : 1;
+}
+
+static i64 ignis_bytes_index_of(
+  const char *haystack,
+  size_t haystack_len,
+  const char *needle,
+  size_t needle_len
+) {
+  if (needle_len == 0) {
+    return 0;
+  }
+
+  if (needle_len > haystack_len) {
+    return -1;
+  }
+
+  size_t last_start = haystack_len - needle_len;
+  for (size_t start = 0; start <= last_start; start++) {
+    if (memcmp(haystack + start, needle, needle_len) == 0) {
+      return (i64)start;
+    }
+  }
+
+  return -1;
+}
+
 // =============================================================================
 // String base API
 // =============================================================================
@@ -203,10 +251,12 @@ void ignis_string_drop(IgnisString *s) {
 // =============================================================================
 
 i32 ignis_string_compare(const IgnisString *a, const IgnisString *b) {
-  const char *a_cstr = (a != NULL) ? ignis_string_cstr(a) : "";
-  const char *b_cstr = (b != NULL) ? ignis_string_cstr(b) : "";
+  const char *a_bytes = (a != NULL && a->data != NULL) ? a->data : "";
+  const char *b_bytes = (b != NULL && b->data != NULL) ? b->data : "";
+  size_t a_len = (a != NULL) ? a->len : 0;
+  size_t b_len = (b != NULL) ? b->len : 0;
 
-  return (i32)strcmp(a_cstr, b_cstr);
+  return ignis_bytes_compare(a_bytes, a_len, b_bytes, b_len);
 }
 
 IgnisString ignis_string_concat(const IgnisString *a, const IgnisString *b) {
@@ -252,15 +302,10 @@ i64 ignis_string_index_of(const IgnisString *haystack, const IgnisString *needle
     return -1;
   }
 
-  const char *h_cstr = ignis_string_cstr(haystack);
-  const char *n_cstr = ignis_string_cstr(needle);
+  const char *haystack_bytes = (haystack->data != NULL) ? haystack->data : "";
+  const char *needle_bytes = (needle->data != NULL) ? needle->data : "";
 
-  const char *pos = strstr(h_cstr, n_cstr);
-  if (pos == NULL) {
-    return -1;
-  }
-
-  return (i64)(pos - h_cstr);
+  return ignis_bytes_index_of(haystack_bytes, haystack->len, needle_bytes, needle->len);
 }
 
 boolean ignis_string_contains(const IgnisString *haystack, const IgnisString *needle) {
