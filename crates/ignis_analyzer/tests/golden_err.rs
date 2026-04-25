@@ -2271,6 +2271,40 @@ function main(): boolean {
 }
 
 #[test]
+fn test_assert_eq_rejects_unsupported_record_type() {
+  let source = r#"
+namespace Test {
+    function assertEq<T>(left: T, right: T): void {
+        if (!@eq<T>(&left, &right)) {
+            return;
+        }
+
+        return;
+    }
+}
+
+record NoEq {
+    public value: i32;
+}
+
+function main(): void {
+    let left: NoEq = NoEq { value: 1 };
+    let right: NoEq = NoEq { value: 1 };
+    Test::assertEq<NoEq>(left, right);
+    return;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0191"]);
+  assert_snapshot!(
+    "test_assert_eq_rejects_unsupported_record_type",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn trait_with_field() {
   let result = common::analyze_allowing_parse_errors(
     r#"

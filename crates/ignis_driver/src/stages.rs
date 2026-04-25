@@ -350,7 +350,18 @@ impl<'a> BackendInput<'a> {
         Self::verify_lowered_root_module(defs, *root_id)?;
         Self::verify_lowered_artifacts(defs, program)
       },
-      (Self::Lowered { .. }, BackendRequest::Header(_)) => Err(StageError::BackendRequestRequiresHeaderInput),
+      (
+        Self::Lowered {
+          types,
+          defs,
+          program,
+          ..
+        },
+        BackendRequest::Header(_),
+      ) => {
+        Self::verify_header_artifacts(types, defs)?;
+        Self::verify_lowered_artifacts(defs, program)
+      },
     }
   }
 
@@ -849,7 +860,7 @@ mod tests {
   }
 
   #[test]
-  fn backend_input_rejects_header_requests_with_lowered_input() {
+  fn backend_input_allows_header_requests_with_lowered_input() {
     let types = TypeStore::new();
     let symbols = SymbolTable::new();
     let namespaces = NamespaceStore::new();
@@ -861,7 +872,7 @@ mod tests {
         namespaces: &namespaces,
         symbols: &symbols,
       })),
-      Err(StageError::BackendRequestRequiresHeaderInput)
+      Ok(())
     );
   }
 

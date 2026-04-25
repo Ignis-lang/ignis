@@ -927,9 +927,11 @@ pub fn compile_project(
             // Generate header
             let header_content = match emit_text(
               &selected_backend,
-              BackendInput::Header {
+              BackendInput::Lowered {
+                root_id,
                 types: &types,
                 defs: &mono_output.defs,
+                program: &lir_program,
               },
               BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
                 module_id: **module_id,
@@ -1872,9 +1874,11 @@ pub fn run_project_tests(
 
     let header_content = match emit_text(
       &selected_backend,
-      BackendInput::Header {
+      BackendInput::Lowered {
+        root_id: **module_id,
         types: &types,
         defs: &mono_output.defs,
+        program: &lir_program,
       },
       BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
         module_id: **module_id,
@@ -2295,9 +2299,11 @@ pub fn run_single_file_tests(
 
     let header_content = match emit_text(
       &selected_backend,
-      BackendInput::Header {
+      BackendInput::Lowered {
+        root_id,
         types: &types,
         defs: &mono_output.defs,
+        program: &lir_program,
       },
       BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
         module_id: **module_id,
@@ -2680,9 +2686,11 @@ pub fn build_std(
     // Generate module header
     let header_content = match emit_text(
       &selected_backend,
-      BackendInput::Header {
+      BackendInput::Lowered {
+        root_id: *module_id,
         types: &types,
         defs: &mono_output.defs,
+        program: &lir_program,
       },
       BackendRequest::Header(HeaderBackendRequest::EmitStdModuleHeader {
         module_name: &module_name,

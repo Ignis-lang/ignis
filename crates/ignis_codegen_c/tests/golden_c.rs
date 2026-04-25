@@ -307,6 +307,99 @@ function main(): void {
 }
 
 #[test]
+fn c_builtin_eq_primitives_and_str() {
+  let c_code = common::compile_to_c(
+    r#"
+function sameNumber(left: &i32, right: &i32): boolean {
+    return @eq<i32>(left, right);
+}
+
+function sameText(left: &str, right: &str): boolean {
+    return @eq<str>(left, right);
+}
+
+function main(): void {
+    let leftNumber: i32 = 7;
+    let rightNumber: i32 = 7;
+    let leftText: str = "same";
+    let rightText: str = "same";
+
+    let _numberEqual: boolean = sameNumber(&leftNumber, &rightNumber);
+    let _textEqual: boolean = sameText(&leftText, &rightText);
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("c_builtin_eq_primitives_and_str", c_code);
+}
+
+#[test]
+fn c_builtin_eq_record_instance() {
+  let c_code = common::compile_to_c(
+    r#"
+trait Eq {
+}
+
+@implements(Eq)
+record Pair {
+    public value: i32;
+
+    equals(&self, other: &Pair): boolean {
+        return self.value == other.value;
+    }
+}
+
+function same(left: &Pair, right: &Pair): boolean {
+    return @eq<Pair>(left, right);
+}
+
+function main(): void {
+    let left: Pair = Pair { value: 1 };
+    let right: Pair = Pair { value: 1 };
+    let _same: boolean = same(&left, &right);
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("c_builtin_eq_record_instance", c_code);
+}
+
+#[test]
+fn c_builtin_eq_enum_instance() {
+  let c_code = common::compile_to_c(
+    r#"
+trait Eq {
+}
+
+@implements(Eq)
+enum Status {
+    READY,
+    ERROR,
+
+    equals(&self, other: &Status): boolean {
+        return true;
+    }
+}
+
+function same(left: &Status, right: &Status): boolean {
+    return @eq<Status>(left, right);
+}
+
+function main(): void {
+    let left: Status = Status::READY;
+    let right: Status = Status::ERROR;
+    let _same: boolean = same(&left, &right);
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("c_builtin_eq_enum_instance", c_code);
+}
+
+#[test]
 fn c_arithmetic_ops() {
   let c_code = common::compile_to_c(
     r#"

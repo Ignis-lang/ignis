@@ -233,3 +233,31 @@ function main(): i32 {
 
   assert_snapshot!("staged_hir_pipe_desugars_to_call", common::format_hir(&result));
 }
+
+#[test]
+fn hir_enum_eq_builtin_call() {
+  let result = common::analyze(
+    r#"
+trait Eq {
+}
+
+@implements(Eq)
+enum Status {
+    READY,
+    ERROR,
+
+    equals(&self, other: &Status): boolean {
+        return true;
+    }
+}
+
+function main(): boolean {
+    let left: Status = Status::READY;
+    let right: Status = Status::ERROR;
+    return @eq<Status>(&left, &right);
+}
+"#,
+  );
+
+  assert_snapshot!("hir_enum_eq_builtin_call", common::format_hir(&result));
+}

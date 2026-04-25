@@ -15,12 +15,13 @@ use crate::stages::{BackendInput, StageError};
 pub struct CBackend;
 
 fn header_emit_input<'a>(
+  program: Option<&'a LirProgram>,
   types: &'a TypeStore,
   defs: &'a DefinitionStore,
 ) -> EmitInput<'a> {
   static EMPTY_PROGRAM: OnceLock<LirProgram> = OnceLock::new();
 
-  EmitInput::new(EMPTY_PROGRAM.get_or_init(LirProgram::new), types, defs)
+  EmitInput::new(program.unwrap_or_else(|| EMPTY_PROGRAM.get_or_init(LirProgram::new)), types, defs)
 }
 
 impl Backend for CBackend {
@@ -31,11 +32,15 @@ impl Backend for CBackend {
   ) -> Result<BackendResult, StageError> {
     let contents = match request {
       BackendRequest::Header(request) => {
-        let BackendInput::Header { types, defs } = input else {
-          return Err(StageError::BackendRequestRequiresHeaderInput);
+        let emit_input = match input {
+          BackendInput::Header { types, defs } => header_emit_input(None, types, defs),
+          BackendInput::Lowered {
+            types,
+            defs,
+            program,
+            ..
+          } => header_emit_input(Some(program), types, defs),
         };
-
-        let emit_input = header_emit_input(types, defs);
 
         match request {
           HeaderBackendRequest::EmitUserModuleHeader {

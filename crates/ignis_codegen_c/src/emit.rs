@@ -496,7 +496,9 @@ impl<'a> CEmitter<'a> {
           return false;
         }
 
-        kind.is_user() || (self.is_monomorphized_generic_def(*def_id) && self.is_std_test_def(*def_id))
+        kind.is_user()
+          || (self.is_monomorphized_generic_def(*def_id)
+            && (self.definition_depends_on_user_type(*def_id) || self.is_std_test_def(*def_id)))
       })
       .collect()
   }
@@ -3692,7 +3694,7 @@ pub fn emit_std_module_h_from_input(
     }
   };
 
-  emit_module_header(&guard_name, &comment, input.defs, input.types, symbols, namespaces, filter)
+  emit_module_header(&guard_name, &comment, input.program, input.defs, input.types, symbols, namespaces, filter)
 }
 
 /// Emit C for a specific user module.
@@ -3788,7 +3790,7 @@ pub fn emit_user_module_h_from_input(
   let filter =
     |_def_id: DefinitionId, def: &ignis_type::definition::Definition| -> bool { def.owner_module == module_id };
 
-  emit_module_header(&guard_name, &comment, input.defs, input.types, symbols, namespaces, filter)
+  emit_module_header(&guard_name, &comment, input.program, input.defs, input.types, symbols, namespaces, filter)
 }
 
 fn prepend_umbrella_header(
@@ -3812,6 +3814,7 @@ fn prepend_umbrella_header(
 fn emit_module_header<F>(
   guard_name: &str,
   comment: &str,
+  program: &LirProgram,
   defs: &DefinitionStore,
   types: &TypeStore,
   symbols: &SymbolTable,
@@ -3887,6 +3890,10 @@ where
           collect_struct_types_from_type(payload_ty, types, defs, symbols, namespaces, &mut struct_forward_decls);
         }
       }
+    }
+
+    if let Some(func) = program.functions.get(&def_id) {
+      collect_struct_types_from_function_body(func, types, defs, symbols, namespaces, &mut struct_forward_decls);
     }
   }
 
@@ -4450,6 +4457,23 @@ fn collect_struct_types_from_def(
     if let DefinitionKind::Parameter(param) = &param_def.kind {
       collect_struct_types_from_type(&param.type_id, types, defs, symbols, namespaces, out);
     }
+  }
+}
+
+fn collect_struct_types_from_function_body(
+  func: &FunctionLir,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+  out: &mut std::collections::HashSet<String>,
+) {
+  for local in func.locals.get_all() {
+    collect_struct_types_from_type(&local.ty, types, defs, symbols, namespaces, out);
+  }
+
+  for temp in func.temps.get_all() {
+    collect_struct_types_from_type(&temp.ty, types, defs, symbols, namespaces, out);
   }
 }
 

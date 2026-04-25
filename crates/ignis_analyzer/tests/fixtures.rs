@@ -226,6 +226,11 @@ fn fixture_eq_wrong_signature() {
 }
 
 #[test]
+fn fixture_enum_eq_wrong_signature() {
+  test_fixture("test_cases/analyzer/lang_traits/enum_eq_wrong_signature.ign");
+}
+
+#[test]
 fn fixture_enum_drop() {
   test_fixture("test_cases/analyzer/lang_traits/enum_drop.ign");
 }
@@ -233,6 +238,11 @@ fn fixture_enum_drop() {
 #[test]
 fn fixture_enum_eq_bound() {
   test_fixture("test_cases/analyzer/lang_traits/enum_eq_bound.ign");
+}
+
+#[test]
+fn fixture_test_extern_invalid() {
+  test_fixture("test_cases/analyzer/lang_traits/test_extern_invalid.ign");
 }
 
 #[test]
