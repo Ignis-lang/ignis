@@ -3,7 +3,8 @@ mod builder;
 use std::collections::{HashMap, HashSet};
 
 use ignis_hir::{
-  CaptureMode, DropSchedules, ExitKey, HIR, HIRCapture, HIRId, HIRKind, HIRMatchArm, HIRPattern,
+  BuiltinEqKind as HirBuiltinEqKind, CaptureMode, DropSchedules, ExitKey, HIR, HIRCapture, HIRId, HIRKind,
+  HIRMatchArm, HIRPattern,
   operation::BinaryOperation, statement::LoopKind,
 };
 use ignis_type::{
@@ -15,7 +16,10 @@ use ignis_type::{
   value::IgnisLiteralValue,
 };
 
-use crate::{BlockId, ConstValue, Instr, LirProgram, LocalData, LocalId, Operand, TempId, Terminator};
+use crate::{
+  BlockId, ConstValue, Instr, LirProgram, LocalData, LocalId, Operand, TempId, Terminator,
+  instr::BuiltinEqKind,
+};
 
 pub use builder::FunctionBuilder;
 
@@ -533,7 +537,12 @@ impl<'a> LoweringContext<'a> {
         self.lower_builtin_hash(*ty, *value, *hasher);
         None
       },
-      HIRKind::BuiltinEq { ty, left, right } => self.lower_builtin_eq(*ty, *left, *right, node.type_id, node.span),
+      HIRKind::BuiltinEq {
+        ty,
+        left,
+        right,
+        kind,
+      } => self.lower_builtin_eq(*ty, *left, *right, *kind, node.type_id, node.span),
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         self.lower_builtin_drop_in_place(*ty, *ptr);
         None
@@ -1121,21 +1130,50 @@ impl<'a> LoweringContext<'a> {
     ty: TypeId,
     left: HIRId,
     right: HIRId,
+    kind: HirBuiltinEqKind,
     result_ty: TypeId,
     span: Span,
   ) -> Option<Operand> {
     let left_op = self.lower_hir_node(left)?;
     let right_op = self.lower_hir_node(right)?;
     let dest = self.fn_builder().alloc_temp(result_ty, span);
+    let kind = self.resolve_builtin_eq_kind(ty, kind)?;
 
     self.fn_builder().emit(Instr::BuiltinEq {
       dest,
       left: left_op,
       right: right_op,
       ty,
+      kind,
     });
 
     Some(Operand::Temp(dest))
+  }
+
+  fn resolve_builtin_eq_kind(
+    &self,
+    ty: TypeId,
+    kind: HirBuiltinEqKind,
+  ) -> Option<BuiltinEqKind> {
+    match kind {
+      HirBuiltinEqKind::Primitive => Some(BuiltinEqKind::Primitive),
+      HirBuiltinEqKind::Str => Some(BuiltinEqKind::Str),
+      HirBuiltinEqKind::Method(method_def) => Some(BuiltinEqKind::Method(method_def)),
+      HirBuiltinEqKind::Pending => match self.types.get(&ty) {
+        Type::Boolean
+        | Type::Char
+        | Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64
+        | Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64 => Some(BuiltinEqKind::Primitive),
+        Type::Str => Some(BuiltinEqKind::Str),
+        _ => None,
+      },
+    }
   }
 
   fn lower_builtin_drop_in_place(

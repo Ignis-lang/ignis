@@ -215,6 +215,34 @@ function invalidEq(): void {
 }
 
 #[test]
+fn run_project_tests_returns_err_when_builtin_eq_uses_unsupported_record_directly() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+record Wrapper {
+    public value: i32;
+}
+
+@test
+function invalidEq(): void {
+    let left: Wrapper = Wrapper { value: 7 };
+    let right: Wrapper = Wrapper { value: 7 };
+    Test::assert(@eq<Wrapper>(&left, &right));
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(result.is_err(), "expected unsupported builtin equality to fail before harness build");
+  assert!(
+    !harness_binary_path(project.path()).exists(),
+    "expected no harness binary when builtin equality is rejected during setup"
+  );
+}
+
+#[test]
 fn run_project_tests_allows_matching_snapshot_without_update_mode() {
   let project = write_test_project(
     r#"

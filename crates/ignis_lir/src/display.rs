@@ -6,7 +6,15 @@ use ignis_type::{
   types::{Type, TypeStore},
 };
 
-use crate::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, Terminator};
+use crate::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, Terminator, instr::BuiltinEqKind};
+
+fn format_builtin_eq_kind(kind: &BuiltinEqKind) -> String {
+  match kind {
+    BuiltinEqKind::Primitive => "primitive".to_string(),
+    BuiltinEqKind::Str => "str".to_string(),
+    BuiltinEqKind::Method(method_def) => format!("method({})", method_def.index()),
+  }
+}
 
 /// Pretty printer for LIR programs.
 pub struct LirPrinter<'a> {
@@ -162,14 +170,21 @@ impl<'a> LirPrinter<'a> {
         let ty_str = self.format_type(*ty);
         writeln!(self.output, "builtin_hash {} -> {} : {}", value_str, hasher_str, ty_str).unwrap();
       },
-      Instr::BuiltinEq { dest, left, right, ty } => {
+      Instr::BuiltinEq {
+        dest,
+        left,
+        right,
+        ty,
+        kind,
+      } => {
         let left_str = self.format_operand(func, left);
         let right_str = self.format_operand(func, right);
         let ty_str = self.format_type(*ty);
         writeln!(
           self.output,
-          "t{} = builtin_eq {}, {} : {}",
+          "t{} = builtin_eq[{}] {}, {} : {}",
           dest.index(),
+          format_builtin_eq_kind(kind),
           left_str,
           right_str,
           ty_str

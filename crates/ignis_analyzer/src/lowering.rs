@@ -9,7 +9,7 @@ use ignis_ast::statements::record::{ASTMethod, ASTRecord, ASTRecordItem};
 use ignis_ast::statements::enum_::{ASTEnum, ASTEnumItem};
 use ignis_ast::statements::for_of::ASTForOf;
 use ignis_hir::{
-  HIR, HIRNode, HIRKind, HIRId, HIRMatchArm, HIRPattern,
+  BuiltinEqKind, HIR, HIRNode, HIRKind, HIRId, HIRMatchArm, HIRPattern,
   operation::{BinaryOperation, UnaryOperation},
   statement::LoopKind,
 };
@@ -2553,12 +2553,14 @@ impl<'a> Analyzer<'a> {
     let value_type = self.resolve_type_syntax(&type_args[0]);
     let left = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
     let right = self.lower_node_to_hir(&bc.args[1], hir, scope_kind);
+    let kind = self.resolve_builtin_eq_kind(value_type).unwrap_or(BuiltinEqKind::Pending);
 
     hir.alloc(HIRNode {
       kind: HIRKind::BuiltinEq {
         ty: value_type,
         left,
         right,
+        kind,
       },
       span: bc.span.clone(),
       type_id: self.types.boolean(),

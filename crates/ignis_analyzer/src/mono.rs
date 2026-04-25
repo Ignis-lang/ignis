@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use ignis_hir::{HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, statement::LoopKind};
+use ignis_hir::{BuiltinEqKind, HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, statement::LoopKind};
 use ignis_type::definition::{
   ConstantDefinition, Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef,
   FieldDefinition, FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
@@ -684,14 +684,21 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
-      HIRKind::BuiltinEq { ty, left, right } => {
+      HIRKind::BuiltinEq {
+        ty,
+        left,
+        right,
+        kind,
+      } => {
         let new_left = self.clone_hir_tree(*left);
         let new_right = self.clone_hir_tree(*right);
+        let new_kind = self.resolve_builtin_eq_kind_after_substitution(*ty, *kind);
         (
           HIRKind::BuiltinEq {
             ty: *ty,
             left: new_left,
             right: new_right,
+            kind: new_kind,
           },
           None,
         )
@@ -1238,7 +1245,22 @@ impl<'a> Monomorphizer<'a> {
         self.scan_hir(*value);
         self.scan_hir(*hasher);
       },
-      HIRKind::BuiltinEq { left, right, .. } => {
+      HIRKind::BuiltinEq {
+        ty,
+        left,
+        right,
+        kind,
+      } => {
+        if let BuiltinEqKind::Method(method_def) = kind
+          && let Some((_, owner_args)) = self.unwrap_to_instance_type(*ty)
+        {
+          let has_param = owner_args.iter().any(|arg| self.types.contains_type_param(arg));
+
+          if !has_param {
+            let _ = self.resolve_concrete_method_with_args(*method_def, &[], &owner_args);
+          }
+        }
+
         self.scan_hir(*left);
         self.scan_hir(*right);
       },
@@ -2231,14 +2253,21 @@ impl<'a> Monomorphizer<'a> {
           hasher: new_hasher,
         }
       },
-      HIRKind::BuiltinEq { ty, left, right } => {
+      HIRKind::BuiltinEq {
+        ty,
+        left,
+        right,
+        kind,
+      } => {
         let new_left = self.substitute_hir(*left, subst);
         let new_right = self.substitute_hir(*right, subst);
         let new_ty = self.types.substitute(*ty, subst);
+        let new_kind = self.resolve_builtin_eq_kind_after_substitution(new_ty, *kind);
         HIRKind::BuiltinEq {
           ty: new_ty,
           left: new_left,
           right: new_right,
+          kind: new_kind,
         }
       },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
@@ -2521,6 +2550,117 @@ impl<'a> Monomorphizer<'a> {
     };
 
     self.resolve_concrete_method_with_args(method_generic, method_type_args, &owner_args)
+  }
+
+  fn resolve_builtin_eq_kind_after_substitution(
+    &mut self,
+    ty: TypeId,
+    kind: BuiltinEqKind,
+  ) -> BuiltinEqKind {
+    match kind {
+      BuiltinEqKind::Primitive | BuiltinEqKind::Str => kind,
+      BuiltinEqKind::Method(method_def_id) => {
+        let owner_args = match self.types.get(&ty).clone() {
+          Type::Instance { args, .. } => args,
+          _ => vec![],
+        };
+
+        BuiltinEqKind::Method(self.resolve_concrete_method_with_args(method_def_id, &[], &owner_args))
+      },
+      BuiltinEqKind::Pending => self.resolve_builtin_eq_kind(ty).unwrap_or(BuiltinEqKind::Pending),
+    }
+  }
+
+  fn resolve_builtin_eq_kind(
+    &mut self,
+    ty: TypeId,
+  ) -> Option<BuiltinEqKind> {
+    match self.types.get(&ty).clone() {
+      Type::Boolean
+      | Type::Char
+      | Type::I8
+      | Type::I16
+      | Type::I32
+      | Type::I64
+      | Type::U8
+      | Type::U16
+      | Type::U32
+      | Type::U64 => Some(BuiltinEqKind::Primitive),
+      Type::Str => Some(BuiltinEqKind::Str),
+      Type::Record(def_id) | Type::Enum(def_id) => self.resolve_builtin_eq_method(def_id, ty),
+      Type::Instance { generic, .. } => self.resolve_builtin_eq_method(generic, ty),
+      _ => None,
+    }
+  }
+
+  fn resolve_builtin_eq_method(
+    &mut self,
+    type_def_id: DefinitionId,
+    type_id: TypeId,
+  ) -> Option<BuiltinEqKind> {
+    let type_def = self.input_defs.get(&type_def_id);
+
+    let (implemented_traits, instance_methods) = match &type_def.kind {
+      DefinitionKind::Record(rd) => (&rd.implemented_traits, &rd.instance_methods),
+      DefinitionKind::Enum(ed) => (&ed.implemented_traits, &ed.instance_methods),
+      _ => return None,
+    };
+
+    if !implemented_traits.iter().any(|trait_def_id| {
+      matches!(self.input_defs.get(trait_def_id).kind, DefinitionKind::Trait(_))
+        && self.symbols.borrow().get(&self.input_defs.get(trait_def_id).name) == "Eq"
+    }) {
+      return None;
+    }
+
+    let method_sym = self.symbols.borrow_mut().intern("equals");
+    let method_def_id = match instance_methods.get(&method_sym)? {
+      SymbolEntry::Single(id) => *id,
+      SymbolEntry::Overload(group) => *group.first()?,
+    };
+
+    let method_def = self.input_defs.get(&method_def_id);
+    let DefinitionKind::Method(md) = &method_def.kind else {
+      return None;
+    };
+
+    let expected_other = self.types.reference(type_id, false);
+    let other_type = md.params.get(1).and_then(|param_id| match &self.input_defs.get(param_id).kind {
+      DefinitionKind::Parameter(pd) => Some(pd.type_id),
+      _ => None,
+    })?;
+
+    let signature_ok = !md.self_mutable
+      && md.params.len() == 2
+      && self.eq_other_param_matches_type(other_type, expected_other, type_def_id)
+      && self.types.types_equal(&md.return_type, &self.types.boolean());
+
+    signature_ok.then_some(BuiltinEqKind::Method(method_def_id))
+  }
+
+  fn eq_other_param_matches_type(
+    &self,
+    other_type: TypeId,
+    expected_other: TypeId,
+    type_def_id: DefinitionId,
+  ) -> bool {
+    if self.types.types_equal(&other_type, &expected_other) {
+      return true;
+    }
+
+    let Type::Reference { inner, mutable } = self.types.get(&other_type).clone() else {
+      return false;
+    };
+
+    if mutable {
+      return false;
+    }
+
+    match self.types.get(&inner) {
+      Type::Record(def_id) | Type::Enum(def_id) => *def_id == type_def_id,
+      Type::Instance { generic, .. } => *generic == type_def_id,
+      _ => false,
+    }
   }
 
   /// Same as unwrap_to_instance_type but reads from output_hir types.

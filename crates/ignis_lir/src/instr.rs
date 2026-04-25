@@ -3,6 +3,13 @@ use ignis_type::{definition::DefinitionId, span::Span, types::TypeId};
 
 use crate::{LocalId, Operand, TempId};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinEqKind {
+  Primitive,
+  Str,
+  Method(DefinitionId),
+}
+
 /// A single LIR instruction (TAC form: at most one operation, result in a temp).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instr {
@@ -59,6 +66,7 @@ pub enum Instr {
     left: Operand,
     right: Operand,
     ty: TypeId,
+    kind: BuiltinEqKind,
   },
 
   /// Copy/move a value to a new temporary.

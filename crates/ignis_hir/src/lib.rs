@@ -31,6 +31,14 @@ pub struct HIRCapture {
   pub type_in_env: TypeId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinEqKind {
+  Primitive,
+  Str,
+  Method(DefinitionId),
+  Pending,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HIRKind {
   // Expression
@@ -99,6 +107,7 @@ pub enum HIRKind {
     ty: TypeId,
     left: HIRId,
     right: HIRId,
+    kind: BuiltinEqKind,
   },
   /// `@dropInPlace<T>(ptr)` — runs T's drop on the pointed-to value.
   BuiltinDropInPlace {

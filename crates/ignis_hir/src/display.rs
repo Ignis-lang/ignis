@@ -6,7 +6,16 @@ use ignis_type::{
   types::TypeStore,
 };
 
-use crate::{HIR, HIRId, HIRKind, statement::LoopKind};
+use crate::{BuiltinEqKind, HIR, HIRId, HIRKind, statement::LoopKind};
+
+fn format_builtin_eq_kind(kind: BuiltinEqKind) -> String {
+  match kind {
+    BuiltinEqKind::Primitive => "primitive".to_string(),
+    BuiltinEqKind::Str => "str".to_string(),
+    BuiltinEqKind::Method(method_def) => format!("method({})", method_def.index()),
+    BuiltinEqKind::Pending => "pending".to_string(),
+  }
+}
 
 pub struct HIRPrinter<'a> {
   hir: &'a HIR,
@@ -287,11 +296,22 @@ impl<'a> HIRPrinter<'a> {
         let hasher_str = self.format_node_compact(*hasher);
         format!("builtin_hash<{}>({}, {})", ty_str, value_str, hasher_str)
       },
-      HIRKind::BuiltinEq { ty, left, right } => {
+      HIRKind::BuiltinEq {
+        ty,
+        left,
+        right,
+        kind,
+      } => {
         let ty_str = self.format_type(ty);
         let left_str = self.format_node_compact(*left);
         let right_str = self.format_node_compact(*right);
-        format!("builtin_eq<{}>({}, {})", ty_str, left_str, right_str)
+        format!(
+          "builtin_eq<{}>[{}]({}, {})",
+          ty_str,
+          format_builtin_eq_kind(*kind),
+          left_str,
+          right_str
+        )
       },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         let ty_str = self.format_type(ty);
@@ -748,9 +768,21 @@ impl<'a> HIRPrinter<'a> {
         self.print_node(*hasher);
         self.indent -= 1;
       },
-      HIRKind::BuiltinEq { ty, left, right } => {
+      HIRKind::BuiltinEq {
+        ty,
+        left,
+        right,
+        kind,
+      } => {
         let ty_str = self.format_type(ty);
-        writeln!(self.output, "BuiltinEq({}) : {}", ty_str, type_str).unwrap();
+        writeln!(
+          self.output,
+          "BuiltinEq({}, {}) : {}",
+          ty_str,
+          format_builtin_eq_kind(*kind),
+          type_str
+        )
+        .unwrap();
         self.indent += 1;
         self.print_node(*left);
         self.print_node(*right);

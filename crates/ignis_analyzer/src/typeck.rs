@@ -23,6 +23,7 @@ use ignis_diagnostics::{
   diagnostic_report::{Diagnostic, Severity},
   message::DiagnosticMessage,
 };
+use ignis_hir::BuiltinEqKind;
 use ignis_type::{
   attribute::FunctionAttr,
   definition::{
@@ -10263,7 +10264,9 @@ impl<'a> Analyzer<'a> {
       return false;
     }
 
-    self.validate_eq_method_signature(type_def_id, type_id, span, EqValidationDiagnostic::UnsupportedEqualityType)
+    self
+      .validate_eq_method_signature(type_def_id, type_id, span, EqValidationDiagnostic::UnsupportedEqualityType)
+      .is_some()
   }
 
   fn type_param_has_eq_bound(
@@ -10315,6 +10318,95 @@ impl<'a> Analyzer<'a> {
   ) -> bool {
     matches!(self.defs.get(&trait_def_id).kind, DefinitionKind::Trait(_))
       && self.get_symbol_name(&self.defs.get(&trait_def_id).name) == "Eq"
+  }
+
+  pub(crate) fn resolve_builtin_eq_kind(
+    &mut self,
+    type_id: TypeId,
+  ) -> Option<BuiltinEqKind> {
+    match self.types.get(&type_id).clone() {
+      Type::Boolean
+      | Type::Char
+      | Type::I8
+      | Type::I16
+      | Type::I32
+      | Type::I64
+      | Type::U8
+      | Type::U16
+      | Type::U32
+      | Type::U64 => Some(BuiltinEqKind::Primitive),
+      Type::Str => Some(BuiltinEqKind::Str),
+      Type::Param { owner, index } => {
+        self.type_param_has_eq_bound_without_diagnostic(owner, index).then_some(BuiltinEqKind::Pending)
+      },
+      Type::Record(def_id) | Type::Enum(def_id) => self
+        .resolve_builtin_eq_method(def_id, type_id)
+        .map(BuiltinEqKind::Method),
+      Type::Instance { generic, .. } => self
+        .resolve_builtin_eq_method(generic, type_id)
+        .map(BuiltinEqKind::Method),
+      Type::Error => None,
+      _ => None,
+    }
+  }
+
+  fn resolve_builtin_eq_method(
+    &mut self,
+    type_def_id: DefinitionId,
+    type_id: TypeId,
+  ) -> Option<DefinitionId> {
+    if !self.definition_implements_eq_trait(type_def_id) {
+      return None;
+    }
+
+    let type_def = self.defs.get(&type_def_id);
+
+    let instance_methods = match &type_def.kind {
+      DefinitionKind::Record(rd) => &rd.instance_methods,
+      DefinitionKind::Enum(ed) => &ed.instance_methods,
+      _ => return None,
+    };
+
+    let method_sym = self.symbols.borrow_mut().intern("equals");
+    let entry = instance_methods.get(&method_sym)?;
+
+    let method_def_id = match entry {
+      SymbolEntry::Single(id) => *id,
+      SymbolEntry::Overload(group) => *group.first()?,
+    };
+
+    let method_def = self.defs.get(&method_def_id);
+    let DefinitionKind::Method(md) = &method_def.kind else {
+      return None;
+    };
+
+    let expected_other = self.types.reference(type_id, false);
+    let other_type = md.params.get(1).and_then(|param_id| match &self.defs.get(param_id).kind {
+      DefinitionKind::Parameter(pd) => Some(pd.type_id),
+      _ => None,
+    })?;
+
+    let signature_ok = !md.self_mutable
+      && md.params.len() == 2
+      && self.eq_other_param_matches_type(other_type, expected_other, type_def_id)
+      && self.types.types_equal(&md.return_type, &self.types.boolean());
+
+    signature_ok.then_some(method_def_id)
+  }
+
+  fn type_param_has_eq_bound_without_diagnostic(
+    &self,
+    owner: DefinitionId,
+    index: u32,
+  ) -> bool {
+    let Some(param_def_id) = self.lookup_type_param_def(owner, index) else {
+      return false;
+    };
+
+    matches!(
+      &self.defs.get(&param_def_id).kind,
+      DefinitionKind::TypeParam(tp) if tp.bounds.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id))
+    )
   }
 
   fn type_param_has_trait_bound(
@@ -10545,7 +10637,7 @@ impl<'a> Analyzer<'a> {
     }
 
     if implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)) {
-      self.validate_eq_method_signature(*type_def_id, type_id, type_span, EqValidationDiagnostic::LangTrait);
+      let _ = self.validate_eq_method_signature(*type_def_id, type_id, type_span, EqValidationDiagnostic::LangTrait);
     }
   }
 
@@ -10555,20 +10647,20 @@ impl<'a> Analyzer<'a> {
     type_id: TypeId,
     span: &Span,
     diagnostic: EqValidationDiagnostic,
-  ) -> bool {
+  ) -> Option<DefinitionId> {
     let type_def = self.defs.get(&type_def_id);
     let type_name = self.get_symbol_name(&type_def.name);
 
     let instance_methods = match &type_def.kind {
       DefinitionKind::Record(rd) => rd.instance_methods.clone(),
       DefinitionKind::Enum(ed) => ed.instance_methods.clone(),
-      _ => return false,
+      _ => return None,
     };
 
     let method_sym = self.symbols.borrow_mut().intern("equals");
     let Some(entry) = instance_methods.get(&method_sym) else {
       self.report_eq_method_issue(&type_name, span, diagnostic, None, None);
-      return false;
+      return None;
     };
 
     let method_def_id = match entry {
@@ -10577,7 +10669,7 @@ impl<'a> Analyzer<'a> {
         Some(id) => *id,
         None => {
           self.report_eq_method_issue(&type_name, span, diagnostic, None, None);
-          return false;
+          return None;
         },
       },
     };
@@ -10587,7 +10679,7 @@ impl<'a> Analyzer<'a> {
 
     let DefinitionKind::Method(md) = &method_def.kind else {
       self.report_eq_method_issue(&type_name, &method_span, diagnostic, None, None);
-      return false;
+      return None;
     };
 
     let expected_other = self.types.reference(type_id, false);
@@ -10605,16 +10697,41 @@ impl<'a> Analyzer<'a> {
 
     let signature_ok = !md.self_mutable
       && params.len() == 2
-      && other_type == Some(expected_other)
-      && return_type == self.types.boolean();
+      && other_type.is_some_and(|other_type| self.eq_other_param_matches_type(other_type, expected_other, type_def_id))
+      && self.types.types_equal(&return_type, &self.types.boolean());
 
     if signature_ok {
-      return true;
+      return Some(method_def_id);
     }
 
     let got = self.format_eq_method_signature(&params, md.self_mutable, return_type);
     self.report_eq_method_issue(&type_name, &method_span, diagnostic, Some(expected), Some(got));
-    false
+    None
+  }
+
+  fn eq_other_param_matches_type(
+    &self,
+    other_type: TypeId,
+    expected_other: TypeId,
+    type_def_id: DefinitionId,
+  ) -> bool {
+    if self.types.types_equal(&other_type, &expected_other) {
+      return true;
+    }
+
+    let Type::Reference { inner, mutable } = self.types.get(&other_type).clone() else {
+      return false;
+    };
+
+    if mutable {
+      return false;
+    }
+
+    match self.types.get(&inner) {
+      Type::Record(def_id) | Type::Enum(def_id) => *def_id == type_def_id,
+      Type::Instance { generic, .. } => *generic == type_def_id,
+      _ => false,
+    }
   }
 
   fn format_eq_method_signature(

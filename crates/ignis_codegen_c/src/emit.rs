@@ -5,7 +5,10 @@ use std::fmt::Write;
 
 use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
-use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator};
+use ignis_lir::{
+  Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator,
+  instr::BuiltinEqKind,
+};
 use ignis_type::{
   attribute::{FieldAttr, FunctionAttr, RecordAttr},
   definition::{
@@ -1854,8 +1857,14 @@ impl<'a> CEmitter<'a> {
       Instr::BuiltinHash { value, hasher, ty } => {
         self.emit_builtin_hash(func, value, hasher, *ty);
       },
-      Instr::BuiltinEq { dest, left, right, ty } => {
-        self.emit_builtin_eq(func, *dest, left, right, *ty);
+      Instr::BuiltinEq {
+        dest,
+        left,
+        right,
+        ty,
+        kind,
+      } => {
+        self.emit_builtin_eq(func, *dest, left, right, *ty, *kind);
       },
       Instr::Copy { dest, source } => {
         let s = self.format_operand(func, source);
@@ -2914,34 +2923,35 @@ impl<'a> CEmitter<'a> {
     left: &Operand,
     right: &Operand,
     ty: TypeId,
+    kind: BuiltinEqKind,
   ) {
     let left_expr = self.format_operand(func, left);
     let right_expr = self.format_operand(func, right);
 
-    match self.types.get(&ty).clone() {
-      Type::Boolean
-      | Type::Char
-      | Type::I8
-      | Type::I16
-      | Type::I32
-      | Type::I64
-      | Type::U8
-      | Type::U16
-      | Type::U32
-      | Type::U64 => {
+    match kind {
+      BuiltinEqKind::Primitive if matches!(
+        self.types.get(&ty),
+        Type::Boolean
+          | Type::Char
+          | Type::I8
+          | Type::I16
+          | Type::I32
+          | Type::I64
+          | Type::U8
+          | Type::U16
+          | Type::U32
+          | Type::U64
+      ) => {
         let left_value = self.format_builtin_ref_deref(&left_expr, ty);
         let right_value = self.format_builtin_ref_deref(&right_expr, ty);
         writeln!(self.output, "t{} = {} == {};", dest.index(), left_value, right_value).unwrap();
       },
-      Type::Str => {
+      BuiltinEqKind::Str if matches!(self.types.get(&ty), Type::Str) => {
         let left_value = self.format_builtin_ref_deref(&left_expr, ty);
         let right_value = self.format_builtin_ref_deref(&right_expr, ty);
         writeln!(self.output, "t{} = strcmp({}, {}) == 0;", dest.index(), left_value, right_value).unwrap();
       },
-      Type::Record(def_id) | Type::Enum(def_id) => {
-        let Some(method_def_id) = self.find_named_instance_method(def_id, "equals") else {
-          panic!("ICE: missing equals method for builtin eq on {:?}", self.types.get(&ty));
-        };
+      BuiltinEqKind::Method(method_def_id) if matches!(self.defs.get(&method_def_id).kind, DefinitionKind::Method(_)) => {
         let method_name = self.def_name(method_def_id);
         writeln!(
           self.output,
@@ -2953,8 +2963,26 @@ impl<'a> CEmitter<'a> {
         )
         .unwrap();
       },
-      other => panic!("ICE: builtin eq unsupported for {:?}", other),
+      BuiltinEqKind::Primitive => {
+        self.emit_invalid_builtin_eq(dest, &format!("primitive eq kind on unsupported type {:?}", self.types.get(&ty)));
+      },
+      BuiltinEqKind::Str => {
+        self.emit_invalid_builtin_eq(dest, &format!("str eq kind on unsupported type {:?}", self.types.get(&ty)));
+      },
+      BuiltinEqKind::Method(method_def_id) => {
+        self.emit_invalid_builtin_eq(dest, &format!("eq method {:?} missing from lowered defs", method_def_id));
+      },
     }
+  }
+
+  fn emit_invalid_builtin_eq(
+    &mut self,
+    dest: TempId,
+    message: &str,
+  ) {
+    eprintln!("ICE: {}", message);
+    writeln!(self.output, "/* {} */", message).unwrap();
+    writeln!(self.output, "t{} = false;", dest.index()).unwrap();
   }
 
   fn emit_hasher_write_call(

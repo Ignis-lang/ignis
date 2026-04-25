@@ -224,6 +224,89 @@ function main(): void {
 }
 
 #[test]
+fn c_builtin_eq_generic_record_instance() {
+  let c_code = common::compile_to_c(
+    r#"
+trait Eq {
+}
+
+@implements(Eq)
+enum Status {
+    READY,
+
+    equals(&self, other: &Status): boolean {
+        return true;
+    }
+}
+
+@implements(Eq)
+record Wrapper<T: Eq> {
+    public value: T;
+
+    equals(&self, other: &Wrapper<T>): boolean {
+        return true;
+    }
+}
+
+function same(left: &Wrapper<Status>, right: &Wrapper<Status>): boolean {
+    return @eq<Wrapper<Status>>(left, right);
+}
+
+function main(): void {
+    let left: Wrapper<Status> = Wrapper { value: Status::READY };
+    let right: Wrapper<Status> = Wrapper { value: Status::READY };
+    let _same: boolean = same(&left, &right);
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("c_builtin_eq_generic_record_instance", c_code);
+}
+
+#[test]
+fn c_builtin_eq_generic_enum_instance() {
+  let c_code = common::compile_to_c(
+    r#"
+trait Eq {
+}
+
+@implements(Eq)
+enum Status {
+    READY,
+
+    equals(&self, other: &Status): boolean {
+        return true;
+    }
+}
+
+@implements(Eq)
+enum Option<T: Eq> {
+    NONE,
+    SOME(T),
+
+    equals(&self, other: &Option<T>): boolean {
+        return true;
+    }
+}
+
+function same(left: &Option<Status>, right: &Option<Status>): boolean {
+    return @eq<Option<Status>>(left, right);
+}
+
+function main(): void {
+    let left: Option<Status> = Option::SOME(Status::READY);
+    let right: Option<Status> = Option::SOME(Status::READY);
+    let _same: boolean = same(&left, &right);
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!("c_builtin_eq_generic_enum_instance", c_code);
+}
+
+#[test]
 fn c_arithmetic_ops() {
   let c_code = common::compile_to_c(
     r#"
