@@ -679,6 +679,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 - `@allow(...)`, `@warn(...)`, `@deny(...)` -- lint level overrides
 - `@extension(Type)` / `@extension(Type, mut)` -- extension methods
 - `@lang(try)` -- mark an enum as try-capable for use with the `!` operator
+- `@test` -- mark a top-level function as a native test case
 
 ### Parameter attributes
 
@@ -694,6 +695,52 @@ function forEach(@noescape f: (i32) -> void, data: *i32, len: i32): void {
     // f is guaranteed not to escape this call
 }
 ```
+
+### `@test`
+
+`@test` marks a top-level function as a native test case executed by
+`ignis test`.
+
+```ignis
+import Test from "std::test";
+
+@test
+function smoke(): void {
+    Test::assert(true);
+}
+```
+
+The current contract is strict:
+
+- the function must be top-level
+- it must not be `extern`
+- it must not be generic
+- it must take zero parameters
+- it must return `void`
+
+### `std::test::Test`
+
+The standard testing namespace is `std::test::Test`.
+
+```ignis
+import String from "std::string";
+import Test from "std::test";
+
+@test
+function assertions(): void {
+    let left: String = String::create("same");
+    let right: String = String::create("same");
+
+    Test::assert(true);
+    Test::assertEq<String>(left, right);
+    Test::assertNe<i32>(1, 2);
+}
+```
+
+Snapshot helpers are also part of this namespace:
+
+- `Test::assertSnapshot(name, actual)`
+- `Test::assertFileSnapshot(name, filePath)`
 
 ## 8. Statements and Control Flow
 
@@ -1139,6 +1186,7 @@ Common directive builtins:
 - `@bitCast`, `@pointerCast`, `@integerFromPointer`, `@pointerFromInteger`
 - `@read`, `@write`
 - `@dropInPlace`, `@dropGlue`
+- `@eq`
 - `@panic`, `@trap`, `@unreachable`
 - `@maxOf`, `@minOf`
 

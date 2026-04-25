@@ -30,6 +30,7 @@ std/                  # Ignis standard library sources (.ign) + C runtime
   ffi/                # FFI utilities: CString
   path/               # Path manipulation
   io/                 # Print functions + IoError types
+  test/               # Test assertions and snapshot helpers (`std::test::Test`)
   libc/               # C standard library wrappers (9 submodules)
 test_cases/           # Ignis fixture files for analyzer tests
 example/              # Example Ignis programs
@@ -64,6 +65,11 @@ ignis build                                    # Compile project (reads ignis.to
 ignis build path/to/file.ign                   # Compile single file
 ignis check                                    # Type-check only (no codegen)
 ignis build-std                                # Build standard library archive
+
+# Language-level tests
+ignis test                                     # Run project tests
+ignis test path/to/file.ign                    # Run tests from a single file
+ignis test --update-snapshots                  # Recreate selected snapshots
 ```
 
 ## Rust Guidelines
@@ -216,7 +222,7 @@ Builtins use `@name(args)` or `@name<Type>(args)` syntax in Ignis source.
 5. **Emit C** in `crates/ignis_codegen_c/src/emit.rs`:
    - Handle the new LIR instruction or HIR-level construct.
 
-Existing builtins: `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `read`, `write`, `dropInPlace`, `dropGlue`, `maxOf`, `minOf`, `panic`, `trap`, `unreachable`, `configFlag`, `compileError`.
+Existing builtins: `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `read`, `write`, `dropInPlace`, `dropGlue`, `hash`, `eq`, `maxOf`, `minOf`, `panic`, `trap`, `unreachable`, `configFlag`, `compileError`.
 
 ### Adding a New Pattern Form
 
@@ -301,6 +307,7 @@ Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `
 | Analyzer (diagnostics) | ignis_analyzer | Error codes at specific line numbers | N/A (assertions) |
 | Analyzer (properties) | ignis_analyzer | Property-based (proptest) fuzz testing | N/A |
 | Codegen (golden) | ignis_codegen_c | Generated C code snapshots | `crates/ignis_codegen_c/tests/snapshots/` |
+| Native test runner | ignis_driver / ignis | `ignis test`, generic assertions, snapshots, single-file mode | module-adjacent `__snapshots__/` |
 
 ### Adding an E2E Test
 
@@ -369,15 +376,19 @@ fn my_semantic_check() {
 
 5. **Snapshot tests require GCC.** E2E and codegen tests compile C code with `gcc`. Ensure it's installed and in `PATH`.
 
-6. **Import order matters.** `.rustfmt.toml` disables import reordering. Maintain the existing grouping: std, external, internal.
+6. **Language-level snapshots are source-adjacent.** `std::test::Test::assertSnapshot` and `assertFileSnapshot` write to `__snapshots__/` next to the module under test. Project-mode and single-file mode use different roots; do not assume they share one build directory.
 
-7. **Two-pass binding.** Records/enums/type aliases are predeclared in pass 1, then fully bound in pass 2. This enables forward references. If you add a new declaration type that can be referenced before its definition, add it to the predeclaration pass.
+7. **Import order matters.** `.rustfmt.toml` disables import reordering. Maintain the existing grouping: std, external, internal.
 
-8. **Bidirectional type inference.** The typechecker propagates expected types downward via `InferContext`. When adding new expression types, consider whether they should propagate or consume type expectations.
+8. **Two-pass binding.** Records/enums/type aliases are predeclared in pass 1, then fully bound in pass 2. This enables forward references. If you add a new declaration type that can be referenced before its definition, add it to the predeclaration pass.
 
-9. **Module classification in codegen.** `classify.rs` determines whether a definition belongs to User, Std, or Runtime code. If you add new definition kinds, ensure they classify correctly to avoid duplicate or missing emissions.
+9. **Bidirectional type inference.** The typechecker propagates expected types downward via `InferContext`. When adding new expression types, consider whether they should propagate or consume type expectations.
 
-10. **Drop schedules.** Ownership analysis produces `DropSchedules` that tell LIR lowering where to emit cleanup code. If you add new control flow constructs, ensure drops are scheduled at all exit points (normal exit, break, continue, return).
+10. **Canonical Eq is test-critical.** Generic `Test::assertEq<T>` / `assertNe<T>` route through canonical `std::hash::Eq` and builtin `@eq<T>`. Unsupported equality must be rejected in analysis; supported paths must not rely on codegen panics.
+
+11. **Module classification in codegen.** `classify.rs` determines whether a definition belongs to User, Std, or Runtime code. If you add new definition kinds, ensure they classify correctly to avoid duplicate or missing emissions.
+
+12. **Drop schedules.** Ownership analysis produces `DropSchedules` that tell LIR lowering where to emit cleanup code. If you add new control flow constructs, ensure drops are scheduled at all exit points (normal exit, break, continue, return).
 
 ## Key Files
 
@@ -385,9 +396,11 @@ fn my_semantic_check() {
 | --- | --- |
 | `crates/ignis/src/main.rs` | CLI entry, config resolution, subcommands |
 | `crates/ignis/src/cli.rs` | Clap CLI definition |
+| `crates/ignis/tests/test_command.rs` | CLI integration tests for `ignis test` |
 | `crates/ignis_driver/src/pipeline.rs` | Build pipeline: analysis → mono → LIR → codegen → link |
 | `crates/ignis_driver/src/context.rs` | Module discovery, import resolution, per-module parsing |
 | `crates/ignis_driver/src/link.rs` | GCC compilation, archive creation, executable linking |
+| `crates/ignis_driver/tests/native_test_runner.rs` | Project/single-file native test runner integration tests |
 | `crates/ignis_parser/src/parser/declarations.rs` | Top-level parsing (functions, records, enums, traits, imports) |
 | `crates/ignis_parser/src/parser/expression.rs` | Expression parsing with Pratt precedence |
 | `crates/ignis_parser/src/parser/statement.rs` | Statement parsing |
@@ -428,6 +441,7 @@ fn my_semantic_check() {
 | `crates/ignis_lsp/src/at_items.rs` | Registry of `@`-prefixed builtins and directives |
 | `crates/ignis_lsp/src/type_format.rs` | Type formatting for LSP hover/display |
 | `std/manifest.toml` | Std module registry and linking config |
+| `std/test/mod.ign` | `std::test::Test` namespace: assertions and snapshots |
 | `std/runtime/ignis_rt.h` | C runtime API (memory, strings, I/O) |
 | `std/runtime/internal/rt_string.c` | IgnisString runtime implementation |
 

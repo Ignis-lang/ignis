@@ -287,6 +287,45 @@ This is used by containers and runtimes that need to drop unknown generic payloa
 
 ---
 
+### `@eq<T>(left, right)`
+
+Compares two references to values of type `T` using the canonical equality path.
+
+| | |
+|---|---|
+| **Type arguments** | 1 type |
+| **Arguments** | 2 expressions (`&T`, `&T`) |
+| **Returns** | `boolean` |
+
+```ignis
+import Eq from "std::hash";
+
+@implements(Eq)
+record UserId {
+    public value: i32;
+
+    equals(&self, other: &UserId): boolean {
+        return self.value == other.value;
+    }
+}
+
+function same(left: &UserId, right: &UserId): boolean {
+    return @eq<UserId>(left, right);
+}
+```
+
+Supported categories today:
+
+- integer primitives
+- `boolean`
+- `char`
+- `str`
+- records and enums implementing canonical `std::hash::Eq`
+
+Unsupported equality must be rejected during analysis before code generation.
+
+---
+
 ### `@panic(message)`
 
 Prints a message to stderr and terminates the program with exit code 101.
@@ -449,6 +488,7 @@ For unsigned types, `minOf` returns `0`.
 | `@write<T>(ptr, value)` | 1 type arg + 2 exprs | `void` | Yes (store through pointer) |
 | `@dropInPlace<T>(ptr)` | 1 type arg + 1 expr | `void` | Yes (drop glue call) |
 | `@dropGlue<T>()` | 1 type arg | `(*mut u8) -> void` | Yes (function pointer constant) |
+| `@eq<T>(left, right)` | 1 type arg + 2 refs | `boolean` | Yes |
 | `@panic("msg")` | 1 string literal | `Never` | Yes (fprintf + exit) |
 | `@trap()` | none | `Never` | Yes (`__builtin_trap`) |
 | `@unreachable()` | none | `Never` | No (`__builtin_unreachable`) |

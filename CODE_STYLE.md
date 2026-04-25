@@ -19,6 +19,7 @@
 | Functions/methods/fields/params | camelCase | `getLength`, `pushBack`, `myVariable` | `std/string/mod.ign` |
 | Constants, enum members | UPPER_SNAKE_CASE | `MAX_SIZE`, `PI`, `TAU` | `std/math/mod.ign` |
 | Modules/namespaces | PascalCase | `Math`, `Memory`, `Io` | `std/manifest.toml` |
+| Test namespaces | PascalCase | `Test` | `std/test/mod.ign` |
 | Files | lower_snake_case | `my_module.ign`, `mut_self_test.ign` | `test_cases/analyzer/` |
 
 ## File Organization
@@ -29,6 +30,7 @@
 - Tests live under `crates/<crate>/tests/` with shared helpers in `tests/common/mod.rs`.
 - Ignis fixture tests live in `test_cases/analyzer/<category>/` organized by semantic feature.
 - Snapshots are stored in `crates/<crate>/tests/snapshots/`.
+- Language-level snapshots are stored in `__snapshots__/` next to the Ignis module under test.
 
 ## Import Style
 
@@ -229,11 +231,13 @@ self.fn_builder().terminate(Terminator::Branch {
 
 - **Snapshots:** `insta::assert_snapshot!` for deterministic output comparison.
 - **E2E:** full compile → run in `crates/ignis_driver/tests/` (requires GCC).
+- **Native Ignis tests:** `ignis test` coverage lives in `crates/ignis_driver/tests/native_test_runner.rs` and `crates/ignis/tests/test_command.rs`.
 - **Analyzer:** semantic analysis snapshots in `crates/ignis_analyzer/tests/`.
 - **Codegen:** C output snapshots in `crates/ignis_codegen_c/tests/`.
 - **Fixtures:** `.ign` test cases in `test_cases/analyzer/<category>/`.
 - **Properties:** `proptest` for fuzz testing in `crates/ignis_analyzer/tests/properties.rs`.
 - Update snapshots: `cargo insta review` or `INSTA_UPDATE=always cargo test`.
+- Update language-level snapshots: `ignis test --update-snapshots`.
 
 ## Formatting
 
@@ -252,6 +256,8 @@ self.fn_builder().terminate(Terminator::Branch {
 - Do use `TypeStore` creation methods (they deduplicate automatically).
 - Do collect diagnostics via `add_diagnostic()` instead of returning early on errors.
 - Do add snapshot tests for new features (E2E for behavior, golden for diagnostics/HIR).
+- Do prefer `std::test::Test` namespace helpers for language-level tests instead of ad hoc `@panic(...)` assertions.
+- Do treat canonical `std::hash::Eq` as the equality contract behind generic test assertions.
 - Do use `@noescape` on closure parameters that must not outlive their call site.
 - Don't create `mod.rs` files; use flat module files.
 - Don't rely on implicit std path; prefer `IGNIS_STD_PATH` or `ignis.toml`.

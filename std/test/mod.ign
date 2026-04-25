@@ -1,9 +1,12 @@
 //!
 //! # Test Assertions
 //!
-//! Minimal assertion helpers for `@test` functions.
+//! Native testing helpers for `@test` functions.
 //!
-//! This test surface intentionally stays small:
+//! The `std::test` module provides the standard assertion and snapshot surface
+//! used by `ignis test`.
+//!
+//! It is intentionally small and stable:
 //! - `Test::assert(condition)`
 //! - `Test::assertEq<T>(left, right)`
 //! - `Test::assertNe<T>(left, right)`
@@ -11,7 +14,65 @@
 //! - `Test::assertSnapshot(name, actual)`
 //! - `Test::assertFileSnapshot(name, filePath)`
 //!
-//! No custom messages, diff rendering, or non-test runners are provided here.
+//! ## Design Goals
+//!
+//! - keep language-level tests deterministic
+//! - make failures explicit and easy to spot in runner output
+//! - route generic equality through the canonical `std::hash::Eq` contract
+//! - store snapshots next to the source module under test
+//! - avoid compiler-only test APIs leaking into user code
+//!
+//! ## Assertions
+//!
+//! `assert`, `assertEq`, and `assertNe` all fail the current test by calling
+//! `@panic(...)` with a fixed message.
+//!
+//! `assertEq<T>` and `assertNe<T>` rely on builtin `@eq<T>`. Supported `T`
+//! includes:
+//!
+//! - integer primitives
+//! - `boolean`
+//! - `char`
+//! - `str`
+//! - records and enums implementing canonical `std::hash::Eq`
+//!
+//! Unsupported equality must be rejected during analysis before code generation
+//! or harness build.
+//!
+//! ## Snapshots
+//!
+//! Snapshot helpers compare UTF-8 text against deterministic files under a
+//! sibling `__snapshots__/` directory.
+//!
+//! File naming is derived from:
+//!
+//! - the fully-qualified test name
+//! - the user-supplied snapshot label
+//!
+//! Both parts are escaped so snapshots from different modules can safely reuse
+//! the same logical label.
+//!
+//! Update behavior is driven by the native runner through environment variables:
+//!
+//! - `IGNIS_TEST_NAME`
+//! - `IGNIS_TEST_SNAPSHOT_DIR`
+//! - `IGNIS_TEST_UPDATE_SNAPSHOTS`
+//!
+//! With update mode enabled, missing or mismatched snapshots are written back to
+//! disk. Without update mode, the helpers fail the current test.
+//!
+//! ## Failure Output
+//!
+//! Snapshot mismatches print small, bounded diagnostics to stderr before
+//! panicking:
+//!
+//! - failure reason
+//! - snapshot path
+//! - expected byte count
+//! - actual byte count
+//!
+//! The native runner is responsible for truncating long stderr/stdout blocks in
+//! the final report.
 //!
 //! ## Example
 //!
@@ -24,15 +85,91 @@
 //!   Test::assertEq<i32>(2 + 2, 4);
 //! }
 //! ```
+//!
+//! ## Generic Equality Example
+//!
+//! ```ignis
+//! import Eq from "std::hash";
+//! import Test from "std::test";
+//!
+//! @implements(Eq)
+//! record UserId {
+//!   public value: i32;
+//!
+//!   equals(&self, other: &UserId): boolean {
+//!     return self.value == other.value;
+//!   }
+//! }
+//!
+//! @test
+//! function compareUserIds(): void {
+//!   let left: UserId = UserId { value: 7 };
+//!   let right: UserId = UserId { value: 7 };
+//!   let other: UserId = UserId { value: 8 };
+//!
+//!   Test::assertEq<UserId>(left, right);
+//!   Test::assertNe<UserId>(left, other);
+//! }
+//! ```
+//!
+//! ## Snapshot Example
+//!
+//! ```ignis
+//! import Test from "std::test";
+//!
+//! @test
+//! function snapshotRenderedOutput(): void {
+//!   Test::assertSnapshot("rendered", "hello snapshot\n");
+//! }
+//! ```
+//!
+//! ## File Snapshot Example
+//!
+//! ```ignis
+//! import Test from "std::test";
+//!
+//! @test
+//! function snapshotGeneratedFile(): void {
+//!   Test::assertFileSnapshot("artifact", "./actual-output.txt");
+//! }
+//! ```
 
 import Fs from "std::fs";
 import Io from "std::io";
 import LibC from "std::libc";
 import Path from "std::path";
 
-/// Assertion helpers for `@test` bodies.
+/// Assertion and snapshot helpers for `@test` bodies.
+///
+/// `Test` is a pure namespace surface used by the native `ignis test` runner.
+/// It does not hold state; instead, snapshot helpers read runner-provided
+/// environment variables to discover the active test name, snapshot directory,
+/// and update mode.
+///
+/// Equality assertions route through canonical builtin `@eq<T>` dispatch.
+/// Snapshot assertions compare or update UTF-8 text files in a sibling
+/// `__snapshots__/` directory.
 export namespace Test {
   /// Fails the current test when `condition` is false.
+  ///
+  /// # Arguments
+  ///
+  /// * `condition` - Boolean condition that must evaluate to `true`.
+  ///
+  /// # Panics
+  ///
+  /// Panics with `"assertion failed"` when `condition` is `false`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Test from "std::test";
+  ///
+  /// @test
+  /// function smoke(): void {
+  ///   Test::assert(2 + 2 == 4);
+  /// }
+  /// ```
   function assert(condition: boolean): void {
     if (!condition) {
       @panic("assertion failed");
@@ -40,11 +177,58 @@ export namespace Test {
   }
 
   /// Fails the current test unconditionally.
+  ///
+  /// Use this when a branch should be treated as an immediate test failure.
+  ///
+  /// # Panics
+  ///
+  /// Always panics with `"test failed"`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Test from "std::test";
+  ///
+  /// @test
+  /// function forcedFailure(): void {
+  ///   Test::fail();
+  /// }
+  /// ```
   function fail(): void {
     @panic("test failed");
   }
 
   /// Fails the current test when two values are not equal under canonical `Eq`.
+  ///
+  /// `T` must be supported by builtin `@eq<T>`. For user-defined records and
+  /// enums this means implementing canonical `std::hash::Eq` with a valid
+  /// `equals(&self, other: &T): boolean` method.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The type being compared.
+  ///
+  /// # Arguments
+  ///
+  /// * `left` - Left-hand value.
+  /// * `right` - Right-hand value.
+  ///
+  /// # Panics
+  ///
+  /// Panics with `"assertion failed: values are not equal"` when the values do
+  /// not compare equal.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Test from "std::test";
+  ///
+  /// @test
+  /// function compareNumbers(): void {
+  ///   Test::assertEq<i32>(40 + 2, 42);
+  ///   Test::assertEq<str>("abc", "abc");
+  /// }
+  /// ```
   function assertEq<T>(left: T, right: T): void {
     if (!@eq<T>(&left, &right)) {
       @panic("assertion failed: values are not equal");
@@ -52,6 +236,33 @@ export namespace Test {
   }
 
   /// Fails the current test when two values are equal under canonical `Eq`.
+  ///
+  /// This is the inverse of `assertEq<T>`.
+  ///
+  /// # Type Parameters
+  ///
+  /// * `T` - The type being compared.
+  ///
+  /// # Arguments
+  ///
+  /// * `left` - Left-hand value.
+  /// * `right` - Right-hand value.
+  ///
+  /// # Panics
+  ///
+  /// Panics with `"assertion failed: values are equal"` when the values compare
+  /// equal.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Test from "std::test";
+  ///
+  /// @test
+  /// function compareDifferentValues(): void {
+  ///   Test::assertNe<i32>(1, 2);
+  /// }
+  /// ```
   function assertNe<T>(left: T, right: T): void {
     if (@eq<T>(&left, &right)) {
       @panic("assertion failed: values are equal");
@@ -59,208 +270,354 @@ export namespace Test {
   }
 
   /// Fails the current test when the named text snapshot does not match.
+  ///
+  /// The snapshot file is resolved from the current test name and the snapshot
+  /// label, then stored in a sibling `__snapshots__/` directory next to the
+  /// module under test.
+  ///
+  /// # Arguments
+  ///
+  /// * `name` - Logical snapshot label within the current test.
+  /// * `actual` - UTF-8 text to compare or write.
+  ///
+  /// # Update Mode
+  ///
+  /// When `ignis test --update-snapshots` is active, missing or mismatched
+  /// snapshots are written to disk instead of failing the test.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Test from "std::test";
+  ///
+  /// @test
+  /// function snapshotText(): void {
+  ///   Test::assertSnapshot("rendered", "hello snapshot\n");
+  /// }
+  /// ```
   function assertSnapshot(name: str, actual: str): void {
     let actualText: String = String::create(actual);
-    Test::assertSnapshotText(name, &actualText);
+    assertSnapshotText(name, &actualText);
   }
 
   /// Reads `filePath` as UTF-8 text before applying snapshot comparison.
+  ///
+  /// This is useful when the code under test writes an artifact to disk and the
+  /// test wants the snapshot baseline to track the file contents.
+  ///
+  /// # Arguments
+  ///
+  /// * `name` - Logical snapshot label within the current test.
+  /// * `filePath` - Path to a UTF-8 text file to snapshot.
+  ///
+  /// # Panics
+  ///
+  /// Panics with `"snapshot assertion failed"` if the input file cannot be
+  /// read, if the snapshot mismatches without update mode, or if snapshot I/O
+  /// fails.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Test from "std::test";
+  ///
+  /// @test
+  /// function snapshotFile(): void {
+  ///   Test::assertFileSnapshot("artifact", "./actual-output.txt");
+  /// }
+  /// ```
   function assertFileSnapshot(name: str, filePath: str): void {
     match (Fs::readToString(filePath)) {
-      Result::OK(actualText) -> Test::assertSnapshotText(name, &actualText),
-      Result::ERROR(_) -> Test::failSnapshotIo(
+      Result::OK(actualText) -> assertSnapshotText(name, &actualText),
+      Result::ERROR(_) -> failSnapshotIo(
         "snapshot input read failed",
         filePath,
         "io error",
       ),
     };
   }
+}
 
-  function assertSnapshotText(name: str, actual: &String): void {
-    let testName: String = Test::requiredSnapshotEnv("IGNIS_TEST_NAME");
-    let snapshotDir: String = Test::requiredSnapshotEnv("IGNIS_TEST_SNAPSHOT_DIR");
-    let updateSnapshots: boolean = Test::snapshotUpdateModeEnabled();
-    let snapshotPath: Path::PathBuf = Test::snapshotPath(&snapshotDir, &testName, name);
-    let snapshotPathStr: String = snapshotPath.toString();
+/// Internal text snapshot engine shared by `Test::assertSnapshot` and
+/// `Test::assertFileSnapshot`.
+///
+/// This resolves runner context, computes the snapshot file path, performs
+/// compare-or-update behavior, and emits bounded mismatch diagnostics before
+/// panicking on failure.
+function assertSnapshotText(name: str, actual: &String): void {
+  let testName: String = requiredSnapshotEnv("IGNIS_TEST_NAME");
+  let snapshotDir: String = requiredSnapshotEnv("IGNIS_TEST_SNAPSHOT_DIR");
+  let updateSnapshots: boolean = snapshotUpdateModeEnabled();
+  let snapshotPath: Path::PathBuf = snapshotPath(&snapshotDir, &testName, name);
+  let snapshotPathStr: String = snapshotPath.toString();
 
-    if (!Fs::exists(snapshotPath.asStr())) {
-      if (updateSnapshots) {
-        Test::writeSnapshot(&snapshotDir, &snapshotPath, actual);
-        return;
-      }
-
-      Test::failSnapshotMissing(&snapshotPathStr);
+  if (!Fs::exists(snapshotPath.asStr())) {
+    if (updateSnapshots) {
+      writeSnapshot(&snapshotDir, &snapshotPath, actual);
       return;
     }
 
-    match (Fs::readToString(snapshotPath.asStr())) {
-      Result::OK(expectedText) -> {
-        if (expectedText.equals(actual)) {
-          return;
-        }
-
-        if (updateSnapshots) {
-          Test::writeSnapshot(&snapshotDir, &snapshotPath, actual);
-          return;
-        }
-
-        Test::failSnapshotMismatch(&snapshotPathStr, expectedText.length(), actual.length());
-      },
-      Result::ERROR(_) -> Test::failSnapshotIo("snapshot read failed", snapshotPathStr.toStr(), "io error"),
-    };
+    failSnapshotMissing(&snapshotPathStr);
+    return;
   }
 
-  function requiredSnapshotEnv(name: str): String {
-    let value: *mut u8 = LibC::Process::getenv(name as *u8);
-    if (value == null) {
-      let detail: String = String::create("missing test runner environment: ").concat(name);
-      Test::failSnapshotIo("snapshot context missing", name, detail.toStr());
-    }
-
-    return String::create(value as str);
-  }
-
-  function snapshotUpdateModeEnabled(): boolean {
-    let value: *mut u8 = LibC::Process::getenv("IGNIS_TEST_UPDATE_SNAPSHOTS" as *u8);
-    if (value == null) {
-      return false;
-    }
-
-    return @read<u8>(value) == 49;
-  }
-
-  function snapshotPath(
-    snapshotDir: &String,
-    testName: &String,
-    snapshotName: str,
-  ): Path::PathBuf {
-    let mut path: Path::PathBuf = Path::PathBuf::fromString(snapshotDir);
-    let fileName: String = Test::snapshotFileName(testName, snapshotName);
-    path.push(fileName.toStr());
-    return path;
-  }
-
-  function snapshotFileName(
-    testName: &String,
-    snapshotName: str,
-  ): String {
-    let snapshotNameString: String = String::create(snapshotName);
-    let mut fileName: String = Test::escapeSnapshotComponent(testName);
-    let escapedSnapshotName: String = Test::escapeSnapshotComponent(&snapshotNameString);
-
-    fileName.pushStr("__");
-    fileName.push(&escapedSnapshotName);
-    fileName.pushStr(".snap.txt");
-
-    return fileName;
-  }
-
-  function escapeSnapshotComponent(value: &String): String {
-    let mut escaped: String = String::withCapacity(value.length() * 3);
-    let mut index: u64 = 0;
-
-    while (index < value.length()) {
-      let current: Option<char> = value.charAt(index);
-
-      if (let Option::SOME(ch) = current) {
-        let byte: u8 = ch as u8;
-
-        if (Test::isSafeSnapshotByte(byte)) {
-          escaped.pushChar(ch);
-        } else {
-          escaped.pushChar('_');
-          escaped.pushChar(Test::hexDigit((byte >> 4) & 15));
-          escaped.pushChar(Test::hexDigit(byte & 15));
-        }
+  match (Fs::readToString(snapshotPath.asStr())) {
+    Result::OK(expectedText) -> {
+      if (expectedText.equals(actual)) {
+        return;
       }
 
-      index += 1;
+      if (updateSnapshots) {
+        writeSnapshot(&snapshotDir, &snapshotPath, actual);
+        return;
+      }
+
+      failSnapshotMismatch(&snapshotPathStr, expectedText.length(), actual.length());
+    },
+    Result::ERROR(_) -> failSnapshotIo("snapshot read failed", snapshotPathStr.toStr(), "io error"),
+  };
+}
+
+/// Reads a required test-runner environment variable as an owned `String`.
+///
+/// # Arguments
+///
+/// * `name` - Name of the environment variable to read.
+///
+/// # Panics
+///
+/// Panics with `"snapshot assertion failed"` if the runner did not provide
+/// the required snapshot context variable.
+function requiredSnapshotEnv(name: str): String {
+  let value: *mut u8 = LibC::Process::getenv(name as *u8);
+  if (value == null) {
+    let detail: String = String::create("missing test runner environment: ").concat(name);
+    failSnapshotIo("snapshot context missing", name, detail.toStr());
+  }
+
+  return String::create(value as str);
+}
+
+/// Returns whether snapshot update mode is enabled for the current test run.
+///
+/// The native runner encodes this as `IGNIS_TEST_UPDATE_SNAPSHOTS=1`.
+function snapshotUpdateModeEnabled(): boolean {
+  let value: *mut u8 = LibC::Process::getenv("IGNIS_TEST_UPDATE_SNAPSHOTS" as *u8);
+  if (value == null) {
+    return false;
+  }
+
+  return @read<u8>(value) == 49;
+}
+
+/// Builds the final snapshot path for the current test and snapshot label.
+///
+/// The resulting file lives in the test's snapshot directory and uses the
+/// escaped file name returned by `snapshotFileName(...)`.
+///
+/// # Arguments
+///
+/// * `snapshotDir` - Snapshot directory provided by the runner.
+/// * `testName` - Fully-qualified test name.
+/// * `snapshotName` - Logical snapshot label within the test.
+function snapshotPath(
+  snapshotDir: &String,
+  testName: &String,
+  snapshotName: str,
+): Path::PathBuf {
+  let mut path: Path::PathBuf = Path::PathBuf::fromString(snapshotDir);
+  let fileName: String = snapshotFileName(testName, snapshotName);
+  path.push(fileName.toStr());
+  return path;
+}
+
+/// Produces the deterministic on-disk file name for a snapshot.
+///
+/// The file name layout is:
+///
+/// ```text
+/// <escaped-test-name>__<escaped-snapshot-name>.snap.txt
+/// ```
+///
+/// Escaping prevents collisions with path separators, `::`, spaces, and
+/// other punctuation while keeping ASCII-safe names for the filesystem.
+///
+/// # Arguments
+///
+/// * `testName` - Fully-qualified test name.
+/// * `snapshotName` - Logical snapshot label.
+function snapshotFileName(
+  testName: &String,
+  snapshotName: str,
+): String {
+  let snapshotNameString: String = String::create(snapshotName);
+  let mut fileName: String = escapeSnapshotComponent(testName);
+  let escapedSnapshotName: String = escapeSnapshotComponent(&snapshotNameString);
+
+  fileName.pushStr("__");
+  fileName.push(&escapedSnapshotName);
+  fileName.pushStr(".snap.txt");
+
+  return fileName;
+}
+
+/// Escapes a file-name component into a deterministic ASCII-safe string.
+///
+/// Safe bytes are kept as-is. All other bytes are rewritten as
+/// `_<hex><hex>`.
+///
+/// # Arguments
+///
+/// * `value` - Raw component to normalize for use in a file name.
+function escapeSnapshotComponent(value: &String): String {
+  let mut escaped: String = String::withCapacity(value.length() * 3);
+  let mut index: u64 = 0;
+
+  while (index < value.length()) {
+    let current: Option<char> = value.charAt(index);
+
+    if (let Option::SOME(ch) = current) {
+      let byte: u8 = ch as u8;
+
+      if (isSafeSnapshotByte(byte)) {
+        escaped.pushChar(ch);
+      } else {
+        escaped.pushChar('_');
+        escaped.pushChar(hexDigit((byte >> 4) & 15));
+        escaped.pushChar(hexDigit(byte & 15));
+      }
     }
 
-    return escaped;
+    index += 1;
   }
 
-  function isSafeSnapshotByte(byte: u8): boolean {
-    let isNumber: boolean = byte >= 48 && byte <= 57;
-    let isUpper: boolean = byte >= 65 && byte <= 90;
-    let isLower: boolean = byte >= 97 && byte <= 122;
-    let isPunctuation: boolean = byte == 45 || byte == 46 || byte == 95;
+  return escaped;
+}
 
-    return isNumber || isUpper || isLower || isPunctuation;
+/// Returns whether a byte may appear unchanged in a snapshot file name.
+///
+/// Safe bytes are limited to ASCII letters, digits, `-`, `.`, and `_`.
+function isSafeSnapshotByte(byte: u8): boolean {
+  let isNumber: boolean = byte >= 48 && byte <= 57;
+  let isUpper: boolean = byte >= 65 && byte <= 90;
+  let isLower: boolean = byte >= 97 && byte <= 122;
+  let isPunctuation: boolean = byte == 45 || byte == 46 || byte == 95;
+
+  return isNumber || isUpper || isLower || isPunctuation;
+}
+
+/// Converts a nibble (`0..=15`) to its lowercase hexadecimal digit.
+function hexDigit(value: u8): char {
+  if (value < 10) {
+    return (48 + value) as char;
   }
 
-  function hexDigit(value: u8): char {
-    if (value < 10) {
-      return (48 + value) as char;
-    }
+  return (87 + value) as char;
+}
 
-    return (87 + value) as char;
-  }
+/// Writes snapshot text to disk, creating the snapshot directory first.
+///
+/// # Arguments
+///
+/// * `snapshotDir` - Parent snapshot directory.
+/// * `snapshotPath` - Full path to the snapshot file.
+/// * `actual` - Snapshot contents to write.
+///
+/// # Panics
+///
+/// Panics with `"snapshot assertion failed"` if directory creation or file
+/// writing fails, or if the write reports a short write.
+function writeSnapshot(
+  snapshotDir: &String,
+  snapshotPath: &Path::PathBuf,
+  actual: &String,
+): void {
+  match (Fs::createDirAll(snapshotDir.toStr())) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> failSnapshotIo(
+      "snapshot directory create failed",
+      snapshotDir.toStr(),
+      "io error",
+    ),
+  };
 
-  function writeSnapshot(
-    snapshotDir: &String,
-    snapshotPath: &Path::PathBuf,
-    actual: &String,
-  ): void {
-    match (Fs::createDirAll(snapshotDir.toStr())) {
-      Result::OK(_) -> {},
-      Result::ERROR(_) -> Test::failSnapshotIo(
-        "snapshot directory create failed",
-        snapshotDir.toStr(),
-        "io error",
-      ),
-    };
+  match (Fs::writeString(snapshotPath.asStr(), actual)) {
+    Result::OK(wroteAll) -> {
+      if (!wroteAll) {
+        failSnapshotIo(
+          "snapshot write failed",
+          snapshotPath.asStr(),
+          "short write",
+        );
+      }
+    },
+    Result::ERROR(_) -> failSnapshotIo(
+      "snapshot write failed",
+      snapshotPath.asStr(),
+      "io error",
+    ),
+  };
+}
 
-    match (Fs::writeString(snapshotPath.asStr(), actual)) {
-      Result::OK(wroteAll) -> {
-        if (!wroteAll) {
-          Test::failSnapshotIo(
-            "snapshot write failed",
-            snapshotPath.asStr(),
-            "short write",
-          );
-        }
-      },
-      Result::ERROR(_) -> Test::failSnapshotIo(
-        "snapshot write failed",
-        snapshotPath.asStr(),
-        "io error",
-      ),
-    };
-  }
+/// Emits a standard `snapshot missing` failure and panics.
+///
+/// # Arguments
+///
+/// * `snapshotPath` - Missing snapshot file path.
+function failSnapshotMissing(snapshotPath: &String): void {
+  Io::eprintln("snapshot missing");
+  printSnapshotPath(snapshotPath);
+  @panic("snapshot assertion failed");
+}
 
-  function failSnapshotMissing(snapshotPath: &String): void {
-    Io::eprintln("snapshot missing");
-    Test::printSnapshotPath(snapshotPath);
-    @panic("snapshot assertion failed");
-  }
+/// Emits a standard mismatch diagnostic and panics.
+///
+/// The byte counts are reported to keep diagnostics stable and compact even
+/// for large snapshot bodies.
+///
+/// # Arguments
+///
+/// * `snapshotPath` - Snapshot file path.
+/// * `expectedBytes` - Byte length of the baseline snapshot.
+/// * `actualBytes` - Byte length of the actual snapshot text.
+function failSnapshotMismatch(
+  snapshotPath: &String,
+  expectedBytes: u64,
+  actualBytes: u64,
+): void {
+  Io::eprintln("snapshot mismatch");
+  printSnapshotPath(snapshotPath);
+  Io::eprintln(String::create("expected-bytes: ").concat(expectedBytes));
+  Io::eprintln(String::create("actual-bytes: ").concat(actualBytes));
+  @panic("snapshot assertion failed");
+}
 
-  function failSnapshotMismatch(
-    snapshotPath: &String,
-    expectedBytes: u64,
-    actualBytes: u64,
-  ): void {
-    Io::eprintln("snapshot mismatch");
-    Test::printSnapshotPath(snapshotPath);
-    Io::eprintln(String::create("expected-bytes: ").concat(expectedBytes));
-    Io::eprintln(String::create("actual-bytes: ").concat(actualBytes));
-    @panic("snapshot assertion failed");
-  }
+/// Emits a standard snapshot I/O diagnostic and panics.
+///
+/// # Arguments
+///
+/// * `reason` - High-level failure category.
+/// * `snapshotPath` - Path associated with the failed I/O operation.
+/// * `detail` - Small detail string included in stderr output.
+function failSnapshotIo(
+  reason: str,
+  snapshotPath: str,
+  detail: str,
+): void {
+  let snapshotPathString: String = String::create(snapshotPath);
 
-  function failSnapshotIo(
-    reason: str,
-    snapshotPath: str,
-    detail: str,
-  ): void {
-    let snapshotPathString: String = String::create(snapshotPath);
+  Io::eprintln(reason);
+  printSnapshotPath(&snapshotPathString);
+  Io::eprintln(String::create("detail: ").concat(detail));
+  @panic("snapshot assertion failed");
+}
 
-    Io::eprintln(reason);
-    Test::printSnapshotPath(&snapshotPathString);
-    Io::eprintln(String::create("detail: ").concat(detail));
-    @panic("snapshot assertion failed");
-  }
-
-  function printSnapshotPath(snapshotPath: &String): void {
-    Io::eprintln(String::create("snapshot: ").concat(snapshotPath));
-  }
+/// Prints the normalized `snapshot: ...` line shared by all snapshot failure
+/// diagnostics.
+///
+/// # Arguments
+///
+/// * `snapshotPath` - Snapshot path to print in user-facing diagnostics.
+function printSnapshotPath(snapshotPath: &String): void {
+  Io::eprintln(String::create("snapshot: ").concat(snapshotPath));
 }

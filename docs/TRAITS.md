@@ -3,7 +3,7 @@
 Ignis now has two trait layers:
 
 1. **Lang traits** (`Drop`, `Clone`, `Copy`) used by ownership and codegen.
-2. **User-defined traits** (`trait Name { ... }`) used as method contracts on records.
+2. **User-defined traits** (`trait Name { ... }`) used as method contracts on records and, for canonical equality, enums.
 
 It also has an extension method system (`@extension`) for adding methods to existing types.
 
@@ -85,6 +85,32 @@ record Pair {
 
 User-defined traits describe behavior that records must provide.
 
+### Canonical `Eq`
+
+The canonical equality contract used by generic test assertions and builtin
+`@eq<T>` dispatch is `std::hash::Eq`.
+
+```ignis
+import Eq from "std::hash";
+
+@implements(Eq)
+record UserId {
+    public value: i32;
+
+    equals(&self, other: &UserId): boolean {
+        return self.value == other.value;
+    }
+}
+```
+
+Rules:
+
+- `Eq` is implemented with `@implements(Eq)`.
+- The required method is `equals(&self, other: &ConcreteType): boolean`.
+- Records and enums can implement canonical `Eq`.
+- Generic `std::test::Test::assertEq<T>` / `assertNe<T>` and builtin `@eq<T>` rely on this contract.
+- Unsupported equality must be rejected during analysis before code generation.
+
 ### Declaring a Trait
 
 ```ignis
@@ -164,7 +190,9 @@ If a required trait method is missing, compilation fails.
 
 ### Current Limit
 
-User-defined trait implementation checks are currently applied to records. Enums continue using lang traits only.
+General user-defined trait implementation checks still primarily target records.
+Canonical `Eq` is the current enum exception because generic test assertions and
+builtin equality rely on it.
 
 ---
 

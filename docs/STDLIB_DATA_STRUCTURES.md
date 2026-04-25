@@ -146,7 +146,7 @@ Keys must satisfy `Hash & Eq`.
 For user-defined key types, that usually means:
 
 ```ignis
-import Eq from "std::collections";
+import Eq from "std::hash";
 import Hash from "std::collections";
 import Hasher from "std::hash";
 
@@ -168,7 +168,7 @@ record Key {
 ### Basic usage
 
 ```ignis
-import Eq from "std::collections";
+import Eq from "std::hash";
 import Hash from "std::collections";
 import HashMap from "std::collections";
 import Hasher from "std::hash";
@@ -224,7 +224,7 @@ hashing and equality.
 ### Basic usage
 
 ```ignis
-import Eq from "std::collections";
+import Eq from "std::hash";
 import Hash from "std::collections";
 import HashSet from "std::collections";
 import Hasher from "std::hash";

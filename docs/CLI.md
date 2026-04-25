@@ -12,6 +12,7 @@ Commands:
 
 - `build` - Compile a file or project.
 - `check` - Run analysis/codegen checks without linking.
+- `test` - Run native Ignis tests.
 - `init` - Create or initialize an Ignis project.
 - `build-std` - Build standard library artifacts.
 - `check-std` - Check standard library codegen output.
@@ -90,6 +91,39 @@ ignis check src/main.ign
 # Analyzer-only pass (skip lowering/codegen)
 ignis check --analyze-only
 ```
+
+## `ignis test`
+
+Run language-level tests declared with `@test`.
+
+Supported modes:
+
+- Project mode: `ignis test`
+- Single-file mode: `ignis test path/to/file.ign`
+
+Examples:
+
+```bash
+# Run all tests in the current project
+ignis test
+
+# Run only tests whose fully-qualified name contains "string"
+ignis test string
+
+# Run tests from a single file
+ignis test src/example.ign
+
+# Create or replace language-level snapshots
+ignis test --update-snapshots
+```
+
+Behavior:
+
+- Tests are top-level functions annotated with `@test`.
+- The runner executes tests in deterministic order and continues after failures.
+- `--update-snapshots` enables creation and replacement of `__snapshots__/` baselines.
+- Project mode stores snapshots next to the module under test.
+- Single-file mode stores snapshots next to the single Ignis source file.
 
 ## `ignis build-std`
 

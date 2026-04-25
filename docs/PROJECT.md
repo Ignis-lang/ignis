@@ -109,3 +109,12 @@ When running `ignis init`, std paths are generated in this order:
 3. If neither is available, `std_path` and `runtime_path` are omitted.
 
 `runtime_path` is written only when `<std_path>/runtime` exists.
+
+## Testing Behavior
+
+`ignis test` uses the same source discovery rules as the normal build pipeline.
+
+- **Project mode** (`ignis test`) discovers `@test` functions from the analyzed module graph rooted at `[build].entry`.
+- **Single-file mode** (`ignis test path/to/file.ign`) does not require `ignis.toml`, but it still needs the standard library available through `IGNIS_STD_PATH` or another explicit std-path input.
+- The test harness binary is written under the configured build output directory.
+- Language-level snapshots are stored in `__snapshots__/` next to the Ignis source module under test, not inside `build/`.

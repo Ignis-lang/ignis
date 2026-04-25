@@ -6,7 +6,7 @@ Ignis is a general-purpose, statically typed language that compiles Ignis source
 
 - **Languages:** Rust (compiler, LSP), Ignis (`.ign` sources, standard library), C (runtime, generated output).
 - **Tooling:** Cargo workspace, GCC for C compilation/linking, `ar` for static archives, `make` for runtime rebuilds.
-- **Testing:** `insta` for snapshot tests, `proptest` for property-based tests, `tempfile` for compilation sandboxes.
+- **Testing:** `insta` for snapshot tests, `proptest` for property-based tests, `tempfile` for compilation sandboxes, native `ignis test` for language-level tests.
 - **LSP:** `tower-lsp` with Tokio async runtime.
 - **CLI:** `clap` with derive macros and typed subcommands.
 
@@ -17,10 +17,12 @@ crates/
   ignis/                          # CLI entry point
     src/main.rs                   # Subcommand routing, config resolution
     src/cli.rs                    # Clap CLI definition
+    tests/test_command.rs         # CLI integration tests for `ignis test`
   ignis_driver/                   # Build pipeline orchestration
     src/pipeline.rs               # Full pipeline: analysis → mono → LIR → codegen → link
     src/context.rs                # Module discovery, import resolution, per-module parsing
     src/link.rs                   # GCC compilation, archive creation, executable linking
+    tests/native_test_runner.rs   # Project + single-file native test runner integration tests
     tests/e2e_ok.rs               # E2E tests (compile + run)
     tests/e2e_err.rs              # E2E error tests (runtime failures)
     tests/common/mod.rs           # Shared test helpers
@@ -134,6 +136,7 @@ std/                              # Ignis standard library
   ffi/mod.ign                     # FFI utilities (CString)
   fs/mod.ign                      # Filesystem (readToString, writeString, Dir, File, Metadata)
   path/mod.ign                    # Path manipulation utilities
+  test/mod.ign                    # `std::test::Test` assertions and snapshot helpers
   runtime/                        # C runtime implementation
     ignis_rt.h                    # Runtime API header (types, strings, Rc, memory)
     libignis_rt.a                 # Precompiled runtime archive
@@ -167,7 +170,7 @@ docs/                             # Language reference and ABI docs
 
 Parses commands via `clap`, resolves compile input (project `ignis.toml` or single file), and builds `IgnisConfig` with CLI overrides (`opt_level`, `debug`, `out_dir`, `std_path`, `cc`, `emit`).
 
-Subcommands: `build`, `check`, `build-std`, `check-std`, `check-runtime`, `lsp`.
+Subcommands: `build`, `check`, `test`, `build-std`, `check-std`, `check-runtime`, `lsp`.
 
 ### Driver Pipeline
 
@@ -179,6 +182,21 @@ Orchestrates the full compilation pipeline. Two codegen paths:
 - **Legacy single-file**: all code emitted to one C file, compiled directly.
 
 Caching uses stamp files with `BuildFingerprint` (compiler version + ABI version + source hashes) to skip recompilation of unchanged modules.
+
+### Native Test Runner
+
+**Entries:** `crates/ignis_driver/src/pipeline.rs` → `run_project_tests()` / `run_single_file_tests()`
+
+The native test runner reuses the normal analysis → mono → LIR → codegen → link pipeline, but swaps the normal entry wrapper for a generated test harness. The harness executes discovered `@test` functions one by one, preserves deterministic ordering, continues after failures, and forwards snapshot context through environment variables.
+
+Runner responsibilities:
+
+- discover `@test` functions from analyzed modules
+- build deterministic fully-qualified test names
+- support project-mode and single-file mode
+- execute tests through a harness binary
+- expose snapshot context (`IGNIS_TEST_NAME`, `IGNIS_TEST_SNAPSHOT_DIR`, `IGNIS_TEST_UPDATE_SNAPSHOTS`)
+- report failures with bounded stderr/stdout detail
 
 ### Module Discovery
 
@@ -345,6 +363,7 @@ Key modules:
 | `option` | `Option<S>` with `SOME`/`NONE`, helpers (`isSome`, `isNone`, `unwrap`, `unwrapOr`) |
 | `result` | `Result<T, E>` with `OK`/`ERROR`, helpers (`isOk`, `isError`, `unwrap`, `unwrapOr`) |
 | `rc` | `Rc<T>` (shared ownership), `Weak<T>` (non-owning observer) |
+| `test` | `std::test::Test` namespace: generic assertions and snapshot helpers |
 | `libc` | C standard library wrappers (memory, string, process, io, stdio, errno, misc, primitives) |
 | `ptr` | Pointer utilities |
 | `ffi` | FFI utilities: `CString` (owned NUL-terminated C string) |
@@ -354,6 +373,8 @@ Key modules:
 **Auto-loaded modules** (always available without explicit import): `string`, `number`, `vector`, `types`, `option`, `result`.
 
 Std modules use `extern namespace` declarations backed by C runtime functions.
+
+The canonical equality contract behind generic test assertions is `std::hash::Eq`. Generic `Test::assertEq<T>` / `assertNe<T>` route through builtin `@eq<T>` after analyzer validation, and unsupported equality must be rejected before codegen.
 
 ### C Runtime
 
