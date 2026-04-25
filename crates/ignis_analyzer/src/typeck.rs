@@ -5513,6 +5513,10 @@ impl<'a> Analyzer<'a> {
       return None;
     }
 
+    if !self.validate_std_test_equality_assertion_call(*def_id, &resolved_type_args, &call.span) {
+      return None;
+    }
+
     // Build substitution - use owner's def_id if type args are for owner
     let subst_def_id = subst_owner.unwrap_or(*def_id);
     let subst = Substitution::for_generic(subst_def_id, &resolved_type_args);
@@ -7082,6 +7086,7 @@ impl<'a> Analyzer<'a> {
           .collect();
 
         self.validate_type_param_bounds(&type_params, &inferred_args, &call.span);
+        self.validate_std_test_equality_assertion_call(*def_id, &inferred_args, &call.span);
 
         return subst_return;
       } else {
@@ -10231,7 +10236,7 @@ impl<'a> Analyzer<'a> {
       | Type::U32
       | Type::U64
       | Type::Str => true,
-      Type::Param { owner, index } => self.type_param_has_eq_bound(owner, index, span),
+      Type::Param { .. } => true,
       Type::Record(def_id) | Type::Enum(def_id) => self.validate_builtin_eq_named_type(def_id, type_id, span),
       Type::Instance { generic, .. } => self.validate_builtin_eq_named_type(generic, type_id, span),
       _ => {
@@ -10269,36 +10274,30 @@ impl<'a> Analyzer<'a> {
       .is_some()
   }
 
-  fn type_param_has_eq_bound(
+  fn validate_std_test_equality_assertion_call(
     &mut self,
-    owner: DefinitionId,
-    index: u32,
+    def_id: DefinitionId,
+    resolved_type_args: &[TypeId],
     span: &Span,
   ) -> bool {
-    let Some(param_def_id) = self.lookup_type_param_def(owner, index) else {
-      return false;
-    };
-
-    let has_eq_bound = match &self.defs.get(&param_def_id).kind {
-      DefinitionKind::TypeParam(tp) => tp.bounds.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
-      _ => false,
-    };
-
-    if has_eq_bound {
-      true
-    } else {
-      let param_type = self.types.param(owner, index);
-      let type_name = self.format_type_for_error(&param_type);
-
-      self.add_diagnostic(
-        DiagnosticMessage::UnsupportedEqualityType {
-          type_name,
-          span: span.clone(),
-        }
-        .report(),
-      );
-      false
+    if !self.is_std_test_equality_assertion(def_id) {
+      return true;
     }
+
+    resolved_type_args
+      .first()
+      .copied()
+      .is_some_and(|type_id| self.validate_builtin_eq_type(type_id, span))
+  }
+
+  fn is_std_test_equality_assertion(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let def = self.defs.get(&def_id);
+    let name = self.get_symbol_name(&def.name);
+
+    name == "assertEq" || name == "assertNe"
   }
 
   fn definition_implements_eq_trait(
@@ -10336,9 +10335,7 @@ impl<'a> Analyzer<'a> {
       | Type::U32
       | Type::U64 => Some(BuiltinEqKind::Primitive),
       Type::Str => Some(BuiltinEqKind::Str),
-      Type::Param { owner, index } => {
-        self.type_param_has_eq_bound_without_diagnostic(owner, index).then_some(BuiltinEqKind::Pending)
-      },
+      Type::Param { .. } => Some(BuiltinEqKind::Pending),
       Type::Record(def_id) | Type::Enum(def_id) => self
         .resolve_builtin_eq_method(def_id, type_id)
         .map(BuiltinEqKind::Method),
@@ -10392,21 +10389,6 @@ impl<'a> Analyzer<'a> {
       && self.types.types_equal(&md.return_type, &self.types.boolean());
 
     signature_ok.then_some(method_def_id)
-  }
-
-  fn type_param_has_eq_bound_without_diagnostic(
-    &self,
-    owner: DefinitionId,
-    index: u32,
-  ) -> bool {
-    let Some(param_def_id) = self.lookup_type_param_def(owner, index) else {
-      return false;
-    };
-
-    matches!(
-      &self.defs.get(&param_def_id).kind,
-      DefinitionKind::TypeParam(tp) if tp.bounds.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id))
-    )
   }
 
   fn type_param_has_trait_bound(

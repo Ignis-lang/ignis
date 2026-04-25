@@ -123,6 +123,37 @@ function assertEqPasses(): void {
 }
 
 #[test]
+fn run_project_tests_returns_ok_when_generic_equality_assertions_pass() {
+  let project = write_test_project(
+    r#"
+import String from "std::string";
+import Test from "std::test";
+
+@test
+function genericAssertionsPass(): void {
+    let equalLeft: String = String::create("shared");
+    let equalRight: String = String::create("shared");
+    let notEqualLeft: String = String::create("shared");
+    let notEqualRight: String = String::create("different");
+
+    Test::assertEq<String>(equalLeft, equalRight);
+    Test::assertNe<String>(notEqualLeft, notEqualRight);
+    Test::assertEq<str>("abc", "abc");
+    Test::assertNe<i32>(1, 2);
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(result.is_ok(), "expected generic equality assertions to pass");
+  assert!(
+    harness_binary_path(project.path()).exists(),
+    "expected test harness binary to be built"
+  );
+}
+
+#[test]
 fn run_project_tests_returns_err_when_any_selected_test_fails() {
   let project = write_test_project(
     r#"

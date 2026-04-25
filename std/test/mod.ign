@@ -5,7 +5,8 @@
 //!
 //! This v0.5 surface intentionally stays small:
 //! - `Test::assert(condition)`
-//! - `Test::assertEq(left: i32, right: i32)`
+//! - `Test::assertEq<T>(left, right)`
+//! - `Test::assertNe<T>(left, right)`
 //! - `Test::fail()`
 //! - `Test::assertSnapshot(name, actual)`
 //! - `Test::assertFileSnapshot(name, filePath)`
@@ -20,7 +21,7 @@
 //! @test
 //! function smoke(): void {
 //!   Test::assert(true);
-//!   Test::assertEq(2 + 2, 4);
+//!   Test::assertEq<i32>(2 + 2, 4);
 //! }
 //! ```
 
@@ -43,10 +44,17 @@ export namespace Test {
     @panic("test failed");
   }
 
-  /// Fails the current test when two `i32` values are not equal.
-  function assertEq(left: i32, right: i32): void {
-    if (!(left == right)) {
+  /// Fails the current test when two values are not equal under canonical `Eq`.
+  function assertEq<T>(left: T, right: T): void {
+    if (!@eq<T>(&left, &right)) {
       @panic("assertion failed: values are not equal");
+    }
+  }
+
+  /// Fails the current test when two values are equal under canonical `Eq`.
+  function assertNe<T>(left: T, right: T): void {
+    if (@eq<T>(&left, &right)) {
+      @panic("assertion failed: values are equal");
     }
   }
 

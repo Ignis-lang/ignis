@@ -2248,11 +2248,8 @@ function main(): boolean {
 }
 
 #[test]
-fn builtin_eq_rejects_unbounded_type_param() {
+fn builtin_eq_allows_supported_generic_wrapper() {
   let source = r#"
-trait Eq {
-}
-
 function same<T>(left: &T, right: &T): boolean {
     return @eq<T>(left, right);
 }
@@ -2266,9 +2263,9 @@ function main(): boolean {
 
   let result = common::analyze(source);
 
-  common::assert_err(source, &["A0191"]);
-  assert_snapshot!(
-    "builtin_eq_rejects_unbounded_type_param",
+  assert!(
+    result.output.diagnostics.is_empty(),
+    "expected supported generic wrapper to analyze without diagnostics, got: {}",
     common::format_diagnostics(&result.output.diagnostics)
   );
 }

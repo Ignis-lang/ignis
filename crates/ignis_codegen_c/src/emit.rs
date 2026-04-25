@@ -496,7 +496,7 @@ impl<'a> CEmitter<'a> {
           return false;
         }
 
-        kind.is_user() || (self.is_monomorphized_generic_def(*def_id) && self.definition_depends_on_user_type(*def_id))
+        kind.is_user() || (self.is_monomorphized_generic_def(*def_id) && self.is_std_test_def(*def_id))
       })
       .collect()
   }
@@ -518,6 +518,16 @@ impl<'a> CEmitter<'a> {
   ) -> bool {
     let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
     raw_name.contains("__") && !raw_name.starts_with("__")
+  }
+
+  fn is_std_test_def(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    self
+      .module_paths
+      .and_then(|module_paths| module_paths.get(&self.defs.get(&def_id).owner_module))
+      .is_some_and(|module_path| matches!(module_path, ModulePath::Std(name) if name == "test"))
   }
 
   fn definition_depends_on_user_type(
