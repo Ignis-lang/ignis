@@ -201,6 +201,7 @@ pub struct EnumDefinition {
   pub static_fields: HashMap<SymbolId, DefinitionId>,
   pub attrs: Vec<RecordAttr>,
   pub lang_traits: LangTraitSet,
+  pub implemented_traits: Vec<DefinitionId>,
   pub try_capable: Option<TryCapability>,
 }
 

@@ -501,6 +501,7 @@ impl<'a> Analyzer<'a> {
         static_fields: HashMap::new(),
         attrs: vec![],
         lang_traits: LangTraitSet::default(),
+        implemented_traits: Vec::new(),
         try_capable: None,
       }),
       name: en.name,
@@ -550,7 +551,7 @@ impl<'a> Analyzer<'a> {
     self.refresh_type_param_bounds(en.type_params.as_ref(), enum_def_id);
 
     let type_name = self.get_symbol_name(&en.name);
-    let (enum_attrs, lang_traits, _implemented_traits) = self.bind_record_attrs(&en.attrs, &type_name);
+    let (enum_attrs, lang_traits, implemented_traits) = self.bind_record_attrs(&en.attrs, &type_name);
 
     // Create the Type::Enum and update the definition's type_id
     let type_id = self.types.enum_type(enum_def_id);
@@ -679,6 +680,7 @@ impl<'a> Analyzer<'a> {
       ed.static_fields = static_fields;
       ed.attrs = enum_attrs;
       ed.lang_traits = lang_traits;
+      ed.implemented_traits = implemented_traits;
       ed.try_capable = try_capable;
     }
   }

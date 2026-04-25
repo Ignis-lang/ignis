@@ -1729,6 +1729,7 @@ impl<'a> Monomorphizer<'a> {
         static_fields: ed.static_fields.clone(),
         attrs: ed.attrs.clone(),
         lang_traits: ed.lang_traits,
+        implemented_traits: ed.implemented_traits.clone(),
         try_capable: ed.try_capable,
       }),
     );

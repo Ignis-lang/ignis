@@ -2189,7 +2189,6 @@ fn collection_bounds_reject_missing_eq_key() {
 trait Hash {
     hash(&self): i32;
 }
-
 trait Eq {
 }
 
@@ -2221,6 +2220,55 @@ function main(): i32 {
   common::assert_err(source, &["A0190"]);
   assert_snapshot!(
     "collection_bounds_reject_missing_eq_key",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn builtin_eq_rejects_unsupported_record_type() {
+  let source = r#"
+record NoEq {
+    public value: i32;
+}
+
+function main(): boolean {
+    let left: NoEq = NoEq { value: 1 };
+    let right: NoEq = NoEq { value: 1 };
+    return @eq<NoEq>(&left, &right);
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0191"]);
+  assert_snapshot!(
+    "builtin_eq_rejects_unsupported_record_type",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn builtin_eq_rejects_unbounded_type_param() {
+  let source = r#"
+trait Eq {
+}
+
+function same<T>(left: &T, right: &T): boolean {
+    return @eq<T>(left, right);
+}
+
+function main(): boolean {
+    let left: i32 = 1;
+    let right: i32 = 1;
+    return same<i32>(&left, &right);
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0191"]);
+  assert_snapshot!(
+    "builtin_eq_rejects_unbounded_type_param",
     common::format_diagnostics(&result.output.diagnostics)
   );
 }

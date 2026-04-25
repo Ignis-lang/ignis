@@ -715,6 +715,10 @@ pub enum DiagnosticMessage {
     payload_index: usize,
     span: Span,
   },
+  UnsupportedEqualityType {
+    type_name: String,
+    span: Span,
+  },
   // Extension method diagnostics
   ExtensionInvalidTargetType {
     type_name: String,
@@ -1539,6 +1543,9 @@ impl fmt::Display for DiagnosticMessage {
           trait_name
         )
       },
+      DiagnosticMessage::UnsupportedEqualityType { type_name, .. } => {
+        write!(f, "type '{}' does not support builtin equality; expected a primitive, str, or Eq-implementing record/enum", type_name)
+      },
       DiagnosticMessage::LangTryRequiresTwoVariants { name, count, .. } => {
         write!(f, "@lang(try) on enum '{}' requires exactly 2 variants, found {}", name, count)
       },
@@ -1970,6 +1977,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
       | DiagnosticMessage::LangTraitInvalidSignature { span, .. }
       | DiagnosticMessage::LangTraitNotApplicable { span, .. }
+      | DiagnosticMessage::UnsupportedEqualityType { span, .. }
       | DiagnosticMessage::LangTryRequiresTwoVariants { span, .. }
       | DiagnosticMessage::TryOperatorOnNonTryType { span, .. }
       | DiagnosticMessage::TryOperatorOutsideFunction { span, .. }
@@ -2208,6 +2216,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::TraitMissingRequiredMethod { .. } => "A0140",
       DiagnosticMessage::TraitMethodSignatureMismatch { .. } => "A0141",
       DiagnosticMessage::UnknownTraitInImplements { .. } => "A0142",
+      DiagnosticMessage::UnsupportedEqualityType { .. } => "A0191",
       DiagnosticMessage::UnknownTraitInGenericBound { .. } => "A0188",
       DiagnosticMessage::GenericBoundMustBeTrait { .. } => "A0189",
       DiagnosticMessage::GenericBoundNotSatisfied { .. } => "A0190",

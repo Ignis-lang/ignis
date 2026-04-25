@@ -221,8 +221,18 @@ fn fixture_clone_wrong_return() {
 }
 
 #[test]
+fn fixture_eq_wrong_signature() {
+  test_fixture("test_cases/analyzer/lang_traits/eq_wrong_signature.ign");
+}
+
+#[test]
 fn fixture_enum_drop() {
   test_fixture("test_cases/analyzer/lang_traits/enum_drop.ign");
+}
+
+#[test]
+fn fixture_enum_eq_bound() {
+  test_fixture("test_cases/analyzer/lang_traits/enum_eq_bound.ign");
 }
 
 #[test]

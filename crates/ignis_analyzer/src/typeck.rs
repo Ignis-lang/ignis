@@ -38,6 +38,12 @@ use ignis_ast::expressions::assignment::ASTAssignmentOperator;
 use ignis_ast::expressions::binary::ASTBinaryOperator;
 use ignis_ast::expressions::unary::UnaryOperator;
 
+#[derive(Clone, Copy)]
+enum EqValidationDiagnostic {
+  LangTrait,
+  UnsupportedEqualityType,
+}
+
 impl<'a> Analyzer<'a> {
   pub fn typecheck_phase(
     &mut self,
@@ -7786,7 +7792,12 @@ impl<'a> Analyzer<'a> {
     let infer = InferContext::expecting(value_ref_type);
     self.typecheck_node_with_infer(&bc.args[0], scope_kind, ctx, &infer);
     self.typecheck_node_with_infer(&bc.args[1], scope_kind, ctx, &infer);
-    self.types.boolean()
+
+    if self.validate_builtin_eq_type(value_type, &bc.span) {
+      self.types.boolean()
+    } else {
+      self.types.error()
+    }
   }
 
   fn typecheck_maxof_builtin(
@@ -10196,8 +10207,114 @@ impl<'a> Analyzer<'a> {
   ) -> bool {
     match &self.defs.get(&type_def_id).kind {
       DefinitionKind::Record(rd) => rd.implemented_traits.contains(&trait_def_id),
+      DefinitionKind::Enum(ed) => ed.implemented_traits.contains(&trait_def_id),
       _ => false,
     }
+  }
+
+  fn validate_builtin_eq_type(
+    &mut self,
+    type_id: TypeId,
+    span: &Span,
+  ) -> bool {
+    match self.types.get(&type_id).clone() {
+      Type::Error => true,
+      Type::Boolean
+      | Type::Char
+      | Type::I8
+      | Type::I16
+      | Type::I32
+      | Type::I64
+      | Type::U8
+      | Type::U16
+      | Type::U32
+      | Type::U64
+      | Type::Str => true,
+      Type::Param { owner, index } => self.type_param_has_eq_bound(owner, index, span),
+      Type::Record(def_id) | Type::Enum(def_id) => self.validate_builtin_eq_named_type(def_id, type_id, span),
+      Type::Instance { generic, .. } => self.validate_builtin_eq_named_type(generic, type_id, span),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnsupportedEqualityType {
+            type_name: self.format_type_for_error(&type_id),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        false
+      },
+    }
+  }
+
+  fn validate_builtin_eq_named_type(
+    &mut self,
+    type_def_id: DefinitionId,
+    type_id: TypeId,
+    span: &Span,
+  ) -> bool {
+    if !self.definition_implements_eq_trait(type_def_id) {
+      self.add_diagnostic(
+        DiagnosticMessage::UnsupportedEqualityType {
+          type_name: self.format_type_for_error(&type_id),
+          span: span.clone(),
+        }
+        .report(),
+      );
+      return false;
+    }
+
+    self.validate_eq_method_signature(type_def_id, type_id, span, EqValidationDiagnostic::UnsupportedEqualityType)
+  }
+
+  fn type_param_has_eq_bound(
+    &mut self,
+    owner: DefinitionId,
+    index: u32,
+    span: &Span,
+  ) -> bool {
+    let Some(param_def_id) = self.lookup_type_param_def(owner, index) else {
+      return false;
+    };
+
+    let has_eq_bound = match &self.defs.get(&param_def_id).kind {
+      DefinitionKind::TypeParam(tp) => tp.bounds.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
+      _ => false,
+    };
+
+    if has_eq_bound {
+      true
+    } else {
+      let param_type = self.types.param(owner, index);
+      let type_name = self.format_type_for_error(&param_type);
+
+      self.add_diagnostic(
+        DiagnosticMessage::UnsupportedEqualityType {
+          type_name,
+          span: span.clone(),
+        }
+        .report(),
+      );
+      false
+    }
+  }
+
+  fn definition_implements_eq_trait(
+    &self,
+    type_def_id: DefinitionId,
+  ) -> bool {
+    match &self.defs.get(&type_def_id).kind {
+      DefinitionKind::Record(rd) => rd.implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
+      DefinitionKind::Enum(ed) => ed.implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
+      _ => false,
+    }
+  }
+
+  fn is_eq_trait(
+    &self,
+    trait_def_id: DefinitionId,
+  ) -> bool {
+    matches!(self.defs.get(&trait_def_id).kind, DefinitionKind::Trait(_))
+      && self.get_symbol_name(&self.defs.get(&trait_def_id).name) == "Eq"
   }
 
   fn type_param_has_trait_bound(
@@ -10320,7 +10437,7 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&type_def.name);
 
     // Clone to release borrow on self.defs
-    let (lang_traits, instance_methods, type_id, is_enum, fields, variants) = match &type_def.kind {
+    let (lang_traits, implemented_traits, instance_methods, type_id, is_enum, fields, variants) = match &type_def.kind {
       DefinitionKind::Record(rd) => {
         let fields: Vec<_> = rd.fields.iter().map(|f| (f.name, f.type_id, f.span.clone())).collect();
 
@@ -10345,6 +10462,7 @@ impl<'a> Analyzer<'a> {
 
         (
           rd.lang_traits,
+          rd.implemented_traits.clone(),
           Some(rd.instance_methods.clone()),
           effective_type,
           false,
@@ -10373,6 +10491,7 @@ impl<'a> Analyzer<'a> {
 
         (
           ed.lang_traits,
+          ed.implemented_traits.clone(),
           Some(ed.instance_methods.clone()),
           effective_type,
           true,
@@ -10383,7 +10502,11 @@ impl<'a> Analyzer<'a> {
       _ => return,
     };
 
-    if !lang_traits.drop && !lang_traits.clone && !lang_traits.copy {
+    if !lang_traits.drop
+      && !lang_traits.clone
+      && !lang_traits.copy
+      && !implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id))
+    {
       return;
     }
 
@@ -10419,6 +10542,147 @@ impl<'a> Analyzer<'a> {
       } else {
         self.validate_copy_structural(&type_name, &fields, type_span);
       }
+    }
+
+    if implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)) {
+      self.validate_eq_method_signature(*type_def_id, type_id, type_span, EqValidationDiagnostic::LangTrait);
+    }
+  }
+
+  fn validate_eq_method_signature(
+    &mut self,
+    type_def_id: DefinitionId,
+    type_id: TypeId,
+    span: &Span,
+    diagnostic: EqValidationDiagnostic,
+  ) -> bool {
+    let type_def = self.defs.get(&type_def_id);
+    let type_name = self.get_symbol_name(&type_def.name);
+
+    let instance_methods = match &type_def.kind {
+      DefinitionKind::Record(rd) => rd.instance_methods.clone(),
+      DefinitionKind::Enum(ed) => ed.instance_methods.clone(),
+      _ => return false,
+    };
+
+    let method_sym = self.symbols.borrow_mut().intern("equals");
+    let Some(entry) = instance_methods.get(&method_sym) else {
+      self.report_eq_method_issue(&type_name, span, diagnostic, None, None);
+      return false;
+    };
+
+    let method_def_id = match entry {
+      SymbolEntry::Single(id) => *id,
+      SymbolEntry::Overload(group) => match group.first() {
+        Some(id) => *id,
+        None => {
+          self.report_eq_method_issue(&type_name, span, diagnostic, None, None);
+          return false;
+        },
+      },
+    };
+
+    let method_def = self.defs.get(&method_def_id);
+    let method_span = method_def.span.clone();
+
+    let DefinitionKind::Method(md) = &method_def.kind else {
+      self.report_eq_method_issue(&type_name, &method_span, diagnostic, None, None);
+      return false;
+    };
+
+    let expected_other = self.types.reference(type_id, false);
+    let expected = format!(
+      "equals(&self, {}): boolean",
+      self.format_type_for_error(&expected_other)
+    );
+
+    let params = md.params.clone();
+    let return_type = md.return_type;
+    let other_type = params.get(1).and_then(|param_id| match &self.defs.get(param_id).kind {
+      DefinitionKind::Parameter(pd) => Some(pd.type_id),
+      _ => None,
+    });
+
+    let signature_ok = !md.self_mutable
+      && params.len() == 2
+      && other_type == Some(expected_other)
+      && return_type == self.types.boolean();
+
+    if signature_ok {
+      return true;
+    }
+
+    let got = self.format_eq_method_signature(&params, md.self_mutable, return_type);
+    self.report_eq_method_issue(&type_name, &method_span, diagnostic, Some(expected), Some(got));
+    false
+  }
+
+  fn format_eq_method_signature(
+    &self,
+    params: &[DefinitionId],
+    self_mutable: bool,
+    return_type: TypeId,
+  ) -> String {
+    let mut param_parts = vec![if self_mutable {
+      "&mut self".to_string()
+    } else {
+      "&self".to_string()
+    }];
+
+    for param_id in params.iter().skip(1) {
+      let param_type = match &self.defs.get(param_id).kind {
+        DefinitionKind::Parameter(pd) => self.format_type_for_error(&pd.type_id),
+        _ => "?".to_string(),
+      };
+      param_parts.push(param_type);
+    }
+
+    format!(
+      "equals({}): {}",
+      param_parts.join(", "),
+      self.format_type_for_error(&return_type)
+    )
+  }
+
+  fn report_eq_method_issue(
+    &mut self,
+    type_name: &str,
+    span: &Span,
+    diagnostic: EqValidationDiagnostic,
+    expected: Option<String>,
+    got: Option<String>,
+  ) {
+    match diagnostic {
+      EqValidationDiagnostic::LangTrait => {
+        let report = match (expected, got) {
+          (Some(expected), Some(got)) => DiagnosticMessage::LangTraitInvalidSignature {
+            trait_name: "Eq".to_string(),
+            method_name: "equals".to_string(),
+            expected,
+            got,
+            span: span.clone(),
+          }
+          .report(),
+          _ => DiagnosticMessage::LangTraitMissingMethod {
+            trait_name: "Eq".to_string(),
+            method_name: "equals".to_string(),
+            type_name: type_name.to_string(),
+            span: span.clone(),
+          }
+          .report(),
+        };
+
+        self.add_diagnostic(report);
+      },
+      EqValidationDiagnostic::UnsupportedEqualityType => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnsupportedEqualityType {
+            type_name: type_name.to_string(),
+            span: span.clone(),
+          }
+          .report(),
+        );
+      },
     }
   }
 
