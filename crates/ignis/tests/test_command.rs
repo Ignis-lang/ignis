@@ -51,6 +51,17 @@ fn write_single_test_file(
   file_path
 }
 
+fn write_project_file(
+  project_dir: &Path,
+  relative_path: &str,
+  contents: &str,
+) {
+  let file_path = project_dir.join(relative_path);
+
+  fs::create_dir_all(file_path.parent().expect("project file parent")).expect("create project file dir");
+  fs::write(file_path, contents).expect("write project file");
+}
+
 fn harness_binary_path(project_dir: &Path) -> PathBuf {
   project_dir.join("build/bin/native_test_runner_fixture-tests")
 }
@@ -69,6 +80,18 @@ fn escape_snapshot_component(value: &str) -> String {
   }
 
   escaped
+}
+
+fn project_snapshot_path(
+  project_dir: &Path,
+  fq_name: &str,
+  snapshot_name: &str,
+) -> PathBuf {
+  project_dir.join("src").join("__snapshots__").join(format!(
+    "{}__{}.snap.txt",
+    escape_snapshot_component(fq_name),
+    escape_snapshot_component(snapshot_name)
+  ))
 }
 
 #[test]
@@ -117,6 +140,158 @@ function genericAssertionsPass(): void {
     "expected successful cli test summary\nstdout:\n{stdout}\nstderr:\n{stderr}"
   );
   assert!(harness_binary_path(&project_dir).exists(), "expected cli test run to build the harness binary");
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_surfaces_failing_assertion_diagnostics_in_project_mode() {
+  let project_dir = make_temp_project_dir("failing-assertion-project");
+  write_test_project(
+    &project_dir,
+    r#"
+import Test from "std::test";
+
+@test
+function failingAssertion(): void {
+    Test::assertEq(1, 2);
+}
+"#,
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("run ignis test");
+
+  assert!(
+    !output.status.success(),
+    "expected ignis test to fail for a failing assertion\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    stdout.contains("Tests failed") || stderr.contains("Tests failed"),
+    "expected failing cli test summary\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("main::failingAssertion") || stderr.contains("main::failingAssertion"),
+    "expected fully qualified failing test name in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("assertion failed: values are not equal") || stderr.contains("assertion failed: values are not equal"),
+    "expected assertion panic text in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("1 total") || stderr.contains("1 total"),
+    "expected total count in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("0 passed") || stderr.contains("0 passed"),
+    "expected passed count in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("1 failed") || stderr.contains("1 failed"),
+    "expected failed count in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(harness_binary_path(&project_dir).exists(), "expected cli test failure to happen after harness build");
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_updates_project_snapshots_via_cli() {
+  let project_dir = make_temp_project_dir("project-snapshot-update");
+  write_test_project(
+    &project_dir,
+    r#"
+import Test from "std::test";
+
+@test
+function writesSnapshot(): void {
+    Test::assertSnapshot("rendered", "new snapshot contents\n");
+}
+"#,
+  );
+
+  let snapshot_path = project_snapshot_path(&project_dir, "main::writesSnapshot", "rendered");
+  write_project_file(
+    &project_dir,
+    "src/__snapshots__/main__writesSnapshot__rendered.snap.txt",
+    "old snapshot contents\n",
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .arg("--update-snapshots")
+    .output()
+    .expect("run ignis test project snapshot");
+
+  if !output.status.success() {
+    panic!(
+      "expected project snapshot update to succeed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read project snapshot"),
+    "new snapshot contents\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_creates_missing_project_snapshots_via_cli() {
+  let project_dir = make_temp_project_dir("project-snapshot-create");
+  write_test_project(
+    &project_dir,
+    r#"
+import Test from "std::test";
+
+@test
+function writesSnapshot(): void {
+    Test::assertSnapshot("rendered", "new snapshot contents\n");
+}
+"#,
+  );
+
+  let snapshot_path = project_snapshot_path(&project_dir, "main::writesSnapshot", "rendered");
+  assert!(
+    !snapshot_path.exists(),
+    "expected project snapshot baseline to be missing before update mode"
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .arg("--update-snapshots")
+    .output()
+    .expect("run ignis test project snapshot");
+
+  if !output.status.success() {
+    panic!(
+      "expected missing project snapshot baseline creation to succeed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read project snapshot"),
+    "new snapshot contents\n"
+  );
 
   cleanup_project_dir(&project_dir);
 }
