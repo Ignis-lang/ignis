@@ -171,6 +171,93 @@ function invalidEq(): void {
 }
 
 #[test]
+fn ignis_test_reports_inline_snapshot_request_as_unsupported_in_project_mode() {
+  let project_dir = make_temp_project_dir("inline-snapshot-project");
+  write_test_project(
+    &project_dir,
+    r#"
+import Test from "std::test";
+
+@test
+function invalidInlineSnapshot(): void {
+    Test::assertInlineSnapshot("rendered", "value");
+}
+"#,
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("run ignis test");
+
+  assert!(
+    !output.status.success(),
+    "expected ignis test to reject unsupported inline snapshot requests\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    stdout.contains("assertInlineSnapshot") || stderr.contains("assertInlineSnapshot"),
+    "expected command output to name the unsupported inline snapshot surface\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    !harness_binary_path(&project_dir).exists(),
+    "expected harness build to stop before binary generation"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_reports_inline_snapshot_request_as_unsupported_in_single_file_mode() {
+  let project_dir = make_temp_project_dir("inline-snapshot-single-file");
+  let file_path = write_single_test_file(
+    &project_dir,
+    "sample.ign",
+    r#"
+import Test from "std::test";
+
+@test
+function invalidInlineSnapshot(): void {
+    Test::assertInlineSnapshot("rendered", "value");
+}
+"#,
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg(&file_path)
+    .env("IGNIS_STD_PATH", workspace_std_path())
+    .output()
+    .expect("run ignis test single-file");
+
+  assert!(
+    !output.status.success(),
+    "expected single-file ignis test to reject unsupported inline snapshot requests\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    stdout.contains("assertInlineSnapshot") || stderr.contains("assertInlineSnapshot"),
+    "expected single-file command output to name the unsupported inline snapshot surface\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    !project_dir.join("build/bin/sample-tests").exists(),
+    "expected harness build to stop before binary generation"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
 fn ignis_test_executes_single_file_input_via_cli() {
   let project_dir = make_temp_project_dir("single-file-generic-eq");
   let file_path = write_single_test_file(

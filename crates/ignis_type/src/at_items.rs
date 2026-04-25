@@ -209,7 +209,7 @@ static AT_ITEMS: &[AtItemMeta] = &[
     syntax: "@test",
     summary: "Marks a top-level function as a native test case.",
     doc: Some(
-      "Valid on: top-level function. v0.5 tests must be non-generic, take zero parameters, return `void`, and not be extern.",
+      "Valid on: top-level function. Tests must be non-generic, take zero parameters, return `void`, and not be extern.",
     ),
   },
   AtItemMeta {

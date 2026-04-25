@@ -3694,7 +3694,7 @@ pub fn emit_std_module_h_from_input(
     }
   };
 
-  emit_module_header(&guard_name, &comment, input.program, input.defs, input.types, symbols, namespaces, filter)
+  emit_module_header(&guard_name, &comment, input, symbols, namespaces, filter)
 }
 
 /// Emit C for a specific user module.
@@ -3790,7 +3790,7 @@ pub fn emit_user_module_h_from_input(
   let filter =
     |_def_id: DefinitionId, def: &ignis_type::definition::Definition| -> bool { def.owner_module == module_id };
 
-  emit_module_header(&guard_name, &comment, input.program, input.defs, input.types, symbols, namespaces, filter)
+  emit_module_header(&guard_name, &comment, input, symbols, namespaces, filter)
 }
 
 fn prepend_umbrella_header(
@@ -3814,9 +3814,7 @@ fn prepend_umbrella_header(
 fn emit_module_header<F>(
   guard_name: &str,
   comment: &str,
-  program: &LirProgram,
-  defs: &DefinitionStore,
-  types: &TypeStore,
+  input: EmitInput<'_>,
   symbols: &SymbolTable,
   namespaces: &NamespaceStore,
   filter: F,
@@ -3825,6 +3823,10 @@ where
   F: Fn(DefinitionId, &ignis_type::definition::Definition) -> bool,
 {
   use std::collections::HashSet;
+
+  let program = input.program;
+  let defs = input.defs;
+  let types = input.types;
 
   let mut output = String::new();
 

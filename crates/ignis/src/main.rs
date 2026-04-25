@@ -30,6 +30,7 @@ enum CompileInput {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum TestInput {
   Project(Project),
   SingleFile(PathBuf),

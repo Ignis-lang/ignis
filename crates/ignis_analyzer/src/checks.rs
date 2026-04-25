@@ -718,7 +718,7 @@ impl<'a> Analyzer<'a> {
     if func_def.is_extern {
       self.add_diagnostic(
         DiagnosticMessage::CompileError {
-          message: "@test functions cannot be extern in v0.5".to_string(),
+          message: "@test functions cannot be extern".to_string(),
           span: func.signature.span.clone(),
         }
         .report(),
@@ -728,7 +728,7 @@ impl<'a> Analyzer<'a> {
     if !func_def.type_params.is_empty() {
       self.add_diagnostic(
         DiagnosticMessage::CompileError {
-          message: "@test functions cannot declare generic parameters in v0.5".to_string(),
+          message: "@test functions cannot declare generic parameters".to_string(),
           span: func.signature.span.clone(),
         }
         .report(),
@@ -738,7 +738,7 @@ impl<'a> Analyzer<'a> {
     if !func_def.params.is_empty() {
       self.add_diagnostic(
         DiagnosticMessage::CompileError {
-          message: "@test functions must not take parameters in v0.5".to_string(),
+          message: "@test functions must not take parameters".to_string(),
           span: func.signature.span.clone(),
         }
         .report(),
@@ -748,7 +748,7 @@ impl<'a> Analyzer<'a> {
     if !matches!(self.types.get(&func_def.return_type), Type::Void) {
       self.add_diagnostic(
         DiagnosticMessage::CompileError {
-          message: "@test functions must return void in v0.5".to_string(),
+          message: "@test functions must return void".to_string(),
           span: func.signature.span.clone(),
         }
         .report(),
