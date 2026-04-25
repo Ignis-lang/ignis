@@ -36,6 +36,17 @@ use crate::link::{
 use crate::project::{CliOverrides, load_project_toml, resolve_project};
 use crate::stages::{AnalyzedStage, BackendInput, CheckedStage, LirStage, ParsedStage, StageError};
 
+#[derive(Debug, Clone)]
+struct TestDriverInput {
+  config: Arc<IgnisConfig>,
+  entry_path: PathBuf,
+  source_dir: PathBuf,
+  out_dir: PathBuf,
+  layout: BuildLayout,
+  harness_c_path: PathBuf,
+  bin_path: PathBuf,
+}
+
 /// Compiler version for stamp file invalidation.
 const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1326,6 +1337,93 @@ fn build_test_driver_config(project_root: &Path) -> Result<(Arc<IgnisConfig>, cr
   Ok((Arc::new(config), project))
 }
 
+fn resolve_test_std_path(std_path_override: Option<&Path>) -> String {
+  std_path_override
+    .map(|path| path.to_string_lossy().into_owned())
+    .or_else(|| std::env::var("IGNIS_STD_PATH").ok())
+    .unwrap_or_default()
+}
+
+fn build_single_file_test_driver_input(
+  file_path: &Path,
+  std_path_override: Option<&Path>,
+) -> Result<TestDriverInput, ()> {
+  if !file_path.exists() {
+    eprintln!("{} File not found: '{}'", "Error:".red().bold(), file_path.display());
+    return Err(());
+  }
+
+  let source_dir = file_path
+    .parent()
+    .map(Path::to_path_buf)
+    .unwrap_or_else(|| PathBuf::from("."));
+  let out_dir = source_dir.join("build");
+  let stem = file_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("out");
+  let raw_std_path = resolve_test_std_path(std_path_override);
+  let std_path = if raw_std_path.is_empty() {
+    raw_std_path
+  } else {
+    let candidate = PathBuf::from(&raw_std_path);
+    candidate.canonicalize().unwrap_or(candidate).to_string_lossy().into_owned()
+  };
+  let std_enabled = !std_path.is_empty();
+
+  let mut config = IgnisConfig::new_basic(false, Vec::new(), false, 0);
+  config.std_path = std_path.clone();
+  config.std = std_enabled;
+  config.auto_load_std = std_enabled;
+  config.manifest = load_manifest(Path::new(&std_path));
+  config.test = true;
+  config.c_compiler = "cc".to_string();
+  config.cflags = Vec::new();
+  config.project_config = Some(IgnisProjectConfig::new(
+    stem.to_string(),
+    COMPILER_VERSION.to_string(),
+    Vec::new(),
+    String::new(),
+    Vec::new(),
+    String::new(),
+    String::new(),
+    TargetBackend::C,
+    file_path.to_string_lossy().to_string(),
+    out_dir.to_string_lossy().to_string(),
+    source_dir.to_string_lossy().to_string(),
+    false,
+    std_path,
+    std_enabled,
+  ));
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(file_path.to_string_lossy().to_string()),
+    TargetBackend::C,
+    false,
+    false,
+    out_dir.to_string_lossy().to_string(),
+    Vec::new(),
+    None,
+    None,
+    None,
+    None,
+    Some(out_dir.join("bin").join(format!("{}-tests", stem)).to_string_lossy().to_string()),
+    false,
+    true,
+    false,
+    true,
+    true,
+  ));
+
+  let layout = BuildLayout::with_project_root(stem, &out_dir, &source_dir);
+
+  Ok(TestDriverInput {
+    config: Arc::new(config),
+    entry_path: file_path.to_path_buf(),
+    source_dir,
+    out_dir: out_dir.clone(),
+    layout,
+    harness_c_path: out_dir.join(format!("{}-tests-harness.c", stem)),
+    bin_path: out_dir.join("bin").join(format!("{}-tests", stem)),
+  })
+}
+
 fn module_segments(
   module_path: &ModulePath,
   source_dir: &Path,
@@ -2017,6 +2115,425 @@ pub fn run_project_tests(
   section_item!(&config, "{} passed", passed);
   section_item!(&config, "{} failed", failed);
   cmd_artifact!(&config, "Test binary", bin_path.display());
+
+  if failed == 0 {
+    cmd_ok!(&config, "Tests passed", start.elapsed());
+    Ok(())
+  } else {
+    cmd_fail!(&config, "Tests failed", start.elapsed());
+    Err(())
+  }
+}
+
+pub fn run_single_file_tests(
+  file_path: &Path,
+  filter: Option<&str>,
+  update_snapshots: bool,
+  std_path_override: Option<&Path>,
+) -> Result<(), ()> {
+  let start = Instant::now();
+  let input = build_single_file_test_driver_input(file_path, std_path_override)?;
+  let config = input.config.clone();
+
+  cmd_header!(&config, "Testing", input.entry_path.display());
+  section!(&config, "Scanning & parsing");
+
+  let mut ctx = CompilationContext::new(&config);
+  let root_id = ctx
+    .discover_modules(input.entry_path.to_string_lossy().as_ref(), &config)
+    .map_err(|()| {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+    })?;
+
+  if config.std && config.auto_load_std {
+    ctx.discover_prelude_modules_for_all(&config);
+  }
+
+  section!(&config, "Analyzing");
+
+  let (output, has_errors) = ctx.compile_collect_all(root_id, &config)?;
+  render_diagnostics(&output.diagnostics, &ctx.source_map, config.quiet);
+
+  if has_errors {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+  let discovered_tests = {
+    let symbols = output.symbols.borrow();
+    discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &input.source_dir)
+  };
+  let plan = build_test_harness_plan(discovered_tests, filter);
+
+  section!(&config, "Planning");
+  if plan.tests.is_empty() {
+    section_item!(&config, "No tests selected");
+    cmd_ok!(&config, "No tests selected", start.elapsed());
+    return Ok(());
+  }
+
+  for test in &plan.tests {
+    section_item!(&config, "{}", test.fq_name);
+  }
+
+  section!(&config, "Codegen & linking");
+
+  let used_modules = ctx.module_graph.topological_sort();
+
+  if ensure_std_built(&used_modules, &ctx.module_graph, &config).is_err() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let manifest = if config.manifest.modules.is_empty() {
+    None
+  } else {
+    Some(&config.manifest)
+  };
+  let build_dir = config
+    .build_config
+    .as_ref()
+    .map(|build_config| build_config.output_dir.clone())
+    .unwrap_or_else(|| "build".to_string());
+  let mut link_plan = LinkPlan::from_modules(
+    &used_modules,
+    &ctx.module_graph,
+    Path::new(&config.std_path),
+    Path::new(&build_dir),
+    manifest,
+  );
+  link_plan.cc = config.c_compiler.clone();
+  link_plan.cflags = config.cflags.clone();
+  let mut types = output.types.clone();
+  let mono_output =
+    ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+      .run(&collect_test_mono_roots(&plan));
+
+  #[cfg(debug_assertions)]
+  mono_output.verify_no_generics(&types);
+
+  let sym_table = output.symbols.borrow();
+
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+      .with_source_map(&ctx.source_map);
+  let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
+
+  let borrow_checker = ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+    .with_source_map(&ctx.source_map);
+  let borrow_diagnostics = borrow_checker.check();
+
+  for diagnostic in ownership_diagnostics.iter().chain(borrow_diagnostics.iter()) {
+    ignis_diagnostics::render(diagnostic, &ctx.source_map);
+  }
+
+  if ownership_diagnostics
+    .iter()
+    .chain(borrow_diagnostics.iter())
+    .any(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+  {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let used_module_set: std::collections::HashSet<ModuleId> = used_modules.iter().copied().collect();
+  let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
+    &mono_output.hir,
+    &mut types,
+    &mono_output.defs,
+    &sym_table,
+    &drop_schedules,
+    Some(&used_module_set),
+  );
+
+  if let Err(errors) = &verify_result {
+    eprintln!("{} Cannot execute tests: LIR verification failed", "Error:".red().bold());
+    for error in errors {
+      eprintln!("  {:?}", error);
+    }
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let selected_backend = select_backend_or_report(&config, "Test setup failed", start)?;
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+
+  if let Err(error) = input.layout.create_user_dirs() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} Failed to create user build directories: {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let std_dir = ctx.module_graph.std_path();
+  let user_modules: Vec<_> = used_modules
+    .iter()
+    .filter(|module_id| {
+      let module = ctx.module_graph.modules.get(module_id);
+      module.path.is_project() && !module.path.is_inside_dir(std_dir)
+    })
+    .collect();
+
+  if user_modules.is_empty() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} No user modules found", "Error:".red().bold());
+    return Err(());
+  }
+
+  for module_id in &user_modules {
+    let module = ctx.module_graph.modules.get(module_id);
+    let source_path = match &module.path {
+      ModulePath::Project(path) => path.clone(),
+      _ => continue,
+    };
+
+    if let Err(error) = input.layout.ensure_user_module_dirs(&source_path) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} Failed to create module directories: {}", "Error:".red().bold(), error);
+      return Err(());
+    }
+
+    let header_content = match emit_text(
+      &selected_backend,
+      BackendInput::Header {
+        types: &types,
+        defs: &mono_output.defs,
+      },
+      BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
+        module_id: **module_id,
+        source_path: &source_path,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+      }),
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
+
+    let header_path = input.layout.user_module_header(&source_path);
+    if let Err(error) = std::fs::write(&header_path, &header_content) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!(
+        "{} Failed to write header '{}': {}",
+        "Error:".red().bold(),
+        header_path.display(),
+        error
+      );
+      return Err(());
+    }
+  }
+
+  let mut link_plan_with_user_includes = link_plan.clone();
+  link_plan_with_user_includes.include_dirs.push(input.layout.user_include_dir());
+
+  let mut user_object_paths = Vec::with_capacity(user_modules.len());
+
+  for module_id in &user_modules {
+    let module = ctx.module_graph.modules.get(module_id);
+    let source_path = match &module.path {
+      ModulePath::Project(path) => path.clone(),
+      _ => continue,
+    };
+
+    let dep_ids = ctx.module_graph.transitive_deps(**module_id);
+    let mut user_module_headers = Vec::new();
+    let self_header_rel = input.layout.relativize(&source_path).with_extension("h");
+    user_module_headers.push(ignis_config::CHeader {
+      path: normalize_path_for_include(&self_header_rel),
+      quoted: true,
+    });
+
+    for dep_id in &dep_ids {
+      let dep_module = ctx.module_graph.modules.get(dep_id);
+      if let ModulePath::Project(dep_path) = &dep_module.path {
+        if dep_path.starts_with(std_dir) {
+          continue;
+        }
+
+        let dep_header_rel = input.layout.relativize(dep_path).with_extension("h");
+        user_module_headers.push(ignis_config::CHeader {
+          path: normalize_path_for_include(&dep_header_rel),
+          quoted: true,
+        });
+      }
+    }
+
+    let module_c_code = match emit_text(
+      &selected_backend,
+      BackendInput::Lowered {
+        root_id,
+        types: &types,
+        defs: &mono_output.defs,
+        program: &lir_program,
+      },
+      BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
+        module_id: **module_id,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+        headers: &link_plan_with_user_includes.headers,
+        module_paths: &module_paths,
+        user_module_headers: &user_module_headers,
+        std_path: std_dir,
+      }),
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
+
+    let module_c_path = input.layout.user_module_src(&source_path);
+    if let Err(error) = std::fs::write(&module_c_path, &module_c_code) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!(
+        "{} Failed to write module source '{}': {}",
+        "Error:".red().bold(),
+        module_c_path.display(),
+        error
+      );
+      return Err(());
+    }
+
+    let module_object_path = input.layout.user_module_obj(&source_path);
+    if let Err(error) = compile_to_object(
+      &module_c_path,
+      &module_object_path,
+      &link_plan_with_user_includes,
+      !ignis_log::show_verbose(&config),
+    ) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), error);
+      return Err(());
+    }
+
+    user_object_paths.push(module_object_path);
+  }
+
+  let harness_c_code = match emit_text(
+    &selected_backend,
+    BackendInput::Lowered {
+      root_id,
+      types: &types,
+      defs: &mono_output.defs,
+      program: &lir_program,
+    },
+    BackendRequest::Lowered(LoweredBackendRequest::EmitUserTestHarness {
+      namespaces: &output.namespaces,
+      symbols: &sym_table,
+      headers: &link_plan.headers,
+      module_paths: &module_paths,
+      plan: &plan,
+    }),
+  ) {
+    Ok(contents) => contents,
+    Err(stage_error) => {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), stage_error);
+      return Err(());
+    },
+  };
+
+  if let Err(error) = std::fs::create_dir_all(&input.out_dir) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to create build directory '{}': {}",
+      "Error:".red().bold(),
+      input.out_dir.display(),
+      error
+    );
+    return Err(());
+  }
+
+  if let Some(parent) = input.bin_path.parent()
+    && let Err(error) = std::fs::create_dir_all(parent)
+  {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to create binary directory '{}': {}",
+      "Error:".red().bold(),
+      parent.display(),
+      error
+    );
+    return Err(());
+  }
+
+  if let Err(error) = std::fs::write(&input.harness_c_path, &harness_c_code) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to write harness source '{}': {}",
+      "Error:".red().bold(),
+      input.harness_c_path.display(),
+      error
+    );
+    return Err(());
+  }
+
+  let harness_object_path = input.harness_c_path.with_extension("o");
+  let suppress_link_logs = !ignis_log::show_verbose(&config);
+
+  if let Err(error) = compile_to_object(&input.harness_c_path, &harness_object_path, &link_plan, suppress_link_logs) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let mut executable_objects = user_object_paths;
+  executable_objects.push(harness_object_path);
+
+  if let Err(error) = link_executable_multi(&executable_objects, &input.bin_path, &link_plan, suppress_link_logs) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  section!(&config, "Running");
+
+  let results = match execute_test_harness_binary(&input.bin_path, &plan, update_snapshots) {
+    Ok(results) => results,
+    Err(error) => {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), error);
+      return Err(());
+    },
+  };
+
+  let passed = results.iter().filter(|result| result.success).count();
+  let total = results.len();
+  let failed = total - passed;
+
+  for result in &results {
+    let status = if result.success {
+      "ok".green()
+    } else {
+      "FAILED".red().bold()
+    };
+    section_item!(&config, "{} ... {}", result.fq_name, status);
+  }
+
+  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
+  if !failed_results.is_empty() {
+    section!(&config, "Failures");
+
+    for result in failed_results {
+      for line in format_failed_test_details(result).lines() {
+        println!("  {}", line);
+      }
+
+      println!();
+    }
+  }
+
+  section!(&config, "Summary");
+  section_item!(&config, "{} total", total);
+  section_item!(&config, "{} passed", passed);
+  section_item!(&config, "{} failed", failed);
+  cmd_artifact!(&config, "Test binary", input.bin_path.display());
 
   if failed == 0 {
     cmd_ok!(&config, "Tests passed", start.elapsed());

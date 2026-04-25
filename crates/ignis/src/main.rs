@@ -11,7 +11,7 @@ use cli::{BuildCommand, CheckCommand, Cli, SubCommand, TestCommand};
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
-  run_project_tests, CliOverrides, Project,
+  run_project_tests, run_single_file_tests, CliOverrides, Project,
 };
 use init::run_init;
 
@@ -32,7 +32,7 @@ enum CompileInput {
 #[derive(Debug, Clone)]
 enum TestInput {
   Project(Project),
-  DeferredSingleFile(PathBuf),
+  SingleFile(PathBuf),
 }
 
 /// Resolve what to compile based on CLI arguments.
@@ -111,7 +111,7 @@ fn resolve_test_input(cmd: &TestCommand) -> Result<TestInput, ()> {
     let path = PathBuf::from(candidate);
 
     if candidate.ends_with(".ign") {
-      return Ok(TestInput::DeferredSingleFile(path));
+      return Ok(TestInput::SingleFile(path));
     }
   }
 
@@ -142,20 +142,9 @@ fn run_test(
   cmd: &TestCommand,
 ) -> Result<(), ()> {
   match resolve_test_input(cmd)? {
-    TestInput::DeferredSingleFile(path) => {
-      eprintln!("{}", format_deferred_test_input_error(&path));
-      Err(())
-    },
+    TestInput::SingleFile(path) => run_single_file_tests(&path, None, cmd.update_snapshots, None),
     TestInput::Project(project) => run_project_tests(&project.root, cmd.filter.as_deref(), cmd.update_snapshots),
   }
-}
-
-fn format_deferred_test_input_error(path: &Path) -> String {
-  format!(
-    "{} Single-file 'ignis test' is deferred for v0.5: '{}'",
-    "Error:".red().bold(),
-    path.display()
-  )
 }
 
 // =============================================================================
@@ -651,7 +640,7 @@ mod tests {
   }
 
   #[test]
-  fn resolve_test_input_rejects_single_file_mode() {
+  fn resolve_test_input_accepts_single_file_mode() {
     let temp_dir = make_temp_dir("single_file");
     let file_path = temp_dir.join("single.ign");
     std::fs::write(&file_path, "function main(): void { return; }").expect("write test file");
@@ -663,8 +652,8 @@ mod tests {
     };
 
     match resolve_test_input(&cmd).expect("resolve test input") {
-      TestInput::DeferredSingleFile(resolved_path) => assert_eq!(resolved_path, file_path),
-      other => panic!("expected deferred single-file input, got {:?}", other),
+      TestInput::SingleFile(resolved_path) => assert_eq!(resolved_path, file_path),
+      other => panic!("expected single-file input, got {:?}", other),
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -732,10 +721,21 @@ mod tests {
   }
 
   #[test]
-  fn deferred_single_file_test_message_mentions_v0_5_scope() {
-    let rendered = format_deferred_test_input_error(Path::new("sample.ign"));
+  fn resolve_test_input_accepts_nonexistent_ign_path_as_single_file() {
+    let temp_dir = make_temp_dir("missing_single_file");
+    let file_path = temp_dir.join("single.ign");
 
-    assert!(rendered.contains("Single-file 'ignis test' is deferred for v0.5"));
-    assert!(rendered.contains("sample.ign"));
+    let cmd = TestCommand {
+      filter: Some(file_path.to_string_lossy().into_owned()),
+      project: None,
+      update_snapshots: false,
+    };
+
+    match resolve_test_input(&cmd).expect("resolve test input") {
+      TestInput::SingleFile(resolved_path) => assert_eq!(resolved_path, file_path),
+      other => panic!("expected single-file input, got {:?}", other),
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
   }
 }

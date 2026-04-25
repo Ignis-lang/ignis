@@ -3,7 +3,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ignis_driver::run_project_tests;
+use ignis_driver::{run_project_tests, run_single_file_tests};
 use tempfile::TempDir;
 
 fn workspace_std_path() -> PathBuf {
@@ -68,6 +68,22 @@ fn snapshot_file_path(
 
 fn harness_binary_path(project_root: &Path) -> PathBuf {
   project_root.join("build/bin/native_test_runner_fixture-tests")
+}
+
+fn write_single_test_file(source: &str) -> (TempDir, PathBuf) {
+  let temp_dir = TempDir::new().expect("temporary single-file dir");
+  let file_path = temp_dir.path().join("sample.ign");
+
+  fs::write(&file_path, source).expect("write single-file source");
+
+  (temp_dir, file_path)
+}
+
+fn single_file_harness_binary_path(file_path: &Path) -> PathBuf {
+  file_path
+    .parent()
+    .expect("single-file parent")
+    .join("build/bin/sample-tests")
 }
 
 #[test]
@@ -151,6 +167,58 @@ function genericAssertionsPass(): void {
     harness_binary_path(project.path()).exists(),
     "expected test harness binary to be built"
   );
+}
+
+#[test]
+fn run_single_file_tests_returns_ok_when_generic_equality_assertions_pass() {
+  let (_temp_dir, file_path) = write_single_test_file(
+    r#"
+import String from "std::string";
+import Test from "std::test";
+
+@test
+function genericAssertionsPass(): void {
+    let equalLeft: String = String::create("shared");
+    let equalRight: String = String::create("shared");
+    let notEqualLeft: String = String::create("shared");
+    let notEqualRight: String = String::create("different");
+
+    Test::assertEq<String>(equalLeft, equalRight);
+    Test::assertNe<String>(notEqualLeft, notEqualRight);
+    Test::assertEq<str>("abc", "abc");
+    Test::assertNe<i32>(1, 2);
+}
+"#,
+  );
+
+  let result = run_single_file_tests(&file_path, None, false, Some(&workspace_std_path()));
+
+  assert!(result.is_ok(), "expected single-file generic equality assertions to pass");
+  assert!(
+    single_file_harness_binary_path(&file_path).exists(),
+    "expected single-file harness binary to be built"
+  );
+}
+
+#[test]
+fn run_single_file_tests_filters_by_case_sensitive_substring() {
+  let (_temp_dir, file_path) = write_single_test_file(
+    r#"
+import Test from "std::test";
+
+@test
+function passes(): void {}
+
+@test
+function Fails(): void {
+    Test::fail();
+}
+"#,
+  );
+
+  let result = run_single_file_tests(&file_path, Some("passes"), false, Some(&workspace_std_path()));
+
+  assert!(result.is_ok(), "expected case-sensitive single-file filter to select only the passing test");
 }
 
 #[test]
@@ -359,6 +427,38 @@ function writesSnapshot(): void {
   assert!(result.is_ok(), "expected update mode to create a missing snapshot");
   assert_eq!(
     fs::read_to_string(&snapshot_path).expect("read snapshot file"),
+    "hello snapshot\n"
+  );
+}
+
+#[test]
+fn run_single_file_tests_creates_snapshot_next_to_source_file() {
+  let (_temp_dir, file_path) = write_single_test_file(
+    r#"
+import Test from "std::test";
+
+@test
+function writesSnapshot(): void {
+    Test::assertSnapshot("rendered", "hello snapshot\n");
+}
+"#,
+  );
+
+  let snapshot_path = file_path
+    .parent()
+    .expect("single-file parent")
+    .join("__snapshots__")
+    .join(format!(
+      "{}__{}.snap.txt",
+      escape_snapshot_component("sample::writesSnapshot"),
+      escape_snapshot_component("rendered")
+    ));
+
+  let result = run_single_file_tests(&file_path, None, true, Some(&workspace_std_path()));
+
+  assert!(result.is_ok(), "expected single-file update mode to create the snapshot next to the source file");
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read single-file snapshot"),
     "hello snapshot\n"
   );
 }

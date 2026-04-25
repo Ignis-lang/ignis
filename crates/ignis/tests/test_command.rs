@@ -41,8 +41,34 @@ fn cleanup_project_dir(project_dir: &Path) {
   let _ = fs::remove_dir_all(project_dir);
 }
 
+fn write_single_test_file(
+  project_dir: &Path,
+  file_name: &str,
+  source: &str,
+) -> PathBuf {
+  let file_path = project_dir.join(file_name);
+  fs::write(&file_path, source).expect("write single-file source");
+  file_path
+}
+
 fn harness_binary_path(project_dir: &Path) -> PathBuf {
   project_dir.join("build/bin/native_test_runner_fixture-tests")
+}
+
+fn escape_snapshot_component(value: &str) -> String {
+  let mut escaped = String::new();
+
+  for byte in value.bytes() {
+    let ch = byte as char;
+    if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+      escaped.push(ch);
+    } else {
+      escaped.push('_');
+      escaped.push_str(&format!("{:02x}", byte));
+    }
+  }
+
+  escaped
 }
 
 #[test]
@@ -139,6 +165,98 @@ function invalidEq(): void {
   assert!(
     !project_dir.join("build/bin/native_test_runner_fixture-tests").exists(),
     "expected harness build to stop before binary generation"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_executes_single_file_input_via_cli() {
+  let project_dir = make_temp_project_dir("single-file-generic-eq");
+  let file_path = write_single_test_file(
+    &project_dir,
+    "sample.ign",
+    r#"
+import String from "std::string";
+import Test from "std::test";
+
+@test
+function genericAssertionsPass(): void {
+    let equalLeft: String = String::create("same");
+    let equalRight: String = String::create("same");
+    let notEqualLeft: String = String::create("same");
+    let notEqualRight: String = String::create("other");
+
+    Test::assertEq<String>(equalLeft, equalRight);
+    Test::assertNe<String>(notEqualLeft, notEqualRight);
+    Test::assertEq<str>("cli", "cli");
+}
+"#,
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg(&file_path)
+    .env("IGNIS_STD_PATH", workspace_std_path())
+    .output()
+    .expect("run ignis test single-file");
+
+  if !output.status.success() {
+    panic!(
+      "expected single-file ignis test to succeed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  assert!(
+    project_dir.join("build/bin/sample-tests").exists(),
+    "expected single-file cli test run to build the sample test harness"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_updates_single_file_snapshots_via_cli() {
+  let project_dir = make_temp_project_dir("single-file-snapshot");
+  let file_path = write_single_test_file(
+    &project_dir,
+    "sample.ign",
+    r#"
+import Test from "std::test";
+
+@test
+function writesSnapshot(): void {
+    Test::assertSnapshot("rendered", "hello snapshot\n");
+}
+"#,
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg(&file_path)
+    .arg("--update-snapshots")
+    .env("IGNIS_STD_PATH", workspace_std_path())
+    .output()
+    .expect("run ignis test single-file snapshot");
+
+  if !output.status.success() {
+    panic!(
+      "expected single-file snapshot update to succeed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  let snapshot_path = project_dir.join("__snapshots__").join(format!(
+    "{}__{}.snap.txt",
+    escape_snapshot_component("sample::writesSnapshot"),
+    escape_snapshot_component("rendered")
+  ));
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read single-file snapshot"),
+    "hello snapshot\n"
   );
 
   cleanup_project_dir(&project_dir);
