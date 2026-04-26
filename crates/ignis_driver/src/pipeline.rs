@@ -1366,7 +1366,11 @@ fn build_single_file_test_driver_input(
     raw_std_path
   } else {
     let candidate = PathBuf::from(&raw_std_path);
-    candidate.canonicalize().unwrap_or(candidate).to_string_lossy().into_owned()
+    candidate
+      .canonicalize()
+      .unwrap_or(candidate)
+      .to_string_lossy()
+      .into_owned()
   };
   let std_enabled = !std_path.is_empty();
 
@@ -1405,7 +1409,13 @@ fn build_single_file_test_driver_input(
     None,
     None,
     None,
-    Some(out_dir.join("bin").join(format!("{}-tests", stem)).to_string_lossy().to_string()),
+    Some(
+      out_dir
+        .join("bin")
+        .join(format!("{}-tests", stem))
+        .to_string_lossy()
+        .to_string(),
+    ),
     false,
     true,
     false,
@@ -1600,10 +1610,7 @@ fn execute_test_harness_binary(
       .arg(&test.fq_name)
       .env("IGNIS_TEST_NAME", &test.fq_name)
       .env("IGNIS_TEST_SNAPSHOT_DIR", &snapshot_dir)
-      .env(
-        "IGNIS_TEST_UPDATE_SNAPSHOTS",
-        if update_snapshots { "1" } else { "0" },
-      )
+      .env("IGNIS_TEST_UPDATE_SNAPSHOTS", if update_snapshots { "1" } else { "0" })
       .output()
       .map_err(|error| format!("Failed to run test '{}': {}", test.fq_name, error))?;
 
@@ -2334,7 +2341,9 @@ pub fn run_single_file_tests(
   }
 
   let mut link_plan_with_user_includes = link_plan.clone();
-  link_plan_with_user_includes.include_dirs.push(input.layout.user_include_dir());
+  link_plan_with_user_includes
+    .include_dirs
+    .push(input.layout.user_include_dir());
 
   let mut user_object_paths = Vec::with_capacity(user_modules.len());
 
@@ -3683,7 +3692,10 @@ function middle(): void {}
 
     let snapshot_dir = source_path.parent().expect("module dir").join("__snapshots__");
 
-    assert_eq!(results[0].stdout, format!("math::updatesSnapshot|{}|1\n", snapshot_dir.display()));
+    assert_eq!(
+      results[0].stdout,
+      format!("math::updatesSnapshot|{}|1\n", snapshot_dir.display())
+    );
   }
 
   #[test]
@@ -3727,10 +3739,22 @@ function middle(): void {}
 
     let details = format_failed_test_details(&result);
 
-    assert!(details.contains("main::fails"), "expected test name in formatted failure details");
-    assert!(details.contains("stderr:"), "expected stderr section in formatted failure details");
-    assert!(details.contains("stdout:"), "expected stdout section in formatted failure details");
-    assert!(details.contains("[truncated]"), "expected truncation marker in formatted failure details");
+    assert!(
+      details.contains("main::fails"),
+      "expected test name in formatted failure details"
+    );
+    assert!(
+      details.contains("stderr:"),
+      "expected stderr section in formatted failure details"
+    );
+    assert!(
+      details.contains("stdout:"),
+      "expected stdout section in formatted failure details"
+    );
+    assert!(
+      details.contains("[truncated]"),
+      "expected truncation marker in formatted failure details"
+    );
   }
 
   #[test]
@@ -3745,8 +3769,14 @@ function middle(): void {}
 
     let details = format_failed_test_details(&result);
 
-    assert!(details.contains("main::mismatchSnapshot"), "expected test name in snapshot failure details");
-    assert!(details.contains("snapshot mismatch"), "expected mismatch reason in snapshot failure details");
+    assert!(
+      details.contains("main::mismatchSnapshot"),
+      "expected test name in snapshot failure details"
+    );
+    assert!(
+      details.contains("snapshot mismatch"),
+      "expected mismatch reason in snapshot failure details"
+    );
     assert!(details.contains("snapshot: /tmp/project/src/__snapshots__/main__rendered.snap.txt"));
     assert!(details.contains("expected-bytes: 12"));
     assert!(details.contains("actual-bytes: 16"));

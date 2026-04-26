@@ -218,7 +218,10 @@ function Fails(): void {
 
   let result = run_single_file_tests(&file_path, Some("passes"), false, Some(&workspace_std_path()));
 
-  assert!(result.is_ok(), "expected case-sensitive single-file filter to select only the passing test");
+  assert!(
+    result.is_ok(),
+    "expected case-sensitive single-file filter to select only the passing test"
+  );
 }
 
 #[test]
@@ -334,7 +337,10 @@ function invalidEq(): void {
 
   let result = run_project_tests(project.path(), None, false);
 
-  assert!(result.is_err(), "expected unsupported builtin equality to fail before harness build");
+  assert!(
+    result.is_err(),
+    "expected unsupported builtin equality to fail before harness build"
+  );
   assert!(
     !harness_binary_path(project.path()).exists(),
     "expected no harness binary when builtin equality is rejected during setup"
@@ -381,7 +387,10 @@ function missingSnapshot(): void {
   let result = run_project_tests(project.path(), None, false);
 
   assert!(result.is_err(), "expected missing snapshot to fail without update mode");
-  assert!(!snapshot_path.exists(), "expected missing snapshot run to avoid creating a baseline");
+  assert!(
+    !snapshot_path.exists(),
+    "expected missing snapshot run to avoid creating a baseline"
+  );
 }
 
 #[test]
@@ -404,7 +413,10 @@ function mismatchedSnapshot(): void {
   let result = run_project_tests(project.path(), None, false);
 
   assert!(result.is_err(), "expected mismatched snapshot to fail without update mode");
-  assert_eq!(fs::read_to_string(&snapshot_path).expect("read snapshot file"), "old contents\n");
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read snapshot file"),
+    "old contents\n"
+  );
 }
 
 #[test]
@@ -456,7 +468,10 @@ function writesSnapshot(): void {
 
   let result = run_single_file_tests(&file_path, None, true, Some(&workspace_std_path()));
 
-  assert!(result.is_ok(), "expected single-file update mode to create the snapshot next to the source file");
+  assert!(
+    result.is_ok(),
+    "expected single-file update mode to create the snapshot next to the source file"
+  );
   assert_eq!(
     fs::read_to_string(&snapshot_path).expect("read single-file snapshot"),
     "hello snapshot\n"
@@ -483,7 +498,10 @@ function replacesSnapshot(): void {
   let result = run_project_tests(project.path(), None, true);
 
   assert!(result.is_ok(), "expected update mode to replace a mismatched snapshot");
-  assert_eq!(fs::read_to_string(&snapshot_path).expect("read snapshot file"), "new contents\n");
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read snapshot file"),
+    "new contents\n"
+  );
 }
 
 #[test]
@@ -514,8 +532,14 @@ function snapshotsFile(): void {
 
   let result = run_project_tests(project.path(), None, true);
 
-  assert!(result.is_ok(), "expected file snapshot helper to write file contents in update mode");
-  assert_eq!(fs::read_to_string(&snapshot_path).expect("read snapshot file"), "file contents\n");
+  assert!(
+    result.is_ok(),
+    "expected file snapshot helper to write file contents in update mode"
+  );
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read snapshot file"),
+    "file contents\n"
+  );
 }
 
 #[test]
@@ -557,7 +581,16 @@ function moduleSnapshot(): void {
   let result = run_project_tests(project.path(), None, true);
 
   assert!(result.is_ok(), "expected update mode to create both module snapshots");
-  assert_eq!(fs::read_to_string(&root_snapshot).expect("read root snapshot"), "root contents\n");
-  assert_eq!(fs::read_to_string(&module_snapshot).expect("read module snapshot"), "module contents\n");
-  assert_ne!(root_snapshot, module_snapshot, "expected module snapshots to use distinct filenames");
+  assert_eq!(
+    fs::read_to_string(&root_snapshot).expect("read root snapshot"),
+    "root contents\n"
+  );
+  assert_eq!(
+    fs::read_to_string(&module_snapshot).expect("read module snapshot"),
+    "module contents\n"
+  );
+  assert_ne!(
+    root_snapshot, module_snapshot,
+    "expected module snapshots to use distinct filenames"
+  );
 }

@@ -7,12 +7,13 @@ use std::sync::Arc;
 use clap::Parser as ClapParser;
 use colored::*;
 
-use cli::{BuildCommand, CheckCommand, Cli, SubCommand, TestCommand};
+use cli::{BuildCommand, CheckCommand, Cli, FmtCommand, SubCommand, TestCommand};
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
   run_project_tests, run_single_file_tests, CliOverrides, Project,
 };
+use ignis_formatter::{FormatOptions, FormatterCliOverrides, FormatterConfigPaths, format_file, load_formatter_config};
 use init::run_init;
 
 // =============================================================================
@@ -32,6 +33,13 @@ enum CompileInput {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 enum TestInput {
+  Project(Project),
+  SingleFile(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+enum FmtInput {
   Project(Project),
   SingleFile(PathBuf),
 }
@@ -136,6 +144,196 @@ fn resolve_test_input(cmd: &TestCommand) -> Result<TestInput, ()> {
       Err(())
     },
   }
+}
+
+fn resolve_fmt_input(cmd: &FmtCommand) -> Result<FmtInput, ()> {
+  let overrides = CliOverrides::default();
+
+  if let Some(dir) = &cmd.project {
+    let root = PathBuf::from(dir);
+    let toml_path = root.join("ignis.toml");
+
+    if !toml_path.exists() {
+      eprintln!("{} No ignis.toml found in '{}'", "Error:".red().bold(), root.display());
+      return Err(());
+    }
+
+    let project = load_and_resolve_project(&root, &overrides)?;
+    return Ok(FmtInput::Project(project));
+  }
+
+  if let Some(path_str) = &cmd.file_path {
+    let path = PathBuf::from(path_str);
+
+    if !path.exists() {
+      eprintln!("{} File not found: '{}'", "Error:".red().bold(), path.display());
+      return Err(());
+    }
+
+    return Ok(FmtInput::SingleFile(path));
+  }
+
+  let cwd = std::env::current_dir().map_err(|e| {
+    eprintln!("{} Failed to get current directory: {}", "Error:".red().bold(), e);
+  })?;
+
+  match find_project_root(&cwd) {
+    Some(root) => load_and_resolve_project(&root, &overrides).map(FmtInput::Project),
+    None => {
+      eprintln!("{} No ignis.toml found", "Error:".red().bold());
+      eprintln!("Hint: Run 'ignis init' to create a project, or provide a file path.");
+      Err(())
+    },
+  }
+}
+
+fn run_fmt(cmd: &FmtCommand) -> Result<(), ()> {
+  match resolve_fmt_input(cmd)? {
+    FmtInput::SingleFile(path) => {
+      let formatter_config = resolve_formatter_config_for_file(&path, cmd).map_err(|error| {
+        eprintln!("{} {}", "Error:".red().bold(), error);
+      })?;
+      let options = FormatOptions {
+        check: cmd.check,
+        config: formatter_config,
+      };
+
+      let outcome = format_file(&path, &options).map_err(|error| {
+        eprintln!("{} {}", "Error:".red().bold(), error);
+      })?;
+
+      if cmd.check && outcome.changed {
+        eprintln!("{} {}", "Check failed:".yellow().bold(), path.display());
+        return Err(());
+      }
+    },
+    FmtInput::Project(project) => {
+      let formatter_config = resolve_formatter_config_for_project(&project, cmd).map_err(|error| {
+        eprintln!("{} {}", "Error:".red().bold(), error);
+      })?;
+      let options = FormatOptions {
+        check: cmd.check,
+        config: formatter_config,
+      };
+
+      let files = collect_project_ign_files(&project.source_dir).map_err(|error| {
+        eprintln!("{} Failed to collect project files: {}", "Error:".red().bold(), error);
+      })?;
+
+      let mut dirty_files = Vec::new();
+
+      for file in files {
+        let outcome = format_file(&file, &options).map_err(|error| {
+          eprintln!("{} {}", "Error:".red().bold(), error);
+        })?;
+
+        if cmd.check && outcome.changed {
+          dirty_files.push(file);
+        }
+      }
+
+      if cmd.check && !dirty_files.is_empty() {
+        for file in dirty_files {
+          eprintln!("{} {}", "Check failed:".yellow().bold(), file.display());
+        }
+        return Err(());
+      }
+    },
+  }
+
+  Ok(())
+}
+
+fn resolve_formatter_config_for_project(
+  project: &Project,
+  cmd: &FmtCommand,
+) -> Result<ignis_formatter::FormatterConfig, ignis_formatter::FormatError> {
+  let explicit_config = cmd.config.as_ref().map(PathBuf::from);
+  let dedicated_config = project.root.join("ignisfmt.toml");
+
+  load_formatter_config(
+    &FormatterConfigPaths {
+      project_root: project.root.clone(),
+      ignis_toml: Some(project.toml_path.clone()),
+      dedicated_config: dedicated_config.exists().then_some(dedicated_config),
+      explicit_config,
+    },
+    &FormatterCliOverrides {
+      indent_width: cmd.indent_width,
+      line_width: cmd.line_width,
+      use_tabs: if cmd.use_tabs {
+        Some(true)
+      } else if cmd.spaces {
+        Some(false)
+      } else {
+        None
+      },
+    },
+  )
+  .map_err(Into::into)
+}
+
+fn resolve_formatter_config_for_file(
+  path: &Path,
+  cmd: &FmtCommand,
+) -> Result<ignis_formatter::FormatterConfig, ignis_formatter::FormatError> {
+  let project_root = if let Some(root) = find_project_root(path.parent().unwrap_or_else(|| Path::new("."))) {
+    root
+  } else {
+    path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+  };
+
+  let ignis_toml = project_root.join("ignis.toml");
+  let dedicated_config = project_root.join("ignisfmt.toml");
+
+  load_formatter_config(
+    &FormatterConfigPaths {
+      project_root,
+      ignis_toml: ignis_toml.exists().then_some(ignis_toml),
+      dedicated_config: dedicated_config.exists().then_some(dedicated_config),
+      explicit_config: cmd.config.as_ref().map(PathBuf::from),
+    },
+    &FormatterCliOverrides {
+      indent_width: cmd.indent_width,
+      line_width: cmd.line_width,
+      use_tabs: if cmd.use_tabs {
+        Some(true)
+      } else if cmd.spaces {
+        Some(false)
+      } else {
+        None
+      },
+    },
+  )
+  .map_err(Into::into)
+}
+
+fn collect_project_ign_files(source_dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+  let mut files = Vec::new();
+  collect_project_ign_files_recursive(source_dir, &mut files)?;
+  files.sort();
+  Ok(files)
+}
+
+fn collect_project_ign_files_recursive(
+  directory: &Path,
+  files: &mut Vec<PathBuf>,
+) -> Result<(), std::io::Error> {
+  for entry in std::fs::read_dir(directory)? {
+    let entry = entry?;
+    let path = entry.path();
+
+    if path.is_dir() {
+      collect_project_ign_files_recursive(&path, files)?;
+      continue;
+    }
+
+    if path.extension().and_then(|extension| extension.to_str()) == Some("ign") {
+      files.push(path);
+    }
+  }
+
+  Ok(())
 }
 
 fn run_test(
@@ -617,6 +815,8 @@ fn main() {
     SubCommand::CheckStd(cmd) => run_check_std(&cli, &cmd.output_dir),
 
     SubCommand::CheckRuntime(cmd) => run_check_runtime(&cli, cmd.runtime_path.as_deref()),
+
+    SubCommand::Fmt(cmd) => run_fmt(cmd),
 
     SubCommand::Init(cmd) => run_init(cmd, cli.quiet),
   };

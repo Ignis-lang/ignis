@@ -283,6 +283,13 @@ impl TokenType {
       TokenType::While,
     ]
   }
+
+  pub fn is_comment_trivia(&self) -> bool {
+    matches!(
+      self,
+      TokenType::Comment | TokenType::MultiLineComment | TokenType::DocComment | TokenType::InnerDocComment
+    )
+  }
 }
 
 impl Display for TokenType {
@@ -415,5 +422,18 @@ impl Display for TokenType {
       TokenType::Whitespace => write!(f, "Whitespace"),
       TokenType::XorAssign => write!(f, "XorAssign"),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::TokenType;
+
+  #[test]
+  fn classifies_comment_tokens_as_trivia() {
+    assert!(TokenType::Comment.is_comment_trivia());
+    assert!(TokenType::DocComment.is_comment_trivia());
+    assert!(TokenType::InnerDocComment.is_comment_trivia());
+    assert!(!TokenType::If.is_comment_trivia());
   }
 }

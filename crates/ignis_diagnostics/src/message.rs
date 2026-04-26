@@ -1544,7 +1544,11 @@ impl fmt::Display for DiagnosticMessage {
         )
       },
       DiagnosticMessage::UnsupportedEqualityType { type_name, .. } => {
-        write!(f, "type '{}' does not support builtin equality; expected a primitive, str, or Eq-implementing record/enum", type_name)
+        write!(
+          f,
+          "type '{}' does not support builtin equality; expected a primitive, str, or Eq-implementing record/enum",
+          type_name
+        )
       },
       DiagnosticMessage::LangTryRequiresTwoVariants { name, count, .. } => {
         write!(f, "@lang(try) on enum '{}' requires exactly 2 variants, found {}", name, count)

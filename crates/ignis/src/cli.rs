@@ -284,6 +284,41 @@ pub struct CheckRuntimeCommand {
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
+#[command(about = "Format Ignis source canonically with parse/reparse safety checks")]
+pub struct FmtCommand {
+  /// File to format (single-file mode) or nothing for project mode
+  pub file_path: Option<String>,
+
+  /// Explicit project directory (overrides auto-detection)
+  #[arg(long)]
+  pub project: Option<String>,
+
+  /// Validate canonical formatting without rewriting files
+  #[arg(long)]
+  pub check: bool,
+
+  /// Explicit formatter config file (defaults to ignisfmt.toml when present)
+  #[arg(long)]
+  pub config: Option<String>,
+
+  /// Override formatter indentation width
+  #[arg(long)]
+  pub indent_width: Option<usize>,
+
+  /// Override formatter line width
+  #[arg(long)]
+  pub line_width: Option<usize>,
+
+  /// Override formatter indentation to use tabs
+  #[arg(long, conflicts_with = "spaces")]
+  pub use_tabs: bool,
+
+  /// Override formatter indentation to use spaces
+  #[arg(long, conflicts_with = "use_tabs")]
+  pub spaces: bool,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq)]
 pub struct TestCommand {
   /// Optional substring filter for fully qualified test names
   pub filter: Option<String>,
@@ -292,9 +327,9 @@ pub struct TestCommand {
   #[arg(long)]
   pub project: Option<String>,
 
-   /// Create or replace selected snapshots during the test run
-   #[arg(long)]
-   pub update_snapshots: bool,
+  /// Create or replace selected snapshots during the test run
+  #[arg(long)]
+  pub update_snapshots: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -320,6 +355,8 @@ pub enum SubCommand {
   CheckStd(CheckStdCommand),
   /// Check the C runtime with syntax-only compilation
   CheckRuntime(CheckRuntimeCommand),
+  /// Format Ignis source canonically with parse/reparse safety checks
+  Fmt(FmtCommand),
   /// Start the Language Server Protocol server
   Lsp(LspCommand),
 }
@@ -431,6 +468,59 @@ mod tests {
         assert!(cmd.update_snapshots);
       },
       other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_fmt_subcommand_with_check_and_project() {
+    let cli = Cli::parse_from(["ignis", "fmt", "--check", "--project", "demo"]);
+
+    match cli.subcommand {
+      SubCommand::Fmt(cmd) => {
+        assert_eq!(cmd.file_path, None);
+        assert_eq!(cmd.project.as_deref(), Some("demo"));
+        assert!(cmd.check);
+      },
+      other => panic!("expected fmt subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_fmt_subcommand_with_single_file() {
+    let cli = Cli::parse_from(["ignis", "fmt", "src/main.ign"]);
+
+    match cli.subcommand {
+      SubCommand::Fmt(cmd) => {
+        assert_eq!(cmd.file_path.as_deref(), Some("src/main.ign"));
+        assert_eq!(cmd.project, None);
+        assert!(!cmd.check);
+      },
+      other => panic!("expected fmt subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_fmt_subcommand_with_style_overrides() {
+    let cli = Cli::parse_from([
+      "ignis",
+      "fmt",
+      "--use-tabs",
+      "--indent-width",
+      "4",
+      "--line-width",
+      "88",
+      "src/main.ign",
+    ]);
+
+    match cli.subcommand {
+      SubCommand::Fmt(cmd) => {
+        assert_eq!(cmd.file_path.as_deref(), Some("src/main.ign"));
+        assert_eq!(cmd.indent_width, Some(4));
+        assert_eq!(cmd.line_width, Some(88));
+        assert!(cmd.use_tabs);
+        assert!(!cmd.spaces);
+      },
+      other => panic!("expected fmt subcommand, got {:?}", other),
     }
   }
 }

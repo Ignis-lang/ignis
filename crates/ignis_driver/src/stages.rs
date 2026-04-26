@@ -352,10 +352,7 @@ impl<'a> BackendInput<'a> {
       },
       (
         Self::Lowered {
-          types,
-          defs,
-          program,
-          ..
+          types, defs, program, ..
         },
         BackendRequest::Header(_),
       ) => {

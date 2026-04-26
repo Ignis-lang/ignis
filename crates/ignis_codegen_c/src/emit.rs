@@ -5,10 +5,7 @@ use std::fmt::Write;
 
 use ignis_config::CHeader;
 use ignis_hir::operation::{BinaryOperation, UnaryOperation};
-use ignis_lir::{
-  Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator,
-  instr::BuiltinEqKind,
-};
+use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, TempId, Terminator, instr::BuiltinEqKind};
 use ignis_type::{
   attribute::{FieldAttr, FunctionAttr, RecordAttr},
   definition::{
@@ -2941,19 +2938,21 @@ impl<'a> CEmitter<'a> {
     let right_expr = self.format_operand(func, right);
 
     match kind {
-      BuiltinEqKind::Primitive if matches!(
-        self.types.get(&ty),
-        Type::Boolean
-          | Type::Char
-          | Type::I8
-          | Type::I16
-          | Type::I32
-          | Type::I64
-          | Type::U8
-          | Type::U16
-          | Type::U32
-          | Type::U64
-      ) => {
+      BuiltinEqKind::Primitive
+        if matches!(
+          self.types.get(&ty),
+          Type::Boolean
+            | Type::Char
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+        ) =>
+      {
         let left_value = self.format_builtin_ref_deref(&left_expr, ty);
         let right_value = self.format_builtin_ref_deref(&right_expr, ty);
         writeln!(self.output, "t{} = {} == {};", dest.index(), left_value, right_value).unwrap();
@@ -2963,7 +2962,9 @@ impl<'a> CEmitter<'a> {
         let right_value = self.format_builtin_ref_deref(&right_expr, ty);
         writeln!(self.output, "t{} = strcmp({}, {}) == 0;", dest.index(), left_value, right_value).unwrap();
       },
-      BuiltinEqKind::Method(method_def_id) if matches!(self.defs.get(&method_def_id).kind, DefinitionKind::Method(_)) => {
+      BuiltinEqKind::Method(method_def_id)
+        if matches!(self.defs.get(&method_def_id).kind, DefinitionKind::Method(_)) =>
+      {
         let method_name = self.def_name(method_def_id);
         writeln!(
           self.output,
@@ -2976,7 +2977,10 @@ impl<'a> CEmitter<'a> {
         .unwrap();
       },
       BuiltinEqKind::Primitive => {
-        self.emit_invalid_builtin_eq(dest, &format!("primitive eq kind on unsupported type {:?}", self.types.get(&ty)));
+        self.emit_invalid_builtin_eq(
+          dest,
+          &format!("primitive eq kind on unsupported type {:?}", self.types.get(&ty)),
+        );
       },
       BuiltinEqKind::Str => {
         self.emit_invalid_builtin_eq(dest, &format!("str eq kind on unsupported type {:?}", self.types.get(&ty)));

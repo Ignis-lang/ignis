@@ -684,12 +684,7 @@ impl<'a> Monomorphizer<'a> {
           None,
         )
       },
-      HIRKind::BuiltinEq {
-        ty,
-        left,
-        right,
-        kind,
-      } => {
+      HIRKind::BuiltinEq { ty, left, right, kind } => {
         let new_left = self.clone_hir_tree(*left);
         let new_right = self.clone_hir_tree(*right);
         let new_kind = self.resolve_builtin_eq_kind_after_substitution(*ty, *kind);
@@ -1245,12 +1240,7 @@ impl<'a> Monomorphizer<'a> {
         self.scan_hir(*value);
         self.scan_hir(*hasher);
       },
-      HIRKind::BuiltinEq {
-        ty,
-        left,
-        right,
-        kind,
-      } => {
+      HIRKind::BuiltinEq { ty, left, right, kind } => {
         if let BuiltinEqKind::Method(method_def) = kind
           && let Some((_, owner_args)) = self.unwrap_to_instance_type(*ty)
         {
@@ -2253,12 +2243,7 @@ impl<'a> Monomorphizer<'a> {
           hasher: new_hasher,
         }
       },
-      HIRKind::BuiltinEq {
-        ty,
-        left,
-        right,
-        kind,
-      } => {
+      HIRKind::BuiltinEq { ty, left, right, kind } => {
         let new_left = self.substitute_hir(*left, subst);
         let new_right = self.substitute_hir(*right, subst);
         let new_ty = self.types.substitute(*ty, subst);
@@ -2625,10 +2610,13 @@ impl<'a> Monomorphizer<'a> {
     };
 
     let expected_other = self.types.reference(type_id, false);
-    let other_type = md.params.get(1).and_then(|param_id| match &self.input_defs.get(param_id).kind {
-      DefinitionKind::Parameter(pd) => Some(pd.type_id),
-      _ => None,
-    })?;
+    let other_type = md
+      .params
+      .get(1)
+      .and_then(|param_id| match &self.input_defs.get(param_id).kind {
+        DefinitionKind::Parameter(pd) => Some(pd.type_id),
+        _ => None,
+      })?;
 
     let signature_ok = !md.self_mutable
       && md.params.len() == 2

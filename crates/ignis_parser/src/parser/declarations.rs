@@ -2139,6 +2139,44 @@ mod tests {
   }
 
   #[test]
+  fn formatter_program_parser_preserves_plain_code_chunks() {
+    let mut sm = SourceMap::new();
+    let source = "import foo from \"module\";\nfunction main(): void {}";
+    let file_id = sm.add_file("formatter.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser
+      .parse_formatter_program()
+      .expect("formatter program parse failed");
+
+    assert_eq!(roots.len(), 2);
+    assert!(matches!(nodes.get(&roots[0]), ASTNode::Statement(ASTStatement::Import(_))));
+    assert!(matches!(nodes.get(&roots[1]), ASTNode::Statement(ASTStatement::Function(_))));
+  }
+
+  #[test]
+  fn formatter_program_parser_rejects_compile_time_directives() {
+    let mut sm = SourceMap::new();
+    let source = "@if(flag) { function enabled(): void {} } @else { function disabled(): void {} }";
+    let file_id = sm.add_file("formatter.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+
+    let diagnostics = parser
+      .parse_formatter_program()
+      .expect_err("formatter parser should reject raw directives");
+    assert_eq!(diagnostics.len(), 1);
+  }
+
+  #[test]
   fn parses_const_declaration() {
     let result = parse("const PI: f64 = 3.14;");
     let stmt = first_root(&result);

@@ -2553,7 +2553,9 @@ impl<'a> Analyzer<'a> {
     let value_type = self.resolve_type_syntax(&type_args[0]);
     let left = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
     let right = self.lower_node_to_hir(&bc.args[1], hir, scope_kind);
-    let kind = self.resolve_builtin_eq_kind(value_type).unwrap_or(BuiltinEqKind::Pending);
+    let kind = self
+      .resolve_builtin_eq_kind(value_type)
+      .unwrap_or(BuiltinEqKind::Pending);
 
     hir.alloc(HIRNode {
       kind: HIRKind::BuiltinEq {

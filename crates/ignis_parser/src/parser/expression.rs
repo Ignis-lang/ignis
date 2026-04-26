@@ -483,9 +483,8 @@ impl IgnisParser {
         }
 
         let expression = self.parse_expression(0)?;
-        let left_span = self.get_span(&expression).clone();
         let right_paren = self.expect(TokenType::RightParen)?;
-        let span = Span::merge(&left_span, &right_paren.span);
+        let span = Span::merge(&token.span, &right_paren.span);
 
         Ok(self.allocate_expression(ASTExpression::Grouped(ASTGrouped::new(expression, span))))
       },
@@ -1081,6 +1080,7 @@ mod tests {
   use crate::{lexer::IgnisLexer, parser::IgnisParser};
 
   struct ParseResult {
+    source: String,
     nodes: Store<ASTNode>,
     roots: Vec<NodeId>,
   }
@@ -1097,7 +1097,11 @@ mod tests {
     let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
     let (nodes, roots) = parser.parse().expect("parse failed");
 
-    ParseResult { nodes, roots }
+    ParseResult {
+      source: program,
+      nodes,
+      roots,
+    }
   }
 
   fn get_expr(result: &ParseResult) -> &ASTExpression {
@@ -1254,6 +1258,42 @@ mod tests {
   }
 
   #[test]
+  fn formatter_expression_parser_handles_plain_expression_chunks() {
+    let mut sm = SourceMap::new();
+    let source = "value + 1";
+    let file_id = sm.add_file("expr.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, expression) = parser
+      .parse_formatter_expression()
+      .expect("formatter expression parse failed");
+
+    assert!(matches!(nodes.get(&expression), ASTNode::Expression(ASTExpression::Binary(_))));
+  }
+
+  #[test]
+  fn formatter_expression_parser_rejects_raw_configflag_calls() {
+    let mut sm = SourceMap::new();
+    let source = "@configFlag(targetTriple == \"linux\")";
+    let file_id = sm.add_file("expr.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+
+    let diagnostics = parser
+      .parse_formatter_expression()
+      .expect_err("formatter expression parser should reject raw configFlag calls");
+    assert_eq!(diagnostics.len(), 1);
+  }
+
+  #[test]
   fn parses_binary_multiplication() {
     let result = parse_expr("4 * 2");
     let expr = get_expr(&result);
@@ -1385,6 +1425,20 @@ mod tests {
           },
           other => panic!("expected binary inside grouped, got {:?}", other),
         }
+      },
+      other => panic!("expected grouped, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn grouped_expression_span_starts_at_left_paren() {
+    let result = parse_expr("(1 + 2)");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Grouped(grouped) => {
+        let grouped_slice = &result.source[grouped.span.start.0 as usize..grouped.span.end.0 as usize];
+        assert_eq!(grouped_slice, "(1 + 2)");
       },
       other => panic!("expected grouped, got {:?}", other),
     }

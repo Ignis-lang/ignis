@@ -13,10 +13,7 @@ fn make_temp_project_dir(label: &str) -> PathBuf {
     .expect("system time before unix epoch")
     .as_nanos();
 
-  let project_dir = std::env::temp_dir().join(format!(
-    "ignis-cli-test-{label}-{}-{unique}",
-    std::process::id()
-  ));
+  let project_dir = std::env::temp_dir().join(format!("ignis-cli-test-{label}-{}-{unique}", std::process::id()));
 
   fs::create_dir_all(project_dir.join("src")).expect("create src dir");
   project_dir
@@ -64,6 +61,13 @@ fn write_project_file(
 
 fn harness_binary_path(project_dir: &Path) -> PathBuf {
   project_dir.join("build/bin/native_test_runner_fixture-tests")
+}
+
+fn read_project_file(
+  project_dir: &Path,
+  relative_path: &str,
+) -> String {
+  fs::read_to_string(project_dir.join(relative_path)).expect("read project file")
 }
 
 fn escape_snapshot_component(value: &str) -> String {
@@ -139,9 +143,299 @@ function genericAssertionsPass(): void {
     stdout.contains("Tests passed") || stderr.contains("Tests passed"),
     "expected successful cli test summary\nstdout:\n{stdout}\nstderr:\n{stderr}"
   );
-  assert!(harness_binary_path(&project_dir).exists(), "expected cli test run to build the harness binary");
+  assert!(
+    harness_binary_path(&project_dir).exists(),
+    "expected cli test run to build the harness binary"
+  );
 
   cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_rewrites_single_file_in_place() {
+  let project_dir = make_temp_project_dir("fmt-single-file");
+  let file_path = write_single_test_file(&project_dir, "sample.ign", "function   main ( ) : void {return;}\n");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg(&file_path)
+    .output()
+    .expect("run ignis fmt single file");
+
+  assert!(
+    output.status.success(),
+    "expected ignis fmt single-file run to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    fs::read_to_string(&file_path).expect("read formatted file"),
+    "function main(): void {\n  return;\n}\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_check_reports_dirty_single_file_without_rewriting() {
+  let project_dir = make_temp_project_dir("fmt-check-single-file");
+  let file_path = write_single_test_file(&project_dir, "sample.ign", "function   main ( ) : void {return;}\n");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg("--check")
+    .arg(&file_path)
+    .output()
+    .expect("run ignis fmt --check single file");
+
+  assert!(
+    !output.status.success(),
+    "expected ignis fmt --check to fail on dirty file\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    fs::read_to_string(&file_path).expect("read unchecked file"),
+    "function   main ( ) : void {return;}\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_formats_all_project_sources() {
+  let project_dir = make_temp_project_dir("fmt-project");
+  write_test_project(&project_dir, "function   main ( ) : void {return;}\n");
+  write_project_file(&project_dir, "src/util.ign", "function   helper ( ) : void {return;}\n");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("run ignis fmt project");
+
+  assert!(
+    output.status.success(),
+    "expected ignis fmt project run to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    read_project_file(&project_dir, "src/main.ign"),
+    "function main(): void {\n  return;\n}\n"
+  );
+  assert_eq!(
+    read_project_file(&project_dir, "src/util.ign"),
+    "function helper(): void {\n  return;\n}\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_cli_indent_width_override_beats_project_and_dedicated_config() {
+  let project_dir = make_temp_project_dir("fmt-indent-width-precedence");
+  write_test_project(
+    &project_dir,
+    r#"@if(featureFlag) {
+/// docs
+function   main ( ) : void {return;}
+}
+"#,
+  );
+  fs::write(
+    project_dir.join("ignis.toml"),
+    format!(
+      "[package]\nname = \"native_test_runner_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n\n[formatter]\nindent_width = 2\nline_width = 90\n",
+      workspace_std_path().display()
+    ),
+  )
+  .expect("rewrite ignis.toml with formatter bridge");
+  write_project_file(&project_dir, "ignisfmt.toml", "indent_width = 6\nline_width = 120\n");
+
+  let file_path = project_dir.join("src/main.ign");
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg("--indent-width")
+    .arg("3")
+    .arg(&file_path)
+    .output()
+    .expect("run ignis fmt with indent width override");
+
+  assert!(
+    output.status.success(),
+    "expected ignis fmt indent-width override run to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    fs::read_to_string(&file_path).expect("read override-formatted file"),
+    "@if(featureFlag) {\n   /// docs\n   function main(): void {\n      return;\n   }\n}\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_cli_spaces_override_beats_project_and_dedicated_config_tabs() {
+  let project_dir = make_temp_project_dir("fmt-tabs-precedence");
+  write_test_project(
+    &project_dir,
+    r#"@if(featureFlag) {
+/// docs
+function   main ( ) : void {return;}
+}
+"#,
+  );
+  fs::write(
+    project_dir.join("ignis.toml"),
+    format!(
+      "[package]\nname = \"native_test_runner_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n\n[formatter]\nindent_width = 4\nline_width = 90\nuse_tabs = true\n",
+      workspace_std_path().display()
+    ),
+  )
+  .expect("rewrite ignis.toml with formatter bridge");
+  write_project_file(
+    &project_dir,
+    "ignisfmt.toml",
+    "indent_width = 6\nline_width = 120\nuse_tabs = true\n",
+  );
+
+  let file_path = project_dir.join("src/main.ign");
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg("--spaces")
+    .arg("--indent-width")
+    .arg("3")
+    .arg(&file_path)
+    .output()
+    .expect("run ignis fmt with spaces override");
+
+  assert!(
+    output.status.success(),
+    "expected ignis fmt spaces override run to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    fs::read_to_string(&file_path).expect("read spaces override-formatted file"),
+    "@if(featureFlag) {\n   /// docs\n   function main(): void {\n      return;\n   }\n}\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_cli_use_tabs_override_rewrites_with_tabs() {
+  let project_dir = make_temp_project_dir("fmt-use-tabs");
+  let file_path = write_single_test_file(&project_dir, "sample.ign", "function   main ( ) : void {return;}\n");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg("--use-tabs")
+    .arg("--indent-width")
+    .arg("4")
+    .arg(&file_path)
+    .output()
+    .expect("run ignis fmt with tabs override");
+
+  assert!(
+    output.status.success(),
+    "expected ignis fmt tabs override run to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    fs::read_to_string(&file_path).expect("read tab-formatted file"),
+    "function main(): void {\n\treturn;\n}\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_rejects_invalid_file_without_rewriting() {
+  let project_dir = make_temp_project_dir("fmt-invalid-file");
+  let file_path = write_single_test_file(
+    &project_dir,
+    "broken.ign",
+    "function main(): void { let broken = \"unterminated; }\n",
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg(&file_path)
+    .output()
+    .expect("run ignis fmt invalid file");
+
+  assert!(
+    !output.status.success(),
+    "expected ignis fmt invalid-file run to fail\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(
+    fs::read_to_string(&file_path).expect("read invalid file after fmt"),
+    "function main(): void { let broken = \"unterminated; }\n"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_rejects_unsupported_file_without_rewriting() {
+  let project_dir = make_temp_project_dir("fmt-unsupported-file");
+  let source = "export namespace CType {\n    type CVoidPtr = *mut void;\n}\n";
+  let file_path = write_single_test_file(&project_dir, "unsupported.ign", source);
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg(&file_path)
+    .output()
+    .expect("run ignis fmt unsupported file");
+
+  assert!(
+    !output.status.success(),
+    "expected ignis fmt unsupported-file run to fail\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stderr).contains("unsupported"),
+    "expected unsupported formatter error\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(fs::read_to_string(&file_path).expect("read unsupported file after fmt"), source);
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_fmt_help_mentions_safety_and_check_mode() {
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg("--help")
+    .output()
+    .expect("run ignis fmt --help");
+
+  assert!(
+    output.status.success(),
+    "expected ignis fmt --help to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+
+  assert!(
+    stdout.contains("parse/reparse safety checks"),
+    "expected fmt help to mention safety validation\nstdout:\n{stdout}"
+  );
+  assert!(
+    stdout.contains("without rewriting files"),
+    "expected fmt help to describe check mode as no-write validation\nstdout:\n{stdout}"
+  );
 }
 
 #[test]
@@ -185,7 +479,8 @@ function failingAssertion(): void {
     "expected fully qualified failing test name in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
   );
   assert!(
-    stdout.contains("assertion failed: values are not equal") || stderr.contains("assertion failed: values are not equal"),
+    stdout.contains("assertion failed: values are not equal")
+      || stderr.contains("assertion failed: values are not equal"),
     "expected assertion panic text in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
   );
   assert!(
@@ -200,7 +495,10 @@ function failingAssertion(): void {
     stdout.contains("1 failed") || stderr.contains("1 failed"),
     "expected failed count in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
   );
-  assert!(harness_binary_path(&project_dir).exists(), "expected cli test failure to happen after harness build");
+  assert!(
+    harness_binary_path(&project_dir).exists(),
+    "expected cli test failure to happen after harness build"
+  );
 
   cleanup_project_dir(&project_dir);
 }

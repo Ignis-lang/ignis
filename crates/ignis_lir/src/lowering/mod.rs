@@ -3,9 +3,8 @@ mod builder;
 use std::collections::{HashMap, HashSet};
 
 use ignis_hir::{
-  BuiltinEqKind as HirBuiltinEqKind, CaptureMode, DropSchedules, ExitKey, HIR, HIRCapture, HIRId, HIRKind,
-  HIRMatchArm, HIRPattern,
-  operation::BinaryOperation, statement::LoopKind,
+  BuiltinEqKind as HirBuiltinEqKind, CaptureMode, DropSchedules, ExitKey, HIR, HIRCapture, HIRId, HIRKind, HIRMatchArm,
+  HIRPattern, operation::BinaryOperation, statement::LoopKind,
 };
 use ignis_type::{
   definition::{DefinitionId, DefinitionKind, DefinitionStore, InlineMode},
@@ -16,10 +15,7 @@ use ignis_type::{
   value::IgnisLiteralValue,
 };
 
-use crate::{
-  BlockId, ConstValue, Instr, LirProgram, LocalData, LocalId, Operand, TempId, Terminator,
-  instr::BuiltinEqKind,
-};
+use crate::{BlockId, ConstValue, Instr, LirProgram, LocalData, LocalId, Operand, TempId, Terminator, instr::BuiltinEqKind};
 
 pub use builder::FunctionBuilder;
 
@@ -537,12 +533,9 @@ impl<'a> LoweringContext<'a> {
         self.lower_builtin_hash(*ty, *value, *hasher);
         None
       },
-      HIRKind::BuiltinEq {
-        ty,
-        left,
-        right,
-        kind,
-      } => self.lower_builtin_eq(*ty, *left, *right, *kind, node.type_id, node.span),
+      HIRKind::BuiltinEq { ty, left, right, kind } => {
+        self.lower_builtin_eq(*ty, *left, *right, *kind, node.type_id, node.span)
+      },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         self.lower_builtin_drop_in_place(*ty, *ptr);
         None

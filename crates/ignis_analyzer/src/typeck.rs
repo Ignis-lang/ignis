@@ -10305,8 +10305,14 @@ impl<'a> Analyzer<'a> {
     type_def_id: DefinitionId,
   ) -> bool {
     match &self.defs.get(&type_def_id).kind {
-      DefinitionKind::Record(rd) => rd.implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
-      DefinitionKind::Enum(ed) => ed.implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
+      DefinitionKind::Record(rd) => rd
+        .implemented_traits
+        .iter()
+        .any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
+      DefinitionKind::Enum(ed) => ed
+        .implemented_traits
+        .iter()
+        .any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
       _ => false,
     }
   }
@@ -10378,10 +10384,13 @@ impl<'a> Analyzer<'a> {
     };
 
     let expected_other = self.types.reference(type_id, false);
-    let other_type = md.params.get(1).and_then(|param_id| match &self.defs.get(param_id).kind {
-      DefinitionKind::Parameter(pd) => Some(pd.type_id),
-      _ => None,
-    })?;
+    let other_type = md
+      .params
+      .get(1)
+      .and_then(|param_id| match &self.defs.get(param_id).kind {
+        DefinitionKind::Parameter(pd) => Some(pd.type_id),
+        _ => None,
+      })?;
 
     let signature_ok = !md.self_mutable
       && md.params.len() == 2
@@ -10579,7 +10588,9 @@ impl<'a> Analyzer<'a> {
     if !lang_traits.drop
       && !lang_traits.clone
       && !lang_traits.copy
-      && !implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id))
+      && !implemented_traits
+        .iter()
+        .any(|trait_def_id| self.is_eq_trait(*trait_def_id))
     {
       return;
     }
@@ -10618,7 +10629,10 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    if implemented_traits.iter().any(|trait_def_id| self.is_eq_trait(*trait_def_id)) {
+    if implemented_traits
+      .iter()
+      .any(|trait_def_id| self.is_eq_trait(*trait_def_id))
+    {
       let _ = self.validate_eq_method_signature(*type_def_id, type_id, type_span, EqValidationDiagnostic::LangTrait);
     }
   }
@@ -10665,10 +10679,7 @@ impl<'a> Analyzer<'a> {
     };
 
     let expected_other = self.types.reference(type_id, false);
-    let expected = format!(
-      "equals(&self, {}): boolean",
-      self.format_type_for_error(&expected_other)
-    );
+    let expected = format!("equals(&self, {}): boolean", self.format_type_for_error(&expected_other));
 
     let params = md.params.clone();
     let return_type = md.return_type;

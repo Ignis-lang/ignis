@@ -168,6 +168,40 @@ impl IgnisParser {
     }
   }
 
+  pub fn parse_formatter_program(&mut self) -> Result<(Store<ASTNode>, Vec<NodeId>), Vec<DiagnosticMessage>> {
+    if let Err(diagnostic) = self.ensure_no_raw_formatter_directives() {
+      self.diagnostics.push(diagnostic);
+      return Err(self.diagnostics.clone());
+    }
+
+    self.parse()
+  }
+
+  pub fn parse_formatter_expression(&mut self) -> Result<(Store<ASTNode>, NodeId), Vec<DiagnosticMessage>> {
+    if let Err(diagnostic) = self.ensure_no_raw_formatter_directives() {
+      self.diagnostics.push(diagnostic);
+      return Err(self.diagnostics.clone());
+    }
+
+    match self.parse_expression(0) {
+      Ok(expression) => {
+        if self.at(TokenType::Eof) {
+          Ok((self.nodes.clone(), expression))
+        } else {
+          self.diagnostics.push(DiagnosticMessage::CompileError {
+            message: "Formatter expression chunks must consume the full token stream".to_string(),
+            span: self.peek().span.clone(),
+          });
+          Err(self.diagnostics.clone())
+        }
+      },
+      Err(diagnostic) => {
+        self.diagnostics.push(diagnostic);
+        Err(self.diagnostics.clone())
+      },
+    }
+  }
+
   fn peek(&self) -> &Token {
     self.tokens.get(self.cursor).unwrap()
   }
@@ -214,6 +248,61 @@ impl IgnisParser {
     }
 
     self.peek_nth(1).type_ == TokenType::Else
+  }
+
+  fn ensure_no_raw_formatter_directives(&self) -> ParserResult<()> {
+    if let Some((directive_name, token)) = self.find_formatter_directive() {
+      return Err(DiagnosticMessage::CompileError {
+        message: format!(
+          "Formatter parser received raw compile-time directive '{}' instead of a directive-free code chunk",
+          directive_name
+        ),
+        span: token.span.clone(),
+      });
+    }
+
+    Ok(())
+  }
+
+  fn find_formatter_directive(&self) -> Option<(&'static str, &Token)> {
+    let mut depth = 0usize;
+
+    for index in 0..self.tokens.len().saturating_sub(1) {
+      let token = self.tokens.get(index)?;
+
+      match token.type_ {
+        TokenType::LeftBrace => {
+          depth += 1;
+          continue;
+        },
+        TokenType::RightBrace => {
+          depth = depth.saturating_sub(1);
+          continue;
+        },
+        TokenType::At => {},
+        _ => continue,
+      }
+
+      let next = self.tokens.get(index + 1)?;
+
+      if next.type_ == TokenType::If && depth == 0 {
+        return Some(("@if", token));
+      }
+
+      if next.type_ == TokenType::Else && depth == 0 {
+        return Some(("@else", token));
+      }
+
+      if next.type_ == TokenType::Identifier && next.lexeme == "ifelse" && depth == 0 {
+        return Some(("@ifelse", token));
+      }
+
+      if next.type_ == TokenType::Identifier && next.lexeme == "configFlag" && depth == 0 {
+        return Some(("@configFlag", token));
+      }
+    }
+
+    None
   }
 
   fn eat(

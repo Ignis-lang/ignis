@@ -773,6 +773,43 @@ mod tests {
   }
 
   #[test]
+  fn lexes_comment_and_directive_trivia_with_raw_source_spans() {
+    let source =
+      "/// doc\n@if(feature) {\n    // branch\n    @configFlag(targetTriple == \"x\")\n}\n@else {\n    //! inner\n}\n";
+    let LexResult { tokens, diagnostics } = lex(source);
+
+    assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
+
+    let significant_tokens: Vec<&Token> = tokens.iter().filter(|token| token.type_ != TokenType::Eof).collect();
+
+    assert_eq!(significant_tokens[0].type_, TokenType::DocComment);
+    assert_eq!(significant_tokens[0].source_text(source), "/// doc");
+
+    assert_eq!(significant_tokens[1].type_, TokenType::At);
+    assert_eq!(significant_tokens[2].type_, TokenType::If);
+    assert_eq!(significant_tokens[2].source_text(source), "if");
+
+    assert_eq!(significant_tokens[7].type_, TokenType::Comment);
+    assert_eq!(significant_tokens[7].source_text(source), "// branch");
+
+    assert_eq!(significant_tokens[8].type_, TokenType::At);
+    assert_eq!(significant_tokens[9].type_, TokenType::Identifier);
+    assert_eq!(significant_tokens[9].source_text(source), "configFlag");
+
+    let else_token = significant_tokens
+      .iter()
+      .find(|token| token.type_ == TokenType::Else)
+      .expect("expected @else token");
+    assert_eq!(else_token.source_text(source), "else");
+
+    let inner_doc = significant_tokens
+      .iter()
+      .find(|token| token.type_ == TokenType::InnerDocComment)
+      .expect("expected inner doc comment");
+    assert_eq!(inner_doc.source_text(source), "//! inner");
+  }
+
+  #[test]
   fn lexes_byte_char_literals() {
     let LexResult { tokens, diagnostics } = lex("'a' '\\n' '\\u{41}'");
 

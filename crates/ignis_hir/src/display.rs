@@ -296,12 +296,7 @@ impl<'a> HIRPrinter<'a> {
         let hasher_str = self.format_node_compact(*hasher);
         format!("builtin_hash<{}>({}, {})", ty_str, value_str, hasher_str)
       },
-      HIRKind::BuiltinEq {
-        ty,
-        left,
-        right,
-        kind,
-      } => {
+      HIRKind::BuiltinEq { ty, left, right, kind } => {
         let ty_str = self.format_type(ty);
         let left_str = self.format_node_compact(*left);
         let right_str = self.format_node_compact(*right);
@@ -768,12 +763,7 @@ impl<'a> HIRPrinter<'a> {
         self.print_node(*hasher);
         self.indent -= 1;
       },
-      HIRKind::BuiltinEq {
-        ty,
-        left,
-        right,
-        kind,
-      } => {
+      HIRKind::BuiltinEq { ty, left, right, kind } => {
         let ty_str = self.format_type(ty);
         writeln!(
           self.output,

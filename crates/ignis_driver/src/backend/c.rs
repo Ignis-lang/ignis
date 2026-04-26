@@ -21,7 +21,11 @@ fn header_emit_input<'a>(
 ) -> EmitInput<'a> {
   static EMPTY_PROGRAM: OnceLock<LirProgram> = OnceLock::new();
 
-  EmitInput::new(program.unwrap_or_else(|| EMPTY_PROGRAM.get_or_init(LirProgram::new)), types, defs)
+  EmitInput::new(
+    program.unwrap_or_else(|| EMPTY_PROGRAM.get_or_init(LirProgram::new)),
+    types,
+    defs,
+  )
 }
 
 impl Backend for CBackend {
@@ -35,10 +39,7 @@ impl Backend for CBackend {
         let emit_input = match input {
           BackendInput::Header { types, defs } => header_emit_input(None, types, defs),
           BackendInput::Lowered {
-            types,
-            defs,
-            program,
-            ..
+            types, defs, program, ..
           } => header_emit_input(Some(program), types, defs),
         };
 
