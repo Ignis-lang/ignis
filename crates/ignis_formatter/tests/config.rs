@@ -52,6 +52,7 @@ fn loads_bounded_defaults_without_project_files() {
       indent_width: 2,
       line_width: 100,
       use_tabs: false,
+      sort_imports: false,
     }
   );
 }
@@ -77,6 +78,7 @@ fn resolves_bridge_file_and_cli_precedence_for_formatter_settings() {
       indent_width: Some(8),
       line_width: Some(100),
       use_tabs: Some(false),
+      sort_imports: None,
     },
   )
   .expect("load formatter config with precedence");
@@ -87,6 +89,7 @@ fn resolves_bridge_file_and_cli_precedence_for_formatter_settings() {
       indent_width: 8,
       line_width: 100,
       use_tabs: false,
+      sort_imports: false,
     }
   );
 }
@@ -113,6 +116,7 @@ fn dedicated_config_can_enable_tabs_without_cli_override() {
       indent_width: 4,
       line_width: 100,
       use_tabs: true,
+      sort_imports: false,
     }
   );
 }
@@ -157,6 +161,7 @@ function   alt ( ) : void {return;}
         indent_width: 2,
         line_width: 100,
         use_tabs: false,
+        sort_imports: false,
       },
     },
   )
@@ -190,10 +195,124 @@ fn format_text_uses_tabs_when_requested() {
         indent_width: 4,
         line_width: 100,
         use_tabs: true,
+        sort_imports: false,
       },
     },
   )
   .expect("format with tabs");
 
   assert_eq!(formatted, "function main(): void {\n\treturn;\n}\n");
+}
+
+// Phase 3: Task 3.3 — Opt-in import sorting
+
+#[test]
+fn sort_imports_defaults_to_false() {
+  let config = FormatterConfig::default();
+  assert!(!config.sort_imports);
+}
+
+#[test]
+fn sort_imports_is_accepted_in_dedicated_config() {
+  let root = temp_dir("sort-imports-config");
+  write_file(&root, "ignisfmt.toml", "sort_imports = true\n");
+
+  let config = load_formatter_config(
+    &FormatterConfigPaths {
+      project_root: root.clone(),
+      ignis_toml: None,
+      dedicated_config: Some(root.join("ignisfmt.toml")),
+      explicit_config: None,
+    },
+    &FormatterCliOverrides::default(),
+  )
+  .expect("sort_imports should be accepted in config");
+
+  assert!(config.sort_imports);
+}
+
+#[test]
+fn format_text_sorts_imports_when_enabled() {
+  let source = "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\nimport beta from \"std::beta\";\n";
+  let formatted = format_text(
+    source,
+    &FormatOptions {
+      check: false,
+      config: FormatterConfig {
+        indent_width: 2,
+        line_width: 100,
+        use_tabs: false,
+        sort_imports: true,
+      },
+    },
+  )
+  .expect("format with import sorting");
+
+  assert_eq!(
+    formatted,
+    "import alpha from \"std::alpha\";\nimport beta from \"std::beta\";\nimport zoo from \"std::zoo\";\n"
+  );
+}
+
+#[test]
+fn format_text_preserves_import_order_when_sort_disabled() {
+  let source = "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n";
+  let formatted = format_text(
+    source,
+    &FormatOptions {
+      check: false,
+      config: FormatterConfig {
+        sort_imports: false,
+        ..FormatterConfig::default()
+      },
+    },
+  )
+  .expect("format without import sorting");
+
+  assert_eq!(
+    formatted,
+    "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n"
+  );
+}
+
+#[test]
+fn format_text_sorts_std_imports_before_local_when_enabled() {
+  let source = "import myFunc from \"my::module\";\nimport stdFunc from \"std::io\";\n";
+  let formatted = format_text(
+    source,
+    &FormatOptions {
+      check: false,
+      config: FormatterConfig {
+        sort_imports: true,
+        ..FormatterConfig::default()
+      },
+    },
+  )
+  .expect("format with std-before-local sorting");
+
+  assert_eq!(
+    formatted,
+    "import stdFunc from \"std::io\";\nimport myFunc from \"my::module\";\n"
+  );
+}
+
+#[test]
+fn format_text_preserves_blank_line_groups_when_sorting() {
+  let source = "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n\nimport local from \"my::module\";\n";
+  let formatted = format_text(
+    source,
+    &FormatOptions {
+      check: false,
+      config: FormatterConfig {
+        sort_imports: true,
+        ..FormatterConfig::default()
+      },
+    },
+  )
+  .expect("format with group-preserving sorting");
+
+  assert_eq!(
+    formatted,
+    "import alpha from \"std::alpha\";\nimport zoo from \"std::zoo\";\n\nimport local from \"my::module\";\n"
+  );
 }

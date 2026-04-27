@@ -12,4 +12,4 @@ pub use comments::{CommentBlock, CommentPlacement, CommentTrivia};
 pub use config::{
   FormatterCliOverrides, FormatterConfig, FormatterConfigError, FormatterConfigPaths, load_formatter_config,
 };
-pub use model::{CodeRegion, DirectiveBlock, FormatFile, FormatItem};
+pub use model::{CodeRegion, DirectiveBlock, FormatFile, FormatItem, SiblingGap};

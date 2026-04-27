@@ -148,7 +148,20 @@ ignis build main.ign --dump hir --dump-hir main  # Dump HIR for a specific funct
 ignis build main.ign --debug --debug-trace analyzer
 ignis build main.ign --debug                 # Enables -vv logs + debug traces
 ignis build main.ign -O                      # Enable optimizations
+
+# Format one or more files canonically
+ignis fmt src/main.ign
+ignis fmt std/fs/mod.ign std/io/mod.ign std/path/mod.ign
+
+# Check formatting without rewriting
+ignis fmt --check src/main.ign
+
+# Emit diffs instead of rewriting
+ignis fmt --emit diff src/main.ign
 ```
+
+Formatter defaults: `indent_width = 2`, `line_width = 100`, `use_tabs = false`, `sort_imports = false`.
+Canonical layout includes inline empty high-level blocks (`namespace Foo {}`), multiline trailing commas, and no trailing comma on single-line signatures or record initializers.
 
 ## Example
 

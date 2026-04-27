@@ -23,6 +23,7 @@ fn render_items(
 ) -> Result<(), FormatError> {
   let mut previous_was_import = false;
   let mut previous_is_complex = false;
+  let mut previous_was_detached_comment = false;
 
   for (index, item) in items.iter().enumerate() {
     match item {
@@ -38,6 +39,7 @@ fn render_items(
         write_item_separator(
           output,
           previous_was_import,
+          previous_was_detached_comment,
           is_import,
           index > 0 && (is_complex || previous_is_complex),
           in_directive_branch,
@@ -86,14 +88,17 @@ fn render_items(
         }
 
         previous_was_import = is_import;
+        previous_was_detached_comment = false;
       },
       FormatItem::DetachedComment(comment) => {
         write_comment_block(output, comment, indent_level, false, index > 0, config);
         previous_was_import = false;
+        previous_is_complex = false;
+        previous_was_detached_comment = true;
       },
       FormatItem::Directive(block) => {
         // Directives are always block-level (multi-line).
-        write_item_separator(output, previous_was_import, false, index > 0, in_directive_branch);
+        write_item_separator(output, previous_was_import, previous_was_detached_comment, false, index > 0, in_directive_branch);
 
         if !output.is_empty() && !output.ends_with('\n') {
           output.push('\n');
@@ -111,6 +116,7 @@ fn render_items(
 
         previous_was_import = false;
         previous_is_complex = true;
+        previous_was_detached_comment = false;
       },
     }
   }
@@ -121,10 +127,19 @@ fn render_items(
 fn write_item_separator(
   output: &mut String,
   previous_was_import: bool,
+  previous_was_detached_comment: bool,
   current_is_import: bool,
   has_previous_item: bool,
   in_directive_branch: bool,
 ) {
+  if previous_was_detached_comment {
+    if !output.ends_with("\n\n") {
+      output.push('\n');
+    }
+
+    return;
+  }
+
   if previous_was_import && !current_is_import {
     if !output.is_empty() && !output.ends_with('\n') {
       output.push('\n');

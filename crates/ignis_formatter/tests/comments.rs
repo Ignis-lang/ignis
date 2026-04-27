@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use ignis_formatter::{CommentPlacement, FormatFile, FormatOptions, format_text};
+use insta::assert_snapshot;
 
 fn workspace_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -174,4 +175,128 @@ fn keeps_import_separator_before_documented_top_level_declaration() {
     formatted,
     "import Block from \"./block\";\nimport Layout, Align from \"std::memory\";\nimport LibC, CType from \"std::libc\";\n\n/// Strategy for searching free blocks in the allocator.\n///\n/// When reusing freed memory blocks, different search strategies offer\n/// different trade-offs between allocation speed and memory utilization.\nexport enum SearchMode {\n  FirstFit,\n  NextFit,\n  BestFit,\n}\n"
   );
+}
+
+// Phase 2: Task 2.4 — Comment/attribute fallback tests
+
+#[test]
+fn preserves_leading_comments_on_function_declarations() {
+  let formatted = format_text(
+    "/// This is a doc comment.\n/// It has multiple lines.\nfunction   hello( ) : void  { return; }\n",
+    &FormatOptions::default(),
+  )
+  .expect("leading doc comments should stay attached to function");
+
+  assert_snapshot!("preserves_leading_comments_on_function_declarations", formatted);
+}
+
+#[test]
+fn preserves_trailing_comments_on_imports() {
+  let formatted = format_text(
+    "import foo from \"bar\"; // trailing import comment\nfunction main(): void { return; }\n",
+    &FormatOptions::default(),
+  )
+  .expect("trailing comment on import should be preserved");
+
+  assert_snapshot!("preserves_trailing_comments_on_imports", formatted);
+}
+
+#[test]
+fn preserves_detached_comments_between_declarations() {
+  let formatted = format_text(
+    "function first(): void { return; }\n\n// This is a detached comment.\n\nfunction second(): void { return; }\n",
+    &FormatOptions::default(),
+  )
+  .expect("detached comment between functions should be preserved");
+
+  assert_snapshot!("preserves_detached_comments_between_declarations", formatted);
+}
+
+#[test]
+fn preserves_detached_section_comment_before_namespace_const() {
+  let formatted = format_text(
+    "namespace Fs::Sys {\n  // ---- Open flags ----\n\n  const SEEK_SET: i32 = __fs_io::SEEK_SET;\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("detached namespace section comment should stay detached");
+
+  assert_eq!(
+    formatted,
+    "namespace Fs::Sys {\n  // ---- Open flags ----\n\n  const SEEK_SET: i32 = __fs_io::SEEK_SET;\n}\n"
+  );
+}
+
+#[test]
+fn preserves_leading_doc_comment_before_first_namespace_record() {
+  let formatted = format_text(
+    "namespace Fs::Sys {\n  /// File metadata returned by `stat` and `fstat`.\n  ///\n  /// Fields correspond to POSIX `struct stat` members.\n  record Stat {\n    public size: i64;\n  }\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("leading namespace doc comment should stay attached to first record");
+
+  assert_eq!(
+    formatted,
+    "namespace Fs::Sys {\n  /// File metadata returned by `stat` and `fstat`.\n  ///\n  /// Fields correspond to POSIX `struct stat` members.\n  record Stat {\n    public size: i64;\n  }\n}\n"
+  );
+}
+
+#[test]
+fn preserves_detached_module_doc_block_before_import() {
+  let formatted = format_text(
+    "//! Header line one\n//! Header line two\n\nimport CType from \"./primitives\";\n",
+    &FormatOptions::default(),
+  )
+  .expect("detached module doc block before import should stay detached");
+
+  assert_eq!(
+    formatted,
+    "//! Header line one\n//! Header line two\n\nimport CType from \"./primitives\";\n"
+  );
+}
+
+#[test]
+fn preserves_attribute_on_exported_record() {
+  let formatted = format_text(
+    "@packed\nexport record Dense {\n  x: i32;\n  y: i32;\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("attribute on exported record should be preserved");
+
+  assert_eq!(
+    formatted,
+    "@packed\nexport record Dense {\n  x: i32;\n  y: i32;\n}\n"
+  );
+}
+
+#[test]
+fn preserves_lang_attribute_on_enum() {
+  let formatted = format_text(
+    "@lang(try)\nexport enum  Option<T> {\n  SOME(T),\n  NONE,\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("lang attribute on exported generic enum should be preserved");
+
+  assert_snapshot!("preserves_lang_attribute_on_enum", formatted);
+}
+
+#[test]
+fn preserves_doc_comment_between_attribute_and_record() {
+  let formatted = format_text(
+    "@implements(Drop)\n/// Frees resources.\nexport record Resource {\n  handle: i32;\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("doc comment between attribute and record should be preserved");
+
+  assert_snapshot!("preserves_doc_comment_between_attribute_and_record", formatted);
+}
+
+#[test]
+fn preserves_comment_inside_block_body() {
+  let formatted = format_text(
+    "function work(): void {\n  // Step 1\n  let x = 1;\n  // Step 2\n  return;\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("comments inside block body should stay with their statements");
+
+  assert_snapshot!("preserves_comment_inside_block_body", formatted);
 }

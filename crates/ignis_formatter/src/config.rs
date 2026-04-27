@@ -12,6 +12,7 @@ pub struct FormatterConfig {
   pub indent_width: usize,
   pub line_width: usize,
   pub use_tabs: bool,
+  pub sort_imports: bool,
 }
 
 impl Default for FormatterConfig {
@@ -20,6 +21,7 @@ impl Default for FormatterConfig {
       indent_width: DEFAULT_INDENT_WIDTH,
       line_width: DEFAULT_LINE_WIDTH,
       use_tabs: false,
+      sort_imports: false,
     }
   }
 }
@@ -49,6 +51,7 @@ pub struct FormatterCliOverrides {
   pub indent_width: Option<usize>,
   pub line_width: Option<usize>,
   pub use_tabs: Option<bool>,
+  pub sort_imports: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +148,10 @@ pub fn load_formatter_config(
     config.use_tabs = use_tabs;
   }
 
+  if let Some(sort_imports) = cli_overrides.sort_imports {
+    config.sort_imports = sort_imports;
+  }
+
   Ok(config)
 }
 
@@ -202,7 +209,7 @@ fn apply_table(
   config: &mut FormatterConfig,
 ) -> Result<(), FormatterConfigError> {
   for key in table.keys() {
-    if !matches!(key.as_str(), "indent_width" | "line_width" | "use_tabs") {
+    if !matches!(key.as_str(), "indent_width" | "line_width" | "use_tabs" | "sort_imports") {
       return Err(FormatterConfigError::UnknownKey {
         path: path.to_path_buf(),
         key: key.clone(),
@@ -220,6 +227,10 @@ fn apply_table(
 
   if let Some(use_tabs) = table.get("use_tabs") {
     config.use_tabs = parse_bool(path, "use_tabs", use_tabs)?;
+  }
+
+  if let Some(sort_imports) = table.get("sort_imports") {
+    config.sort_imports = parse_bool(path, "sort_imports", sort_imports)?;
   }
 
   Ok(())

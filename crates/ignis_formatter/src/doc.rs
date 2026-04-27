@@ -42,8 +42,10 @@ pub(crate) fn format_inline_or_multiline(
   suffix: &str,
   indent_level: usize,
   config: &FormatterConfig,
+  multiline_trailing_comma: bool,
 ) -> Doc {
-  let flat = format!("{prefix}{}{suffix}", items.join(", "));
+  let joined = items.join(", ");
+  let flat = format!("{prefix}{joined}{suffix}");
   let indent_prefix = config.indent_columns(indent_level);
 
   if indent_prefix + flat.len() <= config.line_width {
@@ -58,7 +60,7 @@ pub(crate) fn format_inline_or_multiline(
   let mut param_docs: Vec<Doc> = Vec::new();
   for (index, item) in items.iter().enumerate() {
     param_docs.push(Doc::line());
-    if index + 1 < items.len() {
+    if index + 1 < items.len() || multiline_trailing_comma {
       param_docs.push(Doc::text(format!("{item},")));
     } else {
       param_docs.push(Doc::text(item.clone()));

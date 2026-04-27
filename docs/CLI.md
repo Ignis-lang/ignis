@@ -134,7 +134,9 @@ Supported modes:
 
 - Project mode: `ignis fmt`
 - Single-file mode: `ignis fmt path/to/file.ign`
+- Explicit multi-file mode: `ignis fmt a.ign b.ign c.ign`
 - Explicit project mode: `ignis fmt --project ./my-app`
+- NDJSON batch stdin: `ignis fmt --stdin-json`
 
 Examples:
 
@@ -145,6 +147,9 @@ ignis fmt
 # Format one file in place
 ignis fmt src/main.ign
 
+# Format multiple files explicitly
+ignis fmt std/fs/mod.ign std/io/mod.ign std/path/mod.ign
+
 # Check whether a file is already canonical without rewriting it
 ignis fmt --check src/main.ign
 
@@ -153,21 +158,32 @@ ignis fmt --indent-width 4 src/main.ign
 
 # Emit tab-indented output for one run
 ignis fmt --use-tabs src/main.ign
+
+# Sort imports for one run
+ignis fmt --sort-imports src/main.ign
+
+# Emit a diff instead of rewriting
+ignis fmt --emit diff src/main.ign
+
+# Batch format multiple virtual files over NDJSON
+ignis fmt --stdin-json
 ```
 
 Behavior:
 
 - Files are rewritten only when the canonical output differs from the current bytes.
 - `--check` performs the same formatting and safety validation, but it does not rewrite files.
+- Multiple explicit file paths are formatted in the order provided. All explicit paths are validated before formatting starts.
 - Project mode walks the configured source directory recursively and formats every `.ign` file.
 - Output is accepted only if the formatted text reparses and passes formatter safety validation.
 - Invalid or unsafe input fails the command and leaves the original file unchanged.
-- Supported style overrides are `--indent-width`, `--line-width`, `--use-tabs`, and `--spaces`.
+- Supported style overrides are `--indent-width`, `--line-width`, `--use-tabs`, `--spaces`, and `--sort-imports`.
 - Formatter settings resolve in this order: built-in defaults, then `[formatter]` in `ignis.toml`, then `ignisfmt.toml` (or `--config <path>`), then CLI flags.
-- The shipped defaults are `indent_width = 2`, `line_width = 100`, and `use_tabs = false`.
+- The shipped defaults are `indent_width = 2`, `line_width = 100`, `use_tabs = false`, and `sort_imports = false`.
 - `fmt` currently preserves source order; it does not sort or reorganize imports, declarations, members, attributes, or statements.
-- `--stdin` and `--emit diff` are not shipped yet.
-- When a syntax slice is still unsupported, `fmt` fails instead of applying a heuristic rewrite.
+- `--stdin-json` reads one JSON object per line with `path` and `text` fields and emits one JSON result per line with `path`, `changed`, and either `formatted`, `diff`, or `error`.
+- `--emit diff` works in file, multi-file, project, and `--stdin-json` modes.
+- Formatter failures are safety/modeling failures, not lint diagnostics; valid source is expected to format successfully.
 
 ## `ignis build-std`
 

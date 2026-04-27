@@ -135,6 +135,52 @@ struct OwnedSpannedItem<T> {
   trailing: Vec<CommentBlock>,
 }
 
+enum PipeStep {
+  Head(NodeId),
+  Call(NodeId),
+}
+
+impl PipeStep {
+  fn id(&self) -> NodeId {
+    match self {
+      PipeStep::Head(id) | PipeStep::Call(id) => *id,
+    }
+  }
+}
+
+struct ImportGroup {
+  items: Vec<NodeId>,
+  has_preceding_import_group: bool,
+}
+
+#[derive(Eq, PartialEq)]
+struct ImportSortKey {
+  is_wildcard: bool,
+  is_std: bool,
+  path: String,
+}
+
+impl Ord for ImportSortKey {
+  fn cmp(
+    &self,
+    other: &Self,
+  ) -> std::cmp::Ordering {
+    self.is_wildcard
+      .cmp(&other.is_wildcard)
+      .then_with(|| other.is_std.cmp(&self.is_std))
+      .then_with(|| self.path.cmp(&other.path))
+  }
+}
+
+impl PartialOrd for ImportSortKey {
+  fn partial_cmp(
+    &self,
+    other: &Self,
+  ) -> Option<std::cmp::Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
 impl<'a> AstChunkFormatter<'a> {
   fn new(
     source: &'a str,
@@ -148,26 +194,36 @@ impl<'a> AstChunkFormatter<'a> {
     &self,
     roots: &[NodeId],
   ) -> Result<String, LayoutFailure> {
+    if self.config.sort_imports {
+      return self.format_program_with_sorted_imports(roots);
+    }
+
+    self.format_program_preserving_order(roots)
+  }
+
+  fn format_program_preserving_order(
+    &self,
+    roots: &[NodeId],
+  ) -> Result<String, LayoutFailure> {
     let mut formatted = String::new();
     let mut previous_was_import = false;
     let mut previous_end = None;
 
     for (index, root) in roots.iter().enumerate() {
       let statement = self.format_statement_node(*root, 0)?;
-      let current_is_import = statement.trim_start().starts_with("import ")
-        || (statement.trim_start().starts_with("export ") && statement.contains(" from \""));
+      let current_is_import = self.is_import_node(root);
       let span = self.nodes.get(root).span().clone();
 
       if index > 0 {
-        if let Some(previous_end) = previous_end {
-          self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, previous_end, span.start.0 as usize);
+        if let Some(prev_end) = previous_end {
+          self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, prev_end, span.start.0 as usize);
         }
 
         if !formatted.ends_with('\n') {
           formatted.push('\n');
         }
 
-        if previous_was_import != current_is_import || !current_is_import {
+        if previous_was_import && !current_is_import {
           if !formatted.ends_with("\n\n") {
             formatted.push('\n');
           }
@@ -176,10 +232,197 @@ impl<'a> AstChunkFormatter<'a> {
 
       formatted.push_str(&statement);
       previous_was_import = current_is_import;
-      previous_end = Some(span.end.0 as usize);
+      previous_end = Some(self.node_true_end(root));
     }
 
     Ok(formatted)
+  }
+
+  fn format_program_with_sorted_imports(
+    &self,
+    roots: &[NodeId],
+  ) -> Result<String, LayoutFailure> {
+    let mut formatted = String::new();
+    let mut previous_end = None;
+
+    let groups = self.collect_import_groups(roots);
+
+    for group in &groups {
+      for (index, root) in group.items.iter().enumerate() {
+        let statement = self.format_statement_node(*root, 0)?;
+        let span = self.nodes.get(root).span().clone();
+
+        if let Some(prev_end) = previous_end {
+          self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, prev_end, span.start.0 as usize);
+        }
+
+        if !formatted.is_empty() && !formatted.ends_with('\n') {
+          formatted.push('\n');
+        }
+
+        let current_is_import = self.is_import_node(root);
+        if index == 0 && group.has_preceding_import_group {
+          if !formatted.ends_with("\n\n") {
+            formatted.push('\n');
+          }
+        } else if index == 0 && !current_is_import && previous_end.is_some() {
+          if !formatted.ends_with("\n\n") {
+            formatted.push('\n');
+          }
+        }
+
+        formatted.push_str(&statement);
+        previous_end = Some(self.node_true_end(root));
+      }
+    }
+
+    Ok(formatted)
+  }
+
+  fn is_import_node(
+    &self,
+    node_id: &NodeId,
+  ) -> bool {
+    match self.nodes.get(node_id) {
+      ASTNode::Statement(ASTStatement::Import(_)) => true,
+      ASTNode::Statement(ASTStatement::Export(export)) => {
+        matches!(export, ignis_ast::statements::ASTExport::ReExportFrom { .. })
+      },
+      _ => false,
+    }
+  }
+
+  fn collect_import_groups(
+    &self,
+    roots: &[NodeId],
+  ) -> Vec<ImportGroup> {
+    let mut groups: Vec<ImportGroup> = Vec::new();
+    let mut current_group: Vec<NodeId> = Vec::new();
+    let mut in_import_run = false;
+    let mut has_seen_import_group = false;
+
+    for (index, root) in roots.iter().enumerate() {
+      let span = self.nodes.get(root).span().clone();
+
+      let is_import = self.is_import_node(root);
+
+      if is_import {
+        if !in_import_run {
+          if !current_group.is_empty() {
+            groups.push(ImportGroup {
+              items: std::mem::take(&mut current_group),
+              has_preceding_import_group: has_seen_import_group,
+            });
+          }
+          in_import_run = true;
+        }
+
+        let blank_before = if index > 0 {
+          let prev_root = roots[index - 1];
+          let prev_end = self.node_true_end(&prev_root);
+          let gap_start = prev_end;
+          let gap_end = span.start.0 as usize;
+          self.whitespace_gap_has_intentional_blank_line(gap_start, gap_end)
+        } else {
+          false
+        };
+
+        if blank_before && !current_group.is_empty() {
+          groups.push(ImportGroup {
+            items: std::mem::take(&mut current_group),
+            has_preceding_import_group: has_seen_import_group,
+          });
+          has_seen_import_group = true;
+        }
+
+        current_group.push(*root);
+      } else {
+        if in_import_run && !current_group.is_empty() {
+          has_seen_import_group = true;
+        }
+        in_import_run = false;
+
+        if let Some(prev_root) = roots.get(index.wrapping_sub(1)) {
+          let prev_end = self.node_true_end(prev_root);
+          let gap_start = prev_end;
+          let gap_end = span.start.0 as usize;
+          let blank_before = index > 0 && self.whitespace_gap_has_intentional_blank_line(gap_start, gap_end);
+
+          if blank_before && !current_group.is_empty() {
+            groups.push(ImportGroup {
+              items: std::mem::take(&mut current_group),
+              has_preceding_import_group: false,
+            });
+          }
+        }
+
+        current_group.push(*root);
+      }
+    }
+
+    if !current_group.is_empty() {
+      groups.push(ImportGroup {
+        items: current_group,
+        has_preceding_import_group: has_seen_import_group,
+      });
+    }
+
+    for group in &mut groups {
+      if group.items.iter().all(|root| self.is_import_node(root)) {
+        group.items.sort_by(|a, b| self.compare_imports(a, b));
+      }
+    }
+
+    groups
+  }
+
+  fn compare_imports(
+    &self,
+    a: &NodeId,
+    b: &NodeId,
+  ) -> std::cmp::Ordering {
+    let a_info = self.import_sort_key(a);
+    let b_info = self.import_sort_key(b);
+
+    a_info.cmp(&b_info)
+  }
+
+  fn import_sort_key(
+    &self,
+    node_id: &NodeId,
+  ) -> ImportSortKey {
+    match self.nodes.get(node_id) {
+      ASTNode::Statement(ASTStatement::Import(import)) => {
+        let is_wildcard = self.slice_span(&import.items[0].span).trim() == "_";
+        let is_std = import.from.starts_with("std::");
+        ImportSortKey {
+          is_wildcard,
+          is_std,
+          path: import.from.clone(),
+        }
+      },
+      ASTNode::Statement(ASTStatement::Export(export)) => {
+        if let ignis_ast::statements::ASTExport::ReExportFrom { from, .. } = export {
+          let is_std = from.starts_with("std::");
+          ImportSortKey {
+            is_wildcard: false,
+            is_std,
+            path: from.clone(),
+          }
+        } else {
+          ImportSortKey {
+            is_wildcard: false,
+            is_std: false,
+            path: String::new(),
+          }
+        }
+      },
+      _ => ImportSortKey {
+        is_wildcard: false,
+        is_std: false,
+        path: String::new(),
+      },
+    }
   }
 
   fn indent(
@@ -198,7 +441,7 @@ impl<'a> AstChunkFormatter<'a> {
       ASTNode::Statement(statement) => self.format_statement(statement, indent_level),
       ASTNode::Expression(expression) => {
         let mut formatted = self.indent(indent_level);
-        formatted.push_str(&self.format_expression(expression, 0)?);
+        formatted.push_str(&self.format_expression(expression, 0, indent_level)?);
         formatted.push(';');
         Ok(formatted)
       },
@@ -234,7 +477,7 @@ impl<'a> AstChunkFormatter<'a> {
       ASTStatement::Defer(defer_statement) => {
         let mut formatted = self.indent(indent_level);
         formatted.push_str("defer ");
-        formatted.push_str(&self.format_expression_node(defer_statement.expression, 0)?);
+        formatted.push_str(&self.format_expression_node(defer_statement.expression, 0, indent_level)?);
         formatted.push(';');
         Ok(formatted)
       },
@@ -249,7 +492,7 @@ impl<'a> AstChunkFormatter<'a> {
             ASTNode::Expression(ASTExpression::RecordInit(record_init)) => {
               formatted.push_str(&self.format_record_init_multiline(record_init, indent_level)?);
             },
-            ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(expression, 0)?),
+            ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(expression, 0, indent_level)?),
             ASTNode::Statement(_) => {
               return Err(LayoutFailure::unsupported("return statements require expression children"));
             },
@@ -261,7 +504,7 @@ impl<'a> AstChunkFormatter<'a> {
       },
       ASTStatement::Expression(expression) => {
         let mut formatted = self.indent(indent_level);
-        formatted.push_str(&self.format_expression(expression, 0)?);
+        formatted.push_str(&self.format_expression(expression, 0, indent_level)?);
         formatted.push(';');
         Ok(formatted)
       },
@@ -287,7 +530,7 @@ impl<'a> AstChunkFormatter<'a> {
             ASTNode::Expression(ASTExpression::RecordInit(record_init)) => {
               formatted.push_str(&self.format_record_init_multiline(record_init, indent_level)?);
             },
-            ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(value, 0)?),
+            ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(value, 0, indent_level)?),
             ASTNode::Statement(_) => {
               return Err(LayoutFailure::unsupported("variable initializers require expression children"));
             },
@@ -320,7 +563,7 @@ impl<'a> AstChunkFormatter<'a> {
             ASTNode::Expression(ASTExpression::RecordInit(record_init)) => {
               formatted.push_str(&self.format_record_init_multiline(record_init, indent_level)?);
             },
-            ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(value, 0)?),
+            ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(value, 0, indent_level)?),
             ASTNode::Statement(_) => {
               return Err(LayoutFailure::unsupported("constant initializers require expression children"));
             },
@@ -370,22 +613,14 @@ impl<'a> AstChunkFormatter<'a> {
       .map(|parameter| self.format_parameter(parameter))
       .collect::<Vec<_>>();
 
-    let signature_doc = format_inline_or_multiline(
-      &format!("{header_prefix}("),
+    let formatted = self.format_signature_body(
+      header_prefix,
       &parameters,
-      &format!("): {}", self.format_type(&signature.return_type)),
+      self.callable_has_trailing_comma(&signature.span),
+      &signature.return_type,
+      function.body,
       indent_level,
-      self.config,
-    );
-
-    let mut formatted = render_doc(&signature_doc, self.config, indent_level);
-
-    if let Some(body) = function.body {
-      formatted.push(' ');
-      formatted.push_str(&self.format_block_node(body, indent_level)?);
-    } else {
-      formatted.push(';');
-    }
+    )?;
 
     Ok(formatted)
   }
@@ -412,7 +647,7 @@ impl<'a> AstChunkFormatter<'a> {
     match self.nodes.get(&node_id) {
       ASTNode::Statement(ASTStatement::Block(block)) => self.format_block_statement(block, indent_level),
       ASTNode::Statement(statement) => self.format_statement(statement, indent_level),
-      ASTNode::Expression(expression) => self.format_expression(expression, 0),
+      ASTNode::Expression(expression) => self.format_expression(expression, 0, 0),
     }
   }
 
@@ -484,7 +719,7 @@ impl<'a> AstChunkFormatter<'a> {
   ) -> Result<String, LayoutFailure> {
     let mut formatted = self.indent(indent_level);
     formatted.push_str("if (");
-    formatted.push_str(&self.format_expression_node(if_statement.condition, 0)?);
+    formatted.push_str(&self.format_expression_node(if_statement.condition, 0, 0)?);
     formatted.push_str(") ");
     formatted.push_str(&self.format_block_node(if_statement.then_block, indent_level)?);
 
@@ -499,9 +734,9 @@ impl<'a> AstChunkFormatter<'a> {
           formatted.push_str(self.format_if_statement(else_if, indent_level)?.trim_start());
         },
         _ => {
-          return Err(LayoutFailure::unsupported(
-            "if/else branches must lower to blocks or nested if statements",
-          ));
+          // Source-preserving fallback: format whatever node the parser produced.
+          let inner = self.format_block_node(else_block, indent_level)?;
+          formatted.push_str(&inner);
         },
       }
     }
@@ -516,7 +751,7 @@ impl<'a> AstChunkFormatter<'a> {
   ) -> Result<String, LayoutFailure> {
     let mut formatted = self.indent(indent_level);
     formatted.push_str("while (");
-    formatted.push_str(&self.format_expression_node(while_statement.condition, 0)?);
+    formatted.push_str(&self.format_expression_node(while_statement.condition, 0, 0)?);
     formatted.push_str(") ");
     formatted.push_str(&self.format_block_node(while_statement.body, indent_level)?);
     Ok(formatted)
@@ -537,7 +772,7 @@ impl<'a> AstChunkFormatter<'a> {
     }
 
     formatted.push_str(" = ");
-    formatted.push_str(&self.format_expression_node(let_else.value, 0)?);
+    formatted.push_str(&self.format_expression_node(let_else.value, 0, 0)?);
     formatted.push_str(" else ");
     formatted.push_str(&self.format_block_node(let_else.else_block, indent_level)?);
     formatted.push(';');
@@ -551,8 +786,8 @@ impl<'a> AstChunkFormatter<'a> {
   ) -> Result<String, LayoutFailure> {
     let init_raw = self.format_statement_node(for_stmt.initializer, 0)?;
     let init = init_raw.trim().trim_end_matches(';').trim();
-    let condition = self.format_expression_node(for_stmt.condition, 0)?;
-    let increment = self.format_expression_node(for_stmt.increment, 0)?;
+    let condition = self.format_expression_node(for_stmt.condition, 0, 0)?;
+    let increment = self.format_expression_node(for_stmt.increment, 0, 0)?;
 
     let mut formatted = self.indent(indent_level);
     formatted.push_str("for (");
@@ -572,7 +807,7 @@ impl<'a> AstChunkFormatter<'a> {
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     let binding_text = collapse_spaces(self.slice_span(&for_of.binding.span).trim());
-    let iter = self.format_expression_node(for_of.iter, 0)?;
+    let iter = self.format_expression_node(for_of.iter, 0, 0)?;
 
     let mut formatted = self.indent(indent_level);
     formatted.push_str("for (let ");
@@ -589,6 +824,19 @@ impl<'a> AstChunkFormatter<'a> {
     namespace: &ignis_ast::statements::ASTNamespace,
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
+    let (body_start, body_end) = self.braced_body_bounds(&namespace.span)?;
+    if self.region_contains_raw_directive(body_start, body_end) {
+      return Ok(self.slice_span(&namespace.span).trim().to_string());
+    }
+
+    if self.braced_body_is_empty(body_start, body_end) {
+      let raw = self.slice_span(&namespace.span).trim();
+      let after_kw = raw.strip_prefix("namespace").unwrap_or("").trim_start();
+      let brace_pos = after_kw.find('{').unwrap_or(after_kw.len());
+      let path_str = collapse_spaces(after_kw[..brace_pos].trim());
+      return Ok(format!("{}namespace {} {{}}", self.indent(indent_level), path_str));
+    }
+
     let raw = self.slice_span(&namespace.span).trim();
     let after_kw = raw.strip_prefix("namespace").unwrap_or("").trim_start();
     let brace_pos = after_kw.find('{').unwrap_or(after_kw.len());
@@ -596,21 +844,32 @@ impl<'a> AstChunkFormatter<'a> {
 
     let mut formatted = format!("{}namespace {} {{\n", self.indent(indent_level), path_str);
 
-    let (body_start, body_end) = self.braced_body_bounds(&namespace.span)?;
+    let owned_items = self.owned_spanned_items(&namespace.items, body_start, |item| self.node_owned_span(item))?;
+
     let mut cursor = body_start;
     let mut wrote_any = false;
 
-    for (index, item) in namespace.items.iter().enumerate() {
-      let item_line_start = self.line_start(self.node_effective_start(item));
+    for owned_item in &owned_items {
+      let item_span = self.node_owned_span(owned_item.item);
+      let directive_segment_start = self.directive_prefixed_item_start(owned_item.item, cursor);
 
-      if index > 0 {
-        self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, cursor, item_line_start);
+      if wrote_any {
+        self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, cursor, directive_segment_start);
       }
 
-      self.render_comment_gap(&mut formatted, cursor, item_line_start, indent_level + 1, wrote_any)?;
-      formatted.push_str(&self.format_statement_node(*item, indent_level + 1)?);
+      if directive_segment_start < item_span.start.0 as usize {
+        formatted.push_str(self.slice_range(directive_segment_start, self.node_true_end(owned_item.item)).trim_end());
+      } else {
+        let item_text = self.format_statement_node(*owned_item.item, indent_level + 1)?;
+        formatted.push_str(&self.render_owned_segment(
+          &owned_item.leading,
+          item_text,
+          &owned_item.trailing,
+          indent_level + 1,
+        ));
+      }
       formatted.push('\n');
-      cursor = self.node_true_end(item);
+      cursor = self.node_true_end(owned_item.item);
       wrote_any = true;
     }
 
@@ -626,6 +885,27 @@ impl<'a> AstChunkFormatter<'a> {
     extern_: &ignis_ast::statements::ASTExtern,
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
+    let (body_start, body_end) = self.braced_body_bounds(&extern_.span)?;
+    if self.region_contains_raw_directive(body_start, body_end) {
+      let mut raw = self.format_attributes(&extern_.attrs, indent_level);
+      raw.push_str(self.slice_span(&extern_.span).trim());
+      return Ok(raw);
+    }
+
+    if self.braced_body_is_empty(body_start, body_end) {
+      let mut formatted = self.format_attributes(&extern_.attrs, indent_level);
+      let raw = self.slice_span(&extern_.span).trim();
+      let extern_line = raw
+        .lines()
+        .find(|line| line.trim_start().starts_with("extern"))
+        .unwrap_or("");
+      let after_kw = extern_line.trim().strip_prefix("extern").unwrap_or("").trim_start();
+      let brace_pos = after_kw.find('{').unwrap_or(after_kw.len());
+      let path_str = collapse_spaces(after_kw[..brace_pos].trim());
+      formatted.push_str(&format!("{}extern {} {{}}", self.indent(indent_level), path_str));
+      return Ok(formatted);
+    }
+
     let mut formatted = self.format_attributes(&extern_.attrs, indent_level);
 
     let raw = self.slice_span(&extern_.span).trim();
@@ -639,21 +919,32 @@ impl<'a> AstChunkFormatter<'a> {
 
     formatted.push_str(&format!("{}extern {} {{\n", self.indent(indent_level), path_str));
 
-    let (body_start, body_end) = self.braced_body_bounds(&extern_.span)?;
+    let owned_items = self.owned_spanned_items(&extern_.items, body_start, |item| self.node_owned_span(item))?;
+
     let mut cursor = body_start;
     let mut wrote_any = false;
 
-    for (index, item) in extern_.items.iter().enumerate() {
-      let item_line_start = self.line_start(self.node_effective_start(item));
+    for owned_item in &owned_items {
+      let item_span = self.node_owned_span(owned_item.item);
+      let directive_segment_start = self.directive_prefixed_item_start(owned_item.item, cursor);
 
-      if index > 0 {
-        self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, cursor, item_line_start);
+      if wrote_any {
+        self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, cursor, directive_segment_start);
       }
 
-      self.render_comment_gap(&mut formatted, cursor, item_line_start, indent_level + 1, wrote_any)?;
-      formatted.push_str(&self.format_statement_node(*item, indent_level + 1)?);
+      if directive_segment_start < item_span.start.0 as usize {
+        formatted.push_str(self.slice_range(directive_segment_start, self.node_true_end(owned_item.item)).trim_end());
+      } else {
+        let item_text = self.format_statement_node(*owned_item.item, indent_level + 1)?;
+        formatted.push_str(&self.render_owned_segment(
+          &owned_item.leading,
+          item_text,
+          &owned_item.trailing,
+          indent_level + 1,
+        ));
+      }
       formatted.push('\n');
-      cursor = self.node_true_end(item);
+      cursor = self.node_true_end(owned_item.item);
       wrote_any = true;
     }
 
@@ -689,7 +980,11 @@ impl<'a> AstChunkFormatter<'a> {
         ASTNode::Statement(ASTStatement::Namespace(namespace)) => self
           .format_namespace(namespace, indent_level)
           .map(|formatted| self.insert_export_keyword(&formatted, indent_level)),
-        _ => Err(LayoutFailure::unsupported("export declaration kind is not yet supported by ignis fmt")),
+        // Source-preserving fallback for export kinds without specialized printers.
+        _ => {
+          let inner = self.format_statement_node(*decl, indent_level)?;
+          Ok(self.insert_export_keyword(&inner, indent_level))
+        },
       },
       ignis_ast::statements::ASTExport::ReExportFrom { items, from, .. } => {
         let items_text = items
@@ -712,14 +1007,21 @@ impl<'a> AstChunkFormatter<'a> {
     type_alias: &ignis_ast::statements::ASTTypeAlias,
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
+    let raw_name = self
+      .slice_span(&type_alias.span)
+      .split_whitespace()
+      .nth(1)
+      .unwrap_or_default();
+
+    // Strip any trailing generic params from the name since they are formatted
+    // separately via `format_type_params`. The source text includes `<T, U>`
+    // in the name token when generics are present.
+    let name = raw_name.split('<').next().unwrap_or(raw_name);
+
     let mut formatted = format!(
       "{}type {}",
       self.indent(indent_level),
-      self
-        .slice_span(&type_alias.span)
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or_default()
+      name
     );
 
     if let Some(type_params) = &type_alias.type_params {
@@ -746,13 +1048,20 @@ impl<'a> AstChunkFormatter<'a> {
     if let Some(type_params) = &record.type_params {
       formatted.push_str(&self.format_type_params(type_params));
     }
+
+    let body_start = self.braced_body_bounds(&record.span)?.0;
+    if self.braced_body_is_empty(body_start, self.braced_body_bounds(&record.span)?.1) {
+      formatted.push_str(" {}");
+      return Ok(formatted);
+    }
+
     formatted.push_str(" {\n");
 
     let mut wrote_any = false;
     let (_, body_end) = self.braced_body_bounds(&record.span)?;
-    let owned_items = self.owned_spanned_items(&record.items, |item| self.record_item_span(item).clone())?;
+    let owned_items = self.owned_spanned_items(&record.items, body_start, |item| self.record_item_span(item).clone())?;
 
-    let mut cursor = self.braced_body_bounds(&record.span)?.0;
+    let mut cursor = body_start;
 
     for owned_item in &owned_items {
       let item_span = self.record_item_span(owned_item.item).clone();
@@ -801,12 +1110,19 @@ impl<'a> AstChunkFormatter<'a> {
     if let Some(type_params) = &enum_.type_params {
       formatted.push_str(&self.format_type_params(type_params));
     }
+
+    let body_start = self.braced_body_bounds(&enum_.span)?.0;
+    if self.braced_body_is_empty(body_start, self.braced_body_bounds(&enum_.span)?.1) {
+      formatted.push_str(" {}");
+      return Ok(formatted);
+    }
+
     formatted.push_str(" {\n");
 
     let (_, body_end) = self.braced_body_bounds(&enum_.span)?;
-    let owned_items = self.owned_spanned_items(&enum_.items, |item| self.enum_item_span(item).clone())?;
+    let owned_items = self.owned_spanned_items(&enum_.items, body_start, |item| self.enum_item_span(item).clone())?;
 
-    let mut cursor = self.braced_body_bounds(&enum_.span)?.0;
+    let mut cursor = body_start;
 
     for (index, owned_item) in owned_items.iter().enumerate() {
       let item_span = self.enum_item_span(owned_item.item).clone();
@@ -826,7 +1142,7 @@ impl<'a> AstChunkFormatter<'a> {
               .map(|type_| self.format_type(type_))
               .collect::<Vec<_>>();
             rendered.push_str(&render_doc(
-              &format_inline_or_multiline("(", &payload, ")", indent_level + 1, self.config),
+              &format_inline_or_multiline("(", &payload, ")", indent_level + 1, self.config, false),
               self.config,
               indent_level + 1,
             ));
@@ -869,11 +1185,18 @@ impl<'a> AstChunkFormatter<'a> {
     if let Some(type_params) = &trait_.type_params {
       formatted.push_str(&self.format_type_params(type_params));
     }
+
+    let body_start = self.braced_body_bounds(&trait_.span)?.0;
+    if self.braced_body_is_empty(body_start, self.braced_body_bounds(&trait_.span)?.1) {
+      formatted.push_str(" {}");
+      return Ok(formatted);
+    }
+
     formatted.push_str(" {\n");
 
     let (_, body_end) = self.braced_body_bounds(&trait_.span)?;
-    let owned_items = self.owned_spanned_items(&trait_.methods, |method| method.span.clone())?;
-    let mut cursor = self.braced_body_bounds(&trait_.span)?.0;
+    let owned_items = self.owned_spanned_items(&trait_.methods, body_start, |method| method.span.clone())?;
+    let mut cursor = body_start;
 
     for (index, owned_item) in owned_items.iter().enumerate() {
       if index > 0 {
@@ -922,7 +1245,7 @@ impl<'a> AstChunkFormatter<'a> {
     formatted.push_str(&self.format_type(&field.type_));
     if let Some(value) = field.value {
       formatted.push_str(" = ");
-      formatted.push_str(&self.format_expression_node(value, 0)?);
+      formatted.push_str(&self.format_expression_node(value, 0, 0)?);
     }
     formatted.push(';');
     Ok(formatted)
@@ -941,7 +1264,7 @@ impl<'a> AstChunkFormatter<'a> {
     formatted.push_str(&self.format_type(&field.type_));
     if let Some(value) = field.value {
       formatted.push_str(" = ");
-      formatted.push_str(&self.format_expression_node(value, 0)?);
+      formatted.push_str(&self.format_expression_node(value, 0, 0)?);
     }
     formatted.push(';');
     Ok(formatted)
@@ -978,18 +1301,15 @@ impl<'a> AstChunkFormatter<'a> {
         .map(|parameter| self.format_parameter(parameter)),
     );
 
-    let signature_doc = format_inline_or_multiline(
-      &format!("{header}("),
+    let formatted = self.format_signature_body(
+      header,
       &parameters,
-      &format!("): {}", self.format_type(&method.return_type)),
+      self.callable_has_trailing_comma(&method.span),
+      &method.return_type,
+      Some(method.body),
       indent_level,
-      self.config,
-    );
+    )?;
 
-    let mut formatted = render_doc(&signature_doc, self.config, indent_level);
-
-    formatted.push(' ');
-    formatted.push_str(&self.format_block_node(method.body, indent_level)?);
     Ok(formatted)
   }
 
@@ -1020,17 +1340,41 @@ impl<'a> AstChunkFormatter<'a> {
         .map(|parameter| self.format_parameter(parameter)),
     );
 
+    let formatted = self.format_signature_body(
+      header,
+      &parameters,
+      self.callable_has_trailing_comma(&method.span),
+      &method.return_type,
+      method.body,
+      indent_level,
+    )?;
+
+    Ok(formatted)
+  }
+
+  /// Shared helper: formats a callable signature (parameters + return type)
+  /// using the inline-or-multiline doc, then appends body block or semicolon.
+  fn format_signature_body(
+    &self,
+    header: String,
+    parameters: &[String],
+    has_trailing_comma: bool,
+    return_type: &IgnisTypeSyntax,
+    body: Option<NodeId>,
+    indent_level: usize,
+  ) -> Result<String, LayoutFailure> {
     let signature_doc = format_inline_or_multiline(
       &format!("{header}("),
-      &parameters,
-      &format!("): {}", self.format_type(&method.return_type)),
+      parameters,
+      &format!("): {}", self.format_type(return_type)),
       indent_level,
       self.config,
+      has_trailing_comma,
     );
 
     let mut formatted = render_doc(&signature_doc, self.config, indent_level);
 
-    if let Some(body) = method.body {
+    if let Some(body) = body {
       formatted.push(' ');
       formatted.push_str(&self.format_block_node(body, indent_level)?);
     } else {
@@ -1084,6 +1428,39 @@ impl<'a> AstChunkFormatter<'a> {
     formatted
   }
 
+  fn callable_has_trailing_comma(
+    &self,
+    span: &Span,
+  ) -> bool {
+    let raw = self.slice_span(span);
+    let Some(open_index) = raw.find('(') else {
+      return false;
+    };
+
+    let mut depth = 0usize;
+    let mut close_index = None;
+
+    for (offset, character) in raw[open_index..].char_indices() {
+      match character {
+        '(' => depth += 1,
+        ')' => {
+          depth = depth.saturating_sub(1);
+          if depth == 0 {
+            close_index = Some(open_index + offset);
+            break;
+          }
+        },
+        _ => {},
+      }
+    }
+
+    let Some(close_index) = close_index else {
+      return false;
+    };
+
+    raw[open_index + 1..close_index].trim_end().ends_with(',')
+  }
+
   fn symbol_slice(
     &self,
     span: &Span,
@@ -1098,9 +1475,10 @@ impl<'a> AstChunkFormatter<'a> {
     &self,
     node_id: NodeId,
     parent_precedence: u8,
+    indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     match self.nodes.get(&node_id) {
-      ASTNode::Expression(expression) => self.format_expression(expression, parent_precedence),
+      ASTNode::Expression(expression) => self.format_expression(expression, parent_precedence, indent_level),
       ASTNode::Statement(_) => Err(LayoutFailure::unsupported("expression nodes cannot contain statements")),
     }
   }
@@ -1109,12 +1487,13 @@ impl<'a> AstChunkFormatter<'a> {
     &self,
     expression: &ASTExpression,
     parent_precedence: u8,
+    indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     match expression {
       ASTExpression::Variable(variable) => Ok(self.slice_span(&variable.span).trim().to_string()),
       ASTExpression::Path(path) => Ok(self.slice_span(&path.span).trim().to_string()),
       ASTExpression::Literal(literal) => Ok(self.slice_span(&literal.span).trim().to_string()),
-      ASTExpression::Grouped(grouped) => Ok(format!("({})", self.format_expression_node(grouped.expression, 0)?)),
+      ASTExpression::Grouped(grouped) => Ok(format!("({})", self.format_expression_node(grouped.expression, 0, 0)?)),
       ASTExpression::Unary(unary) => {
         let operator = match unary.operator {
           UnaryOperator::Not => "!",
@@ -1124,12 +1503,12 @@ impl<'a> AstChunkFormatter<'a> {
           UnaryOperator::BitNot => "~",
         };
 
-        Ok(format!("{}{}", operator, self.format_expression_node(unary.operand, 9)?))
+        Ok(format!("{}{}", operator, self.format_expression_node(unary.operand, 9, 0)?))
       },
       ASTExpression::Binary(binary) => {
         let precedence = binary_precedence(binary.operator.clone());
-        let left = self.format_binary_child(binary.left, precedence, false)?;
-        let right = self.format_binary_child(binary.right, precedence, true)?;
+        let left = self.format_binary_child(binary.left, precedence, false, indent_level)?;
+        let right = self.format_binary_child(binary.right, precedence, true, indent_level)?;
         let formatted = format!("{} {} {}", left, binary_operator_text(binary.operator.clone()), right);
 
         if precedence < parent_precedence {
@@ -1141,9 +1520,9 @@ impl<'a> AstChunkFormatter<'a> {
       ASTExpression::Assignment(assignment) => {
         let formatted = format!(
           "{} {} {}",
-          self.format_expression_node(assignment.target, 1)?,
+          self.format_expression_node(assignment.target, 1, 0)?,
           assignment_operator_text(assignment.operator.clone()),
-          self.format_expression_node(assignment.value, 1)?
+          self.format_expression_node(assignment.value, 1, 0)?
         );
 
         if parent_precedence > 1 {
@@ -1155,9 +1534,9 @@ impl<'a> AstChunkFormatter<'a> {
       ASTExpression::Ternary(ternary) => {
         let formatted = format!(
           "{} ? {} : {}",
-          self.format_expression_node(ternary.condition, 0)?,
-          self.format_expression_node(ternary.then_expr, 0)?,
-          self.format_expression_node(ternary.else_expr, 0)?
+          self.format_expression_node(ternary.condition, 0, 0)?,
+          self.format_expression_node(ternary.then_expr, 0, 0)?,
+          self.format_expression_node(ternary.else_expr, 0, 0)?
         );
 
         if parent_precedence > 1 {
@@ -1169,13 +1548,11 @@ impl<'a> AstChunkFormatter<'a> {
       ASTExpression::Call(call) => {
         let source_text = self.slice_span(&call.span).trim();
 
-        // Multiline call expressions cannot be correctly re-indented without knowing
-        // the absolute indent level. Return the source text verbatim.
-        if source_text.contains('\n') {
+        if self.is_multiline_source(source_text) {
           return Ok(source_text.to_string());
         }
 
-        let mut formatted = self.format_expression_node(call.callee, 10)?;
+        let mut formatted = self.format_expression_node(call.callee, 10, 0)?;
 
         if let Some(type_args) = &call.type_args {
           let type_args = type_args
@@ -1191,7 +1568,7 @@ impl<'a> AstChunkFormatter<'a> {
         let arguments = call
           .arguments
           .iter()
-          .map(|argument| self.format_expression_node(*argument, 0))
+          .map(|argument| self.format_expression_node(*argument, 0, 0))
           .collect::<Result<Vec<_>, _>>()?
           .join(", ");
 
@@ -1210,9 +1587,9 @@ impl<'a> AstChunkFormatter<'a> {
 
         Ok(formatted)
       },
-      ASTExpression::Match(match_expression) => self.format_match_expression(match_expression, parent_precedence),
+      ASTExpression::Match(match_expression) => self.format_match_expression(match_expression, parent_precedence, indent_level),
       ASTExpression::Cast(cast) => {
-        let inner = self.format_expression_node(cast.expression, 11)?;
+        let inner = self.format_expression_node(cast.expression, 11, 0)?;
         let formatted = format!("{} as {}", inner, self.format_type(&cast.target_type));
 
         if parent_precedence > 10 {
@@ -1223,10 +1600,10 @@ impl<'a> AstChunkFormatter<'a> {
       },
       ASTExpression::Reference(reference) => {
         let prefix = if reference.mutable { "&mut " } else { "&" };
-        Ok(format!("{}{}", prefix, self.format_expression_node(reference.inner, 11)?))
+        Ok(format!("{}{}", prefix, self.format_expression_node(reference.inner, 11, 0)?))
       },
       ASTExpression::Dereference(dereference) => {
-        Ok(format!("*{}", self.format_expression_node(dereference.inner, 11)?))
+        Ok(format!("*{}", self.format_expression_node(dereference.inner, 11, 0)?))
       },
       ASTExpression::MemberAccess(access) => {
         let op = match access.op {
@@ -1236,7 +1613,7 @@ impl<'a> AstChunkFormatter<'a> {
 
         Ok(format!(
           "{}{}{}",
-          self.format_expression_node(access.object, 10)?,
+          self.format_expression_node(access.object, 10, 0)?,
           op,
           self.slice_span(&access.member_span).trim()
         ))
@@ -1246,21 +1623,19 @@ impl<'a> AstChunkFormatter<'a> {
         vector
           .items
           .iter()
-          .map(|item| self.format_expression_node(*item, 0))
+          .map(|item| self.format_expression_node(*item, 0, 0))
           .collect::<Result<Vec<_>, _>>()?
           .join(", ")
       )),
       ASTExpression::VectorAccess(access) => Ok(format!(
         "{}[{}]",
-        self.format_expression_node(access.name, 12)?,
-        self.format_expression_node(access.index, 0)?
+        self.format_expression_node(access.name, 12, 0)?,
+        self.format_expression_node(access.index, 0, 0)?
       )),
       ASTExpression::RecordInit(record_init) => {
         let source_text = self.slice_span(&record_init.span).trim();
 
-        // Multiline record inits cannot be correctly re-indented without knowing
-        // the absolute indent level. Return the source text verbatim.
-        if source_text.contains('\n') {
+        if self.is_multiline_source(source_text) {
           return Ok(source_text.to_string());
         }
 
@@ -1268,17 +1643,16 @@ impl<'a> AstChunkFormatter<'a> {
       },
       ASTExpression::BuiltinCall(builtin) => self.format_builtin_call(builtin),
       ASTExpression::Lambda(lambda) => self.format_lambda(lambda, parent_precedence),
-      ASTExpression::PostfixIncrement { expr, .. } => Ok(format!("{}++", self.format_expression_node(*expr, 12)?)),
-      ASTExpression::PostfixDecrement { expr, .. } => Ok(format!("{}--", self.format_expression_node(*expr, 12)?)),
-      ASTExpression::Try { expr, .. } => Ok(format!("{}!", self.format_expression_node(*expr, 12)?)),
+      ASTExpression::PostfixIncrement { expr, .. } => Ok(format!("{}++", self.format_expression_node(*expr, 12, 0)?)),
+      ASTExpression::PostfixDecrement { expr, .. } => Ok(format!("{}--", self.format_expression_node(*expr, 12, 0)?)),
+      ASTExpression::Try { expr, .. } => Ok(format!("{}!", self.format_expression_node(*expr, 12, 0)?)),
       ASTExpression::LetCondition(let_cond) => {
-        let value = self.format_expression_node(let_cond.value, 0)?;
+        let value = self.format_expression_node(let_cond.value, 0, 0)?;
         Ok(format!("let {} = {}", self.format_pattern(&let_cond.pattern), value))
       },
       ASTExpression::Pipe { lhs, rhs, .. } => {
-        let left = self.format_expression_node(*lhs, 0)?;
-        let right = self.format_expression_node(*rhs, 0)?;
-        Ok(format!("{} |> {}", left, right))
+        let steps = self.flatten_pipe_chain(*lhs, *rhs);
+        self.format_pipe_chain(&steps, indent_level)
       },
       ASTExpression::PipePlaceholder { .. } => Ok("_".to_string()),
       ASTExpression::CaptureOverride(cap) => {
@@ -1287,22 +1661,133 @@ impl<'a> AstChunkFormatter<'a> {
           ignis_ast::expressions::CaptureOverrideKind::Ref => "@ref",
           ignis_ast::expressions::CaptureOverrideKind::RefMut => "@refMut",
         };
-        Ok(format!("{} {}", prefix, self.format_expression_node(cap.inner, 11)?))
+        Ok(format!("{} {}", prefix, self.format_expression_node(cap.inner, 11, 0)?))
       },
     }
+  }
+
+  /// Returns true when source text spans multiple lines, meaning it cannot be
+  /// re-indented without knowing the absolute indent level (which format_expression
+  /// does not carry). Such expressions are returned verbatim from the source.
+  fn is_multiline_source(
+    &self,
+    source_text: &str,
+  ) -> bool {
+    source_text.contains('\n')
+  }
+
+  /// Flattens a nested `ASTExpression::Pipe` tree into a linear list of steps.
+  /// Each step is either the initial left-hand side or a `|> rhs` segment.
+  fn flatten_pipe_chain(
+    &self,
+    lhs: NodeId,
+    rhs: NodeId,
+  ) -> Vec<PipeStep> {
+    let mut steps = Vec::new();
+    self.collect_pipe_steps(lhs, &mut steps);
+
+    let right_expr = match self.nodes.get(&rhs) {
+      ASTNode::Expression(expression) => expression.clone(),
+      ASTNode::Statement(_) => {
+        steps.push(PipeStep::Call(rhs));
+        return steps;
+      },
+    };
+
+    match &right_expr {
+      ASTExpression::Pipe {
+        lhs: inner_lhs,
+        rhs: inner_rhs,
+        ..
+      } => {
+        self.collect_pipe_steps(*inner_lhs, &mut steps);
+        let right_id = *inner_rhs;
+        steps.push(PipeStep::Call(right_id));
+      },
+      _ => {
+        steps.push(PipeStep::Call(rhs));
+      },
+    }
+
+    steps
+  }
+
+  fn collect_pipe_steps(
+    &self,
+    node_id: NodeId,
+    steps: &mut Vec<PipeStep>,
+  ) {
+    match self.nodes.get(&node_id) {
+      ASTNode::Expression(ASTExpression::Pipe {
+        lhs,
+        rhs,
+        ..
+      }) => {
+        self.collect_pipe_steps(*lhs, steps);
+        steps.push(PipeStep::Call(*rhs));
+      },
+      ASTNode::Expression(_) => {
+        steps.push(PipeStep::Head(node_id));
+      },
+      ASTNode::Statement(_) => {
+        steps.push(PipeStep::Head(node_id));
+      },
+    }
+  }
+
+  fn format_pipe_chain(
+    &self,
+    steps: &[PipeStep],
+    indent_level: usize,
+  ) -> Result<String, LayoutFailure> {
+    let pipe_count = steps.len().saturating_sub(1);
+
+    if pipe_count < 2 {
+      let head = match steps.first() {
+        Some(PipeStep::Head(id)) | Some(PipeStep::Call(id)) => {
+          self.format_expression_node(*id, 0, 0)?
+        },
+        None => return Ok(String::new()),
+      };
+
+      if let Some(PipeStep::Call(rhs_id)) = steps.get(1) {
+        let right = self.format_expression_node(*rhs_id, 0, 0)?;
+        let inline = format!("{head} |> {right}");
+        if inline.len() <= self.config.line_width {
+          return Ok(inline);
+        }
+      }
+
+      return Ok(head);
+    }
+
+    let mut formatted = String::new();
+
+    if let Some(step) = steps.first() {
+      formatted.push_str(&self.format_expression_node(step.id(), 0, 0)?);
+    }
+
+    for step in steps.iter().skip(1) {
+      if let PipeStep::Call(rhs_id) = step {
+        formatted.push('\n');
+        formatted.push_str(&self.indent(indent_level + 1));
+        formatted.push_str("|> ");
+        formatted.push_str(&self.format_expression_node(*rhs_id, 0, 0)?);
+      }
+    }
+
+    Ok(formatted)
   }
 
   fn format_match_expression(
     &self,
     match_expression: &ignis_ast::expressions::ASTMatch,
     parent_precedence: u8,
+    indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     let source_text = self.slice_span(&match_expression.span).trim();
 
-    // Multiline match expressions cannot be correctly re-indented without knowing
-    // the absolute indent level (format_expression has no indent_level parameter).
-    // Return the source text verbatim to avoid collapsing arms onto one line.
-    if source_text.contains('\n') {
+    if self.is_multiline_source(source_text) {
       return Ok(if parent_precedence > 0 {
         format!("({source_text})")
       } else {
@@ -1318,12 +1803,12 @@ impl<'a> AstChunkFormatter<'a> {
 
         if let Some(guard) = arm.guard {
           formatted.push_str(" if ");
-          formatted.push_str(&self.format_expression_node(guard, 0)?);
+          formatted.push_str(&self.format_expression_node(guard, 0, 0)?);
         }
 
         formatted.push_str(" -> ");
         let body = match self.nodes.get(&arm.body) {
-          ASTNode::Expression(expression) => self.format_expression(expression, 0)?,
+          ASTNode::Expression(expression) => self.format_expression(expression, 0, indent_level)?,
           ASTNode::Statement(ASTStatement::Block(block)) => self.format_block_statement(block, 0)?,
           ASTNode::Statement(_) => {
             return Err(LayoutFailure::unsupported("match arm body must be an expression or block"));
@@ -1336,7 +1821,7 @@ impl<'a> AstChunkFormatter<'a> {
 
     let formatted = format!(
       "match ({}) {{ {}, }}",
-      self.format_expression_node(match_expression.scrutinee, 0)?,
+      self.format_expression_node(match_expression.scrutinee, 0, 0)?,
       arms.join(", ")
     );
 
@@ -1372,7 +1857,7 @@ impl<'a> AstChunkFormatter<'a> {
       &builtin
         .args
         .iter()
-        .map(|argument| self.format_expression_node(*argument, 0))
+        .map(|argument| self.format_expression_node(*argument, 0, 0))
         .collect::<Result<Vec<_>, _>>()?
         .join(", "),
     );
@@ -1400,7 +1885,7 @@ impl<'a> AstChunkFormatter<'a> {
     formatted.push_str(" -> ");
 
     match &lambda.body {
-      LambdaBody::Expression(expression) => formatted.push_str(&self.format_expression_node(*expression, 0)?),
+      LambdaBody::Expression(expression) => formatted.push_str(&self.format_expression_node(*expression, 0, 0)?),
       LambdaBody::Block(block) => formatted.push_str(&self.format_block_node(*block, 0)?),
     }
 
@@ -1460,6 +1945,7 @@ impl<'a> AstChunkFormatter<'a> {
     node_id: NodeId,
     parent_precedence: u8,
     is_right_child: bool,
+    indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     let expression = match self.nodes.get(&node_id) {
       ASTNode::Expression(expression) => expression,
@@ -1469,7 +1955,7 @@ impl<'a> AstChunkFormatter<'a> {
     };
 
     let child_precedence = expression_precedence(expression);
-    let formatted = self.format_expression(expression, parent_precedence)?;
+    let formatted = self.format_expression(expression, parent_precedence, indent_level)?;
 
     if child_precedence < parent_precedence
       || (is_right_child && child_precedence == parent_precedence && matches!(expression, ASTExpression::Binary(_)))
@@ -1607,6 +2093,19 @@ impl<'a> AstChunkFormatter<'a> {
       .fold(node_start, usize::min)
   }
 
+  fn node_owned_span(
+    &self,
+    node_id: &NodeId,
+  ) -> Span {
+    let node_span = self.nodes.get(node_id).span().clone();
+
+    Span::new(
+      node_span.file,
+      ignis_type::BytePosition(self.node_effective_start(node_id) as u32),
+      ignis_type::BytePosition(self.node_true_end(node_id) as u32),
+    )
+  }
+
   fn slice_span(
     &self,
     span: &Span,
@@ -1649,14 +2148,7 @@ impl<'a> AstChunkFormatter<'a> {
       .map(|field| self.format_record_init_field_inline(field))
       .collect::<Result<Vec<_>, _>>()?;
 
-    let last = record_init.fields.len().saturating_sub(1);
-    let trailing = if !record_init.fields.is_empty() && self.record_init_field_has_trailing_comma(record_init, last) {
-      ","
-    } else {
-      ""
-    };
-
-    Ok(format!("{} {{ {}{} }}", path, fields.join(", "), trailing))
+    Ok(format!("{} {{ {} }}", path, fields.join(", ")))
   }
 
   fn format_record_init_multiline(
@@ -1673,7 +2165,7 @@ impl<'a> AstChunkFormatter<'a> {
 
     let inline = format!("{} {{ {} }}", path, fields.join(", "));
     let source_is_inline = !self.slice_span(&record_init.span).contains('\n');
-    if source_is_inline && fields.len() <= 1 && self.indent(indent_level).len() + "return ".len() + inline.len() <= self.config.line_width {
+    if source_is_inline && self.indent(indent_level).len() + "return ".len() + inline.len() <= self.config.line_width {
       return Ok(inline);
     }
 
@@ -1681,11 +2173,11 @@ impl<'a> AstChunkFormatter<'a> {
     formatted.push_str(&path);
     formatted.push_str(" {\n");
 
-    for (field_index, field) in fields.iter().enumerate() {
+    for field in &fields {
       formatted.push_str(&self.indent(indent_level + 1));
       formatted.push_str(field);
 
-      if self.record_init_field_has_trailing_comma(record_init, field_index) {
+      if !record_init.fields.is_empty() {
         formatted.push(',');
       }
 
@@ -1729,7 +2221,7 @@ impl<'a> AstChunkFormatter<'a> {
     Ok(format!(
       "{}: {}",
       self.slice_span(&field.name_span).trim(),
-      self.format_expression_node(field.value, 0)?
+      self.format_expression_node(field.value, 0, 0)?
     ))
   }
 
@@ -1746,7 +2238,7 @@ impl<'a> AstChunkFormatter<'a> {
       ASTNode::Expression(ASTExpression::RecordInit(record_init)) => {
         formatted.push_str(&self.format_record_init_multiline(record_init, indent_level)?);
       },
-      ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(field.value, 0)?),
+      ASTNode::Expression(_) => formatted.push_str(&self.format_expression_node(field.value, 0, 0)?),
       ASTNode::Statement(_) => {
         return Err(LayoutFailure::unsupported(
           "record initializer fields require expression values",
@@ -1755,25 +2247,6 @@ impl<'a> AstChunkFormatter<'a> {
     }
 
     Ok(formatted)
-  }
-
-  fn record_init_field_has_trailing_comma(
-    &self,
-    record_init: &ignis_ast::expressions::ASTRecordInit,
-    field_index: usize,
-  ) -> bool {
-    let field = match record_init.fields.get(field_index) {
-      Some(field) => field,
-      None => return false,
-    };
-
-    let lookahead_end = record_init
-      .fields
-      .get(field_index + 1)
-      .map(|next_field| next_field.span.start.0 as usize)
-      .unwrap_or(record_init.span.end.0 as usize);
-
-    self.slice_range(field.span.end.0 as usize, lookahead_end).contains(',')
   }
 
   fn braced_body_bounds(
@@ -1868,6 +2341,14 @@ impl<'a> AstChunkFormatter<'a> {
 
     self.push_comment_blocks(&mut rendered, leading, indent_level, false);
 
+    if leading
+      .last()
+      .is_some_and(|block| matches!(block.placement, CommentPlacement::Detached))
+      && !rendered.ends_with("\n\n")
+    {
+      rendered.push('\n');
+    }
+
     rendered.push_str(&body);
 
     if !trailing.is_empty() {
@@ -1905,11 +2386,23 @@ impl<'a> AstChunkFormatter<'a> {
     indent_level: usize,
     separate_from_previous: bool,
   ) -> Result<(), LayoutFailure> {
-    let blocks = self.comment_blocks_in_slice(start, end)?;
+    let mut blocks = self.comment_blocks_in_slice(start, end)?;
 
     if blocks.is_empty() {
       return Ok(());
     }
+
+    if let Some(last_block) = blocks.last_mut() {
+      if matches!(last_block.placement, CommentPlacement::Detached)
+        && !self.comment_gap_preserves_detached_spacing(start, end)
+      {
+        last_block.placement = CommentPlacement::Leading;
+      }
+    }
+
+    let has_detached_block = blocks
+      .iter()
+      .any(|block| matches!(block.placement, CommentPlacement::Detached));
 
     if separate_from_previous && !output.ends_with("\n\n") {
       output.push('\n');
@@ -1917,12 +2410,17 @@ impl<'a> AstChunkFormatter<'a> {
 
     self.push_comment_blocks(output, &blocks, indent_level, false);
 
+    if has_detached_block && !output.ends_with("\n\n") {
+      output.push('\n');
+    }
+
     Ok(())
   }
 
   fn owned_spanned_items<'b, T, F>(
     &self,
     items: &'b [T],
+    first_item_region_start: usize,
     span_of: F,
   ) -> Result<Vec<OwnedSpannedItem<&'b T>>, LayoutFailure>
   where
@@ -1951,8 +2449,24 @@ impl<'a> AstChunkFormatter<'a> {
       };
 
       if index == 0 {
-        let region_start = self.leading_comment_region_start(span_start);
-        for block in self.comment_blocks_in_slice(region_start, span_start)? {
+        let region_start = first_item_region_start.min(span_start);
+        if self.gap_contains_directive_syntax(region_start, span_start) {
+          owned_items.push(owned_item);
+          cursor = span.end.0 as usize;
+          continue;
+        }
+
+        let mut blocks = self.comment_blocks_in_slice(region_start, span_start)?;
+
+        if let Some(last_block) = blocks.last_mut() {
+          if matches!(last_block.placement, CommentPlacement::Detached)
+            && !self.comment_gap_preserves_detached_spacing(region_start, span_start)
+          {
+            last_block.placement = CommentPlacement::Leading;
+          }
+        }
+
+        for block in blocks {
           match block.placement {
             CommentPlacement::Leading | CommentPlacement::Detached => owned_item.leading.push(block),
             CommentPlacement::Trailing => {
@@ -1965,11 +2479,23 @@ impl<'a> AstChunkFormatter<'a> {
       } else {
         let force_first_trailing = self.gap_starts_with_same_line_comment(cursor, span_start);
 
-        for (comment_index, mut block) in self
-          .comment_blocks_in_slice(cursor, span_start)?
-          .into_iter()
-          .enumerate()
-        {
+        if self.gap_contains_directive_syntax(cursor, span_start) {
+          owned_items.push(owned_item);
+          cursor = span.end.0 as usize;
+          continue;
+        }
+
+        let mut blocks = self.comment_blocks_in_slice(cursor, span_start)?;
+
+        if let Some(last_block) = blocks.last_mut() {
+          if matches!(last_block.placement, CommentPlacement::Detached)
+            && !self.comment_gap_preserves_detached_spacing(cursor, span_start)
+          {
+            last_block.placement = CommentPlacement::Leading;
+          }
+        }
+
+        for (comment_index, mut block) in blocks.into_iter().enumerate() {
           if comment_index == 0 && force_first_trailing {
             block.placement = CommentPlacement::Trailing;
           }
@@ -1990,14 +2516,6 @@ impl<'a> AstChunkFormatter<'a> {
     }
 
     Ok(owned_items)
-  }
-
-  fn leading_comment_region_start(
-    &self,
-    item_start: usize,
-  ) -> usize {
-    let prefix = &self.source[..item_start.min(self.source.len())];
-    prefix.rfind('{').map(|index| index + 1).unwrap_or(0)
   }
 
   fn line_start(
@@ -2106,8 +2624,10 @@ impl<'a> AstChunkFormatter<'a> {
       return;
     }
 
-    if !output.ends_with("\n\n") {
+    if output.ends_with('\n') {
       output.push('\n');
+    } else {
+      output.push_str("\n\n");
     }
   }
 
@@ -2125,7 +2645,7 @@ impl<'a> AstChunkFormatter<'a> {
     // Skip ignorable trailing punctuation (commas, semicolons) at the start of the gap.
     // Variant and statement spans may not include their trailing punctuation token,
     // so the gap starts with ',' or ';' rather than whitespace.
-    let gap = gap.trim_start_matches(|c: char| matches!(c, ',' | ';'));
+    let gap = gap.trim_start_matches([',', ';']);
 
     // Count newlines in the leading whitespace of the gap only.
     // Stop at the first non-whitespace character (e.g. a leading doc comment) so
@@ -2134,6 +2654,112 @@ impl<'a> AstChunkFormatter<'a> {
     let whitespace_prefix = &gap[..whitespace_prefix_len];
 
     whitespace_prefix.chars().filter(|c| *c == '\n').count() >= 2
+  }
+
+  fn comment_gap_preserves_detached_spacing(
+    &self,
+    start: usize,
+    end: usize,
+  ) -> bool {
+    if start >= end {
+      return false;
+    }
+
+    let gap = self.slice_range(start, end);
+    let last_non_whitespace = gap.rfind(|character: char| !character.is_whitespace());
+
+    let Some(last_non_whitespace) = last_non_whitespace else {
+      return false;
+    };
+
+    gap[last_non_whitespace + 1..].chars().filter(|character| *character == '\n').count() >= 2
+  }
+
+  fn gap_contains_directive_syntax(
+    &self,
+    start: usize,
+    end: usize,
+  ) -> bool {
+    if start >= end {
+      return false;
+    }
+
+    self
+      .slice_range(start, end)
+      .lines()
+      .any(|line| line.trim_start().starts_with('@'))
+  }
+
+  fn region_contains_raw_directive(
+    &self,
+    start: usize,
+    end: usize,
+  ) -> bool {
+    if start >= end {
+      return false;
+    }
+
+    self.slice_range(start, end).lines().any(|line| {
+      let trimmed = line.trim_start();
+      trimmed.starts_with("@configFlag(")
+        || trimmed.starts_with("@if(")
+        || trimmed.starts_with("@ifelse(")
+        || trimmed.starts_with("@else")
+    })
+  }
+
+  fn braced_body_is_empty(
+    &self,
+    start: usize,
+    end: usize,
+  ) -> bool {
+    self.slice_range(start, end).trim().is_empty()
+  }
+
+  fn directive_prefixed_item_start(
+    &self,
+    node_id: &NodeId,
+    lower_bound: usize,
+  ) -> usize {
+    let node_start = self.node_effective_start(node_id);
+    let mut current_line_start = self.line_start(node_start);
+    let mut candidate = current_line_start;
+    let mut saw_directive = false;
+
+    while current_line_start > lower_bound {
+      let previous_line_end = current_line_start.saturating_sub(1);
+      let previous_line_start = self.source[..previous_line_end]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+      let previous_line = &self.source[previous_line_start..previous_line_end];
+      let trimmed = previous_line.trim();
+
+      if trimmed.is_empty() {
+        break;
+      }
+
+      if trimmed.starts_with('@') {
+        saw_directive = true;
+        candidate = previous_line_start;
+        current_line_start = previous_line_start;
+        continue;
+      }
+
+      if saw_directive && (trimmed.starts_with("//") || trimmed.starts_with("/*")) {
+        candidate = previous_line_start;
+        current_line_start = previous_line_start;
+        continue;
+      }
+
+      break;
+    }
+
+    if saw_directive {
+      candidate
+    } else {
+      node_start
+    }
   }
 }
 
@@ -2231,4 +2857,3 @@ mod tests {
     assert!(printed.starts_with("import zoo"));
   }
 }
-

@@ -100,6 +100,12 @@ crates/
   ignis_data_type/                # Legacy data type enum (used by ignis_token)
   ignis_config/                   # Build configuration types
     src/lib.rs                    # IgnisSTDManifest, CHeader, StdToolchainConfig, StdLinkingInfo
+  ignis_formatter/                # Canonical source formatter
+    src/api.rs                    # format_text/format_file entry points, safety + idempotence integration
+    src/config.rs                 # Formatter config loading, CLI override precedence
+    src/layout.rs                 # AST-guided layout engine + source-preserving fallbacks
+    src/printer.rs                # Final trivia-aware emission
+    src/safety.rs                 # Parse-back, token-shape, comment-ownership validation
   ignis_diagnostics/              # Error reporting
     src/message.rs                # DiagnosticMessage enum (450+ variants)
     src/diagnostic_report.rs      # Diagnostic, Severity, Label
@@ -170,7 +176,20 @@ docs/                             # Language reference and ABI docs
 
 Parses commands via `clap`, resolves compile input (project `ignis.toml` or single file), and builds `IgnisConfig` with CLI overrides (`opt_level`, `debug`, `out_dir`, `std_path`, `cc`, `emit`).
 
-Subcommands: `build`, `check`, `test`, `build-std`, `check-std`, `check-runtime`, `lsp`.
+Subcommands: `build`, `check`, `fmt`, `test`, `build-std`, `check-std`, `check-runtime`, `lsp`.
+
+### Formatter
+
+**Entry:** `crates/ignis_formatter/src/api.rs` and `crates/ignis/src/main.rs` → `run_fmt()`
+
+The formatter is a parser-aware, safety-validated canonical rewriter for Ignis source.
+
+- Input modes: project, single file, multiple explicit files, and NDJSON batch stdin.
+- Canonical empty high-level blocks emit inline (`namespace Foo {}`).
+- Trailing commas are layout-driven: multiline call/initializer lists gain a final comma, single-line canonical output drops it.
+- `namespace` and `extern` bodies containing raw compile-time directives use source-preserving fallback instead of reparsing branch-selected AST.
+- Safety validation checks parse-back, token-shape stability, comment ownership, directive structure, trailing whitespace, final newline, and idempotence.
+- Import sorting is opt-in only via formatter config or `--sort-imports`.
 
 ### Driver Pipeline
 

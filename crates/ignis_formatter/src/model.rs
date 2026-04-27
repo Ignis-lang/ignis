@@ -4,6 +4,57 @@ use ignis_type::file::SourceMap;
 
 use crate::{CommentBlock, CommentTrivia, FormatError, comments::classify_comment_placement};
 
+/// Describes the normalized gap between two sibling items in a sequence.
+///
+/// The formatter preserves author intent by keeping single blank lines but
+/// collapsing runs of 2+ consecutive blank lines down to exactly one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiblingGap {
+  /// Number of blank lines to emit (0 = adjacent, 1 = one blank line).
+  /// Values greater than 1 are normalized down to 1.
+  pub blank_lines: usize,
+}
+
+impl SiblingGap {
+  /// Creates a `SiblingGap` from a raw whitespace gap between two items.
+  /// Normalizes any run of 2+ blank lines to exactly 1.
+  pub fn from_source_gap(source: &str, start: usize, end: usize) -> Self {
+    let blank_count = count_blank_lines_in_gap(source, start, end);
+    Self {
+      blank_lines: blank_count.min(1),
+    }
+  }
+
+  /// Creates a gap with no blank lines (items are adjacent).
+  pub fn none() -> Self {
+    Self { blank_lines: 0 }
+  }
+
+  /// Creates a gap with exactly one blank line.
+  pub fn single() -> Self {
+    Self { blank_lines: 1 }
+  }
+}
+
+/// Counts the number of blank lines (empty lines) in the whitespace gap
+/// between byte offsets `start` and `end` in `source`.
+fn count_blank_lines_in_gap(source: &str, start: usize, end: usize) -> usize {
+  if start >= end {
+    return 0;
+  }
+
+  let slice = &source[start.min(source.len())..end.min(source.len())];
+  let mut blank_count = 0usize;
+
+  for line in slice.lines() {
+    if line.trim().is_empty() {
+      blank_count += 1;
+    }
+  }
+
+  blank_count
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatFile {
   pub items: Vec<FormatItem>,
@@ -479,8 +530,12 @@ impl<'a> FormatModelBuilder<'a> {
       cursor += 1;
     }
 
+    let start_byte = self.tokens[start_index].span.start.0 as usize;
+    let context_end = (start_byte + 160).min(self.source.len());
+    let context = self.source[start_byte..context_end].replace('\n', "\\n");
+
     Err(FormatError::Model {
-      message: "brace-less directive statement has no clear end".to_string(),
+      message: format!("brace-less directive statement has no clear end near: '{context}'"),
     })
   }
 
@@ -558,32 +613,6 @@ impl<'a> FormatModelBuilder<'a> {
       && (next.type_ == ignis_token::token_types::TokenType::If
         || (next.type_ == ignis_token::token_types::TokenType::Identifier
           && matches!(next.lexeme.as_str(), "ifelse" | "configFlag")))
-  }
-
-  /// Returns true if the directive at `index` uses the braced `{ }` block form.
-  /// `@configFlag(cond) { }` is braced; `@configFlag(cond)\nstatement` is not.
-  fn directive_is_braced(
-    &self,
-    index: usize,
-  ) -> bool {
-    let mut cursor = index + 1;
-    let mut depth = 0usize;
-    while cursor < self.tokens.len() {
-      match self.tokens[cursor].type_ {
-        ignis_token::token_types::TokenType::LeftParen => depth += 1,
-        ignis_token::token_types::TokenType::RightParen => {
-          depth = depth.saturating_sub(1);
-          if depth == 0 {
-            let after_header = cursor + 1;
-            return after_header < self.tokens.len()
-              && self.tokens[after_header].type_ == ignis_token::token_types::TokenType::LeftBrace;
-          }
-        },
-        _ => {},
-      }
-      cursor += 1;
-    }
-    false
   }
 
   fn is_else_directive_start(

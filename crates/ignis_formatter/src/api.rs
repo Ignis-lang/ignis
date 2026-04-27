@@ -59,7 +59,7 @@ pub fn format_text(
   options: &FormatOptions,
 ) -> Result<String, FormatError> {
   let formatted = format_text_unchecked(source, &options.config)?;
-  validate_formatted_output(source, &formatted)?;
+  validate_formatted_output(source, &formatted, options.config.sort_imports)?;
   validate_idempotence(&formatted, |formatted| format_text_unchecked(formatted, &options.config))?;
 
   Ok(formatted)
@@ -177,5 +177,43 @@ mod tests {
       formatted,
       "export record HeapAllocator {\n  public setSearchMode(&mut self, mode: SearchMode): void {\n    self.searchMode = mode;\n\n    // Reset lastSearch when changing modes to avoid stale pointers\n    if (mode != SearchMode::NextFit) {\n      self.lastSearch = null;\n    }\n  }\n}\n"
     );
+  }
+
+  #[test]
+  fn format_text_does_not_return_unsupported_for_valid_code() {
+    let sources = [
+      "function main(): void { return; }\n",
+      "export const MY_CONST: i32 = 42;\n",
+      "record Empty {}\n",
+      "enum Unit { ONLY, }\n",
+      "function pipe(x: i32): i32 { return x |> identity; }\n",
+    ];
+
+    for source in &sources {
+      let result = super::format_text(source, &FormatOptions::default());
+      match &result {
+        Ok(_) => {},
+        Err(super::FormatError::Unsupported { message }) => {
+          panic!(
+            "format_text returned FormatError::Unsupported for valid code:\n  source: {source:?}\n  message: {message}"
+          );
+        },
+        Err(other) => {
+          panic!(
+            "format_text failed for valid code with non-Unsupported error:\n  source: {source:?}\n  error: {other}"
+          );
+        },
+      }
+    }
+  }
+
+  #[test]
+  fn unchecked_formatter_preserves_namespace_leading_doc_comment_shape() {
+    let source = "namespace Fs::Sys {\n  /// File metadata returned by `stat` and `fstat`.\n  ///\n  /// Fields correspond to POSIX `struct stat` members.\n  record Stat {\n    public size: i64;\n  }\n}\n";
+
+    let formatted = format_text_unchecked(source, &FormatOptions::default().config)
+      .expect("namespace leading doc comment should format unchecked");
+
+    assert_eq!(formatted, source);
   }
 }

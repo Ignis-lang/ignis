@@ -1,4 +1,5 @@
 use ignis_formatter::{FormatterConfig, FormatOptions, format_text};
+use insta::assert_snapshot;
 
 fn normalize_expected_indent(text: &str) -> String {
   let config = FormatterConfig::default();
@@ -63,7 +64,7 @@ fn formats_callable_and_vector_value_slices() {
   assert_eq!(
     formatted,
     normalize_expected_indent(
-      "type Mapper = (i32) -> i32;\n\nfunction build(mapper: Mapper, value: i32): i32[] {\n    return [mapper(value), value];\n}\n"
+      "type Mapper = (i32) -> i32;\nfunction build(mapper: Mapper, value: i32): i32[] {\n    return [mapper(value), value];\n}\n"
     )
   );
 }
@@ -101,7 +102,7 @@ fn formats_generic_record_members_with_vector_callable_types_and_record_initiali
   assert_eq!(
     formatted,
     normalize_expected_indent(
-      "record ReducerBox<T> {\n    public values: T[];\n    public reducer: (T, &T) -> T;\n}\n\nfunction build<T>(values: T[], reducer: (T, &T) -> T): ReducerBox<T> {\n    return ReducerBox<T> {\n        values: values,\n        reducer: reducer,\n    };\n}\n"
+      "record ReducerBox<T> {\n    public values: T[];\n    public reducer: (T, &T) -> T;\n}\nfunction build<T>(values: T[], reducer: (T, &T) -> T): ReducerBox<T> {\n    return ReducerBox<T> { values: values, reducer: reducer };\n}\n"
     )
   );
 }
@@ -131,7 +132,7 @@ fn formats_let_bound_record_initializer_values_multiline() {
   assert_eq!(
     formatted,
     normalize_expected_indent(
-      "record Household {\n    public city: str;\n    public price: i32;\n}\n\nfunction main(): i32 {\n    let home: Household = Household {\n        city: \"Barcelona\",\n        price: 109\n    };\n    return home.price;\n}\n"
+      "record Household {\n    public city: str;\n    public price: i32;\n}\nfunction main(): i32 {\n    let home: Household = Household { city: \"Barcelona\", price: 109 };\n    return home.price;\n}\n"
     )
   );
 }
@@ -147,6 +148,48 @@ fn formats_export_namespace_with_single_function() {
   assert_eq!(
     formatted,
     normalize_expected_indent("export namespace Io {\n    function println(message: str): void {\n    }\n}\n")
+  );
+}
+
+#[test]
+fn formats_empty_high_level_blocks_inline() {
+  let formatted = format_text(
+    "export namespace Fs::Sys {\n}\nrecord Empty {\n}\ntrait Marker {\n}\nextern __fs_rt {\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("empty high-level blocks should format inline");
+
+  assert_eq!(
+    formatted,
+    "export namespace Fs::Sys {}\nrecord Empty {}\ntrait Marker {}\nextern __fs_rt {}\n"
+  );
+}
+
+#[test]
+fn removes_trailing_comma_when_record_initializer_collapses_inline() {
+  let formatted = format_text(
+    "record String { data: *mut u8; len: u64; cap: u64; }\nfunction build(): void { let mut result: String = String { data: null, len: 0, cap: 0, }; }\n",
+    &FormatOptions { config: FormatterConfig { indent_width: 2, line_width: 200, use_tabs: false, sort_imports: false }, check: false },
+  )
+  .expect("inline record initializer should drop trailing comma");
+
+  assert!(
+    formatted.contains("let mut result: String = String { data: null, len: 0, cap: 0 };"),
+    "expected inline record initializer without trailing comma\nformatted:\n{formatted}"
+  );
+}
+
+#[test]
+fn adds_trailing_comma_when_record_initializer_breaks_multiline() {
+  let formatted = format_text(
+    "record String { data: *mut u8; len: u64; cap: u64; }\nfunction build(): void { let mut result: String = String { data: null, len: 0, cap: 0 }; }\n",
+    &FormatOptions { config: FormatterConfig { indent_width: 2, line_width: 40, use_tabs: false, sort_imports: false }, check: false },
+  )
+  .expect("multiline record initializer should add trailing comma");
+
+  assert!(
+    formatted.contains("cap: 0,\n  };"),
+    "expected multiline record initializer with trailing comma\nformatted:\n{formatted}"
   );
 }
 
@@ -208,7 +251,79 @@ fn formats_nested_record_initializer_values_inside_generic_record_initializers()
   assert_eq!(
     formatted,
     normalize_expected_indent(
-      "record Child {\n    public left: i32;\n    public right: i32;\n}\n\nrecord Parent {\n    public child: Child;\n    public count: i32;\n}\n\nfunction init(value: i32): Parent {\n    return Parent {\n        child: Child {\n            left: value,\n            right: value + 1,\n        },\n        count: 2,\n    };\n}\n"
+      "record Child {\n    public left: i32;\n    public right: i32;\n}\nrecord Parent {\n    public child: Child;\n    public count: i32;\n}\nfunction init(value: i32): Parent {\n    return Parent { child: Child { left: value, right: value + 1 }, count: 2 };\n}\n"
     )
   );
+}
+
+// Phase 2: Task 2.2 — Type/member snapshots
+
+#[test]
+fn formats_enum_with_mixed_variants_and_fields() {
+  let source = "enum  Status  {  OK(i32),  ERR,  }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("enum with mixed variants should format successfully");
+
+  assert_snapshot!("formats_enum_with_mixed_variants_and_fields", formatted);
+}
+
+#[test]
+fn formats_trait_with_multiple_methods_and_blank_line_separation() {
+  let source = "trait  Comparable  {  compare(&self, other: &Self): i32;  equals(&self, other: &Self): boolean; }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("trait with multiple methods should format with blank lines");
+
+  assert_snapshot!("formats_trait_with_multiple_methods_and_blank_line_separation", formatted);
+}
+
+#[test]
+fn formats_record_with_static_fields_and_methods() {
+  let source = "record  Counter  {  public  static  count: i32;  public  static  increment(): void { Counter::count += 1; }  }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("record with static members should format successfully");
+
+  assert_snapshot!("formats_record_with_static_fields_and_methods", formatted);
+}
+
+#[test]
+fn formats_enum_with_fields_and_methods() {
+  let source = "enum  Color  {  RED,  GREEN,  BLUE,  public static fromName(name: str): Color { return Color::RED; } }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("enum with fields and methods should format successfully");
+
+  assert_snapshot!("formats_enum_with_fields_and_methods", formatted);
+}
+
+#[test]
+fn formats_record_with_default_field_values() {
+  let source = "record  Config  {  host: str = \"localhost\";  port: i32 = 8080;  }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("record with default field values should format successfully");
+
+  assert_snapshot!("formats_record_with_default_field_values", formatted);
+}
+
+#[test]
+fn formats_generic_record_with_multiple_methods() {
+  let source = "record  Container<T>  {  value: T;  get(&self): T { return self.value; }  set(&mut self, value: T): void { self.value = value; }  }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("generic record with multiple methods should format with blank lines between methods");
+
+  assert_snapshot!("formats_generic_record_with_multiple_methods", formatted);
+}
+
+#[test]
+fn formats_trait_with_default_method_body() {
+  let source = "trait  Describable  {  describe(&self): str;  defaultName(&self): str { return \"unknown\"; }  }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("trait with default method body should format successfully");
+
+  assert_snapshot!("formats_trait_with_default_method_body", formatted);
 }

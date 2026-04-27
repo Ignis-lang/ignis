@@ -70,7 +70,17 @@ ignis build-std                                # Build standard library archive
 ignis test                                     # Run project tests
 ignis test path/to/file.ign                    # Run tests from a single file
 ignis test --update-snapshots                  # Recreate selected snapshots
+
+# Formatter
+ignis fmt src/main.ign                         # Format one file
+ignis fmt a.ign b.ign c.ign                    # Format multiple explicit files
+ignis fmt --check src/main.ign                 # Check without rewriting
+ignis fmt --emit diff src/main.ign             # Print unified diff
+ignis fmt --stdin-json                         # Batch stdin protocol (NDJSON)
 ```
+
+Formatter defaults: `indent_width = 2`, `line_width = 100`, `use_tabs = false`, `sort_imports = false`.
+Canonical formatter rules now include inline empty high-level blocks (`namespace Foo {}`), multiline trailing commas, and no trailing comma on single-line callable signatures or record initializers.
 
 ## Rust Guidelines
 

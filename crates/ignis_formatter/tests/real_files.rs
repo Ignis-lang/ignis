@@ -79,6 +79,188 @@ fn extract_slice(
   formatted[start..end].trim_end().to_string()
 }
 
+/// Asserts that formatting a whole real file succeeds, is idempotent, and
+/// produces no trailing whitespace. This is the core regression gate for
+/// real-file corpus coverage.
+fn assert_whole_file_corpus_pass(path: &str) {
+  let source = read_real_file(path);
+  let config = FormatterConfig::default();
+  let options = FormatOptions { check: false, config };
+
+  let first = format_text(&source, &options)
+    .unwrap_or_else(|error| panic!("first pass for {path}: {error}"));
+  let second = format_text(&first, &options)
+    .unwrap_or_else(|error| panic!("idempotence pass for {path}: {error}"));
+
+  assert_eq!(first, second, "idempotence violation for {path}");
+  assert_no_trailing_whitespace(&first);
+}
+
+// --- Phase 5.2: Real-file corpus regressions grouped by AST domain ---
+
+// Domain: imports and top-level declarations
+
+#[test]
+fn corpus_std_collections_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/collections/mod.ign");
+}
+
+#[test]
+fn corpus_std_ffi_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/ffi/mod.ign");
+}
+
+#[test]
+fn corpus_std_hash_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/hash/mod.ign");
+}
+
+#[test]
+fn corpus_std_math_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/math/mod.ign");
+}
+
+#[test]
+fn corpus_std_number_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/number/mod.ign");
+}
+
+// Domain: records, enums, and type declarations
+
+#[test]
+fn corpus_std_option_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/option/mod.ign");
+}
+
+#[test]
+fn corpus_std_result_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/result/mod.ign");
+}
+
+#[test]
+fn corpus_std_types_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/types/mod.ign");
+}
+
+#[test]
+fn corpus_std_memory_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/memory/mod.ign");
+}
+
+// Domain: functions with generic parameters and builtins
+
+#[test]
+fn corpus_std_ptr_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/ptr/mod.ign");
+}
+
+#[test]
+fn corpus_std_io_error_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/io/error.ign");
+}
+
+#[test]
+fn corpus_std_fs_dir_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/fs/dir.ign");
+}
+
+#[test]
+fn corpus_std_fs_file_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/fs/file.ign");
+}
+
+#[test]
+fn corpus_std_fs_sys_unix_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/fs/sys/unix.ign");
+}
+
+// Domain: extern blocks and FFI
+
+#[test]
+fn corpus_std_libc_memory_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/libc/memory.ign");
+}
+
+#[test]
+fn corpus_std_libc_errno_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/libc/errno.ign");
+}
+
+#[test]
+fn corpus_std_libc_primitives_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/libc/primitives.ign");
+}
+
+#[test]
+fn corpus_std_libc_string_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/libc/string.ign");
+}
+
+#[test]
+fn corpus_std_libc_stdio_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/libc/stdio.ign");
+}
+
+#[test]
+fn corpus_std_libc_misc_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/libc/misc.ign");
+}
+
+// Domain: string operations and traits
+
+#[test]
+fn corpus_std_string_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/string/mod.ign");
+}
+
+#[test]
+fn corpus_std_path_mod_formats_idempotently() {
+  assert_whole_file_corpus_pass("std/path/mod.ign");
+}
+
+// Domain: example whole-file programs
+
+#[test]
+fn corpus_example_lambda_formats_idempotently() {
+  assert_whole_file_corpus_pass("example/lambda.ign");
+}
+
+#[test]
+fn corpus_example_main_formats_idempotently() {
+  assert_whole_file_corpus_pass("example/main.ign");
+}
+
+#[test]
+fn corpus_example_day_1_formats_idempotently() {
+  assert_whole_file_corpus_pass("example/day_1.ign");
+}
+
+#[test]
+fn corpus_example_allocator_arena_formats_idempotently() {
+  assert_whole_file_corpus_pass("example/allocator/src/arena_allocator.ign");
+}
+
+#[test]
+fn corpus_example_allocator_main_formats_idempotently() {
+  assert_whole_file_corpus_pass("example/allocator/src/main.ign");
+}
+
+// Deferred: `export inline function` compound modifier causes token shape drift.
+// This is a specialized printer issue (Phase 2), not a safety gate issue.
+#[test]
+fn deferred_example_add_token_shape_drift_from_export_inline() {
+  let source = read_real_file("example/add.ign");
+  let error = format_text(&source, &FormatOptions::default())
+    .expect_err("export inline should be deferred until compound modifier printer is stable");
+
+  assert!(
+    error.to_string().contains("token shape"),
+    "expected token-shape drift for export inline, got {error}"
+  );
+}
+
+// --- Existing tests from Phase 1-4 ---
+
 #[test]
 fn formats_heap_allocator_record_member_comment_window_exactly() {
   let source = read_real_file("example/allocator/src/heap_allocator.ign");
@@ -162,6 +344,7 @@ fn formats_heap_allocator_set_search_mode_window_with_two_space_indent() {
         indent_width: 2,
         line_width: 100,
         use_tabs: false,
+        sort_imports: false,
       },
     },
   )
@@ -248,7 +431,7 @@ function main(): i32 {
         price: 109,
         roomies: 0,
         hasWifi: true,
-        score: 4.9
+        score: 4.9,
     };
 
     let cityLabel: String = String::create("City: ");
@@ -503,6 +686,7 @@ fn formats_real_function_signature_with_tight_line_width_as_multiline() {
         indent_width: 4,
         line_width: 40,
         use_tabs: false,
+        sort_imports: false,
       },
     },
   )
@@ -623,7 +807,7 @@ fn preserves_heap_allocator_intentional_blank_lines_inside_best_fit_loop() {
 }
 
 #[test]
-fn rejects_std_vector_reduce_higher_order_slice_until_comment_ownership_is_stable() {
+fn formats_std_vector_reduce_higher_order_slice_exactly() {
   let source = read_real_file("std/vector/mod.ign");
   let source_window = extract_slice(
     &source,
@@ -631,17 +815,20 @@ fn rejects_std_vector_reduce_higher_order_slice_until_comment_ownership_is_stabl
     "/// Sorts the vector in-place using a comparator.",
   );
 
-  let error = format_text(
+  let formatted = format_text(
     &wrap_record_body(&source_window),
     &FormatOptions {
       check: false,
       config: FormatterConfig::default(),
     },
   )
-  .expect_err("vector reduce slice should stay deferred until comment ownership is safe");
+  .expect("vector reduce slice should now format safely");
 
   assert_eq!(
-    error.to_string(),
-    "formatter safety validation failed: formatted output changed comment ownership or preserved trivia structure"
+    formatted,
+    normalize_expected_indent(
+      "export record HeapAllocator {\n    /// Folds the vector left-to-right without an explicit initial value.\n    ///\n    /// The first element is **copied** as the initial accumulator. Then `f`\n    /// is called for each subsequent element with `(accumulator, &element)`,\n    /// and its return value becomes the new accumulator.\n    ///\n    /// Returns `Option::NONE` for an empty vector.\n    ///\n    /// # Arguments\n    ///\n    /// * `f` - Callback that takes the accumulator by value and the next\n    ///   element by reference, and returns the updated accumulator.\n    ///\n    /// # Returns\n    ///\n    /// `Option::SOME(result)` with the final accumulated value, or\n    /// `Option::NONE` if the vector is empty.\n    ///\n    /// # Example\n    ///\n    /// ```ignis\n    /// import Vector from \"std::vector\";\n    /// import Option from \"std::option\";\n    ///\n    /// let mut v: Vector<i32> = Vector::init<i32>();\n    /// v.push(1);\n    /// v.push(2);\n    /// v.push(3);\n    ///\n    /// // Sum all elements: 1 + 2 + 3 = 6\n    /// let sum: Option<i32> = v.reduce((acc: i32, x: &i32): i32 -> {\n    ///   return acc + *x;\n    /// });\n    /// // sum == Option::SOME(6)\n    ///\n    /// // Empty vector returns NONE\n    /// let empty: Vector<i32> = Vector::init<i32>();\n    /// let result: Option<i32> = empty.reduce((acc: i32, x: &i32): i32 -> {\n    ///   return acc + *x;\n    /// });\n    /// // result == Option::NONE\n    /// ```\n    ///\n    /// # See Also\n    ///\n    /// Use `fold<U>` if you need an explicit initial value or a different\n    /// return type.\n    public reduce(&self, @noescape f: (T, &T) -> T): Option<T> {\n        if (self.length == 0) {\n            return Option::NONE;\n        }\n\n        let mut acc: T = self.data[0];\n        let mut i: u64 = 1;\n        while (i < self.length) {\n            acc = f(acc, &self.data[i]);\n            i += 1;\n        }\n        return Option::SOME(acc);\n    }\n}\n",
+      &FormatterConfig::default()
+    )
   );
 }

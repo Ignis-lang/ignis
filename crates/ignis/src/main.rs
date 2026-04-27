@@ -1,6 +1,7 @@
 mod cli;
 mod init;
 
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ enum TestInput {
 #[allow(clippy::large_enum_variant)]
 enum FmtInput {
   Project(Project),
-  SingleFile(PathBuf),
+  ExplicitFiles(Vec<PathBuf>),
 }
 
 /// Resolve what to compile based on CLI arguments.
@@ -162,15 +163,17 @@ fn resolve_fmt_input(cmd: &FmtCommand) -> Result<FmtInput, ()> {
     return Ok(FmtInput::Project(project));
   }
 
-  if let Some(path_str) = &cmd.file_path {
-    let path = PathBuf::from(path_str);
+  if !cmd.file_paths.is_empty() {
+    let paths = cmd.file_paths.iter().map(PathBuf::from).collect::<Vec<_>>();
 
-    if !path.exists() {
-      eprintln!("{} File not found: '{}'", "Error:".red().bold(), path.display());
-      return Err(());
+    for path in &paths {
+      if !path.exists() {
+        eprintln!("{} File not found: '{}'", "Error:".red().bold(), path.display());
+        return Err(());
+      }
     }
 
-    return Ok(FmtInput::SingleFile(path));
+    return Ok(FmtInput::ExplicitFiles(paths));
   }
 
   let cwd = std::env::current_dir().map_err(|e| {
@@ -188,22 +191,42 @@ fn resolve_fmt_input(cmd: &FmtCommand) -> Result<FmtInput, ()> {
 }
 
 fn run_fmt(cmd: &FmtCommand) -> Result<(), ()> {
+  if cmd.stdin_json {
+    return run_fmt_stdin_json(cmd);
+  }
+
+  let emit_diff = cmd.emit.iter().any(|e| e == "diff");
+
   match resolve_fmt_input(cmd)? {
-    FmtInput::SingleFile(path) => {
-      let formatter_config = resolve_formatter_config_for_file(&path, cmd).map_err(|error| {
-        eprintln!("{} {}", "Error:".red().bold(), error);
-      })?;
-      let options = FormatOptions {
-        check: cmd.check,
-        config: formatter_config,
-      };
+    FmtInput::ExplicitFiles(paths) => {
+      let mut dirty_files = Vec::new();
 
-      let outcome = format_file(&path, &options).map_err(|error| {
-        eprintln!("{} {}", "Error:".red().bold(), error);
-      })?;
+      for path in paths {
+        let formatter_config = resolve_formatter_config_for_file(&path, cmd).map_err(|error| {
+          eprintln!("{} {}: {}", "Error:".red().bold(), path.display(), error);
+        })?;
+        let options = FormatOptions {
+          check: cmd.check,
+          config: formatter_config,
+        };
 
-      if cmd.check && outcome.changed {
-        eprintln!("{} {}", "Check failed:".yellow().bold(), path.display());
+        let outcome = format_file(&path, &options).map_err(|error| {
+          eprintln!("{} {}: {}", "Error:".red().bold(), path.display(), error);
+        })?;
+
+        if emit_diff && outcome.changed {
+          print_diff_for_file(&path, &outcome.formatted);
+        }
+
+        if cmd.check && outcome.changed {
+          dirty_files.push(path);
+        }
+      }
+
+      if cmd.check && !dirty_files.is_empty() {
+        for file in dirty_files {
+          eprintln!("{} {}", "Check failed:".yellow().bold(), file.display());
+        }
         return Err(());
       }
     },
@@ -224,8 +247,12 @@ fn run_fmt(cmd: &FmtCommand) -> Result<(), ()> {
 
       for file in files {
         let outcome = format_file(&file, &options).map_err(|error| {
-          eprintln!("{} {}", "Error:".red().bold(), error);
+          eprintln!("{} {}: {}", "Error:".red().bold(), file.display(), error);
         })?;
+
+        if emit_diff && outcome.changed {
+          print_diff_for_file(&file, &outcome.formatted);
+        }
 
         if cmd.check && outcome.changed {
           dirty_files.push(file);
@@ -244,6 +271,247 @@ fn run_fmt(cmd: &FmtCommand) -> Result<(), ()> {
   Ok(())
 }
 
+fn print_diff_for_file(
+  path: &Path,
+  formatted: &str,
+) {
+  let original = std::fs::read_to_string(path).unwrap_or_default();
+  let diff_text = compute_unified_diff(
+    path.to_string_lossy().as_ref(),
+    &original,
+    formatted,
+  );
+  print!("{diff_text}");
+}
+
+fn compute_unified_diff(
+  path: &str,
+  old_text: &str,
+  new_text: &str,
+) -> String {
+  let old_lines: Vec<&str> = old_text.lines().collect();
+  let new_lines: Vec<&str> = new_text.lines().collect();
+
+  let mut output = String::new();
+  output.push_str(&format!("--- {path}\n+++ {path}\n"));
+
+  let max_lines = old_lines.len().max(new_lines.len());
+  let mut change_start = None;
+  let mut changes = Vec::new();
+
+  for i in 0..max_lines {
+    let old_line = old_lines.get(i).copied();
+    let new_line = new_lines.get(i).copied();
+
+    match (old_line, new_line) {
+      (Some(o), Some(n)) if o == n => {
+        if let Some(start) = change_start.take() {
+          changes.push((start, i));
+        }
+      },
+      _ => {
+        if change_start.is_none() {
+          change_start = Some(i);
+        }
+      },
+    }
+  }
+
+  if let Some(start) = change_start.take() {
+    changes.push((start, max_lines));
+  }
+
+  for (start, end) in &changes {
+    let context_before = start.saturating_sub(3);
+    let context_after = (*end + 3).min(max_lines);
+
+    output.push_str(&format!("@@ -{},{} +{},{} @@\n", context_before + 1, context_after - context_before, context_before + 1, context_after - context_before));
+
+    for i in context_before..context_after {
+      let in_change = i >= *start && i < *end;
+      let old_line = old_lines.get(i).copied();
+      let new_line = new_lines.get(i).copied();
+
+      if in_change {
+        if let Some(line) = old_line {
+          output.push_str(&format!("-{line}\n"));
+        }
+        if let Some(line) = new_line {
+          output.push_str(&format!("+{line}\n"));
+        }
+      } else {
+        if let Some(line) = old_line.or(new_line) {
+          output.push_str(&format!(" {line}\n"));
+        }
+      }
+    }
+  }
+
+  output
+}
+
+// =============================================================================
+// NDJSON stdin protocol
+// =============================================================================
+
+#[derive(serde::Deserialize)]
+struct StdinRecord {
+  path: String,
+  text: String,
+}
+
+#[derive(serde::Serialize)]
+struct StdinResult {
+  path: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  formatted: Option<String>,
+  changed: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  diff: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  error: Option<String>,
+}
+
+fn run_fmt_stdin_json(cmd: &FmtCommand) -> Result<(), ()> {
+  let emit_diff = cmd.emit.iter().any(|e| e == "diff");
+
+  let formatter_config = resolve_formatter_config_for_stdin(cmd).map_err(|error| {
+    eprintln!("{} {}", "Error:".red().bold(), error);
+  })?;
+
+  let stdin = std::io::stdin();
+  let mut any_error = false;
+  let mut any_changed = false;
+
+  for line in stdin.lock().lines() {
+    let line = match line {
+      Ok(l) => l,
+      Err(error) => {
+        eprintln!("{} Failed to read stdin: {error}", "Error:".red().bold());
+        return Err(());
+      },
+    };
+
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+      continue;
+    }
+
+    let record: StdinRecord = match serde_json::from_str(trimmed) {
+      Ok(r) => r,
+      Err(error) => {
+        let result = StdinResult {
+          path: String::new(),
+          formatted: None,
+          changed: false,
+          diff: None,
+          error: Some(format!("failed to parse NDJSON record: {error}")),
+        };
+        print_ndjson_result(&result);
+        any_error = true;
+        continue;
+      },
+    };
+
+    let options = FormatOptions {
+      check: false,
+      config: formatter_config.clone(),
+    };
+
+    match ignis_formatter::format_text(&record.text, &options) {
+      Ok(formatted) => {
+        let changed = formatted != record.text;
+
+        let diff = if emit_diff && changed {
+          Some(compute_unified_diff(&record.path, &record.text, &formatted))
+        } else {
+          None
+        };
+
+        if changed {
+          any_changed = true;
+        }
+
+        let result = StdinResult {
+          path: record.path,
+          formatted: if emit_diff { None } else { Some(formatted) },
+          changed,
+          diff,
+          error: None,
+        };
+        print_ndjson_result(&result);
+      },
+      Err(error) => {
+        let result = StdinResult {
+          path: record.path,
+          formatted: None,
+          changed: false,
+          diff: None,
+          error: Some(error.to_string()),
+        };
+        print_ndjson_result(&result);
+        any_error = true;
+      },
+    }
+  }
+
+  if cmd.check && any_changed {
+    return Err(());
+  }
+
+  if any_error {
+    return Err(());
+  }
+
+  Ok(())
+}
+
+fn print_ndjson_result(result: &StdinResult) {
+  let json = serde_json::to_string(result).unwrap_or_else(|error| {
+    format!(
+      "{{\"path\":\"\",\"error\":\"failed to serialize result: {error}\"}}"
+    )
+  });
+  println!("{json}");
+}
+
+fn resolve_formatter_config_for_stdin(
+  cmd: &FmtCommand,
+) -> Result<ignis_formatter::FormatterConfig, ignis_formatter::FormatError> {
+  let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+  let ignis_toml = cwd.join("ignis.toml");
+  let dedicated_config = cwd.join("ignisfmt.toml");
+
+  Ok(load_formatter_config(
+    &FormatterConfigPaths {
+      project_root: cwd,
+      ignis_toml: ignis_toml.exists().then_some(ignis_toml),
+      dedicated_config: dedicated_config.exists().then_some(dedicated_config),
+      explicit_config: cmd.config.as_ref().map(PathBuf::from),
+    },
+    &build_formatter_cli_overrides(cmd),
+  )?)
+}
+
+fn build_formatter_cli_overrides(cmd: &FmtCommand) -> FormatterCliOverrides {
+  FormatterCliOverrides {
+    indent_width: cmd.indent_width,
+    line_width: cmd.line_width,
+    use_tabs: if cmd.use_tabs {
+      Some(true)
+    } else if cmd.spaces {
+      Some(false)
+    } else {
+      None
+    },
+    sort_imports: if cmd.sort_imports {
+      Some(true)
+    } else {
+      None
+    },
+  }
+}
+
 fn resolve_formatter_config_for_project(
   project: &Project,
   cmd: &FmtCommand,
@@ -258,17 +526,7 @@ fn resolve_formatter_config_for_project(
       dedicated_config: dedicated_config.exists().then_some(dedicated_config),
       explicit_config,
     },
-    &FormatterCliOverrides {
-      indent_width: cmd.indent_width,
-      line_width: cmd.line_width,
-      use_tabs: if cmd.use_tabs {
-        Some(true)
-      } else if cmd.spaces {
-        Some(false)
-      } else {
-        None
-      },
-    },
+    &build_formatter_cli_overrides(cmd),
   )
   .map_err(Into::into)
 }
@@ -293,17 +551,7 @@ fn resolve_formatter_config_for_file(
       dedicated_config: dedicated_config.exists().then_some(dedicated_config),
       explicit_config: cmd.config.as_ref().map(PathBuf::from),
     },
-    &FormatterCliOverrides {
-      indent_width: cmd.indent_width,
-      line_width: cmd.line_width,
-      use_tabs: if cmd.use_tabs {
-        Some(true)
-      } else if cmd.spaces {
-        Some(false)
-      } else {
-        None
-      },
-    },
+    &build_formatter_cli_overrides(cmd),
   )
   .map_err(Into::into)
 }

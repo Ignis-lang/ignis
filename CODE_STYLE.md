@@ -247,6 +247,14 @@ self.fn_builder().terminate(Terminator::Branch {
 - Match blocks with trailing commas.
 - No automatic import reordering.
 
+### Ignis Formatter Canonical Rules
+
+- Empty high-level blocks (`namespace`, `record`, `enum`, `trait`, `extern`) canonicalize to inline `{}`.
+- Single-line callable signatures and single-line record initializers do not keep a trailing comma.
+- Multiline callable signatures and multiline record initializers emit a trailing comma on the final item.
+- Import sorting is opt-in only; default formatting preserves source order.
+- A formatter safety failure indicates a formatter bug or invalid input, not a style lint.
+
 ## Do's and Don'ts
 
 - Do keep Ignis naming: PascalCase types, camelCase members, UPPER_SNAKE_CASE constants.

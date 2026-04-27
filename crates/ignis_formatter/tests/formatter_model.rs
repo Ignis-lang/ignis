@@ -68,3 +68,65 @@ fn keeps_top_level_doc_comments_owned_by_their_following_item() {
     other => panic!("expected owned code region, got {:?}", other),
   }
 }
+
+#[test]
+fn preserves_single_blank_line_between_functions() {
+  let source = "function first(): void {}\n\nfunction second(): void {}\n";
+  let formatted = format_text(source, &FormatOptions::default()).expect("format");
+
+  // The key assertion: exactly one blank line between the two function declarations.
+  let between = formatted.split_once("first").unwrap().1.split_once("second").unwrap().0;
+  assert!(
+    between.contains("\n\n") && !between.contains("\n\n\n"),
+    "expected exactly one blank line between functions, got between-text: {between:?}"
+  );
+}
+
+#[test]
+fn collapses_two_blank_lines_to_one_between_functions() {
+  let source = "function first(): void {}\n\n\nfunction second(): void {}\n";
+  let formatted = format_text(source, &FormatOptions::default()).expect("format");
+
+  // Two blank lines must collapse to one.
+  let between = formatted.split_once("first").unwrap().1.split_once("second").unwrap().0;
+  assert!(
+    between.contains("\n\n") && !between.contains("\n\n\n"),
+    "expected two blank lines collapsed to one, got between-text: {between:?}"
+  );
+}
+
+#[test]
+fn collapses_three_blank_lines_to_one_between_functions() {
+  let source = "function first(): void {}\n\n\n\nfunction second(): void {}\n";
+  let formatted = format_text(source, &FormatOptions::default()).expect("format");
+
+  // Three blank lines must collapse to one.
+  let between = formatted.split_once("first").unwrap().1.split_once("second").unwrap().0;
+  assert!(
+    between.contains("\n\n") && !between.contains("\n\n\n"),
+    "expected three blank lines collapsed to one, got between-text: {between:?}"
+  );
+}
+
+#[test]
+fn preserves_gap_between_import_and_function() {
+  let source = "import foo from \"bar\";\n\nfunction main(): void {}\n";
+  let formatted = format_text(source, &FormatOptions::default()).expect("format");
+
+  let between = formatted.split_once("bar").unwrap().1.split_once("main").unwrap().0;
+  assert!(
+    between.contains("\n\n") && !between.contains("\n\n\n"),
+    "expected exactly one blank line between import and function, got between-text: {between:?}"
+  );
+}
+
+#[test]
+fn preserves_gap_inside_block_body() {
+  let source = "function main(): void {\n  let x: i32 = 1;\n\n  return;\n}\n";
+  let formatted = format_text(source, &FormatOptions::default()).expect("format");
+
+  assert_eq!(
+    formatted, source,
+    "single blank line inside block body must be preserved"
+  );
+}

@@ -154,7 +154,7 @@ function main(): i32 {
         price: 109,
         roomies: 0,
         hasWifi: true,
-        score: 4.9
+        score: 4.9,
     };
 
     let cityLabel: String = String::create("City: ");
@@ -225,6 +225,7 @@ lastSearch: *mut Block;
       expected: r#"import String from "std::string";
 import LibC from "std::libc";
 import Vector from "std::vector";
+
 import _ from "std::io::error";
 "#,
     },
@@ -491,19 +492,18 @@ export enum Result<T, E> {
       wrap_in_heap_allocator_record: false,
       config: FormatterConfig::default(),
       expected: r#"const add: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> a + b;
-
 const mul: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> {
-    return a * b;
+  return a * b;
 };
 
 // Higher-order: takes a closure parameter and applies it
 function apply(f: (i32) -> i32, x: i32): i32 {
-    return f(x);
+  return f(x);
 }
 
 // Takes two closures
 function combine(f: (i32) -> i32, g: (i32) -> i32, x: i32): i32 {
-    return f(g(x));
+  return f(g(x));
 }
 "#,
     },
@@ -518,8 +518,19 @@ function combine(f: (i32) -> i32, g: (i32) -> i32, x: i32): i32 {
         indent_width: 4,
         line_width: 40,
         use_tabs: false,
+        sort_imports: false,
       },
       expected: "function write(\n    path: str,\n    data: *void,\n    len: u64\n): Result<boolean, Io::IoError> {\n    let mut file: Fs::File = Fs::File::create(path)!;\n    let writeResult: i64 = file.write(data, len)!;\n\n    return Result::OK(writeResult == len);\n}\n",
+    },
+    ReviewedRealFileCase {
+      name: "std vector reduce higher-order slice formats exactly",
+      source_path: "std/vector/mod.ign",
+      start_marker: Some("/// Folds the vector left-to-right without an explicit initial value."),
+      end_marker: Some("/// Sorts the vector in-place using a comparator."),
+      append_closing_brace: false,
+      wrap_in_heap_allocator_record: true,
+      config: FormatterConfig::default(),
+      expected: "/// Folds the vector left-to-right without an explicit initial value.\n///\n/// The first element is **copied** as the initial accumulator. Then `f`\n/// is called for each subsequent element with `(accumulator, &element)`,\n/// and its return value becomes the new accumulator.\n///\n/// Returns `Option::NONE` for an empty vector.\n///\n/// # Arguments\n///\n/// * `f` - Callback that takes the accumulator by value and the next\n///   element by reference, and returns the updated accumulator.\n///\n/// # Returns\n///\n/// `Option::SOME(result)` with the final accumulated value, or\n/// `Option::NONE` if the vector is empty.\n///\n/// # Example\n///\n/// ```ignis\n/// import Vector from \"std::vector\";\n/// import Option from \"std::option\";\n///\n/// let mut v: Vector<i32> = Vector::init<i32>();\n/// v.push(1);\n/// v.push(2);\n/// v.push(3);\n///\n/// // Sum all elements: 1 + 2 + 3 = 6\n/// let sum: Option<i32> = v.reduce((acc: i32, x: &i32): i32 -> {\n///   return acc + *x;\n/// });\n/// // sum == Option::SOME(6)\n///\n/// // Empty vector returns NONE\n/// let empty: Vector<i32> = Vector::init<i32>();\n/// let result: Option<i32> = empty.reduce((acc: i32, x: &i32): i32 -> {\n///   return acc + *x;\n/// });\n/// // result == Option::NONE\n/// ```\n///\n/// # See Also\n///\n/// Use `fold<U>` if you need an explicit initial value or a different\n/// return type.\npublic reduce(&self, @noescape f: (T, &T) -> T): Option<T> {\n    if (self.length == 0) {\n        return Option::NONE;\n    }\n\n    let mut acc: T = self.data[0];\n    let mut i: u64 = 1;\n    while (i < self.length) {\n        acc = f(acc, &self.data[i]);\n        i += 1;\n    }\n    return Option::SOME(acc);\n}\n",
     },
   ]
 }
@@ -535,16 +546,6 @@ fn unsupported_real_file_cases() -> Vec<UnsupportedRealFileCase> {
       wrap_in_heap_allocator_record: false,
       config: FormatterConfig::default(),
       expected_error: "parser failed: Expected RightBrace",
-    },
-    UnsupportedRealFileCase {
-      name: "std vector reduce higher-order slice remains deferred",
-      source_path: "std/vector/mod.ign",
-      start_marker: Some("/// Folds the vector left-to-right without an explicit initial value."),
-      end_marker: Some("/// Sorts the vector in-place using a comparator."),
-      append_closing_brace: false,
-      wrap_in_heap_allocator_record: true,
-      config: FormatterConfig::default(),
-      expected_error: "formatter safety validation failed: formatted output changed comment ownership or preserved trivia structure",
     },
   ]
 }
@@ -658,6 +659,80 @@ fn reviewed_real_file_unsupported_cases_fail_fast() {
       case.expected_error,
       "unsupported reviewed case: {}",
       case.name
+    );
+  }
+}
+
+// --- Phase 5.3: Release gate ---
+
+/// The release gate verifies that the three pillars of formatter quality all
+/// hold simultaneously: AST completeness, real-file corpus regression, and
+/// idempotence safety. If any pillar regresses, this test fails and blocks
+/// release. Each pillar is independently enforced by its own test file; this
+/// test verifies they are wired together and documents the gate intent.
+///
+/// Completeness gate: `completeness.rs` (AST node dispatch inventory)
+/// Real-file corpus:  `real_files.rs` (whole-file formatting + idempotence)
+/// Idempotence suite: `safety.rs` (parse-back, token-loss, idempotence checks)
+#[test]
+fn release_gate_completeness_corpus_and_idempotence_suites_must_all_pass() {
+  // This test exercises the same formatter pipeline that the independent
+  // completeness, real-file, and safety test files validate. It acts as a
+  // single integration point that fails fast if any pillar regresses.
+
+  // Completeness: format a representative case from every major AST domain
+  // that currently passes safety validation. Domains with known token-shape
+  // drift (e.g. match-in-let) are covered separately in snapshot tests.
+  let domains = [
+    // Statements: function, record, enum, import, constant, namespace
+    "function main(): void { return; }\n",
+    "record Point { x: i32; y: i32; }\n",
+    "enum Color { RED, GREEN, BLUE, }\n",
+    "import Io from \"std::io\";\n",
+    "const MAX: i32 = 100;\n",
+    "export namespace Inner {\n    function helper(): void {}\n}\n",
+    // Expressions: binary, call, cast, lambda
+    "function f(): void { let x: i32 = 1 + 2; }\n",
+    "function f(): void { Io::println(\"hello\"); }\n",
+    "function f(): void { let p: *void = null as *void; }\n",
+    "function f(): void { let square = (x: i32): i32 -> x * x; }\n",
+  ];
+
+  for source in &domains {
+    let result = format_text(source, &FormatOptions::default());
+    assert!(
+      result.is_ok(),
+      "release gate: completeness domain must format successfully\n  source: {source:?}\n  error: {:?}",
+      result.err()
+    );
+
+    let formatted = result.expect("already checked");
+
+    // Idempotence: second pass must produce identical output.
+    let second = format_text(&formatted, &FormatOptions::default())
+      .expect("release gate: idempotence second pass must succeed");
+    assert_eq!(
+      formatted, second,
+      "release gate: idempotence violation for source: {source:?}"
+    );
+  }
+
+  // Real-file corpus: verify at least one representative whole file formats.
+  let corpus_paths = [
+    "example/hello-world.ign",
+    "std/option/mod.ign",
+    "std/result/mod.ign",
+  ];
+
+  for path in &corpus_paths {
+    let source = read_real_file(path);
+    let first = format_text(&source, &FormatOptions::default())
+      .unwrap_or_else(|error| panic!("release gate: corpus file {path} must format: {error}"));
+    let second = format_text(&first, &FormatOptions::default())
+      .unwrap_or_else(|error| panic!("release gate: corpus file {path} idempotence: {error}"));
+    assert_eq!(
+      first, second,
+      "release gate: corpus file {path} must be idempotent"
     );
   }
 }

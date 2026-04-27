@@ -286,8 +286,8 @@ pub struct CheckRuntimeCommand {
 #[derive(Parser, Debug, Clone, PartialEq)]
 #[command(about = "Format Ignis source canonically with parse/reparse safety checks")]
 pub struct FmtCommand {
-  /// File to format (single-file mode) or nothing for project mode
-  pub file_path: Option<String>,
+  /// Files to format explicitly, or nothing for project mode
+  pub file_paths: Vec<String>,
 
   /// Explicit project directory (overrides auto-detection)
   #[arg(long)]
@@ -316,6 +316,18 @@ pub struct FmtCommand {
   /// Override formatter indentation to use spaces
   #[arg(long, conflicts_with = "use_tabs")]
   pub spaces: bool,
+
+  /// Enable import sorting (overrides config file)
+  #[arg(long)]
+  pub sort_imports: bool,
+
+  /// Read NDJSON batch from stdin instead of formatting files
+  #[arg(long, conflicts_with = "file_paths", conflicts_with = "project")]
+  pub stdin_json: bool,
+
+  /// Output mode: rewrite files in-place, or emit unified diff
+  #[arg(long, value_delimiter = ',')]
+  pub emit: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -477,7 +489,7 @@ mod tests {
 
     match cli.subcommand {
       SubCommand::Fmt(cmd) => {
-        assert_eq!(cmd.file_path, None);
+        assert!(cmd.file_paths.is_empty());
         assert_eq!(cmd.project.as_deref(), Some("demo"));
         assert!(cmd.check);
       },
@@ -491,7 +503,21 @@ mod tests {
 
     match cli.subcommand {
       SubCommand::Fmt(cmd) => {
-        assert_eq!(cmd.file_path.as_deref(), Some("src/main.ign"));
+        assert_eq!(cmd.file_paths, vec!["src/main.ign"]);
+        assert_eq!(cmd.project, None);
+        assert!(!cmd.check);
+      },
+      other => panic!("expected fmt subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_fmt_subcommand_with_multiple_files() {
+    let cli = Cli::parse_from(["ignis", "fmt", "src/a.ign", "src/b.ign", "src/c.ign"]);
+
+    match cli.subcommand {
+      SubCommand::Fmt(cmd) => {
+        assert_eq!(cmd.file_paths, vec!["src/a.ign", "src/b.ign", "src/c.ign"]);
         assert_eq!(cmd.project, None);
         assert!(!cmd.check);
       },
@@ -514,7 +540,7 @@ mod tests {
 
     match cli.subcommand {
       SubCommand::Fmt(cmd) => {
-        assert_eq!(cmd.file_path.as_deref(), Some("src/main.ign"));
+        assert_eq!(cmd.file_paths, vec!["src/main.ign"]);
         assert_eq!(cmd.indent_width, Some(4));
         assert_eq!(cmd.line_width, Some(88));
         assert!(cmd.use_tabs);

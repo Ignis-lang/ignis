@@ -8,32 +8,91 @@ use crate::{DirectiveBlock, FormatError, FormatFile, FormatItem};
 pub fn validate_formatted_output(
   source: &str,
   formatted: &str,
+  sort_imports: bool,
 ) -> Result<(), FormatError> {
+  validate_parse_back(formatted)?;
+  validate_no_trailing_whitespace(formatted)?;
+  validate_final_newline(formatted)?;
+
   let source_file = FormatFile::from_source(source)?;
   let formatted_file = FormatFile::from_source(formatted)?;
 
   let source_shape = file_shape(source, &source_file)?;
   let formatted_shape = file_shape(formatted, &formatted_file)?;
 
-  if source_shape != formatted_shape {
-    let message = if source_shape.tokens != formatted_shape.tokens {
-      "formatted output changed token shape or preserved trivia structure"
-    } else {
-      for (i, (s, f)) in source_shape.comments.iter().zip(formatted_shape.comments.iter()).enumerate() {
-        if s != f {
-          eprintln!("DEBUG comment[{i}] source: {:?}", s);
-          eprintln!("DEBUG comment[{i}] formatted: {:?}", f);
-          break;
-        }
-      }
-      if source_shape.comments.len() != formatted_shape.comments.len() {
-        eprintln!("DEBUG comment count: source={} formatted={}", source_shape.comments.len(), formatted_shape.comments.len());
-      }
-      "formatted output changed comment ownership or preserved trivia structure"
-    };
+  let tokens_match = if sort_imports {
+    let mut source_keys: Vec<String> = source_shape.tokens.iter().map(|(_, text)| text.clone()).collect();
+    let mut formatted_keys: Vec<String> = formatted_shape.tokens.iter().map(|(_, text)| text.clone()).collect();
+    source_keys.sort();
+    formatted_keys.sort();
+    source_keys == formatted_keys
+  } else {
+    normalize_optional_trailing_commas(&source_shape.tokens) == normalize_optional_trailing_commas(&formatted_shape.tokens)
+  };
 
+  if !tokens_match {
     return Err(FormatError::Safety {
-      message: message.to_string(),
+      message: "formatted output changed token shape or preserved trivia structure".to_string(),
+    });
+  }
+
+  if source_shape.comments != formatted_shape.comments {
+    return Err(FormatError::Safety {
+      message: "formatted output changed comment ownership or preserved trivia structure".to_string(),
+    });
+  }
+
+  if source_shape.directives != formatted_shape.directives {
+    return Err(FormatError::Safety {
+      message: "formatted output changed directive structure".to_string(),
+    });
+  }
+
+  Ok(())
+}
+
+/// Verifies that the formatted output can be lexed without errors (parse-back check).
+/// This catches cases where the formatter produces syntactically invalid output.
+pub fn validate_parse_back(formatted: &str) -> Result<(), FormatError> {
+  let mut source_map = SourceMap::new();
+  let file_id = source_map.add_file("formatter_parseback.ign", formatted.to_string());
+  let mut lexer = IgnisLexer::new(file_id, formatted);
+  lexer.scan_tokens();
+
+  if !lexer.diagnostics.is_empty() {
+    return Err(FormatError::Safety {
+      message: format!(
+        "parse-back validation failed: formatted output does not lex cleanly: {}",
+        lexer.diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+      ),
+    });
+  }
+
+  Ok(())
+}
+
+/// Verifies that the formatted output has no trailing whitespace on any line.
+pub fn validate_no_trailing_whitespace(formatted: &str) -> Result<(), FormatError> {
+  for (line_number, line) in formatted.lines().enumerate() {
+    if line != line.trim_end() {
+      return Err(FormatError::Safety {
+        message: format!(
+          "trailing whitespace on line {}: {:?}",
+          line_number + 1,
+          line
+        ),
+      });
+    }
+  }
+
+  Ok(())
+}
+
+/// Verifies that the formatted output ends with a final newline character.
+pub fn validate_final_newline(formatted: &str) -> Result<(), FormatError> {
+  if !formatted.is_empty() && !formatted.ends_with('\n') {
+    return Err(FormatError::Safety {
+      message: "formatted output is missing a final newline".to_string(),
     });
   }
 
@@ -214,4 +273,21 @@ fn normalized_ends_expression(tokens: &[(TokenType, String)]) -> bool {
         | TokenType::RightBrace
     )
   )
+}
+
+fn normalize_optional_trailing_commas(tokens: &[(TokenType, String)]) -> Vec<(TokenType, String)> {
+  let mut normalized = Vec::with_capacity(tokens.len());
+
+  for (index, token) in tokens.iter().enumerate() {
+    if token.0 == TokenType::Comma
+      && let Some((next_type, _)) = tokens.get(index + 1)
+      && matches!(next_type, TokenType::RightParen | TokenType::RightBrace)
+    {
+      continue;
+    }
+
+    normalized.push(token.clone());
+  }
+
+  normalized
 }
