@@ -48,6 +48,8 @@ impl<'a> Analyzer<'a> {
       self.bind_predecl(root, ScopeKind::Global);
     }
 
+    self.process_imports(roots);
+
     // Pass 2: Complete bindings
     for root in roots {
       self.bind_complete(root, ScopeKind::Global);
@@ -2131,9 +2133,11 @@ impl<'a> Analyzer<'a> {
     attr: &ASTAttribute,
     target: DirectiveTarget,
   ) -> bool {
-    let Some((directive_id, provenance)) = self.resolve_directive_use(attr, target) else {
+    let Some((function_def_id, directive_id, provenance)) = self.resolve_directive_use(attr, target) else {
       return false;
     };
+
+    self.mark_referenced(function_def_id);
 
     self.directive_registry.uses.push(DirectiveUse {
       target_node: *target_node,
@@ -2146,34 +2150,74 @@ impl<'a> Analyzer<'a> {
   }
 
   fn resolve_directive_use(
-    &self,
+    &mut self,
     attr: &ASTAttribute,
     target: DirectiveTarget,
-  ) -> Option<(DirectiveDefId, DirectiveProvenance)> {
+  ) -> Option<(DefinitionId, DirectiveDefId, DirectiveProvenance)> {
     let entry = if attr.path.len() == 1 {
-      self.scopes.lookup(&attr.name)
+      self.scopes.lookup(&attr.name).cloned()
     } else {
       let namespace_id = self.namespaces.lookup(&attr.path[..attr.path.len() - 1])?;
-      self.namespaces.lookup_def(namespace_id, &attr.name)
+      self.namespaces.lookup_def(namespace_id, &attr.name).cloned()
     }?;
 
-    self.resolve_directive_entry(entry, target)
+    self.resolve_directive_entry(&entry, target)
   }
 
   fn resolve_directive_entry(
-    &self,
+    &mut self,
     entry: &SymbolEntry,
     target: DirectiveTarget,
-  ) -> Option<(DirectiveDefId, DirectiveProvenance)> {
+  ) -> Option<(DefinitionId, DirectiveDefId, DirectiveProvenance)> {
     let def_ids: &[DefinitionId] = match entry {
       SymbolEntry::Single(def_id) => std::slice::from_ref(def_id),
       SymbolEntry::Overload(def_ids) => def_ids.as_slice(),
     };
 
     def_ids.iter().find_map(|def_id| {
-      let (directive_id, directive) = self.directive_registry.definition_for_function(*def_id)?;
-      (directive.target == target).then_some((directive_id, directive.provenance.clone()))
+      let (directive_id, directive) = self.directive_definition_for_function(*def_id)?;
+      (directive.target == target).then_some((*def_id, directive_id, directive.provenance.clone()))
     })
+  }
+
+  fn directive_definition_for_function(
+    &mut self,
+    function_def_id: DefinitionId,
+  ) -> Option<(DirectiveDefId, DirectiveDefinition)> {
+    if let Some((directive_id, directive)) = self.directive_registry.definition_for_function(function_def_id) {
+      return Some((directive_id, directive.clone()));
+    }
+
+    let directive_attr = match &self.defs.get(&function_def_id).kind {
+      DefinitionKind::Function(function) => function.attrs.iter().find_map(|attr| match attr {
+        FunctionAttr::Directive(metadata) => Some(metadata.clone()),
+        _ => None,
+      })?,
+      _ => return None,
+    };
+
+    let definition = self.defs.get(&function_def_id);
+    let directive_id = self.directive_registry.register_definition(DirectiveDefinition {
+      id: DirectiveDefId::new(0),
+      function_def_id,
+      name: definition.name,
+      target: directive_attr.target,
+      phase: directive_attr.phase,
+      effect: directive_attr.effect,
+      group: directive_attr.group,
+      capabilities: directive_attr.capabilities,
+      provenance: DirectiveProvenance {
+        origin_attr_span: definition.span.clone(),
+      },
+    });
+
+    self
+      .directive_registry
+      .defs
+      .iter()
+      .find(|directive| directive.id == directive_id)
+      .cloned()
+      .map(|directive| (directive_id, directive))
   }
 
   fn bind_legacy_function_attr(
