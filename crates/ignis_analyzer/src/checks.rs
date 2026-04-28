@@ -96,6 +96,7 @@ impl<'a> Analyzer<'a> {
 
           if let Some(func_def) = func_def {
             self.validate_test_function_shape(func, &func_def);
+            self.validate_directive_function_shape(func, &func_def);
           }
         }
 
@@ -749,6 +750,40 @@ impl<'a> Analyzer<'a> {
       self.add_diagnostic(
         DiagnosticMessage::CompileError {
           message: "@test functions must return void".to_string(),
+          span: func.signature.span.clone(),
+        }
+        .report(),
+      );
+    }
+  }
+
+  fn validate_directive_function_shape(
+    &mut self,
+    func: &ignis_ast::statements::function::ASTFunction,
+    func_def: &FunctionDefinition,
+  ) {
+    if !func_def
+      .attrs
+      .iter()
+      .any(|attr| matches!(attr, FunctionAttr::Directive(_)))
+    {
+      return;
+    }
+
+    if !func_def.type_params.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::CompileError {
+          message: "@directive functions cannot declare generic parameters in the current validation slice".to_string(),
+          span: func.signature.span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    if !matches!(self.types.get(&func_def.return_type), Type::Void) {
+      self.add_diagnostic(
+        DiagnosticMessage::CompileError {
+          message: "@directive functions must return void until std::compile directive result types exist".to_string(),
           span: func.signature.span.clone(),
         }
         .report(),

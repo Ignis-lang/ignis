@@ -3203,3 +3203,48 @@ function invalidDirective(): void {
     diagnostics
   );
 }
+
+#[test]
+fn directive_attribute_rejects_duplicate_named_metadata() {
+  let result = common::analyze(
+    r#"
+@directive(target: "record", target: "enum", phase: expand, effect: emit)
+function duplicateDirectiveMetadata(): void {
+    return;
+}
+"#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("duplicate @directive metadata 'target'"),
+    "expected duplicate metadata diagnostic, got:\n{}",
+    diagnostics
+  );
+}
+
+#[test]
+fn directive_attribute_rejects_invalid_signature_shape() {
+  let result = common::analyze(
+    r#"
+@directive(target: "record", phase: expand, effect: emit)
+function invalidDirective<T>(): i32 {
+    return 1;
+}
+"#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("@directive functions cannot declare generic parameters in the current validation slice"),
+    "expected generic-parameter directive diagnostic, got:\n{}",
+    diagnostics
+  );
+  assert!(
+    diagnostics.contains("@directive functions must return void until std::compile directive result types exist"),
+    "expected non-void return directive diagnostic, got:\n{}",
+    diagnostics
+  );
+}

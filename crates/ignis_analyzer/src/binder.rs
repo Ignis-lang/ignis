@@ -2413,10 +2413,23 @@ impl<'a> Analyzer<'a> {
     let mut effect = None;
     let mut group = None;
     let mut capabilities = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
     let mut has_error = false;
 
     for named_arg in &attr.named_args {
       let key = self.get_symbol_name(&named_arg.name).clone();
+
+      if !seen_keys.insert(key.clone()) {
+        has_error = true;
+        self.add_diagnostic(
+          DiagnosticMessage::CompileError {
+            message: format!("duplicate @directive metadata '{}'", key),
+            span: named_arg.span.clone(),
+          }
+          .report(),
+        );
+        continue;
+      }
 
       match key.as_str() {
         "target" => {
