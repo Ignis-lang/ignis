@@ -601,6 +601,118 @@ function smoke(): void {
 }
 
 #[test]
+fn generated_attached_method_metadata_can_attach_to_real_definition_ids() {
+  let result = common::analyze(
+    r#"
+@directive(target: "record", phase: expand, effect: emit)
+function serializable(): void {
+    return;
+}
+
+@serializable
+record User {
+    public id: i32;
+
+    describe(&self): i32 {
+        return self.id;
+    }
+}
+"#,
+  );
+
+  assert_eq!(common::format_diagnostics(&result.output.diagnostics), "(no diagnostics)");
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  let describe_name = symbols.intern("describe");
+  drop(symbols);
+
+  let user_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == user_name).then_some(def_id))
+    .expect("User definition id");
+  let describe_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == describe_name).then_some(def_id))
+    .expect("describe definition id");
+
+  let mut registry = result.output.directive_registry.clone();
+  let generated_metadata = ignis_type::definition::GeneratedItemMetadata::attached_method(
+    registry.uses[0].generated_provenance(3),
+    user_def_id,
+    false,
+  );
+
+  registry.attach_generated_item(describe_def_id, generated_metadata.clone());
+
+  assert_eq!(registry.generated_item_metadata(&describe_def_id), Some(&generated_metadata));
+}
+
+#[test]
+fn generated_implemented_trait_metadata_can_attach_without_changing_implements_behavior() {
+  let result = common::analyze(
+    r#"
+trait EqLike {
+}
+
+@directive(target: "record", phase: expand, effect: emit)
+function deriveEq(): void {
+    return;
+}
+
+@deriveEq
+@implements(EqLike)
+record User {
+    public id: i32;
+}
+"#,
+  );
+
+  assert_eq!(common::format_diagnostics(&result.output.diagnostics), "(no diagnostics)");
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  let eq_like_name = symbols.intern("EqLike");
+  drop(symbols);
+
+  let user_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == user_name).then_some(def_id))
+    .expect("User definition id");
+  let eq_like_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == eq_like_name).then_some(def_id))
+    .expect("EqLike definition id");
+
+  let mut registry = result.output.directive_registry.clone();
+  let generated_metadata = ignis_type::definition::GeneratedItemMetadata::implemented_trait(
+    registry.uses[0].generated_provenance(7),
+    user_def_id,
+    eq_like_def_id,
+  );
+
+  registry.attach_generated_item(user_def_id, generated_metadata.clone());
+
+  assert_eq!(registry.generated_item_metadata(&user_def_id), Some(&generated_metadata));
+
+  let user_record = result.output.defs.get(&user_def_id);
+  match &user_record.kind {
+    ignis_type::definition::DefinitionKind::Record(record) => {
+      assert_eq!(record.implemented_traits, vec![eq_like_def_id]);
+    },
+    other => panic!("expected User record definition, got {:?}", other),
+  }
+}
+
+#[test]
 fn for_loop() {
   let result = common::analyze(
     r#"

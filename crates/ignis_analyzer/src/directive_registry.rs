@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use ignis_ast::NodeId;
-use ignis_type::definition::{DefinitionId, DirectiveDefId, DirectiveDefinition, DirectiveProvenance, GeneratedProvenance};
+use ignis_type::definition::{
+  DefinitionId, DirectiveDefId, DirectiveDefinition, DirectiveProvenance, GeneratedItemMetadata, GeneratedProvenance,
+};
 use ignis_type::span::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -30,6 +32,7 @@ pub struct DirectiveRegistry {
   pub defs: Vec<DirectiveDefinition>,
   pub uses: Vec<DirectiveUse>,
   pub groups: HashMap<String, Vec<DirectiveDefId>>,
+  pub generated_items: HashMap<DefinitionId, GeneratedItemMetadata>,
 }
 
 impl DirectiveRegistry {
@@ -56,6 +59,21 @@ impl DirectiveRegistry {
     self.defs.iter().enumerate().find_map(|(index, directive)| {
       (directive.function_def_id == function_def_id).then_some((DirectiveDefId::new(index as u32), directive))
     })
+  }
+
+  pub fn attach_generated_item(
+    &mut self,
+    definition: DefinitionId,
+    metadata: GeneratedItemMetadata,
+  ) {
+    self.generated_items.insert(definition, metadata);
+  }
+
+  pub fn generated_item_metadata(
+    &self,
+    definition: &DefinitionId,
+  ) -> Option<&GeneratedItemMetadata> {
+    self.generated_items.get(definition)
   }
 }
 
@@ -93,5 +111,24 @@ mod tests {
         generation_id: 15,
       }
     );
+  }
+
+  #[test]
+  fn registry_can_store_generated_item_metadata_by_definition() {
+    let mut registry = DirectiveRegistry::default();
+    let generated_definition = DefinitionId::new(12);
+    let metadata = GeneratedItemMetadata::attached_method(
+      GeneratedProvenance {
+        origin_attr_span: span(5, 12),
+        directive: DirectiveDefId::new(2),
+        generation_id: 8,
+      },
+      DefinitionId::new(3),
+      false,
+    );
+
+    registry.attach_generated_item(generated_definition, metadata.clone());
+
+    assert_eq!(registry.generated_item_metadata(&generated_definition), Some(&metadata));
   }
 }
