@@ -35,6 +35,21 @@ use ignis_type::{
   },
 };
 
+enum DirectiveUseResolution {
+  Matched {
+    function_def_id: DefinitionId,
+    directive_id: DirectiveDefId,
+    provenance: DirectiveProvenance,
+  },
+  WrongTarget {
+    function_def_id: DefinitionId,
+    name: String,
+    expected: DirectiveTarget,
+    actual: DirectiveTarget,
+    span: ignis_type::span::Span,
+  },
+}
+
 impl<'a> Analyzer<'a> {
   /// Two-pass binding phase:
   /// - Pass 1: Predeclare type definitions (TypeAlias, Record, Enum) so they can reference each other
@@ -2133,18 +2148,44 @@ impl<'a> Analyzer<'a> {
     attr: &ASTAttribute,
     target: DirectiveTarget,
   ) -> bool {
-    let Some((function_def_id, directive_id, provenance)) = self.resolve_directive_use(attr, target) else {
+    let Some(resolution) = self.resolve_directive_use(attr, target) else {
       return false;
     };
 
-    self.mark_referenced(function_def_id);
+    match resolution {
+      DirectiveUseResolution::Matched {
+        function_def_id,
+        directive_id,
+        provenance,
+      } => {
+        self.mark_referenced(function_def_id);
 
-    self.directive_registry.uses.push(DirectiveUse {
-      target_node: *target_node,
-      directive: directive_id,
-      span: attr.span.clone(),
-      provenance,
-    });
+        self.directive_registry.uses.push(DirectiveUse {
+          target_node: *target_node,
+          directive: directive_id,
+          span: attr.span.clone(),
+          provenance,
+        });
+      },
+      DirectiveUseResolution::WrongTarget {
+        function_def_id,
+        name,
+        expected,
+        actual,
+        span,
+      } => {
+        self.mark_referenced(function_def_id);
+        self.add_diagnostic(
+          DiagnosticMessage::DirectiveTargetMismatch {
+            name,
+            expected: self.directive_target_name(&expected).to_string(),
+            actual: self.directive_target_name(&actual).to_string(),
+            span,
+          }
+          .report(),
+        );
+      },
+    }
 
     true
   }
@@ -2153,7 +2194,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     attr: &ASTAttribute,
     target: DirectiveTarget,
-  ) -> Option<(DefinitionId, DirectiveDefId, DirectiveProvenance)> {
+  ) -> Option<DirectiveUseResolution> {
     let entry = if attr.path.len() == 1 {
       self.scopes.lookup(&attr.name).cloned()
     } else {
@@ -2161,23 +2202,46 @@ impl<'a> Analyzer<'a> {
       self.namespaces.lookup_def(namespace_id, &attr.name).cloned()
     }?;
 
-    self.resolve_directive_entry(&entry, target)
+    self.resolve_directive_entry(attr, &entry, target)
   }
 
   fn resolve_directive_entry(
     &mut self,
+    attr: &ASTAttribute,
     entry: &SymbolEntry,
     target: DirectiveTarget,
-  ) -> Option<(DefinitionId, DirectiveDefId, DirectiveProvenance)> {
+  ) -> Option<DirectiveUseResolution> {
     let def_ids: &[DefinitionId] = match entry {
       SymbolEntry::Single(def_id) => std::slice::from_ref(def_id),
       SymbolEntry::Overload(def_ids) => def_ids.as_slice(),
     };
 
-    def_ids.iter().find_map(|def_id| {
-      let (directive_id, directive) = self.directive_definition_for_function(*def_id)?;
-      (directive.target == target).then_some((*def_id, directive_id, directive.provenance.clone()))
-    })
+    let attr_name = self.format_attribute_path(attr);
+    let mut wrong_target: Option<DirectiveUseResolution> = None;
+
+    for def_id in def_ids {
+      let Some((directive_id, directive)) = self.directive_definition_for_function(*def_id) else {
+        continue;
+      };
+
+      if directive.target == target {
+        return Some(DirectiveUseResolution::Matched {
+          function_def_id: *def_id,
+          directive_id,
+          provenance: directive.provenance.clone(),
+        });
+      }
+
+      wrong_target.get_or_insert_with(|| DirectiveUseResolution::WrongTarget {
+        function_def_id: *def_id,
+        name: attr_name.clone(),
+        expected: directive.target,
+        actual: target.clone(),
+        span: attr.span.clone(),
+      });
+    }
+
+    wrong_target
   }
 
   fn directive_definition_for_function(
@@ -2813,6 +2877,29 @@ impl<'a> Analyzer<'a> {
       DirectiveEffect::Collect => "collect",
       DirectiveEffect::Transform => "transform",
     }
+  }
+
+  fn directive_target_name(
+    &self,
+    target: &DirectiveTarget,
+  ) -> &'static str {
+    match target {
+      DirectiveTarget::Record => "record",
+      DirectiveTarget::Enum => "enum",
+      DirectiveTarget::Function => "function",
+    }
+  }
+
+  fn format_attribute_path(
+    &self,
+    attr: &ASTAttribute,
+  ) -> String {
+    attr
+      .path
+      .iter()
+      .map(|segment| self.get_symbol_name(segment))
+      .collect::<Vec<_>>()
+      .join("::")
   }
 
   pub fn bind_lint_directives(

@@ -342,6 +342,74 @@ fn imported_plain_function_attribute_stays_unknown() {
 }
 
 #[test]
+fn imported_directive_use_rejects_target_mismatches() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    @directive(target: "function", phase: check, effect: diagnose)
+    export function validate(): void {
+      return;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "directive library should analyze cleanly");
+
+  let lib_exports = lib_output.collect_exports();
+  let lib_module_id = ModuleId::new(0);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_exports);
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./checks".to_string(), lib_module_id);
+
+  let main_src = r#"
+    import validate from "./checks";
+
+    @validate
+    record User {
+      value: i32;
+    }
+  "#;
+
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
+
+  let diagnostics = common::format_diagnostics(&output.diagnostics);
+  assert!(
+    diagnostics.contains("directive '@validate' targets function, not record"),
+    "expected imported directive target mismatch diagnostic, got:\n{}",
+    diagnostics
+  );
+  assert!(
+    !diagnostics.contains("unknown attribute '@validate' on record"),
+    "expected imported target mismatch to avoid unknown attribute fallback, got:\n{}",
+    diagnostics
+  );
+  assert!(
+    output.directive_registry.uses.is_empty(),
+    "expected wrong-target imported directive to avoid directive use registration"
+  );
+}
+
+#[test]
 fn import_non_exported_symbol_error() {
   // Shared stores
   let mut shared_types = TypeStore::new();

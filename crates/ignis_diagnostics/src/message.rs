@@ -653,6 +653,12 @@ pub enum DiagnosticMessage {
     effect: String,
     span: Span,
   },
+  DirectiveTargetMismatch {
+    name: String,
+    expected: String,
+    actual: String,
+    span: Span,
+  },
   // Lang trait diagnostics
   UnknownLangTrait {
     name: String,
@@ -1517,6 +1523,11 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::InvalidDirectivePhaseEffect { phase, effect, .. } => {
         write!(f, "@directive phase '{}' cannot use effect '{}'", phase, effect)
       },
+      DiagnosticMessage::DirectiveTargetMismatch {
+        name, expected, actual, ..
+      } => {
+        write!(f, "directive '@{}' targets {}, not {}", name, expected, actual)
+      },
       DiagnosticMessage::UnknownLangTrait { name, .. } => {
         write!(f, "unknown lang trait '{}' in @implements", name)
       },
@@ -1993,6 +2004,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::AttributeExpectedIdentifier { span, .. }
       | DiagnosticMessage::UnknownDirectiveMetadata { span, .. }
       | DiagnosticMessage::InvalidDirectivePhaseEffect { span, .. }
+      | DiagnosticMessage::DirectiveTargetMismatch { span, .. }
       | DiagnosticMessage::UnknownLangTrait { span, .. }
       | DiagnosticMessage::LangTraitDropCopyConflict { span, .. }
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
@@ -2216,6 +2228,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::AttributeExpectedIdentifier { .. } => "A0126",
       DiagnosticMessage::UnknownDirectiveMetadata { .. } => "A0192",
       DiagnosticMessage::InvalidDirectivePhaseEffect { .. } => "A0193",
+      DiagnosticMessage::DirectiveTargetMismatch { .. } => "A0194",
       DiagnosticMessage::UnknownLangTrait { .. } => "A0130",
       DiagnosticMessage::LangTraitDropCopyConflict { .. } => "A0131",
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",

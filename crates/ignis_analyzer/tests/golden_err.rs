@@ -3274,3 +3274,35 @@ record User {
     diagnostics
   );
 }
+
+#[test]
+fn directive_use_rejects_namespace_directives_on_the_wrong_target() {
+  let result = common::analyze(
+    r#"
+namespace Meta {
+    @directive(target: "record", phase: expand, effect: emit)
+    function serializable(): void {
+        return;
+    }
+}
+
+@Meta::serializable
+function buildUser(): void {
+    return;
+}
+"#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("directive '@Meta::serializable' targets record, not function"),
+    "expected a directive target-mismatch diagnostic, got:\n{}",
+    diagnostics
+  );
+  assert!(
+    !diagnostics.contains("unknown attribute '@serializable' on function"),
+    "expected a specific mismatch diagnostic instead of unknown attribute, got:\n{}",
+    diagnostics
+  );
+}
