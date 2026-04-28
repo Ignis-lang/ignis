@@ -254,6 +254,53 @@ function deriveRecord(): void {
 }
 
 #[test]
+fn directive_attribute_accepts_minimal_required_metadata() {
+  let result = common::analyze(
+    r#"
+@directive(target: "function", phase: check, effect: diagnose)
+function validate(): void {
+    return;
+}
+"#,
+  );
+
+  assert_eq!(
+    common::format_diagnostics(&result.output.diagnostics),
+    "(no diagnostics)",
+    "expected minimal required @directive metadata to analyze cleanly"
+  );
+
+  let validate_name = result.output.symbols.borrow_mut().intern("validate");
+  let validate_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == validate_name).then_some(def))
+    .expect("validate definition");
+
+  let directive_attr = match &validate_def.kind {
+    ignis_type::definition::DefinitionKind::Function(function) => function
+      .attrs
+      .iter()
+      .find_map(|attr| match attr {
+        ignis_type::attribute::FunctionAttr::Directive(metadata) => Some(metadata),
+        _ => None,
+      })
+      .expect("expected @directive metadata on the function definition"),
+    other => panic!("expected function definition, got {:?}", other),
+  };
+
+  assert_eq!(directive_attr.target, ignis_type::attribute::DirectiveTarget::Function);
+  assert_eq!(directive_attr.phase, ignis_type::attribute::DirectivePhase::Check);
+  assert_eq!(directive_attr.effect, ignis_type::attribute::DirectiveEffect::Diagnose);
+  assert_eq!(directive_attr.group, None);
+  assert!(
+    directive_attr.capabilities.is_empty(),
+    "expected optional metadata to stay absent"
+  );
+}
+
+#[test]
 fn directive_registry_exposes_definition_metadata_and_provenance() {
   let result = common::analyze(
     r#"

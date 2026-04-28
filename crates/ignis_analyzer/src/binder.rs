@@ -2657,15 +2657,9 @@ impl<'a> Analyzer<'a> {
       }
     }
 
-    let Some(target) = target else {
-      return None;
-    };
-    let Some(phase) = phase else {
-      return None;
-    };
-    let Some(effect) = effect else {
-      return None;
-    };
+    let target = target?;
+    let phase = phase?;
+    let effect = effect?;
 
     if matches!(phase, DirectivePhase::Check) && !matches!(effect, DirectiveEffect::Diagnose) {
       has_error = true;
