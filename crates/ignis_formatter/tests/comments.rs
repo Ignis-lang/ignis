@@ -262,10 +262,7 @@ fn preserves_attribute_on_exported_record() {
   )
   .expect("attribute on exported record should be preserved");
 
-  assert_eq!(
-    formatted,
-    "@packed\nexport record Dense {\n  x: i32;\n  y: i32;\n}\n"
-  );
+  assert_eq!(formatted, "@packed\nexport record Dense {\n  x: i32;\n  y: i32;\n}\n");
 }
 
 #[test]

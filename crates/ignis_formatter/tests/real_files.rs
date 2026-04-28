@@ -87,10 +87,8 @@ fn assert_whole_file_corpus_pass(path: &str) {
   let config = FormatterConfig::default();
   let options = FormatOptions { check: false, config };
 
-  let first = format_text(&source, &options)
-    .unwrap_or_else(|error| panic!("first pass for {path}: {error}"));
-  let second = format_text(&first, &options)
-    .unwrap_or_else(|error| panic!("idempotence pass for {path}: {error}"));
+  let first = format_text(&source, &options).unwrap_or_else(|error| panic!("first pass for {path}: {error}"));
+  let second = format_text(&first, &options).unwrap_or_else(|error| panic!("idempotence pass for {path}: {error}"));
 
   assert_eq!(first, second, "idempotence violation for {path}");
   assert_no_trailing_whitespace(&first);

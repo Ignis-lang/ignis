@@ -165,7 +165,8 @@ impl Ord for ImportSortKey {
     &self,
     other: &Self,
   ) -> std::cmp::Ordering {
-    self.is_wildcard
+    self
+      .is_wildcard
       .cmp(&other.is_wildcard)
       .then_with(|| other.is_std.cmp(&self.is_std))
       .then_with(|| self.path.cmp(&other.path))
@@ -469,9 +470,7 @@ impl<'a> AstChunkFormatter<'a> {
       ASTStatement::ForOf(for_of) => self.format_for_of_statement(for_of, indent_level),
       ASTStatement::Namespace(namespace) => self.format_namespace(namespace, indent_level),
       ASTStatement::Extern(extern_) => self.format_extern(extern_, indent_level),
-      ASTStatement::Comment(comment) => {
-        Ok(format!("{}{}", self.indent(indent_level), comment.content.trim()))
-      },
+      ASTStatement::Comment(comment) => Ok(format!("{}{}", self.indent(indent_level), comment.content.trim())),
       ASTStatement::Continue(_) => Ok(format!("{}continue;", self.indent(indent_level))),
       ASTStatement::Break(_) => Ok(format!("{}break;", self.indent(indent_level))),
       ASTStatement::Defer(defer_statement) => {
@@ -858,7 +857,11 @@ impl<'a> AstChunkFormatter<'a> {
       }
 
       if directive_segment_start < item_span.start.0 as usize {
-        formatted.push_str(self.slice_range(directive_segment_start, self.node_true_end(owned_item.item)).trim_end());
+        formatted.push_str(
+          self
+            .slice_range(directive_segment_start, self.node_true_end(owned_item.item))
+            .trim_end(),
+        );
       } else {
         let item_text = self.format_statement_node(*owned_item.item, indent_level + 1)?;
         formatted.push_str(&self.render_owned_segment(
@@ -933,7 +936,11 @@ impl<'a> AstChunkFormatter<'a> {
       }
 
       if directive_segment_start < item_span.start.0 as usize {
-        formatted.push_str(self.slice_range(directive_segment_start, self.node_true_end(owned_item.item)).trim_end());
+        formatted.push_str(
+          self
+            .slice_range(directive_segment_start, self.node_true_end(owned_item.item))
+            .trim_end(),
+        );
       } else {
         let item_text = self.format_statement_node(*owned_item.item, indent_level + 1)?;
         formatted.push_str(&self.render_owned_segment(
@@ -1018,11 +1025,7 @@ impl<'a> AstChunkFormatter<'a> {
     // in the name token when generics are present.
     let name = raw_name.split('<').next().unwrap_or(raw_name);
 
-    let mut formatted = format!(
-      "{}type {}",
-      self.indent(indent_level),
-      name
-    );
+    let mut formatted = format!("{}type {}", self.indent(indent_level), name);
 
     if let Some(type_params) = &type_alias.type_params {
       formatted.push_str(&self.format_type_params(type_params));
@@ -1059,7 +1062,8 @@ impl<'a> AstChunkFormatter<'a> {
 
     let mut wrote_any = false;
     let (_, body_end) = self.braced_body_bounds(&record.span)?;
-    let owned_items = self.owned_spanned_items(&record.items, body_start, |item| self.record_item_span(item).clone())?;
+    let owned_items =
+      self.owned_spanned_items(&record.items, body_start, |item| self.record_item_span(item).clone())?;
 
     let mut cursor = body_start;
 
@@ -1575,7 +1579,11 @@ impl<'a> AstChunkFormatter<'a> {
         let trailing = if !call.arguments.is_empty() {
           let last_arg_end = self.nodes.get(call.arguments.last().unwrap()).span().end.0 as usize;
           let call_end = call.span.end.0 as usize;
-          if self.slice_range(last_arg_end, call_end).contains(',') { "," } else { "" }
+          if self.slice_range(last_arg_end, call_end).contains(',') {
+            ","
+          } else {
+            ""
+          }
         } else {
           ""
         };
@@ -1587,7 +1595,9 @@ impl<'a> AstChunkFormatter<'a> {
 
         Ok(formatted)
       },
-      ASTExpression::Match(match_expression) => self.format_match_expression(match_expression, parent_precedence, indent_level),
+      ASTExpression::Match(match_expression) => {
+        self.format_match_expression(match_expression, parent_precedence, indent_level)
+      },
       ASTExpression::Cast(cast) => {
         let inner = self.format_expression_node(cast.expression, 11, 0)?;
         let formatted = format!("{} as {}", inner, self.format_type(&cast.target_type));
@@ -1718,11 +1728,7 @@ impl<'a> AstChunkFormatter<'a> {
     steps: &mut Vec<PipeStep>,
   ) {
     match self.nodes.get(&node_id) {
-      ASTNode::Expression(ASTExpression::Pipe {
-        lhs,
-        rhs,
-        ..
-      }) => {
+      ASTNode::Expression(ASTExpression::Pipe { lhs, rhs, .. }) => {
         self.collect_pipe_steps(*lhs, steps);
         steps.push(PipeStep::Call(*rhs));
       },
@@ -1744,9 +1750,7 @@ impl<'a> AstChunkFormatter<'a> {
 
     if pipe_count < 2 {
       let head = match steps.first() {
-        Some(PipeStep::Head(id)) | Some(PipeStep::Call(id)) => {
-          self.format_expression_node(*id, 0, 0)?
-        },
+        Some(PipeStep::Head(id)) | Some(PipeStep::Call(id)) => self.format_expression_node(*id, 0, 0)?,
         None => return Ok(String::new()),
       };
 
@@ -2672,7 +2676,11 @@ impl<'a> AstChunkFormatter<'a> {
       return false;
     };
 
-    gap[last_non_whitespace + 1..].chars().filter(|character| *character == '\n').count() >= 2
+    gap[last_non_whitespace + 1..]
+      .chars()
+      .filter(|character| *character == '\n')
+      .count()
+      >= 2
   }
 
   fn gap_contains_directive_syntax(
@@ -2755,11 +2763,7 @@ impl<'a> AstChunkFormatter<'a> {
       break;
     }
 
-    if saw_directive {
-      candidate
-    } else {
-      node_start
-    }
+    if saw_directive { candidate } else { node_start }
   }
 }
 

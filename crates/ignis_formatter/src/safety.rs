@@ -27,7 +27,8 @@ pub fn validate_formatted_output(
     formatted_keys.sort();
     source_keys == formatted_keys
   } else {
-    normalize_optional_trailing_commas(&source_shape.tokens) == normalize_optional_trailing_commas(&formatted_shape.tokens)
+    normalize_optional_trailing_commas(&source_shape.tokens)
+      == normalize_optional_trailing_commas(&formatted_shape.tokens)
   };
 
   if !tokens_match {
@@ -63,7 +64,12 @@ pub fn validate_parse_back(formatted: &str) -> Result<(), FormatError> {
     return Err(FormatError::Safety {
       message: format!(
         "parse-back validation failed: formatted output does not lex cleanly: {}",
-        lexer.diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+        lexer
+          .diagnostics
+          .iter()
+          .map(ToString::to_string)
+          .collect::<Vec<_>>()
+          .join("; ")
       ),
     });
   }
@@ -76,11 +82,7 @@ pub fn validate_no_trailing_whitespace(formatted: &str) -> Result<(), FormatErro
   for (line_number, line) in formatted.lines().enumerate() {
     if line != line.trim_end() {
       return Err(FormatError::Safety {
-        message: format!(
-          "trailing whitespace on line {}: {:?}",
-          line_number + 1,
-          line
-        ),
+        message: format!("trailing whitespace on line {}: {:?}", line_number + 1, line),
       });
     }
   }

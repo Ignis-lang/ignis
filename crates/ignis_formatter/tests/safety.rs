@@ -99,13 +99,10 @@ fn validate_formatted_output_rejects_missing_final_newline() {
 fn format_text_end_to_end_safety_passes_for_canonical_simple_function() {
   let source = "function main(): void { return; }\n";
 
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("end-to-end format + safety should pass for simple function");
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("end-to-end format + safety should pass for simple function");
 
-  assert!(
-    formatted.ends_with('\n'),
-    "formatted output should end with a newline"
-  );
+  assert!(formatted.ends_with('\n'), "formatted output should end with a newline");
   for line in formatted.lines() {
     assert_eq!(line, line.trim_end(), "no trailing whitespace: {line:?}");
   }
@@ -115,15 +112,10 @@ fn format_text_end_to_end_safety_passes_for_canonical_simple_function() {
 fn format_text_end_to_end_idempotence_passes_for_record_with_comments() {
   let source = "/// A point in 2D space\nrecord Point {\n    x: i32;\n    y: i32;\n}\n";
 
-  let first = format_text(source, &FormatOptions::default())
-    .expect("first pass should succeed");
-  let second = format_text(&first, &FormatOptions::default())
-    .expect("second pass should succeed");
+  let first = format_text(source, &FormatOptions::default()).expect("first pass should succeed");
+  let second = format_text(&first, &FormatOptions::default()).expect("second pass should succeed");
 
-  assert_eq!(
-    first, second,
-    "formatted output must be idempotent across two passes"
-  );
+  assert_eq!(first, second, "formatted output must be idempotent across two passes");
 }
 
 #[test]
@@ -131,8 +123,7 @@ fn validate_no_trailing_whitespace_accepts_clean_lines() {
   let source = "function main(): void { return; }\n";
   let formatted = "function main(): void {\n  return;\n}\n";
 
-  validate_formatted_output(source, formatted, false)
-    .expect("clean formatted output should pass all safety checks");
+  validate_formatted_output(source, formatted, false).expect("clean formatted output should pass all safety checks");
 }
 
 #[test]
@@ -178,7 +169,8 @@ fn validate_formatted_output_rejects_token_shape_changes() {
   let source = "function main(): void { return; }\n";
   let formatted = "function main(): void {\n    return\n}\n";
 
-  let error = validate_formatted_output(source, formatted, false).expect_err("validation should reject missing semicolon");
+  let error =
+    validate_formatted_output(source, formatted, false).expect_err("validation should reject missing semicolon");
 
   assert!(
     error.to_string().contains("token shape"),
@@ -191,7 +183,8 @@ fn validate_formatted_output_rejects_reordered_imports() {
   let source = "import String from \"std::string\";\nimport LibC from \"std::libc\";\nimport Vector from \"std::vector\";\n\nimport _ from \"std::io::error\";\n";
   let formatted = "import LibC from \"std::libc\";\nimport String from \"std::string\";\nimport Vector from \"std::vector\";\n\nimport _ from \"std::io::error\";\n";
 
-  let error = validate_formatted_output(source, formatted, false).expect_err("validation should reject reordered imports");
+  let error =
+    validate_formatted_output(source, formatted, false).expect_err("validation should reject reordered imports");
 
   assert!(
     error.to_string().contains("token shape"),

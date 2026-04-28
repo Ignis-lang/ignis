@@ -276,11 +276,7 @@ fn print_diff_for_file(
   formatted: &str,
 ) {
   let original = std::fs::read_to_string(path).unwrap_or_default();
-  let diff_text = compute_unified_diff(
-    path.to_string_lossy().as_ref(),
-    &original,
-    formatted,
-  );
+  let diff_text = compute_unified_diff(path.to_string_lossy().as_ref(), &original, formatted);
   print!("{diff_text}");
 }
 
@@ -325,7 +321,13 @@ fn compute_unified_diff(
     let context_before = start.saturating_sub(3);
     let context_after = (*end + 3).min(max_lines);
 
-    output.push_str(&format!("@@ -{},{} +{},{} @@\n", context_before + 1, context_after - context_before, context_before + 1, context_after - context_before));
+    output.push_str(&format!(
+      "@@ -{},{} +{},{} @@\n",
+      context_before + 1,
+      context_after - context_before,
+      context_before + 1,
+      context_after - context_before
+    ));
 
     for i in context_before..context_after {
       let in_change = i >= *start && i < *end;
@@ -467,16 +469,13 @@ fn run_fmt_stdin_json(cmd: &FmtCommand) -> Result<(), ()> {
 }
 
 fn print_ndjson_result(result: &StdinResult) {
-  let json = serde_json::to_string(result).unwrap_or_else(|error| {
-    format!(
-      "{{\"path\":\"\",\"error\":\"failed to serialize result: {error}\"}}"
-    )
-  });
+  let json = serde_json::to_string(result)
+    .unwrap_or_else(|error| format!("{{\"path\":\"\",\"error\":\"failed to serialize result: {error}\"}}"));
   println!("{json}");
 }
 
 fn resolve_formatter_config_for_stdin(
-  cmd: &FmtCommand,
+  cmd: &FmtCommand
 ) -> Result<ignis_formatter::FormatterConfig, ignis_formatter::FormatError> {
   let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
   let ignis_toml = cwd.join("ignis.toml");
@@ -504,11 +503,7 @@ fn build_formatter_cli_overrides(cmd: &FmtCommand) -> FormatterCliOverrides {
     } else {
       None
     },
-    sort_imports: if cmd.sort_imports {
-      Some(true)
-    } else {
-      None
-    },
+    sort_imports: if cmd.sort_imports { Some(true) } else { None },
   }
 }
 

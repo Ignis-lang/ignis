@@ -269,10 +269,7 @@ fn format_text_preserves_import_order_when_sort_disabled() {
   )
   .expect("format without import sorting");
 
-  assert_eq!(
-    formatted,
-    "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n"
-  );
+  assert_eq!(formatted, "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n");
 }
 
 #[test]
@@ -298,7 +295,8 @@ fn format_text_sorts_std_imports_before_local_when_enabled() {
 
 #[test]
 fn format_text_preserves_blank_line_groups_when_sorting() {
-  let source = "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n\nimport local from \"my::module\";\n";
+  let source =
+    "import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n\nimport local from \"my::module\";\n";
   let formatted = format_text(
     source,
     &FormatOptions {

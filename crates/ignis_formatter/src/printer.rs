@@ -29,8 +29,8 @@ fn render_items(
     match item {
       FormatItem::Code(region) => {
         let trimmed_raw = region.raw.trim_start();
-        let is_import = trimmed_raw.starts_with("import ")
-          || (trimmed_raw.starts_with("export ") && region.raw.contains(" from \""));
+        let is_import =
+          trimmed_raw.starts_with("import ") || (trimmed_raw.starts_with("export ") && region.raw.contains(" from \""));
 
         // A code item is "complex" (block-level declaration) if its trimmed content spans
         // multiple lines. Raw includes preceding whitespace so we must trim first.
@@ -98,7 +98,14 @@ fn render_items(
       },
       FormatItem::Directive(block) => {
         // Directives are always block-level (multi-line).
-        write_item_separator(output, previous_was_import, previous_was_detached_comment, false, index > 0, in_directive_branch);
+        write_item_separator(
+          output,
+          previous_was_import,
+          previous_was_detached_comment,
+          false,
+          index > 0,
+          in_directive_branch,
+        );
 
         if !output.is_empty() && !output.ends_with('\n') {
           output.push('\n');

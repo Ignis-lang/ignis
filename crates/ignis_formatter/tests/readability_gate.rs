@@ -536,18 +536,16 @@ function combine(f: (i32) -> i32, g: (i32) -> i32, x: i32): i32 {
 }
 
 fn unsupported_real_file_cases() -> Vec<UnsupportedRealFileCase> {
-  vec![
-    UnsupportedRealFileCase {
-      name: "std io top level structure",
-      source_path: "std/io/mod.ign",
-      start_marker: Some("//! # I/O"),
-      end_marker: Some("/// Prints `message` to stdout followed by a newline (`\\n`)."),
-      append_closing_brace: false,
-      wrap_in_heap_allocator_record: false,
-      config: FormatterConfig::default(),
-      expected_error: "parser failed: Expected RightBrace",
-    },
-  ]
+  vec![UnsupportedRealFileCase {
+    name: "std io top level structure",
+    source_path: "std/io/mod.ign",
+    start_marker: Some("//! # I/O"),
+    end_marker: Some("/// Prints `message` to stdout followed by a newline (`\\n`)."),
+    append_closing_brace: false,
+    wrap_in_heap_allocator_record: false,
+    config: FormatterConfig::default(),
+    expected_error: "parser failed: Expected RightBrace",
+  }]
 }
 
 #[test]
@@ -709,20 +707,13 @@ fn release_gate_completeness_corpus_and_idempotence_suites_must_all_pass() {
     let formatted = result.expect("already checked");
 
     // Idempotence: second pass must produce identical output.
-    let second = format_text(&formatted, &FormatOptions::default())
-      .expect("release gate: idempotence second pass must succeed");
-    assert_eq!(
-      formatted, second,
-      "release gate: idempotence violation for source: {source:?}"
-    );
+    let second =
+      format_text(&formatted, &FormatOptions::default()).expect("release gate: idempotence second pass must succeed");
+    assert_eq!(formatted, second, "release gate: idempotence violation for source: {source:?}");
   }
 
   // Real-file corpus: verify at least one representative whole file formats.
-  let corpus_paths = [
-    "example/hello-world.ign",
-    "std/option/mod.ign",
-    "std/result/mod.ign",
-  ];
+  let corpus_paths = ["example/hello-world.ign", "std/option/mod.ign", "std/result/mod.ign"];
 
   for path in &corpus_paths {
     let source = read_real_file(path);
@@ -730,9 +721,6 @@ fn release_gate_completeness_corpus_and_idempotence_suites_must_all_pass() {
       .unwrap_or_else(|error| panic!("release gate: corpus file {path} must format: {error}"));
     let second = format_text(&first, &FormatOptions::default())
       .unwrap_or_else(|error| panic!("release gate: corpus file {path} idempotence: {error}"));
-    assert_eq!(
-      first, second,
-      "release gate: corpus file {path} must be idempotent"
-    );
+    assert_eq!(first, second, "release gate: corpus file {path} must be idempotent");
   }
 }

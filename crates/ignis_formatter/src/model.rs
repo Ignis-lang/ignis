@@ -18,7 +18,11 @@ pub struct SiblingGap {
 impl SiblingGap {
   /// Creates a `SiblingGap` from a raw whitespace gap between two items.
   /// Normalizes any run of 2+ blank lines to exactly 1.
-  pub fn from_source_gap(source: &str, start: usize, end: usize) -> Self {
+  pub fn from_source_gap(
+    source: &str,
+    start: usize,
+    end: usize,
+  ) -> Self {
     let blank_count = count_blank_lines_in_gap(source, start, end);
     Self {
       blank_lines: blank_count.min(1),
@@ -38,7 +42,11 @@ impl SiblingGap {
 
 /// Counts the number of blank lines (empty lines) in the whitespace gap
 /// between byte offsets `start` and `end` in `source`.
-fn count_blank_lines_in_gap(source: &str, start: usize, end: usize) -> usize {
+fn count_blank_lines_in_gap(
+  source: &str,
+  start: usize,
+  end: usize,
+) -> usize {
   if start >= end {
     return 0;
   }
@@ -213,7 +221,13 @@ impl<'a> FormatModelBuilder<'a> {
         // and carry the attribute prefix over to the next chunk.
         let trailing_since_stmt = &self.source[last_stmt_end_byte..comment_start];
         if trailing_since_stmt.trim().starts_with('@') {
-          self.push_code_item(&mut items, &mut pending_leading, &mut pending_attr_prefix, code_start_byte, last_stmt_end_byte);
+          self.push_code_item(
+            &mut items,
+            &mut pending_leading,
+            &mut pending_attr_prefix,
+            code_start_byte,
+            last_stmt_end_byte,
+          );
           pending_attr_prefix = trailing_since_stmt.to_string();
 
           let (lines, next_index, next_code_start_byte) = self.consume_comment_block(cursor);
@@ -233,7 +247,13 @@ impl<'a> FormatModelBuilder<'a> {
           continue;
         }
 
-        self.push_code_item(&mut items, &mut pending_leading, &mut pending_attr_prefix, code_start_byte, comment_start);
+        self.push_code_item(
+          &mut items,
+          &mut pending_leading,
+          &mut pending_attr_prefix,
+          code_start_byte,
+          comment_start,
+        );
 
         let (lines, next_index, next_code_start_byte) = self.consume_comment_block(cursor);
         let block = CommentBlock {
@@ -255,7 +275,13 @@ impl<'a> FormatModelBuilder<'a> {
       }
 
       if brace_depth == 0 && self.is_directive_start(cursor) {
-        self.push_code_item(&mut items, &mut pending_leading, &mut pending_attr_prefix, code_start_byte, token.span.start.0 as usize);
+        self.push_code_item(
+          &mut items,
+          &mut pending_leading,
+          &mut pending_attr_prefix,
+          code_start_byte,
+          token.span.start.0 as usize,
+        );
 
         let (mut block, next_index, next_code_start_byte) = self.parse_directive_block(cursor)?;
         block.leading = std::mem::take(&mut pending_leading);
@@ -284,7 +310,13 @@ impl<'a> FormatModelBuilder<'a> {
       cursor += 1;
     }
 
-    self.push_code_item(&mut items, &mut pending_leading, &mut pending_attr_prefix, code_start_byte, region_end_byte);
+    self.push_code_item(
+      &mut items,
+      &mut pending_leading,
+      &mut pending_attr_prefix,
+      code_start_byte,
+      region_end_byte,
+    );
 
     for comment in pending_leading {
       items.push(FormatItem::DetachedComment(CommentBlock {
@@ -373,7 +405,11 @@ impl<'a> FormatModelBuilder<'a> {
     start_byte: usize,
     end_byte: usize,
   ) {
-    let raw_bytes = if start_byte < end_byte { &self.source[start_byte..end_byte] } else { "" };
+    let raw_bytes = if start_byte < end_byte {
+      &self.source[start_byte..end_byte]
+    } else {
+      ""
+    };
 
     let (raw, leading_after_attr_prefix) = if attr_prefix.is_empty() {
       if raw_bytes.trim().is_empty() {

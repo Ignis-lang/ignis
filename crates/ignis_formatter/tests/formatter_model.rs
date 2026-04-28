@@ -125,8 +125,5 @@ fn preserves_gap_inside_block_body() {
   let source = "function main(): void {\n  let x: i32 = 1;\n\n  return;\n}\n";
   let formatted = format_text(source, &FormatOptions::default()).expect("format");
 
-  assert_eq!(
-    formatted, source,
-    "single blank line inside block body must be preserved"
-  );
+  assert_eq!(formatted, source, "single blank line inside block body must be preserved");
 }

@@ -17,102 +17,345 @@ impl fmt::Display for KindEntry {
 
 fn ast_statement_kinds() -> Vec<KindEntry> {
   vec![
-    KindEntry { enum_name: "ASTStatement", variant_name: "Expression" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Variable" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "LetElse" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Function" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Block" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "If" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "While" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "For" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "ForOf" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Return" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Continue" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Break" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Defer" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Import" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Extern" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Constant" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Export" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Comment" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Namespace" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "TypeAlias" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Record" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Enum" },
-    KindEntry { enum_name: "ASTStatement", variant_name: "Trait" },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Expression",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Variable",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "LetElse",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Function",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Block",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "If",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "While",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "For",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "ForOf",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Return",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Continue",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Break",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Defer",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Import",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Extern",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Constant",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Export",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Comment",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Namespace",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "TypeAlias",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Record",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Enum",
+    },
+    KindEntry {
+      enum_name: "ASTStatement",
+      variant_name: "Trait",
+    },
   ]
 }
 
 fn ast_expression_kinds() -> Vec<KindEntry> {
   vec![
-    KindEntry { enum_name: "ASTExpression", variant_name: "Assignment" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Binary" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Ternary" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Cast" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Call" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Dereference" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Grouped" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "LetCondition" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Reference" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Unary" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Literal" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Match" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Variable" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Vector" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "VectorAccess" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Path" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "PostfixIncrement" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "PostfixDecrement" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "MemberAccess" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "RecordInit" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "BuiltinCall" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Lambda" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "CaptureOverride" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Pipe" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "PipePlaceholder" },
-    KindEntry { enum_name: "ASTExpression", variant_name: "Try" },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Assignment",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Binary",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Ternary",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Cast",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Call",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Dereference",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Grouped",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "LetCondition",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Reference",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Unary",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Literal",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Match",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Variable",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Vector",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "VectorAccess",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Path",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "PostfixIncrement",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "PostfixDecrement",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "MemberAccess",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "RecordInit",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "BuiltinCall",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Lambda",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "CaptureOverride",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Pipe",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "PipePlaceholder",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
+      variant_name: "Try",
+    },
   ]
 }
 
 fn ast_pattern_kinds() -> Vec<KindEntry> {
   vec![
-    KindEntry { enum_name: "ASTPattern", variant_name: "Wildcard" },
-    KindEntry { enum_name: "ASTPattern", variant_name: "Literal" },
-    KindEntry { enum_name: "ASTPattern", variant_name: "Path" },
-    KindEntry { enum_name: "ASTPattern", variant_name: "Tuple" },
-    KindEntry { enum_name: "ASTPattern", variant_name: "Or" },
+    KindEntry {
+      enum_name: "ASTPattern",
+      variant_name: "Wildcard",
+    },
+    KindEntry {
+      enum_name: "ASTPattern",
+      variant_name: "Literal",
+    },
+    KindEntry {
+      enum_name: "ASTPattern",
+      variant_name: "Path",
+    },
+    KindEntry {
+      enum_name: "ASTPattern",
+      variant_name: "Tuple",
+    },
+    KindEntry {
+      enum_name: "ASTPattern",
+      variant_name: "Or",
+    },
   ]
 }
 
 fn ast_type_syntax_kinds() -> Vec<KindEntry> {
   vec![
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "I8" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "I16" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "I32" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "I64" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "U8" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "U16" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "U32" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "U64" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "F32" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "F64" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Implicit" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Str" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Boolean" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Atom" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Void" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Null" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Char" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Vector" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Tuple" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Callable" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Pointer" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Reference" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Named" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Applied" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Path" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Union" },
-    KindEntry { enum_name: "IgnisTypeSyntax", variant_name: "Intersection" },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "I8",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "I16",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "I32",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "I64",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "U8",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "U16",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "U32",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "U64",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "F32",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "F64",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Implicit",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Str",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Boolean",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Atom",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Void",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Null",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Char",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Vector",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Tuple",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Callable",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Pointer",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Reference",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Named",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Applied",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Path",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Union",
+    },
+    KindEntry {
+      enum_name: "IgnisTypeSyntax",
+      variant_name: "Intersection",
+    },
   ]
 }
 
@@ -127,7 +370,10 @@ fn formatter_statement_dispatch_coverage() -> Vec<KindEntry> {
   // inventory, we enumerate statically — the test compares these lists.
   macro_rules! cover_stmt {
     ($variant:ident) => {
-      covered.push(KindEntry { enum_name: "ASTStatement", variant_name: stringify!($variant) });
+      covered.push(KindEntry {
+        enum_name: "ASTStatement",
+        variant_name: stringify!($variant),
+      });
     };
   }
 
@@ -164,7 +410,10 @@ fn formatter_expression_dispatch_coverage() -> Vec<KindEntry> {
 
   macro_rules! cover_expr {
     ($variant:ident) => {
-      covered.push(KindEntry { enum_name: "ASTExpression", variant_name: stringify!($variant) });
+      covered.push(KindEntry {
+        enum_name: "ASTExpression",
+        variant_name: stringify!($variant),
+      });
     };
   }
 
@@ -204,7 +453,10 @@ fn formatter_pattern_dispatch_coverage() -> Vec<KindEntry> {
 
   macro_rules! cover_pat {
     ($variant:ident) => {
-      covered.push(KindEntry { enum_name: "ASTPattern", variant_name: stringify!($variant) });
+      covered.push(KindEntry {
+        enum_name: "ASTPattern",
+        variant_name: stringify!($variant),
+      });
     };
   }
 
@@ -222,7 +474,10 @@ fn formatter_type_dispatch_coverage() -> Vec<KindEntry> {
 
   macro_rules! cover_ty {
     ($variant:ident) => {
-      covered.push(KindEntry { enum_name: "IgnisTypeSyntax", variant_name: stringify!($variant) });
+      covered.push(KindEntry {
+        enum_name: "IgnisTypeSyntax",
+        variant_name: stringify!($variant),
+      });
     };
   }
 
@@ -275,7 +530,11 @@ fn formatter_covers_all_ast_statement_variants() {
   assert!(
     missing.is_empty(),
     "formatter layout.rs format_statement is missing dispatch for:\n{}",
-    missing.iter().map(|k| format!("  - {k}")).collect::<Vec<_>>().join("\n")
+    missing
+      .iter()
+      .map(|k| format!("  - {k}"))
+      .collect::<Vec<_>>()
+      .join("\n")
   );
 }
 
@@ -286,7 +545,11 @@ fn formatter_covers_all_ast_expression_variants() {
   assert!(
     missing.is_empty(),
     "formatter layout.rs format_expression is missing dispatch for:\n{}",
-    missing.iter().map(|k| format!("  - {k}")).collect::<Vec<_>>().join("\n")
+    missing
+      .iter()
+      .map(|k| format!("  - {k}"))
+      .collect::<Vec<_>>()
+      .join("\n")
   );
 }
 
@@ -297,7 +560,11 @@ fn formatter_covers_all_ast_pattern_variants() {
   assert!(
     missing.is_empty(),
     "formatter layout.rs format_pattern is missing dispatch for:\n{}",
-    missing.iter().map(|k| format!("  - {k}")).collect::<Vec<_>>().join("\n")
+    missing
+      .iter()
+      .map(|k| format!("  - {k}"))
+      .collect::<Vec<_>>()
+      .join("\n")
   );
 }
 
@@ -308,7 +575,11 @@ fn formatter_covers_all_ast_type_syntax_variants() {
   assert!(
     missing.is_empty(),
     "formatter layout.rs format_type is missing dispatch for:\n{}",
-    missing.iter().map(|k| format!("  - {k}")).collect::<Vec<_>>().join("\n")
+    missing
+      .iter()
+      .map(|k| format!("  - {k}"))
+      .collect::<Vec<_>>()
+      .join("\n")
   );
 }
 
@@ -322,8 +593,7 @@ fn ast_statement_inventory_exhaustively_matches_enum() {
   let inventory_count = ast_statement_kinds().len();
 
   assert_eq!(
-    inventory_count,
-    expected_count,
+    inventory_count, expected_count,
     "ASTStatement inventory has {inventory_count} variants but enum has {expected_count}. \
      Add missing variants to ast_statement_kinds()."
   );
@@ -335,8 +605,7 @@ fn ast_expression_inventory_exhaustively_matches_enum() {
   let inventory_count = ast_expression_kinds().len();
 
   assert_eq!(
-    inventory_count,
-    expected_count,
+    inventory_count, expected_count,
     "ASTExpression inventory has {inventory_count} variants but enum has {expected_count}. \
      Add missing variants to ast_expression_kinds()."
   );
@@ -348,8 +617,7 @@ fn ast_pattern_inventory_exhaustively_matches_enum() {
   let inventory_count = ast_pattern_kinds().len();
 
   assert_eq!(
-    inventory_count,
-    expected_count,
+    inventory_count, expected_count,
     "ASTPattern inventory has {inventory_count} variants but enum has {expected_count}. \
      Add missing variants to ast_pattern_kinds()."
   );
@@ -361,8 +629,7 @@ fn ast_type_syntax_inventory_exhaustively_matches_enum() {
   let inventory_count = ast_type_syntax_kinds().len();
 
   assert_eq!(
-    inventory_count,
-    expected_count,
+    inventory_count, expected_count,
     "IgnisTypeSyntax inventory has {inventory_count} variants but enum has {expected_count}. \
      Add missing variants to ast_type_syntax_kinds()."
   );

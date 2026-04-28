@@ -31,8 +31,7 @@ fn formats_export_namespace_with_type_alias_inside() {
 fn formats_export_const_with_source_preserving_fallback() {
   let source = "export const MY_CONST: i32 = 42;\n";
 
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("export const should not fail on valid code");
+  let formatted = format_text(source, &FormatOptions::default()).expect("export const should not fail on valid code");
 
   assert!(
     formatted.contains("MY_CONST"),
@@ -114,15 +113,13 @@ fn formats_unattached_comment_blocks_without_dropping_them() {
 
 #[test]
 fn formats_multiple_attribute_declarations_without_reordering() {
-  let source = "@deprecated\nfunction first(): void { return; }\n@lang(try)\nexport enum Option<T> {\n  SOME(T),\n  NONE,\n}\n";
+  let source =
+    "@deprecated\nfunction first(): void { return; }\n@lang(try)\nexport enum Option<T> {\n  SOME(T),\n  NONE,\n}\n";
 
   let formatted = format_text(source, &FormatOptions::default())
     .expect("multiple attribute declarations should format without reordering");
 
   let first_pos = formatted.find("first").expect("first should appear");
   let second_pos = formatted.find("Option").expect("Option should appear");
-  assert!(
-    first_pos < second_pos,
-    "declarations must stay in original order"
-  );
+  assert!(first_pos < second_pos, "declarations must stay in original order");
 }

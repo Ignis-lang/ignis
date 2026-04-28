@@ -164,10 +164,7 @@ fn formats_pipe_expressions_with_correct_operator_spacing() {
   )
   .expect("pipe expressions should format successfully");
 
-  assert_eq!(
-    formatted,
-    "function main(): i32 {\n  return value |> transform;\n}\n"
-  );
+  assert_eq!(formatted, "function main(): i32 {\n  return value |> transform;\n}\n");
 }
 
 // Phase 2: Task 2.1 — Top-level declaration snapshots
@@ -207,22 +204,16 @@ fn formats_function_with_attributes_and_generic_params() {
 
 #[test]
 fn formats_function_with_empty_body() {
-  let formatted = format_text(
-    "function   noop( ) : void  {}\n",
-    &FormatOptions::default(),
-  )
-  .expect("function with empty body should format successfully");
+  let formatted = format_text("function   noop( ) : void  {}\n", &FormatOptions::default())
+    .expect("function with empty body should format successfully");
 
   assert_snapshot!("formats_function_with_empty_body", formatted);
 }
 
 #[test]
 fn formats_export_type_alias_with_generics() {
-  let formatted = format_text(
-    "export  type   Pair<T>  =  Result<T,T>;\n",
-    &FormatOptions::default(),
-  )
-  .expect("export type alias with generics should format successfully");
+  let formatted = format_text("export  type   Pair<T>  =  Result<T,T>;\n", &FormatOptions::default())
+    .expect("export type alias with generics should format successfully");
 
   assert_snapshot!("formats_export_type_alias_with_generics", formatted);
 }
@@ -281,16 +272,10 @@ fn removes_trailing_comma_when_signature_collapses_inline() {
 
 #[test]
 fn formats_import_with_single_item_and_whitespace_cleanup() {
-  let formatted = format_text(
-    "import   OnlyItem   from  \"std::single\";\n",
-    &FormatOptions::default(),
-  )
-  .expect("single-item import should clean up whitespace");
+  let formatted = format_text("import   OnlyItem   from  \"std::single\";\n", &FormatOptions::default())
+    .expect("single-item import should clean up whitespace");
 
-  assert_eq!(
-    formatted,
-    "import OnlyItem from \"std::single\";\n"
-  );
+  assert_eq!(formatted, "import OnlyItem from \"std::single\";\n");
 }
 
 #[test]
@@ -306,22 +291,16 @@ fn formats_export_function_with_simple_signature() {
 
 #[test]
 fn formats_simple_type_alias_without_generics() {
-  let formatted = format_text(
-    "type   MyInt  =  i32;\n",
-    &FormatOptions::default(),
-  )
-  .expect("simple type alias should format cleanly");
+  let formatted =
+    format_text("type   MyInt  =  i32;\n", &FormatOptions::default()).expect("simple type alias should format cleanly");
 
   assert_eq!(formatted, "type MyInt = i32;\n");
 }
 
 #[test]
 fn formats_type_alias_with_complex_target_type() {
-  let formatted = format_text(
-    "type   Callback  =  ( i32 ,  str )  ->  void;\n",
-    &FormatOptions::default(),
-  )
-  .expect("type alias with callable target should format correctly");
+  let formatted = format_text("type   Callback  =  ( i32 ,  str )  ->  void;\n", &FormatOptions::default())
+    .expect("type alias with callable target should format correctly");
 
   assert_eq!(formatted, "type Callback = (i32, str) -> void;\n");
 }
@@ -374,11 +353,8 @@ fn formats_lambda_with_block_body() {
 
 #[test]
 fn formats_cast_expressions() {
-  let formatted = format_text(
-    "function casts(x: i64): i32 { return x as i32; }\n",
-    &FormatOptions::default(),
-  )
-  .expect("cast expressions should format");
+  let formatted = format_text("function casts(x: i64): i32 { return x as i32; }\n", &FormatOptions::default())
+    .expect("cast expressions should format");
 
   assert_snapshot!("formats_cast_expressions", formatted);
 }
@@ -426,10 +402,7 @@ fn formats_single_pipe_inline_when_it_fits() {
   )
   .expect("single pipe should format inline");
 
-  assert_eq!(
-    formatted,
-    "function main(): i32 {\n  return value |> transform;\n}\n"
-  );
+  assert_eq!(formatted, "function main(): i32 {\n  return value |> transform;\n}\n");
 }
 
 #[test]
@@ -465,8 +438,7 @@ fn formats_three_pipe_chain_multiline_with_indent() {
 #[test]
 fn preserves_single_blank_line_between_top_level_items() {
   let source = "function first(): void { return; }\n\nfunction second(): void { return; }\n";
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("blank line between items should format");
+  let formatted = format_text(source, &FormatOptions::default()).expect("blank line between items should format");
 
   assert_eq!(
     formatted,
@@ -477,8 +449,7 @@ fn preserves_single_blank_line_between_top_level_items() {
 #[test]
 fn collapses_multiple_blank_lines_to_single() {
   let source = "function first(): void { return; }\n\n\n\nfunction second(): void { return; }\n";
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("multiple blank lines should collapse");
+  let formatted = format_text(source, &FormatOptions::default()).expect("multiple blank lines should collapse");
 
   assert_eq!(
     formatted,
@@ -489,32 +460,24 @@ fn collapses_multiple_blank_lines_to_single() {
 #[test]
 fn does_not_insert_blank_lines_between_consecutive_constants_without_source_gap() {
   let source = "const A: i32 = 1;\nconst B: i32 = 2;\nconst C: i32 = 3;\n";
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("consecutive constants without gaps");
+  let formatted = format_text(source, &FormatOptions::default()).expect("consecutive constants without gaps");
 
-  assert_eq!(
-    formatted,
-    "const A: i32 = 1;\nconst B: i32 = 2;\nconst C: i32 = 3;\n"
-  );
+  assert_eq!(formatted, "const A: i32 = 1;\nconst B: i32 = 2;\nconst C: i32 = 3;\n");
 }
 
 #[test]
 fn preserves_existing_blank_line_between_constants() {
   let source = "const A: i32 = 1;\n\nconst B: i32 = 2;\n";
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("blank line between constants should be preserved");
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("blank line between constants should be preserved");
 
-  assert_eq!(
-    formatted,
-    "const A: i32 = 1;\n\nconst B: i32 = 2;\n"
-  );
+  assert_eq!(formatted, "const A: i32 = 1;\n\nconst B: i32 = 2;\n");
 }
 
 #[test]
 fn ensures_final_newline_in_formatted_output() {
   let source = "function main(): void { return; }";
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("output should have final newline");
+  let formatted = format_text(source, &FormatOptions::default()).expect("output should have final newline");
 
   assert!(formatted.ends_with('\n'), "formatted output must end with a newline");
 }
@@ -522,8 +485,7 @@ fn ensures_final_newline_in_formatted_output() {
 #[test]
 fn trims_trailing_whitespace_from_lines() {
   let source = "function main(): void { return; }   \n";
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("trailing whitespace should be trimmed");
+  let formatted = format_text(source, &FormatOptions::default()).expect("trailing whitespace should be trimmed");
 
   for line in formatted.lines() {
     assert_eq!(line, line.trim_end(), "line has trailing whitespace: {:?}", line);

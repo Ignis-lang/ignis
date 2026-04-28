@@ -262,8 +262,8 @@ fn formats_nested_record_initializer_values_inside_generic_record_initializers()
 fn formats_enum_with_mixed_variants_and_fields() {
   let source = "enum  Status  {  OK(i32),  ERR,  }\n";
 
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("enum with mixed variants should format successfully");
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("enum with mixed variants should format successfully");
 
   assert_snapshot!("formats_enum_with_mixed_variants_and_fields", formatted);
 }
@@ -272,28 +272,30 @@ fn formats_enum_with_mixed_variants_and_fields() {
 fn formats_trait_with_multiple_methods_and_blank_line_separation() {
   let source = "trait  Comparable  {  compare(&self, other: &Self): i32;  equals(&self, other: &Self): boolean; }\n";
 
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("trait with multiple methods should format with blank lines");
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("trait with multiple methods should format with blank lines");
 
   assert_snapshot!("formats_trait_with_multiple_methods_and_blank_line_separation", formatted);
 }
 
 #[test]
 fn formats_record_with_static_fields_and_methods() {
-  let source = "record  Counter  {  public  static  count: i32;  public  static  increment(): void { Counter::count += 1; }  }\n";
+  let source =
+    "record  Counter  {  public  static  count: i32;  public  static  increment(): void { Counter::count += 1; }  }\n";
 
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("record with static members should format successfully");
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("record with static members should format successfully");
 
   assert_snapshot!("formats_record_with_static_fields_and_methods", formatted);
 }
 
 #[test]
 fn formats_enum_with_fields_and_methods() {
-  let source = "enum  Color  {  RED,  GREEN,  BLUE,  public static fromName(name: str): Color { return Color::RED; } }\n";
+  let source =
+    "enum  Color  {  RED,  GREEN,  BLUE,  public static fromName(name: str): Color { return Color::RED; } }\n";
 
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("enum with fields and methods should format successfully");
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("enum with fields and methods should format successfully");
 
   assert_snapshot!("formats_enum_with_fields_and_methods", formatted);
 }
@@ -322,8 +324,8 @@ fn formats_generic_record_with_multiple_methods() {
 fn formats_trait_with_default_method_body() {
   let source = "trait  Describable  {  describe(&self): str;  defaultName(&self): str { return \"unknown\"; }  }\n";
 
-  let formatted = format_text(source, &FormatOptions::default())
-    .expect("trait with default method body should format successfully");
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("trait with default method body should format successfully");
 
   assert_snapshot!("formats_trait_with_default_method_body", formatted);
 }
