@@ -5790,8 +5790,10 @@ impl<'a> Analyzer<'a> {
           return self.types.error();
         };
 
+        let instance_methods = self.effective_instance_methods_for_definition(def_id, rd.instance_methods.clone());
+
         // Check instance methods
-        if let Some(entry) = rd.instance_methods.get(&ma.member) {
+        if let Some(entry) = instance_methods.get(&ma.member) {
           match entry {
             SymbolEntry::Single(method_id) => {
               self.set_import_item_def(&ma.member_span, method_id);
@@ -6001,8 +6003,14 @@ impl<'a> Analyzer<'a> {
       Type::Instance { generic, args } => {
         // Instance of a generic record or enum - look up method and substitute types
         let (instance_methods, fields) = match &self.defs.get(&generic).kind {
-          DefinitionKind::Record(rd) => (rd.instance_methods.clone(), Some(rd.fields.clone())),
-          DefinitionKind::Enum(ed) => (ed.instance_methods.clone(), None),
+          DefinitionKind::Record(rd) => (
+            self.effective_instance_methods_for_definition(generic, rd.instance_methods.clone()),
+            Some(rd.fields.clone()),
+          ),
+          DefinitionKind::Enum(ed) => (
+            self.effective_instance_methods_for_definition(generic, ed.instance_methods.clone()),
+            None,
+          ),
           _ => return self.types.error(),
         };
 
@@ -6253,7 +6261,9 @@ impl<'a> Analyzer<'a> {
           return self.types.error();
         };
 
-        if let Some(entry) = ed.instance_methods.get(&ma.member) {
+        let instance_methods = self.effective_instance_methods_for_definition(def_id, ed.instance_methods.clone());
+
+        if let Some(entry) = instance_methods.get(&ma.member) {
           match entry {
             SymbolEntry::Single(method_id) => {
               self.set_import_item_def(&ma.member_span, method_id);
@@ -10250,7 +10260,7 @@ impl<'a> Analyzer<'a> {
       .directive_registry
       .generated_attached_methods_for_owner(type_def_id)
     {
-      if is_static {
+      if is_static || !self.generated_instance_method_overlay_is_compatible(type_def_id, generated_method_def_id) {
         continue;
       }
 
@@ -10272,6 +10282,68 @@ impl<'a> Analyzer<'a> {
     }
 
     instance_methods
+  }
+
+  fn generated_instance_method_overlay_is_compatible(
+    &self,
+    attached_owner_def_id: DefinitionId,
+    generated_method_def_id: DefinitionId,
+  ) -> bool {
+    let DefinitionKind::Method(method) = &self.defs.get(&generated_method_def_id).kind else {
+      return false;
+    };
+
+    if method.is_static {
+      return false;
+    }
+
+    if method.owner_type == attached_owner_def_id {
+      return true;
+    }
+
+    let explicit_params = if method.params.is_empty() {
+      &[][..]
+    } else {
+      &method.params[1..]
+    };
+
+    if explicit_params.iter().any(|param_def_id| {
+      self.type_references_generated_method_owner(*self.defs.type_of(param_def_id), method.owner_type)
+    }) {
+      return false;
+    }
+
+    !self.type_references_generated_method_owner(method.return_type, method.owner_type)
+  }
+
+  fn type_references_generated_method_owner(
+    &self,
+    type_id: TypeId,
+    owner_def_id: DefinitionId,
+  ) -> bool {
+    match self.types.get(&type_id) {
+      Type::Param { owner, .. } => *owner == owner_def_id,
+      Type::Record(def_id) | Type::Enum(def_id) => *def_id == owner_def_id,
+      Type::Instance { generic, args } => {
+        *generic == owner_def_id
+          || args
+            .iter()
+            .any(|arg_type_id| self.type_references_generated_method_owner(*arg_type_id, owner_def_id))
+      },
+      Type::Pointer { inner, .. } | Type::Reference { inner, .. } | Type::Vector { element: inner, .. } => {
+        self.type_references_generated_method_owner(*inner, owner_def_id)
+      },
+      Type::Tuple(elements) => elements
+        .iter()
+        .any(|element_type_id| self.type_references_generated_method_owner(*element_type_id, owner_def_id)),
+      Type::Function { params, ret, .. } => {
+        params
+          .iter()
+          .any(|param_type_id| self.type_references_generated_method_owner(*param_type_id, owner_def_id))
+          || self.type_references_generated_method_owner(*ret, owner_def_id)
+      },
+      _ => false,
+    }
   }
 
   fn validate_builtin_eq_type(
@@ -12186,6 +12258,177 @@ record GeneratedDescribeRecord {
       .expect("generated record definition id");
 
     match &analyzer.defs.get(&generated_record_def_id).kind {
+      DefinitionKind::Record(record) => assert!(record.instance_methods.is_empty()),
+      other => panic!("expected record definition, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn generated_static_method_overlay_does_not_satisfy_instance_trait_requirements() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+trait DerivedDescribe {
+    describe(&self): i32;
+}
+
+record GeneratedDescribeMethod {
+    public static describe(): i32 {
+        return 7;
+    }
+}
+
+record GeneratedDescribeRecord {
+    public value: i32;
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: vec![("GeneratedDescribeRecord", "DerivedDescribe")],
+        attached_methods: vec![("GeneratedDescribeMethod", "describe", "GeneratedDescribeRecord", false)],
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.error_code == "A0140"),
+      "expected incompatible static overlay to be rejected before trait validation, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0141"),
+      "expected incompatible static overlay to be ignored instead of producing a signature mismatch, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_overlay_with_source_owner_type_params_is_not_visible_to_method_calls() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+record GeneratedDescribeMethod<T> {
+    public value: T;
+
+    describe(&self, incoming: T): i32 {
+        return 7;
+    }
+}
+
+record GeneratedDescribeRecord {
+    public value: i32;
+}
+
+function main(): i32 {
+    let user = GeneratedDescribeRecord { value: 7 };
+    return user.describe(7);
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: Vec::new(),
+        attached_methods: vec![("GeneratedDescribeMethod", "describe", "GeneratedDescribeRecord", false)],
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.error_code == "A0054"),
+      "expected overlay with source-owner type params to be rejected before method lookup, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_attached_method_overlay_is_visible_to_record_method_calls() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+record GeneratedDescribeMethod {
+    public value: i32;
+
+    describe(&self): i32 {
+        return self.value;
+    }
+}
+
+record GeneratedDescribeRecord {
+    public value: i32;
+}
+
+function main(): i32 {
+    let user = GeneratedDescribeRecord { value: 7 };
+    return user.describe();
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: Vec::new(),
+        attached_methods: vec![("GeneratedDescribeMethod", "describe", "GeneratedDescribeRecord", false)],
+      },
+    );
+
+    assert!(
+      analyzer.diagnostics.is_empty(),
+      "expected generated attached-method overlays to participate in record call lookup, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+
+    let generated_record_name = analyzer.symbols.borrow_mut().intern("GeneratedDescribeRecord");
+    let generated_record_def_id = analyzer
+      .defs
+      .iter()
+      .find_map(|(definition_id, definition)| (definition.name == generated_record_name).then_some(definition_id))
+      .expect("generated record definition id");
+
+    match &analyzer.defs.get(&generated_record_def_id).kind {
+      DefinitionKind::Record(record) => assert!(record.instance_methods.is_empty()),
+      other => panic!("expected record definition, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn generated_attached_method_overlay_is_visible_to_generic_instance_method_calls() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+record GeneratedDescribeMethod {
+    public value: i32;
+
+    describe(&self): i32 {
+        return self.value;
+    }
+}
+
+record GeneratedBox<T> {
+    public value: T;
+}
+
+function main(): i32 {
+    let userBox: GeneratedBox<i32> = GeneratedBox { value: 7 };
+    return userBox.describe();
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: Vec::new(),
+        attached_methods: vec![("GeneratedDescribeMethod", "describe", "GeneratedBox", false)],
+      },
+    );
+
+    assert!(
+      analyzer.diagnostics.is_empty(),
+      "expected generated attached-method overlays to participate in generic instance call lookup, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+
+    let generated_box_name = analyzer.symbols.borrow_mut().intern("GeneratedBox");
+    let generated_box_def_id = analyzer
+      .defs
+      .iter()
+      .find_map(|(definition_id, definition)| (definition.name == generated_box_name).then_some(definition_id))
+      .expect("generated box definition id");
+
+    match &analyzer.defs.get(&generated_box_def_id).kind {
       DefinitionKind::Record(record) => assert!(record.instance_methods.is_empty()),
       other => panic!("expected record definition, got {:?}", other),
     }
