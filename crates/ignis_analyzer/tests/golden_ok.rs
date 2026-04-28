@@ -316,6 +316,90 @@ function validateFunction(): void {
 }
 
 #[test]
+fn legacy_and_directive_function_attributes_stay_separated() {
+  let result = common::analyze(
+    r#"
+@test
+function smoke(): void {
+    return;
+}
+
+@directive(target: "function", phase: check, effect: diagnose)
+function validateFunction(): void {
+    return;
+}
+"#,
+  );
+
+  assert_eq!(
+    common::format_diagnostics(&result.output.diagnostics),
+    "(no diagnostics)",
+    "expected legacy and directive attributes to coexist without changing behavior"
+  );
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let smoke_name = symbols.intern("smoke");
+  let validate_name = symbols.intern("validateFunction");
+  drop(symbols);
+
+  let smoke_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == smoke_name).then_some(def))
+    .expect("smoke definition");
+
+  let validate_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == validate_name).then_some(def))
+    .expect("validateFunction definition");
+
+  let smoke_attrs = match &smoke_def.kind {
+    ignis_type::definition::DefinitionKind::Function(function) => &function.attrs,
+    other => panic!("expected smoke function definition, got {:?}", other),
+  };
+
+  assert!(
+    smoke_attrs
+      .iter()
+      .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test)),
+    "expected @test to stay on legacy function attributes"
+  );
+  assert!(
+    !smoke_attrs
+      .iter()
+      .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Directive(_))),
+    "expected legacy @test function to avoid directive metadata"
+  );
+
+  let validate_attrs = match &validate_def.kind {
+    ignis_type::definition::DefinitionKind::Function(function) => &function.attrs,
+    other => panic!("expected validateFunction definition, got {:?}", other),
+  };
+
+  assert!(
+    validate_attrs
+      .iter()
+      .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Directive(_))),
+    "expected @directive metadata to stay on directive-marked functions"
+  );
+  assert!(
+    !validate_attrs
+      .iter()
+      .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test)),
+    "expected directive-marked function to avoid legacy @test tagging"
+  );
+
+  assert_eq!(
+    result.output.directive_registry.defs.len(),
+    1,
+    "expected only the directive-marked function to be registered"
+  );
+}
+
+#[test]
 fn for_loop() {
   let result = common::analyze(
     r#"

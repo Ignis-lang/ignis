@@ -2072,146 +2072,192 @@ impl<'a> Analyzer<'a> {
     for attr in ast_attrs {
       let name = self.get_symbol_name(&attr.name);
 
-      match name.as_str() {
-        "test" => {
-          if !allow_test {
-            self.add_diagnostic(
-              DiagnosticMessage::UnknownAttribute {
-                name,
-                target: target.to_string(),
-                span: attr.span.clone(),
-              }
-              .report(),
-            );
-          } else if !attr.args.is_empty() {
-            self.add_diagnostic(
-              DiagnosticMessage::AttributeArgCount {
-                attr: name,
-                expected: 0,
-                got: attr.args.len(),
-                span: attr.span.clone(),
-              }
-              .report(),
-            );
-          } else {
-            attrs.push(FunctionAttr::Test);
-          }
-        },
-        "externName" => {
-          if attr.args.len() != 1 {
-            self.add_diagnostic(
-              DiagnosticMessage::AttributeArgCount {
-                attr: name,
-                expected: 1,
-                got: attr.args.len(),
-                span: attr.span.clone(),
-              }
-              .report(),
-            );
-          } else if let Some(s) = self.extract_string_arg(&name, &attr.args[0]) {
-            attrs.push(FunctionAttr::ExternName(s));
-          }
-        },
-        "cold" => {
-          if !attr.args.is_empty() {
-            self.add_diagnostic(
-              DiagnosticMessage::AttributeArgCount {
-                attr: name,
-                expected: 0,
-                got: attr.args.len(),
-                span: attr.span.clone(),
-              }
-              .report(),
-            );
-          } else {
-            attrs.push(FunctionAttr::Cold);
-          }
-        },
-        "deprecated" => {
-          if attr.args.len() > 1 {
-            self.add_diagnostic(
-              DiagnosticMessage::AttributeArgCount {
-                attr: name,
-                expected: 1,
-                got: attr.args.len(),
-                span: attr.span.clone(),
-              }
-              .report(),
-            );
-          } else if attr.args.is_empty() {
-            attrs.push(FunctionAttr::Deprecated(None));
-          } else if let Some(s) = self.extract_string_arg(&name, &attr.args[0]) {
-            attrs.push(FunctionAttr::Deprecated(Some(s)));
-          }
-        },
-        "extension" => {
-          if attr.args.is_empty() || attr.args.len() > 2 {
-            self.add_diagnostic(
-              DiagnosticMessage::AttributeArgCount {
-                attr: name,
-                expected: 1,
-                got: attr.args.len(),
-                span: attr.span.clone(),
-              }
-              .report(),
-            );
-          } else {
-            let type_name = match &attr.args[0] {
-              ignis_ast::attribute::ASTAttributeArg::StringLiteral(s, _) => Some(s.clone()),
-              ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _) => {
-                Some(self.symbols.borrow().get(sym).to_string())
-              },
-              ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
-                self.add_diagnostic(
-                  DiagnosticMessage::AttributeExpectedString {
-                    attr: name.to_string(),
-                    span: span.clone(),
-                  }
-                  .report(),
-                );
-                None
-              },
-            };
+      if name == "directive" {
+        if let Some(metadata) = self.bind_directive_function_attr(attr, target) {
+          attrs.push(FunctionAttr::Directive(metadata));
+        }
 
-            let mutable = attr.args.get(1).is_some_and(|arg| {
-              matches!(arg, ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _)
-                if self.symbols.borrow().get(sym) == "mut")
-            });
+        continue;
+      }
 
-            if let Some(type_name) = type_name {
-              attrs.push(FunctionAttr::Extension { type_name, mutable });
-            }
-          }
-        },
-        "directive" => {
-          if target != "function" {
-            self.add_diagnostic(
-              DiagnosticMessage::UnknownAttribute {
-                name,
-                target: target.to_string(),
-                span: attr.span.clone(),
-              }
-              .report(),
-            );
-          } else if let Some(metadata) = self.bind_directive_attr(attr) {
-            attrs.push(FunctionAttr::Directive(metadata));
-          }
-        },
-        name if ignis_type::at_items::is_lint_level_directive(name) => {},
-        _ => {
+      if ignis_type::at_items::is_lint_level_directive(&name) {
+        continue;
+      }
+
+      if let Some(attr) = self.bind_legacy_function_attr(attr, &name, target, allow_test) {
+        attrs.push(attr);
+      }
+    }
+
+    attrs
+  }
+
+  fn bind_legacy_function_attr(
+    &mut self,
+    attr: &ASTAttribute,
+    name: &str,
+    target: &str,
+    allow_test: bool,
+  ) -> Option<FunctionAttr> {
+    match name {
+      "test" => {
+        if !allow_test {
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
-              name,
+              name: name.to_string(),
               target: target.to_string(),
               span: attr.span.clone(),
             }
             .report(),
           );
-        },
-      }
+          return None;
+        }
+
+        if !attr.args.is_empty() {
+          self.add_diagnostic(
+            DiagnosticMessage::AttributeArgCount {
+              attr: name.to_string(),
+              expected: 0,
+              got: attr.args.len(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+          return None;
+        }
+
+        Some(FunctionAttr::Test)
+      },
+      "externName" => {
+        if attr.args.len() != 1 {
+          self.add_diagnostic(
+            DiagnosticMessage::AttributeArgCount {
+              attr: name.to_string(),
+              expected: 1,
+              got: attr.args.len(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+          return None;
+        }
+
+        self
+          .extract_string_arg(name, &attr.args[0])
+          .map(FunctionAttr::ExternName)
+      },
+      "cold" => {
+        if !attr.args.is_empty() {
+          self.add_diagnostic(
+            DiagnosticMessage::AttributeArgCount {
+              attr: name.to_string(),
+              expected: 0,
+              got: attr.args.len(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+          return None;
+        }
+
+        Some(FunctionAttr::Cold)
+      },
+      "deprecated" => {
+        if attr.args.len() > 1 {
+          self.add_diagnostic(
+            DiagnosticMessage::AttributeArgCount {
+              attr: name.to_string(),
+              expected: 1,
+              got: attr.args.len(),
+              span: attr.span.clone(),
+            }
+            .report(),
+          );
+          return None;
+        }
+
+        if attr.args.is_empty() {
+          Some(FunctionAttr::Deprecated(None))
+        } else {
+          self
+            .extract_string_arg(name, &attr.args[0])
+            .map(|message| FunctionAttr::Deprecated(Some(message)))
+        }
+      },
+      "extension" => self.bind_extension_attr(attr, name),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownAttribute {
+            name: name.to_string(),
+            target: target.to_string(),
+            span: attr.span.clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn bind_extension_attr(
+    &mut self,
+    attr: &ASTAttribute,
+    attr_name: &str,
+  ) -> Option<FunctionAttr> {
+    if attr.args.is_empty() || attr.args.len() > 2 {
+      self.add_diagnostic(
+        DiagnosticMessage::AttributeArgCount {
+          attr: attr_name.to_string(),
+          expected: 1,
+          got: attr.args.len(),
+          span: attr.span.clone(),
+        }
+        .report(),
+      );
+      return None;
     }
 
-    attrs
+    let type_name = match &attr.args[0] {
+      ignis_ast::attribute::ASTAttributeArg::StringLiteral(s, _) => Some(s.clone()),
+      ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _) => Some(self.symbols.borrow().get(sym).to_string()),
+      ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
+        self.add_diagnostic(
+          DiagnosticMessage::AttributeExpectedString {
+            attr: attr_name.to_string(),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }?;
+
+    let mutable = attr.args.get(1).is_some_and(|arg| {
+      matches!(arg, ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _)
+        if self.symbols.borrow().get(sym) == "mut")
+    });
+
+    Some(FunctionAttr::Extension { type_name, mutable })
+  }
+
+  fn bind_directive_function_attr(
+    &mut self,
+    attr: &ASTAttribute,
+    target: &str,
+  ) -> Option<FunctionAttrDirectiveMetadata> {
+    if target != "function" {
+      self.add_diagnostic(
+        DiagnosticMessage::UnknownAttribute {
+          name: self.get_symbol_name(&attr.name),
+          target: target.to_string(),
+          span: attr.span.clone(),
+        }
+        .report(),
+      );
+      return None;
+    }
+
+    self.bind_directive_attr(attr)
   }
 
   fn bind_param_attrs(
