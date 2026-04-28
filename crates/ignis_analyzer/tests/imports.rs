@@ -1031,7 +1031,16 @@ mod std_imports {
       import Compile from "std::compile";
 
       @directive(target: "record", phase: expand, effect: emit)
-      function derive(context: Compile::Context, target: Compile::ItemRef): void {
+      function derive(
+        context: Compile::Context,
+        diagnostic: Compile::Diagnostic,
+        itemBuilder: Compile::ItemBuilder,
+        exprBuilder: Compile::ExprBuilder,
+        typeBuilder: Compile::TypeBuilder,
+        collector: Compile::Collector,
+        gensym: Compile::Gensym,
+        target: Compile::ItemRef,
+      ): void {
       }
 
       function main(): void {

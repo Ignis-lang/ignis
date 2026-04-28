@@ -65,6 +65,12 @@ import Compile from "std::compile";
 @directive(target: "record", phase: expand, effect: emit)
 function derive(
   context: Compile::Context,
+  diagnostic: Compile::Diagnostic,
+  itemBuilder: Compile::ItemBuilder,
+  exprBuilder: Compile::ExprBuilder,
+  typeBuilder: Compile::TypeBuilder,
+  collector: Compile::Collector,
+  gensym: Compile::Gensym,
   span: Compile::Span,
   symbol: Compile::Symbol,
   target: Compile::ItemRef,
