@@ -449,6 +449,111 @@ function validateFunction(): void {
 }
 
 #[test]
+fn directive_declarations_and_uses_coexist_with_implements_and_test() {
+  let result = common::analyze(
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+@directive(target: "record", phase: expand, effect: emit)
+function serializable(): void {
+    return;
+}
+
+@serializable
+record User {
+    public id: i32;
+}
+
+@implements(Greetable)
+record Person {
+    public age: i32;
+
+    greet(&self): i32 {
+        return self.age;
+    }
+}
+
+@test
+function smoke(): void {
+    let person: Person = Person { age: 7 };
+    let user: User = User { id: person.greet() };
+
+    if (user.id == 0) {
+        return;
+    }
+
+    return;
+}
+"#,
+  );
+
+  assert_eq!(
+    common::format_diagnostics(&result.output.diagnostics),
+    "(no diagnostics)",
+    "expected directive collection to coexist with @implements and @test"
+  );
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let serializable_name = symbols.intern("serializable");
+  let person_name = symbols.intern("Person");
+  let smoke_name = symbols.intern("smoke");
+  drop(symbols);
+
+  let registry = &result.output.directive_registry;
+  assert_eq!(registry.defs.len(), 1, "expected one directive declaration to be registered");
+  assert_eq!(registry.uses.len(), 1, "expected one directive use to be collected");
+
+  let directive_def = registry
+    .defs
+    .iter()
+    .find(|directive| directive.name == serializable_name)
+    .expect("serializable directive definition");
+
+  assert_eq!(directive_def.target, ignis_type::attribute::DirectiveTarget::Record);
+  assert_eq!(registry.uses[0].directive, directive_def.id);
+  assert_eq!(
+    registry.uses[0].provenance.origin_attr_span,
+    directive_def.provenance.origin_attr_span
+  );
+
+  let person_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == person_name).then_some(def))
+    .expect("Person definition");
+
+  match &person_def.kind {
+    ignis_type::definition::DefinitionKind::Record(record) => {
+      assert_eq!(record.implemented_traits.len(), 1, "expected @implements to stay bound");
+    },
+    other => panic!("expected Person record definition, got {:?}", other),
+  }
+
+  let smoke_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == smoke_name).then_some(def))
+    .expect("smoke definition");
+
+  match &smoke_def.kind {
+    ignis_type::definition::DefinitionKind::Function(function) => {
+      assert!(
+        function
+          .attrs
+          .iter()
+          .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test)),
+        "expected @test to stay bound on the legacy function"
+      );
+    },
+    other => panic!("expected smoke function definition, got {:?}", other),
+  }
+}
+
+#[test]
 fn for_loop() {
   let result = common::analyze(
     r#"
