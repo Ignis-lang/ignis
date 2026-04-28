@@ -6,12 +6,51 @@ pub enum RecordAttr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DirectiveTarget {
+  Record,
+  Enum,
+  Function,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DirectivePhase {
+  Check,
+  Expand,
+  Collect,
+  Finalize,
+  Transform,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DirectiveEffect {
+  Diagnose,
+  Emit,
+  Collect,
+  Transform,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DirectiveCapability {
+  Diagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DirectiveMetadata {
+  pub target: DirectiveTarget,
+  pub phase: DirectivePhase,
+  pub effect: DirectiveEffect,
+  pub group: Option<String>,
+  pub capabilities: Vec<DirectiveCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FunctionAttr {
   Test,
   ExternName(String),
   Cold,
   Deprecated(Option<String>),
   Extension { type_name: String, mutable: bool },
+  Directive(DirectiveMetadata),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

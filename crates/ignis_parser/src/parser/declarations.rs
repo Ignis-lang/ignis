@@ -2271,6 +2271,48 @@ mod tests {
   }
 
   #[test]
+  fn keeps_positional_and_named_attribute_args_separate() {
+    let result = parse("@serde::serializable(1, renameAll: snake_case, mut) record User {}");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(rec.attrs.len(), 1);
+
+        let attr = &rec.attrs[0];
+        assert_eq!(attr_path_names(&result, attr), vec!["serde", "serializable"]);
+        assert_eq!(attr.args.len(), 2);
+        assert_eq!(attr.named_args.len(), 1);
+
+        match &attr.args[0] {
+          ignis_ast::attribute::ASTAttributeArg::IntLiteral(value, _) => {
+            assert_eq!(*value, 1);
+          },
+          other => panic!("expected int positional arg, got {:?}", other),
+        }
+
+        match &attr.args[1] {
+          ignis_ast::attribute::ASTAttributeArg::Identifier(value, _) => {
+            assert_eq!(symbol_name(&result, value), "mut");
+          },
+          other => panic!("expected identifier positional arg, got {:?}", other),
+        }
+
+        let named_arg = &attr.named_args[0];
+        assert_eq!(symbol_name(&result, &named_arg.name), "renameAll");
+
+        match &named_arg.value {
+          ignis_ast::attribute::ASTAttributeArg::Identifier(value, _) => {
+            assert_eq!(symbol_name(&result, value), "snake_case");
+          },
+          other => panic!("expected identifier named arg, got {:?}", other),
+        }
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
   fn parse_time_if_directive_still_selects_enabled_branch() {
     let result = parse("@if(@debug()) { function enabled(): void {} } @else { function disabled(): void {} }");
 

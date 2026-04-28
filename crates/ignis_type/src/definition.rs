@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use crate::{
   Id, Store,
-  attribute::{FieldAttr, FunctionAttr, NamespaceAttr, ParamAttr, RecordAttr},
+  attribute::{
+    DirectiveCapability, DirectiveEffect, DirectivePhase, DirectiveTarget, FieldAttr, FunctionAttr, NamespaceAttr,
+    ParamAttr, RecordAttr,
+  },
   module::ModuleId,
   namespace::NamespaceId,
   span::Span,
@@ -51,6 +54,7 @@ pub struct TryCapability {
 }
 
 pub type DefinitionId = Id<Definition>;
+pub type DirectiveDefId = Id<DirectiveDefinition>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SymbolEntry {
@@ -130,6 +134,24 @@ pub struct FunctionDefinition {
   pub is_variadic: bool,
   pub inline_mode: InlineMode,
   pub attrs: Vec<FunctionAttr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DirectiveProvenance {
+  pub origin_attr_span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DirectiveDefinition {
+  pub id: DirectiveDefId,
+  pub function_def_id: DefinitionId,
+  pub name: SymbolId,
+  pub target: DirectiveTarget,
+  pub phase: DirectivePhase,
+  pub effect: DirectiveEffect,
+  pub group: Option<String>,
+  pub capabilities: Vec<DirectiveCapability>,
+  pub provenance: DirectiveProvenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

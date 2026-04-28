@@ -206,6 +206,116 @@ function smoke(): void {
 }
 
 #[test]
+fn directive_attribute_records_function_metadata() {
+  let result = common::analyze(
+    r#"
+@directive(target: "record", phase: expand, effect: emit, group: serde, capabilities: diagnostics)
+function deriveRecord(): void {
+    return;
+}
+"#,
+  );
+
+  assert_eq!(
+    common::format_diagnostics(&result.output.diagnostics),
+    "(no diagnostics)",
+    "expected a valid @directive declaration to analyze cleanly"
+  );
+
+  let derive_record_name = result.output.symbols.borrow_mut().intern("deriveRecord");
+  let directive_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == derive_record_name).then_some(def))
+    .expect("deriveRecord definition");
+
+  let directive_attr = match &directive_def.kind {
+    ignis_type::definition::DefinitionKind::Function(function) => function
+      .attrs
+      .iter()
+      .find_map(|attr| match attr {
+        ignis_type::attribute::FunctionAttr::Directive(metadata) => Some(metadata),
+        _ => None,
+      })
+      .expect("expected @directive metadata on the function definition"),
+    other => panic!("expected function definition, got {:?}", other),
+  };
+
+  assert_eq!(directive_attr.target, ignis_type::attribute::DirectiveTarget::Record);
+  assert_eq!(directive_attr.phase, ignis_type::attribute::DirectivePhase::Expand);
+  assert_eq!(directive_attr.effect, ignis_type::attribute::DirectiveEffect::Emit);
+  assert_eq!(directive_attr.group.as_deref(), Some("serde"));
+  assert_eq!(
+    directive_attr.capabilities,
+    vec![ignis_type::attribute::DirectiveCapability::Diagnostics],
+    "parser named values currently accept identifier|string|int only, so this test locks the scalar identifier form"
+  );
+}
+
+#[test]
+fn directive_registry_exposes_definition_metadata_and_provenance() {
+  let result = common::analyze(
+    r#"
+@directive(target: "record", phase: expand, effect: emit, group: serde, capabilities: diagnostics)
+function deriveRecord(): void {
+    return;
+}
+
+@directive(target: "function", phase: check, effect: diagnose)
+function validateFunction(): void {
+    return;
+}
+"#,
+  );
+
+  assert_eq!(
+    common::format_diagnostics(&result.output.diagnostics),
+    "(no diagnostics)",
+    "expected valid @directive declarations to analyze cleanly"
+  );
+
+  let symbols = result.output.symbols.borrow();
+  let registry = &result.output.directive_registry;
+
+  assert_eq!(registry.defs.len(), 2, "expected both directive definitions to be discoverable");
+  assert_eq!(
+    registry.uses.len(),
+    0,
+    "task 2.2 should not invent directive use resolution yet"
+  );
+
+  let derive_record = registry
+    .defs
+    .iter()
+    .find(|directive| symbols.get(&directive.name) == "deriveRecord")
+    .expect("deriveRecord directive registry entry");
+
+  assert_eq!(derive_record.target, ignis_type::attribute::DirectiveTarget::Record);
+  assert_eq!(derive_record.phase, ignis_type::attribute::DirectivePhase::Expand);
+  assert_eq!(derive_record.effect, ignis_type::attribute::DirectiveEffect::Emit);
+  assert_eq!(derive_record.group.as_deref(), Some("serde"));
+  assert!(
+    derive_record.provenance.origin_attr_span.is_valid() && !derive_record.provenance.origin_attr_span.is_empty(),
+    "expected directive provenance to preserve the originating attribute span"
+  );
+
+  let validate_function = registry
+    .defs
+    .iter()
+    .find(|directive| symbols.get(&directive.name) == "validateFunction")
+    .expect("validateFunction directive registry entry");
+
+  assert_eq!(validate_function.target, ignis_type::attribute::DirectiveTarget::Function);
+  assert_eq!(validate_function.phase, ignis_type::attribute::DirectivePhase::Check);
+  assert_eq!(validate_function.effect, ignis_type::attribute::DirectiveEffect::Diagnose);
+  assert_eq!(validate_function.group, None);
+
+  let serde_group = registry.groups.get("serde").expect("serde directive group entry");
+  assert_eq!(serde_group, &vec![derive_record.id]);
+}
+
+#[test]
 fn for_loop() {
   let result = common::analyze(
     r#"

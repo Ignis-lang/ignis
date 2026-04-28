@@ -644,6 +644,15 @@ pub enum DiagnosticMessage {
     attr: String,
     span: Span,
   },
+  UnknownDirectiveMetadata {
+    name: String,
+    span: Span,
+  },
+  InvalidDirectivePhaseEffect {
+    phase: String,
+    effect: String,
+    span: Span,
+  },
   // Lang trait diagnostics
   UnknownLangTrait {
     name: String,
@@ -1502,6 +1511,12 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::AttributeExpectedIdentifier { attr, .. } => {
         write!(f, "@{} expects an identifier argument", attr)
       },
+      DiagnosticMessage::UnknownDirectiveMetadata { name, .. } => {
+        write!(f, "unknown @directive metadata '{}'", name)
+      },
+      DiagnosticMessage::InvalidDirectivePhaseEffect { phase, effect, .. } => {
+        write!(f, "@directive phase '{}' cannot use effect '{}'", phase, effect)
+      },
       DiagnosticMessage::UnknownLangTrait { name, .. } => {
         write!(f, "unknown lang trait '{}' in @implements", name)
       },
@@ -1976,6 +1991,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::DeprecatedCall { span, .. }
       | DiagnosticMessage::UnknownLint { span, .. }
       | DiagnosticMessage::AttributeExpectedIdentifier { span, .. }
+      | DiagnosticMessage::UnknownDirectiveMetadata { span, .. }
+      | DiagnosticMessage::InvalidDirectivePhaseEffect { span, .. }
       | DiagnosticMessage::UnknownLangTrait { span, .. }
       | DiagnosticMessage::LangTraitDropCopyConflict { span, .. }
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
@@ -2197,6 +2214,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::DeprecatedCall { .. } => "A0124",
       DiagnosticMessage::UnknownLint { .. } => "A0125",
       DiagnosticMessage::AttributeExpectedIdentifier { .. } => "A0126",
+      DiagnosticMessage::UnknownDirectiveMetadata { .. } => "A0192",
+      DiagnosticMessage::InvalidDirectivePhaseEffect { .. } => "A0193",
       DiagnosticMessage::UnknownLangTrait { .. } => "A0130",
       DiagnosticMessage::LangTraitDropCopyConflict { .. } => "A0131",
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",

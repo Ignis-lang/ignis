@@ -22,12 +22,16 @@ use ignis_ast::{
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::symbol::SymbolId;
 use ignis_type::{
-  attribute::{FieldAttr, FunctionAttr, NamespaceAttr, ParamAttr, RecordAttr},
+  attribute::{
+    DirectiveCapability, DirectiveEffect, DirectiveMetadata as FunctionAttrDirectiveMetadata, DirectivePhase,
+    DirectiveTarget, FieldAttr, FunctionAttr, NamespaceAttr, ParamAttr, RecordAttr,
+  },
   definition::{
-    ConstantDefinition, Definition, DefinitionId, DefinitionKind, EnumDefinition, EnumVariantDef, FieldDefinition,
-    FunctionDefinition, LangTraitSet, MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition,
-    RecordFieldDef, SymbolEntry, TraitDefinition, TraitMethodEntry, TryCapability, TypeAliasDefinition,
-    TypeParamDefinition, VariableDefinition, VariantDefinition, Visibility,
+    ConstantDefinition, Definition, DefinitionId, DefinitionKind, DirectiveDefId, DirectiveDefinition,
+    DirectiveProvenance, EnumDefinition, EnumVariantDef, FieldDefinition, FunctionDefinition, LangTraitSet,
+    MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, SymbolEntry,
+    TraitDefinition, TraitMethodEntry, TryCapability, TypeAliasDefinition, TypeParamDefinition, VariableDefinition,
+    VariantDefinition, Visibility,
   },
 };
 
@@ -1135,6 +1139,8 @@ impl<'a> Analyzer<'a> {
       fd.type_params = type_param_defs;
     }
 
+    self.register_function_directives(def_id, func);
+
     let main_symbol = self.symbols.borrow_mut().intern("main");
     let is_main = func.signature.name == main_symbol;
 
@@ -2177,6 +2183,20 @@ impl<'a> Analyzer<'a> {
             }
           }
         },
+        "directive" => {
+          if target != "function" {
+            self.add_diagnostic(
+              DiagnosticMessage::UnknownAttribute {
+                name,
+                target: target.to_string(),
+                span: attr.span.clone(),
+              }
+              .report(),
+            );
+          } else if let Some(metadata) = self.bind_directive_attr(attr) {
+            attrs.push(FunctionAttr::Directive(metadata));
+          }
+        },
         name if ignis_type::at_items::is_lint_level_directive(name) => {},
         _ => {
           self.add_diagnostic(
@@ -2322,6 +2342,289 @@ impl<'a> Analyzer<'a> {
         );
         None
       },
+    }
+  }
+
+  fn bind_directive_attr(
+    &mut self,
+    attr: &ASTAttribute,
+  ) -> Option<FunctionAttrDirectiveMetadata> {
+    if !attr.args.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::AttributeArgCount {
+          attr: "directive".to_string(),
+          expected: 0,
+          got: attr.args.len(),
+          span: attr.span.clone(),
+        }
+        .report(),
+      );
+      return None;
+    }
+
+    let mut target = None;
+    let mut phase = None;
+    let mut effect = None;
+    let mut group = None;
+    let mut capabilities = Vec::new();
+    let mut has_error = false;
+
+    for named_arg in &attr.named_args {
+      let key = self.get_symbol_name(&named_arg.name).clone();
+
+      match key.as_str() {
+        "target" => {
+          target = self.parse_directive_target(&named_arg.value);
+          has_error |= target.is_none();
+        },
+        "phase" => {
+          phase = self.parse_directive_phase(&named_arg.value);
+          has_error |= phase.is_none();
+        },
+        "effect" => {
+          effect = self.parse_directive_effect(&named_arg.value);
+          has_error |= effect.is_none();
+        },
+        "group" => {
+          group = self.extract_attr_name_value("directive", &named_arg.value);
+          has_error |= group.is_none();
+        },
+        "capabilities" => match self.parse_directive_capability(&named_arg.value) {
+          Some(capability) => capabilities.push(capability),
+          None => has_error = true,
+        },
+        _ => {
+          has_error = true;
+          self.add_diagnostic(
+            DiagnosticMessage::UnknownDirectiveMetadata {
+              name: key,
+              span: named_arg.span.clone(),
+            }
+            .report(),
+          );
+        },
+      }
+    }
+
+    let Some(target) = target else {
+      return None;
+    };
+    let Some(phase) = phase else {
+      return None;
+    };
+    let Some(effect) = effect else {
+      return None;
+    };
+
+    if matches!(phase, DirectivePhase::Check) && !matches!(effect, DirectiveEffect::Diagnose) {
+      has_error = true;
+      self.add_diagnostic(
+        DiagnosticMessage::InvalidDirectivePhaseEffect {
+          phase: self.directive_phase_name(&phase).to_string(),
+          effect: self.directive_effect_name(&effect).to_string(),
+          span: attr.span.clone(),
+        }
+        .report(),
+      );
+    }
+
+    if has_error {
+      return None;
+    }
+
+    Some(FunctionAttrDirectiveMetadata {
+      target,
+      phase,
+      effect,
+      group,
+      capabilities,
+    })
+  }
+
+  fn register_function_directives(
+    &mut self,
+    function_def_id: DefinitionId,
+    func: &ASTFunction,
+  ) {
+    let directive_attr_spans: Vec<_> = func
+      .signature
+      .attrs
+      .iter()
+      .filter(|attr| self.get_symbol_name(&attr.name) == "directive")
+      .map(|attr| attr.span.clone())
+      .collect();
+
+    let def = self.defs.get(&function_def_id);
+    let name = def.name;
+
+    let directive_attrs: Vec<_> = match &def.kind {
+      DefinitionKind::Function(function) => function
+        .attrs
+        .iter()
+        .filter_map(|attr| match attr {
+          FunctionAttr::Directive(metadata) => Some(metadata.clone()),
+          _ => None,
+        })
+        .collect(),
+      _ => return,
+    };
+
+    for (index, metadata) in directive_attrs.into_iter().enumerate() {
+      let origin_attr_span = directive_attr_spans
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| func.signature.span.clone());
+
+      self.directive_registry.register_definition(DirectiveDefinition {
+        id: DirectiveDefId::new(0),
+        function_def_id,
+        name,
+        target: metadata.target,
+        phase: metadata.phase,
+        effect: metadata.effect,
+        group: metadata.group,
+        capabilities: metadata.capabilities,
+        provenance: DirectiveProvenance { origin_attr_span },
+      });
+    }
+  }
+
+  fn parse_directive_target(
+    &mut self,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<DirectiveTarget> {
+    let value = self.extract_attr_name_value("directive", arg)?;
+
+    match value.as_str() {
+      "record" => Some(DirectiveTarget::Record),
+      "enum" => Some(DirectiveTarget::Enum),
+      "function" => Some(DirectiveTarget::Function),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownDirectiveMetadata {
+            name: format!("target={}", value),
+            span: arg.span().clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn parse_directive_phase(
+    &mut self,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<DirectivePhase> {
+    let value = self.extract_attr_name_value("directive", arg)?;
+
+    match value.as_str() {
+      "check" => Some(DirectivePhase::Check),
+      "expand" => Some(DirectivePhase::Expand),
+      "collect" => Some(DirectivePhase::Collect),
+      "finalize" => Some(DirectivePhase::Finalize),
+      "transform" => Some(DirectivePhase::Transform),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownDirectiveMetadata {
+            name: format!("phase={}", value),
+            span: arg.span().clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn parse_directive_effect(
+    &mut self,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<DirectiveEffect> {
+    let value = self.extract_attr_name_value("directive", arg)?;
+
+    match value.as_str() {
+      "diagnose" => Some(DirectiveEffect::Diagnose),
+      "emit" => Some(DirectiveEffect::Emit),
+      "collect" => Some(DirectiveEffect::Collect),
+      "transform" => Some(DirectiveEffect::Transform),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownDirectiveMetadata {
+            name: format!("effect={}", value),
+            span: arg.span().clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn parse_directive_capability(
+    &mut self,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<DirectiveCapability> {
+    let value = self.extract_attr_name_value("directive", arg)?;
+
+    match value.as_str() {
+      "diagnostics" => Some(DirectiveCapability::Diagnostics),
+      _ => {
+        self.add_diagnostic(
+          DiagnosticMessage::UnknownDirectiveMetadata {
+            name: format!("capabilities={}", value),
+            span: arg.span().clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn extract_attr_name_value(
+    &mut self,
+    attr_name: &str,
+    arg: &ignis_ast::attribute::ASTAttributeArg,
+  ) -> Option<String> {
+    match arg {
+      ignis_ast::attribute::ASTAttributeArg::Identifier(sym, _) => Some(self.get_symbol_name(sym).clone()),
+      ignis_ast::attribute::ASTAttributeArg::StringLiteral(value, _) => Some(value.clone()),
+      ignis_ast::attribute::ASTAttributeArg::IntLiteral(_, span) => {
+        self.add_diagnostic(
+          DiagnosticMessage::AttributeExpectedIdentifier {
+            attr: attr_name.to_string(),
+            span: span.clone(),
+          }
+          .report(),
+        );
+        None
+      },
+    }
+  }
+
+  fn directive_phase_name(
+    &self,
+    phase: &DirectivePhase,
+  ) -> &'static str {
+    match phase {
+      DirectivePhase::Check => "check",
+      DirectivePhase::Expand => "expand",
+      DirectivePhase::Collect => "collect",
+      DirectivePhase::Finalize => "finalize",
+      DirectivePhase::Transform => "transform",
+    }
+  }
+
+  fn directive_effect_name(
+    &self,
+    effect: &DirectiveEffect,
+  ) -> &'static str {
+    match effect {
+      DirectiveEffect::Diagnose => "diagnose",
+      DirectiveEffect::Emit => "emit",
+      DirectiveEffect::Collect => "collect",
+      DirectiveEffect::Transform => "transform",
     }
   }
 

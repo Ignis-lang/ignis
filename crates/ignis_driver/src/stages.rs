@@ -475,6 +475,7 @@ mod tests {
         import_item_defs: HashMap::new(),
         import_module_files: HashMap::new(),
         extension_methods: HashMap::new(),
+        directive_registry: ignis_analyzer::directive_registry::DirectiveRegistry::default(),
       },
       false,
     )
@@ -652,6 +653,7 @@ mod tests {
       import_item_defs: HashMap::new(),
       import_module_files: HashMap::new(),
       extension_methods: HashMap::new(),
+      directive_registry: ignis_analyzer::directive_registry::DirectiveRegistry::default(),
     };
 
     let result = AnalyzedStage::from_output(parsed_stage.ctx, parsed_stage.root_id, output, true);

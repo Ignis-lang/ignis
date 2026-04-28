@@ -3178,3 +3178,28 @@ function lintDenied(): void {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+#[test]
+fn directive_attribute_rejects_unknown_metadata_and_invalid_phase_effect_combo() {
+  let result = common::analyze(
+    r#"
+@directive(target: "record", phase: check, effect: emit, flavor: fast)
+function invalidDirective(): void {
+    return;
+}
+"#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("unknown @directive metadata 'flavor'"),
+    "expected unknown metadata diagnostic, got:\n{}",
+    diagnostics
+  );
+  assert!(
+    diagnostics.contains("@directive phase 'check' cannot use effect 'emit'"),
+    "expected invalid phase/effect diagnostic, got:\n{}",
+    diagnostics
+  );
+}

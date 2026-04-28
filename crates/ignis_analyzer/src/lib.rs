@@ -17,6 +17,7 @@ pub mod borrowck_hir;
 pub mod capture;
 mod checks;
 mod const_eval;
+pub mod directive_registry;
 pub mod dump;
 pub mod escape;
 pub mod imports;
@@ -49,6 +50,7 @@ use ignis_hir::{HIR, HIRId};
 use ignis_diagnostics::diagnostic_report::Diagnostic;
 
 use imports::ExportTable;
+use directive_registry::DirectiveRegistry;
 
 pub use ignis_hir::{DropSchedules, ExitKey};
 pub use borrowck_hir::HirBorrowChecker;
@@ -159,6 +161,7 @@ pub struct Analyzer<'a> {
   extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
   trait_default_bodies: HashMap<DefinitionId, NodeId>,
   trait_default_clones: HashMap<DefinitionId, NodeId>,
+  directive_registry: DirectiveRegistry,
 
   /// Lambda parameter definitions created by the resolver, keyed by lambda expression NodeId.
   /// The typechecker reuses these definitions (updating their types) instead of creating new ones.
@@ -224,6 +227,7 @@ pub struct AnalyzerOutput {
   /// Used by LSP to provide dot-completion for primitive types.
   pub extension_methods:
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
+  pub directive_registry: DirectiveRegistry,
 }
 
 pub struct SemanticArtifacts {
@@ -240,6 +244,7 @@ pub struct SemanticArtifacts {
   pub import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
   pub extension_methods:
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
+  pub directive_registry: DirectiveRegistry,
 }
 
 impl SemanticArtifacts {
@@ -272,6 +277,7 @@ impl AnalyzerOutput {
       import_item_defs: self.import_item_defs,
       import_module_files: self.import_module_files,
       extension_methods: self.extension_methods,
+      directive_registry: self.directive_registry,
     };
 
     (semantic, hir)
@@ -295,6 +301,7 @@ impl AnalyzerOutput {
       import_item_defs: semantic.import_item_defs,
       import_module_files: semantic.import_module_files,
       extension_methods: semantic.extension_methods,
+      directive_registry: semantic.directive_registry,
     }
   }
 
@@ -312,6 +319,7 @@ impl AnalyzerOutput {
       import_item_defs: self.import_item_defs.clone(),
       import_module_files: self.import_module_files.clone(),
       extension_methods: self.extension_methods.clone(),
+      directive_registry: self.directive_registry.clone(),
     }
     .collect_exports()
   }
@@ -357,6 +365,7 @@ impl<'a> Analyzer<'a> {
       extension_methods: HashMap::new(),
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
+      directive_registry: DirectiveRegistry::default(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
@@ -492,6 +501,7 @@ impl<'a> Analyzer<'a> {
       extension_methods: std::mem::take(shared_extension_methods),
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
+      directive_registry: DirectiveRegistry::default(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
@@ -932,6 +942,7 @@ mod tests {
       import_item_defs,
       import_module_files: HashMap::new(),
       extension_methods: HashMap::new(),
+      directive_registry: DirectiveRegistry::default(),
     }
   }
 
@@ -978,6 +989,7 @@ mod tests {
       import_item_defs: analyzer.import_item_defs,
       import_module_files: analyzer.import_module_files,
       extension_methods: analyzer.extension_methods,
+      directive_registry: analyzer.directive_registry,
     };
 
     (semantic, hir)

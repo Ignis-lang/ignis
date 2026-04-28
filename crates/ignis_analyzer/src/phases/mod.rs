@@ -70,6 +70,7 @@ pub(crate) fn build_semantic_artifacts(
     import_item_defs: analyzer.import_item_defs.clone(),
     import_module_files: analyzer.import_module_files.clone(),
     extension_methods: analyzer.extension_methods.clone(),
+    directive_registry: analyzer.directive_registry.clone(),
   }
 }
 
@@ -97,5 +98,6 @@ pub(crate) fn build_shared_semantic_artifacts(
     import_item_defs: analyzer.import_item_defs.clone(),
     import_module_files: analyzer.import_module_files.clone(),
     extension_methods: shared_extension_methods.clone(),
+    directive_registry: analyzer.directive_registry.clone(),
   }
 }
