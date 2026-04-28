@@ -646,7 +646,9 @@ fn ignis_fmt_stdin_json_formats_single_record() {
     response["changed"].as_bool().unwrap_or(false),
     "expected changed=true for dirty input\nresponse: {response}"
   );
-  let formatted = response["formatted"].as_str().expect("formatted field should be a string");
+  let formatted = response["formatted"]
+    .as_str()
+    .expect("formatted field should be a string");
   assert!(
     formatted.contains("function main(): void"),
     "expected formatted output to contain canonical layout\nformatted: {formatted}"
@@ -656,7 +658,10 @@ fn ignis_fmt_stdin_json_formats_single_record() {
 #[test]
 fn ignis_fmt_stdin_json_reports_unchanged() {
   let canonical = "function main(): void {\n  return;\n}\n";
-  let input = format!("{{\"path\":\"clean.ign\",\"text\":{}}}\n", serde_json::to_string(canonical).unwrap());
+  let input = format!(
+    "{{\"path\":\"clean.ign\",\"text\":{}}}\n",
+    serde_json::to_string(canonical).unwrap()
+  );
 
   let mut child = Command::new(env!("CARGO_BIN_EXE_ignis"))
     .arg("fmt")
@@ -857,7 +862,10 @@ fn ignis_fmt_stdin_json_reports_parse_error_for_invalid_record() {
 #[test]
 fn ignis_fmt_stdin_json_sort_imports_sorts_via_cli_flag() {
   let source = "import Io from \"std::io\";\nimport Fs from \"std::fs\";\n\nfunction main(): void { return; }\n";
-  let input = format!("{{\"path\":\"sort.ign\",\"text\":{}}}\n", serde_json::to_string(source).unwrap());
+  let input = format!(
+    "{{\"path\":\"sort.ign\",\"text\":{}}}\n",
+    serde_json::to_string(source).unwrap()
+  );
 
   let mut child = Command::new(env!("CARGO_BIN_EXE_ignis"))
     .arg("fmt")

@@ -554,6 +554,48 @@ export record HashMap<K: Hash & Eq, V> {
     }
   }
 
+  /// Returns the first occupied entry cursor in deterministic bucket order.
+  ///
+  /// Cursors are opaque bucket positions that remain valid until the map is
+  /// mutated. Callers can advance them with `nextEntryCursor` and read the
+  /// pointed entry via `entryKey` / `entryValue`.
+  public firstEntryCursor(&self): Option<u64> {
+    let mut index: u64 = 0;
+    while (index < self.capacity) {
+      if (self.states[index] == OCCUPIED_STATE) {
+        return Option::SOME(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Returns the next occupied entry cursor after `cursor`, if any.
+  public nextEntryCursor(&self, cursor: u64): Option<u64> {
+    let mut index: u64 = cursor + 1;
+    while (index < self.capacity) {
+      if (self.states[index] == OCCUPIED_STATE) {
+        return Option::SOME(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Returns the key for a cursor previously returned by the entry cursor API.
+  public entryKey(&self, cursor: u64): &K {
+    return (&self.keys[cursor]) as &K;
+  }
+
+  /// Returns the value for a cursor previously returned by the entry cursor API.
+  public entryValue(&self, cursor: u64): &V {
+    return (&self.values[cursor]) as &V;
+  }
+
   /// Drops all occupied entries but keeps the bucket allocation for reuse.
   ///
   /// # Example

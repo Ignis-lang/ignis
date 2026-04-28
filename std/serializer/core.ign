@@ -1,0 +1,187 @@
+//! # Serializer Core
+//!
+//! Format-agnostic serializer helpers shared by entrypoints.
+
+import _ from "std::serializer::error";
+
+export namespace Serializer {
+  record Writer {
+    public recordPrefix: str;
+    public recordSuffix: str;
+    public entrySeparator: str;
+    public fieldSeparator: str;
+    public supportsScalarRoot: boolean;
+    public quoteFieldKeys: boolean;
+  }
+
+  function beginRecord(
+    output: &mut String,
+    serializer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    let mut writer: &mut String = output;
+    writer.pushStr(serializer.recordPrefix);
+
+    return Result::OK(true);
+  }
+
+  function endRecord(
+    output: &mut String,
+    serializer: &Serializer::Writer
+  ): Result<boolean, Serializer::Error> {
+    let mut writer: &mut String = output;
+    writer.pushStr(serializer.recordSuffix);
+
+    return Result::OK(true);
+  }
+
+  function writeField(
+    output: &mut String,
+    key: str,
+    serializer: &Serializer::Writer,
+    first: boolean,
+  ): Result<boolean, Serializer::Error> {
+    let mut writer: &mut String = output;
+    let keyString: String = String::create(key);
+
+    if (first) {
+    } else {
+      writer.pushStr(serializer.entrySeparator);
+    }
+
+    if (serializer.quoteFieldKeys) {
+      Serializer::writeQuotedString(output, &keyString);
+      writer.pushStr(serializer.fieldSeparator);
+
+      return Result::OK(true);
+    }
+
+    if (Serializer::isValidBareKey(key)) {
+    } else {
+      return Result::ERROR(
+        Serializer::Error::invalidFieldKey("bare field keys only support ASCII letters, digits, '_' and '-' in std::serializer v1"),
+      );
+    }
+
+    writer.pushStr(key);
+    writer.pushStr(serializer.fieldSeparator);
+
+    return Result::OK(true);
+  }
+
+  function writeQuotedChar(output: &mut String, value: char): void {
+    let mut writer: &mut String = output;
+
+    writer.pushChar('"');
+    Serializer::writeEscapedByte(writer, value as u8);
+    writer.pushChar('"');
+  }
+
+  function writeQuotedString(output: &mut String, value: &String): void {
+    let mut writer: &mut String = output;
+
+    writer.pushChar('"');
+
+    value.forEachByte((byte: u8): void -> {
+      Serializer::writeEscapedByte(writer, byte);
+    });
+
+    writer.pushChar('"');
+  }
+
+  function writeEscapedByte(output: &mut String, byte: u8): void {
+    let mut writer: &mut String = output;
+
+    if (byte == ('"' as u8)) {
+      writer.pushStr("\\\"");
+      return;
+    }
+
+    if (byte == ('\\' as u8)) {
+      writer.pushStr("\\\\");
+      return;
+    }
+
+    if (byte == ('\n' as u8)) {
+      writer.pushStr("\\n");
+      return;
+    }
+
+    if (byte == ('\r' as u8)) {
+      writer.pushStr("\\r");
+      return;
+    }
+
+    if (byte == ('\t' as u8)) {
+      writer.pushStr("\\t");
+      return;
+    }
+
+    if (byte < 32) {
+      writer.pushStr("\\u00");
+      writer.pushChar(Serializer::hexDigit((byte >> 4) & 15));
+      writer.pushChar(Serializer::hexDigit(byte & 15));
+      return;
+    }
+
+    writer.pushChar(byte as char);
+  }
+
+  function hexDigit(value: u8): char {
+    if (value < 10) {
+      return (48 + value) as char;
+    }
+
+    return (55 + value) as char;
+  }
+
+  function isValidBareKey(key: str): boolean {
+    let owned: String = String::create(key);
+    let bytes: Vector<u8> = owned.toBytes();
+
+    if (bytes.length() == 0) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+    while (index < bytes.length()) {
+      let byte: u8 = match (bytes.get(index)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> {
+          return false;
+        },
+      };
+
+      if (Serializer::isBareKeyByte(byte)) {
+      } else {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  function isBareKeyByte(byte: u8): boolean {
+    if (byte >= ('a' as u8) && byte <= ('z' as u8)) {
+      return true;
+    }
+
+    if (byte >= ('A' as u8) && byte <= ('Z' as u8)) {
+      return true;
+    }
+
+    if (byte >= ('0' as u8) && byte <= ('9' as u8)) {
+      return true;
+    }
+
+    return byte == ('_' as u8) || byte == ('-' as u8);
+  }
+
+  function writeScalarText(output: &mut String, text: &String): Result<boolean, Serializer::Error> {
+    let mut writer: &mut String = output;
+    writer.push(text);
+
+    return Result::OK(true);
+  }
+}
