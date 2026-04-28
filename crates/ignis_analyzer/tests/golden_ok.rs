@@ -651,12 +651,15 @@ record User {
 
   assert_eq!(registry.generated_item_metadata(&describe_def_id), Some(&generated_metadata));
   assert_eq!(
-    registry.generated_attached_methods_for_owner(user_def_id),
-    vec![(describe_def_id, registry.uses[0].generated_provenance(3), false)]
+    registry.generated_attached_method_items_for_owner(user_def_id),
+    vec![ignis_analyzer::directive_registry::GeneratedSemanticItem {
+      definition: describe_def_id,
+      metadata: generated_metadata.clone(),
+    }]
   );
   assert!(
     registry
-      .generated_attached_methods_for_owner(describe_def_id)
+      .generated_attached_method_items_for_owner(describe_def_id)
       .is_empty()
   );
 }
@@ -712,12 +715,15 @@ record User {
 
   assert_eq!(registry.generated_item_metadata(&user_def_id), Some(&generated_metadata));
   assert_eq!(
-    registry.generated_implemented_traits_for_owner(user_def_id),
-    vec![(eq_like_def_id, registry.uses[0].generated_provenance(7))]
+    registry.generated_implemented_trait_items_for_owner(user_def_id),
+    vec![ignis_analyzer::directive_registry::GeneratedSemanticItem {
+      definition: user_def_id,
+      metadata: generated_metadata.clone(),
+    }]
   );
   assert!(
     registry
-      .generated_implemented_traits_for_owner(eq_like_def_id)
+      .generated_implemented_trait_items_for_owner(eq_like_def_id)
       .is_empty()
   );
 

@@ -33,7 +33,13 @@ pub struct DirectiveRegistry {
   pub defs: Vec<DirectiveDefinition>,
   pub uses: Vec<DirectiveUse>,
   pub groups: HashMap<String, Vec<DirectiveDefId>>,
-  pub generated_items: HashMap<DefinitionId, GeneratedItemMetadata>,
+  pub generated_items: HashMap<DefinitionId, GeneratedSemanticItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GeneratedSemanticItem {
+  pub definition: DefinitionId,
+  pub metadata: GeneratedItemMetadata,
 }
 
 impl DirectiveRegistry {
@@ -67,54 +73,99 @@ impl DirectiveRegistry {
     definition: DefinitionId,
     metadata: GeneratedItemMetadata,
   ) {
-    self.generated_items.insert(definition, metadata);
+    self
+      .generated_items
+      .insert(definition, GeneratedSemanticItem { definition, metadata });
+  }
+
+  pub fn generated_semantic_item(
+    &self,
+    definition: &DefinitionId,
+  ) -> Option<&GeneratedSemanticItem> {
+    self.generated_items.get(definition)
   }
 
   pub fn generated_item_metadata(
     &self,
     definition: &DefinitionId,
   ) -> Option<&GeneratedItemMetadata> {
-    self.generated_items.get(definition)
+    self.generated_semantic_item(definition).map(|item| &item.metadata)
+  }
+
+  pub fn generated_attached_method_items_for_owner(
+    &self,
+    owner_type: DefinitionId,
+  ) -> Vec<GeneratedSemanticItem> {
+    let mut methods = self
+      .generated_items
+      .values()
+      .filter(|item| {
+        matches!(
+          item.metadata.kind,
+          GeneratedItemKind::AttachedMethod {
+            owner_type: metadata_owner,
+            ..
+          } if metadata_owner == owner_type
+        )
+      })
+      .cloned()
+      .collect::<Vec<_>>();
+
+    methods.sort_by_key(|item| item.definition.index());
+    methods
+  }
+
+  pub fn generated_implemented_trait_items_for_owner(
+    &self,
+    owner_type: DefinitionId,
+  ) -> Vec<GeneratedSemanticItem> {
+    let mut traits = self
+      .generated_items
+      .values()
+      .filter(|item| {
+        matches!(
+          item.metadata.kind,
+          GeneratedItemKind::ImplementedTrait {
+            owner_type: metadata_owner,
+            ..
+          } if metadata_owner == owner_type
+        )
+      })
+      .cloned()
+      .collect::<Vec<_>>();
+
+    traits.sort_by_key(|item| item.definition.index());
+    traits
   }
 
   pub fn generated_attached_methods_for_owner(
     &self,
     owner_type: DefinitionId,
   ) -> Vec<(DefinitionId, GeneratedProvenance, bool)> {
-    let mut methods = self
-      .generated_items
-      .iter()
-      .filter_map(|(definition, metadata)| match &metadata.kind {
-        GeneratedItemKind::AttachedMethod {
-          owner_type: metadata_owner,
-          is_static,
-        } if *metadata_owner == owner_type => Some((*definition, metadata.provenance.clone(), *is_static)),
+    self
+      .generated_attached_method_items_for_owner(owner_type)
+      .into_iter()
+      .filter_map(|item| match item.metadata.kind {
+        GeneratedItemKind::AttachedMethod { is_static, .. } => {
+          Some((item.definition, item.metadata.provenance, is_static))
+        },
         _ => None,
       })
-      .collect::<Vec<_>>();
-
-    methods.sort_by_key(|(definition, _, _)| definition.index());
-    methods
+      .collect()
   }
 
   pub fn generated_implemented_traits_for_owner(
     &self,
     owner_type: DefinitionId,
   ) -> Vec<(DefinitionId, GeneratedProvenance)> {
-    let mut traits = self
-      .generated_items
-      .values()
-      .filter_map(|metadata| match &metadata.kind {
-        GeneratedItemKind::ImplementedTrait {
-          owner_type: metadata_owner,
-          trait_def,
-        } if *metadata_owner == owner_type => Some((*trait_def, metadata.provenance.clone())),
+    self
+      .generated_implemented_trait_items_for_owner(owner_type)
+      .into_iter()
+      .filter_map(|item| match item.metadata.kind {
+        GeneratedItemKind::ImplementedTrait { trait_def, .. } => Some((trait_def, item.metadata.provenance)),
         _ => None,
       })
-      .collect::<Vec<_>>();
-
-    traits.sort_by_key(|(trait_def, _)| trait_def.index());
-    traits
+      .collect()
   }
 }
 
@@ -170,6 +221,13 @@ mod tests {
 
     registry.attach_generated_item(generated_definition, metadata.clone());
 
+    assert_eq!(
+      registry.generated_semantic_item(&generated_definition),
+      Some(&GeneratedSemanticItem {
+        definition: generated_definition,
+        metadata: metadata.clone(),
+      })
+    );
     assert_eq!(registry.generated_item_metadata(&generated_definition), Some(&metadata));
   }
 }
