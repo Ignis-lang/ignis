@@ -1083,6 +1083,7 @@ mod tests {
     source: String,
     nodes: Store<ASTNode>,
     roots: Vec<NodeId>,
+    symbols: Rc<RefCell<SymbolTable>>,
   }
 
   fn parse_expr(source: &str) -> ParseResult {
@@ -1101,6 +1102,16 @@ mod tests {
       source: program,
       nodes,
       roots,
+      symbols,
+    }
+  }
+
+  impl ParseResult {
+    fn symbol_name(
+      &self,
+      id: &ignis_type::symbol::SymbolId,
+    ) -> String {
+      self.symbols.borrow().get(id).to_string()
     }
   }
 
@@ -1312,6 +1323,36 @@ mod tests {
     match expr {
       ASTExpression::Binary(bin) => assert_eq!(bin.operator, ASTBinaryOperator::Divide),
       other => panic!("expected binary, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_builtin_sizeof_call_unchanged() {
+    let result = parse_expr("@sizeOf<i32>()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::BuiltinCall(call) => {
+        assert_eq!(result.symbol_name(&call.name), "sizeOf");
+        assert_eq!(call.type_args.as_ref().map(Vec::len), Some(1));
+        assert!(call.args.is_empty());
+      },
+      other => panic!("expected builtin call, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_builtin_panic_call_unchanged() {
+    let result = parse_expr("@panic(\"x\")");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::BuiltinCall(call) => {
+        assert_eq!(result.symbol_name(&call.name), "panic");
+        assert!(call.type_args.is_none());
+        assert_eq!(call.args.len(), 1);
+      },
+      other => panic!("expected builtin call, got {:?}", other),
     }
   }
 

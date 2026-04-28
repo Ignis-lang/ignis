@@ -1,6 +1,6 @@
 use ignis_ast::{
   NodeId,
-  attribute::{ASTAttribute, ASTAttributeArg},
+  attribute::{ASTAttribute, ASTAttributeArg, ASTNamedAttributeArg},
   generics::{ASTGenericBound, ASTGenericParam, ASTGenericParams},
   metadata::ASTMetadata,
   statements::{
@@ -625,31 +625,8 @@ impl super::IgnisParser {
   /// Collects zero or more `@name` or `@name(args)` into `self.pending_attrs`.
   pub(crate) fn parse_attributes_to_pending(&mut self) -> ParserResult<()> {
     while self.at(TokenType::At) {
-      let at_token = self.expect(TokenType::At)?.clone();
-      let name_token = self.expect(TokenType::Identifier)?.clone();
-      let name = self.insert_symbol(&name_token);
-
-      let mut args = Vec::new();
-
-      let end_span = if self.eat(TokenType::LeftParen) {
-        if !self.at(TokenType::RightParen) {
-          args.push(self.parse_attribute_arg()?);
-
-          while self.eat(TokenType::Comma) {
-            if self.at(TokenType::RightParen) {
-              break;
-            }
-            args.push(self.parse_attribute_arg()?);
-          }
-        }
-
-        self.expect(TokenType::RightParen)?.span.clone()
-      } else {
-        name_token.span.clone()
-      };
-
-      let span = Span::merge(&at_token.span, &end_span);
-      self.pending_attrs.push(ASTAttribute { name, args, span });
+      let attr = self.parse_attribute()?;
+      self.pending_attrs.push(attr);
     }
 
     Ok(())
@@ -660,34 +637,70 @@ impl super::IgnisParser {
     let mut attrs = Vec::new();
 
     while self.at(TokenType::At) {
-      let at_token = self.expect(TokenType::At)?.clone();
-      let name_token = self.expect(TokenType::Identifier)?.clone();
-      let name = self.insert_symbol(&name_token);
-
-      let mut args = Vec::new();
-
-      let end_span = if self.eat(TokenType::LeftParen) {
-        if !self.at(TokenType::RightParen) {
-          args.push(self.parse_attribute_arg()?);
-
-          while self.eat(TokenType::Comma) {
-            if self.at(TokenType::RightParen) {
-              break;
-            }
-            args.push(self.parse_attribute_arg()?);
-          }
-        }
-
-        self.expect(TokenType::RightParen)?.span.clone()
-      } else {
-        name_token.span.clone()
-      };
-
-      let span = Span::merge(&at_token.span, &end_span);
-      attrs.push(ASTAttribute { name, args, span });
+      attrs.push(self.parse_attribute()?);
     }
 
     Ok(attrs)
+  }
+
+  fn parse_attribute(&mut self) -> ParserResult<ASTAttribute> {
+    let at_token = self.expect(TokenType::At)?.clone();
+    let (path, path_span) = self.parse_qualified_identifier()?;
+    let name = path.last().copied().ok_or_else(|| DiagnosticMessage::UnexpectedToken {
+      at: at_token.span.clone(),
+    })?;
+
+    let mut args = Vec::new();
+    let mut named_args = Vec::new();
+
+    let end_span = if self.eat(TokenType::LeftParen) {
+      if !self.at(TokenType::RightParen) {
+        self.parse_attribute_argument_item(&mut args, &mut named_args)?;
+
+        while self.eat(TokenType::Comma) {
+          if self.at(TokenType::RightParen) {
+            break;
+          }
+
+          self.parse_attribute_argument_item(&mut args, &mut named_args)?;
+        }
+      }
+
+      self.expect(TokenType::RightParen)?.span.clone()
+    } else {
+      path_span.clone()
+    };
+
+    let span = Span::merge(&at_token.span, &end_span);
+
+    Ok(ASTAttribute {
+      name,
+      path,
+      args,
+      named_args,
+      span,
+    })
+  }
+
+  fn parse_attribute_argument_item(
+    &mut self,
+    args: &mut Vec<ASTAttributeArg>,
+    named_args: &mut Vec<ASTNamedAttributeArg>,
+  ) -> ParserResult<()> {
+    if self.at(TokenType::Identifier) && self.peek_nth(1).type_ == TokenType::Colon {
+      let name_token = self.expect(TokenType::Identifier)?.clone();
+      let name = self.insert_symbol(&name_token);
+      self.expect(TokenType::Colon)?;
+
+      let value = self.parse_attribute_arg()?;
+      let span = Span::merge(&name_token.span, value.span());
+
+      named_args.push(ASTNamedAttributeArg { name, value, span });
+      return Ok(());
+    }
+
+    args.push(self.parse_attribute_arg()?);
+    Ok(())
   }
 
   fn parse_attribute_arg(&mut self) -> ParserResult<ASTAttributeArg> {
@@ -1923,6 +1936,13 @@ mod tests {
     }
   }
 
+  fn attr_path_names(
+    result: &ParseResult,
+    attr: &ignis_ast::attribute::ASTAttribute,
+  ) -> Vec<String> {
+    attr.path.iter().map(|segment| symbol_name(result, segment)).collect()
+  }
+
   #[test]
   fn parses_import_single() {
     let result = parse("import foo from \"module\";");
@@ -2198,6 +2218,67 @@ mod tests {
     match stmt {
       ASTStatement::Function(func) => {
         assert_eq!(func.signature.parameters.len(), 1);
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_qualified_attribute_path_on_function() {
+    let result = parse("@serde::serializable function serialize(): void { }");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Function(func) => {
+        assert_eq!(func.signature.attrs.len(), 1);
+
+        let attr = &func.signature.attrs[0];
+        assert_eq!(symbol_name(&result, &attr.name), "serializable");
+        assert_eq!(attr_path_names(&result, attr), vec!["serde", "serializable"]);
+        assert!(attr.args.is_empty());
+        assert!(attr.named_args.is_empty());
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_named_attribute_args_on_qualified_path() {
+    let result = parse("@serde::serializable(renameAll: snake_case) record User {}");
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        assert_eq!(rec.attrs.len(), 1);
+
+        let attr = &rec.attrs[0];
+        assert_eq!(attr_path_names(&result, attr), vec!["serde", "serializable"]);
+        assert!(attr.args.is_empty());
+        assert_eq!(attr.named_args.len(), 1);
+
+        let named_arg = &attr.named_args[0];
+        assert_eq!(symbol_name(&result, &named_arg.name), "renameAll");
+
+        match &named_arg.value {
+          ignis_ast::attribute::ASTAttributeArg::Identifier(value, _) => {
+            assert_eq!(symbol_name(&result, value), "snake_case");
+          },
+          other => panic!("expected identifier named arg, got {:?}", other),
+        }
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parse_time_if_directive_still_selects_enabled_branch() {
+    let result = parse("@if(@debug()) { function enabled(): void {} } @else { function disabled(): void {} }");
+
+    assert_eq!(result.roots.len(), 1);
+
+    match first_root(&result) {
+      ASTStatement::Function(func) => {
+        assert_eq!(symbol_name(&result, &func.signature.name), "enabled");
       },
       other => panic!("expected function, got {:?}", other),
     }
