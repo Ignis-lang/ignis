@@ -152,6 +152,60 @@ function smoke(): void {
 }
 
 #[test]
+fn legacy_attributes_remain_compatible_after_attribute_ast_changes() {
+  let result = common::analyze(
+    r#"
+trait Greetable {
+    greet(&self): i32;
+}
+
+@implements(Greetable)
+record Person {
+    public age: i32;
+
+    greet(&self): i32 {
+        return self.age;
+    }
+}
+
+@allow(unused_variable)
+@test
+function smoke(): void {
+    let usedValue: i32 = Person { age: 3 }.greet();
+    let unusedValue: i32 = usedValue + 1;
+    return;
+}
+"#,
+  );
+
+  let smoke_name = result.output.symbols.borrow_mut().intern("smoke");
+  let test_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(_, def)| (def.name == smoke_name).then_some(def))
+    .expect("smoke definition");
+
+  let has_test_attr = match &test_def.kind {
+    ignis_type::definition::DefinitionKind::Function(function) => function
+      .attrs
+      .iter()
+      .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test)),
+    other => panic!("expected function definition, got {:?}", other),
+  };
+
+  assert!(has_test_attr, "expected @test to be recorded on the function definition");
+  assert_snapshot!(
+    "legacy_attributes_remain_compatible_after_attribute_ast_changes_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!(
+    "legacy_attributes_remain_compatible_after_attribute_ast_changes_hir",
+    common::format_hir(&result)
+  );
+}
+
+#[test]
 fn for_loop() {
   let result = common::analyze(
     r#"

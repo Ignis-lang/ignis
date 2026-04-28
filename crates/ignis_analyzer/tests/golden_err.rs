@@ -3160,3 +3160,21 @@ function invalid<T>(value: i32): i32 {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+#[test]
+fn lint_deny_attribute_still_promotes_unused_mut() {
+  let src = r#"
+@deny(unused_mut)
+function lintDenied(): void {
+    let mut value: i32 = 1;
+    let _sink: i32 = value;
+    return;
+}
+"#;
+
+  let result = common::analyze(src);
+  assert_snapshot!(
+    "lint_deny_attribute_still_promotes_unused_mut",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
