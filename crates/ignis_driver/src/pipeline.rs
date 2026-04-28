@@ -2655,6 +2655,14 @@ pub fn build_std(
     let module = ctx.module_graph.modules.get(module_id);
     let module_name = module.path.module_name();
 
+    if module
+      .path
+      .std_module_name()
+      .is_some_and(|std_name| config.manifest.is_compile_only(std_name))
+    {
+      continue;
+    }
+
     if processed_modules.contains(&module_name) {
       continue;
     }
@@ -2762,6 +2770,14 @@ pub fn build_std(
   for module_id in &all_module_ids {
     let module = ctx.module_graph.modules.get(module_id);
     let module_name = module.path.module_name();
+
+    if module
+      .path
+      .std_module_name()
+      .is_some_and(|std_name| config.manifest.is_compile_only(std_name))
+    {
+      continue;
+    }
 
     if processed_modules.contains(&module_name) {
       continue;
@@ -3033,6 +3049,14 @@ pub fn check_std(
   for module_id in &all_module_ids {
     let module = ctx.module_graph.modules.get(module_id);
     let module_name = module.path.module_name();
+
+    if module
+      .path
+      .std_module_name()
+      .is_some_and(|std_name| config.manifest.is_compile_only(std_name))
+    {
+      continue;
+    }
 
     if processed_modules.contains(&module_name) {
       continue;

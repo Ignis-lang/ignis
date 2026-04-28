@@ -1108,6 +1108,37 @@ mod std_imports {
   }
 
   #[test]
+  fn test_compile_std_module_is_manifested_as_compile_only() {
+    let std_path = get_std_path();
+    let manifest_path = std_path.join("manifest.toml");
+
+    if !manifest_path.exists() {
+      eprintln!("Skipping test: manifest.toml not found");
+      return;
+    }
+
+    let content = std::fs::read_to_string(&manifest_path).expect("Failed to read manifest");
+    let manifest: IgnisSTDManifest = toml::from_str(&content).expect("Failed to parse manifest");
+
+    assert_eq!(
+      manifest.get_module_path("compile").map(|path| path.as_str()),
+      Some("compile/mod.ign")
+    );
+    assert!(
+      manifest.is_compile_only("compile"),
+      "std::compile should be classified as compile-time-only"
+    );
+    assert!(
+      !manifest.is_auto_load("compile"),
+      "std::compile should remain opt-in and stay out of auto_load.modules"
+    );
+    assert!(
+      manifest.get_linking_info("compile").is_none(),
+      "std::compile should not expose runtime linking info"
+    );
+  }
+
+  #[test]
   fn test_prelude_loaded_for_std_non_prelude_module() {
     let std_path = get_std_path();
     let io_path = std_path.join("io/mod.ign");

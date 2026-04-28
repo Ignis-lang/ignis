@@ -116,6 +116,10 @@ impl LinkPlan {
 
         // Then add all module objects/libs
         for module_name in m.modules.keys() {
+          if m.is_compile_only(module_name) {
+            continue;
+          }
+
           if let Some(info) = m.get_linking_info(module_name) {
             if let Some(p) = get_linkable_path(info) {
               let link_path = std_path.join(p);
@@ -184,6 +188,10 @@ impl LinkPlan {
 
     // Add headers/objects/libs for all modules in manifest
     for module_name in manifest.modules.keys() {
+      if manifest.is_compile_only(module_name) {
+        continue;
+      }
+
       if let Some(info) = manifest.get_linking_info(module_name) {
         for header in get_headers(info) {
           // Dedupe by path
@@ -478,6 +486,7 @@ mod tests {
       modules,
       linking,
       auto_load: None,
+      compile_only: None,
     }
   }
 

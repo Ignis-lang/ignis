@@ -594,6 +594,7 @@ mod tests {
       modules,
       linking,
       auto_load: None,
+      compile_only: None,
     };
 
     let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest, HashMap::new());
@@ -619,6 +620,7 @@ mod tests {
       modules,
       linking: HashMap::new(),
       auto_load: None,
+      compile_only: None,
     };
 
     let graph = ModuleGraph::with_manifest(None, PathBuf::from("/usr/lib/ignis/std"), manifest, HashMap::new());
@@ -678,6 +680,7 @@ mod tests {
       modules: HashMap::new(),
       linking,
       auto_load: None,
+      compile_only: None,
     };
 
     let graph = ModuleGraph::with_manifest(None, PathBuf::from("/std"), manifest, HashMap::new());

@@ -50,6 +50,14 @@ pub struct StdAutoLoad {
   pub modules: Vec<String>,
 }
 
+/// Configuration for std modules that are available during analysis but must
+/// not become part of the runtime ABI surface.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StdCompileOnly {
+  /// List of compile-time-only module names (e.g., ["compile"])
+  pub modules: Vec<String>,
+}
+
 /// Manifest for the Ignis standard library
 ///
 /// Expected format in manifest.toml:
@@ -79,6 +87,9 @@ pub struct IgnisSTDManifest {
   /// Modules to auto-load
   #[serde(default)]
   pub auto_load: Option<StdAutoLoad>,
+  /// Modules that are compile-time-only and must stay out of runtime ABI/linking
+  #[serde(default)]
+  pub compile_only: Option<StdCompileOnly>,
 }
 
 impl IgnisSTDManifest {
@@ -125,6 +136,27 @@ impl IgnisSTDManifest {
       .as_ref()
       .map(|a| a.modules.contains(&name.to_string()))
       .unwrap_or(false)
+  }
+
+  /// Check if a module is compile-time-only.
+  pub fn is_compile_only(
+    &self,
+    name: &str,
+  ) -> bool {
+    self
+      .compile_only
+      .as_ref()
+      .map(|compile_only| compile_only.modules.contains(&name.to_string()))
+      .unwrap_or(false)
+  }
+
+  /// Get all compile-time-only module names.
+  pub fn get_compile_only_modules(&self) -> Vec<&str> {
+    self
+      .compile_only
+      .as_ref()
+      .map(|compile_only| compile_only.modules.iter().map(|s| s.as_str()).collect())
+      .unwrap_or_default()
   }
 
   /// Get all auto-load module names
