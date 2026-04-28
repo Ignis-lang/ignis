@@ -10211,11 +10211,31 @@ impl<'a> Analyzer<'a> {
     type_def_id: DefinitionId,
     trait_def_id: DefinitionId,
   ) -> bool {
-    match &self.defs.get(&type_def_id).kind {
-      DefinitionKind::Record(rd) => rd.implemented_traits.contains(&trait_def_id),
-      DefinitionKind::Enum(ed) => ed.implemented_traits.contains(&trait_def_id),
-      _ => false,
+    self
+      .effective_implemented_traits_for_definition(type_def_id)
+      .contains(&trait_def_id)
+  }
+
+  fn effective_implemented_traits_for_definition(
+    &self,
+    type_def_id: DefinitionId,
+  ) -> Vec<DefinitionId> {
+    let mut traits = match &self.defs.get(&type_def_id).kind {
+      DefinitionKind::Record(rd) => rd.implemented_traits.clone(),
+      DefinitionKind::Enum(ed) => ed.implemented_traits.clone(),
+      _ => return Vec::new(),
+    };
+
+    for (generated_trait_def_id, _) in self
+      .directive_registry
+      .generated_implemented_traits_for_owner(type_def_id)
+    {
+      if !traits.contains(&generated_trait_def_id) {
+        traits.push(generated_trait_def_id);
+      }
     }
+
+    traits
   }
 
   fn validate_builtin_eq_type(
@@ -11802,5 +11822,161 @@ impl<'a> Analyzer<'a> {
     self.scopes.pop();
 
     self.types.function(param_types, return_type, false)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::cell::RefCell;
+  use std::rc::Rc;
+
+  use ignis_parser::{IgnisLexer, IgnisParser};
+  use ignis_type::{
+    BytePosition,
+    definition::{DirectiveDefId, GeneratedItemMetadata, GeneratedProvenance},
+    file::{FileId, SourceMap},
+    module::ModuleId,
+    symbol::SymbolTable,
+  };
+
+  fn analyze_typecheck_only(
+    source: &str,
+    attach_generated_marker: bool,
+  ) -> Analyzer<'static> {
+    let mut source_map = SourceMap::new();
+    let file_id = source_map.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source_map.get(&file_id).text.as_str());
+    lexer.scan_tokens();
+    assert!(lexer.diagnostics.is_empty(), "lexer diagnostics: {:?}", lexer.diagnostics);
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    let ast = Box::leak(Box::new(nodes));
+    let mut analyzer = Analyzer::new(ast, symbols, ModuleId::new(0));
+
+    analyzer.bind_phase(&roots);
+    analyzer.resolve_phase(&roots);
+
+    if attach_generated_marker {
+      let marker_name = analyzer.symbols.borrow_mut().intern("Marker");
+      let generated_eq_record_name = analyzer.symbols.borrow_mut().intern("GeneratedEqRecord");
+
+      let marker_trait_def_id = analyzer
+        .defs
+        .iter()
+        .find_map(|(def_id, def)| (def.name == marker_name).then_some(def_id))
+        .expect("Marker definition id");
+      let generated_eq_record_def_id = analyzer
+        .defs
+        .iter()
+        .find_map(|(def_id, def)| (def.name == generated_eq_record_name).then_some(def_id))
+        .expect("GeneratedEqRecord definition id");
+
+      let generated_eq_metadata = GeneratedItemMetadata::implemented_trait(
+        GeneratedProvenance {
+          origin_attr_span: Span::new(FileId::SYNTHETIC, BytePosition(1), BytePosition(2)),
+          directive: DirectiveDefId::new(0),
+          generation_id: 1,
+        },
+        generated_eq_record_def_id,
+        marker_trait_def_id,
+      );
+
+      analyzer
+        .directive_registry
+        .attach_generated_item(generated_eq_record_def_id, generated_eq_metadata);
+    }
+
+    analyzer.typecheck_phase(&roots);
+    analyzer
+  }
+
+  #[test]
+  fn generated_trait_metadata_satisfies_generic_bounds() {
+    let analyzer = analyze_typecheck_only(
+      r#"
+trait Marker {
+}
+
+record Wrapper<T: Marker> {
+    public count: i32;
+
+    public static init(): Wrapper<T> {
+        return Wrapper { count: 0 };
+    }
+}
+
+record GeneratedEqRecord {
+    public value: i32;
+}
+
+@implements(Marker)
+record HandwrittenEqRecord {
+    public value: i32;
+}
+
+function generatedMain(): i32 {
+    let wrapper: Wrapper<GeneratedEqRecord> = Wrapper::init<GeneratedEqRecord>();
+    return wrapper.count;
+}
+
+function handwrittenMain(): i32 {
+    let wrapper: Wrapper<HandwrittenEqRecord> = Wrapper::init<HandwrittenEqRecord>();
+    return wrapper.count;
+}
+"#,
+      true,
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0190"),
+      "expected generated Marker metadata to satisfy generic bounds, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn handwritten_implements_still_satisfies_generic_bounds() {
+    let analyzer = analyze_typecheck_only(
+      r#"
+trait Marker {
+}
+
+record Wrapper<T: Marker> {
+    public count: i32;
+
+    public static init(): Wrapper<T> {
+        return Wrapper { count: 0 };
+    }
+}
+
+@implements(Marker)
+record HandwrittenEqRecord {
+    public value: i32;
+}
+
+function handwrittenMain(): i32 {
+    let wrapper: Wrapper<HandwrittenEqRecord> = Wrapper::init<HandwrittenEqRecord>();
+    return wrapper.count;
+}
+"#,
+      false,
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0190"),
+      "expected handwritten Marker implementation to remain valid, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
   }
 }
