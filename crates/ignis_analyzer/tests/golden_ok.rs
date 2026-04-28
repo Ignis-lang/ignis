@@ -650,6 +650,15 @@ record User {
   registry.attach_generated_item(describe_def_id, generated_metadata.clone());
 
   assert_eq!(registry.generated_item_metadata(&describe_def_id), Some(&generated_metadata));
+  assert_eq!(
+    registry.generated_attached_methods_for_owner(user_def_id),
+    vec![(describe_def_id, registry.uses[0].generated_provenance(3), false)]
+  );
+  assert!(
+    registry
+      .generated_attached_methods_for_owner(describe_def_id)
+      .is_empty()
+  );
 }
 
 #[test]
@@ -702,6 +711,15 @@ record User {
   registry.attach_generated_item(user_def_id, generated_metadata.clone());
 
   assert_eq!(registry.generated_item_metadata(&user_def_id), Some(&generated_metadata));
+  assert_eq!(
+    registry.generated_implemented_traits_for_owner(user_def_id),
+    vec![(eq_like_def_id, registry.uses[0].generated_provenance(7))]
+  );
+  assert!(
+    registry
+      .generated_implemented_traits_for_owner(eq_like_def_id)
+      .is_empty()
+  );
 
   let user_record = result.output.defs.get(&user_def_id);
   match &user_record.kind {
