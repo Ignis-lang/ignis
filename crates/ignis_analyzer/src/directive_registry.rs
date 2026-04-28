@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ignis_ast::NodeId;
-use ignis_type::definition::{DefinitionId, DirectiveDefId, DirectiveDefinition, DirectiveProvenance};
+use ignis_type::definition::{DefinitionId, DirectiveDefId, DirectiveDefinition, DirectiveProvenance, GeneratedProvenance};
 use ignis_type::span::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -10,6 +10,19 @@ pub struct DirectiveUse {
   pub directive: DirectiveDefId,
   pub span: Span,
   pub provenance: DirectiveProvenance,
+}
+
+impl DirectiveUse {
+  pub fn generated_provenance(
+    &self,
+    generation_id: u32,
+  ) -> GeneratedProvenance {
+    GeneratedProvenance {
+      origin_attr_span: self.provenance.origin_attr_span.clone(),
+      directive: self.directive,
+      generation_id,
+    }
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -43,5 +56,42 @@ impl DirectiveRegistry {
     self.defs.iter().enumerate().find_map(|(index, directive)| {
       (directive.function_def_id == function_def_id).then_some((DirectiveDefId::new(index as u32), directive))
     })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ignis_ast::NodeId;
+  use ignis_type::BytePosition;
+  use ignis_type::definition::GeneratedProvenance;
+  use ignis_type::file::FileId;
+
+  fn span(
+    start: u32,
+    end: u32,
+  ) -> Span {
+    Span::new(FileId::SYNTHETIC, BytePosition(start), BytePosition(end))
+  }
+
+  #[test]
+  fn directive_use_can_create_generated_provenance() {
+    let directive_use = DirectiveUse {
+      target_node: NodeId::new(4),
+      directive: DirectiveDefId::new(9),
+      span: span(30, 42),
+      provenance: DirectiveProvenance {
+        origin_attr_span: span(10, 22),
+      },
+    };
+
+    assert_eq!(
+      directive_use.generated_provenance(15),
+      GeneratedProvenance {
+        origin_attr_span: span(10, 22),
+        directive: DirectiveDefId::new(9),
+        generation_id: 15,
+      }
+    );
   }
 }

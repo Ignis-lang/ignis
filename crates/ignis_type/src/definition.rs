@@ -142,6 +142,55 @@ pub struct DirectiveProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GeneratedProvenance {
+  pub origin_attr_span: Span,
+  pub directive: DirectiveDefId,
+  pub generation_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GeneratedItemKind {
+  AttachedMethod {
+    owner_type: DefinitionId,
+    is_static: bool,
+  },
+  ImplementedTrait {
+    owner_type: DefinitionId,
+    trait_def: DefinitionId,
+  },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GeneratedItemMetadata {
+  pub provenance: GeneratedProvenance,
+  pub kind: GeneratedItemKind,
+}
+
+impl GeneratedItemMetadata {
+  pub fn attached_method(
+    provenance: GeneratedProvenance,
+    owner_type: DefinitionId,
+    is_static: bool,
+  ) -> Self {
+    Self {
+      provenance,
+      kind: GeneratedItemKind::AttachedMethod { owner_type, is_static },
+    }
+  }
+
+  pub fn implemented_trait(
+    provenance: GeneratedProvenance,
+    owner_type: DefinitionId,
+    trait_def: DefinitionId,
+  ) -> Self {
+    Self {
+      provenance,
+      kind: GeneratedItemKind::ImplementedTrait { owner_type, trait_def },
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DirectiveDefinition {
   pub id: DirectiveDefId,
   pub function_def_id: DefinitionId,
@@ -415,5 +464,60 @@ impl DefinitionStore {
       "can only update placeholder definitions"
     );
     def.kind = kind;
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::BytePosition;
+  use crate::file::FileId;
+
+  fn span(
+    start: u32,
+    end: u32,
+  ) -> Span {
+    Span::new(FileId::SYNTHETIC, BytePosition(start), BytePosition(end))
+  }
+
+  #[test]
+  fn generated_item_metadata_tracks_attached_method_origin() {
+    let provenance = GeneratedProvenance {
+      origin_attr_span: span(2, 9),
+      directive: DirectiveDefId::new(3),
+      generation_id: 11,
+    };
+
+    let metadata = GeneratedItemMetadata::attached_method(provenance.clone(), DefinitionId::new(7), true);
+
+    assert_eq!(metadata.provenance, provenance);
+    assert_eq!(
+      metadata.kind,
+      GeneratedItemKind::AttachedMethod {
+        owner_type: DefinitionId::new(7),
+        is_static: true,
+      }
+    );
+  }
+
+  #[test]
+  fn generated_item_metadata_tracks_implemented_trait_origin() {
+    let provenance = GeneratedProvenance {
+      origin_attr_span: span(12, 24),
+      directive: DirectiveDefId::new(5),
+      generation_id: 19,
+    };
+
+    let metadata =
+      GeneratedItemMetadata::implemented_trait(provenance.clone(), DefinitionId::new(13), DefinitionId::new(17));
+
+    assert_eq!(metadata.provenance, provenance);
+    assert_eq!(
+      metadata.kind,
+      GeneratedItemKind::ImplementedTrait {
+        owner_type: DefinitionId::new(13),
+        trait_def: DefinitionId::new(17),
+      }
+    );
   }
 }
