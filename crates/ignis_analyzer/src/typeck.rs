@@ -2049,12 +2049,15 @@ impl<'a> Analyzer<'a> {
     let type_def = self.defs.get(record_def_id);
     let type_name = self.get_symbol_name(&type_def.name);
 
-    let (implemented_traits, instance_methods) = match &type_def.kind {
-      DefinitionKind::Record(rd) => (rd.implemented_traits.clone(), rd.instance_methods.clone()),
+    let (record_has_declared_traits, handwritten_instance_methods) = match &type_def.kind {
+      DefinitionKind::Record(rd) => (!rd.implemented_traits.is_empty(), rd.instance_methods.clone()),
       _ => return,
     };
 
-    if implemented_traits.is_empty() {
+    let implemented_traits = self.effective_implemented_traits_for_definition(*record_def_id);
+    let instance_methods = self.effective_instance_methods_for_definition(*record_def_id, handwritten_instance_methods);
+
+    if !record_has_declared_traits && implemented_traits.is_empty() {
       return;
     }
 
@@ -10238,6 +10241,39 @@ impl<'a> Analyzer<'a> {
     traits
   }
 
+  fn effective_instance_methods_for_definition(
+    &self,
+    type_def_id: DefinitionId,
+    mut instance_methods: HashMap<SymbolId, SymbolEntry>,
+  ) -> HashMap<SymbolId, SymbolEntry> {
+    for (generated_method_def_id, _, is_static) in self
+      .directive_registry
+      .generated_attached_methods_for_owner(type_def_id)
+    {
+      if is_static {
+        continue;
+      }
+
+      let generated_method_name = self.defs.get(&generated_method_def_id).name;
+
+      match instance_methods.get_mut(&generated_method_name) {
+        Some(SymbolEntry::Overload(group)) => group.push(generated_method_def_id),
+        Some(SymbolEntry::Single(existing)) => {
+          let existing = *existing;
+          instance_methods.insert(
+            generated_method_name,
+            SymbolEntry::Overload(vec![existing, generated_method_def_id]),
+          );
+        },
+        None => {
+          instance_methods.insert(generated_method_name, SymbolEntry::Single(generated_method_def_id));
+        },
+      }
+    }
+
+    instance_methods
+  }
+
   fn validate_builtin_eq_type(
     &mut self,
     type_id: TypeId,
@@ -11830,6 +11866,7 @@ mod tests {
   use super::*;
   use std::cell::RefCell;
   use std::rc::Rc;
+  use std::collections::HashMap;
 
   use ignis_parser::{IgnisLexer, IgnisParser};
   use ignis_type::{
@@ -11839,6 +11876,12 @@ mod tests {
     module::ModuleId,
     symbol::SymbolTable,
   };
+
+  #[derive(Default)]
+  struct GeneratedOverlayConfig {
+    implemented_traits: Vec<(&'static str, &'static str)>,
+    attached_methods: Vec<(&'static str, &'static str, &'static str, bool)>,
+  }
 
   fn analyze_typecheck_only(
     source: &str,
@@ -11889,6 +11932,98 @@ mod tests {
       analyzer
         .directive_registry
         .attach_generated_item(generated_eq_record_def_id, generated_eq_metadata);
+    }
+
+    analyzer.typecheck_phase(&roots);
+    analyzer
+  }
+
+  fn analyze_typecheck_only_with_generated_overlays(
+    source: &str,
+    overlay_config: GeneratedOverlayConfig,
+  ) -> Analyzer<'static> {
+    let mut source_map = SourceMap::new();
+    let file_id = source_map.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source_map.get(&file_id).text.as_str());
+    lexer.scan_tokens();
+    assert!(lexer.diagnostics.is_empty(), "lexer diagnostics: {:?}", lexer.diagnostics);
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    let ast = Box::leak(Box::new(nodes));
+    let mut analyzer = Analyzer::new(ast, symbols, ModuleId::new(0));
+
+    analyzer.bind_phase(&roots);
+    analyzer.resolve_phase(&roots);
+
+    let mut definition_ids_by_name = HashMap::new();
+    for (definition_id, definition) in analyzer.defs.iter() {
+      let definition_name = analyzer.symbols.borrow().get(&definition.name).to_string();
+      definition_ids_by_name.insert(definition_name, definition_id);
+    }
+
+    for (owner_name, trait_name) in overlay_config.implemented_traits {
+      let owner_def_id = *definition_ids_by_name
+        .get(owner_name)
+        .expect("generated owner definition id");
+      let trait_def_id = *definition_ids_by_name
+        .get(trait_name)
+        .expect("generated trait definition id");
+
+      let generated_metadata = GeneratedItemMetadata::implemented_trait(
+        GeneratedProvenance {
+          origin_attr_span: Span::new(FileId::SYNTHETIC, BytePosition(1), BytePosition(2)),
+          directive: DirectiveDefId::new(0),
+          generation_id: 1,
+        },
+        owner_def_id,
+        trait_def_id,
+      );
+
+      analyzer
+        .directive_registry
+        .attach_generated_item(owner_def_id, generated_metadata);
+    }
+
+    for (generated_method_owner, generated_method_name, attached_owner, is_static) in overlay_config.attached_methods {
+      let generated_method_owner_def_id = *definition_ids_by_name
+        .get(generated_method_owner)
+        .expect("generated method owner definition id");
+      let attached_owner_def_id = *definition_ids_by_name
+        .get(attached_owner)
+        .expect("attached owner definition id");
+      let generated_method_name_symbol = analyzer.symbols.borrow_mut().intern(generated_method_name);
+
+      let generated_method_def_id = analyzer
+        .defs
+        .iter()
+        .find_map(|(definition_id, definition)| match &definition.kind {
+          DefinitionKind::Method(method)
+            if method.owner_type == generated_method_owner_def_id
+              && definition.name == generated_method_name_symbol =>
+          {
+            Some(definition_id)
+          },
+          _ => None,
+        })
+        .expect("generated method definition id");
+
+      let generated_metadata = GeneratedItemMetadata::attached_method(
+        GeneratedProvenance {
+          origin_attr_span: Span::new(FileId::SYNTHETIC, BytePosition(1), BytePosition(2)),
+          directive: DirectiveDefId::new(0),
+          generation_id: 2,
+        },
+        attached_owner_def_id,
+        is_static,
+      );
+
+      analyzer
+        .directive_registry
+        .attach_generated_item(generated_method_def_id, generated_metadata);
     }
 
     analyzer.typecheck_phase(&roots);
@@ -11978,5 +12113,81 @@ function handwrittenMain(): i32 {
       "expected handwritten Marker implementation to remain valid, got diagnostics: {:?}",
       analyzer.diagnostics
     );
+  }
+
+  #[test]
+  fn generated_trait_overlay_requires_trait_methods_during_validation() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+trait DerivedDescribe {
+    describe(&self): i32;
+}
+
+record GeneratedDescribeRecord {
+    public value: i32;
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: vec![("GeneratedDescribeRecord", "DerivedDescribe")],
+        attached_methods: Vec::new(),
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.error_code == "A0140"),
+      "expected generated implemented trait metadata to trigger missing-method validation, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_attached_methods_can_satisfy_generated_trait_overlay_requirements() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+trait DerivedDescribe {
+    describe(&self): i32;
+}
+
+record GeneratedDescribeMethod {
+    public value: i32;
+
+    describe(&self): i32 {
+        return self.value;
+    }
+}
+
+record GeneratedDescribeRecord {
+    public value: i32;
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: vec![("GeneratedDescribeRecord", "DerivedDescribe")],
+        attached_methods: vec![("GeneratedDescribeMethod", "describe", "GeneratedDescribeRecord", false)],
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0140"),
+      "expected generated attached method metadata to satisfy the generated trait overlay, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+
+    let generated_record_name = analyzer.symbols.borrow_mut().intern("GeneratedDescribeRecord");
+    let generated_record_def_id = analyzer
+      .defs
+      .iter()
+      .find_map(|(definition_id, definition)| (definition.name == generated_record_name).then_some(definition_id))
+      .expect("generated record definition id");
+
+    match &analyzer.defs.get(&generated_record_def_id).kind {
+      DefinitionKind::Record(record) => assert!(record.instance_methods.is_empty()),
+      other => panic!("expected record definition, got {:?}", other),
+    }
   }
 }
