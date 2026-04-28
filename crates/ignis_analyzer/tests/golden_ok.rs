@@ -734,6 +734,86 @@ record User {
     },
     other => panic!("expected User record definition, got {:?}", other),
   }
+
+  assert_eq!(
+    result.output.effective_implemented_traits_for_owner(user_def_id),
+    vec![eq_like_def_id]
+  );
+}
+
+#[test]
+fn effective_implemented_traits_include_generated_traits_without_mutating_record_definition() {
+  let result = common::analyze(
+    r#"
+trait EqLike {
+}
+
+trait SerializeLike {
+}
+
+@directive(target: "record", phase: expand, effect: emit)
+function deriveSerializable(): void {
+    return;
+}
+
+@deriveSerializable
+@implements(EqLike)
+record User {
+    public id: i32;
+}
+"#,
+  );
+
+  assert_eq!(common::format_diagnostics(&result.output.diagnostics), "(no diagnostics)");
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  let eq_like_name = symbols.intern("EqLike");
+  let serialize_like_name = symbols.intern("SerializeLike");
+  drop(symbols);
+
+  let user_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == user_name).then_some(def_id))
+    .expect("User definition id");
+  let eq_like_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == eq_like_name).then_some(def_id))
+    .expect("EqLike definition id");
+  let serialize_like_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == serialize_like_name).then_some(def_id))
+    .expect("SerializeLike definition id");
+
+  let mut output = result.output;
+  let generated_metadata = ignis_type::definition::GeneratedItemMetadata::implemented_trait(
+    output.directive_registry.uses[0].generated_provenance(11),
+    user_def_id,
+    serialize_like_def_id,
+  );
+
+  output
+    .directive_registry
+    .attach_generated_item(user_def_id, generated_metadata);
+
+  assert_eq!(
+    output.effective_implemented_traits_for_owner(user_def_id),
+    vec![eq_like_def_id, serialize_like_def_id]
+  );
+
+  let user_record = output.defs.get(&user_def_id);
+  match &user_record.kind {
+    ignis_type::definition::DefinitionKind::Record(record) => {
+      assert_eq!(record.implemented_traits, vec![eq_like_def_id]);
+    },
+    other => panic!("expected User record definition, got {:?}", other),
+  }
 }
 
 #[test]

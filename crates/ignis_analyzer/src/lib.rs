@@ -262,6 +262,28 @@ impl SemanticArtifacts {
 }
 
 impl AnalyzerOutput {
+  pub fn effective_implemented_traits_for_owner(
+    &self,
+    owner_def_id: DefinitionId,
+  ) -> Vec<DefinitionId> {
+    let mut traits = match &self.defs.get(&owner_def_id).kind {
+      DefinitionKind::Record(record) => record.implemented_traits.clone(),
+      DefinitionKind::Enum(enum_def) => enum_def.implemented_traits.clone(),
+      _ => return Vec::new(),
+    };
+
+    for (trait_def_id, _) in self
+      .directive_registry
+      .generated_implemented_traits_for_owner(owner_def_id)
+    {
+      if !traits.contains(&trait_def_id) {
+        traits.push(trait_def_id);
+      }
+    }
+
+    traits
+  }
+
   pub fn into_parts(self) -> (SemanticArtifacts, HIR) {
     let hir = self.hir;
     let semantic = SemanticArtifacts {
