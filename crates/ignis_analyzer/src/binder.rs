@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{Analyzer, ScopeKind};
+use crate::{Analyzer, ScopeKind, directive_registry::DirectiveUse};
 use ignis_ast::{
   attribute::ASTAttribute,
   expressions::{ASTExpression, lambda::LambdaBody},
@@ -369,7 +369,8 @@ impl<'a> Analyzer<'a> {
     self.refresh_type_param_bounds(rec.type_params.as_ref(), record_def_id);
 
     let type_name = self.get_symbol_name(&rec.name);
-    let (record_attrs, lang_traits, implemented_traits) = self.bind_record_attrs(&rec.attrs, &type_name);
+    let (record_attrs, lang_traits, implemented_traits) =
+      self.bind_record_attrs(node_id, &rec.attrs, &type_name, DirectiveTarget::Record);
 
     // Create the Type::Record and update the definition's type_id
     let type_id = self.types.record(record_def_id);
@@ -555,7 +556,8 @@ impl<'a> Analyzer<'a> {
     self.refresh_type_param_bounds(en.type_params.as_ref(), enum_def_id);
 
     let type_name = self.get_symbol_name(&en.name);
-    let (enum_attrs, lang_traits, implemented_traits) = self.bind_record_attrs(&en.attrs, &type_name);
+    let (enum_attrs, lang_traits, implemented_traits) =
+      self.bind_record_attrs(node_id, &en.attrs, &type_name, DirectiveTarget::Enum);
 
     // Create the Type::Enum and update the definition's type_id
     let type_id = self.types.enum_type(enum_def_id);
@@ -728,7 +730,7 @@ impl<'a> Analyzer<'a> {
       Visibility::Private
     };
 
-    let method_attrs = self.bind_function_attrs(&method.attrs, "method", false);
+    let method_attrs = self.bind_function_attrs(None, &method.attrs, "method", false);
 
     let method_def = Definition {
       kind: DefinitionKind::Method(MethodDefinition {
@@ -900,7 +902,7 @@ impl<'a> Analyzer<'a> {
       param_defs.push(param_def_id);
     }
 
-    let method_attrs = self.bind_function_attrs(&method.attrs, "method", false);
+    let method_attrs = self.bind_function_attrs(None, &method.attrs, "method", false);
 
     let method_def = Definition {
       kind: DefinitionKind::Method(MethodDefinition {
@@ -1099,7 +1101,7 @@ impl<'a> Analyzer<'a> {
       param_defs.push(def_id);
     }
 
-    let attrs = self.bind_function_attrs(&func.signature.attrs, "function", true);
+    let attrs = self.bind_function_attrs(Some(node_id), &func.signature.attrs, "function", true);
 
     // Create function definition first (without type params)
     let func_def = FunctionDefinition {
@@ -1828,8 +1830,10 @@ impl<'a> Analyzer<'a> {
 
   fn bind_record_attrs(
     &mut self,
+    target_node: &NodeId,
     ast_attrs: &[ASTAttribute],
     type_name: &str,
+    directive_target: DirectiveTarget,
   ) -> (Vec<RecordAttr>, LangTraitSet, Vec<DefinitionId>) {
     let mut attrs = Vec::new();
     let mut lang_traits = LangTraitSet::default();
@@ -1911,6 +1915,10 @@ impl<'a> Analyzer<'a> {
         },
         name if ignis_type::at_items::is_lint_level_directive(name) => {},
         _ => {
+          if self.collect_directive_use(target_node, attr, directive_target.clone()) {
+            continue;
+          }
+
           self.add_diagnostic(
             DiagnosticMessage::UnknownAttribute {
               name,
@@ -2063,6 +2071,7 @@ impl<'a> Analyzer<'a> {
 
   fn bind_function_attrs(
     &mut self,
+    target_node: Option<&NodeId>,
     ast_attrs: &[ASTAttribute],
     target: &str,
     allow_test: bool,
@@ -2084,12 +2093,87 @@ impl<'a> Analyzer<'a> {
         continue;
       }
 
-      if let Some(attr) = self.bind_legacy_function_attr(attr, &name, target, allow_test) {
-        attrs.push(attr);
+      if self.is_legacy_function_attr(&name) {
+        if let Some(attr) = self.bind_legacy_function_attr(attr, &name, target, allow_test) {
+          attrs.push(attr);
+        }
+
+        continue;
       }
+
+      if target_node.is_some_and(|node_id| self.collect_directive_use(node_id, attr, DirectiveTarget::Function)) {
+        continue;
+      }
+
+      self.add_diagnostic(
+        DiagnosticMessage::UnknownAttribute {
+          name,
+          target: target.to_string(),
+          span: attr.span.clone(),
+        }
+        .report(),
+      );
     }
 
     attrs
+  }
+
+  fn is_legacy_function_attr(
+    &self,
+    name: &str,
+  ) -> bool {
+    matches!(name, "test" | "externName" | "cold" | "deprecated" | "extension")
+  }
+
+  fn collect_directive_use(
+    &mut self,
+    target_node: &NodeId,
+    attr: &ASTAttribute,
+    target: DirectiveTarget,
+  ) -> bool {
+    let Some((directive_id, provenance)) = self.resolve_directive_use(attr, target) else {
+      return false;
+    };
+
+    self.directive_registry.uses.push(DirectiveUse {
+      target_node: *target_node,
+      directive: directive_id,
+      span: attr.span.clone(),
+      provenance,
+    });
+
+    true
+  }
+
+  fn resolve_directive_use(
+    &self,
+    attr: &ASTAttribute,
+    target: DirectiveTarget,
+  ) -> Option<(DirectiveDefId, DirectiveProvenance)> {
+    let entry = if attr.path.len() == 1 {
+      self.scopes.lookup(&attr.name)
+    } else {
+      let namespace_id = self.namespaces.lookup(&attr.path[..attr.path.len() - 1])?;
+      self.namespaces.lookup_def(namespace_id, &attr.name)
+    }?;
+
+    self.resolve_directive_entry(entry, target)
+  }
+
+  fn resolve_directive_entry(
+    &self,
+    entry: &SymbolEntry,
+    target: DirectiveTarget,
+  ) -> Option<(DirectiveDefId, DirectiveProvenance)> {
+    let def_ids: &[DefinitionId] = match entry {
+      SymbolEntry::Single(def_id) => std::slice::from_ref(def_id),
+      SymbolEntry::Overload(def_ids) => def_ids.as_slice(),
+    };
+
+    def_ids.iter().find_map(|def_id| {
+      let (directive_id, directive) = self.directive_registry.definition_for_function(*def_id)?;
+      (directive.target == target).then_some((directive_id, directive.provenance.clone()))
+    })
   }
 
   fn bind_legacy_function_attr(

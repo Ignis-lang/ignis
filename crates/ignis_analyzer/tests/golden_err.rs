@@ -3248,3 +3248,29 @@ function invalidDirective<T>(): i32 {
     diagnostics
   );
 }
+
+#[test]
+fn directive_use_rejects_unknown_record_attribute_names() {
+  let result = common::analyze(
+    r#"
+@packed
+@doesNotExist
+record User {
+    public id: i32;
+}
+"#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("unknown attribute '@doesNotExist' on record"),
+    "expected unknown directive-use diagnostic, got:\n{}",
+    diagnostics
+  );
+  assert!(
+    !diagnostics.contains("unknown attribute '@packed' on record"),
+    "expected legacy record attributes to remain accepted, got:\n{}",
+    diagnostics
+  );
+}

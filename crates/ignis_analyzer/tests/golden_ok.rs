@@ -316,6 +316,55 @@ function validateFunction(): void {
 }
 
 #[test]
+fn qualified_local_directive_use_registers_a_record_use() {
+  let result = common::analyze(
+    r#"
+namespace Serde {
+    @directive(target: "record", phase: expand, effect: emit)
+    function serializable(): void {
+        return;
+    }
+}
+
+@Serde::serializable
+record User {
+    public id: i32;
+}
+"#,
+  );
+
+  assert_eq!(
+    common::format_diagnostics(&result.output.diagnostics),
+    "(no diagnostics)",
+    "expected a same-file qualified directive use to stay analyzable in the minimal 3.1 slice"
+  );
+
+  let symbols = result.output.symbols.borrow();
+  let registry = &result.output.directive_registry;
+
+  assert_eq!(registry.defs.len(), 1, "expected the directive declaration to stay registered");
+  assert_eq!(
+    registry.uses.len(),
+    1,
+    "expected the qualified record attribute to be collected as a directive use"
+  );
+
+  let directive_use = &registry.uses[0];
+  let directive_def = registry
+    .defs
+    .iter()
+    .find(|directive| directive.id == directive_use.directive)
+    .expect("directive definition for collected use");
+
+  assert_eq!(symbols.get(&directive_def.name), "serializable");
+  assert_eq!(directive_def.target, ignis_type::attribute::DirectiveTarget::Record);
+  assert_eq!(
+    directive_use.provenance.origin_attr_span,
+    directive_def.provenance.origin_attr_span
+  );
+}
+
+#[test]
 fn legacy_and_directive_function_attributes_stay_separated() {
   let result = common::analyze(
     r#"
