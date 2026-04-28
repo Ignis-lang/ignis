@@ -55,3 +55,34 @@ fn std_compile_build_std_skips_runtime_codegen_outputs() {
     "compile-time-only std::compile should not emit a runtime object file"
   );
 }
+
+#[test]
+fn std_compile_types_are_importable_for_directive_signatures() {
+  let attempt = common::compile_project_single_file_with_workspace_std(
+    r#"
+import Compile from "std::compile";
+
+@directive(target: "record", phase: expand, effect: emit)
+function derive(
+  context: Compile::Context,
+  span: Compile::Span,
+  symbol: Compile::Symbol,
+  target: Compile::ItemRef,
+  itemType: Compile::TypeRef,
+): void {
+  return;
+}
+
+function main(): i32 {
+  return 0;
+}
+"#,
+    TargetBackend::C,
+  )
+  .expect("temporary project build setup should succeed");
+
+  assert!(
+    attempt.result.is_ok(),
+    "expected std::compile directive signature types to compile with workspace std"
+  );
+}

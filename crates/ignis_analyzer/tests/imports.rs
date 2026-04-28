@@ -1017,6 +1017,51 @@ mod std_imports {
   }
 
   #[test]
+  fn test_std_compile_types_are_available_to_directive_signatures() {
+    let std_path = get_std_path();
+    if !std_path.join("compile/mod.ign").exists() {
+      eprintln!("Skipping test: std/compile/mod.ign not found at {:?}", std_path);
+      return;
+    }
+
+    let config = create_test_config(std_path, true);
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    let test_code = r#"
+      import Compile from "std::compile";
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemRef): void {
+      }
+
+      function main(): void {
+      }
+    "#;
+
+    let test_path = write_test_file(&temp_dir, "main.ign", test_code);
+    let mut ctx = CompilationContext::new(&config);
+
+    let root_id = ctx
+      .discover_modules(test_path.to_str().unwrap(), &config)
+      .expect("Module discovery should succeed");
+
+    let output = ctx
+      .compile(root_id, &config)
+      .expect("analyzer should accept std::compile directive signature types");
+
+    let has_compile = ctx
+      .module_graph
+      .by_path
+      .keys()
+      .any(|p| matches!(p, ignis_type::module::ModulePath::Std(name) if name == "compile"));
+    assert!(has_compile, "std::compile module should be discovered");
+    assert!(
+      output.diagnostics.is_empty(),
+      "expected no diagnostics from std::compile signature imports"
+    );
+  }
+
+  #[test]
   fn test_module_discovery_multiple_std() {
     let std_path = get_std_path();
     if !std_path.join("io/mod.ign").exists() || !std_path.join("math/mod.ign").exists() {
