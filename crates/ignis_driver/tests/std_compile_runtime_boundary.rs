@@ -161,6 +161,56 @@ function main(): i32 {
 }
 
 #[test]
+fn std_compile_repeated_builds_keep_generated_items_compile_only() {
+  let source = r#"
+import Compile from "std::compile";
+
+trait Serializable {
+}
+
+@directive(target: "record", phase: expand, effect: emit)
+function derive(
+  context: Compile::Context,
+  target: Compile::ItemReference,
+): void {
+  Compile::emitRecord(context, target, "GeneratedUser");
+  Compile::emitMethod(context, target, "generatedDescribe", false);
+  Compile::emitImplements(context, target, "Serializable");
+}
+
+@derive
+record User {
+  value: i32;
+}
+
+function requireSerializable<T: Serializable>(value: T): i32 {
+  return 40;
+}
+
+function main(): i32 {
+  let user = User { value: 1 };
+  user.generatedDescribe();
+  let generated = GeneratedUser {};
+  return requireSerializable(user) + 2;
+}
+"#;
+
+  let first_attempt = common::compile_project_single_file_with_workspace_std(source, TargetBackend::C)
+    .expect("first temporary project build setup should succeed");
+  let second_attempt = common::compile_project_single_file_with_workspace_std(source, TargetBackend::C)
+    .expect("second temporary project build setup should succeed");
+
+  assert!(
+    first_attempt.result.is_ok(),
+    "expected the first generated-items build to succeed"
+  );
+  assert!(
+    second_attempt.result.is_ok(),
+    "expected the second generated-items build to succeed"
+  );
+}
+
+#[test]
 fn std_compile_vm_boundary_rejects_local_root_compile_namespace_spoofing() {
   let attempt = common::compile_project_single_file_with_workspace_std(
     r#"

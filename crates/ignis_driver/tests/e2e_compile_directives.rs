@@ -587,6 +587,44 @@ fn e2e_compile_directive_vm_rejects_unsupported_generation_calls() {
   assert!(attempt.result.is_err(), "unsupported generation should block driver build");
 }
 
+#[test]
+fn e2e_compile_directive_generated_items_participate_in_compile_and_run() {
+  let source = r#"
+    import Compile from "std::compile";
+
+    trait Serializable {
+    }
+
+    @directive(target: "record", phase: expand, effect: emit)
+    function derive(context: Compile::Context, target: Compile::ItemReference): void {
+      Compile::emitRecord(context, target, "GeneratedUser");
+      Compile::emitMethod(context, target, "generatedDescribe", false);
+      Compile::emitImplements(context, target, "Serializable");
+    }
+
+    @derive
+    record User {
+      value: i32;
+    }
+
+    function requireSerializable<T: Serializable>(value: T): i32 {
+      return 40;
+    }
+
+    function main(): i32 {
+      let user = User { value: 1 };
+      user.generatedDescribe();
+      let generated = GeneratedUser {};
+      return requireSerializable(user) + 2;
+    }
+  "#;
+
+  let result = common::compile_project_and_run_with_workspace_std(source)
+    .expect("generated record, method, and trait attachments should compile and run");
+
+  assert_eq!(result.exit_code, 42);
+}
+
 // =============================================================================
 // @configFlag — single-item cfg attribute
 // =============================================================================

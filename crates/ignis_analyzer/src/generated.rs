@@ -1,12 +1,15 @@
 use ignis_ast::{
   ASTNode, NodeId,
-  statements::{ASTRecord, ASTStatement},
+  metadata::ASTMetadata,
+  statements::{ASTBlock, ASTEnumItem, ASTMethod, ASTRecord, ASTRecordItem, ASTReturn, ASTStatement},
+  statements::function::ASTParameter,
+  type_::IgnisTypeSyntax,
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::attribute::DirectivePhase;
 use ignis_type::definition::{
   Definition, DefinitionId, DefinitionKind, DirectiveDefId, GeneratedItemKind, GeneratedItemMetadata, MethodDefinition,
-  SymbolEntry, Visibility,
+  SymbolEntry, Visibility, InlineMode,
 };
 use ignis_type::span::Span;
 
@@ -536,16 +539,39 @@ fn materialize_generated_method(
   let symbol = analyzer.symbols.borrow_mut().get_or_intern(name);
   let method_span = directive_use.span.clone();
   let visibility = Visibility::Private;
+  let owner_type = owner_definition_type(analyzer, owner);
+  append_generated_method_ast(analyzer, directive_use.target_node, symbol, &method_span, owner, is_static);
+
+  let mut params = Vec::new();
+  if !is_static {
+    let self_symbol = analyzer.symbols.borrow_mut().get_or_intern("self");
+    let self_param_def = Definition {
+      kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
+        type_id: analyzer.types.reference(owner_type, false),
+        mutable: false,
+        attrs: Vec::new(),
+      }),
+      name: self_symbol,
+      span: method_span.clone(),
+      name_span: method_span.clone(),
+      visibility: Visibility::Private,
+      owner_module: analyzer.current_module,
+      owner_namespace: None,
+      doc: None,
+    };
+
+    params.push(analyzer.defs.alloc(self_param_def));
+  }
 
   let method_def = Definition {
     kind: DefinitionKind::Method(MethodDefinition {
       owner_type: owner,
       type_params: Vec::new(),
-      params: Vec::new(),
+      params,
       return_type: analyzer.types.void(),
       is_static,
       self_mutable: false,
-      inline_mode: ignis_type::definition::InlineMode::None,
+      inline_mode: InlineMode::None,
       attrs: Vec::new(),
     }),
     name: symbol,
@@ -566,6 +592,92 @@ fn materialize_generated_method(
   analyzer
     .directive_registry
     .attach_generated_item(method_def_id, generated_metadata);
+}
+
+fn owner_definition_type(
+  analyzer: &Analyzer<'_>,
+  owner: DefinitionId,
+) -> ignis_type::types::TypeId {
+  match &analyzer.defs.get(&owner).kind {
+    DefinitionKind::Record(record) => record.type_id,
+    DefinitionKind::Enum(enum_def) => enum_def.type_id,
+    _ => analyzer.types.error(),
+  }
+}
+
+fn append_generated_method_ast(
+  analyzer: &mut Analyzer<'_>,
+  owner_node: NodeId,
+  method_name: ignis_type::symbol::SymbolId,
+  method_span: &Span,
+  owner: DefinitionId,
+  is_static: bool,
+) {
+  let return_node = analyzer
+    .working_ast
+    .alloc(ASTNode::Statement(ASTStatement::Return(ASTReturn::new(
+      None,
+      method_span.clone(),
+    ))));
+  let body_node = analyzer
+    .working_ast
+    .alloc(ASTNode::Statement(ASTStatement::Block(ASTBlock::new(
+      vec![return_node],
+      method_span.clone(),
+    ))));
+
+  let metadata = if is_static {
+    ASTMetadata::METHOD | ASTMetadata::STATIC
+  } else {
+    ASTMetadata::METHOD
+  };
+
+  let parameters = if is_static {
+    Vec::new()
+  } else {
+    vec![ASTParameter::new(
+      analyzer.symbols.borrow_mut().get_or_intern("self"),
+      IgnisTypeSyntax::Reference {
+        inner: Box::new(owner_type_syntax(analyzer, owner, method_span)),
+        mutable: false,
+      },
+      method_span.clone(),
+      ASTMetadata::PARAMETER,
+      Vec::new(),
+    )]
+  };
+
+  let method = ASTMethod::new(
+    method_name,
+    method_span.clone(),
+    None,
+    parameters,
+    IgnisTypeSyntax::Void,
+    body_node,
+    metadata,
+    (!is_static).then_some(false),
+    method_span.clone(),
+    None,
+    InlineMode::None,
+    Vec::new(),
+  );
+
+  match analyzer.working_ast.get_mut(&owner_node) {
+    ASTNode::Statement(ASTStatement::Record(record)) => record.items.push(ASTRecordItem::Method(method)),
+    ASTNode::Statement(ASTStatement::Enum(enum_def)) => enum_def.items.push(ASTEnumItem::Method(method)),
+    _ => {},
+  }
+}
+
+fn owner_type_syntax(
+  analyzer: &Analyzer<'_>,
+  owner: DefinitionId,
+  method_span: &Span,
+) -> IgnisTypeSyntax {
+  IgnisTypeSyntax::Named {
+    symbol: analyzer.defs.get(&owner).name,
+    span: method_span.clone(),
+  }
 }
 
 fn materialize_generated_implements(

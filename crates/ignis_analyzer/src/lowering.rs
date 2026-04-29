@@ -94,7 +94,7 @@ impl<'a> Analyzer<'a> {
     hir: &mut HIR,
     scope_kind: ScopeKind,
   ) -> HIRId {
-    let node = self.ast.get(node_id).clone();
+    let node = self.working_ast.get(node_id).clone();
 
     match node {
       ASTNode::Statement(stmt) => self.lower_statement_to_hir(node_id, &stmt, hir, scope_kind),
