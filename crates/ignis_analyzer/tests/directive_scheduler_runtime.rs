@@ -684,3 +684,174 @@ fn staged_analysis_rolls_back_failed_generated_record_materialization_without_le
     "failed generated record insertion must not leak generated registry metadata"
   );
 }
+
+#[test]
+fn staged_analysis_materializes_generated_attached_methods_and_implements() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitMethod(context: Context, target: ItemReference, name: str, isStatic: boolean): void {
+          return;
+        }
+
+        function emitImplements(context: Context, target: ItemReference, traitName: str): void {
+          return;
+        }
+      }
+
+      trait Serializable {
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitMethod(context, target, "generatedDescribe", false);
+        Compile::emitImplements(context, target, "Serializable");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  assert_eq!(common::format_diagnostics(&result.output.diagnostics), "(no diagnostics)");
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  let serializable_name = symbols.intern("Serializable");
+  let generated_method_name = symbols.intern("generatedDescribe");
+  drop(symbols);
+
+  let user_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == user_name).then_some(def_id))
+    .expect("User definition id");
+  let serializable_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == serializable_name).then_some(def_id))
+    .expect("Serializable definition id");
+  let generated_method_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| {
+      (def.name == generated_method_name && matches!(def.kind, ignis_type::definition::DefinitionKind::Method(_)))
+        .then_some(def_id)
+    })
+    .expect("generated method definition id");
+
+  let user_record = result.output.defs.get(&user_def_id);
+  let ignis_type::definition::DefinitionKind::Record(record) = &user_record.kind else {
+    panic!("expected User record definition");
+  };
+
+  assert!(
+    matches!(record.instance_methods.get(&generated_method_name), Some(ignis_type::definition::SymbolEntry::Single(def_id)) if *def_id == generated_method_def_id),
+    "expected generated attached method to be committed into the owner method map"
+  );
+  assert_eq!(record.implemented_traits, vec![serializable_def_id]);
+  assert_eq!(
+    result.output.effective_implemented_traits_for_owner(user_def_id),
+    vec![serializable_def_id]
+  );
+
+  let generated_items = result
+    .output
+    .directive_registry
+    .generated_attached_method_items_for_owner(user_def_id);
+  assert_eq!(generated_items.len(), 1, "expected one generated attached method entry");
+  assert_eq!(generated_items[0].definition, generated_method_def_id);
+
+  let generated_traits = result
+    .output
+    .directive_registry
+    .generated_implemented_trait_items_for_owner(user_def_id);
+  assert_eq!(generated_traits.len(), 1, "expected one generated implemented-trait entry");
+  assert_eq!(generated_traits[0].definition, user_def_id);
+}
+
+#[test]
+fn staged_analysis_rolls_back_failed_generated_implements_materialization_without_method_leaks() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitMethod(context: Context, target: ItemReference, name: str, isStatic: boolean): void {
+          return;
+        }
+
+        function emitImplements(context: Context, target: ItemReference, traitName: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitMethod(context, target, "generatedDescribe", false);
+        Compile::emitImplements(context, target, "MissingTrait");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("MissingTrait") && diagnostics.contains("implements"),
+    "expected generated implements failure diagnostic, got: {diagnostics}"
+  );
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  let generated_method_name = symbols.intern("generatedDescribe");
+  drop(symbols);
+
+  let user_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == user_name).then_some(def_id))
+    .expect("User definition id");
+
+  let generated_method_defs = result
+    .output
+    .defs
+    .iter()
+    .filter(|(_, def)| {
+      def.name == generated_method_name && matches!(def.kind, ignis_type::definition::DefinitionKind::Method(_))
+    })
+    .count();
+
+  let user_record = result.output.defs.get(&user_def_id);
+  let ignis_type::definition::DefinitionKind::Record(record) = &user_record.kind else {
+    panic!("expected User record definition");
+  };
+
+  assert_eq!(
+    generated_method_defs, 0,
+    "failed generated batch must not leak method definitions"
+  );
+  assert!(
+    !record.instance_methods.contains_key(&generated_method_name),
+    "failed generated batch must not leak owner method entries"
+  );
+  assert!(record.implemented_traits.is_empty());
+  assert!(
+    result.output.directive_registry.generated_items.is_empty(),
+    "failed generated batch must not leak generated registry metadata"
+  );
+}

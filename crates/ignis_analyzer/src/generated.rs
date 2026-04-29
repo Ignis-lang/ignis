@@ -2,8 +2,12 @@ use ignis_ast::{
   ASTNode, NodeId,
   statements::{ASTRecord, ASTStatement},
 };
+use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::attribute::DirectivePhase;
-use ignis_type::definition::{DefinitionId, DirectiveDefId, GeneratedItemMetadata};
+use ignis_type::definition::{
+  Definition, DefinitionId, DefinitionKind, DirectiveDefId, GeneratedItemMetadata, MethodDefinition, SymbolEntry,
+  Visibility,
+};
 use ignis_type::span::Span;
 
 use crate::directive_registry::DirectiveUse;
@@ -192,17 +196,25 @@ fn materialize_generated_batch(
   let mut generated_roots = Vec::new();
 
   for entry in entries {
-    if let GeneratedItemDeltaKind::Record { name } = &entry.kind {
-      let Some(directive_use) = directive_uses.iter().find(|directive_use| {
-        directive_use.directive == entry.origin.directive
-          && directive_use.target_node == entry.origin.target_node
-          && directive_use.span == entry.origin.directive_use_span
-      }) else {
-        continue;
-      };
+    let Some(directive_use) = directive_uses.iter().find(|directive_use| {
+      directive_use.directive == entry.origin.directive
+        && directive_use.target_node == entry.origin.target_node
+        && directive_use.span == entry.origin.directive_use_span
+    }) else {
+      continue;
+    };
 
-      let record_node = materialize_generated_record(analyzer, directive_use, entry.origin.generation_id, name);
-      generated_roots.push(record_node);
+    match &entry.kind {
+      GeneratedItemDeltaKind::Record { name } => {
+        let record_node = materialize_generated_record(analyzer, directive_use, entry.origin.generation_id, name);
+        generated_roots.push(record_node);
+      },
+      GeneratedItemDeltaKind::AttachedMethod { owner, name, is_static } => {
+        materialize_generated_method(analyzer, directive_use, entry.origin.generation_id, *owner, name, *is_static);
+      },
+      GeneratedItemDeltaKind::Implements { owner, trait_name } => {
+        materialize_generated_implements(analyzer, directive_use, entry.origin.generation_id, *owner, trait_name);
+      },
     }
   }
 
@@ -241,6 +253,141 @@ fn materialize_generated_record(
   }
 
   record_node
+}
+
+fn materialize_generated_method(
+  analyzer: &mut Analyzer<'_>,
+  directive_use: &DirectiveUse,
+  generation_id: u32,
+  owner: DefinitionId,
+  name: &str,
+  is_static: bool,
+) {
+  let symbol = analyzer.symbols.borrow_mut().get_or_intern(name);
+  let method_span = directive_use.span.clone();
+  let visibility = Visibility::Private;
+
+  let method_def = Definition {
+    kind: DefinitionKind::Method(MethodDefinition {
+      owner_type: owner,
+      type_params: Vec::new(),
+      params: Vec::new(),
+      return_type: analyzer.types.void(),
+      is_static,
+      self_mutable: false,
+      inline_mode: ignis_type::definition::InlineMode::None,
+      attrs: Vec::new(),
+    }),
+    name: symbol,
+    span: method_span.clone(),
+    name_span: method_span.clone(),
+    visibility,
+    owner_module: analyzer.current_module,
+    owner_namespace: analyzer.current_namespace,
+    doc: None,
+  };
+
+  let method_def_id = analyzer.defs.alloc(method_def);
+
+  register_generated_method_on_owner(analyzer, owner, symbol, method_def_id, is_static);
+
+  let generated_metadata =
+    GeneratedItemMetadata::attached_method(directive_use.generated_provenance(generation_id), owner, is_static);
+  analyzer
+    .directive_registry
+    .attach_generated_item(method_def_id, generated_metadata);
+}
+
+fn materialize_generated_implements(
+  analyzer: &mut Analyzer<'_>,
+  directive_use: &DirectiveUse,
+  generation_id: u32,
+  owner: DefinitionId,
+  trait_name: &str,
+) {
+  let Some(trait_def_id) = lookup_trait_definition(analyzer, trait_name) else {
+    analyzer.add_diagnostic(
+      DiagnosticMessage::UnknownTraitInImplements {
+        name: trait_name.to_string(),
+        span: directive_use.span.clone(),
+      }
+      .report(),
+    );
+
+    return;
+  };
+
+  attach_generated_trait_to_owner(analyzer, owner, trait_def_id);
+
+  let generated_metadata =
+    GeneratedItemMetadata::implemented_trait(directive_use.generated_provenance(generation_id), owner, trait_def_id);
+  analyzer
+    .directive_registry
+    .attach_generated_item(owner, generated_metadata);
+}
+
+fn register_generated_method_on_owner(
+  analyzer: &mut Analyzer<'_>,
+  owner: DefinitionId,
+  method_name: ignis_type::symbol::SymbolId,
+  method_def_id: DefinitionId,
+  is_static: bool,
+) {
+  let target_map = match &mut analyzer.defs.get_mut(&owner).kind {
+    DefinitionKind::Record(record) => {
+      if is_static {
+        &mut record.static_methods
+      } else {
+        &mut record.instance_methods
+      }
+    },
+    DefinitionKind::Enum(enum_def) => {
+      if is_static {
+        &mut enum_def.static_methods
+      } else {
+        &mut enum_def.instance_methods
+      }
+    },
+    _ => return,
+  };
+
+  match target_map.get_mut(&method_name) {
+    Some(SymbolEntry::Overload(group)) => group.push(method_def_id),
+    Some(SymbolEntry::Single(existing)) => {
+      let existing = *existing;
+      target_map.insert(method_name, SymbolEntry::Overload(vec![existing, method_def_id]));
+    },
+    None => {
+      target_map.insert(method_name, SymbolEntry::Single(method_def_id));
+    },
+  }
+}
+
+fn attach_generated_trait_to_owner(
+  analyzer: &mut Analyzer<'_>,
+  owner: DefinitionId,
+  trait_def_id: DefinitionId,
+) {
+  match &mut analyzer.defs.get_mut(&owner).kind {
+    DefinitionKind::Record(record) if !record.implemented_traits.contains(&trait_def_id) => {
+      record.implemented_traits.push(trait_def_id);
+    },
+    DefinitionKind::Enum(enum_def) if !enum_def.implemented_traits.contains(&trait_def_id) => {
+      enum_def.implemented_traits.push(trait_def_id);
+    },
+    _ => {},
+  }
+}
+
+fn lookup_trait_definition(
+  analyzer: &Analyzer<'_>,
+  trait_name: &str,
+) -> Option<DefinitionId> {
+  let trait_symbol = analyzer.symbols.borrow_mut().get_or_intern(trait_name);
+
+  analyzer.defs.iter().find_map(|(definition_id, definition)| {
+    (definition.name == trait_symbol && matches!(definition.kind, DefinitionKind::Trait(_))).then_some(definition_id)
+  })
 }
 
 pub fn commit_generated_metadata(analyzer: &mut Analyzer<'_>) {
