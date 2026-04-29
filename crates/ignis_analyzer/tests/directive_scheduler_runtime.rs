@@ -1,6 +1,87 @@
 mod common;
 
+use ignis_analyzer::generated::{
+  GeneratedBatch, GeneratedFingerprint, GeneratedItemDelta, GeneratedItemDeltaKind, GeneratedOrigin,
+};
 use ignis_type::attribute::DirectivePhase;
+use ignis_type::definition::{DefinitionId, DirectiveDefId};
+use ignis_type::file::FileId;
+use ignis_type::span::Span;
+use ignis_type::BytePosition;
+
+fn span(
+  start: u32,
+  end: u32,
+) -> Span {
+  Span::new(FileId::SYNTHETIC, BytePosition(start), BytePosition(end))
+}
+
+#[test]
+fn generated_batches_sort_entries_deterministically_before_materialization() {
+  let batch = GeneratedBatch::new(
+    0,
+    DirectivePhase::Expand,
+    vec![
+      GeneratedItemDelta::new(
+        GeneratedOrigin {
+          directive: DirectiveDefId::new(3),
+          directive_use_span: span(20, 24),
+          target_node: ignis_ast::NodeId::new(9),
+          target_def: Some(DefinitionId::new(11)),
+          source_order: 2,
+          generation_id: 1,
+        },
+        GeneratedItemDeltaKind::Implements {
+          owner: DefinitionId::new(11),
+          trait_def: DefinitionId::new(21),
+        },
+        GeneratedFingerprint::opaque("implements-b"),
+      ),
+      GeneratedItemDelta::new(
+        GeneratedOrigin {
+          directive: DirectiveDefId::new(3),
+          directive_use_span: span(10, 14),
+          target_node: ignis_ast::NodeId::new(5),
+          target_def: Some(DefinitionId::new(7)),
+          source_order: 1,
+          generation_id: 2,
+        },
+        GeneratedItemDeltaKind::AttachedMethod {
+          owner: DefinitionId::new(7),
+          is_static: false,
+        },
+        GeneratedFingerprint::opaque("method-a2"),
+      ),
+      GeneratedItemDelta::new(
+        GeneratedOrigin {
+          directive: DirectiveDefId::new(3),
+          directive_use_span: span(10, 14),
+          target_node: ignis_ast::NodeId::new(5),
+          target_def: Some(DefinitionId::new(7)),
+          source_order: 1,
+          generation_id: 0,
+        },
+        GeneratedItemDeltaKind::Record,
+        GeneratedFingerprint::opaque("record-a0"),
+      ),
+    ],
+  );
+
+  let ordered_fingerprints = batch
+    .entries
+    .iter()
+    .map(|entry| entry.fingerprint.clone())
+    .collect::<Vec<_>>();
+
+  assert_eq!(
+    ordered_fingerprints,
+    vec![
+      GeneratedFingerprint::opaque("record-a0"),
+      GeneratedFingerprint::opaque("method-a2"),
+      GeneratedFingerprint::opaque("implements-b"),
+    ]
+  );
+}
 
 #[test]
 fn staged_analysis_keeps_no_directive_behavior_unchanged() {
@@ -346,4 +427,33 @@ fn staged_analysis_executes_noop_check_phase_directive_bodies_deterministically(
     vec![DirectivePhase::Check]
   );
   assert!(first.output.directive_execution_report.failure.is_none());
+}
+
+#[test]
+fn staged_analysis_keeps_generated_batches_empty_before_materialization() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function note(context: Context, target: ItemReference, message: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function validateRecord(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::note(context, target, "still diagnostics-only");
+      }
+
+      @validateRecord
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  assert!(result.output.directive_execution_report.generated_batches.is_empty());
+  assert!(result.output.directive_registry.generated_items.is_empty());
 }

@@ -9,6 +9,7 @@ use ignis_type::BytePosition;
 
 use crate::directive_registry::DirectiveRegistry;
 use crate::directive_vm::DirectiveVm;
+use crate::generated::{GeneratedBatch, GeneratedItemDelta};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectiveSchedulePlan {
@@ -82,6 +83,7 @@ pub struct DirectiveStageResult {
   pub diagnostics: Vec<Diagnostic>,
   pub fingerprints: Vec<DirectiveFingerprint>,
   pub requested_reanalysis: bool,
+  pub generated_deltas: Vec<GeneratedItemDelta>,
 }
 
 impl DirectiveStageResult {
@@ -95,6 +97,7 @@ impl DirectiveStageResult {
       diagnostics: Vec::new(),
       fingerprints,
       requested_reanalysis,
+      generated_deltas: Vec::new(),
     }
   }
 
@@ -103,6 +106,14 @@ impl DirectiveStageResult {
     diagnostics: Vec<Diagnostic>,
   ) -> Self {
     self.diagnostics = diagnostics;
+    self
+  }
+
+  pub fn with_generated_deltas(
+    mut self,
+    generated_deltas: Vec<GeneratedItemDelta>,
+  ) -> Self {
+    self.generated_deltas = generated_deltas;
     self
   }
 }
@@ -282,6 +293,7 @@ pub struct DirectiveExecutionReport {
   pub executed_phases: Vec<DirectivePhase>,
   pub completed_iterations: Vec<DirectiveIterationRecord>,
   pub reanalysis_requests: Vec<DirectiveReanalysisRequest>,
+  pub generated_batches: Vec<GeneratedBatch>,
   pub diagnostics: Vec<Diagnostic>,
   pub converged: bool,
   pub failure: Option<DirectiveSchedulerFailure>,
@@ -308,6 +320,7 @@ impl DirectiveScheduler {
     let mut state = DirectiveExecutionState::new(plan.clone(), self.cycle_limit);
     let mut executed_phases = Vec::new();
     let mut reanalysis_requests = Vec::new();
+    let mut generated_batches = Vec::new();
     let mut diagnostics = Vec::new();
 
     while let Some(stage) = state.current_stage().cloned() {
@@ -320,6 +333,7 @@ impl DirectiveScheduler {
             executed_phases,
             completed_iterations: state.completed_iterations().to_vec(),
             reanalysis_requests,
+            generated_batches,
             diagnostics,
             converged: false,
             failure: Some(DirectiveSchedulerFailure::from_execution_error(error)),
@@ -328,6 +342,14 @@ impl DirectiveScheduler {
       };
 
       diagnostics.extend(stage_result.diagnostics.clone());
+
+      if !stage_result.generated_deltas.is_empty() {
+        generated_batches.push(GeneratedBatch::new(
+          state.iteration(),
+          stage.phase.clone(),
+          stage_result.generated_deltas.clone(),
+        ));
+      }
 
       match state.consume_current_stage(stage_result) {
         Ok(DirectiveExecutionProgress::AdvancedStage { .. }) | Ok(DirectiveExecutionProgress::Converged { .. }) => {},
@@ -347,6 +369,7 @@ impl DirectiveScheduler {
             executed_phases,
             completed_iterations: state.completed_iterations().to_vec(),
             reanalysis_requests,
+            generated_batches,
             diagnostics,
             converged: false,
             failure: Some(DirectiveSchedulerFailure::from_scheduler_error(&plan, error)),
@@ -359,6 +382,7 @@ impl DirectiveScheduler {
       executed_phases,
       completed_iterations: state.completed_iterations().to_vec(),
       reanalysis_requests,
+      generated_batches,
       diagnostics,
       converged: state.is_converged(),
       failure: None,
@@ -403,6 +427,7 @@ impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
     stage: &DirectiveScheduleStage,
   ) -> Result<DirectiveStageResult, DirectiveExecutionError> {
     let mut diagnostics = Vec::new();
+    let mut generated_deltas = Vec::new();
 
     for entry in &stage.entries {
       let target_span = self
@@ -427,21 +452,28 @@ impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
         && entry.effect == DirectiveEffect::Diagnose
         && let Some(vm) = &self.vm
       {
-        diagnostics.extend(vm.execute_entry(entry)?);
+        let result = vm.execute_entry(entry)?;
+
+        diagnostics.extend(result.diagnostics);
+        generated_deltas.extend(result.generated_deltas);
       }
     }
 
     let fingerprints = stage
       .entries
       .iter()
-      .map(|entry| deterministic_entry_fingerprint(entry, diagnostics.as_slice()))
+      .map(|entry| deterministic_entry_fingerprint(entry, diagnostics.as_slice(), generated_deltas.as_slice()))
       .collect::<Vec<_>>();
     let requested_reanalysis = stage
       .entries
       .iter()
       .any(|entry| effect_requests_reanalysis(&entry.effect));
 
-    Ok(DirectiveStageResult::new(stage.phase.clone(), fingerprints, requested_reanalysis).with_diagnostics(diagnostics))
+    Ok(
+      DirectiveStageResult::new(stage.phase.clone(), fingerprints, requested_reanalysis)
+        .with_diagnostics(diagnostics)
+        .with_generated_deltas(generated_deltas),
+    )
   }
 }
 
@@ -757,6 +789,7 @@ fn diagnostics_signature(diagnostics: &[Diagnostic]) -> Vec<String> {
 pub(crate) fn deterministic_entry_fingerprint(
   entry: &DirectiveScheduleEntry,
   diagnostics: &[Diagnostic],
+  generated_deltas: &[GeneratedItemDelta],
 ) -> DirectiveFingerprint {
   let capabilities = if entry.capabilities.is_empty() {
     "none".to_string()
@@ -784,8 +817,20 @@ pub(crate) fn deterministic_entry_fingerprint(
       .join("|")
   };
 
+  let generated_summary = if generated_deltas.is_empty() {
+    "none".to_string()
+  } else {
+    generated_deltas
+      .iter()
+      .map(|delta| match &delta.fingerprint {
+        crate::generated::GeneratedFingerprint::Opaque(value) => value.clone(),
+      })
+      .collect::<Vec<_>>()
+      .join("|")
+  };
+
   DirectiveFingerprint::opaque(format!(
-    "directive={};function={};target={};effect={:?};capabilities={capabilities};diagnostics={diagnostic_summary}",
+    "directive={};function={};target={};effect={:?};capabilities={capabilities};diagnostics={diagnostic_summary};generated={generated_summary}",
     entry.directive.index(),
     entry.function_def_id.index(),
     entry.target_node.index(),

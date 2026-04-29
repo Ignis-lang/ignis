@@ -22,6 +22,7 @@ pub mod directive_scheduler;
 mod directive_vm;
 pub mod dump;
 pub mod escape;
+pub mod generated;
 pub mod imports;
 mod lint;
 mod lowering;

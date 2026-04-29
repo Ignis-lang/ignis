@@ -12,6 +12,7 @@ use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::types::{Type, TypeStore};
 use ignis_type::value::IgnisLiteralValue;
 
+use crate::generated::GeneratedItemDelta;
 use crate::directive_scheduler::{DirectiveExecutionError, DirectiveScheduleEntry};
 
 const DEFAULT_VM_STEP_LIMIT: usize = 256;
@@ -53,6 +54,13 @@ struct ExecutionState {
   remaining_call_depth: usize,
   locals: HashMap<SymbolId, DirectiveValue>,
   diagnostics: Vec<Diagnostic>,
+  generated_deltas: Vec<GeneratedItemDelta>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DirectiveExecutionResult {
+  pub diagnostics: Vec<Diagnostic>,
+  pub generated_deltas: Vec<GeneratedItemDelta>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,9 +118,9 @@ impl DirectiveVm {
   pub fn execute_entry(
     &self,
     entry: &DirectiveScheduleEntry,
-  ) -> Result<Vec<Diagnostic>, DirectiveExecutionError> {
+  ) -> Result<DirectiveExecutionResult, DirectiveExecutionError> {
     let Some(function_entry) = self.function_entries.get(&entry.function_def_id) else {
-      return Ok(Vec::new());
+      return Ok(DirectiveExecutionResult::default());
     };
 
     let mut state = ExecutionState {
@@ -120,6 +128,7 @@ impl DirectiveVm {
       remaining_call_depth: self.call_depth_limit,
       locals: HashMap::new(),
       diagnostics: Vec::new(),
+      generated_deltas: Vec::new(),
     };
 
     if let Some(context_name) = function_entry.parameter_names.first() {
@@ -137,7 +146,10 @@ impl DirectiveVm {
 
     let _ = self.execute_statement(function_entry.body, entry, &mut state)?;
 
-    Ok(state.diagnostics)
+    Ok(DirectiveExecutionResult {
+      diagnostics: state.diagnostics,
+      generated_deltas: state.generated_deltas,
+    })
   }
 
   pub fn target_span(
@@ -505,7 +517,7 @@ mod tests {
       &analyzer.resolved_calls,
     );
 
-    let diagnostics = vm
+    let result = vm
       .execute_entry(&DirectiveScheduleEntry {
         source_order: 0,
         directive: directive_use.directive,
@@ -518,8 +530,9 @@ mod tests {
       })
       .expect("vm execution should succeed");
 
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].error_code, VM_DIAGNOSTIC_ERROR_CODE);
-    assert!(diagnostics[0].message.contains("record failed validation"));
+    assert_eq!(result.generated_deltas, Vec::new());
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(result.diagnostics[0].error_code, VM_DIAGNOSTIC_ERROR_CODE);
+    assert!(result.diagnostics[0].message.contains("record failed validation"));
   }
 }
