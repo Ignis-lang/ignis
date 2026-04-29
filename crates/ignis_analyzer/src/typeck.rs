@@ -2602,19 +2602,22 @@ impl<'a> Analyzer<'a> {
       Type::Record(def_id) => (def_id, vec![]),
       Type::Instance { generic, args } => (generic, args),
       Type::Enum(def_id) => {
-        if let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind
-          && ed.instance_methods.contains_key(&ma.member)
-        {
-          let member_name = self.get_symbol_name(&ma.member);
-          self.add_diagnostic(
-            DiagnosticMessage::MethodMustBeCalled {
-              method: member_name,
-              span: ma.span.clone(),
-            }
-            .report(),
-          );
-          return self.types.error();
+        if let DefinitionKind::Enum(ed) = &self.defs.get(&def_id).kind {
+          let instance_methods = self.effective_instance_methods_for_definition(def_id, ed.instance_methods.clone());
+
+          if instance_methods.contains_key(&ma.member) {
+            let member_name = self.get_symbol_name(&ma.member);
+            self.add_diagnostic(
+              DiagnosticMessage::MethodMustBeCalled {
+                method: member_name,
+                span: ma.span.clone(),
+              }
+              .report(),
+            );
+            return self.types.error();
+          }
         }
+
         self.add_diagnostic(DiagnosticMessage::DotAccessOnEnum { span: ma.span.clone() }.report());
         return self.types.error();
       },
@@ -2635,7 +2638,9 @@ impl<'a> Analyzer<'a> {
     let rd = match &self.defs.get(&def_id).kind {
       DefinitionKind::Record(rd) => rd.clone(),
       DefinitionKind::Enum(ed) => {
-        if ed.instance_methods.contains_key(&ma.member) {
+        let instance_methods = self.effective_instance_methods_for_definition(def_id, ed.instance_methods.clone());
+
+        if instance_methods.contains_key(&ma.member) {
           let member_name = self.get_symbol_name(&ma.member);
           self.add_diagnostic(
             DiagnosticMessage::MethodMustBeCalled {
@@ -2669,6 +2674,8 @@ impl<'a> Analyzer<'a> {
       Substitution::new()
     };
 
+    let instance_methods = self.effective_instance_methods_for_definition(def_id, rd.instance_methods.clone());
+
     // Check instance fields first
     if let Some(field) = rd.fields.iter().find(|f| f.name == ma.member) {
       // Check visibility
@@ -2692,7 +2699,7 @@ impl<'a> Analyzer<'a> {
     }
 
     // Check instance methods
-    if rd.instance_methods.contains_key(&ma.member) {
+    if instance_methods.contains_key(&ma.member) {
       // Method access without call - this is an error (must be called)
       let member_name = self.get_symbol_name(&ma.member);
       self.add_diagnostic(
@@ -4712,8 +4719,8 @@ impl<'a> Analyzer<'a> {
     };
 
     let instance_methods = match &self.defs.get(&def_id).kind {
-      DefinitionKind::Record(rd) => rd.instance_methods.clone(),
-      DefinitionKind::Enum(ed) => ed.instance_methods.clone(),
+      DefinitionKind::Record(rd) => self.effective_instance_methods_for_definition(def_id, rd.instance_methods.clone()),
+      DefinitionKind::Enum(ed) => self.effective_instance_methods_for_definition(def_id, ed.instance_methods.clone()),
       _ => return None,
     };
 
@@ -10432,17 +10439,10 @@ impl<'a> Analyzer<'a> {
     &self,
     type_def_id: DefinitionId,
   ) -> bool {
-    match &self.defs.get(&type_def_id).kind {
-      DefinitionKind::Record(rd) => rd
-        .implemented_traits
-        .iter()
-        .any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
-      DefinitionKind::Enum(ed) => ed
-        .implemented_traits
-        .iter()
-        .any(|trait_def_id| self.is_eq_trait(*trait_def_id)),
-      _ => false,
-    }
+    self
+      .effective_implemented_traits_for_definition(type_def_id)
+      .iter()
+      .any(|trait_def_id| self.is_eq_trait(*trait_def_id))
   }
 
   fn is_eq_trait(
@@ -10493,8 +10493,12 @@ impl<'a> Analyzer<'a> {
     let type_def = self.defs.get(&type_def_id);
 
     let instance_methods = match &type_def.kind {
-      DefinitionKind::Record(rd) => &rd.instance_methods,
-      DefinitionKind::Enum(ed) => &ed.instance_methods,
+      DefinitionKind::Record(rd) => {
+        self.effective_instance_methods_for_definition(type_def_id, rd.instance_methods.clone())
+      },
+      DefinitionKind::Enum(ed) => {
+        self.effective_instance_methods_for_definition(type_def_id, ed.instance_methods.clone())
+      },
       _ => return None,
     };
 
@@ -10776,8 +10780,12 @@ impl<'a> Analyzer<'a> {
     let type_name = self.get_symbol_name(&type_def.name);
 
     let instance_methods = match &type_def.kind {
-      DefinitionKind::Record(rd) => rd.instance_methods.clone(),
-      DefinitionKind::Enum(ed) => ed.instance_methods.clone(),
+      DefinitionKind::Record(rd) => {
+        self.effective_instance_methods_for_definition(type_def_id, rd.instance_methods.clone())
+      },
+      DefinitionKind::Enum(ed) => {
+        self.effective_instance_methods_for_definition(type_def_id, ed.instance_methods.clone())
+      },
       _ => return None,
     };
 
@@ -12432,5 +12440,243 @@ function main(): i32 {
       DefinitionKind::Record(record) => assert!(record.instance_methods.is_empty()),
       other => panic!("expected record definition, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn generated_attached_method_overlay_requires_call_in_record_dot_access() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+record GeneratedDescribeMethod {
+    public value: i32;
+
+    describe(&self): i32 {
+        return self.value;
+    }
+}
+
+record GeneratedDescribeRecord {
+    public value: i32;
+}
+
+function main(): i32 {
+    let user = GeneratedDescribeRecord { value: 7 };
+    return user.describe;
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: Vec::new(),
+        attached_methods: vec![("GeneratedDescribeMethod", "describe", "GeneratedDescribeRecord", false)],
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.error_code == "A0061"),
+      "expected generated attached-method overlays to produce MethodMustBeCalled on record dot access, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0054"),
+      "expected generated attached-method overlays to avoid FieldNotFound on record dot access, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_attached_method_overlay_requires_call_in_generic_instance_dot_access() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+record GeneratedDescribeMethod {
+    public value: i32;
+
+    describe(&self): i32 {
+        return self.value;
+    }
+}
+
+record GeneratedBox<T> {
+    public value: T;
+}
+
+function main(): i32 {
+    let userBox: GeneratedBox<i32> = GeneratedBox { value: 7 };
+    return userBox.describe;
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: Vec::new(),
+        attached_methods: vec![("GeneratedDescribeMethod", "describe", "GeneratedBox", false)],
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.error_code == "A0061"),
+      "expected generated attached-method overlays to produce MethodMustBeCalled on generic instance dot access, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0054"),
+      "expected generated attached-method overlays to avoid FieldNotFound on generic instance dot access, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_attached_method_overlay_is_visible_to_bare_pipe_method_resolution() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+record GeneratedPipeMethod {
+    public value: i32;
+
+    describe(&self, delta: i32): i32 {
+        return self.value + delta;
+    }
+}
+
+record GeneratedPipeRecord {
+    public value: i32;
+}
+
+function main(): i32 {
+    let user = GeneratedPipeRecord { value: 7 };
+    return 5 |> user.describe;
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: Vec::new(),
+        attached_methods: vec![("GeneratedPipeMethod", "describe", "GeneratedPipeRecord", false)],
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0054"),
+      "expected generated attached-method overlays to participate in bare pipe method resolution, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_attached_method_overlay_is_visible_to_pipe_method_call_resolution() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+record GeneratedPipeMethod {
+    public value: i32;
+
+    describe(&self, piped: i32, scale: i32): i32 {
+        return self.value + piped + scale;
+    }
+}
+
+record GeneratedBox<T> {
+    public value: T;
+}
+
+function main(): i32 {
+    let userBox: GeneratedBox<i32> = GeneratedBox { value: 7 };
+    return 5 |> userBox.describe(_, 3);
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: Vec::new(),
+        attached_methods: vec![("GeneratedPipeMethod", "describe", "GeneratedBox", false)],
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0054"),
+      "expected generated attached-method overlays to participate in pipe method call resolution, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_eq_trait_overlay_is_visible_to_builtin_eq_validation() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+trait Eq {
+}
+
+record GeneratedEqRecord {
+    public value: i32;
+
+    equals(&self, other: &GeneratedEqRecord): boolean {
+        return self.value == other.value;
+    }
+}
+
+function main(): boolean {
+    let left = GeneratedEqRecord { value: 1 };
+    let right = GeneratedEqRecord { value: 1 };
+    return @eq<GeneratedEqRecord>(&left, &right);
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: vec![("GeneratedEqRecord", "Eq")],
+        attached_methods: Vec::new(),
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0191"),
+      "expected generated Eq trait overlays to satisfy builtin equality validation, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
+  }
+
+  #[test]
+  fn generated_eq_trait_overlay_is_visible_to_builtin_eq_validation_for_generic_instances() {
+    let analyzer = analyze_typecheck_only_with_generated_overlays(
+      r#"
+trait Eq {
+}
+
+record GeneratedBox<T> {
+    public value: T;
+
+    equals(&self, other: &GeneratedBox<T>): boolean {
+        return self.value == other.value;
+    }
+}
+
+function main(): boolean {
+    let left: GeneratedBox<i32> = GeneratedBox { value: 1 };
+    let right: GeneratedBox<i32> = GeneratedBox { value: 1 };
+    return @eq<GeneratedBox<i32>>(&left, &right);
+}
+"#,
+      GeneratedOverlayConfig {
+        implemented_traits: vec![("GeneratedBox", "Eq")],
+        attached_methods: Vec::new(),
+      },
+    );
+
+    assert!(
+      analyzer
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.error_code != "A0191"),
+      "expected generated Eq trait overlays to satisfy builtin equality validation for generic instances, got diagnostics: {:?}",
+      analyzer.diagnostics
+    );
   }
 }
