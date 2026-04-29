@@ -26,6 +26,7 @@ fn generated_batches_sort_entries_deterministically_before_materialization() {
         GeneratedOrigin {
           directive: DirectiveDefId::new(3),
           directive_use_span: span(20, 24),
+          target_span: span(20, 24),
           target_node: ignis_ast::NodeId::new(9),
           target_def: Some(DefinitionId::new(11)),
           source_order: 2,
@@ -33,7 +34,7 @@ fn generated_batches_sort_entries_deterministically_before_materialization() {
         },
         GeneratedItemDeltaKind::Implements {
           owner: DefinitionId::new(11),
-          trait_def: DefinitionId::new(21),
+          trait_name: "Serializable".to_string(),
         },
         GeneratedFingerprint::opaque("implements-b"),
       ),
@@ -41,6 +42,7 @@ fn generated_batches_sort_entries_deterministically_before_materialization() {
         GeneratedOrigin {
           directive: DirectiveDefId::new(3),
           directive_use_span: span(10, 14),
+          target_span: span(10, 14),
           target_node: ignis_ast::NodeId::new(5),
           target_def: Some(DefinitionId::new(7)),
           source_order: 1,
@@ -48,6 +50,7 @@ fn generated_batches_sort_entries_deterministically_before_materialization() {
         },
         GeneratedItemDeltaKind::AttachedMethod {
           owner: DefinitionId::new(7),
+          name: "methodA".to_string(),
           is_static: false,
         },
         GeneratedFingerprint::opaque("method-a2"),
@@ -56,12 +59,15 @@ fn generated_batches_sort_entries_deterministically_before_materialization() {
         GeneratedOrigin {
           directive: DirectiveDefId::new(3),
           directive_use_span: span(10, 14),
+          target_span: span(10, 14),
           target_node: ignis_ast::NodeId::new(5),
           target_def: Some(DefinitionId::new(7)),
           source_order: 1,
           generation_id: 0,
         },
-        GeneratedItemDeltaKind::Record,
+        GeneratedItemDeltaKind::Record {
+          name: "RecordA".to_string(),
+        },
         GeneratedFingerprint::opaque("record-a0"),
       ),
     ],
@@ -255,6 +261,89 @@ fn staged_analysis_reports_unsupported_generation_calls_with_call_site_provenanc
   );
   assert_eq!(common::diagnostic_line(&result, unsupported), 13);
   assert!(result.output.directive_execution_report.failure.is_some());
+}
+
+#[test]
+fn staged_analysis_expand_phase_emits_bounded_generated_deltas() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitRecord(context: Context, target: ItemReference, name: str): void {
+          return;
+        }
+
+        function emitMethod(context: Context, target: ItemReference, name: str, isStatic: boolean): void {
+          return;
+        }
+
+        function emitImplements(context: Context, target: ItemReference, traitName: str): void {
+          return;
+        }
+      }
+
+      trait Serializable {
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitMethod(context, target, "generatedMethod", false);
+        Compile::emitRecord(context, target, "GeneratedUser");
+        Compile::emitImplements(context, target, "Serializable");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  assert_eq!(common::format_diagnostics(&result.output.diagnostics), "(no diagnostics)");
+  assert!(result.output.directive_execution_report.failure.is_none());
+  assert_eq!(result.output.directive_execution_report.generated_batches.len(), 2);
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  drop(symbols);
+
+  let user_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == user_name).then_some(def_id))
+    .expect("User definition id");
+
+  for batch in &result.output.directive_execution_report.generated_batches {
+    assert_eq!(batch.phase, DirectivePhase::Expand);
+    assert_eq!(batch.entries.len(), 3);
+    assert_eq!(batch.entries[0].origin.generation_id, 0);
+    assert_eq!(batch.entries[1].origin.generation_id, 1);
+    assert_eq!(batch.entries[2].origin.generation_id, 2);
+    assert_eq!(
+      batch.entries[0].kind,
+      GeneratedItemDeltaKind::AttachedMethod {
+        owner: user_def_id,
+        name: "generatedMethod".to_string(),
+        is_static: false,
+      }
+    );
+    assert_eq!(
+      batch.entries[1].kind,
+      GeneratedItemDeltaKind::Record {
+        name: "GeneratedUser".to_string(),
+      }
+    );
+    assert_eq!(
+      batch.entries[2].kind,
+      GeneratedItemDeltaKind::Implements {
+        owner: user_def_id,
+        trait_name: "Serializable".to_string(),
+      }
+    );
+  }
 }
 
 #[test]

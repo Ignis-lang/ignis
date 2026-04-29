@@ -12,7 +12,7 @@ use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::types::{Type, TypeStore};
 use ignis_type::value::IgnisLiteralValue;
 
-use crate::generated::GeneratedItemDelta;
+use crate::generated::{GeneratedFingerprint, GeneratedItemDelta, GeneratedItemDeltaKind, GeneratedOrigin};
 use crate::directive_scheduler::{DirectiveExecutionError, DirectiveScheduleEntry};
 
 const DEFAULT_VM_STEP_LIMIT: usize = 256;
@@ -25,7 +25,11 @@ pub enum DirectiveValue {
   Bool(bool),
   String(String),
   Context,
-  ItemReference { target_span: Span },
+  ItemReference {
+    target_span: Span,
+    target_node: NodeId,
+    target_def: Option<DefinitionId>,
+  },
   Unsupported,
 }
 
@@ -36,6 +40,7 @@ pub struct DirectiveVm {
   defs: DefinitionStore,
   namespaces: NamespaceStore,
   symbols: Rc<RefCell<SymbolTable>>,
+  node_defs: HashMap<NodeId, DefinitionId>,
   resolved_calls: HashMap<NodeId, DefinitionId>,
   function_entries: HashMap<DefinitionId, DirectiveFunctionEntry>,
   step_limit: usize,
@@ -108,6 +113,7 @@ impl DirectiveVm {
       defs: defs.clone(),
       namespaces: namespaces.clone(),
       symbols,
+      node_defs: node_defs.clone(),
       resolved_calls: resolved_calls.clone(),
       function_entries,
       step_limit: DEFAULT_VM_STEP_LIMIT,
@@ -140,6 +146,8 @@ impl DirectiveVm {
         *target_name,
         DirectiveValue::ItemReference {
           target_span: self.ast.get(&entry.target_node).span().clone(),
+          target_node: entry.target_node,
+          target_def: self.node_defs.get(&entry.target_node).copied(),
         },
       );
     }
@@ -319,6 +327,18 @@ impl DirectiveVm {
           self.emit_host_diagnostic(node_id, Severity::Info, arguments, entry, state)?;
           Ok(DirectiveValue::Void)
         },
+        "emitRecord" if entry.effect == ignis_type::attribute::DirectiveEffect::Emit => {
+          self.emit_record_delta(arguments, entry, state)?;
+          Ok(DirectiveValue::Void)
+        },
+        "emitMethod" if entry.effect == ignis_type::attribute::DirectiveEffect::Emit => {
+          self.emit_method_delta(arguments, entry, state)?;
+          Ok(DirectiveValue::Void)
+        },
+        "emitImplements" if entry.effect == ignis_type::attribute::DirectiveEffect::Emit => {
+          self.emit_implements_delta(arguments, entry, state)?;
+          Ok(DirectiveValue::Void)
+        },
         _ => Err(DirectiveExecutionError::UnsupportedGeneration {
           operation: operation_name,
           span: self.ast.get(&node_id).span().clone(),
@@ -377,6 +397,151 @@ impl DirectiveVm {
     state.diagnostics.push(diagnostic);
 
     Ok(())
+  }
+
+  fn emit_record_delta(
+    &self,
+    arguments: &[NodeId],
+    entry: &DirectiveScheduleEntry,
+    state: &mut ExecutionState,
+  ) -> Result<(), DirectiveExecutionError> {
+    if arguments.len() != 3 {
+      return Ok(());
+    }
+
+    let context = self.evaluate_node(arguments[0], entry, state)?;
+    let target = self.evaluate_node(arguments[1], entry, state)?;
+    let name = self.evaluate_node(arguments[2], entry, state)?;
+
+    if !matches!(context, DirectiveValue::Context) {
+      return Ok(());
+    }
+
+    let Some(origin) = self.generated_origin(target, entry, state) else {
+      return Ok(());
+    };
+    let DirectiveValue::String(name) = name else {
+      return Ok(());
+    };
+
+    state.generated_deltas.push(GeneratedItemDelta::new(
+      origin,
+      GeneratedItemDeltaKind::Record { name: name.clone() },
+      GeneratedFingerprint::opaque(format!("record:{name}")),
+    ));
+
+    Ok(())
+  }
+
+  fn emit_method_delta(
+    &self,
+    arguments: &[NodeId],
+    entry: &DirectiveScheduleEntry,
+    state: &mut ExecutionState,
+  ) -> Result<(), DirectiveExecutionError> {
+    if arguments.len() != 4 {
+      return Ok(());
+    }
+
+    let context = self.evaluate_node(arguments[0], entry, state)?;
+    let target = self.evaluate_node(arguments[1], entry, state)?;
+    let name = self.evaluate_node(arguments[2], entry, state)?;
+    let is_static = self.evaluate_node(arguments[3], entry, state)?;
+
+    if !matches!(context, DirectiveValue::Context) {
+      return Ok(());
+    }
+
+    let Some(origin) = self.generated_origin(target, entry, state) else {
+      return Ok(());
+    };
+    let Some(owner) = origin.target_def else {
+      return Ok(());
+    };
+    let DirectiveValue::String(name) = name else {
+      return Ok(());
+    };
+    let DirectiveValue::Bool(is_static) = is_static else {
+      return Ok(());
+    };
+
+    state.generated_deltas.push(GeneratedItemDelta::new(
+      origin,
+      GeneratedItemDeltaKind::AttachedMethod {
+        owner,
+        name: name.clone(),
+        is_static,
+      },
+      GeneratedFingerprint::opaque(format!("method:{owner:?}:{name}:{is_static}")),
+    ));
+
+    Ok(())
+  }
+
+  fn emit_implements_delta(
+    &self,
+    arguments: &[NodeId],
+    entry: &DirectiveScheduleEntry,
+    state: &mut ExecutionState,
+  ) -> Result<(), DirectiveExecutionError> {
+    if arguments.len() != 3 {
+      return Ok(());
+    }
+
+    let context = self.evaluate_node(arguments[0], entry, state)?;
+    let target = self.evaluate_node(arguments[1], entry, state)?;
+    let trait_name = self.evaluate_node(arguments[2], entry, state)?;
+
+    if !matches!(context, DirectiveValue::Context) {
+      return Ok(());
+    }
+
+    let Some(origin) = self.generated_origin(target, entry, state) else {
+      return Ok(());
+    };
+    let Some(owner) = origin.target_def else {
+      return Ok(());
+    };
+    let DirectiveValue::String(trait_name) = trait_name else {
+      return Ok(());
+    };
+
+    state.generated_deltas.push(GeneratedItemDelta::new(
+      origin,
+      GeneratedItemDeltaKind::Implements {
+        owner,
+        trait_name: trait_name.clone(),
+      },
+      GeneratedFingerprint::opaque(format!("implements:{owner:?}:{trait_name}")),
+    ));
+
+    Ok(())
+  }
+
+  fn generated_origin(
+    &self,
+    target: DirectiveValue,
+    entry: &DirectiveScheduleEntry,
+    state: &ExecutionState,
+  ) -> Option<GeneratedOrigin> {
+    let DirectiveValue::ItemReference {
+      target_span,
+      target_node,
+      target_def,
+    } = target
+    else {
+      return None;
+    };
+
+    Some(GeneratedOrigin {
+      directive: entry.directive,
+      directive_use_span: entry.span.clone(),
+      target_span,
+      target_node,
+      target_def,
+      source_order: entry.source_order,
+      generation_id: state.generated_deltas.len() as u32,
+    })
   }
 
   fn consume_step(

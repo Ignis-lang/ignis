@@ -123,6 +123,44 @@ function main(): i32 {
 }
 
 #[test]
+fn std_compile_supports_bounded_generation_delta_calls_without_runtime_artifacts() {
+  let attempt = common::compile_project_single_file_with_workspace_std(
+    r#"
+import Compile from "std::compile";
+
+trait Serializable {
+}
+
+@directive(target: "record", phase: expand, effect: emit)
+function derive(
+  context: Compile::Context,
+  target: Compile::ItemReference,
+): void {
+  Compile::emitMethod(context, target, "generatedMethod", false);
+  Compile::emitRecord(context, target, "GeneratedUser");
+  Compile::emitImplements(context, target, "Serializable");
+}
+
+@derive
+record User {
+  value: i32;
+}
+
+function main(): i32 {
+  return 0;
+}
+"#,
+    TargetBackend::C,
+  )
+  .expect("temporary project build setup should succeed");
+
+  assert!(
+    attempt.result.is_ok(),
+    "expected std::compile to expose the bounded generated-delta surface during analysis"
+  );
+}
+
+#[test]
 fn std_compile_vm_boundary_rejects_local_root_compile_namespace_spoofing() {
   let attempt = common::compile_project_single_file_with_workspace_std(
     r#"

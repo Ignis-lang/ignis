@@ -18,6 +18,7 @@ impl GeneratedFingerprint {
 pub struct GeneratedOrigin {
   pub directive: DirectiveDefId,
   pub directive_use_span: Span,
+  pub target_span: Span,
   pub target_node: NodeId,
   pub target_def: Option<DefinitionId>,
   pub source_order: usize,
@@ -26,14 +27,17 @@ pub struct GeneratedOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GeneratedItemDeltaKind {
-  Record,
+  Record {
+    name: String,
+  },
   AttachedMethod {
     owner: DefinitionId,
+    name: String,
     is_static: bool,
   },
   Implements {
     owner: DefinitionId,
-    trait_def: DefinitionId,
+    trait_name: String,
   },
 }
 
@@ -57,14 +61,20 @@ impl GeneratedItemDelta {
     }
   }
 
-  fn sort_key(&self) -> (u32, ignis_type::BytePosition, ignis_type::BytePosition, usize, u32) {
+  pub fn sort_key(&self) -> (u32, ignis_type::BytePosition, ignis_type::BytePosition, usize, u32) {
     (
-      self.origin.directive_use_span.file.index(),
-      self.origin.directive_use_span.start,
-      self.origin.directive_use_span.end,
+      self.origin.target_span.file.index(),
+      self.origin.target_span.start,
+      self.origin.target_span.end,
       self.origin.source_order,
       self.origin.generation_id,
     )
+  }
+
+  pub fn fingerprint_value(&self) -> &str {
+    match &self.fingerprint {
+      GeneratedFingerprint::Opaque(value) => value.as_str(),
+    }
   }
 }
 
@@ -116,6 +126,7 @@ mod tests {
           GeneratedOrigin {
             directive: DirectiveDefId::new(1),
             directive_use_span: span(20, 25),
+            target_span: span(40, 45),
             target_node: NodeId::new(4),
             target_def: Some(DefinitionId::new(5)),
             source_order: 1,
@@ -123,6 +134,7 @@ mod tests {
           },
           GeneratedItemDeltaKind::AttachedMethod {
             owner: DefinitionId::new(5),
+            name: "method".to_string(),
             is_static: false,
           },
           GeneratedFingerprint::opaque("late"),
@@ -131,18 +143,22 @@ mod tests {
           GeneratedOrigin {
             directive: DirectiveDefId::new(1),
             directive_use_span: span(10, 15),
+            target_span: span(10, 15),
             target_node: NodeId::new(2),
             target_def: Some(DefinitionId::new(3)),
             source_order: 0,
             generation_id: 2,
           },
-          GeneratedItemDeltaKind::Record,
+          GeneratedItemDeltaKind::Record {
+            name: "First".to_string(),
+          },
           GeneratedFingerprint::opaque("first"),
         ),
         GeneratedItemDelta::new(
           GeneratedOrigin {
             directive: DirectiveDefId::new(1),
             directive_use_span: span(10, 15),
+            target_span: span(10, 15),
             target_node: NodeId::new(2),
             target_def: Some(DefinitionId::new(3)),
             source_order: 0,
@@ -150,7 +166,7 @@ mod tests {
           },
           GeneratedItemDeltaKind::Implements {
             owner: DefinitionId::new(3),
-            trait_def: DefinitionId::new(9),
+            trait_name: "Marker".to_string(),
           },
           GeneratedFingerprint::opaque("second"),
         ),

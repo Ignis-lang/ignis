@@ -428,6 +428,7 @@ impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
   ) -> Result<DirectiveStageResult, DirectiveExecutionError> {
     let mut diagnostics = Vec::new();
     let mut generated_deltas = Vec::new();
+    let mut fingerprints = Vec::new();
 
     for entry in &stage.entries {
       let target_span = self
@@ -448,26 +449,41 @@ impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
         }
       }
 
-      if stage.phase == DirectivePhase::Check
-        && entry.effect == DirectiveEffect::Diagnose
-        && let Some(vm) = &self.vm
-      {
-        let result = vm.execute_entry(entry)?;
+      let mut entry_diagnostics = Vec::new();
+      let mut entry_generated_deltas = Vec::new();
 
-        diagnostics.extend(result.diagnostics);
-        generated_deltas.extend(result.generated_deltas);
+      if let Some(vm) = &self.vm {
+        let should_execute = matches!(
+          (&stage.phase, &entry.effect),
+          (DirectivePhase::Check, DirectiveEffect::Diagnose) | (DirectivePhase::Expand, DirectiveEffect::Emit)
+        );
+
+        if should_execute {
+          let result = vm.execute_entry(entry)?;
+
+          entry_diagnostics = result.diagnostics;
+          entry_generated_deltas = result.generated_deltas;
+        }
       }
+
+      let ordered_entry_generated_deltas = order_generated_deltas(entry_generated_deltas);
+
+      fingerprints.push(deterministic_entry_fingerprint(
+        &stage.phase,
+        entry,
+        entry_diagnostics.as_slice(),
+        ordered_entry_generated_deltas.as_slice(),
+      ));
+
+      diagnostics.extend(entry_diagnostics);
+      generated_deltas.extend(ordered_entry_generated_deltas);
     }
 
-    let fingerprints = stage
-      .entries
-      .iter()
-      .map(|entry| deterministic_entry_fingerprint(entry, diagnostics.as_slice(), generated_deltas.as_slice()))
-      .collect::<Vec<_>>();
     let requested_reanalysis = stage
       .entries
       .iter()
       .any(|entry| effect_requests_reanalysis(&entry.effect));
+    let generated_deltas = order_generated_deltas(generated_deltas);
 
     Ok(
       DirectiveStageResult::new(stage.phase.clone(), fingerprints, requested_reanalysis)
@@ -727,7 +743,10 @@ fn execution_error_message(error: &DirectiveExecutionError) -> (DiagnosticMessag
         directive_use_span: directive_use_span.clone(),
         target_span: target_span.clone(),
       },
-      Some("this VM slice supports diagnostics only; generation and reintegration stay out of scope".to_string()),
+      Some(
+        "supported generation is limited to bounded record, attached-method, and implements deltas; reintegration stays out of scope"
+          .to_string(),
+      ),
     ),
     DirectiveExecutionError::StepLimitExceeded {
       span,
@@ -786,7 +805,13 @@ fn diagnostics_signature(diagnostics: &[Diagnostic]) -> Vec<String> {
     .collect()
 }
 
+fn order_generated_deltas(mut generated_deltas: Vec<GeneratedItemDelta>) -> Vec<GeneratedItemDelta> {
+  generated_deltas.sort_by_key(GeneratedItemDelta::sort_key);
+  generated_deltas
+}
+
 pub(crate) fn deterministic_entry_fingerprint(
+  phase: &DirectivePhase,
   entry: &DirectiveScheduleEntry,
   diagnostics: &[Diagnostic],
   generated_deltas: &[GeneratedItemDelta],
@@ -820,17 +845,25 @@ pub(crate) fn deterministic_entry_fingerprint(
   let generated_summary = if generated_deltas.is_empty() {
     "none".to_string()
   } else {
-    generated_deltas
+    order_generated_deltas(generated_deltas.to_vec())
       .iter()
-      .map(|delta| match &delta.fingerprint {
-        crate::generated::GeneratedFingerprint::Opaque(value) => value.clone(),
+      .map(|delta| {
+        format!(
+          "{}:{}:{}:{}:{}:{}",
+          delta.origin.target_span.file.index(),
+          delta.origin.target_span.start,
+          delta.origin.target_span.end,
+          delta.origin.source_order,
+          delta.origin.generation_id,
+          delta.fingerprint_value(),
+        )
       })
       .collect::<Vec<_>>()
       .join("|")
   };
 
   DirectiveFingerprint::opaque(format!(
-    "directive={};function={};target={};effect={:?};capabilities={capabilities};diagnostics={diagnostic_summary};generated={generated_summary}",
+    "phase={phase:?};directive={};function={};target={};effect={:?};capabilities={capabilities};diagnostics={diagnostic_summary};generated={generated_summary}",
     entry.directive.index(),
     entry.function_def_id.index(),
     entry.target_node.index(),
@@ -1386,6 +1419,67 @@ mod tests {
     assert_eq!(
       report.completed_iterations[0].fingerprint,
       report.completed_iterations[1].fingerprint
+    );
+  }
+
+  #[test]
+  fn deterministic_entry_fingerprint_uses_ordered_generated_batch_metadata() {
+    let entry = DirectiveScheduleEntry {
+      source_order: 7,
+      directive: DirectiveDefId::new(3),
+      function_def_id: DefinitionId::new(5),
+      target_node: NodeId::new(11),
+      effect: DirectiveEffect::Emit,
+      capabilities: vec![DirectiveCapability::Diagnostics],
+      span: span(40, 44),
+      provenance: DirectiveProvenance {
+        origin_attr_span: span(12, 16),
+      },
+    };
+
+    let fingerprint = deterministic_entry_fingerprint(
+      &DirectivePhase::Expand,
+      &entry,
+      &[],
+      &[
+        GeneratedItemDelta::new(
+          crate::generated::GeneratedOrigin {
+            directive: DirectiveDefId::new(3),
+            directive_use_span: span(40, 44),
+            target_span: span(80, 84),
+            target_node: NodeId::new(11),
+            target_def: Some(DefinitionId::new(13)),
+            source_order: 7,
+            generation_id: 1,
+          },
+          crate::generated::GeneratedItemDeltaKind::Record {
+            name: "Later".to_string(),
+          },
+          crate::generated::GeneratedFingerprint::opaque("later"),
+        ),
+        GeneratedItemDelta::new(
+          crate::generated::GeneratedOrigin {
+            directive: DirectiveDefId::new(3),
+            directive_use_span: span(40, 44),
+            target_span: span(20, 24),
+            target_node: NodeId::new(12),
+            target_def: Some(DefinitionId::new(14)),
+            source_order: 7,
+            generation_id: 0,
+          },
+          crate::generated::GeneratedItemDeltaKind::Record {
+            name: "Earlier".to_string(),
+          },
+          crate::generated::GeneratedFingerprint::opaque("earlier"),
+        ),
+      ],
+    );
+
+    assert_eq!(
+      fingerprint,
+      DirectiveFingerprint::opaque(
+        "phase=Expand;directive=3;function=5;target=11;effect=Emit;capabilities=diagnostics;diagnostics=none;generated=4294967295:20:24:7:0:earlier|4294967295:80:84:7:1:later"
+      )
     );
   }
 
