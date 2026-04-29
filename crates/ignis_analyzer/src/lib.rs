@@ -18,6 +18,7 @@ pub mod capture;
 mod checks;
 mod const_eval;
 pub mod directive_registry;
+pub mod directive_scheduler;
 pub mod dump;
 pub mod escape;
 pub mod imports;

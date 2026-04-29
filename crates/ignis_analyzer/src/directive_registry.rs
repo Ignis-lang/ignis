@@ -173,15 +173,38 @@ impl DirectiveRegistry {
 mod tests {
   use super::*;
   use ignis_ast::NodeId;
+  use ignis_type::attribute::{DirectiveCapability, DirectiveEffect, DirectivePhase, DirectiveTarget};
   use ignis_type::BytePosition;
-  use ignis_type::definition::GeneratedProvenance;
+  use ignis_type::definition::{DirectiveDefinition, GeneratedProvenance};
   use ignis_type::file::FileId;
+  use ignis_type::symbol::SymbolId;
 
   fn span(
     start: u32,
     end: u32,
   ) -> Span {
     Span::new(FileId::SYNTHETIC, BytePosition(start), BytePosition(end))
+  }
+
+  fn directive_definition(
+    function_index: u32,
+    name_index: u32,
+    phase: DirectivePhase,
+    effect: DirectiveEffect,
+  ) -> DirectiveDefinition {
+    DirectiveDefinition {
+      id: DirectiveDefId::default(),
+      function_def_id: DefinitionId::new(function_index),
+      name: SymbolId::new(name_index),
+      target: DirectiveTarget::Record,
+      phase,
+      effect,
+      group: None,
+      capabilities: vec![DirectiveCapability::Diagnostics],
+      provenance: DirectiveProvenance {
+        origin_attr_span: span(function_index * 10, function_index * 10 + 4),
+      },
+    }
   }
 
   #[test]
@@ -229,5 +252,147 @@ mod tests {
       })
     );
     assert_eq!(registry.generated_item_metadata(&generated_definition), Some(&metadata));
+  }
+
+  #[test]
+  fn directive_schedule_plan_groups_uses_by_phase_order() {
+    let mut registry = DirectiveRegistry::default();
+
+    let expand =
+      registry.register_definition(directive_definition(1, 1, DirectivePhase::Expand, DirectiveEffect::Emit));
+    let check =
+      registry.register_definition(directive_definition(2, 2, DirectivePhase::Check, DirectiveEffect::Diagnose));
+    let transform = registry.register_definition(directive_definition(
+      3,
+      3,
+      DirectivePhase::Transform,
+      DirectiveEffect::Transform,
+    ));
+    let collect =
+      registry.register_definition(directive_definition(4, 4, DirectivePhase::Collect, DirectiveEffect::Collect));
+    let finalize =
+      registry.register_definition(directive_definition(5, 5, DirectivePhase::Finalize, DirectiveEffect::Collect));
+
+    registry.uses = vec![
+      DirectiveUse {
+        target_node: NodeId::new(10),
+        directive: transform,
+        span: span(50, 55),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(50, 55),
+        },
+      },
+      DirectiveUse {
+        target_node: NodeId::new(11),
+        directive: check,
+        span: span(10, 15),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(10, 15),
+        },
+      },
+      DirectiveUse {
+        target_node: NodeId::new(12),
+        directive: finalize,
+        span: span(40, 45),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(40, 45),
+        },
+      },
+      DirectiveUse {
+        target_node: NodeId::new(13),
+        directive: expand,
+        span: span(20, 25),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(20, 25),
+        },
+      },
+      DirectiveUse {
+        target_node: NodeId::new(14),
+        directive: collect,
+        span: span(30, 35),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(30, 35),
+        },
+      },
+    ];
+
+    let plan = crate::directive_scheduler::DirectiveSchedulePlan::from_registry(&registry);
+
+    assert_eq!(
+      plan.stages.iter().map(|stage| stage.phase.clone()).collect::<Vec<_>>(),
+      vec![
+        DirectivePhase::Check,
+        DirectivePhase::Expand,
+        DirectivePhase::Collect,
+        DirectivePhase::Finalize,
+        DirectivePhase::Transform,
+      ]
+    );
+    assert_eq!(plan.stages[0].entries[0].directive, check);
+    assert_eq!(plan.stages[1].entries[0].directive, expand);
+    assert_eq!(plan.stages[2].entries[0].directive, collect);
+    assert_eq!(plan.stages[3].entries[0].directive, finalize);
+    assert_eq!(plan.stages[4].entries[0].directive, transform);
+  }
+
+  #[test]
+  fn directive_schedule_plan_preserves_deterministic_source_order_and_execution_fields() {
+    let mut registry = DirectiveRegistry::default();
+
+    let first_expand =
+      registry.register_definition(directive_definition(1, 1, DirectivePhase::Expand, DirectiveEffect::Emit));
+    let second_expand =
+      registry.register_definition(directive_definition(2, 2, DirectivePhase::Expand, DirectiveEffect::Emit));
+
+    registry.uses = vec![
+      DirectiveUse {
+        target_node: NodeId::new(20),
+        directive: second_expand,
+        span: span(90, 95),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(90, 95),
+        },
+      },
+      DirectiveUse {
+        target_node: NodeId::new(21),
+        directive: first_expand,
+        span: span(10, 15),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(10, 15),
+        },
+      },
+      DirectiveUse {
+        target_node: NodeId::new(22),
+        directive: second_expand,
+        span: span(90, 95),
+        provenance: DirectiveProvenance {
+          origin_attr_span: span(90, 95),
+        },
+      },
+    ];
+
+    let plan = crate::directive_scheduler::DirectiveSchedulePlan::from_registry(&registry);
+    let expand_stage = &plan.stages[0];
+
+    assert_eq!(expand_stage.phase, DirectivePhase::Expand);
+    assert_eq!(
+      expand_stage
+        .entries
+        .iter()
+        .map(|entry| entry.target_node)
+        .collect::<Vec<_>>(),
+      vec![NodeId::new(21), NodeId::new(20), NodeId::new(22)]
+    );
+    assert_eq!(
+      expand_stage
+        .entries
+        .iter()
+        .map(|entry| entry.source_order)
+        .collect::<Vec<_>>(),
+      vec![1, 0, 2]
+    );
+    assert_eq!(expand_stage.entries[0].effect, DirectiveEffect::Emit);
+    assert_eq!(expand_stage.entries[0].function_def_id, DefinitionId::new(1));
+    assert_eq!(expand_stage.entries[0].provenance.origin_attr_span, span(10, 15));
   }
 }
