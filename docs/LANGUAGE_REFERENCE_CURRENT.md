@@ -706,21 +706,24 @@ The metadata is declared with named arguments such as `target`, `phase`,
 ```ignis
 import Compile from "std::compile";
 
-@directive(target: "record", phase: expand, effect: emit)
-function derive(target: Compile::ItemRef, context: Compile::Context): void {
+@directive(target: "record", phase: check, effect: diagnose)
+function derive(context: Compile::Context, target: Compile::ItemReference): void {
+    Compile::error(context, target, "records must satisfy this invariant");
     return;
 }
 ```
 
 The currently recognized directive phases are `check`, `expand`, `collect`, `finalize`, and `transform`.
 `std::compile` is compile-time-only and is not linked into runtime binaries.
+The VM currently executes diagnostic calls such as `Compile::error`, `Compile::warning`, and `Compile::note` over `Compile::Context` and `Compile::ItemReference`.
+The rest of the `std::compile` surface remains available as opaque compile-time handles for signatures, but unsupported generation operations are hard errors until generated insertion is implemented.
 
 Current migration limits:
 
 - directive declarations and uses are validated and scheduled before lowering
 - compile-time capability checks use a default-deny sandbox
 - directive functions are excluded from runtime codegen and linking
-- generated body execution and typed item insertion are not yet available
+- generated item insertion and semantic reintegration are not yet available
 - `@test` remains compiler-known for native test discovery
 
 ### `@test`

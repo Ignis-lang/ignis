@@ -57,7 +57,36 @@ fn std_compile_build_std_skips_runtime_codegen_outputs() {
 }
 
 #[test]
-fn std_compile_types_are_importable_for_directive_signatures() {
+fn std_compile_exposes_vm_diagnostic_surface_without_runtime_artifacts() {
+  let attempt = common::compile_project_single_file_with_workspace_std(
+    r#"
+import Compile from "std::compile";
+
+@directive(target: "record", phase: check, effect: diagnose)
+function derive(
+  context: Compile::Context,
+  target: Compile::ItemReference,
+): void {
+  Compile::error(context, target, "directive failure");
+  return;
+}
+
+function main(): i32 {
+  return 0;
+}
+"#,
+    TargetBackend::C,
+  )
+  .expect("temporary project build setup should succeed");
+
+  assert!(
+    attempt.result.is_ok(),
+    "expected std::compile to expose the VM diagnostic surface"
+  );
+}
+
+#[test]
+fn std_compile_keeps_generation_placeholders_available_for_future_directive_signatures() {
   let attempt = common::compile_project_single_file_with_workspace_std(
     r#"
 import Compile from "std::compile";
@@ -73,7 +102,7 @@ function derive(
   gensym: Compile::Gensym,
   span: Compile::Span,
   symbol: Compile::Symbol,
-  target: Compile::ItemRef,
+  target: Compile::ItemReference,
   itemType: Compile::TypeRef,
 ): void {
   return;
@@ -89,6 +118,46 @@ function main(): i32 {
 
   assert!(
     attempt.result.is_ok(),
-    "expected std::compile directive signature types to compile with workspace std"
+    "expected std::compile generation placeholders to remain available as opaque compile-time handles"
+  );
+}
+
+#[test]
+fn std_compile_vm_boundary_rejects_local_root_compile_namespace_spoofing() {
+  let attempt = common::compile_project_single_file_with_workspace_std(
+    r#"
+import _ from "std::compile";
+
+namespace Compile {
+  record Context {}
+  record ItemReference {}
+
+  function error(context: Context, target: ItemReference, message: str): void {
+    return;
+  }
+}
+
+@directive(target: "record", phase: check, effect: diagnose)
+function derive(context: Compile::Context, target: Compile::ItemReference): void {
+  Compile::error(context, target, "directive failure");
+  return;
+}
+
+@derive
+record User {
+  value: i32;
+}
+
+function main(): i32 {
+  return 0;
+}
+"#,
+    TargetBackend::C,
+  )
+  .expect("temporary project build setup should succeed");
+
+  assert!(
+    attempt.result.is_err(),
+    "expected local root namespace Compile to be rejected as the std::compile VM boundary"
   );
 }

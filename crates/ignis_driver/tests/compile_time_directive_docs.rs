@@ -26,8 +26,12 @@ fn compile_time_directive_docs_lock_the_current_surface_and_limits() {
   assert!(grammar.contains("@directive(target: \"record\", phase: expand, effect: emit)"));
 
   assert!(language.contains("### `@directive(...)`"));
-  assert!(language.contains("`check`, `expand`, `collect`, `finalize`, and `transform`"));
+  assert!(language.contains("phase: check, effect: diagnose"));
+  assert!(language.contains("function derive(context: Compile::Context, target: Compile::ItemReference): void"));
   assert!(language.contains("`std::compile` is compile-time-only"));
+  assert!(language.contains("`Compile::Context` and `Compile::ItemReference`"));
+  assert!(language.contains("unsupported generation operations are hard errors"));
+  assert!(language.contains("generated item insertion and semantic reintegration are not yet available"));
 
   assert!(traits.contains("internal attached methods plus implemented-trait metadata"));
   assert!(traits.contains("Directive execution does not yet synthesize `Eq` methods for you"));

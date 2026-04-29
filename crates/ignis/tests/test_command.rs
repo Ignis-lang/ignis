@@ -162,7 +162,7 @@ import Compile from "std::compile";
 import Test from "std::test";
 
 @directive(target: "record", phase: check, effect: diagnose)
-function derive(target: Compile::ItemRef, context: Compile::Context): void {
+function derive(target: Compile::ItemReference, context: Compile::Context): void {
     return;
 }
 

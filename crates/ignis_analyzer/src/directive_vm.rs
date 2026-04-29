@@ -5,10 +5,11 @@ use std::rc::Rc;
 use ignis_ast::{ASTNode, NodeId, expressions::ASTExpression, statements::ASTStatement};
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
 use ignis_type::Store as ASTStore;
-use ignis_type::definition::{DefinitionId, DefinitionStore};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore};
 use ignis_type::namespace::NamespaceStore;
 use ignis_type::span::Span;
 use ignis_type::symbol::{SymbolId, SymbolTable};
+use ignis_type::types::{Type, TypeStore};
 use ignis_type::value::IgnisLiteralValue;
 
 use crate::directive_scheduler::{DirectiveExecutionError, DirectiveScheduleEntry};
@@ -23,13 +24,14 @@ pub enum DirectiveValue {
   Bool(bool),
   String(String),
   Context,
-  ItemRef { target_span: Span },
+  ItemReference { target_span: Span },
   Unsupported,
 }
 
 #[derive(Clone)]
 pub struct DirectiveVm {
   ast: ASTStore<ASTNode>,
+  types: TypeStore,
   defs: DefinitionStore,
   namespaces: NamespaceStore,
   symbols: Rc<RefCell<SymbolTable>>,
@@ -62,6 +64,7 @@ enum ControlFlow {
 impl DirectiveVm {
   pub fn new(
     ast: &ASTStore<ASTNode>,
+    types: &TypeStore,
     defs: &DefinitionStore,
     namespaces: &NamespaceStore,
     symbols: Rc<RefCell<SymbolTable>>,
@@ -93,6 +96,7 @@ impl DirectiveVm {
 
     Self {
       ast: ast.clone(),
+      types: types.clone(),
       defs: defs.clone(),
       namespaces: namespaces.clone(),
       symbols,
@@ -125,7 +129,7 @@ impl DirectiveVm {
     if let Some(target_name) = function_entry.parameter_names.get(1) {
       state.locals.insert(
         *target_name,
-        DirectiveValue::ItemRef {
+        DirectiveValue::ItemReference {
           target_span: self.ast.get(&entry.target_node).span().clone(),
         },
       );
@@ -276,7 +280,17 @@ impl DirectiveVm {
     let definition = self.defs.get(&definition_id);
     let operation_name = self.symbol_name(definition.name);
 
-    if self.is_compile_namespace_function(definition_id) {
+    if self.is_root_compile_namespace_function(definition_id) {
+      if !self.is_compile_namespace_function(definition_id, entry.function_def_id) {
+        return Err(DirectiveExecutionError::UnsupportedGeneration {
+          operation: operation_name,
+          span: self.ast.get(&node_id).span().clone(),
+          provenance: entry.provenance.clone(),
+          directive_use_span: entry.span.clone(),
+          target_span: self.target_span(entry.target_node),
+        });
+      }
+
       let previous_call_depth = state.remaining_call_depth;
       state.remaining_call_depth -= 1;
 
@@ -330,7 +344,7 @@ impl DirectiveVm {
       return Ok(());
     }
 
-    let DirectiveValue::ItemRef { target_span, .. } = target else {
+    let DirectiveValue::ItemReference { target_span, .. } = target else {
       return Ok(());
     };
 
@@ -376,6 +390,22 @@ impl DirectiveVm {
   fn is_compile_namespace_function(
     &self,
     definition_id: DefinitionId,
+    caller_function_id: DefinitionId,
+  ) -> bool {
+    if !self.is_root_compile_namespace_function(definition_id) {
+      return false;
+    }
+
+    if !self.directive_uses_external_compile_boundary(caller_function_id) {
+      return true;
+    }
+
+    self.defs.get(&definition_id).owner_module != self.defs.get(&caller_function_id).owner_module
+  }
+
+  fn is_root_compile_namespace_function(
+    &self,
+    definition_id: DefinitionId,
   ) -> bool {
     let definition = self.defs.get(&definition_id);
 
@@ -386,6 +416,25 @@ impl DirectiveVm {
     let namespace_path = self.namespaces.full_path(namespace_id);
 
     namespace_path.len() == 1 && self.symbol_name(namespace_path[0]) == "Compile"
+  }
+
+  fn directive_uses_external_compile_boundary(
+    &self,
+    function_def_id: DefinitionId,
+  ) -> bool {
+    let definition = self.defs.get(&function_def_id);
+    let DefinitionKind::Function(function) = &definition.kind else {
+      return false;
+    };
+
+    function.params.iter().take(2).any(|param_id| {
+      let type_id = *self.defs.type_of(param_id);
+
+      match self.types.get(&type_id) {
+        Type::Record(type_def_id) => self.defs.get(type_def_id).owner_module != definition.owner_module,
+        _ => false,
+      }
+    })
   }
 
   fn symbol_name(
@@ -414,15 +463,15 @@ mod tests {
     let src = r#"
       namespace Compile {
         record Context {}
-        record ItemRef {}
+        record ItemReference {}
 
-        function error(context: Context, target: ItemRef, message: str): void {
+        function error(context: Context, target: ItemReference, message: str): void {
           return;
         }
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
-      function validateRecord(context: Compile::Context, target: Compile::ItemRef): void {
+      function validateRecord(context: Compile::Context, target: Compile::ItemReference): void {
         Compile::error(context, target, "record failed validation");
       }
 
@@ -448,6 +497,7 @@ mod tests {
     let directive_def = analyzer.directive_registry.defs[0].clone();
     let vm = DirectiveVm::new(
       &nodes,
+      &analyzer.types,
       &analyzer.defs,
       &analyzer.namespaces,
       symbols,

@@ -789,7 +789,7 @@ impl<'a> Analyzer<'a> {
       self.add_invalid_directive_signature(func, "must accept exactly 2 parameters");
     } else {
       self.validate_directive_parameter_type(func, &func_def.params[0], 0, "Context", "Compile::Context");
-      self.validate_directive_parameter_type(func, &func_def.params[1], 1, "ItemRef", "Compile::ItemRef");
+      self.validate_directive_parameter_type(func, &func_def.params[1], 1, "ItemReference", "Compile::ItemReference");
     }
 
     if !matches!(self.types.get(&func_def.return_type), Type::Void) {
@@ -806,12 +806,26 @@ impl<'a> Analyzer<'a> {
     expected_label: &str,
   ) {
     let actual_type_id = *self.defs.type_of(param_id);
-    let matches_expected = match self.types.get(&actual_type_id) {
+    let (matches_expected, requirement_suffix) = match self.types.get(&actual_type_id) {
       Type::Record(def_id) => {
-        let actual_name = self.get_symbol_name(&self.defs.get(def_id).name);
-        actual_name == expected_name
+        let definition = self.defs.get(def_id);
+        let actual_name = self.get_symbol_name(&definition.name);
+        let is_root_compile_type = definition.owner_namespace.is_some_and(|namespace_id| {
+          let namespace_path = self.namespaces.full_path(namespace_id);
+          namespace_path.len() == 1 && self.get_symbol_name(&namespace_path[0]) == "Compile"
+        });
+        let expects_std_compile_boundary = self.module_for_path.contains_key("std::compile");
+        let comes_from_host_boundary = !expects_std_compile_boundary || definition.owner_module != self.current_module;
+
+        if actual_name != expected_name || !is_root_compile_type {
+          (false, String::new())
+        } else if !comes_from_host_boundary {
+          (false, " from std::compile".to_string())
+        } else {
+          (true, String::new())
+        }
       },
-      _ => false,
+      _ => (false, String::new()),
     };
 
     if !matches_expected {
@@ -824,7 +838,10 @@ impl<'a> Analyzer<'a> {
         1 => "second",
         _ => "parameter",
       };
-      let requirement = format!("{} parameter must be {} (found {})", ordinal, expected_label, actual_type);
+      let requirement = format!(
+        "{} parameter must be {}{} (found {})",
+        ordinal, expected_label, requirement_suffix, actual_type
+      );
       self.add_invalid_directive_signature(func, &requirement);
     }
   }

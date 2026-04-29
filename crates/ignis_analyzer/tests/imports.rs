@@ -351,11 +351,11 @@ fn imported_directive_use_rejects_target_mismatches() {
   let lib_src = r#"
     namespace Compile {
       record Context {}
-      record ItemRef {}
+      record ItemReference {}
     }
 
     @directive(target: "function", phase: check, effect: diagnose)
-    export function validate(context: Compile::Context, target: Compile::ItemRef): void {
+    export function validate(context: Compile::Context, target: Compile::ItemReference): void {
       return;
     }
   "#;
@@ -1038,7 +1038,7 @@ mod std_imports {
       @directive(target: "record", phase: check, effect: diagnose)
       function derive(
         context: Compile::Context,
-        target: Compile::ItemRef,
+        target: Compile::ItemReference,
       ): void {
       }
 

@@ -40,7 +40,7 @@ import Compile from "std::compile";
 import Eq from "std::hash";
 
 @directive(target: "record", phase: expand, effect: emit, group: "serde")
-function deriveEq(target: Compile::ItemRef, context: Compile::Context): void {
+function deriveEq(target: Compile::ItemReference, context: Compile::Context): void {
     return;
 }
 
@@ -86,12 +86,12 @@ fn http_like_collect_finalize_slice_compiles_as_a_project_story() {
       import Compile from "std::compile";
 
       @directive(target: "record", phase: collect, effect: collect, group: "routes")
-      function route(target: Compile::ItemRef, collector: Compile::Collector): void {
+      function route(target: Compile::ItemReference, collector: Compile::Collector): void {
         return;
       }
 
       @directive(target: "record", phase: finalize, effect: collect, group: "routes")
-      function finalizeRoutes(target: Compile::ItemRef, collector: Compile::Collector): void {
+      function finalizeRoutes(target: Compile::ItemReference, collector: Compile::Collector): void {
         return;
       }
 
@@ -124,7 +124,7 @@ import Compile from "std::compile";
 import Test from "std::test";
 
 @directive(target: "function", phase: check, effect: diagnose)
-function generatedTestMarker(target: Compile::ItemRef, context: Compile::Context): void {
+function generatedTestMarker(target: Compile::ItemReference, context: Compile::Context): void {
     return;
 }
 

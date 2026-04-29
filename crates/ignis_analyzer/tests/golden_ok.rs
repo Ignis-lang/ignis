@@ -259,11 +259,11 @@ fn directive_attribute_accepts_minimal_required_metadata() {
     r#"
 namespace Compile {
     record Context {}
-    record ItemRef {}
+    record ItemReference {}
 }
 
 @directive(target: "function", phase: check, effect: diagnose)
-function validate(context: Compile::Context, target: Compile::ItemRef): void {
+function validate(context: Compile::Context, target: Compile::ItemReference): void {
     return;
 }
 "#,
@@ -316,11 +316,11 @@ function deriveRecord(): void {
 
 namespace Compile {
     record Context {}
-    record ItemRef {}
+    record ItemReference {}
 }
 
 @directive(target: "function", phase: check, effect: diagnose)
-function validateFunction(context: Compile::Context, target: Compile::ItemRef): void {
+function validateFunction(context: Compile::Context, target: Compile::ItemReference): void {
     return;
 }
 "#,
@@ -432,11 +432,11 @@ function smoke(): void {
 
 namespace Compile {
     record Context {}
-    record ItemRef {}
+    record ItemReference {}
 }
 
 @directive(target: "function", phase: check, effect: diagnose)
-function validateFunction(context: Compile::Context, target: Compile::ItemRef): void {
+function validateFunction(context: Compile::Context, target: Compile::ItemReference): void {
     return;
 }
 "#,

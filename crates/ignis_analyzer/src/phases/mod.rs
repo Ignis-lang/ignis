@@ -62,6 +62,7 @@ pub(crate) fn run_directive_scheduling_phase(analyzer: &mut Analyzer<'_>) -> Dir
   let mut scheduler = DirectiveScheduler::new(DIRECTIVE_SCHEDULER_CYCLE_LIMIT);
   let vm = DirectiveVm::new(
     analyzer.ast,
+    &analyzer.types,
     &analyzer.defs,
     &analyzer.namespaces,
     analyzer.symbols.clone(),

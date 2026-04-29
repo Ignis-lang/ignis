@@ -33,11 +33,11 @@ fn staged_analysis_records_scheduler_execution_before_lowering() {
     r#"
       namespace Compile {
         record Context {}
-        record ItemRef {}
+        record ItemReference {}
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
-      function checkRecord(context: Compile::Context, target: Compile::ItemRef): void {
+      function checkRecord(context: Compile::Context, target: Compile::ItemReference): void {
         return;
       }
 
@@ -99,11 +99,11 @@ fn staged_analysis_reports_denied_directive_capability_as_diagnostic() {
     r#"
       namespace Compile {
         record Context {}
-        record ItemRef {}
+        record ItemReference {}
       }
 
       @directive(target: "record", phase: check, effect: diagnose, capabilities: filesystem)
-      function inspectFilesystem(context: Compile::Context, target: Compile::ItemRef): void {
+      function inspectFilesystem(context: Compile::Context, target: Compile::ItemReference): void {
         return;
       }
 
@@ -137,15 +137,15 @@ fn staged_analysis_reports_unsupported_generation_calls_with_call_site_provenanc
     r#"
       namespace Compile {
         record Context {}
-        record ItemRef {}
+        record ItemReference {}
 
-        function emitRecord(context: Context, target: ItemRef): void {
+        function emitRecord(context: Context, target: ItemReference): void {
           return;
         }
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
-      function validateRecord(context: Compile::Context, target: Compile::ItemRef): void {
+      function validateRecord(context: Compile::Context, target: Compile::ItemReference): void {
         Compile::emitRecord(context, target);
       }
 
@@ -183,22 +183,22 @@ fn staged_analysis_rejects_invalid_vm_directive_signatures() {
       namespace Compile {
         record Context {}
         record Diagnostic {}
-        record ItemRef {}
+        record ItemReference {}
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
-      function genericDirective<T>(context: Compile::Context, target: Compile::ItemRef): void {
+      function genericDirective<T>(context: Compile::Context, target: Compile::ItemReference): void {
         return;
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
-      function nonVoidDirective(context: Compile::Context, target: Compile::ItemRef): i32 {
+      function nonVoidDirective(context: Compile::Context, target: Compile::ItemReference): i32 {
         return 1;
       }
 
       extern Meta {
         @directive(target: "record", phase: check, effect: diagnose)
-        function externDirective(context: Compile::Context, target: Compile::ItemRef): void;
+        function externDirective(context: Compile::Context, target: Compile::ItemReference): void;
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
@@ -209,14 +209,14 @@ fn staged_analysis_rejects_invalid_vm_directive_signatures() {
       @directive(target: "record", phase: check, effect: diagnose)
       function extraParam(
         context: Compile::Context,
-        target: Compile::ItemRef,
+        target: Compile::ItemReference,
         diagnostic: Compile::Diagnostic,
       ): void {
         return;
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
-      function wrongFirstParam(target: Compile::ItemRef, context: Compile::Context): void {
+      function wrongFirstParam(target: Compile::ItemReference, context: Compile::Context): void {
         return;
       }
 
@@ -258,7 +258,7 @@ fn staged_analysis_rejects_invalid_vm_directive_signatures() {
     "expected wrong-first-parameter directive signature diagnostic, got: {diagnostics}"
   );
   assert!(
-    diagnostics.contains("wrongSecondParam") && diagnostics.contains("second parameter must be Compile::ItemRef"),
+    diagnostics.contains("wrongSecondParam") && diagnostics.contains("second parameter must be Compile::ItemReference"),
     "expected wrong-second-parameter directive signature diagnostic, got: {diagnostics}"
   );
 }
@@ -269,15 +269,15 @@ fn staged_analysis_executes_check_phase_diagnostic_directive_bodies() {
     r#"
       namespace Compile {
         record Context {}
-        record ItemRef {}
+        record ItemReference {}
 
-        function error(context: Context, target: ItemRef, message: str): void {
+        function error(context: Context, target: ItemReference, message: str): void {
           return;
         }
       }
 
       @directive(target: "record", phase: check, effect: diagnose)
-      function validateRecord(context: Compile::Context, target: Compile::ItemRef): void {
+      function validateRecord(context: Compile::Context, target: Compile::ItemReference): void {
         Compile::error(context, target, "record failed validation");
       }
 
@@ -310,15 +310,15 @@ fn staged_analysis_executes_noop_check_phase_directive_bodies_deterministically(
   let src = r#"
     namespace Compile {
       record Context {}
-      record ItemRef {}
+      record ItemReference {}
 
-      function warning(context: Context, target: ItemRef, message: str): void {
+      function warning(context: Context, target: ItemReference, message: str): void {
         return;
       }
     }
 
     @directive(target: "record", phase: check, effect: diagnose)
-    function validateRecord(context: Compile::Context, target: Compile::ItemRef): void {
+    function validateRecord(context: Compile::Context, target: Compile::ItemReference): void {
       if (false) {
         Compile::warning(context, target, "should stay unreachable");
       }
