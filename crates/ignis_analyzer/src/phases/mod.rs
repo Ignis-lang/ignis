@@ -57,7 +57,10 @@ pub(crate) fn run_lowering_phase(
   lower::run(analyzer, roots)
 }
 
-pub(crate) fn run_directive_scheduling_phase(analyzer: &mut Analyzer<'_>) -> DirectiveExecutionReport {
+pub(crate) fn run_directive_scheduling_phase(
+  analyzer: &mut Analyzer<'_>,
+  roots: &[NodeId],
+) -> DirectiveExecutionReport {
   let plan = DirectiveSchedulePlan::from_registry(&analyzer.directive_registry);
   let mut scheduler = DirectiveScheduler::new(DIRECTIVE_SCHEDULER_CYCLE_LIMIT);
   let vm = DirectiveVm::new(
@@ -80,7 +83,7 @@ pub(crate) fn run_directive_scheduling_phase(analyzer: &mut Analyzer<'_>) -> Dir
   }
 
   analyzer.directive_execution_report = report.clone();
-  crate::generated::integrate_generated_batches(analyzer);
+  crate::generated::integrate_generated_batches(analyzer, roots);
   crate::generated::commit_generated_metadata(analyzer);
 
   report

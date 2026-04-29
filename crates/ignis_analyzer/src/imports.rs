@@ -41,9 +41,9 @@ impl<'a> Analyzer<'a> {
     export_table: &ExportTable,
     module_for_path: &HashMap<String, ModuleId>,
   ) {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    let (import_path, items, span, from_span) = match node {
+    let (import_path, items, span, from_span) = match &node {
       ASTNode::Statement(ASTStatement::Import(import)) => (
         import.from.clone(),
         import.items.clone(),

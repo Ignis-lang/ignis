@@ -54,6 +54,41 @@ function main(): void {
 }
 
 #[test]
+fn staged_generated_replay_reports_provenanced_trait_failures() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitImplements(context: Context, target: ItemReference, traitName: str): void {
+          return;
+        }
+      }
+
+      trait Serializable {
+        serialize(&self): i32;
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitImplements(context, target, "Serializable");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  assert_snapshot!(
+    "staged_generated_replay_reports_provenanced_trait_failures",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn assignment_type_mismatch() {
   let result = common::analyze(
     r#"

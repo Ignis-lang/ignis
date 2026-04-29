@@ -64,9 +64,9 @@ impl<'a> Analyzer<'a> {
     in_function: bool,
     in_defer: bool,
   ) {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    match node {
+    match &node {
       ASTNode::Statement(stmt) => {
         self.extra_checks_statement(node_id, stmt, scope_kind, in_loop, in_function, in_defer)
       },
@@ -263,7 +263,7 @@ impl<'a> Analyzer<'a> {
       ASTStatement::Extern(extern_stmt) => {
         // Validate extern rules: no body for functions, no init for constants
         for item in &extern_stmt.items {
-          let item_node = self.ast.get(item);
+          let item_node = self.ast_node(item);
 
           match item_node {
             ASTNode::Statement(ASTStatement::Function(func)) if func.body.is_some() => {
@@ -561,7 +561,7 @@ impl<'a> Analyzer<'a> {
       return Termination::Always;
     }
 
-    match self.ast.get(&node_id) {
+    match self.ast_node(&node_id) {
       ASTNode::Statement(stmt) => self.statement_termination(stmt),
       ASTNode::Expression(_) => Termination::Sometimes,
     }
@@ -619,7 +619,7 @@ impl<'a> Analyzer<'a> {
       return true;
     }
 
-    match self.ast.get(&node_id) {
+    match self.ast_node(&node_id) {
       ASTNode::Statement(stmt) => matches!(
         stmt,
         ASTStatement::Return(_) | ASTStatement::Break(_) | ASTStatement::Continue(_)

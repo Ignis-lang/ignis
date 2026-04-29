@@ -39,9 +39,9 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     scope_kind: ScopeKind,
   ) {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    match node {
+    match &node {
       ASTNode::Statement(stmt) => self.resolve_statement(node_id, stmt, scope_kind),
       ASTNode::Expression(expr) => self.resolve_expression(Some(node_id), expr, scope_kind),
     }

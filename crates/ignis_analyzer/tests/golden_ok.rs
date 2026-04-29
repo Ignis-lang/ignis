@@ -935,6 +935,63 @@ export function add(a: i32, b: i32): i32 {
 }
 
 #[test]
+fn staged_generated_replay_makes_attached_methods_callable() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitMethod(context: Context, target: ItemReference, name: str, isStatic: boolean): void {
+          return;
+        }
+
+        function emitImplements(context: Context, target: ItemReference, traitName: str): void {
+          return;
+        }
+      }
+
+      trait Serializable {
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitMethod(context, target, "generatedDescribe", false);
+        Compile::emitImplements(context, target, "Serializable");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+
+      function callGenerated(user: User): void {
+        user.generatedDescribe();
+        return;
+      }
+
+      function requireSerializable<T: Serializable>(value: T): void {
+        return;
+      }
+
+      function smoke(): void {
+        requireSerializable(User { value: 1 });
+        return;
+      }
+    "#,
+  );
+
+  assert_snapshot!(
+    "staged_generated_replay_makes_attached_methods_callable_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!(
+    "staged_generated_replay_makes_attached_methods_callable_hir",
+    common::format_hir(&result)
+  );
+}
+
+#[test]
 fn literal_adapts_to_expected_type() {
   let result = common::analyze(
     r#"

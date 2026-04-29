@@ -23,9 +23,9 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     scope_kind: ScopeKind,
   ) {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    match node {
+    match &node {
       ASTNode::Statement(stmt) => self.const_eval_statement(node_id, stmt, scope_kind),
       ASTNode::Expression(_) => {},
     }
@@ -223,7 +223,7 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     _scope_kind: ScopeKind,
   ) -> Option<ConstValue> {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id);
 
     match node {
       ASTNode::Expression(expr) => match expr {

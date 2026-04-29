@@ -855,3 +855,97 @@ fn staged_analysis_rolls_back_failed_generated_implements_materialization_withou
     "failed generated batch must not leak generated registry metadata"
   );
 }
+
+#[test]
+fn staged_analysis_replays_generated_roots_and_touched_owners_into_semantic_maps() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitRecord(context: Context, target: ItemReference, name: str): void {
+          return;
+        }
+
+        function emitMethod(context: Context, target: ItemReference, name: str, isStatic: boolean): void {
+          return;
+        }
+
+        function emitImplements(context: Context, target: ItemReference, traitName: str): void {
+          return;
+        }
+      }
+
+      trait Serializable {
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitRecord(context, target, "GeneratedUser");
+        Compile::emitMethod(context, target, "generatedDescribe", false);
+        Compile::emitImplements(context, target, "Serializable");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+
+      function callGenerated(user: User): void {
+        user.generatedDescribe();
+        return;
+      }
+
+      function requireSerializable<T: Serializable>(value: T): void {
+        return;
+      }
+
+      function smoke(): void {
+        requireSerializable(User { value: 1 });
+        return;
+      }
+    "#,
+  );
+
+  assert_eq!(common::format_diagnostics(&result.output.diagnostics), "(no diagnostics)");
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let generated_record_name = symbols.intern("GeneratedUser");
+  let generated_method_name = symbols.intern("generatedDescribe");
+  drop(symbols);
+
+  let generated_record_node = result
+    .output
+    .ast
+    .iter()
+    .find_map(|(node_id, node)| {
+      matches!(node, ASTNode::Statement(ASTStatement::Record(record)) if record.name == generated_record_name)
+        .then_some(node_id)
+    })
+    .expect("GeneratedUser record node");
+
+  assert!(
+    result.output.node_defs.contains_key(&generated_record_node),
+    "generated record roots should be replayed into node_defs"
+  );
+  assert!(
+    result.output.node_types.contains_key(&generated_record_node),
+    "generated record roots should be replayed into node_types"
+  );
+
+  let generated_method_def_id = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| {
+      (def.name == generated_method_name && matches!(def.kind, ignis_type::definition::DefinitionKind::Method(_)))
+        .then_some(def_id)
+    })
+    .expect("generated method definition id");
+
+  assert!(
+    result.output.defs.get(&generated_method_def_id).name == generated_method_name,
+    "generated method definition should stay committed for replayed method calls"
+  );
+}

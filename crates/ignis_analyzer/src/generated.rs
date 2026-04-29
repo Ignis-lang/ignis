@@ -5,8 +5,8 @@ use ignis_ast::{
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::attribute::DirectivePhase;
 use ignis_type::definition::{
-  Definition, DefinitionId, DefinitionKind, DirectiveDefId, GeneratedItemMetadata, MethodDefinition, SymbolEntry,
-  Visibility,
+  Definition, DefinitionId, DefinitionKind, DirectiveDefId, GeneratedItemKind, GeneratedItemMetadata, MethodDefinition,
+  SymbolEntry, Visibility,
 };
 use ignis_type::span::Span;
 
@@ -121,6 +121,7 @@ pub struct GeneratedIntegrationSnapshot {
   node_defs: std::collections::HashMap<NodeId, DefinitionId>,
   node_types: std::collections::HashMap<NodeId, ignis_type::types::TypeId>,
   directive_registry: crate::directive_registry::DirectiveRegistry,
+  diagnostics: Vec<ignis_diagnostics::diagnostic_report::Diagnostic>,
   generated_roots: Vec<NodeId>,
 }
 
@@ -135,6 +136,7 @@ impl GeneratedIntegrationSnapshot {
       node_defs: analyzer.node_defs.clone(),
       node_types: analyzer.node_types.clone(),
       directive_registry: analyzer.directive_registry.clone(),
+      diagnostics: analyzer.diagnostics.clone(),
       generated_roots: analyzer.generated_roots.clone(),
     }
   }
@@ -151,11 +153,15 @@ impl GeneratedIntegrationSnapshot {
     analyzer.node_defs = self.node_defs;
     analyzer.node_types = self.node_types;
     analyzer.directive_registry = self.directive_registry;
+    analyzer.diagnostics = self.diagnostics;
     analyzer.generated_roots = self.generated_roots;
   }
 }
 
-pub fn integrate_generated_batches(analyzer: &mut Analyzer<'_>) {
+pub fn integrate_generated_batches(
+  analyzer: &mut Analyzer<'_>,
+  roots: &[NodeId],
+) {
   let generated_batches = analyzer.directive_execution_report.generated_batches.clone();
   let mut seen_batches = std::collections::HashSet::new();
 
@@ -171,21 +177,206 @@ pub fn integrate_generated_batches(analyzer: &mut Analyzer<'_>) {
     }
 
     let snapshot = GeneratedIntegrationSnapshot::capture(analyzer);
-    let diagnostics_len = analyzer.diagnostics.len();
-
+    let baseline_diagnostics_len = snapshot.diagnostics.len();
     let generated_roots = materialize_generated_batch(analyzer, &batch.entries);
 
     analyzer.bind_generated_phase(&generated_roots);
+    let preserved_diagnostics = analyzer.diagnostics.split_off(baseline_diagnostics_len);
+    replay_generated_semantics(analyzer, roots, &generated_roots, preserved_diagnostics);
 
-    let new_diagnostics = analyzer.diagnostics.split_off(diagnostics_len);
+    let mut new_diagnostics = analyzer.diagnostics.clone();
+    dedupe_diagnostics(&mut new_diagnostics);
     let has_errors = !new_diagnostics.is_empty();
 
     if has_errors {
       snapshot.restore(analyzer);
       analyzer.diagnostics.extend(new_diagnostics);
+      dedupe_diagnostics(&mut analyzer.diagnostics);
       continue;
     }
   }
+}
+
+fn replay_generated_semantics(
+  analyzer: &mut Analyzer<'_>,
+  roots: &[NodeId],
+  generated_roots: &[NodeId],
+  preserved_diagnostics: Vec<ignis_diagnostics::diagnostic_report::Diagnostic>,
+) {
+  let replay_roots = replay_roots(roots, &analyzer.generated_roots, generated_roots);
+  analyzer.diagnostics = preserved_diagnostics;
+  analyzer.node_types.clear();
+  analyzer.resolved_calls.clear();
+  analyzer.import_item_defs.clear();
+  analyzer.extension_methods.clear();
+  analyzer.scope_infer_vars.clear();
+  analyzer.infer_ctx = ignis_type::inference::InferCtx::new();
+
+  let replay_start = analyzer.diagnostics.len();
+
+  analyzer.resolve_phase(&replay_roots);
+  analyzer.typecheck_phase(&replay_roots);
+
+  let replay_roots_vec = replay_roots.clone();
+  analyzer.const_eval_phase(&replay_roots_vec);
+  analyzer.extra_checks_phase(&replay_roots);
+
+  attach_generated_replay_provenance(analyzer, &replay_roots, replay_start);
+  dedupe_diagnostics(&mut analyzer.diagnostics);
+}
+
+fn replay_roots(
+  roots: &[NodeId],
+  committed_generated_roots: &[NodeId],
+  batch_generated_roots: &[NodeId],
+) -> Vec<NodeId> {
+  let mut replay_roots = roots.to_vec();
+
+  for generated_root in committed_generated_roots.iter().chain(batch_generated_roots.iter()) {
+    if !replay_roots.contains(generated_root) {
+      replay_roots.push(*generated_root);
+    }
+  }
+
+  replay_roots
+}
+
+fn attach_generated_replay_provenance(
+  analyzer: &mut Analyzer<'_>,
+  replay_roots: &[NodeId],
+  diagnostics_start: usize,
+) {
+  let replay_entries = replay_roots
+    .iter()
+    .filter_map(|root| {
+      let root_span = analyzer.node_span(root).clone();
+      let root_def_id = analyzer.node_defs.get(root).copied()?;
+      let provenance_items = generated_provenance_items(analyzer, root_def_id);
+
+      (!provenance_items.is_empty()).then_some((*root, root_span, provenance_items))
+    })
+    .collect::<Vec<_>>();
+
+  for diagnostic in analyzer.diagnostics.iter_mut().skip(diagnostics_start) {
+    for (root_node, root_span, provenance_items) in &replay_entries {
+      if !span_contains(root_span, &diagnostic.primary_span) {
+        continue;
+      }
+
+      for metadata in provenance_items {
+        if !diagnostic
+          .labels
+          .iter()
+          .any(|label| label.span == metadata.provenance.origin_attr_span && label.message == "directive declaration")
+        {
+          diagnostic.labels.push(ignis_diagnostics::diagnostic_report::Label {
+            span: metadata.provenance.origin_attr_span.clone(),
+            message: "directive declaration".to_string(),
+          });
+        }
+
+        if let Some(directive_use) = analyzer.directive_registry.uses.iter().find(|directive_use| {
+          directive_use.directive == metadata.provenance.directive && directive_use.target_node == *root_node
+        }) && !diagnostic
+          .labels
+          .iter()
+          .any(|label| label.span == directive_use.span && label.message == "directive use")
+        {
+          diagnostic.labels.push(ignis_diagnostics::diagnostic_report::Label {
+            span: directive_use.span.clone(),
+            message: "directive use".to_string(),
+          });
+        }
+
+        let provenance_note = format!(
+          "generated item #{}: {}",
+          metadata.provenance.generation_id,
+          generated_item_description(&metadata.kind)
+        );
+
+        if !diagnostic.notes.contains(&provenance_note) {
+          diagnostic.notes.push(provenance_note);
+        }
+      }
+
+      break;
+    }
+  }
+}
+
+fn dedupe_diagnostics(diagnostics: &mut Vec<ignis_diagnostics::diagnostic_report::Diagnostic>) {
+  let mut seen = std::collections::HashSet::new();
+
+  diagnostics.retain(|diagnostic| {
+    let key = format!(
+      "{}|{}|{}|{}|{}",
+      diagnostic.error_code,
+      diagnostic.message,
+      diagnostic.primary_span.file.index(),
+      diagnostic.primary_span.start.0,
+      diagnostic.primary_span.end.0,
+    );
+
+    seen.insert(key)
+  });
+}
+
+fn generated_provenance_items(
+  analyzer: &Analyzer<'_>,
+  root_def_id: DefinitionId,
+) -> Vec<GeneratedItemMetadata> {
+  let mut metadata = Vec::new();
+
+  if let Some(item) = analyzer.directive_registry.generated_item_metadata(&root_def_id) {
+    metadata.push(item.clone());
+  }
+
+  metadata.extend(
+    analyzer
+      .directive_registry
+      .generated_attached_method_items_for_owner(root_def_id)
+      .into_iter()
+      .map(|item| item.metadata),
+  );
+  metadata.extend(
+    analyzer
+      .directive_registry
+      .generated_implemented_trait_items_for_owner(root_def_id)
+      .into_iter()
+      .map(|item| item.metadata),
+  );
+
+  metadata.sort_by_key(|item| item.provenance.generation_id);
+  metadata.dedup();
+  metadata
+}
+
+fn generated_item_description(kind: &GeneratedItemKind) -> String {
+  match kind {
+    GeneratedItemKind::Record => "generated record".to_string(),
+    GeneratedItemKind::AttachedMethod { owner_type, is_static } => {
+      let static_label = if *is_static { "static " } else { "" };
+      format!(
+        "{}generated attached method for definition {}",
+        static_label,
+        owner_type.index()
+      )
+    },
+    GeneratedItemKind::ImplementedTrait { owner_type, trait_def } => {
+      format!(
+        "generated implemented trait attachment for definition {} -> trait {}",
+        owner_type.index(),
+        trait_def.index()
+      )
+    },
+  }
+}
+
+fn span_contains(
+  container: &Span,
+  inner: &Span,
+) -> bool {
+  container.file == inner.file && container.start <= inner.start && container.end >= inner.end
 }
 
 fn materialize_generated_batch(

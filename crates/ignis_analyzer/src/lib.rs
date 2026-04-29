@@ -446,7 +446,7 @@ impl<'a> Analyzer<'a> {
     let mut analyzer = Analyzer::new(ast, symbols, ModuleId::new(0));
 
     phases::run_semantic_passes(&mut analyzer, roots);
-    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer);
+    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer, roots);
 
     let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
@@ -478,7 +478,7 @@ impl<'a> Analyzer<'a> {
     analyzer.module_for_path = module_for_path.clone();
 
     phases::run_semantic_passes(&mut analyzer, roots);
-    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer);
+    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer, roots);
 
     let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
@@ -562,7 +562,7 @@ impl<'a> Analyzer<'a> {
     };
 
     phases::run_semantic_passes(&mut analyzer, roots);
-    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer);
+    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer, roots);
     let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
     let closure_diags = capture::populate_closure_captures(
@@ -817,7 +817,7 @@ impl<'a> Analyzer<'a> {
     &self,
     node_id: &NodeId,
   ) -> &ignis_type::span::Span {
-    self.ast.get(node_id).span()
+    self.ast_node(node_id).span()
   }
 
   /// Reinitializes the scope tree for a new analysis phase.
@@ -1029,7 +1029,7 @@ mod tests {
     analyzer.const_eval_phase(&roots);
     analyzer.extra_checks_phase(&roots);
     analyzer.lint_phase(&roots);
-    analyzer.directive_execution_report = crate::phases::run_directive_scheduling_phase(&mut analyzer);
+    analyzer.directive_execution_report = crate::phases::run_directive_scheduling_phase(&mut analyzer, &roots);
 
     let mut hir = analyzer.lower_to_hir(&roots);
     let closure_diags = capture::populate_closure_captures(
@@ -1076,7 +1076,7 @@ mod tests {
 
     let mut analyzer = Analyzer::new(&nodes, symbols.clone(), ModuleId::new(0));
     let semantic = crate::phases::run_semantic_phases(&mut analyzer, &nodes, &roots, symbols);
-    analyzer.directive_execution_report = crate::phases::run_directive_scheduling_phase(&mut analyzer);
+    analyzer.directive_execution_report = crate::phases::run_directive_scheduling_phase(&mut analyzer, &roots);
     let hir = crate::phases::run_lowering_phase(&mut analyzer, &roots);
 
     (semantic, hir)

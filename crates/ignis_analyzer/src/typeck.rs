@@ -102,8 +102,8 @@ impl<'a> Analyzer<'a> {
       return *ty;
     }
 
-    let node = self.ast.get(node_id);
-    let ty = match node {
+    let node = self.ast_node(node_id).clone();
+    let ty = match &node {
       ASTNode::Statement(stmt) => self.typecheck_statement(node_id, stmt, scope_kind, ctx),
       ASTNode::Expression(expr) => self.typecheck_expression(node_id, expr, scope_kind, ctx, infer),
     };
@@ -2852,9 +2852,9 @@ impl<'a> Analyzer<'a> {
     _scope_kind: ScopeKind,
     _ctx: &TypecheckContext,
   ) -> Option<ignis_type::definition::DefinitionId> {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    match node {
+    match &node {
       ASTNode::Expression(ASTExpression::Variable(var)) => {
         // Simple identifier - look up in scope
         self.scopes.lookup_def(&var.name).cloned()
@@ -2887,9 +2887,9 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     def_id: &DefinitionId,
   ) {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    match node {
+    match &node {
       ASTNode::Expression(ASTExpression::Variable(var)) => {
         self.set_import_item_def(&var.span, def_id);
       },
@@ -3980,7 +3980,7 @@ impl<'a> Analyzer<'a> {
     &self,
     node_id: &NodeId,
   ) -> usize {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id);
 
     match node {
       ASTNode::Expression(expr) => self.count_pipe_placeholders_expr(expr),
@@ -4069,7 +4069,7 @@ impl<'a> Analyzer<'a> {
       return;
     }
 
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id);
     let expr = match node {
       ASTNode::Expression(e) => e,
       _ => return,
@@ -5803,6 +5803,8 @@ impl<'a> Analyzer<'a> {
         if let Some(entry) = instance_methods.get(&ma.member) {
           match entry {
             SymbolEntry::Single(method_id) => {
+              self.set_resolved_call(node_id, *method_id);
+              self.set_resolved_call(&call.callee, *method_id);
               self.set_import_item_def(&ma.member_span, method_id);
               let method = {
                 let method_def = self.defs.get(method_id);
@@ -6025,6 +6027,8 @@ impl<'a> Analyzer<'a> {
         if let Some(entry) = instance_methods.get(&ma.member) {
           match entry {
             SymbolEntry::Single(method_id) => {
+              self.set_resolved_call(node_id, *method_id);
+              self.set_resolved_call(&call.callee, *method_id);
               self.set_import_item_def(&ma.member_span, method_id);
               let method = {
                 let method_def = self.defs.get(method_id);
@@ -8706,11 +8710,11 @@ impl<'a> Analyzer<'a> {
     &self,
     node_id: &NodeId,
   ) -> bool {
-    let ASTNode::Expression(expr) = self.ast.get(node_id) else {
+    let ASTNode::Expression(expr) = self.ast_node(node_id).clone() else {
       return false;
     };
 
-    self.expression_contains_let_condition(expr)
+    self.expression_contains_let_condition(&expr)
   }
 
   fn expression_contains_let_condition(
@@ -10273,6 +10277,10 @@ impl<'a> Analyzer<'a> {
 
       let generated_method_name = self.defs.get(&generated_method_def_id).name;
 
+      if Self::symbol_entry_contains_definition(instance_methods.get(&generated_method_name), generated_method_def_id) {
+        continue;
+      }
+
       match instance_methods.get_mut(&generated_method_name) {
         Some(SymbolEntry::Overload(group)) => group.push(generated_method_def_id),
         Some(SymbolEntry::Single(existing)) => {
@@ -10350,6 +10358,17 @@ impl<'a> Analyzer<'a> {
           || self.type_references_generated_method_owner(*ret, owner_def_id)
       },
       _ => false,
+    }
+  }
+
+  fn symbol_entry_contains_definition(
+    entry: Option<&SymbolEntry>,
+    definition_id: DefinitionId,
+  ) -> bool {
+    match entry {
+      Some(SymbolEntry::Single(existing)) => *existing == definition_id,
+      Some(SymbolEntry::Overload(group)) => group.contains(&definition_id),
+      None => false,
     }
   }
 
