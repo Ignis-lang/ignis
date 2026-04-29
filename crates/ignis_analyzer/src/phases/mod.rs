@@ -86,7 +86,7 @@ pub(crate) fn run_directive_scheduling_phase(
   crate::generated::integrate_generated_batches(analyzer, roots);
   crate::generated::commit_generated_metadata(analyzer);
 
-  report
+  analyzer.directive_execution_report.clone()
 }
 
 pub(crate) fn build_semantic_artifacts(

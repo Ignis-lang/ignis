@@ -737,6 +737,88 @@ fn private_items_not_exported() {
   );
 }
 
+#[test]
+fn failed_generated_reintegration_does_not_leak_into_shared_stores() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let output = analyze_library_with_shared_stores(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitMethod(context: Context, target: ItemReference, name: str, isStatic: boolean): void {
+          return;
+        }
+
+        function emitImplements(context: Context, target: ItemReference, traitName: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitMethod(context, target, "generatedDescribe", false);
+        Compile::emitImplements(context, target, "MissingTrait");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+
+  assert!(
+    output
+      .diagnostics
+      .iter()
+      .any(|diagnostic| diagnostic.message.contains("MissingTrait") && diagnostic.message.contains("implements")),
+    "expected failing generated implements diagnostic"
+  );
+
+  let mut symbols = symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  let generated_method_name = symbols.intern("generatedDescribe");
+  drop(symbols);
+
+  let generated_method_defs = shared_defs
+    .iter()
+    .filter(|(_, def)| {
+      def.name == generated_method_name && matches!(def.kind, ignis_type::definition::DefinitionKind::Method(_))
+    })
+    .count();
+
+  let user_def_id = shared_defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == user_name).then_some(def_id))
+    .expect("User definition id");
+  let ignis_type::definition::DefinitionKind::Record(record) = &shared_defs.get(&user_def_id).kind else {
+    panic!("expected User record definition");
+  };
+
+  assert_eq!(
+    generated_method_defs, 0,
+    "shared stores must not retain rolled-back generated methods"
+  );
+  assert!(
+    !record.instance_methods.contains_key(&generated_method_name),
+    "shared stores must not retain rolled-back owner method entries"
+  );
+  assert!(
+    record.implemented_traits.is_empty(),
+    "shared stores must not retain rolled-back trait attachments"
+  );
+  assert!(output.directive_registry.generated_items.is_empty());
+}
+
 // ============================================================================
 // Import Shadow Tests
 // ============================================================================

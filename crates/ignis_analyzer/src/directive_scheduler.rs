@@ -294,9 +294,23 @@ pub struct DirectiveExecutionReport {
   pub completed_iterations: Vec<DirectiveIterationRecord>,
   pub reanalysis_requests: Vec<DirectiveReanalysisRequest>,
   pub generated_batches: Vec<GeneratedBatch>,
+  pub generated_batch_outcomes: Vec<GeneratedBatchOutcome>,
   pub diagnostics: Vec<Diagnostic>,
   pub converged: bool,
   pub failure: Option<DirectiveSchedulerFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedBatchOutcome {
+  pub iteration: usize,
+  pub phase: DirectivePhase,
+  pub outcome: GeneratedBatchReintegrationOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedBatchReintegrationOutcome {
+  Committed,
+  RolledBack { diagnostics: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +348,7 @@ impl DirectiveScheduler {
             completed_iterations: state.completed_iterations().to_vec(),
             reanalysis_requests,
             generated_batches,
+            generated_batch_outcomes: Vec::new(),
             diagnostics,
             converged: false,
             failure: Some(DirectiveSchedulerFailure::from_execution_error(error)),
@@ -370,6 +385,7 @@ impl DirectiveScheduler {
             completed_iterations: state.completed_iterations().to_vec(),
             reanalysis_requests,
             generated_batches,
+            generated_batch_outcomes: Vec::new(),
             diagnostics,
             converged: false,
             failure: Some(DirectiveSchedulerFailure::from_scheduler_error(&plan, error)),
@@ -383,6 +399,7 @@ impl DirectiveScheduler {
       completed_iterations: state.completed_iterations().to_vec(),
       reanalysis_requests,
       generated_batches,
+      generated_batch_outcomes: Vec::new(),
       diagnostics,
       converged: state.is_converged(),
       failure: None,

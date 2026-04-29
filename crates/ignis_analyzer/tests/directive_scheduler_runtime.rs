@@ -857,6 +857,87 @@ fn staged_analysis_rolls_back_failed_generated_implements_materialization_withou
 }
 
 #[test]
+fn staged_analysis_fingerprints_include_generated_reintegration_outcome() {
+  let success = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitRecord(context: Context, target: ItemReference, name: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitRecord(context, target, "GeneratedUser");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+  let rollback = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitRecord(context: Context, target: ItemReference, name: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitRecord(context, target, "GeneratedUser");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+
+      record GeneratedUser {
+        value: i32;
+      }
+    "#,
+  );
+
+  assert_eq!(common::format_diagnostics(&success.output.diagnostics), "(no diagnostics)");
+  assert!(
+    common::format_diagnostics(&rollback.output.diagnostics).contains("already defined"),
+    "expected rollback case to fail reintegration"
+  );
+
+  assert_eq!(success.output.directive_execution_report.generated_batches.len(), 2);
+  assert_eq!(rollback.output.directive_execution_report.generated_batches.len(), 2);
+  assert_eq!(success.output.directive_execution_report.generated_batch_outcomes.len(), 2);
+  assert_eq!(
+    rollback
+      .output
+      .directive_execution_report
+      .generated_batch_outcomes
+      .len(),
+    2
+  );
+
+  assert_ne!(
+    success.output.directive_execution_report.generated_batch_outcomes,
+    rollback.output.directive_execution_report.generated_batch_outcomes,
+    "reintegration outcomes should distinguish committed and rolled-back batches"
+  );
+  assert_ne!(
+    success.output.directive_execution_report.completed_iterations,
+    rollback.output.directive_execution_report.completed_iterations,
+    "iteration fingerprints must include reintegration outcomes, not just emitted deltas"
+  );
+}
+
+#[test]
 fn staged_analysis_replays_generated_roots_and_touched_owners_into_semantic_maps() {
   let result = common::analyze_staged(
     r#"

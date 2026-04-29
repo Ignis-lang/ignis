@@ -10,6 +10,7 @@ use ignis_type::definition::{
 };
 use ignis_type::span::Span;
 
+use crate::directive_scheduler::{GeneratedBatchOutcome, GeneratedBatchReintegrationOutcome};
 use crate::directive_registry::DirectiveUse;
 use crate::Analyzer;
 
@@ -163,7 +164,8 @@ pub fn integrate_generated_batches(
   roots: &[NodeId],
 ) {
   let generated_batches = analyzer.directive_execution_report.generated_batches.clone();
-  let mut seen_batches = std::collections::HashSet::new();
+  analyzer.directive_execution_report.generated_batch_outcomes.clear();
+  let mut seen_batches = std::collections::HashMap::new();
 
   for batch in generated_batches {
     let batch_key = batch
@@ -172,7 +174,8 @@ pub fn integrate_generated_batches(
       .map(|entry| (entry.origin.generation_id, entry.fingerprint_value().to_string()))
       .collect::<Vec<_>>();
 
-    if !seen_batches.insert(batch_key) {
+    if let Some(previous_outcome) = seen_batches.get(&batch_key).cloned() {
+      record_generated_batch_outcome(analyzer, &batch, previous_outcome);
       continue;
     }
 
@@ -189,12 +192,88 @@ pub fn integrate_generated_batches(
     let has_errors = !new_diagnostics.is_empty();
 
     if has_errors {
+      let outcome = GeneratedBatchReintegrationOutcome::RolledBack {
+        diagnostics: reintegration_diagnostic_fingerprints(&new_diagnostics),
+      };
+
       snapshot.restore(analyzer);
       analyzer.diagnostics.extend(new_diagnostics);
       dedupe_diagnostics(&mut analyzer.diagnostics);
+      seen_batches.insert(batch_key, outcome.clone());
+      record_generated_batch_outcome(analyzer, &batch, outcome);
+
       continue;
     }
+
+    let outcome = GeneratedBatchReintegrationOutcome::Committed;
+    seen_batches.insert(batch_key, outcome.clone());
+    record_generated_batch_outcome(analyzer, &batch, outcome);
   }
+}
+
+fn record_generated_batch_outcome(
+  analyzer: &mut Analyzer<'_>,
+  batch: &GeneratedBatch,
+  outcome: GeneratedBatchReintegrationOutcome,
+) {
+  let fingerprint = reintegration_outcome_fingerprint(batch, &outcome);
+
+  analyzer
+    .directive_execution_report
+    .generated_batch_outcomes
+    .push(GeneratedBatchOutcome {
+      iteration: batch.iteration,
+      phase: batch.phase.clone(),
+      outcome,
+    });
+
+  if let Some(iteration) = analyzer
+    .directive_execution_report
+    .completed_iterations
+    .iter_mut()
+    .find(|iteration| iteration.iteration == batch.iteration)
+  {
+    iteration.fingerprint.components.push(fingerprint);
+  }
+}
+
+fn reintegration_outcome_fingerprint(
+  batch: &GeneratedBatch,
+  outcome: &GeneratedBatchReintegrationOutcome,
+) -> crate::directive_scheduler::DirectiveFingerprint {
+  let outcome_value = match outcome {
+    GeneratedBatchReintegrationOutcome::Committed => "committed".to_string(),
+    GeneratedBatchReintegrationOutcome::RolledBack { diagnostics } => {
+      format!("rolled_back:{}", diagnostics.join("|"))
+    },
+  };
+
+  crate::directive_scheduler::DirectiveFingerprint::opaque(format!(
+    "reintegration=iteration:{};phase={:?};outcome={}",
+    batch.iteration, batch.phase, outcome_value
+  ))
+}
+
+fn reintegration_diagnostic_fingerprints(
+  diagnostics: &[ignis_diagnostics::diagnostic_report::Diagnostic]
+) -> Vec<String> {
+  let mut fingerprints = diagnostics
+    .iter()
+    .map(|diagnostic| {
+      format!(
+        "{}:{}:{}:{}:{}",
+        diagnostic.error_code,
+        diagnostic.primary_span.file.index(),
+        diagnostic.primary_span.start.0,
+        diagnostic.primary_span.end.0,
+        diagnostic.message
+      )
+    })
+    .collect::<Vec<_>>();
+
+  fingerprints.sort();
+  fingerprints.dedup();
+  fingerprints
 }
 
 fn replay_generated_semantics(
