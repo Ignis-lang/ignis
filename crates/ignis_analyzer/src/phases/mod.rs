@@ -22,6 +22,7 @@ use crate::directive_scheduler::{
   CompileTimeDirectiveExecutor, DirectiveExecutionReport, DirectiveSchedulePlan, DirectiveScheduler,
   NoopDirectiveReanalysisHook,
 };
+use crate::directive_vm::DirectiveVm;
 use crate::{Analyzer, SemanticArtifacts, build_node_spans};
 
 const DIRECTIVE_SCHEDULER_CYCLE_LIMIT: usize = 8;
@@ -59,9 +60,19 @@ pub(crate) fn run_lowering_phase(
 pub(crate) fn run_directive_scheduling_phase(analyzer: &mut Analyzer<'_>) -> DirectiveExecutionReport {
   let plan = DirectiveSchedulePlan::from_registry(&analyzer.directive_registry);
   let mut scheduler = DirectiveScheduler::new(DIRECTIVE_SCHEDULER_CYCLE_LIMIT);
-  let mut executor = CompileTimeDirectiveExecutor::default();
+  let vm = DirectiveVm::new(
+    analyzer.ast,
+    &analyzer.defs,
+    &analyzer.namespaces,
+    analyzer.symbols.clone(),
+    &analyzer.node_defs,
+    &analyzer.resolved_calls,
+  );
+  let mut executor = CompileTimeDirectiveExecutor::with_vm(Default::default(), vm);
   let mut reanalysis_hook = NoopDirectiveReanalysisHook;
   let report = scheduler.run(plan, &mut executor, &mut reanalysis_hook);
+
+  analyzer.diagnostics.extend(report.diagnostics.clone());
 
   if let Some(diagnostic) = report.failure.as_ref().and_then(|failure| failure.as_diagnostic()) {
     analyzer.add_diagnostic(diagnostic);

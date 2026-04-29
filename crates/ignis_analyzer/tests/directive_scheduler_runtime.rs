@@ -213,3 +213,88 @@ fn staged_analysis_rejects_invalid_vm_directive_signatures() {
     "expected wrong-second-parameter directive signature diagnostic, got: {diagnostics}"
   );
 }
+
+#[test]
+fn staged_analysis_executes_check_phase_diagnostic_directive_bodies() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemRef {}
+
+        function error(context: Context, target: ItemRef, message: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function validateRecord(context: Compile::Context, target: Compile::ItemRef): void {
+        Compile::error(context, target, "record failed validation");
+      }
+
+      @validateRecord
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("record failed validation"),
+    "expected directive body diagnostic emission, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("directive use") || diagnostics.contains("target item"),
+    "expected directive provenance labels, got: {diagnostics}"
+  );
+  assert_eq!(
+    result.output.directive_execution_report.executed_phases,
+    vec![DirectivePhase::Check]
+  );
+  assert!(result.output.directive_execution_report.failure.is_none());
+}
+
+#[test]
+fn staged_analysis_executes_noop_check_phase_directive_bodies_deterministically() {
+  let src = r#"
+    namespace Compile {
+      record Context {}
+      record ItemRef {}
+
+      function warning(context: Context, target: ItemRef, message: str): void {
+        return;
+      }
+    }
+
+    @directive(target: "record", phase: check, effect: diagnose)
+    function validateRecord(context: Compile::Context, target: Compile::ItemRef): void {
+      if (false) {
+        Compile::warning(context, target, "should stay unreachable");
+      }
+
+      return;
+    }
+
+    @validateRecord
+    record User {
+      value: i32;
+    }
+  "#;
+
+  let first = common::analyze_staged(src);
+  let second = common::analyze_staged(src);
+
+  assert_eq!(common::format_diagnostics(&first.output.diagnostics), "(no diagnostics)");
+  assert_eq!(
+    first.output.directive_execution_report.completed_iterations,
+    second.output.directive_execution_report.completed_iterations,
+    "expected deterministic no-op execution fingerprints"
+  );
+  assert_eq!(
+    first.output.directive_execution_report.executed_phases,
+    vec![DirectivePhase::Check]
+  );
+  assert!(first.output.directive_execution_report.failure.is_none());
+}

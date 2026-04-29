@@ -7,6 +7,7 @@ use ignis_type::span::Span;
 use ignis_type::BytePosition;
 
 use crate::directive_registry::DirectiveRegistry;
+use crate::directive_vm::DirectiveVm;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectiveSchedulePlan {
@@ -74,9 +75,10 @@ impl DirectiveIterationRecord {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DirectiveStageResult {
   pub phase: DirectivePhase,
+  pub diagnostics: Vec<Diagnostic>,
   pub fingerprints: Vec<DirectiveFingerprint>,
   pub requested_reanalysis: bool,
 }
@@ -89,11 +91,34 @@ impl DirectiveStageResult {
   ) -> Self {
     Self {
       phase,
+      diagnostics: Vec::new(),
       fingerprints,
       requested_reanalysis,
     }
   }
+
+  pub fn with_diagnostics(
+    mut self,
+    diagnostics: Vec<Diagnostic>,
+  ) -> Self {
+    self.diagnostics = diagnostics;
+    self
+  }
 }
+
+impl PartialEq for DirectiveStageResult {
+  fn eq(
+    &self,
+    other: &Self,
+  ) -> bool {
+    self.phase == other.phase
+      && self.requested_reanalysis == other.requested_reanalysis
+      && self.fingerprints == other.fingerprints
+      && diagnostics_signature(&self.diagnostics) == diagnostics_signature(&other.diagnostics)
+  }
+}
+
+impl Eq for DirectiveStageResult {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectiveExecutionProgress {
@@ -172,6 +197,19 @@ pub enum DirectiveExecutionError {
     capability: DirectiveCapability,
     provenance: DirectiveProvenance,
   },
+  UnsupportedGeneration {
+    operation: String,
+    span: Span,
+    provenance: DirectiveProvenance,
+  },
+  StepLimitExceeded {
+    span: Span,
+    provenance: DirectiveProvenance,
+  },
+  CallDepthExceeded {
+    span: Span,
+    provenance: DirectiveProvenance,
+  },
 }
 
 pub trait DirectiveStageExecutor {
@@ -235,6 +273,7 @@ pub struct DirectiveExecutionReport {
   pub executed_phases: Vec<DirectivePhase>,
   pub completed_iterations: Vec<DirectiveIterationRecord>,
   pub reanalysis_requests: Vec<DirectiveReanalysisRequest>,
+  pub diagnostics: Vec<Diagnostic>,
   pub converged: bool,
   pub failure: Option<DirectiveSchedulerFailure>,
 }
@@ -260,6 +299,7 @@ impl DirectiveScheduler {
     let mut state = DirectiveExecutionState::new(plan.clone(), self.cycle_limit);
     let mut executed_phases = Vec::new();
     let mut reanalysis_requests = Vec::new();
+    let mut diagnostics = Vec::new();
 
     while let Some(stage) = state.current_stage().cloned() {
       executed_phases.push(stage.phase.clone());
@@ -271,11 +311,14 @@ impl DirectiveScheduler {
             executed_phases,
             completed_iterations: state.completed_iterations().to_vec(),
             reanalysis_requests,
+            diagnostics,
             converged: false,
             failure: Some(DirectiveSchedulerFailure::from_execution_error(error)),
           };
         },
       };
+
+      diagnostics.extend(stage_result.diagnostics.clone());
 
       match state.consume_current_stage(stage_result) {
         Ok(DirectiveExecutionProgress::AdvancedStage { .. }) | Ok(DirectiveExecutionProgress::Converged { .. }) => {},
@@ -295,6 +338,7 @@ impl DirectiveScheduler {
             executed_phases,
             completed_iterations: state.completed_iterations().to_vec(),
             reanalysis_requests,
+            diagnostics,
             converged: false,
             failure: Some(DirectiveSchedulerFailure::from_scheduler_error(&plan, error)),
           };
@@ -306,6 +350,7 @@ impl DirectiveScheduler {
       executed_phases,
       completed_iterations: state.completed_iterations().to_vec(),
       reanalysis_requests,
+      diagnostics,
       converged: state.is_converged(),
       failure: None,
     }
@@ -324,14 +369,22 @@ impl DirectiveStageExecutor for NoopDirectiveStageExecutor {
   }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CompileTimeDirectiveExecutor {
   sandbox: DirectiveExecutionSandbox,
+  vm: Option<DirectiveVm>,
 }
 
 impl CompileTimeDirectiveExecutor {
   pub fn new(sandbox: DirectiveExecutionSandbox) -> Self {
-    Self { sandbox }
+    Self { sandbox, vm: None }
+  }
+
+  pub fn with_vm(
+    sandbox: DirectiveExecutionSandbox,
+    vm: DirectiveVm,
+  ) -> Self {
+    Self { sandbox, vm: Some(vm) }
   }
 }
 
@@ -340,6 +393,8 @@ impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
     &mut self,
     stage: &DirectiveScheduleStage,
   ) -> Result<DirectiveStageResult, DirectiveExecutionError> {
+    let mut diagnostics = Vec::new();
+
     for entry in &stage.entries {
       for capability in &entry.capabilities {
         if !self.sandbox.allows(capability) {
@@ -350,23 +405,26 @@ impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
           });
         }
       }
+
+      if stage.phase == DirectivePhase::Check
+        && entry.effect == DirectiveEffect::Diagnose
+        && let Some(vm) = &self.vm
+      {
+        diagnostics.extend(vm.execute_entry(entry)?);
+      }
     }
 
     let fingerprints = stage
       .entries
       .iter()
-      .map(deterministic_entry_fingerprint)
+      .map(|entry| deterministic_entry_fingerprint(entry, diagnostics.as_slice()))
       .collect::<Vec<_>>();
     let requested_reanalysis = stage
       .entries
       .iter()
       .any(|entry| effect_requests_reanalysis(&entry.effect));
 
-    Ok(DirectiveStageResult::new(
-      stage.phase.clone(),
-      fingerprints,
-      requested_reanalysis,
-    ))
+    Ok(DirectiveStageResult::new(stage.phase.clone(), fingerprints, requested_reanalysis).with_diagnostics(diagnostics))
   }
 }
 
@@ -593,10 +651,68 @@ fn execution_error_diagnostic(error: &DirectiveExecutionError) -> Diagnostic {
       provenance.origin_attr_span.clone(),
     )
     .with_note("allowed-by-default capabilities are limited to deterministic diagnostics".to_string()),
+    DirectiveExecutionError::UnsupportedGeneration {
+      operation,
+      span,
+      provenance,
+    } => Diagnostic::new(
+      Severity::Error,
+      format!(
+        "compile-time directive cannot call unsupported std::compile generation API '{}' in the diagnostics-only VM",
+        operation
+      ),
+      "A0199".to_string(),
+      span.clone(),
+    )
+    .with_label(provenance.origin_attr_span.clone(), "directive use".to_string())
+    .with_note("this VM slice supports diagnostics only; generation and reintegration stay out of scope".to_string()),
+    DirectiveExecutionError::StepLimitExceeded { span, provenance } => Diagnostic::new(
+      Severity::Error,
+      "compile-time directive exceeded the VM step limit during analyzer execution".to_string(),
+      "A0200".to_string(),
+      span.clone(),
+    )
+    .with_label(provenance.origin_attr_span.clone(), "directive use".to_string()),
+    DirectiveExecutionError::CallDepthExceeded { span, provenance } => Diagnostic::new(
+      Severity::Error,
+      "compile-time directive exceeded the VM call-depth limit during analyzer execution".to_string(),
+      "A0201".to_string(),
+      span.clone(),
+    )
+    .with_label(provenance.origin_attr_span.clone(), "directive use".to_string()),
   }
 }
 
-fn deterministic_entry_fingerprint(entry: &DirectiveScheduleEntry) -> DirectiveFingerprint {
+fn diagnostics_signature(diagnostics: &[Diagnostic]) -> Vec<String> {
+  diagnostics
+    .iter()
+    .map(|diagnostic| {
+      let labels = diagnostic
+        .labels
+        .iter()
+        .map(|label| format!("{}:{}:{}", label.span.start, label.span.end, label.message))
+        .collect::<Vec<_>>()
+        .join("|");
+      let notes = diagnostic.notes.join("|");
+
+      format!(
+        "{:?}:{}:{}:{}:{}:{}:{}",
+        diagnostic.severity,
+        diagnostic.error_code,
+        diagnostic.message,
+        diagnostic.primary_span.start,
+        diagnostic.primary_span.end,
+        labels,
+        notes
+      )
+    })
+    .collect()
+}
+
+pub(crate) fn deterministic_entry_fingerprint(
+  entry: &DirectiveScheduleEntry,
+  diagnostics: &[Diagnostic],
+) -> DirectiveFingerprint {
   let capabilities = if entry.capabilities.is_empty() {
     "none".to_string()
   } else {
@@ -608,8 +724,23 @@ fn deterministic_entry_fingerprint(entry: &DirectiveScheduleEntry) -> DirectiveF
       .join(",")
   };
 
+  let diagnostic_summary = if diagnostics.is_empty() {
+    "none".to_string()
+  } else {
+    diagnostics
+      .iter()
+      .map(|diagnostic| {
+        format!(
+          "{}:{}:{}",
+          diagnostic.error_code, diagnostic.primary_span.start, diagnostic.message
+        )
+      })
+      .collect::<Vec<_>>()
+      .join("|")
+  };
+
   DirectiveFingerprint::opaque(format!(
-    "directive={};function={};target={};effect={:?};capabilities={capabilities}",
+    "directive={};function={};target={};effect={:?};capabilities={capabilities};diagnostics={diagnostic_summary}",
     entry.directive.index(),
     entry.function_def_id.index(),
     entry.target_node.index(),
@@ -617,7 +748,7 @@ fn deterministic_entry_fingerprint(entry: &DirectiveScheduleEntry) -> DirectiveF
   ))
 }
 
-fn effect_requests_reanalysis(effect: &DirectiveEffect) -> bool {
+pub(crate) fn effect_requests_reanalysis(effect: &DirectiveEffect) -> bool {
   matches!(
     effect,
     DirectiveEffect::Emit | DirectiveEffect::Collect | DirectiveEffect::Transform

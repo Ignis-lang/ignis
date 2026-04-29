@@ -19,6 +19,7 @@ mod checks;
 mod const_eval;
 pub mod directive_registry;
 pub mod directive_scheduler;
+mod directive_vm;
 pub mod dump;
 pub mod escape;
 pub mod imports;
