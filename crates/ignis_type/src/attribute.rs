@@ -32,6 +32,11 @@ pub enum DirectiveEffect {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DirectiveCapability {
   Diagnostics,
+  FileSystem,
+  Network,
+  Process,
+  Ffi,
+  Clock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

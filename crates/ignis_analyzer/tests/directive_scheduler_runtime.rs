@@ -76,7 +76,43 @@ fn staged_analysis_records_scheduler_execution_before_lowering() {
       DirectivePhase::Collect,
       DirectivePhase::Finalize,
       DirectivePhase::Transform,
+      DirectivePhase::Check,
+      DirectivePhase::Expand,
+      DirectivePhase::Collect,
+      DirectivePhase::Finalize,
+      DirectivePhase::Transform,
     ]
   );
+  assert_eq!(result.output.directive_execution_report.completed_iterations.len(), 2);
+  assert_eq!(result.output.directive_execution_report.reanalysis_requests.len(), 1);
   assert!(result.output.directive_execution_report.failure.is_none());
+}
+
+#[test]
+fn staged_analysis_reports_denied_directive_capability_as_diagnostic() {
+  let result = common::analyze_staged(
+    r#"
+      @directive(target: "record", phase: check, effect: diagnose, capabilities: filesystem)
+      function inspectFilesystem(): void {
+        return;
+      }
+
+      @inspectFilesystem
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("[ERROR] A0196"),
+    "expected denied-capability diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("filesystem"),
+    "expected denied capability name, got: {diagnostics}"
+  );
+  assert!(result.output.directive_execution_report.failure.is_some());
 }

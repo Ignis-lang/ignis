@@ -19,8 +19,8 @@ use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::Store as ASTStore;
 
 use crate::directive_scheduler::{
-  DirectiveExecutionReport, DirectiveSchedulePlan, DirectiveScheduler, NoopDirectiveReanalysisHook,
-  NoopDirectiveStageExecutor,
+  CompileTimeDirectiveExecutor, DirectiveExecutionReport, DirectiveSchedulePlan, DirectiveScheduler,
+  NoopDirectiveReanalysisHook,
 };
 use crate::{Analyzer, SemanticArtifacts, build_node_spans};
 
@@ -59,7 +59,7 @@ pub(crate) fn run_lowering_phase(
 pub(crate) fn run_directive_scheduling_phase(analyzer: &mut Analyzer<'_>) -> DirectiveExecutionReport {
   let plan = DirectiveSchedulePlan::from_registry(&analyzer.directive_registry);
   let mut scheduler = DirectiveScheduler::new(DIRECTIVE_SCHEDULER_CYCLE_LIMIT);
-  let mut executor = NoopDirectiveStageExecutor;
+  let mut executor = CompileTimeDirectiveExecutor::default();
   let mut reanalysis_hook = NoopDirectiveReanalysisHook;
   let report = scheduler.run(plan, &mut executor, &mut reanalysis_hook);
 

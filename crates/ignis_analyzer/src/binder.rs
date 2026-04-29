@@ -2814,6 +2814,11 @@ impl<'a> Analyzer<'a> {
 
     match value.as_str() {
       "diagnostics" => Some(DirectiveCapability::Diagnostics),
+      "filesystem" => Some(DirectiveCapability::FileSystem),
+      "network" => Some(DirectiveCapability::Network),
+      "process" => Some(DirectiveCapability::Process),
+      "ffi" => Some(DirectiveCapability::Ffi),
+      "clock" => Some(DirectiveCapability::Clock),
       _ => {
         self.add_diagnostic(
           DiagnosticMessage::UnknownDirectiveMetadata {

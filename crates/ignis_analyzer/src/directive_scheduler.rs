@@ -1,6 +1,6 @@
 use ignis_ast::NodeId;
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
-use ignis_type::attribute::{DirectiveEffect, DirectivePhase};
+use ignis_type::attribute::{DirectiveCapability, DirectiveEffect, DirectivePhase};
 use ignis_type::definition::{DefinitionId, DirectiveDefId, DirectiveProvenance};
 use ignis_type::file::FileId;
 use ignis_type::span::Span;
@@ -26,6 +26,7 @@ pub struct DirectiveScheduleEntry {
   pub function_def_id: DefinitionId,
   pub target_node: NodeId,
   pub effect: DirectiveEffect,
+  pub capabilities: Vec<DirectiveCapability>,
   pub span: Span,
   pub provenance: DirectiveProvenance,
 }
@@ -132,11 +133,52 @@ pub struct DirectiveReanalysisRequest {
   pub fingerprint: DirectiveIterationFingerprint,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectiveExecutionSandbox {
+  granted_capabilities: Vec<DirectiveCapability>,
+}
+
+impl DirectiveExecutionSandbox {
+  pub fn allowing(capabilities: impl IntoIterator<Item = DirectiveCapability>) -> Self {
+    let mut granted_capabilities = Vec::new();
+
+    for capability in capabilities {
+      if !granted_capabilities.contains(&capability) {
+        granted_capabilities.push(capability);
+      }
+    }
+
+    Self { granted_capabilities }
+  }
+
+  fn allows(
+    &self,
+    capability: &DirectiveCapability,
+  ) -> bool {
+    self.granted_capabilities.contains(capability)
+  }
+}
+
+impl Default for DirectiveExecutionSandbox {
+  fn default() -> Self {
+    Self::allowing([DirectiveCapability::Diagnostics])
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectiveExecutionError {
+  CapabilityDenied {
+    phase: DirectivePhase,
+    capability: DirectiveCapability,
+    provenance: DirectiveProvenance,
+  },
+}
+
 pub trait DirectiveStageExecutor {
   fn execute_stage(
     &mut self,
     stage: &DirectiveScheduleStage,
-  ) -> DirectiveStageResult;
+  ) -> Result<DirectiveStageResult, DirectiveExecutionError>;
 }
 
 pub trait DirectiveReanalysisHook {
@@ -148,12 +190,18 @@ pub trait DirectiveReanalysisHook {
 
 #[derive(Debug, Clone)]
 pub struct DirectiveSchedulerFailure {
-  pub error: DirectiveSchedulerError,
+  pub reason: DirectiveSchedulerFailureReason,
   diagnostic: Option<Diagnostic>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectiveSchedulerFailureReason {
+  Scheduler(DirectiveSchedulerError),
+  Execution(DirectiveExecutionError),
+}
+
 impl DirectiveSchedulerFailure {
-  fn new(
+  fn from_scheduler_error(
     plan: &DirectiveSchedulePlan,
     error: DirectiveSchedulerError,
   ) -> Self {
@@ -164,7 +212,17 @@ impl DirectiveSchedulerFailure {
       DirectiveSchedulerError::NoCurrentStage | DirectiveSchedulerError::PhaseMismatch { .. } => None,
     };
 
-    Self { error, diagnostic }
+    Self {
+      reason: DirectiveSchedulerFailureReason::Scheduler(error),
+      diagnostic,
+    }
+  }
+
+  fn from_execution_error(error: DirectiveExecutionError) -> Self {
+    Self {
+      reason: DirectiveSchedulerFailureReason::Execution(error.clone()),
+      diagnostic: Some(execution_error_diagnostic(&error)),
+    }
   }
 
   pub fn as_diagnostic(&self) -> Option<Diagnostic> {
@@ -206,7 +264,20 @@ impl DirectiveScheduler {
     while let Some(stage) = state.current_stage().cloned() {
       executed_phases.push(stage.phase.clone());
 
-      match state.consume_current_stage(executor.execute_stage(&stage)) {
+      let stage_result = match executor.execute_stage(&stage) {
+        Ok(result) => result,
+        Err(error) => {
+          return DirectiveExecutionReport {
+            executed_phases,
+            completed_iterations: state.completed_iterations().to_vec(),
+            reanalysis_requests,
+            converged: false,
+            failure: Some(DirectiveSchedulerFailure::from_execution_error(error)),
+          };
+        },
+      };
+
+      match state.consume_current_stage(stage_result) {
         Ok(DirectiveExecutionProgress::AdvancedStage { .. }) | Ok(DirectiveExecutionProgress::Converged { .. }) => {},
         Ok(DirectiveExecutionProgress::StartedNextIteration { .. }) => {
           if let Some(iteration) = state.completed_iterations().last() {
@@ -225,7 +296,7 @@ impl DirectiveScheduler {
             completed_iterations: state.completed_iterations().to_vec(),
             reanalysis_requests,
             converged: false,
-            failure: Some(DirectiveSchedulerFailure::new(&plan, error)),
+            failure: Some(DirectiveSchedulerFailure::from_scheduler_error(&plan, error)),
           };
         },
       }
@@ -248,8 +319,54 @@ impl DirectiveStageExecutor for NoopDirectiveStageExecutor {
   fn execute_stage(
     &mut self,
     stage: &DirectiveScheduleStage,
-  ) -> DirectiveStageResult {
-    DirectiveStageResult::new(stage.phase.clone(), Vec::new(), false)
+  ) -> Result<DirectiveStageResult, DirectiveExecutionError> {
+    Ok(DirectiveStageResult::new(stage.phase.clone(), Vec::new(), false))
+  }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CompileTimeDirectiveExecutor {
+  sandbox: DirectiveExecutionSandbox,
+}
+
+impl CompileTimeDirectiveExecutor {
+  pub fn new(sandbox: DirectiveExecutionSandbox) -> Self {
+    Self { sandbox }
+  }
+}
+
+impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
+  fn execute_stage(
+    &mut self,
+    stage: &DirectiveScheduleStage,
+  ) -> Result<DirectiveStageResult, DirectiveExecutionError> {
+    for entry in &stage.entries {
+      for capability in &entry.capabilities {
+        if !self.sandbox.allows(capability) {
+          return Err(DirectiveExecutionError::CapabilityDenied {
+            phase: stage.phase.clone(),
+            capability: capability.clone(),
+            provenance: entry.provenance.clone(),
+          });
+        }
+      }
+    }
+
+    let fingerprints = stage
+      .entries
+      .iter()
+      .map(deterministic_entry_fingerprint)
+      .collect::<Vec<_>>();
+    let requested_reanalysis = stage
+      .entries
+      .iter()
+      .any(|entry| effect_requests_reanalysis(&entry.effect));
+
+    Ok(DirectiveStageResult::new(
+      stage.phase.clone(),
+      fingerprints,
+      requested_reanalysis,
+    ))
   }
 }
 
@@ -281,6 +398,7 @@ impl DirectiveSchedulePlan {
           function_def_id: directive_def.function_def_id,
           target_node: directive_use.target_node,
           effect: directive_def.effect.clone(),
+          capabilities: directive_def.capabilities.clone(),
           span: directive_use.span.clone(),
           provenance: directive_use.provenance.clone(),
         },
@@ -458,6 +576,65 @@ fn cycle_limit_diagnostic(
   .with_note(format!("scheduler iterations: {iteration_summary}"))
 }
 
+fn execution_error_diagnostic(error: &DirectiveExecutionError) -> Diagnostic {
+  match error {
+    DirectiveExecutionError::CapabilityDenied {
+      phase,
+      capability,
+      provenance,
+    } => Diagnostic::new(
+      Severity::Error,
+      format!(
+        "compile-time directive cannot use '{}' capability during {:?} because the sandbox denies it by default",
+        capability_name(capability),
+        phase
+      ),
+      "A0196".to_string(),
+      provenance.origin_attr_span.clone(),
+    )
+    .with_note("allowed-by-default capabilities are limited to deterministic diagnostics".to_string()),
+  }
+}
+
+fn deterministic_entry_fingerprint(entry: &DirectiveScheduleEntry) -> DirectiveFingerprint {
+  let capabilities = if entry.capabilities.is_empty() {
+    "none".to_string()
+  } else {
+    entry
+      .capabilities
+      .iter()
+      .map(capability_name)
+      .collect::<Vec<_>>()
+      .join(",")
+  };
+
+  DirectiveFingerprint::opaque(format!(
+    "directive={};function={};target={};effect={:?};capabilities={capabilities}",
+    entry.directive.index(),
+    entry.function_def_id.index(),
+    entry.target_node.index(),
+    entry.effect,
+  ))
+}
+
+fn effect_requests_reanalysis(effect: &DirectiveEffect) -> bool {
+  matches!(
+    effect,
+    DirectiveEffect::Emit | DirectiveEffect::Collect | DirectiveEffect::Transform
+  )
+}
+
+fn capability_name(capability: &DirectiveCapability) -> &'static str {
+  match capability {
+    DirectiveCapability::Diagnostics => "diagnostics",
+    DirectiveCapability::FileSystem => "filesystem",
+    DirectiveCapability::Network => "network",
+    DirectiveCapability::Process => "process",
+    DirectiveCapability::Ffi => "ffi",
+    DirectiveCapability::Clock => "clock",
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::collections::VecDeque;
@@ -497,6 +674,18 @@ mod tests {
         origin_attr_span: span(function_index * 10, function_index * 10 + 4),
       },
     }
+  }
+
+  fn directive_definition_with_capability(
+    function_index: u32,
+    name_index: u32,
+    phase: DirectivePhase,
+    effect: DirectiveEffect,
+    capability: DirectiveCapability,
+  ) -> DirectiveDefinition {
+    let mut definition = directive_definition(function_index, name_index, phase, effect);
+    definition.capabilities = vec![capability];
+    definition
   }
 
   fn directive_use(
@@ -736,8 +925,8 @@ mod tests {
     fn execute_stage(
       &mut self,
       _stage: &DirectiveScheduleStage,
-    ) -> DirectiveStageResult {
-      self.results.pop_front().expect("expected another staged result")
+    ) -> Result<DirectiveStageResult, DirectiveExecutionError> {
+      Ok(self.results.pop_front().expect("expected another staged result"))
     }
   }
 
@@ -888,5 +1077,94 @@ mod tests {
         .contains("directive expansion exceeded the cycle limit of 2 iteration(s)")
     );
     assert_eq!(report.completed_iterations.len(), 2);
+  }
+
+  #[test]
+  fn compile_time_executor_denies_file_capability_by_default() {
+    let mut registry = DirectiveRegistry::default();
+    let check = registry.register_definition(directive_definition_with_capability(
+      1,
+      1,
+      DirectivePhase::Check,
+      DirectiveEffect::Diagnose,
+      DirectiveCapability::FileSystem,
+    ));
+    registry.uses = vec![directive_use(10, check, 10)];
+
+    let plan = DirectiveSchedulePlan::from_registry(&registry);
+    let mut scheduler = DirectiveScheduler::new(2);
+    let mut executor = CompileTimeDirectiveExecutor::default();
+    let mut hook = RecordingReanalysisHook::default();
+
+    let report = scheduler.run(plan, &mut executor, &mut hook);
+    let diagnostic = report
+      .failure
+      .as_ref()
+      .and_then(DirectiveSchedulerFailure::as_diagnostic)
+      .expect("expected denied capability diagnostic");
+
+    assert_eq!(diagnostic.error_code, "A0196");
+    assert!(diagnostic.message.contains("filesystem"));
+    assert!(report.completed_iterations.is_empty());
+    assert!(hook.requests.is_empty());
+  }
+
+  #[test]
+  fn compile_time_executor_allows_supplied_capability() {
+    let mut registry = DirectiveRegistry::default();
+    let check = registry.register_definition(directive_definition_with_capability(
+      1,
+      1,
+      DirectivePhase::Check,
+      DirectiveEffect::Diagnose,
+      DirectiveCapability::FileSystem,
+    ));
+    registry.uses = vec![directive_use(10, check, 10)];
+
+    let mut plan = DirectiveSchedulePlan::from_registry(&registry);
+    let stage = plan.stages.remove(0);
+    let mut executor = CompileTimeDirectiveExecutor::new(DirectiveExecutionSandbox::allowing([
+      DirectiveCapability::Diagnostics,
+      DirectiveCapability::FileSystem,
+    ]));
+
+    let first = executor.execute_stage(&stage).expect("allowed capability should pass");
+    let second = executor
+      .execute_stage(&stage)
+      .expect("execution should stay deterministic");
+
+    assert_eq!(first, second);
+    assert_eq!(first.phase, DirectivePhase::Check);
+    assert!(!first.requested_reanalysis);
+    assert_eq!(first.fingerprints.len(), 1);
+  }
+
+  #[test]
+  fn compile_time_executor_drives_deterministic_scheduler_reanalysis() {
+    let mut registry = DirectiveRegistry::default();
+    let expand =
+      registry.register_definition(directive_definition(2, 2, DirectivePhase::Expand, DirectiveEffect::Emit));
+    registry.uses = vec![directive_use(13, expand, 20)];
+
+    let plan = DirectiveSchedulePlan::from_registry(&registry);
+    let mut scheduler = DirectiveScheduler::new(3);
+    let mut executor = CompileTimeDirectiveExecutor::default();
+    let mut hook = RecordingReanalysisHook::default();
+
+    let report = scheduler.run(plan, &mut executor, &mut hook);
+
+    assert!(
+      report.failure.is_none(),
+      "expected deterministic convergence: {:?}",
+      report.failure
+    );
+    assert_eq!(report.executed_phases, vec![DirectivePhase::Expand, DirectivePhase::Expand]);
+    assert_eq!(report.completed_iterations.len(), 2);
+    assert_eq!(report.reanalysis_requests.len(), 1);
+    assert_eq!(hook.requests, report.reanalysis_requests);
+    assert_eq!(
+      report.completed_iterations[0].fingerprint,
+      report.completed_iterations[1].fingerprint
+    );
   }
 }
