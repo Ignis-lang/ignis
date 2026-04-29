@@ -136,6 +136,13 @@ impl DirectiveVm {
     Ok(state.diagnostics)
   }
 
+  pub fn target_span(
+    &self,
+    target_node: NodeId,
+  ) -> Span {
+    self.ast.get(&target_node).span().clone()
+  }
+
   fn execute_statement(
     &self,
     statement_id: NodeId,
@@ -257,6 +264,8 @@ impl DirectiveVm {
       return Err(DirectiveExecutionError::CallDepthExceeded {
         span: self.ast.get(&node_id).span().clone(),
         provenance: entry.provenance.clone(),
+        directive_use_span: entry.span.clone(),
+        target_span: self.target_span(entry.target_node),
       });
     }
 
@@ -288,6 +297,8 @@ impl DirectiveVm {
           operation: operation_name,
           span: self.ast.get(&node_id).span().clone(),
           provenance: entry.provenance.clone(),
+          directive_use_span: entry.span.clone(),
+          target_span: self.target_span(entry.target_node),
         }),
       };
 
@@ -333,7 +344,8 @@ impl DirectiveVm {
       VM_DIAGNOSTIC_ERROR_CODE.to_string(),
       self.ast.get(&node_id).span().clone(),
     )
-    .with_label(entry.provenance.origin_attr_span.clone(), "directive use".to_string())
+    .with_label(entry.provenance.origin_attr_span.clone(), "directive declaration".to_string())
+    .with_label(entry.span.clone(), "directive use".to_string())
     .with_label(target_span, "target item".to_string());
 
     state.diagnostics.push(diagnostic);
@@ -351,6 +363,8 @@ impl DirectiveVm {
       return Err(DirectiveExecutionError::StepLimitExceeded {
         span: self.ast.get(&node_id).span().clone(),
         provenance: entry.provenance.clone(),
+        directive_use_span: entry.span.clone(),
+        target_span: self.target_span(entry.target_node),
       });
     }
 

@@ -124,6 +124,55 @@ fn staged_analysis_reports_denied_directive_capability_as_diagnostic() {
     diagnostics.contains("filesystem"),
     "expected denied capability name, got: {diagnostics}"
   );
+  assert!(
+    diagnostics.contains("label: directive use") && diagnostics.contains("label: target item"),
+    "expected denied capability provenance labels, got: {diagnostics}"
+  );
+  assert!(result.output.directive_execution_report.failure.is_some());
+}
+
+#[test]
+fn staged_analysis_reports_unsupported_generation_calls_with_call_site_provenance() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemRef {}
+
+        function emitRecord(context: Context, target: ItemRef): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function validateRecord(context: Compile::Context, target: Compile::ItemRef): void {
+        Compile::emitRecord(context, target);
+      }
+
+      @validateRecord
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+  let unsupported = result
+    .output
+    .diagnostics
+    .iter()
+    .find(|diagnostic| diagnostic.error_code == "A0199")
+    .expect("expected unsupported-generation diagnostic");
+
+  assert!(
+    diagnostics.contains("unsupported std::compile generation API 'emitRecord'"),
+    "expected unsupported-generation message, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("label: directive use") && diagnostics.contains("label: target item"),
+    "expected unsupported-generation provenance labels, got: {diagnostics}"
+  );
+  assert_eq!(common::diagnostic_line(&result, unsupported), 13);
   assert!(result.output.directive_execution_report.failure.is_some());
 }
 

@@ -196,19 +196,27 @@ pub enum DirectiveExecutionError {
     phase: DirectivePhase,
     capability: DirectiveCapability,
     provenance: DirectiveProvenance,
+    directive_use_span: Span,
+    target_span: Span,
   },
   UnsupportedGeneration {
     operation: String,
     span: Span,
     provenance: DirectiveProvenance,
+    directive_use_span: Span,
+    target_span: Span,
   },
   StepLimitExceeded {
     span: Span,
     provenance: DirectiveProvenance,
+    directive_use_span: Span,
+    target_span: Span,
   },
   CallDepthExceeded {
     span: Span,
     provenance: DirectiveProvenance,
+    directive_use_span: Span,
+    target_span: Span,
   },
 }
 
@@ -396,12 +404,20 @@ impl DirectiveStageExecutor for CompileTimeDirectiveExecutor {
     let mut diagnostics = Vec::new();
 
     for entry in &stage.entries {
+      let target_span = self
+        .vm
+        .as_ref()
+        .map(|vm| vm.target_span(entry.target_node))
+        .unwrap_or_else(|| entry.span.clone());
+
       for capability in &entry.capabilities {
         if !self.sandbox.allows(capability) {
           return Err(DirectiveExecutionError::CapabilityDenied {
             phase: stage.phase.clone(),
             capability: capability.clone(),
             provenance: entry.provenance.clone(),
+            directive_use_span: entry.span.clone(),
+            target_span: target_span.clone(),
           });
         }
       }
@@ -640,47 +656,90 @@ fn execution_error_diagnostic(error: &DirectiveExecutionError) -> Diagnostic {
       phase,
       capability,
       provenance,
-    } => Diagnostic::new(
-      Severity::Error,
-      format!(
-        "compile-time directive cannot use '{}' capability during {:?} because the sandbox denies it by default",
-        capability_name(capability),
-        phase
-      ),
-      "A0196".to_string(),
-      provenance.origin_attr_span.clone(),
-    )
-    .with_note("allowed-by-default capabilities are limited to deterministic diagnostics".to_string()),
+      directive_use_span,
+      target_span,
+    } => label_execution_diagnostic(
+      Diagnostic::new(
+        Severity::Error,
+        format!(
+          "compile-time directive cannot use '{}' capability during {:?} because the sandbox denies it by default",
+          capability_name(capability),
+          phase
+        ),
+        "A0196".to_string(),
+        directive_use_span.clone(),
+      )
+      .with_note("allowed-by-default capabilities are limited to deterministic diagnostics".to_string()),
+      provenance,
+      directive_use_span,
+      target_span,
+    ),
     DirectiveExecutionError::UnsupportedGeneration {
       operation,
       span,
       provenance,
-    } => Diagnostic::new(
-      Severity::Error,
-      format!(
-        "compile-time directive cannot call unsupported std::compile generation API '{}' in the diagnostics-only VM",
-        operation
+      directive_use_span,
+      target_span,
+    } => label_execution_diagnostic(
+      Diagnostic::new(
+        Severity::Error,
+        format!(
+          "compile-time directive cannot call unsupported std::compile generation API '{}' in the diagnostics-only VM",
+          operation
+        ),
+        "A0199".to_string(),
+        span.clone(),
+      )
+      .with_note("this VM slice supports diagnostics only; generation and reintegration stay out of scope".to_string()),
+      provenance,
+      directive_use_span,
+      target_span,
+    ),
+    DirectiveExecutionError::StepLimitExceeded {
+      span,
+      provenance,
+      directive_use_span,
+      target_span,
+    } => label_execution_diagnostic(
+      Diagnostic::new(
+        Severity::Error,
+        "compile-time directive exceeded the VM step limit during analyzer execution".to_string(),
+        "A0200".to_string(),
+        span.clone(),
       ),
-      "A0199".to_string(),
-      span.clone(),
-    )
-    .with_label(provenance.origin_attr_span.clone(), "directive use".to_string())
-    .with_note("this VM slice supports diagnostics only; generation and reintegration stay out of scope".to_string()),
-    DirectiveExecutionError::StepLimitExceeded { span, provenance } => Diagnostic::new(
-      Severity::Error,
-      "compile-time directive exceeded the VM step limit during analyzer execution".to_string(),
-      "A0200".to_string(),
-      span.clone(),
-    )
-    .with_label(provenance.origin_attr_span.clone(), "directive use".to_string()),
-    DirectiveExecutionError::CallDepthExceeded { span, provenance } => Diagnostic::new(
-      Severity::Error,
-      "compile-time directive exceeded the VM call-depth limit during analyzer execution".to_string(),
-      "A0201".to_string(),
-      span.clone(),
-    )
-    .with_label(provenance.origin_attr_span.clone(), "directive use".to_string()),
+      provenance,
+      directive_use_span,
+      target_span,
+    ),
+    DirectiveExecutionError::CallDepthExceeded {
+      span,
+      provenance,
+      directive_use_span,
+      target_span,
+    } => label_execution_diagnostic(
+      Diagnostic::new(
+        Severity::Error,
+        "compile-time directive exceeded the VM call-depth limit during analyzer execution".to_string(),
+        "A0201".to_string(),
+        span.clone(),
+      ),
+      provenance,
+      directive_use_span,
+      target_span,
+    ),
   }
+}
+
+fn label_execution_diagnostic(
+  diagnostic: Diagnostic,
+  provenance: &DirectiveProvenance,
+  directive_use_span: &Span,
+  target_span: &Span,
+) -> Diagnostic {
+  diagnostic
+    .with_label(provenance.origin_attr_span.clone(), "directive declaration".to_string())
+    .with_label(directive_use_span.clone(), "directive use".to_string())
+    .with_label(target_span.clone(), "target item".to_string())
 }
 
 fn diagnostics_signature(diagnostics: &[Diagnostic]) -> Vec<String> {
