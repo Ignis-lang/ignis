@@ -1086,6 +1086,7 @@ impl CompilationContext {
       import_module_files: root_import_module_files,
       extension_methods: shared_extension_methods,
       directive_registry: ignis_analyzer::directive_registry::DirectiveRegistry::default(),
+      directive_execution_report: ignis_analyzer::directive_scheduler::DirectiveExecutionReport::default(),
     };
 
     (output, has_errors, per_module_semantic)

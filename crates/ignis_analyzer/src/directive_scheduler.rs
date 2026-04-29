@@ -1,7 +1,10 @@
 use ignis_ast::NodeId;
+use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
 use ignis_type::attribute::{DirectiveEffect, DirectivePhase};
 use ignis_type::definition::{DefinitionId, DirectiveDefId, DirectiveProvenance};
+use ignis_type::file::FileId;
 use ignis_type::span::Span;
+use ignis_type::BytePosition;
 
 use crate::directive_registry::DirectiveRegistry;
 
@@ -121,6 +124,144 @@ pub struct DirectiveExecutionState {
   pending_reanalysis: bool,
   completed_iterations: Vec<DirectiveIterationRecord>,
   converged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectiveReanalysisRequest {
+  pub iteration: usize,
+  pub fingerprint: DirectiveIterationFingerprint,
+}
+
+pub trait DirectiveStageExecutor {
+  fn execute_stage(
+    &mut self,
+    stage: &DirectiveScheduleStage,
+  ) -> DirectiveStageResult;
+}
+
+pub trait DirectiveReanalysisHook {
+  fn request_reanalysis(
+    &mut self,
+    request: DirectiveReanalysisRequest,
+  );
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectiveSchedulerFailure {
+  pub error: DirectiveSchedulerError,
+  diagnostic: Option<Diagnostic>,
+}
+
+impl DirectiveSchedulerFailure {
+  fn new(
+    plan: &DirectiveSchedulePlan,
+    error: DirectiveSchedulerError,
+  ) -> Self {
+    let diagnostic = match &error {
+      DirectiveSchedulerError::CycleLimitExceeded { limit, iterations } => {
+        Some(cycle_limit_diagnostic(plan, *limit, iterations))
+      },
+      DirectiveSchedulerError::NoCurrentStage | DirectiveSchedulerError::PhaseMismatch { .. } => None,
+    };
+
+    Self { error, diagnostic }
+  }
+
+  pub fn as_diagnostic(&self) -> Option<Diagnostic> {
+    self.diagnostic.clone()
+  }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DirectiveExecutionReport {
+  pub executed_phases: Vec<DirectivePhase>,
+  pub completed_iterations: Vec<DirectiveIterationRecord>,
+  pub reanalysis_requests: Vec<DirectiveReanalysisRequest>,
+  pub converged: bool,
+  pub failure: Option<DirectiveSchedulerFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectiveScheduler {
+  cycle_limit: usize,
+}
+
+impl DirectiveScheduler {
+  pub fn new(cycle_limit: usize) -> Self {
+    Self {
+      cycle_limit: cycle_limit.max(1),
+    }
+  }
+
+  pub fn run(
+    &mut self,
+    plan: DirectiveSchedulePlan,
+    executor: &mut impl DirectiveStageExecutor,
+    reanalysis_hook: &mut impl DirectiveReanalysisHook,
+  ) -> DirectiveExecutionReport {
+    let mut state = DirectiveExecutionState::new(plan.clone(), self.cycle_limit);
+    let mut executed_phases = Vec::new();
+    let mut reanalysis_requests = Vec::new();
+
+    while let Some(stage) = state.current_stage().cloned() {
+      executed_phases.push(stage.phase.clone());
+
+      match state.consume_current_stage(executor.execute_stage(&stage)) {
+        Ok(DirectiveExecutionProgress::AdvancedStage { .. }) | Ok(DirectiveExecutionProgress::Converged { .. }) => {},
+        Ok(DirectiveExecutionProgress::StartedNextIteration { .. }) => {
+          if let Some(iteration) = state.completed_iterations().last() {
+            let request = DirectiveReanalysisRequest {
+              iteration: iteration.iteration,
+              fingerprint: iteration.fingerprint.clone(),
+            };
+
+            reanalysis_hook.request_reanalysis(request.clone());
+            reanalysis_requests.push(request);
+          }
+        },
+        Err(error) => {
+          return DirectiveExecutionReport {
+            executed_phases,
+            completed_iterations: state.completed_iterations().to_vec(),
+            reanalysis_requests,
+            converged: false,
+            failure: Some(DirectiveSchedulerFailure::new(&plan, error)),
+          };
+        },
+      }
+    }
+
+    DirectiveExecutionReport {
+      executed_phases,
+      completed_iterations: state.completed_iterations().to_vec(),
+      reanalysis_requests,
+      converged: state.is_converged(),
+      failure: None,
+    }
+  }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopDirectiveStageExecutor;
+
+impl DirectiveStageExecutor for NoopDirectiveStageExecutor {
+  fn execute_stage(
+    &mut self,
+    stage: &DirectiveScheduleStage,
+  ) -> DirectiveStageResult {
+    DirectiveStageResult::new(stage.phase.clone(), Vec::new(), false)
+  }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopDirectiveReanalysisHook;
+
+impl DirectiveReanalysisHook for NoopDirectiveReanalysisHook {
+  fn request_reanalysis(
+    &mut self,
+    _request: DirectiveReanalysisRequest,
+  ) {
+  }
 }
 
 impl DirectiveSchedulePlan {
@@ -286,8 +427,41 @@ fn phase_order() -> [DirectivePhase; 5] {
   ]
 }
 
+fn cycle_limit_diagnostic(
+  plan: &DirectiveSchedulePlan,
+  limit: usize,
+  iterations: &[DirectiveIterationRecord],
+) -> Diagnostic {
+  let span = plan
+    .stages
+    .iter()
+    .flat_map(|stage| stage.entries.iter())
+    .map(|entry| entry.provenance.origin_attr_span.clone())
+    .next()
+    .unwrap_or_else(|| Span::new(FileId::SYNTHETIC, BytePosition(0), BytePosition(0)));
+
+  let iteration_summary = iterations
+    .iter()
+    .map(|iteration| format!("iteration {} => {:?}", iteration.iteration, iteration.fingerprint.components))
+    .collect::<Vec<_>>()
+    .join("; ");
+
+  Diagnostic::new(
+    Severity::Error,
+    format!(
+      "directive expansion exceeded the cycle limit of {} iteration(s) without reaching a fixed point",
+      limit
+    ),
+    "A0195".to_string(),
+    span,
+  )
+  .with_note(format!("scheduler iterations: {iteration_summary}"))
+}
+
 #[cfg(test)]
 mod tests {
+  use std::collections::VecDeque;
+
   use ignis_ast::NodeId;
   use ignis_type::attribute::{DirectiveCapability, DirectiveEffect, DirectivePhase, DirectiveTarget};
   use ignis_type::definition::{DirectiveDefinition, DirectiveProvenance};
@@ -543,5 +717,176 @@ mod tests {
         result.expect("pre-transform stages should still advance before cycle detection");
       }
     }
+  }
+
+  #[derive(Default)]
+  struct FakeStageExecutor {
+    results: VecDeque<DirectiveStageResult>,
+  }
+
+  impl FakeStageExecutor {
+    fn with_results(results: Vec<DirectiveStageResult>) -> Self {
+      Self {
+        results: results.into(),
+      }
+    }
+  }
+
+  impl DirectiveStageExecutor for FakeStageExecutor {
+    fn execute_stage(
+      &mut self,
+      _stage: &DirectiveScheduleStage,
+    ) -> DirectiveStageResult {
+      self.results.pop_front().expect("expected another staged result")
+    }
+  }
+
+  #[derive(Debug, Default, PartialEq, Eq)]
+  struct RecordingReanalysisHook {
+    requests: Vec<DirectiveReanalysisRequest>,
+  }
+
+  impl DirectiveReanalysisHook for RecordingReanalysisHook {
+    fn request_reanalysis(
+      &mut self,
+      request: DirectiveReanalysisRequest,
+    ) {
+      self.requests.push(request);
+    }
+  }
+
+  #[test]
+  fn scheduler_requests_reanalysis_when_fingerprint_changes() {
+    let plan = all_phase_plan();
+    let mut scheduler = DirectiveScheduler::new(3);
+    let mut executor = FakeStageExecutor::with_results(vec![
+      DirectiveStageResult::new(DirectivePhase::Check, vec![DirectiveFingerprint::opaque("round-1-check")], true),
+      DirectiveStageResult::new(
+        DirectivePhase::Expand,
+        vec![DirectiveFingerprint::opaque("round-1-expand")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Collect,
+        vec![DirectiveFingerprint::opaque("round-1-collect")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Finalize,
+        vec![DirectiveFingerprint::opaque("round-1-finalize")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Transform,
+        vec![DirectiveFingerprint::opaque("round-1-transform")],
+        true,
+      ),
+      DirectiveStageResult::new(DirectivePhase::Check, vec![DirectiveFingerprint::opaque("round-1-check")], true),
+      DirectiveStageResult::new(
+        DirectivePhase::Expand,
+        vec![DirectiveFingerprint::opaque("round-1-expand")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Collect,
+        vec![DirectiveFingerprint::opaque("round-1-collect")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Finalize,
+        vec![DirectiveFingerprint::opaque("round-1-finalize")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Transform,
+        vec![DirectiveFingerprint::opaque("round-1-transform")],
+        true,
+      ),
+    ]);
+    let mut hook = RecordingReanalysisHook::default();
+
+    let report = scheduler.run(plan, &mut executor, &mut hook);
+
+    assert!(report.failure.is_none(), "expected scheduler to converge: {:?}", report.failure);
+    assert_eq!(
+      hook.requests,
+      vec![DirectiveReanalysisRequest {
+        iteration: 0,
+        fingerprint: DirectiveIterationFingerprint::new(vec![
+          DirectiveFingerprint::opaque("round-1-check"),
+          DirectiveFingerprint::opaque("round-1-expand"),
+          DirectiveFingerprint::opaque("round-1-collect"),
+          DirectiveFingerprint::opaque("round-1-finalize"),
+          DirectiveFingerprint::opaque("round-1-transform"),
+        ]),
+      }]
+    );
+    assert_eq!(report.completed_iterations.len(), 2);
+  }
+
+  #[test]
+  fn scheduler_reports_cycle_limit_failures_as_diagnostics() {
+    let plan = all_phase_plan();
+    let mut scheduler = DirectiveScheduler::new(2);
+    let mut executor = FakeStageExecutor::with_results(vec![
+      DirectiveStageResult::new(DirectivePhase::Check, vec![DirectiveFingerprint::opaque("round-1-check")], true),
+      DirectiveStageResult::new(
+        DirectivePhase::Expand,
+        vec![DirectiveFingerprint::opaque("round-1-expand")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Collect,
+        vec![DirectiveFingerprint::opaque("round-1-collect")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Finalize,
+        vec![DirectiveFingerprint::opaque("round-1-finalize")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Transform,
+        vec![DirectiveFingerprint::opaque("round-1-transform")],
+        true,
+      ),
+      DirectiveStageResult::new(DirectivePhase::Check, vec![DirectiveFingerprint::opaque("round-2-check")], true),
+      DirectiveStageResult::new(
+        DirectivePhase::Expand,
+        vec![DirectiveFingerprint::opaque("round-2-expand")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Collect,
+        vec![DirectiveFingerprint::opaque("round-2-collect")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Finalize,
+        vec![DirectiveFingerprint::opaque("round-2-finalize")],
+        true,
+      ),
+      DirectiveStageResult::new(
+        DirectivePhase::Transform,
+        vec![DirectiveFingerprint::opaque("round-2-transform")],
+        true,
+      ),
+    ]);
+    let mut hook = RecordingReanalysisHook::default();
+
+    let report = scheduler.run(plan, &mut executor, &mut hook);
+    let diagnostic = report
+      .failure
+      .as_ref()
+      .and_then(DirectiveSchedulerFailure::as_diagnostic)
+      .expect("expected cycle-limit diagnostic");
+
+    assert_eq!(diagnostic.error_code, "A0195");
+    assert!(
+      diagnostic
+        .message
+        .contains("directive expansion exceeded the cycle limit of 2 iteration(s)")
+    );
+    assert_eq!(report.completed_iterations.len(), 2);
   }
 }

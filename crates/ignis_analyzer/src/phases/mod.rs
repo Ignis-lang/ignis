@@ -18,7 +18,13 @@ use ignis_type::symbol::{SymbolId, SymbolTable};
 use ignis_type::types::{TypeId, TypeStore};
 use ignis_type::Store as ASTStore;
 
+use crate::directive_scheduler::{
+  DirectiveExecutionReport, DirectiveSchedulePlan, DirectiveScheduler, NoopDirectiveReanalysisHook,
+  NoopDirectiveStageExecutor,
+};
 use crate::{Analyzer, SemanticArtifacts, build_node_spans};
+
+const DIRECTIVE_SCHEDULER_CYCLE_LIMIT: usize = 8;
 
 pub(crate) fn run_semantic_passes(
   analyzer: &mut Analyzer<'_>,
@@ -50,6 +56,20 @@ pub(crate) fn run_lowering_phase(
   lower::run(analyzer, roots)
 }
 
+pub(crate) fn run_directive_scheduling_phase(analyzer: &mut Analyzer<'_>) -> DirectiveExecutionReport {
+  let plan = DirectiveSchedulePlan::from_registry(&analyzer.directive_registry);
+  let mut scheduler = DirectiveScheduler::new(DIRECTIVE_SCHEDULER_CYCLE_LIMIT);
+  let mut executor = NoopDirectiveStageExecutor;
+  let mut reanalysis_hook = NoopDirectiveReanalysisHook;
+  let report = scheduler.run(plan, &mut executor, &mut reanalysis_hook);
+
+  if let Some(diagnostic) = report.failure.as_ref().and_then(|failure| failure.as_diagnostic()) {
+    analyzer.add_diagnostic(diagnostic);
+  }
+
+  report
+}
+
 pub(crate) fn build_semantic_artifacts(
   analyzer: &Analyzer<'_>,
   ast: &ASTStore<ASTNode>,
@@ -71,6 +91,7 @@ pub(crate) fn build_semantic_artifacts(
     import_module_files: analyzer.import_module_files.clone(),
     extension_methods: analyzer.extension_methods.clone(),
     directive_registry: analyzer.directive_registry.clone(),
+    directive_execution_report: analyzer.directive_execution_report.clone(),
   }
 }
 
@@ -99,5 +120,6 @@ pub(crate) fn build_shared_semantic_artifacts(
     import_module_files: analyzer.import_module_files.clone(),
     extension_methods: shared_extension_methods.clone(),
     directive_registry: analyzer.directive_registry.clone(),
+    directive_execution_report: analyzer.directive_execution_report.clone(),
   }
 }

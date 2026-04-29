@@ -52,6 +52,7 @@ use ignis_diagnostics::diagnostic_report::Diagnostic;
 
 use imports::ExportTable;
 use directive_registry::DirectiveRegistry;
+use directive_scheduler::DirectiveExecutionReport;
 
 pub use ignis_hir::{DropSchedules, ExitKey};
 pub use borrowck_hir::HirBorrowChecker;
@@ -163,6 +164,7 @@ pub struct Analyzer<'a> {
   trait_default_bodies: HashMap<DefinitionId, NodeId>,
   trait_default_clones: HashMap<DefinitionId, NodeId>,
   directive_registry: DirectiveRegistry,
+  directive_execution_report: DirectiveExecutionReport,
 
   /// Lambda parameter definitions created by the resolver, keyed by lambda expression NodeId.
   /// The typechecker reuses these definitions (updating their types) instead of creating new ones.
@@ -229,6 +231,7 @@ pub struct AnalyzerOutput {
   pub extension_methods:
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
   pub directive_registry: DirectiveRegistry,
+  pub directive_execution_report: DirectiveExecutionReport,
 }
 
 pub struct SemanticArtifacts {
@@ -246,6 +249,7 @@ pub struct SemanticArtifacts {
   pub extension_methods:
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
   pub directive_registry: DirectiveRegistry,
+  pub directive_execution_report: DirectiveExecutionReport,
 }
 
 impl SemanticArtifacts {
@@ -301,6 +305,7 @@ impl AnalyzerOutput {
       import_module_files: self.import_module_files,
       extension_methods: self.extension_methods,
       directive_registry: self.directive_registry,
+      directive_execution_report: self.directive_execution_report,
     };
 
     (semantic, hir)
@@ -325,6 +330,7 @@ impl AnalyzerOutput {
       import_module_files: semantic.import_module_files,
       extension_methods: semantic.extension_methods,
       directive_registry: semantic.directive_registry,
+      directive_execution_report: semantic.directive_execution_report,
     }
   }
 
@@ -343,6 +349,7 @@ impl AnalyzerOutput {
       import_module_files: self.import_module_files.clone(),
       extension_methods: self.extension_methods.clone(),
       directive_registry: self.directive_registry.clone(),
+      directive_execution_report: self.directive_execution_report.clone(),
     }
     .collect_exports()
   }
@@ -389,6 +396,7 @@ impl<'a> Analyzer<'a> {
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
       directive_registry: DirectiveRegistry::default(),
+      directive_execution_report: DirectiveExecutionReport::default(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
@@ -425,6 +433,7 @@ impl<'a> Analyzer<'a> {
     let mut analyzer = Analyzer::new(ast, symbols, ModuleId::new(0));
 
     phases::run_semantic_passes(&mut analyzer, roots);
+    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer);
 
     let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
@@ -456,6 +465,7 @@ impl<'a> Analyzer<'a> {
     analyzer.module_for_path = module_for_path.clone();
 
     phases::run_semantic_passes(&mut analyzer, roots);
+    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer);
 
     let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
@@ -525,6 +535,7 @@ impl<'a> Analyzer<'a> {
       trait_default_bodies: HashMap::new(),
       trait_default_clones: HashMap::new(),
       directive_registry: DirectiveRegistry::default(),
+      directive_execution_report: DirectiveExecutionReport::default(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
@@ -535,6 +546,7 @@ impl<'a> Analyzer<'a> {
     };
 
     phases::run_semantic_passes(&mut analyzer, roots);
+    analyzer.directive_execution_report = phases::run_directive_scheduling_phase(&mut analyzer);
     let mut hir = phases::run_lowering_phase(&mut analyzer, roots);
 
     let closure_diags = capture::populate_closure_captures(
@@ -966,6 +978,7 @@ mod tests {
       import_module_files: HashMap::new(),
       extension_methods: HashMap::new(),
       directive_registry: DirectiveRegistry::default(),
+      directive_execution_report: DirectiveExecutionReport::default(),
     }
   }
 
@@ -988,6 +1001,7 @@ mod tests {
     analyzer.const_eval_phase(&roots);
     analyzer.extra_checks_phase(&roots);
     analyzer.lint_phase(&roots);
+    analyzer.directive_execution_report = crate::phases::run_directive_scheduling_phase(&mut analyzer);
 
     let mut hir = analyzer.lower_to_hir(&roots);
     let closure_diags = capture::populate_closure_captures(
@@ -1013,6 +1027,7 @@ mod tests {
       import_module_files: analyzer.import_module_files,
       extension_methods: analyzer.extension_methods,
       directive_registry: analyzer.directive_registry,
+      directive_execution_report: analyzer.directive_execution_report,
     };
 
     (semantic, hir)
@@ -1032,6 +1047,7 @@ mod tests {
 
     let mut analyzer = Analyzer::new(&nodes, symbols.clone(), ModuleId::new(0));
     let semantic = crate::phases::run_semantic_phases(&mut analyzer, &nodes, &roots, symbols);
+    analyzer.directive_execution_report = crate::phases::run_directive_scheduling_phase(&mut analyzer);
     let hir = crate::phases::run_lowering_phase(&mut analyzer, &roots);
 
     (semantic, hir)

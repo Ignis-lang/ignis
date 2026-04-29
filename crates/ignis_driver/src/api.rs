@@ -188,6 +188,7 @@ fn empty_analyzer_output() -> ignis_analyzer::AnalyzerOutput {
     import_module_files: HashMap::new(),
     extension_methods: HashMap::new(),
     directive_registry: ignis_analyzer::directive_registry::DirectiveRegistry::default(),
+    directive_execution_report: ignis_analyzer::directive_scheduler::DirectiveExecutionReport::default(),
   }
 }
 

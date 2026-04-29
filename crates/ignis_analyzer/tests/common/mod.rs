@@ -154,6 +154,7 @@ pub fn analyze_allowing_parse_errors(src: &str) -> AnalysisResult {
         import_module_files: std::collections::HashMap::new(),
         extension_methods: std::collections::HashMap::new(),
         directive_registry: ignis_analyzer::directive_registry::DirectiveRegistry::default(),
+        directive_execution_report: ignis_analyzer::directive_scheduler::DirectiveExecutionReport::default(),
       };
       AnalysisResult { output, source_map: sm }
     },
