@@ -40,7 +40,7 @@ import Compile from "std::compile";
 import Eq from "std::hash";
 
 @directive(target: "record", phase: expand, effect: emit, group: "serde")
-function deriveEq(target: Compile::ItemReference, context: Compile::Context): void {
+function deriveEq(context: Compile::Context, target: Compile::ItemReference): void {
     return;
 }
 
@@ -124,7 +124,7 @@ import Compile from "std::compile";
 import Test from "std::test";
 
 @directive(target: "function", phase: check, effect: diagnose)
-function generatedTestMarker(target: Compile::ItemReference, context: Compile::Context): void {
+function generatedTestMarker(context: Compile::Context, target: Compile::ItemReference): void {
     return;
 }
 

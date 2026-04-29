@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use ignis_analyzer::Analyzer;
 use ignis_config::{CHeader, IgnisBuildConfig, IgnisConfig, IgnisSTDManifest, StdToolchainConfig, TargetBackend};
-use ignis_driver::{build_std, check_std, compile_project};
+use ignis_driver::{AnalyzeProjectOutput, analyze_project_with_text, build_std, check_std, compile_project};
 use ignis_parser::{IgnisLexer, IgnisParser};
 use ignis_type::compilation_context::CompilationContext;
 use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, Visibility, SymbolEntry};
@@ -225,6 +225,19 @@ pub fn compile_project_single_file_with_workspace_std(
     bin_path,
     result,
   })
+}
+
+pub fn analyze_project_single_file_with_workspace_std(source: &str) -> Result<AnalyzeProjectOutput, String> {
+  let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+  let source_path = temp_dir.path().join("main.ign");
+  let output_dir = temp_dir.path().join("build");
+  std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
+  std::fs::write(&source_path, source).map_err(|e| format!("Failed to write source file: {}", e))?;
+
+  let config = build_workspace_std_driver_test_config(&source_path, &output_dir, TargetBackend::C)?;
+  let analysis = analyze_project_with_text(&config, source_path.to_string_lossy().as_ref(), Some(source.to_string()));
+
+  Ok(analysis)
 }
 
 pub fn check_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt, String> {

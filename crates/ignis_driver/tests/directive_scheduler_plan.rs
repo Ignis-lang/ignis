@@ -7,8 +7,13 @@ fn analyze_text_builds_a_consumable_directive_schedule_plan_for_all_phases() {
   let output = analyze_text(
     "scheduler.ign",
     r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+      }
+
       @directive(target: "record", phase: check, effect: diagnose)
-      function checkRecord(): void {
+      function checkRecord(context: Compile::Context, target: Compile::ItemReference): void {
         return;
       }
 

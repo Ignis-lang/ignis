@@ -454,6 +454,140 @@ fn e2e_compile_directive_orphan_else() {
 }
 
 // =============================================================================
+// std::compile directive VM regressions
+// =============================================================================
+
+#[test]
+fn e2e_compile_directive_vm_warning_emits_diagnostic_and_allows_build() {
+  let source = r#"
+    import Compile from "std::compile";
+
+    @directive(target: "record", phase: check, effect: diagnose)
+    function derive(context: Compile::Context, target: Compile::ItemReference): void {
+      Compile::warning(context, target, "record warning from directive");
+      return;
+    }
+
+    @derive
+    record User {
+      value: i32;
+    }
+
+    function main(): i32 {
+      return 7;
+    }
+  "#;
+
+  let analysis = common::analyze_project_single_file_with_workspace_std(source).expect("analysis should succeed");
+  let warnings: Vec<_> = analysis
+    .diagnostics
+    .iter()
+    .filter(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Warning))
+    .collect();
+
+  assert_eq!(
+    warnings.len(),
+    1,
+    "expected one directive warning, got: {:?}",
+    analysis.diagnostics
+  );
+  assert_eq!(warnings[0].error_code, "A0198");
+  assert!(warnings[0].message.contains("record warning from directive"));
+
+  let result = common::compile_project_and_run_with_workspace_std(source).expect("warning should not block build");
+  assert_eq!(result.exit_code, 7);
+}
+
+#[test]
+fn e2e_compile_directive_vm_error_blocks_build() {
+  let source = r#"
+    import Compile from "std::compile";
+
+    @directive(target: "record", phase: check, effect: diagnose)
+    function derive(context: Compile::Context, target: Compile::ItemReference): void {
+      Compile::error(context, target, "record error from directive");
+      return;
+    }
+
+    @derive
+    record User {
+      value: i32;
+    }
+
+    function main(): i32 {
+      return 0;
+    }
+  "#;
+
+  let analysis = common::analyze_project_single_file_with_workspace_std(source).expect("analysis should succeed");
+  let errors: Vec<_> = analysis
+    .diagnostics
+    .iter()
+    .filter(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+    .collect();
+
+  assert_eq!(errors.len(), 1, "expected one directive error, got: {:?}", analysis.diagnostics);
+  assert_eq!(errors[0].error_code, "A0198");
+  assert!(errors[0].message.contains("record error from directive"));
+
+  let attempt = common::compile_project_single_file_with_workspace_std(source, ignis_config::TargetBackend::C)
+    .expect("temporary project build setup should succeed");
+  assert!(attempt.result.is_err(), "directive error should block driver build");
+}
+
+#[test]
+fn e2e_compile_directive_vm_rejects_unsupported_generation_calls() {
+  let source = r#"
+    import _ from "std::compile";
+
+    namespace Compile {
+      function emitRecord(context: Compile::Context, target: Compile::ItemReference): void {
+        return;
+      }
+    }
+
+    @directive(target: "record", phase: check, effect: diagnose)
+    function derive(context: Compile::Context, target: Compile::ItemReference): void {
+      Compile::emitRecord(context, target);
+      return;
+    }
+
+    @derive
+    record User {
+      value: i32;
+    }
+
+    function main(): i32 {
+      return 0;
+    }
+  "#;
+
+  let analysis = common::analyze_project_single_file_with_workspace_std(source).expect("analysis should succeed");
+  let errors: Vec<_> = analysis
+    .diagnostics
+    .iter()
+    .filter(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+    .collect();
+
+  assert_eq!(
+    errors.len(),
+    1,
+    "expected one unsupported-generation error, got: {:?}",
+    analysis.diagnostics
+  );
+  assert_eq!(errors[0].error_code, "A0199");
+  assert!(
+    errors[0]
+      .message
+      .contains("unsupported std::compile generation API 'emitRecord'")
+  );
+
+  let attempt = common::compile_project_single_file_with_workspace_std(source, ignis_config::TargetBackend::C)
+    .expect("temporary project build setup should succeed");
+  assert!(attempt.result.is_err(), "unsupported generation should block driver build");
+}
+
+// =============================================================================
 // @configFlag — single-item cfg attribute
 // =============================================================================
 
