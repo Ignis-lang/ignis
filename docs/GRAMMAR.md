@@ -267,6 +267,11 @@
 <directive-attr> ::= "@[" <directive-attr-list>? "]"
                    | "@" <qualified-identifier> ("(" <expression-list>? ")")?
 
+// `@directive(...)` also accepts named directive arguments such as
+// `@directive(target: "record", phase: expand, effect: emit)`.
+// Named directive arguments use `identifier: <attribute-arg>` alongside
+// positional attribute arguments.
+
 <directive-attr-list> ::= <directive-attr-item> ("," <directive-attr-item>)* ","?
 <directive-attr-item> ::= <qualified-identifier> ("(" <expression-list>? ")")?
 

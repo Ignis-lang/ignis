@@ -670,6 +670,7 @@ Attributes use `@name` or `@name(args)` and are applied to declarations.
 
 ### Declaration attributes
 
+- `@directive(...)` -- declare a compile-time-only directive function
 - `@implements(...)` -- lang traits (`Drop`, `Clone`, `Copy`) or user-defined traits
 - `@packed` -- remove struct padding
 - `@aligned(N)` -- set minimum alignment
@@ -695,6 +696,32 @@ function forEach(@noescape f: (i32) -> void, data: *i32, len: i32): void {
     // f is guaranteed not to escape this call
 }
 ```
+
+### `@directive(...)`
+
+`@directive(...)` marks a function as a compile-time directive declaration.
+The metadata is declared with named arguments such as `target`, `phase`,
+`effect`, optional `group`, and optional `capabilities`.
+
+```ignis
+import Compile from "std::compile";
+
+@directive(target: "record", phase: expand, effect: emit)
+function derive(target: Compile::ItemRef, context: Compile::Context): void {
+    return;
+}
+```
+
+The currently recognized directive phases are `check`, `expand`, `collect`, `finalize`, and `transform`.
+`std::compile` is compile-time-only and is not linked into runtime binaries.
+
+Current migration limits:
+
+- directive declarations and uses are validated and scheduled before lowering
+- compile-time capability checks use a default-deny sandbox
+- directive functions are excluded from runtime codegen and linking
+- generated body execution and typed item insertion are not yet available
+- `@test` remains compiler-known for native test discovery
 
 ### `@test`
 

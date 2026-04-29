@@ -111,6 +111,10 @@ Rules:
 - Generic `std::test::Test::assertEq<T>` / `assertNe<T>` and builtin `@eq<T>` rely on this contract.
 - Unsupported equality must be rejected during analysis before code generation.
 
+Compile-time directives that want to derive trait conformance must target the current implementation model: internal attached methods plus implemented-trait metadata.
+
+Directive execution does not yet synthesize `Eq` methods for you, so the runtime equality contract remains handwritten today.
+
 ### Declaring a Trait
 
 ```ignis

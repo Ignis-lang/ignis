@@ -22,6 +22,10 @@ name<Type>()
 
 Both categories are expressions -- they have a type and return a value (or diverge with `Never`).
 
+By contrast, user-defined compile-time directives are declaration attributes,
+not builtin expressions. They are declared with `@directive(...)`, use
+`std::compile`, and execute under a default-deny sandbox.
+
 Legacy `__builtin_*` names are deprecated; use directive form (`@read`, `@write`, `@dropInPlace`, `@dropGlue`, etc.).
 
 ### Argument Types

@@ -32,6 +32,10 @@ Rules:
 - they must take zero parameters
 - they must return `void`
 
+`@test` remains the native runner's source of truth.
+Directive functions may coexist with tests, but they do not register native test
+cases on their own.
+
 ```ignis
 import Test from "std::test";
 
