@@ -1505,11 +1505,7 @@ fn discover_test_cases(
         return None;
       };
 
-      if !function
-        .attrs
-        .iter()
-        .any(|attr| matches!(attr, ignis_type::attribute::FunctionAttr::Test))
-      {
+      if !function.has_test_attr() {
         return None;
       }
 
@@ -3304,7 +3300,7 @@ fn collect_mono_roots(
   for (def_id, def) in defs.iter() {
     match &def.kind {
       // Include main function
-      DefinitionKind::Function(fd) if !fd.is_extern => {
+      DefinitionKind::Function(fd) if !fd.is_extern && !fd.is_compile_time_only() => {
         let name = symbols.get(&def.name);
         if name == "main" {
           roots.push(def_id);
@@ -3312,7 +3308,9 @@ fn collect_mono_roots(
       },
 
       // Include all public functions
-      DefinitionKind::Function(fd) if def.visibility == Visibility::Public && !fd.is_extern => {
+      DefinitionKind::Function(fd)
+        if def.visibility == Visibility::Public && !fd.is_extern && !fd.is_compile_time_only() =>
+      {
         roots.push(def_id);
       },
 
@@ -3362,7 +3360,7 @@ fn collect_mono_roots_for_std(defs: &DefinitionStore) -> Vec<DefinitionId> {
 
   for (def_id, def) in defs.iter() {
     match &def.kind {
-      DefinitionKind::Function(fd) if !fd.is_extern && fd.type_params.is_empty() => {
+      DefinitionKind::Function(fd) if !fd.is_extern && fd.type_params.is_empty() && !fd.is_compile_time_only() => {
         roots.push(def_id);
       },
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
@@ -3467,7 +3465,7 @@ mod tests {
   use insta::assert_snapshot;
   use tempfile::TempDir;
 
-  use ignis_type::attribute::FunctionAttr;
+  use ignis_type::attribute::{DirectiveEffect, DirectiveMetadata, DirectivePhase, DirectiveTarget, FunctionAttr};
   use ignis_type::definition::{Definition, DefinitionKind, DefinitionStore, FunctionDefinition, Visibility};
   use ignis_type::module::{ModuleId, ModulePath};
   use ignis_type::namespace::NamespaceStore;
@@ -3520,7 +3518,7 @@ mod tests {
 
     alloc_test_function(&mut defs, adds_name, ModuleId::new(1), Some(helpers_namespace), &types);
     alloc_test_function(&mut defs, smoke_name, ModuleId::new(0), None, &types);
-    alloc_plain_function(&mut defs, not_a_test_name, ModuleId::new(0), None, &types);
+    alloc_plain_function(&mut defs, not_a_test_name, ModuleId::new(0), None, Visibility::Private, &types);
     alloc_test_function(&mut defs, ignored_name, ModuleId::new(9), None, &types);
 
     let module_paths = HashMap::from([
@@ -3620,6 +3618,54 @@ function middle(): void {}
 
     assert_eq!(first_names, vec!["main::alpha", "main::middle", "main::zebra"]);
     assert_eq!(first_names, second_names);
+  }
+
+  #[test]
+  fn collect_mono_roots_skips_compile_time_only_directive_functions() {
+    let mut symbols = SymbolTable::new();
+    let types = TypeStore::new();
+    let mut defs = DefinitionStore::new();
+
+    let main_name = symbols.intern("main");
+    let directive_name = symbols.intern("derive");
+
+    let main_def = alloc_plain_function(&mut defs, main_name, ModuleId::new(0), None, Visibility::Private, &types);
+    let directive_def =
+      alloc_directive_function(&mut defs, directive_name, ModuleId::new(0), None, Visibility::Public, &types);
+
+    let roots = super::collect_mono_roots(&defs, &symbols);
+
+    assert!(roots.contains(&main_def), "expected main to remain a runtime root");
+    assert!(
+      !roots.contains(&directive_def),
+      "expected compile-time-only directive functions to stay out of executable monomorphization roots"
+    );
+  }
+
+  #[test]
+  fn collect_mono_roots_for_std_skips_compile_time_only_directive_functions() {
+    let mut symbols = SymbolTable::new();
+    let types = TypeStore::new();
+    let mut defs = DefinitionStore::new();
+
+    let runtime_name = symbols.intern("runtimeHelper");
+    let directive_name = symbols.intern("derive");
+
+    let runtime_def =
+      alloc_plain_function(&mut defs, runtime_name, ModuleId::new(0), None, Visibility::Private, &types);
+    let directive_def =
+      alloc_directive_function(&mut defs, directive_name, ModuleId::new(0), None, Visibility::Private, &types);
+
+    let roots = super::collect_mono_roots_for_std(&defs);
+
+    assert!(
+      roots.contains(&runtime_def),
+      "expected std runtime helper to remain a monomorphization root"
+    );
+    assert!(
+      !roots.contains(&directive_def),
+      "expected compile-time-only directive functions to stay out of std monomorphization roots"
+    );
   }
 
   #[test]
@@ -3813,7 +3859,7 @@ function middle(): void {}
     owner_module: ModuleId,
     owner_namespace: Option<ignis_type::namespace::NamespaceId>,
     types: &TypeStore,
-  ) {
+  ) -> ignis_type::definition::DefinitionId {
     defs.alloc(Definition {
       kind: DefinitionKind::Function(FunctionDefinition {
         type_params: Vec::new(),
@@ -3831,7 +3877,7 @@ function middle(): void {}
       owner_module,
       owner_namespace,
       doc: None,
-    });
+    })
   }
 
   fn alloc_plain_function(
@@ -3839,8 +3885,9 @@ function middle(): void {}
     name: ignis_type::symbol::SymbolId,
     owner_module: ModuleId,
     owner_namespace: Option<ignis_type::namespace::NamespaceId>,
+    visibility: Visibility,
     types: &TypeStore,
-  ) {
+  ) -> ignis_type::definition::DefinitionId {
     defs.alloc(Definition {
       kind: DefinitionKind::Function(FunctionDefinition {
         type_params: Vec::new(),
@@ -3854,10 +3901,44 @@ function middle(): void {}
       name,
       span: Span::default(),
       name_span: Span::default(),
-      visibility: Visibility::Private,
+      visibility,
       owner_module,
       owner_namespace,
       doc: None,
-    });
+    })
+  }
+
+  fn alloc_directive_function(
+    defs: &mut DefinitionStore,
+    name: ignis_type::symbol::SymbolId,
+    owner_module: ModuleId,
+    owner_namespace: Option<ignis_type::namespace::NamespaceId>,
+    visibility: Visibility,
+    types: &TypeStore,
+  ) -> ignis_type::definition::DefinitionId {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Function(FunctionDefinition {
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type: types.void(),
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: Default::default(),
+        attrs: vec![FunctionAttr::Directive(DirectiveMetadata {
+          target: DirectiveTarget::Record,
+          phase: DirectivePhase::Check,
+          effect: DirectiveEffect::Diagnose,
+          group: None,
+          capabilities: Vec::new(),
+        })],
+      }),
+      name,
+      span: Span::default(),
+      name_span: Span::default(),
+      visibility,
+      owner_module,
+      owner_namespace,
+      doc: None,
+    })
   }
 }

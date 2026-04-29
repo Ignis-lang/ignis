@@ -170,6 +170,41 @@ function genericAssertionsPass(): void {
 }
 
 #[test]
+fn run_project_tests_keeps_top_level_test_discovery_with_directive_functions() {
+  let project = write_test_project(
+    r#"
+import Compile from "std::compile";
+import Test from "std::test";
+
+@directive(target: "record", phase: check, effect: diagnose)
+function derive(target: Compile::ItemRef, context: Compile::Context): void {
+    return;
+}
+
+@cold
+function legacyHelper(): void {}
+
+@test
+function smoke(): void {
+    legacyHelper();
+    Test::assert(true);
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(
+    result.is_ok(),
+    "expected top-level @test discovery to remain unchanged when directive functions coexist with legacy attrs"
+  );
+  assert!(
+    harness_binary_path(project.path()).exists(),
+    "expected test harness binary to be built"
+  );
+}
+
+#[test]
 fn run_single_file_tests_returns_ok_when_generic_equality_assertions_pass() {
   let (_temp_dir, file_path) = write_single_test_file(
     r#"
@@ -194,6 +229,41 @@ function genericAssertionsPass(): void {
   let result = run_single_file_tests(&file_path, None, false, Some(&workspace_std_path()));
 
   assert!(result.is_ok(), "expected single-file generic equality assertions to pass");
+  assert!(
+    single_file_harness_binary_path(&file_path).exists(),
+    "expected single-file harness binary to be built"
+  );
+}
+
+#[test]
+fn run_single_file_tests_keep_top_level_test_discovery_with_directive_functions() {
+  let (_temp_dir, file_path) = write_single_test_file(
+    r#"
+import Compile from "std::compile";
+import Test from "std::test";
+
+@directive(target: "record", phase: check, effect: diagnose)
+function derive(target: Compile::ItemRef, context: Compile::Context): void {
+    return;
+}
+
+@deprecated("compat")
+function legacyHelper(): void {}
+
+@test
+function smoke(): void {
+    legacyHelper();
+    Test::assert(true);
+}
+"#,
+  );
+
+  let result = run_single_file_tests(&file_path, None, false, Some(&workspace_std_path()));
+
+  assert!(
+    result.is_ok(),
+    "expected single-file top-level @test discovery to remain unchanged when directive functions coexist with legacy attrs"
+  );
   assert!(
     single_file_harness_binary_path(&file_path).exists(),
     "expected single-file harness binary to be built"

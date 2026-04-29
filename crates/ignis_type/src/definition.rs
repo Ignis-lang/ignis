@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::{
   Id, Store,
   attribute::{
-    DirectiveCapability, DirectiveEffect, DirectivePhase, DirectiveTarget, FieldAttr, FunctionAttr, NamespaceAttr,
-    ParamAttr, RecordAttr,
+    DirectiveCapability, DirectiveEffect, DirectiveMetadata, DirectivePhase, DirectiveTarget, FieldAttr, FunctionAttr,
+    NamespaceAttr, ParamAttr, RecordAttr,
   },
   module::ModuleId,
   namespace::NamespaceId,
@@ -134,6 +134,23 @@ pub struct FunctionDefinition {
   pub is_variadic: bool,
   pub inline_mode: InlineMode,
   pub attrs: Vec<FunctionAttr>,
+}
+
+impl FunctionDefinition {
+  pub fn has_test_attr(&self) -> bool {
+    self.attrs.iter().any(|attr| matches!(attr, FunctionAttr::Test))
+  }
+
+  pub fn directive_metadata(&self) -> Option<&DirectiveMetadata> {
+    self.attrs.iter().find_map(|attr| match attr {
+      FunctionAttr::Directive(metadata) => Some(metadata),
+      _ => None,
+    })
+  }
+
+  pub fn is_compile_time_only(&self) -> bool {
+    self.directive_metadata().is_some()
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

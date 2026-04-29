@@ -153,6 +153,60 @@ function genericAssertionsPass(): void {
 }
 
 #[test]
+fn ignis_test_keeps_top_level_test_discovery_with_directive_functions_via_cli() {
+  let project_dir = make_temp_project_dir("directive-test-compat");
+  write_test_project(
+    &project_dir,
+    r#"
+import Compile from "std::compile";
+import Test from "std::test";
+
+@directive(target: "record", phase: check, effect: diagnose)
+function derive(target: Compile::ItemRef, context: Compile::Context): void {
+    return;
+}
+
+@cold
+function legacyHelper(): void {}
+
+@test
+function smoke(): void {
+    legacyHelper();
+    Test::assert(true);
+}
+"#,
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("run ignis test");
+
+  assert!(
+    output.status.success(),
+    "expected ignis test to preserve top-level @test discovery when directive functions coexist with legacy attrs\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    stdout.contains("Tests passed") || stderr.contains("Tests passed"),
+    "expected successful cli test summary\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    harness_binary_path(&project_dir).exists(),
+    "expected cli test run to build the harness binary"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
 fn ignis_fmt_rewrites_single_file_in_place() {
   let project_dir = make_temp_project_dir("fmt-single-file");
   let file_path = write_single_test_file(&project_dir, "sample.ign", "function   main ( ) : void {return;}\n");

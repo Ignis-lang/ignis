@@ -11,7 +11,6 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::{
-  attribute::FunctionAttr,
   definition::{DefinitionKind, FunctionDefinition},
   types::Type,
 };
@@ -712,7 +711,7 @@ impl<'a> Analyzer<'a> {
     func: &ignis_ast::statements::function::ASTFunction,
     func_def: &FunctionDefinition,
   ) {
-    if !func_def.attrs.iter().any(|attr| matches!(attr, FunctionAttr::Test)) {
+    if !func_def.has_test_attr() {
       return;
     }
 
@@ -762,11 +761,7 @@ impl<'a> Analyzer<'a> {
     func: &ignis_ast::statements::function::ASTFunction,
     func_def: &FunctionDefinition,
   ) {
-    if !func_def
-      .attrs
-      .iter()
-      .any(|attr| matches!(attr, FunctionAttr::Directive(_)))
-    {
+    if !func_def.is_compile_time_only() {
       return;
     }
 
