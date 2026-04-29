@@ -71,15 +71,28 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  pub fn bind_generated_phase(
+    &mut self,
+    roots: &[NodeId],
+  ) {
+    for root in roots {
+      self.bind_predecl(root, ScopeKind::Global);
+    }
+
+    for root in roots {
+      self.bind_complete(root, ScopeKind::Global);
+    }
+  }
+
   /// Pass 1: Predeclare type definitions so they can be referenced before fully defined
   fn bind_predecl(
     &mut self,
     node_id: &NodeId,
     scope_kind: ScopeKind,
   ) {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    match node {
+    match &node {
       ASTNode::Statement(stmt) => self.bind_predecl_statement(node_id, stmt, scope_kind),
       ASTNode::Expression(_) => {},
     }
@@ -119,9 +132,9 @@ impl<'a> Analyzer<'a> {
     node_id: &NodeId,
     scope_kind: ScopeKind,
   ) {
-    let node = self.ast.get(node_id);
+    let node = self.ast_node(node_id).clone();
 
-    match node {
+    match &node {
       ASTNode::Statement(stmt) => self.bind_complete_statement(node_id, stmt, scope_kind),
       ASTNode::Expression(expr) => self.bind_expression_lambdas(expr),
     }

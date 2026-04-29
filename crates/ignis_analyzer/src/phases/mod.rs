@@ -79,17 +79,22 @@ pub(crate) fn run_directive_scheduling_phase(analyzer: &mut Analyzer<'_>) -> Dir
     analyzer.add_diagnostic(diagnostic);
   }
 
+  analyzer.directive_execution_report = report.clone();
+  crate::generated::integrate_generated_batches(analyzer);
+  crate::generated::commit_generated_metadata(analyzer);
+
   report
 }
 
 pub(crate) fn build_semantic_artifacts(
   analyzer: &Analyzer<'_>,
-  ast: &ASTStore<ASTNode>,
+  _ast: &ASTStore<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
 ) -> SemanticArtifacts {
-  let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
+  let node_spans = build_node_spans(&analyzer.working_ast, &analyzer.node_defs, &analyzer.node_types);
 
   SemanticArtifacts {
+    ast: analyzer.working_ast.clone(),
     types: analyzer.types.clone(),
     defs: analyzer.defs.clone(),
     namespaces: analyzer.namespaces.clone(),
@@ -109,16 +114,17 @@ pub(crate) fn build_semantic_artifacts(
 
 pub(crate) fn build_shared_semantic_artifacts(
   analyzer: &Analyzer<'_>,
-  ast: &ASTStore<ASTNode>,
+  _ast: &ASTStore<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
   shared_types: &TypeStore,
   shared_defs: &DefinitionStore,
   shared_namespaces: &NamespaceStore,
   shared_extension_methods: &HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
 ) -> SemanticArtifacts {
-  let node_spans = build_node_spans(ast, &analyzer.node_defs, &analyzer.node_types);
+  let node_spans = build_node_spans(&analyzer.working_ast, &analyzer.node_defs, &analyzer.node_types);
 
   SemanticArtifacts {
+    ast: analyzer.working_ast.clone(),
     types: shared_types.clone(),
     defs: shared_defs.clone(),
     namespaces: shared_namespaces.clone(),

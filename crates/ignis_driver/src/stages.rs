@@ -462,6 +462,7 @@ mod tests {
       parsed_stage.ctx,
       parsed_stage.root_id,
       AnalyzerOutput {
+        ast: Store::new(),
         types: TypeStore::new(),
         defs: DefinitionStore::new(),
         namespaces: NamespaceStore::new(),
@@ -636,6 +637,7 @@ mod tests {
     let parsed_stage = parsed_stage_fixture();
     let file_id = SourceMap::new().add_virtual("analyzer-stage", String::new());
     let output = AnalyzerOutput {
+      ast: Store::new(),
       types: TypeStore::new(),
       defs: DefinitionStore::new(),
       namespaces: NamespaceStore::new(),

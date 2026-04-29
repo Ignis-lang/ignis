@@ -132,6 +132,7 @@ pub enum PipeResolution {
 
 pub struct Analyzer<'a> {
   ast: &'a ASTStore<ASTNode>,
+  working_ast: ASTStore<ASTNode>,
   symbols: Rc<RefCell<SymbolTable>>,
   types: TypeStore,
   defs: DefinitionStore,
@@ -167,6 +168,8 @@ pub struct Analyzer<'a> {
   trait_default_clones: HashMap<DefinitionId, NodeId>,
   directive_registry: DirectiveRegistry,
   directive_execution_report: DirectiveExecutionReport,
+  generated_roots: Vec<NodeId>,
+  pending_generated_items: Vec<(NodeId, ignis_type::definition::GeneratedItemMetadata)>,
 
   /// Lambda parameter definitions created by the resolver, keyed by lambda expression NodeId.
   /// The typechecker reuses these definitions (updating their types) instead of creating new ones.
@@ -197,6 +200,7 @@ pub struct Analyzer<'a> {
 }
 
 pub struct AnalyzerOutput {
+  pub ast: ASTStore<ASTNode>,
   pub types: TypeStore,
   pub defs: DefinitionStore,
   pub namespaces: NamespaceStore,
@@ -237,6 +241,7 @@ pub struct AnalyzerOutput {
 }
 
 pub struct SemanticArtifacts {
+  pub ast: ASTStore<ASTNode>,
   pub types: TypeStore,
   pub defs: DefinitionStore,
   pub namespaces: NamespaceStore,
@@ -294,6 +299,7 @@ impl AnalyzerOutput {
   pub fn into_parts(self) -> (SemanticArtifacts, HIR) {
     let hir = self.hir;
     let semantic = SemanticArtifacts {
+      ast: self.ast,
       types: self.types,
       defs: self.defs,
       namespaces: self.namespaces,
@@ -318,6 +324,7 @@ impl AnalyzerOutput {
     hir: HIR,
   ) -> Self {
     Self {
+      ast: semantic.ast,
       types: semantic.types,
       defs: semantic.defs,
       namespaces: semantic.namespaces,
@@ -338,6 +345,7 @@ impl AnalyzerOutput {
 
   pub fn collect_exports(&self) -> imports::ModuleExportData {
     SemanticArtifacts {
+      ast: self.ast.clone(),
       types: self.types.clone(),
       defs: self.defs.clone(),
       namespaces: self.namespaces.clone(),
@@ -365,6 +373,7 @@ impl<'a> Analyzer<'a> {
   ) -> Self {
     Self {
       ast,
+      working_ast: ast.clone(),
       symbols,
       types: TypeStore::new(),
       defs: DefinitionStore::new(),
@@ -399,6 +408,8 @@ impl<'a> Analyzer<'a> {
       trait_default_clones: HashMap::new(),
       directive_registry: DirectiveRegistry::default(),
       directive_execution_report: DirectiveExecutionReport::default(),
+      generated_roots: Vec::new(),
+      pending_generated_items: Vec::new(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
@@ -504,6 +515,7 @@ impl<'a> Analyzer<'a> {
 
     let mut analyzer = Analyzer {
       ast,
+      working_ast: ast.clone(),
       symbols,
       types: std::mem::replace(shared_types, TypeStore::new()),
       defs: std::mem::replace(shared_defs, DefinitionStore::new()),
@@ -538,6 +550,8 @@ impl<'a> Analyzer<'a> {
       trait_default_clones: HashMap::new(),
       directive_registry: DirectiveRegistry::default(),
       directive_execution_report: DirectiveExecutionReport::default(),
+      generated_roots: Vec::new(),
+      pending_generated_items: Vec::new(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
@@ -582,6 +596,17 @@ impl<'a> Analyzer<'a> {
     diagnostic: Diagnostic,
   ) {
     self.diagnostics.push(diagnostic);
+  }
+
+  fn ast_node(
+    &self,
+    node_id: &NodeId,
+  ) -> &ASTNode {
+    if (node_id.index() as usize) < self.ast.len() {
+      self.ast.get(node_id)
+    } else {
+      self.working_ast.get(node_id)
+    }
   }
 
   fn type_of(
@@ -824,8 +849,8 @@ impl<'a> Analyzer<'a> {
     &mut self,
     node_id: &NodeId,
   ) {
-    let node = self.ast.get(node_id);
-    if let ASTNode::Statement(stmt) = node {
+    let node = self.ast_node(node_id).clone();
+    if let ASTNode::Statement(stmt) = &node {
       self.define_root_statement(node_id, stmt);
     }
   }
@@ -967,6 +992,7 @@ mod tests {
     import_item_defs.insert(Span::empty_at(file_id, Default::default()), private_def_id);
 
     SemanticArtifacts {
+      ast: ASTStore::new(),
       types,
       defs,
       namespaces: NamespaceStore::new(),
@@ -1016,6 +1042,7 @@ mod tests {
 
     let node_spans = build_node_spans(&nodes, &analyzer.node_defs, &analyzer.node_types);
     let semantic = SemanticArtifacts {
+      ast: analyzer.working_ast.clone(),
       types: analyzer.types,
       defs: analyzer.defs,
       namespaces: analyzer.namespaces,

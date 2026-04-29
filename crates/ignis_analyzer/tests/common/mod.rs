@@ -140,6 +140,7 @@ pub fn analyze_allowing_parse_errors(src: &str) -> AnalysisResult {
 
       // Return a minimal output with just the parser errors
       let output = AnalyzerOutput {
+        ast: ignis_type::Store::new(),
         diagnostics,
         hir: HIR::new(),
         types: TypeStore::new(),

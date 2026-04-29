@@ -1072,6 +1072,7 @@ impl CompilationContext {
     }
 
     let output = ignis_analyzer::AnalyzerOutput {
+      ast: ignis_type::Store::new(),
       types: shared_types,
       defs: shared_defs,
       namespaces: shared_namespaces,

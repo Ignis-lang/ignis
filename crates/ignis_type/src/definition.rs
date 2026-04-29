@@ -167,6 +167,7 @@ pub struct GeneratedProvenance {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GeneratedItemKind {
+  Record,
   AttachedMethod {
     owner_type: DefinitionId,
     is_static: bool,
@@ -184,6 +185,13 @@ pub struct GeneratedItemMetadata {
 }
 
 impl GeneratedItemMetadata {
+  pub fn record(provenance: GeneratedProvenance) -> Self {
+    Self {
+      provenance,
+      kind: GeneratedItemKind::Record,
+    }
+  }
+
   pub fn attached_method(
     provenance: GeneratedProvenance,
     owner_type: DefinitionId,

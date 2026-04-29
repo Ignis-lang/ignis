@@ -174,6 +174,7 @@ pub fn analyze_text(
 /// Create an empty AnalyzerOutput for early-exit cases.
 fn empty_analyzer_output() -> ignis_analyzer::AnalyzerOutput {
   ignis_analyzer::AnalyzerOutput {
+    ast: ignis_type::Store::new(),
     types: ignis_type::types::TypeStore::new(),
     defs: ignis_type::definition::DefinitionStore::new(),
     namespaces: ignis_type::namespace::NamespaceStore::new(),

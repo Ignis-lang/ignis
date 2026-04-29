@@ -1,5 +1,6 @@
 mod common;
 
+use ignis_ast::{ASTNode, statements::ASTStatement};
 use ignis_analyzer::generated::{
   GeneratedBatch, GeneratedFingerprint, GeneratedItemDelta, GeneratedItemDeltaKind, GeneratedOrigin,
 };
@@ -545,4 +546,141 @@ fn staged_analysis_keeps_generated_batches_empty_before_materialization() {
 
   assert!(result.output.directive_execution_report.generated_batches.is_empty());
   assert!(result.output.directive_registry.generated_items.is_empty());
+}
+
+#[test]
+fn staged_analysis_materializes_generated_records_into_owned_ast_and_definitions() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitRecord(context: Context, target: ItemReference, name: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitRecord(context, target, "GeneratedUser");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  assert_eq!(common::format_diagnostics(&result.output.diagnostics), "(no diagnostics)");
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let generated_name = symbols.intern("GeneratedUser");
+  drop(symbols);
+
+  let generated_record_def = result
+    .output
+    .defs
+    .iter()
+    .find_map(|(def_id, def)| (def.name == generated_name).then_some((def_id, &def.kind)))
+    .expect("generated record definition");
+
+  assert!(
+    matches!(generated_record_def.1, ignis_type::definition::DefinitionKind::Record(_)),
+    "expected GeneratedUser to be a record definition"
+  );
+
+  let generated_record_nodes = result
+    .output
+    .ast
+    .iter()
+    .filter_map(|(node_id, node)| match node {
+      ASTNode::Statement(ASTStatement::Record(record)) if record.name == generated_name => Some(node_id),
+      _ => None,
+    })
+    .collect::<Vec<_>>();
+
+  assert_eq!(
+    generated_record_nodes.len(),
+    1,
+    "expected one materialized GeneratedUser AST node"
+  );
+  assert_eq!(
+    result.output.node_defs.get(&generated_record_nodes[0]),
+    Some(&generated_record_def.0),
+    "expected generated record node to resolve to its definition"
+  );
+  assert!(
+    result
+      .output
+      .directive_registry
+      .generated_items
+      .contains_key(&generated_record_def.0),
+    "expected generated record metadata to point at the committed definition"
+  );
+}
+
+#[test]
+fn staged_analysis_rolls_back_failed_generated_record_materialization_without_leaks() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record ItemReference {}
+
+        function emitRecord(context: Context, target: ItemReference, name: str): void {
+          return;
+        }
+      }
+
+      @directive(target: "record", phase: expand, effect: emit)
+      function derive(context: Compile::Context, target: Compile::ItemReference): void {
+        Compile::emitRecord(context, target, "User");
+      }
+
+      @derive
+      record User {
+        value: i32;
+      }
+    "#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("User") && diagnostics.contains("already defined"),
+    "expected duplicate generated record diagnostic, got: {diagnostics}"
+  );
+
+  let mut symbols = result.output.symbols.borrow_mut();
+  let user_name = symbols.intern("User");
+  drop(symbols);
+
+  let user_record_nodes = result
+    .output
+    .ast
+    .iter()
+    .filter(|(_, node)| matches!(node, ASTNode::Statement(ASTStatement::Record(record)) if record.name == user_name))
+    .count();
+
+  let user_record_defs = result
+    .output
+    .defs
+    .iter()
+    .filter(|(_, def)| def.name == user_name && matches!(def.kind, ignis_type::definition::DefinitionKind::Record(_)))
+    .count();
+
+  assert_eq!(
+    user_record_nodes, 1,
+    "failed generated record insertion must not leak extra AST nodes"
+  );
+  assert_eq!(
+    user_record_defs, 1,
+    "failed generated record insertion must not leak extra definitions"
+  );
+  assert!(
+    result.output.directive_registry.generated_items.is_empty(),
+    "failed generated record insertion must not leak generated registry metadata"
+  );
 }

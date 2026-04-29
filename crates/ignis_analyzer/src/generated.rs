@@ -1,7 +1,13 @@
-use ignis_ast::NodeId;
+use ignis_ast::{
+  ASTNode, NodeId,
+  statements::{ASTRecord, ASTStatement},
+};
 use ignis_type::attribute::DirectivePhase;
-use ignis_type::definition::{DefinitionId, DirectiveDefId};
+use ignis_type::definition::{DefinitionId, DirectiveDefId, GeneratedItemMetadata};
 use ignis_type::span::Span;
+
+use crate::directive_registry::DirectiveUse;
+use crate::Analyzer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GeneratedFingerprint {
@@ -97,6 +103,154 @@ impl GeneratedBatch {
       iteration,
       phase,
       entries,
+    }
+  }
+}
+
+#[derive(Clone)]
+pub struct GeneratedIntegrationSnapshot {
+  working_ast: ignis_type::Store<ASTNode>,
+  defs: ignis_type::definition::DefinitionStore,
+  types: ignis_type::types::TypeStore,
+  namespaces: ignis_type::namespace::NamespaceStore,
+  scopes: crate::ScopeTree,
+  node_defs: std::collections::HashMap<NodeId, DefinitionId>,
+  node_types: std::collections::HashMap<NodeId, ignis_type::types::TypeId>,
+  directive_registry: crate::directive_registry::DirectiveRegistry,
+  generated_roots: Vec<NodeId>,
+}
+
+impl GeneratedIntegrationSnapshot {
+  pub fn capture(analyzer: &Analyzer<'_>) -> Self {
+    Self {
+      working_ast: analyzer.working_ast.clone(),
+      defs: analyzer.defs.clone(),
+      types: analyzer.types.clone(),
+      namespaces: analyzer.namespaces.clone(),
+      scopes: analyzer.scopes.clone(),
+      node_defs: analyzer.node_defs.clone(),
+      node_types: analyzer.node_types.clone(),
+      directive_registry: analyzer.directive_registry.clone(),
+      generated_roots: analyzer.generated_roots.clone(),
+    }
+  }
+
+  pub fn restore(
+    self,
+    analyzer: &mut Analyzer<'_>,
+  ) {
+    analyzer.working_ast = self.working_ast;
+    analyzer.defs = self.defs;
+    analyzer.types = self.types;
+    analyzer.namespaces = self.namespaces;
+    analyzer.scopes = self.scopes;
+    analyzer.node_defs = self.node_defs;
+    analyzer.node_types = self.node_types;
+    analyzer.directive_registry = self.directive_registry;
+    analyzer.generated_roots = self.generated_roots;
+  }
+}
+
+pub fn integrate_generated_batches(analyzer: &mut Analyzer<'_>) {
+  let generated_batches = analyzer.directive_execution_report.generated_batches.clone();
+  let mut seen_batches = std::collections::HashSet::new();
+
+  for batch in generated_batches {
+    let batch_key = batch
+      .entries
+      .iter()
+      .map(|entry| (entry.origin.generation_id, entry.fingerprint_value().to_string()))
+      .collect::<Vec<_>>();
+
+    if !seen_batches.insert(batch_key) {
+      continue;
+    }
+
+    let snapshot = GeneratedIntegrationSnapshot::capture(analyzer);
+    let diagnostics_len = analyzer.diagnostics.len();
+
+    let generated_roots = materialize_generated_batch(analyzer, &batch.entries);
+
+    analyzer.bind_generated_phase(&generated_roots);
+
+    let new_diagnostics = analyzer.diagnostics.split_off(diagnostics_len);
+    let has_errors = !new_diagnostics.is_empty();
+
+    if has_errors {
+      snapshot.restore(analyzer);
+      analyzer.diagnostics.extend(new_diagnostics);
+      continue;
+    }
+  }
+}
+
+fn materialize_generated_batch(
+  analyzer: &mut Analyzer<'_>,
+  entries: &[GeneratedItemDelta],
+) -> Vec<NodeId> {
+  let directive_uses = analyzer.directive_registry.uses.clone();
+  let mut generated_roots = Vec::new();
+
+  for entry in entries {
+    if let GeneratedItemDeltaKind::Record { name } = &entry.kind {
+      let Some(directive_use) = directive_uses.iter().find(|directive_use| {
+        directive_use.directive == entry.origin.directive
+          && directive_use.target_node == entry.origin.target_node
+          && directive_use.span == entry.origin.directive_use_span
+      }) else {
+        continue;
+      };
+
+      let record_node = materialize_generated_record(analyzer, directive_use, entry.origin.generation_id, name);
+      generated_roots.push(record_node);
+    }
+  }
+
+  generated_roots
+}
+
+fn materialize_generated_record(
+  analyzer: &mut Analyzer<'_>,
+  directive_use: &DirectiveUse,
+  generation_id: u32,
+  name: &str,
+) -> NodeId {
+  let symbol = analyzer.symbols.borrow_mut().get_or_intern(name);
+  let record_node = analyzer
+    .working_ast
+    .alloc(ASTNode::Statement(ASTStatement::Record(ASTRecord::new(
+      symbol,
+      None,
+      Vec::new(),
+      directive_use.span.clone(),
+      None,
+      Vec::new(),
+    ))));
+
+  analyzer.generated_roots.push(record_node);
+
+  let generated_provenance = directive_use.generated_provenance(generation_id);
+  let generated_metadata = GeneratedItemMetadata::record(generated_provenance);
+
+  if let Some(definition_id) = analyzer.node_defs.get(&record_node).copied() {
+    analyzer
+      .directive_registry
+      .attach_generated_item(definition_id, generated_metadata);
+  } else {
+    analyzer.pending_generated_items.push((record_node, generated_metadata));
+  }
+
+  record_node
+}
+
+pub fn commit_generated_metadata(analyzer: &mut Analyzer<'_>) {
+  let pending_items = std::mem::take(&mut analyzer.pending_generated_items);
+
+  for (node_id, metadata) in pending_items {
+    if let Some(definition_id) = analyzer.node_defs.get(&node_id).copied() {
+      analyzer
+        .directive_registry
+        .attach_generated_item(definition_id, metadata);
     }
   }
 }
