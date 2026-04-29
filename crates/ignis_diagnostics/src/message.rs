@@ -664,6 +664,33 @@ pub enum DiagnosticMessage {
     requirement: String,
     span: Span,
   },
+  DirectiveCapabilityDenied {
+    capability: String,
+    phase: String,
+    span: Span,
+    declaration_span: Span,
+    directive_use_span: Span,
+    target_span: Span,
+  },
+  UnsupportedCompileTimeGeneration {
+    operation: String,
+    span: Span,
+    declaration_span: Span,
+    directive_use_span: Span,
+    target_span: Span,
+  },
+  DirectiveVmStepLimitExceeded {
+    span: Span,
+    declaration_span: Span,
+    directive_use_span: Span,
+    target_span: Span,
+  },
+  DirectiveVmCallDepthLimitExceeded {
+    span: Span,
+    declaration_span: Span,
+    directive_use_span: Span,
+    target_span: Span,
+  },
   // Lang trait diagnostics
   UnknownLangTrait {
     name: String,
@@ -1540,6 +1567,29 @@ impl fmt::Display for DiagnosticMessage {
       } => {
         write!(f, "@directive function '{}' {}", function_name, requirement)
       },
+      DiagnosticMessage::DirectiveCapabilityDenied { capability, phase, .. } => {
+        write!(
+          f,
+          "compile-time directive cannot use '{}' capability during {} because the sandbox denies it by default",
+          capability, phase
+        )
+      },
+      DiagnosticMessage::UnsupportedCompileTimeGeneration { operation, .. } => {
+        write!(
+          f,
+          "compile-time directive cannot call unsupported std::compile generation API '{}' in the diagnostics-only VM",
+          operation
+        )
+      },
+      DiagnosticMessage::DirectiveVmStepLimitExceeded { .. } => {
+        write!(f, "compile-time directive exceeded the VM step limit during analyzer execution")
+      },
+      DiagnosticMessage::DirectiveVmCallDepthLimitExceeded { .. } => {
+        write!(
+          f,
+          "compile-time directive exceeded the VM call-depth limit during analyzer execution"
+        )
+      },
       DiagnosticMessage::UnknownLangTrait { name, .. } => {
         write!(f, "unknown lang trait '{}' in @implements", name)
       },
@@ -2018,6 +2068,10 @@ impl DiagnosticMessage {
       | DiagnosticMessage::InvalidDirectivePhaseEffect { span, .. }
       | DiagnosticMessage::DirectiveTargetMismatch { span, .. }
       | DiagnosticMessage::InvalidDirectiveSignature { span, .. }
+      | DiagnosticMessage::DirectiveCapabilityDenied { span, .. }
+      | DiagnosticMessage::UnsupportedCompileTimeGeneration { span, .. }
+      | DiagnosticMessage::DirectiveVmStepLimitExceeded { span, .. }
+      | DiagnosticMessage::DirectiveVmCallDepthLimitExceeded { span, .. }
       | DiagnosticMessage::UnknownLangTrait { span, .. }
       | DiagnosticMessage::LangTraitDropCopyConflict { span, .. }
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
@@ -2243,6 +2297,10 @@ impl DiagnosticMessage {
       DiagnosticMessage::InvalidDirectivePhaseEffect { .. } => "A0193",
       DiagnosticMessage::DirectiveTargetMismatch { .. } => "A0194",
       DiagnosticMessage::InvalidDirectiveSignature { .. } => "A0197",
+      DiagnosticMessage::DirectiveCapabilityDenied { .. } => "A0196",
+      DiagnosticMessage::UnsupportedCompileTimeGeneration { .. } => "A0199",
+      DiagnosticMessage::DirectiveVmStepLimitExceeded { .. } => "A0200",
+      DiagnosticMessage::DirectiveVmCallDepthLimitExceeded { .. } => "A0201",
       DiagnosticMessage::UnknownLangTrait { .. } => "A0130",
       DiagnosticMessage::LangTraitDropCopyConflict { .. } => "A0131",
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",
@@ -2350,6 +2408,36 @@ impl DiagnosticMessage {
       DiagnosticMessage::PipeRhsInstanceMethod { pipe_span, .. } => {
         vec![(pipe_span.clone(), "help: use the static form: `x |> Type::method`".to_string())]
       },
+      DiagnosticMessage::DirectiveCapabilityDenied {
+        declaration_span,
+        directive_use_span,
+        target_span,
+        ..
+      }
+      | DiagnosticMessage::UnsupportedCompileTimeGeneration {
+        declaration_span,
+        directive_use_span,
+        target_span,
+        ..
+      }
+      | DiagnosticMessage::DirectiveVmStepLimitExceeded {
+        declaration_span,
+        directive_use_span,
+        target_span,
+        ..
+      }
+      | DiagnosticMessage::DirectiveVmCallDepthLimitExceeded {
+        declaration_span,
+        directive_use_span,
+        target_span,
+        ..
+      } => {
+        vec![
+          (declaration_span.clone(), "directive declaration".to_string()),
+          (directive_use_span.clone(), "directive use".to_string()),
+          (target_span.clone(), "target item".to_string()),
+        ]
+      },
       DiagnosticMessage::PipePlaceholderOutsidePipe { .. } => {
         vec![]
       },
@@ -2440,5 +2528,64 @@ mod tests {
     let rendered = message.to_string();
     assert!(rendered.contains("<invalid>"));
     assert!(!rendered.contains("'error'"));
+  }
+
+  #[test]
+  fn directive_vm_failure_messages_report_codes_and_provenance_labels() {
+    let message = DiagnosticMessage::DirectiveCapabilityDenied {
+      capability: "filesystem".to_string(),
+      phase: "check".to_string(),
+      span: Span::default(),
+      declaration_span: Span::default(),
+      directive_use_span: Span::default(),
+      target_span: Span::default(),
+    };
+
+    let diagnostic = message.report();
+
+    assert_eq!(diagnostic.error_code, "A0196");
+    assert!(diagnostic.message.contains("filesystem"));
+    assert_eq!(diagnostic.labels.len(), 3);
+    assert_eq!(diagnostic.labels[0].message, "directive declaration");
+    assert_eq!(diagnostic.labels[1].message, "directive use");
+    assert_eq!(diagnostic.labels[2].message, "target item");
+
+    let generation = DiagnosticMessage::UnsupportedCompileTimeGeneration {
+      operation: "emitRecord".to_string(),
+      span: Span::default(),
+      declaration_span: Span::default(),
+      directive_use_span: Span::default(),
+      target_span: Span::default(),
+    };
+
+    let generation_diagnostic = generation.report();
+
+    assert_eq!(generation_diagnostic.error_code, "A0199");
+    assert!(generation_diagnostic.message.contains("emitRecord"));
+    assert_eq!(generation_diagnostic.labels.len(), 3);
+  }
+
+  #[test]
+  fn directive_vm_limit_messages_report_distinct_codes() {
+    let step_limit = DiagnosticMessage::DirectiveVmStepLimitExceeded {
+      span: Span::default(),
+      declaration_span: Span::default(),
+      directive_use_span: Span::default(),
+      target_span: Span::default(),
+    };
+    let call_depth = DiagnosticMessage::DirectiveVmCallDepthLimitExceeded {
+      span: Span::default(),
+      declaration_span: Span::default(),
+      directive_use_span: Span::default(),
+      target_span: Span::default(),
+    };
+
+    let step_diagnostic = step_limit.report();
+    let depth_diagnostic = call_depth.report();
+
+    assert_eq!(step_diagnostic.error_code, "A0200");
+    assert!(step_diagnostic.message.contains("step limit"));
+    assert_eq!(depth_diagnostic.error_code, "A0201");
+    assert!(depth_diagnostic.message.contains("call-depth limit"));
   }
 }

@@ -1,5 +1,6 @@
 use ignis_ast::NodeId;
 use ignis_diagnostics::diagnostic_report::{Diagnostic, Severity};
+use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::attribute::{DirectiveCapability, DirectiveEffect, DirectivePhase};
 use ignis_type::definition::{DefinitionId, DirectiveDefId, DirectiveProvenance};
 use ignis_type::file::FileId;
@@ -651,6 +652,17 @@ fn cycle_limit_diagnostic(
 }
 
 fn execution_error_diagnostic(error: &DirectiveExecutionError) -> Diagnostic {
+  let (message, note) = execution_error_message(error);
+  let diagnostic = message.report();
+
+  if let Some(note) = note {
+    diagnostic.with_note(note)
+  } else {
+    diagnostic
+  }
+}
+
+fn execution_error_message(error: &DirectiveExecutionError) -> (DiagnosticMessage, Option<String>) {
   match error {
     DirectiveExecutionError::CapabilityDenied {
       phase,
@@ -658,21 +670,16 @@ fn execution_error_diagnostic(error: &DirectiveExecutionError) -> Diagnostic {
       provenance,
       directive_use_span,
       target_span,
-    } => label_execution_diagnostic(
-      Diagnostic::new(
-        Severity::Error,
-        format!(
-          "compile-time directive cannot use '{}' capability during {:?} because the sandbox denies it by default",
-          capability_name(capability),
-          phase
-        ),
-        "A0196".to_string(),
-        directive_use_span.clone(),
-      )
-      .with_note("allowed-by-default capabilities are limited to deterministic diagnostics".to_string()),
-      provenance,
-      directive_use_span,
-      target_span,
+    } => (
+      DiagnosticMessage::DirectiveCapabilityDenied {
+        capability: capability_name(capability).to_string(),
+        phase: format!("{:?}", phase).to_lowercase(),
+        span: directive_use_span.clone(),
+        declaration_span: provenance.origin_attr_span.clone(),
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+      Some("allowed-by-default capabilities are limited to deterministic diagnostics".to_string()),
     ),
     DirectiveExecutionError::UnsupportedGeneration {
       operation,
@@ -680,66 +687,45 @@ fn execution_error_diagnostic(error: &DirectiveExecutionError) -> Diagnostic {
       provenance,
       directive_use_span,
       target_span,
-    } => label_execution_diagnostic(
-      Diagnostic::new(
-        Severity::Error,
-        format!(
-          "compile-time directive cannot call unsupported std::compile generation API '{}' in the diagnostics-only VM",
-          operation
-        ),
-        "A0199".to_string(),
-        span.clone(),
-      )
-      .with_note("this VM slice supports diagnostics only; generation and reintegration stay out of scope".to_string()),
-      provenance,
-      directive_use_span,
-      target_span,
+    } => (
+      DiagnosticMessage::UnsupportedCompileTimeGeneration {
+        operation: operation.clone(),
+        span: span.clone(),
+        declaration_span: provenance.origin_attr_span.clone(),
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+      Some("this VM slice supports diagnostics only; generation and reintegration stay out of scope".to_string()),
     ),
     DirectiveExecutionError::StepLimitExceeded {
       span,
       provenance,
       directive_use_span,
       target_span,
-    } => label_execution_diagnostic(
-      Diagnostic::new(
-        Severity::Error,
-        "compile-time directive exceeded the VM step limit during analyzer execution".to_string(),
-        "A0200".to_string(),
-        span.clone(),
-      ),
-      provenance,
-      directive_use_span,
-      target_span,
+    } => (
+      DiagnosticMessage::DirectiveVmStepLimitExceeded {
+        span: span.clone(),
+        declaration_span: provenance.origin_attr_span.clone(),
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+      None,
     ),
     DirectiveExecutionError::CallDepthExceeded {
       span,
       provenance,
       directive_use_span,
       target_span,
-    } => label_execution_diagnostic(
-      Diagnostic::new(
-        Severity::Error,
-        "compile-time directive exceeded the VM call-depth limit during analyzer execution".to_string(),
-        "A0201".to_string(),
-        span.clone(),
-      ),
-      provenance,
-      directive_use_span,
-      target_span,
+    } => (
+      DiagnosticMessage::DirectiveVmCallDepthLimitExceeded {
+        span: span.clone(),
+        declaration_span: provenance.origin_attr_span.clone(),
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+      None,
     ),
   }
-}
-
-fn label_execution_diagnostic(
-  diagnostic: Diagnostic,
-  provenance: &DirectiveProvenance,
-  directive_use_span: &Span,
-  target_span: &Span,
-) -> Diagnostic {
-  diagnostic
-    .with_label(provenance.origin_attr_span.clone(), "directive declaration".to_string())
-    .with_label(directive_use_span.clone(), "directive use".to_string())
-    .with_label(target_span.clone(), "target item".to_string())
 }
 
 fn diagnostics_signature(diagnostics: &[Diagnostic]) -> Vec<String> {
@@ -1356,5 +1342,92 @@ mod tests {
       report.completed_iterations[0].fingerprint,
       report.completed_iterations[1].fingerprint
     );
+  }
+
+  #[test]
+  fn execution_error_diagnostics_keep_consistent_provenance_labels() {
+    let declaration_span = span(1, 2);
+    let directive_use_span = span(10, 12);
+    let target_span = span(20, 24);
+    let provenance = DirectiveProvenance {
+      origin_attr_span: declaration_span.clone(),
+    };
+    let errors = vec![
+      DirectiveExecutionError::CapabilityDenied {
+        phase: DirectivePhase::Check,
+        capability: DirectiveCapability::FileSystem,
+        provenance: provenance.clone(),
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+      DirectiveExecutionError::UnsupportedGeneration {
+        operation: "emitRecord".to_string(),
+        span: span(30, 34),
+        provenance: provenance.clone(),
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+      DirectiveExecutionError::StepLimitExceeded {
+        span: span(40, 44),
+        provenance: provenance.clone(),
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+      DirectiveExecutionError::CallDepthExceeded {
+        span: span(50, 54),
+        provenance,
+        directive_use_span: directive_use_span.clone(),
+        target_span: target_span.clone(),
+      },
+    ];
+
+    for diagnostic in errors.into_iter().map(|error| execution_error_diagnostic(&error)) {
+      assert_eq!(diagnostic.labels.len(), 3);
+      assert_eq!(diagnostic.labels[0].span, declaration_span);
+      assert_eq!(diagnostic.labels[0].message, "directive declaration");
+      assert_eq!(diagnostic.labels[1].span, directive_use_span);
+      assert_eq!(diagnostic.labels[1].message, "directive use");
+      assert_eq!(diagnostic.labels[2].span, target_span);
+      assert_eq!(diagnostic.labels[2].message, "target item");
+    }
+  }
+
+  #[test]
+  fn execution_error_diagnostics_attach_notes_only_to_boundary_failures() {
+    let provenance = DirectiveProvenance {
+      origin_attr_span: span(1, 2),
+    };
+
+    let capability = execution_error_diagnostic(&DirectiveExecutionError::CapabilityDenied {
+      phase: DirectivePhase::Check,
+      capability: DirectiveCapability::FileSystem,
+      provenance: provenance.clone(),
+      directive_use_span: span(10, 12),
+      target_span: span(20, 24),
+    });
+    let unsupported = execution_error_diagnostic(&DirectiveExecutionError::UnsupportedGeneration {
+      operation: "emitRecord".to_string(),
+      span: span(30, 34),
+      provenance: provenance.clone(),
+      directive_use_span: span(10, 12),
+      target_span: span(20, 24),
+    });
+    let step_limit = execution_error_diagnostic(&DirectiveExecutionError::StepLimitExceeded {
+      span: span(40, 44),
+      provenance: provenance.clone(),
+      directive_use_span: span(10, 12),
+      target_span: span(20, 24),
+    });
+    let call_depth = execution_error_diagnostic(&DirectiveExecutionError::CallDepthExceeded {
+      span: span(50, 54),
+      provenance,
+      directive_use_span: span(10, 12),
+      target_span: span(20, 24),
+    });
+
+    assert_eq!(capability.notes.len(), 1);
+    assert_eq!(unsupported.notes.len(), 1);
+    assert!(step_limit.notes.is_empty());
+    assert!(call_depth.notes.is_empty());
   }
 }
