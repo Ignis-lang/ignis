@@ -3228,7 +3228,7 @@ function duplicateDirectiveMetadata(): void {
 fn directive_attribute_rejects_invalid_signature_shape() {
   let result = common::analyze(
     r#"
-@directive(target: "record", phase: expand, effect: emit)
+@directive(target: "record", phase: check, effect: diagnose)
 function invalidDirective<T>(): i32 {
     return 1;
 }
@@ -3238,12 +3238,17 @@ function invalidDirective<T>(): i32 {
   let diagnostics = common::format_diagnostics(&result.output.diagnostics);
 
   assert!(
-    diagnostics.contains("@directive functions cannot declare generic parameters in the current validation slice"),
+    diagnostics.contains("@directive function 'invalidDirective' cannot declare generic parameters"),
     "expected generic-parameter directive diagnostic, got:\n{}",
     diagnostics
   );
   assert!(
-    diagnostics.contains("@directive functions must return void until std::compile directive result types exist"),
+    diagnostics.contains("@directive function 'invalidDirective' must accept exactly 2 parameters"),
+    "expected wrong-arity directive diagnostic, got:\n{}",
+    diagnostics
+  );
+  assert!(
+    diagnostics.contains("@directive function 'invalidDirective' must return void"),
     "expected non-void return directive diagnostic, got:\n{}",
     diagnostics
   );

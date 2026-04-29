@@ -349,8 +349,13 @@ fn imported_directive_use_rejects_target_mismatches() {
   let symbols = Rc::new(RefCell::new(SymbolTable::new()));
 
   let lib_src = r#"
+    namespace Compile {
+      record Context {}
+      record ItemRef {}
+    }
+
     @directive(target: "function", phase: check, effect: diagnose)
-    export function validate(): void {
+    export function validate(context: Compile::Context, target: Compile::ItemRef): void {
       return;
     }
   "#;
@@ -1017,7 +1022,7 @@ mod std_imports {
   }
 
   #[test]
-  fn test_std_compile_types_are_available_to_directive_signatures() {
+  fn test_std_compile_types_are_available_to_vm_directive_signatures() {
     let std_path = get_std_path();
     if !std_path.join("compile/mod.ign").exists() {
       eprintln!("Skipping test: std/compile/mod.ign not found at {:?}", std_path);
@@ -1030,15 +1035,9 @@ mod std_imports {
     let test_code = r#"
       import Compile from "std::compile";
 
-      @directive(target: "record", phase: expand, effect: emit)
+      @directive(target: "record", phase: check, effect: diagnose)
       function derive(
         context: Compile::Context,
-        diagnostic: Compile::Diagnostic,
-        itemBuilder: Compile::ItemBuilder,
-        exprBuilder: Compile::ExprBuilder,
-        typeBuilder: Compile::TypeBuilder,
-        collector: Compile::Collector,
-        gensym: Compile::Gensym,
         target: Compile::ItemRef,
       ): void {
       }
@@ -1056,7 +1055,7 @@ mod std_imports {
 
     let output = ctx
       .compile(root_id, &config)
-      .expect("analyzer should accept std::compile directive signature types");
+      .expect("analyzer should accept the VM directive signature contract");
 
     let has_compile = ctx
       .module_graph
@@ -1066,7 +1065,7 @@ mod std_imports {
     assert!(has_compile, "std::compile module should be discovered");
     assert!(
       output.diagnostics.is_empty(),
-      "expected no diagnostics from std::compile signature imports"
+      "expected no diagnostics from the VM directive signature contract"
     );
   }
 

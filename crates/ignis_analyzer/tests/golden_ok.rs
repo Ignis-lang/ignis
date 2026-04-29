@@ -257,8 +257,13 @@ function deriveRecord(): void {
 fn directive_attribute_accepts_minimal_required_metadata() {
   let result = common::analyze(
     r#"
+namespace Compile {
+    record Context {}
+    record ItemRef {}
+}
+
 @directive(target: "function", phase: check, effect: diagnose)
-function validate(): void {
+function validate(context: Compile::Context, target: Compile::ItemRef): void {
     return;
 }
 "#,
@@ -309,8 +314,13 @@ function deriveRecord(): void {
     return;
 }
 
+namespace Compile {
+    record Context {}
+    record ItemRef {}
+}
+
 @directive(target: "function", phase: check, effect: diagnose)
-function validateFunction(): void {
+function validateFunction(context: Compile::Context, target: Compile::ItemRef): void {
     return;
 }
 "#,
@@ -420,8 +430,13 @@ function smoke(): void {
     return;
 }
 
+namespace Compile {
+    record Context {}
+    record ItemRef {}
+}
+
 @directive(target: "function", phase: check, effect: diagnose)
-function validateFunction(): void {
+function validateFunction(context: Compile::Context, target: Compile::ItemRef): void {
     return;
 }
 "#,

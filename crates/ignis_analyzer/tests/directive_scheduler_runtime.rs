@@ -31,8 +31,13 @@ function main(): i32 {
 fn staged_analysis_records_scheduler_execution_before_lowering() {
   let result = common::analyze_staged(
     r#"
+      namespace Compile {
+        record Context {}
+        record ItemRef {}
+      }
+
       @directive(target: "record", phase: check, effect: diagnose)
-      function checkRecord(): void {
+      function checkRecord(context: Compile::Context, target: Compile::ItemRef): void {
         return;
       }
 
@@ -92,8 +97,13 @@ fn staged_analysis_records_scheduler_execution_before_lowering() {
 fn staged_analysis_reports_denied_directive_capability_as_diagnostic() {
   let result = common::analyze_staged(
     r#"
+      namespace Compile {
+        record Context {}
+        record ItemRef {}
+      }
+
       @directive(target: "record", phase: check, effect: diagnose, capabilities: filesystem)
-      function inspectFilesystem(): void {
+      function inspectFilesystem(context: Compile::Context, target: Compile::ItemRef): void {
         return;
       }
 
@@ -115,4 +125,91 @@ fn staged_analysis_reports_denied_directive_capability_as_diagnostic() {
     "expected denied capability name, got: {diagnostics}"
   );
   assert!(result.output.directive_execution_report.failure.is_some());
+}
+
+#[test]
+fn staged_analysis_rejects_invalid_vm_directive_signatures() {
+  let result = common::analyze_staged(
+    r#"
+      namespace Compile {
+        record Context {}
+        record Diagnostic {}
+        record ItemRef {}
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function genericDirective<T>(context: Compile::Context, target: Compile::ItemRef): void {
+        return;
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function nonVoidDirective(context: Compile::Context, target: Compile::ItemRef): i32 {
+        return 1;
+      }
+
+      extern Meta {
+        @directive(target: "record", phase: check, effect: diagnose)
+        function externDirective(context: Compile::Context, target: Compile::ItemRef): void;
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function missingTarget(context: Compile::Context): void {
+        return;
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function extraParam(
+        context: Compile::Context,
+        target: Compile::ItemRef,
+        diagnostic: Compile::Diagnostic,
+      ): void {
+        return;
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function wrongFirstParam(target: Compile::ItemRef, context: Compile::Context): void {
+        return;
+      }
+
+      @directive(target: "record", phase: check, effect: diagnose)
+      function wrongSecondParam(context: Compile::Context, diagnostic: Compile::Diagnostic): void {
+        return;
+      }
+    "#,
+  );
+
+  let diagnostics = common::format_diagnostics(&result.output.diagnostics);
+
+  assert!(
+    diagnostics.contains("cannot declare generic parameters"),
+    "expected generic directive signature diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("must return void"),
+    "expected non-void directive signature diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("externDirective") && diagnostics.contains("must not be extern"),
+    "expected extern directive signature diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("externDirective") && diagnostics.contains("must declare a body"),
+    "expected missing-body directive signature diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("missingTarget") && diagnostics.contains("must accept exactly 2 parameters"),
+    "expected wrong-arity directive signature diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("extraParam") && diagnostics.contains("must accept exactly 2 parameters"),
+    "expected extra-param directive signature diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("wrongFirstParam") && diagnostics.contains("first parameter must be Compile::Context"),
+    "expected wrong-first-parameter directive signature diagnostic, got: {diagnostics}"
+  );
+  assert!(
+    diagnostics.contains("wrongSecondParam") && diagnostics.contains("second parameter must be Compile::ItemRef"),
+    "expected wrong-second-parameter directive signature diagnostic, got: {diagnostics}"
+  );
 }

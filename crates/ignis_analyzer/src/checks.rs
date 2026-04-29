@@ -12,7 +12,7 @@ use ignis_ast::{
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::{
   definition::{DefinitionKind, FunctionDefinition},
-  types::Type,
+  types::{Type, format_type_name},
 };
 
 /// Control flow termination status.
@@ -761,28 +761,86 @@ impl<'a> Analyzer<'a> {
     func: &ignis_ast::statements::function::ASTFunction,
     func_def: &FunctionDefinition,
   ) {
-    if !func_def.is_compile_time_only() {
+    let Some(directive) = func_def.directive_metadata() else {
+      return;
+    };
+
+    if directive.phase != ignis_type::attribute::DirectivePhase::Check {
       return;
     }
 
     if !func_def.type_params.is_empty() {
-      self.add_diagnostic(
-        DiagnosticMessage::CompileError {
-          message: "@directive functions cannot declare generic parameters in the current validation slice".to_string(),
-          span: func.signature.span.clone(),
-        }
-        .report(),
-      );
+      self.add_invalid_directive_signature(func, "cannot declare generic parameters");
+    }
+
+    if func_def.is_extern {
+      self.add_invalid_directive_signature(func, "must not be extern");
+    }
+
+    if func.body.is_none() {
+      self.add_invalid_directive_signature(func, "must declare a body");
+    }
+
+    if func_def.is_variadic {
+      self.add_invalid_directive_signature(func, "must not be variadic");
+    }
+
+    if func_def.params.len() != 2 {
+      self.add_invalid_directive_signature(func, "must accept exactly 2 parameters");
+    } else {
+      self.validate_directive_parameter_type(func, &func_def.params[0], 0, "Context", "Compile::Context");
+      self.validate_directive_parameter_type(func, &func_def.params[1], 1, "ItemRef", "Compile::ItemRef");
     }
 
     if !matches!(self.types.get(&func_def.return_type), Type::Void) {
-      self.add_diagnostic(
-        DiagnosticMessage::CompileError {
-          message: "@directive functions must return void until std::compile directive result types exist".to_string(),
-          span: func.signature.span.clone(),
-        }
-        .report(),
-      );
+      self.add_invalid_directive_signature(func, "must return void");
     }
+  }
+
+  fn validate_directive_parameter_type(
+    &mut self,
+    func: &ignis_ast::statements::function::ASTFunction,
+    param_id: &ignis_type::definition::DefinitionId,
+    position: usize,
+    expected_name: &str,
+    expected_label: &str,
+  ) {
+    let actual_type_id = *self.defs.type_of(param_id);
+    let matches_expected = match self.types.get(&actual_type_id) {
+      Type::Record(def_id) => {
+        let actual_name = self.get_symbol_name(&self.defs.get(def_id).name);
+        actual_name == expected_name
+      },
+      _ => false,
+    };
+
+    if !matches_expected {
+      let symbols = self.symbols.borrow();
+      let actual_type = format_type_name(&actual_type_id, &self.types, &self.defs, &symbols);
+      drop(symbols);
+
+      let ordinal = match position {
+        0 => "first",
+        1 => "second",
+        _ => "parameter",
+      };
+      let requirement = format!("{} parameter must be {} (found {})", ordinal, expected_label, actual_type);
+      self.add_invalid_directive_signature(func, &requirement);
+    }
+  }
+
+  fn add_invalid_directive_signature(
+    &mut self,
+    func: &ignis_ast::statements::function::ASTFunction,
+    requirement: &str,
+  ) {
+    self.add_diagnostic(
+      DiagnosticMessage::InvalidDirectiveSignature {
+        function_name: self.get_symbol_name(&func.signature.name),
+        requirement: requirement.to_string(),
+        span: func.signature.span.clone(),
+      }
+      .report(),
+    );
   }
 }

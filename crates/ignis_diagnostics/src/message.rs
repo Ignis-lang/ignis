@@ -659,6 +659,11 @@ pub enum DiagnosticMessage {
     actual: String,
     span: Span,
   },
+  InvalidDirectiveSignature {
+    function_name: String,
+    requirement: String,
+    span: Span,
+  },
   // Lang trait diagnostics
   UnknownLangTrait {
     name: String,
@@ -1528,6 +1533,13 @@ impl fmt::Display for DiagnosticMessage {
       } => {
         write!(f, "directive '@{}' targets {}, not {}", name, expected, actual)
       },
+      DiagnosticMessage::InvalidDirectiveSignature {
+        function_name,
+        requirement,
+        ..
+      } => {
+        write!(f, "@directive function '{}' {}", function_name, requirement)
+      },
       DiagnosticMessage::UnknownLangTrait { name, .. } => {
         write!(f, "unknown lang trait '{}' in @implements", name)
       },
@@ -2005,6 +2017,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UnknownDirectiveMetadata { span, .. }
       | DiagnosticMessage::InvalidDirectivePhaseEffect { span, .. }
       | DiagnosticMessage::DirectiveTargetMismatch { span, .. }
+      | DiagnosticMessage::InvalidDirectiveSignature { span, .. }
       | DiagnosticMessage::UnknownLangTrait { span, .. }
       | DiagnosticMessage::LangTraitDropCopyConflict { span, .. }
       | DiagnosticMessage::LangTraitMissingMethod { span, .. }
@@ -2229,6 +2242,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::UnknownDirectiveMetadata { .. } => "A0192",
       DiagnosticMessage::InvalidDirectivePhaseEffect { .. } => "A0193",
       DiagnosticMessage::DirectiveTargetMismatch { .. } => "A0194",
+      DiagnosticMessage::InvalidDirectiveSignature { .. } => "A0197",
       DiagnosticMessage::UnknownLangTrait { .. } => "A0130",
       DiagnosticMessage::LangTraitDropCopyConflict { .. } => "A0131",
       DiagnosticMessage::LangTraitMissingMethod { .. } => "A0132",
