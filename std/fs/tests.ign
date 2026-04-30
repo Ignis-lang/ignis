@@ -1,4 +1,5 @@
 import Fs from "std::fs";
+import Io from "std::io";
 import String from "std::string";
 import Test from "std::test";
 
@@ -185,4 +186,48 @@ function readDirNextReturnsOkNoneForExhaustedEmptyDirectory(): void {
   };
 
   Test::assert(reachedEnd);
+}
+
+@test
+function readDirNextReturnsErrorAfterDirectoryStreamIsInvalidated(): void {
+  let dirPath: str = "/tmp/ignis_std_test_runner_fs_read_dir_invalidated";
+
+  if (Fs::exists(dirPath)) {
+    match (Fs::removeDir(dirPath)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> Test::fail(),
+    };
+  }
+
+  match (Fs::createDir(dirPath, 493)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let mut readDir: Fs::ReadDir = match (Fs::ReadDir::open(dirPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  readDir.close();
+
+  let nextResult: Result<Option<Fs::DirEntry>, Io::IoError> = readDir.next();
+  let mut sawError: boolean = false;
+
+  match (nextResult) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(_) -> {
+      sawError = true;
+    },
+  };
+
+  match (Fs::removeDir(dirPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  Test::assert(sawError);
 }

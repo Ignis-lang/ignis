@@ -5244,15 +5244,9 @@ pub fn emit_std_header_from_input(
       continue;
     }
 
-    let Some(prototype) = emit_func_prototype(
-      def_id,
-      def,
-      input.defs,
-      input.types,
-      symbols,
-      namespaces,
-      &mut emitted_names,
-    ) else {
+    let Some(prototype) =
+      emit_func_prototype(def_id, def, input.defs, input.types, symbols, namespaces, &mut emitted_names)
+    else {
       continue;
     };
 

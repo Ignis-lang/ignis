@@ -433,6 +433,20 @@ fn run_std_tests_executes_fs_read_dir_empty_slice() {
 }
 
 #[test]
+fn run_std_tests_executes_fs_read_dir_invalidated_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::readDirNextReturnsErrorAfterDirectoryStreamIsInvalidated"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs read-dir invalidated std slice to succeed");
+}
+
+#[test]
 fn run_std_tests_executes_string_snapshot_slice() {
   let output_dir = TempDir::new().expect("temporary std output dir");
 

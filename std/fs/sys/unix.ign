@@ -516,6 +516,10 @@ export namespace Fs::Sys {
   /// The returned `SysDirEntry` borrows its `name` from the internal
   /// dirent buffer — valid only until the next `readdir` or `closedir`.
   function readdir(dirp: CType::DirPtr): Result<Option<SysDirEntry>, Io::IoError> {
+    if (dirp == null) {
+      return Result::ERROR(Io::IoError::fromErrno(__fs_errno::EINVAL));
+    }
+
     @write<i32>(__fs_errno_fn::errno_location(), 0);
 
     let entry: *mut void = __fs_dir::readdir(dirp);
