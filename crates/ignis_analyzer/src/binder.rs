@@ -1434,21 +1434,12 @@ impl<'a> Analyzer<'a> {
         self.bind_complete(decl, scope_kind);
 
         if let Some(def_id) = self.lookup_def(decl).cloned() {
-          self.defs.get_mut(&def_id).visibility = Visibility::Public;
+          self.mark_exported_definition(def_id);
         }
       },
       ignis_ast::statements::ASTExport::Name { name, .. } => {
-        if let Some(entry) = self.scopes.lookup(name) {
-          match entry {
-            SymbolEntry::Single(def_id) => {
-              self.defs.get_mut(def_id).visibility = Visibility::Public;
-            },
-            SymbolEntry::Overload(group) => {
-              for def_id in group {
-                self.defs.get_mut(def_id).visibility = Visibility::Public;
-              }
-            },
-          }
+        for def_id in self.exported_definition_ids(name) {
+          self.mark_exported_definition(def_id);
         }
       },
       ignis_ast::statements::ASTExport::ReExportFrom { items, .. } => {
@@ -1456,20 +1447,35 @@ impl<'a> Analyzer<'a> {
           let ImportItemKind::Named(name) = &item.kind else {
             continue;
           };
-          if let Some(entry) = self.scopes.lookup(name) {
-            match entry {
-              SymbolEntry::Single(def_id) => {
-                self.defs.get_mut(def_id).visibility = Visibility::Public;
-              },
-              SymbolEntry::Overload(group) => {
-                for def_id in group {
-                  self.defs.get_mut(def_id).visibility = Visibility::Public;
-                }
-              },
-            }
+
+          for def_id in self.exported_definition_ids(name) {
+            self.mark_exported_definition(def_id);
           }
         }
       },
+    }
+  }
+
+  fn exported_definition_ids(
+    &self,
+    name: &SymbolId,
+  ) -> Vec<DefinitionId> {
+    match self.scopes.lookup(name) {
+      Some(SymbolEntry::Single(def_id)) => vec![*def_id],
+      Some(SymbolEntry::Overload(group)) => group.clone(),
+      None => Vec::new(),
+    }
+  }
+
+  fn mark_exported_definition(
+    &mut self,
+    def_id: DefinitionId,
+  ) {
+    let def = self.defs.get_mut(&def_id);
+    def.visibility = Visibility::Public;
+
+    if def.owner_module != self.current_module {
+      self.reexported_defs.insert(def.name, def_id);
     }
   }
 

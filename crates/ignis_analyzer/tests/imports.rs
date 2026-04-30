@@ -205,6 +205,213 @@ fn import_exported_function() {
 }
 
 #[test]
+fn import_multiple_exported_symbols_from_one_module() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    export function add(a: i32, b: i32): i32 {
+      return a + b;
+    }
+
+    export function sub(a: i32, b: i32): i32 {
+      return a - b;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
+
+  let lib_module_id = ModuleId::new(0);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_output.collect_exports());
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./lib".to_string(), lib_module_id);
+
+  let main_src = r#"
+    import add, sub from "./lib";
+
+    function main(): i32 {
+      return add(4, 3) + sub(4, 3);
+    }
+  "#;
+
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
+
+  assert_eq!(
+    error_count(&output),
+    0,
+    "Multiple imported symbols should resolve without errors: {:?}",
+    output.diagnostics
+  );
+}
+
+#[test]
+fn reexport_multiple_symbols_exports_only_requested_symbols() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    export function foo(): i32 {
+      return 1;
+    }
+
+    export function bar(): i32 {
+      return 2;
+    }
+
+    export function baz(): i32 {
+      return 3;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
+
+  let lib_module_id = ModuleId::new(0);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_output.collect_exports());
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./lib".to_string(), lib_module_id);
+
+  let mid_src = r#"
+    export foo, bar from "./lib";
+  "#;
+
+  let mid_output = analyze_with_imports(
+    mid_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&mid_output), 0, "Re-export module should have no errors");
+
+  let mid_exports = mid_output.collect_exports();
+  let symbol_table = symbols.borrow();
+  let mut names: Vec<String> = mid_exports
+    .exports
+    .keys()
+    .map(|symbol_id| symbol_table.get(symbol_id).to_string())
+    .collect();
+  names.sort();
+
+  assert_eq!(names, vec!["bar".to_string(), "foo".to_string()]);
+}
+
+#[test]
+fn import_symbol_not_reexported_by_intermediate_module_reports_error() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    export function foo(): i32 {
+      return 1;
+    }
+
+    export function bar(): i32 {
+      return 2;
+    }
+
+    export function baz(): i32 {
+      return 3;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
+
+  let lib_module_id = ModuleId::new(0);
+  let mid_module_id = ModuleId::new(1);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_output.collect_exports());
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./lib".to_string(), lib_module_id);
+
+  let mid_src = r#"
+    export foo, bar from "./lib";
+  "#;
+
+  let mid_output = analyze_with_imports(
+    mid_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&mid_output), 0, "Re-export module should have no errors");
+
+  export_table.insert(mid_module_id, mid_output.collect_exports());
+  module_for_path.insert("./mid".to_string(), mid_module_id);
+
+  let main_src = r#"
+    import baz from "./mid";
+
+    function main(): i32 {
+      return 0;
+    }
+  "#;
+
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
+
+  assert!(
+    has_error_code(&output, "M0002"),
+    "Expected M0002 SymbolNotExported error, got: {:?}",
+    output.diagnostics
+  );
+}
+
+#[test]
 fn imported_directive_use_registers_a_record_use() {
   let mut shared_types = TypeStore::new();
   let mut shared_defs = DefinitionStore::new();

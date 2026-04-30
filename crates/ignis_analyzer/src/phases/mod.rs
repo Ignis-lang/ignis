@@ -112,6 +112,8 @@ pub(crate) fn build_semantic_artifacts(
     extension_methods: analyzer.extension_methods.clone(),
     directive_registry: analyzer.directive_registry.clone(),
     directive_execution_report: analyzer.directive_execution_report.clone(),
+    current_module: analyzer.current_module,
+    reexported_defs: analyzer.reexported_defs.clone(),
   }
 }
 
@@ -142,5 +144,7 @@ pub(crate) fn build_shared_semantic_artifacts(
     extension_methods: shared_extension_methods.clone(),
     directive_registry: analyzer.directive_registry.clone(),
     directive_execution_report: analyzer.directive_execution_report.clone(),
+    current_module: analyzer.current_module,
+    reexported_defs: analyzer.reexported_defs.clone(),
   }
 }

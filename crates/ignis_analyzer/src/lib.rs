@@ -170,6 +170,7 @@ pub struct Analyzer<'a> {
   directive_execution_report: DirectiveExecutionReport,
   generated_roots: Vec<NodeId>,
   pending_generated_items: Vec<(NodeId, ignis_type::definition::GeneratedItemMetadata)>,
+  reexported_defs: HashMap<SymbolId, DefinitionId>,
 
   /// Lambda parameter definitions created by the resolver, keyed by lambda expression NodeId.
   /// The typechecker reuses these definitions (updating their types) instead of creating new ones.
@@ -238,6 +239,8 @@ pub struct AnalyzerOutput {
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
   pub directive_registry: DirectiveRegistry,
   pub directive_execution_report: DirectiveExecutionReport,
+  pub current_module: ModuleId,
+  pub reexported_defs: HashMap<SymbolId, DefinitionId>,
 }
 
 pub struct SemanticArtifacts {
@@ -257,6 +260,8 @@ pub struct SemanticArtifacts {
     HashMap<TypeId, HashMap<ignis_type::symbol::SymbolId, Vec<ignis_type::definition::DefinitionId>>>,
   pub directive_registry: DirectiveRegistry,
   pub directive_execution_report: DirectiveExecutionReport,
+  pub current_module: ModuleId,
+  pub reexported_defs: HashMap<SymbolId, DefinitionId>,
 }
 
 impl SemanticArtifacts {
@@ -264,9 +269,13 @@ impl SemanticArtifacts {
     let mut exports = HashMap::new();
 
     for (def_id, def) in self.defs.iter() {
-      if def.visibility == Visibility::Public {
+      if def.visibility == Visibility::Public && def.owner_module == self.current_module {
         exports.insert(def.name, def_id);
       }
+    }
+
+    for (name, def_id) in &self.reexported_defs {
+      exports.insert(*name, *def_id);
     }
 
     imports::ModuleExportData { exports }
@@ -314,6 +323,8 @@ impl AnalyzerOutput {
       extension_methods: self.extension_methods,
       directive_registry: self.directive_registry,
       directive_execution_report: self.directive_execution_report,
+      current_module: self.current_module,
+      reexported_defs: self.reexported_defs,
     };
 
     (semantic, hir)
@@ -340,6 +351,8 @@ impl AnalyzerOutput {
       extension_methods: semantic.extension_methods,
       directive_registry: semantic.directive_registry,
       directive_execution_report: semantic.directive_execution_report,
+      current_module: semantic.current_module,
+      reexported_defs: semantic.reexported_defs,
     }
   }
 
@@ -360,6 +373,8 @@ impl AnalyzerOutput {
       extension_methods: self.extension_methods.clone(),
       directive_registry: self.directive_registry.clone(),
       directive_execution_report: self.directive_execution_report.clone(),
+      current_module: self.current_module,
+      reexported_defs: self.reexported_defs.clone(),
     }
     .collect_exports()
   }
@@ -410,6 +425,7 @@ impl<'a> Analyzer<'a> {
       directive_execution_report: DirectiveExecutionReport::default(),
       generated_roots: Vec::new(),
       pending_generated_items: Vec::new(),
+      reexported_defs: HashMap::new(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),
@@ -552,6 +568,7 @@ impl<'a> Analyzer<'a> {
       directive_execution_report: DirectiveExecutionReport::default(),
       generated_roots: Vec::new(),
       pending_generated_items: Vec::new(),
+      reexported_defs: HashMap::new(),
       lambda_param_defs: HashMap::new(),
       capture_override_stack: Vec::new(),
       pipe_resolutions: HashMap::new(),

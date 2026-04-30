@@ -169,18 +169,8 @@ impl CompilationContext {
     self.discover_recursive(entry_path, None, config)
   }
 
-  /// Fallback std modules implicitly available in every compilation when
-  /// manifest auto-load configuration is missing.
-  const DEFAULT_PRELUDE_STD_MODULES: &'static [&'static str] = &["string", "number", "vector", "types"];
-
   fn prelude_std_modules(config: &IgnisConfig) -> Vec<&str> {
-    let mut modules = config.manifest.get_auto_load_modules();
-
-    if modules.is_empty() {
-      modules.extend(Self::DEFAULT_PRELUDE_STD_MODULES.iter().copied());
-    }
-
-    modules
+    config.manifest.get_auto_load_modules()
   }
 
   /// Discover prelude std modules and add safe DAG edges for ordering.
@@ -1088,9 +1078,37 @@ impl CompilationContext {
       extension_methods: shared_extension_methods,
       directive_registry: ignis_analyzer::directive_registry::DirectiveRegistry::default(),
       directive_execution_report: ignis_analyzer::directive_scheduler::DirectiveExecutionReport::default(),
+      current_module: root_module_id.unwrap_or(ModuleId::new(0)),
+      reexported_defs: HashMap::new(),
     };
 
     (output, has_errors, per_module_semantic)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use ignis_config::{IgnisSTDManifest, StdAutoLoad};
+
+  use super::*;
+
+  #[test]
+  fn prelude_std_modules_comes_only_from_manifest_auto_load() {
+    let mut config = IgnisConfig::default();
+    config.manifest = IgnisSTDManifest {
+      auto_load: Some(StdAutoLoad {
+        modules: vec!["option".to_string(), "result".to_string()],
+      }),
+      ..IgnisSTDManifest::default()
+    };
+
+    assert_eq!(CompilationContext::prelude_std_modules(&config), vec!["option", "result"]);
+
+    config.manifest.auto_load = None;
+    assert!(
+      CompilationContext::prelude_std_modules(&config).is_empty(),
+      "std prelude modules must come from manifest auto_load.modules, not a hardcoded fallback"
+    );
   }
 }
 
