@@ -583,13 +583,12 @@ impl<'a> CEmitter<'a> {
       return true;
     }
 
-    if self.is_monomorphized_generic_def(def_id) {
-      if self.is_std_test_def(def_id)
+    if self.is_monomorphized_generic_def(def_id)
+      && (self.is_std_test_def(def_id)
         || self.definition_depends_on_user_type(def_id)
-        || self.definition_mentions_std_test_user_type(def_id)
-      {
-        return false;
-      }
+        || self.definition_mentions_std_test_user_type(def_id))
+    {
+      return false;
     }
 
     let mut current_namespace = def.owner_namespace;

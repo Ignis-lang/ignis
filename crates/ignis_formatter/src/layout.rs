@@ -226,10 +226,8 @@ impl<'a> AstChunkFormatter<'a> {
           formatted.push('\n');
         }
 
-        if previous_was_import && !current_is_import {
-          if !formatted.ends_with("\n\n") {
-            formatted.push('\n');
-          }
+        if previous_was_import && !current_is_import && !formatted.ends_with("\n\n") {
+          formatted.push('\n');
         }
       }
 
@@ -268,14 +266,11 @@ impl<'a> AstChunkFormatter<'a> {
         }
 
         let current_is_import = self.is_import_node(root);
-        if index == 0 && group.has_preceding_import_group {
-          if !formatted.ends_with("\n\n") {
-            formatted.push('\n');
-          }
-        } else if index == 0 && !current_is_import && previous_end.is_some() {
-          if !formatted.ends_with("\n\n") {
-            formatted.push('\n');
-          }
+        let needs_group_separator = index == 0
+          && (group.has_preceding_import_group || (!current_is_import && previous_end.is_some()));
+
+        if needs_group_separator && !formatted.ends_with("\n\n") {
+          formatted.push('\n');
         }
 
         formatted.push_str(&statement);
@@ -2428,12 +2423,11 @@ impl<'a> AstChunkFormatter<'a> {
       return Ok(());
     }
 
-    if let Some(last_block) = blocks.last_mut() {
-      if matches!(last_block.placement, CommentPlacement::Detached)
-        && !self.comment_gap_preserves_detached_spacing(start, end)
-      {
-        last_block.placement = CommentPlacement::Leading;
-      }
+    if let Some(last_block) = blocks.last_mut()
+      && matches!(last_block.placement, CommentPlacement::Detached)
+      && !self.comment_gap_preserves_detached_spacing(start, end)
+    {
+      last_block.placement = CommentPlacement::Leading;
     }
 
     let has_detached_block = blocks
@@ -2494,12 +2488,11 @@ impl<'a> AstChunkFormatter<'a> {
 
         let mut blocks = self.comment_blocks_in_slice(region_start, span_start)?;
 
-        if let Some(last_block) = blocks.last_mut() {
-          if matches!(last_block.placement, CommentPlacement::Detached)
-            && !self.comment_gap_preserves_detached_spacing(region_start, span_start)
-          {
-            last_block.placement = CommentPlacement::Leading;
-          }
+        if let Some(last_block) = blocks.last_mut()
+          && matches!(last_block.placement, CommentPlacement::Detached)
+          && !self.comment_gap_preserves_detached_spacing(region_start, span_start)
+        {
+          last_block.placement = CommentPlacement::Leading;
         }
 
         for block in blocks {
@@ -2523,12 +2516,11 @@ impl<'a> AstChunkFormatter<'a> {
 
         let mut blocks = self.comment_blocks_in_slice(cursor, span_start)?;
 
-        if let Some(last_block) = blocks.last_mut() {
-          if matches!(last_block.placement, CommentPlacement::Detached)
-            && !self.comment_gap_preserves_detached_spacing(cursor, span_start)
-          {
-            last_block.placement = CommentPlacement::Leading;
-          }
+        if let Some(last_block) = blocks.last_mut()
+          && matches!(last_block.placement, CommentPlacement::Detached)
+          && !self.comment_gap_preserves_detached_spacing(cursor, span_start)
+        {
+          last_block.placement = CommentPlacement::Leading;
         }
 
         for (comment_index, mut block) in blocks.into_iter().enumerate() {
