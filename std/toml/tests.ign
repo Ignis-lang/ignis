@@ -260,3 +260,43 @@ function lexRecognizesSpecialFloatForms(): void {
   assertToken(tokenAt(&tokens, 7), TomlTokenKind::NEWLINE, "\n", 31, 32);
   assertToken(tokenAt(&tokens, 8), TomlTokenKind::EOF, "", 32, 32);
 }
+
+@test
+function lexRecognizesLiteralStrings(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("path = 'C:\\Users\\node'\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 5);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::IDENTIFIER, "path", 0, 4);
+  assertToken(tokenAt(&tokens, 1), TomlTokenKind::EQUALS, "=", 5, 6);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::STRING, "C:\\Users\\node", 7, 22);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::NEWLINE, "\n", 22, 23);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::EOF, "", 23, 23);
+}
+
+@test
+function lexRecognizesMultilineStrings(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("basic = \"\"\"line one\nline two\"\"\"\nliteral = '''raw \\\\ text\nnext'''\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 9);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::IDENTIFIER, "basic", 0, 5);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::STRING, "line one\nline two", 8, 31);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::NEWLINE, "\n", 31, 32);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::IDENTIFIER, "literal", 32, 39);
+  assertToken(tokenAt(&tokens, 6), TomlTokenKind::STRING, "raw \\\\ text\nnext", 42, 64);
+  assertToken(tokenAt(&tokens, 7), TomlTokenKind::NEWLINE, "\n", 64, 65);
+  assertToken(tokenAt(&tokens, 8), TomlTokenKind::EOF, "", 65, 65);
+}
+
+@test
+function lexRecognizesBasicStringUnicodeEscapes(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("face = \"\\u0041\\U00000042\"\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 5);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::IDENTIFIER, "face", 0, 4);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::STRING, "AB", 7, 25);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::NEWLINE, "\n", 25, 26);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::EOF, "", 26, 26);
+}

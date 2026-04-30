@@ -249,6 +249,8 @@ impl<'a> IgnisLexer<'a> {
         match self.peek() {
           '"' => result.push('"'),
           '\\' => result.push('\\'),
+          'b' => result.push('\u{08}'),
+          'f' => result.push('\u{0C}'),
           'n' => result.push('\n'),
           'r' => result.push('\r'),
           't' => result.push('\t'),
@@ -295,6 +297,8 @@ impl<'a> IgnisLexer<'a> {
     let c = if self.peek() == '\\' {
       self.advance();
       match self.peek() {
+        'b' => b'\x08',
+        'f' => b'\x0C',
         'n' => b'\n',
         'r' => b'\r',
         't' => b'\t',
@@ -788,7 +792,7 @@ mod tests {
 
   #[test]
   fn lexes_strings_and_comments() {
-    let LexResult { tokens, diagnostics } = lex("\"hello\" // comment\n/* block */");
+    let LexResult { tokens, diagnostics } = lex("\"hello\" \"\\b\\f\" // comment\n/* block */");
 
     assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
 
@@ -796,6 +800,7 @@ mod tests {
       &tokens,
       &[
         (TokenType::String, "hello"),
+        (TokenType::String, "\u{08}\u{0C}"),
         (TokenType::Comment, "// comment"),
         (TokenType::MultiLineComment, "/* block */"),
         (TokenType::Eof, ""),
@@ -890,7 +895,7 @@ mod tests {
 
   #[test]
   fn lexes_byte_char_literals() {
-    let LexResult { tokens, diagnostics } = lex("'a' '\\n' '\\u{41}'");
+    let LexResult { tokens, diagnostics } = lex("'a' '\\b' '\\f' '\\n' '\\u{41}'");
 
     assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
 
@@ -898,6 +903,8 @@ mod tests {
       &tokens,
       &[
         (TokenType::Char, "97"),
+        (TokenType::Char, "8"),
+        (TokenType::Char, "12"),
         (TokenType::Char, "10"),
         (TokenType::Char, "65"),
         (TokenType::Eof, ""),
