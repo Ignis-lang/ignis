@@ -673,6 +673,8 @@ impl<'a> Monomorphizer<'a> {
         )
       },
       HIRKind::BuiltinHash { ty, value, hasher } => {
+        self.copy_builtin_hash_method_if_original(*ty);
+
         let new_value = self.clone_hir_tree(*value);
         let new_hasher = self.clone_hir_tree(*hasher);
         (
@@ -688,6 +690,11 @@ impl<'a> Monomorphizer<'a> {
         let new_left = self.clone_hir_tree(*left);
         let new_right = self.clone_hir_tree(*right);
         let new_kind = self.resolve_builtin_eq_kind_after_substitution(*ty, *kind);
+
+        if let BuiltinEqKind::Method(method_def_id) = new_kind {
+          self.copy_nongeneric_method_if_original(method_def_id);
+        }
+
         (
           HIRKind::BuiltinEq {
             ty: *ty,
@@ -699,6 +706,8 @@ impl<'a> Monomorphizer<'a> {
         )
       },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
+        self.copy_drop_method_if_original(*ty);
+
         let new_ptr = self.clone_hir_tree(*ptr);
         (HIRKind::BuiltinDropInPlace { ty: *ty, ptr: new_ptr }, None)
       },
@@ -903,6 +912,10 @@ impl<'a> Monomorphizer<'a> {
         let any_arg_is_param = all_args.iter().any(|ty| self.types.contains_type_param(ty));
 
         let concrete_method = self.resolve_concrete_method_with_args(*method, &method_type_args, &owner_args);
+
+        if concrete_method == *method {
+          self.copy_if_nongeneric(concrete_method);
+        }
 
         if is_verbose() {
           eprintln!("[MONO]   -> concrete_method={:?}", concrete_method);
@@ -2078,6 +2091,11 @@ impl<'a> Monomorphizer<'a> {
         // Substitute type params in method's type_args
         let substituted_type_args: Vec<_> = type_args.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
         let concrete_method = self.resolve_concrete_method(&new_receiver, *method, &substituted_type_args);
+
+        if concrete_method == *method {
+          self.copy_nongeneric_method_if_original(concrete_method);
+        }
+
         let new_args: Vec<_> = args.iter().map(|a| self.substitute_hir(*a, subst)).collect();
         HIRKind::MethodCall {
           receiver: new_receiver,
@@ -2234,9 +2252,11 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       HIRKind::BuiltinHash { ty, value, hasher } => {
+        let new_ty = self.types.substitute(*ty, subst);
+        self.copy_builtin_hash_method_if_original(new_ty);
+
         let new_value = self.substitute_hir(*value, subst);
         let new_hasher = self.substitute_hir(*hasher, subst);
-        let new_ty = self.types.substitute(*ty, subst);
         HIRKind::BuiltinHash {
           ty: new_ty,
           value: new_value,
@@ -2248,6 +2268,11 @@ impl<'a> Monomorphizer<'a> {
         let new_right = self.substitute_hir(*right, subst);
         let new_ty = self.types.substitute(*ty, subst);
         let new_kind = self.resolve_builtin_eq_kind_after_substitution(new_ty, *kind);
+
+        if let BuiltinEqKind::Method(method_def_id) = new_kind {
+          self.copy_nongeneric_method_if_original(method_def_id);
+        }
+
         HIRKind::BuiltinEq {
           ty: new_ty,
           left: new_left,
@@ -2258,6 +2283,9 @@ impl<'a> Monomorphizer<'a> {
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         let new_ptr = self.substitute_hir(*ptr, subst);
         let new_ty = self.types.substitute(*ty, subst);
+
+        self.copy_drop_method_if_original(new_ty);
+
         HIRKind::BuiltinDropInPlace {
           ty: new_ty,
           ptr: new_ptr,
@@ -2930,6 +2958,78 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       _ => false,
+    }
+  }
+
+  fn copy_nongeneric_method_if_original(
+    &mut self,
+    method_def_id: DefinitionId,
+  ) {
+    if self.reverse_cache.contains_key(&method_def_id) {
+      return;
+    }
+
+    self.copy_if_nongeneric(method_def_id);
+  }
+
+  fn copy_builtin_hash_method_if_original(
+    &mut self,
+    ty: TypeId,
+  ) {
+    let method_def_id = match self.types.get(&ty).clone() {
+      Type::Record(def_id) | Type::Enum(def_id) if !self.reverse_cache.contains_key(&def_id) => {
+        let type_def = self.input_defs.get(&def_id);
+        let instance_methods = match &type_def.kind {
+          DefinitionKind::Record(record_definition) => &record_definition.instance_methods,
+          DefinitionKind::Enum(enum_definition) => &enum_definition.instance_methods,
+          _ => return,
+        };
+
+        let method_sym = self.symbols.borrow_mut().intern("hash");
+
+        match instance_methods.get(&method_sym) {
+          Some(SymbolEntry::Single(id)) => Some(*id),
+          Some(SymbolEntry::Overload(group)) => group.first().copied(),
+          None => None,
+        }
+      },
+      _ => None,
+    };
+
+    if let Some(method_def_id) = method_def_id {
+      self.copy_nongeneric_method_if_original(method_def_id);
+    }
+  }
+
+  fn copy_drop_method_if_original(
+    &mut self,
+    ty: TypeId,
+  ) {
+    let owner_def_id = match self.types.get(&ty).clone() {
+      Type::Record(def_id) | Type::Enum(def_id) if !self.reverse_cache.contains_key(&def_id) => Some(def_id),
+      _ => None,
+    };
+
+    let Some(owner_def_id) = owner_def_id else {
+      return;
+    };
+
+    let type_def = self.input_defs.get(&owner_def_id);
+    let instance_methods = match &type_def.kind {
+      DefinitionKind::Record(record_definition) => &record_definition.instance_methods,
+      DefinitionKind::Enum(enum_definition) => &enum_definition.instance_methods,
+      _ => return,
+    };
+
+    let method_sym = self.symbols.borrow_mut().intern("drop");
+    let method_def_id = match instance_methods.get(&method_sym) {
+      Some(SymbolEntry::Single(id)) => Some(*id),
+      Some(SymbolEntry::Overload(group)) => group.first().copied(),
+      None => None,
+    };
+
+    if let Some(method_def_id) = method_def_id {
+      self.copy_nongeneric_method_if_original(method_def_id);
     }
   }
 }

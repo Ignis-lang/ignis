@@ -345,6 +345,24 @@ pub struct TestCommand {
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
+pub struct TestStdCommand {
+  /// Optional substring filter for fully qualified std test names
+  pub filter: Option<String>,
+
+  /// Create or replace selected snapshots during the test run
+  #[arg(long)]
+  pub update_snapshots: bool,
+
+  /// Path to the standard library root
+  #[arg(long)]
+  pub std_path: Option<String>,
+
+  /// Output directory for std test build artifacts
+  #[arg(short = 'o', long)]
+  pub output_dir: Option<String>,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq)]
 pub struct LspCommand {
   /// Log file path for debug output
   #[arg(long)]
@@ -357,6 +375,8 @@ pub enum SubCommand {
   Build(BuildCommand),
   /// Run language-native tests for a project
   Test(TestCommand),
+  /// Run language-native tests for the standard library
+  TestStd(TestStdCommand),
   /// Initialize a new Ignis project
   Init(InitCommand),
   /// Build the standard library
@@ -480,6 +500,45 @@ mod tests {
         assert!(cmd.update_snapshots);
       },
       other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_test_std_subcommand_with_all_options() {
+    let cli = Cli::parse_from([
+      "ignis",
+      "test-std",
+      "vector",
+      "--update-snapshots",
+      "--std-path",
+      "./std",
+      "--output-dir",
+      "./build/std-tests",
+    ]);
+
+    match cli.subcommand {
+      SubCommand::TestStd(cmd) => {
+        assert_eq!(cmd.filter.as_deref(), Some("vector"));
+        assert!(cmd.update_snapshots);
+        assert_eq!(cmd.std_path.as_deref(), Some("./std"));
+        assert_eq!(cmd.output_dir.as_deref(), Some("./build/std-tests"));
+      },
+      other => panic!("expected test-std subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_test_std_subcommand_without_filter() {
+    let cli = Cli::parse_from(["ignis", "test-std"]);
+
+    match cli.subcommand {
+      SubCommand::TestStd(cmd) => {
+        assert_eq!(cmd.filter, None);
+        assert!(!cmd.update_snapshots);
+        assert_eq!(cmd.std_path, None);
+        assert_eq!(cmd.output_dir, None);
+      },
+      other => panic!("expected test-std subcommand, got {:?}", other),
     }
   }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -1436,6 +1436,76 @@ fn build_single_file_test_driver_input(
   })
 }
 
+fn build_std_test_driver_input(
+  std_root: &Path,
+  output_dir: Option<&Path>,
+) -> Result<TestDriverInput, ()> {
+  if !std_root.exists() {
+    eprintln!("{} std root '{}' does not exist", "Error:".red().bold(), std_root.display());
+    return Err(());
+  }
+
+  let std_root = std_root.canonicalize().unwrap_or_else(|_| std_root.to_path_buf());
+  let out_dir = output_dir
+    .map(Path::to_path_buf)
+    .unwrap_or_else(|| PathBuf::from("build"));
+
+  let mut config = IgnisConfig::new_basic(false, Vec::new(), false, 0);
+  config.std_path = std_root.to_string_lossy().into_owned();
+  config.std = true;
+  config.auto_load_std = true;
+  config.manifest = load_manifest(&std_root);
+  config.test = true;
+  config.c_compiler = "cc".to_string();
+  config.cflags = Vec::new();
+  config.project_config = Some(IgnisProjectConfig::new(
+    "std".to_string(),
+    COMPILER_VERSION.to_string(),
+    Vec::new(),
+    String::new(),
+    Vec::new(),
+    String::new(),
+    String::new(),
+    TargetBackend::C,
+    std_root.to_string_lossy().to_string(),
+    out_dir.to_string_lossy().to_string(),
+    std_root.to_string_lossy().to_string(),
+    false,
+    std_root.to_string_lossy().to_string(),
+    true,
+  ));
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(std_root.to_string_lossy().to_string()),
+    TargetBackend::C,
+    true,
+    false,
+    out_dir.to_string_lossy().to_string(),
+    Vec::new(),
+    None,
+    None,
+    None,
+    None,
+    Some(out_dir.join("bin/std-tests").to_string_lossy().to_string()),
+    false,
+    true,
+    false,
+    true,
+    true,
+  ));
+
+  let layout = BuildLayout::with_project_root("std", &out_dir, &std_root);
+
+  Ok(TestDriverInput {
+    config: Arc::new(config),
+    entry_path: std_root.clone(),
+    source_dir: std_root,
+    out_dir: out_dir.clone(),
+    layout,
+    harness_c_path: out_dir.join("std-tests-harness.c"),
+    bin_path: out_dir.join("bin/std-tests"),
+  })
+}
+
 fn module_segments(
   module_path: &ModulePath,
   source_dir: &Path,
@@ -1512,6 +1582,91 @@ fn discover_test_cases(
       let ModulePath::Project(source_path) = module_paths.get(&definition.owner_module)? else {
         return None;
       };
+
+      format_test_name(definition_id, defs, namespaces, symbols, module_paths, source_dir).map(|fq_name| {
+        crate::backend::TestCase {
+          def_id: definition_id,
+          fq_name,
+          source_path: source_path.clone(),
+        }
+      })
+    })
+    .collect()
+}
+
+fn discover_std_test_companions(
+  std_root: &Path,
+  manifest: &IgnisSTDManifest,
+) -> Vec<PathBuf> {
+  let mut module_names: Vec<&str> = manifest.modules.keys().map(|name| name.as_str()).collect();
+  module_names.sort();
+
+  let mut discovered = Vec::new();
+
+  for module_name in module_names {
+    let Some(module_path) = manifest.modules.get(module_name) else {
+      continue;
+    };
+
+    let companion_path = std_root.join(module_path).with_file_name("tests.ign");
+    if companion_path.exists() {
+      discovered.push(companion_path);
+    }
+  }
+
+  discovered
+}
+
+fn validate_std_test_layout(
+  defs: &DefinitionStore,
+  module_paths: &HashMap<ModuleId, ModulePath>,
+) -> Result<(), String> {
+  for (_, definition) in defs.iter() {
+    let DefinitionKind::Function(function) = &definition.kind else {
+      continue;
+    };
+
+    if !function.has_test_attr() {
+      continue;
+    }
+
+    if let Some(ModulePath::Std(module_name)) = module_paths.get(&definition.owner_module) {
+      return Err(format!(
+        "std::{} contains @test in a shipping source module; move std tests into the sibling tests.ign file",
+        module_name
+      ));
+    }
+  }
+
+  Ok(())
+}
+
+fn discover_std_test_cases(
+  defs: &DefinitionStore,
+  namespaces: &ignis_type::namespace::NamespaceStore,
+  symbols: &SymbolTable,
+  module_paths: &HashMap<ModuleId, ModulePath>,
+  source_dir: &Path,
+  allowed_sources: &HashSet<PathBuf>,
+) -> Vec<crate::backend::TestCase> {
+  defs
+    .iter()
+    .filter_map(|(definition_id, definition)| {
+      let DefinitionKind::Function(function) = &definition.kind else {
+        return None;
+      };
+
+      if !function.has_test_attr() {
+        return None;
+      }
+
+      let ModulePath::Project(source_path) = module_paths.get(&definition.owner_module)? else {
+        return None;
+      };
+
+      if !allowed_sources.contains(source_path) {
+        return None;
+      }
 
       format_test_name(definition_id, defs, namespaces, symbols, module_paths, source_dir).map(|fq_name| {
         crate::backend::TestCase {
@@ -1776,6 +1931,17 @@ pub fn run_project_tests(
     .as_ref()
     .map(|build_config| build_config.output_dir.clone())
     .unwrap_or_else(|| "build".to_string());
+
+  // `test-std` exercises the shipped std modules themselves. Reusing a cached
+  // std archive compiled by an earlier compiler build can leave this command
+  // running stale code even after lowering/codegen fixes land in the workspace.
+  // Rebuild the std archive for each std-test invocation so the direct CLI path
+  // and the temp-output test path observe the same fresh compiler output.
+  if build_std(config.clone(), &build_dir).is_err() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
   let mut link_plan = LinkPlan::from_modules(
     &used_modules,
     &ctx.module_graph,
@@ -1788,7 +1954,7 @@ pub fn run_project_tests(
   let mut types = output.types.clone();
   let mono_output =
     ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
-      .run(&collect_test_mono_roots(&plan));
+      .run(&collect_mono_roots_for_std(&output.defs));
 
   #[cfg(debug_assertions)]
   mono_output.verify_no_generics(&types);
@@ -2555,6 +2721,465 @@ pub fn run_single_file_tests(
   }
 }
 
+pub fn run_std_tests(
+  std_root: &Path,
+  filter: Option<&str>,
+  update_snapshots: bool,
+  output_dir: Option<&Path>,
+) -> Result<(), ()> {
+  let start = Instant::now();
+  let input = build_std_test_driver_input(std_root, output_dir)?;
+  let config = input.config.clone();
+
+  cmd_header!(&config, "Testing std", input.entry_path.display());
+
+  if config.manifest.modules.is_empty() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} No modules found in std manifest at '{}/manifest.toml'",
+      "Error:".red().bold(),
+      input.source_dir.display()
+    );
+    return Err(());
+  }
+
+  section!(&config, "Scanning & parsing");
+
+  let mut ctx = CompilationContext::new(&config);
+  ctx.discover_all_std_modules(&config);
+
+  let test_sources = discover_std_test_companions(&input.source_dir, &config.manifest);
+  let allowed_test_sources: HashSet<PathBuf> = test_sources.iter().cloned().collect();
+
+  for source_path in &test_sources {
+    if ctx
+      .discover_modules(source_path.to_string_lossy().as_ref(), &config)
+      .is_err()
+    {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      return Err(());
+    }
+  }
+
+  if config.std && config.auto_load_std {
+    ctx.discover_prelude_modules_for_all(&config);
+  }
+
+  section!(&config, "Analyzing");
+
+  let order = ctx.module_graph.all_modules_topological();
+  let (output, has_errors, _) = ctx.analyze_modules_collect_all(&order, &config, true);
+  render_diagnostics(&output.diagnostics, &ctx.source_map, config.quiet);
+
+  if has_errors {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let module_paths = build_module_paths_from_graph(&ctx.module_graph);
+  if let Err(error) = validate_std_test_layout(&output.defs, &module_paths) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let discovered_tests = {
+    let symbols = output.symbols.borrow();
+    discover_std_test_cases(
+      &output.defs,
+      &output.namespaces,
+      &symbols,
+      &module_paths,
+      &input.source_dir,
+      &allowed_test_sources,
+    )
+  };
+  let plan = build_test_harness_plan(discovered_tests, filter);
+
+  section!(&config, "Planning");
+  if plan.tests.is_empty() {
+    section_item!(&config, "No tests selected");
+    cmd_ok!(&config, "No tests selected", start.elapsed());
+    return Ok(());
+  }
+
+  for test in &plan.tests {
+    section_item!(&config, "{}", test.fq_name);
+  }
+
+  section!(&config, "Codegen & linking");
+
+  let used_modules = ctx.module_graph.all_modules_topological();
+
+  let manifest = if config.manifest.modules.is_empty() {
+    None
+  } else {
+    Some(&config.manifest)
+  };
+  let build_dir = config
+    .build_config
+    .as_ref()
+    .map(|build_config| build_config.output_dir.clone())
+    .unwrap_or_else(|| "build".to_string());
+
+  // `test-std` exercises the shipped std modules themselves. Reusing a cached
+  // std archive compiled by an earlier compiler build can leave this command
+  // running stale code even after lowering/codegen fixes land in the workspace.
+  // Rebuild the std archive for each std-test invocation so the direct CLI path
+  // and the temp-output test path observe the same fresh compiler output.
+  if build_std(config.clone(), &build_dir).is_err() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let mut link_plan = LinkPlan::from_modules(
+    &used_modules,
+    &ctx.module_graph,
+    Path::new(&config.std_path),
+    Path::new(&build_dir),
+    manifest,
+  );
+  link_plan.cc = config.c_compiler.clone();
+  link_plan.cflags = config.cflags.clone();
+  let mut types = output.types.clone();
+  let mono_output =
+    ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
+      .run(&collect_test_mono_roots(&plan));
+
+  #[cfg(debug_assertions)]
+  mono_output.verify_no_generics(&types);
+
+  let sym_table = output.symbols.borrow();
+
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+      .with_source_map(&ctx.source_map);
+  let (drop_schedules, ownership_diagnostics) = ownership_checker.check();
+
+  let borrow_checker = ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &sym_table)
+    .with_source_map(&ctx.source_map);
+  let borrow_diagnostics = borrow_checker.check();
+
+  for diagnostic in ownership_diagnostics.iter().chain(borrow_diagnostics.iter()) {
+    ignis_diagnostics::render(diagnostic, &ctx.source_map);
+  }
+
+  if ownership_diagnostics
+    .iter()
+    .chain(borrow_diagnostics.iter())
+    .any(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+  {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let used_module_set: std::collections::HashSet<ModuleId> = used_modules.iter().copied().collect();
+  let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
+    &mono_output.hir,
+    &mut types,
+    &mono_output.defs,
+    &sym_table,
+    &drop_schedules,
+    Some(&used_module_set),
+  );
+
+  if let Err(errors) = &verify_result {
+    eprintln!("{} Cannot execute tests: LIR verification failed", "Error:".red().bold());
+    for error in errors {
+      eprintln!("  {:?}", error);
+    }
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    return Err(());
+  }
+
+  let selected_backend = select_backend_or_report(&config, "Test setup failed", start)?;
+
+  if let Err(error) = input.layout.create_user_dirs() {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} Failed to create user build directories: {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let mut link_plan_with_user_includes = link_plan.clone();
+  link_plan_with_user_includes
+    .include_dirs
+    .push(input.layout.user_include_dir());
+
+  let mut user_object_paths = Vec::new();
+
+  for source_path in &test_sources {
+    if !plan.tests.iter().any(|test| &test.source_path == source_path) {
+      continue;
+    }
+
+    if let Err(error) = input.layout.ensure_user_module_dirs(source_path) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} Failed to create module directories: {}", "Error:".red().bold(), error);
+      return Err(());
+    }
+
+    let module_id = ctx
+      .module_graph
+      .get_by_path(&ModulePath::Project(source_path.clone()))
+      .ok_or_else(|| {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!(
+          "{} Missing discovered std test module '{}'",
+          "Error:".red().bold(),
+          source_path.display()
+        );
+      })?;
+
+    let dep_ids = ctx.module_graph.transitive_deps(module_id);
+    let mut user_module_headers = Vec::new();
+    let self_header_rel = input.layout.relativize(source_path).with_extension("h");
+    user_module_headers.push(ignis_config::CHeader {
+      path: normalize_path_for_include(&self_header_rel),
+      quoted: true,
+    });
+
+    let header_content = match emit_text(
+      &selected_backend,
+      BackendInput::Lowered {
+        root_id: module_id,
+        types: &types,
+        defs: &mono_output.defs,
+        program: &lir_program,
+      },
+      BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
+        module_id,
+        source_path,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+      }),
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
+
+    let header_path = input.layout.user_module_header(source_path);
+    if let Err(error) = std::fs::write(&header_path, &header_content) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!(
+        "{} Failed to write header '{}': {}",
+        "Error:".red().bold(),
+        header_path.display(),
+        error
+      );
+      return Err(());
+    }
+
+    for dep_id in &dep_ids {
+      let dep_module = ctx.module_graph.modules.get(dep_id);
+      if let ModulePath::Project(dep_path) = &dep_module.path {
+        if dep_path == source_path {
+          continue;
+        }
+
+        let dep_header_rel = input.layout.relativize(dep_path).with_extension("h");
+        user_module_headers.push(ignis_config::CHeader {
+          path: normalize_path_for_include(&dep_header_rel),
+          quoted: true,
+        });
+      }
+    }
+
+    let module_c_code = match emit_text(
+      &selected_backend,
+      BackendInput::Lowered {
+        root_id: module_id,
+        types: &types,
+        defs: &mono_output.defs,
+        program: &lir_program,
+      },
+      BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
+        module_id,
+        namespaces: &output.namespaces,
+        symbols: &sym_table,
+        headers: &link_plan_with_user_includes.headers,
+        module_paths: &module_paths,
+        user_module_headers: &user_module_headers,
+        std_path: input.source_dir.as_path(),
+      }),
+    ) {
+      Ok(contents) => contents,
+      Err(stage_error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), stage_error);
+        return Err(());
+      },
+    };
+
+    let module_c_path = input.layout.user_module_src(source_path);
+    if let Err(error) = std::fs::write(&module_c_path, &module_c_code) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!(
+        "{} Failed to write module source '{}': {}",
+        "Error:".red().bold(),
+        module_c_path.display(),
+        error
+      );
+      return Err(());
+    }
+
+    let module_object_path = input.layout.user_module_obj(source_path);
+    if let Err(error) = compile_to_object(
+      &module_c_path,
+      &module_object_path,
+      &link_plan_with_user_includes,
+      !ignis_log::show_verbose(&config),
+    ) {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), error);
+      return Err(());
+    }
+
+    user_object_paths.push(module_object_path);
+  }
+
+  let Some(harness_root_id) = plan.tests.first().and_then(|test| {
+    ctx
+      .module_graph
+      .get_by_path(&ModulePath::Project(test.source_path.clone()))
+  }) else {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} Missing discovered std test root module", "Error:".red().bold());
+    return Err(());
+  };
+
+  let harness_c_code = match emit_text(
+    &selected_backend,
+    BackendInput::Lowered {
+      root_id: harness_root_id,
+      types: &types,
+      defs: &mono_output.defs,
+      program: &lir_program,
+    },
+    BackendRequest::Lowered(LoweredBackendRequest::EmitUserTestHarness {
+      namespaces: &output.namespaces,
+      symbols: &sym_table,
+      headers: &link_plan.headers,
+      module_paths: &module_paths,
+      plan: &plan,
+    }),
+  ) {
+    Ok(contents) => contents,
+    Err(stage_error) => {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), stage_error);
+      return Err(());
+    },
+  };
+
+  if let Err(error) = std::fs::create_dir_all(&input.out_dir) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to create build directory '{}': {}",
+      "Error:".red().bold(),
+      input.out_dir.display(),
+      error
+    );
+    return Err(());
+  }
+
+  if let Some(parent) = input.bin_path.parent()
+    && let Err(error) = std::fs::create_dir_all(parent)
+  {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to create binary directory '{}': {}",
+      "Error:".red().bold(),
+      parent.display(),
+      error
+    );
+    return Err(());
+  }
+
+  if let Err(error) = std::fs::write(&input.harness_c_path, &harness_c_code) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!(
+      "{} Failed to write harness source '{}': {}",
+      "Error:".red().bold(),
+      input.harness_c_path.display(),
+      error
+    );
+    return Err(());
+  }
+
+  let harness_object_path = input.harness_c_path.with_extension("o");
+  let suppress_link_logs = !ignis_log::show_verbose(&config);
+
+  if let Err(error) = compile_to_object(&input.harness_c_path, &harness_object_path, &link_plan, suppress_link_logs) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let mut executable_objects = user_object_paths;
+  executable_objects.push(harness_object_path);
+
+  if let Err(error) = link_executable_multi(&executable_objects, &input.bin_path, &link_plan, suppress_link_logs) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  section!(&config, "Running");
+
+  let results = match execute_test_harness_binary(&input.bin_path, &plan, update_snapshots) {
+    Ok(results) => results,
+    Err(error) => {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!("{} {}", "Error:".red().bold(), error);
+      return Err(());
+    },
+  };
+
+  let passed = results.iter().filter(|result| result.success).count();
+  let total = results.len();
+  let failed = total - passed;
+
+  for result in &results {
+    let status = if result.success {
+      "ok".green()
+    } else {
+      "FAILED".red().bold()
+    };
+    section_item!(&config, "{} ... {}", result.fq_name, status);
+  }
+
+  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
+  if !failed_results.is_empty() {
+    section!(&config, "Failures");
+
+    for result in failed_results {
+      for line in format_failed_test_details(result).lines() {
+        println!("  {}", line);
+      }
+
+      println!();
+    }
+  }
+
+  section!(&config, "Summary");
+  section_item!(&config, "{} total", total);
+  section_item!(&config, "{} passed", passed);
+  section_item!(&config, "{} failed", failed);
+  cmd_artifact!(&config, "Test binary", input.bin_path.display());
+
+  if failed == 0 {
+    cmd_ok!(&config, "Tests passed", start.elapsed());
+    Ok(())
+  } else {
+    cmd_fail!(&config, "Tests failed", start.elapsed());
+    Err(())
+  }
+}
+
 /// Build the standard library into a static archive
 pub fn build_std(
   config: Arc<IgnisConfig>,
@@ -2692,10 +3317,6 @@ pub fn build_std(
       Some(&single_module_set),
     );
 
-    if lir_program.functions.is_empty() {
-      continue;
-    }
-
     // Generate module header
     let header_content = match emit_text(
       &selected_backend,
@@ -2730,6 +3351,50 @@ pub fn build_std(
         e
       );
       return Err(());
+    }
+
+    let nested_header_path = if let Some(std_module_name) = module.path.std_module_name()
+      && std_module_name.contains("::")
+    {
+      Some(
+        layout
+          .std_include_dir()
+          .join(std_module_name.replace("::", std::path::MAIN_SEPARATOR_STR))
+          .with_extension("h"),
+      )
+    } else if let ModulePath::Project(project_path) = &module.path {
+      project_path
+        .strip_prefix(std_path)
+        .ok()
+        .map(|relative| layout.std_include_dir().join(relative).with_extension("h"))
+    } else {
+      None
+    };
+
+    if let Some(nested_header_path) = nested_header_path {
+      if let Some(parent) = nested_header_path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+      {
+        cmd_fail!(&config, "Build failed", start.elapsed());
+        eprintln!(
+          "{} Failed to create std header directory '{}': {}",
+          "Error:".red().bold(),
+          parent.display(),
+          error
+        );
+        return Err(());
+      }
+
+      if let Err(error) = std::fs::write(&nested_header_path, &header_content) {
+        cmd_fail!(&config, "Build failed", start.elapsed());
+        eprintln!(
+          "{} Failed to write header '{}': {}",
+          "Error:".red().bold(),
+          nested_header_path.display(),
+          error
+        );
+        return Err(());
+      }
     }
 
     generated_module_names.push(module_name);
@@ -3363,6 +4028,9 @@ fn collect_mono_roots_for_std(defs: &DefinitionStore) -> Vec<DefinitionId> {
       DefinitionKind::Function(fd) if !fd.is_extern && fd.type_params.is_empty() && !fd.is_compile_time_only() => {
         roots.push(def_id);
       },
+      DefinitionKind::Method(md) if md.type_params.is_empty() => {
+        roots.push(def_id);
+      },
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
         for entry in rd.instance_methods.values() {
           match entry {
@@ -3474,8 +4142,9 @@ mod tests {
   use ignis_type::types::TypeStore;
 
   use super::{
-    build_test_harness_plan, discover_test_cases, execute_test_harness_binary, format_test_plan_snapshot,
-    format_failed_test_details, format_test_summary_snapshot, plan_project_tests_for_snapshot,
+    build_test_harness_plan, discover_std_test_companions, discover_test_cases, execute_test_harness_binary,
+    format_test_plan_snapshot, format_failed_test_details, format_test_summary_snapshot,
+    plan_project_tests_for_snapshot, validate_std_test_layout,
   };
   use crate::backend::{TestCase, TestHarnessPlan};
 
@@ -3618,6 +4287,65 @@ function middle(): void {}
 
     assert_eq!(first_names, vec!["main::alpha", "main::middle", "main::zebra"]);
     assert_eq!(first_names, second_names);
+  }
+
+  #[test]
+  fn discover_std_test_companions_uses_sorted_manifest_roots() {
+    let temp_dir = TempDir::new().expect("temporary std root");
+    let std_root = temp_dir.path();
+
+    fs::create_dir_all(std_root.join("vector")).expect("create vector dir");
+    fs::create_dir_all(std_root.join("string")).expect("create string dir");
+    fs::create_dir_all(std_root.join("hash")).expect("create hash dir");
+
+    fs::write(std_root.join("vector/mod.ign"), "export namespace Vector {}\n").expect("write vector module");
+    fs::write(std_root.join("string/mod.ign"), "export namespace String {}\n").expect("write string module");
+    fs::write(std_root.join("hash/mod.ign"), "export namespace Hash {}\n").expect("write hash module");
+    fs::write(std_root.join("vector/tests.ign"), "@test\nfunction vectorSmoke(): void {}\n")
+      .expect("write vector tests");
+    fs::write(std_root.join("hash/tests.ign"), "@test\nfunction hashSmoke(): void {}\n").expect("write hash tests");
+
+    let manifest = ignis_config::IgnisSTDManifest {
+      modules: HashMap::from([
+        ("vector".to_string(), "vector/mod.ign".to_string()),
+        ("string".to_string(), "string/mod.ign".to_string()),
+        ("hash".to_string(), "hash/mod.ign".to_string()),
+      ]),
+      ..Default::default()
+    };
+
+    let discovered = discover_std_test_companions(std_root, &manifest);
+
+    assert_eq!(
+      discovered,
+      vec![std_root.join("hash/tests.ign"), std_root.join("vector/tests.ign")]
+    );
+  }
+
+  #[test]
+  fn validate_std_test_layout_rejects_inline_std_tests() {
+    let mut symbols = SymbolTable::new();
+    let mut defs = DefinitionStore::new();
+    let types = TypeStore::new();
+
+    let std_test_name = symbols.intern("inlineStdTest");
+    let helper_name = symbols.intern("helper");
+
+    alloc_test_function(&mut defs, std_test_name, ModuleId::new(0), None, &types);
+    alloc_plain_function(&mut defs, helper_name, ModuleId::new(1), None, Visibility::Private, &types);
+
+    let module_paths = HashMap::from([
+      (ModuleId::new(0), ModulePath::Std("string".to_string())),
+      (
+        ModuleId::new(1),
+        ModulePath::Project(PathBuf::from("/tmp/std/string/tests.ign")),
+      ),
+    ]);
+
+    let error = validate_std_test_layout(&defs, &module_paths).expect_err("expected inline std test to be rejected");
+
+    assert!(error.contains("std::string"), "expected module name in layout error: {error}");
+    assert!(error.contains("@test"), "expected @test mention in layout error: {error}");
   }
 
   #[test]

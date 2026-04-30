@@ -9,7 +9,8 @@ use ignis_lir::{Block, ConstValue, FunctionLir, Instr, LirProgram, Operand, Temp
 use ignis_type::{
   attribute::{FieldAttr, FunctionAttr, RecordAttr},
   definition::{
-    DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, InlineMode, RecordDefinition, Visibility,
+    DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, FunctionDefinition, InlineMode, RecordDefinition,
+    Visibility,
   },
   module::{ModuleId, ModulePath},
   namespace::NamespaceStore,
@@ -439,65 +440,222 @@ impl<'a> CEmitter<'a> {
 
       for (_, block) in function.blocks.iter() {
         for instruction in &block.instructions {
-          match instruction {
-            Instr::Call { callee, .. } if reachable.insert(*callee) => {
-              queue.push_back(*callee);
-            },
-            Instr::Drop { local } => {
-              let local_type = function.locals.get(local).ty;
-              if let Some(owner_def_id) = self.resolve_droppable_record(local_type)
-                && let Some(drop_method_def_id) = self.find_drop_method(owner_def_id)
-                && reachable.insert(drop_method_def_id)
-              {
-                queue.push_back(drop_method_def_id);
-              }
-            },
-            _ => {},
+          for dependency in self.forced_emit_instruction_dependencies(function, instruction) {
+            if reachable.insert(dependency) {
+              queue.push_back(dependency);
+            }
           }
         }
       }
     }
 
-    reachable
+    let external_reachable: HashSet<_> = reachable
       .into_iter()
-      .filter(|def_id| {
-        if self.defs.get(def_id).owner_module == target_module_id {
-          return false;
+      .filter(|def_id| self.is_force_emit_candidate(*def_id, target_module_id))
+      .collect();
+
+    let mut forced = HashSet::new();
+    let mut queue: VecDeque<DefinitionId> = external_reachable
+      .iter()
+      .copied()
+      .filter(|def_id| self.is_force_emit_seed(*def_id))
+      .collect();
+
+    while let Some(current) = queue.pop_front() {
+      if !forced.insert(current) {
+        continue;
+      }
+
+      let Some(function) = self.program.functions.get(&current) else {
+        continue;
+      };
+
+      for (_, block) in function.blocks.iter() {
+        for instruction in &block.instructions {
+          for dependency in self.forced_emit_instruction_dependencies(function, instruction) {
+            if external_reachable.contains(&dependency) && self.should_recurse_forced_emit(dependency) {
+              queue.push_back(dependency);
+            }
+          }
         }
+      }
+    }
 
-        let Some(function) = self.program.functions.get(def_id) else {
-          return false;
-        };
+    forced
+  }
 
-        if function.is_extern {
-          return false;
-        }
+  fn forced_emit_instruction_dependencies(
+    &self,
+    function: &FunctionLir,
+    instruction: &Instr,
+  ) -> Vec<DefinitionId> {
+    let mut dependencies = Vec::new();
 
-        if !self.is_function_signature_monomorphized(function) {
-          return false;
-        }
+    match instruction {
+      Instr::Call { callee, .. } => dependencies.push(*callee),
+      Instr::Drop { local } => {
+        self.push_drop_method_dependency(&mut dependencies, function.locals.get(local).ty);
+      },
+      Instr::DropInPlace { ty, .. } => {
+        self.push_drop_method_dependency(&mut dependencies, *ty);
+      },
+      Instr::BuiltinEq {
+        kind: BuiltinEqKind::Method(method_def_id),
+        ..
+      } => {
+        dependencies.push(*method_def_id);
+      },
+      Instr::BuiltinHash { ty, .. } => {
+        self.push_hash_method_dependency(&mut dependencies, *ty);
+      },
+      _ => {},
+    }
 
-        // Public inline functions from other user modules already have a
-        // definition in their owner's .c file and a declaration in the .h
-        // header. Re-emitting them as `static inline` here would conflict
-        // with the header's external-linkage declaration.
-        let def = self.defs.get(def_id);
-        if def.visibility == Visibility::Public
-          && matches!(function.inline_mode, InlineMode::Inline | InlineMode::Always)
-        {
-          return false;
-        }
+    dependencies
+  }
 
-        let kind = self.classify(*def_id);
-        if matches!(kind, DefKind::Runtime) {
-          return false;
-        }
+  fn push_drop_method_dependency(
+    &self,
+    dependencies: &mut Vec<DefinitionId>,
+    ty: TypeId,
+  ) {
+    if let Some(owner_def_id) = self.resolve_droppable_record(ty)
+      && let Some(drop_method_def_id) = self.find_drop_method(owner_def_id)
+    {
+      dependencies.push(drop_method_def_id);
+    }
+  }
 
-        kind.is_user()
-          || (self.is_monomorphized_generic_def(*def_id)
-            && (self.definition_depends_on_user_type(*def_id) || self.is_std_test_def(*def_id)))
-      })
-      .collect()
+  fn push_hash_method_dependency(
+    &self,
+    dependencies: &mut Vec<DefinitionId>,
+    ty: TypeId,
+  ) {
+    let owner_def_id = match self.types.get(&ty) {
+      Type::Record(def_id) | Type::Enum(def_id) => Some(*def_id),
+      _ => None,
+    };
+
+    if let Some(owner_def_id) = owner_def_id
+      && let Some(hash_method_def_id) = self.find_named_instance_method(owner_def_id, "hash")
+    {
+      dependencies.push(hash_method_def_id);
+    }
+  }
+
+  fn is_force_emit_candidate(
+    &self,
+    def_id: DefinitionId,
+    target_module_id: ModuleId,
+  ) -> bool {
+    if self.defs.get(&def_id).owner_module == target_module_id {
+      return false;
+    }
+
+    let Some(function) = self.program.functions.get(&def_id) else {
+      return false;
+    };
+
+    if function.is_extern || !self.is_function_signature_monomorphized(function) {
+      return false;
+    }
+
+    let is_public = self.is_effectively_public(def_id);
+
+    if is_public && matches!(function.inline_mode, InlineMode::Inline | InlineMode::Always) {
+      return false;
+    }
+
+    !matches!(self.classify(def_id), DefKind::Runtime)
+  }
+
+  fn is_effectively_public(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let def = self.defs.get(&def_id);
+
+    if matches!(&def.kind, DefinitionKind::Function(function) if function_is_extension(function)) {
+      return true;
+    }
+
+    if def.visibility == Visibility::Public {
+      return true;
+    }
+
+    if self.is_monomorphized_generic_def(def_id) {
+      if self.is_std_test_def(def_id)
+        || self.definition_depends_on_user_type(def_id)
+        || self.definition_mentions_std_test_user_type(def_id)
+      {
+        return false;
+      }
+    }
+
+    let mut current_namespace = def.owner_namespace;
+
+    while let Some(namespace_id) = current_namespace {
+      let Some(namespace_def_id) = self.namespace_definition_id(namespace_id) else {
+        return false;
+      };
+
+      let namespace_def = self.defs.get(&namespace_def_id);
+      if namespace_def.visibility == Visibility::Public {
+        return true;
+      }
+
+      current_namespace = namespace_def.owner_namespace;
+    }
+
+    false
+  }
+
+  fn namespace_definition_id(
+    &self,
+    namespace_id: ignis_type::namespace::NamespaceId,
+  ) -> Option<DefinitionId> {
+    self.defs.iter().find_map(|(def_id, def)| match &def.kind {
+      DefinitionKind::Namespace(namespace_def) if namespace_def.namespace_id == namespace_id => Some(def_id),
+      _ => None,
+    })
+  }
+
+  fn is_force_emit_seed(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let kind = self.classify(def_id);
+
+    kind.is_user()
+      || (self.is_monomorphized_generic_def(def_id)
+        && (self.definition_depends_on_user_type(def_id)
+          || self.definition_mentions_std_test_user_type(def_id)
+          || self.is_std_test_def(def_id)))
+  }
+
+  fn should_recurse_forced_emit(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    if self.is_force_emit_seed(def_id) {
+      return true;
+    }
+
+    let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
+    let kind = self.classify(def_id);
+
+    kind.is_std() && raw_name.starts_with('_') && self.is_force_emit_candidate_private_std_helper(def_id)
+  }
+
+  fn is_force_emit_candidate_private_std_helper(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let Some(function) = self.program.functions.get(&def_id) else {
+      return false;
+    };
+
+    self.is_function_signature_monomorphized(function)
   }
 
   fn is_entry_user_module(
@@ -560,6 +718,39 @@ impl<'a> CEmitter<'a> {
       },
       _ => false,
     }
+  }
+
+  fn definition_mentions_std_test_user_type(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
+
+    self
+      .defs
+      .iter()
+      .filter_map(|(candidate_id, candidate)| match &candidate.kind {
+        DefinitionKind::Record(_) | DefinitionKind::Enum(_) => Some((candidate_id, candidate)),
+        _ => None,
+      })
+      .filter(|(_, candidate)| self.is_std_test_local_user_type(candidate.owner_module))
+      .map(|(_, candidate)| self.symbols.get(&candidate.name))
+      .any(|candidate_name| raw_name.contains(candidate_name))
+  }
+
+  fn is_std_test_local_user_type(
+    &self,
+    module_id: ModuleId,
+  ) -> bool {
+    self
+      .module_paths
+      .and_then(|module_paths| module_paths.get(&module_id))
+      .is_some_and(|module_path| match module_path {
+        ModulePath::Project(path) => self.std_path.is_some_and(|std_path| {
+          path.starts_with(std_path) && path.file_name().is_some_and(|name| name == "tests.ign")
+        }),
+        ModulePath::Std(_) => false,
+      })
   }
 
   fn definition_tree_contains_user_definition(
@@ -1363,7 +1554,7 @@ impl<'a> CEmitter<'a> {
       // static inline functions don't need forward declarations.
       // Exported inline functions are not static, so they still need one.
       if matches!(func.inline_mode, InlineMode::Inline | InlineMode::Always) {
-        let is_public = self.defs.get(def_id).visibility == Visibility::Public;
+        let is_public = self.is_effectively_public(**def_id);
         if !is_public {
           continue;
         }
@@ -1682,22 +1873,33 @@ impl<'a> CEmitter<'a> {
 
     // Public functions must not be `static` -- conflicts with the header declaration.
     if !func.is_extern {
-      let mut is_public = self.defs.get(&def_id).visibility == Visibility::Public;
+      let mut is_public = self.is_effectively_public(def_id);
+      let mut needs_internal_linkage = false;
+      let is_forced_cross_module_helper = self.forced_emit_defs.contains(&def_id)
+        && self
+          .target
+          .as_ref()
+          .and_then(|target| target.target_user_module())
+          .is_some_and(|target_module_id| self.defs.get(&def_id).owner_module != target_module_id);
 
       // In per-user-module emission, helper definitions forced from other modules
       // are implementation details of this translation unit.
-      if let Some(target_module_id) = self.target.as_ref().and_then(|target| target.target_user_module())
-        && self.defs.get(&def_id).owner_module != target_module_id
-      {
+      if is_forced_cross_module_helper && cross_module_emit_needs_internal_linkage(is_public) {
         is_public = false;
+        needs_internal_linkage = true;
       }
 
       if is_internal_closure_helper {
         is_public = false;
+        needs_internal_linkage = true;
 
         if !matches!(func.inline_mode, InlineMode::Inline | InlineMode::Always) {
-          write!(self.output, "static ").unwrap();
+          needs_internal_linkage = true;
         }
+      }
+
+      if needs_internal_linkage && !matches!(func.inline_mode, InlineMode::Inline | InlineMode::Always) {
+        write!(self.output, "static ").unwrap();
       }
 
       let func_attrs = self.get_function_attrs(def_id);
@@ -4549,6 +4751,10 @@ fn emit_func_prototype(
     return None;
   }
 
+  if !is_effectively_public_for_header(def, defs, symbols, namespaces) {
+    return None;
+  }
+
   if is_extern || !type_params_empty {
     return None;
   }
@@ -4604,6 +4810,54 @@ fn emit_func_prototype(
   };
 
   Some(format!("{} {}({});", return_ty, name, params))
+}
+
+fn is_effectively_public_for_header(
+  def: &ignis_type::definition::Definition,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> bool {
+  let raw_name = symbols.get(&def.name);
+
+  if raw_name.starts_with("__") {
+    return false;
+  }
+
+  if matches!(&def.kind, DefinitionKind::Function(function) if function_is_extension(function)) {
+    return true;
+  }
+
+  if def.visibility == Visibility::Public {
+    return true;
+  }
+
+  let mut current_namespace = def.owner_namespace;
+
+  while let Some(namespace_id) = current_namespace {
+    let Some(namespace_def_id) = defs.iter().find_map(|(candidate_id, candidate)| match &candidate.kind {
+      DefinitionKind::Namespace(namespace_def) if namespace_def.namespace_id == namespace_id => Some(candidate_id),
+      _ => None,
+    }) else {
+      return false;
+    };
+
+    let namespace_def = defs.get(&namespace_def_id);
+    if namespace_def.visibility == Visibility::Public {
+      return true;
+    }
+
+    current_namespace = namespaces.get(&namespace_id).parent;
+  }
+
+  false
+}
+
+fn function_is_extension(function: &FunctionDefinition) -> bool {
+  function
+    .attrs
+    .iter()
+    .any(|attr| matches!(attr, FunctionAttr::Extension { .. }))
 }
 
 fn build_mangled_name_standalone(
@@ -4971,7 +5225,7 @@ pub fn emit_std_header_from_input(
   symbols: &SymbolTable,
   namespaces: &NamespaceStore,
 ) -> String {
-  use ignis_type::definition::{DefinitionKind, Visibility};
+  use ignis_type::definition::DefinitionKind;
   use std::collections::HashSet;
 
   let mut output = String::new();
@@ -4985,55 +5239,24 @@ pub fn emit_std_header_from_input(
   writeln!(output, "// Auto-generated standard library prototypes").unwrap();
   writeln!(output).unwrap();
 
-  for def in input.defs.get_all() {
-    if def.visibility != Visibility::Public {
+  for (def_id, def) in input.defs.iter() {
+    if !matches!(def.kind, DefinitionKind::Function(_)) {
       continue;
     }
 
-    if let DefinitionKind::Function(func_def) = &def.kind {
-      // Skip extern functions - they're declared in runtime headers
-      if func_def.is_extern {
-        continue;
-      }
+    let Some(prototype) = emit_func_prototype(
+      def_id,
+      def,
+      input.defs,
+      input.types,
+      symbols,
+      namespaces,
+      &mut emitted_names,
+    ) else {
+      continue;
+    };
 
-      let name = symbols.get(&def.name);
-
-      // Skip duplicates (imported functions may appear multiple times)
-      if emitted_names.contains(name) {
-        continue;
-      }
-      emitted_names.insert(name.to_string());
-
-      let return_ty = format_c_type(
-        input.types.get(&func_def.return_type),
-        input.types,
-        input.defs,
-        symbols,
-        namespaces,
-      );
-
-      let mut param_strs = Vec::new();
-      for param_id in &func_def.params {
-        let param_def = input.defs.get(param_id);
-        if let DefinitionKind::Parameter(param) = &param_def.kind {
-          let param_name = symbols.get(&param_def.name);
-          let param_ty = format_c_type(input.types.get(&param.type_id), input.types, input.defs, symbols, namespaces);
-          param_strs.push(format!("{} {}", param_ty, param_name));
-        }
-      }
-
-      if func_def.is_variadic {
-        param_strs.push("...".to_string());
-      }
-
-      let params = if param_strs.is_empty() {
-        "void".to_string()
-      } else {
-        param_strs.join(", ")
-      };
-
-      writeln!(output, "{} {}({});", return_ty, name, params).unwrap();
-    }
+    writeln!(output, "{}", prototype).unwrap();
   }
 
   writeln!(output).unwrap();
@@ -5042,9 +5265,20 @@ pub fn emit_std_header_from_input(
   output
 }
 
+fn cross_module_emit_needs_internal_linkage(is_effectively_public: bool) -> bool {
+  !is_effectively_public
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+  use ignis_type::BytePosition;
+  use ignis_type::attribute::FunctionAttr;
+  use ignis_type::definition::{Definition, DefinitionKind, FunctionDefinition, NamespaceDefinition, Visibility};
+  use ignis_type::file::FileId;
+  use ignis_type::module::ModuleId;
+  use ignis_type::namespace::NamespaceId;
+  use ignis_type::span::Span;
   use ignis_type::symbol::SymbolTable;
   use std::cell::RefCell;
   use std::rc::Rc;
@@ -5064,6 +5298,12 @@ mod tests {
     assert!(!should_defer_std_module_emit_for_user_specialization(true, false));
   }
 
+  #[test]
+  fn test_cross_module_emit_keeps_exported_linkage_external() {
+    assert!(!cross_module_emit_needs_internal_linkage(true));
+    assert!(cross_module_emit_needs_internal_linkage(false));
+  }
+
   fn empty_program() -> (LirProgram, TypeStore, DefinitionStore, NamespaceStore, Rc<RefCell<SymbolTable>>) {
     let program = LirProgram::new();
     let types = TypeStore::new();
@@ -5071,6 +5311,62 @@ mod tests {
     let namespaces = NamespaceStore::new();
     let symbols = Rc::new(RefCell::new(SymbolTable::new()));
     (program, types, defs, namespaces, symbols)
+  }
+
+  fn synthetic_span() -> Span {
+    Span::new(FileId::SYNTHETIC, BytePosition(0), BytePosition(0))
+  }
+
+  fn alloc_function(
+    defs: &mut DefinitionStore,
+    symbols: &mut SymbolTable,
+    name: &str,
+    visibility: Visibility,
+    owner_namespace: Option<NamespaceId>,
+    return_type: TypeId,
+    attrs: Vec<FunctionAttr>,
+  ) -> DefinitionId {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Function(FunctionDefinition {
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        attrs,
+      }),
+      name: symbols.intern(name),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility,
+      owner_module: ModuleId::new(0),
+      owner_namespace,
+      doc: None,
+    })
+  }
+
+  fn alloc_namespace(
+    defs: &mut DefinitionStore,
+    symbols: &mut SymbolTable,
+    name: &str,
+    visibility: Visibility,
+    namespace_id: NamespaceId,
+  ) -> DefinitionId {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Namespace(NamespaceDefinition {
+        namespace_id,
+        is_extern: false,
+        attrs: Vec::new(),
+      }),
+      name: symbols.intern(name),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility,
+      owner_module: ModuleId::new(0),
+      owner_namespace: None,
+      doc: None,
+    })
   }
 
   #[test]
@@ -5127,5 +5423,107 @@ mod tests {
 
     assert!(output.contains("#include \"runtime/ignis_rt.h\""));
     assert!(output.contains("#include <math.h>"));
+  }
+
+  #[test]
+  fn test_header_visibility_skips_private_free_functions() {
+    let mut defs = DefinitionStore::new();
+    let types = TypeStore::new();
+    let mut namespaces = NamespaceStore::new();
+    let mut symbols = SymbolTable::new();
+
+    let private_function = alloc_function(
+      &mut defs,
+      &mut symbols,
+      "hashMapStorageBytes",
+      Visibility::Private,
+      None,
+      types.void(),
+      Vec::new(),
+    );
+
+    let libc = symbols.intern("LibC");
+    let file = symbols.intern("File");
+    let public_namespace_id = namespaces.get_or_create(&[libc], false);
+    let nested_namespace_id = namespaces.get_or_create(&[libc, file], false);
+
+    alloc_namespace(&mut defs, &mut symbols, "LibC", Visibility::Public, public_namespace_id);
+    alloc_namespace(&mut defs, &mut symbols, "File", Visibility::Private, nested_namespace_id);
+
+    let exported_namespace_function = alloc_function(
+      &mut defs,
+      &mut symbols,
+      "write",
+      Visibility::Private,
+      Some(nested_namespace_id),
+      types.void(),
+      Vec::new(),
+    );
+    let extension_function = alloc_function(
+      &mut defs,
+      &mut symbols,
+      "toString",
+      Visibility::Private,
+      None,
+      types.void(),
+      vec![FunctionAttr::Extension {
+        type_name: "i32".to_string(),
+        mutable: false,
+      }],
+    );
+
+    assert!(
+      !is_effectively_public_for_header(defs.get(&private_function), &defs, &symbols, &namespaces),
+      "private free functions must stay out of generated headers"
+    );
+    assert!(
+      is_effectively_public_for_header(defs.get(&exported_namespace_function), &defs, &symbols, &namespaces),
+      "functions inside exported namespace chains must keep external linkage"
+    );
+    assert!(
+      is_effectively_public_for_header(defs.get(&extension_function), &defs, &symbols, &namespaces),
+      "extension functions must stay visible across module headers"
+    );
+  }
+
+  #[test]
+  fn test_emit_std_header_skips_generic_function_prototypes() {
+    let program = LirProgram::new();
+    let mut types = TypeStore::new();
+    let mut defs = DefinitionStore::new();
+    let namespaces = NamespaceStore::new();
+    let mut symbols = SymbolTable::new();
+
+    let type_param_owner = DefinitionId::new(99);
+    let generic_param = types.param(type_param_owner, 0);
+
+    defs.alloc(Definition {
+      kind: DefinitionKind::Function(FunctionDefinition {
+        type_params: vec![DefinitionId::new(100)],
+        params: Vec::new(),
+        return_type: generic_param,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        attrs: vec![FunctionAttr::Extension {
+          type_name: "T".to_string(),
+          mutable: false,
+        }],
+      }),
+      name: symbols.intern("toString"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Private,
+      owner_module: ModuleId::new(0),
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let output = emit_std_header_from_input(EmitInput::new(&program, &types, &defs), &symbols, &namespaces);
+
+    assert!(
+      !output.contains("toString"),
+      "generic functions with unresolved type params must be skipped in std headers"
+    );
   }
 }

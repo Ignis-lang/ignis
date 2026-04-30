@@ -2616,6 +2616,39 @@ function main(): void {
 }
 
 #[test]
+fn method_call_owned_argument_consumes_owner() {
+  common::assert_err(
+    r#"
+@implements(Drop)
+record Owned {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Sink {
+    public consume(&self, value: Owned): void {
+        return;
+    }
+}
+
+function main(): void {
+    let sink: Sink = Sink {};
+    let value: Owned = Owned { value: 1 };
+
+    sink.consume(value);
+
+    let again: Owned = value;
+    return;
+}
+"#,
+    &["O0001"],
+  );
+}
+
+#[test]
 fn interprocedural_function_without_drop_does_not_consume_owner() {
   common::assert_ok(
     r#"

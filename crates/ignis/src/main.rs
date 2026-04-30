@@ -8,11 +8,11 @@ use std::sync::Arc;
 use clap::Parser as ClapParser;
 use colored::*;
 
-use cli::{BuildCommand, CheckCommand, Cli, FmtCommand, SubCommand, TestCommand};
+use cli::{BuildCommand, CheckCommand, Cli, FmtCommand, SubCommand, TestCommand, TestStdCommand};
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
-  run_project_tests, run_single_file_tests, CliOverrides, Project,
+  run_project_tests, run_single_file_tests, run_std_tests, CliOverrides, Project,
 };
 use ignis_formatter::{FormatOptions, FormatterCliOverrides, FormatterConfigPaths, format_file, load_formatter_config};
 use init::run_init;
@@ -589,6 +589,16 @@ fn run_test(
   }
 }
 
+fn run_test_std(
+  _cli: &Cli,
+  cmd: &TestStdCommand,
+) -> Result<(), ()> {
+  let std_path = resolve_std_path(cmd.std_path.as_deref());
+  let output_dir = cmd.output_dir.as_deref().map(Path::new);
+
+  run_std_tests(Path::new(&std_path), cmd.filter.as_deref(), cmd.update_snapshots, output_dir)
+}
+
 // =============================================================================
 // Build Command
 // =============================================================================
@@ -1050,6 +1060,8 @@ fn main() {
     SubCommand::Build(cmd) => run_build(&cli, cmd),
 
     SubCommand::Test(cmd) => run_test(&cli, cmd),
+
+    SubCommand::TestStd(cmd) => run_test_std(&cli, cmd),
 
     SubCommand::Check(cmd) => run_check(&cli, cmd),
 

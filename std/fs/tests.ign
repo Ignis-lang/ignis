@@ -1,0 +1,61 @@
+import Fs from "std::fs";
+import String from "std::string";
+import Test from "std::test";
+
+@test
+function writeStringAndReadToStringPreserveInteriorNulBytes(): void {
+  let path: str = "/tmp/ignis_std_test_runner_fs_interior_nul.bin";
+
+  if (Fs::exists(path)) {
+    match (Fs::removeFile(path)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> Test::fail(),
+    };
+  }
+
+  let mut payload: String = String::new();
+  payload.pushChar('A');
+  payload.pushChar('\0');
+  payload.pushChar('B');
+
+  let mut wrote: boolean = false;
+  match (Fs::writeString(path, &payload)) {
+    Result::OK(value) -> {
+      wrote = value;
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+  Test::assert(wrote);
+
+  let mut readBack: String = String::new();
+  match (Fs::readToString(path)) {
+    Result::OK(value) -> {
+      readBack = value;
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (Fs::removeFile(path)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  Test::assertEq<u64>(readBack.length(), 3);
+
+  let firstByte: char = match (readBack.charAt(0)) {
+    Option::SOME(value) -> value,
+    _ -> '?',
+  };
+  let middleByte: char = match (readBack.charAt(1)) {
+    Option::SOME(value) -> value,
+    _ -> '?',
+  };
+  let lastByte: char = match (readBack.charAt(2)) {
+    Option::SOME(value) -> value,
+    _ -> '?',
+  };
+
+  Test::assertEq<char>(firstByte, 'A');
+  Test::assertEq<char>(middleByte, '\0');
+  Test::assertEq<char>(lastByte, 'B');
+}

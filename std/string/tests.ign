@@ -1,0 +1,98 @@
+import Hasher from "std::hash";
+import Memory from "std::memory";
+import String from "std::string";
+import Test from "std::test";
+
+function hashString(value: &String): u64 {
+  let mut hasher: Hasher = Hasher::new();
+  value.hash(&mut hasher);
+  return hasher.finish();
+}
+
+function buildInteriorNulString(last: char): String {
+  let mut value: String = String::new();
+  value.pushChar('a');
+  value.pushChar('\0');
+  value.pushChar(last);
+  return value;
+}
+
+@test
+function hashEqualStringsMatchAndDifferentStringsDiverge(): void {
+  let first: String = String::create("alpha");
+  let second: String = String::create("alpha");
+  let third: String = String::create("beta");
+
+  let firstHash: u64 = hashString(&first);
+  let secondHash: u64 = hashString(&second);
+  let thirdHash: u64 = hashString(&third);
+
+  Test::assertEq<u64>(firstHash, secondHash);
+  Test::assertNe<u64>(firstHash, thirdHash);
+}
+
+@test
+function hashPreservesInteriorNulBytes(): void {
+  let first: String = buildInteriorNulString('b');
+  let second: String = buildInteriorNulString('b');
+  let third: String = buildInteriorNulString('c');
+
+  let firstHash: u64 = hashString(&first);
+  let secondHash: u64 = hashString(&second);
+  let thirdHash: u64 = hashString(&third);
+
+  Test::assertEq<u64>(firstHash, secondHash);
+  Test::assertNe<u64>(firstHash, thirdHash);
+}
+
+@test
+function toStrIsZeroCopyBorrowedView(): void {
+  let owned: String = String::create("hello");
+  let view: str = owned.toStr();
+
+  let viewPtr: u64 = @integerFromPointer(view as *u8);
+  let selfPtr: u64 = @integerFromPointer(owned.toStr() as *u8);
+
+  Test::assertEq<u64>(viewPtr, selfPtr);
+
+  let trailing: u8 = @integerFromPointer(view as *u8) + owned.length()
+    |> @pointerFromInteger<*mut u8>(_)
+    |> @read<u8>(_);
+
+  Test::assertEq<u8>(trailing, 0);
+}
+
+@test
+function createFromStrCopiesAndPreservesTrailingNul(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(6);
+
+  @write<u8>(raw, 'h' as u8);
+  @write<u8>(raw + 1, 'e' as u8);
+  @write<u8>(raw + 2, 'l' as u8);
+  @write<u8>(raw + 3, 'l' as u8);
+  @write<u8>(raw + 4, 'o' as u8);
+  @write<u8>(raw + 5, 0);
+
+  let owned: String = String::create(raw as str);
+  @write<u8>(raw, 'j' as u8);
+
+  let firstByte: char = match (owned.charAt(0)) {
+    Option::SOME(value) -> value,
+    _ -> '?',
+  };
+
+  Test::assertEq<char>(firstByte, 'h');
+
+  let trailing: u8 = @integerFromPointer(owned.toStr() as *u8) + owned.length()
+    |> @pointerFromInteger<*mut u8>(_)
+    |> @read<u8>(_);
+
+  Test::assertEq<u8>(trailing, 0);
+
+  Memory::free(raw);
+}
+
+@test
+function snapshotStdRunnerSmoke(): void {
+  Test::assertSnapshot("smoke", "std-string-smoke\n");
+}

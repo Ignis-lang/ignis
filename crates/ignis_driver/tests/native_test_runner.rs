@@ -3,7 +3,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ignis_driver::{run_project_tests, run_single_file_tests};
+use ignis_driver::{run_project_tests, run_single_file_tests, run_std_tests};
 use tempfile::TempDir;
 
 fn workspace_std_path() -> PathBuf {
@@ -84,6 +84,10 @@ fn single_file_harness_binary_path(file_path: &Path) -> PathBuf {
     .parent()
     .expect("single-file parent")
     .join("build/bin/sample-tests")
+}
+
+fn std_harness_binary_path(output_dir: &Path) -> PathBuf {
+  output_dir.join("bin/std-tests")
 }
 
 #[test]
@@ -292,6 +296,135 @@ function Fails(): void {
     result.is_ok(),
     "expected case-sensitive single-file filter to select only the passing test"
   );
+}
+
+#[test]
+fn run_std_tests_returns_ok_when_filter_matches_no_tests() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("missing-std-test-filter"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected empty std selection to succeed");
+  assert!(
+    !std_harness_binary_path(output_dir.path()).exists(),
+    "expected no std harness binary when no tests are selected"
+  );
+}
+
+#[test]
+fn run_std_tests_executes_workspace_std_test_and_builds_harness() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("vector::tests::clearDropsStringElementsBeforeReuse"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected std test run to succeed");
+  assert!(
+    std_harness_binary_path(output_dir.path()).exists(),
+    "expected std test run to build the harness binary"
+  );
+}
+
+#[test]
+fn run_std_tests_executes_vector_drop_exact_once_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("vector::tests::clearAndDropRunElementDropExactlyOnce"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected vector drop exact-once std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_hash_set_zero_sized_marker_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("collections::tests::hashSetUsesZeroSizedMarkerPayload"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected hash set zero-sized marker std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_hash_map_drop_exact_once_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("collections::tests::hashMapReplacementRemoveAndDropAreExactOnce"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected hash map drop exact-once std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_hash_set_drop_exact_once_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("collections::tests::hashSetMembershipRemoveClearAndDropAreExactOnce"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected hash set drop exact-once std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_fs_interior_nul_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::writeStringAndReadToStringPreserveInteriorNulBytes"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs interior-nul std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_string_snapshot_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("string::tests::snapshotStdRunnerSmoke"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected string snapshot std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_full_workspace_std_suite() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(&workspace_std_path(), None, false, Some(output_dir.path()));
+
+  assert!(result.is_ok(), "expected the full std suite to succeed");
 }
 
 #[test]

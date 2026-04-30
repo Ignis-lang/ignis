@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use ignis_type::definition::{Definition, DefinitionKind};
 use ignis_type::module::{ModuleId, ModulePath};
 
+fn is_std_test_companion_path(path: &std::path::Path) -> bool {
+  path.file_name().is_some_and(|file_name| file_name == "tests.ign")
+}
+
 /// Classification of a definition's origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefKind {
@@ -104,6 +108,7 @@ pub fn classify_def_with_std_path(
     Some(ModulePath::Project(path)) => {
       if let Some(std_dir) = std_path
         && path.starts_with(std_dir)
+        && !is_std_test_companion_path(path)
       {
         let module_path = module_paths.get(&def.owner_module).unwrap();
         return DefKind::Std(module_path.module_name());
@@ -190,6 +195,21 @@ mod tests {
     paths.insert(module_id, ModulePath::Project(PathBuf::from("/project/main.ign")));
 
     let kind = classify_def(&def, &paths);
+    assert_eq!(kind, DefKind::User);
+    assert!(kind.is_user());
+  }
+
+  #[test]
+  fn test_classify_std_companion_tests_as_user_even_with_std_path() {
+    let module_id = ModuleId::new(0);
+    let def = make_function_def(module_id, false);
+
+    let std_path = PathBuf::from("/project/std");
+    let mut paths = HashMap::new();
+    paths.insert(module_id, ModulePath::Project(std_path.join("vector/tests.ign")));
+
+    let kind = classify_def_with_std_path(&def, &paths, Some(&std_path));
+
     assert_eq!(kind, DefKind::User);
     assert!(kind.is_user());
   }

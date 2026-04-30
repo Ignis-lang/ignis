@@ -26,6 +26,62 @@ function main(): void {
 }
 
 #[test]
+fn c_export_namespace_members_keep_external_linkage() {
+  let c_code = common::compile_to_c(
+    r#"
+export namespace Align {
+    function isPowerOfTwo(value: u64): boolean {
+        return value != 0;
+    }
+}
+
+function main(): void {
+    let _value: boolean = Align::isPowerOfTwo(8);
+    return;
+}
+"#,
+  );
+
+  assert!(
+    c_code.contains("boolean Align_isPowerOfTwo(u64 value)"),
+    "expected exported namespace member to be emitted"
+  );
+  assert!(
+    !c_code.contains("static boolean Align_isPowerOfTwo(u64 value)"),
+    "expected exported namespace member to keep external linkage"
+  );
+}
+
+#[test]
+fn c_nested_export_namespace_members_keep_external_linkage() {
+  let c_code = common::compile_to_c(
+    r#"
+export namespace LibC {}
+
+namespace LibC::File {
+    function write(value: i32): i32 {
+        return value;
+    }
+}
+
+function main(): void {
+    let _value: i32 = LibC::File::write(8);
+    return;
+}
+"#,
+  );
+
+  assert!(
+    c_code.contains("i32 LibC_File_write(i32 value)"),
+    "expected nested exported namespace member to be emitted"
+  );
+  assert!(
+    !c_code.contains("static i32 LibC_File_write(i32 value)"),
+    "expected nested exported namespace member to keep external linkage"
+  );
+}
+
+#[test]
 fn c_underscore_escaping() {
   // Test that underscores in names are escaped to avoid collisions.
   // `a::b_c` should produce `a_b__c` (underscore escaped)

@@ -2066,12 +2066,22 @@ impl<'a> LoweringContext<'a> {
     let scrutinee_val = self.lower_hir_node(scrutinee)?;
     let scrutinee_ty = self.hir.get(scrutinee).type_id;
 
-    let scrut_local = self.fn_builder().alloc_local(LocalData {
-      def_id: None,
-      ty: scrutinee_ty,
-      mutable: false,
-      name: Some("match_scrutinee".to_string()),
-    });
+    let track_scrutinee_drop = self.types.needs_drop_with_defs(&scrutinee_ty, self.defs)
+      && !arms
+        .iter()
+        .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
+
+    let scrut_local = if track_scrutinee_drop {
+      self.alloc_synthetic_local(scrutinee_ty, false)
+    } else {
+      self.fn_builder().alloc_local(LocalData {
+        def_id: None,
+        ty: scrutinee_ty,
+        mutable: false,
+        name: Some("match_scrutinee".to_string()),
+      })
+    };
+
     self.fn_builder().emit(Instr::Store {
       dest: scrut_local,
       value: scrutinee_val,
@@ -2444,6 +2454,88 @@ impl<'a> LoweringContext<'a> {
         });
         Operand::Temp(tuple_temp)
       },
+    }
+  }
+
+  fn pattern_moves_owned_value(
+    &mut self,
+    value_ty: TypeId,
+    pattern: &HIRPattern,
+  ) -> bool {
+    match pattern {
+      HIRPattern::Binding { .. } => {
+        self.types.needs_drop_with_defs(&value_ty, self.defs) && !self.types.is_copy_with_defs(&value_ty, self.defs)
+      },
+      HIRPattern::Variant {
+        enum_def,
+        variant_tag,
+        args,
+      } => self
+        .variant_payload_types(value_ty, *enum_def, *variant_tag)
+        .map(|payload_types| {
+          args
+            .iter()
+            .zip(payload_types)
+            .any(|(arg_pattern, arg_ty)| self.pattern_moves_owned_value(arg_ty, arg_pattern))
+        })
+        .unwrap_or(false),
+      HIRPattern::Tuple { elements } => match self.types.get(&value_ty).clone() {
+        Type::Tuple(field_types) => elements
+          .iter()
+          .zip(field_types)
+          .any(|(element_pattern, element_ty)| self.pattern_moves_owned_value(element_ty, element_pattern)),
+        _ => false,
+      },
+      HIRPattern::Or { patterns } => patterns
+        .iter()
+        .any(|nested_pattern| self.pattern_moves_owned_value(value_ty, nested_pattern)),
+      HIRPattern::Wildcard | HIRPattern::Literal { .. } | HIRPattern::Constant { .. } => false,
+    }
+  }
+
+  fn variant_payload_types(
+    &mut self,
+    value_ty: TypeId,
+    enum_def: DefinitionId,
+    variant_tag: u32,
+  ) -> Option<Vec<TypeId>> {
+    match self.types.get(&value_ty).clone() {
+      Type::Enum(def_id) if def_id == enum_def => match &self.defs.get(&enum_def).kind {
+        DefinitionKind::Enum(ed) => ed
+          .variants
+          .get(variant_tag as usize)
+          .map(|variant| variant.payload.clone()),
+        _ => None,
+      },
+      Type::Enum(value_def_id) => match &self.defs.get(&value_def_id).kind {
+        DefinitionKind::Enum(ed) => ed
+          .variants
+          .get(variant_tag as usize)
+          .map(|variant| variant.payload.clone()),
+        _ => None,
+      },
+      Type::Instance {
+        generic,
+        args: type_args,
+      } if generic == enum_def => match &self.defs.get(&enum_def).kind {
+        DefinitionKind::Enum(ed) => {
+          let subst = if ed.type_params.len() == type_args.len() {
+            ignis_type::types::Substitution::for_generic(enum_def, &type_args)
+          } else {
+            ignis_type::types::Substitution::new()
+          };
+
+          ed.variants.get(variant_tag as usize).map(|variant| {
+            variant
+              .payload
+              .iter()
+              .map(|ty| self.types.substitute(*ty, &subst))
+              .collect()
+          })
+        },
+        _ => None,
+      },
+      _ => None,
     }
   }
 

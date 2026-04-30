@@ -18,6 +18,7 @@ pub use context::CompilationContext;
 pub use link::LinkPlan;
 pub use pipeline::{
   build_std, check_runtime, check_std, compile_file, compile_project, run_project_tests, run_single_file_tests,
+  run_std_tests,
 };
 pub use project::{
   find_project_root, load_project_toml, resolve_project, CliOverrides, EmitSet, Project, ProjectError, ProjectToml,

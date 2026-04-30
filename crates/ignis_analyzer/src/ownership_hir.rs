@@ -834,6 +834,13 @@ impl<'a> HirOwnershipChecker<'a> {
 
         for &arg in &args {
           self.check_node(arg);
+
+          if !is_drop && let Some(arg_def) = self.get_moved_var(arg) {
+            let arg_ty = self.defs.type_of(&arg_def);
+            if self.types.needs_drop_with_defs(arg_ty, self.defs) && !self.types.is_copy_with_defs(arg_ty, self.defs) {
+              self.try_consume(arg_def, span.clone());
+            }
+          }
         }
 
         if !is_drop {

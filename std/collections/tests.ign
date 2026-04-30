@@ -1,0 +1,253 @@
+import Eq from "std::collections";
+import Hash from "std::collections";
+import HashMap from "std::collections";
+import HashSet from "std::collections";
+import HashSetMarker from "std::collections::hash_set";
+import Hasher from "std::hash";
+import Test from "std::test";
+
+@implements(Hash, Eq)
+record BucketKey {
+  id: i32;
+  bucket: u64;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeU64(self.bucket);
+  }
+
+  equals(&self, other: &BucketKey): boolean {
+    return self.id == other.id;
+  }
+}
+
+function bucketKey(id: i32): BucketKey {
+  return BucketKey { id: id, bucket: 1 };
+}
+
+@implements(Drop, Hash, Eq)
+record DropKey {
+  id: i32;
+  marker: i32;
+  counter: *mut i32;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeI32(self.id);
+  }
+
+  equals(&self, other: &DropKey): boolean {
+    return self.id == other.id;
+  }
+
+  drop(&mut self): void {
+    *self.counter = *self.counter + self.marker;
+  }
+}
+
+@implements(Drop)
+record DropValue {
+  marker: i32;
+  counter: *mut i32;
+
+  drop(&mut self): void {
+    *self.counter = *self.counter + self.marker;
+  }
+}
+
+@implements(Hash, Eq)
+record PlainKey {
+  id: i32;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeI32(self.id);
+  }
+
+  equals(&self, other: &PlainKey): boolean {
+    return self.id == other.id;
+  }
+}
+
+@implements(Drop, Hash, Eq)
+record SetKey {
+  id: i32;
+  marker: i32;
+  counter: *mut i32;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeU64(1);
+  }
+
+  equals(&self, other: &SetKey): boolean {
+    return self.id == other.id;
+  }
+
+  drop(&mut self): void {
+    *self.counter = *self.counter + self.marker;
+  }
+}
+
+@implements(Hash, Eq)
+record MarkerKey {
+  id: i32;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeI32(self.id);
+  }
+
+  equals(&self, other: &MarkerKey): boolean {
+    return self.id == other.id;
+  }
+}
+
+@test
+function hashMapReusesTombstonesAndPreservesEntriesAcrossReserve(): void {
+  let mut map: HashMap<BucketKey, i32> = HashMap::init<BucketKey, i32>();
+  let removedKey: BucketKey = bucketKey(2);
+  let lookup1: BucketKey = bucketKey(1);
+  let lookup2: BucketKey = bucketKey(2);
+  let lookup3: BucketKey = bucketKey(3);
+  let lookup4: BucketKey = bucketKey(4);
+
+  Test::assert(match (map.insert(bucketKey(1), 10)) { Option::SOME(_) -> false, Option::NONE -> true });
+  Test::assert(match (map.insert(bucketKey(2), 20)) { Option::SOME(_) -> false, Option::NONE -> true });
+  Test::assert(match (map.insert(bucketKey(3), 30)) { Option::SOME(_) -> false, Option::NONE -> true });
+
+  let removed: i32 = match (map.remove(&removedKey)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> -1,
+  };
+  Test::assertEq<i32>(removed, 20);
+
+  let replaced: i32 = match (map.insert(bucketKey(1), 11)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> -1,
+  };
+  Test::assertEq<i32>(replaced, 10);
+
+  map.reserve(16);
+
+  Test::assertEq<u64>(map.length(), 2);
+  Test::assertEq<i32>(match (map.get(&lookup1)) { Option::SOME(value) -> *value, Option::NONE -> -1 }, 11);
+  Test::assert(match (map.get(&lookup2)) { Option::SOME(_) -> false, Option::NONE -> true });
+  Test::assertEq<i32>(match (map.get(&lookup3)) { Option::SOME(value) -> *value, Option::NONE -> -1 }, 30);
+  Test::assert(match (map.insert(bucketKey(4), 40)) { Option::SOME(_) -> false, Option::NONE -> true });
+  Test::assertEq<i32>(match (map.get(&lookup4)) { Option::SOME(value) -> *value, Option::NONE -> -1 }, 40);
+  Test::assert(map.capacity() >= 18);
+  Test::assertEq<u64>(map.length(), 3);
+}
+
+@test
+function hashMapReplacementRemoveAndDropAreExactOnce(): void {
+  let mut keyDrops: i32 = 0;
+  let mut temporaryKeyDrops: i32 = 0;
+  let mut valueDrops: i32 = 0;
+
+  {
+    let mut map: HashMap<DropKey, DropValue> = HashMap::init<DropKey, DropValue>();
+
+    map.insert(
+      DropKey { id: 1, marker: 1, counter: (&mut keyDrops) as *mut i32 },
+      DropValue { marker: 4, counter: (&mut valueDrops) as *mut i32 },
+    );
+    map.insert(
+      DropKey { id: 2, marker: 2, counter: (&mut keyDrops) as *mut i32 },
+      DropValue { marker: 5, counter: (&mut valueDrops) as *mut i32 },
+    );
+
+    let replaced: Option<DropValue> = map.insert(
+      DropKey { id: 1, marker: 1, counter: (&mut keyDrops) as *mut i32 },
+      DropValue { marker: 6, counter: (&mut valueDrops) as *mut i32 },
+    );
+    Test::assert(match (replaced) { Option::SOME(_) -> true, Option::NONE -> false });
+
+    let lookupKey: DropKey = DropKey { id: 2, marker: 2, counter: (&mut temporaryKeyDrops) as *mut i32 };
+    let removed: Option<DropValue> = map.remove(&lookupKey);
+    Test::assert(match (removed) { Option::SOME(_) -> true, Option::NONE -> false });
+  }
+
+  Test::assertEq<i32>(keyDrops, 4);
+  Test::assertEq<i32>(valueDrops, 15);
+}
+
+@test
+function hashMapContainsGetMutAndClearPreserveCapacity(): void {
+  let mut map: HashMap<PlainKey, i32> = HashMap::init<PlainKey, i32>();
+  let lookup1: PlainKey = PlainKey { id: 1 };
+  let lookup2: PlainKey = PlainKey { id: 2 };
+  let lookup3: PlainKey = PlainKey { id: 3 };
+
+  map.insert(PlainKey { id: 1 }, 10);
+  map.insert(PlainKey { id: 2 }, 20);
+  map.reserve(16);
+
+  let preservedCapacity: u64 = map.capacity();
+
+  Test::assert(map.contains(&lookup1));
+  Test::assert(!map.contains(&lookup3));
+
+  let updated: Option<&mut i32> = map.getMut(&lookup2);
+  match (updated) {
+    Option::SOME(value) -> {
+      *value = 25;
+    },
+    Option::NONE -> {
+      Test::fail();
+    },
+  };
+
+  Test::assertEq<i32>(match (map.get(&lookup2)) { Option::SOME(value) -> *value, Option::NONE -> -1 }, 25);
+
+  map.clear();
+
+  Test::assert(map.isEmpty());
+  Test::assertEq<u64>(map.length(), 0);
+  Test::assertEq<u64>(map.capacity(), preservedCapacity);
+  Test::assert(!map.contains(&lookup1));
+  Test::assert(match (map.insert(PlainKey { id: 3 }, 30)) { Option::SOME(_) -> false, Option::NONE -> true });
+  Test::assertEq<i32>(match (map.get(&lookup3)) { Option::SOME(value) -> *value, Option::NONE -> -1 }, 30);
+  Test::assertEq<u64>(map.length(), 1);
+}
+
+@test
+function hashSetMembershipRemoveClearAndDropAreExactOnce(): void {
+  let mut drops: i32 = 0;
+  let mut temporaryDrops: i32 = 0;
+
+  {
+    let mut set: HashSet<SetKey> = HashSet::init<SetKey>();
+    set.reserve(8);
+
+    Test::assert(set.insert(SetKey { id: 1, marker: 1, counter: (&mut drops) as *mut i32 }));
+    Test::assert(set.insert(SetKey { id: 2, marker: 2, counter: (&mut drops) as *mut i32 }));
+    let duplicateKey: SetKey = SetKey { id: 1, marker: 1, counter: (&mut temporaryDrops) as *mut i32 };
+    let containsKey: SetKey = SetKey { id: 1, marker: 1, counter: (&mut temporaryDrops) as *mut i32 };
+    let removeKey: SetKey = SetKey { id: 2, marker: 2, counter: (&mut temporaryDrops) as *mut i32 };
+
+    Test::assert(!set.insert(duplicateKey));
+    Test::assert(set.contains(&containsKey));
+    Test::assert(set.remove(&removeKey));
+    Test::assert(!set.contains(&removeKey));
+    Test::assertEq<u64>(set.length(), 1);
+
+    set.clear();
+
+    Test::assert(set.isEmpty());
+  }
+
+  Test::assertEq<i32>(drops, 3);
+  Test::assertEq<i32>(temporaryDrops, 4);
+}
+
+@test
+function hashSetUsesZeroSizedMarkerPayload(): void {
+  Test::assertEq<u64>(@sizeOf<HashSetMarker>(), 0);
+
+  let mut set: HashSet<MarkerKey> = HashSet::init<MarkerKey>();
+  let lookup: MarkerKey = MarkerKey { id: 7 };
+  Test::assert(set.insert(MarkerKey { id: 7 }));
+  Test::assert(set.contains(&lookup));
+}

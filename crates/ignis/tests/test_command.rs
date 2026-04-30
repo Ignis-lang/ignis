@@ -64,6 +64,38 @@ fn harness_binary_path(project_dir: &Path) -> PathBuf {
   project_dir.join("build/bin/native_test_runner_fixture-tests")
 }
 
+fn std_harness_binary_path(output_dir: &Path) -> PathBuf {
+  output_dir.join("bin/std-tests")
+}
+
+fn std_snapshot_path(
+  std_root: &Path,
+  module_dir: &str,
+  fq_name: &str,
+  snapshot_name: &str,
+) -> PathBuf {
+  std_root.join(module_dir).join("__snapshots__").join(format!(
+    "{}__{}.snap.txt",
+    escape_snapshot_component(fq_name),
+    escape_snapshot_component(snapshot_name)
+  ))
+}
+
+fn read_optional_file(path: &Path) -> Option<Vec<u8>> {
+  fs::read(path).ok()
+}
+
+struct FileRestoreGuard {
+  path: PathBuf,
+  contents: Vec<u8>,
+}
+
+impl Drop for FileRestoreGuard {
+  fn drop(&mut self) {
+    let _ = fs::write(&self.path, &self.contents);
+  }
+}
+
 fn read_project_file(
   project_dir: &Path,
   relative_path: &str,
@@ -201,6 +233,91 @@ function smoke(): void {
   assert!(
     harness_binary_path(&project_dir).exists(),
     "expected cli test run to build the harness binary"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_std_executes_workspace_std_tests_via_cli_from_outside_project_root() {
+  let project_dir = make_temp_project_dir("test-std-outside-project");
+  let output_dir = project_dir.join("std-build");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .current_dir(&project_dir)
+    .arg("test-std")
+    .arg("vector::tests::clearDropsStringElementsBeforeReuse")
+    .arg("--std-path")
+    .arg(workspace_std_path())
+    .arg("--output-dir")
+    .arg(&output_dir)
+    .output()
+    .expect("run ignis test-std");
+
+  assert!(
+    output.status.success(),
+    "expected ignis test-std to succeed from outside any project root\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    stdout.contains("Tests passed") || stderr.contains("Tests passed"),
+    "expected successful std cli test summary\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    std_harness_binary_path(&output_dir).exists(),
+    "expected std cli test run to build the harness binary"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_std_updates_workspace_snapshots_via_cli() {
+  let project_dir = make_temp_project_dir("test-std-update-snapshots");
+  let output_dir = project_dir.join("std-build");
+  let snapshot_path = std_snapshot_path(
+    &workspace_std_path(),
+    "string",
+    "string::tests::snapshotStdRunnerSmoke",
+    "smoke",
+  );
+
+  let original_snapshot = read_optional_file(&snapshot_path).expect("expected committed std snapshot baseline");
+  let _restore_snapshot = FileRestoreGuard {
+    path: snapshot_path.clone(),
+    contents: original_snapshot.clone(),
+  };
+
+  let _ = fs::remove_file(&snapshot_path);
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .current_dir(&project_dir)
+    .arg("test-std")
+    .arg("string::tests::snapshotStdRunnerSmoke")
+    .arg("--update-snapshots")
+    .arg("--std-path")
+    .arg(workspace_std_path())
+    .arg("--output-dir")
+    .arg(&output_dir)
+    .output()
+    .expect("run ignis test-std --update-snapshots");
+
+  assert!(
+    output.status.success(),
+    "expected ignis test-std --update-snapshots to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(snapshot_path.exists(), "expected std snapshot file to be created");
+  assert_eq!(
+    read_optional_file(&snapshot_path).as_deref(),
+    Some(original_snapshot.as_slice()),
+    "expected std snapshot update smoke test to restore the committed baseline contents"
   );
 
   cleanup_project_dir(&project_dir);

@@ -1,0 +1,65 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+@implements(Drop)
+record Tracker {
+  counter: *mut i32;
+  marker: i32;
+
+  drop(&mut self): void {
+    *self.counter = *self.counter * 10 + self.marker;
+  }
+}
+
+@test
+function clearDropsStringElementsBeforeReuse(): void {
+  let mut values: Vector<String> = Vector::init<String>();
+  values.push(String::create("alpha"));
+  values.push(String::create("beta"));
+
+  values.clear();
+
+  Test::assertEq<u64>(values.length(), 0);
+
+  values.push(String::create("gamma"));
+
+  Test::assertEq<u64>(values.length(), 1);
+}
+
+@test
+function dropDropsStringElements(): void {
+  let mut drops: i32 = 0;
+
+  {
+    let mut values: Vector<Tracker> = Vector::init<Tracker>();
+    values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 4 });
+    values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 5 });
+  }
+
+  Test::assertEq<i32>(drops, 45);
+}
+
+@test
+function clearAndDropRunElementDropExactlyOnce(): void {
+  let mut directDrop: i32 = 0;
+  let mut drops: i32 = 0;
+
+  let mut probe: Tracker = Tracker { counter: (&mut directDrop) as *mut i32, marker: 9 };
+  probe.drop();
+  Test::assertEq<i32>(directDrop, 9);
+
+  {
+    let mut values: Vector<Tracker> = Vector::init<Tracker>();
+    values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 1 });
+    values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 2 });
+
+    values.clear();
+
+    Test::assertEq<i32>(drops, 12);
+
+    values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 3 });
+  }
+
+  Test::assertEq<i32>(drops, 123);
+}
