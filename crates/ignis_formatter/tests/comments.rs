@@ -173,7 +173,7 @@ fn keeps_import_separator_before_documented_top_level_declaration() {
 
   assert_eq!(
     formatted,
-    "import LibC, CType from \"std::libc\";\nimport Layout, Align from \"std::memory\";\nimport Block from \"./block\";\n\n/// Strategy for searching free blocks in the allocator.\n///\n/// When reusing freed memory blocks, different search strategies offer\n/// different trade-offs between allocation speed and memory utilization.\nexport enum SearchMode {\n  FirstFit,\n  NextFit,\n  BestFit,\n}\n"
+    "import Block from \"./block\";\nimport Layout, Align from \"std::memory\";\nimport LibC, CType from \"std::libc\";\n\n/// Strategy for searching free blocks in the allocator.\n///\n/// When reusing freed memory blocks, different search strategies offer\n/// different trade-offs between allocation speed and memory utilization.\nexport enum SearchMode {\n  FirstFit,\n  NextFit,\n  BestFit,\n}\n"
   );
 }
 

@@ -52,7 +52,7 @@ fn loads_bounded_defaults_without_project_files() {
       indent_width: 2,
       line_width: 100,
       use_tabs: false,
-      sort_imports: true,
+      sort_imports: false,
     }
   );
 }
@@ -89,7 +89,7 @@ fn resolves_bridge_file_and_cli_precedence_for_formatter_settings() {
       indent_width: 8,
       line_width: 100,
       use_tabs: false,
-      sort_imports: true,
+      sort_imports: false,
     }
   );
 }
@@ -116,7 +116,7 @@ fn dedicated_config_can_enable_tabs_without_cli_override() {
       indent_width: 4,
       line_width: 100,
       use_tabs: true,
-      sort_imports: true,
+      sort_imports: false,
     }
   );
 }
@@ -207,9 +207,9 @@ fn format_text_uses_tabs_when_requested() {
 // Phase 3: Task 3.3 — Import sorting
 
 #[test]
-fn sort_imports_defaults_to_true() {
+fn sort_imports_defaults_to_false() {
   let config = FormatterConfig::default();
-  assert!(config.sort_imports);
+  assert!(!config.sort_imports);
 }
 
 #[test]
@@ -255,13 +255,13 @@ fn format_text_sorts_imports_when_enabled() {
 }
 
 #[test]
-fn format_text_sorts_imports_by_default() {
+fn format_text_preserves_import_order_by_default() {
   let source =
     "import Zoo from \"std::zoo\";\nimport Alpha from \"std::alpha\";\n\nfunction main(): void { return; }\n";
 
-  let formatted = format_text(source, &FormatOptions::default()).expect("format with default import sorting");
+  let formatted = format_text(source, &FormatOptions::default()).expect("format with default import ordering");
 
-  assert!(formatted.starts_with("import Alpha from \"std::alpha\";\nimport Zoo from \"std::zoo\";"));
+  assert!(formatted.starts_with("import Zoo from \"std::zoo\";\nimport Alpha from \"std::alpha\";"));
 }
 
 #[test]

@@ -21,7 +21,7 @@ impl Default for FormatterConfig {
       indent_width: DEFAULT_INDENT_WIDTH,
       line_width: DEFAULT_LINE_WIDTH,
       use_tabs: false,
-      sort_imports: true,
+      sort_imports: false,
     }
   }
 }

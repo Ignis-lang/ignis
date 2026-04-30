@@ -135,8 +135,8 @@ function main(): i32 {
       append_closing_brace: false,
       wrap_in_heap_allocator_record: false,
       config: FormatterConfig::default(),
-      expected: r#"import Io from "std::io";
-import String from "std::string";
+      expected: r#"import String from "std::string";
+import Io from "std::io";
 
 record Household {
     public city: str;
