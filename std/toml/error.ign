@@ -1,0 +1,42 @@
+import TomlSpan from "./token";
+
+export enum TomlErrorKind {
+  UNEXPECTED_CHARACTER,
+  UNTERMINATED_STRING,
+  INVALID_INTEGER,
+}
+
+@implements(Clone)
+export record TomlError {
+  public kind: TomlErrorKind;
+  public message: String;
+  public span: TomlSpan;
+
+  public static new(kind: TomlErrorKind, message: str, span: TomlSpan): TomlError {
+    return TomlError {
+      kind: kind,
+      message: String::create(message),
+      span: span,
+    };
+  }
+
+  public static unexpectedCharacter(span: TomlSpan): TomlError {
+    return TomlError::new(TomlErrorKind::UNEXPECTED_CHARACTER, "unexpected character in TOML input", span);
+  }
+
+  public static unterminatedString(span: TomlSpan): TomlError {
+    return TomlError::new(TomlErrorKind::UNTERMINATED_STRING, "unterminated TOML string", span);
+  }
+
+  public static invalidInteger(span: TomlSpan): TomlError {
+    return TomlError::new(TomlErrorKind::INVALID_INTEGER, "invalid TOML integer literal", span);
+  }
+
+  public clone(&self): TomlError {
+    return TomlError {
+      kind: self.kind,
+      message: self.message.clone(),
+      span: self.span,
+    };
+  }
+}

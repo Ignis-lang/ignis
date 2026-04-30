@@ -1,0 +1,74 @@
+import Memory from "std::memory";
+import String from "std::string";
+import Test from "std::test";
+import Text from "std::text";
+
+function nextChar(cursor: &mut Text::Cursor): Text::Utf8Char {
+  let mut stream: &mut Text::Cursor = cursor;
+
+  return match (stream.advance()) {
+    Option::SOME(value) -> value,
+    Option::NONE -> {
+      Test::fail();
+      @unreachable();
+    },
+  };
+}
+
+function utf8SampleString(): String {
+  let raw: *mut u8 = Memory::allocateVector<u8>(6);
+
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 195 as u8);
+  @write<u8>(raw + 2, 169 as u8);
+  @write<u8>(raw + 3, 228 as u8);
+  @write<u8>(raw + 4, 184 as u8);
+  @write<u8>(raw + 5, 173 as u8);
+
+  return String::create(raw, 6 as u64);
+}
+
+function utf8TailString(): String {
+  let raw: *mut u8 = Memory::allocateVector<u8>(5);
+
+  @write<u8>(raw, 195 as u8);
+  @write<u8>(raw + 1, 169 as u8);
+  @write<u8>(raw + 2, 228 as u8);
+  @write<u8>(raw + 3, 184 as u8);
+  @write<u8>(raw + 4, 173 as u8);
+
+  return String::create(raw, 5 as u64);
+}
+
+@test
+function cursorAdvancesByUtf8ScalarBoundaries(): void {
+  let source: String = utf8SampleString();
+  let mut cursor: Text::Cursor = Text::Cursor::from(&source);
+
+  let first: Text::Utf8Char = nextChar(&mut cursor);
+  Test::assertEq<u32>(first.scalar, 97);
+  Test::assertEq<u64>(first.start, 0);
+  Test::assertEq<u64>(first.end, 1);
+
+  let second: Text::Utf8Char = nextChar(&mut cursor);
+  Test::assertEq<u32>(second.scalar, 233);
+  Test::assertEq<u64>(second.start, 1);
+  Test::assertEq<u64>(second.end, 3);
+
+  let third: Text::Utf8Char = nextChar(&mut cursor);
+  Test::assertEq<u32>(third.scalar, 20013);
+  Test::assertEq<u64>(third.start, 3);
+  Test::assertEq<u64>(third.end, 6);
+
+  Test::assert(cursor.isAtEnd());
+}
+
+@test
+function cursorSlicesByByteRange(): void {
+  let source: String = utf8SampleString();
+  let cursor: Text::Cursor = Text::Cursor::from(&source);
+  let value: String = cursor.slice(1, 6);
+  let expected: String = utf8TailString();
+
+  Test::assert(value.equals(&expected));
+}

@@ -1,0 +1,226 @@
+import Memory from "std::memory";
+import String from "std::string";
+import Test from "std::test";
+import Toml from "std::toml";
+import TomlError from "./error";
+import TomlErrorKind from "./error";
+import TomlSpan from "./token";
+import TomlToken from "./token";
+import TomlTokenKind from "./token";
+import Vector from "std::vector";
+
+function tokenAt(tokens: &Vector<TomlToken>, index: u64): &TomlToken {
+  return match (Toml::tokenAt(tokens, index)) {
+    Option::SOME(token) -> token,
+    Option::NONE -> {
+      Test::fail();
+      @unreachable();
+    },
+  };
+}
+
+function expectTokens(source: str, tokens: &mut Vector<TomlToken>): void {
+  match (Toml::lexInto(source, tokens)) {
+    Option::NONE -> {},
+    Option::SOME(_) -> {
+      Test::fail();
+      @unreachable();
+    },
+  };
+}
+
+function expectTokens(source: &String, tokens: &mut Vector<TomlToken>): void {
+  match (Toml::lexInto(source, tokens)) {
+    Option::NONE -> {},
+    Option::SOME(_) -> {
+      Test::fail();
+      @unreachable();
+    },
+  };
+}
+
+function expectError(source: str, error: &mut TomlError): void {
+  let mut output: &mut TomlError = error;
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+
+  match (Toml::lexInto(source, &mut tokens)) {
+    Option::NONE -> {
+      Test::fail();
+      @unreachable();
+    },
+    Option::SOME(value) -> {
+      *output = value;
+    },
+  };
+}
+
+function utf8TomlSource(): String {
+  let raw: *mut u8 = Memory::allocateVector<u8>(18);
+
+  @write<u8>(raw, 'n' as u8);
+  @write<u8>(raw + 1, 'a' as u8);
+  @write<u8>(raw + 2, 'm' as u8);
+  @write<u8>(raw + 3, 'e' as u8);
+  @write<u8>(raw + 4, ' ' as u8);
+  @write<u8>(raw + 5, '=' as u8);
+  @write<u8>(raw + 6, ' ' as u8);
+  @write<u8>(raw + 7, '"' as u8);
+  @write<u8>(raw + 8, 'c' as u8);
+  @write<u8>(raw + 9, 'a' as u8);
+  @write<u8>(raw + 10, 'f' as u8);
+  @write<u8>(raw + 11, 195 as u8);
+  @write<u8>(raw + 12, 169 as u8);
+  @write<u8>(raw + 13, ' ' as u8);
+  @write<u8>(raw + 14, 228 as u8);
+  @write<u8>(raw + 15, 184 as u8);
+  @write<u8>(raw + 16, 173 as u8);
+  @write<u8>(raw + 17, '"' as u8);
+
+  return String::create(raw, 18 as u64);
+}
+
+function utf8TomlValue(): String {
+  let raw: *mut u8 = Memory::allocateVector<u8>(9);
+
+  @write<u8>(raw, 'c' as u8);
+  @write<u8>(raw + 1, 'a' as u8);
+  @write<u8>(raw + 2, 'f' as u8);
+  @write<u8>(raw + 3, 195 as u8);
+  @write<u8>(raw + 4, 169 as u8);
+  @write<u8>(raw + 5, ' ' as u8);
+  @write<u8>(raw + 6, 228 as u8);
+  @write<u8>(raw + 7, 184 as u8);
+  @write<u8>(raw + 8, 173 as u8);
+
+  return String::create(raw, 9 as u64);
+}
+
+function tokenKindName(kind: TomlTokenKind): str {
+  return match (kind) {
+    TomlTokenKind::LEFT_BRACKET -> "LEFT_BRACKET",
+    TomlTokenKind::RIGHT_BRACKET -> "RIGHT_BRACKET",
+    TomlTokenKind::DOT -> "DOT",
+    TomlTokenKind::EQUALS -> "EQUALS",
+    TomlTokenKind::COMMA -> "COMMA",
+    TomlTokenKind::NEWLINE -> "NEWLINE",
+    TomlTokenKind::IDENTIFIER -> "IDENTIFIER",
+    TomlTokenKind::STRING -> "STRING",
+    TomlTokenKind::INTEGER -> "INTEGER",
+    TomlTokenKind::BOOLEAN -> "BOOLEAN",
+    TomlTokenKind::EOF -> "EOF",
+  };
+}
+
+function errorKindName(kind: TomlErrorKind): str {
+  return match (kind) {
+    TomlErrorKind::UNEXPECTED_CHARACTER -> "UNEXPECTED_CHARACTER",
+    TomlErrorKind::UNTERMINATED_STRING -> "UNTERMINATED_STRING",
+    TomlErrorKind::INVALID_INTEGER -> "INVALID_INTEGER",
+  };
+}
+
+function assertTokenKind(actual: TomlTokenKind, expected: TomlTokenKind): void {
+  let actualName: String = String::create(tokenKindName(actual));
+  let expectedName: String = String::create(tokenKindName(expected));
+
+  Test::assert(actualName.equals(&expectedName));
+}
+
+function assertErrorKind(actual: TomlErrorKind, expected: TomlErrorKind): void {
+  let actualName: String = String::create(errorKindName(actual));
+  let expectedName: String = String::create(errorKindName(expected));
+
+  Test::assert(actualName.equals(&expectedName));
+}
+
+function assertToken(
+  token: &TomlToken,
+  kind: TomlTokenKind,
+  lexeme: str,
+  start: u64,
+  end: u64,
+): void {
+  assertTokenKind(token.kind, kind);
+
+  let expectedLexeme: String = String::create(lexeme);
+  Test::assert(token.lexeme.equals(&expectedLexeme));
+  Test::assertEq<u64>(token.span.start, start);
+  Test::assertEq<u64>(token.span.end, end);
+}
+
+@test
+function lexSkipsCommentsAndEmitsNewlines(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("# lead\nname = true\n# tail\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 7);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::NEWLINE, "\n", 6, 7);
+  assertToken(tokenAt(&tokens, 1), TomlTokenKind::IDENTIFIER, "name", 7, 11);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::EQUALS, "=", 12, 13);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::BOOLEAN, "true", 14, 18);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::NEWLINE, "\n", 18, 19);
+  assertToken(tokenAt(&tokens, 5), TomlTokenKind::NEWLINE, "\n", 25, 26);
+  assertToken(tokenAt(&tokens, 6), TomlTokenKind::EOF, "", 26, 26);
+}
+
+@test
+function lexRecognizesTablesDottedKeysArraysAndScalars(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("[package]\npath.to = [\"std\", \"ffi\"]\ncount = -42\nflag = false", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 22);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::LEFT_BRACKET, "[", 0, 1);
+  assertToken(tokenAt(&tokens, 1), TomlTokenKind::IDENTIFIER, "package", 1, 8);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::RIGHT_BRACKET, "]", 8, 9);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::IDENTIFIER, "path", 10, 14);
+  assertToken(tokenAt(&tokens, 5), TomlTokenKind::DOT, ".", 14, 15);
+  assertToken(tokenAt(&tokens, 6), TomlTokenKind::IDENTIFIER, "to", 15, 17);
+  assertToken(tokenAt(&tokens, 8), TomlTokenKind::LEFT_BRACKET, "[", 20, 21);
+  assertToken(tokenAt(&tokens, 9), TomlTokenKind::STRING, "std", 21, 26);
+  assertToken(tokenAt(&tokens, 10), TomlTokenKind::COMMA, ",", 26, 27);
+  assertToken(tokenAt(&tokens, 11), TomlTokenKind::STRING, "ffi", 28, 33);
+  assertToken(tokenAt(&tokens, 12), TomlTokenKind::RIGHT_BRACKET, "]", 33, 34);
+  assertToken(tokenAt(&tokens, 16), TomlTokenKind::INTEGER, "-42", 43, 46);
+  assertToken(tokenAt(&tokens, 20), TomlTokenKind::BOOLEAN, "false", 54, 59);
+  assertToken(tokenAt(&tokens, 21), TomlTokenKind::EOF, "", 59, 59);
+}
+
+@test
+function lexRecognizesQuotedKeysAndQuotedStrings(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("\"alias-key\" = \"value\"\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 5);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::STRING, "alias-key", 0, 11);
+  assertToken(tokenAt(&tokens, 1), TomlTokenKind::EQUALS, "=", 12, 13);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::STRING, "value", 14, 21);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::NEWLINE, "\n", 21, 22);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::EOF, "", 22, 22);
+}
+
+@test
+function lexPreservesUtf8QuotedStringContent(): void {
+  let source: String = utf8TomlSource();
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens(&source, &mut tokens);
+  let expectedValue: String = utf8TomlValue();
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 4);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::IDENTIFIER, "name", 0, 4);
+  assertToken(tokenAt(&tokens, 1), TomlTokenKind::EQUALS, "=", 5, 6);
+  Test::assert(tokenAt(&tokens, 2).lexeme.equals(&expectedValue));
+  assertTokenKind(tokenAt(&tokens, 2).kind, TomlTokenKind::STRING);
+  Test::assertEq<u64>(tokenAt(&tokens, 2).span.start, 7);
+  Test::assertEq<u64>(tokenAt(&tokens, 2).span.end, 18);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::EOF, "", 18, 18);
+}
+
+@test
+function lexReportsMalformedTokenSpan(): void {
+  let mut error: TomlError = TomlError::unexpectedCharacter(TomlSpan::new(0, 0));
+  expectError("@oops = 1", &mut error);
+
+  assertErrorKind(error.kind, TomlErrorKind::UNEXPECTED_CHARACTER);
+  Test::assertEq<u64>(error.span.start, 0);
+  Test::assertEq<u64>(error.span.end, 1);
+}
