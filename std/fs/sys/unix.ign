@@ -22,7 +22,7 @@
 //! | `rmdir`    | `rmdir(2)`         | `Result<boolean, IoError>`        |
 //! | `rename`   | `rename(2)`        | `Result<boolean, IoError>`        |
 //! | `opendir`  | `opendir(3)`       | `Result<DirPtr, IoError>`         |
-//! | `readdir`  | `readdir(3)`       | `Option<SysDirEntry>`            |
+//! | `readdir`  | `readdir(3)`       | `Result<Option<SysDirEntry>, IoError>` |
 //! | `closedir` | `closedir(3)`      | `void`                            |
 //!
 //! ## Types
@@ -512,24 +512,28 @@ export namespace Fs::Sys {
 
   /// Reads the next entry from a directory stream.
   ///
-  /// Returns `Option::NONE` when the end of the directory is reached.
+  /// Returns `Result::OK(Option::NONE)` when the end of the directory is reached.
   /// The returned `SysDirEntry` borrows its `name` from the internal
   /// dirent buffer — valid only until the next `readdir` or `closedir`.
-  ///
-  /// Note: this does not distinguish "end of directory" from "error".
-  /// For fine-grained error checking, clear errno before calling and
-  /// check it after getting `NONE`.
-  function readdir(dirp: CType::DirPtr): Option<SysDirEntry> {
+  function readdir(dirp: CType::DirPtr): Result<Option<SysDirEntry>, Io::IoError> {
+    @write<i32>(__fs_errno_fn::errno_location(), 0);
+
     let entry: *mut void = __fs_dir::readdir(dirp);
     if (entry == null) {
-      return Option::NONE;
+      let rawErrno: i32 = @read<i32>(__fs_errno_fn::errno_location());
+
+      if (rawErrno == 0) {
+        return Result::OK(Option::NONE);
+      }
+
+      return Result::ERROR(lastError());
     }
 
     let name: str = __fs_rt::ignis_dirent_name(entry) as str;
     let ino: u64 = __fs_rt::ignis_dirent_ino(entry);
     let fileType: u8 = __fs_rt::ignis_dirent_type(entry);
 
-    return Option::SOME(SysDirEntry { name: name, ino: ino, fileType: fileType });
+    return Result::OK(Option::SOME(SysDirEntry { name: name, ino: ino, fileType: fileType }));
   }
 
   /// Closes a directory stream opened with `opendir`.

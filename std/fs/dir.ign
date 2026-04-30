@@ -22,14 +22,18 @@
 //!   let mut iter: Fs::ReadDir = result.unwrap();
 //!
 //!   loop {
-//!     let entry: Option<Fs::DirEntry> = iter.next();
-//!     if (entry.isNone()) {
-//!       break;
-//!     }
-//!
-//!     let e: Fs::DirEntry = entry.unwrap();
-//!     if (e.isDir()) {
-//!       Io::println(e.name);
+//!     match (iter.next()) {
+//!       Result::OK(Option::SOME(entry)) -> {
+//!         if (entry.isDir()) {
+//!           Io::println(entry.name);
+//!         }
+//!       },
+//!       Result::OK(Option::NONE) -> {
+//!         break;
+//!       },
+//!       Result::ERROR(_) -> {
+//!         return 1;
+//!       },
 //!     }
 //!   }
 //!
@@ -86,9 +90,21 @@ export namespace Fs {
       });
     }
 
-    /// Returns the next directory entry, or `NONE` at end of directory.
-    public next(&mut self): Option<Fs::DirEntry> {
-      let raw: Fs::Sys::SysDirEntry = Fs::Sys::readdir(self.dir)!;
+    /// Returns the next directory entry.
+    ///
+    /// `Result::OK(Option::NONE)` means end of directory.
+    public next(&mut self): Result<Option<Fs::DirEntry>, Io::IoError> {
+      let nextEntry: Result<Option<Fs::Sys::SysDirEntry>, Io::IoError> = Fs::Sys::readdir(self.dir);
+
+      let raw: Fs::Sys::SysDirEntry = match (nextEntry) {
+        Result::OK(Option::SOME(entry)) -> entry,
+        Result::OK(Option::NONE) -> {
+          return Result::OK(Option::NONE);
+        },
+        Result::ERROR(err) -> {
+          return Result::ERROR(err);
+        },
+      };
 
       let ownedName: String = String::create(raw.name);
 
@@ -96,12 +112,12 @@ export namespace Fs {
       let mut ownedPath: Path::PathBuf = Path::PathBuf::fromString(&base);
       ownedPath.push(ownedName.toStr());
 
-      return Option::SOME(Fs::DirEntry {
+      return Result::OK(Option::SOME(Fs::DirEntry {
         name: ownedName,
         path: ownedPath,
         fileType: Fs::fileTypeFromDirent(raw.fileType),
         ino: raw.ino,
-      });
+      }));
     }
 
     /// Closes the directory stream.

@@ -405,6 +405,34 @@ fn run_std_tests_executes_fs_interior_nul_slice() {
 }
 
 #[test]
+fn run_std_tests_executes_fs_read_dir_non_empty_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::readDirNextReturnsOkSomeAndThenOkNone"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs read-dir non-empty std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_fs_read_dir_empty_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::readDirNextReturnsOkNoneForExhaustedEmptyDirectory"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs read-dir empty std slice to succeed");
+}
+
+#[test]
 fn run_std_tests_executes_string_snapshot_slice() {
   let output_dir = TempDir::new().expect("temporary std output dir");
 

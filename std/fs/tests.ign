@@ -59,3 +59,130 @@ function writeStringAndReadToStringPreserveInteriorNulBytes(): void {
   Test::assertEq<char>(middleByte, '\0');
   Test::assertEq<char>(lastByte, 'B');
 }
+
+@test
+function readDirNextReturnsOkSomeAndThenOkNone(): void {
+  let dirPath: str = "/tmp/ignis_std_test_runner_fs_read_dir_entries";
+  let filePath: str = "/tmp/ignis_std_test_runner_fs_read_dir_entries/alpha.txt";
+
+  if (Fs::exists(filePath)) {
+    match (Fs::removeFile(filePath)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> Test::fail(),
+    };
+  }
+
+  if (Fs::exists(dirPath)) {
+    match (Fs::removeDir(dirPath)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> Test::fail(),
+    };
+  }
+
+  match (Fs::createDir(dirPath, 493)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let payload: String = String::create("alpha");
+  match (Fs::writeString(filePath, &payload)) {
+    Result::OK(true) -> {},
+    _ -> Test::fail(),
+  };
+
+  let mut readDir: Fs::ReadDir = match (Fs::ReadDir::open(dirPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let mut reachedEnd: boolean = false;
+  let mut steps: i32 = 0;
+  let mut entryCount: i32 = 0;
+
+  while (steps < 16) {
+    let nextResult: Result<Option<Fs::DirEntry>, Io::IoError> = readDir.next();
+
+    match (nextResult) {
+      Result::OK(Option::SOME(_)) -> {
+        entryCount += 1;
+      },
+      Result::OK(Option::NONE) -> {
+        reachedEnd = true;
+        break;
+      },
+      Result::ERROR(_) -> Test::fail(),
+    };
+
+    steps += 1;
+  }
+
+  readDir.drop();
+
+  match (Fs::removeFile(filePath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (Fs::removeDir(dirPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  Test::assert(entryCount > 2);
+  Test::assert(reachedEnd);
+}
+
+@test
+function readDirNextReturnsOkNoneForExhaustedEmptyDirectory(): void {
+  let dirPath: str = "/tmp/ignis_std_test_runner_fs_read_dir_empty";
+
+  if (Fs::exists(dirPath)) {
+    match (Fs::removeDir(dirPath)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> Test::fail(),
+    };
+  }
+
+  match (Fs::createDir(dirPath, 493)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let mut readDir: Fs::ReadDir = match (Fs::ReadDir::open(dirPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let mut reachedEnd: boolean = false;
+  let mut steps: i32 = 0;
+
+  while (steps < 16) {
+    let nextResult: Result<Option<Fs::DirEntry>, Io::IoError> = readDir.next();
+
+    match (nextResult) {
+      Result::OK(Option::SOME(_)) -> {},
+      Result::OK(Option::NONE) -> {
+        reachedEnd = true;
+        break;
+      },
+      Result::ERROR(_) -> Test::fail(),
+    };
+
+    steps += 1;
+  }
+
+  readDir.drop();
+
+  match (Fs::removeDir(dirPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  Test::assert(reachedEnd);
+}
