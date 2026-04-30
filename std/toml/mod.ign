@@ -1,17 +1,12 @@
-import Serialize, Serializer from "std::serializer";
+import Serialize from "std::serializer::serialize";
+import Serializer from "std::serializer::writer";
 
-import String from "std::string";
 import Text from "std::text";
-import Vector from "std::vector";
 
-import TomlError from "./error";
-import TomlErrorKind from "./error";
-import TomlSpan from "./token";
-import TomlToken from "./token";
-import TomlTokenKind from "./token";
+import TomlError, TomlErrorKind from "./error";
+import TomlSpan, TomlToken, TomlTokenKind from "./token";
 
 record TomlLexeme {
-  public value: String;
   public end: u64;
 }
 
@@ -86,7 +81,6 @@ function tomlLexIdentifier(cursor: &mut Text::Cursor, start: u64): TomlLexeme {
   let end: u64 = stream.position();
 
   return TomlLexeme {
-    value: stream.slice(start, end),
     end: end,
   };
 }
@@ -159,7 +153,6 @@ function tomlLexInteger(cursor: &mut Text::Cursor, start: u64): Result<TomlLexem
   let end: u64 = stream.position();
 
   return Result::OK(TomlLexeme {
-    value: stream.slice(start, end),
     end: end,
   });
 }
@@ -191,9 +184,9 @@ function tomlPushEscaped(value: &mut String, escaped: char): boolean {
   return true;
 }
 
-function tomlLexQuotedString(cursor: &mut Text::Cursor, start: u64): Result<TomlLexeme, TomlError> {
+function tomlLexQuotedString(cursor: &mut Text::Cursor, start: u64, output: &mut String): Result<TomlLexeme, TomlError> {
   let mut stream: &mut Text::Cursor = cursor;
-  let mut value: String = String::new();
+  let mut value: &mut String = output;
   let mut segmentStart: u64 = start + 1;
 
   stream.advance();
@@ -220,7 +213,6 @@ function tomlLexQuotedString(cursor: &mut Text::Cursor, start: u64): Result<Toml
       stream.advance();
 
       return Result::OK(TomlLexeme {
-        value: value.clone(),
         end: stream.position(),
       });
     }
@@ -244,7 +236,7 @@ function tomlLexQuotedString(cursor: &mut Text::Cursor, start: u64): Result<Toml
         },
       };
 
-      if (!tomlPushEscaped(&mut value, escapedAscii)) {
+      if (!tomlPushEscaped(value, escapedAscii)) {
         return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(escaped.start, escaped.end)));
       }
 
@@ -274,41 +266,55 @@ function tomlBooleanKind(lexeme: &String): TomlTokenKind {
   return TomlTokenKind::IDENTIFIER;
 }
 
-function tomlPushQuotedToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::Cursor, start: u64): Result<boolean, TomlError> {
+function tomlPushLiteralToken(tokens: &mut Vector<TomlToken>, kind: TomlTokenKind, lexeme: str, span: TomlSpan): void {
   let mut output: &mut Vector<TomlToken> = tokens;
-  let lexeme: TomlLexeme = match (tomlLexQuotedString(cursor, start)) {
+  let slot: *mut TomlToken = output.pushUninitialized();
+
+  @write<TomlToken>(slot, TomlToken::new(kind, lexeme, span));
+}
+
+function tomlPushStringToken(tokens: &mut Vector<TomlToken>, kind: TomlTokenKind, lexeme: &String, span: TomlSpan): void {
+  let mut output: &mut Vector<TomlToken> = tokens;
+  let slot: *mut TomlToken = output.pushUninitialized();
+
+  @write<TomlToken>(slot, TomlToken::create(kind, lexeme, span));
+}
+
+function tomlPushQuotedToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::Cursor, start: u64): Result<boolean, TomlError> {
+  let output: &mut Vector<TomlToken> = tokens;
+  let mut value: String = String::new();
+  let lexeme: TomlLexeme = match (tomlLexQuotedString(cursor, start, &mut value)) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
       return Result::ERROR(error);
     },
   };
-  let value: String = lexeme.value.clone();
 
-  output.push(TomlToken::from(TomlTokenKind::STRING, &value, TomlSpan::new(start, lexeme.end)));
+  tomlPushStringToken(output, TomlTokenKind::STRING, &value, TomlSpan::new(start, lexeme.end));
   return Result::OK(true);
 }
 
 function tomlPushIntegerToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::Cursor, start: u64): Result<boolean, TomlError> {
-  let mut output: &mut Vector<TomlToken> = tokens;
+  let output: &mut Vector<TomlToken> = tokens;
   let lexeme: TomlLexeme = match (tomlLexInteger(cursor, start)) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
       return Result::ERROR(error);
     },
   };
-  let value: String = lexeme.value.clone();
+  let value: String = cursor.slice(start, lexeme.end);
 
-  output.push(TomlToken::from(TomlTokenKind::INTEGER, &value, TomlSpan::new(start, lexeme.end)));
+  tomlPushStringToken(output, TomlTokenKind::INTEGER, &value, TomlSpan::new(start, lexeme.end));
   return Result::OK(true);
 }
 
 function tomlPushIdentifierToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::Cursor, start: u64): void {
-  let mut output: &mut Vector<TomlToken> = tokens;
+  let output: &mut Vector<TomlToken> = tokens;
   let lexeme: TomlLexeme = tomlLexIdentifier(cursor, start);
-  let value: String = lexeme.value.clone();
+  let value: String = cursor.slice(start, lexeme.end);
   let kind: TomlTokenKind = tomlBooleanKind(&value);
 
-  output.push(TomlToken::from(kind, &value, TomlSpan::new(start, lexeme.end)));
+  tomlPushStringToken(output, kind, &value, TomlSpan::new(start, lexeme.end));
 }
 
 export namespace Toml {
@@ -340,7 +346,7 @@ export namespace Toml {
   }
 
   function lex(source: &String): Result<Vector<TomlToken>, TomlError> {
-    let mut cursor: Text::Cursor = Text::Cursor::from(source);
+    let mut cursor: Text::Cursor = Text::Cursor::create(source);
     let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
 
     while (!cursor.isAtEnd()) {
@@ -369,36 +375,36 @@ export namespace Toml {
           tomlSkipComment(&mut cursor);
         },
         '\n' -> {
-          tokens.push(TomlToken::new(TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(&mut tokens, TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '\r' -> {
           cursor.advance();
 
           if (cursor.eatAscii('\n')) {
-            tokens.push(TomlToken::new(TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position())));
+            tomlPushLiteralToken(&mut tokens, TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position()));
           } else {
-            tokens.push(TomlToken::new(TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position())));
+            tomlPushLiteralToken(&mut tokens, TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position()));
           }
         },
         '[' -> {
-          tokens.push(TomlToken::new(TomlTokenKind::LEFT_BRACKET, "[", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(&mut tokens, TomlTokenKind::LEFT_BRACKET, "[", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         ']' -> {
-          tokens.push(TomlToken::new(TomlTokenKind::RIGHT_BRACKET, "]", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(&mut tokens, TomlTokenKind::RIGHT_BRACKET, "]", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '.' -> {
-          tokens.push(TomlToken::new(TomlTokenKind::DOT, ".", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(&mut tokens, TomlTokenKind::DOT, ".", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '=' -> {
-          tokens.push(TomlToken::new(TomlTokenKind::EQUALS, "=", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(&mut tokens, TomlTokenKind::EQUALS, "=", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         ',' -> {
-          tokens.push(TomlToken::new(TomlTokenKind::COMMA, ",", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(&mut tokens, TomlTokenKind::COMMA, ",", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '"' -> {
@@ -442,12 +448,12 @@ export namespace Toml {
       };
     }
 
-    tokens.push(TomlToken::new(TomlTokenKind::EOF, "", TomlSpan::new(cursor.position(), cursor.position())));
+    tomlPushLiteralToken(&mut tokens, TomlTokenKind::EOF, "", TomlSpan::new(cursor.position(), cursor.position()));
     return Result::OK(tokens);
   }
 
   function lexInto(source: &String, tokens: &mut Vector<TomlToken>): Option<TomlError> {
-    let mut cursor: Text::Cursor = Text::Cursor::from(source);
+    let mut cursor: Text::Cursor = Text::Cursor::create(source);
     let mut output: &mut Vector<TomlToken> = tokens;
 
     output.clear();
@@ -478,36 +484,36 @@ export namespace Toml {
           tomlSkipComment(&mut cursor);
         },
         '\n' -> {
-          output.push(TomlToken::new(TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(output, TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '\r' -> {
           cursor.advance();
 
           if (cursor.eatAscii('\n')) {
-            output.push(TomlToken::new(TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position())));
+            tomlPushLiteralToken(output, TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position()));
           } else {
-            output.push(TomlToken::new(TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position())));
+            tomlPushLiteralToken(output, TomlTokenKind::NEWLINE, "\n", TomlSpan::new(current.start, cursor.position()));
           }
         },
         '[' -> {
-          output.push(TomlToken::new(TomlTokenKind::LEFT_BRACKET, "[", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(output, TomlTokenKind::LEFT_BRACKET, "[", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         ']' -> {
-          output.push(TomlToken::new(TomlTokenKind::RIGHT_BRACKET, "]", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(output, TomlTokenKind::RIGHT_BRACKET, "]", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '.' -> {
-          output.push(TomlToken::new(TomlTokenKind::DOT, ".", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(output, TomlTokenKind::DOT, ".", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '=' -> {
-          output.push(TomlToken::new(TomlTokenKind::EQUALS, "=", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(output, TomlTokenKind::EQUALS, "=", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         ',' -> {
-          output.push(TomlToken::new(TomlTokenKind::COMMA, ",", TomlSpan::new(current.start, current.end)));
+          tomlPushLiteralToken(output, TomlTokenKind::COMMA, ",", TomlSpan::new(current.start, current.end));
           cursor.advance();
         },
         '"' -> {
@@ -551,7 +557,7 @@ export namespace Toml {
       };
     }
 
-    output.push(TomlToken::new(TomlTokenKind::EOF, "", TomlSpan::new(cursor.position(), cursor.position())));
+    tomlPushLiteralToken(output, TomlTokenKind::EOF, "", TomlSpan::new(cursor.position(), cursor.position()));
     return Option::NONE;
   }
 
