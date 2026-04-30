@@ -2,12 +2,153 @@ import Memory from "std::memory";
 import Vector from "std::vector";
 
 import TomlError from "./error";
-import TomlSpan from "./token";
+import TomlSpan, TomlToken, TomlTokenKind from "./token";
 
 function tomlPathSegments(path: &String): Vector<String> {
   return path.split((byte: u8): boolean -> {
     return byte == ('.' as u8);
   });
+}
+
+function tomlOwnedStr(value: str): str {
+  let owned: String = String::create(value);
+  return tomlOwnedStr(&owned);
+}
+
+function tomlOwnedStr(value: &String): str {
+  let bytes: Vector<u8> = value.toBytes();
+  let length: u64 = bytes.length();
+  let raw: *mut u8 = Memory::allocateVector<u8>(length + 1);
+
+  if (length > 0) {
+    Memory::copy<u8>(raw, bytes.asPtr(), length);
+  }
+
+  @write<u8>(raw + length, 0);
+  return raw as str;
+}
+
+function tomlUnexpectedParserSpan(tokens: *mut TomlToken, length: u64, index: u64): TomlSpan {
+  if (tokens == null || length == 0) {
+    return TomlSpan::new(0, 0);
+  }
+
+  if (index >= length) {
+    return (*(tokens + (length - 1))).span;
+  }
+
+  return (*(tokens + index)).span;
+}
+
+export record TomlParserCursor {
+  tokens: *mut TomlToken;
+  length: u64;
+  index: u64;
+
+  public static create(tokens: &Vector<TomlToken>): TomlParserCursor {
+    return TomlParserCursor {
+      tokens: tokens.asPtr() as *mut TomlToken,
+      length: tokens.length(),
+      index: 0,
+    };
+  }
+
+  public peekKind(&self): Option<TomlTokenKind> {
+    if (self.tokens == null || self.index >= self.length) {
+      return Option::NONE;
+    }
+
+    return Option::SOME((*(self.tokens + self.index)).kind);
+  }
+
+  public peekLexeme(&self): Option<str> {
+    if (self.tokens == null || self.index >= self.length) {
+      return Option::NONE;
+    }
+
+    return Option::SOME((*(self.tokens + self.index)).lexeme.toStr());
+  }
+
+  public peekSpan(&self): Option<TomlSpan> {
+    if (self.tokens == null || self.index >= self.length) {
+      return Option::NONE;
+    }
+
+    return Option::SOME((*(self.tokens + self.index)).span);
+  }
+
+  public advance(&mut self): Option<TomlTokenKind> {
+    let current: Option<TomlTokenKind> = self.peekKind();
+
+    if (let Option::SOME(token) = current) {
+      self.index += 1;
+      return Option::SOME(token);
+    }
+
+    return Option::NONE;
+  }
+
+  public skipNewlines(&mut self): void {
+    while (true) {
+      let Option::SOME(token) = self.peekKind() else {
+        return;
+      };
+
+      if (token != TomlTokenKind::NEWLINE) {
+        return;
+      }
+
+      self.advance();
+    }
+  }
+
+  public matchKind(&mut self, kind: TomlTokenKind): boolean {
+    let Option::SOME(token) = self.peekKind() else {
+      return false;
+    };
+
+    if (token != kind) {
+      return false;
+    }
+
+    self.index += 1;
+    return true;
+  }
+
+  public expect(&mut self, kind: TomlTokenKind): Result<TomlSpan, TomlError> {
+    let Option::SOME(token) = self.peekKind() else {
+      return Result::ERROR(TomlError::unexpectedToken(tomlUnexpectedParserSpan(self.tokens, self.length, self.index)));
+    };
+
+    let span: TomlSpan = tomlUnexpectedParserSpan(self.tokens, self.length, self.index);
+
+    if (token != kind) {
+      return Result::ERROR(TomlError::unexpectedToken(span));
+    }
+
+    self.index += 1;
+    return Result::OK(span);
+  }
+
+  public tokenSpan(&self): TomlSpan {
+    return tomlUnexpectedParserSpan(self.tokens, self.length, self.index);
+  }
+
+  public previousSpan(&self): TomlSpan {
+    if (self.index == 0) {
+      return TomlSpan::new(0, 0);
+    }
+
+    return tomlUnexpectedParserSpan(self.tokens, self.length, self.index - 1);
+  }
+
+  public isAtEnd(&self): boolean {
+    let Option::SOME(token) = self.peekKind() else {
+      return true;
+    };
+
+    return token == TomlTokenKind::EOF;
+  }
 }
 
 export enum TomlValueKind {
@@ -28,8 +169,26 @@ export enum TomlDateTimeKind {
   OFFSET_DATE_TIME,
 }
 
+export enum TomlTableState {
+  IMPLICIT,
+  EXPLICIT,
+  INLINE,
+}
+
+export record TomlPathSegment {
+  public text: str;
+  public span: TomlSpan;
+
+  public static new(text: &String, span: TomlSpan): TomlPathSegment {
+    return TomlPathSegment {
+      text: tomlOwnedStr(text),
+      span: span,
+    };
+  }
+}
+
 export record TomlDateTime {
-  public raw: String;
+  public raw: str;
   public kind: TomlDateTimeKind;
   public year: i32;
   public month: i32;
@@ -55,7 +214,7 @@ export record TomlDateTime {
     span: TomlSpan,
   ): TomlDateTime {
     return TomlDateTime {
-      raw: String::create(raw),
+      raw: tomlOwnedStr(raw),
       kind: kind,
       year: year,
       month: month,
@@ -106,7 +265,7 @@ export record TomlDateTime {
 
   public clone(&self): TomlDateTime {
     return TomlDateTime {
-      raw: self.raw.clone(),
+      raw: self.raw,
       kind: self.kind,
       year: self.year,
       month: self.month,
@@ -121,46 +280,80 @@ export record TomlDateTime {
   }
 }
 
-function tomlStringPointer(value: String): *mut String {
-  let pointer: *mut String = Memory::allocateVector<String>(1);
-  @write<String>(pointer, value);
-
-  return pointer;
-}
-
-function tomlDateTimePointer(value: TomlDateTime): *mut TomlDateTime {
-  let pointer: *mut TomlDateTime = Memory::allocateVector<TomlDateTime>(1);
-  @write<TomlDateTime>(pointer, value);
-
-  return pointer;
-}
-
 export record TomlValue {
   public kind: TomlValueKind;
   public span: TomlSpan;
   public keySpan: TomlSpan;
-  public stringValue: *mut String;
+  public stringValue: str;
   public integerValue: i64;
   public floatValue: f64;
   public booleanValue: boolean;
   public arrayValue: *mut TomlArray;
   public tableValue: *mut TomlTable;
   public arrayOfTablesValue: *mut TomlArrayOfTables;
-  public dateTimeValue: *mut TomlDateTime;
+  public dateTimeValue: TomlDateTime;
 
   public static string(value: str, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::STRING,
       span: span,
       keySpan: keySpan,
-      stringValue: tomlStringPointer(String::create(value)),
+      stringValue: tomlOwnedStr(value),
       integerValue: 0,
       floatValue: 0.0,
       booleanValue: false,
       arrayValue: null,
       tableValue: null,
       arrayOfTablesValue: null,
-      dateTimeValue: null,
+      dateTimeValue: TomlDateTime::empty(),
+    };
+  }
+
+  public static integer(value: i64, span: TomlSpan, keySpan: TomlSpan): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::INTEGER,
+      span: span,
+      keySpan: keySpan,
+      stringValue: "",
+      integerValue: value,
+      floatValue: 0.0,
+      booleanValue: false,
+      arrayValue: null,
+      tableValue: null,
+      arrayOfTablesValue: null,
+      dateTimeValue: TomlDateTime::empty(),
+    };
+  }
+
+  public static float(value: f64, span: TomlSpan, keySpan: TomlSpan): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::FLOAT,
+      span: span,
+      keySpan: keySpan,
+      stringValue: "",
+      integerValue: 0,
+      floatValue: value,
+      booleanValue: false,
+      arrayValue: null,
+      tableValue: null,
+      arrayOfTablesValue: null,
+      dateTimeValue: TomlDateTime::empty(),
+    };
+  }
+
+  public static fromBoolean(value: boolean, span: TomlSpan, keySpan: TomlSpan): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::BOOLEAN,
+      span: span,
+      keySpan: keySpan,
+      stringValue: "",
+      integerValue: 0,
+      floatValue: 0.0,
+      booleanValue: value,
+      arrayValue: null,
+      tableValue: null,
+      arrayOfTablesValue: null,
+      dateTimeValue: TomlDateTime::empty(),
     };
   }
 
@@ -169,14 +362,14 @@ export record TomlValue {
       kind: TomlValueKind::ARRAY,
       span: span,
       keySpan: keySpan,
-      stringValue: null,
+      stringValue: "",
       integerValue: 0,
       floatValue: 0.0,
       booleanValue: false,
       arrayValue: tomlArrayPointer(value),
       tableValue: null,
       arrayOfTablesValue: null,
-      dateTimeValue: null,
+      dateTimeValue: TomlDateTime::empty(),
     };
   }
 
@@ -185,14 +378,34 @@ export record TomlValue {
       kind: TomlValueKind::TABLE,
       span: span,
       keySpan: keySpan,
-      stringValue: null,
+      stringValue: "",
       integerValue: 0,
       floatValue: 0.0,
       booleanValue: false,
       arrayValue: null,
       tableValue: tomlTablePointer(value),
       arrayOfTablesValue: null,
-      dateTimeValue: null,
+      dateTimeValue: TomlDateTime::empty(),
+    };
+  }
+
+  public static arrayOfTables(
+    value: TomlArrayOfTables,
+    span: TomlSpan,
+    keySpan: TomlSpan
+  ): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::ARRAY_OF_TABLES,
+      span: span,
+      keySpan: keySpan,
+      stringValue: "",
+      integerValue: 0,
+      floatValue: 0.0,
+      booleanValue: false,
+      arrayValue: null,
+      tableValue: null,
+      arrayOfTablesValue: tomlArrayOfTablesPointer(value),
+      dateTimeValue: TomlDateTime::empty(),
     };
   }
 
@@ -201,14 +414,14 @@ export record TomlValue {
       kind: TomlValueKind::DATE_TIME,
       span: span,
       keySpan: keySpan,
-      stringValue: null,
+      stringValue: "",
       integerValue: 0,
       floatValue: 0.0,
       booleanValue: false,
       arrayValue: null,
       tableValue: null,
       arrayOfTablesValue: null,
-      dateTimeValue: tomlDateTimePointer(value),
+      dateTimeValue: value.clone(),
     };
   }
 
@@ -228,13 +441,13 @@ export record TomlValue {
       arrayValue: self.arrayValue,
       tableValue: self.tableValue,
       arrayOfTablesValue: self.arrayOfTablesValue,
-      dateTimeValue: self.dateTimeValue,
+      dateTimeValue: self.dateTimeValue.clone(),
     };
   }
 
   public asString(&self): Option<str> {
     if (self.kind == TomlValueKind::STRING) {
-      return Option::SOME((*self.stringValue).toStr());
+      return Option::SOME(self.stringValue);
     }
 
     return Option::NONE;
@@ -248,20 +461,28 @@ export record TomlValue {
     return Option::NONE;
   }
 
-  public asTable(&self): Option<TomlTable> {
-    if (self.kind == TomlValueKind::TABLE) {
-      return Option::SOME(*self.tableValue);
-    }
+  public asInteger(&self): i64 {
+    return self.integerValue;
+  }
 
-    return Option::NONE;
+  public asFloat(&self): f64 {
+    return self.floatValue;
+  }
+
+  public asBoolean(&self): boolean {
+    return self.booleanValue;
+  }
+
+  public asTable(&self): Option<TomlTable> {
+    return self.kind == TomlValueKind::TABLE ? Option::SOME(*self.tableValue) : Option::NONE;
+  }
+
+  public asArrayOfTables(&self): TomlArrayOfTables {
+    return *self.arrayOfTablesValue;
   }
 
   public asDateTime(&self): Option<TomlDateTime> {
-    if (self.kind == TomlValueKind::DATE_TIME) {
-      return Option::SOME(*self.dateTimeValue);
-    }
-
-    return Option::NONE;
+    return self.kind == TomlValueKind::DATE_TIME ? Option::SOME(self.dateTimeValue.clone()) : Option::NONE;
   }
 }
 
@@ -287,11 +508,7 @@ export record TomlArray {
       newCapacity = 1;
     }
 
-    if (self.values == null) {
-      self.values = Memory::allocateVector<TomlValue>(newCapacity);
-    } else {
-      self.values = Memory::reallocateVector<TomlValue>(self.values, newCapacity);
-    }
+    self.values = self.values == null ? Memory::allocateVector<TomlValue>(newCapacity) : Memory::reallocateVector<TomlValue>(self.values, newCapacity);
 
     self.capacity = newCapacity;
   }
@@ -319,13 +536,13 @@ export record TomlArray {
 }
 
 export record TomlTableEntry {
-  public key: *mut String;
+  public key: str;
   public value: TomlValue;
   public keySpan: TomlSpan;
 
   public static new(key: str, value: TomlValue, keySpan: TomlSpan): TomlTableEntry {
     return TomlTableEntry {
-      key: tomlStringPointer(String::create(key)),
+      key: tomlOwnedStr(key),
       value: value.clone(),
       keySpan: keySpan,
     };
@@ -333,7 +550,7 @@ export record TomlTableEntry {
 
   public static create(key: &String, value: TomlValue, keySpan: TomlSpan): TomlTableEntry {
     return TomlTableEntry {
-      key: tomlStringPointer(key.clone()),
+      key: tomlOwnedStr(key),
       value: value.clone(),
       keySpan: keySpan,
     };
@@ -345,6 +562,7 @@ export record TomlTable {
   length: u64;
   capacity: u64;
   public span: TomlSpan;
+  public state: TomlTableState;
 
   public static new(span: TomlSpan): TomlTable {
     return TomlTable {
@@ -352,6 +570,7 @@ export record TomlTable {
       length: 0,
       capacity: 0,
       span: span,
+      state: TomlTableState::IMPLICIT,
     };
   }
 
@@ -362,11 +581,7 @@ export record TomlTable {
       newCapacity = 1;
     }
 
-    if (self.entries == null) {
-      self.entries = Memory::allocateVector<TomlTableEntry>(newCapacity);
-    } else {
-      self.entries = Memory::reallocateVector<TomlTableEntry>(self.entries, newCapacity);
-    }
+    self.entries = self.entries == null ? Memory::allocateVector<TomlTableEntry>(newCapacity) : Memory::reallocateVector<TomlTableEntry>(self.entries, newCapacity);
 
     self.capacity = newCapacity;
   }
@@ -392,10 +607,28 @@ export record TomlTable {
     let mut index: u64 = 0;
 
     while (index < self.length) {
-      let entry: TomlTableEntry = self.entries[index];
+      let entry: *mut TomlTableEntry = self.entries + index;
 
-      if ((*entry.key).equals(key)) {
-        return Option::SOME(entry.value.clone());
+      let currentKey: String = String::create((*entry).key);
+
+      if (currentKey.equals(key)) {
+        return Option::SOME((*entry).value.clone());
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public entryForKeyPointer(&mut self, key: &String): Option<*mut TomlTableEntry> {
+    let mut index: u64 = 0;
+
+    while (index < self.length) {
+      let currentKey: String = String::create(self.entries[index].key);
+
+      if (currentKey.equals(key)) {
+        return Option::SOME((self.entries + index) as *mut TomlTableEntry);
       }
 
       index += 1;
@@ -427,11 +660,7 @@ export record TomlArrayOfTables {
       newCapacity = 1;
     }
 
-    if (self.entries == null) {
-      self.entries = Memory::allocateVector<TomlTable>(newCapacity);
-    } else {
-      self.entries = Memory::reallocateVector<TomlTable>(self.entries, newCapacity);
-    }
+    self.entries = self.entries == null ? Memory::allocateVector<TomlTable>(newCapacity) : Memory::reallocateVector<TomlTable>(self.entries, newCapacity);
 
     self.capacity = newCapacity;
   }
@@ -443,6 +672,26 @@ export record TomlArrayOfTables {
 
     @write<TomlTable>(self.entries + self.length, value);
     self.length += 1;
+  }
+
+  public length(&self): u64 {
+    return self.length;
+  }
+
+  public item(&self, index: u64): Option<TomlTable> {
+    if (index >= self.length) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(self.entries[index]);
+  }
+
+  public lastPointer(&mut self): Option<*mut TomlTable> {
+    if (self.length == 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME((&mut self.entries[self.length - 1]) as *mut TomlTable);
   }
 }
 

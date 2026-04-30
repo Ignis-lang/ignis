@@ -1,10 +1,11 @@
+import Math from "std::math";
 import Memory from "std::memory";
 import Test from "std::test";
 import Toml from "std::toml";
 import Vector from "std::vector";
 import TomlError, TomlErrorKind from "./error";
 import TomlSpan, TomlToken, TomlTokenKind from "./token";
-import TomlArray, TomlDocument, TomlTable, TomlValue, TomlValueKind from "./value";
+import TomlArray, TomlDateTimeKind, TomlDocument, TomlParserCursor, TomlTable, TomlValue, TomlValueKind from "./value";
 
 function tokenAt(tokens: &Vector<TomlToken>, index: u64): &TomlToken {
   let Option::SOME(token) = Toml::tokenAt(tokens, index) else {
@@ -88,6 +89,109 @@ function assertTokenKind(actual: TomlTokenKind, expected: TomlTokenKind): void {
 
 function assertErrorKind(actual: TomlErrorKind, expected: TomlErrorKind): void {
   Test::assert(actual == expected);
+}
+
+function expectParse(source: str): TomlDocument {
+  let Result::OK(document) = Toml::parse(source) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return document;
+}
+
+function expectParse(source: &String): TomlDocument {
+  let Result::OK(document) = Toml::parse(source) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return document;
+}
+
+function expectParseError(source: str, error: &mut TomlError): void {
+  let mut output: &mut TomlError = error;
+  let Result::ERROR(value) = Toml::parse(source) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  *output = value.clone();
+}
+
+function assertSpan(span: TomlSpan, start: u64, end: u64): void {
+  Test::assertEq<u64>(span.start, start);
+  Test::assertEq<u64>(span.end, end);
+}
+
+function assertStringText(actual: str, expected: str): void {
+  let expectedText: String = String::create(expected);
+  let actualText: String = String::create(actual);
+  Test::assert(actualText.equals(&expectedText));
+}
+
+function assertValueIsInteger(
+  value: TomlValue,
+  expected: i64,
+  start: u64,
+  end: u64,
+  keyStart: u64,
+  keyEnd: u64
+): void {
+  Test::assert(value.kind() == TomlValueKind::INTEGER);
+  Test::assertEq<i64>(value.asInteger(), expected);
+  assertSpan(value.span, start, end);
+  assertSpan(value.keySpan, keyStart, keyEnd);
+}
+
+function assertValueIsFloat(
+  value: TomlValue,
+  expected: f64,
+  start: u64,
+  end: u64,
+  keyStart: u64,
+  keyEnd: u64
+): void {
+  Test::assert(value.kind() == TomlValueKind::FLOAT);
+  Test::assert(Math::fabs(value.asFloat() - expected) < 0.000001);
+  assertSpan(value.span, start, end);
+  assertSpan(value.keySpan, keyStart, keyEnd);
+}
+
+function assertValueIsBoolean(
+  value: TomlValue,
+  expected: boolean,
+  start: u64,
+  end: u64,
+  keyStart: u64,
+  keyEnd: u64
+): void {
+  Test::assert(value.kind() == TomlValueKind::BOOLEAN);
+  Test::assertEq<boolean>(value.asBoolean(), expected);
+  assertSpan(value.span, start, end);
+  assertSpan(value.keySpan, keyStart, keyEnd);
+}
+
+function assertValueIsDateTime(
+  value: TomlValue,
+  expectedKind: TomlDateTimeKind,
+  expectedRaw: str,
+  start: u64,
+  end: u64,
+  keyStart: u64,
+  keyEnd: u64,
+): void {
+  Test::assert(value.kind() == TomlValueKind::DATE_TIME);
+  assertSpan(value.span, start, end);
+  assertSpan(value.keySpan, keyStart, keyEnd);
+
+  let Option::SOME(dateTime) = value.asDateTime() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assert(dateTime.kind == expectedKind);
+  assertStringText(dateTime.raw, expectedRaw);
 }
 
 function assertToken(
@@ -316,7 +420,7 @@ function lexReportsInvalidDateTimeSpan(): void {
 }
 
 @test
-function valueCreatesStringAndPreservesSpan(): void {
+function tomlValueCreatesStringAndPreservesSpan(): void {
   let span: TomlSpan = TomlSpan::new(7, 14);
   let keySpan: TomlSpan = TomlSpan::new(0, 4);
   let value: TomlValue = TomlValue::string("ignis", span, keySpan);
@@ -336,7 +440,7 @@ function valueCreatesStringAndPreservesSpan(): void {
 }
 
 @test
-function valueArrayStoresNestedValues(): void {
+function tomlValueArrayStoresNestedValues(): void {
   let span: TomlSpan = TomlSpan::new(0, 9);
   let keySpan: TomlSpan = TomlSpan::new(0, 4);
   let mut array: TomlArray = TomlArray::new(span);
@@ -369,7 +473,7 @@ function valueArrayStoresNestedValues(): void {
 }
 
 @test
-function documentLooksUpRootStringValues(): void {
+function tomlDocumentLooksUpRootStringValues(): void {
   let rootSpan: TomlSpan = TomlSpan::new(0, 20);
   let nameSpan: TomlSpan = TomlSpan::new(10, 14);
   let root: TomlTable = TomlTable::new(rootSpan);
@@ -385,4 +489,267 @@ function documentLooksUpRootStringValues(): void {
   let expected: String = String::create("ignis");
   let actual: String = String::create(name);
   Test::assert(actual.equals(&expected));
+}
+
+@test
+function tomlDocumentBaselineSupportsGetAndGetArrayQueries(): void {
+  let rootSpan: TomlSpan = TomlSpan::new(0, 40);
+  let titleKeySpan: TomlSpan = TomlSpan::new(0, 5);
+  let titleValueSpan: TomlSpan = TomlSpan::new(8, 15);
+  let featuresSpan: TomlSpan = TomlSpan::new(18, 32);
+  let root: TomlTable = TomlTable::new(rootSpan);
+  let mut features: TomlArray = TomlArray::new(featuresSpan);
+
+  features.push(TomlValue::string("lexer", TomlSpan::new(19, 26), titleKeySpan));
+  features.push(TomlValue::string("parser", TomlSpan::new(28, 36), titleKeySpan));
+
+  root.insert("title", TomlValue::string("ignis", titleValueSpan, titleKeySpan), titleKeySpan);
+  root.insert("features", TomlValue::array(features, featuresSpan, TomlSpan::new(18, 26)), TomlSpan::new(18, 26));
+
+  let document: TomlDocument = TomlDocument::new(root, rootSpan);
+  let Option::SOME(titleValue) = document.get("title") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let Option::SOME(title) = titleValue.asString() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertStringText(title, "ignis");
+
+  let Result::OK(array) = document.getArray("features") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assertEq<u64>(array.length(), 2);
+}
+
+// Parser completion stays Ignis-only; do not route Rust config parsing through std::toml.
+
+@test
+function parseSupportsOwnedAndBorrowedSources(): void {
+  let ownedSource: String = String::create("title = \"Ignis\"\nanswer = 42\n");
+  let ownedDocument: TomlDocument = expectParse(&ownedSource);
+  let borrowedDocument: TomlDocument = expectParse("title = \"Ignis\"\nanswer = 42\n");
+
+  let Result::OK(ownedTitle) = ownedDocument.getString("title") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Result::OK(borrowedTitle) = borrowedDocument.getString("title") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertStringText(ownedTitle, "Ignis");
+  assertStringText(borrowedTitle, "Ignis");
+}
+
+@test
+function parserCursorTracksPeekAdvanceExpectAndSkipNewlines(): void {
+  let Result::OK(tokens) = Toml::lex("\nname = true\n") else {
+    Test::fail();
+    @unreachable();
+  };
+  let ownedTokens: Vector<TomlToken> = tokens;
+  let mut cursor: TomlParserCursor = TomlParserCursor::create(&ownedTokens);
+
+  let Option::SOME(first) = cursor.peekKind() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertTokenKind(first, TomlTokenKind::NEWLINE);
+  cursor.skipNewlines();
+
+  let matchedIdentifier: boolean = cursor.matchKind(TomlTokenKind::IDENTIFIER);
+  Test::assertEq<boolean>(matchedIdentifier, true);
+  let expectedEqualsResult: Result<TomlSpan, TomlError> = cursor.expect(TomlTokenKind::EQUALS);
+  let Result::OK(expectedEqualsSpan) = expectedEqualsResult else {
+    Test::fail();
+    @unreachable();
+  };
+  assertSpan(expectedEqualsSpan, 6, 7);
+
+  let Option::SOME(booleanToken) = cursor.advance() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertTokenKind(booleanToken, TomlTokenKind::BOOLEAN);
+}
+
+@test
+function parseReadsScalarKindsAndPreservesSpans(): void {
+  let document: TomlDocument = expectParse(
+    "title = \"Ignis\"\ncount = 42\nratio = 3.5\nflag = true\ncreated = 1979-05-27T07:32:00Z\n",
+  );
+
+  let Option::SOME(title) = document.get("title") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Option::SOME(titleText) = title.asString() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertStringText(titleText, "Ignis");
+  assertSpan(title.span, 8, 15);
+  assertSpan(title.keySpan, 0, 5);
+
+  let Option::SOME(count) = document.get("count") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Option::SOME(ratio) = document.get("ratio") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Option::SOME(flag) = document.get("flag") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Option::SOME(created) = document.get("created") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertValueIsInteger(count, 42, 24, 26, 16, 21);
+  assertValueIsFloat(ratio, 3.5, 35, 38, 27, 32);
+  assertValueIsBoolean(flag, true, 46, 50, 39, 43);
+  assertValueIsDateTime(created, TomlDateTimeKind::OFFSET_DATE_TIME, "1979-05-27T07:32:00Z", 61, 81, 51, 58);
+}
+
+@test
+function parseRejectsMalformedTopLevelItemsWithUnexpectedToken(): void {
+  let mut error: TomlError = TomlError::unexpectedToken(TomlSpan::new(0, 0));
+  expectParseError("title = \"Ignis\" count = 42", &mut error);
+
+  assertErrorKind(error.kind, TomlErrorKind::UNEXPECTED_TOKEN);
+  assertSpan(error.span, 16, 21);
+}
+
+@test
+function parseRequiresHeadersAndAssignmentsToTerminateAtLineBoundaries(): void {
+  let mut headerError: TomlError = TomlError::unexpectedToken(TomlSpan::new(0, 0));
+  let mut assignmentError: TomlError = TomlError::unexpectedToken(TomlSpan::new(0, 0));
+
+  expectParseError("[package] title = \"ignis\"", &mut headerError);
+  expectParseError("title = \"ignis\" flag = false", &mut assignmentError);
+
+  assertErrorKind(headerError.kind, TomlErrorKind::UNEXPECTED_TOKEN);
+  assertSpan(headerError.span, 10, 15);
+  assertErrorKind(assignmentError.kind, TomlErrorKind::UNEXPECTED_TOKEN);
+  assertSpan(assignmentError.span, 16, 20);
+}
+
+@test
+function parseBuildsNestedTablesArraysAndMixedArrayValues(): void {
+  let document: TomlDocument = expectParse(
+    "title = \"Ignis\"\nauthor.name = \"Irene\"\n[package]\nname = \"compiler\"\nfeatures = [\"lexer\", 42, { enabled = true }]\n[[bench]]\nname = \"parse\"\n[[bench]]\nname = \"codegen\"\npoint = { x = 1, y = 2 }\n",
+  );
+
+  let Result::OK(authorName) = document.getString("author.name") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Result::OK(packageName) = document.getString("package.name") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Result::OK(features) = document.getArray("package.features") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertStringText(authorName, "Irene");
+  assertStringText(packageName, "compiler");
+  Test::assertEq<u64>(features.length(), 3);
+
+  let Option::SOME(stringValue) = features.item(0) else {
+    Test::fail();
+    @unreachable();
+  };
+  let Option::SOME(integerValue) = features.item(1) else {
+    Test::fail();
+    @unreachable();
+  };
+  let Option::SOME(inlineTableValue) = features.item(2) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let Option::SOME(featureName) = stringValue.asString() else {
+    Test::fail();
+    @unreachable();
+  };
+  assertStringText(featureName, "lexer");
+  Test::assertEq<i64>(integerValue.asInteger(), 42);
+  Test::assert(inlineTableValue.kind() == TomlValueKind::TABLE);
+
+  let Option::SOME(benchValue) = document.get("bench") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assert(benchValue.kind() == TomlValueKind::ARRAY_OF_TABLES);
+  Test::assertEq<u64>(benchValue.asArrayOfTables().length(), 2);
+}
+
+@test
+function parseRejectsDuplicateAndConflictingDefinitionsWithStableSpans(): void {
+  let mut duplicateKey: TomlError = TomlError::unexpectedToken(TomlSpan::new(0, 0));
+  let mut tableConflict: TomlError = TomlError::unexpectedToken(TomlSpan::new(0, 0));
+  let mut arrayConflict: TomlError = TomlError::unexpectedToken(TomlSpan::new(0, 0));
+  let mut inlineConflict: TomlError = TomlError::unexpectedToken(TomlSpan::new(0, 0));
+
+  expectParseError("fruit.apple = 1\nfruit.apple = 2\n", &mut duplicateKey);
+  expectParseError("fruit = 1\n[fruit]\n", &mut tableConflict);
+  expectParseError("[[products]]\nname = \"hammer\"\n[products]\n", &mut arrayConflict);
+  expectParseError("point = { x = 1 }\npoint.y = 2\n", &mut inlineConflict);
+
+  assertErrorKind(duplicateKey.kind, TomlErrorKind::DUPLICATE_KEY);
+  assertSpan(duplicateKey.span, 16, 27);
+  assertErrorKind(tableConflict.kind, TomlErrorKind::TABLE_CONFLICT);
+  assertSpan(tableConflict.span, 10, 17);
+  assertErrorKind(arrayConflict.kind, TomlErrorKind::TABLE_CONFLICT);
+  assertSpan(arrayConflict.span, 29, 39);
+  assertErrorKind(inlineConflict.kind, TomlErrorKind::TABLE_CONFLICT);
+  assertSpan(inlineConflict.span, 18, 25);
+}
+
+@test
+function parseKeepsTypedLookupsWorkingForParserProducedNestedOutput(): void {
+  let document: TomlDocument = expectParse(
+    "title = \"Ignis\"\n[package]\nname = \"compiler\"\nfeatures = [\"lexer\", \"parser\"]\n",
+  );
+
+  let Result::OK(title) = document.getString("title") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Result::OK(features) = document.getArray("package.features") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertStringText(title, "Ignis");
+  Test::assertEq<u64>(features.length(), 2);
+
+  let Result::ERROR(missingError) = document.getString("package.version") else {
+    Test::fail();
+    @unreachable();
+  };
+  let Result::ERROR(typeError) = document.getArray("title") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  assertErrorKind(missingError.kind, TomlErrorKind::LOOKUP_NOT_FOUND);
+  assertErrorKind(typeError.kind, TomlErrorKind::LOOKUP_TYPE_MISMATCH);
+  assertSpan(typeError.span, 8, 15);
 }

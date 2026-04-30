@@ -1,0 +1,749 @@
+import LibC, CType from "std::libc";
+import Vector from "std::vector";
+
+import TomlError from "./error";
+import TomlSpan, TomlToken, TomlTokenKind from "./token";
+import TomlArray, TomlArrayOfTables, TomlDateTime, TomlDateTimeKind, TomlDocument, TomlTable, TomlTableEntry, TomlTableState, TomlValue, TomlValueKind from "./value";
+
+function tomlLastSpan(tokens: &Vector<TomlToken>): TomlSpan {
+  if (tokens.length() == 0) {
+    return TomlSpan::new(0, 0);
+  }
+
+  let Option::SOME(token) = tokens.get(tokens.length() - 1) else {
+    return TomlSpan::new(0, 0);
+  };
+
+  return token.span;
+}
+
+function tomlTokenAt(tokens: &Vector<TomlToken>, index: u64): Result<&TomlToken, TomlError> {
+  let Option::SOME(token) = tokens.get(index) else {
+    return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+  };
+
+  return Result::OK(token);
+}
+
+function tomlParserCharAtOrNull(value: &String, index: u64): char {
+  return match (value.charAt(index)) {
+    Option::SOME(ch) -> ch,
+    Option::NONE -> '\0',
+  };
+}
+
+function tomlParseIntegerLiteral(value: &String): i64 {
+  let mut index: u64 = 0;
+  let mut sign: i64 = 1;
+  let mut result: i64 = 0;
+
+  if (tomlParserCharAtOrNull(value, 0) == '-') {
+    sign = -1;
+    index = 1;
+  } else if (tomlParserCharAtOrNull(value, 0) == '+') {
+    index = 1;
+  }
+
+  while (index < value.length()) {
+    let current: char = tomlParserCharAtOrNull(value, index);
+
+    if (current != '_') {
+      result = result * 10 + ((current as i64) - ('0' as i64));
+    }
+
+    index += 1;
+  }
+
+  return result * sign;
+}
+
+function tomlParseBooleanLiteral(value: &String): boolean {
+  return value.length() == 4 && tomlParserCharAtOrNull(value, 0) == 't';
+}
+
+function tomlDateTimeKind(value: &String): TomlDateTimeKind {
+  let mut index: u64 = 0;
+  let mut hasTimeSeparator: boolean = false;
+  let mut hasOffset: boolean = false;
+
+  while (index < value.length()) {
+    let current: char = tomlParserCharAtOrNull(value, index);
+
+    if (current == 'T' || current == 't') {
+      hasTimeSeparator = true;
+    }
+
+    if (current == 'Z' || current == 'z' || (index > 10 && (current == '+' || current == '-'))) {
+      hasOffset = true;
+    }
+
+    index += 1;
+  }
+
+  if (hasOffset) {
+    return TomlDateTimeKind::OFFSET_DATE_TIME;
+  }
+
+  if (hasTimeSeparator) {
+    return TomlDateTimeKind::LOCAL_DATE_TIME;
+  }
+
+  if (value.length() >= 8 && tomlParserCharAtOrNull(value, 2) == ':' && tomlParserCharAtOrNull(value, 5) == ':') {
+    return TomlDateTimeKind::LOCAL_TIME;
+  }
+
+  return TomlDateTimeKind::LOCAL_DATE;
+}
+
+function tomlCombineSpan(start: TomlSpan, end: TomlSpan): TomlSpan {
+  return TomlSpan::new(start.start, end.end);
+}
+
+function tomlSkipNewlines(tokens: &Vector<TomlToken>, index: u64): u64 {
+  let mut current: u64 = index;
+
+  while (current < tokens.length()) {
+    let Result::OK(token) = tomlTokenAt(tokens, current) else {
+      return current;
+    };
+
+    if (token.kind != TomlTokenKind::NEWLINE) {
+      return current;
+    }
+
+    current += 1;
+  }
+
+  return current;
+}
+
+function tomlExpectLineEnd(tokens: &Vector<TomlToken>, index: u64): Result<u64, TomlError> {
+  let Result::OK(token) = tomlTokenAt(tokens, index) else {
+    return Result::OK(index);
+  };
+
+  if (token.kind == TomlTokenKind::NEWLINE) {
+    return Result::OK(tomlSkipNewlines(tokens, index + 1));
+  }
+
+  if (token.kind == TomlTokenKind::EOF) {
+    return Result::OK(index);
+  }
+
+  return Result::ERROR(TomlError::unexpectedToken(token.span));
+}
+
+function tomlParseScalarValue(token: &TomlToken, keySpan: TomlSpan): Result<TomlValue, TomlError> {
+  let lexeme: String = token.lexeme.clone();
+
+  if (token.kind == TomlTokenKind::STRING) {
+    return Result::OK(TomlValue::string(lexeme.toStr(), token.span, keySpan));
+  }
+
+  if (token.kind == TomlTokenKind::INTEGER) {
+    return Result::OK(TomlValue::integer(tomlParseIntegerLiteral(&lexeme), token.span, keySpan));
+  }
+
+  if (token.kind == TomlTokenKind::FLOAT) {
+    return Result::OK(TomlValue::float(LibC::Conversion::atof(lexeme.toStr() as CType::CConstStr) as f64, token.span, keySpan));
+  }
+
+  if (token.kind == TomlTokenKind::BOOLEAN) {
+    return Result::OK(TomlValue::fromBoolean(tomlParseBooleanLiteral(&lexeme), token.span, keySpan));
+  }
+
+  if (token.kind == TomlTokenKind::DATE_TIME) {
+    return Result::OK(TomlValue::dateTime(
+      TomlDateTime::new(
+        lexeme.toStr(),
+        tomlDateTimeKind(&lexeme),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        token.span,
+      ),
+      token.span,
+      keySpan,
+    ));
+  }
+
+  return Result::ERROR(TomlError::unexpectedToken(token.span));
+}
+
+function tomlParsePath(
+  tokens: &Vector<TomlToken>,
+  index: u64,
+  segments: &mut Vector<String>,
+  firstSpan: &mut TomlSpan,
+  lastSpan: &mut TomlSpan,
+): Result<u64, TomlError> {
+  let mut pathSegments: &mut Vector<String> = segments;
+  let mut current: u64 = index;
+  let mut sawSegment: boolean = false;
+
+  while (true) {
+    let Result::OK(token) = tomlTokenAt(tokens, current) else {
+      return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+    };
+
+    if (token.kind != TomlTokenKind::IDENTIFIER && token.kind != TomlTokenKind::STRING) {
+      return Result::ERROR(TomlError::unexpectedToken(token.span));
+    }
+
+    let segmentText: String = token.lexeme.clone();
+    pathSegments.push(segmentText);
+
+    if (!sawSegment) {
+      *firstSpan = token.span;
+      sawSegment = true;
+    }
+
+    *lastSpan = token.span;
+    current += 1;
+
+    let Result::OK(nextToken) = tomlTokenAt(tokens, current) else {
+      return Result::OK(current);
+    };
+
+    if (nextToken.kind != TomlTokenKind::DOT) {
+      return Result::OK(current);
+    }
+
+    current += 1;
+  }
+
+  return Result::OK(current);
+}
+
+function tomlEnsurePrefixTable(
+  tablePointer: *mut TomlTable,
+  segment: &String,
+  segmentSpan: TomlSpan,
+  conflictSpan: TomlSpan,
+  createState: TomlTableState,
+  allowInlineDescend: boolean,
+): Result<*mut TomlTable, TomlError> {
+  let existingEntry: Option<*mut TomlTableEntry> = (*tablePointer).entryForKeyPointer(segment);
+
+  if (let Option::SOME(entryPointer) = existingEntry) {
+    if ((*entryPointer).value.kind == TomlValueKind::TABLE) {
+      let nestedTable: *mut TomlTable = (*entryPointer).value.tableValue;
+
+      if ((*nestedTable).state == TomlTableState::INLINE && !allowInlineDescend) {
+        return Result::ERROR(TomlError::tableConflict(conflictSpan));
+      }
+
+      return Result::OK(nestedTable);
+    }
+
+    if ((*entryPointer).value.kind == TomlValueKind::ARRAY_OF_TABLES) {
+      let arrays: *mut TomlArrayOfTables = (*entryPointer).value.arrayOfTablesValue;
+      let Option::SOME(lastTable) = (*arrays).lastPointer() else {
+        return Result::ERROR(TomlError::tableConflict(conflictSpan));
+      };
+
+      return Result::OK(lastTable);
+    }
+
+    return Result::ERROR(TomlError::tableConflict(conflictSpan));
+  }
+
+  let mut createdTable: TomlTable = TomlTable::new(segmentSpan);
+  createdTable.state = createState;
+  (*tablePointer).insert(segment, TomlValue::table(createdTable, segmentSpan, segmentSpan), segmentSpan);
+
+  let Option::SOME(entryPointer) = (*tablePointer).entryForKeyPointer(segment) else {
+    return Result::ERROR(TomlError::tableConflict(conflictSpan));
+  };
+
+  return Result::OK((*entryPointer).value.tableValue);
+}
+
+function tomlInsertValueAtPath(
+  tablePointer: *mut TomlTable,
+  segments: &Vector<String>,
+  lastSpan: TomlSpan,
+  value: TomlValue,
+  conflictSpan: TomlSpan,
+  allowInlineDescend: boolean,
+): Option<TomlError> {
+  let mut currentTable: *mut TomlTable = tablePointer;
+  let mut index: u64 = 0;
+
+  while (index + 1 < segments.length()) {
+    let Option::SOME(segment) = segments.get(index) else {
+      return Option::SOME(TomlError::unexpectedToken(conflictSpan));
+    };
+
+    let Result::OK(nextTable) = tomlEnsurePrefixTable(
+      currentTable,
+      segment,
+      lastSpan,
+      conflictSpan,
+      allowInlineDescend ? TomlTableState::INLINE : TomlTableState::IMPLICIT,
+      allowInlineDescend,
+    ) else {
+      let Result::ERROR(error) = tomlEnsurePrefixTable(
+        currentTable,
+        segment,
+        lastSpan,
+        conflictSpan,
+        allowInlineDescend ? TomlTableState::INLINE : TomlTableState::IMPLICIT,
+        allowInlineDescend,
+      ) else {
+        return Option::SOME(TomlError::tableConflict(conflictSpan));
+      };
+
+      return Option::SOME(error);
+    };
+
+    currentTable = nextTable;
+    index += 1;
+  }
+
+  let Option::SOME(lastSegment) = segments.get(segments.length() - 1) else {
+    return Option::SOME(TomlError::unexpectedToken(conflictSpan));
+  };
+
+  if (let Option::SOME(entryPointer) = (*currentTable).entryForKeyPointer(lastSegment)) {
+    if ((*entryPointer).value.kind == TomlValueKind::TABLE || (*entryPointer).value.kind == TomlValueKind::ARRAY_OF_TABLES) {
+      return Option::SOME(TomlError::tableConflict(conflictSpan));
+    }
+
+    return Option::SOME(TomlError::duplicateKey(conflictSpan));
+  }
+
+  (*currentTable).insert(lastSegment, value, lastSpan);
+  return Option::NONE;
+}
+
+function tomlOpenTableHeader(
+  rootPointer: *mut TomlTable,
+  segments: &Vector<String>,
+  lastSpan: TomlSpan,
+  headerSpan: TomlSpan,
+): Result<*mut TomlTable, TomlError> {
+  let mut currentTable: *mut TomlTable = rootPointer;
+  let mut index: u64 = 0;
+
+  while (index + 1 < segments.length()) {
+    let Option::SOME(segment) = segments.get(index) else {
+      return Result::ERROR(TomlError::unexpectedToken(headerSpan));
+    };
+
+    let Result::OK(nextTable) = tomlEnsurePrefixTable(currentTable, segment, lastSpan, headerSpan, TomlTableState::IMPLICIT, false) else {
+      let Result::ERROR(error) = tomlEnsurePrefixTable(currentTable, segment, lastSpan, headerSpan, TomlTableState::IMPLICIT, false) else {
+        return Result::ERROR(TomlError::tableConflict(headerSpan));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    currentTable = nextTable;
+    index += 1;
+  }
+
+  let Option::SOME(lastSegment) = segments.get(segments.length() - 1) else {
+    return Result::ERROR(TomlError::unexpectedToken(headerSpan));
+  };
+
+  let existingEntry: Option<*mut TomlTableEntry> = (*currentTable).entryForKeyPointer(lastSegment);
+
+  if (let Option::SOME(entryPointer) = existingEntry) {
+    if ((*entryPointer).value.kind != TomlValueKind::TABLE) {
+      return Result::ERROR(TomlError::tableConflict(headerSpan));
+    }
+
+    let tableValue: *mut TomlTable = (*entryPointer).value.tableValue;
+
+    if ((*tableValue).state == TomlTableState::IMPLICIT) {
+      (*tableValue).state = TomlTableState::EXPLICIT;
+      return Result::OK(tableValue);
+    }
+
+    return Result::ERROR(TomlError::tableConflict(headerSpan));
+  }
+
+  let mut createdTable: TomlTable = TomlTable::new(headerSpan);
+  createdTable.state = TomlTableState::EXPLICIT;
+  (*currentTable).insert(lastSegment, TomlValue::table(createdTable, headerSpan, lastSpan), lastSpan);
+
+  let Option::SOME(entryPointer) = (*currentTable).entryForKeyPointer(lastSegment) else {
+    return Result::ERROR(TomlError::tableConflict(headerSpan));
+  };
+
+  return Result::OK((*entryPointer).value.tableValue);
+}
+
+function tomlAppendArrayTableHeader(
+  rootPointer: *mut TomlTable,
+  segments: &Vector<String>,
+  lastSpan: TomlSpan,
+  headerSpan: TomlSpan,
+): Result<*mut TomlTable, TomlError> {
+  let mut currentTable: *mut TomlTable = rootPointer;
+  let mut index: u64 = 0;
+
+  while (index + 1 < segments.length()) {
+    let Option::SOME(segment) = segments.get(index) else {
+      return Result::ERROR(TomlError::unexpectedToken(headerSpan));
+    };
+
+    let Result::OK(nextTable) = tomlEnsurePrefixTable(currentTable, segment, lastSpan, headerSpan, TomlTableState::IMPLICIT, false) else {
+      let Result::ERROR(error) = tomlEnsurePrefixTable(currentTable, segment, lastSpan, headerSpan, TomlTableState::IMPLICIT, false) else {
+        return Result::ERROR(TomlError::tableConflict(headerSpan));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    currentTable = nextTable;
+    index += 1;
+  }
+
+  let Option::SOME(lastSegment) = segments.get(segments.length() - 1) else {
+    return Result::ERROR(TomlError::unexpectedToken(headerSpan));
+  };
+
+  let existingEntry: Option<*mut TomlTableEntry> = (*currentTable).entryForKeyPointer(lastSegment);
+
+  if (let Option::SOME(entryPointer) = existingEntry) {
+    if ((*entryPointer).value.kind != TomlValueKind::ARRAY_OF_TABLES) {
+      return Result::ERROR(TomlError::tableConflict(headerSpan));
+    }
+
+    let arrays: *mut TomlArrayOfTables = (*entryPointer).value.arrayOfTablesValue;
+    let mut createdTable: TomlTable = TomlTable::new(headerSpan);
+    createdTable.state = TomlTableState::EXPLICIT;
+    (*arrays).push(createdTable);
+
+    let Option::SOME(lastTable) = (*arrays).lastPointer() else {
+      return Result::ERROR(TomlError::tableConflict(headerSpan));
+    };
+
+    return Result::OK(lastTable);
+  }
+
+  let mut arrays: TomlArrayOfTables = TomlArrayOfTables::new(headerSpan);
+  let mut createdTable: TomlTable = TomlTable::new(headerSpan);
+  createdTable.state = TomlTableState::EXPLICIT;
+  arrays.push(createdTable);
+  (*currentTable).insert(lastSegment, TomlValue::arrayOfTables(arrays, headerSpan, lastSpan), lastSpan);
+
+  let Option::SOME(entryPointer) = (*currentTable).entryForKeyPointer(lastSegment) else {
+    return Result::ERROR(TomlError::tableConflict(headerSpan));
+  };
+
+  let arraysPointer: *mut TomlArrayOfTables = (*entryPointer).value.arrayOfTablesValue;
+  let Option::SOME(lastTable) = (*arraysPointer).lastPointer() else {
+    return Result::ERROR(TomlError::tableConflict(headerSpan));
+  };
+
+  return Result::OK(lastTable);
+}
+
+function tomlParseValue(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpan, output: &mut TomlValue): Result<u64, TomlError> {
+  let Result::OK(token) = tomlTokenAt(tokens, index) else {
+    return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+  };
+
+  if (token.kind == TomlTokenKind::LEFT_BRACKET) {
+    return tomlParseArray(tokens, index, keySpan, output);
+  }
+
+  if (token.kind == TomlTokenKind::LEFT_BRACE) {
+    return tomlParseInlineTable(tokens, index, keySpan, output);
+  }
+
+  let Result::OK(value) = tomlParseScalarValue(token, keySpan) else {
+    let Result::ERROR(error) = tomlParseScalarValue(token, keySpan) else {
+      return Result::ERROR(TomlError::unexpectedToken(token.span));
+    };
+
+    return Result::ERROR(error);
+  };
+
+  *output = value;
+  return Result::OK(index + 1);
+}
+
+function tomlParseArray(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpan, output: &mut TomlValue): Result<u64, TomlError> {
+  let Result::OK(leftBracket) = tomlTokenAt(tokens, index) else {
+    return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+  };
+
+  let mut current: u64 = tomlSkipNewlines(tokens, index + 1);
+  let mut array: TomlArray = TomlArray::new(leftBracket.span);
+
+  let Result::OK(nextToken) = tomlTokenAt(tokens, current) else {
+    return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+  };
+
+  if (nextToken.kind == TomlTokenKind::RIGHT_BRACKET) {
+    *output = TomlValue::array(array, tomlCombineSpan(leftBracket.span, nextToken.span), keySpan);
+    return Result::OK(current + 1);
+  }
+
+  while (true) {
+    let mut element: TomlValue = TomlValue::integer(0, leftBracket.span, leftBracket.span);
+    let Result::OK(nextIndex) = tomlParseValue(tokens, current, leftBracket.span, &mut element) else {
+      let Result::ERROR(error) = tomlParseValue(tokens, current, leftBracket.span, &mut element) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    array.push(element);
+    current = tomlSkipNewlines(tokens, nextIndex);
+
+    let Result::OK(separator) = tomlTokenAt(tokens, current) else {
+      return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+    };
+
+    if (separator.kind == TomlTokenKind::COMMA) {
+      current = tomlSkipNewlines(tokens, current + 1);
+
+      let Result::OK(afterComma) = tomlTokenAt(tokens, current) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      if (afterComma.kind == TomlTokenKind::RIGHT_BRACKET) {
+        *output = TomlValue::array(array, tomlCombineSpan(leftBracket.span, afterComma.span), keySpan);
+        return Result::OK(current + 1);
+      }
+
+      continue;
+    }
+
+    if (separator.kind != TomlTokenKind::RIGHT_BRACKET) {
+      return Result::ERROR(TomlError::unexpectedToken(separator.span));
+    }
+
+    *output = TomlValue::array(array, tomlCombineSpan(leftBracket.span, separator.span), keySpan);
+    return Result::OK(current + 1);
+  }
+
+  return Result::ERROR(TomlError::unexpectedToken(leftBracket.span));
+}
+
+function tomlParseInlineTable(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpan, output: &mut TomlValue): Result<u64, TomlError> {
+  let Result::OK(leftBrace) = tomlTokenAt(tokens, index) else {
+    return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+  };
+
+  let mut parsedValue: &mut TomlValue = output;
+  *parsedValue = TomlValue::table(TomlTable::new(leftBrace.span), leftBrace.span, keySpan);
+
+  let tablePointer: *mut TomlTable = parsedValue.tableValue;
+  (*tablePointer).state = TomlTableState::INLINE;
+  let mut current: u64 = index + 1;
+
+  let Result::OK(nextToken) = tomlTokenAt(tokens, current) else {
+    return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+  };
+
+  if (nextToken.kind == TomlTokenKind::RIGHT_BRACE) {
+    parsedValue.span = tomlCombineSpan(leftBrace.span, nextToken.span);
+    return Result::OK(current + 1);
+  }
+
+  while (true) {
+    let mut path: Vector<String> = Vector::init<String>();
+    let mut firstSpan: TomlSpan = leftBrace.span;
+    let mut lastSpan: TomlSpan = leftBrace.span;
+    let Result::OK(nextIndex) = tomlParsePath(tokens, current, &mut path, &mut firstSpan, &mut lastSpan) else {
+      let Result::ERROR(error) = tomlParsePath(tokens, current, &mut path, &mut firstSpan, &mut lastSpan) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      return Result::ERROR(error);
+    };
+    current = nextIndex;
+
+    let Result::OK(equalsToken) = tomlTokenAt(tokens, current) else {
+      return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+    };
+
+    if (equalsToken.kind != TomlTokenKind::EQUALS) {
+      return Result::ERROR(TomlError::unexpectedToken(equalsToken.span));
+    }
+
+    let mut nestedValue: TomlValue = TomlValue::integer(0, leftBrace.span, leftBrace.span);
+    let Result::OK(valueIndex) = tomlParseValue(tokens, current + 1, lastSpan, &mut nestedValue) else {
+      let Result::ERROR(error) = tomlParseValue(tokens, current + 1, lastSpan, &mut nestedValue) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    let pathSpan: TomlSpan = tomlCombineSpan(firstSpan, lastSpan);
+    if (let Option::SOME(error) = tomlInsertValueAtPath(tablePointer, &path, lastSpan, nestedValue, pathSpan, true)) {
+      return Result::ERROR(error);
+    }
+
+    current = valueIndex;
+    let Result::OK(separator) = tomlTokenAt(tokens, current) else {
+      return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+    };
+
+    if (separator.kind == TomlTokenKind::COMMA) {
+      current += 1;
+      continue;
+    }
+
+    if (separator.kind != TomlTokenKind::RIGHT_BRACE) {
+      return Result::ERROR(TomlError::unexpectedToken(separator.span));
+    }
+
+    parsedValue.span = tomlCombineSpan(leftBrace.span, separator.span);
+    return Result::OK(current + 1);
+  }
+
+  return Result::ERROR(TomlError::unexpectedToken(leftBrace.span));
+}
+
+export function parseTokens(tokens: &Vector<TomlToken>): Result<TomlDocument, TomlError> {
+  let rootSpan: TomlSpan = tomlLastSpan(tokens);
+  let mut root: TomlTable = TomlTable::new(rootSpan);
+  root.state = TomlTableState::EXPLICIT;
+
+  let rootPointer: *mut TomlTable = (&mut root) as *mut TomlTable;
+  let mut currentTable: *mut TomlTable = rootPointer;
+  let mut index: u64 = tomlSkipNewlines(tokens, 0);
+
+  while (index < tokens.length()) {
+    let Result::OK(token) = tomlTokenAt(tokens, index) else {
+      return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+    };
+
+    if (token.kind == TomlTokenKind::EOF) {
+      return Result::OK(TomlDocument::new(root, rootSpan));
+    }
+
+    if (token.kind == TomlTokenKind::LEFT_BRACKET) {
+      let Result::OK(nextToken) = tomlTokenAt(tokens, index + 1) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      let mut path: Vector<String> = Vector::init<String>();
+      let mut firstSpan: TomlSpan = token.span;
+      let mut lastSpan: TomlSpan = token.span;
+
+      if (nextToken.kind == TomlTokenKind::LEFT_BRACKET) {
+        let Result::OK(pathIndex) = tomlParsePath(tokens, index + 2, &mut path, &mut firstSpan, &mut lastSpan) else {
+          let Result::ERROR(error) = tomlParsePath(tokens, index + 2, &mut path, &mut firstSpan, &mut lastSpan) else {
+            return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+          };
+
+          return Result::ERROR(error);
+        };
+
+        let Result::OK(innerRight) = tomlTokenAt(tokens, pathIndex) else {
+          return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+        };
+        let Result::OK(outerRight) = tomlTokenAt(tokens, pathIndex + 1) else {
+          return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+        };
+
+        if (innerRight.kind != TomlTokenKind::RIGHT_BRACKET || outerRight.kind != TomlTokenKind::RIGHT_BRACKET) {
+          return Result::ERROR(TomlError::unexpectedToken(innerRight.span));
+        }
+
+        let headerSpan: TomlSpan = tomlCombineSpan(token.span, outerRight.span);
+        let Result::OK(nextTable) = tomlAppendArrayTableHeader(rootPointer, &path, lastSpan, headerSpan) else {
+          let Result::ERROR(error) = tomlAppendArrayTableHeader(rootPointer, &path, lastSpan, headerSpan) else {
+            return Result::ERROR(TomlError::tableConflict(headerSpan));
+          };
+
+          return Result::ERROR(error);
+        };
+
+        currentTable = nextTable;
+        index = match (tomlExpectLineEnd(tokens, pathIndex + 2)) {
+          Result::OK(nextIndex) -> nextIndex,
+          Result::ERROR(error) -> { return Result::ERROR(error); },
+        };
+        continue;
+      }
+
+      let Result::OK(pathIndex) = tomlParsePath(tokens, index + 1, &mut path, &mut firstSpan, &mut lastSpan) else {
+        let Result::ERROR(error) = tomlParsePath(tokens, index + 1, &mut path, &mut firstSpan, &mut lastSpan) else {
+          return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+        };
+
+        return Result::ERROR(error);
+      };
+
+      let Result::OK(rightBracket) = tomlTokenAt(tokens, pathIndex) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      if (rightBracket.kind != TomlTokenKind::RIGHT_BRACKET) {
+        return Result::ERROR(TomlError::unexpectedToken(rightBracket.span));
+      }
+
+      let headerSpan: TomlSpan = tomlCombineSpan(token.span, rightBracket.span);
+      let Result::OK(nextTable) = tomlOpenTableHeader(rootPointer, &path, lastSpan, headerSpan) else {
+        let Result::ERROR(error) = tomlOpenTableHeader(rootPointer, &path, lastSpan, headerSpan) else {
+          return Result::ERROR(TomlError::tableConflict(headerSpan));
+        };
+
+        return Result::ERROR(error);
+      };
+
+      currentTable = nextTable;
+      index = match (tomlExpectLineEnd(tokens, pathIndex + 1)) {
+        Result::OK(nextIndex) -> nextIndex,
+        Result::ERROR(error) -> { return Result::ERROR(error); },
+      };
+      continue;
+    }
+
+    let mut path: Vector<String> = Vector::init<String>();
+    let mut firstSpan: TomlSpan = token.span;
+    let mut lastSpan: TomlSpan = token.span;
+    let Result::OK(pathIndex) = tomlParsePath(tokens, index, &mut path, &mut firstSpan, &mut lastSpan) else {
+      let Result::ERROR(error) = tomlParsePath(tokens, index, &mut path, &mut firstSpan, &mut lastSpan) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    let Result::OK(equalsToken) = tomlTokenAt(tokens, pathIndex) else {
+      return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+    };
+
+    if (equalsToken.kind != TomlTokenKind::EQUALS) {
+      return Result::ERROR(TomlError::unexpectedToken(equalsToken.span));
+    }
+
+    let mut value: TomlValue = TomlValue::integer(0, equalsToken.span, lastSpan);
+    let Result::OK(nextIndex) = tomlParseValue(tokens, pathIndex + 1, lastSpan, &mut value) else {
+      let Result::ERROR(error) = tomlParseValue(tokens, pathIndex + 1, lastSpan, &mut value) else {
+        return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    let pathSpan: TomlSpan = tomlCombineSpan(firstSpan, lastSpan);
+    if (let Option::SOME(error) = tomlInsertValueAtPath(currentTable, &path, lastSpan, value, pathSpan, false)) {
+      return Result::ERROR(error);
+    }
+
+    index = match (tomlExpectLineEnd(tokens, nextIndex)) {
+      Result::OK(valueIndex) -> valueIndex,
+      Result::ERROR(error) -> { return Result::ERROR(error); },
+    };
+  }
+
+  return Result::OK(TomlDocument::new(root, rootSpan));
+}

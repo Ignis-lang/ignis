@@ -4,6 +4,7 @@ import Serializer from "std::serializer::writer";
 import Text from "std::text";
 
 import TomlError from "./error";
+import parseTokens from "./parser";
 import TomlSpan, TomlToken, TomlTokenKind from "./token";
 
 export TomlArray, TomlDocument, TomlTable, TomlValue, TomlValueKind from "./value";
@@ -1361,6 +1362,23 @@ export namespace Toml {
 
     tomlPushLiteralToken(output, TomlTokenKind::EOF, "", TomlSpan::new(cursor.position(), cursor.position()));
     return Option::NONE;
+  }
+
+  function parse(source: str): Result<TomlDocument, TomlError> {
+    let owned: String = String::create(source);
+    return Toml::parse(&owned);
+  }
+
+  function parse(source: &String): Result<TomlDocument, TomlError> {
+    let Result::OK(tokens) = Toml::lex(source) else {
+      let Result::ERROR(error) = Toml::lex(source) else {
+        return Result::ERROR(TomlError::unexpectedToken(TomlSpan::new(0, 0)));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    return parseTokens(&tokens);
   }
 
   function tokenCount(tokens: &Vector<TomlToken>): u64 {
