@@ -1,0 +1,575 @@
+import Memory from "std::memory";
+import Vector from "std::vector";
+
+import TomlError from "./error";
+import TomlSpan from "./token";
+
+function tomlPathSegments(path: &String): Vector<String> {
+  return path.split((byte: u8): boolean -> {
+    return byte == ('.' as u8);
+  });
+}
+
+export enum TomlValueKind {
+  STRING,
+  INTEGER,
+  FLOAT,
+  BOOLEAN,
+  ARRAY,
+  TABLE,
+  ARRAY_OF_TABLES,
+  DATE_TIME,
+}
+
+export enum TomlDateTimeKind {
+  LOCAL_DATE,
+  LOCAL_TIME,
+  LOCAL_DATE_TIME,
+  OFFSET_DATE_TIME,
+}
+
+export record TomlDateTime {
+  public raw: String;
+  public kind: TomlDateTimeKind;
+  public year: i32;
+  public month: i32;
+  public day: i32;
+  public hour: i32;
+  public minute: i32;
+  public second: i32;
+  public fractionalDigits: i32;
+  public offsetMinutes: i32;
+  public span: TomlSpan;
+
+  public static new(
+    raw: str,
+    kind: TomlDateTimeKind,
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+    fractionalDigits: i32,
+    offsetMinutes: i32,
+    span: TomlSpan,
+  ): TomlDateTime {
+    return TomlDateTime {
+      raw: String::create(raw),
+      kind: kind,
+      year: year,
+      month: month,
+      day: day,
+      hour: hour,
+      minute: minute,
+      second: second,
+      fractionalDigits: fractionalDigits,
+      offsetMinutes: offsetMinutes,
+      span: span,
+    };
+  }
+
+  public static offsetDateTime(
+    raw: str,
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+    fractionalDigits: i32,
+    offsetMinutes: i32,
+    span: TomlSpan,
+  ): TomlDateTime {
+    return TomlDateTime::new(
+      raw,
+      TomlDateTimeKind::OFFSET_DATE_TIME,
+      year,
+      month,
+      day,
+      hour,
+      minute,
+      second,
+      fractionalDigits,
+      offsetMinutes,
+      span,
+    );
+  }
+
+  public static localDate(raw: str, year: i32, month: i32, day: i32, span: TomlSpan): TomlDateTime {
+    return TomlDateTime::new(raw, TomlDateTimeKind::LOCAL_DATE, year, month, day, 0, 0, 0, 0, 0, span);
+  }
+
+  public static empty(): TomlDateTime {
+    return TomlDateTime::localDate("", 0, 0, 0, TomlSpan::new(0, 0));
+  }
+
+  public clone(&self): TomlDateTime {
+    return TomlDateTime {
+      raw: self.raw.clone(),
+      kind: self.kind,
+      year: self.year,
+      month: self.month,
+      day: self.day,
+      hour: self.hour,
+      minute: self.minute,
+      second: self.second,
+      fractionalDigits: self.fractionalDigits,
+      offsetMinutes: self.offsetMinutes,
+      span: self.span,
+    };
+  }
+}
+
+function tomlStringPointer(value: String): *mut String {
+  let pointer: *mut String = Memory::allocateVector<String>(1);
+  @write<String>(pointer, value);
+
+  return pointer;
+}
+
+function tomlDateTimePointer(value: TomlDateTime): *mut TomlDateTime {
+  let pointer: *mut TomlDateTime = Memory::allocateVector<TomlDateTime>(1);
+  @write<TomlDateTime>(pointer, value);
+
+  return pointer;
+}
+
+export record TomlValue {
+  public kind: TomlValueKind;
+  public span: TomlSpan;
+  public keySpan: TomlSpan;
+  public stringValue: *mut String;
+  public integerValue: i64;
+  public floatValue: f64;
+  public booleanValue: boolean;
+  public arrayValue: *mut TomlArray;
+  public tableValue: *mut TomlTable;
+  public arrayOfTablesValue: *mut TomlArrayOfTables;
+  public dateTimeValue: *mut TomlDateTime;
+
+  public static string(value: str, span: TomlSpan, keySpan: TomlSpan): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::STRING,
+      span: span,
+      keySpan: keySpan,
+      stringValue: tomlStringPointer(String::create(value)),
+      integerValue: 0,
+      floatValue: 0.0,
+      booleanValue: false,
+      arrayValue: null,
+      tableValue: null,
+      arrayOfTablesValue: null,
+      dateTimeValue: null,
+    };
+  }
+
+  public static array(value: TomlArray, span: TomlSpan, keySpan: TomlSpan): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::ARRAY,
+      span: span,
+      keySpan: keySpan,
+      stringValue: null,
+      integerValue: 0,
+      floatValue: 0.0,
+      booleanValue: false,
+      arrayValue: tomlArrayPointer(value),
+      tableValue: null,
+      arrayOfTablesValue: null,
+      dateTimeValue: null,
+    };
+  }
+
+  public static table(value: TomlTable, span: TomlSpan, keySpan: TomlSpan): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::TABLE,
+      span: span,
+      keySpan: keySpan,
+      stringValue: null,
+      integerValue: 0,
+      floatValue: 0.0,
+      booleanValue: false,
+      arrayValue: null,
+      tableValue: tomlTablePointer(value),
+      arrayOfTablesValue: null,
+      dateTimeValue: null,
+    };
+  }
+
+  public static dateTime(value: TomlDateTime, span: TomlSpan, keySpan: TomlSpan): TomlValue {
+    return TomlValue {
+      kind: TomlValueKind::DATE_TIME,
+      span: span,
+      keySpan: keySpan,
+      stringValue: null,
+      integerValue: 0,
+      floatValue: 0.0,
+      booleanValue: false,
+      arrayValue: null,
+      tableValue: null,
+      arrayOfTablesValue: null,
+      dateTimeValue: tomlDateTimePointer(value),
+    };
+  }
+
+  public kind(&self): TomlValueKind {
+    return self.kind;
+  }
+
+  public clone(&self): TomlValue {
+    return TomlValue {
+      kind: self.kind,
+      span: self.span,
+      keySpan: self.keySpan,
+      stringValue: self.stringValue,
+      integerValue: self.integerValue,
+      floatValue: self.floatValue,
+      booleanValue: self.booleanValue,
+      arrayValue: self.arrayValue,
+      tableValue: self.tableValue,
+      arrayOfTablesValue: self.arrayOfTablesValue,
+      dateTimeValue: self.dateTimeValue,
+    };
+  }
+
+  public asString(&self): Option<str> {
+    if (self.kind == TomlValueKind::STRING) {
+      return Option::SOME((*self.stringValue).toStr());
+    }
+
+    return Option::NONE;
+  }
+
+  public asArray(&self): Option<TomlArray> {
+    if (self.kind == TomlValueKind::ARRAY) {
+      return Option::SOME(*self.arrayValue);
+    }
+
+    return Option::NONE;
+  }
+
+  public asTable(&self): Option<TomlTable> {
+    if (self.kind == TomlValueKind::TABLE) {
+      return Option::SOME(*self.tableValue);
+    }
+
+    return Option::NONE;
+  }
+
+  public asDateTime(&self): Option<TomlDateTime> {
+    if (self.kind == TomlValueKind::DATE_TIME) {
+      return Option::SOME(*self.dateTimeValue);
+    }
+
+    return Option::NONE;
+  }
+}
+
+export record TomlArray {
+  values: *mut TomlValue;
+  length: u64;
+  capacity: u64;
+  public span: TomlSpan;
+
+  public static new(span: TomlSpan): TomlArray {
+    return TomlArray {
+      values: null,
+      length: 0,
+      capacity: 0,
+      span: span,
+    };
+  }
+
+  private grow(&mut self): void {
+    let mut newCapacity: u64 = self.capacity * 2;
+
+    if (newCapacity == 0) {
+      newCapacity = 1;
+    }
+
+    if (self.values == null) {
+      self.values = Memory::allocateVector<TomlValue>(newCapacity);
+    } else {
+      self.values = Memory::reallocateVector<TomlValue>(self.values, newCapacity);
+    }
+
+    self.capacity = newCapacity;
+  }
+
+  public push(&mut self, value: TomlValue): void {
+    if (self.length == self.capacity) {
+      self.grow();
+    }
+
+    @write<TomlValue>(self.values + self.length, value.clone());
+    self.length += 1;
+  }
+
+  public length(&self): u64 {
+    return self.length;
+  }
+
+  public item(&self, index: u64): Option<TomlValue> {
+    if (index >= self.length) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(self.values[index].clone());
+  }
+}
+
+export record TomlTableEntry {
+  public key: *mut String;
+  public value: TomlValue;
+  public keySpan: TomlSpan;
+
+  public static new(key: str, value: TomlValue, keySpan: TomlSpan): TomlTableEntry {
+    return TomlTableEntry {
+      key: tomlStringPointer(String::create(key)),
+      value: value.clone(),
+      keySpan: keySpan,
+    };
+  }
+
+  public static create(key: &String, value: TomlValue, keySpan: TomlSpan): TomlTableEntry {
+    return TomlTableEntry {
+      key: tomlStringPointer(key.clone()),
+      value: value.clone(),
+      keySpan: keySpan,
+    };
+  }
+}
+
+export record TomlTable {
+  entries: *mut TomlTableEntry;
+  length: u64;
+  capacity: u64;
+  public span: TomlSpan;
+
+  public static new(span: TomlSpan): TomlTable {
+    return TomlTable {
+      entries: null,
+      length: 0,
+      capacity: 0,
+      span: span,
+    };
+  }
+
+  private grow(&mut self): void {
+    let mut newCapacity: u64 = self.capacity * 2;
+
+    if (newCapacity == 0) {
+      newCapacity = 1;
+    }
+
+    if (self.entries == null) {
+      self.entries = Memory::allocateVector<TomlTableEntry>(newCapacity);
+    } else {
+      self.entries = Memory::reallocateVector<TomlTableEntry>(self.entries, newCapacity);
+    }
+
+    self.capacity = newCapacity;
+  }
+
+  private pushEntry(&mut self, entry: TomlTableEntry): void {
+    if (self.length == self.capacity) {
+      self.grow();
+    }
+
+    @write<TomlTableEntry>(self.entries + self.length, entry);
+    self.length += 1;
+  }
+
+  public insert(&mut self, key: str, value: TomlValue, keySpan: TomlSpan): void {
+    self.pushEntry(TomlTableEntry::new(key, value, keySpan));
+  }
+
+  public insert(&mut self, key: &String, value: TomlValue, keySpan: TomlSpan): void {
+    self.pushEntry(TomlTableEntry::create(key, value, keySpan));
+  }
+
+  public valueForKey(&self, key: &String): Option<TomlValue> {
+    let mut index: u64 = 0;
+
+    while (index < self.length) {
+      let entry: TomlTableEntry = self.entries[index];
+
+      if ((*entry.key).equals(key)) {
+        return Option::SOME(entry.value.clone());
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+}
+
+export record TomlArrayOfTables {
+  entries: *mut TomlTable;
+  length: u64;
+  capacity: u64;
+  public span: TomlSpan;
+
+  public static new(span: TomlSpan): TomlArrayOfTables {
+    return TomlArrayOfTables {
+      entries: null,
+      length: 0,
+      capacity: 0,
+      span: span,
+    };
+  }
+
+  private grow(&mut self): void {
+    let mut newCapacity: u64 = self.capacity * 2;
+
+    if (newCapacity == 0) {
+      newCapacity = 1;
+    }
+
+    if (self.entries == null) {
+      self.entries = Memory::allocateVector<TomlTable>(newCapacity);
+    } else {
+      self.entries = Memory::reallocateVector<TomlTable>(self.entries, newCapacity);
+    }
+
+    self.capacity = newCapacity;
+  }
+
+  public push(&mut self, value: TomlTable): void {
+    if (self.length == self.capacity) {
+      self.grow();
+    }
+
+    @write<TomlTable>(self.entries + self.length, value);
+    self.length += 1;
+  }
+}
+
+function tomlArrayPointer(value: TomlArray): *mut TomlArray {
+  let pointer: *mut TomlArray = Memory::allocateVector<TomlArray>(1);
+  @write<TomlArray>(pointer, value);
+
+  return pointer;
+}
+
+function tomlTablePointer(value: TomlTable): *mut TomlTable {
+  let pointer: *mut TomlTable = Memory::allocateVector<TomlTable>(1);
+  @write<TomlTable>(pointer, value);
+
+  return pointer;
+}
+
+function tomlArrayOfTablesPointer(value: TomlArrayOfTables): *mut TomlArrayOfTables {
+  let pointer: *mut TomlArrayOfTables = Memory::allocateVector<TomlArrayOfTables>(1);
+  @write<TomlArrayOfTables>(pointer, value);
+
+  return pointer;
+}
+
+function tomlLookupInTable(
+  table: &TomlTable,
+  segments: &Vector<String>,
+  index: u64,
+  fallbackSpan: TomlSpan,
+): Result<TomlValue, TomlError> {
+  let Option::SOME(segment) = segments.get(index) else {
+    return Result::ERROR(TomlError::lookupNotFound(fallbackSpan));
+  };
+
+  if (segment.length() == 0) {
+    return Result::ERROR(TomlError::lookupNotFound(fallbackSpan));
+  }
+
+  let lookupResult: Option<TomlValue> = table.valueForKey(segment);
+  let Option::SOME(foundValue) = lookupResult else {
+    return Result::ERROR(TomlError::lookupNotFound(fallbackSpan));
+  };
+  let value: TomlValue = foundValue;
+
+  if (index + 1 < segments.length()) {
+    let valueSpan: TomlSpan = value.span;
+    let nextFallback: TomlSpan = value.keySpan;
+    let tableResult: Option<TomlTable> = value.asTable();
+    let Option::SOME(foundTable) = tableResult else {
+      return Result::ERROR(TomlError::lookupTypeMismatch(valueSpan));
+    };
+    let nextTable: TomlTable = foundTable;
+
+    return tomlLookupInTable(&nextTable, segments, index + 1, nextFallback);
+  }
+
+  return Result::OK(value);
+}
+
+export record TomlDocument {
+  root: TomlTable;
+  public span: TomlSpan;
+
+  public static new(root: TomlTable, span: TomlSpan): TomlDocument {
+    return TomlDocument {
+      root: root,
+      span: span,
+    };
+  }
+
+  private lookupValue(&self, path: str): Result<TomlValue, TomlError> {
+    let ownedPath: String = String::create(path);
+    return self.lookupValue(&ownedPath);
+  }
+
+  private lookupValue(&self, path: &String): Result<TomlValue, TomlError> {
+    let segments: Vector<String> = tomlPathSegments(path);
+
+    if (segments.length() == 0) {
+      return Result::ERROR(TomlError::lookupNotFound(self.span));
+    }
+
+    let root: TomlTable = self.root;
+
+    return tomlLookupInTable(&root, &segments, 0, self.span);
+  }
+
+  public get(&self, path: str): Option<TomlValue> {
+    return match (self.lookupValue(path)) {
+      Result::OK(value) -> Option::SOME(value),
+      Result::ERROR(_) -> Option::NONE,
+    };
+  }
+
+  public getString(&self, path: str): Result<str, TomlError> {
+    let valueResult: Result<TomlValue, TomlError> = self.lookupValue(path);
+
+    let Result::OK(value) = valueResult else {
+      let Result::ERROR(error) = valueResult else {
+        return Result::ERROR(TomlError::lookupNotFound(self.span));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    let Option::SOME(result) = value.asString() else {
+      return Result::ERROR(TomlError::lookupTypeMismatch(value.span));
+    };
+
+    return Result::OK(result);
+  }
+
+  public getArray(&self, path: str): Result<TomlArray, TomlError> {
+    let valueResult: Result<TomlValue, TomlError> = self.lookupValue(path);
+
+    let Result::OK(value) = valueResult else {
+      let Result::ERROR(error) = valueResult else {
+        return Result::ERROR(TomlError::lookupNotFound(self.span));
+      };
+
+      return Result::ERROR(error);
+    };
+
+    let Option::SOME(result) = value.asArray() else {
+      return Result::ERROR(TomlError::lookupTypeMismatch(value.span));
+    };
+
+    return Result::OK(result);
+  }
+}

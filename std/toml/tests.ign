@@ -4,6 +4,7 @@ import Toml from "std::toml";
 import Vector from "std::vector";
 import TomlError, TomlErrorKind from "./error";
 import TomlSpan, TomlToken, TomlTokenKind from "./token";
+import TomlArray, TomlDocument, TomlTable, TomlValue, TomlValueKind from "./value";
 
 function tokenAt(tokens: &Vector<TomlToken>, index: u64): &TomlToken {
   let Option::SOME(token) = Toml::tokenAt(tokens, index) else {
@@ -81,45 +82,12 @@ function utf8TomlValue(): String {
   return String::create(raw, 9 as u64);
 }
 
-function tokenKindName(kind: TomlTokenKind): str {
-  return match (kind) {
-    TomlTokenKind::LEFT_BRACKET -> "LEFT_BRACKET",
-    TomlTokenKind::RIGHT_BRACKET -> "RIGHT_BRACKET",
-    TomlTokenKind::LEFT_BRACE -> "LEFT_BRACE",
-    TomlTokenKind::RIGHT_BRACE -> "RIGHT_BRACE",
-    TomlTokenKind::DOT -> "DOT",
-    TomlTokenKind::EQUALS -> "EQUALS",
-    TomlTokenKind::COMMA -> "COMMA",
-    TomlTokenKind::NEWLINE -> "NEWLINE",
-    TomlTokenKind::IDENTIFIER -> "IDENTIFIER",
-    TomlTokenKind::STRING -> "STRING",
-    TomlTokenKind::INTEGER -> "INTEGER",
-    TomlTokenKind::FLOAT -> "FLOAT",
-    TomlTokenKind::BOOLEAN -> "BOOLEAN",
-    TomlTokenKind::EOF -> "EOF",
-  };
-}
-
-function errorKindName(kind: TomlErrorKind): str {
-  return match (kind) {
-    TomlErrorKind::UNEXPECTED_CHARACTER -> "UNEXPECTED_CHARACTER",
-    TomlErrorKind::UNTERMINATED_STRING -> "UNTERMINATED_STRING",
-    TomlErrorKind::INVALID_INTEGER -> "INVALID_INTEGER",
-  };
-}
-
 function assertTokenKind(actual: TomlTokenKind, expected: TomlTokenKind): void {
-  let actualName: String = String::create(tokenKindName(actual));
-  let expectedName: String = String::create(tokenKindName(expected));
-
-  Test::assert(actualName.equals(&expectedName));
+  Test::assert(actual == expected);
 }
 
 function assertErrorKind(actual: TomlErrorKind, expected: TomlErrorKind): void {
-  let actualName: String = String::create(errorKindName(actual));
-  let expectedName: String = String::create(errorKindName(expected));
-
-  Test::assert(actualName.equals(&expectedName));
+  Test::assert(actual == expected);
 }
 
 function assertToken(
@@ -299,4 +267,122 @@ function lexRecognizesBasicStringUnicodeEscapes(): void {
   assertToken(tokenAt(&tokens, 2), TomlTokenKind::STRING, "AB", 7, 25);
   assertToken(tokenAt(&tokens, 3), TomlTokenKind::NEWLINE, "\n", 25, 26);
   assertToken(tokenAt(&tokens, 4), TomlTokenKind::EOF, "", 26, 26);
+}
+
+@test
+function lexRecognizesArrayOfTablesAndDateTimeLiterals(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("[[items]]\ncreated = 1979-05-27T07:32:00Z\nlocalDate = 1979-05-27\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 15);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::LEFT_BRACKET, "[", 0, 1);
+  assertToken(tokenAt(&tokens, 1), TomlTokenKind::LEFT_BRACKET, "[", 1, 2);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::IDENTIFIER, "items", 2, 7);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::RIGHT_BRACKET, "]", 7, 8);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::RIGHT_BRACKET, "]", 8, 9);
+  assertToken(tokenAt(&tokens, 8), TomlTokenKind::DATE_TIME, "1979-05-27T07:32:00Z", 20, 40);
+  assertToken(tokenAt(&tokens, 12), TomlTokenKind::DATE_TIME, "1979-05-27", 53, 63);
+  assertToken(tokenAt(&tokens, 14), TomlTokenKind::EOF, "", 64, 64);
+}
+
+@test
+function lexReportsInvalidEscapeSpan(): void {
+  let mut error: TomlError = TomlError::unexpectedCharacter(TomlSpan::new(0, 0));
+  expectError("name = \"bad\\q\"", &mut error);
+
+  assertErrorKind(error.kind, TomlErrorKind::INVALID_ESCAPE);
+  Test::assertEq<u64>(error.span.start, 11);
+  Test::assertEq<u64>(error.span.end, 12);
+}
+
+@test
+function lexReportsInvalidNumberSpan(): void {
+  let mut error: TomlError = TomlError::unexpectedCharacter(TomlSpan::new(0, 0));
+  expectError("value = 1_", &mut error);
+
+  assertErrorKind(error.kind, TomlErrorKind::INVALID_NUMBER);
+  Test::assertEq<u64>(error.span.start, 8);
+  Test::assertEq<u64>(error.span.end, 10);
+}
+
+@test
+function lexReportsInvalidDateTimeSpan(): void {
+  let mut error: TomlError = TomlError::unexpectedCharacter(TomlSpan::new(0, 0));
+  expectError("created = 1979-05-27T07:32:00+24:00", &mut error);
+
+  assertErrorKind(error.kind, TomlErrorKind::INVALID_DATE_TIME);
+  Test::assertEq<u64>(error.span.start, 10);
+  Test::assertEq<u64>(error.span.end, 35);
+}
+
+@test
+function valueCreatesStringAndPreservesSpan(): void {
+  let span: TomlSpan = TomlSpan::new(7, 14);
+  let keySpan: TomlSpan = TomlSpan::new(0, 4);
+  let value: TomlValue = TomlValue::string("ignis", span, keySpan);
+
+  Test::assert(value.kind() == TomlValueKind::STRING);
+  Test::assertEq<u64>(value.span.start, 7);
+  Test::assertEq<u64>(value.span.end, 14);
+
+  let Option::SOME(text) = value.asString() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let expected: String = String::create("ignis");
+  let actual: String = String::create(text);
+  Test::assert(actual.equals(&expected));
+}
+
+@test
+function valueArrayStoresNestedValues(): void {
+  let span: TomlSpan = TomlSpan::new(0, 9);
+  let keySpan: TomlSpan = TomlSpan::new(0, 4);
+  let mut array: TomlArray = TomlArray::new(span);
+
+  array.push(TomlValue::string("one", span, keySpan));
+  array.push(TomlValue::string("two", span, keySpan));
+
+  let value: TomlValue = TomlValue::array(array, span, keySpan);
+
+  let Option::SOME(foundArray) = value.asArray() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  Test::assertEq<u64>(foundArray.length(), 2);
+
+  let Option::SOME(first) = foundArray.item(0) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let Option::SOME(firstText) = first.asString() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let expected: String = String::create("one");
+  let actual: String = String::create(firstText);
+  Test::assert(actual.equals(&expected));
+}
+
+@test
+function documentLooksUpRootStringValues(): void {
+  let rootSpan: TomlSpan = TomlSpan::new(0, 20);
+  let nameSpan: TomlSpan = TomlSpan::new(10, 14);
+  let root: TomlTable = TomlTable::new(rootSpan);
+
+  root.insert("name", TomlValue::string("ignis", nameSpan, nameSpan), nameSpan);
+
+  let document: TomlDocument = TomlDocument::new(root, rootSpan);
+  let Result::OK(name) = document.getString("name") else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let expected: String = String::create("ignis");
+  let actual: String = String::create(name);
+  Test::assert(actual.equals(&expected));
 }

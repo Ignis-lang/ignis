@@ -6,6 +6,8 @@ import Text from "std::text";
 import TomlError from "./error";
 import TomlSpan, TomlToken, TomlTokenKind from "./token";
 
+export TomlArray, TomlDocument, TomlTable, TomlValue, TomlValueKind from "./value";
+
 record TomlLexeme {
   public kind: TomlTokenKind;
   public end: u64;
@@ -25,6 +27,10 @@ function tomlIsSign(ch: char): boolean {
 
 function tomlIsExponentMarker(ch: char): boolean {
   return ch == 'e' || ch == 'E';
+}
+
+function tomlIsDateTimeMarker(ch: char): boolean {
+  return ch == 'T' || ch == 't' || ch == 'Z' || ch == 'z' || ch == ':';
 }
 
 function tomlIsBareKeyStart(ch: char): boolean {
@@ -89,6 +95,360 @@ function tomlPeekAscii(cursor: &mut Text::Cursor): Option<char> {
   };
 
   return tomlAscii(current);
+}
+
+function tomlCharAtOrNull(value: &String, index: u64): char {
+  return match (value.charAt(index)) {
+    Option::SOME(ch) -> ch,
+    Option::NONE -> '\0',
+  };
+}
+
+function tomlIsLiteralDelimiter(ch: char): boolean {
+  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '#' || ch == ',' || ch == ']' || ch == '}' || ch == '=';
+}
+
+function tomlScanLiteralEnd(cursor: &mut Text::Cursor): u64 {
+  let mut stream: &mut Text::Cursor = cursor;
+
+  while (!stream.isAtEnd()) {
+    let Option::SOME(current) = stream.peek() else {
+      break;
+    };
+
+    let Option::SOME(ascii) = tomlAscii(current) else {
+      break;
+    };
+
+    if (tomlIsLiteralDelimiter(ascii)) {
+      break;
+    }
+
+    stream.advance();
+  }
+
+  return stream.position();
+}
+
+function tomlLooksLikeDateTime(value: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < value.length()) {
+    let current: char = tomlCharAtOrNull(value, index);
+
+    if (tomlIsDateTimeMarker(current)) {
+      return true;
+    }
+
+    if (index >= 4 && current == '-') {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function tomlCountDigits(value: &String, index: u64): u64 {
+  let mut currentIndex: u64 = index;
+
+  while (currentIndex < value.length()) {
+    let current: char = tomlCharAtOrNull(value, currentIndex);
+
+    if (!tomlIsDigit(current)) {
+      break;
+    }
+
+    currentIndex += 1;
+  }
+
+  return currentIndex - index;
+}
+
+function tomlParseFixedDigits(value: &String, index: u64, digits: u64): i64 {
+  let mut currentIndex: u64 = index;
+  let mut parsed: u64 = 0;
+  let mut result: i64 = 0;
+
+  while (parsed < digits) {
+    let current: char = tomlCharAtOrNull(value, currentIndex);
+
+    if (!tomlIsDigit(current)) {
+      return -1;
+    }
+
+    result = result * 10 + ((current as i64) - ('0' as i64));
+    currentIndex += 1;
+    parsed += 1;
+  }
+
+  return result;
+}
+
+function tomlHasLeadingZeroViolation(value: &String, start: u64, digitCount: u64): boolean {
+  if (digitCount <= 1) {
+    return false;
+  }
+
+  return tomlCharAtOrNull(value, start) == '0';
+}
+
+function tomlValidateNumberLiteral(value: &String): TomlTokenKind {
+  let length: u64 = value.length();
+
+  if (length == 0) {
+    return TomlTokenKind::EOF;
+  }
+
+  let mut index: u64 = 0;
+  let mut kind: TomlTokenKind = TomlTokenKind::INTEGER;
+  let mut previousWasDigit: boolean = false;
+  let mut previousWasUnderscore: boolean = false;
+  let mut sawDigit: boolean = false;
+  let mut sawDecimalPoint: boolean = false;
+  let mut sawExponent: boolean = false;
+
+  let first: char = tomlCharAtOrNull(value, index);
+
+  if (tomlIsSign(first)) {
+    index += 1;
+  }
+
+  if (index >= length) {
+    return TomlTokenKind::EOF;
+  }
+
+  let integerStart: u64 = index;
+  let integerDigitCount: u64 = tomlCountDigits(value, integerStart);
+
+  if (integerDigitCount == 0) {
+    return TomlTokenKind::EOF;
+  }
+
+  while (index < length) {
+    let current: char = tomlCharAtOrNull(value, index);
+
+    if (tomlIsDigit(current)) {
+      previousWasDigit = true;
+      previousWasUnderscore = false;
+      sawDigit = true;
+      index += 1;
+      continue;
+    }
+
+    if (current == '_') {
+      if (!previousWasDigit || previousWasUnderscore) {
+        return TomlTokenKind::EOF;
+      }
+
+      previousWasDigit = false;
+      previousWasUnderscore = true;
+      index += 1;
+      continue;
+    }
+
+    if (current == '.') {
+      if (sawDecimalPoint || sawExponent || previousWasUnderscore || !previousWasDigit) {
+        return TomlTokenKind::EOF;
+      }
+
+      let next: char = tomlCharAtOrNull(value, index + 1);
+
+      if (!tomlIsDigit(next)) {
+        return TomlTokenKind::EOF;
+      }
+
+      kind = TomlTokenKind::FLOAT;
+      sawDecimalPoint = true;
+      previousWasDigit = false;
+      previousWasUnderscore = false;
+      index += 1;
+      continue;
+    }
+
+    if (tomlIsExponentMarker(current)) {
+      if (sawExponent || previousWasUnderscore || !previousWasDigit) {
+        return TomlTokenKind::EOF;
+      }
+
+      let exponentSign: char = tomlCharAtOrNull(value, index + 1);
+      let mut exponentDigit: char = exponentSign;
+
+      if (tomlIsSign(exponentSign)) {
+        exponentDigit = tomlCharAtOrNull(value, index + 2);
+      }
+
+      if (!tomlIsDigit(exponentDigit)) {
+        return TomlTokenKind::EOF;
+      }
+
+      kind = TomlTokenKind::FLOAT;
+      sawExponent = true;
+      previousWasDigit = false;
+      previousWasUnderscore = false;
+      index += 1;
+
+      if (tomlIsSign(exponentSign)) {
+        index += 1;
+      }
+
+      continue;
+    }
+
+    return TomlTokenKind::EOF;
+  }
+
+  if (!previousWasDigit || previousWasUnderscore) {
+    return TomlTokenKind::EOF;
+  }
+
+  if (!sawDecimalPoint && !sawExponent && tomlHasLeadingZeroViolation(value, integerStart, integerDigitCount)) {
+    return TomlTokenKind::EOF;
+  }
+
+  return kind;
+}
+
+function tomlValidateTimeTail(value: &String, index: u64): boolean {
+  let hour: i64 = tomlParseFixedDigits(value, index, 2);
+  let minute: i64 = tomlParseFixedDigits(value, index + 3, 2);
+  let second: i64 = tomlParseFixedDigits(value, index + 6, 2);
+
+  if (hour < 0 || minute < 0 || second < 0) {
+    return false;
+  }
+
+  if (hour > 23 || minute > 59 || second > 59) {
+    return false;
+  }
+
+  if (tomlCharAtOrNull(value, index + 2) != ':' || tomlCharAtOrNull(value, index + 5) != ':') {
+    return false;
+  }
+
+  let mut tailIndex: u64 = index + 8;
+
+  if (tailIndex < value.length() && tomlCharAtOrNull(value, tailIndex) == '.') {
+    tailIndex += 1;
+
+    let fractionalDigits: u64 = tomlCountDigits(value, tailIndex);
+
+    if (fractionalDigits == 0) {
+      return false;
+    }
+
+    tailIndex += fractionalDigits;
+  }
+
+  if (tailIndex == value.length()) {
+    return true;
+  }
+
+  let offsetMarker: char = tomlCharAtOrNull(value, tailIndex);
+
+  if (offsetMarker == 'Z' || offsetMarker == 'z') {
+    return tailIndex + 1 == value.length();
+  }
+
+  if (!tomlIsSign(offsetMarker)) {
+    return false;
+  }
+
+  let offsetHour: i64 = tomlParseFixedDigits(value, tailIndex + 1, 2);
+  let offsetMinute: i64 = tomlParseFixedDigits(value, tailIndex + 4, 2);
+
+  if (offsetHour < 0 || offsetMinute < 0) {
+    return false;
+  }
+
+  if (offsetHour > 23 || offsetMinute > 59) {
+    return false;
+  }
+
+  if (tomlCharAtOrNull(value, tailIndex + 3) != ':') {
+    return false;
+  }
+
+  return tailIndex + 6 == value.length();
+}
+
+function tomlValidateDateTimeLiteral(value: &String): boolean {
+  let length: u64 = value.length();
+
+  if (length >= 8 && tomlCharAtOrNull(value, 2) == ':' && tomlCharAtOrNull(value, 5) == ':') {
+    return tomlValidateTimeTail(value, 0);
+  }
+
+  if (length < 10) {
+    return false;
+  }
+
+  let year: i64 = tomlParseFixedDigits(value, 0, 4);
+  let month: i64 = tomlParseFixedDigits(value, 5, 2);
+  let day: i64 = tomlParseFixedDigits(value, 8, 2);
+
+  if (year < 0 || month < 0 || day < 0) {
+    return false;
+  }
+
+  if (tomlCharAtOrNull(value, 4) != '-' || tomlCharAtOrNull(value, 7) != '-') {
+    return false;
+  }
+
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+
+  if (length == 10) {
+    return true;
+  }
+
+  let separator: char = tomlCharAtOrNull(value, 10);
+
+  if (separator != 'T' && separator != 't') {
+    return false;
+  }
+
+  return tomlValidateTimeTail(value, 11);
+}
+
+function tomlLexScalarLiteral(cursor: &mut Text::Cursor, start: u64): Result<TomlLexeme, TomlError> {
+  let stream: &mut Text::Cursor = cursor;
+  let specialFloat: Option<TomlLexeme> = tomlLexSignedFloatKeyword(stream);
+
+  if (specialFloat.isSome()) {
+    let Option::SOME(lexeme) = specialFloat else {
+      return Result::ERROR(TomlError::invalidNumber(TomlSpan::new(start, start)));
+    };
+
+    return Result::OK(lexeme);
+  }
+
+  let end: u64 = tomlScanLiteralEnd(stream);
+  let value: String = stream.slice(start, end);
+
+  if (tomlLooksLikeDateTime(&value)) {
+    if (!tomlValidateDateTimeLiteral(&value)) {
+      return Result::ERROR(TomlError::invalidDateTime(TomlSpan::new(start, end)));
+    }
+
+    return Result::OK(TomlLexeme {
+      kind: TomlTokenKind::DATE_TIME,
+      end: end,
+    });
+  }
+
+  let kind: TomlTokenKind = tomlValidateNumberLiteral(&value);
+
+  if (kind == TomlTokenKind::EOF) {
+    return Result::ERROR(TomlError::invalidNumber(TomlSpan::new(start, end)));
+  }
+
+  return Result::OK(TomlLexeme {
+    kind: kind,
+    end: end,
+  });
 }
 
 function tomlRemainingStartsWith(cursor: &mut Text::Cursor, expected: str): boolean {
@@ -306,15 +666,15 @@ function tomlReadHexScalar(
 
   while (index < digits) {
     let Option::SOME(current) = stream.peek() else {
-      return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(start, stream.position())));
+      return Result::ERROR(TomlError::invalidEscape(TomlSpan::new(start, stream.position())));
     };
 
     let Option::SOME(ascii) = tomlAscii(current) else {
-      return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(current.start, current.end)));
+      return Result::ERROR(TomlError::invalidEscape(TomlSpan::new(start, current.end)));
     };
 
     let Option::SOME(nibble) = tomlHexValue(ascii) else {
-      return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(current.start, current.end)));
+      return Result::ERROR(TomlError::invalidEscape(TomlSpan::new(start, current.end)));
     };
 
     value = value * 16 + nibble;
@@ -388,7 +748,7 @@ function tomlPushQuotedEscape(
   escaped: Text::Utf8Char,
   escapedAscii: char
 ): Result<boolean, TomlError> {
-  let mut value: &mut String = output;
+  let value: &mut String = output;
   let mut stream: &mut Text::Cursor = cursor;
 
   if (escapedAscii == 'u' || escapedAscii == 'U') {
@@ -408,14 +768,14 @@ function tomlPushQuotedEscape(
     };
 
     if (!tomlPushUtf8Scalar(value, scalar)) {
-      return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(escaped.start, stream.position())));
+      return Result::ERROR(TomlError::invalidEscape(TomlSpan::new(escaped.start - 1, stream.position())));
     }
 
     return Result::OK(true);
   }
 
   if (!tomlPushEscaped(value, escapedAscii)) {
-    return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(escaped.start, escaped.end)));
+    return Result::ERROR(TomlError::invalidEscape(TomlSpan::new(escaped.start - 1, escaped.start)));
   }
 
   stream.advance();
@@ -465,7 +825,7 @@ function tomlLexBasicMultilineString(
       };
 
       let Option::SOME(escapedAscii) = tomlAscii(escaped) else {
-        return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(escaped.start, escaped.end)));
+        return Result::ERROR(TomlError::invalidEscape(TomlSpan::new(escaped.start - 1, escaped.end)));
       };
 
       match (tomlPushQuotedEscape(value, stream, escaped, escapedAscii)) {
@@ -527,7 +887,7 @@ function tomlLexBasicString(
       };
 
       let Option::SOME(escapedAscii) = tomlAscii(escaped) else {
-        return Result::ERROR(TomlError::unexpectedCharacter(TomlSpan::new(escaped.start, escaped.end)));
+        return Result::ERROR(TomlError::invalidEscape(TomlSpan::new(escaped.start - 1, escaped.end)));
       };
 
       match (tomlPushQuotedEscape(value, stream, escaped, escapedAscii)) {
@@ -716,7 +1076,7 @@ function tomlPushIntegerToken(
   start: u64
 ): Result<boolean, TomlError> {
   let output: &mut Vector<TomlToken> = tokens;
-  let lexeme: TomlLexeme = match (tomlLexInteger(cursor, start)) {
+  let lexeme: TomlLexeme = match (tomlLexScalarLiteral(cursor, start)) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
       return Result::ERROR(error);
