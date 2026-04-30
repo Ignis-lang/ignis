@@ -319,6 +319,20 @@ fn formats_block_with_mixed_statement_types() {
 }
 
 #[test]
+fn formats_nested_bare_blocks_with_current_indentation() {
+  let formatted = format_text(
+    "function scoped(): void { let x = 1; { let y = 2; } return; }\n",
+    &FormatOptions::default(),
+  )
+  .expect("nested bare block should format successfully");
+
+  assert_eq!(
+    formatted,
+    "function scoped(): void {\n  let x = 1;\n  {\n    let y = 2;\n  }\n  return;\n}\n"
+  );
+}
+
+#[test]
 fn formats_match_expression_with_multiple_arms() {
   let formatted = format_text(
     "function classify(n: i32): str { return match (n) { 0 -> \"zero\", 1 -> \"one\", _ -> \"many\", }; }\n",

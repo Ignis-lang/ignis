@@ -20,15 +20,17 @@ pub fn validate_formatted_output(
   let source_shape = file_shape(source, &source_file)?;
   let formatted_shape = file_shape(formatted, &formatted_file)?;
 
+  let source_tokens = normalize_optional_trailing_commas(&source_shape.tokens);
+  let formatted_tokens = normalize_optional_trailing_commas(&formatted_shape.tokens);
+
   let tokens_match = if sort_imports {
-    let mut source_keys: Vec<String> = source_shape.tokens.iter().map(|(_, text)| text.clone()).collect();
-    let mut formatted_keys: Vec<String> = formatted_shape.tokens.iter().map(|(_, text)| text.clone()).collect();
+    let mut source_keys: Vec<String> = source_tokens.iter().map(|(_, text)| text.clone()).collect();
+    let mut formatted_keys: Vec<String> = formatted_tokens.iter().map(|(_, text)| text.clone()).collect();
     source_keys.sort();
     formatted_keys.sort();
     source_keys == formatted_keys
   } else {
-    normalize_optional_trailing_commas(&source_shape.tokens)
-      == normalize_optional_trailing_commas(&formatted_shape.tokens)
+    source_tokens == formatted_tokens
   };
 
   if !tokens_match {

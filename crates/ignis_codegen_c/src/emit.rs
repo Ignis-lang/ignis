@@ -627,6 +627,7 @@ impl<'a> CEmitter<'a> {
     let kind = self.classify(def_id);
 
     kind.is_user()
+      || (kind.is_std() && self.is_std_test_option_presence_method(def_id))
       || (self.is_monomorphized_generic_def(def_id)
         && (self.definition_depends_on_user_type(def_id)
           || self.definition_mentions_std_test_user_type(def_id)
@@ -687,6 +688,16 @@ impl<'a> CEmitter<'a> {
       .is_some_and(|module_path| matches!(module_path, ModulePath::Std(name) if name == "test"))
   }
 
+  fn is_std_test_option_presence_method(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let symbol_name = self.def_name(def_id);
+
+    symbol_name.starts_with("Option____")
+      && (symbol_name.ends_with("____isNone") || symbol_name.ends_with("____isSome"))
+  }
+
   fn definition_depends_on_user_type(
     &self,
     def_id: DefinitionId,
@@ -739,6 +750,13 @@ impl<'a> CEmitter<'a> {
   }
 
   fn is_std_test_local_user_type(
+    &self,
+    module_id: ModuleId,
+  ) -> bool {
+    self.is_std_test_local_user_module(module_id)
+  }
+
+  fn is_std_test_local_user_module(
     &self,
     module_id: ModuleId,
   ) -> bool {

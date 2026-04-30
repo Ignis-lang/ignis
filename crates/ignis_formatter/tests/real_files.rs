@@ -367,7 +367,10 @@ fn formats_heap_allocator_imports_and_search_mode_window_exactly() {
     &source_window,
     &FormatOptions {
       check: false,
-      config: FormatterConfig::default(),
+      config: FormatterConfig {
+        sort_imports: false,
+        ..FormatterConfig::default()
+      },
     },
   )
   .expect("heap allocator import-to-enum window should preserve doc ownership");
@@ -405,7 +408,13 @@ function main(): i32 {
 #[test]
 fn formats_real_record_example_file_exactly() {
   let source = read_real_file("example/record.ign");
-  let formatted = format_with_config(&source, FormatterConfig::default());
+  let formatted = format_with_config(
+    &source,
+    FormatterConfig {
+      sort_imports: false,
+      ..FormatterConfig::default()
+    },
+  );
 
   assert_eq!(
     formatted,

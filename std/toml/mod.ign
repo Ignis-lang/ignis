@@ -184,7 +184,11 @@ function tomlPushEscaped(value: &mut String, escaped: char): boolean {
   return true;
 }
 
-function tomlLexQuotedString(cursor: &mut Text::Cursor, start: u64, output: &mut String): Result<TomlLexeme, TomlError> {
+function tomlLexQuotedString(
+  cursor: &mut Text::Cursor,
+  start: u64,
+  output: &mut String
+): Result<TomlLexeme, TomlError> {
   let mut stream: &mut Text::Cursor = cursor;
   let mut value: &mut String = output;
   let mut segmentStart: u64 = start + 1;
@@ -266,21 +270,35 @@ function tomlBooleanKind(lexeme: &String): TomlTokenKind {
   return TomlTokenKind::IDENTIFIER;
 }
 
-function tomlPushLiteralToken(tokens: &mut Vector<TomlToken>, kind: TomlTokenKind, lexeme: str, span: TomlSpan): void {
+function tomlPushLiteralToken(
+  tokens: &mut Vector<TomlToken>,
+  kind: TomlTokenKind,
+  lexeme: str,
+  span: TomlSpan
+): void {
   let mut output: &mut Vector<TomlToken> = tokens;
   let slot: *mut TomlToken = output.pushUninitialized();
 
   @write<TomlToken>(slot, TomlToken::new(kind, lexeme, span));
 }
 
-function tomlPushStringToken(tokens: &mut Vector<TomlToken>, kind: TomlTokenKind, lexeme: &String, span: TomlSpan): void {
+function tomlPushStringToken(
+  tokens: &mut Vector<TomlToken>,
+  kind: TomlTokenKind,
+  lexeme: &String,
+  span: TomlSpan
+): void {
   let mut output: &mut Vector<TomlToken> = tokens;
   let slot: *mut TomlToken = output.pushUninitialized();
 
   @write<TomlToken>(slot, TomlToken::create(kind, lexeme, span));
 }
 
-function tomlPushQuotedToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::Cursor, start: u64): Result<boolean, TomlError> {
+function tomlPushQuotedToken(
+  tokens: &mut Vector<TomlToken>,
+  cursor: &mut Text::Cursor,
+  start: u64
+): Result<boolean, TomlError> {
   let output: &mut Vector<TomlToken> = tokens;
   let mut value: String = String::new();
   let lexeme: TomlLexeme = match (tomlLexQuotedString(cursor, start, &mut value)) {
@@ -294,7 +312,11 @@ function tomlPushQuotedToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::
   return Result::OK(true);
 }
 
-function tomlPushIntegerToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::Cursor, start: u64): Result<boolean, TomlError> {
+function tomlPushIntegerToken(
+  tokens: &mut Vector<TomlToken>,
+  cursor: &mut Text::Cursor,
+  start: u64
+): Result<boolean, TomlError> {
   let output: &mut Vector<TomlToken> = tokens;
   let lexeme: TomlLexeme = match (tomlLexInteger(cursor, start)) {
     Result::OK(value) -> value,
@@ -308,7 +330,11 @@ function tomlPushIntegerToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text:
   return Result::OK(true);
 }
 
-function tomlPushIdentifierToken(tokens: &mut Vector<TomlToken>, cursor: &mut Text::Cursor, start: u64): void {
+function tomlPushIdentifierToken(
+  tokens: &mut Vector<TomlToken>,
+  cursor: &mut Text::Cursor,
+  start: u64
+): void {
   let output: &mut Vector<TomlToken> = tokens;
   let lexeme: TomlLexeme = tomlLexIdentifier(cursor, start);
   let value: String = cursor.slice(start, lexeme.end);

@@ -12,6 +12,7 @@ use ignis_ast::{
   generics::ASTGenericParams,
   pattern::ASTPattern,
   statements::{ASTFunction, ASTImport, ASTStatement, block::ASTBlock, function::ASTParameter},
+  statements::import_statement::ImportItemKind,
   type_::IgnisTypeSyntax,
 };
 use ignis_parser::{IgnisLexer, IgnisParser};
@@ -168,6 +169,7 @@ impl Ord for ImportSortKey {
     self
       .is_wildcard
       .cmp(&other.is_wildcard)
+      .reverse()
       .then_with(|| other.is_std.cmp(&self.is_std))
       .then_with(|| self.path.cmp(&other.path))
   }
@@ -249,11 +251,15 @@ impl<'a> AstChunkFormatter<'a> {
     let groups = self.collect_import_groups(roots);
 
     for group in &groups {
+      let group_is_imports = group.items.iter().all(|root| self.is_import_node(root));
+
       for (index, root) in group.items.iter().enumerate() {
         let statement = self.format_statement_node(*root, 0)?;
         let span = self.nodes.get(root).span().clone();
 
-        if let Some(prev_end) = previous_end {
+        if let Some(prev_end) = previous_end
+          && !(group_is_imports && index > 0)
+        {
           self.preserve_single_blank_line_for_whitespace_gap(&mut formatted, prev_end, span.start.0 as usize);
         }
 
@@ -339,6 +345,10 @@ impl<'a> AstChunkFormatter<'a> {
         current_group.push(*root);
       } else {
         if in_import_run && !current_group.is_empty() {
+          groups.push(ImportGroup {
+            items: std::mem::take(&mut current_group),
+            has_preceding_import_group: has_seen_import_group,
+          });
           has_seen_import_group = true;
         }
         in_import_run = false;
@@ -369,7 +379,9 @@ impl<'a> AstChunkFormatter<'a> {
     }
 
     for group in &mut groups {
-      if group.items.iter().all(|root| self.is_import_node(root)) {
+      if group.items.iter().all(|root| self.is_import_node(root))
+        && !group.items.iter().any(|root| self.is_discard_import_node(root))
+      {
         group.items.sort_by(|a, b| self.compare_imports(a, b));
       }
     }
@@ -388,13 +400,29 @@ impl<'a> AstChunkFormatter<'a> {
     a_info.cmp(&b_info)
   }
 
+  fn is_discard_import_node(
+    &self,
+    node_id: &NodeId,
+  ) -> bool {
+    match self.nodes.get(node_id) {
+      ASTNode::Statement(ASTStatement::Import(import)) => import
+        .items
+        .iter()
+        .any(|item| matches!(item.kind, ImportItemKind::Discard)),
+      _ => false,
+    }
+  }
+
   fn import_sort_key(
     &self,
     node_id: &NodeId,
   ) -> ImportSortKey {
     match self.nodes.get(node_id) {
       ASTNode::Statement(ASTStatement::Import(import)) => {
-        let is_wildcard = self.slice_span(&import.items[0].span).trim() == "_";
+        let is_wildcard = import
+          .items
+          .iter()
+          .any(|item| matches!(item.kind, ImportItemKind::Discard));
         let is_std = import.from.starts_with("std::");
         ImportSortKey {
           is_wildcard,
@@ -462,7 +490,11 @@ impl<'a> AstChunkFormatter<'a> {
       ASTStatement::Record(record) => self.format_record(record, indent_level),
       ASTStatement::Enum(enum_) => self.format_enum(enum_, indent_level),
       ASTStatement::Trait(trait_) => self.format_trait(trait_, indent_level),
-      ASTStatement::Block(block) => self.format_block_statement(block, indent_level),
+      ASTStatement::Block(block) => {
+        let mut formatted = self.indent(indent_level);
+        formatted.push_str(&self.format_block_statement(block, indent_level)?);
+        Ok(formatted)
+      },
       ASTStatement::If(if_statement) => self.format_if_statement(if_statement, indent_level),
       ASTStatement::While(while_statement) => self.format_while_statement(while_statement, indent_level),
       ASTStatement::LetElse(let_else) => self.format_let_else_statement(let_else, indent_level),
@@ -2855,8 +2887,12 @@ mod tests {
   fn preserves_import_prefix_order() {
     let file = FormatFile::from_source("import zoo from \"std::zoo\";\nimport alpha from \"std::alpha\";\n")
       .expect("build file");
-    let layout = layout_file(&file, &FormatterConfig::default()).expect("layout file");
-    let printed = print_file(&layout, &FormatterConfig::default()).expect("print file");
+    let config = FormatterConfig {
+      sort_imports: false,
+      ..FormatterConfig::default()
+    };
+    let layout = layout_file(&file, &config).expect("layout file");
+    let printed = print_file(&layout, &config).expect("print file");
 
     assert!(printed.starts_with("import zoo"));
   }

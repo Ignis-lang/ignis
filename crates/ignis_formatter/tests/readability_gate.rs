@@ -135,8 +135,8 @@ function main(): i32 {
       append_closing_brace: false,
       wrap_in_heap_allocator_record: false,
       config: FormatterConfig::default(),
-      expected: r#"import String from "std::string";
-import Io from "std::io";
+      expected: r#"import Io from "std::io";
+import String from "std::string";
 
 record Household {
     public city: str;
@@ -216,14 +216,14 @@ lastSearch: *mut Block;
       name: "std io import block",
       source_path: "std/io/mod.ign",
       start_marker: Some(
-        "import String from \"std::string\";\nimport LibC from \"std::libc\";\nimport Vector from \"std::vector\";",
+        "import LibC from \"std::libc\";\nimport String from \"std::string\";\nimport Vector from \"std::vector\";",
       ),
       end_marker: Some("function __vectorStringMonomorphizationRoots(): void {"),
       append_closing_brace: false,
       wrap_in_heap_allocator_record: false,
       config: FormatterConfig::default(),
-      expected: r#"import String from "std::string";
-import LibC from "std::libc";
+      expected: r#"import LibC from "std::libc";
+import String from "std::string";
 import Vector from "std::vector";
 
 import _ from "std::io::error";

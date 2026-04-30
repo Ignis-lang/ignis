@@ -208,6 +208,35 @@ mod tests {
   }
 
   #[test]
+  fn unchecked_formatter_is_idempotent_for_std_fs_module() {
+    let source = fs::read_to_string(workspace_root().join("std/fs/mod.ign")).expect("read std fs module");
+
+    let first_pass =
+      format_text_unchecked(&source, &FormatOptions::default().config).expect("first pass format std fs");
+    let second_pass =
+      format_text_unchecked(&first_pass, &FormatOptions::default().config).expect("second pass format std fs");
+
+    if first_pass != second_pass {
+      let first_lines = first_pass.lines().collect::<Vec<_>>();
+      let second_lines = second_pass.lines().collect::<Vec<_>>();
+      let diff_index = first_lines
+        .iter()
+        .zip(second_lines.iter())
+        .position(|(left, right)| left != right)
+        .unwrap_or(first_lines.len().min(second_lines.len()));
+
+      panic!(
+        "std/fs first diff at line {}\nfirst: {:?}\nsecond: {:?}\nfirst window: {:?}\nsecond window: {:?}",
+        diff_index + 1,
+        first_lines.get(diff_index),
+        second_lines.get(diff_index),
+        first_lines.get(diff_index.saturating_sub(3)..(diff_index + 6).min(first_lines.len())),
+        second_lines.get(diff_index.saturating_sub(3)..(diff_index + 6).min(second_lines.len()))
+      );
+    }
+  }
+
+  #[test]
   fn unchecked_formatter_preserves_namespace_leading_doc_comment_shape() {
     let source = "namespace Fs::Sys {\n  /// File metadata returned by `stat` and `fstat`.\n  ///\n  /// Fields correspond to POSIX `struct stat` members.\n  record Stat {\n    public size: i64;\n  }\n}\n";
 
