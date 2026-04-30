@@ -164,6 +164,9 @@ impl<'a> IgnisLexer<'a> {
       '0' if self.peek().is_ascii_digit() => self.number(),
       c if c.is_ascii_digit() => self.number(),
       ' ' | '\r' | '\t' => Ok(TokenType::Whitespace),
+      '\0' => Err(Box::new(DiagnosticMessage::RawNulInSource(
+        self.mk_span(self.start, self.current),
+      ))),
       '\n' => {
         self.line += 1;
         Ok(TokenType::Whitespace)
@@ -219,12 +222,32 @@ impl<'a> IgnisLexer<'a> {
     let mut result: String = String::new();
     let string_start = self.start;
 
-    while self.peek() != '\"' && !self.is_at_end() {
+    while self.peek() != '"' && !self.is_at_end() {
+      if self.peek() == '\0' {
+        let nul_start = self.current;
+        self.advance();
+        self.skip_to_string_terminator();
+
+        return Err(Box::new(DiagnosticMessage::RawNulInSource(
+          self.mk_span(nul_start, nul_start + 1),
+        )));
+      }
+
       if self.peek() == '\\' {
         self.advance();
 
+        if self.peek() == '\0' {
+          let nul_start = self.current;
+          self.advance();
+          self.skip_to_string_terminator();
+
+          return Err(Box::new(DiagnosticMessage::RawNulInSource(
+            self.mk_span(nul_start, nul_start + 1),
+          )));
+        }
+
         match self.peek() {
-          '\"' => result.push('\"'),
+          '"' => result.push('"'),
           '\\' => result.push('\\'),
           'n' => result.push('\n'),
           'r' => result.push('\r'),
@@ -250,6 +273,14 @@ impl<'a> IgnisLexer<'a> {
 
     self.pending_string = Some(result);
     Ok(TokenType::String)
+  }
+
+  fn skip_to_string_terminator(&mut self) {
+    while !self.is_at_end() {
+      if self.advance() == '"' {
+        break;
+      }
+    }
   }
 
   fn char_literal(&mut self) -> LexerResult {
@@ -767,6 +798,54 @@ mod tests {
         (TokenType::String, "hello"),
         (TokenType::Comment, "// comment"),
         (TokenType::MultiLineComment, "/* block */"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn rejects_raw_nul_byte_in_source() {
+    let LexResult { tokens, diagnostics } = lex("let\0value");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::RawNulInSource(span) => {
+        assert_eq!(span.start.0, 3);
+        assert_eq!(span.end.0, 4);
+      },
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Let, "let"),
+        (TokenType::Identifier, "value"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn rejects_raw_nul_byte_inside_string_after_multibyte_prefix() {
+    let LexResult { tokens, diagnostics } = lex("let value = \"é\0z\";");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::RawNulInSource(span) => {
+        assert_eq!(span.start.0, 15);
+        assert_eq!(span.end.0, 16);
+      },
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Let, "let"),
+        (TokenType::Identifier, "value"),
+        (TokenType::Equal, "="),
+        (TokenType::SemiColon, ";"),
         (TokenType::Eof, ""),
       ],
     );

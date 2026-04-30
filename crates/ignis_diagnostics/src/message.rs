@@ -49,6 +49,7 @@ pub enum DiagnosticMessage {
   UnterminatedCharacter(Span),
   InvalidCharacterEscapeSequence(Span),
   InvalidCharacter(Span),
+  RawNulInSource(Span),
   MultiByteCharacterLiteral(Span),
   UnterminatedString(Span),
   ExpectedInteger(Span),
@@ -948,6 +949,7 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::UnterminatedCharacter(_) => write!(f, "Unterminated character literal"),
       DiagnosticMessage::InvalidCharacterEscapeSequence(_) => write!(f, "Invalid character escape sequence"),
       DiagnosticMessage::InvalidCharacter(_) => write!(f, "Invalid character"),
+      DiagnosticMessage::RawNulInSource(_) => write!(f, "Raw NUL byte is not allowed in source text"),
       DiagnosticMessage::MultiByteCharacterLiteral(_) => write!(f, "multi-byte char literal; use str"),
       DiagnosticMessage::UnterminatedString(_) => write!(f, "Unterminated string literal"),
       DiagnosticMessage::ExpectedInteger(_) => write!(f, "Expected integer literal"),
@@ -1906,6 +1908,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::UnterminatedCharacter(at)
       | DiagnosticMessage::InvalidCharacterEscapeSequence(at)
       | DiagnosticMessage::InvalidCharacter(at)
+      | DiagnosticMessage::RawNulInSource(at)
       | DiagnosticMessage::MultiByteCharacterLiteral(at)
       | DiagnosticMessage::UnterminatedString(at)
       | DiagnosticMessage::ExpectedInteger(at)
@@ -2155,6 +2158,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::UnterminatedCharacter(_) => "I0022",
       DiagnosticMessage::InvalidCharacterEscapeSequence(_) => "I0023",
       DiagnosticMessage::InvalidCharacter(_) => "I0024",
+      DiagnosticMessage::RawNulInSource(_) => "I0051",
       DiagnosticMessage::MultiByteCharacterLiteral(_) => "I0050",
       DiagnosticMessage::UnterminatedString(_) => "I0025",
       DiagnosticMessage::UnexpectedGenerics(_) => "I0026",
