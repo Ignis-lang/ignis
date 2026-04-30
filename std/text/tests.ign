@@ -6,13 +6,12 @@ import Text from "std::text";
 function nextChar(cursor: &mut Text::Cursor): Text::Utf8Char {
   let mut stream: &mut Text::Cursor = cursor;
 
-  return match (stream.advance()) {
-    Option::SOME(value) -> value,
-    Option::NONE -> {
-      Test::fail();
-      @unreachable();
-    },
+  let Option::SOME(value) = stream.advance() else {
+    Test::fail();
+    @unreachable();
   };
+
+  return value;
 }
 
 function utf8SampleString(): String {
@@ -71,4 +70,19 @@ function cursorSlicesByByteRange(): void {
   let expected: String = utf8TailString();
 
   Test::assert(value.equals(&expected));
+}
+
+@test
+function cursorEatAsciiConsumesOnlyMatchingAscii(): void {
+  let source: String = utf8SampleString();
+  let mut cursor: Text::Cursor = Text::Cursor::create(&source);
+
+  Test::assert(cursor.eatAscii('a'));
+  Test::assertEq<u64>(cursor.position(), 1);
+
+  Test::assert(!cursor.eatAscii('a'));
+  Test::assertEq<u64>(cursor.position(), 1);
+
+  Test::assert(!cursor.eatAscii('b'));
+  Test::assertEq<u64>(cursor.position(), 1);
 }

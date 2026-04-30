@@ -6,48 +6,38 @@ import TomlError, TomlErrorKind from "./error";
 import TomlSpan, TomlToken, TomlTokenKind from "./token";
 
 function tokenAt(tokens: &Vector<TomlToken>, index: u64): &TomlToken {
-  return match (Toml::tokenAt(tokens, index)) {
-    Option::SOME(token) -> token,
-    Option::NONE -> {
-      Test::fail();
-      @unreachable();
-    },
+  let Option::SOME(token) = Toml::tokenAt(tokens, index) else {
+    Test::fail();
+    @unreachable();
   };
+
+  return token;
 }
 
 function expectTokens(source: str, tokens: &mut Vector<TomlToken>): void {
-  match (Toml::lexInto(source, tokens)) {
-    Option::NONE -> {},
-    Option::SOME(_) -> {
-      Test::fail();
-      @unreachable();
-    },
-  };
+  if (let Option::SOME(_) = Toml::lexInto(source, tokens)) {
+    Test::fail();
+    @unreachable();
+  }
 }
 
 function expectTokens(source: &String, tokens: &mut Vector<TomlToken>): void {
-  match (Toml::lexInto(source, tokens)) {
-    Option::NONE -> {},
-    Option::SOME(_) -> {
-      Test::fail();
-      @unreachable();
-    },
-  };
+  if (let Option::SOME(_) = Toml::lexInto(source, tokens)) {
+    Test::fail();
+    @unreachable();
+  }
 }
 
 function expectError(source: str, error: &mut TomlError): void {
   let mut output: &mut TomlError = error;
   let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
 
-  match (Toml::lexInto(source, &mut tokens)) {
-    Option::NONE -> {
-      Test::fail();
-      @unreachable();
-    },
-    Option::SOME(value) -> {
-      *output = value.clone();
-    },
+  let Option::SOME(value) = Toml::lexInto(source, &mut tokens) else {
+    Test::fail();
+    @unreachable();
   };
+
+  *output = value.clone();
 }
 
 function utf8TomlSource(): String {
@@ -95,6 +85,8 @@ function tokenKindName(kind: TomlTokenKind): str {
   return match (kind) {
     TomlTokenKind::LEFT_BRACKET -> "LEFT_BRACKET",
     TomlTokenKind::RIGHT_BRACKET -> "RIGHT_BRACKET",
+    TomlTokenKind::LEFT_BRACE -> "LEFT_BRACE",
+    TomlTokenKind::RIGHT_BRACE -> "RIGHT_BRACE",
     TomlTokenKind::DOT -> "DOT",
     TomlTokenKind::EQUALS -> "EQUALS",
     TomlTokenKind::COMMA -> "COMMA",
@@ -102,6 +94,7 @@ function tokenKindName(kind: TomlTokenKind): str {
     TomlTokenKind::IDENTIFIER -> "IDENTIFIER",
     TomlTokenKind::STRING -> "STRING",
     TomlTokenKind::INTEGER -> "INTEGER",
+    TomlTokenKind::FLOAT -> "FLOAT",
     TomlTokenKind::BOOLEAN -> "BOOLEAN",
     TomlTokenKind::EOF -> "EOF",
   };
@@ -212,6 +205,22 @@ function lexPreservesUtf8QuotedStringContent(): void {
 }
 
 @test
+function lexReturnsTokensForBorrowedUtf8Source(): void {
+  let source: String = utf8TomlSource();
+  let Result::OK(tokens) = Toml::lex(&source) else {
+    Test::fail();
+    @unreachable();
+  };
+  let expectedValue: String = utf8TomlValue();
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 4);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::IDENTIFIER, "name", 0, 4);
+  Test::assert(tokenAt(&tokens, 2).lexeme.equals(&expectedValue));
+  assertTokenKind(tokenAt(&tokens, 2).kind, TomlTokenKind::STRING);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::EOF, "", 18, 18);
+}
+
+@test
 function lexReportsMalformedTokenSpan(): void {
   let mut error: TomlError = TomlError::unexpectedCharacter(TomlSpan::new(0, 0));
   expectError("@oops = 1", &mut error);
@@ -219,4 +228,35 @@ function lexReportsMalformedTokenSpan(): void {
   assertErrorKind(error.kind, TomlErrorKind::UNEXPECTED_CHARACTER);
   Test::assertEq<u64>(error.span.start, 0);
   Test::assertEq<u64>(error.span.end, 1);
+}
+
+@test
+function lexRecognizesInlineTableBracesAndFiniteFloatForms(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("point = { x = 1.5, y = -2e3 }\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 13);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::IDENTIFIER, "point", 0, 5);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::LEFT_BRACE, "{", 8, 9);
+  assertToken(tokenAt(&tokens, 5), TomlTokenKind::FLOAT, "1.5", 14, 17);
+  assertToken(tokenAt(&tokens, 6), TomlTokenKind::COMMA, ",", 17, 18);
+  assertToken(tokenAt(&tokens, 9), TomlTokenKind::FLOAT, "-2e3", 23, 27);
+  assertToken(tokenAt(&tokens, 10), TomlTokenKind::RIGHT_BRACE, "}", 28, 29);
+  assertToken(tokenAt(&tokens, 11), TomlTokenKind::NEWLINE, "\n", 29, 30);
+  assertToken(tokenAt(&tokens, 12), TomlTokenKind::EOF, "", 30, 30);
+}
+
+@test
+function lexRecognizesSpecialFloatForms(): void {
+  let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
+  expectTokens("positive = +inf\nnegative = -nan\n", &mut tokens);
+
+  Test::assertEq<u64>(Toml::tokenCount(&tokens), 9);
+  assertToken(tokenAt(&tokens, 0), TomlTokenKind::IDENTIFIER, "positive", 0, 8);
+  assertToken(tokenAt(&tokens, 2), TomlTokenKind::FLOAT, "+inf", 11, 15);
+  assertToken(tokenAt(&tokens, 3), TomlTokenKind::NEWLINE, "\n", 15, 16);
+  assertToken(tokenAt(&tokens, 4), TomlTokenKind::IDENTIFIER, "negative", 16, 24);
+  assertToken(tokenAt(&tokens, 6), TomlTokenKind::FLOAT, "-nan", 27, 31);
+  assertToken(tokenAt(&tokens, 7), TomlTokenKind::NEWLINE, "\n", 31, 32);
+  assertToken(tokenAt(&tokens, 8), TomlTokenKind::EOF, "", 32, 32);
 }

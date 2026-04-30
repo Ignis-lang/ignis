@@ -67,32 +67,21 @@ export namespace Text {
     public advance(&mut self): Option<Text::Utf8Char> {
       let decoded: Option<Text::Utf8Char> = self.peek();
 
-      match (decoded) {
-        Option::SOME(ch) -> {
-          self.offset = ch.end;
-          return Option::SOME(ch);
-        },
-        Option::NONE -> {
-          return Option::NONE;
-        },
-      };
+      if (let Option::SOME(ch) = decoded) {
+        self.offset = ch.end;
+        return Option::SOME(ch);
+      }
 
       return Option::NONE;
     }
 
     public eatAscii(&mut self, expected: char): boolean {
-      let current: Text::Utf8Char = match (self.peek()) {
-        Option::SOME(ch) -> ch,
-        Option::NONE -> {
-          return false;
-        },
+      let Option::SOME(current) = self.peek() else {
+        return false;
       };
 
-      let actual: char = match (current.ascii()) {
-        Option::SOME(ch) -> ch,
-        Option::NONE -> {
-          return false;
-        },
+      let Option::SOME(actual) = current.ascii() else {
+        return false;
       };
 
       if (actual != expected) {
@@ -107,18 +96,16 @@ export namespace Text {
   function byteAt(source: &String, index: u64): Option<u8> {
     let bytes = source.toBytes();
 
-    return match (bytes.get(index)) {
-      Option::SOME(ch) -> Option::SOME(*ch),
-      Option::NONE -> Option::NONE,
-    };
+    if (let Option::SOME(ch) = bytes.get(index)) {
+      return Option::SOME(*ch);
+    }
+
+    return Option::NONE;
   }
 
   function continuation(source: &String, index: u64): Option<u32> {
-    let byte: u8 = match (Text::byteAt(source, index)) {
-      Option::SOME(value) -> value,
-      Option::NONE -> {
-        return Option::NONE;
-      },
+    let Option::SOME(byte) = Text::byteAt(source, index) else {
+      return Option::NONE;
     };
 
     if (byte < 128 || byte > 191) {
@@ -141,11 +128,8 @@ export namespace Text {
       return Option::NONE;
     }
 
-    let first: u8 = match (Text::byteAt(source, offset)) {
-      Option::SOME(value) -> value,
-      Option::NONE -> {
-        return Option::NONE;
-      },
+    let Option::SOME(first) = Text::byteAt(source, offset) else {
+      return Option::NONE;
     };
 
     if (first < 128) {
@@ -157,11 +141,8 @@ export namespace Text {
     }
 
     if (first >= 194 && first <= 223) {
-      let second: u32 = match (Text::continuation(source, offset + 1)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> {
-          return Option::SOME(Text::invalidUtf8(offset));
-        },
+      let Option::SOME(second) = Text::continuation(source, offset + 1) else {
+        return Option::SOME(Text::invalidUtf8(offset));
       };
 
       return Option::SOME(Text::Utf8Char {
@@ -172,18 +153,12 @@ export namespace Text {
     }
 
     if (first >= 224 && first <= 239) {
-      let second: u32 = match (Text::continuation(source, offset + 1)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> {
-          return Option::SOME(Text::invalidUtf8(offset));
-        },
+      let Option::SOME(second) = Text::continuation(source, offset + 1) else {
+        return Option::SOME(Text::invalidUtf8(offset));
       };
 
-      let third: u32 = match (Text::continuation(source, offset + 2)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> {
-          return Option::SOME(Text::invalidUtf8(offset));
-        },
+      let Option::SOME(third) = Text::continuation(source, offset + 2) else {
+        return Option::SOME(Text::invalidUtf8(offset));
       };
 
       return Option::SOME(Text::Utf8Char {
@@ -194,25 +169,16 @@ export namespace Text {
     }
 
     if (first >= 240 && first <= 244) {
-      let second: u32 = match (Text::continuation(source, offset + 1)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> {
-          return Option::SOME(Text::invalidUtf8(offset));
-        },
+      let Option::SOME(second) = Text::continuation(source, offset + 1) else {
+        return Option::SOME(Text::invalidUtf8(offset));
       };
 
-      let third: u32 = match (Text::continuation(source, offset + 2)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> {
-          return Option::SOME(Text::invalidUtf8(offset));
-        },
+      let Option::SOME(third) = Text::continuation(source, offset + 2) else {
+        return Option::SOME(Text::invalidUtf8(offset));
       };
 
-      let fourth: u32 = match (Text::continuation(source, offset + 3)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> {
-          return Option::SOME(Text::invalidUtf8(offset));
-        },
+      let Option::SOME(fourth) = Text::continuation(source, offset + 3) else {
+        return Option::SOME(Text::invalidUtf8(offset));
       };
 
       return Option::SOME(Text::Utf8Char {
