@@ -162,7 +162,8 @@ impl SourceMap {
       .unwrap_or_else(|| f.text.len());
 
     let line_str = &f.text[line_start..line_end].trim_end_matches(&['\r', '\n'][..]);
-    let caret = " ".repeat((col - 1) as usize) + &"^".repeat(span.len());
+    let caret_width = unicode_width(&f.text[span.start.0 as usize..span.end.0 as usize]);
+    let caret = " ".repeat((col - 1) as usize) + &"^".repeat(caret_width.max(1));
 
     format!("{:>4} | {}\n     | {}", line, line_str, caret)
   }
@@ -211,8 +212,36 @@ fn unicode_column(slice: &[u8]) -> usize {
     .unwrap_or(slice.len())
 }
 
+fn unicode_width(text: &str) -> usize {
+  text.chars().count()
+}
+
 fn fxhash_u64(text: &str) -> u64 {
   let mut h = AHasher::default();
   text.hash(&mut h);
   h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::SourceMap;
+  use crate::{BytePosition, span::Span};
+
+  #[test]
+  fn snippet_uses_character_width_for_single_multibyte_span() {
+    let mut source_map = SourceMap::new();
+    let file = source_map.add_virtual("utf8", "aéb".to_string());
+    let span = Span::new(file, BytePosition(1), BytePosition(3));
+
+    assert_eq!(source_map.snippet(span), "   1 | aéb\n     |  ^");
+  }
+
+  #[test]
+  fn snippet_uses_character_width_for_mixed_ascii_and_multibyte_span() {
+    let mut source_map = SourceMap::new();
+    let file = source_map.add_virtual("utf8", "aéb".to_string());
+    let span = Span::new(file, BytePosition(1), BytePosition(4));
+
+    assert_eq!(source_map.snippet(span), "   1 | aéb\n     |  ^^");
+  }
 }
