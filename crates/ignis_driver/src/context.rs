@@ -114,8 +114,8 @@ impl CompilationContext {
     }
   }
 
-  /// If `fs_path` points to a file inside `std_path`, return the matching
-  /// manifest module name. Used to avoid registering the same file as both
+  /// If `fs_path` points to a file inside `std_path`, return its canonical std
+  /// module name. Used to avoid registering the same file as both
   /// `ModulePath::Project` and `ModulePath::Std`.
   pub(crate) fn try_resolve_std_module_name(
     &self,
@@ -133,18 +133,100 @@ impl CompilationContext {
       return None;
     }
 
-    let manifest = self.module_graph.manifest.as_ref()?;
+    if file_canon.file_name().is_some_and(|file_name| file_name == "tests.ign") {
+      return None;
+    }
 
-    for (module_name, rel_path) in &manifest.modules {
-      let module_canon = std_canon.join(rel_path);
-      if let Ok(module_canon) = module_canon.canonicalize()
-        && module_canon == file_canon
-      {
-        return Some(module_name.clone());
+    if let Some(manifest) = self.module_graph.manifest.as_ref() {
+      for (module_name, rel_path) in &manifest.modules {
+        let module_canon = std_canon.join(rel_path);
+        if let Ok(module_canon) = module_canon.canonicalize()
+          && module_canon == file_canon
+        {
+          return Some(module_name.clone());
+        }
       }
     }
 
-    None
+    Self::std_module_name_from_path(&std_canon, &file_canon)
+  }
+
+  fn std_module_name_from_path(
+    std_root: &Path,
+    file_path: &Path,
+  ) -> Option<String> {
+    if file_path.extension().and_then(|ext| ext.to_str()) != Some("ign") {
+      return None;
+    }
+
+    let relative = file_path.strip_prefix(std_root).ok()?;
+    let mut parts: Vec<String> = relative
+      .parent()
+      .map(|parent| {
+        parent
+          .components()
+          .map(|component| component.as_os_str().to_string_lossy().into_owned())
+          .collect()
+      })
+      .unwrap_or_default();
+
+    let file_stem = relative.file_stem()?.to_string_lossy();
+    if file_stem != "mod" {
+      parts.push(file_stem.into_owned());
+    }
+
+    if parts.is_empty() { None } else { Some(parts.join("::")) }
+  }
+
+  fn module_path_alias_keys(
+    import_path: &str,
+    module_path: &ModulePath,
+  ) -> Vec<String> {
+    let mut keys = Vec::new();
+
+    if let ModulePath::Std(name) = module_path {
+      keys.push(format!("std::{}", name));
+    }
+
+    if !import_path.is_empty() && !keys.iter().any(|key| key == import_path) {
+      keys.push(import_path.to_string());
+    }
+
+    keys
+  }
+
+  fn insert_module_path_aliases(
+    &mut self,
+    import_path: &str,
+    module_path: &ModulePath,
+    module_id: ModuleId,
+  ) -> Vec<String> {
+    let mut inserted_keys = Vec::new();
+
+    for key in Self::module_path_alias_keys(import_path, module_path) {
+      if let Some(existing_id) = self.module_for_path.get(&key)
+        && *existing_id != module_id
+      {
+        continue;
+      }
+
+      self.module_for_path.insert(key.clone(), module_id);
+      inserted_keys.push(key);
+    }
+
+    inserted_keys
+  }
+
+  fn remove_module_path_aliases(
+    &mut self,
+    keys: Vec<String>,
+    module_id: ModuleId,
+  ) {
+    for key in keys {
+      if self.module_for_path.get(&key) == Some(&module_id) {
+        self.module_for_path.remove(&key);
+      }
+    }
   }
 
   /// Pre-load a file's content for LSP mode.
@@ -384,6 +466,7 @@ impl CompilationContext {
     let module_path = ModulePath::Std(module_name.to_string());
 
     if let Some(id) = self.module_graph.get_by_path(&module_path) {
+      self.insert_module_path_aliases(module_name, &module_path, id);
       return Ok(id);
     }
 
@@ -396,7 +479,7 @@ impl CompilationContext {
 
     let module = Module::new(file_id, module_path.clone());
     let module_id = self.module_graph.register(module);
-    self.module_for_path.insert(format!("std::{}", module_name), module_id);
+    self.insert_module_path_aliases(module_name, &module_path, module_id);
     self.parsed_modules.insert(module_id, parsed);
 
     for (items, import_from, span) in import_paths {
@@ -430,26 +513,20 @@ impl CompilationContext {
     let module_path = self.normalize_discovered_module_path(module_path);
 
     if let Some(id) = self.module_graph.get_by_path(&module_path) {
+      self.insert_module_path_aliases(path, &module_path, id);
       return Ok(id);
     }
 
     log_dbg!(config, "discovering module {:?}", module_path);
 
-    // Std modules use "std::name" keys so the analyzer's import resolution
-    // finds them under the same string the source code writes.
-    let path_key = match &module_path {
-      ModulePath::Std(name) => format!("std::{}", name),
-      ModulePath::Project(_) => path.to_string(),
-    };
-
     let placeholder_id = ModuleId::new(self.module_graph.modules.iter().count() as u32);
-    self.module_for_path.insert(path_key.clone(), placeholder_id);
+    let placeholder_keys = self.insert_module_path_aliases(path, &module_path, placeholder_id);
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
     let parsed = match self.parse_file(&fs_path, config) {
       Ok(p) => p,
       Err(()) => {
-        self.module_for_path.remove(&path_key);
+        self.remove_module_path_aliases(placeholder_keys, placeholder_id);
         return Err(());
       },
     };
@@ -458,7 +535,8 @@ impl CompilationContext {
 
     let module = Module::new(file_id, module_path.clone());
     let module_id = self.module_graph.register(module);
-    self.module_for_path.insert(path_key, module_id);
+    self.remove_module_path_aliases(placeholder_keys, placeholder_id);
+    self.insert_module_path_aliases(path, &module_path, module_id);
     self.parsed_modules.insert(module_id, parsed);
 
     for (items, import_from, span) in import_paths {
@@ -619,26 +697,22 @@ impl CompilationContext {
     let module_path = self.normalize_discovered_module_path(module_path);
 
     if let Some(id) = self.module_graph.get_by_path(&module_path) {
+      self.insert_module_path_aliases(path, &module_path, id);
       return Ok(id);
     }
 
     log_dbg!(config, "discovering module {:?} (LSP mode)", module_path);
 
-    let path_key = match &module_path {
-      ModulePath::Std(name) => format!("std::{}", name),
-      ModulePath::Project(_) => path.to_string(),
-    };
-
     // Placeholder to prevent infinite recursion on cyclic imports
     let placeholder_id = ModuleId::new(self.module_graph.modules.iter().count() as u32);
-    self.module_for_path.insert(path_key.clone(), placeholder_id);
+    let placeholder_keys = self.insert_module_path_aliases(path, &module_path, placeholder_id);
 
     let fs_path = self.module_graph.to_fs_path(&module_path);
 
     let parsed = match self.parse_file_lsp(&fs_path, config) {
       Ok(p) => p,
       Err(()) => {
-        self.module_for_path.remove(&path_key);
+        self.remove_module_path_aliases(placeholder_keys, placeholder_id);
         return Err(());
       },
     };
@@ -648,7 +722,8 @@ impl CompilationContext {
 
     let module = Module::new(file_id, module_path.clone());
     let module_id = self.module_graph.register(module);
-    self.module_for_path.insert(path_key, module_id);
+    self.remove_module_path_aliases(placeholder_keys, placeholder_id);
+    self.insert_module_path_aliases(path, &module_path, module_id);
     self.parsed_modules.insert(module_id, parsed);
 
     // Continue discovering imports even if this file had errors
@@ -766,6 +841,7 @@ impl CompilationContext {
     let module_path = ModulePath::Std(module_name.to_string());
 
     if let Some(id) = self.module_graph.get_by_path(&module_path) {
+      self.insert_module_path_aliases(module_name, &module_path, id);
       return Ok(id);
     }
 
@@ -782,7 +858,7 @@ impl CompilationContext {
 
     let module = Module::new(file_id, module_path.clone());
     let module_id = self.module_graph.register(module);
-    self.module_for_path.insert(format!("std::{}", module_name), module_id);
+    self.insert_module_path_aliases(module_name, &module_path, module_id);
     self.parsed_modules.insert(module_id, parsed);
 
     for (items, import_from, span) in import_paths {
@@ -1088,9 +1164,53 @@ impl CompilationContext {
 
 #[cfg(test)]
 mod tests {
+  use std::fs;
+
   use ignis_config::{IgnisSTDManifest, StdAutoLoad};
 
   use super::*;
+
+  #[test]
+  fn resolves_std_module_name_from_any_file_under_std_root() {
+    let temp = tempfile::tempdir().expect("create temp std root");
+    let hash_set_path = temp.path().join("collections/hash_set.ign");
+    let string_mod_path = temp.path().join("string/mod.ign");
+
+    fs::create_dir_all(hash_set_path.parent().expect("hash set parent")).expect("create hash set parent");
+    fs::create_dir_all(string_mod_path.parent().expect("string parent")).expect("create string parent");
+    fs::write(&hash_set_path, "").expect("write hash set module");
+    fs::write(&string_mod_path, "").expect("write string module");
+
+    let mut config = IgnisConfig::default();
+    config.std_path = temp.path().to_string_lossy().into_owned();
+
+    let ctx = CompilationContext::new(&config);
+
+    assert_eq!(
+      ctx.try_resolve_std_module_name(hash_set_path.to_string_lossy().as_ref()),
+      Some("collections::hash_set".to_string())
+    );
+    assert_eq!(
+      ctx.try_resolve_std_module_name(string_mod_path.to_string_lossy().as_ref()),
+      Some("string".to_string())
+    );
+  }
+
+  #[test]
+  fn leaves_std_test_companions_as_project_modules() {
+    let temp = tempfile::tempdir().expect("create temp std root");
+    let test_path = temp.path().join("collections/tests.ign");
+
+    fs::create_dir_all(test_path.parent().expect("tests parent")).expect("create tests parent");
+    fs::write(&test_path, "").expect("write tests module");
+
+    let mut config = IgnisConfig::default();
+    config.std_path = temp.path().to_string_lossy().into_owned();
+
+    let ctx = CompilationContext::new(&config);
+
+    assert_eq!(ctx.try_resolve_std_module_name(test_path.to_string_lossy().as_ref()), None);
+  }
 
   #[test]
   fn prelude_std_modules_comes_only_from_manifest_auto_load() {

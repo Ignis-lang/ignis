@@ -9335,6 +9335,8 @@ impl<'a> Analyzer<'a> {
         } = base.as_ref()
           && let Some(def_id) = self.scopes.lookup_def(symbol).cloned()
         {
+          self.mark_referenced(def_id);
+
           // Register span for hover/goto-definition on type references
           self.set_import_item_def(name_span, &def_id);
 

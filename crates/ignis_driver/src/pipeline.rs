@@ -1887,7 +1887,6 @@ pub fn run_project_tests(
   section!(&config, "Analyzing");
 
   let (output, has_errors) = ctx.compile_collect_all(root_id, &config)?;
-  render_diagnostics(&output.diagnostics, &ctx.source_map, config.quiet);
 
   if has_errors {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2325,7 +2324,6 @@ pub fn run_single_file_tests(
   section!(&config, "Analyzing");
 
   let (output, has_errors) = ctx.compile_collect_all(root_id, &config)?;
-  render_diagnostics(&output.diagnostics, &ctx.source_map, config.quiet);
 
   if has_errors {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2769,7 +2767,6 @@ pub fn run_std_tests(
 
   let order = ctx.module_graph.all_modules_topological();
   let (output, has_errors, _) = ctx.analyze_modules_collect_all(&order, &config, true);
-  render_diagnostics(&output.diagnostics, &ctx.source_map, config.quiet);
 
   if has_errors {
     cmd_fail!(&config, "Test setup failed", start.elapsed());

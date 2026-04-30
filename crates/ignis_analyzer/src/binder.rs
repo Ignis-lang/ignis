@@ -1681,6 +1681,7 @@ impl<'a> Analyzer<'a> {
         continue;
       }
 
+      self.mark_referenced(def_id);
       bound_defs.push(def_id);
     }
 
@@ -2004,6 +2005,7 @@ impl<'a> Analyzer<'a> {
               if let Some(SymbolEntry::Single(def_id)) = self.scopes.lookup(sym) {
                 let def_id = *def_id;
                 if matches!(self.defs.get(&def_id).kind, DefinitionKind::Trait(_)) {
+                  self.mark_referenced(def_id);
                   user_traits.push(def_id);
                 } else {
                   self.add_diagnostic(
@@ -2015,6 +2017,7 @@ impl<'a> Analyzer<'a> {
                   );
                 }
               } else if let Some(def_id) = self.lookup_trait_def_by_name(sym) {
+                self.mark_referenced(def_id);
                 user_traits.push(def_id);
               } else {
                 self.add_diagnostic(

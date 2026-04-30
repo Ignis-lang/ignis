@@ -1024,6 +1024,8 @@ mod tests {
       extension_methods: HashMap::new(),
       directive_registry: DirectiveRegistry::default(),
       directive_execution_report: DirectiveExecutionReport::default(),
+      current_module: ModuleId::new(0),
+      reexported_defs: HashMap::new(),
     }
   }
 
@@ -1074,6 +1076,8 @@ mod tests {
       extension_methods: analyzer.extension_methods,
       directive_registry: analyzer.directive_registry,
       directive_execution_report: analyzer.directive_execution_report,
+      current_module: ModuleId::new(0),
+      reexported_defs: analyzer.reexported_defs,
     };
 
     (semantic, hir)
