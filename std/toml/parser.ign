@@ -447,7 +447,12 @@ function tomlAppendArrayTableHeader(
   return Result::OK(lastTable);
 }
 
-function tomlParseValue(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpan, output: &mut TomlValue): Result<u64, TomlError> {
+function tomlParseValue(
+  tokens: &Vector<TomlToken>,
+  index: u64,
+  keySpan: TomlSpan,
+  output: &mut TomlValue
+): Result<u64, TomlError> {
   let Result::OK(token) = tomlTokenAt(tokens, index) else {
     return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
   };
@@ -472,7 +477,12 @@ function tomlParseValue(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpa
   return Result::OK(index + 1);
 }
 
-function tomlParseArray(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpan, output: &mut TomlValue): Result<u64, TomlError> {
+function tomlParseArray(
+  tokens: &Vector<TomlToken>,
+  index: u64,
+  keySpan: TomlSpan,
+  output: &mut TomlValue
+): Result<u64, TomlError> {
   let Result::OK(leftBracket) = tomlTokenAt(tokens, index) else {
     return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
   };
@@ -532,7 +542,12 @@ function tomlParseArray(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpa
   return Result::ERROR(TomlError::unexpectedToken(leftBracket.span));
 }
 
-function tomlParseInlineTable(tokens: &Vector<TomlToken>, index: u64, keySpan: TomlSpan, output: &mut TomlValue): Result<u64, TomlError> {
+function tomlParseInlineTable(
+  tokens: &Vector<TomlToken>,
+  index: u64,
+  keySpan: TomlSpan,
+  output: &mut TomlValue
+): Result<u64, TomlError> {
   let Result::OK(leftBrace) = tomlTokenAt(tokens, index) else {
     return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
   };
@@ -666,10 +681,13 @@ export function parseTokens(tokens: &Vector<TomlToken>): Result<TomlDocument, To
         };
 
         currentTable = nextTable;
-        index = match (tomlExpectLineEnd(tokens, pathIndex + 2)) {
-          Result::OK(nextIndex) -> nextIndex,
+        let mut nextIndex: u64 = index;
+        match (tomlExpectLineEnd(tokens, pathIndex + 2)) {
+          Result::OK(value) -> { nextIndex = value; },
           Result::ERROR(error) -> { return Result::ERROR(error); },
         };
+
+        index = nextIndex;
         continue;
       }
 
@@ -699,10 +717,13 @@ export function parseTokens(tokens: &Vector<TomlToken>): Result<TomlDocument, To
       };
 
       currentTable = nextTable;
-      index = match (tomlExpectLineEnd(tokens, pathIndex + 1)) {
-        Result::OK(nextIndex) -> nextIndex,
+      let mut nextIndex: u64 = index;
+      match (tomlExpectLineEnd(tokens, pathIndex + 1)) {
+        Result::OK(value) -> { nextIndex = value; },
         Result::ERROR(error) -> { return Result::ERROR(error); },
       };
+
+      index = nextIndex;
       continue;
     }
 
@@ -739,10 +760,13 @@ export function parseTokens(tokens: &Vector<TomlToken>): Result<TomlDocument, To
       return Result::ERROR(error);
     }
 
-    index = match (tomlExpectLineEnd(tokens, nextIndex)) {
-      Result::OK(valueIndex) -> valueIndex,
+    let mut valueIndex: u64 = index;
+    match (tomlExpectLineEnd(tokens, nextIndex)) {
+      Result::OK(value) -> { valueIndex = value; },
       Result::ERROR(error) -> { return Result::ERROR(error); },
     };
+
+    index = valueIndex;
   }
 
   return Result::OK(TomlDocument::new(root, rootSpan));
