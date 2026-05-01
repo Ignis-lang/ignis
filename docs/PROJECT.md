@@ -30,6 +30,12 @@ target = "c"
 cc = "cc"
 cflags = []
 emit = []
+
+[formatter]
+indent_width = 2
+line_width = 100
+use_tabs = false
+sort_imports = false
 ```
 
 ## Sections
@@ -64,6 +70,39 @@ If `runtime_path` is omitted, the resolver uses `std_path/runtime`.
 - `cc` - C compiler executable.
 - `cflags` - Extra C compiler/linker flags.
 - `emit` - Extra artifacts (`"c"`, `"obj"`).
+
+### `[formatter]`
+
+Formatter configuration used by `ignis fmt`.
+
+- `indent_width` - Logical indentation width. Must be an integer in `1..=8`. Default: `2`.
+- `line_width` - Preferred maximum line width for constructs with layout-aware wrapping. Must be an integer in `40..=160`. Default: `100`.
+- `use_tabs` - Emit one tab per indentation level instead of spaces. `indent_width` still controls logical layout width. Default: `false`.
+- `sort_imports` - Sort imports and re-exports inside each existing import group. Blank-line-separated groups stay separate. Default: `false`.
+
+`ignis fmt` also reads a dedicated `ignisfmt.toml` file when present. Settings resolve in this order:
+
+1. Built-in defaults.
+2. `[formatter]` in `ignis.toml`.
+3. `ignisfmt.toml`, or the file passed with `ignis fmt --config <path>`.
+4. CLI overrides such as `--indent-width`, `--line-width`, `--use-tabs`, `--spaces`, and `--sort-imports`.
+
+Unknown formatter keys are hard errors.
+
+Formatter layout rules include:
+
+- Normalized indentation, operator spacing, comma spacing, and tight generic angle brackets.
+- Canonical final newline and no trailing whitespace.
+- Preservation of comments, compile-time directives, intentional blank lines, declaration order, member order, match-arm order, and statement order.
+- Import/re-export groups are separated from the following declaration block with a blank line.
+- Consecutive `import ... from` statements with the same path are merged into one import list. Consecutive `export ... from` statements with the same path are merged the same way.
+- Same-path import or re-export statements separated by an intentional blank line remain separate.
+- `sort_imports = true` sorts imports/re-exports within each existing import group only; it does not sort declarations or statements.
+- Callable parameter lists and record initializers drop the final trailing comma when printed on one line and add it when printed multiline.
+- Import and re-export item lists wrap when the flat form exceeds `line_width`; multiline import/re-export lists include a trailing comma before `from`.
+- Single pipe expressions may stay inline when they fit `line_width`; pipe chains with two or more `|>` operators format multiline.
+- Empty high-level blocks (`namespace`, `record`, `enum`, `trait`, `extern`) format as inline `{}`.
+- The formatter does not provide a general-purpose wrapping guarantee for every long expression shape; unsupported or unsafe rewrites fail instead of guessing.
 
 ### `[aliases]`
 

@@ -180,7 +180,18 @@ Behavior:
 - Supported style overrides are `--indent-width`, `--line-width`, `--use-tabs`, `--spaces`, and `--sort-imports`.
 - Formatter settings resolve in this order: built-in defaults, then `[formatter]` in `ignis.toml`, then `ignisfmt.toml` (or `--config <path>`), then CLI flags.
 - The shipped defaults are `indent_width = 2`, `line_width = 100`, `use_tabs = false`, and `sort_imports = false`.
-- `fmt` currently preserves source order; it does not sort or reorganize imports, declarations, members, attributes, or statements.
+- Formatter config keys are `indent_width`, `line_width`, `use_tabs`, and `sort_imports`. Unknown formatter keys are rejected.
+- `indent_width` must be in `1..=8`; `line_width` must be in `40..=160`.
+- `--spaces` overrides configured tab indentation back to spaces. `--use-tabs` and `--spaces` conflict.
+- `fmt` preserves declaration order, member order, attribute order, match-arm order, and statement order.
+- Consecutive `import ... from` statements with the same path are merged into one import list. Consecutive `export ... from` statements with the same path are merged the same way.
+- Same-path imports or re-exports separated by an intentional blank line remain separate.
+- `--sort-imports` sorts imports/re-exports within each existing import group only; it preserves comment-separated and blank-line-separated groups.
+- Long import and re-export item lists wrap when the flat form exceeds `line_width`; multiline lists include a trailing comma before `from`.
+- Callable parameter lists and record initializers drop the final trailing comma when they fit on one line and add it when they print multiline.
+- Single pipe expressions may stay inline when they fit `line_width`; pipe chains with two or more `|>` operators format multiline.
+- Empty high-level blocks (`namespace`, `record`, `enum`, `trait`, `extern`) format as inline `{}`.
+- There is no general-purpose wrapping guarantee for every long expression shape; unsafe or unsupported rewrites fail instead of guessing.
 - `--stdin-json` reads one JSON object per line with `path` and `text` fields and emits one JSON result per line with `path`, `changed`, and either `formatted`, `diff`, or `error`.
 - `--emit diff` works in file, multi-file, project, and `--stdin-json` modes.
 - Formatter failures are safety/modeling failures, not lint diagnostics; valid source is expected to format successfully.
