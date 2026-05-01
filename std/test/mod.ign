@@ -521,31 +521,21 @@ function hexDigit(value: u8): char {
 /// Panics with `"snapshot assertion failed"` if directory creation or file
 /// writing fails, or if the write reports a short write.
 function writeSnapshot(snapshotDir: &String, snapshotPath: &Path::PathBuf, actual: &String): void {
-  match (Fs::createDirAll(snapshotDir.toStr())) {
-    Result::OK(_) -> {},
-    Result::ERROR(_) -> failSnapshotIo(
+  if (let Result::ERROR(_) = Fs::createDirAll(snapshotDir.toStr())) {
+    failSnapshotIo(
       "snapshot directory create failed",
       snapshotDir.toStr(),
       "io error",
-    ),
-  };
+    );
+  }
 
-  match (Fs::writeString(snapshotPath.asStr(), actual)) {
-    Result::OK(wroteAll) -> {
-      if (!wroteAll) {
-        failSnapshotIo(
-          "snapshot write failed",
-          snapshotPath.asStr(),
-          "short write",
-        );
-      }
-    },
-    Result::ERROR(_) -> failSnapshotIo(
+  if (let Result::ERROR(_) = Fs::writeString(snapshotPath.asStr(), actual)) {
+    failSnapshotIo(
       "snapshot write failed",
       snapshotPath.asStr(),
       "io error",
-    ),
-  };
+    );
+  }
 }
 
 /// Emits a standard `snapshot missing` failure and panics.

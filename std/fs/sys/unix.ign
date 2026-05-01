@@ -11,18 +11,23 @@
 //! | Function   | Wraps              | Returns                           |
 //! |------------|--------------------|-----------------------------------|
 //! | `open`     | `open(2)` 3-arg    | `Result<i32, IoError>`            |
-//! | `close`    | `close(2)`         | `Result<boolean, IoError>`        |
+//! | `close`    | `close(2)`         | `Result<void, IoError>`           |
 //! | `read`     | `read(2)`          | `Result<i64, IoError>`            |
 //! | `write`    | `write(2)`         | `Result<i64, IoError>`            |
 //! | `lseek`    | `lseek(2)`         | `Result<i64, IoError>`            |
 //! | `stat`     | `stat(2)`          | `Result<Stat, IoError>`           |
 //! | `fstat`    | `fstat(2)`         | `Result<Stat, IoError>`           |
-//! | `mkdir`    | `mkdir(2)`         | `Result<boolean, IoError>`        |
-//! | `unlink`   | `unlink(2)`        | `Result<boolean, IoError>`        |
-//! | `rmdir`    | `rmdir(2)`         | `Result<boolean, IoError>`        |
-//! | `rename`   | `rename(2)`        | `Result<boolean, IoError>`        |
+//! | `lstat`    | `lstat(2)`         | `Result<Stat, IoError>`           |
+//! | `realpath` | `realpath(3)`      | `Result<String, IoError>`         |
+//! | `tempDirPath` | env/stat fallback | `Result<String, IoError>`       |
+//! | `mkdir`    | `mkdir(2)`         | `Result<void, IoError>`           |
+//! | `unlink`   | `unlink(2)`        | `Result<void, IoError>`           |
+//! | `rmdir`    | `rmdir(2)`         | `Result<void, IoError>`           |
+//! | `removeDirAll` | runtime helper  | `Result<void, IoError>`           |
+//! | `rename`   | `rename(2)`        | `Result<void, IoError>`           |
 //! | `opendir`  | `opendir(3)`       | `Result<DirPtr, IoError>`         |
 //! | `readdir`  | `readdir(3)`       | `Result<Option<SysDirEntry>, IoError>` |
+//! | `readdirEntry` | runtime helper  | `Result<boolean, IoError>`        |
 //! | `closedir` | `closedir(3)`      | `void`                            |
 //!
 //! ## Types
@@ -45,8 +50,7 @@
 //! ## Design Notes
 //!
 //! Functions that succeed without a meaningful value (close, mkdir, etc.)
-//! return `Result<boolean, Io::IoError>` with `Result::OK(true)` because
-//! `void` is not a value in Ignis (`Result<void, E>` is a parse error).
+//! return `Result<void, Io::IoError>` with `Result::OK(())`.
 //!
 //! ## C Runtime Dependency
 //!
@@ -57,13 +61,13 @@
 //! |---------------------|----------------------------------------------------|
 //! | `ignis_stat_call`   | `struct stat` layout is platform-dependent          |
 //! | `ignis_fstat_call`  | same                                                |
+//! | `ignis_lstat_call`  | same                                                |
 //! | `ignis_open3`       | `open(2)` is variadic; Ignis has no variadic calls  |
-//! | `ignis_dirent_name` | `struct dirent` layout is platform-dependent        |
-//! | `ignis_dirent_ino`  | same                                                |
-//! | `ignis_dirent_type` | same                                                |
+//! | `ignis_readdir_call` | `struct dirent` layout is platform-dependent       |
+//! | `ignis_remove_dir_all_call` | symlink-safe recursion uses libc structs     |
 //!
 //! Everything else (`read`, `write`, `close`, `lseek`, `unlink`, `rmdir`,
-//! `rename`, `mkdir`, `opendir`, `closedir`, `readdir`) calls libc
+//! `rename`, `mkdir`, `opendir`, `closedir`, `readdir`, `realpath`) calls libc
 //! directly through Ignis `extern` blocks.
 //!
 //! When `@platform` / `@target` / `@feature` attributes land, the C
@@ -92,7 +96,9 @@
 //! ```
 
 import Io from "std::io";
+import LibC from "std::libc";
 import CType from "std::libc::primitives";
+import String from "std::string";
 
 // Extern blocks — direct C symbols.
 // Local declarations are used as a workaround for cross-module symbol mangling
@@ -150,6 +156,10 @@ extern __fs_dir {
   // readdir returns a pointer to an internal dirent struct.
   // We treat it as *mut void and use C helpers to extract fields.
   function readdir(dirp: CType::DirPtr): *mut void;
+}
+
+extern __fs_path {
+  function realpath(pathname: *u8, resolvedPath: *u8): *mut u8;
 }
 
 // errno access — platform-specific function name.
@@ -213,11 +223,29 @@ extern __fs_rt {
     outBlocks: &mut i64,
   ): i32;
 
+  function ignis_lstat_call(
+    path: *u8,
+    outDev: &mut u64,
+    outIno: &mut u64,
+    outMode: &mut u32,
+    outNlink: &mut u64,
+    outUid: &mut u32,
+    outGid: &mut u32,
+    outSize: &mut i64,
+    outAtime: &mut i64,
+    outMtime: &mut i64,
+    outCtime: &mut i64,
+    outBlksize: &mut i64,
+    outBlocks: &mut i64,
+  ): i32;
+
   function ignis_open3(pathname: *u8, flags: i32, mode: u32): i32;
 
   function ignis_dirent_name(entry: *mut void): *u8;
   function ignis_dirent_ino(entry: *mut void): u64;
   function ignis_dirent_type(entry: *mut void): u8;
+  function ignis_readdir_call(dirp: CType::DirPtr, outName: &mut u64, outIno: &mut u64, outType: &mut u8): i32;
+  function ignis_remove_dir_all_call(path: *u8): i32;
 }
 
 // =============================================================================
@@ -352,12 +380,12 @@ export namespace Fs::Sys {
   }
 
   /// Closes file descriptor `fd`.
-  function close(fd: i32): Result<boolean, Io::IoError> {
+  function close(fd: i32): Result<void, Io::IoError> {
     let rc: i32 = __fs_io::close(fd);
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
-    return Result::OK(true);
+    return Result::OK(());
   }
 
   /// Reads up to `count` bytes from `fd` into `buf`.
@@ -391,6 +419,23 @@ export namespace Fs::Sys {
       return Result::ERROR(lastError());
     }
     return Result::OK(pos);
+  }
+
+  function tempDirCandidate(value: *mut u8): Option<String> {
+    if (value == null || LibC::String::strlen(value as *u8) == 0) {
+      return Option::NONE;
+    }
+
+    let candidate: String = String::create(value as str);
+    let statResult: Result<Stat, Io::IoError> = Fs::Sys::lstat(candidate.toStr());
+
+    if (let Result::OK(stat) = statResult) {
+      if ((stat.mode & Fs::Sys::S_IFMT) == Fs::Sys::S_IFDIR) {
+        return Option::SOME(candidate.clone());
+      }
+    }
+
+    return Option::NONE;
   }
 
   /// Returns file metadata for `path`.
@@ -463,40 +508,117 @@ export namespace Fs::Sys {
     });
   }
 
+  /// Returns file metadata for `path` without following symlinks.
+  function lstat(path: str): Result<Stat, Io::IoError> {
+    let mut dev: u64 = 0;
+    let mut ino: u64 = 0;
+    let mut mode: u32 = 0;
+    let mut nlink: u64 = 0;
+    let mut uid: u32 = 0;
+    let mut gid: u32 = 0;
+    let mut size: i64 = 0;
+    let mut atime: i64 = 0;
+    let mut mtime: i64 = 0;
+    let mut ctime: i64 = 0;
+    let mut blksize: i64 = 0;
+    let mut blocks: i64 = 0;
+
+    let rc: i32 = __fs_rt::ignis_lstat_call(
+      path as *u8,
+      &mut dev, &mut ino, &mut mode, &mut nlink,
+      &mut uid, &mut gid, &mut size,
+      &mut atime, &mut mtime, &mut ctime,
+      &mut blksize, &mut blocks,
+    );
+
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+
+    return Result::OK(Stat {
+      dev: dev, ino: ino, mode: mode, nlink: nlink,
+      uid: uid, gid: gid, size: size,
+      atime: atime, mtime: mtime, ctime: ctime,
+      blksize: blksize, blocks: blocks,
+    });
+  }
+
+  /// Resolves `path` to an existing canonical absolute path.
+  function realpath(path: str): Result<String, Io::IoError> {
+    let resolvedPath: *mut u8 = __fs_path::realpath(path as *u8, null);
+
+    if (resolvedPath == null) {
+      return Result::ERROR(lastError());
+    }
+
+    let ownedPath: String = String::create(resolvedPath as str);
+    LibC::Allocator::free(resolvedPath as *mut void);
+
+    return Result::OK(ownedPath);
+  }
+
+  /// Returns the host temporary-directory root.
+  function tempDirPath(): Result<String, Io::IoError> {
+    if (let Option::SOME(value) = Fs::Sys::tempDirCandidate(LibC::Process::getenv("TMPDIR" as *u8))) {
+      return Result::OK(value);
+    }
+
+    if (let Option::SOME(value) = Fs::Sys::tempDirCandidate(LibC::Process::getenv("TEMP" as *u8))) {
+      return Result::OK(value);
+    }
+
+    if (let Option::SOME(value) = Fs::Sys::tempDirCandidate(LibC::Process::getenv("TMP" as *u8))) {
+      return Result::OK(value);
+    }
+
+    return Result::OK(String::create("/tmp"));
+  }
+
   /// Creates a directory at `path` with the given permission `mode`.
-  function mkdir(path: str, mode: u32): Result<boolean, Io::IoError> {
+  function mkdir(path: str, mode: u32): Result<void, Io::IoError> {
     let rc: i32 = __fs_io::mkdir(path as *u8, mode);
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
-    return Result::OK(true);
+    return Result::OK(());
   }
 
   /// Removes the file at `path`.
-  function unlink(path: str): Result<boolean, Io::IoError> {
+  function unlink(path: str): Result<void, Io::IoError> {
     let rc: i32 = __fs_io::unlink(path as *u8);
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
-    return Result::OK(true);
+    return Result::OK(());
   }
 
   /// Removes the empty directory at `path`.
-  function rmdir(path: str): Result<boolean, Io::IoError> {
+  function rmdir(path: str): Result<void, Io::IoError> {
     let rc: i32 = __fs_io::rmdir(path as *u8);
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
-    return Result::OK(true);
+    return Result::OK(());
+  }
+
+  /// Recursively removes a directory tree without following symlink directories.
+  function removeDirAll(path: str): Result<void, Io::IoError> {
+    let rc: i32 = __fs_rt::ignis_remove_dir_all_call(path as *u8);
+
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+
+    return Result::OK(());
   }
 
   /// Renames `oldPath` to `newPath`.
-  function rename(oldPath: str, newPath: str): Result<boolean, Io::IoError> {
+  function rename(oldPath: str, newPath: str): Result<void, Io::IoError> {
     let rc: i32 = __fs_io::rename(oldPath as *u8, newPath as *u8);
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
-    return Result::OK(true);
+    return Result::OK(());
   }
 
   /// Opens a directory stream for reading entries.
@@ -508,6 +630,21 @@ export namespace Fs::Sys {
       return Result::ERROR(lastError());
     }
     return Result::OK(dirp);
+  }
+
+  /// Reads the next entry from a directory stream.
+  function readdirEntry(dirp: CType::DirPtr, outName: &mut u64, outIno: &mut u64, outType: &mut u8): Result<boolean, Io::IoError> {
+    if (dirp == null) {
+      return Result::ERROR(Io::IoError::fromErrno(__fs_errno::EINVAL));
+    }
+
+    let rc: i32 = __fs_rt::ignis_readdir_call(dirp, outName, outIno, outType);
+
+    if (rc == -1) {
+      return Result::ERROR(lastError());
+    }
+
+    return Result::OK(rc == 1);
   }
 
   /// Reads the next entry from a directory stream.

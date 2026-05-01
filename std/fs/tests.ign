@@ -1,7 +1,21 @@
 import Fs from "std::fs";
 import Io from "std::io";
+import LibC from "std::libc";
+import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
+
+function shellRemoveTree(command: str): void {
+  let exitCode: i32 = LibC::Process::system(command as *u8);
+  if (exitCode != 0) {
+    Test::fail();
+  }
+}
+
+function assertInvalidInput(error: Io::IoError): void {
+  Test::assert(error.errorKind() == Io::ErrorKind::INVALID_INPUT);
+  Test::assertEq<i32>(error.rawCode(), LibC::Errno::EINVAL);
+}
 
 @test
 function writeStringAndReadToStringPreserveInteriorNulBytes(): void {
@@ -19,14 +33,10 @@ function writeStringAndReadToStringPreserveInteriorNulBytes(): void {
   payload.pushChar('\0');
   payload.pushChar('B');
 
-  let mut wrote: boolean = false;
-  match (Fs::writeString(path, &payload)) {
-    Result::OK(value) -> {
-      wrote = value;
-    },
-    Result::ERROR(_) -> Test::fail(),
+  let Result::OK(_) = Fs::writeString(path, &payload) else {
+    Test::fail();
+    return;
   };
-  Test::assert(wrote);
 
   let mut readBack: String = String::new();
   match (Fs::readToString(path)) {
@@ -86,9 +96,9 @@ function readDirNextReturnsOkSomeAndThenOkNone(): void {
   };
 
   let payload: String = String::create("alpha");
-  match (Fs::writeString(filePath, &payload)) {
-    Result::OK(true) -> {},
-    _ -> Test::fail(),
+  let Result::OK(_) = Fs::writeString(filePath, &payload) else {
+    Test::fail();
+    return;
   };
 
   let mut readDir: Fs::ReadDir = match (Fs::ReadDir::open(dirPath)) {
@@ -230,4 +240,260 @@ function readDirNextReturnsErrorAfterDirectoryStreamIsInvalidated(): void {
   };
 
   Test::assert(sawError);
+}
+
+@test
+function writeBytesAndReadToBytesPreserveEmptyAndBinaryPayloads(): void {
+  let emptyPath: str = "/tmp/ignis_std_test_runner_fs_bytes_empty.bin";
+  let binaryPath: str = "/tmp/ignis_std_test_runner_fs_bytes_binary.bin";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_bytes_empty.bin /tmp/ignis_std_test_runner_fs_bytes_binary.bin");
+
+  let emptyPayload: Vector<u8> = Vector::init<u8>();
+  let Result::OK(_) = Fs::writeBytes(emptyPath, emptyPayload.asPtr() as *void, emptyPayload.length()) else {
+    Test::fail();
+    return;
+  };
+
+  let emptyReadBack: Vector<u8> = match (Fs::readToBytes(emptyPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let mut binaryPayload: Vector<u8> = Vector::init<u8>();
+  binaryPayload.push(0 as u8);
+  binaryPayload.push(255 as u8);
+  binaryPayload.push(65 as u8);
+
+  let Result::OK(_) = Fs::writeBytes(binaryPath, binaryPayload.asPtr() as *void, binaryPayload.length()) else {
+    Test::fail();
+    return;
+  };
+
+  let binaryReadBack: Vector<u8> = match (Fs::readToBytes(binaryPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_bytes_empty.bin /tmp/ignis_std_test_runner_fs_bytes_binary.bin");
+
+  Test::assertEq<u64>(emptyReadBack.length(), 0);
+  Test::assertEq<u64>(binaryReadBack.length(), 3);
+  Test::assertEq<u8>(match (binaryReadBack.get(0)) { Option::SOME(value) -> *value, Option::NONE -> 1 as u8, }, 0 as u8);
+  Test::assertEq<u8>(match (binaryReadBack.get(1)) { Option::SOME(value) -> *value, Option::NONE -> 1 as u8, }, 255 as u8);
+  Test::assertEq<u8>(match (binaryReadBack.get(2)) { Option::SOME(value) -> *value, Option::NONE -> 1 as u8, }, 65 as u8);
+}
+
+@test
+function fsOwnedPathsRejectInteriorNulBytes(): void {
+  let mut invalidPath: String = String::create("/tmp/ignis_std_test_runner_fs_invalid_path");
+  let suffix: String = String::create("suffix");
+  invalidPath.pushChar('\0');
+  invalidPath.push(&suffix);
+
+  let invalidPathBuf: Path::PathBuf = Path::PathBuf::fromString(&invalidPath);
+  let payload: String = String::create("payload");
+  let bytes: Vector<u8> = Vector::init<u8>();
+
+  match (Fs::writeBytes(&invalidPath, bytes.asPtr() as *void, bytes.length())) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertInvalidInput(error),
+  };
+
+  match (Fs::readToBytes(&invalidPath)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertInvalidInput(error),
+  };
+
+  match (Fs::writeString(&invalidPathBuf, &payload)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertInvalidInput(error),
+  };
+
+  match (Fs::canonicalize(&invalidPathBuf)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertInvalidInput(error),
+  };
+
+  match (Fs::createDirAll(&invalidPath)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertInvalidInput(error),
+  };
+
+  match (Fs::walk(&invalidPathBuf)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertInvalidInput(error),
+  };
+
+  match (Fs::removeDirAll(&invalidPath)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertInvalidInput(error),
+  };
+}
+
+@test
+function canonicalizeRequiresExistingPathAndResolvesRealLocation(): void {
+  let nestedPath: str = "/tmp/ignis_std_test_runner_fs_canonicalize/real/child.txt";
+  let missingPath: str = "/tmp/ignis_std_test_runner_fs_canonicalize_missing";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_canonicalize /tmp/ignis_std_test_runner_fs_canonicalize_missing");
+
+  match (Fs::createDirAll("/tmp/ignis_std_test_runner_fs_canonicalize/real")) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let payload: String = String::create("child");
+  let Result::OK(_) = Fs::writeString(nestedPath, &payload) else {
+    Test::fail();
+    return;
+  };
+
+  let resolved: Path::PathBuf = match (Fs::canonicalize("/tmp/ignis_std_test_runner_fs_canonicalize/real/../real/./child.txt")) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let missingResult: Result<Path::PathBuf, Io::IoError> = Fs::canonicalize(missingPath);
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_canonicalize /tmp/ignis_std_test_runner_fs_canonicalize_missing");
+
+  Test::assertEq<str>(resolved.asStr(), nestedPath);
+  match (missingResult) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(_) -> {},
+  };
+}
+
+@test
+function tempDirReturnsExistingDirectoryRoot(): void {
+  let tempRoot: Path::PathBuf = match (Fs::tempDir()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let Result::OK(_) = Fs::canonicalize(tempRoot.asStr()) else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function walkTreatsSymlinkDirectoryAsLeaf(): void {
+  let rootPath: str = "/tmp/ignis_std_test_runner_fs_walk";
+  let targetDir: str = "/tmp/ignis_std_test_runner_fs_walk/real";
+  let nestedFile: str = "/tmp/ignis_std_test_runner_fs_walk/real/nested.txt";
+  let symlinkPath: str = "/tmp/ignis_std_test_runner_fs_walk/link_to_real";
+  let symlinkDescendantPath: str = "/tmp/ignis_std_test_runner_fs_walk/link_to_real/nested.txt";
+  let targetDirString: String = String::create(targetDir);
+  let nestedFileString: String = String::create(nestedFile);
+  let symlinkPathString: String = String::create(symlinkPath);
+  let symlinkDescendantString: String = String::create(symlinkDescendantPath);
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk");
+
+  match (Fs::createDirAll(targetDir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let payload: String = String::create("nested");
+  let Result::OK(_) = Fs::writeString(nestedFile, &payload) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i32>(LibC::Process::system("ln -s /tmp/ignis_std_test_runner_fs_walk/real /tmp/ignis_std_test_runner_fs_walk/link_to_real" as *u8), 0);
+
+  let walkedEntries: Vector<String> = match (Fs::walk(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let sawRealDir: boolean = Fs::walkContains(&walkedEntries, targetDirString.toStr());
+  let sawNestedFile: boolean = Fs::walkContains(&walkedEntries, nestedFileString.toStr());
+  let sawSymlink: boolean = Fs::walkContains(&walkedEntries, symlinkPathString.toStr());
+  let sawSymlinkDescendant: boolean = Fs::walkContains(&walkedEntries, symlinkDescendantString.toStr());
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk");
+
+  Test::assert(sawRealDir);
+  Test::assert(sawNestedFile);
+  Test::assert(sawSymlink);
+  Test::assert(!sawSymlinkDescendant);
+}
+
+@test
+function removeDirAllFailsWhenMissingAndRemovesNestedTreesWithoutFollowingSymlinks(): void {
+  let rootPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all";
+  let externalPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all_external";
+  let missingPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all_missing";
+  let nestedFile: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all/root/child.txt";
+  let linkPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all/link_to_external";
+  let externalFile: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all_external/keep.txt";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_remove_dir_all /tmp/ignis_std_test_runner_fs_remove_dir_all_external /tmp/ignis_std_test_runner_fs_remove_dir_all_missing");
+
+  match (Fs::createDirAll("/tmp/ignis_std_test_runner_fs_remove_dir_all/root")) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (Fs::createDirAll(externalPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let nestedPayload: String = String::create("child");
+  let externalPayload: String = String::create("keep");
+
+  let Result::OK(_) = Fs::writeString(nestedFile, &nestedPayload) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::OK(_) = Fs::writeString(externalFile, &externalPayload) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i32>(LibC::Process::system("ln -s /tmp/ignis_std_test_runner_fs_remove_dir_all_external /tmp/ignis_std_test_runner_fs_remove_dir_all/link_to_external" as *u8), 0);
+
+  let missingResult: Result<void, Io::IoError> = Fs::removeDirAll(missingPath);
+
+  let removeResult: Result<void, Io::IoError> = Fs::removeDirAll(rootPath);
+
+  let externalStillExists: boolean = Fs::exists(externalPath);
+  let externalFileStillExists: boolean = Fs::exists(externalFile);
+  let linkGone: boolean = !Fs::exists(linkPath);
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_remove_dir_all /tmp/ignis_std_test_runner_fs_remove_dir_all_external /tmp/ignis_std_test_runner_fs_remove_dir_all_missing");
+
+  if (let Result::OK(_) = missingResult) {
+    Test::fail();
+  }
+
+  if (let Result::ERROR(_) = removeResult) {
+    Test::fail();
+  }
+
+  Test::assert(!Fs::exists(rootPath));
+  Test::assert(externalStillExists);
+  Test::assert(externalFileStillExists);
+  Test::assert(linkGone);
 }

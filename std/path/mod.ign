@@ -27,6 +27,7 @@
 //! |---------------|------------------|-----------------------------------------|
 //! | `isEmpty`     | `boolean`        | True if the path has no bytes           |
 //! | `isAbsolute`  | `boolean`        | True if the path starts with `/`        |
+//! | `isRelative`  | `boolean`        | True if the path does not start with `/`|
 //! | `asStr`       | `str`            | Borrow as `const char*` (NUL-terminated)|
 //! | `toString`    | `String`         | Clone the inner String                  |
 //! | `fileName`    | `Option<String>` | Last component after final `/`          |
@@ -45,6 +46,7 @@
 //! | Method   | Signature                           | Description                   |
 //! |----------|-------------------------------------|-------------------------------|
 //! | `join`   | `join(&self, part: str): PathBuf`   | Clone self, then push `part`  |
+//! | `normalize` | `normalize(&self): PathBuf`      | Lexically resolve `.`/`..`    |
 //!
 //! ## Platform Notes
 //!
@@ -150,6 +152,11 @@ export namespace Path {
       }
 
       return false;
+    }
+
+    /// Returns `true` when the path is not absolute.
+    public isRelative(&self): boolean {
+      return !self.isAbsolute();
     }
 
     /// Borrows the path as a `str` (`const char*`).
@@ -362,6 +369,41 @@ export namespace Path {
       return result;
     }
 
+    /// Returns a lexically normalized path without touching the filesystem.
+    public normalize(&self): PathBuf {
+      let absolute: boolean = self.isAbsolute();
+      let mut normalized: String = String::new();
+
+      if (absolute) {
+        normalized.pushChar(SEP);
+      }
+
+      let len: u64 = self.data.length();
+      let mut segmentStart: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index <= len) {
+        if (!self.isSegmentBoundary(index, len)) {
+          index += 1;
+          continue;
+        }
+
+        let segmentLen: u64 = index - segmentStart;
+        if (segmentLen > 0) {
+          let segment: String = self.data.substring(segmentStart as i64, segmentLen as i64);
+          self.appendNormalizedSegment(&mut normalized, &segment, absolute);
+        }
+
+        if (index < len) {
+          segmentStart = index + 1;
+        }
+
+        index += 1;
+      }
+
+      return PathBuf { data: normalized };
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -411,6 +453,150 @@ export namespace Path {
       }
 
       return limit;
+    }
+
+    isSegmentBoundary(&self, index: u64, len: u64): boolean {
+      if (index == len) {
+        return true;
+      }
+
+      return self.isSeparatorAt(index);
+    }
+
+    isSeparatorAt(&self, index: u64): boolean {
+      return match (self.data.charAt(index)) {
+        Option::SOME(value) -> value == SEP,
+        Option::NONE -> false,
+      };
+    }
+
+    appendNormalizedSegment(&self, normalized: &mut String, segment: &String, absolute: boolean): void {
+      let output: &mut String = normalized;
+
+      if (self.isCurrentDirSegment(segment)) {
+        return;
+      }
+
+      if (self.isParentDirSegment(segment)) {
+        self.appendParentSegment(output, segment, absolute);
+        return;
+      }
+
+      self.appendChildSegment(output, segment, absolute);
+    }
+
+    appendChildSegment(&self, normalized: &mut String, segment: &String, absolute: boolean): void {
+      let mut output: &mut String = normalized;
+
+      if (output.length() > 0 && !(absolute && output.length() == 1)) {
+        output.pushChar(SEP);
+      }
+
+      output.push(segment);
+    }
+
+    appendParentSegment(&self, normalized: &mut String, segment: &String, absolute: boolean): void {
+      let output: &mut String = normalized;
+
+      if (absolute) {
+        self.popLastSegment(output, true);
+        return;
+      }
+
+      if (output.length() == 0 || self.lastSegmentIsParent(output)) {
+        self.appendChildSegment(output, segment, false);
+        return;
+      }
+
+      self.popLastSegment(output, false);
+    }
+
+    popLastSegment(&self, normalized: &mut String, keepRoot: boolean): void {
+      let mut output: &mut String = normalized;
+
+      if (keepRoot && output.length() <= 1) {
+        return;
+      }
+
+      let mut index: i64 = (output.length() as i64) - 1;
+
+      while (index >= 0) {
+        let isSep: boolean = match (output.charAt(index as u64)) {
+          Option::SOME(value) -> value == SEP,
+          Option::NONE -> false,
+        };
+
+        if (isSep) {
+          self.truncateNormalized(output, index, keepRoot);
+          return;
+        }
+
+        index -= 1;
+      }
+
+      output.clear();
+    }
+
+    truncateNormalized(&self, normalized: &mut String, index: i64, keepRoot: boolean): void {
+      let mut output: &mut String = normalized;
+
+      if (keepRoot && index == 0) {
+        output.clear();
+        output.pushChar(SEP);
+        return;
+      }
+
+      let truncated: String = output.substring(0, index);
+      output.clear();
+      output.push(&truncated);
+    }
+
+    lastSegmentIsParent(&self, normalized: &mut String): boolean {
+      let start: u64 = self.lastSegmentStart(normalized);
+      let len: u64 = normalized.length() - start;
+
+      return len == 2 && self.stringMutCharEquals(normalized, start, '.') && self.stringMutCharEquals(normalized, start + 1, '.');
+    }
+
+    lastSegmentStart(&self, value: &mut String): u64 {
+      let mut index: i64 = (value.length() as i64) - 1;
+
+      while (index >= 0) {
+        let isSep: boolean = match (value.charAt(index as u64)) {
+          Option::SOME(ch) -> ch == SEP,
+          Option::NONE -> false,
+        };
+
+        if (isSep) {
+          return (index + 1) as u64;
+        }
+
+        index -= 1;
+      }
+
+      return 0;
+    }
+
+    isCurrentDirSegment(&self, segment: &String): boolean {
+      return segment.length() == 1 && self.stringCharEquals(segment, 0, '.');
+    }
+
+    isParentDirSegment(&self, segment: &String): boolean {
+      return segment.length() == 2 && self.stringCharEquals(segment, 0, '.') && self.stringCharEquals(segment, 1, '.');
+    }
+
+    stringCharEquals(&self, value: &String, index: u64, expected: char): boolean {
+      return match (value.charAt(index)) {
+        Option::SOME(ch) -> ch == expected,
+        Option::NONE -> false,
+      };
+    }
+
+    stringMutCharEquals(&self, value: &mut String, index: u64, expected: char): boolean {
+      return match (value.charAt(index)) {
+        Option::SOME(ch) -> ch == expected,
+        Option::NONE -> false,
+      };
     }
 
     // -----------------------------------------------------------------------

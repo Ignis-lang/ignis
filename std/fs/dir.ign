@@ -94,19 +94,17 @@ export namespace Fs {
     ///
     /// `Result::OK(Option::NONE)` means end of directory.
     public next(&mut self): Result<Option<Fs::DirEntry>, Io::IoError> {
-      let nextEntry: Result<Option<Fs::Sys::SysDirEntry>, Io::IoError> = Fs::Sys::readdir(self.dir);
+      let mut rawName: u64 = 0;
+      let mut rawIno: u64 = 0;
+      let mut rawFileType: u8 = 0;
+      let hasEntry: boolean = Fs::Sys::readdirEntry(self.dir, &mut rawName, &mut rawIno, &mut rawFileType)!;
 
-      let raw: Fs::Sys::SysDirEntry = match (nextEntry) {
-        Result::OK(Option::SOME(entry)) -> entry,
-        Result::OK(Option::NONE) -> {
-          return Result::OK(Option::NONE);
-        },
-        Result::ERROR(err) -> {
-          return Result::ERROR(err);
-        },
-      };
+      if (!hasEntry) {
+        return Result::OK(Option::NONE);
+      }
 
-      let ownedName: String = String::create(raw.name);
+      let rawNamePtr: *u8 = @pointerFromInteger<*u8>(rawName);
+      let ownedName: String = String::create(rawNamePtr as str);
 
       let base: String = self.baseDir.clone();
       let mut ownedPath: Path::PathBuf = Path::PathBuf::fromString(&base);
@@ -115,8 +113,8 @@ export namespace Fs {
       return Result::OK(Option::SOME(Fs::DirEntry {
         name: ownedName,
         path: ownedPath,
-        fileType: Fs::fileTypeFromDirent(raw.fileType),
-        ino: raw.ino,
+        fileType: Fs::fileTypeFromDirent(rawFileType),
+        ino: rawIno,
       }));
     }
 
@@ -134,5 +132,223 @@ export namespace Fs {
 
       self.baseDir.drop();
     }
+  }
+
+  function isDotEntry(name: String): boolean {
+    if (name.length() == 1) {
+      return match (name.charAt(0)) {
+        Option::SOME(value) -> value == '.',
+        Option::NONE -> false,
+      };
+    }
+
+    if (name.length() == 2) {
+      let first: Option<char> = name.charAt(0);
+      let second: Option<char> = name.charAt(1);
+      let firstChar: char = match (first) {
+        Option::SOME(value) -> value,
+        Option::NONE -> '\0',
+      };
+      let secondChar: char = match (second) {
+        Option::SOME(value) -> value,
+        Option::NONE -> '\0',
+      };
+
+      return firstChar == '.' && secondChar == '.';
+    }
+
+    return false;
+  }
+
+  function isDotEntryName(name: str): boolean {
+    if ((name as *u8) == null) {
+      return false;
+    }
+
+    let namePtr: *mut u8 = name as *mut u8;
+    let firstByte: u8 = @read<u8>(namePtr);
+
+    if (firstByte != 46) {
+      return false;
+    }
+
+    let secondPtr: *mut u8 = @integerFromPointer(namePtr) + 1
+      |> @pointerFromInteger<*mut u8>(_);
+    let secondByte: u8 = @read<u8>(secondPtr);
+
+    if (secondByte == 0) {
+      return true;
+    }
+
+    if (secondByte != 46) {
+      return false;
+    }
+
+    let thirdPtr: *mut u8 = @integerFromPointer(secondPtr) + 1
+      |> @pointerFromInteger<*mut u8>(_);
+
+    return @read<u8>(thirdPtr) == 0;
+  }
+
+  function isDotEntryPath(path: &Path::PathBuf): boolean {
+    return match (path.fileName()) {
+      Option::SOME(name) -> Fs::isDotEntry(name),
+      Option::NONE -> false,
+    };
+  }
+
+  function walkEntryFromPath(path: Path::PathBuf): Result<Fs::DirEntry, Io::IoError> {
+    let stat: Fs::Sys::Stat = Fs::Sys::lstat(path.asStr())!;
+    let fileType: Fs::FileType = Fs::fileTypeFromMode(stat.mode);
+    let name: String = match (path.fileName()) {
+      Option::SOME(value) -> value,
+      Option::NONE -> String::create(path.asStr()),
+    };
+
+    return Result::OK(Fs::DirEntry {
+      name: name,
+      path: path,
+      fileType: fileType,
+      ino: stat.ino,
+    });
+  }
+
+  function collectWalkEntry(
+    path: &String,
+    isDirectory: boolean,
+    output: &mut Vector<String>,
+  ): Result<void, Io::IoError> {
+    let mut outputRef: &mut Vector<String> = output;
+    outputRef.push(path.clone());
+
+    if (!isDirectory) {
+      return Result::OK(());
+    }
+
+    return Fs::collectWalkChildren(path, output);
+  }
+
+  function collectWalkPathOwned(
+    path: &String,
+    output: &mut Vector<String>,
+  ): Result<void, Io::IoError> {
+    let stat: Fs::Sys::Stat = Fs::Sys::lstat(path.toStr())!;
+    let isDirectory: boolean = (stat.mode & Fs::Sys::S_IFMT) == Fs::Sys::S_IFDIR;
+
+    return Fs::collectWalkEntry(path, isDirectory, output);
+  }
+
+  function collectWalkPath(path: str, output: &mut Vector<String>): Result<void, Io::IoError> {
+    let ownedPath: String = String::create(path);
+    return Fs::collectWalkPathOwned(&ownedPath, output);
+  }
+
+  function collectWalkChildren(
+    parent: &String,
+    output: &mut Vector<String>,
+  ): Result<void, Io::IoError> {
+    let dir: CType::DirPtr = Fs::Sys::opendir(parent.toStr())!;
+
+    defer Fs::Sys::closedir(dir);
+
+    while (true) {
+      let mut rawName: u64 = 0;
+      let mut rawIno: u64 = 0;
+      let mut rawFileType: u8 = 0;
+      let hasEntry: boolean = Fs::Sys::readdirEntry(dir, &mut rawName, &mut rawIno, &mut rawFileType)!;
+
+      if (!hasEntry) {
+        break;
+      }
+
+      let rawNamePtr: *u8 = @pointerFromInteger<*u8>(rawName);
+      let childName: String = String::create(rawNamePtr as str);
+
+      if (Fs::isDotEntry(childName.clone())) {
+        continue;
+      }
+
+      let mut childPath: Path::PathBuf = Path::PathBuf::fromString(parent);
+      childPath.push(childName.toStr());
+
+      let childPathString: String = childPath.toString();
+      let mut childIsDirectory: boolean = rawFileType == Fs::Sys::DT_DIR;
+
+      if (rawFileType == Fs::Sys::DT_UNKNOWN) {
+        let childStat: Fs::Sys::Stat = Fs::Sys::lstat(childPathString.toStr())!;
+        childIsDirectory = (childStat.mode & Fs::Sys::S_IFMT) == Fs::Sys::S_IFDIR;
+      }
+
+      Fs::collectWalkEntry(&childPathString, childIsDirectory, output)!;
+    }
+
+    return Result::OK(());
+  }
+
+  function collectWalkDirectory(
+    path: str,
+    output: &mut Vector<String>,
+  ): Result<void, Io::IoError> {
+    let directoryPath: String = String::create(path);
+    return Fs::collectWalkChildren(&directoryPath, output);
+  }
+
+  function collectWalkSingle(
+    path: str,
+    output: &mut Vector<String>,
+  ): Result<void, Io::IoError> {
+    return Fs::collectWalkPath(path, output);
+  }
+
+  function removeDirAllPath(path: str): Result<void, Io::IoError> {
+    return Fs::Sys::removeDirAll(path);
+  }
+
+  function collectWalk(path: str): Result<Vector<String>, Io::IoError> {
+    let mut entries: Vector<String> = Vector::init<String>();
+
+    match (Fs::ReadDir::open(path)) {
+      Result::OK(_) -> { Fs::collectWalkDirectory(path, &mut entries)!; },
+      Result::ERROR(_) -> { Fs::collectWalkSingle(path, &mut entries)!; },
+    };
+
+    return Result::OK(entries);
+  }
+
+  function walkContains(entries: &Vector<String>, expected: str): boolean {
+    let expectedPath: String = String::create(expected);
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      let nextEntry: Option<&String> = entries.get(index);
+
+      if (let Option::SOME(value) = nextEntry && value.equals(&expectedPath)) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function walkDescribe(entries: &Vector<String>): String {
+    let mut output: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      let nextEntry: Option<&String> = entries.get(index);
+
+      if (let Option::SOME(value) = nextEntry && output.length() > 0) {
+        output.pushChar('\n');
+        output.push(value);
+      } else if (let Option::SOME(value) = nextEntry) {
+        output.push(value);
+      }
+
+      index += 1;
+    }
+
+    return output;
   }
 }

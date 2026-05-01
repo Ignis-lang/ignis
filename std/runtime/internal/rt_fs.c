@@ -109,6 +109,44 @@ int ignis_fstat_call(
     return 0;
 }
 
+/*
+ * Call lstat(2) on `path` and extract all fields into the output pointers.
+ * Returns 0 on success, -1 on failure (errno is set).
+ */
+int ignis_lstat_call(
+    const char *path,
+    u64 *out_dev,
+    u64 *out_ino,
+    u32 *out_mode,
+    u64 *out_nlink,
+    u32 *out_uid,
+    u32 *out_gid,
+    i64 *out_size,
+    i64 *out_atime,
+    i64 *out_mtime,
+    i64 *out_ctime,
+    i64 *out_blksize,
+    i64 *out_blocks
+) {
+    struct stat st;
+    int rc = lstat(path, &st);
+    if (rc != 0) return -1;
+
+    *out_dev     = (u64)st.st_dev;
+    *out_ino     = (u64)st.st_ino;
+    *out_mode    = (u32)st.st_mode;
+    *out_nlink   = (u64)st.st_nlink;
+    *out_uid     = (u32)st.st_uid;
+    *out_gid     = (u32)st.st_gid;
+    *out_size    = (i64)st.st_size;
+    *out_atime   = (i64)st.st_atim.tv_sec;
+    *out_mtime   = (i64)st.st_mtim.tv_sec;
+    *out_ctime   = (i64)st.st_ctim.tv_sec;
+    *out_blksize = (i64)st.st_blksize;
+    *out_blocks  = (i64)st.st_blocks;
+    return 0;
+}
+
 // =============================================================================
 // dirent helpers
 // =============================================================================
@@ -137,6 +175,80 @@ u64 ignis_dirent_ino(void *entry) {
 u8 ignis_dirent_type(void *entry) {
     if (entry == NULL) return 0;
     return ((struct dirent *)entry)->d_type;
+}
+
+/*
+ * Read the next directory entry and extract its borrowed fields.
+ * Returns 1 when an entry was read, 0 on EOF, and -1 on error.
+ */
+int ignis_readdir_call(void *dirp, u64 *out_name, u64 *out_ino, u8 *out_type) {
+    struct dirent *entry;
+
+    if (dirp == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    errno = 0;
+    entry = readdir((DIR *)dirp);
+    if (entry == NULL) {
+        return errno == 0 ? 0 : -1;
+    }
+
+    *out_name = (u64)(uintptr_t)entry->d_name;
+    *out_ino = (u64)entry->d_ino;
+    *out_type = entry->d_type;
+    return 1;
+}
+
+static int ignis_remove_dir_all_impl(const char *path) {
+    struct stat st;
+    DIR *dir;
+    struct dirent *entry;
+
+    if (lstat(path, &st) != 0) {
+        return -1;
+    }
+
+    if ((st.st_mode & S_IFMT) != S_IFDIR) {
+        return unlink(path);
+    }
+
+    dir = opendir(path);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char child_path[4096];
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        if (snprintf(child_path, sizeof(child_path), "%s/%s", path, entry->d_name) >= (int)sizeof(child_path)) {
+            closedir(dir);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        if (ignis_remove_dir_all_impl(child_path) != 0) {
+            int saved_errno = errno;
+            closedir(dir);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    if (closedir(dir) != 0) {
+        return -1;
+    }
+
+    return rmdir(path);
+}
+
+int ignis_remove_dir_all_call(const char *path) {
+    return ignis_remove_dir_all_impl(path);
 }
 
 // =============================================================================

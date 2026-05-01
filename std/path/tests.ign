@@ -1,0 +1,46 @@
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+
+@test
+function normalizeCollapsesDotDotAndRepeatedSeparators(): void {
+  let relative: Path::PathBuf = Path::PathBuf::create("a/./b//../c");
+  let absolute: Path::PathBuf = Path::PathBuf::create("/../tmp//x");
+
+  let normalizedRelative: Path::PathBuf = relative.normalize();
+  let normalizedAbsolute: Path::PathBuf = absolute.normalize();
+
+  Test::assertEq<str>(normalizedRelative.asStr(), "a/c");
+  Test::assertEq<str>(normalizedAbsolute.asStr(), "/tmp/x");
+}
+
+@test
+function normalizePreservesLeadingDotDotOnRelativePaths(): void {
+  let leadingParent: Path::PathBuf = Path::PathBuf::create("../../a//b/..");
+  let repeatedSeparators: Path::PathBuf = Path::PathBuf::create("foo///bar//baz");
+
+  let normalizedLeadingParent: Path::PathBuf = leadingParent.normalize();
+  let normalizedRepeatedSeparators: Path::PathBuf = repeatedSeparators.normalize();
+
+  Test::assertEq<str>(normalizedLeadingParent.asStr(), "../../a");
+  Test::assertEq<str>(normalizedRepeatedSeparators.asStr(), "foo/bar/baz");
+}
+
+@test
+function isRelativeNegatesIsAbsolute(): void {
+  let relative: Path::PathBuf = Path::PathBuf::create("tmp/file.txt");
+  let absolute: Path::PathBuf = Path::PathBuf::create("/tmp/file.txt");
+
+  Test::assert(relative.isRelative());
+  Test::assert(!absolute.isRelative());
+}
+
+@test
+function createJoinAndToStringRemainCompatible(): void {
+  let base: Path::PathBuf = Path::PathBuf::create("/tmp");
+  let joined: Path::PathBuf = base.join("ignis-path-test.txt");
+  let owned: String = joined.toString();
+
+  Test::assertEq<str>(joined.asStr(), "/tmp/ignis-path-test.txt");
+  Test::assertEq<str>(owned.toStr(), "/tmp/ignis-path-test.txt");
+}

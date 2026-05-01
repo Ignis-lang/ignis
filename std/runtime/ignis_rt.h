@@ -458,8 +458,17 @@ int ignis_fstat_call(
     i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
     i64 *out_blksize, i64 *out_blocks);
 
+int ignis_lstat_call(
+    const char *path,
+    u64 *out_dev, u64 *out_ino, u32 *out_mode, u64 *out_nlink,
+    u32 *out_uid, u32 *out_gid, i64 *out_size,
+    i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
+    i64 *out_blksize, i64 *out_blocks);
+
 int ignis_open3(const char *pathname, int flags, u32 mode);
 
 const char *ignis_dirent_name(void *entry);
 u64 ignis_dirent_ino(void *entry);
 u8 ignis_dirent_type(void *entry);
+int ignis_readdir_call(void *dirp, u64 *out_name, u64 *out_ino, u8 *out_type);
+int ignis_remove_dir_all_call(const char *path);
