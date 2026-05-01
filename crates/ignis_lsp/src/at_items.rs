@@ -40,6 +40,7 @@ pub fn snippet_for(item: &AtItemMeta) -> Option<String> {
     "sizeOf" | "alignOf" | "typeName" | "dropGlue" => Some(format!("{}<${{1:T}}>()", item.name)),
     "bitCast" | "pointerCast" | "read" | "dropInPlace" => Some(format!("{}<${{1:T}}>(${{2:expr}})", item.name)),
     "pointerFromInteger" => Some(format!("{}<${{1:*const T}}>(${{2:addr}})", item.name)),
+    "sliceFromParts" => Some(format!("{}<${{1:T}}>(${{2:ptr}}, ${{3:len}})", item.name)),
     "write" => Some(format!("{}<${{1:T}}>(${{2:ptr}}, ${{3:value}})", item.name)),
     "integerFromPointer" => Some(format!("{}(${{1:ptr}})", item.name)),
     "compileError" => Some(format!("{}(\"${{1:message}}\")", item.name)),

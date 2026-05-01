@@ -2384,6 +2384,7 @@ impl<'a> Analyzer<'a> {
       "pointerCast" => self.lower_builtin_pointer_cast(bc, hir, scope_kind),
       "integerFromPointer" => self.lower_builtin_integer_from_pointer(bc, hir, scope_kind),
       "pointerFromInteger" => self.lower_builtin_pointer_from_integer(bc, hir, scope_kind),
+      "sliceFromParts" => self.lower_builtin_slice_from_parts(bc, hir, scope_kind),
       "read" => self.lower_builtin_read(bc, hir, scope_kind),
       "write" => self.lower_builtin_write(bc, hir, scope_kind),
       "hash" => self.lower_builtin_hash(bc, hir, scope_kind),
@@ -2843,6 +2844,44 @@ impl<'a> Analyzer<'a> {
       },
       span: bc.span.clone(),
       type_id: target,
+    })
+  }
+
+  fn lower_builtin_slice_from_parts(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    hir: &mut HIR,
+    scope_kind: ScopeKind,
+  ) -> HIRId {
+    let Some(ref type_args) = bc.type_args else {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    };
+
+    if type_args.len() != 1 || bc.args.len() != 2 {
+      return hir.alloc(HIRNode {
+        kind: HIRKind::Error,
+        span: bc.span.clone(),
+        type_id: self.types.error(),
+      });
+    }
+
+    let element_type = self.resolve_type_syntax(&type_args[0]);
+    let data = self.lower_node_to_hir(&bc.args[0], hir, scope_kind);
+    let len = self.lower_node_to_hir(&bc.args[1], hir, scope_kind);
+    let slice_type = self.types.slice(element_type, false);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::MakeSlice {
+        data,
+        len,
+        element_type,
+      },
+      span: bc.span.clone(),
+      type_id: slice_type,
     })
   }
 

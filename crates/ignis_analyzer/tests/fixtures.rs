@@ -75,6 +75,11 @@ fn fixture_mutate_while_slice_borrowed() {
 }
 
 #[test]
+fn fixture_mutate_vector_while_slice_borrowed() {
+  test_fixture("test_cases/analyzer/borrows/mutate_vector_while_slice_borrowed.ign");
+}
+
+#[test]
 fn fixture_return_local_slice() {
   test_fixture("test_cases/analyzer/borrows/return_local_slice.ign");
 }

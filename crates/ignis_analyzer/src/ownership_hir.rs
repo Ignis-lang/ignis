@@ -406,6 +406,11 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       },
 
+      HIRKind::MakeSlice { data, len, .. } => {
+        dropped.extend(self.summary_must_drops(*data, tracked_params, summaries));
+        dropped.extend(self.summary_must_drops(*len, tracked_params, summaries));
+      },
+
       HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => {
         dropped.extend(self.summary_must_drops(*ptr, tracked_params, summaries));
       },
@@ -794,6 +799,11 @@ impl<'a> HirOwnershipChecker<'a> {
             self.try_consume(source_def, span.clone());
           }
         }
+      },
+
+      HIRKind::MakeSlice { data, len, .. } => {
+        self.check_node(data);
+        self.check_node(len);
       },
 
       HIRKind::TypeOf(inner) => {

@@ -2347,14 +2347,15 @@ impl<'a> CEmitter<'a> {
         element_type: _,
       } => {
         let data_operand = self.format_operand(func, data);
+        let len_operand = self.format_operand(func, len);
         let slice_type = self.format_type(func.temp_type(*dest));
         writeln!(
           self.output,
-          "t{} = ({}){{ .data = {}, .len = {}ULL }};",
+          "t{} = ({}){{ .data = {}, .len = {} }};",
           dest.index(),
           slice_type,
           data_operand,
-          len
+          len_operand
         )
         .unwrap();
       },

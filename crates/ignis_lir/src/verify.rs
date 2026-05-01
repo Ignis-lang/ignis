@@ -233,8 +233,9 @@ impl<'a> LirVerifier<'a> {
         self.check_operand(func, func_name, block_name, index, defined_temps);
         defined_temps.insert(*dest);
       },
-      Instr::MakeSlice { dest, data, .. } => {
+      Instr::MakeSlice { dest, data, len, .. } => {
         self.check_operand(func, func_name, block_name, data, defined_temps);
+        self.check_operand(func, func_name, block_name, len, defined_temps);
         defined_temps.insert(*dest);
       },
       Instr::InitVector { dest_ptr, elements, .. } => {

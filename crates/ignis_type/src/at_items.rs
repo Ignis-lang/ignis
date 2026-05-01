@@ -71,6 +71,13 @@ static AT_ITEMS: &[AtItemMeta] = &[
     doc: Some("The type argument must be a pointer type. The expression must be an integer."),
   },
   AtItemMeta {
+    name: "sliceFromParts",
+    kind: AtItemKind::Builtin,
+    syntax: "@sliceFromParts<T>(ptr, len)",
+    summary: "Creates a non-owning `T[]` slice from a data pointer and length.",
+    doc: Some("Low-level builtin for std containers. The pointer must address at least `len` initialized `T` values."),
+  },
+  AtItemMeta {
     name: "read",
     kind: AtItemKind::Builtin,
     syntax: "@read<T>(ptr)",

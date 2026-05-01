@@ -208,6 +208,11 @@ fn analyze_var_usage(
       }
     },
 
+    HIRKind::MakeSlice { data, len, .. } => {
+      analyze_var_usage(hir, *data, var_def, usage, defs, types);
+      analyze_var_usage(hir, *len, var_def, usage, defs, types);
+    },
+
     HIRKind::RecordInit { fields, .. } => {
       for (_, value) in fields {
         analyze_var_usage(hir, *value, var_def, usage, defs, types);
@@ -618,6 +623,11 @@ fn collect_closures_postorder(
       for &e in elements {
         collect_closures_postorder(hir, e, owner_module, result, visited);
       }
+    },
+
+    HIRKind::MakeSlice { data, len, .. } => {
+      collect_closures_postorder(hir, *data, owner_module, result, visited);
+      collect_closures_postorder(hir, *len, owner_module, result, visited);
     },
 
     HIRKind::RecordInit { fields, .. } => {
@@ -1217,6 +1227,11 @@ fn collect_free_vars(
       for &elem in elements {
         collect_free_vars(hir, elem, locals, defs, free_vars, seen);
       }
+    },
+
+    HIRKind::MakeSlice { data, len, .. } => {
+      collect_free_vars(hir, *data, locals, defs, free_vars, seen);
+      collect_free_vars(hir, *len, locals, defs, free_vars, seen);
     },
 
     HIRKind::RecordInit { fields, .. } => {

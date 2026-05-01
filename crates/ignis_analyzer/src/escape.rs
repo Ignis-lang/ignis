@@ -273,6 +273,11 @@ fn scan_for_escapes(
       }
     },
 
+    HIRKind::MakeSlice { data, len, .. } => {
+      scan_for_escapes(hir, *data, defs, alias_to_closure, escaping);
+      scan_for_escapes(hir, *len, defs, alias_to_closure, escaping);
+    },
+
     HIRKind::Match { scrutinee, arms } => {
       scan_for_escapes(hir, *scrutinee, defs, alias_to_closure, escaping);
       for arm in arms {

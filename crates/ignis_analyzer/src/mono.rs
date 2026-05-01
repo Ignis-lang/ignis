@@ -742,6 +742,22 @@ impl<'a> Monomorphizer<'a> {
         let new_elems: Vec<_> = elements.iter().map(|e| self.clone_hir_tree(*e)).collect();
         (HIRKind::VectorLiteral { elements: new_elems }, None)
       },
+      HIRKind::MakeSlice {
+        data,
+        len,
+        element_type,
+      } => {
+        let new_data = self.clone_hir_tree(*data);
+        let new_len = self.clone_hir_tree(*len);
+        (
+          HIRKind::MakeSlice {
+            data: new_data,
+            len: new_len,
+            element_type: *element_type,
+          },
+          None,
+        )
+      },
       HIRKind::TypeOf(expr) => {
         let new_expr = self.clone_hir_tree(*expr);
         (HIRKind::TypeOf(new_expr), None)
@@ -1406,6 +1422,10 @@ impl<'a> Monomorphizer<'a> {
         for e in elements {
           self.scan_hir(*e);
         }
+      },
+      HIRKind::MakeSlice { data, len, .. } => {
+        self.scan_hir(*data);
+        self.scan_hir(*len);
       },
       HIRKind::ExpressionStatement(expr) => {
         self.scan_hir(*expr);
@@ -2309,6 +2329,20 @@ impl<'a> Monomorphizer<'a> {
       HIRKind::VectorLiteral { elements } => {
         let new_elems: Vec<_> = elements.iter().map(|e| self.substitute_hir(*e, subst)).collect();
         HIRKind::VectorLiteral { elements: new_elems }
+      },
+      HIRKind::MakeSlice {
+        data,
+        len,
+        element_type,
+      } => {
+        let new_data = self.substitute_hir(*data, subst);
+        let new_len = self.substitute_hir(*len, subst);
+        let new_element_type = self.types.substitute(*element_type, subst);
+        HIRKind::MakeSlice {
+          data: new_data,
+          len: new_len,
+          element_type: new_element_type,
+        }
       },
       HIRKind::TypeOf(expr) => {
         let new_expr = self.substitute_hir(*expr, subst);

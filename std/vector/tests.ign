@@ -5,11 +5,28 @@ import Vector from "std::vector";
 @implements(Drop)
 record Tracker {
   counter: *mut i32;
-  marker: i32;
+  public marker: i32;
 
   drop(&mut self): void {
     *self.counter = *self.counter * 10 + self.marker;
   }
+}
+
+function sumFirstThreeMarkers(values: Tracker[]): i32 {
+  return values[0].marker + values[1].marker + values[2].marker;
+}
+
+@test
+function toSlicePassesVectorStorageAsSlice(): void {
+  let mut drops: i32 = 0;
+  let mut values: Vector<Tracker> = Vector::init<Tracker>();
+  values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 10 });
+  values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 20 });
+  values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 30 });
+
+  let view: Tracker[] = values.toSlice();
+
+  Test::assertEq<i32>(sumFirstThreeMarkers(view), 60);
 }
 
 @test

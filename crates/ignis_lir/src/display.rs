@@ -259,13 +259,14 @@ impl<'a> LirPrinter<'a> {
         element_type,
       } => {
         let data_operand = self.format_operand(func, data);
+        let len_operand = self.format_operand(func, len);
         let ty = self.format_type(*element_type);
         writeln!(
           self.output,
           "t{} = make_slice {}, {} : {}[]",
           dest.index(),
           data_operand,
-          len,
+          len_operand,
           ty
         )
         .unwrap();

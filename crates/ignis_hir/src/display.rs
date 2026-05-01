@@ -318,6 +318,16 @@ impl<'a> HIRPrinter<'a> {
         let ty_str = self.format_type(ty);
         format!("builtin_drop_glue<{}>()", ty_str)
       },
+      HIRKind::MakeSlice {
+        data,
+        len,
+        element_type,
+      } => {
+        let data_str = self.format_node_compact(*data);
+        let len_str = self.format_node_compact(*len);
+        let element_str = self.format_type(element_type);
+        format!("make_slice<{}>({}, {})", element_str, data_str, len_str)
+      },
       HIRKind::Panic(msg) => {
         let msg_str = self.format_node_compact(*msg);
         format!("@panic({})", msg_str)
@@ -792,6 +802,18 @@ impl<'a> HIRPrinter<'a> {
       HIRKind::BuiltinDropGlue { ty } => {
         let ty_str = self.format_type(ty);
         writeln!(self.output, "BuiltinDropGlue({}) : {}", ty_str, type_str).unwrap();
+      },
+      HIRKind::MakeSlice {
+        data,
+        len,
+        element_type,
+      } => {
+        let element_str = self.format_type(element_type);
+        writeln!(self.output, "MakeSlice({}) : {}", element_str, type_str).unwrap();
+        self.indent += 1;
+        self.print_node(*data);
+        self.print_node(*len);
+        self.indent -= 1;
       },
       HIRKind::Panic(msg) => {
         writeln!(self.output, "Panic : {}", type_str).unwrap();

@@ -84,6 +84,11 @@ pub enum HIRKind {
   VectorLiteral {
     elements: Vec<HIRId>,
   },
+  MakeSlice {
+    data: HIRId,
+    len: HIRId,
+    element_type: TypeId,
+  },
 
   TypeOf(HIRId),
   SizeOf(TypeId),
@@ -296,6 +301,10 @@ impl HIRKind {
         for elem in elements {
           *elem = HIRId::new(elem.index() + offset);
         }
+      },
+      HIRKind::MakeSlice { data, len, .. } => {
+        *data = HIRId::new(data.index() + offset);
+        *len = HIRId::new(len.index() + offset);
       },
       HIRKind::FieldAccess { base, .. } => {
         *base = HIRId::new(base.index() + offset);

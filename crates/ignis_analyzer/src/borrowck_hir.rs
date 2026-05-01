@@ -275,9 +275,12 @@ impl<'a> HirBorrowChecker<'a> {
         }
       },
 
-      HIRKind::MethodCall { receiver, args, .. } => {
+      HIRKind::MethodCall {
+        receiver, method, args, ..
+      } => {
         if let Some(recv) = receiver {
           self.check_node(recv);
+          self.check_temporary_receiver_borrow(recv, method, &span);
         }
         for &arg in &args {
           self.check_node(arg);
@@ -328,6 +331,10 @@ impl<'a> HirBorrowChecker<'a> {
         for elem in elements {
           self.check_node(elem);
         }
+      },
+      HIRKind::MakeSlice { data, len, .. } => {
+        self.check_node(data);
+        self.check_node(len);
       },
       HIRKind::FieldAccess { base, .. } => {
         self.check_node(base);
@@ -682,6 +689,24 @@ impl<'a> HirBorrowChecker<'a> {
     }
   }
 
+  fn check_temporary_receiver_borrow(
+    &mut self,
+    receiver_id: HIRId,
+    method: DefinitionId,
+    span: &Span,
+  ) {
+    let DefinitionKind::Method(method_definition) = &self.defs.get(&method).kind else {
+      return;
+    };
+
+    let Some(target_def) = self.extract_root_variable(receiver_id) else {
+      return;
+    };
+
+    self.try_borrow(target_def, method_definition.self_mutable, span);
+    self.release_borrow(target_def, method_definition.self_mutable);
+  }
+
   /// Attempt to create a borrow on a variable. Emits a diagnostic on conflict.
   fn try_borrow(
     &mut self,
@@ -830,6 +855,7 @@ impl<'a> HirBorrowChecker<'a> {
     match &node.kind {
       HIRKind::Variable(def_id) => Some(*def_id),
       HIRKind::FieldAccess { base, .. } => self.extract_root_variable(*base),
+      HIRKind::Reference { expression, .. } => self.extract_root_variable(*expression),
       HIRKind::Dereference(inner) => self.extract_root_variable(*inner),
       HIRKind::Index { base, .. } => self.extract_root_variable(*base),
       _ => None,
@@ -852,7 +878,13 @@ impl<'a> HirBorrowChecker<'a> {
         Type::FixedArray { .. } => Some(*def_id),
         _ => None,
       },
+      HIRKind::MakeSlice { data, .. } => self.extract_slice_borrow_root(*data),
+      HIRKind::MethodCall {
+        receiver: Some(receiver),
+        ..
+      } if matches!(self.types.get(&node.type_id), Type::Slice { .. }) => self.extract_root_variable(*receiver),
       HIRKind::Index { base, .. } | HIRKind::FieldAccess { base, .. } => self.extract_slice_borrow_root(*base),
+      HIRKind::Reference { expression, .. } => self.extract_slice_borrow_root(*expression),
       HIRKind::Dereference(inner) => self.extract_slice_borrow_root(*inner),
       _ => None,
     }

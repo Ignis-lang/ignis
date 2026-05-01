@@ -467,6 +467,11 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Dereference(expr) => self.lower_dereference(*expr, node.type_id, node.span),
       HIRKind::Index { base, index } => self.lower_index(*base, *index, node.type_id, node.span),
       HIRKind::VectorLiteral { elements } => self.lower_vector_literal(elements, node.type_id, node.span),
+      HIRKind::MakeSlice {
+        data,
+        len,
+        element_type,
+      } => self.lower_make_slice(*data, *len, *element_type, node.type_id, node.span),
       // Statements
       HIRKind::Let { name, value } => {
         self.lower_let(*name, value.as_ref().copied());
@@ -2844,16 +2849,39 @@ impl<'a> LoweringContext<'a> {
     match slice_conversion {
       Some((element_type, len)) => {
         let dest = self.fn_builder().alloc_temp(target_ty, span);
+        let len_operand = Operand::Const(ConstValue::UInt(len, self.types.u64()));
         self.fn_builder().emit(Instr::MakeSlice {
           dest,
           data: operand,
-          len,
+          len: len_operand,
           element_type,
         });
         Operand::Temp(dest)
       },
       _ => operand,
     }
+  }
+
+  fn lower_make_slice(
+    &mut self,
+    data_hir: HIRId,
+    len_hir: HIRId,
+    element_type: TypeId,
+    slice_type: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let data = self.lower_hir_node(data_hir)?;
+    let len = self.lower_hir_node(len_hir)?;
+    let dest = self.fn_builder().alloc_temp(slice_type, span);
+
+    self.fn_builder().emit(Instr::MakeSlice {
+      dest,
+      data,
+      len,
+      element_type,
+    });
+
+    Some(Operand::Temp(dest))
   }
 
   fn ensure_return(&mut self) {

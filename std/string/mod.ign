@@ -749,6 +749,15 @@ export record String {
     return result;
   }
 
+  /// Borrows the underlying bytes as a non-owning `u8[]` slice.
+  ///
+  /// The returned slice preserves interior NUL bytes because `String` stores
+  /// an explicit byte length. It is invalidated if the string is mutated in a
+  /// way that reallocates its backing buffer.
+  public asBytes(&self): u8[] {
+    return @sliceFromParts<u8>(self.data, self.len);
+  }
+
   /// Copies the underlying bytes into a new `Vector<char>`.
   ///
   /// This remains byte-oriented: each byte is cast to `char` directly.
@@ -1331,4 +1340,20 @@ function toString(value: f64): String {
 @extension(boolean)
 function toString(value: boolean): String {
   return value ? String::create("true") : String::create("false");
+}
+
+/// Borrows a NUL-terminated `str` as a non-owning byte slice.
+///
+/// Because primitive `str` does not carry a length in v0.4, this scans until
+/// the first NUL byte. Bytes after an interior NUL are not part of the slice.
+@extension(str)
+function asBytes(value: str): u8[] {
+  let data: *mut u8 = value as *mut u8;
+  let mut len: u64 = 0;
+
+  while (*(data + len) != 0) {
+    len += 1;
+  }
+
+  return @sliceFromParts<u8>(data, len);
 }

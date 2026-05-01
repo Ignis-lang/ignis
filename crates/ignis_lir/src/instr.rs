@@ -132,7 +132,7 @@ pub enum Instr {
   MakeSlice {
     dest: TempId,
     data: Operand,
-    len: u64,
+    len: Operand,
     element_type: TypeId,
   },
 

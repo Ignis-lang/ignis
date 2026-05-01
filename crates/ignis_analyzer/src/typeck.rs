@@ -7967,6 +7967,7 @@ impl<'a> Analyzer<'a> {
       "pointerCast" => self.typecheck_builtin_pointer_cast(bc, scope_kind, ctx),
       "integerFromPointer" => self.typecheck_builtin_integer_from_pointer(bc, scope_kind, ctx),
       "pointerFromInteger" => self.typecheck_builtin_pointer_from_integer(bc, scope_kind, ctx),
+      "sliceFromParts" => self.typecheck_builtin_slice_from_parts(bc, scope_kind, ctx),
       "read" => self.typecheck_builtin_read(bc, scope_kind, ctx),
       "write" => self.typecheck_builtin_write(bc, scope_kind, ctx),
       "hash" => self.typecheck_builtin_hash(bc, scope_kind, ctx),
@@ -8286,6 +8287,90 @@ impl<'a> Analyzer<'a> {
     }
 
     target_ty
+  }
+
+  fn typecheck_builtin_slice_from_parts(
+    &mut self,
+    bc: &ASTBuiltinCall,
+    scope_kind: ScopeKind,
+    ctx: &TypecheckContext,
+  ) -> TypeId {
+    let type_args = match &bc.type_args {
+      Some(ta) => ta,
+      None => {
+        self.add_diagnostic(
+          DiagnosticMessage::WrongNumberOfTypeArgs {
+            expected: 1,
+            got: 0,
+            type_name: "@sliceFromParts".to_string(),
+            span: bc.span.clone(),
+          }
+          .report(),
+        );
+        return self.types.error();
+      },
+    };
+
+    if type_args.len() != 1 {
+      self.add_diagnostic(
+        DiagnosticMessage::WrongNumberOfTypeArgs {
+          expected: 1,
+          got: type_args.len(),
+          type_name: "@sliceFromParts".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if bc.args.len() != 2 {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinArgCount {
+          name: "sliceFromParts".to_string(),
+          expected: 2,
+          got: bc.args.len(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    let element_ty = self.resolve_type_syntax_with_span(&type_args[0], &bc.span);
+    let ptr_ty = self.typecheck_node(&bc.args[0], scope_kind, ctx);
+    let len_ty = self.typecheck_node(&bc.args[1], scope_kind, ctx);
+
+    let valid_ptr = match self.types.get(&ptr_ty) {
+      Type::Pointer { inner, .. } => self.types.types_equal(inner, &element_ty),
+      _ => false,
+    };
+
+    if !valid_ptr {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinTypeConstraint {
+          name: "sliceFromParts".to_string(),
+          constraint: "expected pointer argument to the slice element type".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    if !self.types.types_equal(&len_ty, &self.types.u64()) {
+      self.add_diagnostic(
+        DiagnosticMessage::BuiltinTypeConstraint {
+          name: "sliceFromParts".to_string(),
+          constraint: "expected u64 length argument".to_string(),
+          span: bc.span.clone(),
+        }
+        .report(),
+      );
+      return self.types.error();
+    }
+
+    self.types.slice(element_ty, false)
   }
 
   fn typecheck_builtin_panic(
