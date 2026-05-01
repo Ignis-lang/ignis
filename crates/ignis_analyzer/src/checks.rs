@@ -414,6 +414,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Path(_) => {},
+      ASTExpression::Unit { .. } => {},
       ASTExpression::Variable(var) => {
         if self.is_builtin_name(&var.name) {
           return;

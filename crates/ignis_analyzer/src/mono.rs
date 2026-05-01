@@ -568,6 +568,7 @@ impl<'a> Monomorphizer<'a> {
   ) -> (HIRKind, Option<Substitution>) {
     match kind {
       HIRKind::Literal(v) => (HIRKind::Literal(v.clone()), None),
+      HIRKind::Unit => (HIRKind::Unit, None),
       HIRKind::Variable(def) => (HIRKind::Variable(*def), None),
       HIRKind::Binary { operation, left, right } => {
         let new_left = self.clone_hir_tree(*left);
@@ -1423,6 +1424,7 @@ impl<'a> Monomorphizer<'a> {
       },
       // Terminals
       HIRKind::Literal(_)
+      | HIRKind::Unit
       | HIRKind::Variable(_)
       | HIRKind::StaticAccess { .. }
       | HIRKind::Break
@@ -2185,6 +2187,7 @@ impl<'a> Monomorphizer<'a> {
   ) -> HIRKind {
     match kind {
       HIRKind::Literal(v) => HIRKind::Literal(v.clone()),
+      HIRKind::Unit => HIRKind::Unit,
       HIRKind::Variable(def) => {
         // Remap variable references (e.g., parameters) to their new definitions
         let new_def = self.current_def_remap.get(def).copied().unwrap_or(*def);

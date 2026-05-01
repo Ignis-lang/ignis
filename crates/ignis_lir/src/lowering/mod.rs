@@ -447,6 +447,7 @@ impl<'a> LoweringContext<'a> {
     match &node.kind {
       // Expressions
       HIRKind::Literal(lit) => self.lower_literal(lit, node.type_id),
+      HIRKind::Unit => None,
       HIRKind::Variable(def_id) => self.lower_variable(*def_id, node.type_id),
       HIRKind::Binary { operation, left, right } => {
         self.lower_binary(operation.clone(), *left, *right, node.type_id, node.span)
@@ -2397,18 +2398,26 @@ impl<'a> LoweringContext<'a> {
 
         let mut combined = Operand::Temp(tag_match);
         let check_count = std::cmp::min(args.len(), payload_types.len());
+        let mut runtime_field_index: u32 = 0;
 
         for index in 0..check_count {
           let field_ty = payload_types[index];
-          let field_temp = self.fn_builder().alloc_temp(field_ty, span.clone());
-          self.fn_builder().emit(Instr::EnumGetPayloadField {
-            dest: field_temp,
-            source: enum_value.clone(),
-            variant_tag: *variant_tag,
-            field_index: index as u32,
-          });
 
-          let nested = self.lower_pattern_check(Operand::Temp(field_temp), field_ty, &args[index], span.clone());
+          let nested = if matches!(self.types.get(&field_ty), Type::Void) {
+            self.lower_void_payload_pattern_check(&args[index], span.clone())
+          } else {
+            let field_temp = self.fn_builder().alloc_temp(field_ty, span.clone());
+            self.fn_builder().emit(Instr::EnumGetPayloadField {
+              dest: field_temp,
+              source: enum_value.clone(),
+              variant_tag: *variant_tag,
+              field_index: runtime_field_index,
+            });
+            runtime_field_index += 1;
+
+            self.lower_pattern_check(Operand::Temp(field_temp), field_ty, &args[index], span.clone())
+          };
+
           let and_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
           self.fn_builder().emit(Instr::BinOp {
             dest: and_temp,
@@ -2536,6 +2545,42 @@ impl<'a> LoweringContext<'a> {
         _ => None,
       },
       _ => None,
+    }
+  }
+
+  fn lower_void_payload_pattern_check(
+    &mut self,
+    pattern: &HIRPattern,
+    span: Span,
+  ) -> Operand {
+    let bool_ty = self.types.boolean();
+
+    let matches = match pattern {
+      HIRPattern::Wildcard => true,
+      HIRPattern::Tuple { elements } => elements.is_empty(),
+      HIRPattern::Or { patterns } => patterns
+        .iter()
+        .any(|nested_pattern| self.void_pattern_matches(nested_pattern)),
+      _ => false,
+    };
+
+    let temp = self.fn_builder().alloc_temp(bool_ty, span);
+    self.fn_builder().emit(Instr::Copy {
+      dest: temp,
+      source: Operand::Const(ConstValue::Bool(matches, bool_ty)),
+    });
+    Operand::Temp(temp)
+  }
+
+  fn void_pattern_matches(
+    &self,
+    pattern: &HIRPattern,
+  ) -> bool {
+    match pattern {
+      HIRPattern::Wildcard => true,
+      HIRPattern::Tuple { elements } => elements.is_empty(),
+      HIRPattern::Or { patterns } => patterns.iter().any(|nested_pattern| self.void_pattern_matches(nested_pattern)),
+      _ => false,
     }
   }
 

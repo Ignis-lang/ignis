@@ -313,6 +313,7 @@ fn scan_for_escapes(
     // Leaf nodes
     HIRKind::Variable(_)
     | HIRKind::Literal(_)
+    | HIRKind::Unit
     | HIRKind::StaticAccess { .. }
     | HIRKind::SizeOf(_)
     | HIRKind::AlignOf(_)

@@ -251,6 +251,7 @@ impl DisplayLisp for ASTExpression {
         format!("(*{})", inner)
       },
       ASTExpression::Grouped(expr) => expr.to_lisp(formatter),
+      ASTExpression::Unit { .. } => "()".to_string(),
       ASTExpression::LetCondition(expr) => expr.to_lisp(formatter),
       ASTExpression::Reference(expr) => {
         let inner = formatter.format_node(&expr.inner);

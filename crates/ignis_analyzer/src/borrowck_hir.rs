@@ -376,6 +376,7 @@ impl<'a> HirBorrowChecker<'a> {
 
       // Leaf nodes
       HIRKind::Literal(_)
+      | HIRKind::Unit
       | HIRKind::Variable(_)
       | HIRKind::SizeOf(_)
       | HIRKind::AlignOf(_)

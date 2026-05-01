@@ -190,6 +190,7 @@ fn collect_expression_children(
     ASTExpression::Unary(u) => {
       stack.push(u.operand);
     },
+    ASTExpression::Unit { .. } => {},
     ASTExpression::Literal(_) => {},
     ASTExpression::Variable(_) => {},
     ASTExpression::Vector(v) => {

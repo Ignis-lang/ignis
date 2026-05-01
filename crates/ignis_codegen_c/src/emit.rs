@@ -1290,19 +1290,29 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output, "    {} tag;", tag_ty).unwrap();
 
     // Check if any variant has payload
-    let has_payload = ed.variants.iter().any(|v| !v.payload.is_empty());
+    let has_payload = ed
+      .variants
+      .iter()
+      .any(|variant| variant.payload.iter().any(|payload_ty| !matches!(self.types.get(payload_ty), Type::Void)));
 
     if has_payload {
       writeln!(self.output, "    union {{").unwrap();
 
       for variant in &ed.variants {
-        if variant.payload.is_empty() {
+        let payload_fields: Vec<_> = variant
+          .payload
+          .iter()
+          .copied()
+          .filter(|payload_ty| !matches!(self.types.get(payload_ty), Type::Void))
+          .collect();
+
+        if payload_fields.is_empty() {
           continue;
         }
 
         writeln!(self.output, "        struct {{").unwrap();
-        for (i, &payload_ty) in variant.payload.iter().enumerate() {
-          let ty = self.format_type(payload_ty);
+        for (i, payload_ty) in payload_fields.iter().enumerate() {
+          let ty = self.format_type(*payload_ty);
           writeln!(self.output, "            {} field_{};", ty, i).unwrap();
         }
         writeln!(self.output, "        }} variant_{};", variant.tag_value).unwrap();
@@ -2427,7 +2437,12 @@ impl<'a> CEmitter<'a> {
             match &def.kind {
               DefinitionKind::Enum(ed) => {
                 if let Some(variant) = ed.variants.iter().find(|v| v.tag_value == *variant_tag) {
-                  variant.payload.clone()
+                  variant
+                    .payload
+                    .iter()
+                    .copied()
+                    .filter(|payload_ty| !matches!(self.types.get(payload_ty), Type::Void))
+                    .collect()
                 } else {
                   Vec::new()
                 }
@@ -4369,15 +4384,25 @@ fn emit_enum_definition_standalone(
   writeln!(output, "    {} tag;", tag_type).unwrap();
 
   // Check if any variant has payload
-  let has_payloads = ed.variants.iter().any(|v| !v.payload.is_empty());
+  let has_payloads = ed
+    .variants
+    .iter()
+    .any(|variant| variant.payload.iter().any(|payload_ty| !matches!(types.get(payload_ty), Type::Void)));
 
   if has_payloads {
     writeln!(output, "    union {{").unwrap();
     for variant in &ed.variants {
-      if !variant.payload.is_empty() {
+      let payload_fields: Vec<_> = variant
+        .payload
+        .iter()
+        .copied()
+        .filter(|payload_ty| !matches!(types.get(payload_ty), Type::Void))
+        .collect();
+
+      if !payload_fields.is_empty() {
         writeln!(output, "        struct {{").unwrap();
-        for (i, &payload_type_id) in variant.payload.iter().enumerate() {
-          let payload_type = format_c_type(types.get(&payload_type_id), types, defs, symbols, namespaces);
+        for (i, payload_type_id) in payload_fields.iter().enumerate() {
+          let payload_type = format_c_type(types.get(payload_type_id), types, defs, symbols, namespaces);
           writeln!(output, "            {} field_{};", payload_type, i).unwrap();
         }
         writeln!(output, "        }} variant_{};", variant.tag_value).unwrap();

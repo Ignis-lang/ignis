@@ -307,6 +307,7 @@ fn analyze_var_usage(
 
     // Leaf nodes
     HIRKind::Literal(_)
+    | HIRKind::Unit
     | HIRKind::StaticAccess { .. }
     | HIRKind::SizeOf(_)
     | HIRKind::AlignOf(_)
@@ -660,6 +661,7 @@ fn collect_closures_postorder(
 
     // Leaf nodes
     HIRKind::Literal(_)
+    | HIRKind::Unit
     | HIRKind::Variable(_)
     | HIRKind::StaticAccess { .. }
     | HIRKind::SizeOf(_)
@@ -1316,6 +1318,7 @@ fn collect_free_vars(
 
     // Leaf nodes: no children to recurse into
     HIRKind::Literal(_)
+    | HIRKind::Unit
     | HIRKind::StaticAccess { .. }
     | HIRKind::SizeOf(_)
     | HIRKind::AlignOf(_)

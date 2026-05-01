@@ -268,6 +268,7 @@ impl<'a> Analyzer<'a> {
 
       // Leaf expressions (no sub-expressions that could contain lambdas)
       ASTExpression::Literal(_)
+      | ASTExpression::Unit { .. }
       | ASTExpression::Variable(_)
       | ASTExpression::Path(_)
       | ASTExpression::PipePlaceholder { .. } => {},

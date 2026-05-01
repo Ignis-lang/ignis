@@ -709,6 +709,7 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Grouped(grouped) => self.typecheck_node(&grouped.expression, scope_kind, ctx),
+      ASTExpression::Unit { .. } => self.types.void(),
       ASTExpression::Vector(vector) => {
         for elem in &vector.items {
           self.typecheck_node(elem, scope_kind, ctx);
@@ -4000,7 +4001,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Pipe { .. } => 0,
 
       // Leaves
-      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) => 0,
+      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) | ASTExpression::Unit { .. } => 0,
 
       // Recurse into children
       ASTExpression::Call(call) => {
@@ -4081,7 +4082,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Lambda(_) | ASTExpression::Pipe { .. } => {},
 
-      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) => {},
+      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) | ASTExpression::Unit { .. } => {},
 
       ASTExpression::Call(call) => {
         self.collect_placeholder_spans_inner(&call.callee, max, spans);
@@ -8778,6 +8779,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Try { expr, .. } => self.node_contains_let_condition(expr),
       ASTExpression::Literal(_)
+      | ASTExpression::Unit { .. }
       | ASTExpression::Variable(_)
       | ASTExpression::Path(_)
       | ASTExpression::Lambda(_)
@@ -9672,7 +9674,7 @@ impl<'a> Analyzer<'a> {
         .find_first_symbol_usage(*lhs, symbol)
         .or_else(|| self.find_first_symbol_usage(*rhs, symbol)),
       ASTExpression::Try { expr, .. } => self.find_first_symbol_usage(*expr, symbol),
-      ASTExpression::Literal(_) | ASTExpression::Path(_) | ASTExpression::PipePlaceholder { .. } => None,
+      ASTExpression::Literal(_) | ASTExpression::Unit { .. } | ASTExpression::Path(_) | ASTExpression::PipePlaceholder { .. } => None,
     }
   }
 

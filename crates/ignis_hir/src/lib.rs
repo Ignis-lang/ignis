@@ -43,6 +43,7 @@ pub enum BuiltinEqKind {
 pub enum HIRKind {
   // Expression
   Literal(IgnisLiteralValue),
+  Unit,
   Variable(DefinitionId),
   Binary {
     operation: operation::BinaryOperation,
@@ -223,6 +224,7 @@ impl HIRKind {
   ) {
     match self {
       HIRKind::Literal(_)
+      | HIRKind::Unit
       | HIRKind::Variable(_)
       | HIRKind::Break
       | HIRKind::Continue

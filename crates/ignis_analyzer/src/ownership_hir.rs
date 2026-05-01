@@ -447,6 +447,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
       HIRKind::Variable(_)
       | HIRKind::Literal(_)
+      | HIRKind::Unit
       | HIRKind::SizeOf(_)
       | HIRKind::AlignOf(_)
       | HIRKind::MaxOf(_)
@@ -741,6 +742,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
       // Expressions that don't affect ownership directly
       HIRKind::Literal(_)
+      | HIRKind::Unit
       | HIRKind::SizeOf(_)
       | HIRKind::AlignOf(_)
       | HIRKind::MaxOf(_)

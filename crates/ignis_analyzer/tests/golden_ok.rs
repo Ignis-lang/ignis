@@ -3,6 +3,59 @@ mod common;
 use insta::assert_snapshot;
 
 #[test]
+fn overloaded_write_shapes_resolve_without_type_suffixes() {
+  common::assert_ok(
+    r#"
+namespace Fs {
+    function write(path: str, text: str): void {
+        return;
+    }
+
+    function write(path: str, data: *void, len: u64): void {
+        return;
+    }
+}
+
+function main(): void {
+    Fs::write("/tmp/message.txt", "hello");
+    Fs::write("/tmp/data.bin", "hello" as *void, 5 as u64);
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn unit_value_typechecks_in_result_argument_and_return_positions() {
+  let result = common::analyze(
+    r#"
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function consumeVoid(value: void): void {
+    return;
+}
+
+function makeResult(): Result<void, boolean> {
+    consumeVoid(());
+    return Result::OK(());
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "unit_value_typechecks_in_result_argument_and_return_positions_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!(
+    "unit_value_typechecks_in_result_argument_and_return_positions_hir",
+    common::format_hir(&result)
+  );
+}
+
+#[test]
 fn basic_function() {
   let result = common::analyze(
     r#"

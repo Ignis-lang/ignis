@@ -1078,6 +1078,11 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Grouped(grouped) => self.lower_node_to_hir(&grouped.expression, hir, scope_kind),
+      ASTExpression::Unit { span } => hir.alloc(HIRNode {
+        kind: HIRKind::Unit,
+        span: span.clone(),
+        type_id: self.types.void(),
+      }),
       ASTExpression::Vector(vector) => {
         let elem_hirs: Vec<_> = vector
           .items
@@ -1406,29 +1411,43 @@ impl<'a> Analyzer<'a> {
       self.types.void()
     };
 
+    let ok_has_runtime_payload = ok_variant.payload.len() == 1 && !matches!(self.types.get(&ok_inner_type), Type::Void);
+
     let result_type = self.lookup_type(node_id).cloned().unwrap_or(ok_inner_type);
 
-    let ok_binding_name = self.symbols.borrow_mut().intern("_try_ok_value");
-    let ok_binding_def = Definition {
-      kind: DefinitionKind::Variable(VariableDefinition {
-        type_id: ok_inner_type,
-        mutable: false,
-      }),
-      name: ok_binding_name,
-      span: span.clone(),
-      name_span: span.clone(),
-      visibility: Visibility::Private,
-      owner_module: self.current_module,
-      owner_namespace: self.current_namespace,
-      doc: None,
+    let ok_binding_id = if ok_has_runtime_payload {
+      let ok_binding_name = self.symbols.borrow_mut().intern("_try_ok_value");
+      let ok_binding_def = Definition {
+        kind: DefinitionKind::Variable(VariableDefinition {
+          type_id: ok_inner_type,
+          mutable: false,
+        }),
+        name: ok_binding_name,
+        span: span.clone(),
+        name_span: span.clone(),
+        visibility: Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: self.current_namespace,
+        doc: None,
+      };
+      Some(self.defs.alloc(ok_binding_def))
+    } else {
+      None
     };
-    let ok_binding_id = self.defs.alloc(ok_binding_def);
 
-    let ok_body = hir.alloc(HIRNode {
-      kind: HIRKind::Variable(ok_binding_id),
-      span: span.clone(),
-      type_id: ok_inner_type,
-    });
+    let ok_body = if let Some(ok_binding_id) = ok_binding_id {
+      hir.alloc(HIRNode {
+        kind: HIRKind::Variable(ok_binding_id),
+        span: span.clone(),
+        type_id: ok_inner_type,
+      })
+    } else {
+      hir.alloc(HIRNode {
+        kind: HIRKind::Unit,
+        span: span.clone(),
+        type_id: self.types.void(),
+      })
+    };
 
     let err_inner_type = if err_variant.payload.len() == 1 {
       let raw = err_variant.payload[0];
@@ -1438,27 +1457,33 @@ impl<'a> Analyzer<'a> {
       self.types.void()
     };
 
-    let err_binding_name = self.symbols.borrow_mut().intern("_try_err_value");
-    let err_binding_def = Definition {
-      kind: DefinitionKind::Variable(VariableDefinition {
-        type_id: err_inner_type,
-        mutable: false,
-      }),
-      name: err_binding_name,
-      span: span.clone(),
-      name_span: span.clone(),
-      visibility: Visibility::Private,
-      owner_module: self.current_module,
-      owner_namespace: self.current_namespace,
-      doc: None,
-    };
-    let err_binding_id = self.defs.alloc(err_binding_def);
+    let err_has_runtime_payload = err_variant.payload.len() == 1 && !matches!(self.types.get(&err_inner_type), Type::Void);
 
-    let err_payload = if err_variant.payload.is_empty() {
+    let err_binding_id = if err_has_runtime_payload {
+      let err_binding_name = self.symbols.borrow_mut().intern("_try_err_value");
+      let err_binding_def = Definition {
+        kind: DefinitionKind::Variable(VariableDefinition {
+          type_id: err_inner_type,
+          mutable: false,
+        }),
+        name: err_binding_name,
+        span: span.clone(),
+        name_span: span.clone(),
+        visibility: Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: self.current_namespace,
+        doc: None,
+      };
+      Some(self.defs.alloc(err_binding_def))
+    } else {
+      None
+    };
+
+    let err_payload = if !err_has_runtime_payload {
       vec![]
     } else {
       vec![hir.alloc(HIRNode {
-        kind: HIRKind::Variable(err_binding_id),
+        kind: HIRKind::Variable(err_binding_id.expect("runtime payload binding must exist")),
         span: span.clone(),
         type_id: err_inner_type,
       })]
@@ -1488,7 +1513,7 @@ impl<'a> Analyzer<'a> {
       type_id: self.types.void(),
     });
 
-    let ok_pattern = if ok_variant.payload.is_empty() {
+    let ok_pattern = if !ok_has_runtime_payload {
       HIRPattern::Variant {
         enum_def,
         variant_tag: try_capable.ok_variant,
@@ -1498,11 +1523,13 @@ impl<'a> Analyzer<'a> {
       HIRPattern::Variant {
         enum_def,
         variant_tag: try_capable.ok_variant,
-        args: vec![HIRPattern::Binding { def_id: ok_binding_id }],
+        args: vec![HIRPattern::Binding {
+          def_id: ok_binding_id.expect("runtime payload binding must exist"),
+        }],
       }
     };
 
-    let err_pattern = if err_variant.payload.is_empty() {
+    let err_pattern = if !err_has_runtime_payload {
       HIRPattern::Variant {
         enum_def,
         variant_tag: try_capable.err_variant,
@@ -1512,7 +1539,9 @@ impl<'a> Analyzer<'a> {
       HIRPattern::Variant {
         enum_def,
         variant_tag: try_capable.err_variant,
-        args: vec![HIRPattern::Binding { def_id: err_binding_id }],
+        args: vec![HIRPattern::Binding {
+          def_id: err_binding_id.expect("runtime payload binding must exist"),
+        }],
       }
     };
 

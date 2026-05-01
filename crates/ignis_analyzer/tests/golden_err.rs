@@ -3,6 +3,53 @@ mod common;
 use insta::assert_snapshot;
 
 #[test]
+fn return_type_only_overloads_remain_ambiguous() {
+  let result = common::analyze(
+    r#"
+function read(path: str): i32 {
+    return 1;
+}
+
+function read(path: str): boolean {
+    return true;
+}
+
+function main(): void {
+    read("/tmp/value");
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "return_type_only_overloads_remain_ambiguous",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn result_void_payload_rejects_boolean_workaround() {
+  let result = common::analyze(
+    r#"
+enum Result<T, E> {
+    OK(T),
+    ERROR(E),
+}
+
+function main(): void {
+    let value: Result<void, boolean> = Result::OK(true);
+    return;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "result_void_payload_rejects_boolean_workaround",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn undeclared_identifier() {
   let result = common::analyze(
     r#"

@@ -211,6 +211,7 @@ impl<'a> HIRPrinter<'a> {
 
     match &node.kind {
       HIRKind::Literal(lit) => format!("Literal({:?})", lit),
+      HIRKind::Unit => "Unit".to_string(),
       HIRKind::Variable(def_id) => {
         let def = self.defs.get(def_id);
         let name = self.symbols.get(&def.name);
@@ -364,6 +365,9 @@ impl<'a> HIRPrinter<'a> {
     match &node.kind {
       HIRKind::Literal(lit) => {
         writeln!(self.output, "Literal({:?}) : {}", lit, type_str).unwrap();
+      },
+      HIRKind::Unit => {
+        writeln!(self.output, "Unit : {}", type_str).unwrap();
       },
       HIRKind::Variable(def_id) => {
         let def = self.defs.get(def_id);

@@ -464,6 +464,7 @@ impl<'a> Analyzer<'a> {
           },
         }
       },
+      ASTExpression::Unit { .. } => {},
       ASTExpression::Literal(_) => {},
       ASTExpression::PostfixIncrement { expr, .. } => {
         self.resolve_node(expr, scope_kind);

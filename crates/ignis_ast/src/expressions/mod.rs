@@ -53,6 +53,9 @@ pub enum ASTExpression {
   Call(ASTCallExpression),
   Dereference(ASTDereference),
   Grouped(ASTGrouped),
+  Unit {
+    span: Span,
+  },
   LetCondition(ASTLetCondition),
   Reference(ASTReference),
   Unary(ASTUnary),
@@ -100,6 +103,7 @@ impl ASTExpression {
       ASTExpression::Call(expr) => &expr.span,
       ASTExpression::Dereference(expr) => &expr.span,
       ASTExpression::Grouped(expr) => &expr.span,
+      ASTExpression::Unit { span } => span,
       ASTExpression::LetCondition(expr) => &expr.span,
       ASTExpression::Reference(expr) => &expr.span,
       ASTExpression::Unary(expr) => &expr.span,

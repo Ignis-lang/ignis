@@ -7,7 +7,8 @@ fn e2e_test(
   name: &str,
   source: &str,
 ) {
-  let result = common::compile_and_run(source).unwrap_or_else(|_| panic!("Compilation of '{}' failed", name));
+  let result = common::compile_and_run(source)
+    .unwrap_or_else(|error| panic!("Compilation of '{}' failed: {}", name, error));
 
   assert!(
     !result.leaked,
@@ -33,6 +34,22 @@ fn e2e_no_warnings(
 ) {
   let warnings = common::compile_warnings(source).unwrap_or_else(|_| panic!("Compilation of '{}' failed", name));
   assert!(warnings.is_empty(), "expected no warnings for '{}', got: {:?}", name, warnings);
+}
+
+fn e2e_workspace_std_test(
+  name: &str,
+  source: &str,
+) {
+  let result = common::compile_project_and_run_with_workspace_std(source)
+    .unwrap_or_else(|error| panic!("Compilation of '{}' failed: {}", name, error));
+
+  assert!(
+    !result.leaked,
+    "LeakSanitizer detected a memory leak in '{}':\n{}",
+    name, result.leak_report,
+  );
+
+  assert_snapshot!(name, common::format_e2e_result(&result));
 }
 
 #[test]
@@ -106,6 +123,65 @@ fn e2e_return_zero() {
     r#"
 function main(): i32 {
     return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_try_operator_accepts_result_void_ok_payloads() {
+  e2e_workspace_std_test(
+    "try_operator_accepts_result_void_ok_payloads",
+    r#"
+import Result from "std::result";
+
+function step(flag: boolean): Result<void, str> {
+    if (flag) {
+        return Result::OK(());
+    }
+
+    return Result::ERROR("boom");
+}
+
+function run(): Result<void, str> {
+    step(true)!;
+    return Result::OK(());
+}
+
+function main(): i32 {
+    let code: i32 = match (run()) {
+        Result::OK(_) -> 42,
+        Result::ERROR(_) -> 1,
+    };
+
+    return code;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_match_wildcard_accepts_result_void_ok_payloads() {
+  e2e_workspace_std_test(
+    "match_wildcard_accepts_result_void_ok_payloads",
+    r#"
+import Result from "std::result";
+
+function step(flag: boolean): Result<void, str> {
+    if (flag) {
+        return Result::OK(());
+    }
+
+    return Result::ERROR("boom");
+}
+
+function main(): i32 {
+    let code: i32 = match (step(true)) {
+        Result::OK(_) -> 7,
+        Result::ERROR(_) -> 1,
+    };
+
+    return code;
 }
 "#,
   );

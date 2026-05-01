@@ -447,6 +447,76 @@ fn run_std_tests_executes_fs_read_dir_invalidated_slice() {
 }
 
 #[test]
+fn run_std_tests_executes_fs_bytes_roundtrip_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::writeBytesAndReadToBytesPreserveEmptyAndBinaryPayloads"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs byte roundtrip std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_fs_canonicalize_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::canonicalizeRequiresExistingPathAndResolvesRealLocation"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs canonicalize std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_fs_temp_dir_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::tempDirReturnsExistingDirectoryRoot"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs temp-dir std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_fs_walk_symlink_leaf_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::walkTreatsSymlinkDirectoryAsLeaf"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs walk symlink-leaf std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_fs_remove_dir_all_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("fs::tests::removeDirAllFailsWhenMissingAndRemovesNestedTreesWithoutFollowingSymlinks"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected fs removeDirAll std slice to succeed");
+}
+
+#[test]
 fn run_std_tests_executes_string_snapshot_slice() {
   let output_dir = TempDir::new().expect("temporary std output dir");
 
@@ -458,6 +528,34 @@ fn run_std_tests_executes_string_snapshot_slice() {
   );
 
   assert!(result.is_ok(), "expected string snapshot std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_path_normalize_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("path::tests::normalizeCollapsesDotDotAndRepeatedSeparators"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected path normalize std slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_path_is_relative_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("path::tests::isRelativeNegatesIsAbsolute"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected path isRelative std slice to succeed");
 }
 
 #[test]

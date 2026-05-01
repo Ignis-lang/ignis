@@ -482,6 +482,12 @@ impl IgnisParser {
           return self.parse_lambda(token.span.clone(), None);
         }
 
+        if self.at(TokenType::RightParen) {
+          let right_paren = self.expect(TokenType::RightParen)?;
+          let span = Span::merge(&token.span, &right_paren.span);
+          return Ok(self.allocate_expression(ASTExpression::Unit { span }));
+        }
+
         let expression = self.parse_expression(0)?;
         let right_paren = self.expect(TokenType::RightParen)?;
         let span = Span::merge(&token.span, &right_paren.span);
@@ -1130,6 +1136,17 @@ mod tests {
     match stmt {
       ASTNode::Statement(ASTStatement::Expression(e)) => e,
       _ => panic!("expected expression statement"),
+    }
+  }
+
+  #[test]
+  fn parses_unit_expression() {
+    let result = parse_expr("()");
+    let expr = get_expr(&result);
+
+    match expr {
+      ASTExpression::Unit { .. } => {},
+      other => panic!("expected unit expression, got {:?}", other),
     }
   }
 
