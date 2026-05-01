@@ -359,7 +359,7 @@ impl<'a> Analyzer<'a> {
         }
 
         let element_type = match self.types.get(&iter_type) {
-          Type::Vector { element, .. } => *element,
+          Type::Slice { element, .. } | Type::FixedArray { element, .. } => *element,
           Type::Record(def_id) => {
             let def_id = *def_id;
             match self.extract_record_iterable_element_type(&def_id) {
@@ -673,7 +673,8 @@ impl<'a> Analyzer<'a> {
         }
 
         match self.types.get(&base_type).clone() {
-          ignis_type::types::Type::Vector { element, size } => {
+          ignis_type::types::Type::Slice { element, .. } => element,
+          ignis_type::types::Type::FixedArray { element, size } => {
             // Compile-time bounds checking for constant indices
             if let Some(ConstValue::Int(index_val)) = self.const_eval_expression_node(&access.index, scope_kind)
               && (index_val < 0 || (index_val as usize) >= size)
@@ -721,7 +722,7 @@ impl<'a> Analyzer<'a> {
           .and_then(|e| self.lookup_type(e).copied())
           .unwrap_or(self.types.error());
 
-        self.types.vector(elem_type, vector.items.len())
+        self.types.fixed_array(elem_type, vector.items.len())
       },
       ASTExpression::Path(path) => {
         // Track path segment spans for hover support
@@ -9136,17 +9137,13 @@ impl<'a> Analyzer<'a> {
       IgnisTypeSyntax::Char => self.types.char(),
       IgnisTypeSyntax::Implicit => self.types.infer(),
       IgnisTypeSyntax::Null => self.types.error(),
-      IgnisTypeSyntax::Vector(inner, size) => {
+      IgnisTypeSyntax::Slice(inner) => {
         let inner_type = self.resolve_type_syntax_impl(inner, span);
-        match size {
-          Some(n) => self.types.vector(inner_type, *n),
-          None => {
-            if let Some(s) = span {
-              self.add_diagnostic(DiagnosticMessage::DynamicVectorsNotSupported { span: s.clone() }.report());
-            }
-            self.types.error()
-          },
-        }
+        self.types.slice(inner_type, false)
+      },
+      IgnisTypeSyntax::FixedArray(inner, size) => {
+        let inner_type = self.resolve_type_syntax_impl(inner, span);
+        self.types.fixed_array(inner_type, *size)
       },
       IgnisTypeSyntax::Tuple(elements) => {
         let element_types: Vec<_> = elements
@@ -9778,8 +9775,11 @@ impl<'a> Analyzer<'a> {
           format!("&{}", self.format_type_for_error(inner))
         }
       },
-      Type::Vector { element, size } => {
-        format!("[{}; {}]", self.format_type_for_error(element), size)
+      Type::Slice { element, .. } => {
+        format!("{}[]", self.format_type_for_error(element))
+      },
+      Type::FixedArray { element, size } => {
+        format!("{}[{}]", self.format_type_for_error(element), size)
       },
       Type::Tuple(elements) => {
         let elem_strs: Vec<_> = elements.iter().map(|e| self.format_type_for_error(e)).collect();
@@ -10349,7 +10349,10 @@ impl<'a> Analyzer<'a> {
             .iter()
             .any(|arg_type_id| self.type_references_generated_method_owner(*arg_type_id, owner_def_id))
       },
-      Type::Pointer { inner, .. } | Type::Reference { inner, .. } | Type::Vector { element: inner, .. } => {
+      Type::Pointer { inner, .. }
+      | Type::Reference { inner, .. }
+      | Type::Slice { element: inner, .. }
+      | Type::FixedArray { element: inner, .. } => {
         self.type_references_generated_method_owner(*inner, owner_def_id)
       },
       Type::Tuple(elements) => elements

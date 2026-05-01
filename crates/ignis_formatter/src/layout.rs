@@ -2146,10 +2146,8 @@ impl<'a> AstChunkFormatter<'a> {
       IgnisTypeSyntax::Void => "void".to_string(),
       IgnisTypeSyntax::Null => "null".to_string(),
       IgnisTypeSyntax::Char => "char".to_string(),
-      IgnisTypeSyntax::Vector(inner, size) => match size {
-        Some(size) => format!("{}[{}]", self.format_type(inner), size),
-        None => format!("{}[]", self.format_type(inner)),
-      },
+      IgnisTypeSyntax::Slice(inner) => format!("{}[]", self.format_type(inner)),
+      IgnisTypeSyntax::FixedArray(inner, size) => format!("{}[{}]", self.format_type(inner), size),
       IgnisTypeSyntax::Tuple(items) => format!(
         "({})",
         items

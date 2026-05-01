@@ -1209,10 +1209,9 @@ impl DisplayLisp for IgnisTypeSyntax {
       IgnisTypeSyntax::Char => "Char".to_string(),
       IgnisTypeSyntax::Implicit => "Implicit".to_string(),
 
-      IgnisTypeSyntax::Vector(inner, size) => match size {
-        Some(s) => format!("({}[{}])", inner.to_lisp(formatter), s),
-        None => format!("({}[])", inner.to_lisp(formatter)),
-      },
+      IgnisTypeSyntax::Slice(inner) => format!("({}[])", inner.to_lisp(formatter)),
+
+      IgnisTypeSyntax::FixedArray(inner, size) => format!("({}[{}])", inner.to_lisp(formatter), size),
 
       IgnisTypeSyntax::Tuple(types) => {
         let types_str: Vec<String> = types.iter().map(|t| t.to_lisp(formatter)).collect();

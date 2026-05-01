@@ -45,7 +45,10 @@ pub fn format_type(
         format!("&{}", format_type(types, defs, symbol_names, inner))
       }
     },
-    Type::Vector { element, size } => {
+    Type::Slice { element, .. } => {
+      format!("{}[]", format_type(types, defs, symbol_names, element))
+    },
+    Type::FixedArray { element, size } => {
       format!("{}[{}]", format_type(types, defs, symbol_names, element), size)
     },
     Type::Tuple(elements) => {

@@ -26,6 +26,44 @@ function main(): void {
 }
 
 #[test]
+fn slice_annotations_accept_str_slices_through_the_same_t_bracket_bracket_path() {
+  common::assert_ok(
+    r#"
+function consume(bytes: u8[], label: str[]): void {
+    return;
+}
+"#,
+  );
+}
+
+#[test]
+fn slice_and_fixed_array_annotations_remain_distinct() {
+  common::assert_ok(
+    r#"
+function project(window: i32[], fixed: i32[4]): void {
+    return;
+}
+
+"#,
+  );
+}
+
+#[test]
+fn nominal_vector_types_remain_regular_named_generics() {
+  common::assert_ok(
+    r#"
+record Vector<T> {
+    public length: i32;
+}
+
+function inspect(values: Vector<i32>, fixed: i32[4], window: i32[]): void {
+    return;
+}
+"#,
+  );
+}
+
+#[test]
 fn unit_value_typechecks_in_result_argument_and_return_positions() {
   let result = common::analyze(
     r#"

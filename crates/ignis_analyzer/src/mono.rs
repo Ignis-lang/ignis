@@ -2792,12 +2792,20 @@ impl<'a> Monomorphizer<'a> {
           self.types.reference(new_inner, mutable)
         }
       },
-      Type::Vector { element, size } => {
+      Type::FixedArray { element, size } => {
         let new_elem = self.concretize_type(element);
         if new_elem == element {
           ty
         } else {
-          self.types.vector(new_elem, size)
+          self.types.fixed_array(new_elem, size)
+        }
+      },
+      Type::Slice { element, mutable } => {
+        let new_elem = self.concretize_type(element);
+        if new_elem == element {
+          ty
+        } else {
+          self.types.slice(new_elem, mutable)
         }
       },
       Type::Tuple(elems) => {
@@ -2896,7 +2904,11 @@ impl<'a> Monomorphizer<'a> {
         let prefix = if *mutable { "refmut" } else { "ref" };
         format!("{}_{}", prefix, self.mangle_type(*inner))
       },
-      Type::Vector { element, size } => format!("arr{}_{}", size, self.mangle_type(*element)),
+      Type::Slice { element, mutable } => {
+        let prefix = if *mutable { "slicemut" } else { "slice" };
+        format!("{}_{}", prefix, self.mangle_type(*element))
+      },
+      Type::FixedArray { element, size } => format!("arr{}_{}", size, self.mangle_type(*element)),
       Type::Instance { generic, args } => {
         let base = Self::escape(&self.get_def_name(generic));
         let args_str = args.iter().map(|a| self.mangle_type(*a)).collect::<Vec<_>>().join("__");
@@ -3142,7 +3154,7 @@ impl MonoOutput {
       },
       Type::Pointer { inner, .. } => self.check_type_is_concrete(*inner, types, context, warnings),
       Type::Reference { inner, .. } => self.check_type_is_concrete(*inner, types, context, warnings),
-      Type::Vector { element, .. } => self.check_type_is_concrete(*element, types, context, warnings),
+      Type::FixedArray { element, .. } => self.check_type_is_concrete(*element, types, context, warnings),
       Type::Tuple(elems) => {
         for e in elems {
           self.check_type_is_concrete(*e, types, context, warnings);

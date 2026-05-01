@@ -46,7 +46,11 @@ pub enum Type {
     inner: TypeId,
     mutable: bool,
   },
-  Vector {
+  Slice {
+    element: TypeId,
+    mutable: bool,
+  },
+  FixedArray {
     element: TypeId,
     size: usize,
   },
@@ -99,7 +103,13 @@ struct ReferenceKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct VectorKey {
+struct SliceKey {
+  element: TypeId,
+  mutable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FixedArrayKey {
   element: TypeId,
   size: usize,
 }
@@ -129,7 +139,8 @@ pub struct TypeStore {
   primitives: HashMap<Type, TypeId>,
   pointers: HashMap<PointerKey, TypeId>,
   references: HashMap<ReferenceKey, TypeId>,
-  vectors: HashMap<VectorKey, TypeId>,
+  slices: HashMap<SliceKey, TypeId>,
+  fixed_arrays: HashMap<FixedArrayKey, TypeId>,
   tuples: HashMap<Vec<TypeId>, TypeId>,
   functions: HashMap<FunctionKey, TypeId>,
   records: HashMap<DefinitionId, TypeId>,
@@ -152,7 +163,8 @@ impl TypeStore {
       primitives: HashMap::new(),
       pointers: HashMap::new(),
       references: HashMap::new(),
-      vectors: HashMap::new(),
+      slices: HashMap::new(),
+      fixed_arrays: HashMap::new(),
       tuples: HashMap::new(),
       functions: HashMap::new(),
       records: HashMap::new(),
@@ -224,17 +236,31 @@ impl TypeStore {
     id
   }
 
-  pub fn vector(
+  pub fn slice(
+    &mut self,
+    element: TypeId,
+    mutable: bool,
+  ) -> TypeId {
+    let key = SliceKey { element, mutable };
+    if let Some(&id) = self.slices.get(&key) {
+      return id;
+    }
+    let id = self.types.alloc(Type::Slice { element, mutable });
+    self.slices.insert(key, id);
+    id
+  }
+
+  pub fn fixed_array(
     &mut self,
     element: TypeId,
     size: usize,
   ) -> TypeId {
-    let key = VectorKey { element, size };
-    if let Some(&id) = self.vectors.get(&key) {
+    let key = FixedArrayKey { element, size };
+    if let Some(&id) = self.fixed_arrays.get(&key) {
       return id;
     }
-    let id = self.types.alloc(Type::Vector { element, size });
-    self.vectors.insert(key, id);
+    let id = self.types.alloc(Type::FixedArray { element, size });
+    self.fixed_arrays.insert(key, id);
     id
   }
 
@@ -399,7 +425,6 @@ impl TypeStore {
   pub fn str(&self) -> TypeId {
     self.primitives[&Type::Str]
   }
-  #[inline]
   pub fn atom(&self) -> TypeId {
     self.primitives[&Type::Atom]
   }
@@ -708,9 +733,9 @@ impl TypeStore {
       | Type::NullPtr
       | Type::Error => true,
 
-      Type::Pointer { .. } | Type::Reference { .. } | Type::Function { .. } => true,
+      Type::Pointer { .. } | Type::Reference { .. } | Type::Slice { .. } | Type::Function { .. } => true,
 
-      Type::Vector { element, .. } => self.is_copy(element),
+      Type::FixedArray { element, .. } => self.is_copy(element),
 
       Type::Infer => false,
       Type::InferVar(_) => false,
@@ -818,7 +843,9 @@ impl TypeStore {
         result
       },
 
-      Type::Vector { element, .. } => self.is_copy_with_defs_inner(element, defs, visiting),
+      Type::Slice { element, .. } | Type::FixedArray { element, .. } => {
+        self.is_copy_with_defs_inner(element, defs, visiting)
+      },
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_with_defs_inner(e, defs, visiting)),
 
       Type::Instance { generic, args } => {
@@ -941,7 +968,9 @@ impl TypeStore {
         elems.iter().any(|e| self.needs_drop_with_defs_inner(e, defs, visiting))
       },
 
-      Type::Vector { element, .. } => {
+      Type::Slice { .. } => false,
+
+      Type::FixedArray { element, .. } => {
         let element = *element;
         self.needs_drop_with_defs_inner(&element, defs, visiting)
       },
@@ -952,7 +981,7 @@ impl TypeStore {
 
   /// Returns true if the type contains any type parameters.
   ///
-  /// This recursively checks compound types (pointers, references, vectors, tuples,
+  /// This recursively checks compound types (pointers, references, fixed arrays, tuples,
   /// functions, instances) for type parameters.
   pub fn contains_type_param(
     &self,
@@ -960,7 +989,10 @@ impl TypeStore {
   ) -> bool {
     match self.get(ty) {
       Type::Param { .. } => true,
-      Type::Pointer { inner, .. } | Type::Reference { inner, .. } | Type::Vector { element: inner, .. } => {
+      Type::Pointer { inner, .. }
+      | Type::Reference { inner, .. }
+      | Type::Slice { element: inner, .. }
+      | Type::FixedArray { element: inner, .. } => {
         self.contains_type_param(inner)
       },
       Type::Tuple(elems) => elems.iter().any(|e| self.contains_type_param(e)),
@@ -976,7 +1008,7 @@ impl TypeStore {
   ///
   /// This recursively traverses the type, replacing any `Type::Param` with its
   /// corresponding concrete type from the substitution. Compound types (pointers,
-  /// references, vectors, tuples, functions, instances) are reconstructed with
+  /// references, fixed arrays, tuples, functions, instances) are reconstructed with
   /// substituted inner types.
   pub fn substitute(
     &mut self,
@@ -1001,9 +1033,14 @@ impl TypeStore {
         self.reference(new_inner, mutable)
       },
 
-      Type::Vector { element, size } => {
+      Type::Slice { element, mutable } => {
         let new_elem = self.substitute(element, subst);
-        self.vector(new_elem, size)
+        self.slice(new_elem, mutable)
+      },
+
+      Type::FixedArray { element, size } => {
+        let new_elem = self.substitute(element, subst);
+        self.fixed_array(new_elem, size)
       },
 
       Type::Tuple(elems) => {
@@ -1087,8 +1124,15 @@ impl TypeStore {
         self.unify_for_inference(i1, i2, subst)
       },
 
-      // Vector types
-      (Type::Vector { element: e1, size: s1 }, Type::Vector { element: e2, size: s2 }) => {
+      (Type::Slice { element: e1, mutable: m1 }, Type::Slice { element: e2, mutable: m2 }) => {
+        if m1 != m2 {
+          return false;
+        }
+        self.unify_for_inference(e1, e2, subst)
+      },
+
+      // Fixed array types
+      (Type::FixedArray { element: e1, size: s1 }, Type::FixedArray { element: e2, size: s2 }) => {
         if s1 != s2 {
           return false;
         }
@@ -1268,8 +1312,12 @@ pub fn format_type_name(
       }
     },
 
-    Type::Vector { element, size } => {
-      format!("[{}; {}]", format_type_name(element, types, defs, symbols), size)
+    Type::Slice { element, .. } => {
+      format!("{}[]", format_type_name(element, types, defs, symbols))
+    },
+
+    Type::FixedArray { element, size } => {
+      format!("{}[{}]", format_type_name(element, types, defs, symbols), size)
     },
 
     Type::Tuple(elements) => {

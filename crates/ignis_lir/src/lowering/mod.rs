@@ -1443,7 +1443,7 @@ impl<'a> LoweringContext<'a> {
 
     // Get element type
     let elem_ty = match self.types.get(&vec_ty) {
-      Type::Vector { element, .. } => *element,
+      Type::FixedArray { element, .. } => *element,
       _ => return None,
     };
 

@@ -19,7 +19,8 @@ pub enum IgnisTypeSyntax {
   Void,
   Null,
   Char,
-  Vector(Box<IgnisTypeSyntax>, Option<usize>),
+  Slice(Box<IgnisTypeSyntax>),
+  FixedArray(Box<IgnisTypeSyntax>, usize),
   Tuple(Vec<IgnisTypeSyntax>),
   Callable(Vec<IgnisTypeSyntax>, Box<IgnisTypeSyntax>),
   Pointer {

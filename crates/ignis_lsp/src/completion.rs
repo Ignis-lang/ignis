@@ -2645,7 +2645,12 @@ fn format_type_brief(
       }
     },
 
-    Type::Vector { element, size } => {
+    Type::Slice { element, .. } => {
+      let elem_str = format_type_brief(types, defs, symbol_names, element);
+      format!("{}[]", elem_str)
+    },
+
+    Type::FixedArray { element, size } => {
       let elem_str = format_type_brief(types, defs, symbol_names, element);
       format!("{}[{}]", elem_str, size)
     },

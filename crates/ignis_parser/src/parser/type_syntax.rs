@@ -48,9 +48,9 @@ impl super::IgnisParser {
 
     let mut base = self.base_type()?;
 
-    // Check for vector suffix: T[size?]
+    // Check for array suffix: T[size?]
     while self.at(TokenType::LeftBrack) {
-      base = self.parse_vector_suffix(base)?;
+      base = self.parse_array_suffix(base)?;
     }
 
     // Apply modifiers if any
@@ -135,24 +135,32 @@ impl super::IgnisParser {
     Ok(args)
   }
 
-  /// Parse vector suffix: T[size?]
+  /// Parse array suffix: T[size?]
   /// This is called after parsing the base type T
-  fn parse_vector_suffix(
+  fn parse_array_suffix(
     &mut self,
     element_type: IgnisTypeSyntax,
   ) -> ParserResult<IgnisTypeSyntax> {
     self.expect(TokenType::LeftBrack)?;
-    let mut size = None;
-
     // Optional size: T[10] or just T[]
     if self.at(TokenType::Int) {
       let token = self.bump().clone();
-      size = token.lexeme.parse::<usize>().ok();
+      let size = token.lexeme.parse::<usize>().ok();
+
+      self.expect(TokenType::RightBrack)?;
+
+      if let Some(size) = size {
+        return Ok(IgnisTypeSyntax::FixedArray(Box::new(element_type), size));
+      }
+
+      return Err(DiagnosticMessage::UnexpectedToken {
+        at: token.span,
+      });
     }
 
     self.expect(TokenType::RightBrack)?;
 
-    Ok(IgnisTypeSyntax::Vector(Box::new(element_type), size))
+    Ok(IgnisTypeSyntax::Slice(Box::new(element_type)))
   }
 
   /// Parse function type: (T, U) -> R
@@ -297,40 +305,59 @@ mod tests {
   }
 
   #[test]
-  fn parses_vector_type() {
+  fn parses_slice_type() {
     let ty = parse_type("i32[]");
     match ty {
-      IgnisTypeSyntax::Vector(inner, size) => {
+      IgnisTypeSyntax::Slice(inner) => {
         assert_eq!(*inner, IgnisTypeSyntax::I32);
-        assert!(size.is_none());
       },
-      other => panic!("expected vector, got {:?}", other),
+      other => panic!("expected slice, got {:?}", other),
     }
   }
 
   #[test]
-  fn parses_sized_vector_type() {
+  fn parses_sized_fixed_array_type() {
     let ty = parse_type("i32[10]");
     match ty {
-      IgnisTypeSyntax::Vector(inner, size) => {
+      IgnisTypeSyntax::FixedArray(inner, size) => {
         assert_eq!(*inner, IgnisTypeSyntax::I32);
-        assert_eq!(size, Some(10));
+        assert_eq!(size, 10);
       },
-      other => panic!("expected vector, got {:?}", other),
+      other => panic!("expected fixed array, got {:?}", other),
     }
   }
 
   #[test]
-  fn parses_nested_vector_type() {
+  fn parses_nested_slice_type() {
     let ty = parse_type("i32[][]");
     match ty {
-      IgnisTypeSyntax::Vector(inner, _) => match *inner {
-        IgnisTypeSyntax::Vector(inner_inner, _) => {
+      IgnisTypeSyntax::Slice(inner) => match *inner {
+        IgnisTypeSyntax::Slice(inner_inner) => {
           assert_eq!(*inner_inner, IgnisTypeSyntax::I32);
         },
-        other => panic!("expected nested vector, got {:?}", other),
+        other => panic!("expected nested slice, got {:?}", other),
       },
-      other => panic!("expected vector, got {:?}", other),
+      other => panic!("expected slice, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_str_as_regular_slice_element() {
+    let ty = parse_type("str[]");
+    match ty {
+      IgnisTypeSyntax::Slice(inner) => {
+        assert_eq!(*inner, IgnisTypeSyntax::Str);
+      },
+      other => panic!("expected slice, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_str_slice_name_as_regular_named_type() {
+    let ty = parse_type("StrSlice");
+    match ty {
+      IgnisTypeSyntax::Named { .. } => {},
+      other => panic!("expected named type, got {:?}", other),
     }
   }
 
@@ -550,20 +577,19 @@ mod tests {
   }
 
   #[test]
-  fn parses_vector_of_applied_type() {
-    // Box<i32>[] is an array of Box<i32>
+  fn parses_slice_of_applied_type() {
+    // Box<i32>[] is a slice of Box<i32>
     let ty = parse_type("Box<i32>[]");
     match ty {
-      IgnisTypeSyntax::Vector(inner, size) => {
-        assert!(size.is_none());
+      IgnisTypeSyntax::Slice(inner) => {
         match *inner {
           IgnisTypeSyntax::Applied { args, .. } => {
             assert_eq!(args.len(), 1);
           },
-          other => panic!("expected applied type inside vector, got {:?}", other),
+          other => panic!("expected applied type inside slice, got {:?}", other),
         }
       },
-      other => panic!("expected vector, got {:?}", other),
+      other => panic!("expected slice, got {:?}", other),
     }
   }
 
@@ -587,17 +613,16 @@ mod tests {
 
   #[test]
   fn parses_applied_type_with_array_arg() {
-    // Container<i32[]> - generic with array type argument
+    // Container<i32[]> - generic with slice type argument
     let ty = parse_type("Container<i32[]>");
     match ty {
       IgnisTypeSyntax::Applied { args, .. } => {
         assert_eq!(args.len(), 1);
         match &args[0] {
-          IgnisTypeSyntax::Vector(inner, size) => {
+          IgnisTypeSyntax::Slice(inner) => {
             assert_eq!(**inner, IgnisTypeSyntax::I32);
-            assert!(size.is_none());
           },
-          other => panic!("expected vector, got {:?}", other),
+          other => panic!("expected slice, got {:?}", other),
         }
       },
       other => panic!("expected applied type, got {:?}", other),
@@ -612,11 +637,11 @@ mod tests {
       IgnisTypeSyntax::Applied { args, .. } => {
         assert_eq!(args.len(), 1);
         match &args[0] {
-          IgnisTypeSyntax::Vector(inner, size) => {
+          IgnisTypeSyntax::FixedArray(inner, size) => {
             assert_eq!(**inner, IgnisTypeSyntax::I32);
-            assert_eq!(*size, Some(10));
+            assert_eq!(*size, 10);
           },
-          other => panic!("expected vector, got {:?}", other),
+          other => panic!("expected fixed array, got {:?}", other),
         }
       },
       other => panic!("expected applied type, got {:?}", other),

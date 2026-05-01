@@ -810,7 +810,7 @@ impl<'a> CEmitter<'a> {
       Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
         self.type_contains_user_definition(*inner, visited_types)
       },
-      Type::Vector { element, .. } => self.type_contains_user_definition(*element, visited_types),
+      Type::FixedArray { element, .. } => self.type_contains_user_definition(*element, visited_types),
       Type::Tuple(elements) => elements
         .iter()
         .any(|element_type| self.type_contains_user_definition(*element_type, visited_types)),
@@ -1215,7 +1215,7 @@ impl<'a> CEmitter<'a> {
     match self.types.get(&type_id) {
       Type::Param { .. } | Type::Instance { .. } | Type::Infer => false,
       Type::Pointer { inner, .. } | Type::Reference { inner, .. } => self.is_fully_monomorphized(*inner),
-      Type::Vector { element, .. } => self.is_fully_monomorphized(*element),
+      Type::FixedArray { element, .. } => self.is_fully_monomorphized(*element),
       Type::Function { params, ret, .. } => {
         params.iter().all(|&p| self.is_fully_monomorphized(p)) && self.is_fully_monomorphized(*ret)
       },
@@ -1666,6 +1666,7 @@ impl<'a> CEmitter<'a> {
 
     let Some(entry_args) = self.entry_main_args_kind() else {
       writeln!(self.output, "int main(int argc, char** argv) {{").unwrap();
+      writeln!(self.output, "    ignis_runtime_init((i32)argc, argv);").unwrap();
       writeln!(self.output, "    (void)argc;").unwrap();
       writeln!(self.output, "    (void)argv;").unwrap();
       writeln!(self.output, "    return 1;").unwrap();
@@ -1684,6 +1685,7 @@ impl<'a> CEmitter<'a> {
     };
 
     writeln!(self.output, "int main(int argc, char** argv) {{").unwrap();
+    writeln!(self.output, "    ignis_runtime_init((i32)argc, argv);").unwrap();
 
     if matches!(entry_args, EntryMainArgs::None) {
       writeln!(self.output, "    (void)argc;").unwrap();
@@ -1738,6 +1740,7 @@ impl<'a> CEmitter<'a> {
     test_harness: &[TestHarnessEntry],
   ) {
     writeln!(self.output, "int main(int argc, char** argv) {{").unwrap();
+    writeln!(self.output, "    ignis_runtime_init((i32)argc, argv);").unwrap();
     writeln!(self.output, "    if (argc != 3 || strcmp(argv[1], \"--ignis-test\") != 0) {{").unwrap();
     writeln!(
       self.output,
@@ -1982,7 +1985,7 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output, "    // Locals").unwrap();
     for (idx, local) in locals.iter().enumerate() {
       let name = local.name.as_deref().unwrap_or("_");
-      if let Type::Vector { element, size: n } = self.types.get(&local.ty) {
+      if let Type::FixedArray { element, size: n } = self.types.get(&local.ty) {
         let elem_ty = self.format_type(*element);
         writeln!(self.output, "    {} l{}[{}]; // {}", elem_ty, idx, n, name).unwrap();
       } else {
@@ -2049,7 +2052,7 @@ impl<'a> CEmitter<'a> {
         let local_info = func.locals.get(dest);
         let target_ty = local_info.ty;
 
-        if let Type::Vector { size: n, element } = self.types.get(&target_ty) {
+        if let Type::FixedArray { size: n, element } = self.types.get(&target_ty) {
           let val = self.format_operand(func, value);
           let elem_size = self.sizeof_type(*element);
           writeln!(self.output, "memcpy(l{}, {}, {} * {});", dest.index(), val, n, elem_size).unwrap();
@@ -2250,7 +2253,7 @@ impl<'a> CEmitter<'a> {
       Instr::AddrOfLocal { dest, local, .. } => {
         // For array locals, the name already decays to a pointer in C
         let local_info = func.locals.get(local);
-        if matches!(self.types.get(&local_info.ty), Type::Vector { .. }) {
+        if matches!(self.types.get(&local_info.ty), Type::FixedArray { .. }) {
           writeln!(self.output, "t{} = l{};", dest.index(), local.index()).unwrap();
         } else {
           writeln!(self.output, "t{} = &l{};", dest.index(), local.index()).unwrap();
@@ -2978,7 +2981,8 @@ impl<'a> CEmitter<'a> {
       Type::Error => "/* error */ void*".to_string(),
       Type::Pointer { inner, .. } => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
-      Type::Vector { element, .. } => {
+      Type::Slice { .. } => panic!("ICE: Slice reached C codegen before Phase B2 lowering/codegen support"),
+      Type::FixedArray { element, .. } => {
         format!("{}*", self.format_type(*element))
       },
       Type::Tuple(_) => "/* tuple */ void*".to_string(),
@@ -3713,7 +3717,7 @@ impl<'a> CEmitter<'a> {
       Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: true } => format!("mutref_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: false } => format!("ref_{}", self.format_type_for_mangling(inner)),
-      Type::Vector { element, .. } => {
+      Type::FixedArray { element, .. } => {
         format!("vec_{}", self.format_type_for_mangling(element))
       },
       Type::Tuple(elems) => {
@@ -4469,7 +4473,7 @@ fn is_type_fully_monomorphized_standalone(
     Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
       is_type_fully_monomorphized_standalone(*inner, types)
     },
-    Type::Vector { element, .. } => is_type_fully_monomorphized_standalone(*element, types),
+    Type::FixedArray { element, .. } => is_type_fully_monomorphized_standalone(*element, types),
     Type::Function { params, ret, .. } => {
       params
         .iter()
@@ -4497,7 +4501,7 @@ fn collect_struct_dependencies_from_type(
         collect_struct_dependencies_from_type(*element, types, defs, symbols, namespaces, out);
       }
     },
-    Type::Pointer { .. } | Type::Reference { .. } | Type::Vector { .. } | Type::Function { .. } => {
+    Type::Pointer { .. } | Type::Reference { .. } | Type::FixedArray { .. } | Type::Function { .. } => {
       // Pointers/function pointers do not require complete by-value definitions.
     },
     _ => {},
@@ -4744,7 +4748,7 @@ fn collect_struct_types_from_type(
     Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
       collect_struct_types_from_type(inner, types, defs, symbols, namespaces, out);
     },
-    Type::Vector { element, .. } => {
+    Type::FixedArray { element, .. } => {
       collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
     },
     Type::Function { params, ret, .. } => {
@@ -5091,7 +5095,7 @@ fn format_type_for_mangling_standalone(
     Type::Reference { inner, mutable: false } => {
       format!("ref_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
     },
-    Type::Vector { element, .. } => {
+    Type::FixedArray { element, .. } => {
       format!("vec_{}", format_type_for_mangling_standalone(element, types, defs, symbols))
     },
     Type::Tuple(elems) => {
@@ -5216,7 +5220,8 @@ pub fn format_c_type(
     Type::Reference { inner, .. } => {
       format!("{}*", format_c_type(types.get(inner), types, defs, symbols, namespaces))
     },
-    Type::Vector { element, .. } => {
+    Type::Slice { .. } => panic!("ICE: Slice reached C codegen before Phase B2 lowering/codegen support"),
+    Type::FixedArray { element, .. } => {
       format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
     },
     Type::Tuple(_) => "void*".to_string(),

@@ -1,0 +1,39 @@
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+function expectArg(args: &Vector<String>, index: u64, expected: str): void {
+  match (args.get(index)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), expected),
+    Option::NONE -> Test::fail(),
+  };
+}
+
+@test
+function argsPreserveHarnessOrdering(): void {
+  let values: Vector<String> = Process::args();
+
+  Test::assertEq<i32>(Process::argCount(), 3);
+  Test::assertEq<u64>(values.length(), 3);
+
+  match (values.get(0)) {
+    Option::SOME(programName) -> Test::assert(programName.length() > 0),
+    Option::NONE -> Test::fail(),
+  };
+
+  expectArg(&values, 1, "--ignis-test");
+  expectArg(&values, 2, "process::tests::argsPreserveHarnessOrdering");
+}
+
+@test
+function processIdentifiersArePositive(): void {
+  Test::assert(Process::id() > 0);
+  Test::assert(Process::parentId() > 0);
+}
+
+@test
+function systemReturnsHostStatusWithoutPanicking(): void {
+  Test::assertEq<i32>(Process::system("/bin/sh -c 'exit 0'"), 0);
+  Test::assertNe<i32>(Process::system("/bin/sh -c 'exit 7'"), 0);
+}

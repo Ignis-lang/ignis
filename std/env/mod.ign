@@ -1,0 +1,44 @@
+//!
+//! # Environment
+//!
+//! Safe, owned access to environment variables on supported POSIX hosts.
+
+import LibC from "std::libc";
+import String from "std::string";
+
+export namespace Env {
+  /// Error returned when a required environment variable is missing.
+  record EnvError {
+    public name: String;
+  }
+
+  /// Returns an owned copy of the environment variable when it is present.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function get(name: str): Option<String> {
+    let value: *mut u8 = LibC::Process::getenv(name as *u8);
+
+    if (value == null) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(String::create(value as str));
+  }
+
+  /// Returns `true` when the environment variable is present.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function has(name: str): boolean {
+    let value: *mut u8 = LibC::Process::getenv(name as *u8);
+    return value != null;
+  }
+
+  /// Returns an owned environment value or an `EnvError` when it is missing.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function var(name: str): Result<String, EnvError> {
+    return match (Env::get(name)) {
+      Option::SOME(value) -> Result::OK(value),
+      Option::NONE -> Result::ERROR(EnvError {
+        name: String::create(name),
+      }),
+    };
+  }
+}

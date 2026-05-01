@@ -1,0 +1,47 @@
+import Env from "std::env";
+import String from "std::string";
+import Test from "std::test";
+
+function assertSomeString(value: Option<String>, expected: str): void {
+  match (value) {
+    Option::SOME(text) -> {
+      Test::assertEq<str>(text.toStr(), expected);
+    },
+    Option::NONE -> Test::fail(),
+  };
+}
+
+function assertOkString(value: Result<String, Env::EnvError>, expected: str): void {
+  match (value) {
+    Result::OK(text) -> {
+      Test::assertEq<str>(text.toStr(), expected);
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function getReturnsOwnedValueForPresentVariable(): void {
+  assertSomeString(Env::get("IGNIS_STD_ENV_PRESENT"), "ignis-present-value");
+  Test::assert(Env::has("IGNIS_STD_ENV_PRESENT"));
+  assertOkString(Env::var("IGNIS_STD_ENV_PRESENT"), "ignis-present-value");
+}
+
+@test
+function getReturnsNoneForUnsetVariable(): void {
+  let missingValue: Option<String> = Env::get("IGNIS_STD_ENV_UNSET");
+  Test::assert(missingValue.isNone());
+  Test::assert(!Env::has("IGNIS_STD_ENV_UNSET"));
+
+  match (Env::var("IGNIS_STD_ENV_UNSET")) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(_) -> {},
+  };
+}
+
+@test
+function getPreservesEmptyEnvironmentValues(): void {
+  assertSomeString(Env::get("IGNIS_STD_ENV_EMPTY"), "");
+  Test::assert(Env::has("IGNIS_STD_ENV_EMPTY"));
+  assertOkString(Env::var("IGNIS_STD_ENV_EMPTY"), "");
+}

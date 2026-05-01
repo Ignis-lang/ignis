@@ -1,0 +1,64 @@
+//!
+//! # Process
+//!
+//! Safe, owned process helpers on supported POSIX hosts.
+
+import LibC from "std::libc";
+import String from "std::string";
+import Vector from "std::vector";
+
+extern __process_rt {
+  function ignis_process_arg_count(): i32;
+  function ignis_process_arg_at(index: i32): *mut u8;
+}
+
+function processOwnedArgAt(index: i32): String {
+  let raw: *mut u8 = __process_rt::ignis_process_arg_at(index);
+
+  if (raw == null) {
+    return String::create("");
+  }
+
+  return String::create(raw as str);
+}
+
+export namespace Process {
+  /// Returns owned copies of the startup arguments, including `argv[0]`.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function args(): Vector<String> {
+    let count: i32 = Process::argCount();
+    let mut values: Vector<String> = Vector::init<String>(count as u64);
+    let mut index: i32 = 0;
+
+    while (index < count) {
+      values.push(processOwnedArgAt(index));
+      index += 1;
+    }
+
+    return values;
+  }
+
+  /// Returns the host startup argument count, including `argv[0]`.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function argCount(): i32 {
+    return __process_rt::ignis_process_arg_count();
+  }
+
+  /// Returns the current process identifier.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function id(): i32 {
+    return LibC::Process::getpid() as i32;
+  }
+
+  /// Returns the parent process identifier.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function parentId(): i32 {
+    return LibC::Process::getppid() as i32;
+  }
+
+  /// Executes `command` through the host shell and returns the raw host status.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function system(command: str): i32 {
+    return LibC::Process::system(command as *u8);
+  }
+}

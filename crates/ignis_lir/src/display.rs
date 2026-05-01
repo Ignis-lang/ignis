@@ -543,8 +543,11 @@ impl<'a> LirPrinter<'a> {
           format!("&{}", self.format_type(*inner))
         }
       },
-      Type::Vector { element, size } => {
-        format!("[{}; {}]", self.format_type(*element), size)
+      Type::Slice { element, .. } => {
+        format!("{}[]", self.format_type(*element))
+      },
+      Type::FixedArray { element, size } => {
+        format!("{}[{}]", self.format_type(*element), size)
       },
       Type::Tuple(elems) => {
         let parts: Vec<_> = elems.iter().map(|e| self.format_type(*e)).collect();

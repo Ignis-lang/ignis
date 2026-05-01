@@ -86,6 +86,25 @@ typedef struct IgnisString {
 typedef void *null;
 
 // =============================================================================
+// Process bootstrap helpers
+// =============================================================================
+
+/**
+ * Stores the host argv snapshot for std::process.
+ */
+void ignis_runtime_init(i32 argc, char **argv);
+
+/**
+ * Returns the stored startup argument count, including argv[0].
+ */
+i32 ignis_process_arg_count(void);
+
+/**
+ * Returns the stored argument at index, or NULL when out of range.
+ */
+const char *ignis_process_arg_at(i32 index);
+
+// =============================================================================
 // Reference counting (Rc)
 // =============================================================================
 

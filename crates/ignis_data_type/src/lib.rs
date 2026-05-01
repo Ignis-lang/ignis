@@ -39,7 +39,7 @@ pub enum DataType {
   Pending,
   Void,
   Variable(String, Box<DataType>),
-  Vector(Box<DataType>, Option<usize>),
+  FixedArray(Box<DataType>, Option<usize>),
   Callable(Vec<DataType>, Box<DataType>),
   Function(Vec<DataType>, Box<DataType>),
   PendingImport(String),
@@ -101,7 +101,7 @@ impl DataType {
       DataType::Reference(data_type) => format!("&{}", data_type,),
       DataType::Pointer(data_type) => format!("*{}", data_type,),
       DataType::Variable(name, _) => name.to_string(),
-      DataType::Vector(data_type, size) => format!(
+      DataType::FixedArray(data_type, size) => format!(
         "{}[{}]",
         data_type,
         size
@@ -166,7 +166,7 @@ impl DataType {
       DataType::Pending => String::from("TYPE_PENDING"),
       DataType::Void => String::from("TYPE_VOID"),
       DataType::Variable(_, data_type) => data_type.to_ignis_type_enum(),
-      DataType::Vector(data_type, _) => data_type.to_ignis_type_enum(),
+      DataType::FixedArray(data_type, _) => data_type.to_ignis_type_enum(),
       DataType::Callable(_data_types, _data_type) => todo!(),
       DataType::Function(_data_types, _data_type) => todo!(),
       DataType::PendingImport(_) => todo!(),
@@ -258,7 +258,7 @@ impl Display for DataType {
       DataType::Reference(data_type) => write!(f, "&{}", data_type),
       DataType::Pointer(data_type) => write!(f, "*{}", data_type),
       DataType::Variable(name, data_type) => write!(f, "variable({}, {})", name, data_type),
-      DataType::Vector(data_type, size) => {
+      DataType::FixedArray(data_type, size) => {
         write!(
           f,
           "{}[{}]",

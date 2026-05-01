@@ -1061,7 +1061,7 @@ impl<'a> Analyzer<'a> {
           .unwrap_or_else(|| self.types.error());
 
         let elem_type = match self.types.get(&base_type).clone() {
-          ignis_type::types::Type::Vector { element, .. } => element,
+          ignis_type::types::Type::FixedArray { element, .. } => element,
           ignis_type::types::Type::Pointer { inner, .. } => inner,
           _ => self.types.error(),
         };
@@ -1090,7 +1090,7 @@ impl<'a> Analyzer<'a> {
           .map(|elem| self.lower_node_to_hir(elem, hir, scope_kind))
           .collect();
 
-        let vec_type = self.types.vector(
+        let array_type = self.types.fixed_array(
           vector
             .items
             .first()
@@ -1102,7 +1102,7 @@ impl<'a> Analyzer<'a> {
         let hir_node = HIRNode {
           kind: HIRKind::VectorLiteral { elements: elem_hirs },
           span: vector.span.clone(),
-          type_id: vec_type,
+          type_id: array_type,
         };
 
         hir.alloc(hir_node)
@@ -3379,12 +3379,12 @@ impl<'a> Analyzer<'a> {
       .unwrap_or_else(|| self.types.error());
 
     enum IterKind {
-      FixedVector(usize),
+      FixedArray(usize),
       Record(DefinitionId),
     }
 
     let (element_type, iter_kind) = match self.types.get(&iter_type).clone() {
-      Type::Vector { element, size } => (element, IterKind::FixedVector(size)),
+      Type::FixedArray { element, size } => (element, IterKind::FixedArray(size)),
       Type::Record(def_id) => match self.extract_record_iterable_info(&def_id) {
         Some((elem_ty, _data_index, _len_index)) => (elem_ty, IterKind::Record(def_id)),
         None => {
@@ -3441,7 +3441,7 @@ impl<'a> Analyzer<'a> {
     };
 
     let loop_hir = match iter_kind {
-      IterKind::FixedVector(n) => self.lower_for_of_fixed(&ctx, hir, n),
+      IterKind::FixedArray(n) => self.lower_for_of_fixed(&ctx, hir, n),
       IterKind::Record(def_id) => self.lower_for_of_record(&ctx, hir, &def_id),
     };
 

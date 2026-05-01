@@ -1457,9 +1457,9 @@ function main(): i32 {
 }
 
 #[test]
-fn e2e_alignof_fixed_vector() {
+fn e2e_alignof_fixed_array() {
   e2e_test(
-    "alignof_fixed_vector",
+    "alignof_fixed_array",
     r#"
 function main(): i32 {
     let elemAlign: u64 = alignOf<u64>();
