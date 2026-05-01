@@ -106,13 +106,21 @@ import String from "std::string";
 
 // POSIX file I/O primitives and related constants (fcntl.h, unistd.h, sys/stat.h).
 extern __fs_io {
+  /// POSIX `read`; returns bytes read, 0 on EOF, or -1.
   function read(fd: i32, buf: *mut void, count: u64): i64;
+  /// POSIX `write`; returns bytes written or -1.
   function write(fd: i32, buf: *mut void, count: u64): i64;
+  /// POSIX `close`; closes a file descriptor.
   function close(fd: i32): i32;
+  /// POSIX `lseek`; repositions a file descriptor offset.
   function lseek(fd: i32, offset: i64, whence: i32): i64;
+  /// POSIX `unlink`; removes a file path.
   function unlink(pathname: *u8): i32;
+  /// POSIX `rmdir`; removes an empty directory path.
   function rmdir(pathname: *u8): i32;
+  /// POSIX `rename`; renames a filesystem path.
   function rename(oldpath: *u8, newpath: *u8): i32;
+  /// POSIX `mkdir`; creates one directory with `mode`.
   function mkdir(pathname: *u8, mode: u32): i32;
 
   const SEEK_SET: i32;
@@ -150,15 +158,19 @@ extern __fs_io {
 
 // POSIX directory stream operations (dirent.h).
 extern __fs_dir {
+  /// POSIX `opendir`; opens a directory stream.
   function opendir(name: *u8): CType::DirPtr;
+  /// POSIX `closedir`; closes a directory stream.
   function closedir(dirp: CType::DirPtr): i32;
 
   // readdir returns a pointer to an internal dirent struct.
   // We treat it as *mut void and use C helpers to extract fields.
+  /// POSIX `readdir`; returns a host-owned `dirent` pointer or null.
   function readdir(dirp: CType::DirPtr): *mut void;
 }
 
 extern __fs_path {
+  /// POSIX `realpath`; resolves an absolute canonical path.
   function realpath(pathname: *u8, resolvedPath: *u8): *mut u8;
 }
 
@@ -166,17 +178,20 @@ extern __fs_path {
 @configFlag(@platform("linux"))
 extern __fs_errno_fn {
   @externName("__errno_location")
+  /// Returns the thread-local `errno` pointer on Linux.
   function errno_location(): *mut i32;
 }
 
 @configFlag(@platform("macos"))
 extern __fs_errno_fn {
   @externName("__error")
+  /// Returns the thread-local `errno` pointer on macOS.
   function errno_location(): *mut i32;
 }
 
 // strerror and errno constants (POSIX-standard).
 extern __fs_errno {
+  /// Returns a host-owned message for an errno value.
   function strerror(errnum: i32): *u8;
 
   const ENOENT: i32;
@@ -191,6 +206,7 @@ extern __fs_errno {
 // C runtime helpers implemented in std/runtime/internal/rt_fs.c.
 // Needed for platform-dependent structs (`stat`, `dirent`) and `open(2)` variadics.
 extern __fs_rt {
+  /// Runtime bridge for `stat(2)` with layout-independent out parameters.
   function ignis_stat_call(
     path: *u8,
     outDev: &mut u64,
@@ -207,6 +223,7 @@ extern __fs_rt {
     outBlocks: &mut i64,
   ): i32;
 
+  /// Runtime bridge for `fstat(2)` with layout-independent out parameters.
   function ignis_fstat_call(
     fd: i32,
     outDev: &mut u64,
@@ -223,6 +240,7 @@ extern __fs_rt {
     outBlocks: &mut i64,
   ): i32;
 
+  /// Runtime bridge for `lstat(2)` that does not follow symlinks.
   function ignis_lstat_call(
     path: *u8,
     outDev: &mut u64,
@@ -239,17 +257,23 @@ extern __fs_rt {
     outBlocks: &mut i64,
   ): i32;
 
+  /// Runtime bridge for variadic `open(path, flags, mode)`.
   function ignis_open3(pathname: *u8, flags: i32, mode: u32): i32;
 
+  /// Returns the `d_name` pointer from a host `dirent`.
   function ignis_dirent_name(entry: *mut void): *u8;
+  /// Returns the inode from a host `dirent`.
   function ignis_dirent_ino(entry: *mut void): u64;
+  /// Returns the file-type byte from a host `dirent`.
   function ignis_dirent_type(entry: *mut void): u8;
+  /// Runtime bridge for `readdir` with extracted out parameters.
   function ignis_readdir_call(
     dirp: CType::DirPtr,
     outName: &mut u64,
     outIno: &mut u64,
     outType: &mut u8
   ): i32;
+  /// Runtime recursive directory removal helper.
   function ignis_remove_dir_all_call(path: *u8): i32;
 }
 
@@ -257,6 +281,7 @@ extern __fs_rt {
 // Public types and namespace
 // =============================================================================
 
+/// POSIX filesystem backend used by supported Unix-like targets.
 export namespace Fs::Sys {
   // ---- Stat record ----
 
@@ -346,6 +371,7 @@ export namespace Fs::Sys {
   // errno helper (private)
   // =========================================================================
 
+  /// Converts current `errno` into the portable `Io::IoError` representation.
   function lastError(): Io::IoError {
     let rawErrno: i32 = @read<i32>(__fs_errno_fn::errno_location());
     let msg: str = __fs_errno::strerror(rawErrno) as str;
@@ -426,6 +452,7 @@ export namespace Fs::Sys {
     return Result::OK(pos);
   }
 
+  /// Returns a temp-dir candidate only when the raw path is non-empty and a directory.
   function tempDirCandidate(value: *mut u8): Option<String> {
     if (value == null || LibC::String::strlen(value as *u8) == 0) {
       return Option::NONE;

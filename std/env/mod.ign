@@ -1,18 +1,131 @@
 //!
 //! # Environment
 //!
-//! Safe, owned access to environment variables on supported POSIX hosts.
+//! Safe, owned access to process environment variables on supported POSIX hosts.
+//!
+//! ## Overview
+//!
+//! The `Env` namespace wraps process environment access through `std::libc`
+//! and returns owned `String` values instead of borrowed C pointers. This keeps
+//! callers insulated from host-owned environment storage.
+//!
+//! The environment is a mutable key/value map attached to the current process.
+//! Reads observe the current process state, and writes affect later reads in the
+//! same process plus child processes created after the mutation. Existing parent
+//! processes and already-running child processes are not modified.
+//!
+//! ```text
+//!   Host process environment
+//!   ┌─────────────────────────────────────────────────────────────┐
+//!   │ name -> NUL-terminated byte string                         │
+//!   │ name -> NUL-terminated byte string                         │
+//!   └─────────────────────────────────────────────────────────────┘
+//!             │ getenv/setenv/unsetenv
+//!             ▼
+//!   Env namespace
+//!   ┌─────────────────────────────────────────────────────────────┐
+//!   │ get/var copy host values into owned String results          │
+//!   │ set/unset mutate only the current process environment       │
+//!   └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## APIs
+//!
+//! | Function      | Description                                      |
+//! |---------------|--------------------------------------------------|
+//! | `Env::get`    | Optional owned value for an environment name     |
+//! | `Env::has`    | Presence check without copying the value         |
+//! | `Env::set`    | Set or replace a value in the current process    |
+//! | `Env::unset`  | Remove a value from the current process          |
+//! | `Env::var`    | `Result` wrapper that reports missing variables  |
+//!
+//! ## Empty Values vs Missing Values
+//!
+//! `Env::get("NAME")` returns `Option::SOME(String::create(""))` when `NAME`
+//! exists and is set to the empty string. It returns `Option::NONE` only when the
+//! variable is absent. Use `Env::has` when presence matters independently from
+//! the stored text.
+//!
+//! ## Mutation Semantics
+//!
+//! `Env::set` uses replacement semantics: if the variable already exists, its
+//! value is overwritten. `Env::unset` removes the name entirely. Both functions
+//! return `false` when the underlying platform call fails, for example because a
+//! name is invalid for the host C library.
+//!
+//! ## Platform Notes
+//!
+//! These APIs are currently enabled on Linux and macOS. Changes affect only the
+//! current process and any children started after the change. Environment values
+//! are passed through POSIX `getenv(3)`, `setenv(3)`, and `unsetenv(3)`, so names
+//! and values must be representable as NUL-terminated C strings.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Env from "std::env";
+//! import Option from "std::option";
+//! import String from "std::string";
+//!
+//! function main(): i32 {
+//!   let home: Option<String> = Env::get("HOME");
+//!   return home.isSome() ? 0 : 1;
+//! }
+//! ```
 
 import LibC from "std::libc";
 import String from "std::string";
 
+/// Process environment accessors.
+///
+/// Functions in this namespace read and mutate the current process environment
+/// through the host C runtime. Read APIs return owned Ignis values so callers do
+/// not borrow from host-managed environment storage.
 export namespace Env {
   /// Error returned when a required environment variable is missing.
+  ///
+  /// `EnvError` preserves the requested variable name so callers can report a
+  /// precise configuration failure without separately storing the lookup key.
   record EnvError {
+    /// Environment variable name that was requested.
     public name: String;
   }
 
   /// Returns an owned copy of the environment variable when it is present.
+  ///
+  /// The returned string is copied from host-owned storage before it leaves this
+  /// function. A present but empty variable returns `Option::SOME("")`; only an
+  /// absent variable returns `Option::NONE`.
+  ///
+  /// # Arguments
+  ///
+  /// - `name`: environment variable name to query.
+  ///
+  /// # Returns
+  ///
+  /// - `Option::SOME(value)` when the variable exists. `value` is an owned copy.
+  /// - `Option::NONE` when the variable is absent.
+  ///
+  /// # Invariants
+  ///
+  /// - Empty variables are still present: `NAME=` returns `Option::SOME("")`.
+  /// - The returned `String` does not borrow from the host environment.
+  /// - Later `Env::set` or `Env::unset` calls do not invalidate earlier results.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Env from "std::env";
+  /// import Option from "std::option";
+  ///
+  /// Env::set("IGNIS_MODE", "debug");
+  /// match (Env::get("IGNIS_MODE")) {
+  ///   Option::SOME(value) -> {
+  ///     // value is an owned String containing "debug".
+  ///   },
+  ///   Option::NONE -> {},
+  /// };
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function get(name: str): Option<String> {
     let value: *mut u8 = LibC::Process::getenv(name as *u8);
@@ -25,6 +138,32 @@ export namespace Env {
   }
 
   /// Returns `true` when the environment variable is present.
+  ///
+  /// Presence is independent from value length. A variable set to the empty
+  /// string is still present and therefore returns `true`.
+  ///
+  /// # Arguments
+  ///
+  /// - `name`: environment variable name to check.
+  ///
+  /// # Returns
+  ///
+  /// `true` when the host environment contains `name`, otherwise `false`.
+  ///
+  /// # When To Use
+  ///
+  /// Use `has` when presence matters but the actual value does not. Use `get`
+  /// or `var` when the value must be read. `has` still calls into the host
+  /// environment; it is not a cached result.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Env from "std::env";
+  ///
+  /// Env::set("IGNIS_EMPTY", "");
+  /// let exists: boolean = Env::has("IGNIS_EMPTY"); // true
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function has(name: str): boolean {
     let value: *mut u8 = LibC::Process::getenv(name as *u8);
@@ -32,18 +171,109 @@ export namespace Env {
   }
 
   /// Sets or replaces an environment variable in the current process.
+  ///
+  /// The mutation is process-local: later calls to `Env::get` in this process
+  /// observe the new value, and child processes spawned after the call inherit
+  /// it. Already-running processes are not affected.
+  ///
+  /// Returns `true` when the host `setenv` call succeeds and `false` otherwise.
+  /// Passing an empty `value` creates a present variable whose value is empty; it
+  /// does not unset the variable.
+  ///
+  /// # Arguments
+  ///
+  /// - `name`: environment variable name to create or replace.
+  /// - `value`: new variable value.
+  ///
+  /// # Returns
+  ///
+  /// `true` if `setenv(name, value, 1)` succeeds, otherwise `false`.
+  ///
+  /// # Failure Modes
+  ///
+  /// Host `setenv` can fail when `name` is invalid for the C runtime, for
+  /// example an empty name or a name containing `=`. This API does not currently
+  /// expose `errno`; it reports failure as `false`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Env from "std::env";
+  ///
+  /// if (Env::set("IGNIS_LOG", "trace")) {
+  ///   let enabled: boolean = Env::has("IGNIS_LOG");
+  /// }
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function set(name: str, value: str): boolean {
     return LibC::Process::setenv(name as *u8, value as *u8, 1) == 0;
   }
 
   /// Removes an environment variable from the current process.
+  ///
+  /// After a successful unset, `Env::has(name)` is `false` and `Env::get(name)`
+  /// returns `Option::NONE`. Child processes created after the call do not
+  /// inherit the removed variable from this process environment.
+  ///
+  /// # Arguments
+  ///
+  /// - `name`: environment variable name to remove.
+  ///
+  /// # Returns
+  ///
+  /// `true` if `unsetenv(name)` succeeds, otherwise `false`.
+  ///
+  /// # Failure Modes
+  ///
+  /// Host `unsetenv` can fail for invalid names. Removing a variable that is
+  /// already absent is treated as a successful no-op on the supported POSIX
+  /// hosts used by the std test suite.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Env from "std::env";
+  ///
+  /// Env::set("IGNIS_TEMP", "1");
+  /// Env::unset("IGNIS_TEMP");
+  /// let missing: boolean = !Env::has("IGNIS_TEMP");
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function unset(name: str): boolean {
     return LibC::Process::unsetenv(name as *u8) == 0;
   }
 
   /// Returns an owned environment value or an `EnvError` when it is missing.
+  ///
+  /// This is the `Result`-oriented variant of `Env::get` for required
+  /// configuration. Missing variables return `Result::ERROR(EnvError { name })`;
+  /// present empty variables return `Result::OK(String::create(""))`.
+  ///
+  /// # Arguments
+  ///
+  /// - `name`: required environment variable name.
+  ///
+  /// # Returns
+  ///
+  /// - `Result::OK(value)` with an owned copy when present.
+  /// - `Result::ERROR(EnvError { name })` when missing.
+  ///
+  /// # Difference From `get`
+  ///
+  /// `get` is best for optional configuration. `var` is best when the caller
+  /// wants absence to participate in normal `Result` error propagation with `!`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Env from "std::env";
+  /// import Result from "std::result";
+  ///
+  /// match (Env::var("PATH")) {
+  ///   Result::OK(path) -> {},
+  ///   Result::ERROR(error) -> {},
+  /// };
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function var(name: str): Result<String, EnvError> {
     return match (Env::get(name)) {

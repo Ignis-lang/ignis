@@ -2,16 +2,109 @@
 //! # Process
 //!
 //! Safe, owned process helpers on supported POSIX hosts.
+//!
+//! ## Overview
+//!
+//! The `Process` namespace exposes startup argument access, process identifiers,
+//! and host shell execution. Argument helpers copy host `argv` data into owned
+//! `String` values so callers do not depend on raw C pointers.
+//!
+//! The compiler-generated C `main` wrapper bootstraps runtime access to `argc`
+//! and `argv`. `Process::argCount` and `Process::args` read from that runtime
+//! storage instead of requiring user `main` functions to accept arguments
+//! directly.
+//!
+//! ```text
+//!   C entrypoint
+//!   ┌──────────────────────────────────────────────────────────────┐
+//!   │ int main(int argc, char** argv)                              │
+//!   └───────────────────────┬──────────────────────────────────────┘
+//!                           │ stores argc/argv in runtime slots
+//!                           ▼
+//!   __process_rt
+//!   ┌──────────────────────────────────────────────────────────────┐
+//!   │ ignis_process_arg_count() -> argc                            │
+//!   │ ignis_process_arg_at(i) -> argv[i] or null                   │
+//!   └───────────────────────┬──────────────────────────────────────┘
+//!                           │ copied into owned String values
+//!                           ▼
+//!   Process::args() -> Vector<String>
+//! ```
+//!
+//! ## APIs
+//!
+//! | Function              | Description                                      |
+//! |-----------------------|--------------------------------------------------|
+//! | `Process::args`       | Owned startup arguments, including `argv[0]`     |
+//! | `Process::argCount`   | Raw startup argument count                       |
+//! | `Process::id`         | Current process identifier                       |
+//! | `Process::parentId`   | Parent process identifier                        |
+//! | `Process::system`     | Execute a command through the host shell         |
+//!
+//! ## Raw Status Values
+//!
+//! `Process::system` returns the raw integer status produced by the host C
+//! library. This value is not normalized to an exit code; POSIX hosts encode
+//! signal and exit information in the wait status. Callers that need portable
+//! exit-code handling should decode the status according to the target platform.
+//!
+//! ## Shell and Security Notes
+//!
+//! `Process::system` delegates to the host shell. Shell expansion, quoting,
+//! environment inheritance, current working directory, and PATH lookup all follow
+//! host behavior. Do not pass untrusted text into `system` without explicit
+//! validation or quoting for the target shell.
+//!
+//! ## Platform Notes
+//!
+//! These APIs are currently enabled on Linux and macOS. `system` returns the raw
+//! host status and inherits the shell's quoting and security behavior.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Process from "std::process";
+//! import String from "std::string";
+//! import Vector from "std::vector";
+//!
+//! function main(): i32 {
+//!   let args: Vector<String> = Process::args();
+//!   return args.length() > 0 ? 0 : 1;
+//! }
+//! ```
 
 import LibC from "std::libc";
 import String from "std::string";
 import Vector from "std::vector";
 
 extern __process_rt {
+  /// Returns the `argc` value captured by the generated runtime entrypoint.
   function ignis_process_arg_count(): i32;
+
+  /// Returns a borrowed `argv[index]` pointer captured by the runtime.
   function ignis_process_arg_at(index: i32): *mut u8;
 }
 
+/// Copies one runtime argument into an owned `String`.
+///
+/// A null runtime pointer is treated as an empty string to keep `Process::args`
+/// total over the range `0..Process::argCount()`.
+///
+/// # Runtime Contract
+///
+/// The generated C wrapper must call `ignis_runtime_init(argc, argv)` before any
+/// user or test code calls this helper. Without runtime initialization, argument
+/// count and pointer reads fall back to whatever the runtime bridge reports.
+///
+/// # Arguments
+///
+/// - `index`: zero-based runtime argument index.
+///
+/// # Returns
+///
+/// An owned `String` copy of `argv[index]`, or an empty `String` if the runtime
+/// reports a null pointer. Callers normally use `Process::args` instead of this
+/// helper.
 function processOwnedArgAt(index: i32): String {
   let raw: *mut u8 = __process_rt::ignis_process_arg_at(index);
 
@@ -22,8 +115,43 @@ function processOwnedArgAt(index: i32): String {
   return String::create(raw as str);
 }
 
+/// Process inspection and command execution helpers.
+///
+/// This namespace wraps runtime-provided startup arguments and selected POSIX
+/// process calls. Argument APIs return owned strings detached from the raw C
+/// `argv` storage captured when the generated program starts.
 export namespace Process {
   /// Returns owned copies of the startup arguments, including `argv[0]`.
+  ///
+  /// The returned vector owns every string. Mutating or storing the returned
+  /// values is safe because they no longer borrow from the runtime `argv` array.
+  ///
+  /// # Ordering
+  ///
+  /// The result preserves host `argv` order exactly:
+  ///
+  /// ```text
+  ///   args()[0] -> argv[0]  // program/test binary path
+  ///   args()[1] -> argv[1]
+  ///   args()[2] -> argv[2]
+  /// ```
+  ///
+  /// The std test runner invokes individual tests through its own harness, so
+  /// `argv[0]` is the generated std test binary in that context.
+  ///
+  /// # Returns
+  ///
+  /// A vector with `Process::argCount()` entries. The first entry is the program
+  /// path or command name as supplied by the host process launcher.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let args = Process::args();
+  /// let hasUserArg: boolean = args.length() > 1;
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function args(): Vector<String> {
     let count: i32 = Process::argCount();
@@ -39,24 +167,124 @@ export namespace Process {
   }
 
   /// Returns the host startup argument count, including `argv[0]`.
+  ///
+  /// The count comes from the runtime bootstrap created by the compiler's C
+  /// `main` wrapper. It is the same count used by `Process::args`.
+  ///
+  /// # Returns
+  ///
+  /// Number of startup arguments captured by the runtime, including `argv[0]`.
+  ///
+  /// # Invariants
+  ///
+  /// `argCount()` should match `Process::args().length()` as long as runtime
+  /// initialization happened before the call and the runtime bridge remains
+  /// unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let count: i32 = Process::argCount();
+  /// let hasProgramName: boolean = count > 0;
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function argCount(): i32 {
     return __process_rt::ignis_process_arg_count();
   }
 
   /// Returns the current process identifier.
+  ///
+  /// This is the host PID returned by `getpid(2)` on POSIX platforms. The value
+  /// is useful for diagnostics, logs, temporary file names, and process-aware
+  /// integration tests.
+  ///
+  /// # Returns
+  ///
+  /// Positive host process identifier for the currently running test or program.
+  ///
+  /// # Notes
+  ///
+  /// PIDs are host resources. They are not deterministic between runs and should
+  /// only be used for diagnostics, uniqueness, or sanity checks.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let pid: i32 = Process::id();
+  /// let valid: boolean = pid > 0;
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function id(): i32 {
     return LibC::Process::getpid() as i32;
   }
 
   /// Returns the parent process identifier.
+  ///
+  /// This is the host parent PID returned by `getppid(2)`. Parent process IDs
+  /// can change if the original parent exits and the process is reparented by
+  /// the operating system.
+  ///
+  /// # Returns
+  ///
+  /// Host process identifier for the current process parent.
+  ///
+  /// # Notes
+  ///
+  /// POSIX can reparent processes when the original parent exits. Do not use this
+  /// value as a stable identity across long-running programs.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let parent: i32 = Process::parentId();
+  /// let hasParent: boolean = parent > 0;
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function parentId(): i32 {
     return LibC::Process::getppid() as i32;
   }
 
   /// Executes `command` through the host shell and returns the raw host status.
+  ///
+  /// The command is passed to the platform C library `system(3)`. The shell is
+  /// responsible for parsing, expansion, redirection, PATH lookup, and process
+  /// creation. The returned value is the raw host status, not a normalized exit
+  /// code.
+  ///
+  /// # Security
+  ///
+  /// Avoid building `command` from untrusted input. Shell metacharacters can
+  /// change the executed program or add additional commands.
+  ///
+  /// # Arguments
+  ///
+  /// - `command`: shell command text passed directly to `system(3)`.
+  ///
+  /// # Returns
+  ///
+  /// Raw host status returned by the C library. On POSIX this is a wait status,
+  /// not just the child exit code.
+  ///
+  /// # Status Encoding
+  ///
+  /// A command that exits with code `1` may return an encoded value such as
+  /// `256`, depending on the platform. This API intentionally preserves the raw
+  /// status until Ignis has a dedicated `ExitStatus` abstraction.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let status: i32 = Process::system("true");
+  /// let succeededExactly: boolean = status == 0;
+  /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function system(command: str): i32 {
     return LibC::Process::system(command as *u8);

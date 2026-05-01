@@ -90,13 +90,20 @@ import LibC from "std::libc";
 import Memory from "std::memory";
 import Path from "std::path";
 
+/// Filesystem convenience APIs built on `Fs::Sys` and safe owned path handling.
+///
+/// Overloads accepting owned `String` or `Path::PathBuf` reject interior NULs
+/// before crossing into C APIs. Raw `str` overloads preserve C-string semantics
+/// and may stop at the first NUL byte.
 export namespace Fs {
   const DEFAULT_CREATE_DIR_MODE: u32 = 493;
 
+  /// Builds the standard invalid-path error used for interior-NUL path inputs.
   function invalidPathError(): Io::IoError {
     return Io::IoError::fromErrno(LibC::Errno::EINVAL);
   }
 
+  /// Converts an owned string path to `CString`, rejecting interior NUL bytes.
   function validatedPath(path: &String): Result<FFI::CString, Io::IoError> {
     return match (FFI::CString::ofString(path)) {
       Result::OK(value) -> Result::OK(value),
@@ -104,11 +111,13 @@ export namespace Fs {
     };
   }
 
+  /// Converts a `PathBuf` to `CString`, rejecting interior NUL bytes.
   function validatedPath(path: &Path::PathBuf): Result<FFI::CString, Io::IoError> {
     let pathString: String = path.toString();
     return Fs::validatedPath(&pathString);
   }
 
+  /// Reads a raw C-string path into bytes with buffered file reads.
   function readRaw(path: str): Result<Vector<u8>, Io::IoError> {
     let mut file: Fs::File = Fs::File::open(path)!;
     let mut output: Vector<u8> = Vector::init<u8>();
@@ -142,11 +151,13 @@ export namespace Fs {
     return Fs::readRaw(path);
   }
 
+  /// Reads an owned string path into bytes after validating C-string safety.
   function read(path: &String): Result<Vector<u8>, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::readRaw(cPath.asStr() as str);
   }
 
+  /// Reads a `PathBuf` into bytes after validating C-string safety.
   function read(path: &Path::PathBuf): Result<Vector<u8>, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::readRaw(cPath.asStr() as str);
@@ -157,10 +168,12 @@ export namespace Fs {
     return Fs::read(path);
   }
 
+  /// Alias for `read(&String)`.
   function readToBytes(path: &String): Result<Vector<u8>, Io::IoError> {
     return Fs::read(path);
   }
 
+  /// Alias for `read(&PathBuf)`.
   function readToBytes(path: &Path::PathBuf): Result<Vector<u8>, Io::IoError> {
     return Fs::read(path);
   }
@@ -173,6 +186,7 @@ export namespace Fs {
     return Fs::readToStringBytes(Fs::readRaw(path)!);
   }
 
+  /// Converts a byte vector into an owned `String`, preserving interior NULs.
   function readToStringBytes(bytes: Vector<u8>): Result<String, Io::IoError> {
     let len: u64 = bytes.length();
 
@@ -191,10 +205,12 @@ export namespace Fs {
     return Result::OK(String::create(raw, len));
   }
 
+  /// Reads an owned string path into an owned `String` after path validation.
   function readToString(path: &String): Result<String, Io::IoError> {
     return Fs::readToStringBytes(Fs::read(path)!);
   }
 
+  /// Reads a `PathBuf` into an owned `String` after path validation.
   function readToString(path: &Path::PathBuf): Result<String, Io::IoError> {
     let pathString: String = path.toString();
     return Fs::readToString(&pathString);
@@ -221,11 +237,13 @@ export namespace Fs {
     return Fs::writeBytesRaw(path, data, len);
   }
 
+  /// Writes raw bytes to an owned string path after path validation.
   function writeBytes(path: &String, data: *void, len: u64): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::writeBytesRaw(cPath.asStr() as str, data, len);
   }
 
+  /// Writes raw bytes to a `PathBuf` after path validation.
   function writeBytes(path: &Path::PathBuf, data: *void, len: u64): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::writeBytesRaw(cPath.asStr() as str, data, len);
@@ -236,10 +254,12 @@ export namespace Fs {
     return Fs::writeBytesRaw(path, data, len);
   }
 
+  /// Alias for `writeBytes(&String, data, len)`.
   function write(path: &String, data: *void, len: u64): Result<void, Io::IoError> {
     return Fs::writeBytes(path, data, len);
   }
 
+  /// Alias for `writeBytes(&PathBuf, data, len)`.
   function write(path: &Path::PathBuf, data: *void, len: u64): Result<void, Io::IoError> {
     return Fs::writeBytes(path, data, len);
   }
@@ -250,11 +270,13 @@ export namespace Fs {
     return Fs::writeBytesRaw(path, text as *void, len);
   }
 
+  /// Writes a NUL-terminated text view to an owned string path.
   function write(path: &String, text: str): Result<void, Io::IoError> {
     let len: u64 = LibC::String::strlen(text as *u8);
     return Fs::writeBytes(path, text as *void, len);
   }
 
+  /// Writes a NUL-terminated text view to a `PathBuf`.
   function write(path: &Path::PathBuf, text: str): Result<void, Io::IoError> {
     let len: u64 = LibC::String::strlen(text as *u8);
     return Fs::writeBytes(path, text as *void, len);
@@ -268,10 +290,12 @@ export namespace Fs {
     return Fs::writeBytesRaw(path, s.toStr() as *void, s.length());
   }
 
+  /// Writes all bytes from an owned string to an owned string path.
   function writeString(path: &String, s: &String): Result<void, Io::IoError> {
     return Fs::writeBytes(path, s.toStr() as *void, s.length());
   }
 
+  /// Writes all bytes from an owned string to a `PathBuf`.
   function writeString(path: &Path::PathBuf, s: &String): Result<void, Io::IoError> {
     return Fs::writeBytes(path, s.toStr() as *void, s.length());
   }
@@ -282,6 +306,7 @@ export namespace Fs {
     return statResult.isOk();
   }
 
+  /// Reads raw metadata from a C-string path.
   function metadataRaw(path: str): Result<Fs::Metadata, Io::IoError> {
     let stat: Fs::Sys::Stat = Fs::Sys::stat(path)!;
     return Result::OK(Fs::metadataFromStat(&stat));
@@ -292,11 +317,13 @@ export namespace Fs {
     return Fs::metadataRaw(path);
   }
 
+  /// Reads metadata for an owned string path after path validation.
   function metadata(path: &String): Result<Fs::Metadata, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::metadataRaw(cPath.asStr() as str);
   }
 
+  /// Reads metadata for a `PathBuf` after path validation.
   function metadata(path: &Path::PathBuf): Result<Fs::Metadata, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::metadataRaw(cPath.asStr() as str);
@@ -313,11 +340,13 @@ export namespace Fs {
     return Fs::canonicalizeRaw(path);
   }
 
+  /// Canonicalizes an owned string path after path validation.
   function canonicalize(path: &String): Result<Path::PathBuf, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::canonicalizeRaw(cPath.asStr() as str);
   }
 
+  /// Canonicalizes a `PathBuf` after path validation.
   function canonicalize(path: &Path::PathBuf): Result<Path::PathBuf, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::canonicalizeRaw(cPath.asStr() as str);
@@ -339,25 +368,30 @@ export namespace Fs {
     return Fs::createDirRaw(path, mode);
   }
 
+  /// Creates a single directory using an `i32` mode.
   function createDir(path: str, mode: i32): Result<void, Io::IoError> {
     return Fs::createDirRaw(path, mode as u32);
   }
 
+  /// Creates a single directory for an owned string path.
   function createDir(path: &String, mode: u32): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::createDirRaw(cPath.asStr() as str, mode);
   }
 
+  /// Creates a single directory for an owned string path using an `i32` mode.
   function createDir(path: &String, mode: i32): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::createDirRaw(cPath.asStr() as str, mode as u32);
   }
 
+  /// Creates a single directory for a `PathBuf`.
   function createDir(path: &Path::PathBuf, mode: u32): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::createDirRaw(cPath.asStr() as str, mode);
   }
 
+  /// Creates a single directory for a `PathBuf` using an `i32` mode.
   function createDir(path: &Path::PathBuf, mode: i32): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::createDirRaw(cPath.asStr() as str, mode as u32);
@@ -421,11 +455,13 @@ export namespace Fs {
     return Fs::createDirAllRaw(path);
   }
 
+  /// Recursively creates directories for an owned string path.
   function createDirAll(path: &String): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::createDirAllRaw(cPath.asStr() as str);
   }
 
+  /// Recursively creates directories for a `PathBuf`.
   function createDirAll(path: &Path::PathBuf): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::createDirAllRaw(cPath.asStr() as str);
@@ -441,11 +477,13 @@ export namespace Fs {
     return Fs::removeFileRaw(path);
   }
 
+  /// Removes a file at an owned string path.
   function removeFile(path: &String): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::removeFileRaw(cPath.asStr() as str);
   }
 
+  /// Removes a file at a `PathBuf`.
   function removeFile(path: &Path::PathBuf): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::removeFileRaw(cPath.asStr() as str);
@@ -461,11 +499,13 @@ export namespace Fs {
     return Fs::removeDirRaw(path);
   }
 
+  /// Removes an empty directory at an owned string path.
   function removeDir(path: &String): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::removeDirRaw(cPath.asStr() as str);
   }
 
+  /// Removes an empty directory at a `PathBuf`.
   function removeDir(path: &Path::PathBuf): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::removeDirRaw(cPath.asStr() as str);
@@ -481,11 +521,13 @@ export namespace Fs {
     return Fs::removeDirAllRaw(path);
   }
 
+  /// Recursively removes a directory tree at an owned string path.
   function removeDirAll(path: &String): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::removeDirAllRaw(cPath.asStr() as str);
   }
 
+  /// Recursively removes a directory tree at a `PathBuf`.
   function removeDirAll(path: &Path::PathBuf): Result<void, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::removeDirAllRaw(cPath.asStr() as str);
@@ -501,11 +543,13 @@ export namespace Fs {
     return Fs::walkRaw(path);
   }
 
+  /// Walks an owned string path after path validation.
   function walk(path: &String): Result<Vector<String>, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::walkRaw(cPath.asStr() as str);
   }
 
+  /// Walks a `PathBuf` after path validation.
   function walk(path: &Path::PathBuf): Result<Vector<String>, Io::IoError> {
     let cPath: FFI::CString = Fs::validatedPath(path)!;
     return Fs::walkRaw(cPath.asStr() as str);

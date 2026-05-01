@@ -14,9 +14,14 @@ const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
 const FNV_PRIME: u64 = 1099511628211;
 
 extern __hash_rt {
+  /// Continues an FNV-1a hash over a NUL-terminated C string.
   function ignis_hash_fnv1a_cstr(state: u64, value: str): u64;
 }
 
+/// Trait for values that can feed their canonical bytes into a `Hasher`.
+///
+/// Implementations must be consistent with `Eq`: if two values compare equal,
+/// they must write the same byte sequence to the hasher.
 export trait Hash {
   hash(&self, hasher: &mut Hasher): void;
 }
@@ -27,34 +32,47 @@ export trait Hash {
 /// `equals(&self, other: &ConcreteType): boolean`.
 export trait Eq {}
 
+/// Deterministic 64-bit FNV-1a hasher used by std collections.
+///
+/// The hasher has a fixed seed and byte order, so output is stable across runs
+/// for the same std implementation. It is intended for hash tables and tests,
+/// not for cryptographic or adversarial-input protection.
 export record Hasher {
+  /// Current FNV-1a state.
   state: u64;
 
+  /// Creates a hasher initialized to the FNV offset basis.
   public static new(): Hasher {
     return Hasher { state: FNV_OFFSET_BASIS };
   }
 
+  /// Resets this hasher to its initial offset-basis state.
   public reset(&mut self): void {
     self.state = FNV_OFFSET_BASIS;
   }
 
+  /// Mixes one byte into the current FNV-1a state.
   public writeByte(&mut self, value: u8): void {
     self.state = (self.state ^ (value as u64)) * FNV_PRIME;
   }
 
+  /// Mixes a boolean as a single canonical byte (`0` or `1`).
   public writeBoolean(&mut self, value: boolean): void {
     self.writeByte(value ? 1 : 0);
   }
 
+  /// Mixes a byte-backed Ignis `char` value.
   public writeChar(&mut self, value: char): void {
     self.writeByte(value as u8);
   }
 
+  /// Mixes a `u16` in little-endian byte order.
   public writeU16(&mut self, value: u16): void {
     self.writeByte((value & 0x00ff) as u8);
     self.writeByte(((value >> 8) & 0x00ff) as u8);
   }
 
+  /// Mixes a `u32` in little-endian byte order.
   public writeU32(&mut self, value: u32): void {
     self.writeByte((value & 0x000000ff) as u8);
     self.writeByte(((value >> 8) & 0x000000ff) as u8);
@@ -62,6 +80,7 @@ export record Hasher {
     self.writeByte(((value >> 24) & 0x000000ff) as u8);
   }
 
+  /// Mixes a `u64` in little-endian byte order.
   public writeU64(&mut self, value: u64): void {
     self.writeByte((value & 0x00000000000000ff) as u8);
     self.writeByte(((value >> 8) & 0x00000000000000ff) as u8);
@@ -73,38 +92,50 @@ export record Hasher {
     self.writeByte(((value >> 56) & 0x00000000000000ff) as u8);
   }
 
+  /// Mixes an `i8` by its two's-complement byte representation.
   public writeI8(&mut self, value: i8): void {
     self.writeByte(value as u8);
   }
 
+  /// Mixes an `i16` by its two's-complement little-endian representation.
   public writeI16(&mut self, value: i16): void {
     self.writeU16(value as u16);
   }
 
+  /// Mixes an `i32` by its two's-complement little-endian representation.
   public writeI32(&mut self, value: i32): void {
     self.writeU32(value as u32);
   }
 
+  /// Mixes an `i64` by its two's-complement little-endian representation.
   public writeI64(&mut self, value: i64): void {
     self.writeU64(value as u64);
   }
 
+  /// Mixes a NUL-terminated string view.
+  ///
+  /// Hashing stops at the first NUL byte because `str` is represented as a C
+  /// string view. Owned `String` hashing should not use this for interior-NUL
+  /// preserving behavior.
   public writeStr(&mut self, value: str): void {
     self.state = __hash_rt::ignis_hash_fnv1a_cstr(self.state, value);
   }
 
+  /// Returns the current 64-bit hash state without resetting the hasher.
   public finish(&self): u64 {
     return self.state;
   }
 }
 
 @extension(boolean)
+/// Implements `Hash` for `boolean` using `Hasher::writeBoolean`.
 function hash(value: boolean, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeBoolean(value);
 }
 
 @extension(boolean)
+/// Implements canonical equality for booleans.
 function equals(value: boolean, other: boolean): boolean {
   if (value) {
     return other;
@@ -114,111 +145,134 @@ function equals(value: boolean, other: boolean): boolean {
 }
 
 @extension(char)
+/// Implements `Hash` for byte-backed `char` values.
 function hash(value: char, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeChar(value);
 }
 
 @extension(char)
+/// Implements canonical equality for `char`.
 function equals(value: char, other: char): boolean {
   return value == other;
 }
 
 @extension(i8)
+/// Implements `Hash` for `i8`.
 function hash(value: i8, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeI8(value);
 }
 
 @extension(i8)
+/// Implements canonical equality for `i8`.
 function equals(value: i8, other: i8): boolean {
   return value == other;
 }
 
 @extension(i16)
+/// Implements `Hash` for `i16`.
 function hash(value: i16, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeI16(value);
 }
 
 @extension(i16)
+/// Implements canonical equality for `i16`.
 function equals(value: i16, other: i16): boolean {
   return value == other;
 }
 
 @extension(i32)
+/// Implements `Hash` for `i32`.
 function hash(value: i32, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeI32(value);
 }
 
 @extension(i32)
+/// Implements canonical equality for `i32`.
 function equals(value: i32, other: i32): boolean {
   return value == other;
 }
 
 @extension(i64)
+/// Implements `Hash` for `i64`.
 function hash(value: i64, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeI64(value);
 }
 
 @extension(i64)
+/// Implements canonical equality for `i64`.
 function equals(value: i64, other: i64): boolean {
   return value == other;
 }
 
 @extension(u8)
+/// Implements `Hash` for `u8`.
 function hash(value: u8, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeByte(value);
 }
 
 @extension(u8)
+/// Implements canonical equality for `u8`.
 function equals(value: u8, other: u8): boolean {
   return value == other;
 }
 
 @extension(u16)
+/// Implements `Hash` for `u16`.
 function hash(value: u16, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeU16(value);
 }
 
 @extension(u16)
+/// Implements canonical equality for `u16`.
 function equals(value: u16, other: u16): boolean {
   return value == other;
 }
 
 @extension(u32)
+/// Implements `Hash` for `u32`.
 function hash(value: u32, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeU32(value);
 }
 
 @extension(u32)
+/// Implements canonical equality for `u32`.
 function equals(value: u32, other: u32): boolean {
   return value == other;
 }
 
 @extension(u64)
+/// Implements `Hash` for `u64`.
 function hash(value: u64, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeU64(value);
 }
 
 @extension(u64)
+/// Implements canonical equality for `u64`.
 function equals(value: u64, other: u64): boolean {
   return value == other;
 }
 
 @extension(str)
+/// Implements `Hash` for NUL-terminated string views.
 function hash(value: str, hasher: &mut Hasher): void {
   let mut state: &mut Hasher = hasher;
   state.writeStr(value);
 }
 
 @extension(str)
+/// Implements byte-wise equality for NUL-terminated string views.
+///
+/// Comparison stops at the first NUL byte in either view. Use owned `String`
+/// equality when interior NUL bytes must participate in comparison.
 function equals(value: str, other: str): boolean {
   let left: *u8 = value as *u8;
   let right: *u8 = other as *u8;

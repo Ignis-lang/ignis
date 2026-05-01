@@ -1,17 +1,57 @@
+//!
 //! # Serializer Errors
 //!
 //! Shared structured error types for std serialization entrypoints.
+//!
+//! ## Overview
+//!
+//! Serializer errors are format-neutral. Front-ends such as `std::json` and
+//! `std::toml` return the same error type so callers can handle serialization
+//! failures without depending on a concrete writer implementation.
+//!
+//! ## Error Kinds
+//!
+//! | Kind                       | Meaning                                      |
+//! |----------------------------|----------------------------------------------|
+//! | `UNSUPPORTED_ROOT_SHAPE`   | The format rejected the requested root value  |
+//! | `INVALID_FIELD_KEY`        | A record field key cannot be emitted safely   |
+//!
+//! Error messages are human-readable diagnostics. Match on `kind` for program
+//! control flow.
 
 export namespace Serializer {
+  /// Machine-readable serializer failure category.
   enum ErrorKind {
+    /// The selected writer does not support the requested root shape.
     UNSUPPORTED_ROOT_SHAPE,
+
+    /// A field key cannot be represented with the selected writer settings.
     INVALID_FIELD_KEY,
   }
 
+  /// Structured serializer failure with a stable kind and diagnostic message.
   record Error {
+    /// Machine-readable error category.
     public kind: ErrorKind;
+
+    /// Human-readable explanation suitable for diagnostics.
     public message: String;
 
+    /// Creates a serializer error with an owned diagnostic message.
+    ///
+    /// # Arguments
+    ///
+    /// - `kind`: stable category used by callers for control flow.
+    /// - `message`: human-readable explanation copied into the error.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let error: Serializer::Error = Serializer::Error::new(
+    ///   Serializer::ErrorKind::INVALID_FIELD_KEY,
+    ///   "field key must be bare ASCII",
+    /// );
+    /// ```
     public static new(kind: ErrorKind, message: str): Error {
       return Error {
         kind: kind,
@@ -19,10 +59,33 @@ export namespace Serializer {
       };
     }
 
+    /// Creates an `UNSUPPORTED_ROOT_SHAPE` error.
+    ///
+    /// Used when a front-end such as TOML rejects scalar document roots.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let error: Serializer::Error = Serializer::Error::unsupportedRootShape(
+    ///   "TOML root must be a record",
+    /// );
+    /// ```
     public static unsupportedRootShape(message: str): Error {
       return Error::new(ErrorKind::UNSUPPORTED_ROOT_SHAPE, message);
     }
 
+    /// Creates an `INVALID_FIELD_KEY` error.
+    ///
+    /// Used when a writer requires bare keys and the supplied field name does
+    /// not match the serializer's accepted bare-key character set.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let error: Serializer::Error = Serializer::Error::invalidFieldKey(
+    ///   "bare field keys only support ASCII letters, digits, '_' and '-'",
+    /// );
+    /// ```
     public static invalidFieldKey(message: str): Error {
       return Error::new(ErrorKind::INVALID_FIELD_KEY, message);
     }

@@ -1,6 +1,65 @@
+//!
 //! # Serializer
 //!
 //! Opt-in std serialization contracts shared by JSON and TOML front-ends.
+//!
+//! ## Overview
+//!
+//! `std::serializer` defines a small format-agnostic writer surface. Concrete
+//! modules such as `std::json` and `std::toml` provide writer settings, while
+//! user-defined records opt in by implementing `Serialize`.
+//!
+//! The module intentionally separates three responsibilities:
+//!
+//! | Layer                  | Responsibility                                  |
+//! |------------------------|--------------------------------------------------|
+//! | `Serializer::Writer`   | Format punctuation and root-shape policy         |
+//! | `Serializer::write`    | Scalar text and string escaping helpers          |
+//! | `Serialize` trait      | User record field ordering and value selection   |
+//!
+//! Concrete front-ends create a writer and then call either scalar overloads or
+//! a user-provided `Serialize` implementation. Records use `beginRecord`,
+//! `writeField`, scalar `write` overloads, and `endRecord` to produce output.
+//!
+//! ```text
+//!   Json::stringify(value) / Toml::stringify(value)
+//!                 │
+//!                 ▼
+//!        concrete Serializer::Writer
+//!                 │
+//!                 ▼
+//!   scalar overloads or value.serialize(...)
+//!                 │
+//!                 ▼
+//!        caller-provided output String
+//! ```
+//!
+//! ## Exports
+//!
+//! | Export        | Description                                      |
+//! |---------------|--------------------------------------------------|
+//! | `Serialize`   | Trait for records that can write themselves      |
+//! | `Serializer`  | Writer configuration, helpers, and error types   |
+//!
+//! ## Notes
+//!
+//! The current serializer is text-oriented and writes into an existing
+//! `String`. It supports scalar roots only when the selected format allows
+//! them, and validates bare field names for formats such as TOML.
+//!
+//! Writer helpers append to the output string. They do not clear existing
+//! content, allocate a destination automatically, or validate that callers emit a
+//! complete record. A `Serialize` implementation is responsible for pairing
+//! `beginRecord` with `endRecord` and for passing the correct `first` flag to
+//! `writeField` so separators are emitted in the right positions.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Serializer, Serialize from "std::serializer";
+//!
+//! // Format front-ends provide a Serializer::Writer for concrete output.
+//! ```
 
 export Serialize from "std::serializer::serialize";
 export Serializer from "std::serializer::writer";

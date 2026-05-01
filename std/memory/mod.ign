@@ -193,14 +193,23 @@ export ArenaAllocator;
 /// - Correct size calculations
 /// - Proper alignment (handled by the runtime)
 extern __memory {
+  /// Allocates `size` bytes using the runtime allocator.
   function ignis_alloc(size: u64): *mut u8;
+  /// Allocates `size` bytes with an explicit alignment.
   function ignis_alloc_aligned(size: u64, alignment: u64): *mut u8;
+  /// Frees a pointer previously returned by the runtime allocator.
   function ignis_free(ptr: *mut u8): void;
+  /// Reallocates `ptr` to `size` bytes using default alignment.
   function ignis_realloc(ptr: *mut u8, size: u64): *mut u8;
+  /// Reallocates `ptr` to `size` bytes with an explicit alignment.
   function ignis_realloc_aligned(ptr: *mut u8, size: u64, alignment: u64): *mut u8;
+  /// Allocates zeroed storage for `count * size` bytes.
   function ignis_calloc(count: u64, size: u64): *mut u8;
+  /// Allocates zeroed storage with explicit alignment.
   function ignis_calloc_aligned(count: u64, size: u64, alignment: u64): *mut u8;
+  /// Copies `n` bytes from `src` to `dest`; regions must not overlap.
   function ignis_memcpy(dest: *mut u8, src: *u8, n: u64): void;
+  /// Moves `n` bytes from `src` to `dest`; regions may overlap.
   function ignis_memmove(dest: *mut u8, src: *u8, n: u64): void;
 }
 
@@ -210,6 +219,7 @@ extern __memory {
 /// in the runtime instead of returning `Option`, `Result`, or `null`.
 /// Zero-sized layouts return `null` because no backing storage is needed.
 export namespace GlobalAllocator {
+  /// Allocates storage for `layout`, returning null for zero-sized layouts.
   function allocate(layout: Layout): *mut u8 {
     if (layout.size() == 0) {
       return null;
@@ -218,6 +228,7 @@ export namespace GlobalAllocator {
     return __memory::ignis_alloc_aligned(layout.size(), layout.align());
   }
 
+  /// Allocates zero-initialized storage for `layout`.
   function allocateZeroed(layout: Layout): *mut u8 {
     if (layout.size() == 0) {
       return null;
@@ -226,6 +237,9 @@ export namespace GlobalAllocator {
     return __memory::ignis_calloc_aligned(1, layout.size(), layout.align());
   }
 
+  /// Resizes an existing allocation to `layout`.
+  ///
+  /// Passing a zero-sized layout frees the existing pointer and returns null.
   function reallocate(pointer: *mut u8, layout: Layout): *mut u8 {
     if (layout.size() == 0) {
       if (pointer != null) {
@@ -238,6 +252,7 @@ export namespace GlobalAllocator {
     return __memory::ignis_realloc_aligned(pointer, layout.size(), layout.align());
   }
 
+  /// Frees a pointer allocated by `GlobalAllocator` or the runtime allocator.
   function free(pointer: *mut u8): void {
     __memory::ignis_free(pointer);
   }

@@ -1,20 +1,80 @@
+//!
+//! # TOML Values
+//!
+//! Owned TOML document, table, array, and scalar value model.
+//!
+//! ## Overview
+//!
+//! The value layer stores parsed TOML data in owned Ignis records and provides
+//! lookup helpers for dotted paths. Tables preserve explicit table state so the
+//! parser can distinguish duplicate keys, table conflicts, and arrays of tables.
+//!
+
 import Memory from "std::memory";
 import Vector from "std::vector";
 
 import TomlError from "./error";
 import TomlSpan, TomlToken, TomlTokenKind from "./token";
 
+/// Splits a dotted TOML lookup path into owned string segments.
+///
+/// Lookup helpers use this for public `"a.b.c"` path APIs. It performs a simple
+/// byte split on `.` and does not implement quoted-key escaping; callers that
+/// need exact TOML syntax should use parsed document paths instead.
 function tomlPathSegments(path: &String): Vector<String> {
   return path.split((byte: u8): boolean -> {
     return byte == ('.' as u8);
   });
 }
 
+/// Copies a borrowed string into TOML-owned string storage.
+///
+/// TOML values store string-like payloads as `str` for compact access, but the
+/// backing memory must outlive parser temporaries. This overload first creates
+/// an owned `String`, then delegates to the `&String` overload that allocates a
+/// NUL-terminated byte buffer.
+///
+/// # Arguments
+///
+/// - `value`: borrowed UTF-8 string slice to preserve.
+///
+/// # Returns
+///
+/// A `str` pointing to newly allocated TOML-owned storage.
+///
+/// # Example
+///
+/// ```ignis
+/// let owned: str = tomlOwnedStr("package");
+/// ```
 function tomlOwnedStr(value: str): str {
   let owned: String = String::create(value);
   return tomlOwnedStr(&owned);
 }
 
+/// Copies a `String` into TOML-owned NUL-terminated storage.
+///
+/// This helper is used by tokens, values, and table entries that need to store a
+/// stable `str` after parser-local `String` values go out of scope. The memory is
+/// allocated with `Memory::allocateVector<u8>` and is intentionally not reclaimed
+/// by the TOML value model yet.
+///
+/// # Arguments
+///
+/// - `value`: owned string whose bytes should be copied.
+///
+/// # Returns
+///
+/// A `str` view into newly allocated storage with a trailing NUL byte.
+///
+/// # Memory Layout
+///
+/// ```text
+///   input bytes: [p][k][g]
+///   allocated:   [p][k][g][\0]
+///                         ▲
+///                         C-string terminator for str interop
+/// ```
 function tomlOwnedStr(value: &String): str {
   let bytes: Vector<u8> = value.toBytes();
   let length: u64 = bytes.length();
@@ -28,6 +88,21 @@ function tomlOwnedStr(value: &String): str {
   return raw as str;
 }
 
+/// Returns the best diagnostic span for a parser cursor position.
+///
+/// Parser cursors may point at EOF or one position past the last real token.
+/// This helper keeps error reporting stable by using the requested token span
+/// when available, or the last token span as a fallback.
+///
+/// # Arguments
+///
+/// - `tokens`: pointer to the first token in the stream.
+/// - `length`: number of tokens in the stream.
+/// - `index`: cursor index that triggered an error.
+///
+/// # Returns
+///
+/// A stable span for diagnostics. Empty streams return `TomlSpan::new(0, 0)`.
 function tomlUnexpectedParserSpan(tokens: *mut TomlToken, length: u64, index: u64): TomlSpan {
   if (tokens == null || length == 0) {
     return TomlSpan::new(0, 0);
@@ -40,11 +115,46 @@ function tomlUnexpectedParserSpan(tokens: *mut TomlToken, length: u64, index: u6
   return (*(tokens + index)).span;
 }
 
+/// Cursor over a TOML token stream used by parser tests and parser helpers.
+///
+/// The cursor is a lightweight view into a `Vector<TomlToken>`. It does not own
+/// the token memory; callers must keep the source vector alive while the cursor
+/// is used.
+///
+/// # Cursor Model
+///
+/// ```text
+///   tokens:  [IDENTIFIER][EQUALS][STRING][EOF]
+///             index=0
+///
+///   advance() -> IDENTIFIER, index=1
+///   peekKind() -> EQUALS, index stays 1
+/// ```
 export record TomlParserCursor {
+  /// Borrowed pointer to token storage owned by a `Vector<TomlToken>`.
   tokens: *mut TomlToken;
+
+  /// Number of tokens available through `tokens`.
   length: u64;
+
+  /// Current cursor index.
   index: u64;
 
+  /// Creates a cursor over a token vector.
+  ///
+  /// # Arguments
+  ///
+  /// - `tokens`: token vector to view. It must outlive the cursor.
+  ///
+  /// # Returns
+  ///
+  /// A cursor positioned at index 0.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let cursor: TomlParserCursor = TomlParserCursor::create(&tokens);
+  /// ```
   public static create(tokens: &Vector<TomlToken>): TomlParserCursor {
     return TomlParserCursor {
       tokens: tokens.asPtr() as *mut TomlToken,
@@ -53,6 +163,10 @@ export record TomlParserCursor {
     };
   }
 
+  /// Returns the kind of the current token without advancing.
+  ///
+  /// Returns `Option::NONE` when the cursor has no token storage or has moved
+  /// past the end of the token stream.
   public peekKind(&self): Option<TomlTokenKind> {
     if (self.tokens == null || self.index >= self.length) {
       return Option::NONE;
@@ -61,6 +175,10 @@ export record TomlParserCursor {
     return Option::SOME((*(self.tokens + self.index)).kind);
   }
 
+  /// Returns the current token lexeme without advancing.
+  ///
+  /// The returned `str` borrows from the token's owned `String`. It remains valid
+  /// as long as the underlying token vector is alive.
   public peekLexeme(&self): Option<str> {
     if (self.tokens == null || self.index >= self.length) {
       return Option::NONE;
@@ -69,6 +187,9 @@ export record TomlParserCursor {
     return Option::SOME((*(self.tokens + self.index)).lexeme.toStr());
   }
 
+  /// Returns the current token span without advancing.
+  ///
+  /// Use this for diagnostics that need to report the lookahead token.
   public peekSpan(&self): Option<TomlSpan> {
     if (self.tokens == null || self.index >= self.length) {
       return Option::NONE;
@@ -77,6 +198,10 @@ export record TomlParserCursor {
     return Option::SOME((*(self.tokens + self.index)).span);
   }
 
+  /// Consumes the current token and returns its kind.
+  ///
+  /// If the cursor is already past the stream, the index is unchanged and the
+  /// result is `Option::NONE`.
   public advance(&mut self): Option<TomlTokenKind> {
     let current: Option<TomlTokenKind> = self.peekKind();
 
@@ -88,6 +213,11 @@ export record TomlParserCursor {
     return Option::NONE;
   }
 
+  /// Consumes consecutive `NEWLINE` tokens.
+  ///
+  /// TOML parsing uses newlines as statement separators. This helper centralizes
+  /// the common pattern of allowing blank lines between table headers and
+  /// assignments.
   public skipNewlines(&mut self): void {
     while (true) {
       let Option::SOME(token) = self.peekKind() else {
@@ -102,6 +232,11 @@ export record TomlParserCursor {
     }
   }
 
+  /// Consumes the current token only if it has the requested kind.
+  ///
+  /// # Returns
+  ///
+  /// `true` when a token was consumed, otherwise `false`.
   public matchKind(&mut self, kind: TomlTokenKind): boolean {
     let Option::SOME(token) = self.peekKind() else {
       return false;
@@ -115,6 +250,13 @@ export record TomlParserCursor {
     return true;
   }
 
+  /// Requires the current token to have a specific kind and consumes it.
+  ///
+  /// # Returns
+  ///
+  /// `Result::OK(span)` with the consumed token span on success, or
+  /// `Result::ERROR(TomlError::unexpectedToken(...))` when the stream is empty
+  /// or the current token has a different kind.
   public expect(&mut self, kind: TomlTokenKind): Result<TomlSpan, TomlError> {
     let Option::SOME(token) = self.peekKind() else {
       return Result::ERROR(TomlError::unexpectedToken(tomlUnexpectedParserSpan(self.tokens, self.length, self.index)));
@@ -130,10 +272,18 @@ export record TomlParserCursor {
     return Result::OK(span);
   }
 
+  /// Returns a diagnostic span for the current cursor position.
+  ///
+  /// If the cursor is at EOF or past the end, the last token span is used as a
+  /// fallback so errors still point near the source location that ended parsing.
   public tokenSpan(&self): TomlSpan {
     return tomlUnexpectedParserSpan(self.tokens, self.length, self.index);
   }
 
+  /// Returns the span of the previously consumed token.
+  ///
+  /// At the beginning of the stream there is no previous token, so this returns
+  /// an empty zero span.
   public previousSpan(&self): TomlSpan {
     if (self.index == 0) {
       return TomlSpan::new(0, 0);
@@ -142,6 +292,9 @@ export record TomlParserCursor {
     return tomlUnexpectedParserSpan(self.tokens, self.length, self.index - 1);
   }
 
+  /// Returns whether the cursor is positioned at the logical end of input.
+  ///
+  /// A missing token or an explicit `EOF` token both count as end-of-input.
   public isAtEnd(&self): boolean {
     let Option::SOME(token) = self.peekKind() else {
       return true;
@@ -151,34 +304,77 @@ export record TomlParserCursor {
   }
 }
 
+/// Runtime kind tag for `TomlValue`.
+///
+/// `TomlValue` stores all possible payload fields in one record and uses this
+/// tag to identify which payload is active. Accessors such as `asString` and
+/// `asArray` check this tag before returning typed data.
 export enum TomlValueKind {
+  /// TOML basic, literal, multiline, or quoted-key string value.
   STRING,
+  /// Signed integer value.
   INTEGER,
+  /// Floating-point value, including TOML special floats.
   FLOAT,
+  /// Boolean value.
   BOOLEAN,
+  /// Ordered array value.
   ARRAY,
+  /// Table value.
   TABLE,
+  /// Array of tables value.
   ARRAY_OF_TABLES,
+  /// Date, time, or datetime scalar stored as `TomlDateTime`.
   DATE_TIME,
 }
 
+/// Structured datetime category recognized by the TOML parser.
+///
+/// TOML has several date/time shapes. The parser preserves the original raw
+/// text and also records the classified shape for callers that need to
+/// distinguish local dates from offset datetimes.
 export enum TomlDateTimeKind {
+  /// Calendar date without a time component, for example `1979-05-27`.
   LOCAL_DATE,
+  /// Time without a date component, for example `07:32:00`.
   LOCAL_TIME,
+  /// Local date plus time without a UTC offset.
   LOCAL_DATE_TIME,
+  /// Date plus time with `Z` or numeric UTC offset.
   OFFSET_DATE_TIME,
 }
 
+/// Parser state for a TOML table definition.
+///
+/// This state lets the parser distinguish tables created implicitly by dotted
+/// keys from tables explicitly declared by `[table]` or inline table syntax.
 export enum TomlTableState {
+  /// Table was created by a dotted path before an explicit header appeared.
   IMPLICIT,
+  /// Table was declared with a normal TOML header.
   EXPLICIT,
+  /// Table came from inline table syntax: `{ key = value }`.
   INLINE,
 }
 
+/// One segment of a dotted TOML path plus its source span.
+///
+/// For `package.metadata.name`, each segment stores the segment text and the
+/// source range that produced it. Parser diagnostics use the span for duplicate
+/// key and table conflict errors.
 export record TomlPathSegment {
+  /// TOML-owned segment text.
   public text: str;
+
+  /// Source span of this segment.
   public span: TomlSpan;
 
+  /// Creates a path segment by copying `text` into TOML-owned storage.
+  ///
+  /// # Arguments
+  ///
+  /// - `text`: segment text without dots.
+  /// - `span`: source span for this segment.
   public static new(text: &String, span: TomlSpan): TomlPathSegment {
     return TomlPathSegment {
       text: tomlOwnedStr(text),
@@ -187,19 +383,43 @@ export record TomlPathSegment {
   }
 }
 
+/// Structured TOML date/time value.
+///
+/// The parser keeps both the raw source representation and parsed numeric
+/// fields. Fields that do not apply to the selected `kind` are set to zero.
+/// `offsetMinutes` is zero for local date/time values.
 export record TomlDateTime {
+  /// TOML-owned raw literal text.
   public raw: str;
+  /// Classified datetime shape.
   public kind: TomlDateTimeKind;
+  /// Four-digit year for date-bearing values, or 0 for local time.
   public year: i32;
+  /// Month number for date-bearing values, or 0 for local time.
   public month: i32;
+  /// Day number for date-bearing values, or 0 for local time.
   public day: i32;
+  /// Hour component for time-bearing values.
   public hour: i32;
+  /// Minute component for time-bearing values.
   public minute: i32;
+  /// Second component for time-bearing values.
   public second: i32;
+  /// Number of fractional second digits preserved from the literal.
   public fractionalDigits: i32;
+  /// UTC offset in minutes for offset datetimes.
   public offsetMinutes: i32;
+  /// Source span of the datetime literal.
   public span: TomlSpan;
 
+  /// Creates a structured datetime with explicit components.
+  ///
+  /// # Arguments
+  ///
+  /// - `raw`: original TOML literal text.
+  /// - `kind`: datetime category.
+  /// - numeric fields: parsed date/time/offset components.
+  /// - `span`: source span for diagnostics.
   public static new(
     raw: str,
     kind: TomlDateTimeKind,
@@ -228,6 +448,10 @@ export record TomlDateTime {
     };
   }
 
+  /// Creates an offset datetime value.
+  ///
+  /// This is a convenience wrapper around `TomlDateTime::new` that fixes the
+  /// kind to `OFFSET_DATE_TIME`.
   public static offsetDateTime(
     raw: str,
     year: i32,
@@ -255,14 +479,29 @@ export record TomlDateTime {
     );
   }
 
+  /// Creates a local date value with zeroed time fields.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let date: TomlDateTime = TomlDateTime::localDate("1979-05-27", 1979, 5, 27, TomlSpan::new(0, 10));
+  /// ```
   public static localDate(raw: str, year: i32, month: i32, day: i32, span: TomlSpan): TomlDateTime {
     return TomlDateTime::new(raw, TomlDateTimeKind::LOCAL_DATE, year, month, day, 0, 0, 0, 0, 0, span);
   }
 
+  /// Returns the zero/default datetime used by inactive `TomlValue` payloads.
+  ///
+  /// `TomlValue` is a tagged record rather than a union; inactive datetime
+  /// storage is filled with this value.
   public static empty(): TomlDateTime {
     return TomlDateTime::localDate("", 0, 0, 0, TomlSpan::new(0, 0));
   }
 
+  /// Clones this datetime value.
+  ///
+  /// The raw `str` pointer is copied as-is because it points at TOML-owned
+  /// immutable storage.
   public clone(&self): TomlDateTime {
     return TomlDateTime {
       raw: self.raw,
@@ -280,19 +519,37 @@ export record TomlDateTime {
   }
 }
 
+/// Tagged TOML value with scalar, array, table, and datetime payloads.
+///
+/// `TomlValue` uses a manual tagged representation: `kind` identifies the active
+/// payload and the remaining fields contain defaults or pointers to heap-owned
+/// nested structures. Arrays and tables are stored indirectly to avoid recursive
+/// value-by-value record layout.
 export record TomlValue {
+  /// Active payload kind.
   public kind: TomlValueKind;
+  /// Source span of the value literal or composite value.
   public span: TomlSpan;
+  /// Source span of the key that introduced this value.
   public keySpan: TomlSpan;
+  /// Active when `kind == TomlValueKind::STRING`.
   public stringValue: str;
+  /// Active when `kind == TomlValueKind::INTEGER`.
   public integerValue: i64;
+  /// Active when `kind == TomlValueKind::FLOAT`.
   public floatValue: f64;
+  /// Active when `kind == TomlValueKind::BOOLEAN`.
   public booleanValue: boolean;
+  /// Heap pointer active when `kind == TomlValueKind::ARRAY`.
   public arrayValue: *mut TomlArray;
+  /// Heap pointer active when `kind == TomlValueKind::TABLE`.
   public tableValue: *mut TomlTable;
+  /// Heap pointer active when `kind == TomlValueKind::ARRAY_OF_TABLES`.
   public arrayOfTablesValue: *mut TomlArrayOfTables;
+  /// Active when `kind == TomlValueKind::DATE_TIME`.
   public dateTimeValue: TomlDateTime;
 
+  /// Creates a string value and copies the text into TOML-owned storage.
   public static string(value: str, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::STRING,
@@ -309,6 +566,7 @@ export record TomlValue {
     };
   }
 
+  /// Creates an integer value.
   public static integer(value: i64, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::INTEGER,
@@ -325,6 +583,7 @@ export record TomlValue {
     };
   }
 
+  /// Creates a floating-point value.
   public static float(value: f64, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::FLOAT,
@@ -341,6 +600,7 @@ export record TomlValue {
     };
   }
 
+  /// Creates a boolean value.
   public static fromBoolean(value: boolean, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::BOOLEAN,
@@ -357,6 +617,9 @@ export record TomlValue {
     };
   }
 
+  /// Creates an array value by storing the array behind a heap pointer.
+  ///
+  /// Arrays are recursive containers, so `TomlValue` stores them indirectly.
   public static array(value: TomlArray, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::ARRAY,
@@ -373,6 +636,7 @@ export record TomlValue {
     };
   }
 
+  /// Creates a table value by storing the table behind a heap pointer.
   public static table(value: TomlTable, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::TABLE,
@@ -389,6 +653,7 @@ export record TomlValue {
     };
   }
 
+  /// Creates an array-of-tables value by storing entries behind a heap pointer.
   public static arrayOfTables(
     value: TomlArrayOfTables,
     span: TomlSpan,
@@ -409,6 +674,7 @@ export record TomlValue {
     };
   }
 
+  /// Creates a datetime scalar value.
   public static dateTime(value: TomlDateTime, span: TomlSpan, keySpan: TomlSpan): TomlValue {
     return TomlValue {
       kind: TomlValueKind::DATE_TIME,
@@ -425,10 +691,16 @@ export record TomlValue {
     };
   }
 
+  /// Returns the active payload kind.
   public kind(&self): TomlValueKind {
     return self.kind;
   }
 
+  /// Clones this value.
+  ///
+  /// Scalar payloads are copied directly. Nested array/table payload pointers are
+  /// copied shallowly because parsed TOML documents treat nested values as stable
+  /// immutable storage after construction.
   public clone(&self): TomlValue {
     return TomlValue {
       kind: self.kind,
@@ -445,6 +717,7 @@ export record TomlValue {
     };
   }
 
+  /// Returns the string payload when this value is a TOML string.
   public asString(&self): Option<str> {
     if (self.kind == TomlValueKind::STRING) {
       return Option::SOME(self.stringValue);
@@ -453,6 +726,7 @@ export record TomlValue {
     return Option::NONE;
   }
 
+  /// Returns the array payload when this value is a TOML array.
   public asArray(&self): Option<TomlArray> {
     if (self.kind == TomlValueKind::ARRAY) {
       return Option::SOME(*self.arrayValue);
@@ -461,37 +735,64 @@ export record TomlValue {
     return Option::NONE;
   }
 
+  /// Returns the integer payload.
+  ///
+  /// Callers should check `kind()` first. Inactive scalar fields contain default
+  /// values, so this method does not distinguish type mismatches by itself.
   public asInteger(&self): i64 {
     return self.integerValue;
   }
 
+  /// Returns the float payload.
+  ///
+  /// Callers should check `kind()` first. Inactive scalar fields contain default
+  /// values, so this method does not distinguish type mismatches by itself.
   public asFloat(&self): f64 {
     return self.floatValue;
   }
 
+  /// Returns the boolean payload.
+  ///
+  /// Callers should check `kind()` first. Inactive boolean storage is `false`.
   public asBoolean(&self): boolean {
     return self.booleanValue;
   }
 
+  /// Returns the table payload when this value is a TOML table.
   public asTable(&self): Option<TomlTable> {
     return self.kind == TomlValueKind::TABLE ? Option::SOME(*self.tableValue) : Option::NONE;
   }
 
+  /// Returns the array-of-tables payload.
+  ///
+  /// This accessor assumes the active kind is `ARRAY_OF_TABLES`; check `kind()`
+  /// before calling it when handling arbitrary values.
   public asArrayOfTables(&self): TomlArrayOfTables {
     return *self.arrayOfTablesValue;
   }
 
+  /// Returns the datetime payload when this value is a TOML datetime scalar.
   public asDateTime(&self): Option<TomlDateTime> {
     return self.kind == TomlValueKind::DATE_TIME ? Option::SOME(self.dateTimeValue.clone()) : Option::NONE;
   }
 }
 
+/// Ordered TOML array value.
+///
+/// `TomlArray` stores cloned `TomlValue` entries in a manually managed growable
+/// buffer. It is intentionally separate from `Vector<TomlValue>` so the parser
+/// can control cloning and recursive value storage explicitly.
 export record TomlArray {
+  /// Pointer to the array element storage.
   values: *mut TomlValue;
+  /// Number of initialized values.
   length: u64;
+  /// Number of value slots currently allocated.
   capacity: u64;
+  /// Source span covering the array expression.
   public span: TomlSpan;
 
+  /// Creates an empty TOML array with the given source span.
   public static new(span: TomlSpan): TomlArray {
     return TomlArray {
       values: null,
@@ -501,6 +802,10 @@ export record TomlArray {
     };
   }
 
+  /// Grows the backing storage using geometric doubling.
+  ///
+  /// Capacity starts at 1 and doubles whenever `push` would exceed the current
+  /// allocation.
   private grow(&mut self): void {
     let mut newCapacity: u64 = self.capacity * 2;
 
@@ -513,6 +818,11 @@ export record TomlArray {
     self.capacity = newCapacity;
   }
 
+  /// Appends a cloned TOML value to the array.
+  ///
+  /// # Arguments
+  ///
+  /// - `value`: value to clone into array storage.
   public push(&mut self, value: TomlValue): void {
     if (self.length == self.capacity) {
       self.grow();
@@ -522,10 +832,16 @@ export record TomlArray {
     self.length += 1;
   }
 
+  /// Returns the number of initialized array values.
   public length(&self): u64 {
     return self.length;
   }
 
+  /// Returns a cloned value at `index` when it exists.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(value)` for in-bounds indices, otherwise `Option::NONE`.
   public item(&self, index: u64): Option<TomlValue> {
     if (index >= self.length) {
       return Option::NONE;
@@ -535,11 +851,16 @@ export record TomlArray {
   }
 }
 
+/// Single key/value entry in a TOML table.
 export record TomlTableEntry {
+  /// TOML-owned key text.
   public key: str;
+  /// Stored value for this key.
   public value: TomlValue;
+  /// Source span of the key.
   public keySpan: TomlSpan;
 
+  /// Creates an entry from a borrowed key string.
   public static new(key: str, value: TomlValue, keySpan: TomlSpan): TomlTableEntry {
     return TomlTableEntry {
       key: tomlOwnedStr(key),
@@ -548,6 +869,7 @@ export record TomlTableEntry {
     };
   }
 
+  /// Creates an entry from an owned key string reference.
   public static create(key: &String, value: TomlValue, keySpan: TomlSpan): TomlTableEntry {
     return TomlTableEntry {
       key: tomlOwnedStr(key),
@@ -557,13 +879,23 @@ export record TomlTableEntry {
   }
 }
 
+/// TOML key/value table.
+///
+/// Tables store entries in insertion order. The parser uses `state` to validate
+/// duplicate table declarations and conflicts between scalar values and tables.
 export record TomlTable {
+  /// Pointer to table entry storage.
   entries: *mut TomlTableEntry;
+  /// Number of initialized entries.
   length: u64;
+  /// Number of allocated entry slots.
   capacity: u64;
+  /// Source span for this table.
   public span: TomlSpan;
+  /// Whether this table is implicit, explicit, or inline.
   public state: TomlTableState;
 
+  /// Creates an empty implicit table.
   public static new(span: TomlSpan): TomlTable {
     return TomlTable {
       entries: null,
@@ -574,6 +906,7 @@ export record TomlTable {
     };
   }
 
+  /// Grows table entry storage using geometric doubling.
   private grow(&mut self): void {
     let mut newCapacity: u64 = self.capacity * 2;
 
@@ -586,6 +919,7 @@ export record TomlTable {
     self.capacity = newCapacity;
   }
 
+  /// Appends a pre-built table entry.
   private pushEntry(&mut self, entry: TomlTableEntry): void {
     if (self.length == self.capacity) {
       self.grow();
@@ -595,14 +929,24 @@ export record TomlTable {
     self.length += 1;
   }
 
+  /// Inserts a value by borrowed key text.
+  ///
+  /// This method does not reject duplicates; parser validation performs conflict
+  /// checks before insertion.
   public insert(&mut self, key: str, value: TomlValue, keySpan: TomlSpan): void {
     self.pushEntry(TomlTableEntry::new(key, value, keySpan));
   }
 
+  /// Inserts a value by owned key string reference.
   public insert(&mut self, key: &String, value: TomlValue, keySpan: TomlSpan): void {
     self.pushEntry(TomlTableEntry::create(key, value, keySpan));
   }
 
+  /// Looks up a table value by key.
+  ///
+  /// # Returns
+  ///
+  /// A cloned `TomlValue` when the key exists, otherwise `Option::NONE`.
   public valueForKey(&self, key: &String): Option<TomlValue> {
     let mut index: u64 = 0;
 
@@ -621,6 +965,10 @@ export record TomlTable {
     return Option::NONE;
   }
 
+  /// Looks up a mutable pointer to a table entry by key.
+  ///
+  /// Parser code uses this to mutate existing implicit tables while building
+  /// dotted paths and arrays of tables.
   public entryForKeyPointer(&mut self, key: &String): Option<*mut TomlTableEntry> {
     let mut index: u64 = 0;
 
@@ -638,12 +986,21 @@ export record TomlTable {
   }
 }
 
+/// TOML array-of-tables container.
+///
+/// Each entry is a full `TomlTable` corresponding to one `[[table]]` header.
+/// Entries preserve parse order.
 export record TomlArrayOfTables {
+  /// Pointer to table entry storage.
   entries: *mut TomlTable;
+  /// Number of initialized table entries.
   length: u64;
+  /// Number of allocated table slots.
   capacity: u64;
+  /// Source span for the array-of-tables header or container.
   public span: TomlSpan;
 
+  /// Creates an empty array-of-tables container.
   public static new(span: TomlSpan): TomlArrayOfTables {
     return TomlArrayOfTables {
       entries: null,
@@ -653,6 +1010,7 @@ export record TomlArrayOfTables {
     };
   }
 
+  /// Grows table storage using geometric doubling.
   private grow(&mut self): void {
     let mut newCapacity: u64 = self.capacity * 2;
 
@@ -665,6 +1023,7 @@ export record TomlArrayOfTables {
     self.capacity = newCapacity;
   }
 
+  /// Appends a table entry.
   public push(&mut self, value: TomlTable): void {
     if (self.length == self.capacity) {
       self.grow();
@@ -674,10 +1033,12 @@ export record TomlArrayOfTables {
     self.length += 1;
   }
 
+  /// Returns the number of stored table entries.
   public length(&self): u64 {
     return self.length;
   }
 
+  /// Returns a table entry by index.
   public item(&self, index: u64): Option<TomlTable> {
     if (index >= self.length) {
       return Option::NONE;
@@ -686,6 +1047,9 @@ export record TomlArrayOfTables {
     return Option::SOME(self.entries[index]);
   }
 
+  /// Returns a mutable pointer to the last table entry.
+  ///
+  /// Parser code uses this to append assignments to the most recent array table.
   public lastPointer(&mut self): Option<*mut TomlTable> {
     if (self.length == 0) {
       return Option::NONE;
@@ -695,6 +1059,7 @@ export record TomlArrayOfTables {
   }
 }
 
+/// Allocates one `TomlArray` and writes `value` into it.
 function tomlArrayPointer(value: TomlArray): *mut TomlArray {
   let pointer: *mut TomlArray = Memory::allocateVector<TomlArray>(1);
   @write<TomlArray>(pointer, value);
@@ -702,6 +1067,7 @@ function tomlArrayPointer(value: TomlArray): *mut TomlArray {
   return pointer;
 }
 
+/// Allocates one `TomlTable` and writes `value` into it.
 function tomlTablePointer(value: TomlTable): *mut TomlTable {
   let pointer: *mut TomlTable = Memory::allocateVector<TomlTable>(1);
   @write<TomlTable>(pointer, value);
@@ -709,6 +1075,7 @@ function tomlTablePointer(value: TomlTable): *mut TomlTable {
   return pointer;
 }
 
+/// Allocates one `TomlArrayOfTables` and writes `value` into it.
 function tomlArrayOfTablesPointer(value: TomlArrayOfTables): *mut TomlArrayOfTables {
   let pointer: *mut TomlArrayOfTables = Memory::allocateVector<TomlArrayOfTables>(1);
   @write<TomlArrayOfTables>(pointer, value);
@@ -716,6 +1083,18 @@ function tomlArrayOfTablesPointer(value: TomlArrayOfTables): *mut TomlArrayOfTab
   return pointer;
 }
 
+/// Recursively resolves dotted path segments inside a TOML table.
+///
+/// # Arguments
+///
+/// - `table`: current table to inspect.
+/// - `segments`: split path segments.
+/// - `index`: current segment index.
+/// - `fallbackSpan`: span used when lookup fails before a more specific span is available.
+///
+/// # Returns
+///
+/// `Result::OK(value)` when the full path resolves, otherwise a lookup error.
 function tomlLookupInTable(
   table: &TomlTable,
   segments: &Vector<String>,
@@ -751,10 +1130,18 @@ function tomlLookupInTable(
   return Result::OK(value);
 }
 
+/// Parsed TOML document rooted at a table.
+///
+/// Document lookup helpers accept dotted paths such as `package.name` and return
+/// typed lookup results with TOML spans when a path is missing or has the wrong
+/// value kind.
 export record TomlDocument {
+  /// Root TOML table.
   root: TomlTable;
+  /// Source span covering the parsed document.
   public span: TomlSpan;
 
+  /// Creates a document from a root table and source span.
   public static new(root: TomlTable, span: TomlSpan): TomlDocument {
     return TomlDocument {
       root: root,
@@ -762,11 +1149,13 @@ export record TomlDocument {
     };
   }
 
+  /// Resolves a borrowed dotted path into a TOML value.
   private lookupValue(&self, path: str): Result<TomlValue, TomlError> {
     let ownedPath: String = String::create(path);
     return self.lookupValue(&ownedPath);
   }
 
+  /// Resolves an owned dotted path into a TOML value.
   private lookupValue(&self, path: &String): Result<TomlValue, TomlError> {
     let segments: Vector<String> = tomlPathSegments(path);
 
@@ -779,6 +1168,16 @@ export record TomlDocument {
     return tomlLookupInTable(&root, &segments, 0, self.span);
   }
 
+  /// Returns a value at a dotted path, discarding lookup error details.
+  ///
+  /// Use this when absence and type mismatch should both be treated as a simple
+  /// missing optional value.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let name: Option<TomlValue> = document.get("package.name");
+  /// ```
   public get(&self, path: str): Option<TomlValue> {
     return match (self.lookupValue(path)) {
       Result::OK(value) -> Option::SOME(value),
@@ -786,6 +1185,19 @@ export record TomlDocument {
     };
   }
 
+  /// Returns a string value at a dotted path.
+  ///
+  /// # Returns
+  ///
+  /// - `Result::OK(str)` when the path exists and resolves to a TOML string.
+  /// - `LOOKUP_NOT_FOUND` when any path segment is missing.
+  /// - `LOOKUP_TYPE_MISMATCH` when the final value is not a string.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let name: Result<str, TomlError> = document.getString("package.name");
+  /// ```
   public getString(&self, path: str): Result<str, TomlError> {
     let valueResult: Result<TomlValue, TomlError> = self.lookupValue(path);
 
@@ -804,6 +1216,13 @@ export record TomlDocument {
     return Result::OK(result);
   }
 
+  /// Returns an array value at a dotted path.
+  ///
+  /// # Returns
+  ///
+  /// - `Result::OK(TomlArray)` when the path exists and resolves to an array.
+  /// - `LOOKUP_NOT_FOUND` when any path segment is missing.
+  /// - `LOOKUP_TYPE_MISMATCH` when the final value is not an array.
   public getArray(&self, path: str): Result<TomlArray, TomlError> {
     let valueResult: Result<TomlValue, TomlError> = self.lookupValue(path);
 

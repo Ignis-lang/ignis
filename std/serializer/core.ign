@@ -1,19 +1,85 @@
+//!
 //! # Serializer Core
 //!
-//! Format-agnostic serializer helpers shared by entrypoints.
+//! Format-agnostic serializer helpers shared by front-ends and user records.
+//!
+//! ## Overview
+//!
+//! Core helpers implement the state-free operations needed by JSON and TOML
+//! serialization: opening and closing records, writing field names, escaping text,
+//! validating bare keys, and appending scalar text. The caller owns all ordering
+//! decisions; this module only appends the requested bytes to the destination.
+//!
+//! ## Record Emission Flow
+//!
+//! A typical `Serialize` implementation uses these helpers in this order:
+//!
+//! ```text
+//!   beginRecord(output, writer)
+//!        │
+//!        ├─ writeField(output, "first", writer, true)
+//!        │       └─ Serializer::write(output, value, writer)
+//!        │
+//!        ├─ writeField(output, "second", writer, false)
+//!        │       └─ Serializer::write(output, value, writer)
+//!        │
+//!        └─ endRecord(output, writer)
+//! ```
+//!
+//! The `first` flag controls whether the writer's `entrySeparator` is emitted
+//! before a field. The core helpers do not track field count internally.
+//!
+//! ## Escaping
+//!
+//! `writeQuotedString` and `writeQuotedChar` use byte-oriented escaping. Quotes,
+//! backslashes, newlines, carriage returns, tabs, and ASCII control bytes are
+//! escaped. Other bytes are written through as UTF-8 bytes stored in Ignis
+//! `String` values.
 
 import _ from "std::serializer::error";
 
+/// Format-neutral serialization primitives shared by JSON and TOML front-ends.
+///
+/// The namespace contains the `Writer` configuration record and low-level
+/// helpers used by generated or handwritten `Serialize` implementations.
 export namespace Serializer {
+  /// Format configuration consumed by serializer helpers.
+  ///
+  /// JSON and TOML differ mostly in punctuation and root-shape policy. A writer
+  /// stores those differences so scalar and record code can stay format-neutral.
   record Writer {
+    /// Text appended before a serialized record, for example `{` for JSON.
     public recordPrefix: str;
+
+    /// Text appended after a serialized record, for example `}` for JSON.
     public recordSuffix: str;
+
+    /// Text inserted between record entries after the first field.
     public entrySeparator: str;
+
+    /// Text inserted between a field key and its value.
     public fieldSeparator: str;
+
+    /// Whether the front-end permits a scalar value as the document root.
     public supportsScalarRoot: boolean;
+
+    /// Whether field keys are always emitted as quoted strings.
     public quoteFieldKeys: boolean;
   }
 
+  /// Appends the writer's record prefix to `output`.
+  ///
+  /// Returns `Result::OK(true)` for consistency with the rest of the serializer
+  /// API. This function does not validate that a matching `endRecord` is later
+  /// called.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::new();
+  /// Serializer::beginRecord(&mut output, &writer)!; // appends "{"
+  /// ```
   function beginRecord(
     output: &mut String,
     serializer: &Serializer::Writer
@@ -24,6 +90,18 @@ export namespace Serializer {
     return Result::OK(true);
   }
 
+  /// Appends the writer's record suffix to `output`.
+  ///
+  /// Call this after all fields have been written. The helper does not check
+  /// whether the record is empty or whether field separators were used correctly.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::create("{");
+  /// Serializer::endRecord(&mut output, &writer)!; // appends "}"
+  /// ```
   function endRecord(
     output: &mut String,
     serializer: &Serializer::Writer
@@ -34,6 +112,29 @@ export namespace Serializer {
     return Result::OK(true);
   }
 
+  /// Writes a field key and separator for the next record entry.
+  ///
+  /// If `first` is `false`, the writer's `entrySeparator` is emitted before the
+  /// key. When `quoteFieldKeys` is enabled, the key is escaped as a quoted string.
+  /// Otherwise the key must be a non-empty ASCII bare key containing only
+  /// letters, digits, `_`, or `-`; invalid keys return
+  /// `Serializer::ErrorKind::INVALID_FIELD_KEY`.
+  ///
+  /// # Arguments
+  ///
+  /// - `output`: destination record text.
+  /// - `key`: field name to emit.
+  /// - `serializer`: writer configuration that controls quoting and separators.
+  /// - `first`: whether this is the first field in the record.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::create("{");
+  /// Serializer::writeField(&mut output, "name", &writer, true)!;
+  /// // output now contains "{\"name\":"
+  /// ```
   function writeField(
     output: &mut String,
     key: str,
@@ -68,6 +169,18 @@ export namespace Serializer {
     return Result::OK(true);
   }
 
+  /// Writes one quoted character using serializer string escaping rules.
+  ///
+  /// The character is emitted between double quotes. Special byte values are
+  /// escaped through `writeEscapedByte`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let mut output: String = String::new();
+  /// Serializer::writeQuotedChar(&mut output, '\n');
+  /// // output contains "\n"
+  /// ```
   function writeQuotedChar(output: &mut String, value: char): void {
     let mut writer: &mut String = output;
 
@@ -76,6 +189,18 @@ export namespace Serializer {
     writer.pushChar('"');
   }
 
+  /// Writes a quoted string using byte-oriented serializer escaping rules.
+  ///
+  /// The input is not modified. Escaping is shared by JSON and TOML front-ends,
+  /// so it intentionally covers the common JSON-compatible escape set.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let mut output: String = String::new();
+  /// let value: String = String::create("line\nquoted");
+  /// Serializer::writeQuotedString(&mut output, &value);
+  /// ```
   function writeQuotedString(output: &mut String, value: &String): void {
     let mut writer: &mut String = output;
 
@@ -88,6 +213,19 @@ export namespace Serializer {
     writer.pushChar('"');
   }
 
+  /// Writes one string byte, escaping bytes that require quoted-string syntax.
+  ///
+  /// This helper assumes the caller has already written the surrounding quotes.
+  /// It emits JSON-compatible escapes for quotes, backslashes, common whitespace,
+  /// and ASCII control bytes.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let mut output: String = String::new();
+  /// Serializer::writeEscapedByte(&mut output, ('\t' as u8));
+  /// // output contains "\\t"
+  /// ```
   function writeEscapedByte(output: &mut String, byte: u8): void {
     let mut writer: &mut String = output;
 
@@ -126,6 +264,16 @@ export namespace Serializer {
     writer.pushChar(byte as char);
   }
 
+  /// Converts a four-bit value into an uppercase hexadecimal digit.
+  ///
+  /// `writeEscapedByte` uses this for `\u00XX` control-byte escapes. Values
+  /// should be in the inclusive range `0..15`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let digit: char = Serializer::hexDigit(10); // 'A'
+  /// ```
   function hexDigit(value: u8): char {
     if (value < 10) {
       return (48 + value) as char;
@@ -134,6 +282,18 @@ export namespace Serializer {
     return (55 + value) as char;
   }
 
+  /// Returns whether `key` is valid as an unquoted serializer field key.
+  ///
+  /// Bare keys are currently restricted to non-empty ASCII letters, digits,
+  /// underscores, and hyphens. This matches TOML's common bare-key subset and
+  /// avoids ambiguous output in front-ends that do not quote field names.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let ok: boolean = Serializer::isValidBareKey("package-name");
+  /// let bad: boolean = Serializer::isValidBareKey("package.name");
+  /// ```
   function isValidBareKey(key: str): boolean {
     let owned: String = String::create(key);
     let bytes: Vector<u8> = owned.toBytes();
@@ -162,6 +322,16 @@ export namespace Serializer {
     return true;
   }
 
+  /// Returns whether one byte is accepted by `isValidBareKey`.
+  ///
+  /// Accepted bytes are ASCII letters, ASCII digits, `_`, and `-`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let letter: boolean = Serializer::isBareKeyByte('a' as u8);
+  /// let dot: boolean = Serializer::isBareKeyByte('.' as u8); // false
+  /// ```
   function isBareKeyByte(byte: u8): boolean {
     if (byte >= ('a' as u8) && byte <= ('z' as u8)) {
       return true;
@@ -178,6 +348,18 @@ export namespace Serializer {
     return byte == ('_' as u8) || byte == ('-' as u8);
   }
 
+  /// Appends already-formatted scalar text to `output`.
+  ///
+  /// Numeric and boolean `write` overloads convert to text before calling this
+  /// helper. The text is not quoted or escaped here.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let mut output: String = String::new();
+  /// let text: String = String::create("42");
+  /// Serializer::writeScalarText(&mut output, &text)!;
+  /// ```
   function writeScalarText(output: &mut String, text: &String): Result<boolean, Serializer::Error> {
     let mut writer: &mut String = output;
     writer.push(text);

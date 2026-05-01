@@ -1,3 +1,15 @@
+//!
+//! # TOML Parser
+//!
+//! Recursive-descent parser for tokenized TOML documents.
+//!
+//! ## Overview
+//!
+//! This module consumes `TomlToken` streams and builds owned `TomlDocument`
+//! values. It handles table headers, arrays of tables, dotted keys, inline
+//! tables, arrays, scalar literals, and duplicate-key validation.
+//!
+
 import LibC, CType from "std::libc";
 import Vector from "std::vector";
 
@@ -16,6 +28,12 @@ import
   TomlValueKind,
 from "./value";
 
+/// Returns the span of the final token in a token stream.
+///
+/// The parser uses this as a fallback diagnostic location when it reaches the
+/// end of the stream while still expecting a token. Empty streams map to the
+/// zero-width span `0..0`, which keeps parser helpers total even when called on
+/// malformed or manually constructed token vectors.
 function tomlLastSpan(tokens: &Vector<TomlToken>): TomlSpan {
   if (tokens.length() == 0) {
     return TomlSpan::new(0, 0);
@@ -28,6 +46,11 @@ function tomlLastSpan(tokens: &Vector<TomlToken>): TomlSpan {
   return token.span;
 }
 
+/// Returns the token at `index`, or an unexpected-token error at the stream end.
+///
+/// This helper centralizes bounds handling for the recursive-descent parser so
+/// individual parsing routines can report the last known span instead of
+/// relying on unchecked vector access.
 function tomlTokenAt(tokens: &Vector<TomlToken>, index: u64): Result<&TomlToken, TomlError> {
   let Option::SOME(token) = tokens.get(index) else {
     return Result::ERROR(TomlError::unexpectedToken(tomlLastSpan(tokens)));
@@ -36,6 +59,11 @@ function tomlTokenAt(tokens: &Vector<TomlToken>, index: u64): Result<&TomlToken,
   return Result::OK(token);
 }
 
+/// Reads a character from `value`, returning `\0` when `index` is out of range.
+///
+/// Literal parsing in this file is only called after tokenization has already
+/// validated the token shape. The sentinel keeps the small classification
+/// helpers simple without turning tokenizer invariants into parser panics.
 function tomlParserCharAtOrNull(value: &String, index: u64): char {
   return match (value.charAt(index)) {
     Option::SOME(ch) -> ch,
@@ -43,6 +71,11 @@ function tomlParserCharAtOrNull(value: &String, index: u64): char {
   };
 }
 
+/// Converts a tokenized TOML integer lexeme into an `i64`.
+///
+/// The tokenizer is responsible for validating the grammar. This routine only
+/// applies the optional sign and ignores `_` separators while accumulating base
+/// 10 digits. It does not perform overflow checking.
 function tomlParseIntegerLiteral(value: &String): i64 {
   let mut index: u64 = 0;
   let mut sign: i64 = 1;
@@ -68,10 +101,20 @@ function tomlParseIntegerLiteral(value: &String): i64 {
   return result * sign;
 }
 
+/// Converts a tokenized TOML boolean lexeme into a boolean value.
+///
+/// The lexer only emits boolean tokens for valid `true` and `false` literals, so
+/// the parser can distinguish them by length and first byte.
 function tomlParseBooleanLiteral(value: &String): boolean {
   return value.length() == 4 && tomlParserCharAtOrNull(value, 0) == 't';
 }
 
+/// Classifies a tokenized TOML date/time lexeme by its visible separators.
+///
+/// Date/time component decoding is intentionally deferred; `TomlDateTime` keeps
+/// the original text and this kind enum. The classifier distinguishes offset
+/// date-times, local date-times, local times, and local dates using TOML's
+/// separators after the lexer has accepted the literal.
 function tomlDateTimeKind(value: &String): TomlDateTimeKind {
   let mut index: u64 = 0;
   let mut hasTimeSeparator: boolean = false;
@@ -106,10 +149,18 @@ function tomlDateTimeKind(value: &String): TomlDateTimeKind {
   return TomlDateTimeKind::LOCAL_DATE;
 }
 
+/// Builds a span covering the source range from `start.start` to `end.end`.
+///
+/// Callers pass the first and last token spans of a syntactic construct, such as
+/// an array, table header, or dotted key.
 function tomlCombineSpan(start: TomlSpan, end: TomlSpan): TomlSpan {
   return TomlSpan::new(start.start, end.end);
 }
 
+/// Advances past consecutive newline tokens starting at `index`.
+///
+/// TOML allows newlines between array elements and between top-level entries.
+/// The returned index is either the first non-newline token or the stream end.
 function tomlSkipNewlines(tokens: &Vector<TomlToken>, index: u64): u64 {
   let mut current: u64 = index;
 
@@ -128,6 +179,12 @@ function tomlSkipNewlines(tokens: &Vector<TomlToken>, index: u64): u64 {
   return current;
 }
 
+/// Requires the next token to terminate a top-level TOML item.
+///
+/// A valid terminator is a newline sequence or EOF. On success the returned
+/// index points to the first token after any consumed newlines, or to the EOF
+/// token itself. Any other token means the current key/value or table header has
+/// trailing syntax and is reported as `UnexpectedToken`.
 function tomlExpectLineEnd(tokens: &Vector<TomlToken>, index: u64): Result<u64, TomlError> {
   let Result::OK(token) = tomlTokenAt(tokens, index) else {
     return Result::OK(index);
@@ -144,6 +201,12 @@ function tomlExpectLineEnd(tokens: &Vector<TomlToken>, index: u64): Result<u64, 
   return Result::ERROR(TomlError::unexpectedToken(token.span));
 }
 
+/// Converts a scalar token into an owned `TomlValue`.
+///
+/// Supported scalar tokens are strings, integers, floats, booleans, and
+/// date/time literals. Array and inline-table tokens are handled by their own
+/// recursive parsers. `keySpan` is recorded on the created value so duplicate-key
+/// and lookup diagnostics can point back to the key that introduced it.
 function tomlParseScalarValue(token: &TomlToken, keySpan: TomlSpan): Result<TomlValue, TomlError> {
   let lexeme: String = token.lexeme.clone();
 
@@ -186,6 +249,12 @@ function tomlParseScalarValue(token: &TomlToken, keySpan: TomlSpan): Result<Toml
   return Result::ERROR(TomlError::unexpectedToken(token.span));
 }
 
+/// Parses a dotted TOML key path into `segments`.
+///
+/// The path starts at `index` and accepts bare identifiers and quoted string
+/// keys separated by dots. Parsed segment text is appended to `segments`,
+/// `firstSpan` is updated to the first segment, and `lastSpan` is updated after
+/// each segment. The returned index points to the first token after the path.
 function tomlParsePath(
   tokens: &Vector<TomlToken>,
   index: u64,
@@ -231,6 +300,13 @@ function tomlParsePath(
   return Result::OK(current);
 }
 
+/// Returns or creates the table reached by a prefix path segment.
+///
+/// Prefixes in dotted keys and headers must resolve to tables, or to the latest
+/// element of an array-of-tables. Missing prefixes are created with
+/// `createState`. Inline tables are closed values in normal document parsing,
+/// but inline-table parsing can set `allowInlineDescend` to permit dotted keys
+/// inside the same inline table expression.
 function tomlEnsurePrefixTable(
   tablePointer: *mut TomlTable,
   segment: &String,
@@ -275,6 +351,12 @@ function tomlEnsurePrefixTable(
   return Result::OK((*entryPointer).value.tableValue);
 }
 
+/// Inserts a parsed value into `tablePointer` at a dotted key path.
+///
+/// Intermediate path segments are resolved through `tomlEnsurePrefixTable`.
+/// Existing scalar values at the final segment produce `DuplicateKey`; existing
+/// tables or arrays of tables at the final segment produce `TableConflict`.
+/// Returning `Option::NONE` means the value was inserted successfully.
 function tomlInsertValueAtPath(
   tablePointer: *mut TomlTable,
   segments: &Vector<String>,
@@ -333,6 +415,12 @@ function tomlInsertValueAtPath(
   return Option::NONE;
 }
 
+/// Opens an explicit `[table]` header and returns the active table pointer.
+///
+/// Missing prefix tables are created implicitly. The final table may be newly
+/// created or may be an implicit table promoted to explicit. Re-opening an
+/// explicit table, targeting a scalar, or targeting an array of tables is a TOML
+/// table conflict.
 function tomlOpenTableHeader(
   rootPointer: *mut TomlTable,
   segments: &Vector<String>,
@@ -391,6 +479,12 @@ function tomlOpenTableHeader(
   return Result::OK((*entryPointer).value.tableValue);
 }
 
+/// Opens an `[[array-of-tables]]` header and returns the appended table pointer.
+///
+/// Missing prefix tables are created implicitly. If the final key already holds
+/// an array of tables, a new explicit table is appended and becomes current. If
+/// the final key holds any other value kind, parsing fails with a table
+/// conflict.
 function tomlAppendArrayTableHeader(
   rootPointer: *mut TomlTable,
   segments: &Vector<String>,
@@ -458,6 +552,11 @@ function tomlAppendArrayTableHeader(
   return Result::OK(lastTable);
 }
 
+/// Parses any TOML value at `index` into `output`.
+///
+/// Arrays and inline tables are parsed recursively. Scalar values are converted
+/// directly from the current token. The returned index points to the first token
+/// after the value, leaving separators and line terminators for the caller.
 function tomlParseValue(
   tokens: &Vector<TomlToken>,
   index: u64,
@@ -488,6 +587,12 @@ function tomlParseValue(
   return Result::OK(index + 1);
 }
 
+/// Parses a TOML array value starting at `[`.
+///
+/// Arrays may contain nested arrays and inline tables. Newlines are accepted
+/// after `[` and after commas, and a trailing comma before `]` is accepted. The
+/// parser preserves element order and stores an aggregate span from the opening
+/// bracket through the closing bracket.
 function tomlParseArray(
   tokens: &Vector<TomlToken>,
   index: u64,
@@ -553,6 +658,12 @@ function tomlParseArray(
   return Result::ERROR(TomlError::unexpectedToken(leftBracket.span));
 }
 
+/// Parses a TOML inline table value starting at `{`.
+///
+/// Inline table entries use the same dotted-key insertion logic as top-level
+/// assignments, but `allowInlineDescend` is enabled so dotted keys can construct
+/// nested tables within the inline value. The resulting table state is marked
+/// `INLINE`, which prevents later document-level headers from extending it.
 function tomlParseInlineTable(
   tokens: &Vector<TomlToken>,
   index: u64,
@@ -635,6 +746,13 @@ function tomlParseInlineTable(
   return Result::ERROR(TomlError::unexpectedToken(leftBrace.span));
 }
 
+/// Parses a complete token stream into a `TomlDocument`.
+///
+/// The stream is expected to come from the TOML tokenizer and normally ends with
+/// an EOF token. The parser accepts top-level key/value assignments, explicit
+/// table headers (`[table]`), and arrays of tables (`[[table]]`). On success it
+/// returns a fully owned document rooted at an explicit table; on failure it
+/// returns the first syntax, duplicate-key, or table-conflict error encountered.
 export function parseTokens(tokens: &Vector<TomlToken>): Result<TomlDocument, TomlError> {
   let rootSpan: TomlSpan = tomlLastSpan(tokens);
   let mut root: TomlTable = TomlTable::new(rootSpan);

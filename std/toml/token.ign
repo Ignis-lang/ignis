@@ -1,7 +1,61 @@
+//!
+//! # TOML Tokens
+//!
+//! Token and span types shared by the TOML lexer and parser.
+//!
+//! ## Overview
+//!
+//! `TomlSpan` stores byte offsets into the original UTF-8 input. `TomlToken`
+//! owns its lexeme text so token streams remain valid after lexing completes.
+//!
+//! ## Token Stream Shape
+//!
+//! The lexer emits structural punctuation, scalar literals, newlines, and a
+//! terminal `EOF` token. The parser consumes newline tokens explicitly because
+//! TOML uses line boundaries to terminate assignments and table headers.
+//!
+//! | Token group       | Kinds                                      |
+//! |-------------------|--------------------------------------------|
+//! | Punctuation       | brackets, braces, dot, equals, comma       |
+//! | Whitespace marker | `NEWLINE`                                  |
+//! | Key/value text    | `IDENTIFIER`, `STRING`                     |
+//! | Scalar literals   | `INTEGER`, `FLOAT`, `DATE_TIME`, `BOOLEAN` |
+//! | End marker        | `EOF`                                      |
+
+/// Byte span into the original TOML source text.
+///
+/// Spans are half-open byte ranges: `start` is inclusive and `end` is exclusive.
+/// They intentionally use byte offsets so diagnostics can point into UTF-8 input
+/// without depending on display width or terminal rendering.
+///
+/// # Example
+///
+/// ```ignis
+/// let span: TomlSpan = TomlSpan::new(4, 12);
+/// ```
 export record TomlSpan {
+  /// Inclusive byte offset where the span begins.
   public start: u64;
+
+  /// Exclusive byte offset where the span ends.
   public end: u64;
 
+  /// Creates a new source span from byte offsets.
+  ///
+  /// The constructor does not validate ordering. Lexer and parser code should
+  /// pass stable offsets from the original source cursor.
+  ///
+  /// # Arguments
+  ///
+  /// - `start`: inclusive byte offset.
+  /// - `end`: exclusive byte offset.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let empty: TomlSpan = TomlSpan::new(0, 0);
+  /// let key: TomlSpan = TomlSpan::new(0, 7);
+  /// ```
   public static new(start: u64, end: u64): TomlSpan {
     return TomlSpan {
       start: start,
@@ -10,29 +64,94 @@ export record TomlSpan {
   }
 }
 
+/// Token categories produced by the TOML lexer.
+///
+/// These are syntactic categories. Semantic scalar classification happens later
+/// when parser code builds `TomlValue` records.
 export enum TomlTokenKind {
+  /// `[`.
   LEFT_BRACKET,
+
+  /// `]`.
   RIGHT_BRACKET,
+
+  /// `{`.
   LEFT_BRACE,
+
+  /// `}`.
   RIGHT_BRACE,
+
+  /// `.` between path segments.
   DOT,
+
+  /// `=` between a key and value.
   EQUALS,
+
+  /// `,` between array or inline-table entries.
   COMMA,
+
+  /// Line boundary used to terminate assignments and headers.
   NEWLINE,
+
+  /// Unquoted bare key segment or literal candidate.
   IDENTIFIER,
+
+  /// Quoted string literal or quoted key segment without surrounding quotes.
   STRING,
+
+  /// Integer literal text.
   INTEGER,
+
+  /// Floating-point literal text.
   FLOAT,
+
+  /// Date, time, or datetime literal text.
   DATE_TIME,
+
+  /// Boolean literal text.
   BOOLEAN,
+
+  /// End-of-file marker appended by the lexer.
   EOF,
 }
 
+/// Owned TOML token with original source span.
+///
+/// Tokens own their lexeme text. This keeps parser cursors valid after lexer
+/// helper strings go out of scope and makes snapshots deterministic.
+///
+/// # Example
+///
+/// ```ignis
+/// let token: TomlToken = TomlToken::new(
+///   TomlTokenKind::IDENTIFIER,
+///   "package",
+///   TomlSpan::new(0, 7),
+/// );
+/// ```
 export record TomlToken {
+  /// Token category.
   public kind: TomlTokenKind;
+
+  /// Owned token text after lexer normalization.
   public lexeme: String;
+
+  /// Byte span in the original input.
   public span: TomlSpan;
 
+  /// Creates a token by copying a borrowed string slice into owned storage.
+  ///
+  /// # Arguments
+  ///
+  /// - `kind`: token category.
+  /// - `lexeme`: borrowed token text to copy.
+  /// - `span`: source byte span.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let token: TomlToken = TomlToken::new(TomlTokenKind::BOOLEAN, "true", TomlSpan::new(0, 4));
+  /// ```
   public static new(kind: TomlTokenKind, lexeme: str, span: TomlSpan): TomlToken {
     return TomlToken {
       kind: kind,
@@ -41,6 +160,17 @@ export record TomlToken {
     };
   }
 
+  /// Creates a token by cloning an owned `String` value.
+  ///
+  /// Use this overload when lexer code built a `String` while decoding escapes.
+  /// The caller keeps ownership of the original string.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let text: String = String::create("value");
+  /// let token: TomlToken = TomlToken::create(TomlTokenKind::STRING, text, TomlSpan::new(1, 8));
+  /// ```
   public static create(kind: TomlTokenKind, lexeme: String, span: TomlSpan): TomlToken {
     return TomlToken {
       kind: kind,
@@ -49,6 +179,17 @@ export record TomlToken {
     };
   }
 
+  /// Creates a token by cloning a referenced `String` value.
+  ///
+  /// Use this overload when parser or lexer code only has a borrowed reference
+  /// but the token must retain independent storage.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let text: String = String::create("value");
+  /// let token: TomlToken = TomlToken::create(TomlTokenKind::STRING, &text, TomlSpan::new(1, 8));
+  /// ```
   public static create(kind: TomlTokenKind, lexeme: &String, span: TomlSpan): TomlToken {
     return TomlToken {
       kind: kind,

@@ -1,11 +1,69 @@
+//!
 //! # Serializer Writer
 //!
 //! Shared writer configuration used by concrete format frontends.
+//!
+//! ## Overview
+//!
+//! This module provides scalar `Serializer::write` overloads for primitive Ignis
+//! values. The overloads append text to an existing output string using the
+//! selected writer's escaping and field-key policy.
+//!
+//! ## Scalar Output Rules
+//!
+//! | Value kind           | Output behavior                                  |
+//! |----------------------|--------------------------------------------------|
+//! | `boolean`            | Writes `true` or `false`                         |
+//! | integers/floats      | Writes `toString()` output without quotes        |
+//! | `char`               | Writes a quoted, escaped one-byte character      |
+//! | `str` / `String`     | Writes a quoted, escaped string                  |
+//!
+//! Scalar overloads do not inspect `supportsScalarRoot`; root-shape validation is
+//! the responsibility of concrete front-ends such as `Toml::writeRoot`.
+//!
+//! ## Common Contract For `Serializer::write`
+//!
+//! Every overload follows the same contract:
+//!
+//! - append to `output`; never clear existing content
+//! - use `writer` only for formatting policy that affects this value kind
+//! - return `Result::OK(true)` when text was appended successfully
+//! - return `Serializer::Error` only for format rules that can be violated
+//!
+//! Numeric and boolean overloads cannot currently fail because they only append
+//! `toString()` output. String and character overloads also currently cannot fail
+//! because escaping is total for byte-backed UTF-8 strings.
+//!
+//! ## Usage Pattern
+//!
+//! Concrete front-ends call these overloads after selecting a writer:
+//!
+//! ```ignis
+//! import Json from "std::json";
+//! import Serializer from "std::serializer";
+//!
+//! let writer: Serializer::Writer = Json::writer();
+//! let mut output: String = String::new();
+//! Serializer::write(&mut output, 42, &writer)!;
+//! ```
 
 import _ from "std::serializer::error";
 import _ from "std::serializer::core";
 
+/// Scalar writer overloads for serializer-backed formats.
+///
+/// These overloads append primitive values to a caller-owned `String` using the
+/// punctuation and root-shape policy provided by `Serializer::Writer`.
 export namespace Serializer {
+  /// Writes a boolean scalar as `true` or `false`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::new();
+  /// Serializer::write(&mut output, true, &writer)!; // "true"
+  /// ```
   function write(
     output: &mut String,
     value: boolean,
@@ -16,6 +74,10 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes a signed 8-bit integer scalar.
+  ///
+  /// The value is converted with `toString()` and appended without quotes.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: i8,
@@ -25,6 +87,10 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes a signed 16-bit integer scalar.
+  ///
+  /// The value is converted with `toString()` and appended without quotes.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: i16,
@@ -34,6 +100,15 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes a signed 32-bit integer scalar.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::new();
+  /// Serializer::write(&mut output, -42, &writer)!; // "-42"
+  /// ```
   function write(
     output: &mut String,
     value: i32,
@@ -43,6 +118,10 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes a signed 64-bit integer scalar.
+  ///
+  /// The value is converted with `toString()` and appended without quotes.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: i64,
@@ -52,6 +131,10 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes an unsigned 8-bit integer scalar.
+  ///
+  /// The value is converted with `toString()` and appended without quotes.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: u8,
@@ -61,6 +144,10 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes an unsigned 16-bit integer scalar.
+  ///
+  /// The value is converted with `toString()` and appended without quotes.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: u16,
@@ -70,6 +157,10 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes an unsigned 32-bit integer scalar.
+  ///
+  /// The value is converted with `toString()` and appended without quotes.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: u32,
@@ -79,6 +170,15 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes an unsigned 64-bit integer scalar.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::new();
+  /// Serializer::write(&mut output, 42u64, &writer)!; // "42"
+  /// ```
   function write(
     output: &mut String,
     value: u64,
@@ -88,6 +188,11 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes a 32-bit floating-point scalar using `toString()` formatting.
+  ///
+  /// The writer does not normalize precision; it trusts the numeric `toString()`
+  /// implementation used by the runtime.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: f32,
@@ -97,6 +202,11 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes a 64-bit floating-point scalar using `toString()` formatting.
+  ///
+  /// The writer does not normalize precision; it trusts the numeric `toString()`
+  /// implementation used by the runtime.
+  /// Returns `Result::OK(true)` after appending the text.
   function write(
     output: &mut String,
     value: f64,
@@ -106,6 +216,18 @@ export namespace Serializer {
     return Serializer::writeScalarText(output, &text);
   }
 
+  /// Writes a quoted character scalar.
+  ///
+  /// The character is escaped with the shared serializer escaping rules.
+  /// Returns `Result::OK(true)` after writing the quoted character.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::new();
+  /// Serializer::write(&mut output, '\n', &writer)!; // "\n"
+  /// ```
   function write(
     output: &mut String,
     value: char,
@@ -116,6 +238,19 @@ export namespace Serializer {
     return Result::OK(true);
   }
 
+  /// Writes a borrowed `str` as a quoted string scalar.
+  ///
+  /// The borrowed text is first copied into a `String` so the shared string
+  /// writer can iterate over bytes safely.
+  /// Returns `Result::OK(true)` after writing the quoted string.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let mut output: String = String::new();
+  /// Serializer::write(&mut output, "ignis", &writer)!; // "ignis"
+  /// ```
   function write(
     output: &mut String,
     value: str,
@@ -126,6 +261,20 @@ export namespace Serializer {
     return Serializer::write(output, &owned, writer);
   }
 
+  /// Writes an owned string reference as a quoted string scalar.
+  ///
+  /// Quotes, backslashes, common control characters, and other ASCII control
+  /// bytes are escaped by `Serializer::writeQuotedString`.
+  /// Returns `Result::OK(true)` after writing the quoted string.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// let writer: Serializer::Writer = Json::writer();
+  /// let value: String = String::create("line\nquoted");
+  /// let mut output: String = String::new();
+  /// Serializer::write(&mut output, &value, &writer)!;
+  /// ```
   function write(
     output: &mut String,
     value: &String,

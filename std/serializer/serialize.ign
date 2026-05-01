@@ -1,11 +1,60 @@
+//!
 //! # Serializer Trait
 //!
 //! Shared format-agnostic record serialization contract.
+//!
+//! ## Overview
+//!
+//! `Serialize` is implemented by records that know how to write their own fields
+//! into a caller-provided `String` using a caller-provided `Serializer::Writer`.
+//! The trait does not choose a format; JSON, TOML, or another front-end supplies
+//! the writer configuration.
+//!
+//! ## Contract
+//!
+//! Implementations should:
+//!
+//! - Append output to the provided `String` without clearing it.
+//! - Call `Serializer::beginRecord` before emitting fields.
+//! - Call `Serializer::writeField` before each field value.
+//! - Pass `first = true` only for the first field.
+//! - Use `Serializer::write` or nested `Serialize::serialize` for field values.
+//! - Propagate `Serializer::Error` with `!` when a helper fails.
+//! - Call `Serializer::endRecord` before returning success.
+//!
+//! ```ignis
+//! import Serialize, Serializer from "std::serializer";
+//!
+//! record Package {
+//!   name: String;
+//!
+//!   public serialize(&self, output: &mut String, writer: &Serializer::Writer): Result<boolean, Serializer::Error> {
+//!     Serializer::beginRecord(output, writer)!;
+//!     Serializer::writeField(output, "name", writer, true)!;
+//!     Serializer::write(output, &self.name, writer)!;
+//!     Serializer::endRecord(output, writer)!;
+//!
+//!     return Result::OK(true);
+//!   }
+//! }
+//! ```
 
 import _ from "std::serializer::error";
 import _ from "std::serializer::writer";
 
+/// Format-agnostic serialization contract for record-like values.
 export trait Serialize {
+  /// Appends a serialized representation of `self` to `output`.
+  ///
+  /// # Arguments
+  ///
+  /// - `output`: destination string to append to.
+  /// - `writer`: format settings supplied by the concrete front-end.
+  ///
+  /// # Returns
+  ///
+  /// `Result::OK(true)` on success, or `Serializer::Error` when the selected
+  /// writer rejects a field key or root shape.
   serialize(
     &self,
     output: &mut String,

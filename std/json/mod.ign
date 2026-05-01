@@ -1,7 +1,78 @@
+//!
+//! # JSON
+//!
+//! JSON serialization front-end for the shared `std::serializer` contracts.
+//!
+//! ## Overview
+//!
+//! The `Json` namespace configures `Serializer::Writer` for JSON object syntax
+//! and exposes `writeRoot` overloads for scalar and `Serialize` values. Output is
+//! appended to a caller-provided `String`.
+//!
+//! JSON is the permissive front-end for the shared serializer: scalar document
+//! roots are allowed, field names are always quoted, and record entries are
+//! separated with commas.
+//!
+//! ```text
+//!   Json::writer()
+//!   ┌──────────────────────────────────────────────┐
+//!   │ recordPrefix: "{"                            │
+//!   │ recordSuffix: "}"                            │
+//!   │ entrySeparator: ","                          │
+//!   │ fieldSeparator: ":"                          │
+//!   │ supportsScalarRoot: true                     │
+//!   │ quoteFieldKeys: true                         │
+//!   └──────────────────────────────────────────────┘
+//! ```
+//!
+//! ## APIs
+//!
+//! | Function            | Description                                      |
+//! |---------------------|--------------------------------------------------|
+//! | `Json::writer`      | JSON writer configuration                        |
+//! | `Json::writeRoot`   | Serialize a root scalar or `Serialize` value     |
+//!
+//! ## Notes
+//!
+//! JSON supports scalar roots, quotes field keys, and uses comma-separated
+//! object entries. String escaping is provided by the shared serializer helpers.
+//! `writeRoot` appends to the provided output string, while `stringify` creates a
+//! fresh output string and returns it.
+//!
+//! ## Root Shapes
+//!
+//! | Root value                    | Supported | Notes                       |
+//! |-------------------------------|-----------|-----------------------------|
+//! | Boolean, number, char, string | Yes       | Uses scalar overloads        |
+//! | `T: Serialize`                | Yes       | Uses record serialization    |
+//! | Arrays                        | No        | No generic array writer yet  |
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Json from "std::json";
+//! import String from "std::string";
+//!
+//! function main(): i32 {
+//!   let mut output: String = String::create("");
+//!   Json::writeRoot(&output, true);
+//!   return 0;
+//! }
+//! ```
+
 import Serialize from "std::serializer::serialize";
 import Serializer from "std::serializer::writer";
 
+/// JSON serialization front-end built on `std::serializer`.
+///
+/// The namespace exposes the JSON writer configuration plus convenience helpers
+/// for writing scalar and serializable roots into `String` buffers.
 export namespace Json {
+  /// Returns the JSON serializer writer configuration.
+  ///
+  /// The writer quotes all field keys and permits scalar root values. Callers
+  /// normally use `Json::writeRoot` or `Json::stringify` instead of constructing
+  /// this writer directly.
   function writer(): Serializer::Writer {
     return Serializer::Writer {
       recordPrefix: "{",
@@ -13,76 +84,91 @@ export namespace Json {
     };
   }
 
+  /// Appends a boolean JSON document root to `output`.
   function writeRoot(output: &mut String, value: boolean): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a quoted character JSON document root to `output`.
   function writeRoot(output: &mut String, value: char): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a signed 8-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: i8): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a signed 16-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: i16): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a signed 32-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: i32): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a signed 64-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: i64): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends an unsigned 8-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: u8): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends an unsigned 16-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: u16): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends an unsigned 32-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: u32): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends an unsigned 64-bit integer JSON document root to `output`.
   function writeRoot(output: &mut String, value: u64): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a 32-bit float JSON document root to `output`.
   function writeRoot(output: &mut String, value: f32): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a 64-bit float JSON document root to `output`.
   function writeRoot(output: &mut String, value: f64): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends a borrowed string JSON document root to `output`.
   function writeRoot(output: &mut String, value: str): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Appends an owned string JSON document root to `output`.
   function writeRoot(output: &mut String, value: &String): Result<boolean, Serializer::Error> {
     let writer: Serializer::Writer = Json::writer();
     return Serializer::write(output, value, &writer);
   }
 
+  /// Serializes a boolean JSON document into a fresh `String`.
   function stringify(value: boolean): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -90,6 +176,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a character JSON document into a fresh `String`.
   function stringify(value: char): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -97,6 +184,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a signed 8-bit integer JSON document into a fresh `String`.
   function stringify(value: i8): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -104,6 +192,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a signed 16-bit integer JSON document into a fresh `String`.
   function stringify(value: i16): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -111,6 +200,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a signed 32-bit integer JSON document into a fresh `String`.
   function stringify(value: i32): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -118,6 +208,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a signed 64-bit integer JSON document into a fresh `String`.
   function stringify(value: i64): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -125,6 +216,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes an unsigned 8-bit integer JSON document into a fresh `String`.
   function stringify(value: u8): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -132,6 +224,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes an unsigned 16-bit integer JSON document into a fresh `String`.
   function stringify(value: u16): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -139,6 +232,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes an unsigned 32-bit integer JSON document into a fresh `String`.
   function stringify(value: u32): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -146,6 +240,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes an unsigned 64-bit integer JSON document into a fresh `String`.
   function stringify(value: u64): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -153,6 +248,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a 32-bit float JSON document into a fresh `String`.
   function stringify(value: f32): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -160,6 +256,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a 64-bit float JSON document into a fresh `String`.
   function stringify(value: f64): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -167,6 +264,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a borrowed string JSON document into a fresh `String`.
   function stringify(value: str): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -174,6 +272,7 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes an owned string JSON document into a fresh `String`.
   function stringify(value: &String): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     Json::writeRoot(&mut output, value)!;
@@ -181,6 +280,11 @@ export namespace Json {
     return Result::OK(output);
   }
 
+  /// Serializes a `Serialize` record-like value into a fresh JSON string.
+  ///
+  /// The value controls field order and nested output through its `Serialize`
+  /// implementation. JSON writer settings quote field keys and wrap records with
+  /// `{` and `}`.
   function stringify<T: Serialize>(value: &T): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     let writer: Serializer::Writer = Json::writer();

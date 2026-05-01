@@ -6,16 +6,26 @@
 
 import String from "std::string";
 
+/// UTF-8 scalar cursor utilities with byte-offset spans.
+///
+/// Parsers use this namespace to walk text by UTF-8 scalar while still reporting
+/// byte offsets compatible with `String::substring` and diagnostics.
 export namespace Text {
+  /// Decoded UTF-8 scalar plus its source byte range.
   record Utf8Char {
+    /// Unicode scalar value, or U+FFFD for invalid byte sequences.
     public scalar: u32;
+    /// Inclusive byte offset where this scalar begins.
     public start: u64;
+    /// Exclusive byte offset where this scalar ends.
     public end: u64;
 
+    /// Returns whether this scalar fits in a single ASCII byte.
     public isAscii(&self): boolean {
       return self.scalar <= 127;
     }
 
+    /// Returns this scalar as `char` when it is ASCII.
     public ascii(&self): Option<char> {
       if (!self.isAscii()) {
         return Option::NONE;
@@ -25,10 +35,14 @@ export namespace Text {
     }
   }
 
+  /// Owned cursor over a `String` that advances by UTF-8 scalar boundaries.
   record Cursor {
+    /// Source text being traversed.
     source: String;
+    /// Current byte offset into `source`.
     offset: u64;
 
+    /// Creates a cursor by copying a borrowed string slice.
     public static create(source: str): Text::Cursor {
       return Text::Cursor {
         source: String::create(source),
@@ -36,6 +50,7 @@ export namespace Text {
       };
     }
 
+    /// Creates a cursor by cloning an owned string.
     public static create(source: &String): Text::Cursor {
       return Text::Cursor {
         source: source.clone(),
@@ -43,27 +58,33 @@ export namespace Text {
       };
     }
 
+    /// Returns the current byte offset.
     public position(&self): u64 {
       return self.offset;
     }
 
+    /// Returns the source byte length.
     public length(&self): u64 {
       return self.source.length();
     }
 
+    /// Returns whether the cursor has reached or passed the end of source.
     public isAtEnd(&self): boolean {
       return self.offset >= self.source.length();
     }
 
+    /// Returns an owned substring for the byte range `start..end`.
     public slice(&self, start: u64, end: u64): String {
       return self.source.substring(start as i64, (end - start) as i64);
     }
 
+    /// Decodes the current scalar without advancing the cursor.
     public peek(&self): Option<Text::Utf8Char> {
       let source: String = self.source.clone();
       return Text::decodeAt(&source, self.offset);
     }
 
+    /// Decodes the current scalar and advances past it.
     public advance(&mut self): Option<Text::Utf8Char> {
       let decoded: Option<Text::Utf8Char> = self.peek();
 
@@ -75,6 +96,7 @@ export namespace Text {
       return Option::NONE;
     }
 
+    /// Consumes `expected` when the current scalar is that ASCII character.
     public eatAscii(&mut self, expected: char): boolean {
       let Option::SOME(current) = self.peek() else {
         return false;
@@ -93,6 +115,7 @@ export namespace Text {
     }
   }
 
+  /// Returns the byte at `index` from a string, if present.
   function byteAt(source: &String, index: u64): Option<u8> {
     let bytes = source.toBytes();
 
@@ -103,6 +126,7 @@ export namespace Text {
     return Option::NONE;
   }
 
+  /// Returns a UTF-8 continuation payload at `index`, if the byte is valid.
   function continuation(source: &String, index: u64): Option<u32> {
     let Option::SOME(byte) = Text::byteAt(source, index) else {
       return Option::NONE;
@@ -115,6 +139,7 @@ export namespace Text {
     return Option::SOME((byte - 128) as u32);
   }
 
+  /// Builds a replacement-character scalar for invalid UTF-8 at `start`.
   function invalidUtf8(start: u64): Text::Utf8Char {
     return Text::Utf8Char {
       scalar: 65533,
@@ -123,6 +148,10 @@ export namespace Text {
     };
   }
 
+  /// Decodes one UTF-8 scalar from `source` at byte `offset`.
+  ///
+  /// Invalid byte sequences return U+FFFD covering the first invalid byte so the
+  /// cursor can make progress while preserving diagnostic offsets.
   function decodeAt(source: &String, offset: u64): Option<Text::Utf8Char> {
     if (offset >= source.length()) {
       return Option::NONE;

@@ -47,6 +47,7 @@ import Path from "std::path";
 
 /// Owned directory entry.
 export namespace Fs {
+  /// Directory entry produced by `ReadDir` and filesystem walking helpers.
   record DirEntry {
     /// File name (owned).
     public name: String;
@@ -134,6 +135,7 @@ export namespace Fs {
     }
   }
 
+  /// Returns true for owned `.` and `..` entry names.
   function isDotEntry(name: String): boolean {
     if (name.length() == 1) {
       return match (name.charAt(0)) {
@@ -160,6 +162,7 @@ export namespace Fs {
     return false;
   }
 
+  /// Returns true for raw C-string `.` and `..` entry names.
   function isDotEntryName(name: str): boolean {
     if ((name as *u8) == null) {
       return false;
@@ -188,6 +191,7 @@ export namespace Fs {
     return @read<u8>(thirdPtr) == 0;
   }
 
+  /// Returns true when a path's final component is `.` or `..`.
   function isDotEntryPath(path: &Path::PathBuf): boolean {
     return match (path.fileName()) {
       Option::SOME(name) -> Fs::isDotEntry(name),
@@ -195,6 +199,7 @@ export namespace Fs {
     };
   }
 
+  /// Builds a `DirEntry` for a path using `lstat` so symlinks stay leaves.
   function walkEntryFromPath(path: Path::PathBuf): Result<Fs::DirEntry, Io::IoError> {
     let stat: Fs::Sys::Stat = Fs::Sys::lstat(path.asStr())!;
     let fileType: Fs::FileType = Fs::fileTypeFromMode(stat.mode);
@@ -211,6 +216,7 @@ export namespace Fs {
     });
   }
 
+  /// Adds `path` to walk output and descends when it is a directory.
   function collectWalkEntry(
     path: &String,
     isDirectory: boolean,
@@ -226,6 +232,7 @@ export namespace Fs {
     return Fs::collectWalkChildren(path, output);
   }
 
+  /// Walks an owned path after classifying it with `lstat`.
   function collectWalkPathOwned(
     path: &String,
     output: &mut Vector<String>,
@@ -236,11 +243,13 @@ export namespace Fs {
     return Fs::collectWalkEntry(path, isDirectory, output);
   }
 
+  /// Walks a raw C-string path after copying it to owned storage.
   function collectWalkPath(path: str, output: &mut Vector<String>): Result<void, Io::IoError> {
     let ownedPath: String = String::create(path);
     return Fs::collectWalkPathOwned(&ownedPath, output);
   }
 
+  /// Recursively collects children of `parent` without following symlink dirs.
   function collectWalkChildren(
     parent: &String,
     output: &mut Vector<String>,
@@ -283,19 +292,23 @@ export namespace Fs {
     return Result::OK(());
   }
 
+  /// Collects entries under an existing directory path.
   function collectWalkDirectory(path: str, output: &mut Vector<String>): Result<void, Io::IoError> {
     let directoryPath: String = String::create(path);
     return Fs::collectWalkChildren(&directoryPath, output);
   }
 
+  /// Collects a single non-directory path.
   function collectWalkSingle(path: str, output: &mut Vector<String>): Result<void, Io::IoError> {
     return Fs::collectWalkPath(path, output);
   }
 
+  /// Removes a directory tree through the platform system layer.
   function removeDirAllPath(path: str): Result<void, Io::IoError> {
     return Fs::Sys::removeDirAll(path);
   }
 
+  /// Returns a depth-first list of paths rooted at `path`.
   function collectWalk(path: str): Result<Vector<String>, Io::IoError> {
     let mut entries: Vector<String> = Vector::init<String>();
 
@@ -307,6 +320,7 @@ export namespace Fs {
     return Result::OK(entries);
   }
 
+  /// Returns whether a walk result contains `expected` exactly.
   function walkContains(entries: &Vector<String>, expected: str): boolean {
     let expectedPath: String = String::create(expected);
     let mut index: u64 = 0;
@@ -324,6 +338,7 @@ export namespace Fs {
     return false;
   }
 
+  /// Joins walk result entries with newlines for diagnostics and tests.
   function walkDescribe(entries: &Vector<String>): String {
     let mut output: String = String::new();
     let mut index: u64 = 0;

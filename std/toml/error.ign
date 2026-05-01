@@ -1,25 +1,82 @@
+//!
+//! # TOML Errors
+//!
+//! Structured TOML parse and lookup failures with source spans.
+//!
+//! ## Overview
+//!
+//! `TomlError` pairs an error kind with a human-readable message and the byte
+//! span where the parser or lookup operation detected the problem. Lookup errors
+//! use the same type so callers can handle parse and access failures uniformly.
+//!
+//! ## Error Flow
+//!
+//! ```text
+//!   lexer/parser/lookup detects failure
+//!                 │
+//!                 ▼
+//!   TomlErrorKind + message + TomlSpan
+//!                 │
+//!                 ▼
+//!   Result::ERROR(TomlError)
+//! ```
+//!
+//! Parse errors use spans from the original input. Lookup errors use the span of
+//! the missing path's nearest known location or the value that caused a type
+//! mismatch.
+//! 
+
 import TomlSpan from "./token";
 
+/// Machine-readable TOML parse or lookup failure category.
 export enum TomlErrorKind {
+  /// The lexer found a byte sequence that cannot start any TOML token.
   UNEXPECTED_CHARACTER,
+
+  /// A quoted string reached the end of input before its closing quote.
   UNTERMINATED_STRING,
+
+  /// An integer literal failed TOML integer validation.
   INVALID_INTEGER,
+
+  /// A string escape sequence is not supported by this parser.
   INVALID_ESCAPE,
+
+  /// A numeric literal failed TOML number validation.
   INVALID_NUMBER,
+
+  /// A date or datetime literal failed TOML date/time validation.
   INVALID_DATE_TIME,
+
+  /// The parser found a token that is not valid in the current grammar position.
   UNEXPECTED_TOKEN,
+
+  /// A key was assigned more than once in the same table path.
   DUPLICATE_KEY,
+
+  /// A table, inline table, array of tables, or scalar conflicts with another definition.
   TABLE_CONFLICT,
+
+  /// A lookup path did not resolve to any value.
   LOOKUP_NOT_FOUND,
+
+  /// A lookup path resolved to a value of a different kind than requested.
   LOOKUP_TYPE_MISMATCH,
 }
 
 @implements(Clone)
+/// Structured TOML error with source span information.
 export record TomlError {
+  /// Stable error category for matching in caller code.
   public kind: TomlErrorKind;
+
+  /// Human-readable diagnostic message.
   public message: str;
+
+  /// Byte span in the original TOML input associated with the failure.
   public span: TomlSpan;
 
+  /// Creates a TOML error from an explicit kind, message, and span.
   public static new(kind: TomlErrorKind, message: str, span: TomlSpan): TomlError {
     return TomlError {
       kind: kind,
@@ -28,50 +85,62 @@ export record TomlError {
     };
   }
 
+  /// Creates an unexpected-character lexer error.
   public static unexpectedCharacter(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::UNEXPECTED_CHARACTER, "unexpected character in TOML input", span);
   }
 
+  /// Creates an unterminated-string lexer error.
   public static unterminatedString(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::UNTERMINATED_STRING, "unterminated TOML string", span);
   }
 
+  /// Creates an invalid-integer lexer error.
   public static invalidInteger(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::INVALID_INTEGER, "invalid TOML integer literal", span);
   }
 
+  /// Creates an invalid string escape error.
   public static invalidEscape(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::INVALID_ESCAPE, "invalid TOML escape sequence", span);
   }
 
+  /// Creates an invalid-number lexer error.
   public static invalidNumber(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::INVALID_NUMBER, "invalid TOML number literal", span);
   }
 
+  /// Creates an invalid date or datetime lexer error.
   public static invalidDateTime(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::INVALID_DATE_TIME, "invalid TOML date or datetime literal", span);
   }
 
+  /// Creates an unexpected-token parser error.
   public static unexpectedToken(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::UNEXPECTED_TOKEN, "unexpected TOML token", span);
   }
 
+  /// Creates a duplicate-key parser error.
   public static duplicateKey(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::DUPLICATE_KEY, "duplicate TOML key", span);
   }
 
+  /// Creates a table-conflict parser error.
   public static tableConflict(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::TABLE_CONFLICT, "conflicting TOML table or value definition", span);
   }
 
+  /// Creates a lookup-not-found access error.
   public static lookupNotFound(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::LOOKUP_NOT_FOUND, "TOML query path was not found", span);
   }
 
+  /// Creates a lookup type-mismatch access error.
   public static lookupTypeMismatch(span: TomlSpan): TomlError {
     return TomlError::new(TomlErrorKind::LOOKUP_TYPE_MISMATCH, "TOML query path resolved to a different value kind", span);
   }
 
+  /// Returns a shallow clone of the error.
   public clone(&self): TomlError {
     return TomlError {
       kind: self.kind,

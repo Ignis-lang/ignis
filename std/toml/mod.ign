@@ -1,3 +1,49 @@
+//!
+//! # TOML
+//!
+//! TOML parsing, lookup, and serialization front-end for Ignis data.
+//!
+//! ## Overview
+//!
+//! The `Toml` namespace parses UTF-8 TOML text into owned tables, arrays, and
+//! values. It also exposes writer helpers backed by `std::serializer` for
+//! serializing primitive and `Serialize` values as TOML-compatible output.
+//!
+//! ## Types
+//!
+//! | Type             | Description                                      |
+//! |------------------|--------------------------------------------------|
+//! | `TomlDocument`   | Root document with table storage                 |
+//! | `TomlTable`      | Key/value table                                  |
+//! | `TomlArray`      | Ordered TOML array values                        |
+//! | `TomlValue`      | Tagged TOML scalar, array, or table value        |
+//! | `TomlError`      | Structured parse or lookup error with span       |
+//!
+//! ## APIs
+//!
+//! | Function            | Description                                      |
+//! |---------------------|--------------------------------------------------|
+//! | `Toml::parse`       | Parse TOML text into a `TomlDocument`            |
+//! | `Toml::writer`      | TOML writer configuration                        |
+//! | `Toml::writeRoot`   | Serialize a root `Serialize` value               |
+//!
+//! ## Notes
+//!
+//! TOML root output must be a record-like serialized value. Scalar roots are
+//! rejected by the shared serializer because they are not valid TOML documents.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Toml, TomlDocument, TomlError from "std::toml";
+//! import Result from "std::result";
+//!
+//! function main(): i32 {
+//!   let parsed: Result<TomlDocument, TomlError> = Toml::parse("name = \"ignis\"\n");
+//!   return parsed.isOk() ? 0 : 1;
+//! }
+//! ```
+
 import Serialize from "std::serializer::serialize";
 import Serializer from "std::serializer::writer";
 
@@ -9,39 +55,55 @@ import TomlSpan, TomlToken, TomlTokenKind from "./token";
 
 export TomlArray, TomlDocument, TomlTable, TomlValue, TomlValueKind from "./value";
 
+/// Internal lexer result describing a token kind and its exclusive end offset.
+///
+/// The lexer keeps decoded string contents separately in temporary `String`
+/// values. `TomlLexeme` records only the syntactic classification and how far
+/// the cursor advanced through the source text.
 record TomlLexeme {
   public kind: TomlTokenKind;
   public end: u64;
 }
 
+/// Converts a UTF-8 cursor character to ASCII when TOML punctuation can use it.
 function tomlAscii(ch: Text::Utf8Char): Option<char> {
   return ch.ascii();
 }
 
+/// Returns whether `ch` is an ASCII decimal digit.
 function tomlIsDigit(ch: char): boolean {
   return ch >= '0' && ch <= '9';
 }
 
+/// Returns whether `ch` is a numeric sign accepted before numbers and offsets.
 function tomlIsSign(ch: char): boolean {
   return ch == '+' || ch == '-';
 }
 
+/// Returns whether `ch` starts a floating-point exponent suffix.
 function tomlIsExponentMarker(ch: char): boolean {
   return ch == 'e' || ch == 'E';
 }
 
+/// Returns whether `ch` suggests that a scalar literal may be date/time-shaped.
 function tomlIsDateTimeMarker(ch: char): boolean {
   return ch == 'T' || ch == 't' || ch == 'Z' || ch == 'z' || ch == ':';
 }
 
+/// Returns whether `ch` can begin an unquoted TOML bare key.
 function tomlIsBareKeyStart(ch: char): boolean {
   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' || ch == '-';
 }
 
+/// Returns whether `ch` can continue an unquoted TOML bare key.
 function tomlIsBareKeyContinue(ch: char): boolean {
   return tomlIsBareKeyStart(ch) || tomlIsDigit(ch);
 }
 
+/// Advances `cursor` over a TOML comment without consuming the line ending.
+///
+/// The caller handles newlines as significant top-level separators, so this
+/// helper stops immediately before `\n` or `\r`.
 function tomlSkipComment(cursor: &mut Text::Cursor): void {
   let mut stream: &mut Text::Cursor = cursor;
 
@@ -63,6 +125,11 @@ function tomlSkipComment(cursor: &mut Text::Cursor): void {
   }
 }
 
+/// Lexes an identifier or bare-key token starting at `start`.
+///
+/// The cursor is expected to be positioned at the first character of the key.
+/// It is advanced through all allowed continuation bytes and the returned
+/// lexeme stores the end offset for later slicing.
 function tomlLexIdentifier(cursor: &mut Text::Cursor, start: u64): TomlLexeme {
   let mut stream: &mut Text::Cursor = cursor;
 
@@ -90,6 +157,7 @@ function tomlLexIdentifier(cursor: &mut Text::Cursor, start: u64): TomlLexeme {
   };
 }
 
+/// Peeks at the cursor and returns the current character only when it is ASCII.
 function tomlPeekAscii(cursor: &mut Text::Cursor): Option<char> {
   let Option::SOME(current) = cursor.peek() else {
     return Option::NONE;
@@ -98,6 +166,10 @@ function tomlPeekAscii(cursor: &mut Text::Cursor): Option<char> {
   return tomlAscii(current);
 }
 
+/// Reads a character from `value`, returning `\0` when `index` is out of range.
+///
+/// Number and date validators call this only on tokenizer candidate strings. The
+/// sentinel keeps validation branches explicit instead of relying on panics.
 function tomlCharAtOrNull(value: &String, index: u64): char {
   return match (value.charAt(index)) {
     Option::SOME(ch) -> ch,
@@ -105,10 +177,18 @@ function tomlCharAtOrNull(value: &String, index: u64): char {
   };
 }
 
+/// Returns whether `ch` terminates an unquoted scalar literal.
+///
+/// Delimiters include whitespace, comments, collection separators, and key/value
+/// syntax. The scanned literal does not include the delimiter.
 function tomlIsLiteralDelimiter(ch: char): boolean {
   return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '#' || ch == ',' || ch == ']' || ch == '}' || ch == '=';
 }
 
+/// Advances through an unquoted scalar literal and returns its end offset.
+///
+/// Scanning stops at the first literal delimiter, non-ASCII character, or end of
+/// input. The cursor is left at the returned offset.
 function tomlScanLiteralEnd(cursor: &mut Text::Cursor): u64 {
   let mut stream: &mut Text::Cursor = cursor;
 
@@ -131,6 +211,10 @@ function tomlScanLiteralEnd(cursor: &mut Text::Cursor): u64 {
   return stream.position();
 }
 
+/// Performs a cheap precheck for date/time-looking scalar text.
+///
+/// This avoids routing ordinary integers through the stricter date/time
+/// validator while still recognizing local dates, local times, and offset forms.
 function tomlLooksLikeDateTime(value: &String): boolean {
   let mut index: u64 = 0;
 
@@ -151,6 +235,7 @@ function tomlLooksLikeDateTime(value: &String): boolean {
   return false;
 }
 
+/// Counts consecutive decimal digits in `value` starting at `index`.
 function tomlCountDigits(value: &String, index: u64): u64 {
   let mut currentIndex: u64 = index;
 
@@ -167,6 +252,10 @@ function tomlCountDigits(value: &String, index: u64): u64 {
   return currentIndex - index;
 }
 
+/// Parses exactly `digits` decimal digits at `index`, or returns `-1`.
+///
+/// Date/time validation uses the sentinel to validate fixed-width components
+/// without allocating substrings.
 function tomlParseFixedDigits(value: &String, index: u64, digits: u64): i64 {
   let mut currentIndex: u64 = index;
   let mut parsed: u64 = 0;
@@ -187,6 +276,7 @@ function tomlParseFixedDigits(value: &String, index: u64, digits: u64): i64 {
   return result;
 }
 
+/// Returns whether a multi-digit integer component starts with a forbidden `0`.
 function tomlHasLeadingZeroViolation(value: &String, start: u64, digitCount: u64): boolean {
   if (digitCount <= 1) {
     return false;
@@ -195,6 +285,11 @@ function tomlHasLeadingZeroViolation(value: &String, start: u64, digitCount: u64
   return tomlCharAtOrNull(value, start) == '0';
 }
 
+/// Validates a TOML numeric literal and returns its token kind.
+///
+/// Valid integers return `TomlTokenKind::INTEGER`; valid floats return
+/// `TomlTokenKind::FLOAT`. `TomlTokenKind::EOF` is used as an internal invalid
+/// sentinel so callers can choose the appropriate diagnostic span.
 function tomlValidateNumberLiteral(value: &String): TomlTokenKind {
   let length: u64 = value.length();
 
@@ -311,6 +406,11 @@ function tomlValidateNumberLiteral(value: &String): TomlTokenKind {
   return kind;
 }
 
+/// Validates the time, fractional second, and optional offset tail of a literal.
+///
+/// `index` must point to the first hour digit. The accepted forms are local time
+/// (`HH:MM:SS` with optional fraction), `Z` offsets, and signed `+HH:MM` or
+/// `-HH:MM` offsets.
 function tomlValidateTimeTail(value: &String, index: u64): boolean {
   let hour: i64 = tomlParseFixedDigits(value, index, 2);
   let minute: i64 = tomlParseFixedDigits(value, index + 3, 2);
@@ -374,6 +474,11 @@ function tomlValidateTimeTail(value: &String, index: u64): boolean {
   return tailIndex + 6 == value.length();
 }
 
+/// Validates TOML local-date, local-time, local-date-time, and offset literals.
+///
+/// The tokenizer stores the original text as the value lexeme; this function
+/// only decides whether the candidate is structurally valid enough to become a
+/// date/time token.
 function tomlValidateDateTimeLiteral(value: &String): boolean {
   let length: u64 = value.length();
 
@@ -414,6 +519,11 @@ function tomlValidateDateTimeLiteral(value: &String): boolean {
   return tomlValidateTimeTail(value, 11);
 }
 
+/// Lexes a numeric or date/time scalar literal at `start`.
+///
+/// Signed `inf` and `nan` are recognized before generic scanning. Date/time-like
+/// text is validated as a date/time token; all other scalar text is validated as
+/// an integer or float. Invalid candidates return precise TOML diagnostics.
 function tomlLexScalarLiteral(cursor: &mut Text::Cursor, start: u64): Result<TomlLexeme, TomlError> {
   let stream: &mut Text::Cursor = cursor;
   let specialFloat: Option<TomlLexeme> = tomlLexSignedFloatKeyword(stream);
@@ -452,6 +562,10 @@ function tomlLexScalarLiteral(cursor: &mut Text::Cursor, start: u64): Result<Tom
   });
 }
 
+/// Returns whether the cursor's remaining source starts with `expected`.
+///
+/// The cursor position is not changed. This helper is used for multi-character
+/// delimiters such as triple-quoted strings and signed float keywords.
 function tomlRemainingStartsWith(cursor: &mut Text::Cursor, expected: str): boolean {
   let sourceStart: u64 = cursor.position();
   let expectedString: String = String::create(expected);
@@ -465,6 +579,11 @@ function tomlRemainingStartsWith(cursor: &mut Text::Cursor, expected: str): bool
   return actual.equals(&expectedString);
 }
 
+/// Lexes signed special float keywords (`+inf`, `-inf`, `+nan`, `-nan`).
+///
+/// On success the cursor is advanced past the keyword and a float lexeme is
+/// returned. Unsigned `inf` and `nan` are not handled here because this helper is
+/// only reached from sign-prefixed numeric paths.
 function tomlLexSignedFloatKeyword(cursor: &mut Text::Cursor): Option<TomlLexeme> {
   let mut stream: &mut Text::Cursor = cursor;
 
@@ -483,6 +602,12 @@ function tomlLexSignedFloatKeyword(cursor: &mut Text::Cursor): Option<TomlLexeme
   return Option::NONE;
 }
 
+/// Lexes an integer or floating-point literal from a cursor position.
+///
+/// This routine handles the fast path while walking the cursor. The stricter
+/// whole-literal validator is still used by `tomlLexScalarLiteral` for scanned
+/// scalar text; this helper exists for source positions known to begin with a
+/// sign or digit.
 function tomlLexInteger(cursor: &mut Text::Cursor, start: u64): Result<TomlLexeme, TomlError> {
   let mut stream: &mut Text::Cursor = cursor;
 
@@ -607,6 +732,10 @@ function tomlLexInteger(cursor: &mut Text::Cursor, start: u64): Result<TomlLexem
   });
 }
 
+/// Appends the decoded value for a basic-string single-character escape.
+///
+/// Returns `false` when `escaped` is not one of TOML's recognized short escape
+/// codes. Unicode escapes are handled by `tomlPushQuotedEscape`.
 function tomlPushEscaped(value: &mut String, escaped: char): boolean {
   let mut output: &mut String = value;
 
@@ -640,6 +769,7 @@ function tomlPushEscaped(value: &mut String, escaped: char): boolean {
   return true;
 }
 
+/// Converts an ASCII hexadecimal digit into its numeric nibble value.
 function tomlHexValue(ch: char): Option<u32> {
   if (ch >= '0' && ch <= '9') {
     return Option::SOME((ch as u32) - ('0' as u32));
@@ -656,6 +786,11 @@ function tomlHexValue(ch: char): Option<u32> {
   return Option::NONE;
 }
 
+/// Reads a fixed-width hexadecimal Unicode scalar from the cursor.
+///
+/// The cursor is advanced over exactly `digits` hex characters on success. Any
+/// missing, non-ASCII, or non-hex character returns an invalid-escape error at
+/// the offending source span.
 function tomlReadHexScalar(
   cursor: &mut Text::Cursor,
   start: u64,
@@ -686,6 +821,11 @@ function tomlReadHexScalar(
   return Result::OK(value);
 }
 
+/// Encodes a Unicode scalar value into `output` as UTF-8 bytes.
+///
+/// Returns `false` for surrogate code points and values above the Unicode scalar
+/// range. The implementation writes the encoded bytes as `char` values because
+/// Ignis strings are UTF-8 byte-backed.
 function tomlPushUtf8Scalar(output: &mut String, scalar: u32): boolean {
   let mut value: &mut String = output;
 
@@ -722,6 +862,7 @@ function tomlPushUtf8Scalar(output: &mut String, scalar: u32): boolean {
   return false;
 }
 
+/// Advances the cursor by `count` UTF-8 characters.
 function tomlAdvanceCount(cursor: &mut Text::Cursor, count: u64): void {
   let mut stream: &mut Text::Cursor = cursor;
   let mut index: u64 = 0;
@@ -732,6 +873,10 @@ function tomlAdvanceCount(cursor: &mut Text::Cursor, count: u64): void {
   }
 }
 
+/// Consumes the optional first newline after a multiline string opening marker.
+///
+/// TOML trims one immediately following line ending for both basic and literal
+/// multiline strings. CRLF is consumed as a single logical newline.
 function tomlTrimInitialMultilineNewline(cursor: &mut Text::Cursor): void {
   let mut stream: &mut Text::Cursor = cursor;
 
@@ -743,6 +888,11 @@ function tomlTrimInitialMultilineNewline(cursor: &mut Text::Cursor): void {
   stream.eatAscii('\n');
 }
 
+/// Decodes one escape sequence in a basic string or basic multiline string.
+///
+/// The cursor is positioned at the escaped character, not at the preceding
+/// backslash. Short escapes and Unicode scalar escapes are appended to `output`;
+/// invalid escapes return `TomlError::InvalidEscape`.
 function tomlPushQuotedEscape(
   output: &mut String,
   cursor: &mut Text::Cursor,
@@ -783,6 +933,11 @@ function tomlPushQuotedEscape(
   return Result::OK(true);
 }
 
+/// Lexes a TOML basic multiline string (`"""..."""`).
+///
+/// The decoded string contents are appended to `output`. Escapes are interpreted
+/// and the initial newline after the opening delimiter is trimmed according to
+/// TOML rules. Unterminated strings and invalid escapes return parser errors.
 function tomlLexBasicMultilineString(
   cursor: &mut Text::Cursor,
   start: u64,
@@ -846,6 +1001,10 @@ function tomlLexBasicMultilineString(
   return Result::ERROR(TomlError::unterminatedString(TomlSpan::new(start, stream.position())));
 }
 
+/// Lexes a TOML basic string (`"..."`).
+///
+/// Escapes are decoded into `output`. Bare newlines are rejected because ordinary
+/// basic strings cannot span lines.
 function tomlLexBasicString(
   cursor: &mut Text::Cursor,
   start: u64,
@@ -912,6 +1071,7 @@ function tomlLexBasicString(
   return Result::ERROR(TomlError::unterminatedString(TomlSpan::new(start, stream.position())));
 }
 
+/// Dispatches to basic or basic multiline string lexing based on the delimiter.
 function tomlLexQuotedString(
   cursor: &mut Text::Cursor,
   start: u64,
@@ -924,6 +1084,10 @@ function tomlLexQuotedString(
   return tomlLexBasicString(cursor, start, output);
 }
 
+/// Lexes a TOML literal or literal multiline string.
+///
+/// Literal strings do not process escapes; source text between delimiters is
+/// copied directly into `output`. The multiline form trims one initial newline.
 function tomlLexLiteralString(
   cursor: &mut Text::Cursor,
   start: u64,
@@ -1000,6 +1164,7 @@ function tomlLexLiteralString(
   return Result::ERROR(TomlError::unterminatedString(TomlSpan::new(start, stream.position())));
 }
 
+/// Classifies an identifier lexeme as a boolean keyword or a plain identifier.
 function tomlBooleanKind(lexeme: &String): TomlTokenKind {
   let trueValue: String = String::create("true");
   let falseValue: String = String::create("false");
@@ -1011,6 +1176,7 @@ function tomlBooleanKind(lexeme: &String): TomlTokenKind {
   return TomlTokenKind::IDENTIFIER;
 }
 
+/// Pushes a token whose lexeme is a static string slice.
 function tomlPushLiteralToken(
   tokens: &mut Vector<TomlToken>,
   kind: TomlTokenKind,
@@ -1023,6 +1189,7 @@ function tomlPushLiteralToken(
   @write<TomlToken>(slot, TomlToken::new(kind, lexeme, span));
 }
 
+/// Pushes a token by cloning an owned string lexeme into the token vector.
 function tomlPushStringToken(
   tokens: &mut Vector<TomlToken>,
   kind: TomlTokenKind,
@@ -1035,6 +1202,7 @@ function tomlPushStringToken(
   @write<TomlToken>(slot, TomlToken::create(kind, lexeme, span));
 }
 
+/// Lexes and pushes a decoded basic string token.
 function tomlPushQuotedToken(
   tokens: &mut Vector<TomlToken>,
   cursor: &mut Text::Cursor,
@@ -1053,6 +1221,7 @@ function tomlPushQuotedToken(
   return Result::OK(true);
 }
 
+/// Lexes and pushes a decoded literal string token.
 function tomlPushLiteralStringToken(
   tokens: &mut Vector<TomlToken>,
   cursor: &mut Text::Cursor,
@@ -1071,6 +1240,7 @@ function tomlPushLiteralStringToken(
   return Result::OK(true);
 }
 
+/// Lexes and pushes a numeric or date/time scalar token.
 function tomlPushIntegerToken(
   tokens: &mut Vector<TomlToken>,
   cursor: &mut Text::Cursor,
@@ -1089,6 +1259,7 @@ function tomlPushIntegerToken(
   return Result::OK(true);
 }
 
+/// Lexes and pushes a bare identifier or boolean token.
 function tomlPushIdentifierToken(
   tokens: &mut Vector<TomlToken>,
   cursor: &mut Text::Cursor,
@@ -1102,13 +1273,27 @@ function tomlPushIdentifierToken(
   tomlPushStringToken(output, kind, &value, TomlSpan::new(start, lexeme.end));
 }
 
+/// Public TOML front-end for lexing, parsing, token inspection, and writing.
+///
+/// Most users should call `Toml::parse` to obtain a `TomlDocument`. The lexer is
+/// exposed for tests and tooling that need token-level diagnostics or syntax
+/// highlighting.
 export namespace Toml {
+  /// Returns the shared error for scalar TOML root serialization attempts.
+  ///
+  /// TOML documents require table-like roots. Primitive overloads of
+  /// `stringify` route through this helper so they all report the same contract
+  /// violation.
   function unsupportedRootValue(): Result<String, Serializer::Error> {
     return Result::ERROR(
       Serializer::Error::unsupportedRootShape("TOML root serialization currently requires a record-like serializer implementation"),
     );
   }
 
+  /// Returns the serializer configuration used for TOML record output.
+  ///
+  /// The writer emits field entries as `key = value` lines, does not wrap records
+  /// in braces, and rejects scalar roots.
   function writer(): Serializer::Writer {
     return Serializer::Writer {
       recordPrefix: "",
@@ -1120,16 +1305,29 @@ export namespace Toml {
     };
   }
 
+  /// Lexes TOML source text from a borrowed string slice.
+  ///
+  /// This overload copies `source` into an owned `String` so the cursor and token
+  /// construction paths can share the `&String` implementation.
   function lex(source: str): Result<Vector<TomlToken>, TomlError> {
     let owned: String = String::create(source);
     return Toml::lex(&owned);
   }
 
+  /// Lexes TOML source text into an existing token vector.
+  ///
+  /// The vector is cleared before tokens are appended. Returning `Option::NONE`
+  /// means lexing succeeded and the vector ends with an EOF token.
   function lexInto(source: str, tokens: &mut Vector<TomlToken>): Option<TomlError> {
     let owned: String = String::create(source);
     return Toml::lexInto(&owned, tokens);
   }
 
+  /// Lexes owned TOML source text into a fresh token vector.
+  ///
+  /// Whitespace except newlines is skipped, comments are ignored, CRLF and CR are
+  /// normalized to newline tokens, and every successful token stream ends with
+  /// `TomlTokenKind::EOF`.
   function lex(source: &String): Result<Vector<TomlToken>, TomlError> {
     let mut cursor: Text::Cursor = Text::Cursor::create(source);
     let mut tokens: Vector<TomlToken> = Vector::init<TomlToken>();
@@ -1246,6 +1444,11 @@ export namespace Toml {
     return Result::OK(tokens);
   }
 
+  /// Lexes owned TOML source text into `tokens` without allocating a new vector.
+  ///
+  /// This is useful for callers that reuse token storage across parses. Existing
+  /// contents are discarded before lexing starts. On error, the vector contains
+  /// the tokens produced before the failing character or literal.
   function lexInto(source: &String, tokens: &mut Vector<TomlToken>): Option<TomlError> {
     let mut cursor: Text::Cursor = Text::Cursor::create(source);
     let mut output: &mut Vector<TomlToken> = tokens;
@@ -1364,11 +1567,19 @@ export namespace Toml {
     return Option::NONE;
   }
 
+  /// Parses TOML source text from a borrowed string slice.
+  ///
+  /// This overload owns the text temporarily and delegates to `Toml::parse(&String)`.
   function parse(source: str): Result<TomlDocument, TomlError> {
     let owned: String = String::create(source);
     return Toml::parse(&owned);
   }
 
+  /// Parses owned TOML source text into a `TomlDocument`.
+  ///
+  /// Parsing is two-stage: source text is tokenized first, then `parseTokens`
+  /// builds the table/value model. Lexer errors are returned unchanged; parser
+  /// errors include duplicate keys, table conflicts, and unexpected tokens.
   function parse(source: &String): Result<TomlDocument, TomlError> {
     let Result::OK(tokens) = Toml::lex(source) else {
       let Result::ERROR(error) = Toml::lex(source) else {
@@ -1381,70 +1592,97 @@ export namespace Toml {
     return parseTokens(&tokens);
   }
 
+  /// Returns the number of tokens in a token vector.
+  ///
+  /// This small wrapper keeps token inspection available through the TOML module
+  /// without exposing vector implementation details to simple tooling tests.
   function tokenCount(tokens: &Vector<TomlToken>): u64 {
     return tokens.length();
   }
 
+  /// Returns the token at `index` when it exists.
   function tokenAt(tokens: &Vector<TomlToken>, index: u64): Option<&TomlToken> {
     return tokens.get(index);
   }
 
+  /// Rejects boolean TOML root serialization.
+  ///
+  /// TOML output currently supports record-like roots only; use a serializable
+  /// record wrapper when emitting a document.
   function stringify(_value: boolean): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects character TOML root serialization.
   function stringify(_value: char): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `i8` TOML root serialization.
   function stringify(_value: i8): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `i16` TOML root serialization.
   function stringify(_value: i16): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `i32` TOML root serialization.
   function stringify(_value: i32): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `i64` TOML root serialization.
   function stringify(_value: i64): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `u8` TOML root serialization.
   function stringify(_value: u8): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `u16` TOML root serialization.
   function stringify(_value: u16): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `u32` TOML root serialization.
   function stringify(_value: u32): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `u64` TOML root serialization.
   function stringify(_value: u64): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `f32` TOML root serialization.
   function stringify(_value: f32): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects `f64` TOML root serialization.
   function stringify(_value: f64): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects borrowed string TOML root serialization.
   function stringify(_value: str): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Rejects owned string TOML root serialization.
   function stringify(_value: &String): Result<String, Serializer::Error> {
     return Toml::unsupportedRootValue();
   }
 
+  /// Serializes a record-like value as a TOML document string.
+  ///
+  /// The type's `Serialize` implementation controls which fields are emitted.
+  /// Serializer errors are propagated, including unsupported nested shapes or an
+  /// implementation that does not produce a TOML-compatible root record.
   function stringify<T: Serialize>(value: &T): Result<String, Serializer::Error> {
     let mut output: String = String::new();
     let writer: Serializer::Writer = Toml::writer();
