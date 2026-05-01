@@ -128,6 +128,14 @@ pub enum Instr {
     element_type: TypeId,
   },
 
+  /// Build a non-owning slice from a data pointer and length.
+  MakeSlice {
+    dest: TempId,
+    data: Operand,
+    len: u64,
+    element_type: TypeId,
+  },
+
   /// Initialize a vector in memory.
   InitVector {
     dest_ptr: Operand,

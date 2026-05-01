@@ -880,15 +880,22 @@ impl<'a> LoweringContext<'a> {
     span: Span,
   ) -> Option<Operand> {
     let is_extern = self.is_callee_extern(callee);
+    let param_types = self.call_param_types(callee);
 
     // Extern calls don't consume ownership - spill owned temps so caller drops them.
     // Non-extern calls transfer ownership to callee.
     let arg_ops: Vec<_> = args
       .iter()
-      .filter_map(|&arg| {
+      .enumerate()
+      .filter_map(|(index, &arg)| {
         let arg_node = self.hir.get(arg);
         let arg_ty = arg_node.type_id;
         let op = self.lower_hir_node(arg)?;
+        let op = if let Some(&target_ty) = param_types.get(index) {
+          self.coerce_operand_to_type(arg, op, target_ty, arg_node.span.clone())
+        } else {
+          op
+        };
 
         if is_extern {
           Some(self.spill_if_owned_temp(op, arg_ty))
@@ -1542,9 +1549,10 @@ impl<'a> LoweringContext<'a> {
 
       // General case
       if let Some(val) = self.lower_hir_node(value_id) {
+        let coerced = self.coerce_operand_to_type(value_id, val, ty, value_node.span.clone());
         self.fn_builder().emit(Instr::Store {
           dest: local,
-          value: val,
+          value: coerced,
         });
       }
     }
@@ -2771,11 +2779,71 @@ impl<'a> LoweringContext<'a> {
     hir_id: HIRId,
     value: Option<HIRId>,
   ) {
-    let val = value.and_then(|v| self.lower_hir_node(v)); // Don't spill - ownership transfers to caller
+    let return_type = self.current_fn.as_ref().map(|func| func.return_type());
+    let val = value.and_then(|v| {
+      let value_node = self.hir.get(v);
+      let op = self.lower_hir_node(v)?;
+      Some(if let Some(target_ty) = return_type {
+        self.coerce_operand_to_type(v, op, target_ty, value_node.span.clone())
+      } else {
+        op
+      })
+    }); // Don't spill - ownership transfers to caller
     self.emit_exit_defers(ExitKey::Return(hir_id));
     self.emit_exit_drops(ExitKey::Return(hir_id));
     self.emit_all_synthetic_drops();
     self.fn_builder().terminate(Terminator::Return(val));
+  }
+
+  fn call_param_types(
+    &self,
+    callee: DefinitionId,
+  ) -> Vec<TypeId> {
+    let def = self.defs.get(&callee);
+
+    match &def.kind {
+      DefinitionKind::Function(function_definition) => function_definition
+        .params
+        .iter()
+        .map(|param_id| *self.defs.type_of(param_id))
+        .collect(),
+      DefinitionKind::Method(method_definition) => method_definition
+        .params
+        .iter()
+        .map(|param_id| *self.defs.type_of(param_id))
+        .collect(),
+      _ => Vec::new(),
+    }
+  }
+
+  fn coerce_operand_to_type(
+    &mut self,
+    source_hir: HIRId,
+    operand: Operand,
+    target_ty: TypeId,
+    span: Span,
+  ) -> Operand {
+    let source_ty = self.hir.get(source_hir).type_id;
+
+    let slice_conversion = match (self.types.get(&target_ty), self.types.get(&source_ty)) {
+      (Type::Slice { element: target_element, .. }, Type::FixedArray { element: source_element, size })
+        if self.types.types_equal(target_element, source_element) => Some((*source_element, *size as u64)),
+      _ => None,
+    };
+
+    match slice_conversion {
+      Some((element_type, len)) => {
+        let dest = self.fn_builder().alloc_temp(target_ty, span);
+        self.fn_builder().emit(Instr::MakeSlice {
+          dest,
+          data: operand,
+          len,
+          element_type,
+        });
+        Operand::Temp(dest)
+      },
+      _ => operand,
+    }
   }
 
   fn ensure_return(&mut self) {
@@ -3144,16 +3212,30 @@ impl<'a> LoweringContext<'a> {
   ) -> Option<Operand> {
     // Build argument list: receiver (if any) + args
     // Don't spill arguments - ownership transfers to callee
+    let param_types = self.call_param_types(method);
     let mut call_args = Vec::new();
 
-    if let Some(recv) = receiver
-      && let Some(recv_op) = self.lower_hir_node(recv)
-    {
-      call_args.push(recv_op);
+    if let Some(recv) = receiver {
+      let receiver_node = self.hir.get(recv);
+      if let Some(recv_op) = self.lower_hir_node(recv) {
+        let recv_op = if let Some(&target_ty) = param_types.first() {
+          self.coerce_operand_to_type(recv, recv_op, target_ty, receiver_node.span.clone())
+        } else {
+          recv_op
+        };
+        call_args.push(recv_op);
+      }
     }
 
-    for &arg in args {
+    let start_index = usize::from(receiver.is_some());
+    for (index, &arg) in args.iter().enumerate() {
+      let arg_node = self.hir.get(arg);
       if let Some(arg_op) = self.lower_hir_node(arg) {
+        let arg_op = if let Some(&target_ty) = param_types.get(start_index + index) {
+          self.coerce_operand_to_type(arg, arg_op, target_ty, arg_node.span.clone())
+        } else {
+          arg_op
+        };
         call_args.push(arg_op);
       }
     }

@@ -1,0 +1,144 @@
+import Eq from "std::collections";
+import Hash from "std::collections";
+import HashMap from "std::collections";
+import Hasher from "std::hash";
+import Json from "std::json";
+import Serialize, Serializer from "std::serializer";
+import Test from "std::test";
+import Toml from "std::toml";
+
+@implements(Hash, Eq)
+record Key {
+  public id: i32;
+  public bucket: u64;
+
+  hash(&self, hasher: &mut Hasher): void {
+    let mut state: &mut Hasher = hasher;
+    state.writeU64(self.bucket);
+  }
+
+  public equals(&self, other: &Key): boolean {
+    return self.id == other.id;
+  }
+}
+
+@implements(Serialize)
+record Payload {
+  public value: i32;
+  public name: str;
+
+  serialize(&self, output: &mut String, writer: &Serializer::Writer): Result<boolean, Serializer::Error> {
+    Serializer::beginRecord(output, writer)!;
+    Serializer::writeField(output, "value", writer, true)!;
+    Serializer::write(output, self.value, writer)!;
+    Serializer::writeField(output, "name", writer, false)!;
+    Serializer::write(output, self.name, writer)!;
+    Serializer::endRecord(output, writer)!;
+
+    return Result::OK(true);
+  }
+}
+
+function assertOkString(value: Result<String, Serializer::Error>, expected: str): void {
+  match (value) {
+    Result::OK(text) -> Test::assertEq<str>(text.toStr(), expected),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function jsonScalarEntrypointsRoundTrip(): void {
+  assertOkString(Json::stringify(true), "true");
+  assertOkString(Json::stringify(42), "42");
+  assertOkString(Json::stringify("line\n\"quoted\""), "\"line\\n\\\"quoted\\\"\"");
+}
+
+@test
+function recordHelpersSupportJsonAndToml(): void {
+  let payload: Payload = Payload { value: 7, name: "ignis" };
+  let mut json: String = String::new();
+  let mut toml: String = String::new();
+  let jsonWriter: Serializer::Writer = Json::writer();
+  let tomlWriter: Serializer::Writer = Toml::writer();
+
+  match (payload.serialize(&mut json, &jsonWriter)) {
+    Result::OK(_) -> Test::assertEq<str>(json.toStr(), "{\"value\":7,\"name\":\"ignis\"}"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (payload.serialize(&mut toml, &tomlWriter)) {
+    Result::OK(_) -> Test::assertEq<str>(toml.toStr(), "value = 7\nname = \"ignis\""),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function tomlRejectsScalarRoots(): void {
+  match (Toml::stringify(42)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> Test::assert(error.kind == Serializer::ErrorKind::UNSUPPORTED_ROOT_SHAPE),
+  };
+}
+
+@test
+function coreSupportsCustomWriterLayouts(): void {
+  let payload: Payload = Payload { value: 7, name: "ignis" };
+  let mut output: String = String::new();
+  let writer: Serializer::Writer = Serializer::Writer {
+    recordPrefix: "<",
+    recordSuffix: ">",
+    entrySeparator: " | ",
+    fieldSeparator: " => ",
+    supportsScalarRoot: true,
+    quoteFieldKeys: false,
+  };
+
+  match (payload.serialize(&mut output, &writer)) {
+    Result::OK(_) -> Test::assertEq<str>(output.toStr(), "<value => 7 | name => \"ignis\">"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function serializerSurfaceAndHashMapTraversalStayStable(): void {
+  let mut map: HashMap<Key, i32> = HashMap::init<Key, i32>();
+  let payload: Payload = Payload { value: 7, name: "ignis" };
+  let jsonResult: Result<String, Serializer::Error> = Json::stringify<Payload>(&payload);
+  let tomlResult: Result<String, Serializer::Error> = Toml::stringify<Payload>(&payload);
+  let _jsonSurface: Result<String, Serializer::Error> = jsonResult;
+  let _tomlSurface: Result<String, Serializer::Error> = tomlResult;
+
+  map.insert(Key { id: 2, bucket: 1 }, 2);
+  map.insert(Key { id: 1, bucket: 1 }, 1);
+
+  let mut firstOrder: i32 = 0;
+  let mut cursor: Option<u64> = map.firstEntryCursor();
+  while (true) {
+    match (cursor) {
+      Option::SOME(entryCursor) -> {
+        firstOrder = (firstOrder * 100) + (map.entryKey(entryCursor).id * 10) + *map.entryValue(entryCursor);
+        cursor = map.nextEntryCursor(entryCursor);
+      },
+      Option::NONE -> {
+        break;
+      },
+    };
+  }
+
+  let mut secondOrder: i32 = 0;
+  cursor = map.firstEntryCursor();
+  while (true) {
+    match (cursor) {
+      Option::SOME(entryCursor) -> {
+        secondOrder = (secondOrder * 100) + (map.entryKey(entryCursor).id * 10) + *map.entryValue(entryCursor);
+        cursor = map.nextEntryCursor(entryCursor);
+      },
+      Option::NONE -> {
+        break;
+      },
+    };
+  }
+
+  Test::assert(firstOrder != 0);
+  Test::assertEq<i32>(firstOrder, secondOrder);
+}

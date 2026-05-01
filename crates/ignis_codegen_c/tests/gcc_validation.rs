@@ -189,6 +189,44 @@ function main(): void {
 }
 
 #[test]
+fn gcc_slice_parameter_return_and_indexing() {
+  gcc_compiles(
+    r#"
+function identity(values: i32[]): i32[] {
+    return values;
+}
+
+function sumEdges(values: i32[]): i32 {
+    return values[0] + values[2];
+}
+
+function main(): i32 {
+    let data: i32[3] = [7, 11, 13];
+    let view: i32[] = identity(data);
+    return sumEdges(view);
+}
+"#,
+  );
+}
+
+#[test]
+fn gcc_str_slice_parameter_indexing() {
+  gcc_compiles(
+    r#"
+function secondStartsWithB(labels: str[]): i32 {
+    let second: str = labels[1];
+    return ((second as *u8)[0]) as i32;
+}
+
+function main(): i32 {
+    let labels: str[2] = ["a", "beta"];
+    return secondStartsWithB(labels);
+}
+"#,
+  );
+}
+
+#[test]
 fn gcc_drop_glue_owned_field() {
   gcc_compiles(
     r#"

@@ -18,6 +18,12 @@ typedef int64_t i64;
 typedef float f32;
 typedef double f64;
 typedef u8 boolean;
+
+/* Minimal process bootstrap stub for generated wrapper tests. */
+static inline void ignis_runtime_init(i32 argc, char **argv) {
+  (void)argc;
+  (void)argv;
+}
 typedef u32 ignis_atom_t;
 typedef char *string;
 

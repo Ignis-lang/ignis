@@ -590,6 +590,12 @@ impl TypeStore {
       return true;
     }
 
+    if let (Type::Slice { element: target_element, .. }, Type::FixedArray { element: source_element, .. }) =
+      (self.get(target), self.get(source))
+    {
+      return self.types_equal(target_element, source_element);
+    }
+
     // Allow implicit widening for same-sign integers
     if self.is_integer(target) && self.is_integer(source) {
       return self.is_implicit_widening(target, source);

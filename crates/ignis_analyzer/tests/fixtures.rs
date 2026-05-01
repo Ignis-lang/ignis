@@ -69,6 +69,16 @@ fn fixture_mutate_deref_while_borrowed() {
   test_fixture("test_cases/analyzer/borrows/mutate_deref_while_borrowed.ign");
 }
 
+#[test]
+fn fixture_mutate_while_slice_borrowed() {
+  test_fixture("test_cases/analyzer/borrows/mutate_while_slice_borrowed.ign");
+}
+
+#[test]
+fn fixture_return_local_slice() {
+  test_fixture("test_cases/analyzer/borrows/return_local_slice.ign");
+}
+
 // --- Cast Tests ---
 
 #[test]

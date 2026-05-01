@@ -7,7 +7,7 @@ use ignis_type::{
   file::SourceMap,
   span::Span,
   symbol::SymbolTable,
-  types::{Type, TypeStore},
+  types::{Type, TypeId, TypeStore},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +84,8 @@ pub struct HirBorrowChecker<'a> {
   /// (the deferred expression executes at scope exit, so borrows must live that long).
   in_defer_body: bool,
 
+  current_return_type: Option<TypeId>,
+
   diagnostics: Vec<Diagnostic>,
 }
 
@@ -106,6 +108,7 @@ impl<'a> HirBorrowChecker<'a> {
       reachable: true,
       loop_continue_stack: Vec::new(),
       in_defer_body: false,
+      current_return_type: None,
       diagnostics: Vec::new(),
     }
   }
@@ -128,13 +131,13 @@ impl<'a> HirBorrowChecker<'a> {
             continue;
           }
           if let Some(&body_id) = self.hir.function_bodies.get(&fn_def_id) {
-            self.check_function(body_id);
+            self.check_function(body_id, func_def.return_type);
           }
         },
 
-        DefinitionKind::Method(_) => {
+        DefinitionKind::Method(method_def) => {
           if let Some(&body_id) = self.hir.function_bodies.get(&fn_def_id) {
-            self.check_function(body_id);
+            self.check_function(body_id, method_def.return_type);
           }
         },
 
@@ -148,12 +151,14 @@ impl<'a> HirBorrowChecker<'a> {
   fn check_function(
     &mut self,
     body_id: HIRId,
+    return_type: TypeId,
   ) {
     self.borrow_state.clear();
     self.scope_stack.clear();
     self.branch_snapshots.clear();
     self.reachable = true;
     self.loop_continue_stack.clear();
+    self.current_return_type = Some(return_type);
 
     self.scope_stack.push(ScopeEntry {
       block_hir_id: None,
@@ -164,6 +169,7 @@ impl<'a> HirBorrowChecker<'a> {
     self.check_node(body_id);
 
     self.scope_stack.pop();
+    self.current_return_type = None;
   }
 
   fn check_node(
@@ -185,6 +191,10 @@ impl<'a> HirBorrowChecker<'a> {
 
           // If the value is a reference expression, record a named borrow
           self.try_record_let_borrow(name, val_id, &span);
+
+          // If the binding stores a slice view into a local fixed array, keep
+          // the owner borrowed for the lifetime of the binding.
+          self.try_record_let_slice_borrow(name, val_id, &span);
 
           // If the value is a closure with ByRef/ByMutRef captures, register
           // borrows on the captured variables for the lifetime of this binding.
@@ -608,6 +618,35 @@ impl<'a> HirBorrowChecker<'a> {
     }
   }
 
+  fn try_record_let_slice_borrow(
+    &mut self,
+    binder: DefinitionId,
+    value_id: HIRId,
+    span: &Span,
+  ) {
+    if !matches!(self.types.get(self.defs.type_of(&binder)), Type::Slice { .. }) {
+      return;
+    }
+
+    let Some(target_def) = self.extract_slice_borrow_root(value_id) else {
+      return;
+    };
+
+    if !matches!(self.defs.get(&target_def).kind, DefinitionKind::Variable(_)) {
+      return;
+    }
+
+    self.try_borrow(target_def, false, span);
+
+    if let Some(scope) = self.scope_stack.last_mut() {
+      scope.borrows.push(ActiveBorrow {
+        binder,
+        target: target_def,
+        mutable: false,
+      });
+    }
+  }
+
   /// Check a temporary reference passed as a function argument.
   /// These borrows are transient: conflict-check only, no persistent state.
   fn check_temporary_borrow(
@@ -744,6 +783,18 @@ impl<'a> HirBorrowChecker<'a> {
   ) {
     let node = self.hir.get(value_id);
 
+    if self
+      .current_return_type
+      .is_some_and(|return_type| matches!(self.types.get(&return_type), Type::Slice { .. }))
+      && let Some(def_id) = self.extract_slice_borrow_root(value_id)
+      && matches!(self.defs.get(&def_id).kind, DefinitionKind::Variable(_))
+    {
+      self
+        .diagnostics
+        .push(DiagnosticMessage::CannotReturnLocalReference { span: span.clone() }.report());
+      return;
+    }
+
     let inner = match &node.kind {
       HIRKind::Reference { expression, .. } => *expression,
       _ => {
@@ -781,6 +832,28 @@ impl<'a> HirBorrowChecker<'a> {
       HIRKind::FieldAccess { base, .. } => self.extract_root_variable(*base),
       HIRKind::Dereference(inner) => self.extract_root_variable(*inner),
       HIRKind::Index { base, .. } => self.extract_root_variable(*base),
+      _ => None,
+    }
+  }
+
+  fn extract_slice_borrow_root(
+    &self,
+    hir_id: HIRId,
+  ) -> Option<DefinitionId> {
+    let node = self.hir.get(hir_id);
+
+    match &node.kind {
+      HIRKind::Variable(def_id) => match self.types.get(self.defs.type_of(def_id)) {
+        Type::Slice { .. } => self
+          .hir
+          .variables_inits
+          .get(def_id)
+          .and_then(|init_hir_id| self.extract_slice_borrow_root(*init_hir_id)),
+        Type::FixedArray { .. } => Some(*def_id),
+        _ => None,
+      },
+      HIRKind::Index { base, .. } | HIRKind::FieldAccess { base, .. } => self.extract_slice_borrow_root(*base),
+      HIRKind::Dereference(inner) => self.extract_slice_borrow_root(*inner),
       _ => None,
     }
   }

@@ -1061,6 +1061,7 @@ impl<'a> Analyzer<'a> {
           .unwrap_or_else(|| self.types.error());
 
         let elem_type = match self.types.get(&base_type).clone() {
+          ignis_type::types::Type::Slice { element, .. } => element,
           ignis_type::types::Type::FixedArray { element, .. } => element,
           ignis_type::types::Type::Pointer { inner, .. } => inner,
           _ => self.types.error(),

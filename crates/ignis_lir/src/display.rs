@@ -252,6 +252,16 @@ impl<'a> LirPrinter<'a> {
         let ty = self.format_type(*element_type);
         writeln!(self.output, "t{} = gep {}[{}] : *{}", dest.index(), b, i, ty).unwrap();
       },
+      Instr::MakeSlice {
+        dest,
+        data,
+        len,
+        element_type,
+      } => {
+        let data_operand = self.format_operand(func, data);
+        let ty = self.format_type(*element_type);
+        writeln!(self.output, "t{} = make_slice {}, {} : {}[]", dest.index(), data_operand, len, ty).unwrap();
+      },
       Instr::InitVector {
         dest_ptr,
         elements,

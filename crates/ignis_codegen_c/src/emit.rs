@@ -248,6 +248,7 @@ impl<'a> CEmitter<'a> {
     let uses_module_headers = matches!(self.target, Some(EmitTarget::UserModule(_)) | Some(EmitTarget::StdModule(_)));
 
     if !uses_module_headers {
+      self.emit_slice_types();
       self.emit_type_forward_declarations();
       self.emit_type_definitions();
     } else if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
@@ -810,6 +811,7 @@ impl<'a> CEmitter<'a> {
       Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
         self.type_contains_user_definition(*inner, visited_types)
       },
+      Type::Slice { element, .. } => self.type_contains_user_definition(*element, visited_types),
       Type::FixedArray { element, .. } => self.type_contains_user_definition(*element, visited_types),
       Type::Tuple(elements) => elements
         .iter()
@@ -984,6 +986,47 @@ impl<'a> CEmitter<'a> {
       writeln!(self.output, "typedef struct {} {};", name, name).unwrap();
     }
     writeln!(self.output).unwrap();
+  }
+
+  fn emit_slice_types(&mut self) {
+    let mut slice_type_ids: Vec<TypeId> = self
+      .types
+      .iter()
+      .filter_map(|(type_id, ty)| match ty {
+        Type::Slice { element, .. } if self.is_fully_monomorphized(*element) => Some(type_id),
+        _ => None,
+      })
+      .collect();
+
+    if slice_type_ids.is_empty() {
+      return;
+    }
+
+    slice_type_ids.sort_by_key(|type_id| type_id.index());
+    slice_type_ids.dedup();
+
+    writeln!(self.output, "// Slice types").unwrap();
+    for slice_type_id in slice_type_ids {
+      self.emit_slice_type_definition(slice_type_id);
+    }
+    writeln!(self.output).unwrap();
+  }
+
+  fn emit_slice_type_definition(
+    &mut self,
+    slice_type_id: TypeId,
+  ) {
+    let Type::Slice { element, .. } = self.types.get(&slice_type_id) else {
+      return;
+    };
+
+    let struct_name = self.slice_struct_name(slice_type_id);
+    let data_type = self.format_type(*element);
+
+    writeln!(self.output, "struct {} {{", struct_name).unwrap();
+    writeln!(self.output, "    {}* data;", data_type).unwrap();
+    writeln!(self.output, "    u64 len;").unwrap();
+    writeln!(self.output, "}};").unwrap();
   }
 
   /// Emit struct definitions for all record and enum types.
@@ -1202,9 +1245,21 @@ impl<'a> CEmitter<'a> {
       Type::Never => "never".to_string(),
       Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_name(*inner)),
       Type::Reference { inner, .. } => format!("ref_{}", self.format_type_for_name(*inner)),
+      Type::Slice { element, .. } => format!("slice_{}", self.format_type_for_name(*element)),
       Type::Record(def_id) | Type::Enum(def_id) => self.build_mangled_name(*def_id),
       _ => format!("ty{}", ty.index()),
     }
+  }
+
+  fn slice_struct_name(
+    &self,
+    slice_type_id: TypeId,
+  ) -> String {
+    let Type::Slice { element, .. } = self.types.get(&slice_type_id) else {
+      return format!("__ignis_slice_{}", slice_type_id.index());
+    };
+
+    format!("__ignis_slice_{}", self.format_type_for_name(*element))
   }
 
   /// Check if a type is fully monomorphized (no Type::Param or Type::Instance).
@@ -1215,6 +1270,7 @@ impl<'a> CEmitter<'a> {
     match self.types.get(&type_id) {
       Type::Param { .. } | Type::Instance { .. } | Type::Infer => false,
       Type::Pointer { inner, .. } | Type::Reference { inner, .. } => self.is_fully_monomorphized(*inner),
+      Type::Slice { element, .. } => self.is_fully_monomorphized(*element),
       Type::FixedArray { element, .. } => self.is_fully_monomorphized(*element),
       Type::Function { params, ret, .. } => {
         params.iter().all(|&p| self.is_fully_monomorphized(p)) && self.is_fully_monomorphized(*ret)
@@ -2263,7 +2319,35 @@ impl<'a> CEmitter<'a> {
         let b = self.format_operand(func, base);
         let i = self.format_operand(func, index);
 
+        let base_slice = self.operand_type(func, base).and_then(|ty| match self.types.get(&ty) {
+          Type::Slice { .. } => Some(false),
+          Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
+            matches!(self.types.get(inner), Type::Slice { .. }).then_some(true)
+          },
+          _ => None,
+        });
+
+        if let Some(pointer_to_slice) = base_slice {
+          if pointer_to_slice {
+            writeln!(self.output, "t{} = &(({})->data[{}]);", dest.index(), b, i).unwrap();
+          } else {
+            writeln!(self.output, "t{} = &(({}).data[{}]);", dest.index(), b, i).unwrap();
+          }
+          return;
+        }
+
         writeln!(self.output, "t{} = &{}[{}];", dest.index(), b, i).unwrap();
+      },
+      Instr::MakeSlice {
+        dest,
+        data,
+        len,
+        element_type: _,
+      } => {
+        let data_operand = self.format_operand(func, data);
+        let slice_type = self.format_type(func.temp_type(*dest));
+        writeln!(self.output, "t{} = ({}){{ .data = {}, .len = {}ULL }};", dest.index(), slice_type, data_operand, len)
+          .unwrap();
       },
       Instr::InitVector { dest_ptr, elements, .. } => {
         let p = self.format_operand(func, dest_ptr);
@@ -2981,7 +3065,7 @@ impl<'a> CEmitter<'a> {
       Type::Error => "/* error */ void*".to_string(),
       Type::Pointer { inner, .. } => format!("{}*", self.format_type(*inner)),
       Type::Reference { inner, .. } => format!("{}*", self.format_type(*inner)),
-      Type::Slice { .. } => panic!("ICE: Slice reached C codegen before Phase B2 lowering/codegen support"),
+      Type::Slice { .. } => format!("struct {}", self.slice_struct_name(ty)),
       Type::FixedArray { element, .. } => {
         format!("{}*", self.format_type(*element))
       },
@@ -3717,6 +3801,7 @@ impl<'a> CEmitter<'a> {
       Type::Pointer { inner, .. } => format!("ptr_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: true } => format!("mutref_{}", self.format_type_for_mangling(inner)),
       Type::Reference { inner, mutable: false } => format!("ref_{}", self.format_type_for_mangling(inner)),
+      Type::Slice { element, .. } => format!("slice_{}", self.format_type_for_mangling(element)),
       Type::FixedArray { element, .. } => {
         format!("vec_{}", self.format_type_for_mangling(element))
       },
@@ -4151,13 +4236,24 @@ where
   // Separate closure structs from regular external structs.
   // Closure structs need full definitions (for by-value passing); others get forward decls.
   let mut external_forward_decls: Vec<&String> = Vec::new();
+  let mut slice_struct_type_ids: Vec<TypeId> = Vec::new();
   let mut closure_struct_type_ids: Vec<TypeId> = Vec::new();
 
   for name in &struct_forward_decls {
     if module_type_names.contains(name) {
       continue;
     }
-    if name.starts_with("__ignis_closure_") {
+    if name.starts_with("__ignis_slice_") {
+      for (type_id, ty) in types.iter() {
+        if matches!(ty, Type::Slice { .. }) {
+          let slice_name = slice_struct_name_standalone(type_id, types, defs, symbols, namespaces);
+          if &slice_name == name && !slice_struct_type_ids.contains(&type_id) {
+            slice_struct_type_ids.push(type_id);
+            break;
+          }
+        }
+      }
+    } else if name.starts_with("__ignis_closure_") {
       // Find the matching TypeId for this closure struct name
       for (type_id, ty) in types.iter() {
         if let Type::Function { params, ret, .. } = ty {
@@ -4187,6 +4283,28 @@ where
     for name in &external_forward_decls {
       writeln!(output, "typedef struct {} {};", name, name).unwrap();
     }
+    writeln!(output).unwrap();
+  }
+
+  slice_struct_type_ids.sort_by_key(|id| id.index());
+
+  for slice_type_id in &slice_struct_type_ids {
+    if let Type::Slice { element, .. } = types.get(slice_type_id) {
+      let struct_name = slice_struct_name_standalone(*slice_type_id, types, defs, symbols, namespaces);
+      let guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&struct_name));
+      let data_type = format_c_type(types.get(element), types, defs, symbols, namespaces);
+
+      writeln!(output, "#ifndef {}", guard).unwrap();
+      writeln!(output, "#define {}", guard).unwrap();
+      writeln!(output, "struct {} {{", struct_name).unwrap();
+      writeln!(output, "    {}* data;", data_type).unwrap();
+      writeln!(output, "    u64 len;").unwrap();
+      writeln!(output, "}};").unwrap();
+      writeln!(output, "#endif // {}", guard).unwrap();
+    }
+  }
+
+  if !slice_struct_type_ids.is_empty() {
     writeln!(output).unwrap();
   }
 
@@ -4473,6 +4591,7 @@ fn is_type_fully_monomorphized_standalone(
     Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
       is_type_fully_monomorphized_standalone(*inner, types)
     },
+    Type::Slice { element, .. } => is_type_fully_monomorphized_standalone(*element, types),
     Type::FixedArray { element, .. } => is_type_fully_monomorphized_standalone(*element, types),
     Type::Function { params, ret, .. } => {
       params
@@ -4495,6 +4614,10 @@ fn collect_struct_dependencies_from_type(
   match types.get(&type_id) {
     Type::Record(def_id) | Type::Enum(def_id) => {
       out.insert(build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types));
+    },
+    Type::Slice { element, .. } => {
+      out.insert(slice_struct_name_standalone(type_id, types, defs, symbols, namespaces));
+      collect_struct_dependencies_from_type(*element, types, defs, symbols, namespaces, out);
     },
     Type::Tuple(elements) => {
       for element in elements {
@@ -4744,6 +4867,10 @@ fn collect_struct_types_from_type(
     Type::Record(def_id) | Type::Enum(def_id) => {
       let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
       out.insert(name);
+    },
+    Type::Slice { element, .. } => {
+      out.insert(slice_struct_name_standalone(*type_id, types, defs, symbols, namespaces));
+      collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
     },
     Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
       collect_struct_types_from_type(inner, types, defs, symbols, namespaces, out);
@@ -5095,6 +5222,9 @@ fn format_type_for_mangling_standalone(
     Type::Reference { inner, mutable: false } => {
       format!("ref_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
     },
+    Type::Slice { element, .. } => {
+      format!("slice_{}", format_type_for_mangling_standalone(element, types, defs, symbols))
+    },
     Type::FixedArray { element, .. } => {
       format!("vec_{}", format_type_for_mangling_standalone(element, types, defs, symbols))
     },
@@ -5180,11 +5310,42 @@ fn format_type_for_name_standalone(
       "ref_{}",
       format_type_for_name_standalone(*inner, types, defs, symbols, namespaces)
     ),
+    Type::Slice { element, .. } => format!(
+      "slice_{}",
+      format_type_for_name_standalone(*element, types, defs, symbols, namespaces)
+    ),
     Type::Record(def_id) | Type::Enum(def_id) => {
       build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types)
     },
     _ => format!("ty{}", ty.index()),
   }
+}
+
+fn slice_struct_name_from_element_standalone(
+  element: TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> String {
+  format!(
+    "__ignis_slice_{}",
+    format_type_for_name_standalone(element, types, defs, symbols, namespaces)
+  )
+}
+
+fn slice_struct_name_standalone(
+  slice_type_id: TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> String {
+  let Type::Slice { element, .. } = types.get(&slice_type_id) else {
+    return format!("__ignis_slice_{}", slice_type_id.index());
+  };
+
+  slice_struct_name_from_element_standalone(*element, types, defs, symbols, namespaces)
 }
 
 /// Format a type as C type string using runtime type aliases.
@@ -5220,7 +5381,12 @@ pub fn format_c_type(
     Type::Reference { inner, .. } => {
       format!("{}*", format_c_type(types.get(inner), types, defs, symbols, namespaces))
     },
-    Type::Slice { .. } => panic!("ICE: Slice reached C codegen before Phase B2 lowering/codegen support"),
+    Type::Slice { element, .. } => {
+      format!(
+        "struct {}",
+        slice_struct_name_from_element_standalone(*element, types, defs, symbols, namespaces)
+      )
+    },
     Type::FixedArray { element, .. } => {
       format!("{}*", format_c_type(types.get(element), types, defs, symbols, namespaces))
     },
