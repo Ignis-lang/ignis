@@ -1458,7 +1458,8 @@ impl<'a> Analyzer<'a> {
       self.types.void()
     };
 
-    let err_has_runtime_payload = err_variant.payload.len() == 1 && !matches!(self.types.get(&err_inner_type), Type::Void);
+    let err_has_runtime_payload =
+      err_variant.payload.len() == 1 && !matches!(self.types.get(&err_inner_type), Type::Void);
 
     let err_binding_id = if err_has_runtime_payload {
       let err_binding_name = self.symbols.borrow_mut().intern("_try_err_value");

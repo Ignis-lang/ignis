@@ -7,8 +7,8 @@ fn e2e_test(
   name: &str,
   source: &str,
 ) {
-  let result = common::compile_and_run(source)
-    .unwrap_or_else(|error| panic!("Compilation of '{}' failed: {}", name, error));
+  let result =
+    common::compile_and_run(source).unwrap_or_else(|error| panic!("Compilation of '{}' failed: {}", name, error));
 
   assert!(
     !result.leaked,

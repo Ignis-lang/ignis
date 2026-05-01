@@ -1346,10 +1346,12 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output, "    {} tag;", tag_ty).unwrap();
 
     // Check if any variant has payload
-    let has_payload = ed
-      .variants
-      .iter()
-      .any(|variant| variant.payload.iter().any(|payload_ty| !matches!(self.types.get(payload_ty), Type::Void)));
+    let has_payload = ed.variants.iter().any(|variant| {
+      variant
+        .payload
+        .iter()
+        .any(|payload_ty| !matches!(self.types.get(payload_ty), Type::Void))
+    });
 
     if has_payload {
       writeln!(self.output, "    union {{").unwrap();
@@ -2346,8 +2348,15 @@ impl<'a> CEmitter<'a> {
       } => {
         let data_operand = self.format_operand(func, data);
         let slice_type = self.format_type(func.temp_type(*dest));
-        writeln!(self.output, "t{} = ({}){{ .data = {}, .len = {}ULL }};", dest.index(), slice_type, data_operand, len)
-          .unwrap();
+        writeln!(
+          self.output,
+          "t{} = ({}){{ .data = {}, .len = {}ULL }};",
+          dest.index(),
+          slice_type,
+          data_operand,
+          len
+        )
+        .unwrap();
       },
       Instr::InitVector { dest_ptr, elements, .. } => {
         let p = self.format_operand(func, dest_ptr);
@@ -4506,10 +4515,12 @@ fn emit_enum_definition_standalone(
   writeln!(output, "    {} tag;", tag_type).unwrap();
 
   // Check if any variant has payload
-  let has_payloads = ed
-    .variants
-    .iter()
-    .any(|variant| variant.payload.iter().any(|payload_ty| !matches!(types.get(payload_ty), Type::Void)));
+  let has_payloads = ed.variants.iter().any(|variant| {
+    variant
+      .payload
+      .iter()
+      .any(|payload_ty| !matches!(types.get(payload_ty), Type::Void))
+  });
 
   if has_payloads {
     writeln!(output, "    union {{").unwrap();

@@ -832,6 +832,88 @@ mod tests {
   }
 
   #[test]
+  fn rejects_raw_nul_byte_at_file_start_and_recovers_to_later_tokens() {
+    let LexResult { tokens, diagnostics } = lex("\0let value");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::RawNulInSource(span) => {
+        assert_eq!(span.start.0, 0);
+        assert_eq!(span.end.0, 1);
+      },
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Let, "let"),
+        (TokenType::Identifier, "value"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn rejects_raw_nul_byte_after_utf8_multibyte_prefix() {
+    let LexResult { tokens, diagnostics } = lex("é\0let");
+
+    assert_eq!(
+      diagnostics.len(),
+      2,
+      "expected UTF-8 token rejection plus raw NUL, got {:?}",
+      diagnostics
+    );
+
+    match &diagnostics[0] {
+      DiagnosticMessage::InvalidToken(span) => {
+        assert_eq!(span.start.0, 0);
+        assert_eq!(span.end.0, 2);
+      },
+      other => panic!("unexpected first diagnostic: {:?}", other),
+    }
+
+    match &diagnostics[1] {
+      DiagnosticMessage::RawNulInSource(span) => {
+        assert_eq!(span.start.0, 2);
+        assert_eq!(span.end.0, 3);
+      },
+      other => panic!("unexpected second diagnostic: {:?}", other),
+    }
+
+    assert_tokens(&tokens, &[(TokenType::Let, "let"), (TokenType::Eof, "")]);
+  }
+
+  #[test]
+  fn rejects_raw_nul_byte_before_valid_later_token() {
+    let LexResult { tokens, diagnostics } = lex("let value = 1;\0return 2;");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::RawNulInSource(span) => {
+        assert_eq!(span.start.0, 14);
+        assert_eq!(span.end.0, 15);
+      },
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Let, "let"),
+        (TokenType::Identifier, "value"),
+        (TokenType::Equal, "="),
+        (TokenType::Int, "1"),
+        (TokenType::SemiColon, ";"),
+        (TokenType::Return, "return"),
+        (TokenType::Int, "2"),
+        (TokenType::SemiColon, ";"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
   fn rejects_raw_nul_byte_inside_string_after_multibyte_prefix() {
     let LexResult { tokens, diagnostics } = lex("let value = \"é\0z\";");
 
@@ -854,6 +936,33 @@ mod tests {
         (TokenType::Eof, ""),
       ],
     );
+  }
+
+  #[test]
+  fn accepts_escaped_nul_inside_string_literal() {
+    let LexResult { tokens, diagnostics } = lex("let value = \"a\\0b\";");
+
+    assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Let, "let"),
+        (TokenType::Identifier, "value"),
+        (TokenType::Equal, "="),
+        (TokenType::String, "a\0b"),
+        (TokenType::SemiColon, ";"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn accepts_escaped_nul_char_literal() {
+    let LexResult { tokens, diagnostics } = lex("'\\0'");
+
+    assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
+    assert_tokens(&tokens, &[(TokenType::Char, "0"), (TokenType::Eof, "")]);
   }
 
   #[test]

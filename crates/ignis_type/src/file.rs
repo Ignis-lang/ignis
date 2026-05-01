@@ -139,6 +139,19 @@ impl SourceMap {
     ((line as u32) + 1, (col as u32) + 1)
   }
 
+  pub fn byte_line_col(
+    &self,
+    file: &FileId,
+    pos: BytePosition,
+  ) -> (u32, u32) {
+    let f = self.get(file);
+    let line = upper_bound_line(&f.line_starts, pos);
+    let line_start = f.line_starts[line].0;
+    let col = pos.0.saturating_sub(line_start) + 1;
+
+    ((line as u32) + 1, col)
+  }
+
   pub fn slice(
     &self,
     span: Span,
@@ -151,21 +164,48 @@ impl SourceMap {
     &self,
     span: Span,
   ) -> String {
-    let (line, col) = self.line_col(&span.file, span.start);
     let f = self.get(&span.file);
-    let line_idx = (line - 1) as usize;
-    let line_start = f.line_starts[line_idx].0 as usize;
-    let line_end = f
-      .line_starts
-      .get(line_idx + 1)
-      .map(|p| p.0 as usize)
-      .unwrap_or_else(|| f.text.len());
+    let start_line_idx = upper_bound_line(&f.line_starts, span.start);
+    let end_anchor = if span.end.0 > span.start.0 {
+      BytePosition(span.end.0 - 1)
+    } else {
+      span.end
+    };
+    let end_line_idx = upper_bound_line(&f.line_starts, end_anchor);
+    let mut snippet_lines = Vec::new();
 
-    let line_str = &f.text[line_start..line_end].trim_end_matches(&['\r', '\n'][..]);
-    let caret_width = unicode_width(&f.text[span.start.0 as usize..span.end.0 as usize]);
-    let caret = " ".repeat((col - 1) as usize) + &"^".repeat(caret_width.max(1));
+    for line_idx in start_line_idx..=end_line_idx {
+      let line_number = (line_idx as u32) + 1;
+      let (line_start, _line_end, content_end) = line_bounds(f, line_idx);
+      let line_str = &f.text[line_start..content_end];
 
-    format!("{:>4} | {}\n     | {}", line, line_str, caret)
+      let highlight_start = if line_idx == start_line_idx {
+        span.start.0 as usize
+      } else {
+        line_start
+      }
+      .clamp(line_start, content_end);
+
+      let highlight_end = if span.is_empty() {
+        highlight_start
+      } else if line_idx == end_line_idx {
+        (span.end.0 as usize).clamp(line_start, content_end)
+      } else {
+        content_end
+      };
+
+      let caret_col = unicode_column(&f.text.as_bytes()[line_start..highlight_start]);
+      let caret_width = if highlight_end > highlight_start {
+        unicode_width(&f.text[highlight_start..highlight_end])
+      } else {
+        1
+      };
+
+      snippet_lines.push(format!("{:>4} | {}", line_number, line_str));
+      snippet_lines.push(format!("     | {}{}", " ".repeat(caret_col), "^".repeat(caret_width.max(1))));
+    }
+
+    snippet_lines.join("\n")
   }
 }
 
@@ -216,6 +256,24 @@ fn unicode_width(text: &str) -> usize {
   text.chars().count()
 }
 
+fn line_bounds(
+  file: &SourceFile,
+  line_idx: usize,
+) -> (usize, usize, usize) {
+  let line_start = file.line_starts[line_idx].0 as usize;
+  let line_end = file
+    .line_starts
+    .get(line_idx + 1)
+    .map(|p| p.0 as usize)
+    .unwrap_or_else(|| file.text.len());
+  let content_end = file.text[line_start..line_end]
+    .trim_end_matches(&['\r', '\n'][..])
+    .len()
+    + line_start;
+
+  (line_start, line_end, content_end)
+}
+
 fn fxhash_u64(text: &str) -> u64 {
   let mut h = AHasher::default();
   text.hash(&mut h);
@@ -243,5 +301,46 @@ mod tests {
     let span = Span::new(file, BytePosition(1), BytePosition(4));
 
     assert_eq!(source_map.snippet(span), "   1 | aéb\n     |  ^^");
+  }
+
+  #[test]
+  fn byte_line_col_uses_byte_offsets_for_multibyte_text() {
+    let mut source_map = SourceMap::new();
+    let file = source_map.add_virtual("utf8", "aéb".to_string());
+
+    assert_eq!(source_map.byte_line_col(&file, BytePosition(0)), (1, 1));
+    assert_eq!(source_map.byte_line_col(&file, BytePosition(1)), (1, 2));
+    assert_eq!(source_map.byte_line_col(&file, BytePosition(3)), (1, 4));
+    assert_eq!(source_map.line_col(&file, BytePosition(3)), (1, 3));
+  }
+
+  #[test]
+  fn snippet_marks_zero_length_span() {
+    let mut source_map = SourceMap::new();
+    let file = source_map.add_virtual("empty", "abc".to_string());
+    let span = Span::new(file, BytePosition(1), BytePosition(1));
+
+    assert_eq!(source_map.snippet(span), "   1 | abc\n     |  ^");
+  }
+
+  #[test]
+  fn snippet_renders_multiline_span() {
+    let mut source_map = SourceMap::new();
+    let file = source_map.add_virtual("multi", "alpha\nbeta\ngamma".to_string());
+    let span = Span::new(file, BytePosition(2), BytePosition(10));
+
+    assert_eq!(source_map.snippet(span), "   1 | alpha\n     |   ^^^\n   2 | beta\n     | ^^^^");
+  }
+
+  #[test]
+  fn snippet_handles_tabs_eof_and_crlf() {
+    let mut source_map = SourceMap::new();
+    let file = source_map.add_virtual("mixed", "\txy\r\nlast".to_string());
+
+    let tabbed = Span::new(file, BytePosition(1), BytePosition(3));
+    assert_eq!(source_map.snippet(tabbed), "   1 | \txy\n     |  ^^");
+
+    let eof = Span::new(file, BytePosition(9), BytePosition(9));
+    assert_eq!(source_map.snippet(eof), "   2 | last\n     |     ^");
   }
 }

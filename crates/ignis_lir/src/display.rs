@@ -260,7 +260,15 @@ impl<'a> LirPrinter<'a> {
       } => {
         let data_operand = self.format_operand(func, data);
         let ty = self.format_type(*element_type);
-        writeln!(self.output, "t{} = make_slice {}, {} : {}[]", dest.index(), data_operand, len, ty).unwrap();
+        writeln!(
+          self.output,
+          "t{} = make_slice {}, {} : {}[]",
+          dest.index(),
+          data_operand,
+          len,
+          ty
+        )
+        .unwrap();
       },
       Instr::InitVector {
         dest_ptr,

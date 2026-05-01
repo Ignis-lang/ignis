@@ -2587,7 +2587,9 @@ impl<'a> LoweringContext<'a> {
     match pattern {
       HIRPattern::Wildcard => true,
       HIRPattern::Tuple { elements } => elements.is_empty(),
-      HIRPattern::Or { patterns } => patterns.iter().any(|nested_pattern| self.void_pattern_matches(nested_pattern)),
+      HIRPattern::Or { patterns } => patterns
+        .iter()
+        .any(|nested_pattern| self.void_pattern_matches(nested_pattern)),
       _ => false,
     }
   }
@@ -2826,8 +2828,16 @@ impl<'a> LoweringContext<'a> {
     let source_ty = self.hir.get(source_hir).type_id;
 
     let slice_conversion = match (self.types.get(&target_ty), self.types.get(&source_ty)) {
-      (Type::Slice { element: target_element, .. }, Type::FixedArray { element: source_element, size })
-        if self.types.types_equal(target_element, source_element) => Some((*source_element, *size as u64)),
+      (
+        Type::Slice {
+          element: target_element,
+          ..
+        },
+        Type::FixedArray {
+          element: source_element,
+          size,
+        },
+      ) if self.types.types_equal(target_element, source_element) => Some((*source_element, *size as u64)),
       _ => None,
     };
 

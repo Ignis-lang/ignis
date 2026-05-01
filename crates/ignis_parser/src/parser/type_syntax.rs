@@ -153,9 +153,7 @@ impl super::IgnisParser {
         return Ok(IgnisTypeSyntax::FixedArray(Box::new(element_type), size));
       }
 
-      return Err(DiagnosticMessage::UnexpectedToken {
-        at: token.span,
-      });
+      return Err(DiagnosticMessage::UnexpectedToken { at: token.span });
     }
 
     self.expect(TokenType::RightBrack)?;
@@ -581,13 +579,11 @@ mod tests {
     // Box<i32>[] is a slice of Box<i32>
     let ty = parse_type("Box<i32>[]");
     match ty {
-      IgnisTypeSyntax::Slice(inner) => {
-        match *inner {
-          IgnisTypeSyntax::Applied { args, .. } => {
-            assert_eq!(args.len(), 1);
-          },
-          other => panic!("expected applied type inside slice, got {:?}", other),
-        }
+      IgnisTypeSyntax::Slice(inner) => match *inner {
+        IgnisTypeSyntax::Applied { args, .. } => {
+          assert_eq!(args.len(), 1);
+        },
+        other => panic!("expected applied type inside slice, got {:?}", other),
       },
       other => panic!("expected slice, got {:?}", other),
     }

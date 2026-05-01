@@ -4083,7 +4083,8 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Lambda(_) | ASTExpression::Pipe { .. } => {},
 
-      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) | ASTExpression::Unit { .. } => {},
+      ASTExpression::Variable(_) | ASTExpression::Path(_) | ASTExpression::Literal(_) | ASTExpression::Unit { .. } => {
+      },
 
       ASTExpression::Call(call) => {
         self.collect_placeholder_spans_inner(&call.callee, max, spans);
@@ -9671,7 +9672,10 @@ impl<'a> Analyzer<'a> {
         .find_first_symbol_usage(*lhs, symbol)
         .or_else(|| self.find_first_symbol_usage(*rhs, symbol)),
       ASTExpression::Try { expr, .. } => self.find_first_symbol_usage(*expr, symbol),
-      ASTExpression::Literal(_) | ASTExpression::Unit { .. } | ASTExpression::Path(_) | ASTExpression::PipePlaceholder { .. } => None,
+      ASTExpression::Literal(_)
+      | ASTExpression::Unit { .. }
+      | ASTExpression::Path(_)
+      | ASTExpression::PipePlaceholder { .. } => None,
     }
   }
 
@@ -10352,9 +10356,7 @@ impl<'a> Analyzer<'a> {
       Type::Pointer { inner, .. }
       | Type::Reference { inner, .. }
       | Type::Slice { element: inner, .. }
-      | Type::FixedArray { element: inner, .. } => {
-        self.type_references_generated_method_owner(*inner, owner_def_id)
-      },
+      | Type::FixedArray { element: inner, .. } => self.type_references_generated_method_owner(*inner, owner_def_id),
       Type::Tuple(elements) => elements
         .iter()
         .any(|element_type_id| self.type_references_generated_method_owner(*element_type_id, owner_def_id)),

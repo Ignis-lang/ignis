@@ -590,8 +590,16 @@ impl TypeStore {
       return true;
     }
 
-    if let (Type::Slice { element: target_element, .. }, Type::FixedArray { element: source_element, .. }) =
-      (self.get(target), self.get(source))
+    if let (
+      Type::Slice {
+        element: target_element,
+        ..
+      },
+      Type::FixedArray {
+        element: source_element,
+        ..
+      },
+    ) = (self.get(target), self.get(source))
     {
       return self.types_equal(target_element, source_element);
     }
@@ -998,9 +1006,7 @@ impl TypeStore {
       Type::Pointer { inner, .. }
       | Type::Reference { inner, .. }
       | Type::Slice { element: inner, .. }
-      | Type::FixedArray { element: inner, .. } => {
-        self.contains_type_param(inner)
-      },
+      | Type::FixedArray { element: inner, .. } => self.contains_type_param(inner),
       Type::Tuple(elems) => elems.iter().any(|e| self.contains_type_param(e)),
       Type::Function { params, ret, .. } => {
         params.iter().any(|p| self.contains_type_param(p)) || self.contains_type_param(ret)
@@ -1130,7 +1136,16 @@ impl TypeStore {
         self.unify_for_inference(i1, i2, subst)
       },
 
-      (Type::Slice { element: e1, mutable: m1 }, Type::Slice { element: e2, mutable: m2 }) => {
+      (
+        Type::Slice {
+          element: e1,
+          mutable: m1,
+        },
+        Type::Slice {
+          element: e2,
+          mutable: m2,
+        },
+      ) => {
         if m1 != m2 {
           return false;
         }
