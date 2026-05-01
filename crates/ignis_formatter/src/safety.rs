@@ -20,8 +20,8 @@ pub fn validate_formatted_output(
   let source_shape = file_shape(source, &source_file)?;
   let formatted_shape = file_shape(formatted, &formatted_file)?;
 
-  let source_tokens = normalize_optional_trailing_commas(&source_shape.tokens);
-  let formatted_tokens = normalize_optional_trailing_commas(&formatted_shape.tokens);
+  let source_tokens = normalize_module_item_groups(&normalize_optional_trailing_commas(&source_shape.tokens));
+  let formatted_tokens = normalize_module_item_groups(&normalize_optional_trailing_commas(&formatted_shape.tokens));
 
   let tokens_match = if sort_imports {
     let mut source_keys: Vec<String> = source_tokens.iter().map(|(_, text)| text.clone()).collect();
@@ -285,7 +285,7 @@ fn normalize_optional_trailing_commas(tokens: &[(TokenType, String)]) -> Vec<(To
   for (index, token) in tokens.iter().enumerate() {
     if token.0 == TokenType::Comma
       && let Some((next_type, _)) = tokens.get(index + 1)
-      && matches!(next_type, TokenType::RightParen | TokenType::RightBrace)
+      && matches!(next_type, TokenType::RightParen | TokenType::RightBrace | TokenType::From)
     {
       continue;
     }
@@ -294,4 +294,104 @@ fn normalize_optional_trailing_commas(tokens: &[(TokenType, String)]) -> Vec<(To
   }
 
   normalized
+}
+
+fn normalize_module_item_groups(tokens: &[(TokenType, String)]) -> Vec<(TokenType, String)> {
+  let mut normalized = Vec::with_capacity(tokens.len());
+  let mut index = 0;
+
+  while index < tokens.len() {
+    let Some(first_statement) = parse_module_item_statement(tokens, index) else {
+      normalized.push(tokens[index].clone());
+      index += 1;
+      continue;
+    };
+
+    let mut grouped_items = first_statement.items;
+    let mut next_index = first_statement.end_index;
+
+    while let Some(next_statement) = parse_module_item_statement(tokens, next_index) {
+      if next_statement.keyword != first_statement.keyword || next_statement.from != first_statement.from {
+        break;
+      }
+
+      grouped_items.extend(next_statement.items);
+      next_index = next_statement.end_index;
+    }
+
+    normalized.push((first_statement.keyword, first_statement.keyword_text));
+    for (item_index, item) in grouped_items.iter().enumerate() {
+      if item_index > 0 {
+        normalized.push((TokenType::Comma, ",".to_string()));
+      }
+
+      normalized.extend(item.iter().cloned());
+    }
+
+    normalized.push((TokenType::From, "from".to_string()));
+    normalized.push((TokenType::String, first_statement.from));
+    normalized.push((TokenType::SemiColon, ";".to_string()));
+    index = next_index;
+  }
+
+  normalized
+}
+
+struct ModuleItemStatement {
+  keyword: TokenType,
+  keyword_text: String,
+  items: Vec<Vec<(TokenType, String)>>,
+  from: String,
+  end_index: usize,
+}
+
+fn parse_module_item_statement(
+  tokens: &[(TokenType, String)],
+  start: usize,
+) -> Option<ModuleItemStatement> {
+  let (keyword, keyword_text) = tokens.get(start)?.clone();
+  if !matches!(keyword, TokenType::Import | TokenType::Export) {
+    return None;
+  }
+
+  let mut items = Vec::new();
+  let mut current_item = Vec::new();
+  let mut cursor = start + 1;
+
+  while let Some((token_type, token_text)) = tokens.get(cursor) {
+    if *token_type == TokenType::From {
+      break;
+    }
+
+    if *token_type == TokenType::Comma {
+      if !current_item.is_empty() {
+        items.push(std::mem::take(&mut current_item));
+      }
+    } else {
+      current_item.push((*token_type, token_text.clone()));
+    }
+
+    cursor += 1;
+  }
+
+  if !current_item.is_empty() {
+    items.push(current_item);
+  }
+
+  if items.is_empty() || tokens.get(cursor)?.0 != TokenType::From {
+    return None;
+  }
+
+  let (from_type, from) = tokens.get(cursor + 1)?.clone();
+  if from_type != TokenType::String || tokens.get(cursor + 2)?.0 != TokenType::SemiColon {
+    return None;
+  }
+
+  Some(ModuleItemStatement {
+    keyword,
+    keyword_text,
+    items,
+    from,
+    end_index: cursor + 3,
+  })
 }

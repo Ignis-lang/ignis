@@ -211,11 +211,13 @@ impl<'a> AstChunkFormatter<'a> {
     let mut formatted = String::new();
     let mut previous_was_import = false;
     let mut previous_end = None;
+    let mut index = 0;
 
-    for (index, root) in roots.iter().enumerate() {
-      let statement = self.format_statement_node(*root, 0)?;
-      let current_is_import = self.is_import_node(root);
-      let span = self.nodes.get(root).span().clone();
+    while index < roots.len() {
+      let root = roots[index];
+      let (statement, consumed) = self.format_grouped_module_item_nodes(roots, index, 0)?;
+      let current_is_import = self.is_import_node(&root);
+      let span = self.nodes.get(&root).span().clone();
 
       if index > 0 {
         if let Some(prev_end) = previous_end {
@@ -233,7 +235,8 @@ impl<'a> AstChunkFormatter<'a> {
 
       formatted.push_str(&statement);
       previous_was_import = current_is_import;
-      previous_end = Some(self.node_true_end(root));
+      previous_end = Some(self.node_true_end(&roots[index + consumed - 1]));
+      index += consumed;
     }
 
     Ok(formatted)
@@ -250,10 +253,12 @@ impl<'a> AstChunkFormatter<'a> {
 
     for group in &groups {
       let group_is_imports = group.items.iter().all(|root| self.is_import_node(root));
+      let mut index = 0;
 
-      for (index, root) in group.items.iter().enumerate() {
-        let statement = self.format_statement_node(*root, 0)?;
-        let span = self.nodes.get(root).span().clone();
+      while index < group.items.len() {
+        let root = group.items[index];
+        let (statement, consumed) = self.format_grouped_module_item_nodes(&group.items, index, 0)?;
+        let span = self.nodes.get(&root).span().clone();
 
         if let Some(prev_end) = previous_end
           && !(group_is_imports && index > 0)
@@ -265,20 +270,59 @@ impl<'a> AstChunkFormatter<'a> {
           formatted.push('\n');
         }
 
-        let current_is_import = self.is_import_node(root);
-        let needs_group_separator = index == 0
-          && (group.has_preceding_import_group || (!current_is_import && previous_end.is_some()));
+        let current_is_import = self.is_import_node(&root);
+        let needs_group_separator =
+          index == 0 && (group.has_preceding_import_group || (!current_is_import && previous_end.is_some()));
 
         if needs_group_separator && !formatted.ends_with("\n\n") {
           formatted.push('\n');
         }
 
         formatted.push_str(&statement);
-        previous_end = Some(self.node_true_end(root));
+        previous_end = Some(self.node_true_end(&group.items[index + consumed - 1]));
+        index += consumed;
       }
     }
 
     Ok(formatted)
+  }
+
+  fn format_grouped_module_item_nodes(
+    &self,
+    roots: &[NodeId],
+    start_index: usize,
+    indent_level: usize,
+  ) -> Result<(String, usize), LayoutFailure> {
+    let first = roots[start_index];
+    let Some((keyword, from)) = self.groupable_module_item_signature(&first) else {
+      return Ok((self.format_statement_node(first, indent_level)?, 1));
+    };
+
+    let mut items = self.module_item_names(&first);
+    let mut consumed = 1;
+
+    while let Some(next) = roots.get(start_index + consumed) {
+      let previous = roots[start_index + consumed - 1];
+      let previous_end = self.node_true_end(&previous);
+      let next_span = self.nodes.get(next).span().clone();
+
+      if self.whitespace_gap_has_intentional_blank_line(previous_end, next_span.start.0 as usize) {
+        break;
+      }
+
+      if !self.module_item_signature_matches(next, keyword, &from) {
+        break;
+      }
+
+      items.extend(self.module_item_names(next));
+      consumed += 1;
+    }
+
+    if consumed == 1 {
+      return Ok((self.format_statement_node(first, indent_level)?, 1));
+    }
+
+    Ok((self.format_module_item_list(keyword, &items, &from, indent_level), consumed))
   }
 
   fn is_import_node(
@@ -449,6 +493,58 @@ impl<'a> AstChunkFormatter<'a> {
     }
   }
 
+  fn groupable_module_item_signature(
+    &self,
+    node_id: &NodeId,
+  ) -> Option<(&'static str, String)> {
+    match self.nodes.get(node_id) {
+      ASTNode::Statement(ASTStatement::Import(import)) => {
+        if import
+          .items
+          .iter()
+          .any(|item| matches!(item.kind, ImportItemKind::Discard))
+        {
+          return None;
+        }
+
+        Some(("import", import.from.clone()))
+      },
+      ASTNode::Statement(ASTStatement::Export(ignis_ast::statements::ASTExport::ReExportFrom { from, .. })) => {
+        Some(("export", from.clone()))
+      },
+      _ => None,
+    }
+  }
+
+  fn module_item_signature_matches(
+    &self,
+    node_id: &NodeId,
+    keyword: &str,
+    from: &str,
+  ) -> bool {
+    self
+      .groupable_module_item_signature(node_id)
+      .is_some_and(|(candidate_keyword, candidate_from)| candidate_keyword == keyword && candidate_from == from)
+  }
+
+  fn module_item_names(
+    &self,
+    node_id: &NodeId,
+  ) -> Vec<String> {
+    match self.nodes.get(node_id) {
+      ASTNode::Statement(ASTStatement::Import(import)) => import
+        .items
+        .iter()
+        .map(|item| self.slice_span(&item.span).trim().to_string())
+        .collect(),
+      ASTNode::Statement(ASTStatement::Export(ignis_ast::statements::ASTExport::ReExportFrom { items, .. })) => items
+        .iter()
+        .map(|item| self.slice_span(&item.span).trim().to_string())
+        .collect(),
+      _ => Vec::new(),
+    }
+  }
+
   fn indent(
     &self,
     level: usize,
@@ -478,7 +574,7 @@ impl<'a> AstChunkFormatter<'a> {
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     match statement {
-      ASTStatement::Import(import) => Ok(format!("{}{}", self.indent(indent_level), self.format_import(import))),
+      ASTStatement::Import(import) => Ok(self.format_import(import, indent_level)),
       ASTStatement::Export(export) => self.format_export(export, indent_level),
       ASTStatement::Function(function) => self.format_function(function, indent_level),
       ASTStatement::TypeAlias(type_alias) => self.format_type_alias(type_alias, indent_level),
@@ -605,15 +701,45 @@ impl<'a> AstChunkFormatter<'a> {
   fn format_import(
     &self,
     import: &ASTImport,
+    indent_level: usize,
   ) -> String {
     let items = import
       .items
       .iter()
       .map(|item| self.slice_span(&item.span).trim().to_string())
-      .collect::<Vec<_>>()
-      .join(", ");
+      .collect::<Vec<_>>();
 
-    format!("import {} from \"{}\";", items, import.from)
+    self.format_module_item_list("import", &items, &import.from, indent_level)
+  }
+
+  fn format_module_item_list(
+    &self,
+    keyword: &str,
+    items: &[String],
+    from: &str,
+    indent_level: usize,
+  ) -> String {
+    let indent = self.indent(indent_level);
+    let flat = format!("{keyword} {} from \"{from}\";", items.join(", "));
+
+    if self.config.indent_columns(indent_level) + flat.len() <= self.config.line_width {
+      return format!("{indent}{flat}");
+    }
+
+    let item_indent = self.indent(indent_level + 1);
+    let mut formatted = format!("{indent}{keyword}\n");
+
+    for item in items {
+      formatted.push_str(&item_indent);
+      formatted.push_str(item);
+      formatted.push_str(",\n");
+    }
+
+    formatted.push_str(&indent);
+    formatted.push_str("from \"");
+    formatted.push_str(from);
+    formatted.push_str("\";");
+    formatted
   }
 
   fn format_function(
@@ -1021,12 +1147,12 @@ impl<'a> AstChunkFormatter<'a> {
         },
       },
       ignis_ast::statements::ASTExport::ReExportFrom { items, from, .. } => {
-        let items_text = items
+        let items = items
           .iter()
           .map(|item| self.slice_span(&item.span).trim().to_string())
-          .collect::<Vec<_>>()
-          .join(", ");
-        Ok(format!("{}export {} from \"{}\";", self.indent(indent_level), items_text, from))
+          .collect::<Vec<_>>();
+
+        Ok(self.format_module_item_list("export", &items, from, indent_level))
       },
       ignis_ast::statements::ASTExport::Name { span, .. } => {
         let raw = collapse_spaces(self.slice_span(span).trim());

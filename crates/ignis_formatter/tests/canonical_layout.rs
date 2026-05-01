@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ignis_formatter::{FormatOptions, format_text};
+use ignis_formatter::{FormatOptions, FormatterConfig, format_text};
 use insta::assert_snapshot;
 
 fn workspace_root() -> PathBuf {
@@ -181,6 +181,69 @@ fn formats_multiple_imports_with_preserved_order() {
 }
 
 #[test]
+fn wraps_import_items_when_line_width_is_exceeded() {
+  let options = FormatOptions {
+    config: FormatterConfig {
+      line_width: 80,
+      ..FormatterConfig::default()
+    },
+    ..FormatOptions::default()
+  };
+
+  let formatted = format_text(
+    "import TomlArray, TomlArrayOfTables, TomlDateTime, TomlDateTimeKind, TomlDocument, TomlTable, TomlTableEntry, TomlTableState, TomlValue, TomlValueKind from \"./value\";\n",
+    &options,
+  )
+  .expect("long import should format successfully");
+
+  assert_eq!(
+    formatted,
+    "import\n  TomlArray,\n  TomlArrayOfTables,\n  TomlDateTime,\n  TomlDateTimeKind,\n  TomlDocument,\n  TomlTable,\n  TomlTableEntry,\n  TomlTableState,\n  TomlValue,\n  TomlValueKind,\nfrom \"./value\";\n"
+  );
+}
+
+#[test]
+fn keeps_import_items_inline_when_they_fit_line_width() {
+  let options = FormatOptions {
+    config: FormatterConfig {
+      line_width: 80,
+      ..FormatterConfig::default()
+    },
+    ..FormatOptions::default()
+  };
+
+  let formatted = format_text("import   Alpha , Beta  from  \"std::alpha\";\n", &options)
+    .expect("short import should format successfully");
+
+  assert_eq!(formatted, "import Alpha, Beta from \"std::alpha\";\n");
+}
+
+#[test]
+fn groups_consecutive_imports_from_the_same_path() {
+  let formatted = format_text(
+    "import TomlArray from \"./value\";\nimport TomlArray from \"./value\";\n",
+    &FormatOptions::default(),
+  )
+  .expect("duplicate same-path imports should format successfully");
+
+  assert_eq!(formatted, "import TomlArray, TomlArray from \"./value\";\n");
+}
+
+#[test]
+fn keeps_import_groups_separate_across_blank_lines() {
+  let formatted = format_text(
+    "import TomlArray from \"./value\";\n\nimport TomlValue from \"./value\";\n",
+    &FormatOptions::default(),
+  )
+  .expect("same-path imports separated by a blank line should format successfully");
+
+  assert_eq!(
+    formatted,
+    "import TomlArray from \"./value\";\n\nimport TomlValue from \"./value\";\n"
+  );
+}
+
+#[test]
 fn formats_export_name_and_reexport_without_reordering() {
   let formatted = format_text(
     "export   foo;\nexport   bar ,  baz  from  \"mod\";\n",
@@ -189,6 +252,39 @@ fn formats_export_name_and_reexport_without_reordering() {
   .expect("export name and reexport variants should format successfully");
 
   assert_snapshot!("formats_export_name_and_reexport_without_reordering", formatted);
+}
+
+#[test]
+fn wraps_reexport_items_when_line_width_is_exceeded() {
+  let options = FormatOptions {
+    config: FormatterConfig {
+      line_width: 80,
+      ..FormatterConfig::default()
+    },
+    ..FormatOptions::default()
+  };
+
+  let formatted = format_text(
+    "export TomlArray, TomlArrayOfTables, TomlDateTime, TomlDateTimeKind, TomlDocument, TomlTable, TomlTableEntry, TomlTableState, TomlValue, TomlValueKind from \"./value\";\n",
+    &options,
+  )
+  .expect("long re-export should format successfully");
+
+  assert_eq!(
+    formatted,
+    "export\n  TomlArray,\n  TomlArrayOfTables,\n  TomlDateTime,\n  TomlDateTimeKind,\n  TomlDocument,\n  TomlTable,\n  TomlTableEntry,\n  TomlTableState,\n  TomlValue,\n  TomlValueKind,\nfrom \"./value\";\n"
+  );
+}
+
+#[test]
+fn groups_consecutive_reexports_from_the_same_path() {
+  let formatted = format_text(
+    "export TomlArray from \"./value\";\nexport TomlValue from \"./value\";\n",
+    &FormatOptions::default(),
+  )
+  .expect("same-path re-exports should format successfully");
+
+  assert_eq!(formatted, "export TomlArray, TomlValue from \"./value\";\n");
 }
 
 #[test]
