@@ -7,7 +7,7 @@
 //!
 //! | Namespace        | C Header               | Description                           |
 //! |------------------|------------------------|---------------------------------------|
-//! | `LibC::Process`  | `stdlib.h`, `unistd.h` | Process lifecycle, environment, IPC   |
+//! | `LibC::Process`  | `stdlib.h`, `unistd.h` | Process lifecycle, environment, IPC, exec |
 //! | `LibC::Signals`  | `signal.h`             | `raise`, `kill`                       |
 //! | `LibC::Wait`     | `sys/wait.h`           | `wait`, `waitpid`                     |
 //!
@@ -21,6 +21,16 @@
 //! | `LibC::Signals`  | `SIGKILL`        | Kill signal (cannot be caught)    |
 //! | `LibC::Signals`  | `SIGSEGV`        | Segmentation fault                |
 //! | `LibC::Signals`  | `SIGTERM`        | Termination signal                |
+//!
+//! ## Process Functions
+//!
+//! | Function       | Description                                      |
+//! |----------------|--------------------------------------------------|
+//! | `fork`         | Duplicate the current process                    |
+//! | `pipe`         | Create a unidirectional file-descriptor pair     |
+//! | `execvp`       | Replace the process image using PATH lookup      |
+//! | `setenv`       | Set or replace a process environment variable    |
+//! | `unsetenv`     | Remove a process environment variable            |
 //!
 //! ## Example
 //!
@@ -83,6 +93,11 @@ extern __unistd_proc {
   function fork(): CType::PidT;
   /// POSIX `pipe`; creates a pipe fd pair.
   function pipe(pipefd: *mut CType::CInt): CType::CInt;
+  /// POSIX `execvp`; replaces the current process image using PATH lookup.
+  ///
+  /// `argv` must be a null-terminated vector of null-terminated strings. On
+  /// success this call does not return; on failure it returns -1 and sets errno.
+  function execvp(file: CType::CConstStr, argv: *mut str): CType::CInt;
 }
 
 @configFlag(@platform("linux") || @platform("macos"))
@@ -173,6 +188,15 @@ namespace LibC::Process {
   /// `pipefd[1]` is the write end.
   @configFlag(@platform("linux") || @platform("macos"))
   function pipe(pipefd: *mut CType::CInt): CType::CInt { return __unistd_proc::pipe(pipefd); }
+
+  /// Replaces the current process image using PATH lookup.
+  ///
+  /// `argv` must be null-terminated and conventionally starts with `file` as
+  /// `argv[0]`. Returns only on error, with -1 and errno set by the host.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function execvp(file: CType::CConstStr, argv: *mut str): CType::CInt {
+    return __unistd_proc::execvp(file, argv);
+  }
 }
 
 /// Signals (signal.h) — POSIX only.

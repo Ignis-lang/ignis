@@ -34,6 +34,7 @@
 //! | `ferror`    | Test error indicator                              |
 //! | `remove`    | Delete file by pathname                           |
 //! | `rename`    | Rename file                                       |
+//! | `mkstemp`   | Create and open a unique temporary file           |
 //!
 //! ## Example
 //!
@@ -107,6 +108,11 @@ extern __stdio {
   function remove(pathname: CType::CConstStr): CType::CInt;
   /// C `rename`; renames a filesystem entry.
   function rename(oldpath: CType::CConstStr, newpath: CType::CConstStr): CType::CInt;
+  /// POSIX `mkstemp`; creates and opens a unique temporary file in place.
+  ///
+  /// `template` must be mutable and end in six `X` characters. The host replaces
+  /// those bytes with the created path and returns an open file descriptor.
+  function mkstemp(template: CType::CStr): CType::CInt;
 }
 
 /// C standard I/O streams (stdio.h)
@@ -223,5 +229,15 @@ namespace LibC::Stdio {
   /// Renames `oldpath` to `newpath`. Returns 0 on success.
   function rename(oldpath: CType::CConstStr, newpath: CType::CConstStr): CType::CInt {
     return __stdio::rename(oldpath, newpath);
+  }
+
+  /// Creates a unique temporary file from `template` and returns its fd.
+  ///
+  /// `template` must end with six `X` characters and is mutated in place to the
+  /// created path. The returned descriptor is open for reading and writing and
+  /// should be closed by the caller. Returns -1 on error.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function mkstemp(template: CType::CStr): CType::CInt {
+    return __stdio::mkstemp(template);
   }
 }

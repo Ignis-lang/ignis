@@ -1,3 +1,6 @@
+import Env from "std::env";
+import Io from "std::io";
+import Path from "std::path";
 import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
@@ -8,6 +11,48 @@ function expectArg(args: &Vector<String>, index: u64, expected: str): void {
     Option::SOME(value) -> Test::assertEq<str>(value.toStr(), expected),
     Option::NONE -> Test::fail(),
   };
+}
+
+function shellCommand(script: str): Process::Command {
+  let mut command: Process::Command = Process::command("/bin/sh");
+  command.arg("-c");
+  command.arg(script);
+  return command;
+}
+
+function shellCommandWithArgs(script: str): Process::Command {
+  let mut values: Vector<String> = Vector::init<String>();
+  values.push(String::create("-c"));
+  values.push(String::create(script));
+
+  let mut command: Process::Command = Process::command("/bin/sh");
+  command.args(values);
+  return command;
+}
+
+function assertOutputStatus(
+  output: &Process::Output,
+  expectedCode: i32,
+  expectedSuccess: boolean
+): void {
+  let status: Process::ExitStatus = output.status();
+
+  Test::assertEq<boolean>(status.success, expectedSuccess);
+  Test::assertEq<i32>(status.code, expectedCode);
+}
+
+function assertOutputStdout(output: &Process::Output, expected: str): void {
+  let stdout: String = output.stdout();
+  Test::assertEq<str>(stdout.toStr(), expected);
+}
+
+function assertOutputStderr(output: &Process::Output, expected: str): void {
+  let stderr: String = output.stderr();
+  Test::assertEq<str>(stderr.toStr(), expected);
+}
+
+function assertIsNotFoundIoError(error: Io::IoError): void {
+  Test::assert(error.errorKind() == Io::ErrorKind::NOT_FOUND);
 }
 
 @test
@@ -36,4 +81,136 @@ function processIdentifiersArePositive(): void {
 function systemReturnsHostStatusWithoutPanicking(): void {
   Test::assertEq<i32>(Process::system("/bin/sh -c 'exit 0'"), 0);
   Test::assertNe<i32>(Process::system("/bin/sh -c 'exit 7'"), 0);
+}
+
+@test
+function commandRunReturnsSuccessStatusForZeroExit(): void {
+  let command: Process::Command = shellCommand("exit 0");
+
+  match (command.run()) {
+    Result::OK(status) -> {
+      Test::assert(status.success);
+      Test::assertEq<i32>(status.code, 0);
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function commandRunReturnsNonZeroExitCode(): void {
+  let command: Process::Command = shellCommand("exit 7");
+
+  match (command.run()) {
+    Result::OK(status) -> {
+      Test::assert(!status.success);
+      Test::assertEq<i32>(status.code, 7);
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function commandRunReturnsIoErrorWhenProgramIsMissing(): void {
+  let command: Process::Command = Process::Command::new("/tmp/ignis_process_command_missing_program");
+
+  match (command.run()) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertIsNotFoundIoError(error),
+  };
+}
+
+@test
+function commandOutputReturnsIoErrorWhenProgramIsMissing(): void {
+  let command: Process::Command = Process::Command::new("/tmp/ignis_process_command_missing_program");
+
+  match (command.output()) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> assertIsNotFoundIoError(error),
+  };
+}
+
+@test
+function commandOutputCapturesStdoutAndStderr(): void {
+  let command: Process::Command = shellCommandWithArgs("printf 'alpha'; printf 'beta' 1>&2");
+
+  match (command.output()) {
+    Result::OK(output) -> {
+      assertOutputStatus(&output, 0, true);
+      assertOutputStdout(&output, "alpha");
+      assertOutputStderr(&output, "beta");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function commandOutputUsesChildEnvironmentWithoutMutatingParent(): void {
+  Env::unset("IGNIS_PROCESS_CHILD_ONLY");
+
+  let mut command: Process::Command = shellCommand("printf '%s' \"$IGNIS_PROCESS_CHILD_ONLY\"");
+  command.env("IGNIS_PROCESS_CHILD_ONLY", "child-value");
+
+  match (command.output()) {
+    Result::OK(output) -> {
+      assertOutputStdout(&output, "child-value");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  Test::assert(!Env::has("IGNIS_PROCESS_CHILD_ONLY"));
+}
+
+@test
+function commandOutputUsesChildWorkingDirectoryWithoutMutatingParent(): void {
+  let childDir: Path::PathBuf = Path::PathBuf::create("/tmp");
+
+  let mut command: Process::Command = shellCommand("test \"$PWD\" = /tmp");
+  command.cwd(&childDir);
+
+  match (command.run()) {
+    Result::OK(status) -> {
+      Test::assert(status.success);
+      Test::assertEq<i32>(status.code, 0);
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let parentCommand: Process::Command = shellCommand("test \"$PWD\" != /tmp");
+
+  match (parentCommand.run()) {
+    Result::OK(status) -> {
+      Test::assert(status.success);
+      Test::assertEq<i32>(status.code, 0);
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+}
+
+@test
+function commandBuilderConvenienceFunctionUsesOwnedState(): void {
+  let childDir: Path::PathBuf = Path::PathBuf::create("/tmp");
+  Env::unset("IGNIS_PROCESS_CHAIN_CHILD");
+
+  let mut command: Process::Command = Process::command("/bin/sh");
+  command.arg("-c");
+  command.arg("printf '%s|%s' \"$IGNIS_PROCESS_CHAIN_CHILD\" \"$PWD\"");
+  command.env("IGNIS_PROCESS_CHAIN_CHILD", "builder");
+  command.cwd(&childDir);
+
+  match (command.output()) {
+    Result::OK(output) -> {
+      assertOutputStatus(&output, 0, true);
+      assertOutputStdout(&output, "builder|/tmp");
+      assertOutputStderr(&output, "");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  Test::assert(!Env::has("IGNIS_PROCESS_CHAIN_CHILD"));
 }

@@ -1,7 +1,6 @@
-/* Ignis runtime: process bootstrap helpers for argv access. */
+/* Ignis runtime: process bootstrap helpers only. */
 
 #include "../ignis_rt.h"
-#include "rt_internal.h"
 
 static i32 ignis_runtime_argc = 0;
 static char **ignis_runtime_argv = NULL;

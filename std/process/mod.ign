@@ -6,13 +6,14 @@
 //! ## Overview
 //!
 //! The `Process` namespace exposes startup argument access, process identifiers,
-//! and host shell execution. Argument helpers copy host `argv` data into owned
-//! `String` values so callers do not depend on raw C pointers.
+//! host shell execution, and an owned `Command` builder for child processes.
+//! Argument helpers copy host `argv` data into owned `String` values so callers
+//! do not depend on raw C pointers.
 //!
 //! The compiler-generated C `main` wrapper bootstraps runtime access to `argc`
-//! and `argv`. `Process::argCount` and `Process::args` read from that runtime
-//! storage instead of requiring user `main` functions to accept arguments
-//! directly.
+//! and `argv`. Runtime C does not own command-builder state; `Process::Command`
+//! stores owned Ignis data and drives POSIX `fork`, `execvp`, `pipe`, `dup2`,
+//! `waitpid`, and related calls through `std::libc`.
 //!
 //! ```text
 //!   C entrypoint
@@ -33,20 +34,25 @@
 //!
 //! ## APIs
 //!
-//! | Function              | Description                                      |
-//! |-----------------------|--------------------------------------------------|
-//! | `Process::args`       | Owned startup arguments, including `argv[0]`     |
-//! | `Process::argCount`   | Raw startup argument count                       |
-//! | `Process::id`         | Current process identifier                       |
-//! | `Process::parentId`   | Parent process identifier                        |
-//! | `Process::system`     | Execute a command through the host shell         |
+//! | API                            | Description                                      |
+//! |--------------------------------|--------------------------------------------------|
+//! | `Process::args`                | Owned startup arguments, including `argv[0]`     |
+//! | `Process::argCount`            | Raw startup argument count                       |
+//! | `Process::id`                  | Current process identifier                       |
+//! | `Process::parentId`            | Parent process identifier                        |
+//! | `Process::system`              | Execute a command through the host shell         |
+//! | `Process::Command`             | Owned child-process builder backed by POSIX APIs |
+//! | `Process::command`             | Convenience constructor for `Command`            |
+//! | `Process::ExitStatus`          | Normalized wait-status view                      |
+//! | `Process::Output`              | Captured stdout/stderr and status                |
 //!
 //! ## Raw Status Values
 //!
 //! `Process::system` returns the raw integer status produced by the host C
 //! library. This value is not normalized to an exit code; POSIX hosts encode
 //! signal and exit information in the wait status. Callers that need portable
-//! exit-code handling should decode the status according to the target platform.
+//! exit-code handling should prefer `Process::Command::run` or
+//! `Process::Command::output`, which return `Process::ExitStatus`.
 //!
 //! ## Shell and Security Notes
 //!
@@ -54,6 +60,9 @@
 //! environment inheritance, current working directory, and PATH lookup all follow
 //! host behavior. Do not pass untrusted text into `system` without explicit
 //! validation or quoting for the target shell.
+//!
+//! `Process::Command` bypasses the shell unless the selected program is itself a
+//! shell. Arguments are passed as distinct `argv` entries to `execvp`.
 //!
 //! ## Platform Notes
 //!
@@ -72,8 +81,42 @@
 //!   return args.length() > 0 ? 0 : 1;
 //! }
 //! ```
+//!
+//! ## Command Example
+//!
+//! ```ignis
+//! import Path from "std::path";
+//! import Process from "std::process";
+//! import String from "std::string";
+//! import Vector from "std::vector";
+//!
+//! function main(): i32 {
+//!   let mut command: Process::Command = Process::command("/bin/sh");
+//!   command.arg("-c");
+//!   command.arg("printf '%s' \"$IGNIS_EXAMPLE\"");
+//!   command.env("IGNIS_EXAMPLE", "ok");
+//!   command.cwd(&Path::PathBuf::create("/tmp"));
+//!
+//!   match (command.output()) {
+//!     Result::OK(output) -> {
+//!       let status: Process::ExitStatus = output.status();
+//!       let stdout: String = output.stdout();
+//!
+//!       if status.success && stdout.equalsStr("ok") {
+//!         return 0;
+//!       }
+//!
+//!       return status.code;
+//!     },
+//!     Result::ERROR(_) -> return 1,
+//!   };
+//! }
+//! ```
 
 import LibC from "std::libc";
+import Io from "std::io";
+import Memory from "std::memory";
+import Path from "std::path";
 import String from "std::string";
 import Vector from "std::vector";
 
@@ -84,6 +127,18 @@ extern __process_rt {
   /// Returns a borrowed `argv[index]` pointer captured by the runtime.
   function ignis_process_arg_at(index: i32): *mut u8;
 }
+
+/// POSIX wait-status mask for the terminating signal bits.
+const PROCESS_SIGNAL_MASK: i32 = 127;
+
+/// POSIX wait-status mask used to recognize stopped children.
+const PROCESS_STOPPED_MASK: i32 = 255;
+
+/// POSIX wait-status low-byte value for stopped children.
+const PROCESS_STOPPED_VALUE: i32 = 127;
+
+/// Conventional exit code used when the forked child cannot prepare or exec.
+const PROCESS_EXEC_FAILURE_EXIT: i32 = 127;
 
 /// Copies one runtime argument into an owned `String`.
 ///
@@ -115,12 +170,707 @@ function processOwnedArgAt(index: i32): String {
   return String::create(raw as str);
 }
 
+/// Returns true when a POSIX wait status represents normal child exit.
+function processWaitStatusExited(rawStatus: i32): boolean {
+  return (rawStatus & PROCESS_SIGNAL_MASK) == 0;
+}
+
+/// Returns true when a POSIX wait status represents a stopped child.
+function processWaitStatusStopped(rawStatus: i32): boolean {
+  return (rawStatus & PROCESS_STOPPED_MASK) == PROCESS_STOPPED_VALUE;
+}
+
+/// Converts a POSIX wait status into a shell-like status code.
+function processWaitStatusCode(rawStatus: i32): i32 {
+  if (processWaitStatusExited(rawStatus) || processWaitStatusStopped(rawStatus)) {
+    return (rawStatus >> 8) & 255;
+  }
+
+  return 128 + (rawStatus & PROCESS_SIGNAL_MASK);
+}
+
+/// Returns true only for normal exit with status code 0.
+function processWaitStatusSuccess(rawStatus: i32): boolean {
+  return processWaitStatusExited(rawStatus) && processWaitStatusCode(rawStatus) == 0;
+}
+
+/// Converts a raw host wait status into the public `ExitStatus` record.
+function processExitStatusFromRaw(rawStatus: i32): Process::ExitStatus {
+  return Process::ExitStatus {
+    raw: rawStatus,
+    code: processWaitStatusCode(rawStatus),
+    success: processWaitStatusSuccess(rawStatus),
+  };
+}
+
+/// Marks `fd` close-on-exec so parent-only descriptors do not leak into children.
+function processCommandSetCloseOnExec(fd: i32): i32 {
+  let flags: i32 = LibC::File::fcntl(fd, LibC::File::F_GETFD);
+
+  if (flags == -1) {
+    return LibC::Errno::get();
+  }
+
+  if (LibC::File::fcntlArg(fd, LibC::File::F_SETFD, flags | LibC::File::FD_CLOEXEC) == -1) {
+    return LibC::Errno::get();
+  }
+
+  return 0;
+}
+
+/// Reports child setup or exec failure to the parent, then exits the child.
+///
+/// This helper must only run after `fork` in the child process. It writes a raw
+/// `errno` value to the close-on-exec error pipe so the parent can distinguish
+/// successful `execvp` from setup failures before returning an `IoError`.
+function processCommandChildFail(errorFd: i32, rawErrno: i32): void {
+  let mut childErrno: i32 = rawErrno == 0 ? LibC::Errno::EIO : rawErrno;
+  LibC::File::write(errorFd, (&mut childErrno) as *void, @sizeOf<i32>());
+  LibC::Process::_exit(PROCESS_EXEC_FAILURE_EXIT);
+}
+
+/// Waits for child startup completion and then reaps the child process.
+///
+/// The error pipe is close-on-exec. EOF therefore means `execvp` succeeded,
+/// while bytes on the pipe contain the child setup/exec `errno`. This function
+/// owns and closes `errorReadFd` before returning.
+function processCommandWaitForExec(pid: i32, errorReadFd: i32, rawStatusOut: &mut i32): i32 {
+  let mut childErrno: i32 = 0;
+  let mut bytesRead: i64 = -1;
+
+  while (true) {
+    bytesRead = LibC::File::read(errorReadFd, (&mut childErrno) as *mut void, @sizeOf<i32>());
+
+    if (bytesRead == -1 && LibC::Errno::get() == LibC::Errno::EINTR) {
+      continue;
+    }
+
+    break;
+  }
+
+  let readErrno: i32 = bytesRead == -1 ? LibC::Errno::get() : 0;
+  LibC::File::close(errorReadFd);
+
+  let mut rawStatus: i32 = 0;
+  let mut waitResult: i32 = -1;
+
+  while (true) {
+    waitResult = LibC::Wait::waitpid(pid, (&mut rawStatus) as *mut i32, 0);
+
+    if (waitResult == -1 && LibC::Errno::get() == LibC::Errno::EINTR) {
+      continue;
+    }
+
+    break;
+  }
+
+  if (waitResult == -1) {
+    return LibC::Errno::get();
+  }
+
+  if (bytesRead > 0) {
+    return childErrno == 0 ? LibC::Errno::EIO : childErrno;
+  }
+
+  if (bytesRead == -1) {
+    return readErrno == 0 ? LibC::Errno::EIO : readErrno;
+  }
+
+  @write<i32>(rawStatusOut as *mut i32, rawStatus);
+  return 0;
+}
+
+/// Reads a seekable temporary output file into an owned `String`.
+///
+/// The caller retains ownership of `fd` and must close it after this helper
+/// returns. The temporary file has already been unlinked by `Command::output`,
+/// so reading consumes only the anonymous open descriptor.
+function processCommandReadAll(fd: i32): Result<String, Io::IoError> {
+  let length: i64 = LibC::File::lseek(fd, 0, LibC::File::SEEK_END);
+
+  if (length == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  if (LibC::File::lseek(fd, 0, LibC::File::SEEK_SET) == -1) {
+    return Result::ERROR(Io::IoError::lastError());
+  }
+
+  if (length == 0) {
+    return Result::OK(String::new());
+  }
+
+  let buffer: *mut u8 = Memory::allocateVector<u8>(length as u64);
+  let mut offset: u64 = 0;
+
+  while (offset < length as u64) {
+    let chunk: i64 = LibC::File::read(fd, (buffer + offset) as *mut void, (length as u64) - offset);
+
+    if (chunk == -1) {
+      if (LibC::Errno::get() == LibC::Errno::EINTR) {
+        continue;
+      }
+
+      Memory::free(buffer);
+      return Result::ERROR(Io::IoError::lastError());
+    }
+
+    if (chunk == 0) {
+      break;
+    }
+
+    offset += chunk as u64;
+  }
+
+  let result: String = String::create(buffer, offset);
+  Memory::free(buffer);
+  return Result::OK(result);
+}
+
 /// Process inspection and command execution helpers.
 ///
 /// This namespace wraps runtime-provided startup arguments and selected POSIX
 /// process calls. Argument APIs return owned strings detached from the raw C
 /// `argv` storage captured when the generated program starts.
 export namespace Process {
+  /// Normalized child-process status derived from a POSIX wait status.
+  ///
+  /// `raw` preserves the host wait status. `code` contains a shell-like exit
+  /// code: regular exits use the child exit code and signal exits use
+  /// `128 + signal`. `success` is true only when the child exited with code 0.
+  record ExitStatus {
+    /// Raw host wait status returned by the runtime.
+    public raw: i32;
+
+    /// Normalized exit-code-like value.
+    public code: i32;
+
+    /// True when the command exited successfully.
+    public success: boolean;
+  }
+
+  /// Captured child-process output plus exit status.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  /// import String from "std::string";
+  ///
+  /// let command: Process::Command = Process::Command::new("/bin/echo");
+  /// match (command.output()) {
+  ///   Result::OK(output) -> {
+  ///     let status: Process::ExitStatus = output.status();
+  ///     let stdout: String = output.stdout();
+  ///   },
+  ///   Result::ERROR(_) -> {},
+  /// };
+  /// ```
+  record Output {
+    /// Child exit status.
+    status: ExitStatus;
+
+    /// Captured stdout bytes as an owned String.
+    stdout: String;
+
+    /// Captured stderr bytes as an owned String.
+    stderr: String;
+
+    /// Returns the child exit status.
+    public status(&self): ExitStatus {
+      return self.status;
+    }
+
+    /// Returns a cloned copy of captured stdout.
+    public stdout(&self): String {
+      return self.stdout.clone();
+    }
+
+    /// Returns a cloned copy of captured stderr.
+    public stderr(&self): String {
+      return self.stderr.clone();
+    }
+  }
+
+  /// Owned child-process builder implemented in Ignis std.
+  ///
+  /// The builder keeps owned program, argument, environment, and cwd state in
+  /// nongeneric storage so the std module can drive POSIX `fork`/`execvp`
+  /// directly through `std::libc` without relying on dedicated runtime helpers.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Path from "std::path";
+  /// import Process from "std::process";
+  /// import String from "std::string";
+  /// import Vector from "std::vector";
+  ///
+  /// let mut extra: Vector<String> = Vector::init<String>();
+  /// extra.push(String::create("-c"));
+  /// extra.push(String::create("printf done"));
+  ///
+  /// let mut command: Process::Command = Process::Command::new("/bin/sh");
+  /// command.args(extra);
+  /// command.env("IGNIS_CHILD", "1");
+  /// command.cwd(&Path::PathBuf::create("/tmp"));
+  ///
+  /// match (command.run()) {
+  ///   Result::OK(status) -> {
+  ///     let ok: boolean = status.success;
+  ///   },
+  ///   Result::ERROR(_) -> {},
+  /// };
+  /// ```
+  @implements(Drop)
+  record Command {
+    /// Program path or command name used for `execvp`.
+    public program: String;
+
+    /// Owned argv entries, including argv[0].
+    public args: *mut String;
+
+    /// Number of initialized entries in `args`.
+    public argsLength: u64;
+
+    /// Allocated capacity of `args`.
+    public argsCapacity: u64;
+
+    /// Owned child-only environment keys.
+    public envKeys: *mut String;
+
+    /// Owned child-only environment values.
+    public envValues: *mut String;
+
+    /// Number of initialized key/value pairs in `envKeys` and `envValues`.
+    public envLength: u64;
+
+    /// Allocated capacity of `envKeys` and `envValues`.
+    public envCapacity: u64;
+
+    /// Owned child-only working directory.
+    public cwd: String;
+
+    /// True when `cwd` should be applied in the child after `fork`.
+    public hasCwd: boolean;
+
+    /// Creates a new child-process command builder.
+    ///
+    /// `program` is copied into owned storage and is also inserted as `argv[0]`.
+    public static new(program: str): Command {
+      let mut command: Command = Command {
+        program: String::create(program),
+        args: null,
+        argsLength: 0,
+        argsCapacity: 0,
+        envKeys: null,
+        envValues: null,
+        envLength: 0,
+        envCapacity: 0,
+        cwd: String::new(),
+        hasCwd: false,
+      };
+
+      command.pushArgValue(program);
+      return command;
+    }
+
+    /// Ensures argv storage can hold at least `minCapacity` initialized entries.
+    growArgs(&mut self, minCapacity: u64): void {
+      let mut newCapacity: u64 = self.argsCapacity == 0 ? 4 : self.argsCapacity;
+
+      while (newCapacity < minCapacity) {
+        newCapacity *= 2;
+      }
+
+      if (self.args == null) {
+        self.args = Memory::allocateVector<String>(newCapacity);
+      } else {
+        self.args = Memory::reallocateVector<String>(self.args, newCapacity);
+      }
+
+      self.argsCapacity = newCapacity;
+    }
+
+    /// Ensures environment key/value storage can hold `minCapacity` entries.
+    growEnv(&mut self, minCapacity: u64): void {
+      let mut newCapacity: u64 = self.envCapacity == 0 ? 4 : self.envCapacity;
+
+      while (newCapacity < minCapacity) {
+        newCapacity *= 2;
+      }
+
+      if (self.envKeys == null) {
+        self.envKeys = Memory::allocateVector<String>(newCapacity);
+      } else {
+        self.envKeys = Memory::reallocateVector<String>(self.envKeys, newCapacity);
+      }
+
+      if (self.envValues == null) {
+        self.envValues = Memory::allocateVector<String>(newCapacity);
+      } else {
+        self.envValues = Memory::reallocateVector<String>(self.envValues, newCapacity);
+      }
+
+      self.envCapacity = newCapacity;
+    }
+
+    /// Copies `value` into owned argv storage.
+    pushArgValue(&mut self, value: str): void {
+      if (self.argsLength == self.argsCapacity) {
+        self.growArgs(self.argsLength + 1);
+      }
+
+      @write<String>(self.args + self.argsLength, String::create(value));
+      self.argsLength += 1;
+    }
+
+    /// Adds or replaces one child environment override in owned storage.
+    setEnvValue(&mut self, key: str, value: str): void {
+      let keyString: String = String::create(key);
+      let mut index: u64 = 0;
+
+      while (index < self.envLength) {
+        if (self.envKeys[index].equals(&keyString)) {
+          self.envValues[index].clear();
+          self.envValues[index].pushStr(value);
+          return;
+        }
+
+        index += 1;
+      }
+
+      if (self.envLength == self.envCapacity) {
+        self.growEnv(self.envLength + 1);
+      }
+
+      @write<String>(self.envKeys + self.envLength, String::create(key));
+      @write<String>(self.envValues + self.envLength, String::create(value));
+      self.envLength += 1;
+    }
+
+    /// Builds the null-terminated borrowed `argv` array required by `execvp`.
+    ///
+    /// The returned array owns only the pointer vector, not the pointed-to string
+    /// bytes. The parent frees the vector after `fork`; the child only uses it
+    /// until `execvp` succeeds or `processCommandChildFail` exits.
+    buildArgv(&self): *mut str {
+      let argv: *mut str = Memory::allocateZeroedVector<str>(self.argsLength + 1);
+      let mut index: u64 = 0;
+
+      while (index < self.argsLength) {
+        @write<str>(argv + index, self.args[index].toStr());
+        index += 1;
+      }
+
+      return argv;
+    }
+
+    /// Applies child-only cwd and environment state after `fork`.
+    ///
+    /// This function must run in the child. On failure it reports `errno` through
+    /// `errorFd` and exits, because returning into shared parent control flow
+    /// after partial child setup would be unsafe.
+    prepareChild(&self, errorFd: i32): void {
+      if (self.hasCwd && LibC::File::chdir(self.cwd.toStr() as *u8) == -1) {
+        processCommandChildFail(errorFd, LibC::Errno::get());
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < self.envLength) {
+        if (LibC::Process::setenv(self.envKeys[index].toStr() as *u8, self.envValues[index].toStr() as *u8, 1) == -1) {
+          processCommandChildFail(errorFd, LibC::Errno::get());
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Forks, optionally redirects output fds, execs the program, and waits.
+    ///
+    /// Returns 0 on successful spawn/wait and writes the raw wait status to
+    /// `rawStatusOut`. A nonzero return value is a raw `errno` suitable for
+    /// `Io::IoError::fromErrno`.
+    spawn(&self, stdoutFd: i32, stderrFd: i32, rawStatusOut: &mut i32): i32 {
+      let argv: *mut str = self.buildArgv();
+      let mut errorPipe: i32[2] = [0, 0];
+
+      if (LibC::Process::pipe((&mut errorPipe[0]) as *mut i32) == -1) {
+        Memory::free(argv as *mut u8);
+        return LibC::Errno::get();
+      }
+
+      let cloexecErrno: i32 = processCommandSetCloseOnExec(errorPipe[1]);
+      if (cloexecErrno != 0) {
+        LibC::File::close(errorPipe[0]);
+        LibC::File::close(errorPipe[1]);
+        Memory::free(argv as *mut u8);
+        return cloexecErrno;
+      }
+
+      let pid: i32 = LibC::Process::fork();
+
+      if (pid == -1) {
+        let rawErrno: i32 = LibC::Errno::get();
+        LibC::File::close(errorPipe[0]);
+        LibC::File::close(errorPipe[1]);
+        Memory::free(argv as *mut u8);
+        return rawErrno;
+      }
+
+      if (pid == 0) {
+        LibC::File::close(errorPipe[0]);
+
+        if (stdoutFd != -1 && LibC::File::dup2(stdoutFd, LibC::File::STDOUT_FILENO) == -1) {
+          processCommandChildFail(errorPipe[1], LibC::Errno::get());
+        }
+
+        if (stderrFd != -1 && LibC::File::dup2(stderrFd, LibC::File::STDERR_FILENO) == -1) {
+          processCommandChildFail(errorPipe[1], LibC::Errno::get());
+        }
+
+        if (stdoutFd != -1) {
+          LibC::File::close(stdoutFd);
+        }
+
+        if (stderrFd != -1 && stderrFd != stdoutFd) {
+          LibC::File::close(stderrFd);
+        }
+
+        self.prepareChild(errorPipe[1]);
+        LibC::Process::execvp(self.program.toStr() as *u8, argv);
+        processCommandChildFail(errorPipe[1], LibC::Errno::get());
+      }
+
+      LibC::File::close(errorPipe[1]);
+      Memory::free(argv as *mut u8);
+
+      return processCommandWaitForExec(pid, errorPipe[0], rawStatusOut);
+    }
+
+    /// Drops all initialized argv strings and frees argv storage.
+    dropArgsStorage(&mut self): void {
+      let mut index: u64 = 0;
+
+      while (index < self.argsLength) {
+        @dropInPlace<String>(self.args + index);
+        index += 1;
+      }
+
+      if (self.args != null) {
+        Memory::free(self.args as *mut u8);
+      }
+
+      self.argsLength = 0;
+      self.argsCapacity = 0;
+    }
+
+    /// Drops all initialized environment strings and frees environment storage.
+    dropEnvStorage(&mut self): void {
+      let mut index: u64 = 0;
+
+      while (index < self.envLength) {
+        @dropInPlace<String>(self.envKeys + index);
+        @dropInPlace<String>(self.envValues + index);
+        index += 1;
+      }
+
+      if (self.envKeys != null) {
+        Memory::free(self.envKeys as *mut u8);
+      }
+
+      if (self.envValues != null) {
+        Memory::free(self.envValues as *mut u8);
+      }
+
+      self.envLength = 0;
+      self.envCapacity = 0;
+    }
+
+    /// Appends one argument to the child command line.
+    ///
+    /// Arguments are not parsed by a shell. Each call appends one exact `argv`
+    /// entry for the eventual `execvp` call.
+    public arg(&mut self, value: str): void {
+      self.pushArgValue(value);
+    }
+
+    /// Appends multiple arguments in order.
+    ///
+    /// Each vector element is appended as one `argv` entry, preserving order.
+    public args(&mut self, values: Vector<String>): void {
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        match (values.get(index)) {
+          Option::SOME(value) -> self.arg(value.toStr()),
+          Option::NONE -> {},
+        };
+
+        index += 1;
+      }
+
+    }
+
+    /// Adds or replaces one environment variable for the child only.
+    ///
+    /// The parent process environment is not changed. Reusing the same key
+    /// updates the child override instead of adding a duplicate entry.
+    public env(&mut self, key: str, value: str): void {
+      self.setEnvValue(key, value);
+    }
+
+    /// Sets the child working directory without mutating the parent process.
+    ///
+    /// The directory change runs after `fork` and before `execvp`, so it applies
+    /// only to the child process.
+    public cwd(&mut self, path: &Path::PathBuf): void {
+      self.cwd.clear();
+      self.cwd.pushStr(path.asStr());
+      self.hasCwd = true;
+    }
+
+    /// Runs the child process without capturing stdout or stderr.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// import Process from "std::process";
+    ///
+    /// let mut command: Process::Command = Process::command("/bin/sh");
+    /// command.arg("-c");
+    /// command.arg("exit 7");
+    ///
+    /// match (command.run()) {
+    ///   Result::OK(status) -> {
+    ///     let code: i32 = status.code;
+    ///     let ok: boolean = status.success;
+    ///   },
+    ///   Result::ERROR(_) -> {},
+    /// };
+    /// ```
+    public run(&self): Result<ExitStatus, Io::IoError> {
+      let mut rawStatus: i32 = 0;
+      let rawErrno: i32 = self.spawn(-1, -1, &mut rawStatus);
+
+      if (rawErrno != 0) {
+        return Result::ERROR(Io::IoError::fromErrno(rawErrno));
+      }
+
+      return Result::OK(processExitStatusFromRaw(rawStatus));
+    }
+
+    /// Runs the child process and captures stdout/stderr into owned Strings.
+    ///
+    /// Captured output is stored in temporary files created with `mkstemp` and
+    /// unlinked before the child runs, avoiding visible leftover paths when the
+    /// process completes normally.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// import Process from "std::process";
+    /// import String from "std::string";
+    ///
+    /// let mut command: Process::Command = Process::Command::new("/bin/sh");
+    /// command.arg("-c");
+    /// command.arg("printf stdout; printf stderr 1>&2");
+    ///
+    /// match (command.output()) {
+    ///   Result::OK(output) -> {
+    ///     let status: Process::ExitStatus = output.status();
+    ///     let stdout: String = output.stdout();
+    ///     let stderr: String = output.stderr();
+    ///   },
+    ///   Result::ERROR(_) -> {},
+    /// };
+    /// ```
+    public output(&self): Result<Output, Io::IoError> {
+      let stdoutTemplate: String = String::create("/tmp/ignis-process-stdout-XXXXXX");
+      let stderrTemplate: String = String::create("/tmp/ignis-process-stderr-XXXXXX");
+      let stdoutFd: i32 = LibC::Stdio::mkstemp(stdoutTemplate.toStr() as *mut u8);
+
+      if (stdoutFd == -1) {
+        return Result::ERROR(Io::IoError::lastError());
+      }
+
+        let stderrFd: i32 = LibC::Stdio::mkstemp(stderrTemplate.toStr() as *mut u8);
+
+        if (stderrFd == -1) {
+          let error: Io::IoError = Io::IoError::lastError();
+          LibC::File::close(stdoutFd);
+          LibC::File::unlink(stdoutTemplate.toStr() as *u8);
+          return Result::ERROR(error);
+        }
+
+        LibC::File::unlink(stdoutTemplate.toStr() as *u8);
+        LibC::File::unlink(stderrTemplate.toStr() as *u8);
+
+      let mut rawStatus: i32 = 0;
+      let rawErrno: i32 = self.spawn(stdoutFd, stderrFd, &mut rawStatus);
+
+      if (rawErrno != 0) {
+        LibC::File::close(stdoutFd);
+        LibC::File::close(stderrFd);
+        return Result::ERROR(Io::IoError::fromErrno(rawErrno));
+      }
+
+      let mut stdout: String = String::new();
+
+      match (processCommandReadAll(stdoutFd)) {
+        Result::OK(value) -> stdout = value,
+        Result::ERROR(error) -> {
+          LibC::File::close(stdoutFd);
+          LibC::File::close(stderrFd);
+          return Result::ERROR(error);
+        },
+      };
+
+      LibC::File::close(stdoutFd);
+
+      let mut stderr: String = String::new();
+
+      match (processCommandReadAll(stderrFd)) {
+        Result::OK(value) -> stderr = value,
+        Result::ERROR(error) -> {
+          LibC::File::close(stderrFd);
+          return Result::ERROR(error);
+        },
+      };
+
+      LibC::File::close(stderrFd);
+
+      return Result::OK(Output {
+        status: processExitStatusFromRaw(rawStatus),
+        stdout: stdout,
+        stderr: stderr,
+      });
+    }
+
+    /// Releases the owned builder storage.
+    public drop(&mut self): void {
+      self.program.drop();
+      self.dropArgsStorage();
+      self.dropEnvStorage();
+      self.cwd.drop();
+    }
+  }
+
+  /// Convenience helper mirroring common builder-style construction.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let mut command: Process::Command = Process::command("/bin/echo");
+  /// command.arg("hello");
+  /// ```
+  function command(program: str): Command {
+    return Process::Command::new(program);
+  }
+
   /// Returns owned copies of the startup arguments, including `argv[0]`.
   ///
   /// The returned vector owns every string. Mutating or storing the returned
@@ -274,8 +1024,8 @@ export namespace Process {
   /// # Status Encoding
   ///
   /// A command that exits with code `1` may return an encoded value such as
-  /// `256`, depending on the platform. This API intentionally preserves the raw
-  /// status until Ignis has a dedicated `ExitStatus` abstraction.
+  /// `256`, depending on the platform. Prefer `Process::Command::run` when you
+  /// need the normalized `Process::ExitStatus` view.
   ///
   /// # Example
   ///

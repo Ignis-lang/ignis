@@ -20,6 +20,9 @@
 //! | `O_CREAT`        | Create file if it does not exist  |
 //! | `O_TRUNC`        | Truncate file to zero length      |
 //! | `O_APPEND`       | Append on each write              |
+//! | `F_GETFD`        | `fcntl` request: get fd flags     |
+//! | `F_SETFD`        | `fcntl` request: set fd flags     |
+//! | `FD_CLOEXEC`     | Close fd on successful `exec`     |
 //!
 //! ## Functions
 //!
@@ -37,6 +40,8 @@
 //! | `dup`     | Duplicate file descriptor                          |
 //! | `dup2`    | Duplicate fd to specific number                    |
 //! | `isatty`  | Test if fd refers to a terminal                    |
+//! | `fcntl`   | Run `fcntl(fd, cmd)`                               |
+//! | `fcntlArg`| Run `fcntl(fd, cmd, arg)`                          |
 //!
 //! Most functions return -1 on error. `read` returns 0 on EOF.
 //!
@@ -105,6 +110,20 @@ extern __fcntl {
   const O_CREAT: CType::CInt;
   const O_TRUNC: CType::CInt;
   const O_APPEND: CType::CInt;
+  /// `fcntl` command that reads descriptor flags.
+  const F_GETFD: CType::CInt;
+  /// `fcntl` command that writes descriptor flags.
+  const F_SETFD: CType::CInt;
+  /// Descriptor flag that closes the fd during successful `exec`.
+  const FD_CLOEXEC: CType::CInt;
+
+  /// POSIX `fcntl(fd, cmd)` for commands without a third argument.
+  @externName("fcntl")
+  function fcntl(fd: CType::CInt, cmd: CType::CInt): CType::CInt;
+
+  /// POSIX `fcntl(fd, cmd, arg)` for integer descriptor-flag commands.
+  @externName("fcntl")
+  function fcntlArg(fd: CType::CInt, cmd: CType::CInt, arg: CType::CInt): CType::CInt;
 }
 
 /// POSIX file descriptors (unistd.h / fcntl.h)
@@ -151,6 +170,15 @@ namespace LibC::File {
 
   /// Append on each write.
   const O_APPEND: CType::CInt = __fcntl::O_APPEND;
+
+  /// `fcntl` request: get descriptor flags.
+  const F_GETFD: CType::CInt = __fcntl::F_GETFD;
+
+  /// `fcntl` request: set descriptor flags.
+  const F_SETFD: CType::CInt = __fcntl::F_SETFD;
+
+  /// Close the descriptor automatically on successful `exec`.
+  const FD_CLOEXEC: CType::CInt = __fcntl::FD_CLOEXEC;
 
   // ---- functions ----
 
@@ -220,5 +248,15 @@ namespace LibC::File {
   /// Tests whether `fd` refers to a terminal. Returns 1 if true.
   function isatty(fd: CType::CInt): CType::CInt {
     return __unistd_io::isatty(fd);
+  }
+
+  /// Performs `fcntl(fd, cmd)` for commands without a third argument.
+  function fcntl(fd: CType::CInt, cmd: CType::CInt): CType::CInt {
+    return __fcntl::fcntl(fd, cmd);
+  }
+
+  /// Performs `fcntl(fd, cmd, arg)` for commands that require an integer value.
+  function fcntlArg(fd: CType::CInt, cmd: CType::CInt, arg: CType::CInt): CType::CInt {
+    return __fcntl::fcntlArg(fd, cmd, arg);
   }
 }
