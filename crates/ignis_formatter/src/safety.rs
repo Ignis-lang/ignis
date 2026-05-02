@@ -202,7 +202,7 @@ fn comment_shape(source: &str) -> Result<Vec<CommentShape>, FormatError> {
     }
 
     comments.push(CommentShape {
-      raw: token.source_text(source).to_string(),
+      raw: token.source_text(source).trim_end().to_string(),
       placement: classify_comment_placement(source, &lexer.tokens, index, 0, eof_index),
       previous_token: lexer.tokens[..index]
         .iter()

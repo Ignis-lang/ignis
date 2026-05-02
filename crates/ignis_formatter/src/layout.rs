@@ -749,12 +749,20 @@ impl<'a> AstChunkFormatter<'a> {
   ) -> Result<String, LayoutFailure> {
     let signature = &function.signature;
 
-    let mut header_prefix = self.format_attributes(&signature.attrs, indent_level);
-    header_prefix.push_str(&format!(
+    let mut declaration_prefix = self.format_attributes(&signature.attrs, indent_level);
+    self.render_comment_gap_after_attributes(
+      &mut declaration_prefix,
+      &signature.attrs,
+      signature.span.start.0 as usize,
+      indent_level,
+    )?;
+
+    let mut header_prefix = format!(
       "{}function {}",
       self.indent(indent_level),
       self.slice_span(&signature.name_span).trim()
-    ));
+    );
+
     if let Some(type_params) = &signature.type_params {
       header_prefix.push_str(&self.format_type_params(type_params));
     }
@@ -765,14 +773,15 @@ impl<'a> AstChunkFormatter<'a> {
       .map(|parameter| self.format_parameter(parameter))
       .collect::<Vec<_>>();
 
-    let formatted = self.format_signature_body(
+    let mut formatted = declaration_prefix;
+    formatted.push_str(&self.format_signature_body(
       header_prefix,
       &parameters,
       self.callable_has_trailing_comma(&signature.span),
       &signature.return_type,
       function.body,
       indent_level,
-    )?;
+    )?);
 
     Ok(formatted)
   }
@@ -1196,6 +1205,8 @@ impl<'a> AstChunkFormatter<'a> {
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     let mut formatted = self.format_attributes(&record.attrs, indent_level);
+    self.render_comment_gap_after_attributes(&mut formatted, &record.attrs, record.span.start.0 as usize, indent_level)?;
+
     formatted.push_str(&format!(
       "{}record {}",
       self.indent(indent_level),
@@ -2570,6 +2581,25 @@ impl<'a> AstChunkFormatter<'a> {
     }
 
     Ok(())
+  }
+
+  fn render_comment_gap_after_attributes(
+    &self,
+    output: &mut String,
+    attrs: &[ASTAttribute],
+    declaration_start: usize,
+    indent_level: usize,
+  ) -> Result<(), LayoutFailure> {
+    let Some(last_attr) = attrs.last() else {
+      return Ok(());
+    };
+
+    let gap_end = self.line_start(declaration_start);
+    if gap_end <= last_attr.span.end.0 as usize {
+      return Ok(());
+    }
+
+    self.render_comment_gap(output, last_attr.span.end.0 as usize, gap_end, indent_level, false)
   }
 
   fn owned_spanned_items<'b, T, F>(

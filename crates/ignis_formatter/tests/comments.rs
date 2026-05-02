@@ -288,6 +288,34 @@ fn preserves_doc_comment_between_attribute_and_record() {
 }
 
 #[test]
+fn preserves_doc_comment_between_attribute_and_nested_record() {
+  let formatted = format_text(
+    "namespace Fs {\n  @implements(Drop)\n  /// RAII wrapper around an owned POSIX file descriptor.\n  record File {\n    fd: i32;\n  }\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("doc comment between attribute and nested record should be preserved");
+
+  assert_eq!(
+    formatted,
+    "namespace Fs {\n  @implements(Drop)\n  /// RAII wrapper around an owned POSIX file descriptor.\n  record File {\n    fd: i32;\n  }\n}\n"
+  );
+}
+
+#[test]
+fn preserves_doc_comment_between_attribute_and_extern_function() {
+  let formatted = format_text(
+    "extern Fs {\n  @externName(\"__errno_location\")\n  /// Returns the thread-local `errno` pointer.\n  function errno_location(): *mut i32;\n}\n",
+    &FormatOptions::default(),
+  )
+  .expect("doc comment between attribute and extern function should be preserved");
+
+  assert_eq!(
+    formatted,
+    "extern Fs {\n  @externName(\"__errno_location\")\n  /// Returns the thread-local `errno` pointer.\n  function errno_location(): *mut i32;\n}\n"
+  );
+}
+
+#[test]
 fn preserves_comment_inside_block_body() {
   let formatted = format_text(
     "function work(): void {\n  // Step 1\n  let x = 1;\n  // Step 2\n  return;\n}\n",

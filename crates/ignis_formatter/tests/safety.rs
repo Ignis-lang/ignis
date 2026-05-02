@@ -109,6 +109,16 @@ fn format_text_end_to_end_safety_passes_for_canonical_simple_function() {
 }
 
 #[test]
+fn format_text_allows_cleaning_trailing_whitespace_in_comment_lines() {
+  let source = "//! \n\nfunction main(): void { return; }\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("comment safety should allow trimming trailing whitespace from comment lines");
+
+  assert_eq!(formatted, "//!\n\nfunction main(): void {\n  return;\n}\n");
+}
+
+#[test]
 fn format_text_end_to_end_idempotence_passes_for_record_with_comments() {
   let source = "/// A point in 2D space\nrecord Point {\n    x: i32;\n    y: i32;\n}\n";
 
