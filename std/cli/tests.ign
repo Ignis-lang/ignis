@@ -1,0 +1,138 @@
+import Cli from "std::cli";
+import Test from "std::test";
+
+function newArgs(): Vector<String> {
+  // TODO(ignis): validate generic constructor inference for cases like
+  // `Vector::init()` before removing explicit type arguments here.
+  return Vector::init<String>();
+}
+
+function buildCommand(): Cli::Command {
+  let mut command: Cli::Command = Cli::Command::new("tool");
+
+  command.aboutText("Build project artifacts.");
+  command.flag("verbose", "v", "Enable verbose output.");
+  command.option("output", "o", "Write output file.");
+
+  return command;
+}
+
+@test
+function cliParsesLongShortOptionsAndOrderedPositionals(): void {
+  let command: Cli::Command = buildCommand();
+  let mut args: Vector<String> = newArgs();
+
+  args.push(String::create("tool"));
+  args.push(String::create("--verbose"));
+  args.push(String::create("-o"));
+  args.push(String::create("out.txt"));
+  args.push(String::create("src/main.ign"));
+  args.push(String::create("build/debug"));
+
+  let Result::OK(matches) = command.parse(&args) else {
+    @panic("expected cli parse success");
+  };
+
+  Test::assertEq<str>(matches.programName().toStr(), "tool");
+  Test::assert(matches.has("verbose"));
+  Test::assert(matches.has("output"));
+  Test::assert(!matches.has("missing"));
+
+  match (matches.value("output")) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "out.txt"),
+    Option::NONE -> Test::fail(),
+  };
+
+  match (matches.value("verbose")) {
+    Option::SOME(_) -> Test::fail(),
+    Option::NONE -> {},
+  };
+
+  match (matches.positional(0)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "src/main.ign"),
+    Option::NONE -> Test::fail(),
+  };
+
+  match (matches.positional(1)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "build/debug"),
+    Option::NONE -> Test::fail(),
+  };
+
+  match (matches.positional(2)) {
+    Option::SOME(_) -> Test::fail(),
+    Option::NONE -> {},
+  };
+}
+
+@test
+function cliTreatsTokensAfterTerminatorAsPositionals(): void {
+  let command: Cli::Command = buildCommand();
+  let mut args: Vector<String> = newArgs();
+
+  args.push(String::create("tool"));
+  args.push(String::create("--verbose"));
+  args.push(String::create("--"));
+  args.push(String::create("--literal"));
+  args.push(String::create("-o"));
+  args.push(String::create("final.ign"));
+
+  let Result::OK(matches) = command.parse(&args) else {
+    @panic("expected cli parse success");
+  };
+
+  Test::assert(matches.has("verbose"));
+  Test::assert(!matches.has("output"));
+
+  match (matches.positional(0)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "--literal"),
+    Option::NONE -> Test::fail(),
+  };
+
+  match (matches.positional(1)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "-o"),
+    Option::NONE -> Test::fail(),
+  };
+
+  match (matches.positional(2)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "final.ign"),
+    Option::NONE -> Test::fail(),
+  };
+}
+
+@test
+function cliRejectsUnknownOptionsWithStableMessage(): void {
+  let command: Cli::Command = buildCommand();
+  let mut args: Vector<String> = newArgs();
+
+  args.push(String::create("tool"));
+  args.push(String::create("--missing"));
+
+  match (command.parse(&args)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> Test::assertEq<str>(error.message.toStr(), "unknown option: --missing"),
+  };
+}
+
+@test
+function cliRejectsMissingOptionValueWithStableMessage(): void {
+  let command: Cli::Command = buildCommand();
+  let mut args: Vector<String> = newArgs();
+
+  args.push(String::create("tool"));
+  args.push(String::create("--output"));
+
+  match (command.parse(&args)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> Test::assertEq<str>(error.message.toStr(), "missing value for option: --output"),
+  };
+}
+
+@test
+function cliRenderHelpIsDeterministic(): void {
+  let help: String = buildCommand().renderHelp();
+
+  Test::assertEq<str>(
+    help.toStr(),
+    "Usage: tool [OPTIONS] [ARGS]\n\nBuild project artifacts.\n\nOptions:\n  --verbose, -v\tEnable verbose output.\n  --output, -o <value>\tWrite output file.\n"
+  );
+}

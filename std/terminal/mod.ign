@@ -1,0 +1,676 @@
+//!
+//! # Terminal Module
+//!
+//! Semantic terminal helpers for ANSI-capable command-line applications.
+//!
+//! ## Purpose
+//!
+//! Use this module when a program needs **readable terminal intent** instead of
+//! manually assembling ANSI fragments.
+//!
+//! The public API answers questions like:
+//! - "How do I render text in red and then reset the terminal?"
+//! - "How do I clear the screen or move the cursor?"
+//! - "How do I avoid styling output when stdout is not a terminal?"
+//!
+//! The module intentionally does **not** expose raw ANSI assembly as the primary
+//! contract. Callers work with `Terminal::Style`, `Terminal::Screen`, and
+//! `Terminal::Cursor`, while private helpers translate those semantic requests
+//! into escape sequences.
+//!
+//! ## Quick path
+//!
+//! 1. Build a style with `Terminal::Style::new()`.
+//! 2. Apply colors and attributes.
+//! 3. Call `apply(text)` or use `colorText` / `styledText`.
+//! 4. Check `isOutputTerminal()` before styling if plain output is required for
+//!    redirected streams.
+//!
+//! ## Public surface
+//!
+//! | Area | API | Use when |
+//! |------|-----|----------|
+//! | Text styling | `Terminal::Style`, `colorText`, `styledText`, `reset` | You want semantic color/attribute output with automatic trailing reset |
+//! | Screen control | `Terminal::Screen::clear`, `clearLine` | You need simple full-screen or line clearing |
+//! | Cursor control | `Terminal::Cursor::{moveTo, save, restore, hide, show}` | You need TUI-style cursor positioning or visibility control |
+//! | Capability checks | `isInputTerminal`, `isOutputTerminal`, `isErrorTerminal` | You need to branch on whether a file descriptor is a terminal |
+//!
+//! ## Design boundary
+//!
+//! ```text
+//!   Caller intent
+//!   ┌──────────────────────────────────────────────────────┐
+//!   │ Terminal::Style::new().foreground(...).apply(text)  │
+//!   │ Terminal::Screen::clear()                           │
+//!   │ Terminal::Cursor::moveTo(row, column)               │
+//!   └──────────────────────────┬───────────────────────────┘
+//!                              │ semantic API
+//!                              ▼
+//!   Private implementation
+//!   ┌──────────────────────────────────────────────────────┐
+//!   │ ansiSgr(code)                                        │
+//!   │ ansiCsi(command)                                    │
+//!   └──────────────────────────────────────────────────────┘
+//! ```
+//!
+//! This split is deliberate:
+//! - Public code stays easy to read and review.
+//! - Escape-sequence details stay centralized.
+//! - Tests can assert high-level behavior without calling low-level helpers.
+//!
+//! ## Behavior notes
+//!
+//! - Styled helpers append a trailing reset automatically.
+//! - Cursor coordinates are **one-based**, matching common ANSI terminal usage.
+//! - Capability checks currently rely on `isatty` through `std::libc` and are
+//!   therefore limited to the supported POSIX-style hosts enabled by the
+//!   `@configFlag` annotations.
+//! - This module does not implement raw mode, alternate screen buffers, event
+//!   input, or terminal layout/widgets.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Terminal from "std::terminal";
+//!
+//! function main(): i32 {
+//!   if (Terminal::isOutputTerminal()) {
+//!     let mut style: Terminal::Style = Terminal::Style::new();
+//!     style.foreground(Terminal::TerminalColor::GREEN);
+//!     style.attribute(Terminal::TerminalAttribute::BOLD);
+//!   }
+//!
+//!   let heading: String = Terminal::colorText("ready", Terminal::TerminalColor::GREEN);
+//!   let clear: String = Terminal::Screen::clear();
+//!   let moveHome: String = Terminal::Cursor::moveTo(1, 1);
+//!   return 0;
+//! }
+//! ```
+
+import LibC from "std::libc";
+
+/// Builds a Control Sequence Introducer (CSI) escape sequence.
+///
+/// # Purpose
+///
+/// This is a private implementation helper used by the public semantic API.
+/// Callers should prefer `Terminal::Style`, `Terminal::Screen`, and
+/// `Terminal::Cursor` instead of assembling CSI commands directly.
+///
+/// # Arguments
+///
+/// - `command`: trailing CSI payload such as `"2J"`, `"12;34H"`, or `"0m"`.
+///
+/// # Returns
+///
+/// An owned `String` beginning with `ESC [` followed by `command`.
+///
+/// # Invariants
+///
+/// - Always returns a complete CSI prefix.
+/// - Does not append any trailing reset or newline on its own.
+///
+/// # Example
+///
+/// ```ignis
+/// let sequence: String = ansiCsi("2J");
+/// // sequence is ESC[2J
+/// ```
+function ansiCsi(command: str): String {
+  let mut sequence: String = String::new();
+
+  sequence.pushChar(27 as char);
+  sequence.pushStr("[");
+  sequence.pushStr(command);
+
+  return sequence;
+}
+
+/// Builds one Select Graphic Rendition (SGR) command.
+///
+/// # Purpose
+///
+/// Converts one numeric SGR code into a full CSI escape string. This helper is
+/// private so the public API can remain semantic.
+///
+/// # Arguments
+///
+/// - `code`: ANSI SGR code such as `0`, `31`, or `1`.
+///
+/// # Returns
+///
+/// A complete ANSI sequence like `ESC[31m`.
+///
+/// # Example
+///
+/// ```ignis
+/// let red: String = ansiSgr(31);
+/// // red is ESC[31m
+/// ```
+function ansiSgr(code: i32): String {
+  let mut command: String = String::create(code);
+  command.pushChar('m');
+
+  return ansiCsi(command.toStr());
+}
+
+/// Terminal utilities for semantic terminal formatting and control.
+///
+/// ## What this namespace provides
+///
+/// - Nested color and attribute enums
+/// - Composable text styles
+/// - Screen and cursor helpers
+/// - File-descriptor terminal capability checks
+///
+/// ## What it does not provide
+///
+/// - Raw mode
+/// - Alternate screen buffers
+/// - Keyboard or mouse event handling
+/// - High-level TUI widgets or layout primitives
+export namespace Terminal {
+  /// ANSI 8-color palette used by semantic styling helpers.
+  ///
+  /// These values describe **intent** rather than literal bytes. Convert them
+  /// to concrete escape codes through `foregroundCode()` or `backgroundCode()`.
+  /// Most callers should use them through `Terminal::Style`, `colorText`, or
+  /// `styledText` instead of calling the code helpers themselves.
+  enum TerminalColor {
+    /// Black foreground/background color.
+    BLACK,
+    /// Red foreground/background color.
+    RED,
+    /// Green foreground/background color.
+    GREEN,
+    /// Yellow foreground/background color.
+    YELLOW,
+    /// Blue foreground/background color.
+    BLUE,
+    /// Magenta foreground/background color.
+    MAGENTA,
+    /// Cyan foreground/background color.
+    CYAN,
+    /// White foreground/background color.
+    WHITE,
+    /// Terminal default foreground/background color.
+    DEFAULT,
+
+    /// Returns the ANSI foreground SGR code for this color.
+    ///
+    /// # Returns
+    ///
+    /// One of the standard foreground codes in the 30–39 range.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let code: i32 = Terminal::TerminalColor::RED.foregroundCode();
+    /// // code == 31
+    /// ```
+    public foregroundCode(&self): i32 {
+      return match (self) {
+        TerminalColor::BLACK -> 30,
+        TerminalColor::RED -> 31,
+        TerminalColor::GREEN -> 32,
+        TerminalColor::YELLOW -> 33,
+        TerminalColor::BLUE -> 34,
+        TerminalColor::MAGENTA -> 35,
+        TerminalColor::CYAN -> 36,
+        TerminalColor::WHITE -> 37,
+        TerminalColor::DEFAULT -> 39,
+      };
+    }
+
+    /// Returns the ANSI background SGR code for this color.
+    ///
+    /// # Returns
+    ///
+    /// One of the standard background codes in the 40–49 range.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let code: i32 = Terminal::TerminalColor::BLUE.backgroundCode();
+    /// // code == 44
+    /// ```
+    public backgroundCode(&self): i32 {
+      return match (self) {
+        TerminalColor::BLACK -> 40,
+        TerminalColor::RED -> 41,
+        TerminalColor::GREEN -> 42,
+        TerminalColor::YELLOW -> 43,
+        TerminalColor::BLUE -> 44,
+        TerminalColor::MAGENTA -> 45,
+        TerminalColor::CYAN -> 46,
+        TerminalColor::WHITE -> 47,
+        TerminalColor::DEFAULT -> 49,
+      };
+    }
+  }
+
+  /// Text attributes represented by ANSI SGR codes.
+  ///
+  /// Combine one or more of these through `Terminal::Style::attribute()`.
+  enum TerminalAttribute {
+    /// Bold or intensified text.
+    BOLD,
+    /// Dim or faint text.
+    DIM,
+    /// Italic text where the terminal supports it.
+    ITALIC,
+    /// Underlined text.
+    UNDERLINE,
+    /// Reversed foreground/background colors.
+    REVERSED,
+
+    /// Returns the ANSI SGR code for this attribute.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let code: i32 = Terminal::TerminalAttribute::UNDERLINE.code();
+    /// // code == 4
+    /// ```
+    public code(&self): i32 {
+      return match (self) {
+        TerminalAttribute::BOLD -> 1,
+        TerminalAttribute::DIM -> 2,
+        TerminalAttribute::ITALIC -> 3,
+        TerminalAttribute::UNDERLINE -> 4,
+        TerminalAttribute::REVERSED -> 7,
+      };
+    }
+  }
+
+  /// Composable text styling state.
+  ///
+  /// `Style` collects semantic foreground, background, and attribute choices
+  /// and converts them into a single rendered string when `apply()` is called.
+  ///
+  /// ## Rendering model
+  ///
+  /// ```text
+  ///   foreground? -> background? -> attributes* -> text -> reset
+  /// ```
+  ///
+  /// ## Key behavior
+  ///
+  /// - Missing foreground/background means "leave terminal default unchanged"
+  ///   until the final reset.
+  /// - Attributes are emitted in insertion order.
+  /// - `apply()` always appends `Terminal::reset()`.
+  record Style {
+    /// Optional foreground color to emit before text.
+    foregroundColor: Option<Terminal::TerminalColor>;
+    /// Optional background color to emit before text.
+    backgroundColor: Option<Terminal::TerminalColor>;
+    /// Ordered text attributes to emit before text.
+    attributes: Vector<Terminal::TerminalAttribute>;
+
+    /// Creates an empty style with no colors or attributes.
+    ///
+    /// # Returns
+    ///
+    /// A style that leaves all formatting unset until additional builder-style
+    /// methods are called.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let style: Terminal::Style = Terminal::Style::new();
+    /// ```
+    public static new(): Terminal::Style {
+      return Terminal::Style {
+        foregroundColor: Option::NONE,
+        backgroundColor: Option::NONE,
+        // TODO(ignis): validate generic constructor inference for cases like
+        // `Vector::init()` before removing explicit type arguments here.
+        attributes: Vector::init<Terminal::TerminalAttribute>(),
+      };
+    }
+
+    /// Sets the style foreground color.
+    ///
+    /// # Arguments
+    ///
+    /// - `color`: semantic color to use for later `apply()` calls.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let mut style: Terminal::Style = Terminal::Style::new();
+    /// style.foreground(Terminal::TerminalColor::GREEN);
+    /// ```
+    public foreground(&mut self, color: Terminal::TerminalColor): void {
+      self.foregroundColor = Option::SOME(color);
+    }
+
+    /// Sets the style background color.
+    ///
+    /// # Arguments
+    ///
+    /// - `color`: semantic background color to use for later `apply()` calls.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let mut style: Terminal::Style = Terminal::Style::new();
+    /// style.background(Terminal::TerminalColor::BLUE);
+    /// ```
+    public background(&mut self, color: Terminal::TerminalColor): void {
+      self.backgroundColor = Option::SOME(color);
+    }
+
+    /// Appends one text attribute to the style.
+    ///
+    /// # Arguments
+    ///
+    /// - `attribute`: attribute to emit before the text.
+    ///
+    /// # Notes
+    ///
+    /// Repeated calls preserve insertion order. The module does not currently
+    /// deduplicate attributes or validate conflicting combinations.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let mut style: Terminal::Style = Terminal::Style::new();
+    /// style.attribute(Terminal::TerminalAttribute::BOLD);
+    /// style.attribute(Terminal::TerminalAttribute::UNDERLINE);
+    /// ```
+    public attribute(&mut self, attribute: Terminal::TerminalAttribute): void {
+      self.attributes.push(attribute);
+    }
+
+    /// Applies the style to `text` and appends a trailing reset.
+    ///
+    /// # Arguments
+    ///
+    /// - `text`: text payload to wrap.
+    ///
+    /// # Returns
+    ///
+    /// An owned `String` containing all configured prefix sequences, then the
+    /// original text, then `Terminal::reset()`.
+    ///
+    /// # Invariants
+    ///
+    /// - Always returns a trailing reset.
+    /// - Never mutates the input text.
+    /// - Attribute order matches insertion order.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let mut style: Terminal::Style = Terminal::Style::new();
+    /// style.foreground(Terminal::TerminalColor::RED);
+    /// let styled: String = style.apply("alert");
+    /// ```
+    public apply(&self, text: str): String {
+      let mut output: String = String::new();
+
+      if (let Option::SOME(color) = self.foregroundColor) {
+        let sequence: String = ansiSgr(color.foregroundCode());
+        output.push(&sequence);
+      }
+
+      if (let Option::SOME(color) = self.backgroundColor) {
+        let sequence: String = ansiSgr(color.backgroundCode());
+        output.push(&sequence);
+      }
+
+      let mut index: u64 = 0;
+      while (index < self.attributes.length()) {
+        let Option::SOME(attribute) = self.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let sequence: String = ansiSgr(attribute.code());
+        output.push(&sequence);
+        index += 1;
+      }
+
+      output.pushStr(text);
+      let reset: String = Terminal::reset();
+      output.push(&reset);
+
+      return output;
+    }
+  }
+
+  /// Screen control helpers.
+  ///
+  /// Use these methods when a caller needs a complete command string for common
+  /// clearing operations without depending on raw ANSI fragments.
+  namespace Screen {
+    /// Returns the full-screen clear command.
+    ///
+    /// # Returns
+    ///
+    /// A complete CSI sequence equivalent to ANSI `ESC[2J`.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let clear: String = Terminal::Screen::clear();
+    /// ```
+    function clear(): String {
+      return ansiCsi("2J");
+    }
+
+    /// Returns the current-line clear command.
+    ///
+    /// # Returns
+    ///
+    /// A complete CSI sequence equivalent to ANSI `ESC[2K`.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let clearLine: String = Terminal::Screen::clearLine();
+    /// ```
+    function clearLine(): String {
+      return ansiCsi("2K");
+    }
+  }
+
+  /// Cursor control helpers.
+  ///
+  /// All cursor coordinates in this namespace are **one-based**.
+  /// Row `1`, column `1` is the top-left corner.
+  namespace Cursor {
+    /// Moves the cursor to one-based row and column coordinates.
+    ///
+    /// # Arguments
+    ///
+    /// - `row`: one-based terminal row.
+    /// - `column`: one-based terminal column.
+    ///
+    /// # Returns
+    ///
+    /// A complete CSI sequence such as `ESC[12;34H`.
+    ///
+    /// # Invariants
+    ///
+    /// The function preserves the provided numeric values exactly; it does not
+    /// clamp zero or out-of-range coordinates.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let moveCursor: String = Terminal::Cursor::moveTo(3, 10);
+    /// ```
+    function moveTo(row: u32, column: u32): String {
+      let mut command: String = String::create(row);
+      let columnText: String = String::create(column);
+
+      command.pushChar(';');
+      command.push(&columnText);
+      command.pushChar('H');
+
+      return ansiCsi(command.toStr());
+    }
+
+    /// Saves the current cursor position.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let save: String = Terminal::Cursor::save();
+    /// ```
+    function save(): String {
+      return ansiCsi("s");
+    }
+
+    /// Restores the most recently saved cursor position.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let restore: String = Terminal::Cursor::restore();
+    /// ```
+    function restore(): String {
+      return ansiCsi("u");
+    }
+
+    /// Hides the cursor.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let hide: String = Terminal::Cursor::hide();
+    /// ```
+    function hide(): String {
+      return ansiCsi("?25l");
+    }
+
+    /// Shows the cursor.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let show: String = Terminal::Cursor::show();
+    /// ```
+    function show(): String {
+      return ansiCsi("?25h");
+    }
+  }
+
+  /// Resets color and style attributes.
+  ///
+  /// # Returns
+  ///
+  /// The complete ANSI reset sequence `ESC[0m`.
+  ///
+    /// # Notes
+    ///
+    /// `Style::apply`, `colorText`, and `styledText` all append this sequence
+    /// automatically, so callers rarely need to concatenate it manually.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let reset: String = Terminal::reset();
+    /// ```
+    function reset(): String {
+    return ansiSgr(0);
+  }
+
+  /// Wraps text in one foreground color and a trailing reset.
+  ///
+  /// # Arguments
+  ///
+  /// - `text`: text payload to wrap.
+  /// - `color`: semantic foreground color.
+  ///
+    /// # Returns
+    ///
+    /// Styled text equivalent to constructing a new `Style`, setting its
+    /// foreground color, and calling `apply(text)`.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let ok: String = Terminal::colorText("ok", Terminal::TerminalColor::GREEN);
+    /// ```
+    function colorText(text: str, color: Terminal::TerminalColor): String {
+    let mut style: Terminal::Style = Terminal::Style::new();
+    style.foreground(color);
+
+    return style.apply(text);
+  }
+
+  /// Wraps text in one text attribute and a trailing reset.
+  ///
+    /// # Arguments
+    ///
+    /// - `text`: text payload to wrap.
+    /// - `attribute`: semantic attribute to apply.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let heading: String = Terminal::styledText("Title", Terminal::TerminalAttribute::BOLD);
+    /// ```
+    function styledText(text: str, attribute: Terminal::TerminalAttribute): String {
+    let mut style: Terminal::Style = Terminal::Style::new();
+    style.attribute(attribute);
+
+    return style.apply(text);
+  }
+
+  /// Returns `true` when stdin is attached to a terminal.
+  ///
+  /// # Returns
+  ///
+  /// Host `isatty(STDIN_FILENO) != 0` on supported platforms.
+  ///
+    /// # Limitations
+    ///
+    /// This check is only available on the hosts enabled by the surrounding
+    /// `@configFlag` annotation.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let interactive: boolean = Terminal::isInputTerminal();
+    /// ```
+    @configFlag(@platform("linux") || @platform("macos"))
+    function isInputTerminal(): boolean {
+    return LibC::File::isatty(LibC::File::STDIN_FILENO) != 0;
+  }
+
+    /// Returns `true` when stdout is attached to a terminal.
+    ///
+    /// Use this before emitting styling when redirected output should remain plain.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// if (Terminal::isOutputTerminal()) {
+    ///   let text: String = Terminal::colorText("ready", Terminal::TerminalColor::GREEN);
+    /// }
+    /// ```
+    @configFlag(@platform("linux") || @platform("macos"))
+    function isOutputTerminal(): boolean {
+    return LibC::File::isatty(LibC::File::STDOUT_FILENO) != 0;
+  }
+
+    /// Returns `true` when stderr is attached to a terminal.
+    ///
+    /// This is useful for tooling that styles diagnostics separately from normal
+    /// stdout output.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let canStyleErrors: boolean = Terminal::isErrorTerminal();
+    /// ```
+    @configFlag(@platform("linux") || @platform("macos"))
+    function isErrorTerminal(): boolean {
+    return LibC::File::isatty(LibC::File::STDERR_FILENO) != 0;
+  }
+}

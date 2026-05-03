@@ -1,0 +1,696 @@
+//!
+//! # CLI Module
+//!
+//! Bounded clap-like command-line parsing helpers.
+//!
+//! ## Purpose
+//!
+//! This module provides a small, reviewable command builder and argv parser for
+//! common Ignis CLI entrypoints.
+//!
+//! It is inspired by clap-style APIs, but it is intentionally narrower:
+//! callers declare a command, register supported flags/options, and then parse a
+//! `Vector<String>` or the current process arguments into owned `Matches`.
+//!
+//! ## Supported grammar
+//!
+//! | Form | Supported | Notes |
+//! |------|-----------|-------|
+//! | `--flag` | Yes | Declared boolean flag |
+//! | `-f` | Yes | Declared short flag |
+//! | `--output file` | Yes | Declared valued option consumes next argv item |
+//! | `-o file` | Yes | Declared short valued option consumes next argv item |
+//! | positional args | Yes | Preserved in order |
+//! | `--` terminator | Yes | All later tokens become positionals |
+//! | `--opt=value` | No | Intentionally out of scope |
+//! | grouped short flags (`-abc`) | No | Intentionally out of scope |
+//! | defaults / env injection | No | Intentionally out of scope |
+//! | subcommands | No | Intentionally out of scope |
+//!
+//! ## Parsing lifecycle
+//!
+//! ```text
+//!   Command spec
+//!   ┌───────────────────────────────────────────┐
+//!   │ new(name)                                 │
+//!   │ aboutText(...)                            │
+//!   │ flag(...) / option(...)                   │
+//!   └────────────────────┬──────────────────────┘
+//!                        │
+//!                        ▼
+//!   argv scan
+//!   ┌───────────────────────────────────────────┐
+//!   │ parse(&args) or parseProcess()            │
+//!   │ - detect `--`                             │
+//!   │ - match long/short specs                  │
+//!   │ - collect owned option values             │
+//!   │ - preserve ordered positionals            │
+//!   └────────────────────┬──────────────────────┘
+//!                        │
+//!                        ▼
+//!   Result
+//!   ┌───────────────────────────────────────────┐
+//!   │ Result::OK(Matches)                       │
+//!   │ Result::ERROR(CliError)                   │
+//!   └───────────────────────────────────────────┘
+//! ```
+//!
+//! ## Ownership model
+//!
+//! - `parseProcess()` copies host argv into owned `String` values via
+//!   `Process::args()`.
+//! - `parse(&args)` clones only the values it needs to store in `Matches`.
+//! - `Matches::value()` and `Matches::positional()` return owned `String`
+//!   clones so callers do not borrow from internal parser storage.
+//!
+//! ## Error model
+//!
+//! Parsing failures are explicit `Result::ERROR(CliError)` values.
+//! The current bounded error surface is:
+//! - unknown option
+//! - missing value for a declared valued option
+//!
+//! ## Help rendering
+//!
+//! `renderHelp()` is deterministic:
+//! - usage line first
+//! - about text next when present
+//! - option listing in declaration order
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Cli from "std::cli";
+//!
+//! function main(): i32 {
+//!   let mut command: Cli::Command = Cli::Command::new("tool");
+//!   command.aboutText("Build project artifacts.");
+//!   command.flag("verbose", "v", "Enable verbose output.");
+//!   command.option("output", "o", "Write output file.");
+//!
+//!   match (command.parseProcess()) {
+//!     Result::OK(matches) -> {
+//!       if (matches.has("verbose")) {
+//!         // verbose branch
+//!       }
+//!       return 0;
+//!     },
+//!     Result::ERROR(error) -> {
+//!       // print error.message or renderHelp()
+//!       return 1;
+//!     },
+//!   };
+//! }
+//! ```
+
+import Process from "std::process";
+
+/// Returns whether an owned string equals a `str` literal.
+///
+/// This is a private parser helper that keeps equality checks readable in the
+/// argv scan loop.
+///
+/// # Example
+///
+/// ```ignis
+/// let same: boolean = cliStringEquals(&String::create("--help"), "--help");
+/// ```
+function cliStringEquals(value: &String, expected: str): boolean {
+  let expectedString: String = String::create(expected);
+  return value.compare(&expectedString) == 0;
+}
+
+/// Returns whether `value` begins with `prefix`.
+///
+/// # Notes
+///
+/// - This check is byte-oriented.
+/// - It allocates a temporary owned `String` for the prefix comparison.
+///
+/// # Example
+///
+/// ```ignis
+/// let isLong: boolean = cliStringStartsWith(&String::create("--verbose"), "--");
+/// ```
+function cliStringStartsWith(value: &String, prefix: str): boolean {
+  let prefixString: String = String::create(prefix);
+
+  if (value.length() < prefixString.length()) {
+    return false;
+  }
+
+  return value.substring(0, prefixString.length() as i64).equals(&prefixString);
+}
+
+/// Returns the substring after a known prefix length.
+///
+/// # Arguments
+///
+/// - `value`: source token.
+/// - `prefixLength`: number of leading bytes to skip.
+///
+/// # Returns
+///
+/// A new owned `String` containing the suffix.
+///
+/// # Example
+///
+/// ```ignis
+/// let suffix: String = cliStringAfterPrefix(&String::create("--output"), 2);
+/// // suffix == "output"
+/// ```
+function cliStringAfterPrefix(value: &String, prefixLength: u64): String {
+  return value.substring(prefixLength as i64, (value.length() - prefixLength) as i64);
+}
+
+/// CLI parsing and help-generation utilities.
+///
+/// The namespace exposes a bounded public surface centered on:
+/// - `Command` for spec definition and parsing
+/// - `Matches` for query access
+/// - `CliError` for stable failures
+export namespace Cli {
+  /// One parsed option or flag occurrence.
+  ///
+  /// `OptionValue` is an internal storage shape used by `Matches`. Boolean
+  /// flags set `hasValue = false` and store an empty `value` string.
+  record OptionValue {
+    /// Canonical long option name, even when parsed through a short alias.
+    public name: String;
+    /// Owned option payload when one was consumed.
+    public value: String;
+    /// Whether this occurrence carries a value.
+    public hasValue: boolean;
+  }
+
+  /// Parsed command-line matches.
+  ///
+  /// `Matches` stores owned data so callers can inspect results without
+  /// borrowing from the original argv vector.
+  record Matches {
+    /// Program name taken from `argv[0]` or the command name fallback.
+    public program: String;
+    /// Parsed flag/option occurrences in arrival order.
+    public options: Vector<OptionValue>;
+    /// Parsed positional arguments after option handling.
+    public positionals: Vector<String>;
+
+    /// Returns an owned copy of the resolved program name.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let name: String = matches.programName();
+    /// ```
+    public programName(&self): String {
+      return self.program.clone();
+    }
+
+    /// Returns `true` when the named flag or option was present.
+    ///
+    /// # Arguments
+    ///
+    /// - `name`: canonical long option name.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let verboseEnabled: boolean = matches.has("verbose");
+    /// ```
+    public has(&self, name: str): boolean {
+      return self.find(name).isSome();
+    }
+
+    /// Returns the first stored value for a named option.
+    ///
+    /// # Returns
+    ///
+    /// - `Option::SOME(String)` when the named option was present with a value
+    /// - `Option::NONE` when the option is absent or is a boolean flag
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let output: Option<String> = matches.value("output");
+    /// ```
+    public value(&self, name: str): Option<String> {
+      let Option::SOME(optionValue) = self.find(name) else {
+        return Option::NONE;
+      };
+
+      if (!optionValue.hasValue) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(optionValue.value.clone());
+    }
+
+    /// Returns the positional argument at `index`.
+    ///
+    /// Positionals remain ordered exactly as parsed, including tokens that
+    /// appeared after `--`.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let firstArg: Option<String> = matches.positional(0);
+    /// ```
+    public positional(&self, index: u64): Option<String> {
+      let Option::SOME(value) = self.positionals.get(index) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(value.clone());
+    }
+
+    /// Finds the first stored option occurrence by canonical long name.
+    ///
+    /// This helper is private because the public API should expose semantic
+    /// queries such as `has()` and `value()` instead of raw storage traversal.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let entry: Option<&Cli::OptionValue> = matches.find("output");
+    /// ```
+    private find(&self, name: str): Option<&OptionValue> {
+      let expectedName: String = String::create(name);
+      let mut index: u64 = 0;
+
+      while (index < self.options.length()) {
+        if (let Option::SOME(optionValue) = self.options.get(index)) {
+          if (optionValue.name.equals(&expectedName)) {
+            return Option::SOME(optionValue);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+  }
+
+  /// A parsing or validation error.
+  ///
+  /// The current bounded parser uses a single message field so callers can show
+  /// stable human-readable output without depending on backend diagnostics.
+  @implements(Clone)
+  record CliError {
+    /// Stable error text suitable for user-facing CLI messages.
+    public message: String;
+
+    /// Returns an owned copy of the error.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let duplicate: Cli::CliError = error.clone();
+    /// ```
+    public clone(&self): CliError {
+      return CliError { message: self.message.clone() };
+    }
+  }
+
+  /// Option definition used by `Command`.
+  ///
+  /// This record describes one accepted long/short option pair.
+  record OptionSpec {
+    /// Canonical long option name without the `--` prefix.
+    public longName: String;
+    /// Optional short alias without the `-` prefix.
+    public shortName: String;
+    /// Help text rendered in `renderHelp()`.
+    public help: String;
+    /// Whether the option consumes the next argv item as a value.
+    public takesValue: boolean;
+  }
+
+  /// Builder for bounded command-line parsers.
+  ///
+  /// `Command` owns a declared option specification and can parse either an
+  /// explicit argv vector or the current process argv.
+  record Command {
+    /// Canonical command name used for help rendering and argv fallback.
+    name: String;
+    /// Optional one-line about text shown in help output.
+    about: String;
+    /// Declared flag and option specifications in stable insertion order.
+    specs: Vector<OptionSpec>;
+
+    /// Creates a new empty command specification.
+    ///
+    /// # Arguments
+    ///
+    /// - `name`: command/program name to display in help output.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let command: Cli::Command = Cli::Command::new("tool");
+    /// ```
+    public static new(name: str): Command {
+      return Command {
+        name: String::create(name),
+        about: String::new(),
+        // TODO(ignis): validate generic constructor inference for cases like
+        // `Vector::init()` before removing explicit type arguments here.
+        specs: Vector::init<OptionSpec>(),
+      };
+    }
+
+    /// Sets the one-line about text used by `renderHelp()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// command.aboutText("Build project artifacts.");
+    /// ```
+    public aboutText(&mut self, about: str): void {
+      self.about = String::create(about);
+    }
+
+    /// Declares a boolean flag.
+    ///
+    /// # Arguments
+    ///
+    /// - `longName`: canonical long name without `--`
+    /// - `shortName`: optional short alias without `-`
+    /// - `help`: help text shown in deterministic help output
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// command.flag("verbose", "v", "Enable verbose output.");
+    /// ```
+    public flag(&mut self, longName: str, shortName: str, help: str): void {
+      self.specs.push(OptionSpec {
+        longName: String::create(longName),
+        shortName: String::create(shortName),
+        help: String::create(help),
+        takesValue: false,
+      });
+    }
+
+    /// Declares an option that consumes the next argv item as its value.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// command.option("output", "o", "Write output file.");
+    /// ```
+    public option(&mut self, longName: str, shortName: str, help: str): void {
+      self.specs.push(OptionSpec {
+        longName: String::create(longName),
+        shortName: String::create(shortName),
+        help: String::create(help),
+        takesValue: true,
+      });
+    }
+
+    /// Parses the current process argv.
+    ///
+    /// # Returns
+    ///
+    /// The same result shape as `parse(&args)`, but using owned argv copies from
+    /// `Process::args()`.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let result: Result<Cli::Matches, Cli::CliError> = command.parseProcess();
+    /// ```
+    public parseProcess(&self): Result<Matches, CliError> {
+      let args: Vector<String> = Process::args();
+      return self.parse(&args);
+    }
+
+    /// Parses an explicit argv vector.
+    ///
+    /// # Arguments
+    ///
+    /// - `args`: argv-style vector where index `0` is the program name.
+    ///
+    /// # Supported behavior
+    ///
+    /// - long flags and valued options
+    /// - short flags and valued options
+    /// - ordered positionals
+    /// - `--` terminator
+    ///
+    /// # Unsupported behavior
+    ///
+    /// - grouped short flags
+    /// - `--opt=value`
+    /// - repeated-value aggregation helpers
+    /// - default values and env fallbacks
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let mut args: Vector<String> = Vector::init<String>();
+    /// args.push(String::create("tool"));
+    /// args.push(String::create("--verbose"));
+    /// let result: Result<Cli::Matches, Cli::CliError> = command.parse(&args);
+    /// ```
+    public parse(&self, args: &Vector<String>): Result<Matches, CliError> {
+      let program: String = self.programName(args);
+      let mut options: Vector<OptionValue> = Vector::init<OptionValue>();
+      let mut positionals: Vector<String> = Vector::init<String>();
+      let mut index: u64 = 1;
+      let mut parsingOptions: boolean = true;
+
+      while (index < args.length()) {
+        let Option::SOME(current) = args.get(index) else {
+          break;
+        };
+
+        if (parsingOptions && cliStringEquals(current, "--")) {
+          parsingOptions = false;
+          index += 1;
+          continue;
+        }
+
+        if (parsingOptions && cliStringStartsWith(current, "--") && current.length() > 2) {
+          let name: String = cliStringAfterPrefix(current, 2);
+          match (self.parseOption(&mut options, &name, current, args, index)) {
+            Result::OK(nextIndex) -> {
+              index = nextIndex;
+            },
+            Result::ERROR(error) -> {
+              return Result::ERROR(error.clone());
+            },
+          };
+
+          continue;
+        }
+
+        if (parsingOptions && cliStringStartsWith(current, "-") && current.length() > 1) {
+          let name: String = cliStringAfterPrefix(current, 1);
+          match (self.parseOption(&mut options, &name, current, args, index)) {
+            Result::OK(nextIndex) -> {
+              index = nextIndex;
+            },
+            Result::ERROR(error) -> {
+              return Result::ERROR(error.clone());
+            },
+          };
+
+          continue;
+        }
+
+        positionals.push(current.clone());
+        index += 1;
+      }
+
+      return Result::OK(Matches {
+        program: program,
+        options: options,
+        positionals: positionals,
+      });
+    }
+
+    /// Renders deterministic help text from the command specification.
+    ///
+    /// # Output order
+    ///
+    /// 1. usage line
+    /// 2. blank line + about text when present
+    /// 3. blank line + options section when at least one spec exists
+    /// 4. options in declaration order
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let help: String = command.renderHelp();
+    /// ```
+    public renderHelp(&self): String {
+      let mut help: String = String::new();
+
+      help.pushStr("Usage: ");
+      help.pushStr(self.name.toStr());
+      help.pushStr(" [OPTIONS] [ARGS]\n");
+
+      if (self.about.length() > 0) {
+        help.pushStr("\n");
+        help.pushStr(self.about.toStr());
+        help.pushStr("\n");
+      }
+
+      if (self.specs.length() == 0) {
+        return help;
+      }
+
+      help.pushStr("\nOptions:\n");
+
+      let mut index: u64 = 0;
+      while (index < self.specs.length()) {
+        let Option::SOME(spec) = self.specs.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        self.appendSpecHelp(&mut help, spec);
+        index += 1;
+      }
+
+      return help;
+    }
+
+    /// Parses one long or short option token and advances the argv index.
+    ///
+    /// # Arguments
+    ///
+    /// - `options`: output vector that accumulates parsed option occurrences
+    /// - `name`: canonicalized token text without `-`/`--`
+    /// - `token`: original raw token for stable error reporting
+    /// - `args`: full argv vector
+    /// - `index`: current token index within `args`
+    ///
+    /// # Returns
+    ///
+    /// - `Result::OK(nextIndex)` when parsing succeeds
+    /// - `Result::ERROR(CliError)` when the option is undeclared or missing a required value
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let nextIndex: Result<u64, Cli::CliError> = command.parseOption(&mut options, &name, token, &args, 1);
+    /// ```
+    private parseOption(
+      &self,
+      options: &mut Vector<OptionValue>,
+      name: &String,
+      token: &String,
+      args: &Vector<String>,
+      index: u64
+    ): Result<u64, CliError> {
+      let mut optionValues: &mut Vector<OptionValue> = options;
+
+      let Option::SOME(spec) = self.findSpec(name) else {
+        let message: String = String::create("unknown option: ").concat(token);
+        return Result::ERROR(CliError { message: message });
+      };
+
+      if (!spec.takesValue) {
+        optionValues.push(OptionValue {
+          name: spec.longName.clone(),
+          value: String::new(),
+          hasValue: false,
+        });
+
+        return Result::OK(index + 1);
+      }
+
+      let valueIndex: u64 = index + 1;
+      let Option::SOME(value) = args.get(valueIndex) else {
+        let message: String = String::create("missing value for option: ").concat(token);
+        return Result::ERROR(CliError {
+          message: message,
+        });
+      };
+
+      optionValues.push(OptionValue {
+        name: spec.longName.clone(),
+        value: value.clone(),
+        hasValue: true,
+      });
+
+      return Result::OK(valueIndex + 1);
+    }
+
+    /// Finds the declared spec matching a long name or short alias.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let spec: Option<&Cli::OptionSpec> = command.findSpec(&String::create("verbose"));
+    /// ```
+    private findSpec(&self, name: &String): Option<&OptionSpec> {
+      let mut index: u64 = 0;
+
+      while (index < self.specs.length()) {
+        if (let Option::SOME(spec) = self.specs.get(index) && (spec.longName.equals(name) || (spec.shortName.length() > 0 && spec.shortName.equals(name)))) {
+          return Option::SOME(spec);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Resolves the program name from argv or falls back to the command name.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// let program: String = command.programName(&args);
+    /// ```
+    private programName(&self, args: &Vector<String>): String {
+      let Option::SOME(value) = args.get(0) else {
+        return self.name.clone();
+      };
+
+      return value.clone();
+    }
+
+    /// Appends one formatted help line for a declared option spec.
+    ///
+    /// The output format is intentionally compact and deterministic so tests and
+    /// CLI callers can rely on stable rendering.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// command.appendSpecHelp(&mut help, spec);
+    /// ```
+    private appendSpecHelp(&self, help: &mut String, spec: &OptionSpec): void {
+      let mut output: &mut String = help;
+      let longName: String = spec.longName.clone();
+
+      output.pushStr("  --");
+      output.push(&longName);
+
+      if (spec.shortName.length() > 0) {
+        let shortName: String = spec.shortName.clone();
+
+        output.pushStr(", -");
+        output.push(&shortName);
+      }
+
+      if (spec.takesValue) {
+        output.pushStr(" <value>");
+      }
+
+      if (spec.help.length() > 0) {
+        let helpText: String = spec.help.clone();
+
+        output.pushChar('\t');
+        output.push(&helpText);
+      }
+
+      output.pushChar('\n');
+    }
+  }
+}

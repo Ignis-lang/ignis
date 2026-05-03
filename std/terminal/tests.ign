@@ -1,0 +1,59 @@
+import LibC from "std::libc";
+import Terminal from "std::terminal";
+import Test from "std::test";
+
+function ansi(command: str): String {
+  let mut sequence: String = String::new();
+
+  sequence.pushChar(27 as char);
+  sequence.pushStr("[");
+  sequence.pushStr(command);
+
+  return sequence;
+}
+
+@test
+function terminalStyleApplyUsesNestedEnumsAndTrailingReset(): void {
+  let mut style: Terminal::Style = Terminal::Style::new();
+  style.foreground(Terminal::TerminalColor::RED);
+  style.attribute(Terminal::TerminalAttribute::BOLD);
+
+  let styled: String = style.apply("alert");
+  let expected: String = ansi("31m").concat(ansi("1m")).concat("alert").concat(ansi("0m"));
+
+  Test::assertEq<str>(styled.toStr(), expected.toStr());
+}
+
+@test
+function terminalColorTextAppliesColorAndTrailingReset(): void {
+  let colored: String = Terminal::colorText("ready", Terminal::TerminalColor::GREEN);
+  let expected: String = ansi("32m").concat("ready").concat(ansi("0m"));
+
+  Test::assertEq<str>(colored.toStr(), expected.toStr());
+}
+
+@test
+function terminalScreenHelpersReturnCompleteCommands(): void {
+  Test::assertEq<str>(Terminal::Screen::clear().toStr(), ansi("2J").toStr());
+  Test::assertEq<str>(Terminal::Screen::clearLine().toStr(), ansi("2K").toStr());
+}
+
+@test
+function terminalCursorHelpersUseOneBasedCoordinates(): void {
+  Test::assertEq<str>(Terminal::Cursor::moveTo(12, 34).toStr(), ansi("12;34H").toStr());
+  Test::assertEq<str>(Terminal::Cursor::save().toStr(), ansi("s").toStr());
+  Test::assertEq<str>(Terminal::Cursor::restore().toStr(), ansi("u").toStr());
+  Test::assertEq<str>(Terminal::Cursor::hide().toStr(), ansi("?25l").toStr());
+  Test::assertEq<str>(Terminal::Cursor::show().toStr(), ansi("?25h").toStr());
+}
+
+@test
+function terminalCapabilityChecksMatchHostIsatty(): void {
+  let inputExpected: boolean = LibC::File::isatty(LibC::File::STDIN_FILENO) != 0;
+  let outputExpected: boolean = LibC::File::isatty(LibC::File::STDOUT_FILENO) != 0;
+  let errorExpected: boolean = LibC::File::isatty(LibC::File::STDERR_FILENO) != 0;
+
+  Test::assertEq<boolean>(Terminal::isInputTerminal(), inputExpected);
+  Test::assertEq<boolean>(Terminal::isOutputTerminal(), outputExpected);
+  Test::assertEq<boolean>(Terminal::isErrorTerminal(), errorExpected);
+}
