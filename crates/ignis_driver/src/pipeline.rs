@@ -1914,6 +1914,15 @@ pub fn run_project_tests(
   section!(&config, "Codegen & linking");
 
   let used_modules = ctx.module_graph.topological_sort();
+  let mut test_module_ids = HashSet::new();
+  for test in &plan.tests {
+    let owner_module = output.defs.get(&test.def_id).owner_module;
+    test_module_ids.insert(owner_module);
+
+    for dep_id in ctx.module_graph.transitive_deps(owner_module) {
+      test_module_ids.insert(dep_id);
+    }
+  }
 
   if ensure_std_built(&used_modules, &ctx.module_graph, &config).is_err() {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2017,7 +2026,7 @@ pub fn run_project_tests(
     .iter()
     .filter(|module_id| {
       let module = ctx.module_graph.modules.get(module_id);
-      module.path.is_project() && !module.path.is_inside_dir(std_dir)
+      test_module_ids.contains(module_id) && module.path.is_project() && !module.path.is_inside_dir(std_dir)
     })
     .collect();
 

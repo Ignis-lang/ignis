@@ -1,4 +1,7 @@
 import Env from "std::env";
+import Fs from "std::fs";
+import Io from "std::io";
+import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
 
@@ -16,6 +19,24 @@ function assertOkString(value: Result<String, Env::EnvError>, expected: str): vo
     Result::OK(text) -> {
       Test::assertEq<str>(text.toStr(), expected);
     },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+function assertOkPath(value: Result<Path::PathBuf, Io::IoError>): Path::PathBuf {
+  match (value) {
+    Result::OK(path) -> {
+      return path;
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  @unreachable();
+}
+
+function assertCanOpenDirectory(value: Result<Fs::ReadDir, Io::IoError>): void {
+  match (value) {
+    Result::OK(_) -> {},
     Result::ERROR(_) -> Test::fail(),
   };
 }
@@ -50,4 +71,14 @@ function getPreservesEmptyEnvironmentValues(): void {
   assertSomeString(Env::get("IGNIS_STD_ENV_EMPTY"), "");
   Test::assert(Env::has("IGNIS_STD_ENV_EMPTY"));
   assertOkString(Env::var("IGNIS_STD_ENV_EMPTY"), "");
+}
+
+@test
+function currentDirReturnsAnExistingAbsoluteDirectory(): void {
+  let current: Path::PathBuf = assertOkPath(Env::currentDir());
+
+  Test::assert(!current.isEmpty());
+  Test::assert(current.isAbsolute());
+  Test::assert(Fs::exists(current.asStr()));
+  assertCanOpenDirectory(Fs::ReadDir::open(current.asStr()));
 }

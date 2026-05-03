@@ -896,15 +896,7 @@ impl CompilationContext {
     if !root_is_std && let Err(err) = self.module_graph.detect_cycles() {
       match err {
         ModuleError::CircularDependency { cycle } => {
-          let std_root = std::path::Path::new(&config.std_path);
-          let canonical_std_root = std::fs::canonicalize(std_root).unwrap_or_else(|_| std_root.to_path_buf());
-          let cycle_is_std_only = !config.std_path.is_empty()
-            && cycle.iter().skip(1).all(|path| {
-              let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-              canonical_path.starts_with(&canonical_std_root)
-            });
-
-          if !cycle_is_std_only {
+          if !cycle_is_embedded_std_only(&cycle, Path::new(&config.std_path)) {
             let cycle_str: Vec<String> = cycle.iter().map(|p| p.display().to_string()).collect();
             eprintln!(
               "{} Circular dependency detected: {}",
@@ -1160,6 +1152,30 @@ impl CompilationContext {
 
     (output, has_errors, per_module_semantic)
   }
+}
+
+fn cycle_is_embedded_std_only(
+  cycle: &[PathBuf],
+  std_root: &Path,
+) -> bool {
+  if std_root.as_os_str().is_empty() || cycle.len() < 2 {
+    return false;
+  }
+
+  let Some(repeated_module) = cycle.last() else {
+    return false;
+  };
+
+  let repeated_index = cycle[..cycle.len() - 1].iter().position(|path| path == repeated_module);
+  let Some(repeated_index) = repeated_index else {
+    return false;
+  };
+
+  let canonical_std_root = std::fs::canonicalize(std_root).unwrap_or_else(|_| std_root.to_path_buf());
+  cycle[repeated_index..].iter().all(|path| {
+    let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical_path.starts_with(&canonical_std_root)
+  })
 }
 
 #[cfg(test)]

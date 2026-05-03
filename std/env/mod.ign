@@ -38,6 +38,7 @@
 //! | `Env::set`    | Set or replace a value in the current process    |
 //! | `Env::unset`  | Remove a value from the current process          |
 //! | `Env::var`    | `Result` wrapper that reports missing variables  |
+//! | `Env::currentDir` | Current working directory as a `PathBuf`      |
 //!
 //! ## Empty Values vs Missing Values
 //!
@@ -74,6 +75,9 @@
 //! ```
 
 import LibC from "std::libc";
+import Io from "std::io";
+import Memory from "std::memory";
+import Path from "std::path";
 import String from "std::string";
 
 /// Process environment accessors.
@@ -282,5 +286,43 @@ export namespace Env {
         name: String::create(name),
       }),
     };
+  }
+
+  /// Returns the current working directory as an owned path.
+  ///
+  /// The path is copied from `getcwd(3)` into a `Path::PathBuf`. The returned
+  /// value is absolute on supported POSIX hosts and does not borrow from the
+  /// temporary C buffer used for the syscall.
+  ///
+  /// # Returns
+  ///
+  /// - `Result::OK(path)` when the host current directory can be read.
+  /// - `Result::ERROR(error)` with the captured `errno` when `getcwd` fails.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function currentDir(): Result<Path::PathBuf, Io::IoError> {
+    let mut capacity: u64 = 256;
+
+    while (true) {
+      let buffer: *mut u8 = Memory::allocateVector<u8>(capacity);
+      let result: *mut u8 = LibC::File::getcwd(buffer, capacity);
+
+      if (result != null) {
+        let pathString: String = String::create(buffer as str);
+        Memory::free(buffer);
+
+        return Result::OK(Path::PathBuf::fromString(&pathString));
+      }
+
+      let rawErrno: i32 = LibC::Errno::get();
+      Memory::free(buffer);
+
+      if (rawErrno != LibC::Errno::ERANGE) {
+        return Result::ERROR(Io::IoError::fromErrno(rawErrno));
+      }
+
+      capacity = capacity * 2;
+    }
+
+    return Result::ERROR(Io::IoError::fromErrno(LibC::Errno::ERANGE));
   }
 }

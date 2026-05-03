@@ -626,7 +626,7 @@ impl<'a> CEmitter<'a> {
   ) -> bool {
     let kind = self.classify(def_id);
 
-    kind.is_user()
+    (kind.is_user() && self.is_monomorphized_generic_def(def_id))
       || (kind.is_std() && self.is_std_test_option_presence_method(def_id))
       || (self.is_monomorphized_generic_def(def_id)
         && (self.definition_depends_on_user_type(def_id)
