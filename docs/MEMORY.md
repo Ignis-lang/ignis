@@ -331,10 +331,13 @@ Typical examples:
 ```ignis
 import Layout from "std::memory";
 
-let oneI32: Layout = Layout::init<i32>();
-let manyI32: Layout = Layout::init<i32>(64);
+let oneI32: Layout = Layout::new<i32>();
+let manyI32: Layout = Layout::new<i32>(64);
 let custom: Layout = Layout::new(128, 16);
 ```
+
+`Layout::new()` is the canonical constructor family. Compatibility `init()`
+aliases may exist for older code, but new examples should use `new()`.
 
 ### `std::memory` helpers
 
@@ -388,7 +391,7 @@ Bad fits:
 import ArenaAllocator from "std::memory";
 
 function main(): i32 {
-    let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+    let mut arena: ArenaAllocator = ArenaAllocator::new(4096);
 
     let buffer: *mut u8 = arena.allocate<u8>(256);
     if (buffer == null) {

@@ -95,7 +95,7 @@
 //! import Layout from "std::memory";
 //!
 //! function main(): i32 {
-//!   let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+//!   let mut arena: ArenaAllocator = ArenaAllocator::new(4096);
 //!
 //!   let numbers: *mut i32 = arena.allocate<i32>(16);
 //!   if (numbers == null) {
@@ -106,7 +106,7 @@
 //!   arena.reset();
 //!   // `numbers` is now invalid and must not be used.
 //!
-//!   let raw: *mut u8 = arena.allocate(Layout::init<u64>());
+//!   let raw: *mut u8 = arena.allocate(Layout::new<u64>());
 //!   if (raw == null) {
 //!     return 2;
 //!   }
@@ -152,13 +152,18 @@ export record ArenaAllocator {
   /// ```ignis
   /// import ArenaAllocator from "std::memory";
   ///
-  /// let arena: ArenaAllocator = ArenaAllocator::init(4096);
+  /// let arena: ArenaAllocator = ArenaAllocator::new(4096);
   /// ```
-  public static init(blockSize: u64): ArenaAllocator {
+  public static new(blockSize: u64): ArenaAllocator {
     return ArenaAllocator {
       handle: __arena::ignis_arena_create(blockSize),
       blockSize: blockSize,
     };
+  }
+
+  /// Compatibility alias for `ArenaAllocator::new(blockSize)`.
+  public static init(blockSize: u64): ArenaAllocator {
+    return ArenaAllocator::new(blockSize);
   }
 
   /// Allocates raw memory for `layout` from the arena.
@@ -184,11 +189,11 @@ export record ArenaAllocator {
   /// ```ignis
   /// import ArenaAllocator from "std::memory";
   ///
-  /// let mut arena: ArenaAllocator = ArenaAllocator::init(1024);
+  /// let mut arena: ArenaAllocator = ArenaAllocator::new(1024);
   /// let point: *mut i32 = arena.allocate<i32>();
   /// ```
   public allocate<T>(&mut self): *mut T {
-    return self.allocate(Layout::init<T>()) as *mut T;
+    return self.allocate(Layout::new<T>()) as *mut T;
   }
 
   /// Allocates enough arena memory for `count` contiguous values of type `T`.
@@ -198,11 +203,11 @@ export record ArenaAllocator {
   /// ```ignis
   /// import ArenaAllocator from "std::memory";
   ///
-  /// let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
+  /// let mut arena: ArenaAllocator = ArenaAllocator::new(4096);
   /// let buffer: *mut u8 = arena.allocate<u8>(256);
   /// ```
   public allocate<T>(&mut self, count: u64): *mut T {
-    return self.allocate(Layout::init<T>(count)) as *mut T;
+    return self.allocate(Layout::new<T>(count)) as *mut T;
   }
 
   /// Rewinds allocation state so all arena space becomes reusable again.

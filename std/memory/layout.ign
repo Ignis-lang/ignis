@@ -93,21 +93,21 @@
 //!
 //!   Method 1: From type (recommended)
 //!   ┌─────────────────────────────────────────────────────────────────────┐
-//!   │  let layout: Layout = Layout::init<MyStruct>();                     │
+//!   │  let layout: Layout = Layout::new<MyStruct>();                      │
 //!   │                                                                     │
 //!   │  Automatically uses @sizeOf<T>() and @alignOf<T>()                  │
 //!   └─────────────────────────────────────────────────────────────────────┘
 //!
 //!   Method 2: From explicit size and alignment
 //!   ┌─────────────────────────────────────────────────────────────────────┐
-//!   │  let layout: Layout = Layout::init(1024, 16);                       │
+//!   │  let layout: Layout = Layout::new(1024, 16);                        │
 //!   │                                                                     │
 //!   │  Useful for custom allocations (e.g., SIMD-aligned buffers)         │
 //!   └─────────────────────────────────────────────────────────────────────┘
 //!
 //!   Method 3: For arrays
 //!   ┌─────────────────────────────────────────────────────────────────────┐
-//!   │  let layout: Layout = Layout::init<u64>(100);                       │
+//!   │  let layout: Layout = Layout::new<u64>(100);                        │
 //!   │                                                                     │
 //!   │  Creates layout for 100 contiguous u64 elements                     │
 //!   └─────────────────────────────────────────────────────────────────────┘
@@ -164,7 +164,7 @@ import Align from "./align";
 /// import { Layout } from "std/memory/layout";
 ///
 /// // Create layout for a u64
-/// let layout: Layout = Layout::init<u64>();
+/// let layout: Layout = Layout::new<u64>();
 /// assert(layout.size() == 8);
 /// assert(layout.align() == 8);
 ///
@@ -186,7 +186,7 @@ export record Layout {
   /// # Example
   ///
   /// ```ignis
-  /// let layout: Layout = Layout::init(100, 16);
+  /// let layout: Layout = Layout::new(100, 16);
   /// assert(layout.align() == 16);
   /// ```
   public align(&self): u64 {
@@ -205,7 +205,7 @@ export record Layout {
   /// # Example
   ///
   /// ```ignis
-  /// let layout: Layout = Layout::init(100, 16);
+  /// let layout: Layout = Layout::new(100, 16);
   /// assert(layout.size() == 100);
   /// ```
   public size(&self): u64 {
@@ -235,7 +235,7 @@ export record Layout {
   /// # Validation
   ///
   /// ```text
-  ///   Layout::init(size, alignment)
+  ///   Layout::new(size, alignment)
   ///   ════════════════════════════════════════════════════════════════════════
   ///
   ///   Step 1: Check alignment != 0
@@ -261,27 +261,32 @@ export record Layout {
   /// import { Layout } from "std/memory/layout";
   ///
   /// // Standard layout
-  /// let layout: Layout = Layout::init(1024, 8);
+  /// let layout: Layout = Layout::new(1024, 8);
   ///
   /// // SIMD-aligned buffer
-  /// let simd: Layout = Layout::init(256, 32);
+  /// let simd: Layout = Layout::new(256, 32);
   ///
   /// // Cache-line aligned
-  /// let cacheLine: Layout = Layout::init(64, 64);
+  /// let cacheLine: Layout = Layout::new(64, 64);
   /// ```
-  public static init(size: u64, alignment: u64): Layout {
+  public static new(size: u64, alignment: u64): Layout {
     if (alignment == 0) {
-      @panic("Layout::init: alignment must be greater than zero");
+      @panic("Layout::new: alignment must be greater than zero");
     }
 
     if (!Align::isPowerOfTwo(alignment)) {
-      @panic("Layout::init: alignment must be a power of two");
+      @panic("Layout::new: alignment must be a power of two");
     }
 
     return Layout {
       size: size,
       alignment: alignment,
     };
+  }
+
+  /// Compatibility alias for `Layout::new(size, alignment)`.
+  public static init(size: u64, alignment: u64): Layout {
+    return Layout::new(size, alignment);
   }
 
   /// Returns the size padded up to the alignment boundary.
@@ -327,15 +332,15 @@ export record Layout {
   /// import { Layout } from "std/memory/layout";
   ///
   /// // Size already aligned
-  /// let layout1: Layout = Layout::init(16, 8);
+  /// let layout1: Layout = Layout::new(16, 8);
   /// assert(layout1.paddedSize() == 16);
   ///
   /// // Size needs padding
-  /// let layout2: Layout = Layout::init(12, 8);
+  /// let layout2: Layout = Layout::new(12, 8);
   /// assert(layout2.paddedSize() == 16);
   ///
   /// // Larger alignment
-  /// let layout3: Layout = Layout::init(20, 16);
+  /// let layout3: Layout = Layout::new(20, 16);
   /// assert(layout3.paddedSize() == 32);
   /// ```
   public paddedSize(&self): u64 {
@@ -369,22 +374,27 @@ export record Layout {
   /// import { Layout } from "std/memory/layout";
   ///
   /// // Primitive types
-  /// let u8Layout: Layout = Layout::init<u8>();
+  /// let u8Layout: Layout = Layout::new<u8>();
   /// assert(u8Layout.size() == 1);
   /// assert(u8Layout.align() == 1);
   ///
-  /// let u64Layout: Layout = Layout::init<u64>();
+  /// let u64Layout: Layout = Layout::new<u64>();
   /// assert(u64Layout.size() == 8);
   /// assert(u64Layout.align() == 8);
   ///
   /// // Custom struct
   /// record Point { x: f64; y: f64; }
-  /// let pointLayout: Layout = Layout::init<Point>();
+  /// let pointLayout: Layout = Layout::new<Point>();
   /// assert(pointLayout.size() == 16);
   /// assert(pointLayout.align() == 8);
   /// ```
+  public static new<T>(): Layout {
+    return Layout::new(@sizeOf<T>(), @alignOf<T>());
+  }
+
+  /// Compatibility alias for `Layout::new<T>()`.
   public static init<T>(): Layout {
-    return Layout::init(@sizeOf<T>(), @alignOf<T>());
+    return Layout::new<T>();
   }
 
   /// Creates a `Layout` for `count` contiguous elements of type `T`.
@@ -416,17 +426,22 @@ export record Layout {
   /// import { Layout } from "std/memory/layout";
   ///
   /// // Array of 100 u64 values
-  /// let layout: Layout = Layout::init<u64>(100);
+  /// let layout: Layout = Layout::new<u64>(100);
   /// assert(layout.size() == 800);   // 100 * 8
   /// assert(layout.align() == 8);
   ///
   /// // Empty array is valid
-  /// let empty: Layout = Layout::init<u64>(0);
+  /// let empty: Layout = Layout::new<u64>(0);
   /// assert(empty.size() == 0);
   /// assert(empty.align() == 8);
   /// ```
+  public static new<T>(count: u64): Layout {
+    return Layout::array(Layout::new<T>(), count);
+  }
+
+  /// Compatibility alias for `Layout::new<T>(count)`.
   public static init<T>(count: u64): Layout {
-    return Layout::array(Layout::init<T>(), count);
+    return Layout::new<T>(count);
   }
 
   /// Creates an array layout from an element layout and element count.
@@ -441,6 +456,6 @@ export record Layout {
       @panic("Layout::array: total size overflow");
     }
 
-    return Layout::init(total, elementLayout.align());
+    return Layout::new(total, elementLayout.align());
   }
 }

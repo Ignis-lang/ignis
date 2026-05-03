@@ -56,7 +56,7 @@ import String from "std::string";
 import Vector from "std::vector";
 
 function main(): i32 {
-  let mut values: Vector<i32> = Vector::init<i32>();
+  let mut values: Vector<i32> = Vector::new<i32>();
   values.push(10);
   values.push(20);
 

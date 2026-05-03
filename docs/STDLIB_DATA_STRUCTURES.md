@@ -9,6 +9,7 @@ structures that already exist in Ignis today:
 - `Vector<T>`
 - `HashMap<K, V>`
 - `HashSet<T>`
+- `BitSet`
 
 It also contrasts them with lower-level compiler/language primitives so it is
 clear where the standard library begins and where the language itself provides
@@ -24,8 +25,16 @@ the abstraction.
 | Growable contiguous sequence | `Vector<T>` | Heap-backed dynamic array |
 | Key/value lookup by hash | `HashMap<K, V>` | Average `O(1)` insert/get/remove |
 | Unique membership test by hash | `HashSet<T>` | Thin set wrapper over `HashMap` |
+| Dense `u32` membership set | `BitSet` | Compact bit-vector storage for compiler-style ids |
 
-## 2. `str` vs `String`
+## 2. Constructor Convention
+
+Use `::new()` for standard-library record constructors.
+
+Some older records still retain `::init()` aliases for compatibility, but new
+examples and application code should prefer the canonical `::new()` form.
+
+## 3. `str` vs `String`
 
 ### `str`
 
@@ -65,7 +74,7 @@ Use `String` when:
 - you need concatenation, mutation, trimming, splitting, or cloning
 - you need to store strings in `Vector`, `HashMap`, or `HashSet`
 
-## 3. Fixed-Size Arrays vs `Vector<T>`
+## 4. Fixed-Size Arrays vs `Vector<T>`
 
 This is the most important comparison.
 
@@ -105,7 +114,7 @@ Use fixed-size arrays when:
 import Vector from "std::vector";
 
 function main(): i32 {
-  let mut values: Vector<i32> = Vector::init<i32>();
+  let mut values: Vector<i32> = Vector::new<i32>();
   values.push(10);
   values.push(20);
   values.push(30);
@@ -132,7 +141,7 @@ Use `Vector<T>` when:
 - Use `T[N]` for fixed-size data known at compile time.
 - Use `Vector<T>` for runtime-sized collections.
 
-## 4. `HashMap<K, V>`
+## 5. `HashMap<K, V>`
 
 `HashMap<K, V>` is the standard-library hash table.
 
@@ -188,7 +197,7 @@ record Key {
 }
 
 function main(): i32 {
-  let mut map: HashMap<Key, i32> = HashMap::init<Key, i32>();
+  let mut map: HashMap<Key, i32> = HashMap::new<Key, i32>();
   map.insert(Key { id: 1 }, 100);
   map.insert(Key { id: 2 }, 200);
 
@@ -214,7 +223,7 @@ Do not use it when:
 - you need range queries
 - the collection size is tiny and fixed, where an array/vector may be simpler
 
-## 5. `HashSet<T>`
+## 6. `HashSet<T>`
 
 `HashSet<T>` is the standard-library set type for unique values.
 
@@ -244,7 +253,7 @@ record Key {
 }
 
 function main(): i32 {
-  let mut set: HashSet<Key> = HashSet::init<Key>();
+  let mut set: HashSet<Key> = HashSet::new<Key>();
   set.insert(Key { id: 7 });
   set.insert(Key { id: 7 });
 
@@ -263,7 +272,33 @@ Use `HashSet<T>` when:
 
 If you need an associated payload, use `HashMap<K, V>` instead.
 
-## 6. Choosing Between Primitive and Stdlib Structures
+## 7. `BitSet`
+
+`BitSet` is the standard-library dense set for `u32` bit indexes.
+
+It stores membership in packed `u64` words, which makes it a good fit for
+compiler-style ids and dataflow sets where indexes are dense.
+
+```ignis
+import BitSet from "std::collections";
+
+function main(): i32 {
+  let mut visited: BitSet = BitSet::new();
+  visited.insert(42);
+
+  return visited.contains(42) ? 0 : 1;
+}
+```
+
+Use `BitSet` when:
+
+- values are dense `u32` indexes
+- compact membership storage matters
+- you do not need to store arbitrary hashable keys or associated payloads
+
+Use `HashSet<T>` instead when values are not naturally dense integer indexes.
+
+## 8. Choosing Between Primitive and Stdlib Structures
 
 ### Fixed-size array vs `Vector<T>`
 
@@ -281,15 +316,16 @@ If you need an associated payload, use `HashMap<K, V>` instead.
 | Is it a borrowed literal or immutable external string? | `str` |
 | Do you need ownership or mutation? | `String` |
 
-### `Vector<T>` vs `HashMap<K, V>` vs `HashSet<T>`
+### `Vector<T>` vs `HashMap<K, V>` vs `HashSet<T>` vs `BitSet`
 
 | Need | Prefer |
 |---|---|
 | Ordered contiguous values by index | `Vector<T>` |
 | Key/value lookup | `HashMap<K, V>` |
 | Unique membership only | `HashSet<T>` |
+| Dense `u32` membership only | `BitSet` |
 
-## 7. Low-Level Alternatives
+## 9. Low-Level Alternatives
 
 Ignis also exposes lower-level memory primitives in `std::memory`.
 
@@ -303,9 +339,18 @@ Those are useful when implementing containers or interoperating with lower-level
 code, but application code should usually prefer `String`, `Vector`, `HashMap`,
 and `HashSet`.
 
-## 8. Current Scope
+## 10. Related Std Modules
+
+Recent std additions complement these data structures:
+
+| Module | Purpose |
+|---|---|
+| `std::cli` | Bounded command-line parser for declared flags, options, positionals, and `--` terminators. |
+| `std::terminal` | Semantic terminal API for styling, screen/cursor commands, and terminal capability checks. |
+
+## 11. Current Scope
 
 As of the current tree, the standard library already includes practical dynamic
-string, vector, map, and set support. More advanced structures such as
-`VecDeque`, `BTreeMap`, or `BinaryHeap` are not required for most programs and
-are intentionally not treated as core prerequisites.
+string, vector, map, set, and dense bit-set support. More advanced structures
+such as `VecDeque`, `BTreeMap`, or `BinaryHeap` are not required for most
+programs and are intentionally not treated as core prerequisites.

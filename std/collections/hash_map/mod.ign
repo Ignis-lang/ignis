@@ -141,7 +141,7 @@
 //! }
 //!
 //! function main(): i32 {
-//!   let mut map: HashMap<Key, i32> = HashMap::init<Key, i32>();
+//!   let mut map: HashMap<Key, i32> = HashMap::new<Key, i32>();
 //!   map.insert(Key { id: 1 }, 10);
 //!   map.insert(Key { id: 2 }, 20);
 //!
@@ -208,9 +208,9 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// ```
-  public static init(): HashMap<K, V> {
+  public static new(): HashMap<K, V> {
     return HashMap {
       states: null,
       hashes: null,
@@ -230,8 +230,54 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let map: HashMap<i32, i32> = HashMap::init<i32, i32>(64);
+  /// let map: HashMap<i32, i32> = HashMap::new<i32, i32>(64);
   /// ```
+  public static new(capacity: u64): HashMap<K, V> {
+    let mut bucketCapacity: u64 = 0;
+    if (capacity != 0) {
+      bucketCapacity = INITIAL_BUCKET_CAPACITY;
+      while ((capacity * 100) >= (bucketCapacity * MAX_LOAD_PERCENT)) {
+        bucketCapacity *= 2;
+      }
+    }
+
+    if (bucketCapacity == 0) {
+      return HashMap {
+        states: null,
+        hashes: null,
+        keys: null,
+        values: null,
+        length: 0,
+        capacity: 0,
+        tombstones: 0,
+      };
+    }
+
+    return HashMap {
+      states: Memory::allocateZeroedVector<u8>(bucketCapacity),
+      hashes: Memory::allocateZeroedVector<u8>(bucketCapacity * @sizeOf<u64>()) as *mut u64,
+      keys: Memory::allocate<u8>(__hashMapStorageBytes<K>(bucketCapacity)) as *mut K,
+      values: Memory::allocate<u8>(__hashMapStorageBytes<V>(bucketCapacity)) as *mut V,
+      length: 0,
+      capacity: bucketCapacity,
+      tombstones: 0,
+    };
+  }
+
+  /// Compatibility alias for `HashMap::new()`.
+  public static init(): HashMap<K, V> {
+    return HashMap {
+      states: null,
+      hashes: null,
+      keys: null,
+      values: null,
+      length: 0,
+      capacity: 0,
+      tombstones: 0,
+    };
+  }
+
+  /// Compatibility alias for `HashMap::new(capacity)`.
   public static init(capacity: u64): HashMap<K, V> {
     let mut bucketCapacity: u64 = 0;
     if (capacity != 0) {
@@ -280,7 +326,7 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let mut map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// map.insert(1, 10);
   /// let found: boolean = map.contains(&1);
   /// ```
@@ -327,7 +373,7 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let mut map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// map.insert(7, 99);
   /// let value: Option<&i32> = map.get(&7);
   /// ```
@@ -369,7 +415,7 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let mut map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// map.insert(7, 99);
   /// let value: Option<&mut i32> = map.getMut(&7);
   /// ```
@@ -415,7 +461,7 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let mut map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// let inserted: Option<i32> = map.insert(1, 10); // NONE
   /// let replaced: Option<i32> = map.insert(1, 20); // SOME(10)
   /// ```
@@ -489,7 +535,7 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let mut map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// map.insert(1, 10);
   /// let removed: Option<i32> = map.remove(&1);
   /// ```
@@ -540,7 +586,7 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let mut map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// map.reserve(32);
   /// ```
   public reserve(&mut self, additional: u64): void {
@@ -608,7 +654,7 @@ export record HashMap<K: Hash & Eq, V> {
   /// ```ignis
   /// import HashMap from "std::collections";
   ///
-  /// let mut map: HashMap<i32, i32> = HashMap::init<i32, i32>();
+  /// let mut map: HashMap<i32, i32> = HashMap::new<i32, i32>();
   /// map.insert(1, 10);
   /// map.clear();
   /// ```

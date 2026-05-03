@@ -297,6 +297,11 @@ record Config {
 let max = Config::MAX_SIZE;
 ```
 
+For standard-library records, `::new()` is the canonical constructor naming
+convention. Some std records retain `::init()` aliases for compatibility only;
+new code should use forms such as `Vector::new<T>()`, `HashMap::new<K, V>()`,
+`Layout::new<T>()`, and `ArenaAllocator::new(size)`.
+
 ### 4.7 Enums
 
 ```ignis
@@ -440,6 +445,15 @@ The `from` string is resolved in this order:
 2. **Relative path** (`./`, `../`) -- Resolved from the importing file's directory.
 
 3. **Bare path** -- Resolved from the project root (source directory).
+
+Common std modules include:
+
+| Module | Import path | Use when |
+|---|---|---|
+| I/O | `std::io` | Printing and low-level I/O helpers. |
+| CLI parsing | `std::cli` | Building a bounded command parser for declared flags, options, positionals, and `--`. |
+| Terminal control | `std::terminal` | Styling text, clearing screen/lines, moving cursors, and checking terminal capability semantically. |
+| Data structures | `std::collections`, `std::vector` | Using `HashMap`, `HashSet`, `BitSet`, and `Vector`. |
 
 ```toml
 # ignis.toml

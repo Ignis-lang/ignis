@@ -2,6 +2,10 @@
 
 Reference for the `ignis` command line interface.
 
+For Ignis programs that need to parse their own command-line arguments, use the
+standard-library `std::cli` module. It provides a bounded parser for declared
+flags, valued options, positional arguments, and `--` terminators.
+
 ## Overview
 
 ```bash
@@ -125,6 +129,51 @@ Behavior:
 - `--update-snapshots` enables creation and replacement of `__snapshots__/` baselines.
 - Project mode stores snapshots next to the module under test.
 - Single-file mode stores snapshots next to the single Ignis source file.
+
+## Standard-Library CLI Helpers
+
+`std::cli` is separate from the compiler's `ignis` command. Use it inside Ignis
+programs to build small, deterministic command-line parsers.
+
+```ignis
+import Cli from "std::cli";
+import Io from "std::io";
+
+function main(): i32 {
+  let mut command: Cli::Command = Cli::Command::new("tool");
+  command.aboutText("Build project artifacts.");
+  command.flag("verbose", "v", "Enable verbose output.");
+  command.option("output", "o", "Write output file.");
+
+  match (command.parseProcess()) {
+    Result::OK(matches) -> {
+      if (matches.has("verbose")) {
+        Io::println("verbose enabled");
+      }
+      return 0;
+    },
+    Result::ERROR(error) -> {
+      Io::println(error.message.toStr());
+      return 1;
+    },
+  };
+}
+```
+
+Supported parser surface:
+
+| Form | Status |
+|---|---|
+| `--flag`, `-f` | Supported for declared boolean flags. |
+| `--output file`, `-o file` | Supported for declared valued options. |
+| Positional arguments | Preserved in order. |
+| `--` terminator | Supported; later tokens become positionals. |
+| `--opt=value`, grouped short flags, subcommands | Intentionally out of scope for the bounded parser. |
+
+For terminal-aware CLI output, pair `std::cli` with `std::terminal`. The terminal
+module exposes semantic APIs such as `Terminal::Style::new()`,
+`Terminal::colorText(...)`, `Terminal::Screen::clear()`,
+`Terminal::Cursor::moveTo(...)`, and terminal capability checks.
 
 ## `ignis fmt`
 

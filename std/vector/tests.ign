@@ -19,7 +19,7 @@ function sumFirstThreeMarkers(values: Tracker[]): i32 {
 @test
 function toSlicePassesVectorStorageAsSlice(): void {
   let mut drops: i32 = 0;
-  let mut values: Vector<Tracker> = Vector::init<Tracker>();
+  let mut values: Vector<Tracker> = Vector::new<Tracker>();
   values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 10 });
   values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 20 });
   values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 30 });
@@ -31,7 +31,7 @@ function toSlicePassesVectorStorageAsSlice(): void {
 
 @test
 function clearDropsStringElementsBeforeReuse(): void {
-  let mut values: Vector<String> = Vector::init<String>();
+  let mut values: Vector<String> = Vector::new<String>();
   values.push(String::create("alpha"));
   values.push(String::create("beta"));
 
@@ -45,11 +45,23 @@ function clearDropsStringElementsBeforeReuse(): void {
 }
 
 @test
+function newWithCapacityStartsEmptyAndPreservesCapacity(): void {
+  let mut values: Vector<String> = Vector::new<String>(8 as u64);
+
+  Test::assertEq<u64>(values.length(), 0);
+
+  values.push(String::create("alpha"));
+  values.push(String::create("beta"));
+
+  Test::assertEq<u64>(values.length(), 2);
+}
+
+@test
 function dropDropsStringElements(): void {
   let mut drops: i32 = 0;
 
   {
-    let mut values: Vector<Tracker> = Vector::init<Tracker>();
+    let mut values: Vector<Tracker> = Vector::new<Tracker>();
     values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 4 });
     values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 5 });
   }
@@ -67,7 +79,7 @@ function clearAndDropRunElementDropExactlyOnce(): void {
   Test::assertEq<i32>(directDrop, 9);
 
   {
-    let mut values: Vector<Tracker> = Vector::init<Tracker>();
+    let mut values: Vector<Tracker> = Vector::new<Tracker>();
     values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 1 });
     values.push(Tracker { counter: (&mut drops) as *mut i32, marker: 2 });
 

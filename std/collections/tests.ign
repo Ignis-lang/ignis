@@ -102,7 +102,7 @@ record MarkerKey {
 
 @test
 function hashMapReusesTombstonesAndPreservesEntriesAcrossReserve(): void {
-  let mut map: HashMap<BucketKey, i32> = HashMap::init<BucketKey, i32>();
+  let mut map: HashMap<BucketKey, i32> = HashMap::new<BucketKey, i32>();
   let removedKey: BucketKey = bucketKey(2);
   let lookup1: BucketKey = bucketKey(1);
   let lookup2: BucketKey = bucketKey(2);
@@ -144,7 +144,7 @@ function hashMapReplacementRemoveAndDropAreExactOnce(): void {
   let mut valueDrops: i32 = 0;
 
   {
-    let mut map: HashMap<DropKey, DropValue> = HashMap::init<DropKey, DropValue>();
+    let mut map: HashMap<DropKey, DropValue> = HashMap::new<DropKey, DropValue>();
 
     map.insert(
       DropKey { id: 1, marker: 1, counter: (&mut keyDrops) as *mut i32 },
@@ -172,7 +172,7 @@ function hashMapReplacementRemoveAndDropAreExactOnce(): void {
 
 @test
 function hashMapContainsGetMutAndClearPreserveCapacity(): void {
-  let mut map: HashMap<PlainKey, i32> = HashMap::init<PlainKey, i32>();
+  let mut map: HashMap<PlainKey, i32> = HashMap::new<PlainKey, i32>();
   let lookup1: PlainKey = PlainKey { id: 1 };
   let lookup2: PlainKey = PlainKey { id: 2 };
   let lookup3: PlainKey = PlainKey { id: 3 };
@@ -215,7 +215,7 @@ function hashSetMembershipRemoveClearAndDropAreExactOnce(): void {
   let mut temporaryDrops: i32 = 0;
 
   {
-    let mut set: HashSet<SetKey> = HashSet::init<SetKey>();
+    let mut set: HashSet<SetKey> = HashSet::new<SetKey>();
     set.reserve(8);
 
     Test::assert(set.insert(SetKey { id: 1, marker: 1, counter: (&mut drops) as *mut i32 }));
@@ -243,8 +243,24 @@ function hashSetMembershipRemoveClearAndDropAreExactOnce(): void {
 function hashSetUsesZeroSizedMarkerPayload(): void {
   Test::assertEq<u64>(@sizeOf<HashSetMarker>(), 0);
 
-  let mut set: HashSet<MarkerKey> = HashSet::init<MarkerKey>();
+  let mut set: HashSet<MarkerKey> = HashSet::new<MarkerKey>();
   let lookup: MarkerKey = MarkerKey { id: 7 };
   Test::assert(set.insert(MarkerKey { id: 7 }));
   Test::assert(set.contains(&lookup));
+}
+
+@test
+function hashMapNewWithCapacityStartsEmptyAndPreservesCapacity(): void {
+  let map: HashMap<PlainKey, i32> = HashMap::new<PlainKey, i32>(16 as u64);
+
+  Test::assertEq<u64>(map.length(), 0);
+  Test::assert(map.capacity() >= 16);
+}
+
+@test
+function hashSetNewWithCapacityStartsEmptyAndPreservesCapacity(): void {
+  let set: HashSet<MarkerKey> = HashSet::new<MarkerKey>(16 as u64);
+
+  Test::assertEq<u64>(set.length(), 0);
+  Test::assert(set.capacity() >= 16);
 }

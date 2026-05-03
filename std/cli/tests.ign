@@ -2,9 +2,7 @@ import Cli from "std::cli";
 import Test from "std::test";
 
 function newArgs(): Vector<String> {
-  // TODO(ignis): validate generic constructor inference for cases like
-  // `Vector::init()` before removing explicit type arguments here.
-  return Vector::init<String>();
+  return Vector::new<String>();
 }
 
 function buildCommand(): Cli::Command {
@@ -15,6 +13,21 @@ function buildCommand(): Cli::Command {
   command.option("output", "o", "Write output file.");
 
   return command;
+}
+
+@test
+function cliNewArgsStartsEmptyAndAcceptsPushes(): void {
+  let mut args: Vector<String> = newArgs();
+
+  Test::assertEq<u64>(args.length(), 0);
+
+  args.push(String::create("tool"));
+  Test::assertEq<u64>(args.length(), 1);
+
+  match (args.get(0)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "tool"),
+    Option::NONE -> Test::fail(),
+  };
 }
 
 @test
