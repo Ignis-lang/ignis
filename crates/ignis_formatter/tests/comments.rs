@@ -164,6 +164,44 @@ fn preserves_comment_ownership_around_grouped_pointer_member_assignment() {
 }
 
 #[test]
+fn preserves_line_comment_between_record_initializer_fields() {
+  let formatted = format_text(
+    "record Command {
+    name: str;
+    specs: i32;
+}
+
+function make(name: str): Command {
+    return Command {
+        name: name,
+        // Keep this comment attached to the following field.
+        specs: 1,
+    };
+}
+",
+    &FormatOptions::default(),
+  )
+  .expect("record initializer field comments should stay formatter-safe");
+
+  assert_eq!(
+    formatted,
+    "record Command {
+  name: str;
+  specs: i32;
+}
+
+function make(name: str): Command {
+  return Command {
+    name: name,
+    // Keep this comment attached to the following field.
+    specs: 1,
+  };
+}
+"
+  );
+}
+
+#[test]
 fn keeps_import_separator_before_documented_top_level_declaration() {
   let formatted = format_text(
     "import Block from \"./block\";\nimport Layout, Align from \"std::memory\";\nimport LibC, CType from \"std::libc\";\n/// Strategy for searching free blocks in the allocator.\n///\n/// When reusing freed memory blocks, different search strategies offer\n/// different trade-offs between allocation speed and memory utilization.\nexport enum SearchMode {\n    FirstFit,\n    NextFit,\n    BestFit,\n}\n",

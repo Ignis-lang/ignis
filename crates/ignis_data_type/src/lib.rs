@@ -46,7 +46,6 @@ pub enum DataType {
   Reference(Box<DataType>),
   Pointer(Box<DataType>),
   Optional(Box<DataType>),
-  // TODO: Ignis v0.2.0
   Record(String, Vec<(String, DataType)>),
   Object(Vec<(String, DataType)>),
   GenericType(GenericType),

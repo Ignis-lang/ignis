@@ -2324,32 +2324,46 @@ impl<'a> AstChunkFormatter<'a> {
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     let path = self.record_init_path(record_init);
-    let fields = record_init
+    let field_texts = record_init
       .fields
       .iter()
       .map(|field| self.format_record_init_field_multiline(field, indent_level + 1))
       .collect::<Result<Vec<_>, _>>()?;
 
-    let inline = format!("{} {{ {} }}", path, fields.join(", "));
+    let inline = format!("{} {{ {} }}", path, field_texts.join(", "));
     let source_is_inline = !self.slice_span(&record_init.span).contains('\n');
     if source_is_inline && self.indent(indent_level).len() + "return ".len() + inline.len() <= self.config.line_width {
       return Ok(inline);
     }
 
+    let (body_start, body_end) = self.braced_body_bounds(&record_init.span)?;
+    let owned_fields = self.owned_spanned_items(&record_init.fields, body_start, |field| {
+      self.record_init_field_owned_span(field)
+    })?;
+
     let mut formatted = String::new();
     formatted.push_str(&path);
     formatted.push_str(" {\n");
 
-    for field in &fields {
-      formatted.push_str(&self.indent(indent_level + 1));
-      formatted.push_str(field);
+    let mut cursor = body_start;
 
-      if !record_init.fields.is_empty() {
-        formatted.push(',');
-      }
+    for (owned_field, field_text) in owned_fields.iter().zip(field_texts) {
+      let mut field_body = self.indent(indent_level + 1);
+      field_body.push_str(&field_text);
+      field_body.push(',');
 
+      formatted.push_str(&self.render_owned_segment(
+        &owned_field.leading,
+        field_body,
+        &owned_field.trailing,
+        indent_level + 1,
+      ));
       formatted.push('\n');
+
+      cursor = self.record_init_field_owned_span(owned_field.item).end.0 as usize;
     }
+
+    self.render_region_tail(&mut formatted, cursor, body_end, indent_level + 1)?;
 
     formatted.push_str(&self.indent(indent_level));
     formatted.push('}');
@@ -2390,6 +2404,29 @@ impl<'a> AstChunkFormatter<'a> {
       self.slice_span(&field.name_span).trim(),
       self.format_expression_node(field.value, 0, 0)?
     ))
+  }
+
+  fn record_init_field_owned_span(
+    &self,
+    field: &ignis_ast::expressions::ASTRecordInitField,
+  ) -> Span {
+    let value_end = self.node_true_end(&field.value);
+    let line_end = self.source[value_end.min(self.source.len())..]
+      .find('\n')
+      .map(|offset| value_end + offset)
+      .unwrap_or(self.source.len());
+    let same_line_tail = self.slice_range(value_end, line_end);
+    let end = same_line_tail
+      .find(',')
+      .filter(|comma| !same_line_tail[..*comma].trim().is_empty())
+      .map(|comma| value_end + comma)
+      .unwrap_or(value_end);
+
+    Span::new(
+      field.name_span.file,
+      field.name_span.start,
+      ignis_type::BytePosition(end as u32),
+    )
   }
 
   fn format_record_init_field_multiline(
