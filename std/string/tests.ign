@@ -112,6 +112,37 @@ function strAsBytesBorrowsUntilTerminatingNul(): void {
 }
 
 @test
+function strToCharsCopiesAsciiBytesIntoOwnedVector(): void {
+  let text: str = "az";
+  let chars: Vector<char> = text.toChars();
+  let data: *mut char = chars.asPtr() as *mut char;
+
+  Test::assertEq<u64>(chars.length(), 2);
+  Test::assertEq<char>(@read<char>(data), 'a');
+  Test::assertEq<char>(@read<char>(data + 1), 'z');
+}
+
+@test
+function strToCharsStopsAtFirstTerminatingNul(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(4);
+
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 'z' as u8);
+  @write<u8>(raw + 2, 0);
+  @write<u8>(raw + 3, 'q' as u8);
+
+  let text: str = raw as str;
+  let chars: Vector<char> = text.toChars();
+  let data: *mut char = chars.asPtr() as *mut char;
+
+  Test::assertEq<u64>(chars.length(), 2);
+  Test::assertEq<char>(@read<char>(data), 'a');
+  Test::assertEq<char>(@read<char>(data + 1), 'z');
+
+  Memory::free(raw);
+}
+
+@test
 function snapshotStdRunnerSmoke(): void {
   Test::assertSnapshot("smoke", "std-string-smoke\n");
 }

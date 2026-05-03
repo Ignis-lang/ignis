@@ -857,9 +857,8 @@ impl TypeStore {
         result
       },
 
-      Type::Slice { element, .. } | Type::FixedArray { element, .. } => {
-        self.is_copy_with_defs_inner(element, defs, visiting)
-      },
+      Type::Slice { .. } => true,
+      Type::FixedArray { element, .. } => self.is_copy_with_defs_inner(element, defs, visiting),
       Type::Tuple(elems) => elems.iter().all(|e| self.is_copy_with_defs_inner(e, defs, visiting)),
 
       Type::Instance { generic, args } => {
@@ -1400,5 +1399,76 @@ pub fn format_type_name(
       let arg_strs: Vec<_> = args.iter().map(|a| format_type_name(a, types, defs, symbols)).collect();
       format!("{}<{}>", name, arg_strs.join(", "))
     },
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::HashMap;
+
+  use super::{TypeId, TypeStore};
+  use crate::{
+    attribute::RecordAttr,
+    definition::{DefinitionKind, DefinitionStore, LangTraitSet, RecordDefinition, Visibility},
+    module::ModuleId,
+    span::Span,
+    symbol::SymbolId,
+  };
+
+  fn drop_record_type(
+    types: &mut TypeStore,
+    defs: &mut DefinitionStore,
+  ) -> TypeId {
+    let def_id = defs.alloc_placeholder(
+      SymbolId::default(),
+      Span::default(),
+      Span::default(),
+      Visibility::Private,
+      ModuleId::default(),
+      None,
+    );
+    let type_id = types.record(def_id);
+
+    defs.get_mut(&def_id).kind = DefinitionKind::Record(RecordDefinition {
+      type_params: Vec::new(),
+      type_id,
+      fields: Vec::new(),
+      instance_methods: HashMap::new(),
+      static_methods: HashMap::new(),
+      static_fields: HashMap::new(),
+      attrs: vec![RecordAttr::Packed],
+      lang_traits: LangTraitSet {
+        drop: true,
+        clone: false,
+        copy: false,
+      },
+      implemented_traits: Vec::new(),
+    });
+
+    type_id
+  }
+
+  #[test]
+  fn immutable_slice_is_copy_even_for_drop_elements() {
+    let mut types = TypeStore::new();
+    let mut defs = DefinitionStore::new();
+    let element = drop_record_type(&mut types, &mut defs);
+    let slice = types.slice(element, false);
+
+    assert!(types.is_copy(&slice));
+    assert!(types.needs_drop_with_defs(&element, &defs));
+    assert!(!types.is_copy_with_defs(&element, &defs));
+    assert!(types.is_copy_with_defs(&slice, &defs));
+  }
+
+  #[test]
+  fn fixed_array_of_drop_elements_stays_non_copy() {
+    let mut types = TypeStore::new();
+    let mut defs = DefinitionStore::new();
+    let element = drop_record_type(&mut types, &mut defs);
+    let array = types.fixed_array(element, 2);
+
+    assert!(types.needs_drop_with_defs(&element, &defs));
+    assert!(!types.is_copy_with_defs(&array, &defs));
   }
 }

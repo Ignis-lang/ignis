@@ -266,6 +266,11 @@ fn fixture_copy_noncopy_field() {
 }
 
 #[test]
+fn fixture_copy_slice_descriptor_noncopy() {
+  test_fixture("test_cases/analyzer/lang_traits/copy_slice_descriptor_noncopy.ign");
+}
+
+#[test]
 fn fixture_copy_explicit() {
   test_fixture("test_cases/analyzer/lang_traits/copy_explicit.ign");
 }

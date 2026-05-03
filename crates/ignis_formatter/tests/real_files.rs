@@ -681,8 +681,8 @@ fn formats_real_function_signature_with_tight_line_width_as_multiline() {
   let source = read_real_file("std/fs/mod.ign");
   let source_window = extract_slice(
     &source,
-    "function write(path: str, data: *void, len: u64): Result<boolean, Io::IoError> {",
-    "/// Creates/truncates a file and writes an entire String.",
+    "function write(path: str, data: *void, len: u64): Result<void, Io::IoError> {",
+    "/// Alias for `writeBytes(&String, data, len)`.",
   );
 
   let formatted = format_text(
@@ -701,7 +701,7 @@ fn formats_real_function_signature_with_tight_line_width_as_multiline() {
 
   assert_eq!(
     formatted,
-    "function write(\n    path: str,\n    data: *void,\n    len: u64\n): Result<boolean, Io::IoError> {\n    let mut file: Fs::File = Fs::File::create(path)!;\n    let writeResult: i64 = file.write(data, len)!;\n\n    return Result::OK(writeResult == len);\n}\n"
+    "function write(\n    path: str,\n    data: *void,\n    len: u64\n): Result<void, Io::IoError> {\n    return Fs::writeBytesRaw(path, data, len);\n}\n"
   );
 }
 

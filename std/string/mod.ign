@@ -1357,3 +1357,25 @@ function asBytes(value: str): u8[] {
 
   return @sliceFromParts<u8>(data, len);
 }
+
+/// Copies a NUL-terminated `str` into an owned `Vector<char>`.
+///
+/// This remains byte-oriented: each byte is cast to `char` directly and the
+/// scan stops at the first terminating NUL.
+@extension(str)
+function toChars(value: str): Vector<char> {
+  let data: *mut u8 = value as *mut u8;
+  let mut result: Vector<char> = Vector::init<char>();
+  let mut index: u64 = 0;
+
+  while (@read<u8>(data + index) != 0) {
+    result.push(@read<u8>(data + index) as char);
+    index += 1;
+  }
+
+  // Touch the `Vector<char>` helper monomorphizations that downstream std tests use.
+  let _resultPtr: *char = result.asPtr();
+  let _resultLen: u64 = result.length();
+
+  return result;
+}

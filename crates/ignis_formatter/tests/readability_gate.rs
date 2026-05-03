@@ -227,6 +227,12 @@ import String from "std::string";
 import Vector from "std::vector";
 
 import _ from "std::io::error";
+
+/// Keeps `Vector<String>` monomorphizations reachable for std I/O builds.
+///
+/// Some std APIs return or manipulate `Vector<String>` only through code paths
+/// that may be optimized away in small programs. This internal root forces the
+/// compiler to instantiate clear/drop paths used by linked std modules.
 "#,
     },
     ReviewedRealFileCase {
@@ -510,8 +516,8 @@ function combine(f: (i32) -> i32, g: (i32) -> i32, x: i32): i32 {
     ReviewedRealFileCase {
       name: "std fs tight line width function slice",
       source_path: "std/fs/mod.ign",
-      start_marker: Some("function write(path: str, data: *void, len: u64): Result<boolean, Io::IoError> {"),
-      end_marker: Some("/// Creates/truncates a file and writes an entire String."),
+      start_marker: Some("function write(path: str, data: *void, len: u64): Result<void, Io::IoError> {"),
+      end_marker: Some("/// Alias for `writeBytes(&String, data, len)`."),
       append_closing_brace: false,
       wrap_in_heap_allocator_record: false,
       config: FormatterConfig {
@@ -520,7 +526,7 @@ function combine(f: (i32) -> i32, g: (i32) -> i32, x: i32): i32 {
         use_tabs: false,
         sort_imports: false,
       },
-      expected: "function write(\n    path: str,\n    data: *void,\n    len: u64\n): Result<boolean, Io::IoError> {\n    let mut file: Fs::File = Fs::File::create(path)!;\n    let writeResult: i64 = file.write(data, len)!;\n\n    return Result::OK(writeResult == len);\n}\n",
+      expected: "function write(\n    path: str,\n    data: *void,\n    len: u64\n): Result<void, Io::IoError> {\n    return Fs::writeBytesRaw(path, data, len);\n}\n",
     },
     ReviewedRealFileCase {
       name: "std vector reduce higher-order slice formats exactly",
