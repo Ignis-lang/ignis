@@ -859,6 +859,18 @@ pub fn compile_project(
             return Err(());
           }
 
+          let std_defined_symbols = match &link_plan.std_archive {
+            Some(archive_path) => match collect_archive_defined_symbols(archive_path) {
+              Ok(symbols) => Some(symbols),
+              Err(error) => {
+                cmd_fail!(&config, "Build failed", start.elapsed());
+                eprintln!("{} {}", "Error:".red().bold(), error);
+                return Err(());
+              },
+            },
+            None => None,
+          };
+
           // Collect user modules (exclude std and std-internal files)
           let std_dir = ctx.module_graph.std_path();
           let user_modules: Vec<_> = used_modules
@@ -1063,6 +1075,7 @@ pub fn compile_project(
                 module_paths: &module_paths,
                 user_module_headers: &user_module_headers,
                 std_path: std_dir,
+                std_defined_symbols: std_defined_symbols.as_ref(),
               }),
             ) {
               Ok(contents) => contents,
@@ -1959,6 +1972,18 @@ pub fn run_project_tests(
   );
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
+  let std_defined_symbols = match &link_plan.std_archive {
+    Some(archive_path) => match collect_archive_defined_symbols(archive_path) {
+      Ok(symbols) => Some(symbols),
+      Err(error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), error);
+        return Err(());
+      },
+    },
+    None => None,
+  };
+
   let mut types = output.types.clone();
   let mono_output =
     ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
@@ -2138,6 +2163,7 @@ pub fn run_project_tests(
         module_paths: &module_paths,
         user_module_headers: &user_module_headers,
         std_path: std_dir,
+        std_defined_symbols: std_defined_symbols.as_ref(),
       }),
     ) {
       Ok(contents) => contents,
@@ -2385,6 +2411,18 @@ pub fn run_single_file_tests(
   );
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
+  let std_defined_symbols = match &link_plan.std_archive {
+    Some(archive_path) => match collect_archive_defined_symbols(archive_path) {
+      Ok(symbols) => Some(symbols),
+      Err(error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), error);
+        return Err(());
+      },
+    },
+    None => None,
+  };
+
   let mut types = output.types.clone();
   let mono_output =
     ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
@@ -2562,6 +2600,7 @@ pub fn run_single_file_tests(
         module_paths: &module_paths,
         user_module_headers: &user_module_headers,
         std_path: std_dir,
+        std_defined_symbols: std_defined_symbols.as_ref(),
       }),
     ) {
       Ok(contents) => contents,
@@ -3010,6 +3049,7 @@ pub fn run_std_tests(
         module_paths: &module_paths,
         user_module_headers: &user_module_headers,
         std_path: input.source_dir.as_path(),
+        std_defined_symbols: None,
       }),
     ) {
       Ok(contents) => contents,
@@ -3956,6 +3996,35 @@ fn create_static_archive_multi(
   }
 
   Ok(())
+}
+
+fn collect_archive_defined_symbols(archive_path: &Path) -> Result<HashSet<String>, String> {
+  let output = Command::new("nm")
+    .arg("-g")
+    .arg("--defined-only")
+    .arg(archive_path)
+    .output()
+    .map_err(|error| format!("Failed to run nm for '{}': {}", archive_path.display(), error))?;
+
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(format_tool_error("nm", "archive symbol scan", &stderr));
+  }
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let mut symbols = HashSet::new();
+
+  for line in stdout.lines() {
+    let Some(symbol) = line.split_whitespace().last() else {
+      continue;
+    };
+
+    if !symbol.ends_with(':') {
+      symbols.insert(symbol.to_string());
+    }
+  }
+
+  Ok(symbols)
 }
 
 /// Collect root definitions for monomorphization.

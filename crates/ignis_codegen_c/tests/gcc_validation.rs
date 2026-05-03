@@ -73,6 +73,53 @@ function main(): Result<i32, str> {
 }
 
 #[test]
+fn gcc_match_statement_arm_locals_feed_method_arguments() {
+  gcc_compiles(
+    r#"
+enum MaybeI32 {
+    SOME(i32),
+    NONE,
+}
+
+record Box {
+    value: i32;
+
+    public static make(value: i32): Box {
+        return Box { value: value };
+    }
+
+    public get(&self): i32 {
+        return self.value;
+    }
+}
+
+record Sink {
+    value: i32;
+
+    public set(&mut self, value: i32): void {
+        self.value = value;
+    }
+}
+
+function main(): void {
+    let mut sink: Sink = Sink { value: 0 };
+    let maybe: MaybeI32 = MaybeI32::SOME(1);
+
+    match (maybe) {
+        MaybeI32::SOME(value) -> {
+            let boxed: Box = Box::make(value);
+            sink.set(boxed.get());
+        },
+        MaybeI32::NONE -> {},
+    };
+
+    return;
+}
+"#,
+  );
+}
+
+#[test]
 fn gcc_main_with_args_wrapper() {
   gcc_compiles(
     r#"

@@ -72,6 +72,9 @@ pub struct CEmitter<'a> {
   /// Extra function definitions that must be emitted in user module mode
   /// (typically monomorphized generic callees owned by other modules).
   forced_emit_defs: HashSet<DefinitionId>,
+  /// Symbols already provided by the precompiled std archive. Used to emit only
+  /// missing std generic specializations into user objects.
+  std_defined_symbols: Option<&'a HashSet<String>>,
 
   /// Maps `Type::Function` TypeId → emitted closure struct name.
   /// Populated during `emit_closure_types()`, used by `format_type()`.
@@ -106,6 +109,7 @@ impl<'a> CEmitter<'a> {
       module_paths: None,
       std_path: None,
       forced_emit_defs: HashSet::new(),
+      std_defined_symbols: None,
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
@@ -137,6 +141,7 @@ impl<'a> CEmitter<'a> {
       module_paths: Some(module_paths),
       std_path: None,
       forced_emit_defs: HashSet::new(),
+      std_defined_symbols: None,
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
@@ -155,6 +160,7 @@ impl<'a> CEmitter<'a> {
     module_id: ModuleId,
     module_paths: &'a HashMap<ModuleId, ModulePath>,
     std_path: &'a std::path::Path,
+    std_defined_symbols: Option<&'a HashSet<String>>,
   ) -> Self {
     Self {
       program,
@@ -169,6 +175,7 @@ impl<'a> CEmitter<'a> {
       module_paths: Some(module_paths),
       std_path: Some(std_path),
       forced_emit_defs: HashSet::new(),
+      std_defined_symbols,
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
@@ -201,6 +208,7 @@ impl<'a> CEmitter<'a> {
       module_paths: Some(module_paths),
       std_path: Some(std_path),
       forced_emit_defs: HashSet::new(),
+      std_defined_symbols: None,
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
@@ -231,6 +239,7 @@ impl<'a> CEmitter<'a> {
       module_paths: None,
       std_path: None,
       forced_emit_defs: HashSet::new(),
+      std_defined_symbols: None,
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: Some(test_harness),
@@ -382,22 +391,6 @@ impl<'a> CEmitter<'a> {
             return true;
           }
 
-          // Monomorphized user functions (mangled names with __) are emitted only in the entry module
-          // to avoid duplicate definitions across user modules. Std functions are excluded because
-          // they are already compiled in prebuilt std object files.
-          if kind.is_user() {
-            let name = self.symbols.get(&def.name);
-            if name.contains("__")
-              && !name.starts_with("__")
-              && let Some(entry_id) = self.program.entry_point
-            {
-              let entry_def = self.defs.get(&entry_id);
-              if entry_def.owner_module == target_module_id {
-                return true;
-              }
-            }
-          }
-
           return false;
         }
 
@@ -480,6 +473,11 @@ impl<'a> CEmitter<'a> {
           }
         }
       }
+    }
+
+    if !self.is_entry_user_module(target_module_id) {
+      forced
+        .retain(|def_id| !self.is_missing_std_archive_generic_specialization(*def_id) || self.is_std_test_def(*def_id));
     }
 
     forced
@@ -628,10 +626,24 @@ impl<'a> CEmitter<'a> {
 
     (kind.is_user() && self.is_monomorphized_generic_def(def_id))
       || (kind.is_std() && self.is_std_test_option_presence_method(def_id))
+      || (kind.is_std() && self.is_missing_std_archive_generic_specialization(def_id))
       || (self.is_monomorphized_generic_def(def_id)
         && (self.definition_depends_on_user_type(def_id)
           || self.definition_mentions_std_test_user_type(def_id)
           || self.is_std_test_def(def_id)))
+  }
+
+  fn is_missing_std_archive_generic_specialization(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    if !self.is_monomorphized_generic_def(def_id) {
+      return false;
+    }
+
+    self
+      .std_defined_symbols
+      .is_some_and(|symbols| !symbols.contains(&self.def_name(def_id)))
   }
 
   fn should_recurse_forced_emit(
@@ -3641,7 +3653,7 @@ impl<'a> CEmitter<'a> {
     let def = self.defs.get(&def_id);
     let raw_name = self.symbols.get(&def.name).to_string();
 
-    let has_overloads = self.has_overloads(def_id);
+    let has_overloads = self.has_overloads(def_id) || self.original_generic_method_has_overloads(def_id);
 
     let param_suffix = if has_overloads {
       self.format_param_types_for_mangling(def_id)
@@ -3756,6 +3768,57 @@ impl<'a> CEmitter<'a> {
     false
   }
 
+  fn original_generic_method_has_overloads(
+    &self,
+    target_def_id: DefinitionId,
+  ) -> bool {
+    let target_def = self.defs.get(&target_def_id);
+    let DefinitionKind::Method(target_method) = &target_def.kind else {
+      return false;
+    };
+
+    let target_owner_def = self.defs.get(&target_method.owner_type);
+    let target_owner_name = self.symbols.get(&target_owner_def.name);
+    let raw_name = self.symbols.get(&target_def.name);
+    let Some(original_method_name) = raw_name.strip_prefix(&format!("{}__", target_owner_name)) else {
+      return false;
+    };
+
+    let Some(original_owner_name) = target_owner_name.split("__").next() else {
+      return false;
+    };
+
+    let Some(original_owner_def_id) = self.defs.iter().find_map(|(candidate_id, candidate)| {
+      if candidate.owner_module == target_owner_def.owner_module
+        && matches!(candidate.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_))
+        && self.symbols.get(&candidate.name) == original_owner_name
+      {
+        Some(candidate_id)
+      } else {
+        None
+      }
+    }) else {
+      return false;
+    };
+
+    let Some(&method_symbol) = self.symbols.map.get(original_method_name) else {
+      return false;
+    };
+
+    let overload_count = self
+      .defs
+      .iter()
+      .filter(|(_, candidate)| {
+        candidate.name == method_symbol
+          && matches!(candidate.kind, DefinitionKind::Method(_))
+          && matches!(&candidate.kind, DefinitionKind::Method(method) if method.owner_type == original_owner_def_id)
+      })
+      .take(2)
+      .count();
+
+    overload_count > 1
+  }
+
   fn format_param_types_for_mangling(
     &self,
     def_id: DefinitionId,
@@ -3854,7 +3917,11 @@ fn should_defer_owner_module_emit_to_entry(
   is_monomorphized_generic_def: bool,
   depends_on_user_type: bool,
 ) -> bool {
-  !is_entry_user_module && is_monomorphized_generic_def && depends_on_user_type
+  let _ = is_entry_user_module;
+  let _ = is_monomorphized_generic_def;
+  let _ = depends_on_user_type;
+
+  false
 }
 
 fn should_defer_std_module_emit_for_user_specialization(
@@ -4060,6 +4127,7 @@ pub fn emit_user_module_c(
     module_paths,
     user_module_headers,
     std_path,
+    None,
   )
 }
 
@@ -4073,6 +4141,7 @@ pub fn emit_user_module_c_from_input(
   module_paths: &HashMap<ModuleId, ModulePath>,
   user_module_headers: &[CHeader],
   std_path: &std::path::Path,
+  std_defined_symbols: Option<&HashSet<String>>,
 ) -> String {
   let mut all_headers = user_module_headers.to_vec();
   all_headers.extend(headers.iter().cloned());
@@ -4087,6 +4156,7 @@ pub fn emit_user_module_c_from_input(
     module_id,
     module_paths,
     std_path,
+    std_defined_symbols,
   )
   .emit()
 }
@@ -4599,7 +4669,10 @@ fn is_type_fully_monomorphized_standalone(
   types: &TypeStore,
 ) -> bool {
   match types.get(&type_id) {
-    Type::Param { .. } | Type::Instance { .. } | Type::Infer => false,
+    Type::Param { .. } | Type::Infer => false,
+    Type::Instance { args, .. } => args
+      .iter()
+      .all(|arg| is_type_fully_monomorphized_standalone(*arg, types)),
     Type::Pointer { inner, .. } | Type::Reference { inner, .. } => {
       is_type_fully_monomorphized_standalone(*inner, types)
     },
@@ -4626,6 +4699,12 @@ fn collect_struct_dependencies_from_type(
   match types.get(&type_id) {
     Type::Record(def_id) | Type::Enum(def_id) => {
       out.insert(build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types));
+    },
+    Type::Instance { args, .. } => {
+      out.insert(monomorphized_instance_type_name_standalone(type_id, types, defs, symbols));
+      for arg in args {
+        collect_struct_dependencies_from_type(*arg, types, defs, symbols, namespaces, out);
+      }
     },
     Type::Slice { element, .. } => {
       out.insert(slice_struct_name_standalone(type_id, types, defs, symbols, namespaces));
@@ -4880,6 +4959,12 @@ fn collect_struct_types_from_type(
       let name = build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types);
       out.insert(name);
     },
+    Type::Instance { args, .. } => {
+      out.insert(monomorphized_instance_type_name_standalone(*type_id, types, defs, symbols));
+      for arg in args {
+        collect_struct_types_from_type(arg, types, defs, symbols, namespaces, out);
+      }
+    },
     Type::Slice { element, .. } => {
       out.insert(slice_struct_name_standalone(*type_id, types, defs, symbols, namespaces));
       collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
@@ -5071,7 +5156,8 @@ fn build_mangled_name_standalone(
   }
 
   // Check for overloads to determine if we need a parameter suffix
-  let has_overloads = has_overloads_standalone(def_id, defs);
+  let has_overloads =
+    has_overloads_standalone(def_id, defs) || original_generic_method_has_overloads_standalone(def_id, defs, symbols);
   let param_suffix = if has_overloads {
     format_param_types_for_mangling_standalone(def_id, defs, types, symbols)
   } else {
@@ -5168,6 +5254,57 @@ fn has_overloads_standalone(
     }
   }
   false
+}
+
+fn original_generic_method_has_overloads_standalone(
+  target_def_id: DefinitionId,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+) -> bool {
+  let target_def = defs.get(&target_def_id);
+  let DefinitionKind::Method(target_method) = &target_def.kind else {
+    return false;
+  };
+
+  let target_owner_def = defs.get(&target_method.owner_type);
+  let target_owner_name = symbols.get(&target_owner_def.name);
+  let raw_name = symbols.get(&target_def.name);
+  let Some(original_method_name) = raw_name.strip_prefix(&format!("{}__", target_owner_name)) else {
+    return false;
+  };
+
+  let Some(original_owner_name) = target_owner_name.split("__").next() else {
+    return false;
+  };
+
+  let Some(original_owner_def_id) = defs.iter().find_map(|(candidate_id, candidate)| {
+    if candidate.owner_module == target_owner_def.owner_module
+      && matches!(candidate.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_))
+      && symbols.get(&candidate.name) == original_owner_name
+    {
+      Some(candidate_id)
+    } else {
+      None
+    }
+  }) else {
+    return false;
+  };
+
+  let Some(&method_symbol) = symbols.map.get(original_method_name) else {
+    return false;
+  };
+
+  let overload_count = defs
+    .iter()
+    .filter(|(_, candidate)| {
+      candidate.name == method_symbol
+        && matches!(candidate.kind, DefinitionKind::Method(_))
+        && matches!(&candidate.kind, DefinitionKind::Method(method) if method.owner_type == original_owner_def_id)
+    })
+    .take(2)
+    .count();
+
+  overload_count > 1
 }
 
 fn format_param_types_for_mangling_standalone(
@@ -5273,6 +5410,123 @@ fn escape_ident(name: &str) -> String {
   name.replace('_', "__")
 }
 
+fn monomorphized_instance_type_name_standalone(
+  type_id: TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+) -> String {
+  match types.get(&type_id) {
+    Type::Instance { generic, args } => {
+      monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols)
+    },
+    _ => escape_ident(&format_type_for_monomorphized_name_standalone(type_id, types, defs, symbols)),
+  }
+}
+
+fn monomorphized_instance_name_from_parts_standalone(
+  generic: DefinitionId,
+  args: &[TypeId],
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+) -> String {
+  let generic_def = defs.get(&generic);
+  let base = symbols.get(&generic_def.name).to_string();
+
+  if args.is_empty() {
+    return escape_ident(&base);
+  }
+
+  let args_str = args
+    .iter()
+    .map(|arg| format_type_for_monomorphized_name_standalone(*arg, types, defs, symbols))
+    .collect::<Vec<_>>()
+    .join("__");
+
+  escape_ident(&format!("{}__{}", base, args_str))
+}
+
+fn format_type_for_monomorphized_name_standalone(
+  type_id: TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+  symbols: &SymbolTable,
+) -> String {
+  match types.get(&type_id) {
+    Type::I8 => "i8".to_string(),
+    Type::I16 => "i16".to_string(),
+    Type::I32 => "i32".to_string(),
+    Type::I64 => "i64".to_string(),
+    Type::U8 => "u8".to_string(),
+    Type::U16 => "u16".to_string(),
+    Type::U32 => "u32".to_string(),
+    Type::U64 => "u64".to_string(),
+    Type::F32 => "f32".to_string(),
+    Type::F64 => "f64".to_string(),
+    Type::Boolean => "bool".to_string(),
+    Type::Char => "char".to_string(),
+    Type::Str => "str".to_string(),
+    Type::Atom => "atom".to_string(),
+    Type::Void => "void".to_string(),
+    Type::Never => "never".to_string(),
+    Type::Pointer { inner, mutable } => {
+      let prefix = if *mutable { "ptrmut" } else { "ptr" };
+      format!(
+        "{}_{}",
+        prefix,
+        format_type_for_monomorphized_name_standalone(*inner, types, defs, symbols)
+      )
+    },
+    Type::Reference { inner, mutable } => {
+      let prefix = if *mutable { "refmut" } else { "ref" };
+      format!(
+        "{}_{}",
+        prefix,
+        format_type_for_monomorphized_name_standalone(*inner, types, defs, symbols)
+      )
+    },
+    Type::Slice { element, mutable } => {
+      let prefix = if *mutable { "slicemut" } else { "slice" };
+      format!(
+        "{}_{}",
+        prefix,
+        format_type_for_monomorphized_name_standalone(*element, types, defs, symbols)
+      )
+    },
+    Type::FixedArray { element, size } => {
+      format!(
+        "arr{}_{}",
+        size,
+        format_type_for_monomorphized_name_standalone(*element, types, defs, symbols)
+      )
+    },
+    Type::Instance { generic, args } => {
+      let generic_def = defs.get(generic);
+      let base = symbols.get(&generic_def.name).to_string();
+      let args_str = args
+        .iter()
+        .map(|arg| format_type_for_monomorphized_name_standalone(*arg, types, defs, symbols))
+        .collect::<Vec<_>>()
+        .join("__");
+      format!("{}__{}", base, args_str)
+    },
+    Type::Record(def_id) | Type::Enum(def_id) => {
+      let def = defs.get(def_id);
+      symbols.get(&def.name).to_string()
+    },
+    Type::Tuple(elements) => {
+      let elements_str = elements
+        .iter()
+        .map(|element| format_type_for_monomorphized_name_standalone(*element, types, defs, symbols))
+        .collect::<Vec<_>>()
+        .join("_");
+      format!("tuple_{}", elements_str)
+    },
+    _ => "unknown".to_string(),
+  }
+}
+
 /// Build a deterministic closure struct name from a function signature (standalone version).
 fn closure_struct_name_standalone(
   params: &[TypeId],
@@ -5328,6 +5582,9 @@ fn format_type_for_name_standalone(
     ),
     Type::Record(def_id) | Type::Enum(def_id) => {
       build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types)
+    },
+    Type::Instance { generic, args } => {
+      monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols)
     },
     _ => format!("ty{}", ty.index()),
   }
@@ -5419,9 +5676,9 @@ pub fn format_c_type(
       // Type::Param should never reach codegen (Invariant A)
       panic!("ICE: Type::Param reached C codegen - monomorphization failed")
     },
-    Type::Instance { .. } => {
-      // Type::Instance should never reach codegen (Invariant D)
-      panic!("ICE: Type::Instance reached C codegen - monomorphization failed")
+    Type::Instance { generic, args } => {
+      let name = monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols);
+      format!("struct {}", name)
     },
     Type::Infer => {
       panic!("ICE: Type::Infer reached C codegen after implicit type removal")
@@ -5493,7 +5750,10 @@ mod tests {
   use super::*;
   use ignis_type::BytePosition;
   use ignis_type::attribute::FunctionAttr;
-  use ignis_type::definition::{Definition, DefinitionKind, FunctionDefinition, NamespaceDefinition, Visibility};
+  use ignis_type::definition::{
+    Definition, DefinitionKind, FieldDefinition, FunctionDefinition, LangTraitSet, MethodDefinition,
+    NamespaceDefinition, RecordDefinition, RecordFieldDef, Visibility,
+  };
   use ignis_type::file::FileId;
   use ignis_type::module::ModuleId;
   use ignis_type::namespace::NamespaceId;
@@ -5503,8 +5763,8 @@ mod tests {
   use std::rc::Rc;
 
   #[test]
-  fn test_owner_module_emission_defers_user_specializations_to_entry_module() {
-    assert!(should_defer_owner_module_emit_to_entry(false, true, true));
+  fn test_owner_module_emission_keeps_user_specializations_in_owner_module() {
+    assert!(!should_defer_owner_module_emit_to_entry(false, true, true));
     assert!(!should_defer_owner_module_emit_to_entry(true, true, true));
     assert!(!should_defer_owner_module_emit_to_entry(false, false, true));
     assert!(!should_defer_owner_module_emit_to_entry(false, true, false));
@@ -5586,6 +5846,367 @@ mod tests {
       owner_namespace: None,
       doc: None,
     })
+  }
+
+  fn alloc_record(
+    defs: &mut DefinitionStore,
+    symbols: &mut SymbolTable,
+    name: &str,
+    owner_module: ModuleId,
+  ) -> DefinitionId {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Record(RecordDefinition {
+        type_params: Vec::new(),
+        type_id: TypeId::new(0),
+        fields: Vec::new(),
+        instance_methods: std::collections::HashMap::new(),
+        static_methods: std::collections::HashMap::new(),
+        static_fields: std::collections::HashMap::new(),
+        attrs: Vec::new(),
+        lang_traits: LangTraitSet::default(),
+        implemented_traits: Vec::new(),
+      }),
+      name: symbols.intern(name),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Public,
+      owner_module,
+      owner_namespace: None,
+      doc: None,
+    })
+  }
+
+  fn alloc_method(
+    defs: &mut DefinitionStore,
+    symbols: &mut SymbolTable,
+    name: &str,
+    owner_type: DefinitionId,
+    owner_module: ModuleId,
+    return_type: TypeId,
+  ) -> DefinitionId {
+    defs.alloc(Definition {
+      kind: DefinitionKind::Method(MethodDefinition {
+        type_params: Vec::new(),
+        owner_type,
+        params: Vec::new(),
+        return_type,
+        is_static: true,
+        self_mutable: false,
+        inline_mode: InlineMode::None,
+        attrs: Vec::new(),
+      }),
+      name: symbols.intern(name),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Public,
+      owner_module,
+      owner_namespace: None,
+      doc: None,
+    })
+  }
+
+  #[test]
+  fn test_monomorphized_method_uses_original_overload_suffix_for_archive_abi() {
+    let (program, types, mut defs, namespaces, symbols_rc) = empty_program();
+    let mut symbols = symbols_rc.borrow_mut();
+
+    let vector_def = alloc_record(&mut defs, &mut symbols, "Vector", ModuleId::new(1));
+    let vector_string_def = alloc_record(&mut defs, &mut symbols, "Vector__String", ModuleId::new(1));
+    let bool_type = types.boolean();
+
+    alloc_method(&mut defs, &mut symbols, "init", vector_def, ModuleId::new(1), bool_type);
+    alloc_method(&mut defs, &mut symbols, "init", vector_def, ModuleId::new(1), bool_type);
+    let concrete_init = alloc_method(
+      &mut defs,
+      &mut symbols,
+      "Vector__String__init",
+      vector_string_def,
+      ModuleId::new(1),
+      bool_type,
+    );
+
+    let emitter = CEmitter::new(&program, &types, &defs, &namespaces, &symbols, &[]);
+
+    assert_eq!(emitter.build_mangled_name(concrete_init), "Vector____String____init_bool");
+  }
+
+  #[test]
+  fn test_missing_std_archive_generic_specialization_is_force_emit_seed() {
+    let (program, types, mut defs, namespaces, symbols_rc) = empty_program();
+    let mut symbols = symbols_rc.borrow_mut();
+
+    let vector_string_def = alloc_record(&mut defs, &mut symbols, "Vector__String", ModuleId::new(1));
+    let bool_type = types.boolean();
+    let concrete_is_empty = alloc_method(
+      &mut defs,
+      &mut symbols,
+      "Vector__String__isEmpty",
+      vector_string_def,
+      ModuleId::new(1),
+      bool_type,
+    );
+
+    let module_paths = HashMap::new();
+    let missing_symbols = HashSet::new();
+    let emitter = CEmitter::with_user_module_target(
+      &program,
+      &types,
+      &defs,
+      &namespaces,
+      &symbols,
+      &[],
+      ModuleId::new(0),
+      &module_paths,
+      std::path::Path::new("std"),
+      Some(&missing_symbols),
+    );
+
+    assert!(emitter.is_missing_std_archive_generic_specialization(concrete_is_empty));
+
+    let mut present_symbols = HashSet::new();
+    present_symbols.insert("Vector____String____isEmpty".to_string());
+    let emitter = CEmitter::with_user_module_target(
+      &program,
+      &types,
+      &defs,
+      &namespaces,
+      &symbols,
+      &[],
+      ModuleId::new(0),
+      &module_paths,
+      std::path::Path::new("std"),
+      Some(&present_symbols),
+    );
+
+    assert!(!emitter.is_missing_std_archive_generic_specialization(concrete_is_empty));
+  }
+
+  #[test]
+  fn test_non_entry_user_module_force_emits_missing_std_test_generic_specialization() {
+    let (mut program, types, mut defs, namespaces, symbols_rc) = empty_program();
+    let mut symbols = symbols_rc.borrow_mut();
+
+    let user_module = ModuleId::new(0);
+    let std_test_module = ModuleId::new(1);
+    let void_type = types.void();
+
+    let caller = alloc_function(
+      &mut defs,
+      &mut symbols,
+      "callsAssertEq",
+      Visibility::Private,
+      None,
+      void_type,
+      Vec::new(),
+    );
+
+    let assert_eq = defs.alloc(Definition {
+      kind: DefinitionKind::Function(FunctionDefinition {
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type: void_type,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        attrs: Vec::new(),
+      }),
+      name: symbols.intern("assertEq__str"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Private,
+      owner_module: std_test_module,
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let mut caller_blocks = ignis_type::Store::new();
+    let mut caller_block = Block::new("entry".to_string());
+    caller_block.instructions.push(Instr::Call {
+      dest: None,
+      callee: assert_eq,
+      args: Vec::new(),
+    });
+    caller_block.terminator = Terminator::Return(None);
+    let caller_entry = caller_blocks.alloc(caller_block);
+
+    program.functions.insert(
+      caller,
+      FunctionLir {
+        def_id: caller,
+        params: Vec::new(),
+        return_type: void_type,
+        locals: ignis_type::Store::new(),
+        temps: ignis_type::Store::new(),
+        blocks: caller_blocks,
+        entry_block: caller_entry,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        span: synthetic_span(),
+      },
+    );
+
+    let mut assert_blocks = ignis_type::Store::new();
+    let mut assert_block = Block::new("entry".to_string());
+    assert_block.terminator = Terminator::Return(None);
+    let assert_entry = assert_blocks.alloc(assert_block);
+
+    program.functions.insert(
+      assert_eq,
+      FunctionLir {
+        def_id: assert_eq,
+        params: Vec::new(),
+        return_type: void_type,
+        locals: ignis_type::Store::new(),
+        temps: ignis_type::Store::new(),
+        blocks: assert_blocks,
+        entry_block: assert_entry,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        span: synthetic_span(),
+      },
+    );
+
+    let module_paths = HashMap::from([
+      (user_module, ModulePath::Project(std::path::PathBuf::from("src/tests.ign"))),
+      (std_test_module, ModulePath::Std("test".to_string())),
+    ]);
+    let missing_symbols = HashSet::new();
+
+    let c_code = CEmitter::with_user_module_target(
+      &program,
+      &types,
+      &defs,
+      &namespaces,
+      &symbols,
+      &[],
+      user_module,
+      &module_paths,
+      std::path::Path::new("std"),
+      Some(&missing_symbols),
+    )
+    .emit();
+
+    assert!(
+      c_code.contains("void assertEq____str(void);"),
+      "expected a prototype for the forced std::test generic specialization"
+    );
+    assert!(
+      c_code.contains("static void assertEq____str(void)"),
+      "expected the forced std::test generic specialization to be emitted with internal linkage"
+    );
+  }
+
+  #[test]
+  fn test_user_module_header_emits_record_with_generic_instance_field() {
+    let (program, mut types, mut defs, namespaces, symbols_rc) = empty_program();
+    let mut symbols = symbols_rc.borrow_mut();
+
+    let vector_def = defs.alloc(Definition {
+      kind: DefinitionKind::Record(RecordDefinition {
+        type_params: Vec::new(),
+        type_id: types.void(),
+        fields: Vec::new(),
+        instance_methods: std::collections::HashMap::new(),
+        static_methods: std::collections::HashMap::new(),
+        static_fields: std::collections::HashMap::new(),
+        attrs: Vec::new(),
+        lang_traits: LangTraitSet::default(),
+        implemented_traits: Vec::new(),
+      }),
+      name: symbols.intern("Vector"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Public,
+      owner_module: ModuleId::new(1),
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let string_def = defs.alloc(Definition {
+      kind: DefinitionKind::Record(RecordDefinition {
+        type_params: Vec::new(),
+        type_id: types.void(),
+        fields: Vec::new(),
+        instance_methods: std::collections::HashMap::new(),
+        static_methods: std::collections::HashMap::new(),
+        static_fields: std::collections::HashMap::new(),
+        attrs: Vec::new(),
+        lang_traits: LangTraitSet::default(),
+        implemented_traits: Vec::new(),
+      }),
+      name: symbols.intern("String"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Public,
+      owner_module: ModuleId::new(1),
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let string_type = types.record(string_def);
+    let vector_string_type = types.instance(vector_def, vec![string_type]);
+
+    let interner_def = defs.alloc(Definition {
+      kind: DefinitionKind::Record(RecordDefinition {
+        type_params: Vec::new(),
+        type_id: types.void(),
+        fields: Vec::new(),
+        instance_methods: std::collections::HashMap::new(),
+        static_methods: std::collections::HashMap::new(),
+        static_fields: std::collections::HashMap::new(),
+        attrs: Vec::new(),
+        lang_traits: LangTraitSet::default(),
+        implemented_traits: Vec::new(),
+      }),
+      name: symbols.intern("StringInterner"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Public,
+      owner_module: ModuleId::new(0),
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let field_def = defs.alloc(Definition {
+      kind: DefinitionKind::Field(FieldDefinition {
+        type_id: vector_string_type,
+        owner_type: interner_def,
+        index: 0,
+      }),
+      name: symbols.intern("texts"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Private,
+      owner_module: ModuleId::new(0),
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let interner_type = types.record(interner_def);
+    if let DefinitionKind::Record(record) = &mut defs.get_mut(&interner_def).kind {
+      record.type_id = interner_type;
+      record.fields.push(RecordFieldDef {
+        name: symbols.intern("texts"),
+        type_id: vector_string_type,
+        index: 0,
+        span: synthetic_span(),
+        def_id: field_def,
+        attrs: Vec::new(),
+      });
+    }
+
+    let header = emit_user_module_h_from_input(
+      ModuleId::new(0),
+      std::path::Path::new("ignis/symbols/mod.ign"),
+      EmitInput::new(&program, &types, &defs),
+      &symbols,
+      &namespaces,
+    );
+
+    assert!(header.contains("struct StringInterner {"), "{header}");
+    assert!(header.contains("struct Vector____String field_0;"), "{header}");
   }
 
   #[test]

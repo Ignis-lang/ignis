@@ -8,7 +8,7 @@ use ignis_analyzer::modules::{ModuleError, ModuleGraph};
 use ignis_ast::statements::export_statement::ASTExport;
 use ignis_ast::statements::import_statement::ImportItemKind;
 use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
-use ignis_config::{DebugTrace, IgnisConfig};
+use ignis_config::{DebugTrace, IgnisConfig, IgnisSTDManifest};
 use ignis_diagnostics::diagnostic_report::Diagnostic;
 
 use ignis_log::{log_dbg, log_trc, phase_log, trace_dbg};
@@ -64,6 +64,16 @@ pub struct CompilationContext {
 }
 
 impl CompilationContext {
+  fn load_std_manifest_if_needed(config: &IgnisConfig) -> Option<IgnisSTDManifest> {
+    if config.std_path.is_empty() || !config.manifest.modules.is_empty() {
+      return None;
+    }
+
+    let manifest_path = Path::new(&config.std_path).join("manifest.toml");
+    let text = std::fs::read_to_string(&manifest_path).ok()?;
+    toml::from_str(&text).ok()
+  }
+
   fn normalize_discovered_module_path(
     &self,
     module_path: ModulePath,
@@ -96,10 +106,12 @@ impl CompilationContext {
     }
     aliases.extend(config.aliases.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-    let module_graph = if config.manifest.modules.is_empty() {
+    let manifest = Self::load_std_manifest_if_needed(config).unwrap_or_else(|| config.manifest.clone());
+
+    let module_graph = if manifest.modules.is_empty() {
       ModuleGraph::new(project_root, std_path, aliases)
     } else {
-      ModuleGraph::with_manifest(project_root, std_path, config.manifest.clone(), aliases)
+      ModuleGraph::with_manifest(project_root, std_path, manifest, aliases)
     };
 
     Self {
@@ -335,16 +347,6 @@ impl CompilationContext {
     let prelude_set: HashSet<ModuleId> = self.prelude_module_ids.iter().copied().collect();
     let all_module_ids: Vec<ModuleId> = self.module_graph.modules.iter().map(|(mid, _)| mid).collect();
 
-    // Pre-prelude reachability snapshot (explicit edges only).
-    let pre_prelude_reachable: HashMap<ModuleId, HashSet<ModuleId>> = self
-      .prelude_module_ids
-      .iter()
-      .map(|&pid| {
-        let deps: HashSet<ModuleId> = self.module_graph.transitive_deps(pid).into_iter().collect();
-        (pid, deps)
-      })
-      .collect();
-
     // Pass 1: prelude-to-prelude edges.
     for &module_id in &self.prelude_module_ids {
       let file_id = self.module_graph.modules.get(&module_id).file_id;
@@ -355,9 +357,9 @@ impl CompilationContext {
           continue;
         }
 
-        if let Some(reachable) = pre_prelude_reachable.get(&prelude_id)
-          && reachable.contains(&module_id)
-        {
+        let reachable_from_prelude: HashSet<ModuleId> =
+          self.module_graph.transitive_deps(prelude_id).into_iter().collect();
+        if reachable_from_prelude.contains(&module_id) {
           continue;
         }
 
@@ -380,16 +382,8 @@ impl CompilationContext {
     }
 
     // Pass 2: non-prelude-to-prelude edges.
-    // Recompute reachability now that prelude-to-prelude edges exist,
-    // so indirect cycles through prelude chains are detected.
-    let updated_reachable: HashMap<ModuleId, HashSet<ModuleId>> = self
-      .prelude_module_ids
-      .iter()
-      .map(|&pid| {
-        let deps: HashSet<ModuleId> = self.module_graph.transitive_deps(pid).into_iter().collect();
-        (pid, deps)
-      })
-      .collect();
+    // Reachability is checked against the current graph for each candidate,
+    // including prelude-to-prelude edges accepted in pass 1.
 
     for &module_id in &all_module_ids {
       if prelude_set.contains(&module_id) {
@@ -400,9 +394,9 @@ impl CompilationContext {
       let dummy_span = Span::empty_at(file_id, BytePosition::default());
 
       for &prelude_id in &self.prelude_module_ids {
-        if let Some(reachable) = updated_reachable.get(&prelude_id)
-          && reachable.contains(&module_id)
-        {
+        let reachable_from_prelude: HashSet<ModuleId> =
+          self.module_graph.transitive_deps(prelude_id).into_iter().collect();
+        if reachable_from_prelude.contains(&module_id) {
           continue;
         }
 
@@ -1244,6 +1238,112 @@ mod tests {
     assert!(
       CompilationContext::prelude_std_modules(&config).is_empty(),
       "std prelude modules must come from manifest auto_load.modules, not a hardcoded fallback"
+    );
+  }
+
+  #[test]
+  fn std_root_topological_order_keeps_explicit_std_imports_before_importers() {
+    let temp = tempfile::tempdir().expect("create temp std root");
+    let option_path = temp.path().join("option/mod.ign");
+    let vector_path = temp.path().join("vector/mod.ign");
+
+    fs::create_dir_all(option_path.parent().expect("option parent")).expect("create option parent");
+    fs::create_dir_all(vector_path.parent().expect("vector parent")).expect("create vector parent");
+    fs::write(&option_path, "export enum Option<T> { SOME(T), NONE }\n").expect("write option module");
+    fs::write(&vector_path, "import Option from \"std::option\";\nexport record Vector {}\n")
+      .expect("write vector module");
+    fs::write(
+      temp.path().join("manifest.toml"),
+      r#"
+[toolchain]
+
+[modules]
+option = "option/mod.ign"
+vector = "vector/mod.ign"
+
+[auto_load]
+modules = ["vector", "option"]
+"#,
+    )
+    .expect("write manifest");
+
+    let mut config = IgnisConfig::default();
+    config.std = true;
+    config.auto_load_std = true;
+    config.std_path = temp.path().to_string_lossy().into_owned();
+    config.manifest = CompilationContext::load_std_manifest_if_needed(&config).expect("load std manifest");
+
+    let mut ctx = CompilationContext::new(&config);
+    ctx.discover_all_std_modules(&config);
+    ctx.discover_prelude_modules_for_all(&config);
+
+    let order = ctx.module_graph.all_modules_topological();
+    let option_id = *ctx.module_for_path.get("std::option").expect("std::option alias");
+    let vector_id = *ctx.module_for_path.get("std::vector").expect("std::vector alias");
+
+    let option_index = order.iter().position(|id| *id == option_id).expect("option in order");
+    let vector_index = order.iter().position(|id| *id == vector_id).expect("vector in order");
+
+    assert!(
+      option_index < vector_index,
+      "std::option must be analyzed before std::vector because vector explicitly imports it"
+    );
+  }
+
+  #[test]
+  fn real_std_orders_option_before_vector_for_std_root_analysis() {
+    let std_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../std");
+
+    let mut config = IgnisConfig::default();
+    config.std = true;
+    config.auto_load_std = true;
+    config.std_path = std_path.to_string_lossy().into_owned();
+    config.manifest = CompilationContext::load_std_manifest_if_needed(&config).expect("load real std manifest");
+
+    let mut ctx = CompilationContext::new(&config);
+    ctx.discover_all_std_modules(&config);
+    ctx.discover_prelude_modules_for_all(&config);
+
+    let order = ctx.module_graph.all_modules_topological();
+    let option_id = *ctx.module_for_path.get("std::option").expect("std::option alias");
+    let vector_id = *ctx.module_for_path.get("std::vector").expect("std::vector alias");
+
+    let option_index = order.iter().position(|id| *id == option_id).expect("option in order");
+    let vector_index = order.iter().position(|id| *id == vector_id).expect("vector in order");
+
+    assert!(
+      option_index < vector_index,
+      "std::option must be analyzed before std::vector because vector explicitly imports it"
+    );
+  }
+
+  #[test]
+  fn loads_std_manifest_from_std_path_when_config_manifest_is_empty() {
+    let temp = tempfile::tempdir().expect("create temp std root");
+    fs::write(
+      temp.path().join("manifest.toml"),
+      r#"
+[toolchain]
+
+[modules]
+option = "option/mod.ign"
+string = "string/mod.ign"
+"#,
+    )
+    .expect("write manifest");
+
+    let mut config = IgnisConfig::default();
+    config.std_path = temp.path().to_string_lossy().into_owned();
+
+    let ctx = CompilationContext::new(&config);
+
+    assert_eq!(
+      ctx
+        .module_graph
+        .manifest
+        .as_ref()
+        .and_then(|manifest| manifest.get_module_path("option")),
+      Some(&"option/mod.ign".to_string())
     );
   }
 }

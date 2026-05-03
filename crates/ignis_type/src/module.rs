@@ -143,7 +143,12 @@ impl ModulePath {
 
       let resolved = current_dir.join(import_from);
       let with_ext = if resolved.extension().is_none() {
-        resolved.with_extension("ign")
+        let mod_path = resolved.join("mod.ign");
+        if mod_path.exists() {
+          mod_path
+        } else {
+          resolved.with_extension("ign")
+        }
       } else {
         resolved
       };
@@ -155,7 +160,12 @@ impl ModulePath {
     if let Some(root) = project_root {
       let resolved = root.join(import_from);
       let with_ext = if resolved.extension().is_none() {
-        resolved.with_extension("ign")
+        let mod_path = resolved.join("mod.ign");
+        if mod_path.exists() {
+          mod_path
+        } else {
+          resolved.with_extension("ign")
+        }
       } else {
         resolved
       };
@@ -473,6 +483,54 @@ mod tests {
         assert!(path.to_string_lossy().ends_with("utils.ign"));
         assert!(!path.to_string_lossy().ends_with("utils.ign.ign"));
       },
+      _ => panic!("Expected Project path"),
+    }
+  }
+
+  #[test]
+  fn relative_directory_path_prefers_mod_file() {
+    let root = std::env::temp_dir().join(format!("ignis-module-path-relative-{}", std::process::id()));
+    let current_dir = root.join("project/src");
+    let current_file = current_dir.join("main.ign");
+    let target_dir = current_dir.join("collections");
+    let target_mod = target_dir.join("mod.ign");
+
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::write(&current_file, "").unwrap();
+    std::fs::write(&target_mod, "").unwrap();
+
+    let result = ModulePath::from_import_path("./collections", &current_file, None, &HashMap::new());
+
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => assert_eq!(path, target_mod),
+      _ => panic!("Expected Project path"),
+    }
+  }
+
+  #[test]
+  fn bare_directory_path_prefers_mod_file() {
+    let root = std::env::temp_dir().join(format!("ignis-module-path-bare-{}", std::process::id()));
+    let current_dir = root.join("project/src");
+    let current_file = current_dir.join("main.ign");
+    let target_dir = root.join("project/collections");
+    let target_mod = target_dir.join("mod.ign");
+
+    std::fs::create_dir_all(&current_dir).unwrap();
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::write(&current_file, "").unwrap();
+    std::fs::write(&target_mod, "").unwrap();
+
+    let result =
+      ModulePath::from_import_path("collections", &current_file, Some(&root.join("project")), &HashMap::new());
+
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert!(result.is_ok());
+    match result.unwrap() {
+      ModulePath::Project(path) => assert_eq!(path, target_mod),
       _ => panic!("Expected Project path"),
     }
   }

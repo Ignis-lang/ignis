@@ -1,0 +1,64 @@
+import Test from "std::test";
+
+import Id from "@compiler::ids";
+import IndexVec from "@compiler::indexing";
+
+record NumberTag {}
+
+type NumberId = Id<NumberTag>;
+
+function assertValue(values: &IndexVec<NumberTag, u64>, id: NumberId, expected: u64): void {
+  match (values.get(id)) {
+    Option::SOME(value) -> Test::assertEq<u64>(*value, expected),
+    Option::NONE -> @panic("missing index"),
+  };
+}
+
+@test
+function indexVecPushGetSetAndLengthAreDeterministic(): void {
+  let mut values: IndexVec<NumberTag, u64> = IndexVec::init<NumberTag, u64>();
+
+  Test::assert(values.isEmpty());
+
+  let first: NumberId = values.push(10);
+  let second: NumberId = values.push(20);
+
+  Test::assertEq<u32>(first.raw(), 0);
+  Test::assertEq<u32>(second.raw(), 1);
+  Test::assertEq<u64>(values.length(), 2);
+  Test::assert(!values.isEmpty());
+
+  assertValue(&values, first, 10);
+  assertValue(&values, second, 20);
+
+  Test::assert(values.set(first, 42));
+
+  assertValue(&values, first, 42);
+}
+
+@test
+function indexVecGetMutUpdatesStoredValue(): void {
+  let mut values: IndexVec<NumberTag, u64> = IndexVec::init<NumberTag, u64>();
+  let first: NumberId = values.push(10);
+
+  match (values.getMut(first)) {
+    Option::SOME(value) -> {
+      *value = 99;
+    },
+    Option::NONE -> @panic("missing mutable value"),
+  };
+
+  assertValue(&values, first, 99);
+}
+
+@test
+function indexVecOutOfBoundsReturnsNoneAndRejectsSet(): void {
+  let mut values: IndexVec<NumberTag, u64> = IndexVec::init<NumberTag, u64>();
+  values.push(10);
+
+  let missing: NumberId = Id::fromRaw<NumberTag>(7);
+
+  Test::assert(match (values.get(missing)) { Option::SOME(_) -> false, Option::NONE -> true, });
+  Test::assert(match (values.getMut(missing)) { Option::SOME(_) -> false, Option::NONE -> true, });
+  Test::assert(!values.set(missing, 50));
+}

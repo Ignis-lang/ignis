@@ -167,7 +167,7 @@ impl<'a> Analyzer<'a> {
         self.bind_namespace_complete(node_id, ns_stmt);
       },
       ASTStatement::Export(export_stmt) => self.bind_export(export_stmt, scope_kind),
-      ASTStatement::Expression(_) => {},
+      ASTStatement::Expression(expr) => self.bind_expression_lambdas(expr),
       _ => {},
     }
   }

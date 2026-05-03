@@ -1,6 +1,6 @@
 pub mod c;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ignis_config::{CHeader, TargetBackend};
@@ -94,6 +94,7 @@ pub enum LoweredBackendRequest<'a> {
     module_paths: &'a HashMap<ModuleId, ModulePath>,
     user_module_headers: &'a [CHeader],
     std_path: &'a Path,
+    std_defined_symbols: Option<&'a HashSet<String>>,
   },
   EmitStdModule {
     module_name: &'a str,

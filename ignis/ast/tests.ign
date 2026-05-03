@@ -1,0 +1,52 @@
+import Test from "std::test";
+
+import AstStore, AstTag from "@compiler::ast";
+import Id from "@compiler::ids";
+
+type AstId = Id<AstTag>;
+
+function assertStoredValue(store: &AstStore<u64>, id: AstId, expected: u64): void {
+  match (store.get(id)) {
+    Option::SOME(value) -> Test::assertEq<u64>(*value, expected),
+    Option::NONE -> @panic("missing stored value"),
+  };
+}
+
+@test
+function astStoreAddGetAndLengthStayStable(): void {
+  let mut store: AstStore<u64> = AstStore::init<u64>();
+
+  let first: AstId = store.add(10);
+  let second: AstId = store.add(20);
+
+  Test::assertEq<u32>(first.raw(), 0);
+  Test::assertEq<u32>(second.raw(), 1);
+  Test::assertEq<u64>(store.length(), 2);
+
+  assertStoredValue(&store, first, 10);
+  assertStoredValue(&store, second, 20);
+}
+
+@test
+function astStoreGetMutPreservesExistingIds(): void {
+  let mut store: AstStore<u64> = AstStore::init<u64>();
+  let first: AstId = store.add(10);
+  let second: AstId = store.add(20);
+
+  match (store.getMut(first)) {
+    Option::SOME(value) -> {
+      *value = 42;
+    },
+    Option::NONE -> @panic("missing mutable stored value"),
+  };
+
+  assertStoredValue(&store, first, 42);
+  assertStoredValue(&store, second, 20);
+}
+
+@test
+function astIdDisplayIsStable(): void {
+  let id: AstId = Id::fromRaw<AstTag>(3);
+
+  Test::assertEq<str>(id.display().toStr(), "Id(3)");
+}

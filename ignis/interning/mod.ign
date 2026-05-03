@@ -1,0 +1,73 @@
+import Symbol from "@compiler::symbols";
+
+@implements(Display)
+export record StringInterner {
+  texts: Vector<String>;
+
+  public static init(): StringInterner {
+    return StringInterner {
+      texts: Vector {
+        data: null,
+        length: 0,
+        capacity: 0,
+      },
+    };
+  }
+
+  public intern(&mut self, text: str): Symbol {
+    let ownedText: String = String::create(text);
+    let mut index: u64 = 0;
+
+    while (index < self.texts.length()) {
+      if (let Option::SOME(existing) = self.texts.get(index) && existing.equals(&ownedText)) {
+        return Symbol::fromRaw(index as u32);
+      }
+
+      index += 1;
+    }
+
+    self.texts.push(ownedText);
+
+    return Symbol::fromRaw((self.texts.length() - 1) as u32);
+  }
+
+  public resolve(&self, symbol: Symbol): Option<str> {
+    return match (self.texts.get(symbol.raw() as u64)) {
+      Option::SOME(text) -> Option::SOME(text.toStr()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public length(&self): u64 {
+    return self.texts.length();
+  }
+
+  public display(&self): String {
+    let mut result: String = String::create("StringInterner[");
+    let mut index: u64 = 0;
+
+    while (index < self.texts.length()) {
+      if (index > 0) {
+        result.pushStr("\n");
+      }
+
+      if (let Option::SOME(text) = self.texts.get(index)) {
+        let symbol: Symbol = Symbol::fromRaw(index as u32);
+        let symbolText: String = symbol.display();
+        result.pushStr(symbolText.toStr());
+        result.pushStr(": \"");
+        result.pushStr(text.toStr());
+        result.pushStr("\"");
+      }
+
+      index += 1;
+    }
+
+    if (self.texts.length() > 0) {
+      result.pushStr("\n");
+    }
+
+    result.pushStr("]");
+    return result;
+  }
+}

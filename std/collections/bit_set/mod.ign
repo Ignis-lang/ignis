@@ -1,0 +1,74 @@
+const WORD_BITS: u64 = 64;
+
+/// Dense deterministic set for `u32` bit indexes.
+///
+/// `BitSet` stores membership in little-endian `u64` words. It is intended for
+/// compiler-style dataflow and membership sets where ids are dense enough that a
+/// bit-vector is simpler than a hash table.
+export record BitSet {
+  words: Vector<u64>;
+
+  /// Creates an empty bit set.
+  public static init(): BitSet {
+    return BitSet {
+      words: Vector::init<u64>(),
+    };
+  }
+
+  private static wordIndex(bit: u32): u64 {
+    return (bit as u64) / WORD_BITS;
+  }
+
+  private static bitMask(bit: u32): u64 {
+    return (1 as u64) << ((bit as u64) % WORD_BITS);
+  }
+
+  private ensureWord(&mut self, wordIndex: u64): void {
+    while (self.words.length() <= wordIndex) {
+      self.words.push(0);
+    }
+  }
+
+  /// Adds `bit` to the set.
+  public insert(&mut self, bit: u32): void {
+    let wordIndex: u64 = BitSet::wordIndex(bit);
+    let mask: u64 = BitSet::bitMask(bit);
+
+    self.ensureWord(wordIndex);
+
+    if (let Option::SOME(word) = self.words.getMut(wordIndex)) {
+      *word = *word | mask;
+    }
+  }
+
+  /// Removes `bit` from the set when it is present.
+  public remove(&mut self, bit: u32): void {
+    let wordIndex: u64 = BitSet::wordIndex(bit);
+    let mask: u64 = BitSet::bitMask(bit);
+
+    if (let Option::SOME(word) = self.words.getMut(wordIndex)) {
+      *word = *word & ~mask;
+    }
+  }
+
+  /// Returns whether `bit` is present in the set.
+  public contains(&self, bit: u32): boolean {
+    let wordIndex: u64 = BitSet::wordIndex(bit);
+    let mask: u64 = BitSet::bitMask(bit);
+
+    return match (self.words.get(wordIndex)) {
+      Option::SOME(word) -> (*word & mask) != 0,
+      Option::NONE -> false,
+    };
+  }
+
+  /// Removes every bit from the set and releases the backing words.
+  public clear(&mut self): void {
+    self.words.clear();
+  }
+
+  /// Returns the number of backing words currently allocated.
+  public lengthWords(&self): u64 {
+    return self.words.length();
+  }
+}

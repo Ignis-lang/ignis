@@ -1,0 +1,49 @@
+import Test from "std::test";
+
+import StringInterner from "@compiler::interning";
+import Symbol from "@compiler::symbols";
+
+function assertResolvedText(interner: &StringInterner, symbol: Symbol, expected: str): void {
+  match (interner.resolve(symbol)) {
+    Option::SOME(value) -> Test::assertEq<str>(value, expected),
+    Option::NONE -> @panic("missing interned string"),
+  };
+}
+
+@test
+function stringInternerReusesSymbolsForDuplicateText(): void {
+  let mut interner: StringInterner = StringInterner::init();
+  let first: Symbol = interner.intern("alpha");
+  let second: Symbol = interner.intern("alpha");
+
+  Test::assertEq<u32>(first.raw(), 0);
+  Test::assertEq<u32>(second.raw(), 0);
+  Test::assertEq<u64>(interner.length(), 1);
+
+  assertResolvedText(&interner, first, "alpha");
+}
+
+@test
+function stringInternerPreservesDistinctInsertionOrder(): void {
+  let mut interner: StringInterner = StringInterner::init();
+  let alpha: Symbol = interner.intern("alpha");
+  let beta: Symbol = interner.intern("beta");
+  let alphaAgain: Symbol = interner.intern("alpha");
+
+  Test::assert(alpha.raw() < beta.raw());
+  Test::assertEq<u32>(alphaAgain.raw(), alpha.raw());
+  Test::assertEq<u64>(interner.length(), 2);
+
+  assertResolvedText(&interner, beta, "beta");
+}
+
+@test
+function stringInternerDisplayIsStable(): void {
+  let mut interner: StringInterner = StringInterner::init();
+  interner.intern("alpha");
+  interner.intern("beta");
+
+  let rendered: String = interner.display().concat("\n");
+
+  Test::assertSnapshot("string-interner-display", rendered.toStr());
+}
