@@ -1083,7 +1083,10 @@ mod tests {
     }
 
     assert_tokens(&tokens, &[(TokenType::Eof, "")]);
-    assert_eq!(diagnostics[0].to_string(), "Invalid char literal: expected exactly one Unicode scalar value");
+    assert_eq!(
+      diagnostics[0].to_string(),
+      "Invalid char literal: expected exactly one Unicode scalar value"
+    );
   }
 
   #[test]
@@ -1097,7 +1100,10 @@ mod tests {
     }
 
     assert_tokens(&tokens, &[(TokenType::Eof, "")]);
-    assert_eq!(diagnostics[0].to_string(), "Invalid char literal: expected exactly one Unicode scalar value");
+    assert_eq!(
+      diagnostics[0].to_string(),
+      "Invalid char literal: expected exactly one Unicode scalar value"
+    );
   }
 
   #[test]
@@ -1111,7 +1117,10 @@ mod tests {
     }
 
     assert_tokens(&tokens, &[(TokenType::Eof, "")]);
-    assert_eq!(diagnostics[0].to_string(), "Invalid char escape: expected a valid Unicode scalar");
+    assert_eq!(
+      diagnostics[0].to_string(),
+      "Invalid char escape: expected a valid Unicode scalar"
+    );
   }
 
   #[test]
@@ -1125,6 +1134,9 @@ mod tests {
     }
 
     assert_tokens(&tokens, &[(TokenType::Eof, "")]);
-    assert_eq!(diagnostics[0].to_string(), "Invalid char escape: expected a valid Unicode scalar");
+    assert_eq!(
+      diagnostics[0].to_string(),
+      "Invalid char escape: expected a valid Unicode scalar"
+    );
   }
 }
