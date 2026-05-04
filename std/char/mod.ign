@@ -4,7 +4,7 @@
 //! Character and UTF-8 scalar classification helpers.
 //!
 //! `char` is a native Unicode scalar. Byte-oriented text traversal metadata lives
-//! in `Text::CharSpan`, but the classification helpers in this module accept
+//! in `Utf8ScalarSpan`, but the classification helpers in this module accept
 //! native `char` values directly. This keeps scalar semantics ergonomic while
 //! keeping ASCII-only behavior explicit:
 //!
@@ -98,6 +98,18 @@ export namespace Char {
   @extension(char)
   function isAsciiNumeric(value: char): boolean {
     return value >= '0' && value <= '9';
+  }
+
+  /// Returns the numeric value of an ASCII decimal digit.
+  ///
+  /// Non-ASCII digits, including Unicode decimal digits, return `Option::NONE`.
+  @extension(char)
+  function asciiDigitValue(value: char): Option<u64> {
+    if (!Char::isAsciiNumeric(value)) {
+      return Option::NONE;
+    }
+
+    return Option::SOME((Char::scalarOf(value) - ('0' as u32)) as u64);
   }
 
   /// Returns whether `value` is ASCII alphabetic or numeric.

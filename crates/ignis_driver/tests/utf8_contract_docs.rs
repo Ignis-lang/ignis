@@ -49,7 +49,6 @@ fn utf8_std_docs_distinguish_owned_string_from_borrowed_str() {
 #[test]
 fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   let string_mod = read_repo_file("std/string/mod.ign");
-  let text_mod = read_repo_file("std/text/mod.ign");
   let char_mod = read_repo_file("std/char/mod.ign");
   let fs_mod = read_repo_file("std/fs/mod.ign");
   let diagnostics = read_repo_file("crates/ignis_diagnostics/src/message.rs");
@@ -67,10 +66,14 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
 
   assert!(diagnostics.contains("Invalid char escape: expected a valid Unicode scalar"));
   assert!(lexer.contains("fn decode_unicode_char_escape"));
-  assert!(string_mod.contains("`charAt` and `pushChar` work with native `char` values"));
-  assert!(string_mod.contains("`byteAt`, `pushByte`, `forEachByte`"));
-  assert!(text_mod.contains("record CharSpan"));
-  assert!(!text_mod.contains("record Utf8Char"));
+  assert!(string_mod.contains("`charAt` and `pushChar` work with decoded `char` values"));
+  assert!(string_mod.contains("`byteAt`,"));
+  assert!(string_mod.contains("`pushByte`,"));
+  assert!(string_mod.contains("`forEachByte`,"));
+  assert!(string_mod.contains("record Utf8ScalarSpan"));
+  assert!(string_mod.contains("public codepoint: u32;"));
+  assert!(string_mod.contains("record Utf8Cursor"));
+  assert!(string_mod.contains("Use `charAt()` or `Utf8Cursor`"));
   assert!(char_mod.contains("native `char` values"));
   assert!(language_reference.contains("Unicode scalar"));
   assert!(!language_reference.contains("`char` (single byte)"));

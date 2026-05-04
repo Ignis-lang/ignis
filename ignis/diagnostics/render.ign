@@ -1,4 +1,5 @@
 import Terminal from "std::terminal";
+import Utf8Cursor from "std::string";
 
 import Diagnostic, DiagnosticBag, DiagnosticLabel, Severity from "./model";
 import SourceFile, SourceLocation, SourceSpan from "./source";
@@ -22,7 +23,7 @@ function trimLineEnding(source: &SourceFile, start: u64, endExclusive: u64): u64
 }
 
 function lineIndexAt(source: &SourceFile, position: u64): u32 {
-  let mut index: u64 = 0;
+  let mut cursor: Utf8Cursor = source.text.cursor();
   let mut line: u32 = 0;
   let mut limit: u64 = source.text.length();
 
@@ -30,12 +31,14 @@ function lineIndexAt(source: &SourceFile, position: u64): u32 {
     limit = position;
   }
 
-  while (index < limit) {
-    if (let Option::SOME(value) = source.text.charAt(index) && value == '\n') {
+  while (!cursor.isAtEnd() && cursor.position() < limit) {
+    let Option::SOME(current) = cursor.advance() else {
+      break;
+    };
+
+    if (current.codepoint == '\n' as u32) {
       line += 1;
     }
-
-    index += 1;
   }
 
   return line;
@@ -47,18 +50,20 @@ function lineStart(source: &SourceFile, lineIndex: u32): u64 {
   }
 
   let mut currentLine: u32 = 0;
-  let mut index: u64 = 0;
+  let mut cursor: Utf8Cursor = source.text.cursor();
 
-  while (index < source.text.length()) {
-    if (let Option::SOME(value) = source.text.charAt(index) && value == '\n') {
+  while (!cursor.isAtEnd()) {
+    let Option::SOME(current) = cursor.advance() else {
+      break;
+    };
+
+    if (current.codepoint == '\n' as u32) {
       currentLine += 1;
 
       if (currentLine == lineIndex) {
-        return index + 1;
+        return current.endByte;
       }
     }
-
-    index += 1;
   }
 
   return source.text.length();
@@ -66,14 +71,20 @@ function lineStart(source: &SourceFile, lineIndex: u32): u64 {
 
 function lineEnd(source: &SourceFile, lineIndex: u32): u64 {
   let start: u64 = lineStart(source, lineIndex);
-  let mut index: u64 = start;
+  let mut cursor: Utf8Cursor = source.text.cursor();
 
-  while (index < source.text.length()) {
-    if (let Option::SOME(value) = source.text.charAt(index) && value == '\n') {
-      return index + 1;
+  while (!cursor.isAtEnd() && cursor.position() < start) {
+    cursor.advance();
+  }
+
+  while (!cursor.isAtEnd()) {
+    let Option::SOME(current) = cursor.advance() else {
+      break;
+    };
+
+    if (current.codepoint == '\n' as u32) {
+      return current.endByte;
     }
-
-    index += 1;
   }
 
   return source.text.length();
@@ -95,11 +106,9 @@ function appendPipeSpacer(output: &mut String): void {
 function appendStage0Line(output: &mut String, lineNumber: u32, line: &String): void {
   let mut outputRef: &mut String = output;
   let lineNumberText: String = String::create(lineNumber);
-  let mut padding: u64 = 0;
 
-  while (padding + lineNumberText.length() < 3) {
-    outputRef.pushStr(" ");
-    padding += 1;
+  if (lineNumberText.length() < 3) {
+    outputRef.pushRepeated(" ", 3 - lineNumberText.length());
   }
 
   outputRef.push(&lineNumberText);
@@ -116,18 +125,13 @@ function appendStage0Caret(
   color: Terminal::TerminalColor
 ): void {
   let mut outputRef: &mut String = output;
-  let mut spaces: u32 = 0;
   let mut carets: u32 = 0;
 
   outputRef.pushStr("     |");
-
-  while (spaces < column) {
-    outputRef.pushStr(" ");
-    spaces += 1;
-  }
+  outputRef.pushRepeated(" ", column as u64);
 
   while (carets < width) {
-    appendStyledText(output, "^", useAnsi, color, true);
+    Terminal::appendStyled(output, "^", useAnsi, color, true);
     carets += 1;
   }
 
@@ -201,30 +205,6 @@ function severityColor(severity: Severity): Terminal::TerminalColor {
   };
 }
 
-function appendStyledText(
-  output: &mut String,
-  text: str,
-  useAnsi: boolean,
-  color: Terminal::TerminalColor,
-  bold: boolean
-): void {
-  let mut outputRef: &mut String = output;
-
-  if (!useAnsi) {
-    outputRef.pushStr(text);
-    return;
-  }
-
-  let mut style: Terminal::Style = Terminal::Style::new();
-  style.foreground(color);
-
-  if (bold) {
-    style.attribute(Terminal::TerminalAttribute::BOLD);
-  }
-
-  let styled: String = style.apply(text);
-  outputRef.push(&styled);
-}
 
 function appendLocation(
   output: &mut String,
@@ -235,7 +215,7 @@ function appendLocation(
   let mut outputRef: &mut String = output;
 
   outputRef.pushStr("  ");
-  appendStyledText(output, "-->", useAnsi, Terminal::TerminalColor::BLUE, true);
+  Terminal::appendStyled(output, "-->", useAnsi, Terminal::TerminalColor::BLUE, true);
   outputRef.pushStr(" ");
   outputRef.pushStr(source.path.asStr());
   outputRef.pushChar(':');
@@ -255,7 +235,7 @@ function appendSummaryLine(
   let mut outputRef: &mut String = output;
 
   outputRef.pushStr("  = ");
-  appendStyledText(output, prefix, useAnsi, color, true);
+  Terminal::appendStyled(output, prefix, useAnsi, color, true);
   outputRef.pushStr(" ");
   outputRef.pushStr(message);
   outputRef.pushStr("\n");
@@ -271,7 +251,7 @@ function appendLabelBlock(
   let labelSpan: SourceSpan = label.span;
   let mut outputRef: &mut String = output;
   outputRef.pushStr("  ");
-  appendStyledText(output, "label:", useAnsi, Terminal::TerminalColor::YELLOW, true);
+  Terminal::appendStyled(output, "label:", useAnsi, Terminal::TerminalColor::YELLOW, true);
   outputRef.pushStr(" ");
   outputRef.pushStr(label.message);
   outputRef.pushStr("\n");
@@ -313,9 +293,9 @@ export namespace DiagnosticRenderer {
     let mut labelIndex: u64 = 0;
     let mut noteIndex: u64 = 0;
 
-    appendStyledText(&mut rendered, severityText, useAnsi, severityStyling, true);
+    Terminal::appendStyled(&mut rendered, severityText, useAnsi, severityStyling, true);
     rendered.pushChar('[');
-    appendStyledText(&mut rendered, diagnostic.code, useAnsi, severityStyling, true);
+    Terminal::appendStyled(&mut rendered, diagnostic.code, useAnsi, severityStyling, true);
     rendered.pushStr("]: ");
     rendered.pushStr(diagnostic.message);
     rendered.pushStr("\n");

@@ -1,5 +1,37 @@
+import Char from "std::char";
 import Path from "std::path";
-import Text from "std::text";
+import Utf8Cursor from "std::string";
+
+function storeSourceSpanPath(storage: &mut Vector<String>, value: String): str {
+  let mut storageRef: &mut Vector<String> = storage;
+  storageRef.push(value);
+
+  let Option::SOME(storedValue) = storageRef.get(storageRef.length() - 1) else {
+    @panic("failed to retain source span path");
+  };
+
+  return storedValue.toStr();
+}
+
+function parseSourceSpanNumber(text: &String, start: u64, endExclusive: u64): u64 {
+  let mut value: u64 = 0;
+  let mut index: u64 = start;
+
+  while (index < endExclusive) {
+    let Option::SOME(digit) = text.charAt(index) else {
+      @panic("invalid source span number");
+    };
+
+    let Option::SOME(digitValue) = Char::asciiDigitValue(digit) else {
+      @panic("invalid source span number");
+    };
+
+    value = value * 10 + digitValue;
+    index += 1;
+  }
+
+  return value;
+}
 
 function trimLineEnding(text: String, start: u64, endExclusive: u64): u64 {
   let mut contentEnd: u64 = endExclusive;
@@ -47,6 +79,21 @@ export record SourceSpan {
     };
   }
 
+  public static parse(text: &String, storage: &mut Vector<String>): SourceSpan {
+    let Option::SOME(colonIndex) = text.indexOfCharFrom(':', 0) else {
+      @panic("invalid span format");
+    };
+    let Option::SOME(dashIndex) = text.indexOfCharFrom('-', colonIndex + 1) else {
+      @panic("invalid span format");
+    };
+
+    let pathText: str = storeSourceSpanPath(storage, text.substringBytes(0, colonIndex));
+    let start: u64 = parseSourceSpanNumber(text, colonIndex + 1, dashIndex);
+    let end: u64 = parseSourceSpanNumber(text, dashIndex + 1, text.length());
+
+    return SourceSpan::new(pathText, start, end);
+  }
+
   public isEmpty(&self): boolean {
     return self.start == self.end;
   }
@@ -81,7 +128,7 @@ export record SourceFile {
   }
 
   private lineIndexAt(&self, position: u64): u32 {
-    let mut index: u64 = 0;
+    let mut cursor: Utf8Cursor = self.text.cursor();
     let mut line: u32 = 0;
     let mut limit: u64 = self.text.length();
 
@@ -89,12 +136,14 @@ export record SourceFile {
       limit = position;
     }
 
-    while (index < limit) {
-      if (let Option::SOME(value) = self.text.charAt(index) && value == '\n') {
+    while (!cursor.isAtEnd() && cursor.position() < limit) {
+      let Option::SOME(current) = cursor.advance() else {
+        break;
+      };
+
+      if (current.codepoint == '\n' as u32) {
         line += 1;
       }
-
-      index += 1;
     }
 
     return line;
@@ -106,18 +155,20 @@ export record SourceFile {
     }
 
     let mut currentLine: u32 = 0;
-    let mut index: u64 = 0;
+    let mut cursor: Utf8Cursor = self.text.cursor();
 
-    while (index < self.text.length()) {
-      if (let Option::SOME(value) = self.text.charAt(index) && value == '\n') {
+    while (!cursor.isAtEnd()) {
+      let Option::SOME(current) = cursor.advance() else {
+        break;
+      };
+
+      if (current.codepoint == '\n' as u32) {
         currentLine += 1;
 
         if (currentLine == lineIndex) {
-          return index + 1;
+          return current.endByte;
         }
       }
-
-      index += 1;
     }
 
     return self.text.length();
@@ -125,21 +176,27 @@ export record SourceFile {
 
   private lineEnd(&self, lineIndex: u32): u64 {
     let start: u64 = self.lineStart(lineIndex);
-    let mut index: u64 = start;
+    let mut cursor: Utf8Cursor = self.text.cursor();
 
-    while (index < self.text.length()) {
-      if (let Option::SOME(value) = self.text.charAt(index) && value == '\n') {
-        return index + 1;
+    while (!cursor.isAtEnd() && cursor.position() < start) {
+      cursor.advance();
+    }
+
+    while (!cursor.isAtEnd()) {
+      let Option::SOME(current) = cursor.advance() else {
+        break;
+      };
+
+      if (current.codepoint == '\n' as u32) {
+        return current.endByte;
       }
-
-      index += 1;
     }
 
     return self.text.length();
   }
 
   private unicodeColumn(start: u64, endExclusive: u64): u32 {
-    let mut cursor: Text::Cursor = Text::Cursor::create(self.text.toStr());
+    let mut cursor: Utf8Cursor = self.text.cursor();
     let mut column: u32 = 0;
     let mut limit: u64 = self.text.length();
 
@@ -152,11 +209,11 @@ export record SourceFile {
         break;
       };
 
-      if (current.end <= start) {
+      if (current.endByte <= start) {
         continue;
       }
 
-      if (current.start >= start) {
+      if (current.startByte >= start) {
         column += 1;
       }
     }

@@ -42,6 +42,18 @@ function terminalColorTextAppliesColorAndTrailingReset(): void {
 }
 
 @test
+function terminalStyledIfAndStripAnsiHelpersAreReusable(): void {
+  let styled: String = Terminal::styledIf("ready", true, Terminal::TerminalColor::GREEN, true);
+  let expected: String = ansi("32m").concat(ansi("1m")).concat("ready").concat(ansi("0m"));
+  let plain: String = Terminal::styledIf("ready", false, Terminal::TerminalColor::GREEN, true);
+  let normalized: String = Terminal::stripAnsiAndWhitespace(styled.concat(" \n").toStr());
+
+  Test::assertEq<str>(styled.toStr(), expected.toStr());
+  Test::assertEq<str>(plain.toStr(), "ready");
+  Test::assertEq<str>(normalized.toStr(), "ready");
+}
+
+@test
 function terminalScreenHelpersReturnCompleteCommands(): void {
   Test::assertEq<str>(Terminal::Screen::clear().toStr(), ansi("2J").toStr());
   Test::assertEq<str>(Terminal::Screen::clearLine().toStr(), ansi("2K").toStr());

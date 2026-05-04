@@ -88,6 +88,7 @@
 //! ```
 
 import LibC from "std::libc";
+import Utf8Cursor from "std::string";
 
 /// Builds a Control Sequence Introducer (CSI) escape sequence.
 ///
@@ -613,11 +614,92 @@ export namespace Terminal {
     /// ```ignis
     /// let heading: String = Terminal::styledText("Title", Terminal::TerminalAttribute::BOLD);
     /// ```
-    function styledText(text: str, attribute: Terminal::TerminalAttribute): String {
+  function styledText(text: str, attribute: Terminal::TerminalAttribute): String {
     let mut style: Terminal::Style = Terminal::Style::new();
     style.attribute(attribute);
 
     return style.apply(text);
+  }
+
+  /// Applies optional ANSI styling to `text`.
+  ///
+  /// When `useAnsi` is false, this returns `text` unchanged as an owned string.
+  /// When `useAnsi` is true, it applies the requested foreground color and
+  /// optional bold attribute with a trailing reset.
+  function styledIf(text: str, useAnsi: boolean, color: Terminal::TerminalColor, bold: boolean): String {
+    if (!useAnsi) {
+      return String::create(text);
+    }
+
+    let mut style: Terminal::Style = Terminal::Style::new();
+    style.foreground(color);
+
+    if (bold) {
+      style.attribute(Terminal::TerminalAttribute::BOLD);
+    }
+
+    return style.apply(text);
+  }
+
+  /// Appends optionally styled text to `output`.
+  function appendStyled(
+    output: &mut String,
+    text: str,
+    useAnsi: boolean,
+    color: Terminal::TerminalColor,
+    bold: boolean
+  ): void {
+    let styled: String = Terminal::styledIf(text, useAnsi, color, bold);
+    let mut outputRef: &mut String = output;
+    outputRef.push(&styled);
+  }
+
+  /// Strips ANSI escape sequences and ASCII whitespace from rendered text.
+  ///
+  /// This is intended for tests and compatibility comparisons where diagnostic
+  /// styling and layout whitespace should not affect semantic equality.
+  function stripAnsiAndWhitespace(text: str): String {
+    let owned: String = String::create(text);
+    let mut stripped: String = String::new();
+    let mut cursor: Utf8Cursor = owned.cursor();
+    let mut skippingAnsi: boolean = false;
+
+    while (!cursor.isAtEnd()) {
+      let Option::SOME(current) = cursor.advance() else {
+        break;
+      };
+      let ascii: Option<char> = current.ascii();
+
+      if (skippingAnsi) {
+        if (let Option::SOME(value) = ascii) {
+          if ((value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z')) {
+            skippingAnsi = false;
+          }
+        }
+
+        continue;
+      }
+
+      if (let Option::SOME(value) = ascii) {
+        if (value == 27 as char) {
+          skippingAnsi = true;
+          continue;
+        }
+
+        if (Terminal::isAsciiWhitespace(value)) {
+          continue;
+        }
+      }
+
+      let segment: String = cursor.slice(current.startByte, current.endByte);
+      stripped.push(&segment);
+    }
+
+    return stripped;
+  }
+
+  function isAsciiWhitespace(value: char): boolean {
+    return value == ' ' || value == '\n' || value == '\r' || value == '\t';
   }
 
   /// Returns `true` when stdin is attached to a terminal.

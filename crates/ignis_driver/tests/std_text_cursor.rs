@@ -8,10 +8,15 @@ fn workspace_std_path() -> PathBuf {
 }
 
 #[test]
-fn run_std_tests_executes_text_cursor_slice() {
+fn run_std_tests_executes_string_utf8_cursor_slice() {
   let output_dir = TempDir::new().expect("temporary std output dir");
 
-  let result = run_std_tests(&workspace_std_path(), Some("text::tests"), false, Some(output_dir.path()));
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("string::tests::utf8CursorSlicesByByteRange"),
+    false,
+    Some(output_dir.path()),
+  );
 
-  assert!(result.is_ok(), "expected text std cursor slice to succeed");
+  assert!(result.is_ok(), "expected string UTF-8 cursor slice to succeed");
 }

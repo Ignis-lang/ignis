@@ -1,6 +1,6 @@
 import Hasher from "std::hash";
 import Memory from "std::memory";
-import String from "std::string";
+import String, Utf8Cursor, Utf8ScalarSpan from "std::string";
 import Test from "std::test";
 
 function hashString(value: &String): u64 {
@@ -15,6 +15,42 @@ function buildInteriorNulString(last: char): String {
   value.pushChar('\0');
   value.pushChar(last);
   return value;
+}
+
+function nextScalar(cursor: &mut Utf8Cursor): Utf8ScalarSpan {
+  let mut stream: &mut Utf8Cursor = cursor;
+
+  let Option::SOME(value) = stream.advance() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return value;
+}
+
+function utf8SampleString(): String {
+  let raw: *mut u8 = Memory::allocateVector<u8>(6);
+
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 195 as u8);
+  @write<u8>(raw + 2, 169 as u8);
+  @write<u8>(raw + 3, 228 as u8);
+  @write<u8>(raw + 4, 184 as u8);
+  @write<u8>(raw + 5, 173 as u8);
+
+  return String::create(raw, 6 as u64);
+}
+
+function utf8TailString(): String {
+  let raw: *mut u8 = Memory::allocateVector<u8>(5);
+
+  @write<u8>(raw, 195 as u8);
+  @write<u8>(raw + 1, 169 as u8);
+  @write<u8>(raw + 2, 228 as u8);
+  @write<u8>(raw + 3, 184 as u8);
+  @write<u8>(raw + 4, 173 as u8);
+
+  return String::create(raw, 5 as u64);
 }
 
 @test
@@ -220,6 +256,86 @@ function byteAtReadsRawUtf8BytesWithoutScalarDecoding(): void {
   Test::assertEq<u8>(second, 169 as u8);
 
   Memory::free(raw);
+}
+
+@test
+function stringHelpersCoverPrefixesSlicesTrimmingAndLines(): void {
+  let text: String = String::create("  alpha\nbeta\n  ");
+  let trimmed: String = text.trimAsciiWhitespace();
+  let expectedFirstLine: str = "alpha";
+  let lines: Vector<String> = trimmed.lines();
+  let firstLine: &String = match (lines.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> {
+      Test::fail();
+      @unreachable();
+    },
+  };
+  let secondLine: &String = match (lines.get(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> {
+      Test::fail();
+      @unreachable();
+    },
+  };
+
+  Test::assert(text.startsWith("  al"));
+  Test::assert(!text.startsWith("alpha"));
+  Test::assert(trimmed.equals("alpha\nbeta"));
+  Test::assert(expectedFirstLine.equals(firstLine.toStr()));
+  Test::assertEq<u64>(match (text.indexOfCharFrom('a', 0)) { Option::SOME(value) -> value, Option::NONE -> 99 }, 2);
+  Test::assertEq<str>(trimmed.toStr(), "alpha\nbeta");
+  Test::assertEq<u64>(lines.length(), 2);
+  Test::assertEq<str>(firstLine.toStr(), "alpha");
+  Test::assertEq<str>(secondLine.toStr(), "beta");
+}
+
+@test
+function utf8CursorAdvancesByScalarBoundaries(): void {
+  let source: String = utf8SampleString();
+  let mut cursor: Utf8Cursor = source.cursor();
+
+  let first: Utf8ScalarSpan = nextScalar(&mut cursor);
+  Test::assertEq<u32>(first.codepoint, 'a' as u32);
+  Test::assertEq<u64>(first.startByte, 0);
+  Test::assertEq<u64>(first.endByte, 1);
+
+  let second: Utf8ScalarSpan = nextScalar(&mut cursor);
+  Test::assertEq<u32>(second.codepoint, 233);
+  Test::assertEq<u64>(second.startByte, 1);
+  Test::assertEq<u64>(second.endByte, 3);
+
+  let third: Utf8ScalarSpan = nextScalar(&mut cursor);
+  Test::assertEq<u32>(third.codepoint, 20013);
+  Test::assertEq<u64>(third.startByte, 3);
+  Test::assertEq<u64>(third.endByte, 6);
+
+  Test::assert(cursor.isAtEnd());
+}
+
+@test
+function utf8CursorSlicesByByteRange(): void {
+  let source: String = utf8SampleString();
+  let cursor: Utf8Cursor = source.cursor();
+  let value: String = cursor.slice(1, 6);
+  let expected: String = utf8TailString();
+
+  Test::assert(value.equals(&expected));
+}
+
+@test
+function utf8CursorEatAsciiConsumesOnlyMatchingAscii(): void {
+  let source: String = utf8SampleString();
+  let mut cursor: Utf8Cursor = source.cursor();
+
+  Test::assert(cursor.eatAscii('a'));
+  Test::assertEq<u64>(cursor.position(), 1);
+
+  Test::assert(!cursor.eatAscii('a'));
+  Test::assertEq<u64>(cursor.position(), 1);
+
+  Test::assert(!cursor.eatAscii('b'));
+  Test::assertEq<u64>(cursor.position(), 1);
 }
 
 @test
