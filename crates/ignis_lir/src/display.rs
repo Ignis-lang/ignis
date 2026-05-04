@@ -516,7 +516,7 @@ impl<'a> LirPrinter<'a> {
       ConstValue::UInt(v, _) => format!("{}u", v),
       ConstValue::Float(v, _) => format!("{}", v),
       ConstValue::Bool(v, _) => format!("{}", v),
-      ConstValue::Char(v, _) => format!("'{}'", escape_byte(*v)),
+      ConstValue::Char(v, _) => format!("'{}'", escape_scalar(*v)),
       ConstValue::String(v, _) => format!("\"{}\"", escape_string(v)),
       ConstValue::Atom(id, _) => format!(":atom#{}", id),
       ConstValue::Null(_) => "null".to_string(),
@@ -648,17 +648,20 @@ fn escape_char(c: char) -> String {
   }
 }
 
-fn escape_byte(value: u8) -> String {
+fn escape_scalar(value: u32) -> String {
   match value {
-    b'\n' => "\\n".to_string(),
-    b'\r' => "\\r".to_string(),
-    b'\t' => "\\t".to_string(),
-    b'\0' => "\\0".to_string(),
-    b'\\' => "\\\\".to_string(),
-    b'\'' => "\\'".to_string(),
-    b'"' => "\\\"".to_string(),
-    b if b.is_ascii_graphic() || b == b' ' => (b as char).to_string(),
-    _ => format!("\\x{:02x}", value),
+    10 => "\\n".to_string(),
+    13 => "\\r".to_string(),
+    9 => "\\t".to_string(),
+    0 => "\\0".to_string(),
+    92 => "\\\\".to_string(),
+    39 => "\\'".to_string(),
+    34 => "\\\"".to_string(),
+    _ => match char::from_u32(value) {
+      Some(c) if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+      Some(_) => format!("\\u{{{:x}}}", value),
+      None => format!("\\u{{{:x}}}", value),
+    },
   }
 }
 

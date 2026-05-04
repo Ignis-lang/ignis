@@ -817,6 +817,52 @@ fn e2e_char_unicode_escape_byte() {
 function main(): i32 {
     let value: char = '\u{00FF}';
     return value as i32;
+    }
+"#,
+  );
+}
+
+#[test]
+fn e2e_char_unicode_scalar() {
+  e2e_test(
+    "char_unicode_scalar",
+    r#"
+function echo(value: char): char {
+    return value;
+}
+
+function main(): i32 {
+    let heart: char = echo('\u{2764}');
+
+    if (heart as i32 == 10084) {
+        return 42;
+    }
+
+    return 1;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_char_unicode_scalar_argument_and_return_round_trip() {
+  e2e_test(
+    "char_unicode_scalar_argument_and_return_round_trip",
+    r#"
+function bounce(value: char): char {
+    return value;
+}
+
+function combine(left: char, right: char): i32 {
+    if (bounce(left) as i32 == 233 && bounce(right) as i32 == 20013) {
+        return 42;
+    }
+
+    return 1;
+}
+
+function main(): i32 {
+    return combine('é', '中');
 }
 "#,
   );

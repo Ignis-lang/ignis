@@ -53,8 +53,8 @@ fn print_body(
   sm: &SourceMap,
 ) {
   let file = sm.get(&diag.primary_span.file);
-  let (line, col): (u32, u32) = sm.line_col(&diag.primary_span.file, diag.primary_span.start);
-  let (end_line, end_col): (u32, u32) = sm.line_col(&diag.primary_span.file, diag.primary_span.end);
+  let (line, col): (u32, u32) = sm.display_line_col(&diag.primary_span.file, diag.primary_span.start);
+  let (end_line, end_col): (u32, u32) = sm.display_line_col(&diag.primary_span.file, diag.primary_span.end);
 
   println!(
     "{:2}{} {}:{}:{}",
@@ -110,7 +110,7 @@ fn print_body(
   // Labels adicionales
   for label in &diag.labels {
     println!();
-    let (label_line, label_col): (u32, u32) = sm.line_col(&label.span.file, label.span.start);
+    let (label_line, label_col): (u32, u32) = sm.display_line_col(&label.span.file, label.span.start);
     println!("  {} {}", "label:".yellow().bold(), label.message);
 
     if let Some(label_line_text) = lines.get((label_line as usize).saturating_sub(1)) {

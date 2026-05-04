@@ -572,6 +572,34 @@ fn run_std_tests_executes_string_snapshot_slice() {
 }
 
 #[test]
+fn run_std_tests_executes_string_utf8_char_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("string::tests::charAtDecodesUtf8ScalarAtByteBoundary"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected std string utf8 charAt slice to succeed");
+}
+
+#[test]
+fn run_std_tests_executes_string_utf8_push_slice() {
+  let output_dir = TempDir::new().expect("temporary std output dir");
+
+  let result = run_std_tests(
+    &workspace_std_path(),
+    Some("string::tests::pushCharEncodesScalarUtf8BytesAndPushByteStaysByteOriented"),
+    false,
+    Some(output_dir.path()),
+  );
+
+  assert!(result.is_ok(), "expected std string utf8 push slice to succeed");
+}
+
+#[test]
 fn run_std_tests_executes_path_normalize_slice() {
   let output_dir = TempDir::new().expect("temporary std output dir");
 

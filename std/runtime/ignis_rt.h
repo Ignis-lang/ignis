@@ -28,6 +28,7 @@ typedef double f64;
 typedef u8 boolean;
 
 typedef u32 ignis_atom_t;
+typedef u32 ignis_char_t;
 
 typedef void *Pointer;
 
@@ -316,9 +317,14 @@ IgnisString ignis_string_from_len(const char *s, size_t len);
 IgnisString ignis_string_clone(const IgnisString *s);
 
 /**
- * Appends a single byte to the string in place.
+ * Appends a Unicode scalar to the string in place, encoded as UTF-8 bytes.
  */
-void ignis_string_push_char(IgnisString *s, u8 c);
+void ignis_string_push_char(IgnisString *s, ignis_char_t c);
+
+/**
+ * Appends a single raw byte to the string in place.
+ */
+void ignis_string_push_byte(IgnisString *s, u8 c);
 
 /**
  * Appends a C string to the string in place.
@@ -349,9 +355,18 @@ size_t ignis_string_len(const IgnisString *s);
 size_t ignis_string_cap(const IgnisString *s);
 
 /**
- * Returns the byte at `idx`, or 0 if out of range.
+ * Decodes the scalar that starts at byte `idx`.
+ *
+ * On success, returns the scalar and writes the exclusive end byte offset to
+ * `out_end`. On failure or non-boundary input, returns 0 and leaves `*out_end`
+ * equal to `idx`.
  */
-u8 ignis_string_char_at(const IgnisString *s, size_t idx);
+ignis_char_t ignis_string_char_at(const IgnisString *s, size_t idx, size_t *out_end);
+
+/**
+ * Returns the raw byte at `idx`, or 0 if out of range.
+ */
+u8 ignis_string_byte_at(const IgnisString *s, size_t idx);
 
 /**
  * Clears the string to length 0 without releasing capacity.

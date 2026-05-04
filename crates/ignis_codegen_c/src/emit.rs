@@ -1562,7 +1562,7 @@ impl<'a> CEmitter<'a> {
       ConstValue::Int(i) => i.to_string(),
       ConstValue::Float(f) => format!("{:.}", f.into_inner()),
       ConstValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-      ConstValue::Char(c) => format!("((u8){})", c),
+      ConstValue::Char(c) => format!("((ignis_char_t){})", c),
       ConstValue::String(s) => format!("\"{}\"", s.escape_default()),
       ConstValue::Null => "NULL".to_string(),
       ConstValue::Array(arr) => {
@@ -2899,7 +2899,7 @@ impl<'a> CEmitter<'a> {
         }
       },
       ConstValue::Bool(v, _) => format!("{}", v),
-      ConstValue::Char(v, _) => format!("((u8){})", *v as u32),
+      ConstValue::Char(v, _) => format!("((ignis_char_t){})", *v),
       ConstValue::String(v, _ty) => {
         format!("\"{}\"", Self::escape_string(v))
       },
@@ -3100,7 +3100,7 @@ impl<'a> CEmitter<'a> {
       Type::F32 => "f32".to_string(),
       Type::F64 => "f64".to_string(),
       Type::Boolean => "boolean".to_string(),
-      Type::Char => "u8".to_string(),
+      Type::Char => "ignis_char_t".to_string(),
       Type::Str => "const char*".to_string(),
       Type::Atom => "ignis_atom_t".to_string(),
       Type::Void => "void".to_string(),
@@ -5659,7 +5659,7 @@ pub fn format_c_type(
     Type::F32 => "f32".to_string(),
     Type::F64 => "f64".to_string(),
     Type::Boolean => "boolean".to_string(),
-    Type::Char => "u8".to_string(),
+    Type::Char => "ignis_char_t".to_string(),
     Type::Str => "const char*".to_string(),
     Type::Atom => "ignis_atom_t".to_string(),
     Type::Void => "void".to_string(),

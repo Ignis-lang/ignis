@@ -6,6 +6,165 @@
 #define INT_BUF_SIZE 24
 #define FLOAT_BUF_SIZE 32
 
+static ignis_char_t ignis_utf8_replacement_char(void) {
+  return 0xFFFDu;
+}
+
+static ignis_char_t ignis_utf8_normalize_scalar(ignis_char_t scalar) {
+  if ((scalar >= 0xD800u && scalar <= 0xDFFFu) || scalar > 0x10FFFFu) {
+    return ignis_utf8_replacement_char();
+  }
+
+  return scalar;
+}
+
+static size_t ignis_utf8_encode_scalar(ignis_char_t scalar, u8 out[4]) {
+  ignis_char_t normalized = ignis_utf8_normalize_scalar(scalar);
+
+  if (normalized <= 0x7Fu) {
+    out[0] = (u8)normalized;
+    return 1;
+  }
+
+  if (normalized <= 0x7FFu) {
+    out[0] = (u8)(0xC0u | (normalized >> 6));
+    out[1] = (u8)(0x80u | (normalized & 0x3Fu));
+    return 2;
+  }
+
+  if (normalized <= 0xFFFFu) {
+    out[0] = (u8)(0xE0u | (normalized >> 12));
+    out[1] = (u8)(0x80u | ((normalized >> 6) & 0x3Fu));
+    out[2] = (u8)(0x80u | (normalized & 0x3Fu));
+    return 3;
+  }
+
+  out[0] = (u8)(0xF0u | (normalized >> 18));
+  out[1] = (u8)(0x80u | ((normalized >> 12) & 0x3Fu));
+  out[2] = (u8)(0x80u | ((normalized >> 6) & 0x3Fu));
+  out[3] = (u8)(0x80u | (normalized & 0x3Fu));
+  return 4;
+}
+
+static bool ignis_utf8_decode_at(
+  const IgnisString *s,
+  size_t idx,
+  ignis_char_t *out_scalar,
+  size_t *out_end
+) {
+  if (out_end != NULL) {
+    *out_end = idx;
+  }
+
+  if (out_scalar != NULL) {
+    *out_scalar = 0;
+  }
+
+  if (s == NULL || s->data == NULL || idx >= s->len) {
+    return false;
+  }
+
+  const u8 *data = (const u8 *)s->data;
+  u8 first = data[idx];
+
+  if (first <= 0x7Fu) {
+    if (out_scalar != NULL) {
+      *out_scalar = (ignis_char_t)first;
+    }
+    if (out_end != NULL) {
+      *out_end = idx + 1;
+    }
+    return true;
+  }
+
+  if (first >= 0x80u && first <= 0xBFu) {
+    return false;
+  }
+
+  if (first >= 0xC2u && first <= 0xDFu) {
+    if (idx + 1 >= s->len) {
+      return false;
+    }
+
+    u8 second = data[idx + 1];
+    if (second < 0x80u || second > 0xBFu) {
+      return false;
+    }
+
+    if (out_scalar != NULL) {
+      *out_scalar = (ignis_char_t)(((first & 0x1Fu) << 6) | (second & 0x3Fu));
+    }
+    if (out_end != NULL) {
+      *out_end = idx + 2;
+    }
+    return true;
+  }
+
+  if (first >= 0xE0u && first <= 0xEFu) {
+    if (idx + 2 >= s->len) {
+      return false;
+    }
+
+    u8 second = data[idx + 1];
+    u8 third = data[idx + 2];
+    if (second < 0x80u || second > 0xBFu || third < 0x80u || third > 0xBFu) {
+      return false;
+    }
+    if (first == 0xE0u && second < 0xA0u) {
+      return false;
+    }
+    if (first == 0xEDu && second >= 0xA0u) {
+      return false;
+    }
+
+    if (out_scalar != NULL) {
+      *out_scalar = (ignis_char_t)(((first & 0x0Fu) << 12) | ((second & 0x3Fu) << 6) | (third & 0x3Fu));
+    }
+    if (out_end != NULL) {
+      *out_end = idx + 3;
+    }
+    return true;
+  }
+
+  if (first >= 0xF0u && first <= 0xF4u) {
+    if (idx + 3 >= s->len) {
+      return false;
+    }
+
+    u8 second = data[idx + 1];
+    u8 third = data[idx + 2];
+    u8 fourth = data[idx + 3];
+    if (
+      second < 0x80u || second > 0xBFu ||
+      third < 0x80u || third > 0xBFu ||
+      fourth < 0x80u || fourth > 0xBFu
+    ) {
+      return false;
+    }
+    if (first == 0xF0u && second < 0x90u) {
+      return false;
+    }
+    if (first == 0xF4u && second > 0x8Fu) {
+      return false;
+    }
+
+    if (out_scalar != NULL) {
+      *out_scalar = (ignis_char_t)(
+        ((first & 0x07u) << 18) |
+        ((second & 0x3Fu) << 12) |
+        ((third & 0x3Fu) << 6) |
+        (fourth & 0x3Fu)
+      );
+    }
+    if (out_end != NULL) {
+      *out_end = idx + 4;
+    }
+    return true;
+  }
+
+  return false;
+}
+
 // =============================================================================
 // Internal helpers
 // =============================================================================
@@ -128,7 +287,27 @@ IgnisString ignis_string_clone(const IgnisString *s) {
   return ignis_string_from_len(s->data, s->len);
 }
 
-void ignis_string_push_char(IgnisString *s, u8 c) {
+void ignis_string_push_char(IgnisString *s, ignis_char_t c) {
+  if (s == NULL) {
+    return;
+  }
+
+  u8 encoded[4];
+  size_t encoded_len = ignis_utf8_encode_scalar(c, encoded);
+  size_t required = s->len + encoded_len + 1;
+  if (required > s->cap) {
+    ignis_string_grow(s, required);
+  }
+
+  for (size_t index = 0; index < encoded_len; index++) {
+    s->data[s->len + index] = (char)encoded[index];
+  }
+
+  s->len += encoded_len;
+  s->data[s->len] = '\0';
+}
+
+void ignis_string_push_byte(IgnisString *s, u8 c) {
   if (s == NULL) {
     return;
   }
@@ -138,7 +317,7 @@ void ignis_string_push_char(IgnisString *s, u8 c) {
     ignis_string_grow(s, required);
   }
 
-  s->data[s->len] = c;
+  s->data[s->len] = (char)c;
   s->len++;
   s->data[s->len] = '\0';
 }
@@ -202,7 +381,16 @@ size_t ignis_string_cap(const IgnisString *s) {
   return s->cap;
 }
 
-u8 ignis_string_char_at(const IgnisString *s, size_t idx) {
+ignis_char_t ignis_string_char_at(const IgnisString *s, size_t idx, size_t *out_end) {
+  ignis_char_t scalar = 0;
+  if (!ignis_utf8_decode_at(s, idx, &scalar, out_end)) {
+    return 0;
+  }
+
+  return scalar;
+}
+
+u8 ignis_string_byte_at(const IgnisString *s, size_t idx) {
   if (s == NULL || idx >= s->len) {
     return 0;
   }

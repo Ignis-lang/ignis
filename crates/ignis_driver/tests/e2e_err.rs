@@ -291,37 +291,37 @@ function main(): void {
 }
 
 #[test]
-fn e2e_err_multi_byte_char_literal() {
+fn e2e_err_multi_scalar_char_literal() {
   use ignis_type::compilation_context::CompilationContext;
 
   let errors = common::parse_errors_with_ctx(
     r#"
 function main(): i32 {
-    let c: char = 'ñ';
+    let c: char = 'ab';
     return c as i32;
 }
 "#,
     CompilationContext::default(),
   );
 
-  assert!(!errors.is_empty(), "Expected parse error for multi-byte char literal");
+  assert!(!errors.is_empty(), "Expected parse error for multi-scalar char literal");
   assert!(
     errors
       .iter()
-      .any(|error| error.contains("multi-byte char literal; use str")),
-    "Expected multi-byte char literal error, got: {:?}",
+      .any(|error| error.contains("Invalid char literal: expected exactly one Unicode scalar value")),
+    "Expected Unicode-scalar char literal error, got: {:?}",
     errors
   );
 }
 
 #[test]
-fn e2e_err_multi_byte_char_literal_unicode_escape() {
+fn e2e_err_surrogate_char_literal_unicode_escape() {
   use ignis_type::compilation_context::CompilationContext;
 
   let errors = common::parse_errors_with_ctx(
     r#"
 function main(): i32 {
-    let c: char = '\u{100}';
+    let c: char = '\u{D800}';
     return c as i32;
 }
 "#,
@@ -330,13 +330,13 @@ function main(): i32 {
 
   assert!(
     !errors.is_empty(),
-    "Expected parse error for multi-byte char literal unicode escape"
+    "Expected parse error for surrogate char literal unicode escape"
   );
   assert!(
     errors
       .iter()
-      .any(|error| error.contains("multi-byte char literal; use str")),
-    "Expected multi-byte char literal error, got: {:?}",
+      .any(|error| error.contains("Invalid char escape: expected a valid Unicode scalar")),
+    "Expected Unicode-scalar char escape error, got: {:?}",
     errors
   );
 }

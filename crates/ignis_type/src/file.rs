@@ -130,6 +130,14 @@ impl SourceMap {
     file: &FileId,
     pos: BytePosition,
   ) -> (u32, u32) {
+    self.display_line_col(file, pos)
+  }
+
+  pub fn display_line_col(
+    &self,
+    file: &FileId,
+    pos: BytePosition,
+  ) -> (u32, u32) {
     let f = self.get(file);
     let line = upper_bound_line(&f.line_starts, pos);
     let line_start = f.line_starts[line].0 as usize;
@@ -312,6 +320,16 @@ mod tests {
     assert_eq!(source_map.byte_line_col(&file, BytePosition(1)), (1, 2));
     assert_eq!(source_map.byte_line_col(&file, BytePosition(3)), (1, 4));
     assert_eq!(source_map.line_col(&file, BytePosition(3)), (1, 3));
+  }
+
+  #[test]
+  fn display_line_col_uses_unicode_columns_for_multibyte_text() {
+    let mut source_map = SourceMap::new();
+    let file = source_map.add_virtual("utf8", "aéb".to_string());
+
+    assert_eq!(source_map.display_line_col(&file, BytePosition(0)), (1, 1));
+    assert_eq!(source_map.display_line_col(&file, BytePosition(1)), (1, 2));
+    assert_eq!(source_map.display_line_col(&file, BytePosition(3)), (1, 3));
   }
 
   #[test]

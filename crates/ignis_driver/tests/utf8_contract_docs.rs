@@ -49,10 +49,14 @@ fn utf8_std_docs_distinguish_owned_string_from_borrowed_str() {
 #[test]
 fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   let string_mod = read_repo_file("std/string/mod.ign");
+  let text_mod = read_repo_file("std/text/mod.ign");
+  let char_mod = read_repo_file("std/char/mod.ign");
   let fs_mod = read_repo_file("std/fs/mod.ign");
   let diagnostics = read_repo_file("crates/ignis_diagnostics/src/message.rs");
   let lexer = read_repo_file("crates/ignis_parser/src/lexer/mod.rs");
   let emit = read_repo_file("crates/ignis_codegen_c/src/emit.rs");
+  let language_reference = read_repo_file("docs/LANGUAGE_REFERENCE_CURRENT.md");
+  let runtime_readme = read_repo_file("std/runtime/README.md");
 
   assert!(string_mod.contains("function ignis_string_init_from_len(out: &mut String, s: *mut u8, len: u64): void;"));
   assert!(string_mod.contains("public static create(bytes: *mut u8, len: u64): String"));
@@ -61,8 +65,19 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   assert!(fs_mod.contains("return Result::OK(String::create(raw, len));"));
   assert!(!fs_mod.contains("String::create(raw as str)"));
 
-  assert!(diagnostics.contains("multi-byte char literal; use str"));
-  assert!(lexer.contains("DiagnosticMessage::MultiByteCharacterLiteral"));
-  assert!(emit.contains("Type::Char => \"u8\".to_string()"));
+  assert!(diagnostics.contains("Invalid char escape: expected a valid Unicode scalar"));
+  assert!(lexer.contains("fn decode_unicode_char_escape"));
+  assert!(string_mod.contains("`charAt` and `pushChar` work with native `char` values"));
+  assert!(string_mod.contains("`byteAt`, `pushByte`, `forEachByte`"));
+  assert!(text_mod.contains("record CharSpan"));
+  assert!(!text_mod.contains("record Utf8Char"));
+  assert!(char_mod.contains("native `char` values"));
+  assert!(language_reference.contains("Unicode scalar"));
+  assert!(!language_reference.contains("`char` (single byte)"));
+  assert!(!language_reference.contains("byte-oriented in v0.4"));
+  assert!(runtime_readme.contains("ignis_string_push_char"));
+  assert!(runtime_readme.contains("ignis_string_push_byte"));
+  assert!(runtime_readme.contains("ignis_string_byte_at"));
+  assert!(emit.contains("Type::Char => \"ignis_char_t\".to_string()"));
   assert!(emit.contains("Type::Str => \"const char*\".to_string()"));
 }

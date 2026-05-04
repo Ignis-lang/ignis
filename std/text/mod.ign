@@ -12,17 +12,17 @@ import String from "std::string";
 /// byte offsets compatible with `String::substring` and diagnostics.
 export namespace Text {
   /// Decoded UTF-8 scalar plus its source byte range.
-  record Utf8Char {
+  record CharSpan {
     /// Unicode scalar value, or U+FFFD for invalid byte sequences.
-    public scalar: u32;
+    public value: char;
     /// Inclusive byte offset where this scalar begins.
-    public start: u64;
+    public startByte: u64;
     /// Exclusive byte offset where this scalar ends.
-    public end: u64;
+    public endByte: u64;
 
     /// Returns whether this scalar fits in a single ASCII byte.
     public isAscii(&self): boolean {
-      return self.scalar <= 127;
+      return self.value <= 127 as char;
     }
 
     /// Returns this scalar as `char` when it is ASCII.
@@ -31,7 +31,7 @@ export namespace Text {
         return Option::NONE;
       }
 
-      return Option::SOME(self.scalar as char);
+      return Option::SOME(self.value);
     }
   }
 
@@ -79,17 +79,17 @@ export namespace Text {
     }
 
     /// Decodes the current scalar without advancing the cursor.
-    public peek(&self): Option<Text::Utf8Char> {
+    public peek(&self): Option<Text::CharSpan> {
       let source: String = self.source.clone();
       return Text::decodeAt(&source, self.offset);
     }
 
     /// Decodes the current scalar and advances past it.
-    public advance(&mut self): Option<Text::Utf8Char> {
-      let decoded: Option<Text::Utf8Char> = self.peek();
+    public advance(&mut self): Option<Text::CharSpan> {
+      let decoded: Option<Text::CharSpan> = self.peek();
 
       if (let Option::SOME(ch) = decoded) {
-        self.offset = ch.end;
+        self.offset = ch.endByte;
         return Option::SOME(ch);
       }
 
@@ -110,7 +110,7 @@ export namespace Text {
         return false;
       }
 
-      self.offset = current.end;
+      self.offset = current.endByte;
       return true;
     }
   }
@@ -140,11 +140,19 @@ export namespace Text {
   }
 
   /// Builds a replacement-character scalar for invalid UTF-8 at `start`.
-  function invalidUtf8(start: u64): Text::Utf8Char {
-    return Text::Utf8Char {
-      scalar: 65533,
-      start: start,
-      end: start + 1,
+  function invalidUtf8(start: u64): Text::CharSpan {
+    return Text::CharSpan {
+      value: 65533 as char,
+      startByte: start,
+      endByte: start + 1,
+    };
+  }
+
+  function scalarSpan(value: char, startByte: u64, endByte: u64): Text::CharSpan {
+    return Text::CharSpan {
+      value: value,
+      startByte: startByte,
+      endByte: endByte,
     };
   }
 
@@ -152,7 +160,7 @@ export namespace Text {
   ///
   /// Invalid byte sequences return U+FFFD covering the first invalid byte so the
   /// cursor can make progress while preserving diagnostic offsets.
-  function decodeAt(source: &String, offset: u64): Option<Text::Utf8Char> {
+  function decodeAt(source: &String, offset: u64): Option<Text::CharSpan> {
     if (offset >= source.length()) {
       return Option::NONE;
     }
@@ -162,11 +170,7 @@ export namespace Text {
     };
 
     if (first < 128) {
-      return Option::SOME(Text::Utf8Char {
-        scalar: first as u32,
-        start: offset,
-        end: offset + 1,
-      });
+      return Option::SOME(Text::scalarSpan(first as char, offset, offset + 1));
     }
 
     if (first >= 194 && first <= 223) {
@@ -174,11 +178,9 @@ export namespace Text {
         return Option::SOME(Text::invalidUtf8(offset));
       };
 
-      return Option::SOME(Text::Utf8Char {
-        scalar: ((first - 192) as u32) * 64 + second,
-        start: offset,
-        end: offset + 2,
-      });
+      let scalar: u32 = ((first - 192) as u32) * 64 + second;
+
+      return Option::SOME(Text::scalarSpan(scalar as char, offset, offset + 2));
     }
 
     if (first >= 224 && first <= 239) {
@@ -186,21 +188,27 @@ export namespace Text {
         return Option::SOME(Text::invalidUtf8(offset));
       };
 
+      if ((first == 224 && second < 32) || (first == 237 && second >= 32)) {
+        return Option::SOME(Text::invalidUtf8(offset));
+      }
+
       let Option::SOME(third) = Text::continuation(source, offset + 2) else {
         return Option::SOME(Text::invalidUtf8(offset));
       };
 
-      return Option::SOME(Text::Utf8Char {
-        scalar: ((first - 224) as u32) * 4096 + second * 64 + third,
-        start: offset,
-        end: offset + 3,
-      });
+      let scalar: u32 = ((first - 224) as u32) * 4096 + second * 64 + third;
+
+      return Option::SOME(Text::scalarSpan(scalar as char, offset, offset + 3));
     }
 
     if (first >= 240 && first <= 244) {
       let Option::SOME(second) = Text::continuation(source, offset + 1) else {
         return Option::SOME(Text::invalidUtf8(offset));
       };
+
+      if ((first == 240 && second < 16) || (first == 244 && second >= 16)) {
+        return Option::SOME(Text::invalidUtf8(offset));
+      }
 
       let Option::SOME(third) = Text::continuation(source, offset + 2) else {
         return Option::SOME(Text::invalidUtf8(offset));
@@ -210,11 +218,9 @@ export namespace Text {
         return Option::SOME(Text::invalidUtf8(offset));
       };
 
-      return Option::SOME(Text::Utf8Char {
-        scalar: ((first - 240) as u32) * 262144 + second * 4096 + third * 64 + fourth,
-        start: offset,
-        end: offset + 4,
-      });
+      let scalar: u32 = ((first - 240) as u32) * 262144 + second * 4096 + third * 64 + fourth;
+
+      return Option::SOME(Text::scalarSpan(scalar as char, offset, offset + 4));
     }
 
     return Option::SOME(Text::invalidUtf8(offset));

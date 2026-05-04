@@ -25,6 +25,7 @@ static inline void ignis_runtime_init(i32 argc, char **argv) {
   (void)argv;
 }
 typedef u32 ignis_atom_t;
+typedef u32 ignis_char_t;
 typedef char *string;
 
 /* Minimal string runtime stubs for E2E tests */

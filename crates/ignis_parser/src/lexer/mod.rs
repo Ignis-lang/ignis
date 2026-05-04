@@ -15,7 +15,7 @@ pub struct IgnisLexer<'a> {
   prev: char,
   pub diagnostics: Vec<DiagnosticMessage>,
   pending_string: Option<String>,
-  pending_char: Option<u8>,
+  pending_char: Option<u32>,
 }
 
 impl<'a> IgnisLexer<'a> {
@@ -288,7 +288,15 @@ impl<'a> IgnisLexer<'a> {
   fn char_literal(&mut self) -> LexerResult {
     let char_start = self.start;
 
-    if self.is_at_end() || self.peek() == '\'' {
+    if self.is_at_end() {
+      return Err(Box::new(DiagnosticMessage::InvalidCharacter(
+        self.mk_span(char_start, self.current),
+      )));
+    }
+
+    if self.peek() == '\'' {
+      self.advance();
+
       return Err(Box::new(DiagnosticMessage::InvalidCharacter(
         self.mk_span(char_start, self.current),
       )));
@@ -296,88 +304,31 @@ impl<'a> IgnisLexer<'a> {
 
     let c = if self.peek() == '\\' {
       self.advance();
-      match self.peek() {
-        'b' => b'\x08',
-        'f' => b'\x0C',
-        'n' => b'\n',
-        'r' => b'\r',
-        't' => b'\t',
-        '0' => b'\0',
-        '\\' => b'\\',
-        '\'' => b'\'',
-        'u' => {
-          self.advance();
-
-          if self.peek() != '{' {
-            return Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
-              self.mk_span(char_start, self.current),
-            )));
-          }
-
-          self.advance();
-
-          let hex_start = self.current;
-          while self.peek().is_ascii_hexdigit() {
-            self.advance();
-          }
-
-          if self.peek() != '}' {
-            return Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
-              self.mk_span(char_start, self.current),
-            )));
-          }
-
-          let hex_str = &self.source[hex_start..self.current];
-          let code_point = u32::from_str_radix(hex_str, 16).map_err(|_| {
-            Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
-              self.mk_span(char_start, self.current),
-            ))
-          })?;
-
-          if code_point > u8::MAX as u32 {
-            if self.peek() == '}' {
-              self.advance();
-            }
-
-            if self.peek() == '\'' {
-              self.advance();
-            }
-
-            return Err(Box::new(DiagnosticMessage::MultiByteCharacterLiteral(
-              self.mk_span(char_start, self.current),
-            )));
-          }
-
-          code_point as u8
-        },
-        _ => {
-          return Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
-            self.mk_span(char_start, self.current),
-          )));
-        },
-      }
+      self.decode_char_escape(char_start)?
     } else {
       let value = self.peek();
+      self.advance();
+      value as u32
+    };
 
-      if value.len_utf8() != 1 {
-        self.advance();
+    if self.is_at_end() {
+      return Err(Box::new(DiagnosticMessage::UnterminatedCharacter(
+        self.mk_span(char_start, self.current),
+      )));
+    }
 
-        if self.peek() == '\'' {
-          self.advance();
-        }
+    if self.peek() != '\'' {
+      self.skip_to_char_terminator();
 
-        return Err(Box::new(DiagnosticMessage::MultiByteCharacterLiteral(
+      if self.is_at_end() {
+        return Err(Box::new(DiagnosticMessage::UnterminatedCharacter(
           self.mk_span(char_start, self.current),
         )));
       }
 
-      value as u8
-    };
+      self.advance();
 
-    self.advance();
-
-    if self.is_at_end() || self.peek() != '\'' {
-      return Err(Box::new(DiagnosticMessage::UnterminatedCharacter(
+      return Err(Box::new(DiagnosticMessage::InvalidCharacter(
         self.mk_span(char_start, self.current),
       )));
     }
@@ -386,6 +337,105 @@ impl<'a> IgnisLexer<'a> {
 
     self.pending_char = Some(c);
     Ok(TokenType::Char)
+  }
+
+  fn decode_char_escape(
+    &mut self,
+    char_start: usize,
+  ) -> Result<u32, Box<DiagnosticMessage>> {
+    match self.peek() {
+      'b' => {
+        self.advance();
+        Ok(b'\x08' as u32)
+      },
+      'f' => {
+        self.advance();
+        Ok(b'\x0C' as u32)
+      },
+      'n' => {
+        self.advance();
+        Ok(b'\n' as u32)
+      },
+      'r' => {
+        self.advance();
+        Ok(b'\r' as u32)
+      },
+      't' => {
+        self.advance();
+        Ok(b'\t' as u32)
+      },
+      '0' => {
+        self.advance();
+        Ok(b'\0' as u32)
+      },
+      '\\' => {
+        self.advance();
+        Ok(b'\\' as u32)
+      },
+      '\'' => {
+        self.advance();
+        Ok(b'\'' as u32)
+      },
+      'u' => self.decode_unicode_char_escape(char_start),
+      _ => self.invalid_character_escape(char_start),
+    }
+  }
+
+  fn decode_unicode_char_escape(
+    &mut self,
+    char_start: usize,
+  ) -> Result<u32, Box<DiagnosticMessage>> {
+    self.advance();
+
+    if self.peek() != '{' {
+      return self.invalid_character_escape(char_start);
+    }
+
+    self.advance();
+
+    let hex_start = self.current;
+    while self.peek().is_ascii_hexdigit() {
+      self.advance();
+    }
+
+    if hex_start == self.current || self.peek() != '}' {
+      return self.invalid_character_escape(char_start);
+    }
+
+    let hex_str = &self.source[hex_start..self.current];
+    let code_point = match u32::from_str_radix(hex_str, 16) {
+      Ok(code_point) => code_point,
+      Err(_) => return self.invalid_character_escape(char_start),
+    };
+
+    if char::from_u32(code_point).is_none() {
+      return self.invalid_character_escape(char_start);
+    }
+
+    self.advance();
+
+    Ok(code_point)
+  }
+
+  fn skip_to_char_terminator(&mut self) {
+    while !self.is_at_end() && self.peek() != '\'' {
+      self.advance();
+    }
+  }
+
+  fn invalid_character_escape(
+    &mut self,
+    char_start: usize,
+  ) -> Result<u32, Box<DiagnosticMessage>> {
+    self.skip_to_char_terminator();
+
+    if !self.is_at_end() && self.peek() == '\'' {
+      self.advance();
+    }
+
+    Err(Box::new(DiagnosticMessage::InvalidCharacterEscapeSequence(
+      self.mk_span(char_start, self.current),
+    )))
   }
 
   fn number(&mut self) -> LexerResult {
@@ -1003,8 +1053,8 @@ mod tests {
   }
 
   #[test]
-  fn lexes_byte_char_literals() {
-    let LexResult { tokens, diagnostics } = lex("'a' '\\b' '\\f' '\\n' '\\u{41}'");
+  fn lexes_unicode_scalar_char_literals() {
+    let LexResult { tokens, diagnostics } = lex("'a' '\\b' '\\f' '\\n' 'ñ' '\\u{2764}'");
 
     assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
 
@@ -1015,35 +1065,66 @@ mod tests {
         (TokenType::Char, "8"),
         (TokenType::Char, "12"),
         (TokenType::Char, "10"),
-        (TokenType::Char, "65"),
+        (TokenType::Char, "241"),
+        (TokenType::Char, "10084"),
         (TokenType::Eof, ""),
       ],
     );
   }
 
   #[test]
-  fn rejects_multi_byte_char_literal() {
-    let LexResult { tokens, diagnostics } = lex("'ñ'");
+  fn rejects_multi_scalar_char_literal() {
+    let LexResult { tokens, diagnostics } = lex("'ab'");
 
     assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
     match &diagnostics[0] {
-      DiagnosticMessage::MultiByteCharacterLiteral(_) => {},
+      DiagnosticMessage::InvalidCharacter(_) => {},
       other => panic!("unexpected diagnostic: {:?}", other),
     }
 
     assert_tokens(&tokens, &[(TokenType::Eof, "")]);
+    assert_eq!(diagnostics[0].to_string(), "Invalid char literal: expected exactly one Unicode scalar value");
   }
 
   #[test]
-  fn rejects_unicode_escape_above_byte_range() {
-    let LexResult { tokens, diagnostics } = lex("'\\u{2764}'");
+  fn rejects_empty_char_literal_with_scalar_message() {
+    let LexResult { tokens, diagnostics } = lex("''");
 
     assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
     match &diagnostics[0] {
-      DiagnosticMessage::MultiByteCharacterLiteral(_) => {},
+      DiagnosticMessage::InvalidCharacter(_) => {},
       other => panic!("unexpected diagnostic: {:?}", other),
     }
 
     assert_tokens(&tokens, &[(TokenType::Eof, "")]);
+    assert_eq!(diagnostics[0].to_string(), "Invalid char literal: expected exactly one Unicode scalar value");
+  }
+
+  #[test]
+  fn rejects_surrogate_escape_in_char_literal() {
+    let LexResult { tokens, diagnostics } = lex("'\\u{D800}'");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::InvalidCharacterEscapeSequence(_) => {},
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(&tokens, &[(TokenType::Eof, "")]);
+    assert_eq!(diagnostics[0].to_string(), "Invalid char escape: expected a valid Unicode scalar");
+  }
+
+  #[test]
+  fn rejects_malformed_unicode_escape_in_char_literal_with_scalar_message() {
+    let LexResult { tokens, diagnostics } = lex("'\\u{}'");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::InvalidCharacterEscapeSequence(_) => {},
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
+
+    assert_tokens(&tokens, &[(TokenType::Eof, "")]);
+    assert_eq!(diagnostics[0].to_string(), "Invalid char escape: expected a valid Unicode scalar");
   }
 }

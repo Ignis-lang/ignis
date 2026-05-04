@@ -208,6 +208,24 @@ function main(): void {
 }
 
 #[test]
+fn c_unicode_scalar_char_literal() {
+  let c_code = common::compile_to_c(
+    r#"
+function echo(value: char): char {
+    return value;
+}
+
+function main(): i32 {
+    let heart: char = echo('\u{2764}');
+    return heart as i32;
+}
+"#,
+  );
+
+  assert_snapshot!("c_unicode_scalar_char_literal", c_code);
+}
+
+#[test]
 fn c_main_i32_wrapper() {
   let c_code = common::compile_to_c(
     r#"

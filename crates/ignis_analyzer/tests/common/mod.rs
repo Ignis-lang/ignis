@@ -254,7 +254,7 @@ pub fn diagnostic_line(
 ) -> u32 {
   let (line, _col) = result
     .source_map
-    .line_col(&diag.primary_span.file, diag.primary_span.start);
+    .display_line_col(&diag.primary_span.file, diag.primary_span.start);
   line
 }
 

@@ -947,8 +947,12 @@ impl fmt::Display for DiagnosticMessage {
       // Lexer
       DiagnosticMessage::UnterminatedComment(_) => write!(f, "Unterminated comment"),
       DiagnosticMessage::UnterminatedCharacter(_) => write!(f, "Unterminated character literal"),
-      DiagnosticMessage::InvalidCharacterEscapeSequence(_) => write!(f, "Invalid character escape sequence"),
-      DiagnosticMessage::InvalidCharacter(_) => write!(f, "Invalid character"),
+      DiagnosticMessage::InvalidCharacterEscapeSequence(_) => {
+        write!(f, "Invalid char escape: expected a valid Unicode scalar")
+      },
+      DiagnosticMessage::InvalidCharacter(_) => {
+        write!(f, "Invalid char literal: expected exactly one Unicode scalar value")
+      },
       DiagnosticMessage::RawNulInSource(_) => write!(f, "Raw NUL byte is not allowed in source text"),
       DiagnosticMessage::MultiByteCharacterLiteral(_) => write!(f, "multi-byte char literal; use str"),
       DiagnosticMessage::UnterminatedString(_) => write!(f, "Unterminated string literal"),

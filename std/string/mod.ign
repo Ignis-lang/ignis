@@ -35,11 +35,12 @@
 //! - `len`  — number of bytes currently stored
 //! - `cap`  — total bytes allocated
 //!
-//! ## Byte-Oriented Operations
+//! ## Scalar and Byte Operations
 //!
-//! All operations in this module are **byte-oriented** (no UTF-8 awareness).
-//! Methods like `charAt`, `forEachByte`, `findByte`, `trimWhere`, and `split`
-//! work on individual bytes (`u8`), not Unicode code points.
+//! `String` stays byte-backed, but public character operations now decode UTF-8
+//! scalars. `charAt` and `pushChar` work with native `char` values, while
+//! `byteAt`, `pushByte`, `forEachByte`, `findByte`, `trimWhere`, and `split`
+//! keep byte-oriented behavior explicit.
 //!
 //! ## Higher-Order Iteration Methods
 //!
@@ -48,9 +49,9 @@
 //!
 //! | Method        | Callback signature   | Returns            | Description                        |
 //! |---------------|----------------------|--------------------|------------------------------------|
-//! | `forEach`     | `(char) -> void`     | `void`             | Iterate bytes as `char` values     |
+//! | `forEach`     | `(char) -> void`     | `void`             | Iterate scalar `char` values       |
 //! | `forEachByte` | `(u8) -> void`       | `void`             | Iterate over every byte            |
-//! | `map`         | `(char) -> char`     | `String`           | Transform bytes as `char` values   |
+//! | `map`         | `(char) -> char`     | `String`           | Transform scalar `char` values     |
 //! | `mapBytes`    | `(u8) -> u8`         | `String`           | Transform bytes directly           |
 //! | `findByte`    | `(u8) -> boolean`    | `Option<u64>`      | Index of first matching byte       |
 //! | `findLastByte`| `(u8) -> boolean`    | `Option<u64>`      | Index of last matching byte        |
@@ -123,8 +124,10 @@ extern __string {
   function ignis_string_len(s: &String): u64;
   /// Compares two strings byte-wise using runtime ordering semantics.
   function ignis_string_compare(a: &String, b: &String): i32;
-  /// Returns the byte at `idx` as a `char`; callers wrap bounds checks.
-  function ignis_string_char_at(s: &String, idx: u64): char;
+  /// Returns the scalar at byte `idx` and writes the exclusive end byte offset.
+  function ignis_string_char_at(s: &String, idx: u64, outEnd: &mut u64): char;
+  /// Returns the raw byte at `idx`; callers wrap bounds checks.
+  function ignis_string_byte_at(s: &String, idx: u64): u8;
   /// Returns the byte index of `needle` in `haystack`, or `-1`.
   function ignis_string_index_of(haystack: &String, needle: &String): i64;
   /// Returns whether `haystack` contains `needle`.
@@ -133,8 +136,10 @@ extern __string {
   function ignis_string_cstr(s: &String): str;
 
   // Mutating operations
-  /// Appends one byte-backed `char` to `s`.
+  /// Appends one Unicode-scalar `char` to `s` as UTF-8.
   function ignis_string_push_char(s: &mut String, c: char): void;
+  /// Appends one raw byte to `s`.
+  function ignis_string_push_byte(s: &mut String, c: u8): void;
   /// Appends a NUL-terminated string view to `s`.
   function ignis_string_push_cstr(s: &mut String, cstr: str): void;
   /// Appends the owned bytes from `other` to `s`.
@@ -171,10 +176,10 @@ extern __string {
 
 /// Owned, heap-backed UTF-8 byte string.
 ///
-/// The `data` buffer is heap-allocated and freed when the String is dropped.
-/// The record stores an owned UTF-8 byte buffer with byte-counted length and
-/// a trailing NUL byte for interop. All operations are byte-oriented (no UTF-8
-/// decoding).
+  /// The `data` buffer is heap-allocated and freed when the String is dropped.
+  /// The record stores an owned UTF-8 byte buffer with byte-counted length and
+  /// a trailing NUL byte for interop. Character APIs decode UTF-8 scalars while
+  /// byte APIs remain explicit.
 ///
 /// Implements `Drop` for automatic cleanup and `Clone` for deep copies.
 ///
@@ -474,7 +479,8 @@ export record String {
   ///
   /// # Returns
   ///
-  /// `Option::SOME(c)` if `index < length`, `Option::NONE` otherwise.
+  /// `Option::SOME(c)` when `index` points at a valid UTF-8 scalar boundary,
+  /// `Option::NONE` otherwise.
   ///
   /// # Example
   ///
@@ -487,8 +493,20 @@ export record String {
   /// let oob: Option<char> = s.charAt(99);  // Option::NONE
   /// ```
   public charAt(&self, index: u64): Option<char> {
+    let mut end: u64 = index;
+    let value: char = __string::ignis_string_char_at(self, index, &mut end);
+
+    if (end > index) {
+      return Option::SOME(value);
+    }
+
+    return Option::NONE;
+  }
+
+  /// Returns the raw byte at `index`, or `Option::NONE` when out of range.
+  public byteAt(&self, index: u64): Option<u8> {
     if (index < self.len) {
-      return Option::SOME(__string::ignis_string_char_at(self, index));
+      return Option::SOME(__string::ignis_string_byte_at(self, index));
     }
 
     return Option::NONE;
@@ -760,7 +778,9 @@ export record String {
 
   /// Copies the underlying bytes into a new `Vector<char>`.
   ///
-  /// This remains byte-oriented: each byte is cast to `char` directly.
+  /// This is a byte-oriented compatibility helper: each raw byte is cast to
+  /// `char` directly without UTF-8 decoding. Use `charAt()` or `Text::Cursor`
+  /// when you need Unicode scalar traversal.
   public toChars(&self): Vector<char> {
     let mut result: Vector<char> = Vector::new<char>(self.len);
 
@@ -815,7 +835,7 @@ export record String {
 
     let mut index: u64 = 0;
     while (index < self.length()) {
-      let byte: u8 = __string::ignis_string_char_at(self, index) as u8;
+      let byte: u8 = __string::ignis_string_byte_at(self, index);
       let high: u8 = (byte >> 4) & 15;
       let low: u8 = byte & 15;
 
@@ -839,13 +859,13 @@ export record String {
   // Instance methods — mutating
   // ---------------------------------------------------------------------------
 
-  /// Appends a single character (byte) to the end of this string.
+  /// Appends one Unicode scalar to the end of this string.
   ///
   /// May trigger a reallocation if the buffer is full.
   ///
   /// # Arguments
   ///
-  /// * `c` - The character to append.
+  /// * `c` - The Unicode scalar to append.
   ///
   /// # Example
   ///
@@ -857,6 +877,11 @@ export record String {
   /// ```
   public pushChar(&mut self, c: char): void {
     __string::ignis_string_push_char(self, c);
+  }
+
+  /// Appends a raw byte to the end of this string.
+  public pushByte(&mut self, c: u8): void {
+    __string::ignis_string_push_byte(self, c);
   }
 
   /// Appends a `str` literal to the end of this string.
@@ -943,16 +968,24 @@ export record String {
   // Higher-order iteration methods
   // ---------------------------------------------------------------------------
 
-  /// Calls `callback` once for each byte converted to `char`.
+  /// Calls `callback` once for each decoded UTF-8 scalar.
   ///
-  /// This is byte-backed (`char` is one byte in v0.4): each callback value
-  /// maps to one raw byte.
+  /// Invalid UTF-8 bytes are surfaced as U+FFFD and consume one byte so the
+  /// traversal always makes forward progress.
   public forEach(&self, @noescape callback: (char) -> void): void {
     let mut i: u64 = 0;
 
     while (i < self.len) {
-      callback(self.data[i] as char);
-      i += 1;
+      let mut end: u64 = i;
+      let mut value: char = __string::ignis_string_char_at(self, i, &mut end);
+
+      if (end <= i) {
+        value = 65533 as char;
+        end = i + 1;
+      }
+
+      callback(value);
+      i = end;
     }
   }
 
@@ -991,17 +1024,26 @@ export record String {
     self.forEach(callback);
   }
 
-  /// Maps each byte (as `char`) through `mapper` and returns a new String.
+  /// Maps each decoded UTF-8 scalar through `mapper` and returns a new String.
   ///
-  /// This remains byte-backed and does not perform UTF-8 decoding.
+  /// Invalid UTF-8 bytes are surfaced to `mapper` as U+FFFD and consume one
+  /// byte in the source string.
   public map(&self, @noescape mapper: (char) -> char): String {
     let mut result: String = String::withCapacity(self.len);
 
     let mut i: u64 = 0;
 
     while (i < self.len) {
-      result.pushChar(mapper(self.data[i] as char));
-      i += 1;
+      let mut end: u64 = i;
+      let mut value: char = __string::ignis_string_char_at(self, i, &mut end);
+
+      if (end <= i) {
+        value = 65533 as char;
+        end = i + 1;
+      }
+
+      result.pushChar(mapper(value));
+      i = end;
     }
 
     return result;
@@ -1014,7 +1056,7 @@ export record String {
     let mut i: u64 = 0;
 
     while (i < self.len) {
-      result.pushChar(mapper(self.data[i]) as char);
+      result.pushByte(mapper(self.data[i]));
       i += 1;
     }
 

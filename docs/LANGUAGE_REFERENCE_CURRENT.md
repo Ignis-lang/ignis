@@ -65,7 +65,7 @@ namespace Math {
 - Unsigned integers: `u8`, `u16`, `u32`, `u64`
 - Floating point: `f32`, `f64`
 - `boolean`
-- `char` (single byte)
+- `char` (one Unicode scalar value)
 - `atom`
 - `str`
 - `void`
@@ -77,9 +77,9 @@ namespace Math {
 
 ### 3.3 `char`
 
-- `char` is byte-oriented in v0.4 (`0..=255`).
-- Character literals must resolve to a single byte.
-- Multi-byte literals (for example `'ñ'`) are rejected; use `str` instead.
+- `char` is one Unicode scalar value.
+- Character literals must resolve to exactly one Unicode scalar.
+- Empty literals, multi-scalar literals, and surrogate escapes are rejected.
 
 ### 3.4 `atom`
 

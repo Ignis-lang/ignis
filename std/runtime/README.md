@@ -39,9 +39,9 @@ Core runtime types, IDs, and APIs.
 - String API:
   - `ignis_string_new`, `ignis_string_with_capacity`
   - `ignis_string_from_cstr`, `ignis_string_from_len`, `ignis_string_clone`
-  - `ignis_string_push_char`, `ignis_string_push_cstr`, `ignis_string_push_str`
+  - `ignis_string_push_char`, `ignis_string_push_byte`, `ignis_string_push_cstr`, `ignis_string_push_str`
   - `ignis_string_cstr`, `ignis_string_len`, `ignis_string_cap`
-  - `ignis_string_char_at`, `ignis_string_clear`, `ignis_string_reserve`
+  - `ignis_string_char_at`, `ignis_string_byte_at`, `ignis_string_clear`, `ignis_string_reserve`
   - `ignis_string_drop`
 - Internal helpers in `ignis_rt.c`:
   - `ignis_string_grow`

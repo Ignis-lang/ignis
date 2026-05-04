@@ -1,19 +1,23 @@
 use std::fmt::Display;
+
 use ordered_float::OrderedFloat;
 
 use crate::symbol::SymbolId;
 
-fn escape_byte_as_char_literal(value: u8) -> String {
+fn escape_scalar_as_char_literal(value: u32) -> String {
   match value {
-    b'\n' => "\\n".to_string(),
-    b'\r' => "\\r".to_string(),
-    b'\t' => "\\t".to_string(),
-    b'\0' => "\\0".to_string(),
-    b'\\' => "\\\\".to_string(),
-    b'\'' => "\\'".to_string(),
-    b'"' => "\\\"".to_string(),
-    b if b.is_ascii_graphic() || b == b' ' => (b as char).to_string(),
-    _ => format!("\\x{:02x}", value),
+    10 => "\\n".to_string(),
+    13 => "\\r".to_string(),
+    9 => "\\t".to_string(),
+    0 => "\\0".to_string(),
+    92 => "\\\\".to_string(),
+    39 => "\\'".to_string(),
+    34 => "\\\"".to_string(),
+    _ => match char::from_u32(value) {
+      Some(c) if c.is_ascii_graphic() || c == ' ' => c.to_string(),
+      Some(_) => format!("\\u{{{:x}}}", value),
+      None => format!("\\u{{{:x}}}", value),
+    },
   }
 }
 
@@ -40,7 +44,7 @@ pub enum IgnisLiteralValue {
   Float32(OrderedFloat<f32>),
   Float64(OrderedFloat<f64>),
   Boolean(bool),
-  Char(u8),
+  Char(u32),
   String(String),
   Atom(SymbolId),
   Hex(String),
@@ -64,7 +68,7 @@ impl Display for IgnisLiteralValue {
       IgnisLiteralValue::UnsignedInt64(i) => write!(f, "{}", i),
       IgnisLiteralValue::Float32(x) => write!(f, "{}", x),
       IgnisLiteralValue::Float64(x) => write!(f, "{}", x),
-      IgnisLiteralValue::Char(x) => write!(f, "'{}'", escape_byte_as_char_literal(*x)),
+      IgnisLiteralValue::Char(x) => write!(f, "'{}'", escape_scalar_as_char_literal(*x)),
       IgnisLiteralValue::String(x) => write!(f, "\"{}\"", escape_special_characters(x)),
       IgnisLiteralValue::Atom(sym) => write!(f, ":{}", sym.index()),
       IgnisLiteralValue::Hex(x) => write!(f, "0x{}", x),

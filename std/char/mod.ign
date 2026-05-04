@@ -3,16 +3,27 @@
 //!
 //! Character and UTF-8 scalar classification helpers.
 //!
-//! `char` is currently usable for single-byte character literals and ASCII
-//! delimiters. UTF-8 text traversal uses `Text::Utf8Char`, which preserves the
-//! Unicode scalar value and its byte range. This module keeps those two domains
-//! explicit:
+//! `char` is a native Unicode scalar. Byte-oriented text traversal metadata lives
+//! in `Text::CharSpan`, but the classification helpers in this module accept
+//! native `char` values directly. This keeps scalar semantics ergonomic while
+//! keeping ASCII-only behavior explicit:
 //!
 //! - `isAscii*` helpers classify `char` values without byte casts.
 //! - `isAlpha`, `isNumeric`, `isAlphanumeric`, and `isWhitespace` classify
-//!   decoded UTF-8 scalars.
-
-import Text from "std::text";
+//!   Unicode scalar `char` values.
+//!
+//! ## Examples
+//!
+//! ```ignis
+//! import Char from "std::char";
+//!
+//! let letter: char = 'é';
+//! let digit: char = '５';
+//!
+//! letter.isAlpha();        // true
+//! digit.isNumeric();       // true
+//! Char::isAsciiAlpha('A'); // true
+//! ```
 
 function isLatinAlpha(scalar: u32): boolean {
   return (scalar >= 65 && scalar <= 90) || (scalar >= 97 && scalar <= 122) || (scalar >= 192 && scalar <= 214) || (scalar >= 216 && scalar <= 246) || (scalar >= 248 && scalar <= 255);
@@ -31,90 +42,313 @@ function isCjkAlpha(scalar: u32): boolean {
 }
 
 /// Character and UTF-8 scalar classification helpers.
+///
+/// Methods whose names include `Ascii` intentionally classify only ASCII
+/// characters. Methods without that prefix operate on native Unicode scalar
+/// `char` values.
 export namespace Char {
+  /// Returns the Unicode scalar value stored by `value`.
+  ///
+  /// Use this only when numeric scalar ranges are required. Text-facing code
+  /// should prefer the semantic classification helpers below.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let code: u32 = Char::scalarOf('é');  // 233
+  /// ```
+  @extension(char)
+  function scalarOf(value: char): u32 {
+    return value as u32;
+  }
+
   /// Returns whether `value` is an ASCII alphabetic character.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let ascii: char = 'A';
+  /// let unicode: char = 'é';
+  ///
+  /// ascii.isAsciiAlpha();    // true
+  /// unicode.isAsciiAlpha();  // false
+  /// ```
   @extension(char)
   function isAsciiAlpha(value: char): boolean {
     return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
   }
 
   /// Returns whether `value` is an ASCII decimal digit.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let ascii: char = '7';
+  /// let fullWidth: char = '５';
+  ///
+  /// ascii.isAsciiNumeric();     // true
+  /// fullWidth.isAsciiNumeric(); // false
+  /// ```
   @extension(char)
   function isAsciiNumeric(value: char): boolean {
     return value >= '0' && value <= '9';
   }
 
   /// Returns whether `value` is ASCII alphabetic or numeric.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let letter: char = 'x';
+  /// let underscore: char = '_';
+  ///
+  /// letter.isAsciiAlphanumeric();     // true
+  /// underscore.isAsciiAlphanumeric(); // false
+  /// ```
   @extension(char)
   function isAsciiAlphanumeric(value: char): boolean {
     return Char::isAsciiAlpha(value) || Char::isAsciiNumeric(value);
   }
 
   /// Returns whether `value` is an ASCII hexadecimal digit.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let hex: char = 'f';
+  /// let other: char = 'g';
+  ///
+  /// hex.isAsciiHexDigit();   // true
+  /// other.isAsciiHexDigit(); // false
+  /// ```
   @extension(char)
   function isAsciiHexDigit(value: char): boolean {
     return Char::isAsciiNumeric(value) || (value >= 'A' && value <= 'F') || (value >= 'a' && value <= 'f');
   }
 
   /// Returns whether `value` is ASCII whitespace supported by Ignis escapes.
+  ///
+  /// This includes space, line feed, carriage return, and tab.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let newline: char = '\n';
+  /// let letter: char = 'A';
+  ///
+  /// newline.isAsciiWhitespace(); // true
+  /// letter.isAsciiWhitespace();  // false
+  /// ```
   @extension(char)
   function isAsciiWhitespace(value: char): boolean {
     return value == ' ' || value == '\n' || value == '\r' || value == '\t';
   }
 
   /// Returns whether `value` is an ASCII lowercase letter.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let lower: char = 'a';
+  /// let upper: char = 'A';
+  ///
+  /// lower.isAsciiLowercase(); // true
+  /// upper.isAsciiLowercase(); // false
+  /// ```
   @extension(char)
   function isAsciiLowercase(value: char): boolean {
     return value >= 'a' && value <= 'z';
   }
 
   /// Returns whether `value` is an ASCII uppercase letter.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let upper: char = 'A';
+  /// let lower: char = 'a';
+  ///
+  /// upper.isAsciiUppercase(); // true
+  /// lower.isAsciiUppercase(); // false
+  /// ```
   @extension(char)
   function isAsciiUppercase(value: char): boolean {
     return value >= 'A' && value <= 'Z';
   }
 
-  /// Returns whether `value` is an alphabetic UTF-8 scalar.
+  /// Returns whether `value` is an alphabetic Unicode scalar.
   ///
   /// This covers the scalar ranges needed by current parser/diagnostic text
   /// handling without pretending that `char` literals are raw bytes.
-  function isAlpha(value: Text::Utf8Char): boolean {
-    return isLatinAlpha(value.scalar) || isGreekAlpha(value.scalar) || isCyrillicAlpha(value.scalar) || isCjkAlpha(value.scalar);
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let latin: char = 'é';
+  /// let cjk: char = '中';
+  /// let digit: char = '５';
+  ///
+  /// latin.isAlpha(); // true
+  /// cjk.isAlpha();   // true
+  /// digit.isAlpha(); // false
+  /// ```
+  @extension(char)
+  function isAlpha(value: char): boolean {
+    let scalar: u32 = Char::scalarOf(value);
+    return isLatinAlpha(scalar) || isGreekAlpha(scalar) || isCyrillicAlpha(scalar) || isCjkAlpha(scalar);
   }
 
-  /// Returns whether `value` is an alphabetic UTF-8 scalar.
-  function isAlphabetic(value: Text::Utf8Char): boolean {
+  /// Returns whether `value` is an alphabetic Unicode scalar.
+  ///
+  /// This is an alias for `isAlpha` using the longer Rust-style name.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let lambda: char = 'λ';
+  ///
+  /// lambda.isAlphabetic(); // true
+  /// ```
+  @extension(char)
+  function isAlphabetic(value: char): boolean {
     return Char::isAlpha(value);
   }
 
-  /// Returns whether `value` is a numeric UTF-8 scalar.
-  function isNumeric(value: Text::Utf8Char): boolean {
-    return (value.scalar >= 48 && value.scalar <= 57) || (value.scalar >= 1632 && value.scalar <= 1641) || (value.scalar >= 65296 && value.scalar <= 65305);
+  /// Returns whether `value` is a numeric Unicode scalar.
+  ///
+  /// This includes ASCII digits, Arabic-Indic digits, and full-width digits.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let ascii: char = '7';
+  /// let fullWidth: char = '５';
+  ///
+  /// ascii.isNumeric();     // true
+  /// fullWidth.isNumeric(); // true
+  /// ```
+  @extension(char)
+  function isNumeric(value: char): boolean {
+    let scalar: u32 = Char::scalarOf(value);
+    return (scalar >= 48 && scalar <= 57) || (scalar >= 1632 && scalar <= 1641) || (scalar >= 65296 && scalar <= 65305);
   }
 
-  /// Returns whether `value` is a numeric UTF-8 scalar.
-  function isDigit(value: Text::Utf8Char): boolean {
+  /// Returns whether `value` is a numeric Unicode scalar.
+  ///
+  /// This is an alias for `isNumeric`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let digit: char = '9';
+  ///
+  /// digit.isDigit(); // true
+  /// ```
+  @extension(char)
+  function isDigit(value: char): boolean {
     return Char::isNumeric(value);
   }
 
-  /// Returns whether `value` is an alphabetic or numeric UTF-8 scalar.
-  function isAlphanumeric(value: Text::Utf8Char): boolean {
+  /// Returns whether `value` is an alphabetic or numeric Unicode scalar.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let letter: char = 'A';
+  /// let digit: char = '５';
+  /// let underscore: char = '_';
+  ///
+  /// letter.isAlphanumeric();     // true
+  /// digit.isAlphanumeric();      // true
+  /// underscore.isAlphanumeric(); // false
+  /// ```
+  @extension(char)
+  function isAlphanumeric(value: char): boolean {
     return Char::isAlpha(value) || Char::isNumeric(value);
   }
 
   /// Returns whether `value` is a hexadecimal ASCII scalar.
-  function isHexDigit(value: Text::Utf8Char): boolean {
-    return (value.scalar >= 48 && value.scalar <= 57) || (value.scalar >= 65 && value.scalar <= 70) || (value.scalar >= 97 && value.scalar <= 102);
+  ///
+  /// This intentionally follows ASCII hexadecimal syntax. Use `isNumeric` for
+  /// broader Unicode digit classification.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let hex: char = 'F';
+  /// let fullWidth: char = 'Ｇ';
+  ///
+  /// hex.isHexDigit();       // true
+  /// fullWidth.isHexDigit(); // false
+  /// ```
+  @extension(char)
+  function isHexDigit(value: char): boolean {
+    let scalar: u32 = Char::scalarOf(value);
+    return (scalar >= 48 && scalar <= 57) || (scalar >= 65 && scalar <= 70) || (scalar >= 97 && scalar <= 102);
   }
 
-  /// Returns whether `value` is a UTF-8 whitespace scalar.
-  function isWhitespace(value: Text::Utf8Char): boolean {
-    return value.scalar == 9 || value.scalar == 10 || value.scalar == 11 || value.scalar == 12 || value.scalar == 13 || value.scalar == 32 || value.scalar == 133 || value.scalar == 160 || value.scalar == 5760 || (value.scalar >= 8192 && value.scalar <= 8202) || value.scalar == 8232 || value.scalar == 8233 || value.scalar == 8239 || value.scalar == 8287 || value.scalar == 12288;
+  /// Returns whether `value` is a Unicode whitespace scalar.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let space: char = ' ';
+  /// let nonBreakingSpace: char = 160 as char;
+  ///
+  /// space.isWhitespace();            // true
+  /// nonBreakingSpace.isWhitespace(); // true
+  /// ```
+  @extension(char)
+  function isWhitespace(value: char): boolean {
+    let scalar: u32 = Char::scalarOf(value);
+    return scalar == 9 || scalar == 10 || scalar == 11 || scalar == 12 || scalar == 13 || scalar == 32 || scalar == 133 || scalar == 160 || scalar == 5760 || (scalar >= 8192 && scalar <= 8202) || scalar == 8232 || scalar == 8233 || scalar == 8239 || scalar == 8287 || scalar == 12288;
   }
 
   /// Converts an ASCII uppercase letter to lowercase.
   ///
   /// Non-uppercase characters are returned unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let upper: char = 'A';
+  /// let unicode: char = 'é';
+  ///
+  /// upper.toAsciiLowercase();   // 'a'
+  /// unicode.toAsciiLowercase(); // 'é'
+  /// ```
   @extension(char)
   function toAsciiLowercase(value: char): char {
     return match (value) {
@@ -151,6 +385,18 @@ export namespace Char {
   /// Converts an ASCII lowercase letter to uppercase.
   ///
   /// Non-lowercase characters are returned unchanged.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Char from "std::char";
+  ///
+  /// let lower: char = 'a';
+  /// let unicode: char = 'é';
+  ///
+  /// lower.toAsciiUppercase();   // 'A'
+  /// unicode.toAsciiUppercase(); // 'é'
+  /// ```
   @extension(char)
   function toAsciiUppercase(value: char): char {
     return match (value) {

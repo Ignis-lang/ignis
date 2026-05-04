@@ -143,6 +143,160 @@ function strToCharsStopsAtFirstTerminatingNul(): void {
 }
 
 @test
+function charAtDecodesUtf8ScalarAtByteBoundary(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(6);
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 195 as u8);
+  @write<u8>(raw + 2, 169 as u8);
+  @write<u8>(raw + 3, 228 as u8);
+  @write<u8>(raw + 4, 184 as u8);
+  @write<u8>(raw + 5, 173 as u8);
+
+  let text: String = String::create(raw, 6 as u64);
+
+  let first: char = match (text.charAt(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let accented: char = match (text.charAt(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let ideograph: char = match (text.charAt(3)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+
+  Test::assertEq<i32>(first as i32, 'a' as i32);
+  Test::assertEq<i32>(accented as i32, 233);
+  Test::assertEq<i32>(ideograph as i32, 20013);
+
+  Memory::free(raw);
+}
+
+@test
+function pushCharEncodesScalarUtf8BytesAndPushByteStaysByteOriented(): void {
+  let mut text: String = String::new();
+  text.pushChar('é');
+  text.pushByte('!' as u8);
+
+  let first: u8 = match (text.byteAt(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> 0,
+  };
+  let second: u8 = match (text.byteAt(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> 0,
+  };
+  let third: u8 = match (text.byteAt(2)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> 0,
+  };
+
+  Test::assertEq<u64>(text.length(), 3);
+  Test::assertEq<u8>(first, 195 as u8);
+  Test::assertEq<u8>(second, 169 as u8);
+  Test::assertEq<u8>(third, '!' as u8);
+}
+
+@test
+function byteAtReadsRawUtf8BytesWithoutScalarDecoding(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(2);
+  @write<u8>(raw, 195 as u8);
+  @write<u8>(raw + 1, 169 as u8);
+
+  let text: String = String::create(raw, 2 as u64);
+
+  let first: u8 = match (text.byteAt(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> 0,
+  };
+  let second: u8 = match (text.byteAt(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> 0,
+  };
+
+  Test::assertEq<u8>(first, 195 as u8);
+  Test::assertEq<u8>(second, 169 as u8);
+
+  Memory::free(raw);
+}
+
+@test
+function forEachDecodesUtf8Scalars(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(6);
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 195 as u8);
+  @write<u8>(raw + 2, 169 as u8);
+  @write<u8>(raw + 3, 228 as u8);
+  @write<u8>(raw + 4, 184 as u8);
+  @write<u8>(raw + 5, 173 as u8);
+
+  let text: String = String::create(raw, 6 as u64);
+  let visited: *mut char = Memory::allocateVector<char>(3);
+  let index: *mut u64 = Memory::allocateVector<u64>(1);
+  @write<u64>(index, 0);
+
+  text.forEach((value: char): void -> {
+    let current: u64 = @read<u64>(index);
+    @write<char>(visited + current, value);
+    @write<u64>(index, current + 1);
+  });
+
+  let count: u64 = @read<u64>(index);
+  let first: char = @read<char>(visited);
+  let accented: char = @read<char>(visited + 1);
+  let ideograph: char = @read<char>(visited + 2);
+
+  Test::assertEq<u64>(count, 3);
+  Test::assertEq<i32>(first as i32, 'a' as i32);
+  Test::assertEq<i32>(accented as i32, 233);
+  Test::assertEq<i32>(ideograph as i32, 20013);
+
+  Memory::free(visited);
+  Memory::free(index as *mut u8);
+  Memory::free(raw);
+}
+
+@test
+function mapDecodesUtf8Scalars(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(5);
+  @write<u8>(raw, 195 as u8);
+  @write<u8>(raw + 1, 169 as u8);
+  @write<u8>(raw + 2, 228 as u8);
+  @write<u8>(raw + 3, 184 as u8);
+  @write<u8>(raw + 4, 173 as u8);
+
+  let text: String = String::create(raw, 5 as u64);
+  let mapped: String = text.map((value: char): char -> {
+    if (value == 'é') {
+      return 'x';
+    }
+
+    if (value == 20013 as char) {
+      return 'y';
+    }
+
+    return '?';
+  });
+
+  let first: char = match (mapped.charAt(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let second: char = match (mapped.charAt(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+
+  Test::assertEq<u64>(mapped.length(), 2);
+  Test::assertEq<char>(first, 'x');
+  Test::assertEq<char>(second, 'y');
+
+  Memory::free(raw);
+}
+
+@test
 function snapshotStdRunnerSmoke(): void {
   Test::assertSnapshot("smoke", "std-string-smoke\n");
 }

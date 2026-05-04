@@ -94,6 +94,31 @@ function makeResult(): Result<void, boolean> {
 }
 
 #[test]
+fn unicode_scalar_char_literal_round_trips_through_analysis() {
+  let result = common::analyze(
+    r#"
+function echo(value: char): char {
+    return value;
+}
+
+function main(): i32 {
+    let heart: char = echo('\u{2764}');
+    return heart as i32;
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "unicode_scalar_char_literal_round_trips_through_analysis_diags",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+  assert_snapshot!(
+    "unicode_scalar_char_literal_round_trips_through_analysis_hir",
+    common::format_hir(&result)
+  );
+}
+
+#[test]
 fn basic_function() {
   let result = common::analyze(
     r#"
