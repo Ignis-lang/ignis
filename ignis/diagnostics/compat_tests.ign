@@ -1,0 +1,276 @@
+import Fs from "std::fs";
+import Test from "std::test";
+
+import CompatibilityFixture, Diagnostic, DiagnosticBag, DiagnosticCode, DiagnosticFixtureParser, DiagnosticLabel, DiagnosticRenderer, LabelKind, ParsedDiagnostics, Severity, SourceFile, SourceSpan from "@compiler::diagnostics";
+
+const ESCAPE: char = '\u{1B}';
+
+function loadFixtureText(path: str): String {
+  return match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("missing compatibility fixture"),
+  };
+}
+
+function assertCompatLabel(label: &DiagnosticLabel, kind: LabelKind, start: u64, end: u64, message: str): void {
+  Test::assertEq<LabelKind>(label.kind, kind);
+  Test::assertEq<u64>(label.span.start, start);
+  Test::assertEq<u64>(label.span.end, end);
+  Test::assertEq<str>(label.message, message);
+}
+
+function formatParsedDiagnostics(parsed: &ParsedDiagnostics): String {
+  let mut rendered: String = String::new();
+
+  rendered.pushStr("count=");
+  rendered.pushStr(String::create(parsed.diagnostics.length()).toStr());
+  rendered.pushStr("\n");
+
+  let Option::SOME(diagnostic) = parsed.diagnostics.get(0) else {
+    return rendered;
+  };
+
+  rendered.pushStr(diagnostic.severity.displayName());
+  rendered.pushStr("|");
+  rendered.pushStr(diagnostic.code);
+  rendered.pushStr("|");
+  rendered.pushStr(diagnostic.message);
+  rendered.pushStr("|");
+  rendered.pushStr(diagnostic.primarySpan.filePath);
+  rendered.pushStr(":");
+  rendered.pushStr(String::create(diagnostic.primarySpan.start).toStr());
+  rendered.pushStr("-");
+  rendered.pushStr(String::create(diagnostic.primarySpan.end).toStr());
+  rendered.pushStr("\nlabels=");
+  rendered.pushStr(String::create(diagnostic.labels.length()).toStr());
+  rendered.pushStr("\nnotes=");
+  rendered.pushStr(String::create(diagnostic.notes.length()).toStr());
+  rendered.pushStr("\n");
+
+  return rendered;
+}
+
+function renderFixtureDiagnostic(path: str, sourceText: str, start: u64, end: u64, label: str): String {
+  let source: SourceFile = SourceFile::create(path, sourceText);
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::EXPECTED_TOKEN, "expected expression", SourceSpan::new(path, start, end));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new(path, start, end), label);
+  diagnostic.addNote("parser stopped here");
+  diagnostic.setHelp("insert an expression before the newline");
+
+  return DiagnosticRenderer::render(&diagnostic, &source, false);
+}
+
+function utf8RenderedSourceFile(path: str): SourceFile {
+  let text: String = loadFixtureText("test_cases/selfhost/diagnostics/compat_utf8_excerpt/input.ign");
+  return SourceFile::create(path, text.toStr());
+}
+
+@test
+function compatibilityFixtureLoaderReadsBootstrapFiles(): void {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture("test_cases/selfhost/diagnostics/bootstrap_render_foundation");
+
+  Test::assert(match (fixture.input) {
+    Option::SOME(_) -> true,
+    Option::NONE -> false,
+  });
+  Test::assert(match (fixture.expectedTokens) {
+    Option::SOME(_) -> true,
+    Option::NONE -> false,
+  });
+  Test::assert(match (fixture.expectedAst) {
+    Option::SOME(_) -> true,
+    Option::NONE -> false,
+  });
+  Test::assert(match (fixture.expectedDiagnostics) {
+    Option::SOME(_) -> true,
+    Option::NONE -> false,
+  });
+}
+
+@test
+function parseExpectedDiagnosticsPreservesStructuredFields(): void {
+  let text: String = loadFixtureText("test_cases/selfhost/diagnostics/compat_multi_label/expected.diagnostics");
+  let parsed: ParsedDiagnostics = DiagnosticFixtureParser::parse(text.toStr());
+
+  Test::assertSnapshot("compat-parsed-multi-label", formatParsedDiagnostics(&parsed).toStr());
+
+  Test::assertEq<u64>(parsed.diagnostics.length(), 1);
+
+  let diagnostic: &Diagnostic = match (parsed.diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing parsed diagnostic"),
+  };
+
+  Test::assertEq<Severity>(diagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(diagnostic.message, "type mismatch");
+  Test::assertEq<str>(diagnostic.primarySpan.filePath, "input.ign");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 23);
+  Test::assertEq<u64>(diagnostic.primarySpan.end, 27);
+  Test::assertEq<u64>(diagnostic.labels.length(), 2);
+  Test::assertEq<u64>(diagnostic.notes.length(), 1);
+
+  let primaryLabel: &DiagnosticLabel = match (diagnostic.labels.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing primary label"),
+  };
+  let secondaryLabel: &DiagnosticLabel = match (diagnostic.labels.get(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing secondary label"),
+  };
+
+  assertCompatLabel(primaryLabel, LabelKind::PRIMARY, 23, 27, "used here");
+  assertCompatLabel(secondaryLabel, LabelKind::SECONDARY, 4, 10, "declared here");
+
+  let help: str = match (diagnostic.help) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing help"),
+  };
+
+  Test::assertEq<str>(help, "convert the value before use");
+}
+
+@test
+function compareStructuredDiagnosticsDetectsSemanticDrift(): void {
+  let text: String = loadFixtureText("test_cases/selfhost/diagnostics/compat_multi_label/expected.diagnostics");
+  let expected: ParsedDiagnostics = DiagnosticFixtureParser::parse(text.toStr());
+
+  let mut actual: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("input.ign", 23, 27));
+  actual.addLabel(LabelKind::PRIMARY, SourceSpan::new("input.ign", 23, 27), "used here");
+  actual.addLabel(LabelKind::SECONDARY, SourceSpan::new("input.ign", 4, 10), "declared here");
+  actual.addNote("expected i32");
+  actual.setHelp("convert the value before use");
+
+  let mut actualBag = DiagnosticBag::init();
+  actualBag.push(actual);
+
+  Test::assert(DiagnosticFixtureParser::compare(&expected, &actualBag));
+
+  let mut drifted: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("input.ign", 23, 27));
+  drifted.addLabel(LabelKind::PRIMARY, SourceSpan::new("input.ign", 23, 27), "used here");
+  drifted.addLabel(LabelKind::SECONDARY, SourceSpan::new("input.ign", 4, 10), "declared elsewhere");
+  drifted.addNote("expected i32");
+  drifted.setHelp("convert the value before use");
+
+  let mut driftedBag = DiagnosticBag::init();
+  driftedBag.push(drifted);
+
+  Test::assert(!DiagnosticFixtureParser::compare(&expected, &driftedBag));
+}
+
+@test
+function renderedCompatibilityIgnoresAnsiAndWhitespaceOnlyDifferences(): void {
+  let expected: str = "Error[I0001]: expected expression\n  --> input.ign:4:4\n  = note: parser stopped here\n";
+  let mut actualRendered: String = String::new();
+
+  actualRendered.pushChar(ESCAPE);
+  actualRendered.pushStr("[1;31mError");
+  actualRendered.pushChar(ESCAPE);
+  actualRendered.pushStr("[0m [");
+  actualRendered.pushChar(ESCAPE);
+  actualRendered.pushStr("[1;31mI0001");
+  actualRendered.pushChar(ESCAPE);
+  actualRendered.pushStr("[0m]: expected expression\n\t--> input.ign:4:4\n  = note: parser stopped here\n");
+
+  Test::assert(DiagnosticFixtureParser::renderedEquivalent(expected, actualRendered.toStr()));
+  Test::assert(!DiagnosticFixtureParser::renderedEquivalent(expected, "Error[I0001]: different message"));
+}
+
+@test
+function bootstrapRenderedFixtureCanRequireExactParity(): void {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture("test_cases/selfhost/diagnostics/bootstrap_render_foundation");
+  let expectedRendered: String = match (fixture.expectedRendered) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing rendered fixture"),
+  };
+  let actualRendered: String = renderFixtureDiagnostic("input.ign", "first\n  let value = ;\nthird\n", 20, 20, "expression expected");
+
+  Test::assert(DiagnosticFixtureParser::renderedEquivalentStrict(expectedRendered.toStr(), actualRendered.toStr()));
+}
+
+@test
+function emptySpanFixtureSupportsStructuredAndExactRenderedParity(): void {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture("test_cases/selfhost/diagnostics/compat_empty_span");
+  let diagnosticsText: String = match (fixture.expectedDiagnostics) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing diagnostics fixture"),
+  };
+  let expectedRendered: String = match (fixture.expectedRendered) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing rendered fixture"),
+  };
+  let expected: ParsedDiagnostics = DiagnosticFixtureParser::parse(diagnosticsText.toStr());
+  let source: SourceFile = SourceFile::create("input.ign", "first\nproblem\nthird\n");
+  let mut actualBag: DiagnosticBag = DiagnosticBag::init();
+  let mut actualDiagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::EXPECTED_TOKEN, "expected expression", SourceSpan::new("input.ign", 8, 8));
+
+  actualDiagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("input.ign", 8, 8), "expression expected");
+  actualDiagnostic.addNote("parser stopped here");
+  actualDiagnostic.setHelp("insert an expression before the newline");
+
+  let actualRendered: String = DiagnosticRenderer::render(&actualDiagnostic, &source, false);
+  actualBag.push(actualDiagnostic);
+
+  Test::assert(DiagnosticFixtureParser::compare(&expected, &actualBag));
+  Test::assert(DiagnosticFixtureParser::renderedEquivalentStrict(expectedRendered.toStr(), actualRendered.toStr()));
+}
+
+@test
+function multiLabelFixtureRequiresExactRenderedParity(): void {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture("test_cases/selfhost/diagnostics/compat_multi_label");
+  let diagnosticsText: String = match (fixture.expectedDiagnostics) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing diagnostics fixture"),
+  };
+  let expectedRendered: String = match (fixture.expectedRendered) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing rendered fixture"),
+  };
+  let expected: ParsedDiagnostics = DiagnosticFixtureParser::parse(diagnosticsText.toStr());
+  let source: SourceFile = SourceFile::create("input.ign", "let answer = 1;\nlet total = answer + nope;\n");
+  let mut actualBag: DiagnosticBag = DiagnosticBag::init();
+  let mut actualDiagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("input.ign", 23, 27));
+
+  actualDiagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("input.ign", 23, 27), "used here");
+  actualDiagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new("input.ign", 4, 10), "declared here");
+  actualDiagnostic.addNote("expected i32");
+  actualDiagnostic.setHelp("convert the value before use");
+
+  let actualRendered: String = DiagnosticRenderer::render(&actualDiagnostic, &source, false);
+  actualBag.push(actualDiagnostic);
+
+  Test::assertSnapshot("compat-multi-label-rendered", actualRendered.toStr());
+
+  Test::assert(DiagnosticFixtureParser::compare(&expected, &actualBag));
+  Test::assert(DiagnosticFixtureParser::renderedEquivalentStrict(expectedRendered.toStr(), actualRendered.toStr()));
+}
+
+@test
+function multibyteFixtureSupportsStructuredAndExactRenderedParity(): void {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture("test_cases/selfhost/diagnostics/compat_utf8_excerpt");
+  let diagnosticsText: String = match (fixture.expectedDiagnostics) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing diagnostics fixture"),
+  };
+  let expectedRendered: String = match (fixture.expectedRendered) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing rendered fixture"),
+  };
+  let expected: ParsedDiagnostics = DiagnosticFixtureParser::parse(diagnosticsText.toStr());
+  let source: SourceFile = utf8RenderedSourceFile("input.ign");
+  let mut actualBag: DiagnosticBag = DiagnosticBag::init();
+  let mut actualDiagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::EXPECTED_TOKEN, "expected expression", SourceSpan::new("input.ign", 1, 3));
+
+  actualDiagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("input.ign", 1, 3), "accented character");
+  actualDiagnostic.addNote("parser stopped here");
+  actualDiagnostic.setHelp("replace the accented character");
+
+  let actualRendered: String = DiagnosticRenderer::render(&actualDiagnostic, &source, false);
+  actualBag.push(actualDiagnostic);
+
+  Test::assertSnapshot("compat-utf8-rendered", actualRendered.toStr());
+
+  Test::assert(DiagnosticFixtureParser::compare(&expected, &actualBag));
+  Test::assert(DiagnosticFixtureParser::renderedEquivalentStrict(expectedRendered.toStr(), actualRendered.toStr()));
+}

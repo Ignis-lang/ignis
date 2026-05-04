@@ -1,0 +1,149 @@
+import Test from "std::test";
+
+import Diagnostic, DiagnosticCode, DiagnosticRenderer, LabelKind, Severity, SourceFile, SourceSpan from "@compiler::diagnostics";
+
+const ESCAPE: char = '\u{1B}';
+
+function lineCount(text: &String): u64 {
+  let mut index: u64 = 0;
+  let mut count: u64 = 1;
+
+  while (index < text.length()) {
+    let Option::SOME(ch) = text.charAt(index) else {
+      break;
+    };
+
+    if (ch == '\n') {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function escapeAnsi(text: String): String {
+  let mut escaped: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(ch) = text.charAt(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (ch == ESCAPE) {
+      escaped.pushStr("\\x1b");
+    } else {
+      escaped.pushChar(ch);
+    }
+
+    index += 1;
+  }
+
+  return escaped;
+}
+
+function renderSingleLabelDiagnostic(useAnsi: boolean): String {
+  let source: SourceFile = SourceFile::create("fixtures/render_single.ign", "first\nproblem\nthird\n");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::EXPECTED_TOKEN, "expected expression", SourceSpan::new("fixtures/render_single.ign", 6, 13));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("fixtures/render_single.ign", 6, 13), "expression expected");
+  diagnostic.addNote("parser stopped here");
+  diagnostic.setHelp("insert an expression before the newline");
+
+  return DiagnosticRenderer::render(&diagnostic, &source, useAnsi);
+}
+
+@test
+function renderPlainSingleLabelDiagnosticMatchesSnapshot(): void {
+  let rendered: String = renderSingleLabelDiagnostic(false);
+
+  Test::assertSnapshot("render-plain-single-label", rendered.toStr());
+}
+
+@test
+function renderPlainSingleLabelDiagnosticShowsAdjacentContextAndLabelSnippet(): void {
+  let rendered: String = renderSingleLabelDiagnostic(false);
+  let previousLine: String = String::create("  1  |first\n");
+  let primaryLine: String = String::create("  2  |problem\n");
+  let nextLine: String = String::create("  3  |third\n");
+  let labelBlock: String = String::create("label: expression expected\n");
+  let repeatedSnippet: String = String::create("  2  |problem\n");
+
+  if (!rendered.contains(&previousLine) || !rendered.contains(&primaryLine) || !rendered.contains(&nextLine)) {
+    @panic("missing adjacent context lines");
+  }
+
+  if (!rendered.contains(&labelBlock)) {
+    @panic("missing label snippet header");
+  }
+
+  if (lineCount(&rendered) < 10) {
+    @panic("expected multi-block stage0-style rendering");
+  }
+
+  if (!rendered.contains(&repeatedSnippet)) {
+    @panic("missing repeated label snippet line");
+  }
+}
+
+@test
+function renderAnsiSingleLabelDiagnosticMatchesSnapshot(): void {
+  let rendered: String = escapeAnsi(renderSingleLabelDiagnostic(true));
+
+  Test::assertSnapshot("render-ansi-single-label", rendered.toStr());
+}
+
+@test
+function renderPlainMultiLabelDiagnosticPreservesInsertionOrder(): void {
+  let source: SourceFile = SourceFile::create("fixtures/render_multi.ign", "let answer = 1;\nlet total = answer + nope;\n");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("fixtures/render_multi.ign", 37, 41));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("fixtures/render_multi.ign", 37, 41), "used here");
+  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new("fixtures/render_multi.ign", 4, 10), "declared here");
+  diagnostic.addNote("expected i32");
+  diagnostic.setHelp("convert the value before use");
+
+  let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
+  let primaryBlock: String = String::create("label: used here\n");
+  let secondaryBlock: String = String::create("label: declared here\n");
+  let primarySnippet: String = String::create("let total = answer + nope;\n");
+  let secondarySnippet: String = String::create("let answer = 1;\n");
+  let trailingNotes: String = String::create("  = note: expected i32\n  = help: convert the value before use\n");
+
+  if (!rendered.contains(&primaryBlock) || !rendered.contains(&secondaryBlock)) {
+    @panic("missing label blocks");
+  }
+
+  if (!rendered.contains(&primarySnippet) || !rendered.contains(&secondarySnippet)) {
+    @panic("missing per-label snippets");
+  }
+
+  if (!rendered.contains(&trailingNotes)) {
+    @panic("missing trailing notes");
+  }
+}
+
+@test
+function renderPlainMultiLabelDiagnosticRendersPerLabelSnippetBlocks(): void {
+  let source: SourceFile = SourceFile::create("fixtures/render_multi.ign", "let answer = 1;\nlet total = answer + nope;\n");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("fixtures/render_multi.ign", 37, 41));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("fixtures/render_multi.ign", 37, 41), "used here");
+  diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new("fixtures/render_multi.ign", 4, 10), "declared here");
+
+  let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
+  let primaryBlock: String = String::create("label: used here\n");
+  let secondaryBlock: String = String::create("label: declared here\n");
+  let declarationLine: String = String::create("let answer = 1;\n");
+
+  if (!rendered.contains(&primaryBlock) || !rendered.contains(&secondaryBlock)) {
+    @panic("missing per-label blocks");
+  }
+
+  if (!rendered.contains(&declarationLine)) {
+    @panic("missing secondary label source excerpt");
+  }
+}

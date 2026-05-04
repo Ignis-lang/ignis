@@ -1,0 +1,186 @@
+//!
+//! # Char Module
+//!
+//! Character and UTF-8 scalar classification helpers.
+//!
+//! `char` is currently usable for single-byte character literals and ASCII
+//! delimiters. UTF-8 text traversal uses `Text::Utf8Char`, which preserves the
+//! Unicode scalar value and its byte range. This module keeps those two domains
+//! explicit:
+//!
+//! - `isAscii*` helpers classify `char` values without byte casts.
+//! - `isAlpha`, `isNumeric`, `isAlphanumeric`, and `isWhitespace` classify
+//!   decoded UTF-8 scalars.
+
+import Text from "std::text";
+
+function isLatinAlpha(scalar: u32): boolean {
+  return (scalar >= 65 && scalar <= 90) || (scalar >= 97 && scalar <= 122) || (scalar >= 192 && scalar <= 214) || (scalar >= 216 && scalar <= 246) || (scalar >= 248 && scalar <= 255);
+}
+
+function isGreekAlpha(scalar: u32): boolean {
+  return scalar >= 880 && scalar <= 1023;
+}
+
+function isCyrillicAlpha(scalar: u32): boolean {
+  return scalar >= 1024 && scalar <= 1279;
+}
+
+function isCjkAlpha(scalar: u32): boolean {
+  return scalar >= 19968 && scalar <= 40959;
+}
+
+/// Character and UTF-8 scalar classification helpers.
+export namespace Char {
+  /// Returns whether `value` is an ASCII alphabetic character.
+  @extension(char)
+  function isAsciiAlpha(value: char): boolean {
+    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+  }
+
+  /// Returns whether `value` is an ASCII decimal digit.
+  @extension(char)
+  function isAsciiNumeric(value: char): boolean {
+    return value >= '0' && value <= '9';
+  }
+
+  /// Returns whether `value` is ASCII alphabetic or numeric.
+  @extension(char)
+  function isAsciiAlphanumeric(value: char): boolean {
+    return Char::isAsciiAlpha(value) || Char::isAsciiNumeric(value);
+  }
+
+  /// Returns whether `value` is an ASCII hexadecimal digit.
+  @extension(char)
+  function isAsciiHexDigit(value: char): boolean {
+    return Char::isAsciiNumeric(value) || (value >= 'A' && value <= 'F') || (value >= 'a' && value <= 'f');
+  }
+
+  /// Returns whether `value` is ASCII whitespace supported by Ignis escapes.
+  @extension(char)
+  function isAsciiWhitespace(value: char): boolean {
+    return value == ' ' || value == '\n' || value == '\r' || value == '\t';
+  }
+
+  /// Returns whether `value` is an ASCII lowercase letter.
+  @extension(char)
+  function isAsciiLowercase(value: char): boolean {
+    return value >= 'a' && value <= 'z';
+  }
+
+  /// Returns whether `value` is an ASCII uppercase letter.
+  @extension(char)
+  function isAsciiUppercase(value: char): boolean {
+    return value >= 'A' && value <= 'Z';
+  }
+
+  /// Returns whether `value` is an alphabetic UTF-8 scalar.
+  ///
+  /// This covers the scalar ranges needed by current parser/diagnostic text
+  /// handling without pretending that `char` literals are raw bytes.
+  function isAlpha(value: Text::Utf8Char): boolean {
+    return isLatinAlpha(value.scalar) || isGreekAlpha(value.scalar) || isCyrillicAlpha(value.scalar) || isCjkAlpha(value.scalar);
+  }
+
+  /// Returns whether `value` is an alphabetic UTF-8 scalar.
+  function isAlphabetic(value: Text::Utf8Char): boolean {
+    return Char::isAlpha(value);
+  }
+
+  /// Returns whether `value` is a numeric UTF-8 scalar.
+  function isNumeric(value: Text::Utf8Char): boolean {
+    return (value.scalar >= 48 && value.scalar <= 57) || (value.scalar >= 1632 && value.scalar <= 1641) || (value.scalar >= 65296 && value.scalar <= 65305);
+  }
+
+  /// Returns whether `value` is a numeric UTF-8 scalar.
+  function isDigit(value: Text::Utf8Char): boolean {
+    return Char::isNumeric(value);
+  }
+
+  /// Returns whether `value` is an alphabetic or numeric UTF-8 scalar.
+  function isAlphanumeric(value: Text::Utf8Char): boolean {
+    return Char::isAlpha(value) || Char::isNumeric(value);
+  }
+
+  /// Returns whether `value` is a hexadecimal ASCII scalar.
+  function isHexDigit(value: Text::Utf8Char): boolean {
+    return (value.scalar >= 48 && value.scalar <= 57) || (value.scalar >= 65 && value.scalar <= 70) || (value.scalar >= 97 && value.scalar <= 102);
+  }
+
+  /// Returns whether `value` is a UTF-8 whitespace scalar.
+  function isWhitespace(value: Text::Utf8Char): boolean {
+    return value.scalar == 9 || value.scalar == 10 || value.scalar == 11 || value.scalar == 12 || value.scalar == 13 || value.scalar == 32 || value.scalar == 133 || value.scalar == 160 || value.scalar == 5760 || (value.scalar >= 8192 && value.scalar <= 8202) || value.scalar == 8232 || value.scalar == 8233 || value.scalar == 8239 || value.scalar == 8287 || value.scalar == 12288;
+  }
+
+  /// Converts an ASCII uppercase letter to lowercase.
+  ///
+  /// Non-uppercase characters are returned unchanged.
+  @extension(char)
+  function toAsciiLowercase(value: char): char {
+    return match (value) {
+      'A' -> 'a',
+      'B' -> 'b',
+      'C' -> 'c',
+      'D' -> 'd',
+      'E' -> 'e',
+      'F' -> 'f',
+      'G' -> 'g',
+      'H' -> 'h',
+      'I' -> 'i',
+      'J' -> 'j',
+      'K' -> 'k',
+      'L' -> 'l',
+      'M' -> 'm',
+      'N' -> 'n',
+      'O' -> 'o',
+      'P' -> 'p',
+      'Q' -> 'q',
+      'R' -> 'r',
+      'S' -> 's',
+      'T' -> 't',
+      'U' -> 'u',
+      'V' -> 'v',
+      'W' -> 'w',
+      'X' -> 'x',
+      'Y' -> 'y',
+      'Z' -> 'z',
+      _ -> value,
+    };
+  }
+
+  /// Converts an ASCII lowercase letter to uppercase.
+  ///
+  /// Non-lowercase characters are returned unchanged.
+  @extension(char)
+  function toAsciiUppercase(value: char): char {
+    return match (value) {
+      'a' -> 'A',
+      'b' -> 'B',
+      'c' -> 'C',
+      'd' -> 'D',
+      'e' -> 'E',
+      'f' -> 'F',
+      'g' -> 'G',
+      'h' -> 'H',
+      'i' -> 'I',
+      'j' -> 'J',
+      'k' -> 'K',
+      'l' -> 'L',
+      'm' -> 'M',
+      'n' -> 'N',
+      'o' -> 'O',
+      'p' -> 'P',
+      'q' -> 'Q',
+      'r' -> 'R',
+      's' -> 'S',
+      't' -> 'T',
+      'u' -> 'U',
+      'v' -> 'V',
+      'w' -> 'W',
+      'x' -> 'X',
+      'y' -> 'Y',
+      'z' -> 'Z',
+      _ -> value,
+    };
+  }
+}

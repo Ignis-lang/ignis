@@ -174,6 +174,47 @@ function genericAssertionsPass(): void {
 }
 
 #[test]
+fn run_project_tests_links_std_generic_specializations_used_by_tests() {
+  let project = write_test_project(
+    r#"
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+record DiagnosticLabel {
+    public message: str;
+}
+
+@test
+function stdGenericSpecializationsLink(): void {
+    let mut labels: Vector<DiagnosticLabel> = Vector::new<DiagnosticLabel>();
+    labels.push(DiagnosticLabel { message: "label" });
+
+    Test::assertEq<u64>(labels.length(), 1);
+
+    let source: String = String::create("x");
+    let found: char = match (source.charAt(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing char"),
+    };
+    let fallback: char = source.charAt(9).unwrapOr('?');
+
+    Test::assertEq<char>(found, 'x');
+    Test::assertEq<char>(fallback, '?');
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(result.is_ok(), "expected test-used std generic specializations to link");
+  assert!(
+    harness_binary_path(project.path()).exists(),
+    "expected test harness binary to be built"
+  );
+}
+
+#[test]
 fn run_project_tests_keeps_top_level_test_discovery_with_directive_functions() {
   let project = write_test_project(
     r#"

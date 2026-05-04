@@ -1205,7 +1205,12 @@ impl<'a> AstChunkFormatter<'a> {
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     let mut formatted = self.format_attributes(&record.attrs, indent_level);
-    self.render_comment_gap_after_attributes(&mut formatted, &record.attrs, record.span.start.0 as usize, indent_level)?;
+    self.render_comment_gap_after_attributes(
+      &mut formatted,
+      &record.attrs,
+      record.span.start.0 as usize,
+      indent_level,
+    )?;
 
     formatted.push_str(&format!(
       "{}record {}",

@@ -1,0 +1,605 @@
+import Fs from "std::fs";
+import Char from "std::char";
+import Text from "std::text";
+
+import Diagnostic, DiagnosticBag, DiagnosticLabel, DiagnosticNote, LabelKind, NoteKind, Severity from "./model";
+import SourceSpan from "./source";
+
+const ESCAPE: char = '\u{1B}';
+
+function booleanEquals(left: boolean, right: boolean): boolean {
+  return left ? right : !right;
+}
+
+function strEquals(left: str, right: str): boolean {
+  let leftText: str = left;
+  let rightText: str = right;
+  return @eq<str>(&leftText, &rightText);
+}
+
+function ownedEquals(left: &String, right: str): boolean {
+  let leftText: str = left.toStr();
+  let rightText: str = right;
+  return @eq<str>(&leftText, &rightText);
+}
+
+function startsWith(text: &String, prefix: str): boolean {
+  let prefixString: String = String::create(prefix);
+
+  if (text.length() < prefixString.length()) {
+    return false;
+  }
+
+  return text.substring(0, prefixString.length() as i64).equals(&prefixString);
+}
+
+function slice(text: &String, start: u64, endExclusive: u64): String {
+  if (endExclusive <= start) {
+    return String::new();
+  }
+
+  return text.substring(start as i64, (endExclusive - start) as i64);
+}
+
+function indexOfChar(text: &String, target: char, start: u64): i64 {
+  let mut index: u64 = start;
+
+  while (index < text.length()) {
+    let current: char = match (text.charAt(index)) {
+      Option::SOME(value) -> value,
+      Option::NONE -> {
+        index += 1;
+        continue;
+      },
+    };
+
+    if (current == target) {
+      return index as i64;
+    }
+
+    index += 1;
+  }
+
+  return -1;
+}
+
+function indexOfSpanSeparator(text: &String, start: u64): i64 {
+  let mut index: u64 = start;
+
+  while (index + 3 < text.length()) {
+    let Option::SOME(first) = text.charAt(index) else {
+      return -1;
+    };
+    let Option::SOME(second) = text.charAt(index + 1) else {
+      return -1;
+    };
+    let Option::SOME(third) = text.charAt(index + 2) else {
+      return -1;
+    };
+    let Option::SOME(fourth) = text.charAt(index + 3) else {
+      return -1;
+    };
+
+    if (first == ' ' && second == 'a' && third == 't' && fourth == ' ') {
+      return index as i64;
+    }
+
+    index += 1;
+  }
+
+  return -1;
+}
+
+function digitValue(value: char): u64 {
+  return match (value) {
+    '0' -> 0,
+    '1' -> 1,
+    '2' -> 2,
+    '3' -> 3,
+    '4' -> 4,
+    '5' -> 5,
+    '6' -> 6,
+    '7' -> 7,
+    '8' -> 8,
+    '9' -> 9,
+    _ -> @panic("invalid numeric segment"),
+  };
+}
+
+function parseU64Segment(text: &String, start: u64, endExclusive: u64): u64 {
+  let mut value: u64 = 0;
+  let mut index: u64 = start;
+
+  while (index < endExclusive) {
+    let Option::SOME(digit) = text.charAt(index) else {
+      @panic("invalid numeric segment");
+    };
+
+    if (!Char::isAsciiNumeric(digit)) {
+      @panic("invalid numeric segment");
+    }
+
+    value = value * 10 + digitValue(digit);
+    index += 1;
+  }
+
+  return value;
+}
+
+function storeString(storage: &mut Vector<String>, value: String): str {
+  let mut storageRef: &mut Vector<String> = storage;
+  storageRef.push(value);
+
+  let Option::SOME(storedValue) = storageRef.get(storageRef.length() - 1) else {
+    @panic("failed to retain fixture string");
+  };
+
+  return storedValue.toStr();
+}
+
+function parseSeverity(text: &String): Severity {
+  if (ownedEquals(text, "ERROR")) {
+    return Severity::ERROR;
+  }
+
+  if (ownedEquals(text, "WARNING")) {
+    return Severity::WARNING;
+  }
+
+  if (ownedEquals(text, "INFO")) {
+    return Severity::INFO;
+  }
+
+  if (ownedEquals(text, "HINT")) {
+    return Severity::HINT;
+  }
+
+  @panic("unknown diagnostic severity");
+}
+
+function parseLabelKind(text: &String): LabelKind {
+  if (ownedEquals(text, "primary")) {
+    return LabelKind::PRIMARY;
+  }
+
+  if (ownedEquals(text, "secondary")) {
+    return LabelKind::SECONDARY;
+  }
+
+  @panic("unknown label kind");
+}
+
+function parseSpanText(text: &String, storage: &mut Vector<String>): SourceSpan {
+  let colonIndex: i64 = indexOfChar(text, ':', 0);
+  let dashIndex: i64 = indexOfChar(text, '-', (colonIndex + 1) as u64);
+
+  if (colonIndex < 0 || dashIndex < 0) {
+    @panic("invalid span format");
+  }
+
+  let pathText: str = storeString(storage, slice(text, 0, colonIndex as u64));
+  let start: u64 = parseU64Segment(text, (colonIndex + 1) as u64, dashIndex as u64);
+  let end: u64 = parseU64Segment(text, (dashIndex + 1) as u64, text.length());
+
+  return SourceSpan::new(pathText, start, end);
+}
+
+function parseHeaderLine(text: &String, storage: &mut Vector<String>): Diagnostic {
+  let closeBracket: i64 = indexOfChar(text, ']', 0);
+  let colonIndex: i64 = indexOfChar(text, ':', (closeBracket + 2) as u64);
+
+  if (closeBracket < 0 || colonIndex < 0) {
+    @panic("invalid diagnostic header");
+  }
+
+  let severityText: String = slice(text, 1, closeBracket as u64);
+  let severity: Severity = parseSeverity(&severityText);
+  let code: str = storeString(storage, slice(text, (closeBracket + 2) as u64, colonIndex as u64));
+  let message: str = storeString(storage, slice(text, (colonIndex + 2) as u64, text.length()));
+
+  return Diagnostic::new(severity, code, message, SourceSpan::new("", 0, 0));
+}
+
+function parseLabelLine(diagnostic: &mut Diagnostic, text: &String, storage: &mut Vector<String>): void {
+  let closeParen: i64 = indexOfChar(text, ')', 6);
+  let atIndex: i64 = indexOfSpanSeparator(text, (closeParen + 3) as u64);
+
+  if (closeParen < 0 || atIndex < 0) {
+    @panic("invalid label line");
+  }
+
+  let kindText: String = slice(text, 6, closeParen as u64);
+  let kind: LabelKind = parseLabelKind(&kindText);
+  let message: str = storeString(storage, slice(text, (closeParen + 3) as u64, atIndex as u64));
+  let spanText: String = slice(text, (atIndex + 4) as u64, text.length());
+  let span: SourceSpan = parseSpanText(&spanText, storage);
+  let mut currentDiagnostic: &mut Diagnostic = diagnostic;
+
+  currentDiagnostic.addLabel(kind, span, message);
+}
+
+function trimAsciiWhitespace(text: &String): String {
+  let mut start: u64 = 0;
+  let mut end: u64 = text.length();
+
+  while (start < end) {
+    let Option::SOME(current) = text.charAt(start) else {
+      break;
+    };
+
+    if (!Char::isAsciiWhitespace(current)) {
+      break;
+    }
+
+    start += 1;
+  }
+
+  while (end > start) {
+    let Option::SOME(current) = text.charAt(end - 1) else {
+      break;
+    };
+
+    if (!Char::isAsciiWhitespace(current)) {
+      break;
+    }
+
+    end -= 1;
+  }
+
+  return slice(text, start, end);
+}
+
+function splitLines(text: str): Vector<String> {
+  let owned: String = String::create(text);
+  let mut lines: Vector<String> = Vector::new<String>();
+  let mut cursor: Text::Cursor = Text::Cursor::create(&owned);
+  let mut lineStart: u64 = 0;
+
+  while (!cursor.isAtEnd()) {
+    let Option::SOME(current) = cursor.advance() else {
+      break;
+    };
+
+    let Option::SOME(ascii) = current.ascii() else {
+      continue;
+    };
+
+    if (ascii == '\n') {
+      lines.push(cursor.slice(lineStart, current.start));
+      lineStart = current.end;
+    }
+  }
+
+  if (lineStart <= owned.length()) {
+    lines.push(cursor.slice(lineStart, owned.length()));
+  }
+
+  return lines;
+}
+
+function stripIgnoredRenderedBytes(text: str): String {
+  let owned: String = String::create(text);
+  let mut stripped: String = String::new();
+  let mut cursor: Text::Cursor = Text::Cursor::create(&owned);
+  let mut skippingAnsi: boolean = false;
+
+  while (!cursor.isAtEnd()) {
+    let Option::SOME(current) = cursor.advance() else {
+      break;
+    };
+    let ascii: Option<char> = current.ascii();
+
+    if (skippingAnsi) {
+      if (let Option::SOME(value) = ascii) {
+        if (Char::isAsciiUppercase(value) || Char::isAsciiLowercase(value)) {
+          skippingAnsi = false;
+        }
+      }
+
+      continue;
+    }
+
+    if (let Option::SOME(value) = ascii && value == ESCAPE) {
+      skippingAnsi = true;
+      continue;
+    }
+
+    if (let Option::SOME(value) = ascii && Char::isAsciiWhitespace(value)) {
+      continue;
+    }
+
+    let segment: String = cursor.slice(current.start, current.end);
+    stripped.push(&segment);
+  }
+
+  return stripped;
+}
+
+function labelEquals(expected: &DiagnosticLabel, actual: &DiagnosticLabel): boolean {
+  let expectedKind: LabelKind = expected.kind;
+  let actualKind: LabelKind = actual.kind;
+  let expectedSpan: SourceSpan = expected.span;
+  let actualSpan: SourceSpan = actual.span;
+
+  return @eq<LabelKind>(&expectedKind, &actualKind)
+    && @eq<SourceSpan>(&expectedSpan, &actualSpan)
+    && strEquals(expected.message, actual.message);
+}
+
+function noteEquals(expected: &DiagnosticNote, actual: &DiagnosticNote): boolean {
+  let expectedKind: NoteKind = expected.kind;
+  let actualKind: NoteKind = actual.kind;
+
+  return @eq<NoteKind>(&expectedKind, &actualKind) && strEquals(expected.message, actual.message);
+}
+
+function diagnosticEquals(expected: &Diagnostic, actual: &Diagnostic): boolean {
+  let expectedSeverity: Severity = expected.severity;
+  let actualSeverity: Severity = actual.severity;
+
+  if (!@eq<Severity>(&expectedSeverity, &actualSeverity)) {
+    return false;
+  }
+
+  if (!strEquals(expected.code, actual.code) || !strEquals(expected.message, actual.message)) {
+    return false;
+  }
+
+  let expectedPrimarySpan: SourceSpan = expected.primarySpan;
+  let actualPrimarySpan: SourceSpan = actual.primarySpan;
+
+  if (!@eq<SourceSpan>(&expectedPrimarySpan, &actualPrimarySpan)) {
+    return false;
+  }
+
+  if (expected.labels.length() != actual.labels.length() || expected.notes.length() != actual.notes.length()) {
+    return false;
+  }
+
+  let mut labelIndex: u64 = 0;
+  while (labelIndex < expected.labels.length()) {
+    let Option::SOME(expectedLabel) = expected.labels.get(labelIndex) else {
+      return false;
+    };
+    let Option::SOME(actualLabel) = actual.labels.get(labelIndex) else {
+      return false;
+    };
+
+    if (!labelEquals(expectedLabel, actualLabel)) {
+      return false;
+    }
+
+    labelIndex += 1;
+  }
+
+  let mut noteIndex: u64 = 0;
+  while (noteIndex < expected.notes.length()) {
+    let Option::SOME(expectedNote) = expected.notes.get(noteIndex) else {
+      return false;
+    };
+    let Option::SOME(actualNote) = actual.notes.get(noteIndex) else {
+      return false;
+    };
+
+    if (!noteEquals(expectedNote, actualNote)) {
+      return false;
+    }
+
+    noteIndex += 1;
+  }
+
+  return match (expected.help) {
+    Option::SOME(expectedHelp) -> match (actual.help) {
+      Option::SOME(actualHelp) -> strEquals(expectedHelp, actualHelp),
+      Option::NONE -> false,
+    },
+    Option::NONE -> match (actual.help) {
+      Option::SOME(_) -> false,
+      Option::NONE -> true,
+    },
+  };
+}
+
+function readOptionalFile(path: str): Option<String> {
+  if (!Fs::exists(path)) {
+    return Option::NONE;
+  }
+
+  return match (Fs::readToString(path)) {
+    Result::OK(value) -> Option::SOME(value),
+    Result::ERROR(_) -> Option::NONE,
+  };
+}
+
+@implements(Eq)
+export record CompatibilityReport {
+  public tokensMatch: boolean;
+  public astMatch: boolean;
+  public diagnosticsMatch: boolean;
+  public renderedMatch: boolean;
+
+  equals(&self, other: &CompatibilityReport): boolean {
+    return booleanEquals(self.tokensMatch, other.tokensMatch)
+      && booleanEquals(self.astMatch, other.astMatch)
+      && booleanEquals(self.diagnosticsMatch, other.diagnosticsMatch)
+      && booleanEquals(self.renderedMatch, other.renderedMatch);
+  }
+}
+
+export record CompatibilityFixture {
+  public rootPath: str;
+  public input: Option<String>;
+  public expectedTokens: Option<String>;
+  public expectedAst: Option<String>;
+  public expectedDiagnostics: Option<String>;
+  public expectedRendered: Option<String>;
+}
+
+export record ParsedDiagnostics {
+  public backing: Vector<String>;
+  public diagnostics: DiagnosticBag;
+}
+
+export namespace DiagnosticFixtureParser {
+  function loadFixture(rootPath: str): CompatibilityFixture {
+    let inputPath: String = String::create(rootPath).concat("/input.ign");
+    let tokensPath: String = String::create(rootPath).concat("/expected.tokens");
+    let astPath: String = String::create(rootPath).concat("/expected.ast");
+    let diagnosticsPath: String = String::create(rootPath).concat("/expected.diagnostics");
+    let renderedPath: String = String::create(rootPath).concat("/expected.rendered");
+
+    return CompatibilityFixture {
+      rootPath: rootPath,
+      input: readOptionalFile(inputPath.toStr()),
+      expectedTokens: readOptionalFile(tokensPath.toStr()),
+      expectedAst: readOptionalFile(astPath.toStr()),
+      expectedDiagnostics: readOptionalFile(diagnosticsPath.toStr()),
+      expectedRendered: readOptionalFile(renderedPath.toStr()),
+    };
+  }
+
+  function parse(text: str): ParsedDiagnostics {
+    let lines: Vector<String> = splitLines(text);
+    let mut backing: Vector<String> = Vector::new<String>();
+    let mut bag: DiagnosticBag = DiagnosticBag::init();
+    let mut currentIndex: Option<u64> = Option::NONE;
+    let mut index: u64 = 0;
+
+    while (index < lines.length()) {
+      let line: &String = match (lines.get(index)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> {
+          index += 1;
+          continue;
+        },
+      };
+      let trimmed: String = trimAsciiWhitespace(line);
+
+      if (trimmed.length() == 0) {
+        index += 1;
+        continue;
+      }
+
+      if (startsWith(&trimmed, "[")) {
+        bag.push(parseHeaderLine(&trimmed, &mut backing));
+        currentIndex = Option::SOME(bag.length() - 1);
+
+        index += 1;
+        continue;
+      }
+
+      if (startsWith(&trimmed, "at ")) {
+        let spanText: String = slice(&trimmed, 3, trimmed.length());
+        let activeIndex: u64 = match (currentIndex) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("diagnostic span line without header"),
+        };
+        let mut active: &mut Diagnostic = match (bag.getMut(activeIndex)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing active diagnostic"),
+        };
+
+        active.setPrimarySpan(parseSpanText(&spanText, &mut backing));
+        index += 1;
+        continue;
+      }
+
+      if (startsWith(&trimmed, "label(")) {
+        let activeIndex: u64 = match (currentIndex) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("diagnostic label line without header"),
+        };
+        let mut active: &mut Diagnostic = match (bag.getMut(activeIndex)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing active diagnostic"),
+        };
+
+        parseLabelLine(active, &trimmed, &mut backing);
+        index += 1;
+        continue;
+      }
+
+      if (startsWith(&trimmed, "note: ")) {
+        let noteMessage: str = storeString(&mut backing, slice(&trimmed, 6, trimmed.length()));
+        let activeIndex: u64 = match (currentIndex) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("diagnostic note line without header"),
+        };
+        let mut active: &mut Diagnostic = match (bag.getMut(activeIndex)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing active diagnostic"),
+        };
+
+        active.addNote(noteMessage);
+        index += 1;
+        continue;
+      }
+
+      if (startsWith(&trimmed, "help: ")) {
+        let helpMessage: str = storeString(&mut backing, slice(&trimmed, 6, trimmed.length()));
+        let activeIndex: u64 = match (currentIndex) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("diagnostic help line without header"),
+        };
+        let mut active: &mut Diagnostic = match (bag.getMut(activeIndex)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing active diagnostic"),
+        };
+
+        active.setHelp(helpMessage);
+        index += 1;
+        continue;
+      }
+
+      @panic("unsupported diagnostics fixture line");
+    }
+
+    return ParsedDiagnostics {
+      backing: backing,
+      diagnostics: bag,
+    };
+  }
+
+  function compare(expected: &ParsedDiagnostics, actual: &DiagnosticBag): boolean {
+    if (expected.diagnostics.length() != actual.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+    while (index < expected.diagnostics.length()) {
+      let Option::SOME(expectedDiagnostic) = expected.diagnostics.get(index) else {
+        return false;
+      };
+      let Option::SOME(actualDiagnostic) = actual.get(index) else {
+        return false;
+      };
+
+      if (!diagnosticEquals(expectedDiagnostic, actualDiagnostic)) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  function renderedEquivalent(expected: str, actual: str): boolean {
+    let normalizedExpected: String = stripIgnoredRenderedBytes(expected);
+    let normalizedActual: String = stripIgnoredRenderedBytes(actual);
+    return normalizedExpected.equals(&normalizedActual);
+  }
+
+  function renderedEquivalentStrict(expected: str, actual: str): boolean {
+    return strEquals(expected, actual);
+  }
+
+  function renderReport(expected: &ParsedDiagnostics, actual: &DiagnosticBag): CompatibilityReport {
+    return CompatibilityReport {
+      tokensMatch: true,
+      astMatch: true,
+      diagnosticsMatch: DiagnosticFixtureParser::compare(expected, actual),
+      renderedMatch: false,
+    };
+  }
+}

@@ -1,0 +1,83 @@
+import Fs from "std::fs";
+import Test from "std::test";
+
+import SourceFile, SourceLocation, SourceSpan from "@compiler::diagnostics";
+
+function readUtf8Fixture(path: str): String {
+  return match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("missing UTF-8 diagnostics fixture"),
+  };
+}
+
+function utf8FixturePath(): str {
+  return "test_cases/selfhost/diagnostics/compat_utf8_excerpt/input.ign";
+}
+
+function utf8SourceFile(): SourceFile {
+  let path: str = utf8FixturePath();
+  let text: String = readUtf8Fixture(path);
+
+  return SourceFile::create(path, text.toStr());
+}
+
+function utf8Word(): String {
+  return readUtf8Fixture(utf8FixturePath()).substring(0, 4);
+}
+
+@test
+function sourceSnippetTrimsLineEndingsAndShowsZeroLengthCaret(): void {
+  let source: SourceFile = SourceFile::create("fixtures/empty_span.ign", "first\nproblem\nthird\n");
+  let span: SourceSpan = SourceSpan::new("fixtures/empty_span.ign", 8, 8);
+  let rendered: String = source.snippet(span);
+
+  Test::assertEq<str>(rendered.toStr(), "   2 | problem\n     |   ^");
+}
+
+@test
+function sourceLocationsPreserveUnicodeAndByteColumns(): void {
+  let source: SourceFile = utf8SourceFile();
+  let scalarLocation: SourceLocation = source.lineCol(3);
+  let byteLocation: SourceLocation = source.byteLineCol(3);
+
+  Test::assertEq<u32>(scalarLocation.line, 1);
+  Test::assertEq<u32>(scalarLocation.column, 3);
+  Test::assertEq<u32>(scalarLocation.byteColumn, 4);
+
+  Test::assertEq<u32>(byteLocation.line, 1);
+  Test::assertEq<u32>(byteLocation.column, 4);
+  Test::assertEq<u32>(byteLocation.byteColumn, 4);
+}
+
+@test
+function sourceSnippetUsesCharacterWidthForMultibyteSpan(): void {
+  let source: SourceFile = utf8SourceFile();
+  let singleWidth: String = source.snippet(SourceSpan::new("fixtures/utf8.ign", 1, 3));
+  let mixedWidth: String = source.snippet(SourceSpan::new("fixtures/utf8.ign", 1, 4));
+  let mut snapshot: String = String::new();
+
+  snapshot.pushStr("single=\n");
+  snapshot.push(&singleWidth);
+  snapshot.pushStr("\n\nmixed=\n");
+  snapshot.push(&mixedWidth);
+
+  let renderedWord: String = utf8Word();
+  let singleCaret: String = String::create("  ^");
+  let doubleCaret: String = String::create("  ^^");
+
+  Test::assertSnapshot("source-multibyte-snippets", snapshot.toStr());
+  Test::assert(singleWidth.contains(&renderedWord));
+  Test::assert(mixedWidth.contains(&renderedWord));
+  Test::assert(singleWidth.contains(&singleCaret));
+  Test::assert(!singleWidth.contains(&doubleCaret));
+  Test::assert(mixedWidth.contains(&doubleCaret));
+
+}
+
+@test
+function sourceSnippetRendersMultilineSpanLikeStage0(): void {
+  let source: SourceFile = SourceFile::create("fixtures/multiline.ign", "alpha\nbeta\ngamma");
+  let rendered: String = source.snippet(SourceSpan::new("fixtures/multiline.ign", 2, 10));
+
+  Test::assertEq<str>(rendered.toStr(), "   1 | alpha\n     |   ^^^\n   2 | beta\n     | ^^^^");
+}

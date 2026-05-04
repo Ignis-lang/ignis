@@ -1,0 +1,317 @@
+import CType, LibC from "std::libc";
+
+import SourceSpan from "./source";
+
+@implements(Eq)
+export enum Severity {
+  ERROR,
+  WARNING,
+  INFO,
+  HINT,
+
+  public displayName(&self): str {
+    return match (self) {
+      Severity::ERROR -> "Error",
+      Severity::WARNING -> "Warning",
+      Severity::INFO -> "Info",
+      Severity::HINT -> "Hint",
+    };
+  }
+
+  public equals(&self, other: &Severity): boolean {
+    return match (self) {
+      Severity::ERROR -> *other == Severity::ERROR,
+      Severity::WARNING -> *other == Severity::WARNING,
+      Severity::INFO -> *other == Severity::INFO,
+      Severity::HINT -> *other == Severity::HINT,
+    };
+  }
+}
+
+@implements(Eq)
+export enum LabelKind {
+  PRIMARY,
+  SECONDARY,
+
+  public displayName(&self): str {
+    return match (self) {
+      LabelKind::PRIMARY -> "primary",
+      LabelKind::SECONDARY -> "secondary",
+    };
+  }
+
+  equals(&self, other: &LabelKind): boolean {
+    return match (self) {
+      LabelKind::PRIMARY -> *other == LabelKind::PRIMARY,
+      LabelKind::SECONDARY -> *other == LabelKind::SECONDARY,
+    };
+  }
+}
+
+@implements(Eq)
+export enum NoteKind {
+  NOTE,
+  HELP,
+
+  public displayName(&self): str {
+    return match (self) {
+      NoteKind::NOTE -> "note",
+      NoteKind::HELP -> "help",
+    };
+  }
+
+  public equals(&self, other: &NoteKind): boolean {
+    return match (self) {
+      NoteKind::NOTE -> *other == NoteKind::NOTE,
+      NoteKind::HELP -> *other == NoteKind::HELP,
+    };
+  }
+}
+
+export record DiagnosticLabel {
+  public kind: LabelKind;
+  public span: SourceSpan;
+  public message: str;
+}
+
+export record DiagnosticLabelList {
+  data: *mut DiagnosticLabel;
+  length: u64;
+  capacity: u64;
+
+  public static init(): DiagnosticLabelList {
+    return DiagnosticLabelList {
+      data: null,
+      length: 0,
+      capacity: 0,
+    };
+  }
+
+  public push(&mut self, value: DiagnosticLabel): void {
+    if (self.length == self.capacity) {
+      let mut nextCapacity: u64 = self.capacity * 2;
+
+      if (nextCapacity == 0) {
+        nextCapacity = 1;
+      }
+
+      if (self.data == null) {
+        self.data = LibC::Allocator::malloc((nextCapacity * @sizeOf<DiagnosticLabel>()) as CType::SizeT) as *mut DiagnosticLabel;
+      } else {
+        self.data = LibC::Allocator::realloc(
+          self.data as CType::CVoidPtr,
+          (nextCapacity * @sizeOf<DiagnosticLabel>()) as CType::SizeT,
+        ) as *mut DiagnosticLabel;
+      }
+
+      self.capacity = nextCapacity;
+    }
+
+    self.data[self.length] = value;
+    self.length += 1;
+  }
+
+  public get(&self, index: u64): Option<&DiagnosticLabel> {
+    if (index < self.length) {
+      return Option::SOME(&self.data[index]);
+    }
+
+    return Option::NONE;
+  }
+
+  public length(&self): u64 {
+    return self.length;
+  }
+
+  drop(&mut self): void {
+    if (self.data != null) {
+      LibC::Allocator::free(self.data as CType::CVoidPtr);
+      self.data = null;
+    }
+
+    self.length = 0;
+    self.capacity = 0;
+  }
+}
+
+export record DiagnosticNote {
+  public kind: NoteKind;
+  public message: str;
+}
+
+export record DiagnosticNoteList {
+  data: *mut DiagnosticNote;
+  length: u64;
+  capacity: u64;
+
+  public static init(): DiagnosticNoteList {
+    return DiagnosticNoteList {
+      data: null,
+      length: 0,
+      capacity: 0,
+    };
+  }
+
+  public push(&mut self, value: DiagnosticNote): void {
+    if (self.length == self.capacity) {
+      let mut nextCapacity: u64 = self.capacity * 2;
+
+      if (nextCapacity == 0) {
+        nextCapacity = 1;
+      }
+
+      if (self.data == null) {
+        self.data = LibC::Allocator::malloc((nextCapacity * @sizeOf<DiagnosticNote>()) as CType::SizeT) as *mut DiagnosticNote;
+      } else {
+        self.data = LibC::Allocator::realloc(
+          self.data as CType::CVoidPtr,
+          (nextCapacity * @sizeOf<DiagnosticNote>()) as CType::SizeT,
+        ) as *mut DiagnosticNote;
+      }
+
+      self.capacity = nextCapacity;
+    }
+
+    self.data[self.length] = value;
+    self.length += 1;
+  }
+
+  public get(&self, index: u64): Option<&DiagnosticNote> {
+    if (index < self.length) {
+      return Option::SOME(&self.data[index]);
+    }
+
+    return Option::NONE;
+  }
+
+  public length(&self): u64 {
+    return self.length;
+  }
+
+  drop(&mut self): void {
+    if (self.data != null) {
+      LibC::Allocator::free(self.data as CType::CVoidPtr);
+      self.data = null;
+    }
+
+    self.length = 0;
+    self.capacity = 0;
+  }
+}
+
+export record Diagnostic {
+  public severity: Severity;
+  public code: str;
+  public message: str;
+  public primarySpan: SourceSpan;
+  public labels: DiagnosticLabelList;
+  public notes: DiagnosticNoteList;
+  public help: Option<str>;
+
+  public static new(severity: Severity, code: str, message: str, primarySpan: SourceSpan): Diagnostic {
+    return Diagnostic {
+      severity: severity,
+      code: code,
+      message: message,
+      primarySpan: primarySpan,
+      labels: DiagnosticLabelList::init(),
+      notes: DiagnosticNoteList::init(),
+      help: Option::NONE,
+    };
+  }
+
+  public addLabel(&mut self, kind: LabelKind, span: SourceSpan, message: str): void {
+    self.labels.push(DiagnosticLabel {
+      kind: kind,
+      span: span,
+      message: message,
+    });
+  }
+
+  public setPrimarySpan(&mut self, span: SourceSpan): void {
+    self.primarySpan = span;
+  }
+
+  public addNote(&mut self, message: str): void {
+    self.notes.push(DiagnosticNote {
+      kind: NoteKind::NOTE,
+      message: message,
+    });
+  }
+
+  public setHelp(&mut self, message: str): void {
+    self.help = Option::SOME(message);
+  }
+}
+
+export record DiagnosticBag {
+  diagnostics: *mut Diagnostic;
+  length: u64;
+  capacity: u64;
+
+  public static init(): DiagnosticBag {
+    return DiagnosticBag {
+      diagnostics: null,
+      length: 0,
+      capacity: 0,
+    };
+  }
+
+  public push(&mut self, diagnostic: Diagnostic): void {
+    if (self.length == self.capacity) {
+      let mut nextCapacity: u64 = self.capacity * 2;
+
+      if (nextCapacity == 0) {
+        nextCapacity = 1;
+      }
+
+      if (self.diagnostics == null) {
+        self.diagnostics = LibC::Allocator::malloc((nextCapacity * @sizeOf<Diagnostic>()) as CType::SizeT) as *mut Diagnostic;
+      } else {
+        self.diagnostics = LibC::Allocator::realloc(
+          self.diagnostics as CType::CVoidPtr,
+          (nextCapacity * @sizeOf<Diagnostic>()) as CType::SizeT,
+        ) as *mut Diagnostic;
+      }
+
+      self.capacity = nextCapacity;
+    }
+
+    self.diagnostics[self.length] = diagnostic;
+    self.length += 1;
+  }
+
+  public length(&self): u64 {
+    return self.length;
+  }
+
+  public isEmpty(&self): boolean {
+    return self.length() == 0;
+  }
+
+  public get(&self, index: u64): Option<&Diagnostic> {
+    if (index < self.length) {
+      return Option::SOME(&self.diagnostics[index]);
+    }
+
+    return Option::NONE;
+  }
+
+  public getMut(&mut self, index: u64): Option<&mut Diagnostic> {
+    if (index < self.length) {
+      return Option::SOME(&mut self.diagnostics[index]);
+    }
+
+    return Option::NONE;
+  }
+
+  drop(&mut self): void {
+    if (self.diagnostics != null) {
+      LibC::Allocator::free(self.diagnostics as CType::CVoidPtr);
+      self.diagnostics = null;
+    }
+
+    self.length = 0;
+    self.capacity = 0;
+  }
+}

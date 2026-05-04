@@ -1,0 +1,287 @@
+import Path from "std::path";
+import Text from "std::text";
+
+function trimLineEnding(text: String, start: u64, endExclusive: u64): u64 {
+  let mut contentEnd: u64 = endExclusive;
+
+  if (contentEnd > start) {
+    if (let Option::SOME(last) = text.charAt(contentEnd - 1) && last == '\n') {
+      contentEnd -= 1;
+    }
+  }
+
+  if (contentEnd > start) {
+    if (let Option::SOME(last) = text.charAt(contentEnd - 1) && last == '\r') {
+      contentEnd -= 1;
+    }
+  }
+
+  return contentEnd;
+}
+
+function clampPosition(value: u64, minValue: u64, maxValue: u64): u64 {
+  let mut clamped: u64 = value;
+
+  if (clamped < minValue) {
+    clamped = minValue;
+  }
+
+  if (clamped > maxValue) {
+    clamped = maxValue;
+  }
+
+  return clamped;
+}
+
+@implements(Eq)
+export record SourceSpan {
+  public filePath: str;
+  public start: u64;
+  public end: u64;
+
+  public static new(filePath: str, start: u64, end: u64): SourceSpan {
+    return SourceSpan {
+      filePath: filePath,
+      start: start,
+      end: end,
+    };
+  }
+
+  public isEmpty(&self): boolean {
+    return self.start == self.end;
+  }
+
+  equals(&self, other: &SourceSpan): boolean {
+    let leftPath: str = self.filePath;
+    let rightPath: str = other.filePath;
+    return @eq<str>(&leftPath, &rightPath) && self.start == other.start && self.end == other.end;
+  }
+}
+
+@implements(Eq)
+export record SourceLocation {
+  public line: u32;
+  public column: u32;
+  public byteColumn: u32;
+
+  equals(&self, other: &SourceLocation): boolean {
+    return self.line == other.line && self.column == other.column && self.byteColumn == other.byteColumn;
+  }
+}
+
+export record SourceFile {
+  public path: Path::PathBuf;
+  public text: String;
+
+  public static create(path: str, text: str): SourceFile {
+    return SourceFile {
+      path: Path::PathBuf::create(path),
+      text: String::create(text),
+    };
+  }
+
+  private lineIndexAt(&self, position: u64): u32 {
+    let mut index: u64 = 0;
+    let mut line: u32 = 0;
+    let mut limit: u64 = self.text.length();
+
+    if (position < limit) {
+      limit = position;
+    }
+
+    while (index < limit) {
+      if (let Option::SOME(value) = self.text.charAt(index) && value == '\n') {
+        line += 1;
+      }
+
+      index += 1;
+    }
+
+    return line;
+  }
+
+  private lineStart(&self, lineIndex: u32): u64 {
+    if (lineIndex == 0) {
+      return 0;
+    }
+
+    let mut currentLine: u32 = 0;
+    let mut index: u64 = 0;
+
+    while (index < self.text.length()) {
+      if (let Option::SOME(value) = self.text.charAt(index) && value == '\n') {
+        currentLine += 1;
+
+        if (currentLine == lineIndex) {
+          return index + 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return self.text.length();
+  }
+
+  private lineEnd(&self, lineIndex: u32): u64 {
+    let start: u64 = self.lineStart(lineIndex);
+    let mut index: u64 = start;
+
+    while (index < self.text.length()) {
+      if (let Option::SOME(value) = self.text.charAt(index) && value == '\n') {
+        return index + 1;
+      }
+
+      index += 1;
+    }
+
+    return self.text.length();
+  }
+
+  private unicodeColumn(start: u64, endExclusive: u64): u32 {
+    let mut cursor: Text::Cursor = Text::Cursor::create(self.text.toStr());
+    let mut column: u32 = 0;
+    let mut limit: u64 = self.text.length();
+
+    if (endExclusive < limit) {
+      limit = endExclusive;
+    }
+
+    while (!cursor.isAtEnd() && cursor.position() < limit) {
+      let Option::SOME(current) = cursor.advance() else {
+        break;
+      };
+
+      if (current.end <= start) {
+        continue;
+      }
+
+      if (current.start >= start) {
+        column += 1;
+      }
+    }
+
+    return column;
+  }
+
+  public lineCol(&self, position: u64): SourceLocation {
+    let lineIndex: u32 = self.lineIndexAt(position);
+    let lineStart: u64 = self.lineStart(lineIndex);
+    let mut safePosition: u64 = position;
+
+    if (safePosition < lineStart) {
+      safePosition = lineStart;
+    }
+
+    return SourceLocation {
+      line: lineIndex + 1,
+      column: self.unicodeColumn(lineStart, safePosition) + 1,
+      byteColumn: (safePosition - lineStart + 1) as u32,
+    };
+  }
+
+  public byteLineCol(&self, position: u64): SourceLocation {
+    let lineIndex: u32 = self.lineIndexAt(position);
+    let lineStart: u64 = self.lineStart(lineIndex);
+    let mut safePosition: u64 = position;
+
+    if (safePosition < lineStart) {
+      safePosition = lineStart;
+    }
+
+    return SourceLocation {
+      line: lineIndex + 1,
+      column: (safePosition - lineStart + 1) as u32,
+      byteColumn: (safePosition - lineStart + 1) as u32,
+    };
+  }
+
+  private appendPaddedLineNumber(output: &mut String, lineNumber: u32): void {
+    let lineNumberText: String = String::create(lineNumber);
+    let mut outputRef: &mut String = output;
+    let mut spaces: u64 = 0;
+
+    while (spaces + lineNumberText.length() < 4) {
+      outputRef.pushStr(" ");
+      spaces += 1;
+    }
+
+    outputRef.push(&lineNumberText);
+  }
+
+  private appendSnippetLine(&self, output: &mut String, lineIndex: u32, highlightStart: u64, highlightEnd: u64): void {
+    let lineStart: u64 = self.lineStart(lineIndex);
+    let lineEnd: u64 = self.lineEnd(lineIndex);
+    let contentEnd: u64 = trimLineEnding(self.text.clone(), lineStart, lineEnd);
+    let lineText: String = self.text.substring(lineStart as i64, (contentEnd - lineStart) as i64);
+    let mut outputRef: &mut String = output;
+
+    self.appendPaddedLineNumber(output, lineIndex + 1);
+    outputRef.pushStr(" | ");
+    outputRef.pushStr(lineText.toStr());
+    outputRef.pushStr("\n");
+
+    let caretStart: u64 = clampPosition(highlightStart, lineStart, contentEnd);
+    let caretEnd: u64 = clampPosition(highlightEnd, caretStart, contentEnd);
+    let caretColumn: u32 = self.unicodeColumn(lineStart, caretStart);
+    let mut caretWidth: u32 = self.unicodeColumn(caretStart, caretEnd);
+
+    if (caretWidth == 0) {
+      caretWidth = 1;
+    }
+
+    outputRef.pushStr("     | ");
+
+    let mut spaces: u32 = 0;
+    while (spaces < caretColumn) {
+      outputRef.pushStr(" ");
+      spaces += 1;
+    }
+
+    let mut carets: u32 = 0;
+    while (carets < caretWidth) {
+      outputRef.pushStr("^");
+      carets += 1;
+    }
+  }
+
+  public snippet(&self, span: SourceSpan): String {
+    let mut rendered: String = String::new();
+    let startLineIndex: u32 = self.lineIndexAt(span.start);
+    let mut endAnchor: u64 = span.end;
+
+    if (span.end > span.start) {
+      endAnchor = span.end - 1;
+    }
+
+    let endLineIndex: u32 = self.lineIndexAt(endAnchor);
+    let mut lineIndex: u32 = startLineIndex;
+
+    while (lineIndex <= endLineIndex) {
+      let lineStart: u64 = self.lineStart(lineIndex);
+      let lineEnd: u64 = self.lineEnd(lineIndex);
+      let contentEnd: u64 = trimLineEnding(self.text.clone(), lineStart, lineEnd);
+      let mut highlightStart: u64 = lineStart;
+      if (lineIndex == startLineIndex) {
+        highlightStart = clampPosition(span.start, lineStart, contentEnd);
+      }
+
+      let mut highlightEnd: u64 = contentEnd;
+      if (span.isEmpty()) {
+        highlightEnd = highlightStart;
+      } else if (lineIndex == endLineIndex) {
+        highlightEnd = clampPosition(span.end, lineStart, contentEnd);
+      }
+
+      self.appendSnippetLine(&mut rendered, lineIndex, highlightStart, highlightEnd);
+
+      if (lineIndex < endLineIndex) {
+        rendered.pushStr("\n");
+      }
+
+      lineIndex += 1;
+    }
+
+    return rendered;
+  }
+}

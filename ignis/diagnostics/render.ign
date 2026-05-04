@@ -1,0 +1,347 @@
+import Terminal from "std::terminal";
+
+import Diagnostic, DiagnosticBag, DiagnosticLabel, Severity from "./model";
+import SourceFile, SourceLocation, SourceSpan from "./source";
+
+function trimLineEnding(source: &SourceFile, start: u64, endExclusive: u64): u64 {
+  let mut contentEnd: u64 = endExclusive;
+
+  if (contentEnd > start) {
+    if (let Option::SOME(last) = source.text.charAt(contentEnd - 1) && last == '\n') {
+      contentEnd -= 1;
+    }
+  }
+
+  if (contentEnd > start) {
+    if (let Option::SOME(last) = source.text.charAt(contentEnd - 1) && last == '\r') {
+      contentEnd -= 1;
+    }
+  }
+
+  return contentEnd;
+}
+
+function lineIndexAt(source: &SourceFile, position: u64): u32 {
+  let mut index: u64 = 0;
+  let mut line: u32 = 0;
+  let mut limit: u64 = source.text.length();
+
+  if (position < limit) {
+    limit = position;
+  }
+
+  while (index < limit) {
+    if (let Option::SOME(value) = source.text.charAt(index) && value == '\n') {
+      line += 1;
+    }
+
+    index += 1;
+  }
+
+  return line;
+}
+
+function lineStart(source: &SourceFile, lineIndex: u32): u64 {
+  if (lineIndex == 0) {
+    return 0;
+  }
+
+  let mut currentLine: u32 = 0;
+  let mut index: u64 = 0;
+
+  while (index < source.text.length()) {
+    if (let Option::SOME(value) = source.text.charAt(index) && value == '\n') {
+      currentLine += 1;
+
+      if (currentLine == lineIndex) {
+        return index + 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return source.text.length();
+}
+
+function lineEnd(source: &SourceFile, lineIndex: u32): u64 {
+  let start: u64 = lineStart(source, lineIndex);
+  let mut index: u64 = start;
+
+  while (index < source.text.length()) {
+    if (let Option::SOME(value) = source.text.charAt(index) && value == '\n') {
+      return index + 1;
+    }
+
+    index += 1;
+  }
+
+  return source.text.length();
+}
+
+function lineText(source: &SourceFile, lineIndex: u32): String {
+  let start: u64 = lineStart(source, lineIndex);
+  let endExclusive: u64 = lineEnd(source, lineIndex);
+  let contentEnd: u64 = trimLineEnding(source, start, endExclusive);
+
+  return source.text.substring(start as i64, (contentEnd - start) as i64);
+}
+
+function appendPipeSpacer(output: &mut String): void {
+  let mut outputRef: &mut String = output;
+  outputRef.pushStr("     |\n");
+}
+
+function appendStage0Line(output: &mut String, lineNumber: u32, line: &String): void {
+  let mut outputRef: &mut String = output;
+  let lineNumberText: String = String::create(lineNumber);
+  let mut padding: u64 = 0;
+
+  while (padding + lineNumberText.length() < 3) {
+    outputRef.pushStr(" ");
+    padding += 1;
+  }
+
+  outputRef.push(&lineNumberText);
+  outputRef.pushStr("  |");
+  outputRef.pushStr(line.toStr());
+  outputRef.pushStr("\n");
+}
+
+function appendStage0Caret(output: &mut String, column: u32, width: u32, useAnsi: boolean, color: Terminal::TerminalColor): void {
+  let mut outputRef: &mut String = output;
+  let mut spaces: u32 = 0;
+  let mut carets: u32 = 0;
+
+  outputRef.pushStr("     |");
+
+  while (spaces < column) {
+    outputRef.pushStr(" ");
+    spaces += 1;
+  }
+
+  while (carets < width) {
+    appendStyledText(output, "^", useAnsi, color, true);
+    carets += 1;
+  }
+
+  outputRef.pushStr("\n");
+}
+
+function stage0CaretWidth(source: &SourceFile, span: &SourceSpan, location: SourceLocation): u32 {
+  if (span.start == span.end) {
+    return 1;
+  }
+
+  let endLocation: SourceLocation = source.lineCol(span.end);
+
+  if (endLocation.line == location.line && endLocation.column > location.column) {
+    return endLocation.column - location.column;
+  }
+
+  let currentLineText: String = lineText(source, location.line - 1);
+  let lineLength: u32 = currentLineText.length() as u32;
+
+  if (lineLength > location.column) {
+    return lineLength - location.column;
+  }
+
+  return 1;
+}
+
+function appendSourceBlock(output: &mut String, source: &SourceFile, location: SourceLocation, span: &SourceSpan, useAnsi: boolean, color: Terminal::TerminalColor, includeAdjacentContext: boolean): void {
+  let lineIndex: u32 = location.line - 1;
+
+  if (includeAdjacentContext && location.line > 1) {
+    let previousLine: String = lineText(source, lineIndex - 1);
+
+    appendPipeSpacer(output);
+    appendStage0Line(output, location.line - 1, &previousLine);
+  }
+
+  let currentLine: String = lineText(source, lineIndex);
+
+  appendPipeSpacer(output);
+  appendStage0Line(output, location.line, &currentLine);
+  appendStage0Caret(output, location.column, stage0CaretWidth(source, span, location), useAnsi, color);
+
+  if (includeAdjacentContext) {
+    let nextLineIndex: u32 = lineIndex + 1;
+    let nextLineStart: u64 = lineStart(source, nextLineIndex);
+
+    if (nextLineStart < source.text.length()) {
+      let nextLine: String = lineText(source, nextLineIndex);
+
+      appendPipeSpacer(output);
+      appendStage0Line(output, location.line + 1, &nextLine);
+    }
+  }
+}
+
+function severityColor(severity: Severity): Terminal::TerminalColor {
+  return match (severity) {
+    Severity::ERROR -> Terminal::TerminalColor::RED,
+    Severity::WARNING -> Terminal::TerminalColor::YELLOW,
+    Severity::INFO -> Terminal::TerminalColor::BLUE,
+    Severity::HINT -> Terminal::TerminalColor::CYAN,
+  };
+}
+
+function appendStyledText(output: &mut String, text: str, useAnsi: boolean, color: Terminal::TerminalColor, bold: boolean): void {
+  let mut outputRef: &mut String = output;
+
+  if (!useAnsi) {
+    outputRef.pushStr(text);
+    return;
+  }
+
+  let mut style: Terminal::Style = Terminal::Style::new();
+  style.foreground(color);
+
+  if (bold) {
+    style.attribute(Terminal::TerminalAttribute::BOLD);
+  }
+
+  let styled: String = style.apply(text);
+  outputRef.push(&styled);
+}
+
+function appendLocation(output: &mut String, source: &SourceFile, location: SourceLocation, useAnsi: boolean): void {
+  let mut outputRef: &mut String = output;
+
+  outputRef.pushStr("  ");
+  appendStyledText(output, "-->", useAnsi, Terminal::TerminalColor::BLUE, true);
+  outputRef.pushStr(" ");
+  outputRef.pushStr(source.path.asStr());
+  outputRef.pushChar(':');
+  outputRef.pushStr(String::create(location.line).toStr());
+  outputRef.pushChar(':');
+  outputRef.pushStr(String::create(location.column).toStr());
+  outputRef.pushStr("\n");
+}
+
+function appendSummaryLine(output: &mut String, prefix: str, message: str, useAnsi: boolean, color: Terminal::TerminalColor): void {
+  let mut outputRef: &mut String = output;
+
+  outputRef.pushStr("  = ");
+  appendStyledText(output, prefix, useAnsi, color, true);
+  outputRef.pushStr(" ");
+  outputRef.pushStr(message);
+  outputRef.pushStr("\n");
+}
+
+function appendLabelBlock(output: &mut String, label: &DiagnosticLabel, source: &SourceFile, useAnsi: boolean): void {
+  let labelLocation: SourceLocation = source.lineCol(label.span.start);
+  let labelSpan: SourceSpan = label.span;
+  let mut outputRef: &mut String = output;
+  outputRef.pushStr("  ");
+  appendStyledText(output, "label:", useAnsi, Terminal::TerminalColor::YELLOW, true);
+  outputRef.pushStr(" ");
+  outputRef.pushStr(label.message);
+  outputRef.pushStr("\n");
+
+  appendSourceBlock(output, source, labelLocation, &labelSpan, useAnsi, Terminal::TerminalColor::YELLOW, false);
+}
+
+@implements(Eq)
+export enum RenderMode {
+  PLAIN,
+  ANSI,
+
+  equals(&self, other: &RenderMode): boolean {
+    return match (self) {
+      RenderMode::PLAIN -> *other == RenderMode::PLAIN,
+      RenderMode::ANSI -> *other == RenderMode::ANSI,
+    };
+  }
+}
+
+export record RenderOptions {
+  public useAnsi: boolean;
+
+  public static plain(): RenderOptions {
+    return RenderOptions { useAnsi: false };
+  }
+
+  public static ansi(): RenderOptions {
+    return RenderOptions { useAnsi: true };
+  }
+}
+
+export namespace DiagnosticRenderer {
+  function render(diagnostic: &Diagnostic, source: &SourceFile, useAnsi: boolean): String {
+    let mut rendered: String = String::new();
+    let severityText: str = diagnostic.severity.displayName();
+    let severityStyling: Terminal::TerminalColor = severityColor(diagnostic.severity);
+    let primaryLocation: SourceLocation = source.lineCol(diagnostic.primarySpan.start);
+    let mut labelIndex: u64 = 0;
+    let mut noteIndex: u64 = 0;
+
+    appendStyledText(&mut rendered, severityText, useAnsi, severityStyling, true);
+    rendered.pushChar('[');
+    appendStyledText(&mut rendered, diagnostic.code, useAnsi, severityStyling, true);
+    rendered.pushStr("]: ");
+    rendered.pushStr(diagnostic.message);
+    rendered.pushStr("\n");
+
+    appendLocation(&mut rendered, source, primaryLocation, useAnsi);
+    let primarySpan: SourceSpan = diagnostic.primarySpan;
+
+    appendSourceBlock(&mut rendered, source, primaryLocation, &primarySpan, useAnsi, severityStyling, true);
+
+    while (labelIndex < diagnostic.labels.length()) {
+      let Option::SOME(label) = diagnostic.labels.get(labelIndex) else {
+        labelIndex += 1;
+        continue;
+      };
+
+      rendered.pushStr("\n");
+      appendLabelBlock(&mut rendered, label, source, useAnsi);
+      labelIndex += 1;
+    }
+
+    while (noteIndex < diagnostic.notes.length()) {
+      let Option::SOME(note) = diagnostic.notes.get(noteIndex) else {
+        noteIndex += 1;
+        continue;
+      };
+
+      appendSummaryLine(&mut rendered, "note:", note.message, useAnsi, Terminal::TerminalColor::CYAN);
+      noteIndex += 1;
+    }
+
+    if (let Option::SOME(help) = diagnostic.help) {
+      appendSummaryLine(&mut rendered, "help:", help, useAnsi, Terminal::TerminalColor::GREEN);
+    }
+
+    return rendered;
+  }
+
+  function writeTo(output: &mut String, diagnostic: &Diagnostic, source: &SourceFile, useAnsi: boolean): void {
+    let rendered: String = DiagnosticRenderer::render(diagnostic, source, useAnsi);
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(rendered.toStr());
+  }
+
+  function renderBag(bag: &DiagnosticBag, source: &SourceFile, useAnsi: boolean): String {
+    let mut rendered: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < bag.length()) {
+      let Option::SOME(diagnostic) = bag.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        rendered.pushStr("\n");
+      }
+
+      let current: String = DiagnosticRenderer::render(diagnostic, source, useAnsi);
+      rendered.push(&current);
+      index += 1;
+    }
+
+    return rendered;
+  }
+}

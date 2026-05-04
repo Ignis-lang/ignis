@@ -1,0 +1,84 @@
+import Char from "std::char";
+import Memory from "std::memory";
+import String from "std::string";
+import Test from "std::test";
+import Text from "std::text";
+
+function nextScalar(cursor: &mut Text::Cursor): Text::Utf8Char {
+  let mut stream: &mut Text::Cursor = cursor;
+
+  let Option::SOME(value) = stream.advance() else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return value;
+}
+
+function utf8ScalarSample(): String {
+  let raw: *mut u8 = Memory::allocateVector<u8>(8);
+
+  @write<u8>(raw, 195 as u8);
+  @write<u8>(raw + 1, 169 as u8);
+  @write<u8>(raw + 2, 228 as u8);
+  @write<u8>(raw + 3, 184 as u8);
+  @write<u8>(raw + 4, 173 as u8);
+  @write<u8>(raw + 5, 239 as u8);
+  @write<u8>(raw + 6, 188 as u8);
+  @write<u8>(raw + 7, 149 as u8);
+
+  return String::create(raw, 8 as u64);
+}
+
+@test
+function charClassifiesAsciiCharsWithExplicitAsciiNames(): void {
+  Test::assert(Char::isAsciiAlpha('A'));
+  Test::assert(Char::isAsciiAlpha('z'));
+  Test::assert(!Char::isAsciiAlpha('7'));
+
+  Test::assert(Char::isAsciiNumeric('0'));
+  Test::assert(Char::isAsciiNumeric('9'));
+  Test::assert(!Char::isAsciiNumeric('x'));
+
+  Test::assert(Char::isAsciiAlphanumeric('Q'));
+  Test::assert(Char::isAsciiAlphanumeric('3'));
+  Test::assert(!Char::isAsciiAlphanumeric('_'));
+}
+
+@test
+function charClassifiesUtf8Scalars(): void {
+  let source: String = utf8ScalarSample();
+  let mut cursor: Text::Cursor = Text::Cursor::create(&source);
+
+  let latin: Text::Utf8Char = nextScalar(&mut cursor);
+  let cjk: Text::Utf8Char = nextScalar(&mut cursor);
+  let fullWidthDigit: Text::Utf8Char = nextScalar(&mut cursor);
+
+  Test::assert(Char::isAlpha(latin));
+  Test::assert(Char::isAlpha(cjk));
+  Test::assert(Char::isNumeric(fullWidthDigit));
+  Test::assert(Char::isAlphanumeric(fullWidthDigit));
+}
+
+@test
+function charClassifiesHexDigitsWhitespaceAndCase(): void {
+  Test::assert(Char::isAsciiHexDigit('0'));
+  Test::assert(Char::isAsciiHexDigit('a'));
+  Test::assert(Char::isAsciiHexDigit('F'));
+  Test::assert(!Char::isAsciiHexDigit('g'));
+
+  Test::assert(Char::isAsciiWhitespace(' '));
+  Test::assert(Char::isAsciiWhitespace('\n'));
+  Test::assert(Char::isAsciiWhitespace('\t'));
+  Test::assert(!Char::isAsciiWhitespace('A'));
+
+  Test::assert(Char::isAsciiUppercase('A'));
+  Test::assert(!Char::isAsciiUppercase('a'));
+  Test::assert(Char::isAsciiLowercase('a'));
+  Test::assert(!Char::isAsciiLowercase('A'));
+
+  Test::assertEq<char>(Char::toAsciiLowercase('A'), 'a');
+  Test::assertEq<char>(Char::toAsciiLowercase('z'), 'z');
+  Test::assertEq<char>(Char::toAsciiUppercase('a'), 'A');
+  Test::assertEq<char>(Char::toAsciiUppercase('Z'), 'Z');
+}

@@ -1,0 +1,155 @@
+import Test from "std::test";
+
+import Diagnostic, DiagnosticBag, DiagnosticCode, DiagnosticLabel, DiagnosticNote, LabelKind, NoteKind, Severity, SourceSpan from "@compiler::diagnostics";
+
+function assertLabel(label: &DiagnosticLabel, kind: LabelKind, start: u64, end: u64, message: str): void {
+  Test::assertEq<LabelKind>(label.kind, kind);
+  Test::assertEq<u64>(label.span.start, start);
+  Test::assertEq<u64>(label.span.end, end);
+  Test::assertEq<str>(label.message, message);
+}
+
+function assertNote(note: &DiagnosticNote, kind: NoteKind, message: str): void {
+  Test::assertEq<NoteKind>(note.kind, kind);
+  Test::assertEq<str>(note.message, message);
+}
+
+@test
+function diagnosticBagPreservesInsertionOrderAndStructuredFields(): void {
+  let firstSpan: SourceSpan = SourceSpan::new("input.ign", 4, 7);
+  let secondSpan: SourceSpan = SourceSpan::new("input.ign", 12, 12);
+
+  let mut first: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::EXPECTED_TOKEN, "expected expression", SourceSpan::new("input.ign", 4, 7));
+  first.addLabel(LabelKind::PRIMARY, firstSpan, "expression expected");
+  first.addNote("parser stopped here");
+
+  let mut second: Diagnostic = Diagnostic::new(Severity::WARNING, DiagnosticCode::UNEXPECTED_TOKEN, "unused value", SourceSpan::new("input.ign", 12, 12));
+  second.addLabel(LabelKind::PRIMARY, secondSpan, "value is ignored");
+  second.setHelp("remove the statement");
+
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(first);
+  bag.push(second);
+
+  Test::assertEq<u64>(bag.length(), 2);
+  Test::assert(!bag.isEmpty());
+
+  let firstDiagnostic: &Diagnostic = match (bag.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing first diagnostic"),
+  };
+  let secondDiagnostic: &Diagnostic = match (bag.get(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing second diagnostic"),
+  };
+
+  Test::assertEq<Severity>(firstDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(firstDiagnostic.code, "I0001");
+  Test::assertEq<str>(firstDiagnostic.message, "expected expression");
+  Test::assertEq<str>(firstDiagnostic.primarySpan.filePath, "input.ign");
+
+  let firstLabel: &DiagnosticLabel = match (firstDiagnostic.labels.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing first label"),
+  };
+  assertLabel(firstLabel, LabelKind::PRIMARY, 4, 7, "expression expected");
+
+  let firstNote: &DiagnosticNote = match (firstDiagnostic.notes.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing first note"),
+  };
+  assertNote(firstNote, NoteKind::NOTE, "parser stopped here");
+
+  Test::assert(match (secondDiagnostic.help) {
+    Option::SOME(_) -> true,
+    Option::NONE -> false,
+  });
+  Test::assertEq<Severity>(secondDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(secondDiagnostic.code, "I0002");
+}
+
+@test
+function diagnosticTracksPrimarySecondaryLabelsAndOptionalHelp(): void {
+  let declarationSpan: SourceSpan = SourceSpan::new("module.ign", 2, 5);
+  let useSpan: SourceSpan = SourceSpan::new("module.ign", 16, 20);
+
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("module.ign", 16, 20));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, useSpan, "used here");
+  diagnostic.addLabel(LabelKind::SECONDARY, declarationSpan, "declared here");
+  diagnostic.addNote("expected i32");
+  diagnostic.setHelp("convert the value before use");
+
+  Test::assertEq<u64>(diagnostic.labels.length(), 2);
+  Test::assertEq<u64>(diagnostic.notes.length(), 1);
+
+  let primaryLabel: &DiagnosticLabel = match (diagnostic.labels.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing primary label"),
+  };
+  let secondaryLabel: &DiagnosticLabel = match (diagnostic.labels.get(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing secondary label"),
+  };
+
+  assertLabel(primaryLabel, LabelKind::PRIMARY, 16, 20, "used here");
+  assertLabel(secondaryLabel, LabelKind::SECONDARY, 2, 5, "declared here");
+
+  let help: str = match (diagnostic.help) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing help"),
+  };
+
+  Test::assertEq<str>(help, "convert the value before use");
+}
+
+@test
+function diagnosticCodeSurfaceIsStable(): void {
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_TOKEN, "I0001");
+  Test::assertEq<str>(DiagnosticCode::UNEXPECTED_TOKEN, "I0002");
+  Test::assertEq<str>(DiagnosticCode::INVALID_TOKEN, "I0003");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_EXPRESSION, "I0004");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_VARIABLE_NAME, "I0005");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_RETURN_TYPE_AFTER_FUNCTION, "I0006");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_AFTER_EXPRESSION, "I0007");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_EXPRESSION_AFTER, "I0008");
+  Test::assertEq<str>(DiagnosticCode::INVALID_ASSIGNMENT_TARGET, "I0009");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_TYPE_AFTER_VARIABLE, "I0010");
+  Test::assertEq<str>(DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS, "I0011");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_SEMICOLON_AFTER_EXPRESSION, "I0012");
+  Test::assertEq<str>(DiagnosticCode::INVALID_ENUM_MEMBER, "I0013");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_TYPE_AFTER_PIPE, "I0014");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_DELIMITER, "I0015");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_TYPE, "I0016");
+  Test::assertEq<str>(DiagnosticCode::UNEXPECTED_KEYWORD, "I0017");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_IDENTIFIER, "I0018");
+  Test::assertEq<str>(DiagnosticCode::UNINITIALIZED_CONSTANT, "I0019");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_PATTERN, "I0020");
+  Test::assertEq<str>(DiagnosticCode::UNTERMINATED_COMMENT, "I0021");
+  Test::assertEq<str>(DiagnosticCode::UNTERMINATED_CHARACTER, "I0022");
+  Test::assertEq<str>(DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "I0023");
+  Test::assertEq<str>(DiagnosticCode::INVALID_CHARACTER, "I0024");
+  Test::assertEq<str>(DiagnosticCode::UNTERMINATED_STRING, "I0025");
+  Test::assertEq<str>(DiagnosticCode::UNEXPECTED_GENERICS, "I0026");
+  Test::assertEq<str>(DiagnosticCode::UNDEFINED_META, "I0027");
+  Test::assertEq<str>(DiagnosticCode::INVALID_META_ENTITY, "I0028");
+  Test::assertEq<str>(DiagnosticCode::MISSING_ARGUMENT, "I0029");
+  Test::assertEq<str>(DiagnosticCode::INVALID_ARGUMENT_TYPE, "I0030");
+  Test::assertEq<str>(DiagnosticCode::TYPE_MISMATCH, "I0031");
+  Test::assertEq<str>(DiagnosticCode::UNDECLARED_VARIABLE, "I0033");
+  Test::assertEq<str>(DiagnosticCode::VARIABLE_ALREADY_DEFINED, "I0041");
+  Test::assertEq<str>(DiagnosticCode::FUNCTION_ALREADY_DEFINED, "I0042");
+  Test::assertEq<str>(DiagnosticCode::UNDEFINED_TYPE, "I0043");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_INTEGER, "I0044");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_FLOAT, "I0045");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_HEX, "I0046");
+  Test::assertEq<str>(DiagnosticCode::EXPECTED_BINARY, "I0047");
+  Test::assertEq<str>(DiagnosticCode::MULTI_BYTE_CHARACTER_LITERAL, "I0050");
+  Test::assertEq<str>(DiagnosticCode::RAW_NUL_IN_SOURCE, "I0051");
+  Test::assertEq<str>(DiagnosticCode::TYPE_ALREADY_DEFINED, "A0052");
+
+  Test::assert(DiagnosticCode::isStable("I0001"));
+  Test::assert(DiagnosticCode::isStable("A0052"));
+  Test::assert(!DiagnosticCode::isStable("broken"));
+  Test::assert(!DiagnosticCode::isStable("I001"));
+}

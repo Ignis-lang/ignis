@@ -353,9 +353,9 @@ function println(message: str): void {
 /// ```ignis
 /// import Vector from "std::vector";
 ///
-/// let v: Vector<i32> = Vector::init<i32>();
+/// let v: Vector<i32> = Vector::new<i32>();
 /// ```
-public static init(): Vector<T> {
+public static new(): Vector<T> {
     return Vector {
         data: null,
         length: 0,
@@ -370,8 +370,26 @@ public static init(): Vector<T> {
 /// ```ignis
 /// import Vector from "std::vector";
 ///
-/// let v: Vector<i32> = Vector::init<i32>(16);
+/// let v: Vector<i32> = Vector::new<i32>(16);
 /// ```
+public static new(capacity: u64): Vector<T> {
+    return Vector {
+        data: Memory::allocateVector<T>(capacity),
+        length: 0,
+        capacity: capacity,
+    };
+}
+
+/// Compatibility alias for `Vector::new()`.
+public static init(): Vector<T> {
+    return Vector {
+        data: null,
+        length: 0,
+        capacity: 0,
+    };
+}
+
+/// Compatibility alias for `Vector::new(capacity)`.
 public static init(capacity: u64): Vector<T> {
     return Vector {
         data: Memory::allocateVector<T>(capacity),
@@ -460,7 +478,7 @@ export enum Result<T, E> {
       wrap_in_heap_allocator_record: true,
       config: FormatterConfig::default(),
       expected: r#"public map<U>(&self, @noescape f: (&T) -> U): Vector<U> {
-    let mut result: Vector<U> = Vector::init<U>(self.length);
+    let mut result: Vector<U> = Vector::new<U>(self.length);
     let mut i: u64 = 0;
     while (i < self.length) {
         result.push(f(&self.data[i]));
@@ -536,7 +554,7 @@ function combine(f: (i32) -> i32, g: (i32) -> i32, x: i32): i32 {
       append_closing_brace: false,
       wrap_in_heap_allocator_record: true,
       config: FormatterConfig::default(),
-      expected: "/// Folds the vector left-to-right without an explicit initial value.\n///\n/// The first element is **copied** as the initial accumulator. Then `f`\n/// is called for each subsequent element with `(accumulator, &element)`,\n/// and its return value becomes the new accumulator.\n///\n/// Returns `Option::NONE` for an empty vector.\n///\n/// # Arguments\n///\n/// * `f` - Callback that takes the accumulator by value and the next\n///   element by reference, and returns the updated accumulator.\n///\n/// # Returns\n///\n/// `Option::SOME(result)` with the final accumulated value, or\n/// `Option::NONE` if the vector is empty.\n///\n/// # Example\n///\n/// ```ignis\n/// import Vector from \"std::vector\";\n/// import Option from \"std::option\";\n///\n/// let mut v: Vector<i32> = Vector::init<i32>();\n/// v.push(1);\n/// v.push(2);\n/// v.push(3);\n///\n/// // Sum all elements: 1 + 2 + 3 = 6\n/// let sum: Option<i32> = v.reduce((acc: i32, x: &i32): i32 -> {\n///   return acc + *x;\n/// });\n/// // sum == Option::SOME(6)\n///\n/// // Empty vector returns NONE\n/// let empty: Vector<i32> = Vector::init<i32>();\n/// let result: Option<i32> = empty.reduce((acc: i32, x: &i32): i32 -> {\n///   return acc + *x;\n/// });\n/// // result == Option::NONE\n/// ```\n///\n/// # See Also\n///\n/// Use `fold<U>` if you need an explicit initial value or a different\n/// return type.\npublic reduce(&self, @noescape f: (T, &T) -> T): Option<T> {\n    if (self.length == 0) {\n        return Option::NONE;\n    }\n\n    let mut acc: T = self.data[0];\n    let mut i: u64 = 1;\n    while (i < self.length) {\n        acc = f(acc, &self.data[i]);\n        i += 1;\n    }\n    return Option::SOME(acc);\n}\n",
+      expected: "/// Folds the vector left-to-right without an explicit initial value.\n///\n/// The first element is **copied** as the initial accumulator. Then `f`\n/// is called for each subsequent element with `(accumulator, &element)`,\n/// and its return value becomes the new accumulator.\n///\n/// Returns `Option::NONE` for an empty vector.\n///\n/// # Arguments\n///\n/// * `f` - Callback that takes the accumulator by value and the next\n///   element by reference, and returns the updated accumulator.\n///\n/// # Returns\n///\n/// `Option::SOME(result)` with the final accumulated value, or\n/// `Option::NONE` if the vector is empty.\n///\n/// # Example\n///\n/// ```ignis\n/// import Vector from \"std::vector\";\n/// import Option from \"std::option\";\n///\n/// let mut v: Vector<i32> = Vector::new<i32>();\n/// v.push(1);\n/// v.push(2);\n/// v.push(3);\n///\n/// // Sum all elements: 1 + 2 + 3 = 6\n/// let sum: Option<i32> = v.reduce((acc: i32, x: &i32): i32 -> {\n///   return acc + *x;\n/// });\n/// // sum == Option::SOME(6)\n///\n/// // Empty vector returns NONE\n/// let empty: Vector<i32> = Vector::new<i32>();\n/// let result: Option<i32> = empty.reduce((acc: i32, x: &i32): i32 -> {\n///   return acc + *x;\n/// });\n/// // result == Option::NONE\n/// ```\n///\n/// # See Also\n///\n/// Use `fold<U>` if you need an explicit initial value or a different\n/// return type.\npublic reduce(&self, @noescape f: (T, &T) -> T): Option<T> {\n    if (self.length == 0) {\n        return Option::NONE;\n    }\n\n    let mut acc: T = self.data[0];\n    let mut i: u64 = 1;\n    while (i < self.length) {\n        acc = f(acc, &self.data[i]);\n        i += 1;\n    }\n    return Option::SOME(acc);\n}\n",
     },
   ]
 }

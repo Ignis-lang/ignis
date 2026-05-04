@@ -476,8 +476,11 @@ impl<'a> CEmitter<'a> {
     }
 
     if !self.is_entry_user_module(target_module_id) {
-      forced
-        .retain(|def_id| !self.is_missing_std_archive_generic_specialization(*def_id) || self.is_std_test_def(*def_id));
+      forced.retain(|def_id| {
+        !self.is_missing_std_archive_generic_specialization(*def_id)
+          || self.is_std_test_def(*def_id)
+          || (self.program.entry_point.is_none() && self.definition_depends_on_user_type(*def_id))
+      });
     }
 
     forced
@@ -675,11 +678,30 @@ impl<'a> CEmitter<'a> {
     &self,
     target_module_id: ModuleId,
   ) -> bool {
-    let Some(entry_id) = self.program.entry_point else {
+    if let Some(entry_id) = self.program.entry_point {
+      return self.defs.get(&entry_id).owner_module == target_module_id;
+    }
+
+    self.is_primary_user_module_without_entry(target_module_id)
+  }
+
+  fn is_primary_user_module_without_entry(
+    &self,
+    target_module_id: ModuleId,
+  ) -> bool {
+    let Some(module_paths) = self.module_paths else {
       return false;
     };
 
-    self.defs.get(&entry_id).owner_module == target_module_id
+    module_paths
+      .iter()
+      .filter(|(_, module_path)| match module_path {
+        ModulePath::Project(path) => !self.std_path.is_some_and(|std_path| path.starts_with(std_path)),
+        ModulePath::Std(_) => false,
+      })
+      .map(|(module_id, _)| *module_id)
+      .min_by_key(|module_id| module_id.index())
+      .is_some_and(|module_id| module_id == target_module_id)
   }
 
   fn is_monomorphized_generic_def(
