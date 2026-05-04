@@ -185,7 +185,8 @@ impl super::IgnisParser {
     let is_complex_pattern = self.looks_like_complex_pattern();
 
     if is_complex_pattern {
-      return self.parse_let_else_statement(keyword);
+      let is_mutable = self.eat(TokenType::Mut);
+      return self.parse_let_else_statement(keyword, is_mutable);
     }
 
     let is_mutable = self.eat(TokenType::Mut);
@@ -211,7 +212,7 @@ impl super::IgnisParser {
           args: None,
           span: name_token.span,
         };
-        let let_else = ASTLetElse::new(pattern, Some(type_annotation), initializer, else_block, span);
+        let let_else = ASTLetElse::new(pattern, is_mutable, Some(type_annotation), initializer, else_block, span);
         return Ok(self.allocate_statement(ASTStatement::LetElse(let_else)));
       }
 
@@ -264,6 +265,7 @@ impl super::IgnisParser {
   fn parse_let_else_statement(
     &mut self,
     keyword: ignis_token::token::Token,
+    is_mutable: bool,
   ) -> ParserResult<NodeId> {
     let pattern = self.parse_pattern()?;
     self.expect(TokenType::Equal)?;
@@ -273,7 +275,7 @@ impl super::IgnisParser {
     let semicolon = self.expect(TokenType::SemiColon)?.clone();
 
     let span = Span::merge(&keyword.span, &semicolon.span);
-    let let_else = ASTLetElse::new(pattern, None, value, else_block, span);
+    let let_else = ASTLetElse::new(pattern, is_mutable, None, value, else_block, span);
     Ok(self.allocate_statement(ASTStatement::LetElse(let_else)))
   }
 

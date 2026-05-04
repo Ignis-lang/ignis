@@ -62,7 +62,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::LetElse(let_else) => {
         self.resolve_node(&let_else.value, scope_kind);
-        self.resolve_pattern(&let_else.pattern);
+        self.resolve_pattern(&let_else.pattern, let_else.mutable);
 
         self.scopes.push(ScopeKind::Block);
         self.resolve_node(&let_else.else_block, scope_kind);
@@ -379,6 +379,11 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Grouped(grouped) => {
         self.resolve_node(&grouped.expression, scope_kind);
       },
+      ASTExpression::Tuple(tuple) => {
+        for element in &tuple.elements {
+          self.resolve_node(element, scope_kind);
+        }
+      },
       ASTExpression::Vector(vector) => {
         for elem in &vector.items {
           self.resolve_node(elem, scope_kind);
@@ -487,14 +492,14 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::LetCondition(let_condition) => {
         self.resolve_node(&let_condition.value, scope_kind);
-        self.resolve_pattern(&let_condition.pattern);
+        self.resolve_pattern(&let_condition.pattern, false);
       },
       ASTExpression::Match(match_expr) => {
         self.resolve_node(&match_expr.scrutinee, scope_kind);
 
         for arm in &match_expr.arms {
           self.scopes.push(ScopeKind::Block);
-          self.resolve_pattern(&arm.pattern);
+          self.resolve_pattern(&arm.pattern, false);
 
           if let Some(guard) = arm.guard.as_ref() {
             self.resolve_node(guard, scope_kind);
@@ -568,6 +573,7 @@ impl<'a> Analyzer<'a> {
   fn resolve_pattern(
     &mut self,
     pattern: &ASTPattern,
+    mutable: bool,
   ) {
     match pattern {
       ASTPattern::Wildcard { .. } | ASTPattern::Literal { .. } => {},
@@ -577,23 +583,23 @@ impl<'a> Analyzer<'a> {
           let name_str = self.symbols.borrow().get(name).to_string();
 
           if name_str != "_" {
-            self.define_pattern_binding_if_absent(*name, span, self.types.error());
+            self.define_pattern_binding_if_absent(*name, span, self.types.error(), mutable);
           }
         }
         if let Some(pattern_args) = args {
           for arg in pattern_args {
-            self.resolve_pattern(arg);
+            self.resolve_pattern(arg, mutable);
           }
         }
       },
       ASTPattern::Tuple { elements, .. } => {
         for elem in elements {
-          self.resolve_pattern(elem);
+          self.resolve_pattern(elem, mutable);
         }
       },
       ASTPattern::Or { patterns, .. } => {
         for p in patterns {
-          self.resolve_pattern(p);
+          self.resolve_pattern(p, mutable);
         }
       },
     }

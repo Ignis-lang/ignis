@@ -467,6 +467,7 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Dereference(expr) => self.lower_dereference(*expr, node.type_id, node.span),
       HIRKind::Index { base, index } => self.lower_index(*base, *index, node.type_id, node.span),
       HIRKind::VectorLiteral { elements } => self.lower_vector_literal(elements, node.type_id, node.span),
+      HIRKind::TupleLiteral { .. } => None,
       HIRKind::MakeSlice {
         data,
         len,
@@ -2077,6 +2078,10 @@ impl<'a> LoweringContext<'a> {
     result_ty: TypeId,
     span: Span,
   ) -> Option<Operand> {
+    if let HIRKind::TupleLiteral { elements } = self.hir.get(scrutinee).kind.clone() {
+      return self.lower_tuple_match(&elements, arms, result_ty, span);
+    }
+
     let scrutinee_val = self.lower_hir_node(scrutinee)?;
     let scrutinee_ty = self.hir.get(scrutinee).type_id;
 
@@ -2224,6 +2229,184 @@ impl<'a> LoweringContext<'a> {
     })
   }
 
+  fn lower_tuple_match(
+    &mut self,
+    elements: &[HIRId],
+    arms: &[HIRMatchArm],
+    result_ty: TypeId,
+    span: Span,
+  ) -> Option<Operand> {
+    let mut element_locals = Vec::new();
+
+    for element in elements {
+      let element_ty = self.hir.get(*element).type_id;
+      let element_val = self.lower_hir_node(*element)?;
+      let local = self.fn_builder().alloc_local(LocalData {
+        def_id: None,
+        ty: element_ty,
+        mutable: false,
+        name: Some("match_tuple_element".to_string()),
+      });
+
+      self.fn_builder().emit(Instr::Store {
+        dest: local,
+        value: element_val,
+      });
+      element_locals.push((local, element_ty));
+    }
+
+    let is_void = matches!(self.types.get(&result_ty), Type::Void);
+    let result_local = if !is_void {
+      Some(self.fn_builder().alloc_local(LocalData {
+        def_id: None,
+        ty: result_ty,
+        mutable: true,
+        name: Some("match_result".to_string()),
+      }))
+    } else {
+      None
+    };
+
+    if arms.is_empty() {
+      self.fn_builder().emit(Instr::PanicMessage {
+        message: "non-exhaustive match".to_string(),
+        span,
+      });
+      self.fn_builder().terminate(Terminator::Unreachable);
+      return None;
+    }
+
+    let merge_block = self.fn_builder().create_block("match_merge");
+    let panic_block = self.fn_builder().create_block("match_panic");
+    let check_blocks: Vec<_> = (0..arms.len())
+      .map(|i| self.fn_builder().create_block(&format!("match_check_{}", i)))
+      .collect();
+    let arm_blocks: Vec<_> = (0..arms.len())
+      .map(|i| self.fn_builder().create_block(&format!("match_arm_{}", i)))
+      .collect();
+
+    if !self.fn_builder().is_terminated() {
+      self.fn_builder().terminate(Terminator::Goto(check_blocks[0]));
+    }
+
+    for (i, arm) in arms.iter().enumerate() {
+      self.fn_builder().switch_to_block(check_blocks[i]);
+      let matches = self.lower_tuple_match_pattern_check(&element_locals, &arm.pattern, span.clone());
+      let else_block = if i + 1 < arms.len() {
+        check_blocks[i + 1]
+      } else {
+        panic_block
+      };
+
+      self.fn_builder().terminate(Terminator::Branch {
+        condition: matches,
+        then_block: arm_blocks[i],
+        else_block,
+      });
+
+      self.fn_builder().switch_to_block(arm_blocks[i]);
+      let body_val = self.lower_hir_node(arm.body);
+
+      if !self.fn_builder().is_terminated() {
+        if let (Some(local), Some(val)) = (result_local, body_val) {
+          self.fn_builder().emit(Instr::Store {
+            dest: local,
+            value: val,
+          });
+        }
+        self.fn_builder().terminate(Terminator::Goto(merge_block));
+      }
+    }
+
+    self.fn_builder().switch_to_block(panic_block);
+    if !self.fn_builder().is_terminated() {
+      self.fn_builder().emit(Instr::PanicMessage {
+        message: "non-exhaustive match".to_string(),
+        span: span.clone(),
+      });
+      self.fn_builder().terminate(Terminator::Unreachable);
+    }
+
+    self.fn_builder().switch_to_block(merge_block);
+
+    result_local.map(|local| {
+      let temp = self.fn_builder().alloc_temp(result_ty, span);
+      self.fn_builder().emit(Instr::Load {
+        dest: temp,
+        source: local,
+      });
+      Operand::Temp(temp)
+    })
+  }
+
+  fn lower_tuple_match_pattern_check(
+    &mut self,
+    element_locals: &[(LocalId, TypeId)],
+    pattern: &HIRPattern,
+    span: Span,
+  ) -> Operand {
+    let bool_ty = self.types.boolean();
+
+    match pattern {
+      HIRPattern::Wildcard => self.lower_bool_const(true, span),
+      HIRPattern::Tuple { elements } if elements.len() == element_locals.len() => {
+        let mut combined = self.lower_bool_const(true, span.clone());
+
+        for (element_pattern, (local, element_ty)) in elements.iter().zip(element_locals.iter()) {
+          let temp = self.fn_builder().alloc_temp(*element_ty, span.clone());
+          self.fn_builder().emit(Instr::Load {
+            dest: temp,
+            source: *local,
+          });
+          let nested = self.lower_pattern_check(Operand::Temp(temp), *element_ty, element_pattern, span.clone());
+          let and_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
+          self.fn_builder().emit(Instr::BinOp {
+            dest: and_temp,
+            op: BinaryOperation::And,
+            left: combined,
+            right: nested,
+          });
+          combined = Operand::Temp(and_temp);
+        }
+
+        combined
+      },
+      HIRPattern::Or { patterns } => {
+        let mut combined = self.lower_bool_const(false, span.clone());
+
+        for nested_pattern in patterns {
+          let nested = self.lower_tuple_match_pattern_check(element_locals, nested_pattern, span.clone());
+          let or_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
+          self.fn_builder().emit(Instr::BinOp {
+            dest: or_temp,
+            op: BinaryOperation::Or,
+            left: combined,
+            right: nested,
+          });
+          combined = Operand::Temp(or_temp);
+        }
+
+        combined
+      },
+      _ => self.lower_bool_const(false, span),
+    }
+  }
+
+  fn lower_bool_const(
+    &mut self,
+    value: bool,
+    span: Span,
+  ) -> Operand {
+    let bool_ty = self.types.boolean();
+    let temp = self.fn_builder().alloc_temp(bool_ty, span);
+    self.fn_builder().emit(Instr::Copy {
+      dest: temp,
+      source: Operand::Const(ConstValue::Bool(value, bool_ty)),
+    });
+
+    Operand::Temp(temp)
+  }
+
   fn lower_pattern_check(
     &mut self,
     value: Operand,
@@ -2275,10 +2458,14 @@ impl<'a> LoweringContext<'a> {
         let binding_local = if let Some(&local) = self.def_to_local.get(def_id) {
           local
         } else {
+          let binding_mutable = match &self.defs.get(def_id).kind {
+            DefinitionKind::Variable(var_def) => var_def.mutable,
+            _ => false,
+          };
           let local = self.fn_builder().alloc_local(LocalData {
             def_id: Some(*def_id),
             ty: value_ty,
-            mutable: false,
+            mutable: binding_mutable,
             name: None,
           });
           self.def_to_local.insert(*def_id, local);

@@ -1079,6 +1079,20 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Grouped(grouped) => self.lower_node_to_hir(&grouped.expression, hir, scope_kind),
+      ASTExpression::Tuple(tuple) => {
+        let elements = tuple
+          .elements
+          .iter()
+          .map(|element| self.lower_node_to_hir(element, hir, scope_kind))
+          .collect();
+        let type_id = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
+
+        hir.alloc(HIRNode {
+          kind: HIRKind::TupleLiteral { elements },
+          span: tuple.span.clone(),
+          type_id,
+        })
+      },
       ASTExpression::Unit { span } => hir.alloc(HIRNode {
         kind: HIRKind::Unit,
         span: span.clone(),

@@ -742,6 +742,10 @@ impl<'a> Monomorphizer<'a> {
         let new_elems: Vec<_> = elements.iter().map(|e| self.clone_hir_tree(*e)).collect();
         (HIRKind::VectorLiteral { elements: new_elems }, None)
       },
+      HIRKind::TupleLiteral { elements } => {
+        let new_elems: Vec<_> = elements.iter().map(|e| self.clone_hir_tree(*e)).collect();
+        (HIRKind::TupleLiteral { elements: new_elems }, None)
+      },
       HIRKind::MakeSlice {
         data,
         len,
@@ -1419,6 +1423,11 @@ impl<'a> Monomorphizer<'a> {
         self.scan_hir(*base);
       },
       HIRKind::VectorLiteral { elements } => {
+        for e in elements {
+          self.scan_hir(*e);
+        }
+      },
+      HIRKind::TupleLiteral { elements } => {
         for e in elements {
           self.scan_hir(*e);
         }
@@ -2329,6 +2338,10 @@ impl<'a> Monomorphizer<'a> {
       HIRKind::VectorLiteral { elements } => {
         let new_elems: Vec<_> = elements.iter().map(|e| self.substitute_hir(*e, subst)).collect();
         HIRKind::VectorLiteral { elements: new_elems }
+      },
+      HIRKind::TupleLiteral { elements } => {
+        let new_elems: Vec<_> = elements.iter().map(|e| self.substitute_hir(*e, subst)).collect();
+        HIRKind::TupleLiteral { elements: new_elems }
       },
       HIRKind::MakeSlice {
         data,

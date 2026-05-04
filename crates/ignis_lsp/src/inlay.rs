@@ -196,6 +196,9 @@ fn collect_expression_children(
     ASTExpression::Vector(v) => {
       stack.extend(v.items.iter().cloned());
     },
+    ASTExpression::Tuple(tuple) => {
+      stack.extend(tuple.elements.iter().cloned());
+    },
     ASTExpression::VectorAccess(va) => {
       stack.push(va.name);
       stack.push(va.index);

@@ -208,6 +208,12 @@ fn analyze_var_usage(
       }
     },
 
+    HIRKind::TupleLiteral { elements } => {
+      for &elem in elements {
+        analyze_var_usage(hir, elem, var_def, usage, defs, types);
+      }
+    },
+
     HIRKind::MakeSlice { data, len, .. } => {
       analyze_var_usage(hir, *data, var_def, usage, defs, types);
       analyze_var_usage(hir, *len, var_def, usage, defs, types);
@@ -620,6 +626,12 @@ fn collect_closures_postorder(
     },
 
     HIRKind::VectorLiteral { elements } => {
+      for &e in elements {
+        collect_closures_postorder(hir, e, owner_module, result, visited);
+      }
+    },
+
+    HIRKind::TupleLiteral { elements } => {
       for &e in elements {
         collect_closures_postorder(hir, e, owner_module, result, visited);
       }
@@ -1224,6 +1236,12 @@ fn collect_free_vars(
     },
 
     HIRKind::VectorLiteral { elements } => {
+      for &elem in elements {
+        collect_free_vars(hir, elem, locals, defs, free_vars, seen);
+      }
+    },
+
+    HIRKind::TupleLiteral { elements } => {
       for &elem in elements {
         collect_free_vars(hir, elem, locals, defs, free_vars, seen);
       }

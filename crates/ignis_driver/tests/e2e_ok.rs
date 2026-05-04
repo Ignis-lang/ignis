@@ -4340,6 +4340,36 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_let_else_mut_variant_binding() {
+  e2e_test(
+    "let_else_mut_variant_binding",
+    r#"
+enum Outcome {
+    Ok(i32),
+    Err,
+}
+
+function toOutcome(value: i32): Outcome {
+    if (value > 0) {
+        return Outcome::Ok(value);
+    }
+
+    return Outcome::Err;
+}
+
+function main(): i32 {
+    let mut Outcome::Ok(value) = toOutcome(40) else {
+        return -1;
+    };
+
+    value += 2;
+    return value;
+}
+"#,
+  );
+}
+
 // ── Type Inference ──────────────────────────────────────────
 
 #[test]

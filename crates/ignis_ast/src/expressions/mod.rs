@@ -17,6 +17,7 @@ pub mod path;
 pub mod record_init;
 pub mod reference;
 pub mod ternary;
+pub mod tuple;
 pub mod unary;
 pub mod variable;
 pub mod vector;
@@ -39,6 +40,7 @@ pub use path::{ASTPath, ASTPathSegment};
 pub use record_init::{ASTRecordInit, ASTRecordInitField};
 pub use reference::ASTReference;
 pub use ternary::ASTTernary;
+pub use tuple::ASTTuple;
 pub use unary::ASTUnary;
 pub use variable::ASTVariableExpression;
 pub use vector::ASTVector;
@@ -53,6 +55,7 @@ pub enum ASTExpression {
   Call(ASTCallExpression),
   Dereference(ASTDereference),
   Grouped(ASTGrouped),
+  Tuple(ASTTuple),
   Unit {
     span: Span,
   },
@@ -103,6 +106,7 @@ impl ASTExpression {
       ASTExpression::Call(expr) => &expr.span,
       ASTExpression::Dereference(expr) => &expr.span,
       ASTExpression::Grouped(expr) => &expr.span,
+      ASTExpression::Tuple(expr) => &expr.span,
       ASTExpression::Unit { span } => span,
       ASTExpression::LetCondition(expr) => &expr.span,
       ASTExpression::Reference(expr) => &expr.span,

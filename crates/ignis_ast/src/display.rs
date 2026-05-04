@@ -251,6 +251,14 @@ impl DisplayLisp for ASTExpression {
         format!("(*{})", inner)
       },
       ASTExpression::Grouped(expr) => expr.to_lisp(formatter),
+      ASTExpression::Tuple(expr) => {
+        let elements: Vec<String> = expr
+          .elements
+          .iter()
+          .map(|element| formatter.format_node(element))
+          .collect();
+        format!("(Tuple {})", elements.join(" "))
+      },
       ASTExpression::Unit { .. } => "()".to_string(),
       ASTExpression::LetCondition(expr) => expr.to_lisp(formatter),
       ASTExpression::Reference(expr) => {

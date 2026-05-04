@@ -5,6 +5,7 @@ use crate::{NodeId, pattern::ASTPattern, type_::IgnisTypeSyntax};
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct ASTLetElse {
   pub pattern: ASTPattern,
+  pub mutable: bool,
   pub binding_type: Option<IgnisTypeSyntax>,
   pub value: NodeId,
   pub else_block: NodeId,
@@ -14,6 +15,7 @@ pub struct ASTLetElse {
 impl ASTLetElse {
   pub fn new(
     pattern: ASTPattern,
+    mutable: bool,
     binding_type: Option<IgnisTypeSyntax>,
     value: NodeId,
     else_block: NodeId,
@@ -21,6 +23,7 @@ impl ASTLetElse {
   ) -> Self {
     Self {
       pattern,
+      mutable,
       binding_type,
       value,
       else_block,

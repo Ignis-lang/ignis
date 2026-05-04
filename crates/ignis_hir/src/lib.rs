@@ -84,6 +84,9 @@ pub enum HIRKind {
   VectorLiteral {
     elements: Vec<HIRId>,
   },
+  TupleLiteral {
+    elements: Vec<HIRId>,
+  },
   MakeSlice {
     data: HIRId,
     len: HIRId,
@@ -298,6 +301,11 @@ impl HIRKind {
         *index = HIRId::new(index.index() + offset);
       },
       HIRKind::VectorLiteral { elements } => {
+        for elem in elements {
+          *elem = HIRId::new(elem.index() + offset);
+        }
+      },
+      HIRKind::TupleLiteral { elements } => {
         for elem in elements {
           *elem = HIRId::new(elem.index() + offset);
         }

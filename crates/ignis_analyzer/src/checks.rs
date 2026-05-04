@@ -150,7 +150,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::LetElse(let_else) => {
         self.extra_checks_node(&let_else.value, scope_kind, in_loop, in_function, in_defer);
-        self.register_pattern_bindings(&let_else.pattern);
+        self.register_pattern_bindings(&let_else.pattern, let_else.mutable);
 
         self.scopes.push(ScopeKind::Block);
         self.extra_checks_node(&let_else.else_block, ScopeKind::Block, in_loop, in_function, in_defer);
@@ -408,6 +408,11 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Grouped(grouped) => {
         self.extra_checks_node(&grouped.expression, scope_kind, in_loop, in_function, in_defer);
       },
+      ASTExpression::Tuple(tuple) => {
+        for element in &tuple.elements {
+          self.extra_checks_node(element, scope_kind, in_loop, in_function, in_defer);
+        }
+      },
       ASTExpression::Vector(vector) => {
         for elem in &vector.items {
           self.extra_checks_node(elem, scope_kind, in_loop, in_function, in_defer);
@@ -452,14 +457,14 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::LetCondition(let_condition) => {
         self.extra_checks_node(&let_condition.value, scope_kind, in_loop, in_function, in_defer);
-        self.register_pattern_bindings(&let_condition.pattern);
+        self.register_pattern_bindings(&let_condition.pattern, false);
       },
       ASTExpression::Match(match_expr) => {
         self.extra_checks_node(&match_expr.scrutinee, scope_kind, in_loop, in_function, in_defer);
 
         for arm in &match_expr.arms {
           self.scopes.push(ScopeKind::Block);
-          self.register_pattern_bindings(&arm.pattern);
+          self.register_pattern_bindings(&arm.pattern, false);
 
           if let Some(guard) = arm.guard.as_ref() {
             self.extra_checks_node(guard, scope_kind, in_loop, in_function, in_defer);
@@ -523,6 +528,7 @@ impl<'a> Analyzer<'a> {
   fn register_pattern_bindings(
     &mut self,
     pattern: &ASTPattern,
+    mutable: bool,
   ) {
     match pattern {
       ASTPattern::Wildcard { .. } | ASTPattern::Literal { .. } => {},
@@ -532,23 +538,23 @@ impl<'a> Analyzer<'a> {
           let name_str = self.symbols.borrow().get(name).to_string();
 
           if name_str != "_" {
-            self.define_pattern_binding_if_absent(*name, span, self.types.error());
+            self.define_pattern_binding_if_absent(*name, span, self.types.error(), mutable);
           }
         }
         if let Some(pattern_args) = args {
           for arg in pattern_args {
-            self.register_pattern_bindings(arg);
+            self.register_pattern_bindings(arg, mutable);
           }
         }
       },
       ASTPattern::Tuple { elements, .. } => {
         for elem in elements {
-          self.register_pattern_bindings(elem);
+          self.register_pattern_bindings(elem, mutable);
         }
       },
       ASTPattern::Or { patterns, .. } => {
         for p in patterns {
-          self.register_pattern_bindings(p);
+          self.register_pattern_bindings(p, mutable);
         }
       },
     }

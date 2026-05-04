@@ -178,9 +178,14 @@ impl<'a> Analyzer<'a> {
         let value_type = self.typecheck_node(&let_else.value, scope_kind, ctx);
 
         if let Some(binding_type_syntax) = &let_else.binding_type {
-          self.typecheck_shorthand_let_else_pattern(&let_else.pattern, binding_type_syntax, value_type);
+          self.typecheck_shorthand_let_else_pattern(
+            &let_else.pattern,
+            binding_type_syntax,
+            value_type,
+            let_else.mutable,
+          );
         } else {
-          let irrefutable = self.typecheck_pattern(&let_else.pattern, &value_type);
+          let irrefutable = self.typecheck_pattern(&let_else.pattern, &value_type, let_else.mutable);
           if irrefutable {
             self.add_diagnostic(
               DiagnosticMessage::IrrefutableLetElsePattern {
@@ -710,6 +715,15 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Grouped(grouped) => self.typecheck_node(&grouped.expression, scope_kind, ctx),
+      ASTExpression::Tuple(tuple) => {
+        let elements = tuple
+          .elements
+          .iter()
+          .map(|element| self.typecheck_node(element, scope_kind, ctx))
+          .collect();
+
+        self.types.tuple(elements)
+      },
       ASTExpression::Unit { .. } => self.types.void(),
       ASTExpression::Vector(vector) => {
         for elem in &vector.items {
@@ -876,10 +890,10 @@ impl<'a> Analyzer<'a> {
           );
 
           self.scopes.push(ScopeKind::Block);
-          self.typecheck_pattern(&let_condition.pattern, &value_type);
+          self.typecheck_pattern(&let_condition.pattern, &value_type, false);
           self.scopes.pop();
         } else {
-          self.typecheck_pattern(&let_condition.pattern, &value_type);
+          self.typecheck_pattern(&let_condition.pattern, &value_type, false);
         }
 
         self.types.boolean()
@@ -911,7 +925,7 @@ impl<'a> Analyzer<'a> {
 
           self.scopes.push(ScopeKind::Block);
 
-          let irrefutable = self.typecheck_pattern(&arm.pattern, &scrutinee_type);
+          let irrefutable = self.typecheck_pattern(&arm.pattern, &scrutinee_type, false);
 
           if let Some(guard) = arm.guard.as_ref() {
             let guard_type = self.typecheck_node(guard, ScopeKind::Block, ctx);
@@ -1138,9 +1152,10 @@ impl<'a> Analyzer<'a> {
     pattern: &ASTPattern,
     binding_type_syntax: &IgnisTypeSyntax,
     value_type: TypeId,
+    mutable: bool,
   ) {
     let Some((binding_name, binding_span)) = self.shorthand_let_else_binding(pattern) else {
-      let irrefutable = self.typecheck_pattern(pattern, &value_type);
+      let irrefutable = self.typecheck_pattern(pattern, &value_type, mutable);
       if irrefutable {
         self.add_diagnostic(
           DiagnosticMessage::IrrefutableLetElsePattern {
@@ -1177,7 +1192,7 @@ impl<'a> Analyzer<'a> {
     };
 
     if !is_wildcard {
-      self.define_pattern_binding_if_absent(binding_name, &binding_span, binding_type);
+      self.define_pattern_binding_if_absent(binding_name, &binding_span, binding_type, mutable);
     }
   }
 
@@ -1236,6 +1251,7 @@ impl<'a> Analyzer<'a> {
     &mut self,
     pattern: &ASTPattern,
     expected_type: &TypeId,
+    mutable: bool,
   ) -> bool {
     match pattern {
       ASTPattern::Wildcard { .. } => true,
@@ -1320,7 +1336,7 @@ impl<'a> Analyzer<'a> {
               if let Some(pattern_args) = args {
                 for (i, arg_pattern) in pattern_args.iter().enumerate() {
                   if let Some(payload_ty) = expected_payload.get(i) {
-                    self.typecheck_pattern(arg_pattern, payload_ty);
+                    self.typecheck_pattern(arg_pattern, payload_ty, mutable);
                   }
                 }
               }
@@ -1347,7 +1363,7 @@ impl<'a> Analyzer<'a> {
             return true;
           }
 
-          self.define_pattern_binding_if_absent(*name, span, *expected_type);
+          self.define_pattern_binding_if_absent(*name, span, *expected_type, mutable);
           return true;
         }
 
@@ -1376,10 +1392,21 @@ impl<'a> Analyzer<'a> {
       },
       ASTPattern::Tuple { elements, .. } => {
         if let Type::Tuple(tuple_elements) = self.types.get(expected_type).clone() {
-          for (i, elem_pattern) in elements.iter().enumerate() {
-            if i < tuple_elements.len() {
-              self.typecheck_pattern(elem_pattern, &tuple_elements[i]);
-            }
+          if elements.len() != tuple_elements.len() {
+            self.add_diagnostic(
+              DiagnosticMessage::PatternTypeMismatch {
+                expected: self.format_type_for_error(expected_type),
+                got: format!("tuple with {} elements", elements.len()),
+                span: pattern.span().clone(),
+              }
+              .report(),
+            );
+
+            return false;
+          }
+
+          for (elem_pattern, elem_type) in elements.iter().zip(tuple_elements.iter()) {
+            self.typecheck_pattern(elem_pattern, elem_type, mutable);
           }
         } else {
           self.add_diagnostic(
@@ -1398,7 +1425,7 @@ impl<'a> Analyzer<'a> {
           self.add_diagnostic(DiagnosticMessage::OrPatternBindingsDisallowed { span: span.clone() }.report());
         }
         for p in patterns {
-          self.typecheck_pattern(p, expected_type);
+          self.typecheck_pattern(p, expected_type, mutable);
         }
         patterns.iter().all(|p| matches!(p, ASTPattern::Wildcard { .. }))
       },
@@ -1585,6 +1612,7 @@ impl<'a> Analyzer<'a> {
     name: ignis_type::symbol::SymbolId,
     span: &Span,
     type_id: TypeId,
+    mutable: bool,
   ) {
     let current_scope = *self.scopes.current();
 
@@ -1601,6 +1629,7 @@ impl<'a> Analyzer<'a> {
         && var_def.type_id == self.types.error()
       {
         var_def.type_id = type_id;
+        var_def.mutable = mutable;
       }
       return;
     }
@@ -1619,16 +1648,14 @@ impl<'a> Analyzer<'a> {
         && var_def.type_id == self.types.error()
       {
         var_def.type_id = type_id;
+        var_def.mutable = mutable;
       }
 
       let _ = self.scopes.define(&name, &def_id, false);
       return;
     }
 
-    let var_def = VariableDefinition {
-      type_id,
-      mutable: false,
-    };
+    let var_def = VariableDefinition { type_id, mutable };
 
     let def = Definition {
       kind: DefinitionKind::Variable(var_def),
@@ -4031,6 +4058,11 @@ impl<'a> Analyzer<'a> {
       ASTExpression::MemberAccess(ma) => self.count_pipe_placeholders(&ma.object),
       ASTExpression::RecordInit(ri) => ri.fields.iter().map(|f| self.count_pipe_placeholders(&f.value)).sum(),
       ASTExpression::Vector(v) => v.items.iter().map(|i| self.count_pipe_placeholders(i)).sum(),
+      ASTExpression::Tuple(tuple) => tuple
+        .elements
+        .iter()
+        .map(|element| self.count_pipe_placeholders(element))
+        .sum(),
       ASTExpression::Match(m) => {
         let mut count = self.count_pipe_placeholders(&m.scrutinee);
         for arm in &m.arms {
@@ -4135,6 +4167,11 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Vector(v) => {
         for i in &v.items {
           self.collect_placeholder_spans_inner(i, max, spans);
+        }
+      },
+      ASTExpression::Tuple(tuple) => {
+        for element in &tuple.elements {
+          self.collect_placeholder_spans_inner(element, max, spans);
         }
       },
       ASTExpression::Match(m) => {
@@ -8835,6 +8872,10 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Reference(reference) => self.node_contains_let_condition(&reference.inner),
       ASTExpression::Unary(unary) => self.node_contains_let_condition(&unary.operand),
       ASTExpression::Vector(vector) => vector.items.iter().any(|item| self.node_contains_let_condition(item)),
+      ASTExpression::Tuple(tuple) => tuple
+        .elements
+        .iter()
+        .any(|element| self.node_contains_let_condition(element)),
       ASTExpression::VectorAccess(access) => {
         self.node_contains_let_condition(&access.name) || self.node_contains_let_condition(&access.index)
       },
@@ -9724,6 +9765,10 @@ impl<'a> Analyzer<'a> {
         .items
         .iter()
         .find_map(|item| self.find_first_symbol_usage(*item, symbol)),
+      ASTExpression::Tuple(tuple) => tuple
+        .elements
+        .iter()
+        .find_map(|element| self.find_first_symbol_usage(*element, symbol)),
       ASTExpression::PostfixIncrement { expr, .. } | ASTExpression::PostfixDecrement { expr, .. } => {
         self.find_first_symbol_usage(*expr, symbol)
       },

@@ -210,6 +210,11 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Grouped(g) => {
         self.bind_complete(&g.expression, ScopeKind::Block);
       },
+      ASTExpression::Tuple(tuple) => {
+        for element in &tuple.elements {
+          self.bind_complete(element, ScopeKind::Block);
+        }
+      },
       ASTExpression::Reference(r) => {
         self.bind_complete(&r.inner, ScopeKind::Block);
       },

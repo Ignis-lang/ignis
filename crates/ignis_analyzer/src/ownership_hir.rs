@@ -406,6 +406,12 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       },
 
+      HIRKind::TupleLiteral { elements } => {
+        for &element in elements {
+          dropped.extend(self.summary_must_drops(element, tracked_params, summaries));
+        }
+      },
+
       HIRKind::MakeSlice { data, len, .. } => {
         dropped.extend(self.summary_must_drops(*data, tracked_params, summaries));
         dropped.extend(self.summary_must_drops(*len, tracked_params, summaries));
@@ -792,6 +798,16 @@ impl<'a> HirOwnershipChecker<'a> {
       },
 
       HIRKind::VectorLiteral { elements } => {
+        for elem in elements {
+          self.check_node(elem);
+
+          if let Some(source_def) = self.get_moved_var(elem) {
+            self.try_consume(source_def, span.clone());
+          }
+        }
+      },
+
+      HIRKind::TupleLiteral { elements } => {
         for elem in elements {
           self.check_node(elem);
 

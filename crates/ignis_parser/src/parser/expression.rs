@@ -489,6 +489,26 @@ impl IgnisParser {
         }
 
         let expression = self.parse_expression(0)?;
+
+        if self.eat(TokenType::Comma) {
+          let mut elements = vec![expression];
+
+          while !self.at(TokenType::RightParen) {
+            elements.push(self.parse_expression(0)?);
+
+            if !self.eat(TokenType::Comma) {
+              break;
+            }
+          }
+
+          let right_paren = self.expect(TokenType::RightParen)?;
+          let span = Span::merge(&token.span, &right_paren.span);
+
+          return Ok(
+            self.allocate_expression(ASTExpression::Tuple(ignis_ast::expressions::ASTTuple::new(elements, span))),
+          );
+        }
+
         let right_paren = self.expect(TokenType::RightParen)?;
         let span = Span::merge(&token.span, &right_paren.span);
 

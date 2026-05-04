@@ -332,6 +332,11 @@ impl<'a> HirBorrowChecker<'a> {
           self.check_node(elem);
         }
       },
+      HIRKind::TupleLiteral { elements } => {
+        for elem in elements {
+          self.check_node(elem);
+        }
+      },
       HIRKind::MakeSlice { data, len, .. } => {
         self.check_node(data);
         self.check_node(len);

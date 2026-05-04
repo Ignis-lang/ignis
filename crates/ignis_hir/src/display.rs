@@ -539,6 +539,20 @@ impl<'a> HIRPrinter<'a> {
           self.indent -= 1;
         }
       },
+      HIRKind::TupleLiteral { elements } => {
+        writeln!(self.output, "TupleLiteral : {}", type_str).unwrap();
+        if !elements.is_empty() {
+          self.indent += 1;
+          for (i, elem) in elements.iter().enumerate() {
+            self.write_indent();
+            writeln!(self.output, "[{}]:", i).unwrap();
+            self.indent += 1;
+            self.print_node(*elem);
+            self.indent -= 1;
+          }
+          self.indent -= 1;
+        }
+      },
       HIRKind::Let { name, value } => {
         let def = self.defs.get(name);
         let var_name = self.symbols.get(&def.name);

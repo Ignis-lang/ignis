@@ -273,6 +273,12 @@ fn scan_for_escapes(
       }
     },
 
+    HIRKind::TupleLiteral { elements } => {
+      for &elem in elements {
+        scan_for_escapes(hir, elem, defs, alias_to_closure, escaping);
+      }
+    },
+
     HIRKind::MakeSlice { data, len, .. } => {
       scan_for_escapes(hir, *data, defs, alias_to_closure, escaping);
       scan_for_escapes(hir, *len, defs, alias_to_closure, escaping);

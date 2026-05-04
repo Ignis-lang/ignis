@@ -1668,6 +1668,15 @@ impl<'a> AstChunkFormatter<'a> {
       ASTExpression::Literal(literal) => Ok(self.slice_span(&literal.span).trim().to_string()),
       ASTExpression::Unit { .. } => Ok("()".to_string()),
       ASTExpression::Grouped(grouped) => Ok(format!("({})", self.format_expression_node(grouped.expression, 0, 0)?)),
+      ASTExpression::Tuple(tuple) => Ok(format!(
+        "({})",
+        tuple
+          .elements
+          .iter()
+          .map(|element| self.format_expression_node(*element, 0, 0))
+          .collect::<Result<Vec<_>, _>>()?
+          .join(", ")
+      )),
       ASTExpression::Unary(unary) => {
         let operator = match unary.operator {
           UnaryOperator::Not => "!",
