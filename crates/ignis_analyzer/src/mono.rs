@@ -2121,7 +2121,12 @@ impl<'a> Monomorphizer<'a> {
         let new_receiver = receiver.map(|r| self.substitute_hir(r, subst));
         // Substitute type params in method's type_args
         let substituted_type_args: Vec<_> = type_args.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
-        let concrete_method = self.resolve_concrete_method(&new_receiver, *method, &substituted_type_args);
+        let concrete_method = if new_receiver.is_none() {
+          let (owner_args, method_type_args) = self.split_static_method_type_args(*method, &substituted_type_args);
+          self.resolve_concrete_method_with_args(*method, &method_type_args, &owner_args)
+        } else {
+          self.resolve_concrete_method(&new_receiver, *method, &substituted_type_args)
+        };
 
         if concrete_method == *method {
           self.copy_nongeneric_method_if_original(concrete_method);
@@ -2613,6 +2618,31 @@ impl<'a> Monomorphizer<'a> {
     };
 
     self.resolve_concrete_method_with_args(method_generic, method_type_args, &owner_args)
+  }
+
+  fn split_static_method_type_args(
+    &self,
+    method: DefinitionId,
+    type_args: &[TypeId],
+  ) -> (Vec<TypeId>, Vec<TypeId>) {
+    let method_def = self.input_defs.get(&method);
+    let owner_param_count = match &method_def.kind {
+      DefinitionKind::Method(method_def) => {
+        let owner_def = self.input_defs.get(&method_def.owner_type);
+
+        match &owner_def.kind {
+          DefinitionKind::Record(record_def) => record_def.type_params.len(),
+          DefinitionKind::Enum(enum_def) => enum_def.type_params.len(),
+          _ => 0,
+        }
+      },
+      _ => 0,
+    };
+
+    let owner_args = type_args.iter().take(owner_param_count).copied().collect();
+    let method_type_args = type_args.iter().skip(owner_param_count).copied().collect();
+
+    (owner_args, method_type_args)
   }
 
   fn resolve_builtin_eq_kind_after_substitution(

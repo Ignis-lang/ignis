@@ -73,6 +73,44 @@ impl<'a> Analyzer<'a> {
     hir
   }
 
+  fn lower_implicit_mut_ref_assignment_target(
+    &self,
+    target: &NodeId,
+    target_hir_id: HIRId,
+    hir: &mut HIR,
+  ) -> HIRId {
+    if !self.is_lowering_implicit_mut_ref_assignment_target(target) {
+      return target_hir_id;
+    }
+
+    let target_type = hir.get(target_hir_id).type_id;
+    let inner_type = match self.types.get(&target_type) {
+      Type::Reference { inner, mutable: true } => *inner,
+      _ => return target_hir_id,
+    };
+
+    let span = hir.get(target_hir_id).span.clone();
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Dereference(target_hir_id),
+      span,
+      type_id: inner_type,
+    })
+  }
+
+  fn is_lowering_implicit_mut_ref_assignment_target(
+    &self,
+    target: &NodeId,
+  ) -> bool {
+    match self.ast.get(target) {
+      ASTNode::Expression(ASTExpression::Variable(_)) | ASTNode::Expression(ASTExpression::Path(_)) => true,
+      ASTNode::Expression(ASTExpression::Grouped(grouped)) => {
+        self.is_lowering_implicit_mut_ref_assignment_target(&grouped.expression)
+      },
+      _ => false,
+    }
+  }
+
   fn callable_return_type(
     &self,
     def_id: &DefinitionId,
@@ -975,7 +1013,9 @@ impl<'a> Analyzer<'a> {
         hir.alloc(hir_node)
       },
       ASTExpression::Assignment(assign) => {
-        let target_id = self.lower_node_to_hir(&assign.target, hir, scope_kind);
+        let mut target_id = self.lower_node_to_hir(&assign.target, hir, scope_kind);
+        target_id = self.lower_implicit_mut_ref_assignment_target(&assign.target, target_id, hir);
+
         let value_id = self.lower_node_to_hir(&assign.value, hir, scope_kind);
         let assign_type = self.lookup_type(node_id).cloned().unwrap_or_else(|| self.types.error());
 

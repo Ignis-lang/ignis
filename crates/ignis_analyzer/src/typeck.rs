@@ -9009,7 +9009,8 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
   ) -> TypeId {
     let target_type = self.typecheck_node(&assign.target, scope_kind, ctx);
-    let infer = InferContext::expecting(target_type);
+    let assignment_target_type = self.effective_assignment_target_type(&assign.target, target_type);
+    let infer = InferContext::expecting(assignment_target_type);
     let value_type = self.typecheck_node_with_infer(&assign.value, scope_kind, ctx, &infer);
 
     self.mark_mutation_target(&assign.target);
@@ -9017,6 +9018,7 @@ impl<'a> Analyzer<'a> {
     let target_node = self.ast.get(&assign.target);
     if let ASTNode::Expression(target_expr) = target_node
       && !self.is_mutable_expression(target_expr)
+      && !self.is_mutable_reference_assignment_target(&assign.target, target_type)
     {
       let var_name = self.get_var_name_from_expr(target_expr);
       self.add_diagnostic(
@@ -9030,15 +9032,15 @@ impl<'a> Analyzer<'a> {
 
     match assign.operator {
       ASTAssignmentOperator::Assign => {
-        self.typecheck_assignment(&target_type, &value_type, &assign.span);
+        self.typecheck_assignment(&assignment_target_type, &value_type, &assign.span);
       },
       _ => {
-        if !self.types.is_error(&target_type) && !self.types.is_error(&value_type) {
-          if self.types.is_numeric(&target_type) && self.types.is_numeric(&value_type) {
-            self.typecheck_common_type(&target_type, &value_type, &assign.span);
+        if !self.types.is_error(&assignment_target_type) && !self.types.is_error(&value_type) {
+          if self.types.is_numeric(&assignment_target_type) && self.types.is_numeric(&value_type) {
+            self.typecheck_common_type(&assignment_target_type, &value_type, &assign.span);
           } else {
             let operator_str = format!("{:?}", assign.operator);
-            let type_name = self.format_type_for_error(&target_type);
+            let type_name = self.format_type_for_error(&assignment_target_type);
             self.add_diagnostic(
               DiagnosticMessage::CompoundAssignmentNonNumeric {
                 operator: operator_str,
@@ -9053,6 +9055,43 @@ impl<'a> Analyzer<'a> {
     };
 
     target_type
+  }
+
+  fn effective_assignment_target_type(
+    &self,
+    target: &NodeId,
+    target_type: TypeId,
+  ) -> TypeId {
+    if !self.is_implicit_mut_ref_assignment_target(target) {
+      return target_type;
+    }
+
+    match self.types.get(&target_type) {
+      Type::Reference { inner, mutable: true } => *inner,
+      _ => target_type,
+    }
+  }
+
+  fn is_mutable_reference_assignment_target(
+    &self,
+    target: &NodeId,
+    target_type: TypeId,
+  ) -> bool {
+    self.is_implicit_mut_ref_assignment_target(target)
+      && matches!(self.types.get(&target_type), Type::Reference { mutable: true, .. })
+  }
+
+  fn is_implicit_mut_ref_assignment_target(
+    &self,
+    target: &NodeId,
+  ) -> bool {
+    match self.ast.get(target) {
+      ASTNode::Expression(ASTExpression::Variable(_)) | ASTNode::Expression(ASTExpression::Path(_)) => true,
+      ASTNode::Expression(ASTExpression::Grouped(grouped)) => {
+        self.is_implicit_mut_ref_assignment_target(&grouped.expression)
+      },
+      _ => false,
+    }
   }
 
   fn typecheck_assignment(

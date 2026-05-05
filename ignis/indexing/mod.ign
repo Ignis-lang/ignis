@@ -1,107 +1,48 @@
-import Memory from "std::memory";
+import Vector from "std::vector";
 
 import Id from "@compiler::ids";
 
-@implements(Drop)
 export record IndexVec<Tag, T> {
-  public data: *mut T;
-  public length: u64;
-  public capacity: u64;
+  values: Vector<T>;
 
-  public static init(): IndexVec<Tag, T> {
+  public static new(): IndexVec<Tag, T> {
     return IndexVec {
-      data: null,
-      length: 0,
-      capacity: 0,
+      values: Vector::new<T>(),
     };
   }
 
-  private grow(&mut self): void {
-    let mut newCapacity: u64 = self.capacity * 2;
-
-    if (newCapacity == 0) {
-      newCapacity = 1;
-    }
-
-    if (self.data == null) {
-      self.data = Memory::allocateVector<T>(newCapacity);
-    } else {
-      self.data = Memory::reallocateVector<T>(self.data, newCapacity);
-    }
-
-    self.capacity = newCapacity;
-  }
-
   public push(&mut self, value: T): Id<Tag> {
-    if (self.length == self.capacity) {
-      self.grow();
-    }
+    let index: u64 = self.values.length();
 
-    @write<T>(self.data + self.length, value);
-    self.length += 1;
+    self.values.push(value);
 
     return Id {
-      id: (self.length - 1) as u32,
+      id: index as u32,
     };
   }
 
   public get(&self, id: Id<Tag>): Option<&T> {
-    let index: u64 = id.raw() as u64;
-
-    if (index < self.length) {
-      return Option::SOME(&self.data[index]);
-    }
-
-    return Option::NONE;
+    return self.values.get(id.raw() as u64);
   }
 
   public getMut(&mut self, id: Id<Tag>): Option<&mut T> {
-    let index: u64 = id.raw() as u64;
-
-    if (index < self.length) {
-      return Option::SOME(&mut self.data[index]);
-    }
-
-    return Option::NONE;
+    return self.values.getMut(id.raw() as u64);
   }
 
   public set(&mut self, id: Id<Tag>, value: T): boolean {
-    let index: u64 = id.raw() as u64;
-
-    if (index >= self.length) {
-      return false;
+    if (let Option::SOME(slot) = self.values.getMut(id.raw() as u64)) {
+      slot = value;
+      return true;
     }
 
-    @write<T>(self.data + index, value);
-    return true;
+    return false;
   }
 
   public length(&self): u64 {
-    return self.length;
+    return self.values.length();
   }
 
   public isEmpty(&self): boolean {
-    return self.length == 0;
-  }
-
-  private dropElements(&mut self): void {
-    let mut index: u64 = 0;
-
-    while (index < self.length) {
-      @dropInPlace<T>(self.data + index);
-      index += 1;
-    }
-  }
-
-  public drop(&mut self): void {
-    self.dropElements();
-
-    if (self.data != null) {
-      Memory::free(self.data);
-      self.data = null;
-    }
-
-    self.length = 0;
-    self.capacity = 0;
+    return self.values.length() == 0;
   }
 }
