@@ -109,6 +109,19 @@ fn format_text_end_to_end_safety_passes_for_canonical_simple_function() {
 }
 
 #[test]
+fn format_text_preserves_mutable_complex_let_else_pattern() {
+  let source = "function main(): void { let mut Option::SOME(active) = bag.getMut(activeIndex) else { @panic(\"missing active diagnostic\"); }; return; }\n";
+
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("formatter should preserve mut on complex let-else patterns");
+
+  assert!(
+    formatted.contains("let mut Option::SOME(active)"),
+    "formatted output must preserve let-else mutability:\n{formatted}"
+  );
+}
+
+#[test]
 fn format_text_allows_cleaning_trailing_whitespace_in_comment_lines() {
   let source = "//! \n\nfunction main(): void { return; }\n";
 

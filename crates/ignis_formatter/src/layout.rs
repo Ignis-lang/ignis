@@ -925,6 +925,11 @@ impl<'a> AstChunkFormatter<'a> {
   ) -> Result<String, LayoutFailure> {
     let mut formatted = self.indent(indent_level);
     formatted.push_str("let ");
+
+    if let_else.mutable {
+      formatted.push_str("mut ");
+    }
+
     formatted.push_str(&self.format_pattern(&let_else.pattern));
 
     if let Some(binding_type) = &let_else.binding_type {
