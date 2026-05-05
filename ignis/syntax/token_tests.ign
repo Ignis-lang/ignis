@@ -1,0 +1,53 @@
+import Test from "std::test";
+
+import SourceSpan from "@compiler::diagnostics";
+import Keyword, LiteralKind, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+function tokenFixtureSpan(start: u64, end: u64): SourceSpan {
+  return SourceSpan::new("fixtures/token.ign", start, end);
+}
+
+@test
+function tokenTaxonomySeparatesKeywordsIdentifiersAndPunctuation(): void {
+  let mut stream: TokenStream = TokenStream::create();
+  stream.push(Token::keyword(Keyword::FUNCTION, tokenFixtureSpan(0, 8), "function"));
+  stream.push(Token::identifier(tokenFixtureSpan(9, 13), "main"));
+  stream.push(Token::punctuation(Punctuation::RIGHT_SHIFT, tokenFixtureSpan(13, 15), ">>"));
+  stream.push(Token::eof(tokenFixtureSpan(15, 15)));
+
+  let keyword: Token = stream.bump();
+  let identifier: Token = stream.bump();
+  let punctuation: Token = stream.bump();
+
+  Test::assertEq<TokenKind>(keyword.kindValue(), TokenKind::KEYWORD);
+  Test::assertEq<TokenKind>(identifier.kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(punctuation.kindValue(), TokenKind::PUNCTUATION);
+
+  Test::assertEq<Keyword>(keyword.keywordValue(), Keyword::FUNCTION);
+  Test::assertEq<Punctuation>(punctuation.punctuationValue(), Punctuation::RIGHT_SHIFT);
+  Test::assertEq<str>(identifier.lexemeText(), "main");
+}
+
+@test
+function tokenTaxonomyKeepsLiteralCommentBadAndEofFamiliesDistinct(): void {
+  let mut stream: TokenStream = TokenStream::create();
+  stream.push(Token::literal(LiteralKind::INTEGER, tokenFixtureSpan(0, 2), "42"));
+  stream.push(Token::outerDocComment(tokenFixtureSpan(3, 12), "/// docs"));
+  stream.push(Token::bad(tokenFixtureSpan(13, 14), "@"));
+  stream.push(Token::eof(tokenFixtureSpan(14, 14)));
+
+  let literal: Token = stream.bump();
+  let outerDoc: Token = stream.bump();
+  let bad: Token = stream.bump();
+  let eof: Token = stream.bump();
+
+  Test::assertEq<TokenKind>(literal.kindValue(), TokenKind::LITERAL);
+  Test::assertEq<LiteralKind>(literal.literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<TokenKind>(outerDoc.kindValue(), TokenKind::OUTER_DOC_COMMENT);
+  Test::assertEq<TokenKind>(bad.kindValue(), TokenKind::BAD);
+  Test::assertEq<TokenKind>(eof.kindValue(), TokenKind::EOF);
+
+  Test::assertEq<str>(literal.lexemeText(), "42");
+  Test::assertEq<u64>(eof.spanStart(), 14);
+  Test::assertEq<u64>(eof.spanEnd(), 14);
+}

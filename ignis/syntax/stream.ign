@@ -1,0 +1,168 @@
+import SourceSpan from "@compiler::diagnostics";
+import Vector from "std::vector";
+
+import Token, TokenKind, Punctuation from "./token";
+
+function emptySpan(): SourceSpan {
+  return SourceSpan::new("", 0, 0);
+}
+
+function splitGreaterToken(token: &Token): Token {
+  let mut start: u64 = token.span.start;
+  let mut end: u64 = token.span.end;
+
+  if (end > start) {
+    start += 1;
+  }
+
+  if (end < start) {
+    end = start;
+  }
+
+  return Token::punctuation(Punctuation::GREATER, SourceSpan::new(token.span.filePath, start, end), ">");
+}
+
+export record TokenCheckpoint {
+  public index: u64;
+  public pendingGreater: boolean;
+}
+
+export record TokenStream {
+  tokens: Vector<Token>;
+  index: u64;
+  pendingGreater: boolean;
+
+  public static create(): TokenStream {
+    return TokenStream {
+      tokens: Vector::new<Token>(),
+      index: 0,
+      pendingGreater: false,
+    };
+  }
+
+  public push(&mut self, token: Token): void {
+    self.tokens.push(token);
+  }
+
+  public checkpoint(&self): TokenCheckpoint {
+    return TokenCheckpoint {
+      index: self.index,
+      pendingGreater: self.pendingGreater,
+    };
+  }
+
+  public rewind(&mut self, checkpoint: TokenCheckpoint): void {
+    self.index = checkpoint.index;
+    self.pendingGreater = checkpoint.pendingGreater;
+  }
+
+  private fallbackEof(&self): Token {
+    if (self.tokens.length() == 0) {
+      return Token::eof(emptySpan());
+    }
+
+    let lastIndex: u64 = self.tokens.length() - 1;
+    let Option::SOME(last) = self.tokens.get(lastIndex) else {
+      return Token::eof(emptySpan());
+    };
+
+    if (last.kind == TokenKind::EOF) {
+      return last.clone();
+    }
+
+    return Token::eof(SourceSpan::new(last.span.filePath, last.span.start, last.span.end));
+  }
+
+  private tokenAt(&self, index: u64): Token {
+    let Option::SOME(token) = self.tokens.get(index) else {
+      return self.fallbackEof();
+    };
+
+    return token.clone();
+  }
+
+  public peek(&self): Token {
+    if (self.pendingGreater) {
+      let Option::SOME(token) = self.tokens.get(self.index) else {
+        return self.fallbackEof();
+      };
+
+      return splitGreaterToken(token);
+    }
+
+    return self.tokenAt(self.index);
+  }
+
+  public peekNth(distance: u64): Token {
+    if (!self.pendingGreater) {
+      return self.tokenAt(self.index + distance);
+    }
+
+    if (distance == 0) {
+      return self.peek();
+    }
+
+    return self.tokenAt(self.index + distance);
+  }
+
+  public bump(&mut self): Token {
+    if (self.pendingGreater) {
+      let Option::SOME(token) = self.tokens.get(self.index) else {
+        self.pendingGreater = false;
+        return self.fallbackEof();
+      };
+
+      let split: Token = splitGreaterToken(token);
+      self.pendingGreater = false;
+      self.index += 1;
+      return split;
+    }
+
+    let next: Token = self.tokenAt(self.index);
+
+    if (self.index < self.tokens.length()) {
+      self.index += 1;
+    }
+
+    return next;
+  }
+
+  public consume(&mut self, kind: TokenKind): boolean {
+    if (self.peek().kind == kind) {
+      let mut stream: &mut TokenStream = self;
+      stream.bump();
+      return true;
+    }
+
+    return false;
+  }
+
+  public expectGreater(&mut self): boolean {
+    if (self.pendingGreater) {
+      self.pendingGreater = false;
+      self.index += 1;
+      return true;
+    }
+
+    let Option::SOME(current) = self.tokens.get(self.index) else {
+      return false;
+    };
+
+    if (current.kind != TokenKind::PUNCTUATION) {
+      return false;
+    }
+
+    if (current.punctuation == Punctuation::GREATER) {
+      self.index += 1;
+      return true;
+    }
+
+    if (current.punctuation == Punctuation::RIGHT_SHIFT) {
+      self.pendingGreater = true;
+      return true;
+    }
+
+    return false;
+  }
+
+}

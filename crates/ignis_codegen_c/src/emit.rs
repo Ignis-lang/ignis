@@ -467,7 +467,10 @@ impl<'a> CEmitter<'a> {
       for (_, block) in function.blocks.iter() {
         for instruction in &block.instructions {
           for dependency in self.forced_emit_instruction_dependencies(function, instruction) {
-            if external_reachable.contains(&dependency) && self.should_recurse_forced_emit(dependency) {
+            if (external_reachable.contains(&dependency)
+              || self.is_missing_std_archive_generic_specialization(dependency))
+              && self.should_recurse_forced_emit(dependency)
+            {
               queue.push_back(dependency);
             }
           }
@@ -479,7 +482,8 @@ impl<'a> CEmitter<'a> {
       forced.retain(|def_id| {
         !self.is_missing_std_archive_generic_specialization(*def_id)
           || self.is_std_test_def(*def_id)
-          || (self.program.entry_point.is_none() && self.definition_depends_on_user_type(*def_id))
+          || self.definition_depends_on_user_type(*def_id)
+          || self.definition_mangled_name_mentions_user_type(*def_id)
       });
     }
 
@@ -627,10 +631,10 @@ impl<'a> CEmitter<'a> {
   ) -> bool {
     let kind = self.classify(def_id);
 
-    (kind.is_user() && self.is_monomorphized_generic_def(def_id))
-      || (kind.is_std() && self.is_std_test_option_presence_method(def_id))
+    (kind.is_std() && self.is_std_test_option_presence_method(def_id))
       || (kind.is_std() && self.is_missing_std_archive_generic_specialization(def_id))
-      || (self.is_monomorphized_generic_def(def_id)
+      || (kind.is_std()
+        && self.is_monomorphized_generic_def(def_id)
         && (self.definition_depends_on_user_type(def_id)
           || self.definition_mentions_std_test_user_type(def_id)
           || self.is_std_test_def(def_id)))
@@ -780,6 +784,23 @@ impl<'a> CEmitter<'a> {
       })
       .filter(|(_, candidate)| self.is_std_test_local_user_type(candidate.owner_module))
       .map(|(_, candidate)| self.symbols.get(&candidate.name))
+      .any(|candidate_name| raw_name.contains(candidate_name))
+  }
+
+  fn definition_mangled_name_mentions_user_type(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
+
+    self
+      .defs
+      .iter()
+      .filter_map(|(candidate_id, candidate)| match &candidate.kind {
+        DefinitionKind::Record(_) | DefinitionKind::Enum(_) if self.classify(candidate_id).is_user() => Some(candidate),
+        _ => None,
+      })
+      .map(|candidate| self.symbols.get(&candidate.name))
       .any(|candidate_name| raw_name.contains(candidate_name))
   }
 
@@ -2006,7 +2027,10 @@ impl<'a> CEmitter<'a> {
 
       // In per-user-module emission, helper definitions forced from other modules
       // are implementation details of this translation unit.
-      if is_forced_cross_module_helper && cross_module_emit_needs_internal_linkage(is_public) {
+      if is_forced_cross_module_helper
+        && (self.is_missing_std_archive_generic_specialization(def_id)
+          || cross_module_emit_needs_internal_linkage(is_public))
+      {
         is_public = false;
         needs_internal_linkage = true;
       }
@@ -5774,7 +5798,7 @@ mod tests {
   use ignis_type::attribute::FunctionAttr;
   use ignis_type::definition::{
     Definition, DefinitionKind, FieldDefinition, FunctionDefinition, LangTraitSet, MethodDefinition,
-    NamespaceDefinition, RecordDefinition, RecordFieldDef, Visibility,
+    ParameterDefinition, NamespaceDefinition, RecordDefinition, RecordFieldDef, Visibility,
   };
   use ignis_type::file::FileId;
   use ignis_type::module::ModuleId;
@@ -6117,6 +6141,170 @@ mod tests {
     assert!(
       c_code.contains("static void assertEq____str(void)"),
       "expected the forced std::test generic specialization to be emitted with internal linkage"
+    );
+  }
+
+  #[test]
+  fn test_non_entry_user_module_force_emits_missing_std_generic_user_type_specialization() {
+    let (mut program, mut types, mut defs, namespaces, symbols_rc) = empty_program();
+    let mut symbols = symbols_rc.borrow_mut();
+
+    let entry_module = ModuleId::new(0);
+    let std_module = ModuleId::new(1);
+    let user_module = ModuleId::new(2);
+
+    let void_type = types.void();
+    let token_def = alloc_record(&mut defs, &mut symbols, "Token", user_module);
+    let token_type = types.record(token_def);
+    let vector_token_def = alloc_record(&mut defs, &mut symbols, "Vector__Token", std_module);
+
+    let push_param = defs.alloc(Definition {
+      kind: DefinitionKind::Parameter(ParameterDefinition {
+        type_id: token_type,
+        mutable: false,
+        attrs: Vec::new(),
+      }),
+      name: symbols.intern("value"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Private,
+      owner_module: std_module,
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let vector_push = defs.alloc(Definition {
+      kind: DefinitionKind::Method(MethodDefinition {
+        type_params: Vec::new(),
+        owner_type: vector_token_def,
+        params: vec![push_param],
+        return_type: void_type,
+        is_static: false,
+        self_mutable: true,
+        inline_mode: InlineMode::None,
+        attrs: Vec::new(),
+      }),
+      name: symbols.intern("Vector__Token__push"),
+      span: synthetic_span(),
+      name_span: synthetic_span(),
+      visibility: Visibility::Public,
+      owner_module: std_module,
+      owner_namespace: None,
+      doc: None,
+    });
+
+    let entry = alloc_function(&mut defs, &mut symbols, "main", Visibility::Public, None, void_type, Vec::new());
+    let caller = alloc_function(
+      &mut defs,
+      &mut symbols,
+      "usesVectorToken",
+      Visibility::Private,
+      None,
+      void_type,
+      Vec::new(),
+    );
+    defs.get_mut(&caller).owner_module = user_module;
+
+    let mut entry_blocks = ignis_type::Store::new();
+    let mut entry_block = Block::new("entry".to_string());
+    entry_block.terminator = Terminator::Return(None);
+    let entry_block_id = entry_blocks.alloc(entry_block);
+    program.entry_point = Some(entry);
+    program.functions.insert(
+      entry,
+      FunctionLir {
+        def_id: entry,
+        params: Vec::new(),
+        return_type: void_type,
+        locals: ignis_type::Store::new(),
+        temps: ignis_type::Store::new(),
+        blocks: entry_blocks,
+        entry_block: entry_block_id,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        span: synthetic_span(),
+      },
+    );
+
+    let mut caller_blocks = ignis_type::Store::new();
+    let mut caller_block = Block::new("entry".to_string());
+    caller_block.instructions.push(Instr::Call {
+      dest: None,
+      callee: vector_push,
+      args: Vec::new(),
+    });
+    caller_block.terminator = Terminator::Return(None);
+    let caller_entry = caller_blocks.alloc(caller_block);
+    program.functions.insert(
+      caller,
+      FunctionLir {
+        def_id: caller,
+        params: Vec::new(),
+        return_type: void_type,
+        locals: ignis_type::Store::new(),
+        temps: ignis_type::Store::new(),
+        blocks: caller_blocks,
+        entry_block: caller_entry,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        span: synthetic_span(),
+      },
+    );
+
+    let mut push_blocks = ignis_type::Store::new();
+    let mut push_block = Block::new("entry".to_string());
+    push_block.terminator = Terminator::Return(None);
+    let push_entry = push_blocks.alloc(push_block);
+    program.functions.insert(
+      vector_push,
+      FunctionLir {
+        def_id: vector_push,
+        params: vec![push_param],
+        return_type: void_type,
+        locals: ignis_type::Store::new(),
+        temps: ignis_type::Store::new(),
+        blocks: push_blocks,
+        entry_block: push_entry,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        span: synthetic_span(),
+      },
+    );
+
+    let module_paths = HashMap::from([
+      (entry_module, ModulePath::Project(std::path::PathBuf::from("ignis/main.ign"))),
+      (std_module, ModulePath::Std("vector".to_string())),
+      (
+        user_module,
+        ModulePath::Project(std::path::PathBuf::from("ignis/syntax/stream.ign")),
+      ),
+    ]);
+    let missing_symbols = HashSet::new();
+
+    let c_code = CEmitter::with_user_module_target(
+      &program,
+      &types,
+      &defs,
+      &namespaces,
+      &symbols,
+      &[],
+      user_module,
+      &module_paths,
+      std::path::Path::new("std"),
+      Some(&missing_symbols),
+    )
+    .emit();
+
+    assert!(
+      c_code.contains("void Vector____Token____push("),
+      "expected a prototype for the missing Vector<Token> specialization"
+    );
+    assert!(
+      c_code.contains("static void Vector____Token____push("),
+      "expected non-entry user module to force-emit missing Vector<Token> specialization with internal linkage"
     );
   }
 

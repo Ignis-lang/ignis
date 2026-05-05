@@ -1,0 +1,53 @@
+import Test from "std::test";
+
+import SourceSpan from "@compiler::diagnostics";
+import Punctuation, Token, TokenCheckpoint, TokenKind, TokenStream from "@compiler::syntax";
+
+function streamFixtureSpan(start: u64, end: u64): SourceSpan {
+  return SourceSpan::new("fixtures/stream.ign", start, end);
+}
+
+function identifier(text: str, start: u64, end: u64): Token {
+  return Token::identifier(streamFixtureSpan(start, end), text);
+}
+
+function punctuation(kind: Punctuation, text: str, start: u64, end: u64): Token {
+  return Token::punctuation(kind, streamFixtureSpan(start, end), text);
+}
+
+@test
+function tokenStreamCheckpointRewindAndLookaheadAreDeterministic(): void {
+  let mut stream: TokenStream = TokenStream::create();
+  stream.push(identifier("foo", 0, 3));
+  stream.push(punctuation(Punctuation::LESS, "<", 3, 4));
+  stream.push(identifier("bar", 4, 7));
+  stream.push(punctuation(Punctuation::GREATER, ">", 7, 8));
+  stream.push(Token::eof(streamFixtureSpan(8, 8)));
+  let start: TokenCheckpoint = stream.checkpoint();
+
+  Test::assertEq<TokenKind>(stream.peek().kind, TokenKind::IDENTIFIER);
+  Test::assertEq<TokenKind>(stream.peekNth(1).kind, TokenKind::PUNCTUATION);
+
+  Test::assertEq<str>(stream.bump().lexemeText(), "foo");
+  Test::assertEq<str>(stream.bump().lexemeText(), "<");
+
+  stream.rewind(start);
+
+  Test::assertEq<str>(stream.peek().lexemeText(), "foo");
+  Test::assertEq<str>(stream.peekNth(2).lexemeText(), "bar");
+}
+
+@test
+function tokenStreamSplitsRightShiftIntoTwoGreaterTokens(): void {
+  let mut stream: TokenStream = TokenStream::create();
+  stream.push(punctuation(Punctuation::RIGHT_SHIFT, ">>", 10, 12));
+  stream.push(Token::eof(streamFixtureSpan(12, 12)));
+
+  Test::assert(stream.expectGreater());
+  Test::assertEq<Punctuation>(stream.peek().punctuation, Punctuation::GREATER);
+  Test::assertEq<u64>(stream.peek().span.start, 11);
+  Test::assertEq<u64>(stream.peek().span.end, 12);
+
+  Test::assert(stream.expectGreater());
+  Test::assertEq<TokenKind>(stream.peek().kind, TokenKind::EOF);
+}

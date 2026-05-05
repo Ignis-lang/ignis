@@ -1,0 +1,70 @@
+import Test from "std::test";
+import Memory from "std::memory";
+import Path from "std::path";
+
+import SourceFile from "@compiler::diagnostics";
+import SourceCursor from "@compiler::syntax";
+
+function assertNextByte(cursor: &mut SourceCursor, expected: u8): void {
+  let mut stream: &mut SourceCursor = cursor;
+  let Option::SOME(actual) = stream.advance() else {
+    @panic("expected cursor byte");
+  };
+
+  Test::assertEq<u8>(actual, expected);
+}
+
+@test
+function sourceCursorMarkResetReplaysTheSameByteRange(): void {
+  let source: SourceFile = SourceFile::create("fixtures/cursor_mark.ign", "token");
+  let mut cursor: SourceCursor = SourceCursor::create(&source);
+  let start = cursor.mark();
+
+  Test::assertEq<u64>(cursor.position(), 0);
+  Test::assertEq<u8>(match (cursor.peek()) { Option::SOME(value) -> value, Option::NONE -> 255, }, 't' as u8);
+  Test::assertEq<u8>(match (cursor.peek2()) { Option::SOME(value) -> value, Option::NONE -> 255, }, 'o' as u8);
+
+  assertNextByte(&mut cursor, 't' as u8);
+  assertNextByte(&mut cursor, 'o' as u8);
+
+  let consumed: String = cursor.lexemeFrom(start);
+  Test::assertEq<str>(consumed.toStr(), "to");
+  Test::assertEq<u64>(cursor.position(), 2);
+
+  cursor.reset(start);
+
+  Test::assertEq<u64>(cursor.position(), 0);
+  assertNextByte(&mut cursor, 't' as u8);
+  assertNextByte(&mut cursor, 'o' as u8);
+
+  let replayed = cursor.mark();
+  assertNextByte(&mut cursor, 'k' as u8);
+
+  Test::assertEq<str>(cursor.lexemeFrom(replayed).toStr(), "k");
+}
+
+@test
+function sourceCursorTreatsRawNulAsDataUntilTheFinalByte(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(3);
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 0);
+  @write<u8>(raw + 2, 'b' as u8);
+
+  let source: SourceFile = SourceFile {
+    path: Path::PathBuf::create("fixtures/cursor_nul.ign"),
+    text: String::create(raw, 3 as u64),
+  };
+  let mut cursor: SourceCursor = SourceCursor::create(&source);
+
+  Test::assert(!cursor.isAtEnd());
+
+  assertNextByte(&mut cursor, 'a' as u8);
+  assertNextByte(&mut cursor, 0);
+
+  Test::assert(!cursor.isAtEnd());
+
+  assertNextByte(&mut cursor, 'b' as u8);
+
+  Test::assert(cursor.isAtEnd());
+  Test::assert(match (cursor.advance()) { Option::SOME(_) -> false, Option::NONE -> true, });
+}

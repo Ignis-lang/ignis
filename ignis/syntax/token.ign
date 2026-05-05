@@ -1,0 +1,207 @@
+import SourceSpan from "@compiler::diagnostics";
+
+@implements(Eq)
+export enum Keyword {
+  NONE,
+  FUNCTION,
+  LET,
+  IF,
+  ELSE,
+  RETURN,
+
+  public equals(&self, other: &Keyword): boolean {
+    return match (self) {
+      Keyword::NONE -> *other == Keyword::NONE,
+      Keyword::FUNCTION -> *other == Keyword::FUNCTION,
+      Keyword::LET -> *other == Keyword::LET,
+      Keyword::IF -> *other == Keyword::IF,
+      Keyword::ELSE -> *other == Keyword::ELSE,
+      Keyword::RETURN -> *other == Keyword::RETURN,
+    };
+  }
+}
+
+@implements(Eq)
+export enum Punctuation {
+  NONE,
+  LESS,
+  GREATER,
+  RIGHT_SHIFT,
+  AT,
+  COMMA,
+  LEFT_PAREN,
+  RIGHT_PAREN,
+
+  public equals(&self, other: &Punctuation): boolean {
+    return match (self) {
+      Punctuation::NONE -> *other == Punctuation::NONE,
+      Punctuation::LESS -> *other == Punctuation::LESS,
+      Punctuation::GREATER -> *other == Punctuation::GREATER,
+      Punctuation::RIGHT_SHIFT -> *other == Punctuation::RIGHT_SHIFT,
+      Punctuation::AT -> *other == Punctuation::AT,
+      Punctuation::COMMA -> *other == Punctuation::COMMA,
+      Punctuation::LEFT_PAREN -> *other == Punctuation::LEFT_PAREN,
+      Punctuation::RIGHT_PAREN -> *other == Punctuation::RIGHT_PAREN,
+    };
+  }
+}
+
+@implements(Eq)
+export enum LiteralKind {
+  NONE,
+  INTEGER,
+  FLOAT,
+  STRING,
+  CHAR,
+
+  public equals(&self, other: &LiteralKind): boolean {
+    return match (self) {
+      LiteralKind::NONE -> *other == LiteralKind::NONE,
+      LiteralKind::INTEGER -> *other == LiteralKind::INTEGER,
+      LiteralKind::FLOAT -> *other == LiteralKind::FLOAT,
+      LiteralKind::STRING -> *other == LiteralKind::STRING,
+      LiteralKind::CHAR -> *other == LiteralKind::CHAR,
+    };
+  }
+}
+
+@implements(Eq)
+export enum TokenKind {
+  IDENTIFIER,
+  KEYWORD,
+  PUNCTUATION,
+  LITERAL,
+  LINE_COMMENT,
+  BLOCK_COMMENT,
+  OUTER_DOC_COMMENT,
+  INNER_DOC_COMMENT,
+  WHITESPACE,
+  BAD,
+  EOF,
+
+  public equals(&self, other: &TokenKind): boolean {
+    return match (self) {
+      TokenKind::IDENTIFIER -> *other == TokenKind::IDENTIFIER,
+      TokenKind::KEYWORD -> *other == TokenKind::KEYWORD,
+      TokenKind::PUNCTUATION -> *other == TokenKind::PUNCTUATION,
+      TokenKind::LITERAL -> *other == TokenKind::LITERAL,
+      TokenKind::LINE_COMMENT -> *other == TokenKind::LINE_COMMENT,
+      TokenKind::BLOCK_COMMENT -> *other == TokenKind::BLOCK_COMMENT,
+      TokenKind::OUTER_DOC_COMMENT -> *other == TokenKind::OUTER_DOC_COMMENT,
+      TokenKind::INNER_DOC_COMMENT -> *other == TokenKind::INNER_DOC_COMMENT,
+      TokenKind::WHITESPACE -> *other == TokenKind::WHITESPACE,
+      TokenKind::BAD -> *other == TokenKind::BAD,
+      TokenKind::EOF -> *other == TokenKind::EOF,
+    };
+  }
+}
+
+export record Token {
+  public kind: TokenKind;
+  public span: SourceSpan;
+  public lexeme: String;
+  public keyword: Keyword;
+  public punctuation: Punctuation;
+  public literalKind: LiteralKind;
+
+  public static identifier(span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::IDENTIFIER, span, lexeme, Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static keyword(keyword: Keyword, span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::KEYWORD, span, lexeme, keyword, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static punctuation(punctuation: Punctuation, span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::PUNCTUATION, span, lexeme, Keyword::NONE, punctuation, LiteralKind::NONE);
+  }
+
+  public static literal(literalKind: LiteralKind, span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::LITERAL, span, lexeme, Keyword::NONE, Punctuation::NONE, literalKind);
+  }
+
+  public static lineComment(span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::LINE_COMMENT, span, lexeme, Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static blockComment(span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::BLOCK_COMMENT, span, lexeme, Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static outerDocComment(span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::OUTER_DOC_COMMENT, span, lexeme, Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static innerDocComment(span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::INNER_DOC_COMMENT, span, lexeme, Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static whitespace(span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::WHITESPACE, span, lexeme, Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static bad(span: SourceSpan, lexeme: str): Token {
+    return Token::create(TokenKind::BAD, span, lexeme, Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  public static eof(span: SourceSpan): Token {
+    return Token::create(TokenKind::EOF, span, "", Keyword::NONE, Punctuation::NONE, LiteralKind::NONE);
+  }
+
+  private static create(
+    kind: TokenKind,
+    span: SourceSpan,
+    lexeme: str,
+    keyword: Keyword,
+    punctuation: Punctuation,
+    literalKind: LiteralKind
+  ): Token {
+    return Token {
+      kind: kind,
+      span: span,
+      lexeme: String::create(lexeme),
+      keyword: keyword,
+      punctuation: punctuation,
+      literalKind: literalKind,
+    };
+  }
+
+  public clone(&self): Token {
+    return Token {
+      kind: self.kind,
+      span: SourceSpan::new(self.span.filePath, self.span.start, self.span.end),
+      lexeme: self.lexeme.clone(),
+      keyword: self.keyword,
+      punctuation: self.punctuation,
+      literalKind: self.literalKind,
+    };
+  }
+
+  public lexemeText(&self): str {
+    return self.lexeme.toStr();
+  }
+
+  public kindValue(&self): TokenKind {
+    return self.kind;
+  }
+
+  public keywordValue(&self): Keyword {
+    return self.keyword;
+  }
+
+  public punctuationValue(&self): Punctuation {
+    return self.punctuation;
+  }
+
+  public literalKindValue(&self): LiteralKind {
+    return self.literalKind;
+  }
+
+  public spanStart(&self): u64 {
+    return self.span.start;
+  }
+
+  public spanEnd(&self): u64 {
+    return self.span.end;
+  }
+}

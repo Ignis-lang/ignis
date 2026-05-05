@@ -1,0 +1,61 @@
+import SourceFile, SourceSpan from "@compiler::diagnostics";
+
+export record SourceMark {
+  public position: u64;
+}
+
+export record SourceCursor {
+  file: &SourceFile;
+  offset: u64;
+
+  public static create(file: &SourceFile): SourceCursor {
+    return SourceCursor {
+      file: file,
+      offset: 0,
+    };
+  }
+
+  public position(&self): u64 {
+    return self.offset;
+  }
+
+  public isAtEnd(&self): boolean {
+    return self.offset >= self.file.text.length();
+  }
+
+  public peek(&self): Option<u8> {
+    return self.file.text.byteAt(self.offset);
+  }
+
+  public peek2(&self): Option<u8> {
+    return self.file.text.byteAt(self.offset + 1);
+  }
+
+  public advance(&mut self): Option<u8> {
+    let next: Option<u8> = self.peek();
+
+    if (let Option::SOME(_) = next) {
+      self.offset += 1;
+    }
+
+    return next;
+  }
+
+  public mark(&self): SourceMark {
+    return SourceMark {
+      position: self.offset,
+    };
+  }
+
+  public reset(&mut self, mark: SourceMark): void {
+    self.offset = mark.position;
+  }
+
+  public lexemeFrom(&self, mark: SourceMark): String {
+    return self.file.text.substringBytes(mark.position, self.offset);
+  }
+
+  public spanFrom(&self, mark: SourceMark): SourceSpan {
+    return SourceSpan::new(self.file.path.asStr(), mark.position, self.offset);
+  }
+}
