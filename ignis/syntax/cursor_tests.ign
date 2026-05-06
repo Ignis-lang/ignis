@@ -14,6 +14,15 @@ function assertNextByte(cursor: &mut SourceCursor, expected: u8): void {
   Test::assertEq<u8>(actual, expected);
 }
 
+function assertNextChar(cursor: &mut SourceCursor, expected: char): void {
+  let mut stream: &mut SourceCursor = cursor;
+  let Option::SOME(actual) = stream.advanceChar() else {
+    @panic("expected cursor char");
+  };
+
+  Test::assertEq<i32>(actual as i32, expected as i32);
+}
+
 @test
 function sourceCursorMarkResetReplaysTheSameByteRange(): void {
   let source: SourceFile = SourceFile::create("fixtures/cursor_mark.ign", "token");
@@ -67,4 +76,55 @@ function sourceCursorTreatsRawNulAsDataUntilTheFinalByte(): void {
 
   Test::assert(cursor.isAtEnd());
   Test::assert(match (cursor.advance()) { Option::SOME(_) -> false, Option::NONE -> true, });
+}
+
+@test
+function sourceCursorPeeksAndAdvancesUtf8CharsByScalar(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(3);
+  @write<u8>(raw, 195 as u8);
+  @write<u8>(raw + 1, 177 as u8);
+  @write<u8>(raw + 2, 'a' as u8);
+
+  let source: SourceFile = SourceFile {
+    path: Path::PathBuf::create("fixtures/cursor_utf8.ign"),
+    text: String::create(raw, 3 as u64),
+  };
+  let mut cursor: SourceCursor = SourceCursor::create(&source);
+
+  Test::assertEq<i32>(match (cursor.peekChar()) { Option::SOME(value) -> value as i32, Option::NONE -> 0, }, 241);
+  Test::assertEq<i32>(match (cursor.peekNextChar()) { Option::SOME(value) -> value as i32, Option::NONE -> 0, }, 'a' as i32);
+
+  assertNextChar(&mut cursor, 241 as char);
+  Test::assertEq<u64>(cursor.position(), 2);
+  Test::assertEq<i32>(match (cursor.peekChar()) { Option::SOME(value) -> value as i32, Option::NONE -> 0, }, 'a' as i32);
+
+  assertNextChar(&mut cursor, 'a');
+  Test::assertEq<u64>(cursor.position(), 3);
+  Test::assert(cursor.isAtEnd());
+}
+
+@test
+function sourceCursorReplacesMalformedUtf8AndAdvancesOneByte(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(3);
+  @write<u8>(raw, 255 as u8);
+  @write<u8>(raw + 1, 'a' as u8);
+  @write<u8>(raw + 2, 128 as u8);
+
+  let source: SourceFile = SourceFile {
+    path: Path::PathBuf::create("fixtures/cursor_malformed_utf8.ign"),
+    text: String::create(raw, 3 as u64),
+  };
+  let mut cursor: SourceCursor = SourceCursor::create(&source);
+
+  Test::assertEq<i32>(match (cursor.peekChar()) { Option::SOME(value) -> value as i32, Option::NONE -> 0, }, 65533);
+
+  assertNextChar(&mut cursor, 65533 as char);
+  Test::assertEq<u64>(cursor.position(), 1);
+
+  assertNextChar(&mut cursor, 'a');
+  Test::assertEq<u64>(cursor.position(), 2);
+
+  assertNextChar(&mut cursor, 65533 as char);
+  Test::assertEq<u64>(cursor.position(), 3);
+  Test::assert(cursor.isAtEnd());
 }

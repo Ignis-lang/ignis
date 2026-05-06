@@ -1,14 +1,28 @@
-import Char from "std::char";
-
-import Diagnostic, DiagnosticBag, DiagnosticCode, LabelKind, Severity, SourceFile from "@compiler::diagnostics";
-import Keyword, Punctuation, SourceCursor, SourceMark, Token, TokenKind, TokenStream from "@compiler::syntax";
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticCode,
+  LabelKind,
+  Severity,
+  SourceFile,
+from "@compiler::diagnostics";
+import
+  Keyword,
+  LiteralKind,
+  Punctuation,
+  SourceCursor,
+  SourceMark,
+  Token,
+  TokenKind,
+  TokenStream,
+from "@compiler::syntax";
 
 function isIdentifierStart(value: char): boolean {
-  return Char::isAsciiAlpha(value) || value == '_';
+  return value.isAlphabetic() || value == '_';
 }
 
 function isIdentifierContinue(value: char): boolean {
-  return Char::isAsciiAlphanumeric(value) || value == '_';
+  return value.isAlphanumeric() || value == '_';
 }
 
 export record LexResult {
@@ -33,7 +47,12 @@ record LexerScanner {
     self.tokens.push(token);
   }
 
-  private emitPunctuation(&mut self, start: SourceMark, punctuation: Punctuation, lexeme: str): void {
+  private emitPunctuation(
+    &mut self,
+    start: SourceMark,
+    punctuation: Punctuation,
+    lexeme: str
+  ): void {
     self.emitToken(Token::punctuation(punctuation, self.cursor.spanFrom(start), lexeme));
   }
 
@@ -50,21 +69,40 @@ record LexerScanner {
     let lexeme: String = self.cursor.lexemeFrom(start);
 
     if (kind == TokenKind::OUTER_DOC_COMMENT) {
-      self.emitToken(Token::outerDocComment(self.cursor.spanFrom(start), lexeme.toStr()));
+      self.emitToken(Token::outerDocCommentOwned(self.cursor.spanFrom(start), &lexeme));
       return;
     }
 
     if (kind == TokenKind::INNER_DOC_COMMENT) {
-      self.emitToken(Token::innerDocComment(self.cursor.spanFrom(start), lexeme.toStr()));
+      self.emitToken(Token::innerDocCommentOwned(self.cursor.spanFrom(start), &lexeme));
       return;
     }
 
     if (kind == TokenKind::BLOCK_COMMENT) {
-      self.emitToken(Token::blockComment(self.cursor.spanFrom(start), lexeme.toStr()));
+      self.emitToken(Token::blockCommentOwned(self.cursor.spanFrom(start), &lexeme));
       return;
     }
 
-    self.emitToken(Token::lineComment(self.cursor.spanFrom(start), lexeme.toStr()));
+    self.emitToken(Token::lineCommentOwned(self.cursor.spanFrom(start), &lexeme));
+  }
+
+  private emitLiteral(&mut self, start: SourceMark, kind: LiteralKind): void {
+    let lexeme: String = self.cursor.lexemeFrom(start);
+    self.emitToken(Token::literalOwned(kind, self.cursor.spanFrom(start), &lexeme));
+  }
+
+  private emitDiagnostic(&mut self, start: SourceMark, code: str, message: str, label: str): void {
+    let span = self.cursor.spanFrom(start);
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, label);
+    self.diagnostics.push(diagnostic);
+  }
+
+  private emitBadLiteral(&mut self, start: SourceMark, code: str, message: str, label: str): void {
+    let span = self.cursor.spanFrom(start);
+    let lexeme: String = self.cursor.lexemeFrom(start);
+    self.emitDiagnostic(start, code, message, label);
+    self.emitToken(Token::badOwned(span, &lexeme));
   }
 
   private emitInvalidToken(&mut self, start: SourceMark): void {
@@ -73,7 +111,7 @@ record LexerScanner {
     let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::INVALID_TOKEN, "invalid token", span);
     diagnostic.addLabel(LabelKind::PRIMARY, span, "token is not valid here");
     self.diagnostics.push(diagnostic);
-    self.emitToken(Token::bad(span, lexeme.toStr()));
+    self.emitToken(Token::badOwned(span, &lexeme));
   }
 
   private emitUnterminatedComment(&mut self, start: SourceMark): void {
@@ -82,15 +120,15 @@ record LexerScanner {
     let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::UNTERMINATED_COMMENT, "unterminated comment", span);
     diagnostic.addLabel(LabelKind::PRIMARY, span, "comment must end with */");
     self.diagnostics.push(diagnostic);
-    self.emitToken(Token::bad(span, lexeme.toStr()));
+    self.emitToken(Token::badOwned(span, &lexeme));
+  }
+
+  private emitRawNulInSource(&mut self, start: SourceMark): void {
+    self.emitDiagnostic(start, DiagnosticCode::RAW_NUL_IN_SOURCE, "raw NUL in source", "source text cannot contain raw NUL bytes");
   }
 
   private matchAscii(&mut self, expected: char): boolean {
-    let Option::SOME(next) = self.cursor.peekScalar() else {
-      return false;
-    };
-
-    let Option::SOME(actual) = next.ascii() else {
+    let Option::SOME(actual) = self.cursor.peekChar() else {
       return false;
     };
 
@@ -98,51 +136,478 @@ record LexerScanner {
       return false;
     }
 
-    self.cursor.advanceScalar();
+    self.cursor.advanceChar();
     return true;
   }
 
-  private scanIdentifierTail(&mut self): void {
-    while (let Option::SOME(next) = self.cursor.peekScalar()) {
-      let Option::SOME(ascii) = next.ascii() else {
-        return;
-      };
+  private isLineTerminator(value: char): boolean {
+    return value == '\n' || value == '\r';
+  }
 
-      if (!isIdentifierContinue(ascii)) {
+  private scanNumericRecoveryTail(&mut self): void {
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (!next.isAlphanumeric() && next != '_') {
         return;
       }
 
-      self.cursor.advanceScalar();
+      self.cursor.advanceChar();
+    }
+  }
+
+  private scanDigitsWithSeparators(&mut self): boolean {
+    let mut previousWasDigit: boolean = true;
+
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next.isAsciiNumeric()) {
+        self.cursor.advanceChar();
+        previousWasDigit = true;
+        continue;
+      }
+
+      if (next != '_') {
+        return previousWasDigit;
+      }
+
+      let Option::SOME(following) = self.cursor.peekNextChar() else {
+        return false;
+      };
+
+      if (!previousWasDigit || !following.isAsciiNumeric()) {
+        return false;
+      }
+
+      self.cursor.advanceChar();
+      previousWasDigit = false;
+    }
+
+    return previousWasDigit;
+  }
+
+  private scanDecimalOrFloatLiteral(&mut self, start: SourceMark): void {
+    if (!self.scanDigitsWithSeparators()) {
+      self.scanNumericRecoveryTail();
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_INTEGER, "malformed integer literal", "integer separators must stay between digits");
+      return;
+    }
+
+    let Option::SOME(dot) = self.cursor.peekChar() else {
+      self.emitLiteral(start, LiteralKind::INTEGER);
+      return;
+    };
+
+    if (dot != '.') {
+      self.emitLiteral(start, LiteralKind::INTEGER);
+      return;
+    }
+
+    let Option::SOME(second) = self.cursor.peekNextChar() else {
+      self.emitLiteral(start, LiteralKind::INTEGER);
+      return;
+    };
+
+    if (!second.isAsciiNumeric()) {
+      self.emitLiteral(start, LiteralKind::INTEGER);
+      return;
+    }
+
+    self.cursor.advanceChar();
+    let Option::SOME(_) = self.cursor.peekChar() else {
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_FLOAT, "malformed float literal", "float literal needs digits after the decimal point");
+      return;
+    };
+
+    self.cursor.advanceChar();
+
+    if (!self.scanDigitsWithSeparators()) {
+      self.scanNumericRecoveryTail();
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_FLOAT, "malformed float literal", "float separators must stay between digits");
+      return;
+    }
+
+    self.emitLiteral(start, LiteralKind::FLOAT);
+  }
+
+  private scanBinaryLiteral(&mut self, start: SourceMark): void {
+    let Option::SOME(first) = self.cursor.peekChar() else {
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "malformed binary literal", "binary literal needs at least one digit after 0b");
+      return;
+    };
+
+    if (first != '0' && first != '1') {
+      self.scanNumericRecoveryTail();
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "malformed binary literal", "binary literal only allows 0 or 1 digits");
+      return;
+    }
+
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next == '0' || next == '1') {
+        self.cursor.advanceChar();
+        continue;
+      }
+
+      if (next.isAlphanumeric() || next == '_') {
+        self.scanNumericRecoveryTail();
+        self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "malformed binary literal", "binary literal only allows 0 or 1 digits");
+        return;
+      }
+
+      self.emitLiteral(start, LiteralKind::BINARY);
+      return;
+    }
+
+    self.emitLiteral(start, LiteralKind::BINARY);
+  }
+
+  private scanHexLiteral(&mut self, start: SourceMark): void {
+    let Option::SOME(first) = self.cursor.peekChar() else {
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "malformed hex literal", "hex literal needs at least one digit after 0x");
+      return;
+    };
+
+    if (!first.isHexDigit()) {
+      self.scanNumericRecoveryTail();
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "malformed hex literal", "hex literal only allows 0-9, a-f, and A-F digits");
+      return;
+    }
+
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next.isHexDigit()) {
+        self.cursor.advanceChar();
+        continue;
+      }
+
+      if (next.isAlphanumeric() || next == '_') {
+        self.scanNumericRecoveryTail();
+        self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "malformed hex literal", "hex literal only allows 0-9, a-f, and A-F digits");
+        return;
+      }
+
+      self.emitLiteral(start, LiteralKind::HEX);
+      return;
+    }
+
+    self.emitLiteral(start, LiteralKind::HEX);
+  }
+
+  private scanNumberLiteral(&mut self, start: SourceMark, first: char): void {
+    if (first == '0' && (self.matchAscii('x') || self.matchAscii('X'))) {
+      self.scanHexLiteral(start);
+      return;
+    }
+
+    if (first == '0' && (self.matchAscii('b') || self.matchAscii('B'))) {
+      self.scanBinaryLiteral(start);
+      return;
+    }
+
+    self.scanDecimalOrFloatLiteral(start);
+  }
+
+  private scanStringLiteral(&mut self, start: SourceMark): void {
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next == '"') {
+        self.cursor.advanceChar();
+        self.emitLiteral(start, LiteralKind::STRING);
+        return;
+      }
+
+      if (self.isLineTerminator(next)) {
+        self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must close before the end of the line");
+        return;
+      }
+
+      if (next == '\\') {
+        self.cursor.advanceChar();
+
+        if (self.cursor.isAtEnd()) {
+          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must end with a closing quote");
+          return;
+        }
+
+        let Option::SOME(escaped) = self.cursor.peekChar() else {
+          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must end with a closing quote");
+          return;
+        };
+
+        if (self.isLineTerminator(escaped)) {
+          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must close before the end of the line");
+          return;
+        }
+
+        if (escaped == '\0') {
+          let nulStart: SourceMark = self.cursor.mark();
+          self.cursor.advanceChar();
+          self.emitRawNulInSource(nulStart);
+
+          while (let Option::SOME(current) = self.cursor.peekChar()) {
+            if (self.isLineTerminator(current)) {
+              break;
+            }
+
+            if (current == '"') {
+              self.cursor.advanceChar();
+              break;
+            }
+
+            self.cursor.advanceChar();
+          }
+
+          let lexeme: String = self.cursor.lexemeFrom(start);
+          self.emitToken(Token::badOwned(self.cursor.spanFrom(start), &lexeme));
+          return;
+        }
+
+        self.cursor.advanceChar();
+        continue;
+      }
+
+      if (next == '\0') {
+        let nulStart: SourceMark = self.cursor.mark();
+        self.cursor.advanceChar();
+        self.emitRawNulInSource(nulStart);
+
+        while (let Option::SOME(current) = self.cursor.peekChar()) {
+          if (self.isLineTerminator(current)) {
+            break;
+          }
+
+          if (current == '"') {
+            self.cursor.advanceChar();
+            break;
+          }
+
+          self.cursor.advanceChar();
+        }
+
+        let lexeme: String = self.cursor.lexemeFrom(start);
+        self.emitToken(Token::badOwned(self.cursor.spanFrom(start), &lexeme));
+        return;
+      }
+
+      self.cursor.advanceChar();
+    }
+
+    self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must end with a closing quote");
+  }
+
+  private recoverMalformedCharLiteral(&mut self): void {
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next == '\'' || self.isLineTerminator(next)) {
+        break;
+      }
+
+      self.cursor.advanceChar();
+    }
+
+    if (let Option::SOME(next) = self.cursor.peekChar() && next == '\'') {
+      self.cursor.advanceChar();
+    }
+  }
+
+  private hexDigitValue(value: char): u32 {
+    if (value.isAsciiNumeric()) {
+      return (value as u32) - ('0' as u32);
+    }
+
+    if (value >= 'a' && value <= 'f') {
+      return 10 + ((value as u32) - ('a' as u32));
+    }
+
+    return 10 + ((value as u32) - ('A' as u32));
+  }
+
+  private scanUnicodeEscapeValue(&mut self): Option<u32> {
+    const MAX_UNICODE_ESCAPE_HEX_DIGITS: u64 = 6;
+
+    if (!self.matchAscii('{')) {
+      return Option::NONE;
+    }
+
+    let mut sawDigit: boolean = false;
+    let mut digitCount: u64 = 0;
+    let mut value: u32 = 0;
+
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next == '}') {
+        if (!sawDigit) {
+          return Option::NONE;
+        }
+
+        self.cursor.advanceChar();
+        return Option::SOME(value);
+      }
+
+      if (!next.isHexDigit()) {
+        return Option::NONE;
+      }
+
+      if (digitCount >= MAX_UNICODE_ESCAPE_HEX_DIGITS) {
+        return Option::NONE;
+      }
+
+      sawDigit = true;
+      digitCount += 1;
+      value = value * 16 + self.hexDigitValue(next);
+      self.cursor.advanceChar();
+    }
+
+    return Option::NONE;
+  }
+
+  private scanCharEscape(&mut self, start: SourceMark): boolean {
+    let Option::SOME(next) = self.cursor.peekChar() else {
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      return false;
+    };
+
+    if (next == '\0') {
+      let nulStart: SourceMark = self.cursor.mark();
+      self.cursor.advanceChar();
+      self.emitRawNulInSource(nulStart);
+      self.recoverMalformedCharLiteral();
+
+      let lexeme: String = self.cursor.lexemeFrom(start);
+      self.emitToken(Token::badOwned(self.cursor.spanFrom(start), &lexeme));
+      return false;
+    }
+
+    if (next == 'b' || next == 'f' || next == 'n' || next == 'r' || next == 't' || next == '0' || next == '\\' || next == '\'' || next == '"') {
+      self.cursor.advanceChar();
+      return true;
+    }
+
+    if (next != 'u') {
+      self.recoverMalformedCharLiteral();
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "invalid char escape", "char escape must be a known escape or \\u{...}");
+      return false;
+    }
+
+    self.cursor.advanceChar();
+    let Option::SOME(codepoint) = self.scanUnicodeEscapeValue() else {
+      self.recoverMalformedCharLiteral();
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "invalid char escape", "unicode escape must contain one valid scalar value");
+      return false;
+    };
+
+    if (codepoint > 1114111 || (codepoint >= 55296 && codepoint <= 57343)) {
+      self.recoverMalformedCharLiteral();
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "invalid char escape", "unicode escape must contain one valid scalar value");
+      return false;
+    }
+
+    return true;
+  }
+
+  private scanCharLiteral(&mut self, start: SourceMark): void {
+    let Option::SOME(next) = self.cursor.peekChar() else {
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      return;
+    };
+
+    if (next == '\'') {
+      self.cursor.advanceChar();
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER, "invalid char literal", "char literal must contain exactly one UTF-8 scalar");
+      return;
+    }
+
+    if (self.isLineTerminator(next)) {
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      return;
+    }
+
+    if (next == '\0') {
+      let nulStart: SourceMark = self.cursor.mark();
+      self.cursor.advanceChar();
+      self.emitRawNulInSource(nulStart);
+      self.recoverMalformedCharLiteral();
+
+      let lexeme: String = self.cursor.lexemeFrom(start);
+      self.emitToken(Token::badOwned(self.cursor.spanFrom(start), &lexeme));
+      return;
+    }
+
+    if (next == '\\') {
+      self.cursor.advanceChar();
+
+      if (!self.scanCharEscape(start)) {
+        return;
+      }
+    } else {
+      self.cursor.advanceChar();
+    }
+
+    let Option::SOME(closer) = self.cursor.peekChar() else {
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      return;
+    };
+
+    if (closer == '\'') {
+      self.cursor.advanceChar();
+      self.emitLiteral(start, LiteralKind::CHAR);
+      return;
+    }
+
+    if (self.isLineTerminator(closer)) {
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      return;
+    }
+
+    self.recoverMalformedCharLiteral();
+    self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER, "invalid char literal", "char literal must contain exactly one UTF-8 scalar");
+  }
+
+  private scanIdentifierTail(&mut self): void {
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (!isIdentifierContinue(next)) {
+        return;
+      }
+
+      self.cursor.advanceChar();
     }
   }
 
   private scanLineComment(&mut self): void {
-    while (let Option::SOME(next) = self.cursor.peekScalar()) {
-      let Option::SOME(value) = next.ascii() else {
-        self.cursor.advanceScalar();
-        continue;
-      };
-
-      if (value == '\n' || value == '\r') {
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next == '\n' || next == '\r') {
         return;
       }
 
-      self.cursor.advanceScalar();
+      if (next == '\0') {
+        let nulStart: SourceMark = self.cursor.mark();
+        self.cursor.advanceChar();
+        self.emitRawNulInSource(nulStart);
+        continue;
+      }
+
+      self.cursor.advanceChar();
     }
   }
 
   private scanBlockCommentBody(&mut self): boolean {
-    while (let Option::SOME(current) = self.cursor.peekScalar()) {
-      if (self.matchAscii('*') && self.matchAscii('/')) {
+    while (let Option::SOME(current) = self.cursor.peekChar()) {
+      let mut closesComment: boolean = false;
+
+      if (current == '*') {
+        closesComment = match (self.cursor.peekNextChar()) {
+          Option::SOME(next) -> next == '/',
+          Option::NONE -> false,
+        };
+      }
+
+      if (closesComment) {
+        self.cursor.advanceChar();
+        self.cursor.advanceChar();
         return true;
       }
 
-      if (!current.isAscii()) {
-        self.cursor.advanceScalar();
+      if (current == '\0') {
+        let nulStart: SourceMark = self.cursor.mark();
+        self.cursor.advanceChar();
+        self.emitRawNulInSource(nulStart);
         continue;
       }
 
-      self.cursor.advanceScalar();
+      self.cursor.advanceChar();
     }
 
     return false;
@@ -377,22 +842,37 @@ record LexerScanner {
   public scanAll(&mut self): void {
     while (!self.cursor.isAtEnd()) {
       let start: SourceMark = self.cursor.mark();
-      let Option::SOME(current) = self.cursor.advanceScalar() else {
+      let Option::SOME(current) = self.cursor.advanceChar() else {
         break;
       };
 
-      let Option::SOME(ascii) = current.ascii() else {
-        self.emitInvalidToken(start);
+      if (current == '\0') {
+        self.emitRawNulInSource(start);
         continue;
-      };
-
-      if (isIdentifierStart(ascii)) {
-          self.scanIdentifierTail();
-          self.emitIdentifierOrKeyword(start);
-          continue;
       }
 
-      self.scanGrammarToken(start, ascii);
+      if (current.isAsciiNumeric()) {
+        self.scanNumberLiteral(start, current);
+        continue;
+      }
+
+      if (current == '"') {
+        self.scanStringLiteral(start);
+        continue;
+      }
+
+      if (current == '\'') {
+        self.scanCharLiteral(start);
+        continue;
+      }
+
+      if (isIdentifierStart(current)) {
+        self.scanIdentifierTail();
+        self.emitIdentifierOrKeyword(start);
+        continue;
+      }
+
+      self.scanGrammarToken(start, current);
     }
 
     let end: SourceMark = self.cursor.mark();

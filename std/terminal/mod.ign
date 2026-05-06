@@ -88,7 +88,6 @@
 //! ```
 
 import LibC from "std::libc";
-import Utf8Cursor from "std::string";
 
 /// Builds a Control Sequence Introducer (CSI) escape sequence.
 ///
@@ -661,14 +660,17 @@ export namespace Terminal {
   function stripAnsiAndWhitespace(text: str): String {
     let owned: String = String::create(text);
     let mut stripped: String = String::new();
-    let mut cursor: Utf8Cursor = owned.cursor();
+    let mut offset: u64 = 0;
     let mut skippingAnsi: boolean = false;
 
-    while (!cursor.isAtEnd()) {
-      let Option::SOME(current) = cursor.advance() else {
+    while (offset < owned.length()) {
+      let startByte: u64 = offset;
+      let mut endByte: u64 = offset;
+      let Option::SOME(current) = owned.charAt(offset, &mut endByte) else {
         break;
       };
-      let ascii: Option<char> = current.ascii();
+      offset = endByte;
+      let ascii: Option<char> = (current as u32) <= 127 ? Option::SOME(current) : Option::NONE;
 
       if (skippingAnsi) {
         if (let Option::SOME(value) = ascii) {
@@ -691,7 +693,7 @@ export namespace Terminal {
         }
       }
 
-      let segment: String = cursor.slice(current.startByte, current.endByte);
+      let segment: String = owned.substringBytes(startByte, endByte);
       stripped.push(&segment);
     }
 

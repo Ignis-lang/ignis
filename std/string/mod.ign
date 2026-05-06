@@ -35,12 +35,11 @@
 //! - `len`  — number of bytes currently stored
 //! - `cap`  — total bytes allocated
 //!
-//! ## UTF-8 Scanning, Scalars, and Bytes
+//! ## UTF-8 Scanning and Bytes
 //!
-//! `String` stays byte-backed. APIs that need parser/diagnostic offsets use
-//! explicit UTF-8 scanning records: `Utf8Cursor`, `Utf8ScalarSpan`, `ByteSpan`,
-//! and `LineSpan`. These expose byte ranges directly instead of pretending that
-//! source spans are character indices.
+//! `String` stays byte-backed. APIs that need parser or diagnostic offsets keep
+//! those byte positions internal to the caller while decoding `char` values at
+//! explicit byte boundaries.
 //!
 //! `charAt` and `pushChar` work with decoded `char` values, while `byteAt`,
 //! `pushByte`, `forEachByte`, `findByte`, `trimWhere`, and `split` keep raw byte
@@ -104,53 +103,6 @@ import Hasher from "std::hash";
 
 function stringAsciiWhitespace(value: char): boolean {
   return value == ' ' || value == '\n' || value == '\r' || value == '\t';
-}
-
-/// Half-open byte range `startByte..endByte`.
-export record ByteSpan {
-  /// Inclusive byte offset where the span begins.
-  public startByte: u64;
-
-  /// Exclusive byte offset where the span ends.
-  public endByte: u64;
-}
-
-/// Source line represented as a byte range.
-export record LineSpan {
-  /// Zero-based line index.
-  public lineIndex: u32;
-
-  /// Inclusive byte offset where the line begins.
-  public startByte: u64;
-
-  /// Exclusive byte offset where the line ends.
-  public endByte: u64;
-}
-
-/// Decoded UTF-8 scalar plus its source byte range.
-export record Utf8ScalarSpan {
-  /// Unicode scalar value, or U+FFFD for invalid byte sequences.
-  public codepoint: u32;
-
-  /// Inclusive byte offset where this scalar begins.
-  public startByte: u64;
-
-  /// Exclusive byte offset where this scalar ends.
-  public endByte: u64;
-
-  /// Returns whether this scalar fits in a single ASCII byte.
-  public isAscii(&self): boolean {
-    return self.codepoint <= 127;
-  }
-
-  /// Returns this scalar as `char` when it is ASCII.
-  public ascii(&self): Option<char> {
-    if (!self.isAscii()) {
-      return Option::NONE;
-    }
-
-    return Option::SOME(self.codepoint as char);
-  }
 }
 
 extern __string {
@@ -548,14 +500,39 @@ export record String {
   /// let oob: Option<char> = s.charAt(99);  // Option::NONE
   /// ```
   public charAt(&self, index: u64): Option<char> {
-    let mut end: u64 = index;
-    let value: char = __string::ignis_string_char_at(self, index, &mut end);
+    let mut endByte: u64 = index;
+    return self.charAt(index, &mut endByte);
+  }
 
-    if (end > index) {
-      return Option::SOME(value);
+  /// Convenience overload for signed integer literals and indices.
+  public charAt(&self, index: i64): Option<char> {
+    if (index < 0) {
+      return Option::NONE;
     }
 
-    return Option::NONE;
+    return self.charAt(index as u64);
+  }
+
+  /// Returns the decoded UTF-8 scalar at `index` and writes its exclusive byte end.
+  ///
+  /// Use `charAt()` with byte offsets when you need Unicode scalar traversal
+  /// without exposing extra public span or cursor records.
+  public charAt(&self, index: u64, outEndByte: &mut u64): Option<char> {
+    if (index >= self.len) {
+      *outEndByte = index;
+      return Option::NONE;
+    }
+
+    return Utf8::decodeAt(self, index, outEndByte);
+  }
+
+  /// Convenience overload for signed integer literals with end-byte capture.
+  public charAt(&self, index: i64, outEndByte: &mut u64): Option<char> {
+    if (index < 0) {
+      return Option::NONE;
+    }
+
+    return self.charAt(index as u64, outEndByte);
   }
 
   /// Returns the raw byte at `index`, or `Option::NONE` when out of range.
@@ -565,34 +542,6 @@ export record String {
     }
 
     return Option::NONE;
-  }
-
-  /// Creates a UTF-8 cursor over this string's bytes.
-  ///
-  /// Use this for parsers, diagnostics, and formatters that need decoded UTF-8
-  /// scalars together with byte offsets.
-  public cursor(&self): Utf8Cursor {
-    return Utf8Cursor {
-      source: self.clone(),
-      offset: 0,
-    };
-  }
-
-  /// Decodes the UTF-8 scalar beginning at `byteOffset`.
-  ///
-  /// Returns `Option::NONE` when `byteOffset` is past the end of the string.
-  /// Invalid UTF-8 returns U+FFFD covering the first invalid byte so callers can
-  /// continue scanning without losing byte-position information.
-  public scalarSpanAt(&self, byteOffset: u64): Option<Utf8ScalarSpan> {
-    return Utf8::decodeAt(self, byteOffset);
-  }
-
-  /// Returns byte ranges for all source lines in this string.
-  ///
-  /// Line spans are half-open byte ranges. A line ending with `\n` includes the
-  /// newline byte in its `endByte`, matching diagnostics source-snippet behavior.
-  public lineSpans(&self): Vector<LineSpan> {
-    return Utf8::lineSpans(self);
   }
 
   /// Returns the byte index of the first occurrence of `needle`, or `NONE`.
@@ -658,14 +607,36 @@ export record String {
 
   /// Returns the byte offset of `target` at or after `startByte`.
   public indexOfCharFrom(&self, target: char, startByte: u64): Option<u64> {
-    let mut index: u64 = startByte;
+    let mut index: u64 = 0;
+    let mut endByte: u64 = startByte;
+
+    while (index < startByte) {
+      let Option::SOME(_) = self.charAt(index, &mut endByte) else {
+        return Option::NONE;
+      };
+
+      if (endByte > startByte) {
+        index = endByte;
+        break;
+      }
+
+      index = endByte;
+    }
+
+    if (index < startByte) {
+      index = startByte;
+    }
 
     while (index < self.length()) {
-      if (let Option::SOME(current) = self.charAt(index) && current == target) {
+      let Option::SOME(current) = self.charAt(index, &mut endByte) else {
+        return Option::NONE;
+      };
+
+      if (current == target) {
         return Option::SOME(index);
       }
 
-      index += 1;
+      index = endByte;
     }
 
     return Option::NONE;
@@ -957,7 +928,7 @@ export record String {
   /// Copies the underlying bytes into a new `Vector<char>`.
   ///
   /// This is a byte-oriented compatibility helper: each raw byte is cast to
-  /// `char` directly without UTF-8 decoding. Use `charAt()` or `Utf8Cursor`
+  /// `char` directly without UTF-8 decoding. Use `charAt()` with byte offsets
   /// when you need Unicode scalar traversal.
   public toChars(&self): Vector<char> {
     let mut result: Vector<char> = Vector::new<char>(self.len);
@@ -1509,93 +1480,7 @@ export record String {
 
 }
 
-/// Owned UTF-8 cursor over a `String` that preserves byte offsets.
-export record Utf8Cursor {
-  /// Source text being traversed.
-  source: String;
-
-  /// Current byte offset into `source`.
-  offset: u64;
-
-  /// Creates a cursor by copying a borrowed string slice.
-  public static create(source: str): Utf8Cursor {
-    return Utf8Cursor {
-      source: String::create(source),
-      offset: 0,
-    };
-  }
-
-  /// Creates a cursor by cloning an owned string.
-  public static create(source: &String): Utf8Cursor {
-    return Utf8Cursor {
-      source: source.clone(),
-      offset: 0,
-    };
-  }
-
-  /// Returns the current byte offset.
-  public position(&self): u64 {
-    return self.offset;
-  }
-
-  /// Returns the source byte length.
-  public length(&self): u64 {
-    return self.source.length();
-  }
-
-  /// Returns whether the cursor has reached or passed the end of source.
-  public isAtEnd(&self): boolean {
-    return self.offset >= self.source.length();
-  }
-
-  /// Returns an owned substring for the byte range `startByte..endByte`.
-  public slice(&self, startByte: u64, endByte: u64): String {
-    return self.source.substringBytes(startByte, endByte);
-  }
-
-  /// Decodes the current UTF-8 scalar without advancing the cursor.
-  public peek(&self): Option<Utf8ScalarSpan> {
-    let source: String = self.source.clone();
-    return Utf8::decodeAt(&source, self.offset);
-  }
-
-  /// Decodes the current UTF-8 scalar and advances past it.
-  public advance(&mut self): Option<Utf8ScalarSpan> {
-    let decoded: Option<Utf8ScalarSpan> = self.peek();
-
-    if (let Option::SOME(scalar) = decoded) {
-      self.offset = scalar.endByte;
-      return Option::SOME(scalar);
-    }
-
-    return Option::NONE;
-  }
-
-  /// Consumes `expected` when the current scalar is that ASCII character.
-  public eatAscii(&mut self, expected: char): boolean {
-    let Option::SOME(current) = self.peek() else {
-      return false;
-    };
-
-    let Option::SOME(actual) = current.ascii() else {
-      return false;
-    };
-
-    if (actual != expected) {
-      return false;
-    }
-
-    self.offset = current.endByte;
-    return true;
-  }
-}
-
-
-/// UTF-8 byte-backed scanning helpers for `String`.
-///
-/// These helpers centralize scalar decoding and byte-span handling for parsers,
-/// diagnostics, and other source-processing code. They intentionally expose
-/// Unicode scalar values as `u32` code points, plus half-open byte ranges.
+/// UTF-8 byte-backed decoding helpers for `String`.
 export namespace Utf8 {
   /// Returns the byte at `index` from a string, if present.
   function byteAt(source: &String, index: u64): Option<u8> {
@@ -1615,28 +1500,17 @@ export namespace Utf8 {
     return Option::SOME((byte - 128) as u32);
   }
 
-  /// Builds a replacement-character scalar for invalid UTF-8 at `startByte`.
-  function invalidUtf8(startByte: u64): Utf8ScalarSpan {
-    return Utf8ScalarSpan {
-      codepoint: 65533,
-      startByte: startByte,
-      endByte: startByte + 1,
-    };
-  }
-
-  function scalarSpan(codepoint: u32, startByte: u64, endByte: u64): Utf8ScalarSpan {
-    return Utf8ScalarSpan {
-      codepoint: codepoint,
-      startByte: startByte,
-      endByte: endByte,
-    };
+  /// Returns a replacement character and advances by one byte.
+  function invalidUtf8(startByte: u64, outEndByte: &mut u64): char {
+    *outEndByte = startByte + 1;
+    return 65533 as char;
   }
 
   /// Decodes one UTF-8 scalar from `source` at byte `offset`.
   ///
   /// Invalid byte sequences return U+FFFD covering the first invalid byte so the
-  /// cursor can make progress while preserving diagnostic offsets.
-  function decodeAt(source: &String, offset: u64): Option<Utf8ScalarSpan> {
+  /// caller can make progress while preserving diagnostic offsets.
+  function decodeAt(source: &String, offset: u64, outEndByte: &mut u64): Option<char> {
     if (offset >= source.length()) {
       return Option::NONE;
     }
@@ -1646,106 +1520,64 @@ export namespace Utf8 {
     };
 
     if (first < 128) {
-      return Option::SOME(Utf8::scalarSpan(first as u32, offset, offset + 1));
+      *outEndByte = offset + 1;
+      return Option::SOME(first as char);
     }
 
     if (first >= 194 && first <= 223) {
       let Option::SOME(second) = Utf8::continuation(source, offset + 1) else {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       };
 
       let scalar: u32 = ((first - 192) as u32) * 64 + second;
 
-      return Option::SOME(Utf8::scalarSpan(scalar, offset, offset + 2));
+      *outEndByte = offset + 2;
+      return Option::SOME(scalar as char);
     }
 
     if (first >= 224 && first <= 239) {
       let Option::SOME(second) = Utf8::continuation(source, offset + 1) else {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       };
 
       if ((first == 224 && second < 32) || (first == 237 && second >= 32)) {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       }
 
       let Option::SOME(third) = Utf8::continuation(source, offset + 2) else {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       };
 
       let scalar: u32 = ((first - 224) as u32) * 4096 + second * 64 + third;
 
-      return Option::SOME(Utf8::scalarSpan(scalar, offset, offset + 3));
+      *outEndByte = offset + 3;
+      return Option::SOME(scalar as char);
     }
 
     if (first >= 240 && first <= 244) {
       let Option::SOME(second) = Utf8::continuation(source, offset + 1) else {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       };
 
       if ((first == 240 && second < 16) || (first == 244 && second >= 16)) {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       }
 
       let Option::SOME(third) = Utf8::continuation(source, offset + 2) else {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       };
 
       let Option::SOME(fourth) = Utf8::continuation(source, offset + 3) else {
-        return Option::SOME(Utf8::invalidUtf8(offset));
+        return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
       };
 
       let scalar: u32 = ((first - 240) as u32) * 262144 + second * 4096 + third * 64 + fourth;
 
-      return Option::SOME(Utf8::scalarSpan(scalar, offset, offset + 4));
+      *outEndByte = offset + 4;
+      return Option::SOME(scalar as char);
     }
 
-    return Option::SOME(Utf8::invalidUtf8(offset));
-  }
-
-  /// Returns whether `offset` is a UTF-8 scalar boundary.
-  function isBoundary(source: &String, offset: u64): boolean {
-    if (offset == 0 || offset == source.length()) {
-      return true;
-    }
-
-    let Option::SOME(byte) = Utf8::byteAt(source, offset) else {
-      return false;
-    };
-
-    return byte < 128 || byte > 191;
-  }
-
-  /// Returns byte spans for all lines in `source`.
-  function lineSpans(source: &String): Vector<LineSpan> {
-    let mut result: Vector<LineSpan> = Vector::new<LineSpan>();
-    let mut cursor: Utf8Cursor = source.cursor();
-    let mut lineIndex: u32 = 0;
-    let mut lineStart: u64 = 0;
-
-    while (!cursor.isAtEnd()) {
-      let Option::SOME(current) = cursor.advance() else {
-        break;
-      };
-
-      if (current.codepoint == '\n' as u32) {
-        result.push(LineSpan {
-          lineIndex: lineIndex,
-          startByte: lineStart,
-          endByte: current.endByte,
-        });
-
-        lineIndex += 1;
-        lineStart = current.endByte;
-      }
-    }
-
-    result.push(LineSpan {
-      lineIndex: lineIndex,
-      startByte: lineStart,
-      endByte: source.length(),
-    });
-
-    return result;
+    return Option::SOME(Utf8::invalidUtf8(offset, outEndByte));
   }
 }
 

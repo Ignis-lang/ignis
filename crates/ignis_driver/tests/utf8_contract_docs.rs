@@ -48,6 +48,9 @@ fn utf8_std_docs_distinguish_owned_string_from_borrowed_str() {
 
 #[test]
 fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
+  let agents = read_repo_file("AGENTS.md");
+  let architecture = read_repo_file("ARCHITECTURE.md");
+  let changelog = read_repo_file("CHANGELOG.md");
   let string_mod = read_repo_file("std/string/mod.ign");
   let char_mod = read_repo_file("std/char/mod.ign");
   let fs_mod = read_repo_file("std/fs/mod.ign");
@@ -55,6 +58,7 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   let lexer = read_repo_file("crates/ignis_parser/src/lexer/mod.rs");
   let emit = read_repo_file("crates/ignis_codegen_c/src/emit.rs");
   let language_reference = read_repo_file("docs/LANGUAGE_REFERENCE_CURRENT.md");
+  let abi_reference = read_repo_file("docs/ABI_CURRENT.md");
   let runtime_readme = read_repo_file("std/runtime/README.md");
 
   assert!(string_mod.contains("function ignis_string_init_from_len(out: &mut String, s: *mut u8, len: u64): void;"));
@@ -70,17 +74,59 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   assert!(string_mod.contains("`byteAt`,"));
   assert!(string_mod.contains("`pushByte`,"));
   assert!(string_mod.contains("`forEachByte`,"));
-  assert!(string_mod.contains("record Utf8ScalarSpan"));
-  assert!(string_mod.contains("public codepoint: u32;"));
-  assert!(string_mod.contains("record Utf8Cursor"));
-  assert!(string_mod.contains("Use `charAt()` or `Utf8Cursor`"));
+  assert!(string_mod.contains("Use `charAt()` with byte offsets when you need Unicode scalar traversal"));
+
+  for removed_name in [
+    concat!("record Utf8", "ScalarSpan"),
+    concat!("record Byte", "Span"),
+    concat!("record Line", "Span"),
+    concat!("record Utf8", "Cursor"),
+  ] {
+    assert!(!string_mod.contains(removed_name));
+  }
+
+  assert!(!char_mod.contains(concat!("Utf8", "ScalarSpan")));
   assert!(char_mod.contains("native `char` values"));
+  assert!(agents.contains("One Unicode scalar value"));
+  assert!(architecture.contains("One Unicode scalar value"));
+  assert!(changelog.contains("one Unicode scalar value"));
+  assert!(!agents.contains("single-byte ASCII or byte-range escapes"));
+  assert!(!architecture.contains("single-byte ASCII or byte-range escapes"));
+  assert!(!changelog.contains("single-byte values"));
   assert!(language_reference.contains("Unicode scalar"));
   assert!(!language_reference.contains("`char` (single byte)"));
   assert!(!language_reference.contains("byte-oriented in v0.4"));
+  assert!(abi_reference.contains("`char` is emitted as `ignis_char_t`"));
+  assert!(abi_reference.contains("| `char` | `ignis_char_t` | Unicode scalar value |"));
+  assert!(!abi_reference.contains("`char` is emitted as `u8`"));
+  assert!(!abi_reference.contains("| `char` | `u8` | `uint8_t` |"));
   assert!(runtime_readme.contains("ignis_string_push_char"));
   assert!(runtime_readme.contains("ignis_string_push_byte"));
   assert!(runtime_readme.contains("ignis_string_byte_at"));
   assert!(emit.contains("Type::Char => \"ignis_char_t\".to_string()"));
   assert!(emit.contains("Type::Str => \"const char*\".to_string()"));
+}
+
+#[test]
+fn utf8_selfhost_token_paths_keep_len_aware_lexeme_copies() {
+  let lexer = read_repo_file("ignis/lexer/mod.ign");
+  let token = read_repo_file("ignis/syntax/token.ign");
+
+  assert!(token.contains("public static lineCommentOwned(span: SourceSpan, lexeme: &String): Token"));
+  assert!(token.contains("public static badOwned(span: SourceSpan, lexeme: &String): Token"));
+  assert!(token.contains("lexeme: lexeme.clone(),"));
+
+  assert!(lexer.contains("Token::lineCommentOwned(self.cursor.spanFrom(start), &lexeme)"));
+  assert!(lexer.contains("Token::blockCommentOwned(self.cursor.spanFrom(start), &lexeme)"));
+  assert!(lexer.contains("Token::outerDocCommentOwned(self.cursor.spanFrom(start), &lexeme)"));
+  assert!(lexer.contains("Token::innerDocCommentOwned(self.cursor.spanFrom(start), &lexeme)"));
+  assert!(lexer.contains("Token::literalOwned(kind, self.cursor.spanFrom(start), &lexeme)"));
+  assert!(lexer.contains("Token::badOwned(span, &lexeme)"));
+
+  assert!(!lexer.contains("Token::lineComment(self.cursor.spanFrom(start), lexeme.toStr())"));
+  assert!(!lexer.contains("Token::blockComment(self.cursor.spanFrom(start), lexeme.toStr())"));
+  assert!(!lexer.contains("Token::outerDocComment(self.cursor.spanFrom(start), lexeme.toStr())"));
+  assert!(!lexer.contains("Token::innerDocComment(self.cursor.spanFrom(start), lexeme.toStr())"));
+  assert!(!lexer.contains("Token::literal(kind, self.cursor.spanFrom(start), lexeme.toStr())"));
+  assert!(!lexer.contains("Token::bad(span, lexeme.toStr())"));
 }

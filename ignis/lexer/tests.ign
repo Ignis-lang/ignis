@@ -1,9 +1,11 @@
 import Fs from "std::fs";
+import Memory from "std::memory";
+import Path from "std::path";
 import Test from "std::test";
 
-import SourceFile from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
-import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+import Keyword, LiteralKind, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
 
 function readFixture(path: str): String {
   return match (Fs::readToString(path)) {
@@ -20,6 +22,24 @@ function lexText(path: str, sourceText: str): LexResult {
 function lexFixture(path: str): LexResult {
   let text: String = readFixture(path);
   return lexText(path, text.toStr());
+}
+
+function lexBytes(path: str, raw: *mut u8, len: u64): LexResult {
+  let source: SourceFile = SourceFile {
+    path: Path::PathBuf::create(path),
+    text: String::create(raw, len),
+  };
+
+  return Lexer::lex(&source);
+}
+
+function lexOwnedText(path: str, sourceText: String): LexResult {
+  let source: SourceFile = SourceFile {
+    path: Path::PathBuf::create(path),
+    text: sourceText,
+  };
+
+  return Lexer::lex(&source);
 }
 
 function appendKindPrefix(rendered: &mut String, token: &Token): void {
@@ -76,7 +96,8 @@ function renderTokens(tokens: TokenStream): String {
     let token: Token = stream.bump();
 
     appendKindPrefix(&mut rendered, &token);
-    rendered.pushStr(token.lexemeText());
+    let lexeme: String = token.lexemeString();
+    rendered.push(&lexeme);
     rendered.pushStr("|");
     rendered.pushStr(String::create(token.spanStart()).toStr());
     rendered.pushStr("-");
@@ -89,6 +110,78 @@ function renderTokens(tokens: TokenStream): String {
   }
 
   return rendered;
+}
+
+function appendDiagnostic(rendered: &mut String, diagnostic: &Diagnostic): void {
+  let mut output: &mut String = rendered;
+  output.pushStr(diagnostic.code);
+  output.pushStr("|");
+  output.pushStr(String::create(diagnostic.primarySpan.start).toStr());
+  output.pushStr("-");
+  output.pushStr(String::create(diagnostic.primarySpan.end).toStr());
+  output.pushStr("|");
+  output.pushStr(diagnostic.message);
+  output.pushStr("\n");
+}
+
+function renderDiagnostics(diagnostics: DiagnosticBag, source: &SourceFile): String {
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < diagnostics.length()) {
+    let Option::SOME(diagnostic) = diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    appendDiagnostic(&mut rendered, diagnostic);
+    index += 1;
+  }
+
+  if (diagnostics.length() > 0) {
+    rendered.pushStr("---\n");
+    rendered.pushStr(DiagnosticRenderer::renderBag(&diagnostics, source, false).toStr());
+  }
+
+  return rendered;
+}
+
+function renderTokensAndDiagnostics(path: str, sourceText: str): String {
+  let source: SourceFile = SourceFile::create(path, sourceText);
+  let result: LexResult = Lexer::lex(&source);
+  let mut rendered: String = String::new();
+  rendered.pushStr(renderTokens(result.tokens).toStr());
+  rendered.pushStr("=== diagnostics ===\n");
+  rendered.pushStr(renderDiagnostics(result.diagnostics, &source).toStr());
+  return rendered;
+}
+
+function lexUnicodeIdentifierSource(): LexResult {
+  let raw: *mut u8 = Memory::allocateVector<u8>(17);
+  @write<u8>(raw, 'l' as u8);
+  @write<u8>(raw + 1, 'e' as u8);
+  @write<u8>(raw + 2, 't' as u8);
+  @write<u8>(raw + 3, ' ' as u8);
+  @write<u8>(raw + 4, 'm' as u8);
+  @write<u8>(raw + 5, 'a' as u8);
+  @write<u8>(raw + 6, 195 as u8);
+  @write<u8>(raw + 7, 177 as u8);
+  @write<u8>(raw + 8, 'a' as u8);
+  @write<u8>(raw + 9, 'n' as u8);
+  @write<u8>(raw + 10, 'a' as u8);
+  @write<u8>(raw + 11, ' ' as u8);
+  @write<u8>(raw + 12, '=' as u8);
+  @write<u8>(raw + 13, ' ' as u8);
+  @write<u8>(raw + 14, 206 as u8);
+  @write<u8>(raw + 15, 187 as u8);
+  @write<u8>(raw + 16, ';' as u8);
+
+  let source: SourceFile = SourceFile {
+    path: Path::PathBuf::create("fixtures/unicode_identifiers.ign"),
+    text: String::create(raw, 17 as u64),
+  };
+
+  return Lexer::lex(&source);
 }
 
 @test
@@ -226,9 +319,411 @@ function lexerAllowsUtf8InsideCommentsWithoutDiagnostics(): void {
 }
 
 @test
-function lexerConsumesUtf8ScalarAsOneBadTokenAndKeepsLaterSpansStable(): void {
-  let result: LexResult = lexFixture("test_cases/selfhost/lexer/utf8_bad_scalar.ign");
+function lexerTreatsUtf8IdentifierStartAsIdentifierAndKeepsLaterSpansStable(): void {
+  let result: LexResult = lexFixture("test_cases/selfhost/lexer/utf8_identifier.ign");
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertSnapshot("utf8-identifier", renderTokens(result.tokens).toStr());
+}
+
+@test
+function lexerRecoversRawNulInsideStringWithoutSpuriousUnterminatedDiagnostic(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(25);
+  @write<u8>(raw, 'l' as u8);
+  @write<u8>(raw + 1, 'e' as u8);
+  @write<u8>(raw + 2, 't' as u8);
+  @write<u8>(raw + 3, ' ' as u8);
+  @write<u8>(raw + 4, 'a' as u8);
+  @write<u8>(raw + 5, ' ' as u8);
+  @write<u8>(raw + 6, '=' as u8);
+  @write<u8>(raw + 7, ' ' as u8);
+  @write<u8>(raw + 8, '"' as u8);
+  @write<u8>(raw + 9, 'a' as u8);
+  @write<u8>(raw + 10, 0);
+  @write<u8>(raw + 11, 'b' as u8);
+  @write<u8>(raw + 12, '"' as u8);
+  @write<u8>(raw + 13, ';' as u8);
+  @write<u8>(raw + 14, ' ' as u8);
+  @write<u8>(raw + 15, 'l' as u8);
+  @write<u8>(raw + 16, 'e' as u8);
+  @write<u8>(raw + 17, 't' as u8);
+  @write<u8>(raw + 18, ' ' as u8);
+  @write<u8>(raw + 19, 'b' as u8);
+  @write<u8>(raw + 20, ' ' as u8);
+  @write<u8>(raw + 21, '=' as u8);
+  @write<u8>(raw + 22, ' ' as u8);
+  @write<u8>(raw + 23, '1' as u8);
+  @write<u8>(raw + 24, ';' as u8);
+
+  let result: LexResult = lexBytes("fixtures/raw_nul_string.ign", raw, 25 as u64);
+  let mut tokens: TokenStream = result.tokens;
 
   Test::assertEq<u64>(result.diagnostics.length(), 1);
-  Test::assertSnapshot("utf8-bad-scalar", renderTokens(result.tokens).toStr());
+  Test::assertEq<str>(match (result.diagnostics.get(0)) {
+    Option::SOME(value) -> value.code,
+    Option::NONE -> "",
+  }, "I0051");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::KEYWORD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerReportsRawNulAfterBackslashInsideStringWithoutUnterminatedNoise(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(26);
+  @write<u8>(raw, 'l' as u8);
+  @write<u8>(raw + 1, 'e' as u8);
+  @write<u8>(raw + 2, 't' as u8);
+  @write<u8>(raw + 3, ' ' as u8);
+  @write<u8>(raw + 4, 'a' as u8);
+  @write<u8>(raw + 5, ' ' as u8);
+  @write<u8>(raw + 6, '=' as u8);
+  @write<u8>(raw + 7, ' ' as u8);
+  @write<u8>(raw + 8, '"' as u8);
+  @write<u8>(raw + 9, 'a' as u8);
+  @write<u8>(raw + 10, '\\' as u8);
+  @write<u8>(raw + 11, 0);
+  @write<u8>(raw + 12, 'b' as u8);
+  @write<u8>(raw + 13, '"' as u8);
+  @write<u8>(raw + 14, ';' as u8);
+  @write<u8>(raw + 15, ' ' as u8);
+  @write<u8>(raw + 16, 'l' as u8);
+  @write<u8>(raw + 17, 'e' as u8);
+  @write<u8>(raw + 18, 't' as u8);
+  @write<u8>(raw + 19, ' ' as u8);
+  @write<u8>(raw + 20, 'b' as u8);
+  @write<u8>(raw + 21, ' ' as u8);
+  @write<u8>(raw + 22, '=' as u8);
+  @write<u8>(raw + 23, ' ' as u8);
+  @write<u8>(raw + 24, '1' as u8);
+  @write<u8>(raw + 25, ';' as u8);
+
+  let result: LexResult = lexBytes("fixtures/raw_nul_escaped_string.ign", raw, 26 as u64);
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+  Test::assertEq<str>(match (result.diagnostics.get(0)) {
+    Option::SOME(value) -> value.code,
+    Option::NONE -> "",
+  }, "I0051");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::KEYWORD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerClosesBlockCommentsAfterExtraAsteriskRuns(): void {
+  let result: LexResult = lexText("fixtures/block_comment_close.ign", "/* **/let after = 1;");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BLOCK_COMMENT);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+}
+
+@test
+function lexerTreatsFullWidthDigitsAsInvalidTokensInsteadOfNumericLiterals(): void {
+  let result: LexResult = lexText("fixtures/full_width_digits.ign", "let value = １２;");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 2);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+}
+
+@test
+function lexerRejectsUnicodeEscapesThatExceedScalarDigitWidth(): void {
+  let result: LexResult = lexText("fixtures/unicode_escape_overflow.ign", "let bad = '\\u{123456789}'; let after = 1;");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+  Test::assertEq<str>(match (result.diagnostics.get(0)) {
+    Option::SOME(value) -> value.code,
+    Option::NONE -> "",
+  }, "I0023");
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+}
+
+@test
+function lexerReportsRawNulInsideCharsAndCommentsWhileRecovering(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(37);
+  @write<u8>(raw, 'l' as u8);
+  @write<u8>(raw + 1, 'e' as u8);
+  @write<u8>(raw + 2, 't' as u8);
+  @write<u8>(raw + 3, ' ' as u8);
+  @write<u8>(raw + 4, 'c' as u8);
+  @write<u8>(raw + 5, ' ' as u8);
+  @write<u8>(raw + 6, '=' as u8);
+  @write<u8>(raw + 7, ' ' as u8);
+  @write<u8>(raw + 8, '\'' as u8);
+  @write<u8>(raw + 9, 0);
+  @write<u8>(raw + 10, '\'' as u8);
+  @write<u8>(raw + 11, ';' as u8);
+  @write<u8>(raw + 12, ' ' as u8);
+  @write<u8>(raw + 13, '/' as u8);
+  @write<u8>(raw + 14, '/' as u8);
+  @write<u8>(raw + 15, 0);
+  @write<u8>(raw + 16, '\n' as u8);
+  @write<u8>(raw + 17, '/' as u8);
+  @write<u8>(raw + 18, '*' as u8);
+  @write<u8>(raw + 19, 0);
+  @write<u8>(raw + 20, '*' as u8);
+  @write<u8>(raw + 21, '/' as u8);
+  @write<u8>(raw + 22, ' ' as u8);
+  @write<u8>(raw + 23, 'l' as u8);
+  @write<u8>(raw + 24, 'e' as u8);
+  @write<u8>(raw + 25, 't' as u8);
+  @write<u8>(raw + 26, ' ' as u8);
+  @write<u8>(raw + 27, 'a' as u8);
+  @write<u8>(raw + 28, 'f' as u8);
+  @write<u8>(raw + 29, 't' as u8);
+  @write<u8>(raw + 30, 'e' as u8);
+  @write<u8>(raw + 31, 'r' as u8);
+  @write<u8>(raw + 32, ' ' as u8);
+  @write<u8>(raw + 33, '=' as u8);
+  @write<u8>(raw + 34, ' ' as u8);
+  @write<u8>(raw + 35, '1' as u8);
+  @write<u8>(raw + 36, ';' as u8);
+
+  let result: LexResult = lexBytes("fixtures/raw_nul_comment_and_char.ign", raw, 37 as u64);
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 3);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::KEYWORD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::LINE_COMMENT);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BLOCK_COMMENT);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+}
+
+@test
+function lexerReportsRawNulAfterBackslashInsideCharAndRecovers(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(28);
+  @write<u8>(raw, 'l' as u8);
+  @write<u8>(raw + 1, 'e' as u8);
+  @write<u8>(raw + 2, 't' as u8);
+  @write<u8>(raw + 3, ' ' as u8);
+  @write<u8>(raw + 4, 'c' as u8);
+  @write<u8>(raw + 5, ' ' as u8);
+  @write<u8>(raw + 6, '=' as u8);
+  @write<u8>(raw + 7, ' ' as u8);
+  @write<u8>(raw + 8, '\'' as u8);
+  @write<u8>(raw + 9, '\\' as u8);
+  @write<u8>(raw + 10, 0);
+  @write<u8>(raw + 11, '\'' as u8);
+  @write<u8>(raw + 12, ';' as u8);
+  @write<u8>(raw + 13, ' ' as u8);
+  @write<u8>(raw + 14, 'l' as u8);
+  @write<u8>(raw + 15, 'e' as u8);
+  @write<u8>(raw + 16, 't' as u8);
+  @write<u8>(raw + 17, ' ' as u8);
+  @write<u8>(raw + 18, 'a' as u8);
+  @write<u8>(raw + 19, 'f' as u8);
+  @write<u8>(raw + 20, 't' as u8);
+  @write<u8>(raw + 21, 'e' as u8);
+  @write<u8>(raw + 22, 'r' as u8);
+  @write<u8>(raw + 23, ' ' as u8);
+  @write<u8>(raw + 24, '=' as u8);
+  @write<u8>(raw + 25, ' ' as u8);
+  @write<u8>(raw + 26, '1' as u8);
+  @write<u8>(raw + 27, ';' as u8);
+
+  let result: LexResult = lexBytes("fixtures/raw_nul_escaped_char.ign", raw, 28 as u64);
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+  Test::assertEq<str>(match (result.diagnostics.get(0)) {
+    Option::SOME(value) -> value.code,
+    Option::NONE -> "",
+  }, "I0051");
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::KEYWORD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::BAD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerBadTokenLexemePreservesInteriorNulBytes(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(13);
+  @write<u8>(raw, 'l' as u8);
+  @write<u8>(raw + 1, 'e' as u8);
+  @write<u8>(raw + 2, 't' as u8);
+  @write<u8>(raw + 3, ' ' as u8);
+  @write<u8>(raw + 4, 'a' as u8);
+  @write<u8>(raw + 5, ' ' as u8);
+  @write<u8>(raw + 6, '=' as u8);
+  @write<u8>(raw + 7, ' ' as u8);
+  @write<u8>(raw + 8, '"' as u8);
+  @write<u8>(raw + 9, 'a' as u8);
+  @write<u8>(raw + 10, 0);
+  @write<u8>(raw + 11, 'b' as u8);
+  @write<u8>(raw + 12, '"' as u8);
+
+  let result: LexResult = lexBytes("fixtures/raw_nul_bad_token.ign", raw, 13 as u64);
+  let mut tokens: TokenStream = result.tokens;
+  let keyword: Token = tokens.bump();
+  let identifier: Token = tokens.bump();
+  let equal: Token = tokens.bump();
+  let bad: Token = tokens.bump();
+  let lexeme: String = bad.lexemeString();
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+  Test::assertEq<TokenKind>(keyword.kindValue(), TokenKind::KEYWORD);
+  Test::assertEq<TokenKind>(identifier.kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(equal.punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(bad.kindValue(), TokenKind::BAD);
+  Test::assertEq<u64>(lexeme.length(), 5);
+  Test::assertEq<u8>(match (lexeme.byteAt(0)) { Option::SOME(value) -> value, Option::NONE -> 255 }, '"' as u8);
+  Test::assertEq<u8>(match (lexeme.byteAt(1)) { Option::SOME(value) -> value, Option::NONE -> 255 }, 'a' as u8);
+  Test::assertEq<u8>(match (lexeme.byteAt(2)) { Option::SOME(value) -> value, Option::NONE -> 255 }, 0);
+  Test::assertEq<u8>(match (lexeme.byteAt(3)) { Option::SOME(value) -> value, Option::NONE -> 255 }, 'b' as u8);
+  Test::assertEq<u8>(match (lexeme.byteAt(4)) { Option::SOME(value) -> value, Option::NONE -> 255 }, '"' as u8);
+
+  Memory::free(raw);
+}
+
+@test
+function lexerLexesLiteralFamiliesIncludingUtf8Chars(): void {
+  let result: LexResult = lexFixture("test_cases/selfhost/lexer/literals.ign");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::FLOAT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::HEX);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::BINARY);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::STRING);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::CHAR);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::CHAR);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::CHAR);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerRecoversAfterMalformedLiteralsAndSnapshotsDiagnostics(): void {
+  let fixturePath: str = "test_cases/selfhost/lexer/malformed_literals.ign";
+  let sourceText: String = readFixture(fixturePath);
+
+  Test::assertSnapshot("malformed-literals", renderTokensAndDiagnostics(fixturePath, sourceText.toStr()).toStr());
+}
+
+@test
+function lexerLexesUnicodeIdentifiersWithByteStableSpans(): void {
+  let result: LexResult = lexUnicodeIdentifierSource();
+  let mut tokens: TokenStream = result.tokens;
+
+  let keyword: Token = tokens.bump();
+  let firstIdentifier: Token = tokens.bump();
+  let equal: Token = tokens.bump();
+  let secondIdentifier: Token = tokens.bump();
+  let semicolon: Token = tokens.bump();
+  let eof: Token = tokens.bump();
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<Keyword>(keyword.keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(firstIdentifier.kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<u64>(firstIdentifier.spanStart(), 4);
+  Test::assertEq<u64>(firstIdentifier.spanEnd(), 11);
+  Test::assertEq<Punctuation>(equal.punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(secondIdentifier.kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<u64>(secondIdentifier.spanStart(), 14);
+  Test::assertEq<u64>(secondIdentifier.spanEnd(), 16);
+  Test::assertEq<Punctuation>(semicolon.punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<TokenKind>(eof.kindValue(), TokenKind::EOF);
+  Test::assertEq<u64>(eof.spanStart(), 17);
+}
+
+
+@test
+function lexerSnapshotsUnicodeIdentifiers(): void {
+  let result: LexResult = lexUnicodeIdentifierSource();
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertSnapshot("unicode-identifiers", renderTokens(result.tokens).toStr());
 }

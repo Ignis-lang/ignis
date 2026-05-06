@@ -1,5 +1,3 @@
-import Utf8ScalarSpan from "std::string";
-
 import SourceFile, SourceSpan from "@compiler::diagnostics";
 
 export record SourceMark {
@@ -9,6 +7,11 @@ export record SourceMark {
 export record SourceCursor {
   file: &SourceFile;
   offset: u64;
+
+  private charAt(&self, offset: u64): Option<char> {
+    let mut endByte: u64 = offset;
+    return self.file.text.charAt(offset, &mut endByte);
+  }
 
   public static create(file: &SourceFile): SourceCursor {
     return SourceCursor {
@@ -33,8 +36,17 @@ export record SourceCursor {
     return self.file.text.byteAt(self.offset + 1);
   }
 
-  public peekScalar(&self): Option<Utf8ScalarSpan> {
-    return self.file.text.scalarSpanAt(self.offset);
+  public peekChar(&self): Option<char> {
+    return self.charAt(self.offset);
+  }
+
+  public peekNextChar(&self): Option<char> {
+    let mut endByte: u64 = self.offset;
+    let Option::SOME(_) = self.file.text.charAt(self.offset, &mut endByte) else {
+      return Option::NONE;
+    };
+
+    return self.charAt(endByte);
   }
 
   public advance(&mut self): Option<u8> {
@@ -47,15 +59,14 @@ export record SourceCursor {
     return next;
   }
 
-  public advanceScalar(&mut self): Option<Utf8ScalarSpan> {
-    let decoded: Option<Utf8ScalarSpan> = self.peekScalar();
+  public advanceChar(&mut self): Option<char> {
+    let mut endByte: u64 = self.offset;
+    let Option::SOME(current) = self.file.text.charAt(self.offset, &mut endByte) else {
+      return Option::NONE;
+    };
 
-    if (let Option::SOME(scalar) = decoded) {
-      self.offset = scalar.endByte;
-      return Option::SOME(scalar);
-    }
-
-    return Option::NONE;
+    self.offset = endByte;
+    return Option::SOME(current);
   }
 
   public mark(&self): SourceMark {

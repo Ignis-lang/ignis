@@ -1,6 +1,6 @@
 import Hasher from "std::hash";
 import Memory from "std::memory";
-import String, Utf8Cursor, Utf8ScalarSpan from "std::string";
+import String from "std::string";
 import Test from "std::test";
 
 function hashString(value: &String): u64 {
@@ -17,17 +17,6 @@ function buildInteriorNulString(last: char): String {
   return value;
 }
 
-function nextScalar(cursor: &mut Utf8Cursor): Utf8ScalarSpan {
-  let mut stream: &mut Utf8Cursor = cursor;
-
-  let Option::SOME(value) = stream.advance() else {
-    Test::fail();
-    @unreachable();
-  };
-
-  return value;
-}
-
 function utf8SampleString(): String {
   let raw: *mut u8 = Memory::allocateVector<u8>(6);
 
@@ -39,18 +28,6 @@ function utf8SampleString(): String {
   @write<u8>(raw + 5, 173 as u8);
 
   return String::create(raw, 6 as u64);
-}
-
-function utf8TailString(): String {
-  let raw: *mut u8 = Memory::allocateVector<u8>(5);
-
-  @write<u8>(raw, 195 as u8);
-  @write<u8>(raw + 1, 169 as u8);
-  @write<u8>(raw + 2, 228 as u8);
-  @write<u8>(raw + 3, 184 as u8);
-  @write<u8>(raw + 4, 173 as u8);
-
-  return String::create(raw, 5 as u64);
 }
 
 @test
@@ -291,51 +268,107 @@ function stringHelpersCoverPrefixesSlicesTrimmingAndLines(): void {
 }
 
 @test
-function utf8CursorAdvancesByScalarBoundaries(): void {
-  let source: String = utf8SampleString();
-  let mut cursor: Utf8Cursor = source.cursor();
+function indexOfCharFromSkipsUtf8ContinuationBytesWhenLookingForReplacementChar(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(1);
+  @write<u8>(raw, 255 as u8);
 
-  let first: Utf8ScalarSpan = nextScalar(&mut cursor);
-  Test::assertEq<u32>(first.codepoint, 'a' as u32);
-  Test::assertEq<u64>(first.startByte, 0);
-  Test::assertEq<u64>(first.endByte, 1);
+  let malformed: String = String::create(raw, 1 as u64);
+  let replacement: char = match (malformed.charAt(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let validUtf8: *mut u8 = Memory::allocateVector<u8>(2);
+  @write<u8>(validUtf8, 195 as u8);
+  @write<u8>(validUtf8 + 1, 169 as u8);
 
-  let second: Utf8ScalarSpan = nextScalar(&mut cursor);
-  Test::assertEq<u32>(second.codepoint, 233);
-  Test::assertEq<u64>(second.startByte, 1);
-  Test::assertEq<u64>(second.endByte, 3);
+  let source: String = String::create(validUtf8, 2 as u64);
 
-  let third: Utf8ScalarSpan = nextScalar(&mut cursor);
-  Test::assertEq<u32>(third.codepoint, 20013);
-  Test::assertEq<u64>(third.startByte, 3);
-  Test::assertEq<u64>(third.endByte, 6);
+  Test::assert(match (source.indexOfCharFrom(replacement, 0)) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
+  Test::assert(match (source.indexOfCharFrom(replacement, 1)) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
 
-  Test::assert(cursor.isAtEnd());
+  Memory::free(raw);
+  Memory::free(validUtf8);
 }
 
 @test
-function utf8CursorSlicesByByteRange(): void {
-  let source: String = utf8SampleString();
-  let cursor: Utf8Cursor = source.cursor();
-  let value: String = cursor.slice(1, 6);
-  let expected: String = utf8TailString();
+function indexOfCharFromStillFindsActualReplacementChars(): void {
+  let mut source: String = String::new();
+  source.pushChar('a');
+  source.pushChar(65533 as char);
+  source.pushChar('é');
 
-  Test::assert(value.equals(&expected));
+  let index: u64 = match (source.indexOfCharFrom(65533 as char, 0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> 99,
+  };
+
+  Test::assertEq<u64>(index, 1);
 }
 
 @test
-function utf8CursorEatAsciiConsumesOnlyMatchingAscii(): void {
+function charAtReportsUtf8ScalarEndBytes(): void {
   let source: String = utf8SampleString();
-  let mut cursor: Utf8Cursor = source.cursor();
+  let mut firstEnd: u64 = 0;
+  let mut secondEnd: u64 = 0;
+  let mut thirdEnd: u64 = 0;
 
-  Test::assert(cursor.eatAscii('a'));
-  Test::assertEq<u64>(cursor.position(), 1);
+  let first: char = match (source.charAt(0, &mut firstEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let second: char = match (source.charAt(firstEnd, &mut secondEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let third: char = match (source.charAt(secondEnd, &mut thirdEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
 
-  Test::assert(!cursor.eatAscii('a'));
-  Test::assertEq<u64>(cursor.position(), 1);
+  Test::assertEq<i32>(first as i32, 'a' as i32);
+  Test::assertEq<u64>(firstEnd, 1);
+  Test::assertEq<i32>(second as i32, 233);
+  Test::assertEq<u64>(secondEnd, 3);
+  Test::assertEq<i32>(third as i32, 20013);
+  Test::assertEq<u64>(thirdEnd, 6);
+}
 
-  Test::assert(!cursor.eatAscii('b'));
-  Test::assertEq<u64>(cursor.position(), 1);
+@test
+function charAtEndBytesCanDriveUtf8ByteSlices(): void {
+  let source: String = utf8SampleString();
+  let mut endByte: u64 = 0;
+  let Option::SOME(_) = source.charAt(1, &mut endByte) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  let value: String = source.substringBytes(1, endByte);
+  let first: char = match (value.charAt(0)) {
+    Option::SOME(current) -> current,
+    Option::NONE -> '?',
+  };
+
+  Test::assertEq<i32>(first as i32, 233);
+  Test::assertEq<u64>(value.length(), 2);
+  Test::assertEq<u64>(endByte, 3);
+}
+
+@test
+function charAtReturnsNoneAtOrPastTheEnd(): void {
+  let source: String = utf8SampleString();
+  let mut endByte: u64 = 99;
+
+  Test::assert(match (source.charAt(source.length(), &mut endByte)) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
+  Test::assertEq<u64>(endByte, source.length());
 }
 
 @test
@@ -413,6 +446,64 @@ function mapDecodesUtf8Scalars(): void {
 }
 
 @test
-function snapshotStdRunnerSmoke(): void {
-  Test::assertSnapshot("smoke", "std-string-smoke\n");
+function charAtReplacesMalformedUtf8AndAdvancesOneByte(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(4);
+  @write<u8>(raw, 255 as u8);
+  @write<u8>(raw + 1, 'a' as u8);
+  @write<u8>(raw + 2, 195 as u8);
+  @write<u8>(raw + 3, 169 as u8);
+
+  let source: String = String::create(raw, 4 as u64);
+  let mut firstEnd: u64 = 0;
+  let mut secondEnd: u64 = 0;
+  let mut thirdEnd: u64 = 0;
+
+  let first: char = match (source.charAt(0, &mut firstEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let second: char = match (source.charAt(firstEnd, &mut secondEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let third: char = match (source.charAt(secondEnd, &mut thirdEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+
+  Test::assertEq<i32>(first as i32, 65533);
+  Test::assertEq<u64>(firstEnd, 1);
+  Test::assertEq<i32>(second as i32, 'a' as i32);
+  Test::assertEq<u64>(secondEnd, 2);
+  Test::assertEq<i32>(third as i32, 233);
+  Test::assertEq<u64>(thirdEnd, 4);
+
+  Memory::free(raw);
+}
+
+@test
+function charAtReturnsReplacementForMalformedContinuationBytes(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(2);
+  @write<u8>(raw, 128 as u8);
+  @write<u8>(raw + 1, 'b' as u8);
+
+  let source: String = String::create(raw, 2 as u64);
+  let mut malformedEnd: u64 = 0;
+  let mut trailingEnd: u64 = 0;
+
+  let malformed: char = match (source.charAt(0, &mut malformedEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+  let trailing: char = match (source.charAt(malformedEnd, &mut trailingEnd)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> '?',
+  };
+
+  Test::assertEq<i32>(malformed as i32, 65533);
+  Test::assertEq<u64>(malformedEnd, 1);
+  Test::assertEq<char>(trailing, 'b');
+  Test::assertEq<u64>(trailingEnd, 2);
+
+  Memory::free(raw);
 }

@@ -461,13 +461,13 @@ Ignis v0.4 defines string types as UTF-8 byte-backed:
 
 | Type | Representation | C equivalent |
 | --- | --- | --- |
-| `char` | Single byte (`u8`) | `u8` |
+| `char` | One Unicode scalar value | `ignis_char_t` |
 | `str` | UTF-8 NUL-terminated byte slice | `const char*` |
 | `String` | Heap-backed UTF-8 byte buffer (data + len + cap) | `IgnisString` |
 
 Key rules:
-- Char literals (`'a'`) accept only single-byte ASCII or byte-range escapes (`\u{00}`–`\u{FF}`).
-- Multi-byte char literals (`'ñ'`, `'\u{100}'`+) produce a compile error (`MultiByteCharacterLiteral`).
+- Char literals must resolve to exactly one Unicode scalar.
+- Empty literals, multi-scalar literals, and surrogate escapes are rejected.
 - `String::forEach` and `map` iterate over `char` by default; `forEachByte`/`mapBytes` for explicit `u8`.
 - `String → str` via `toStr()` (zero-copy view); `str → String` via `String::create(s)` (copy).
 

@@ -25,7 +25,7 @@ Inspired by TypeScript and Rust, Ignis compiles to C and produces native executa
 - **FFI**: `extern` blocks for C interop
 - **Borrow checking**: Rust-style borrow analysis
 - **Collections and memory foundations**: `HashMap`, `HashSet`, and low-level std memory helpers
-- **UTF-8 byte-backed strings**: `char` is a single byte and `str`/`String` use UTF-8 byte storage
+- **UTF-8 scalar chars + byte-backed strings**: `char` is one Unicode scalar value, while `str`/`String` keep UTF-8 byte storage
 
 See [docs/LANGUAGE_REFERENCE_CURRENT.md](docs/LANGUAGE_REFERENCE_CURRENT.md) for full language documentation.
 

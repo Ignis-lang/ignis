@@ -155,3 +155,23 @@ function renderPlainMultiLabelDiagnosticRendersPerLabelSnippetBlocks(): void {
     @panic("missing secondary label source excerpt");
   }
 }
+
+@test
+function renderMultilineCaretWidthUsesUnicodeColumns(): void {
+  let source: SourceFile = SourceFile::create("fixtures/render_unicode_multiline.ign", "aññx\nnext\n");
+  let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::TYPE_MISMATCH, "type mismatch", SourceSpan::new("fixtures/render_unicode_multiline.ign", 1, 7));
+
+  diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("fixtures/render_unicode_multiline.ign", 1, 7), "highlight extends to next line");
+
+  let rendered: String = DiagnosticRenderer::render(&diagnostic, &source, false);
+  let expectedCaretLine: String = String::create("     |  ^^^\n");
+  let tooWideCaretLine: String = String::create("     |  ^^^^\n");
+
+  if (!rendered.contains(&expectedCaretLine)) {
+    @panic("expected caret width to follow Unicode scalar columns");
+  }
+
+  if (rendered.contains(&tooWideCaretLine)) {
+    @panic("caret width still uses byte length");
+  }
+}

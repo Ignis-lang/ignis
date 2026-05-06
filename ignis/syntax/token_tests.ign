@@ -1,3 +1,4 @@
+import Memory from "std::memory";
 import Test from "std::test";
 
 import SourceSpan from "@compiler::diagnostics";
@@ -25,7 +26,7 @@ function tokenTaxonomySeparatesKeywordsIdentifiersAndPunctuation(): void {
 
   Test::assertEq<Keyword>(keyword.keywordValue(), Keyword::FUNCTION);
   Test::assertEq<Punctuation>(punctuation.punctuationValue(), Punctuation::RIGHT_SHIFT);
-  Test::assertEq<str>(identifier.lexemeText(), "main");
+  Test::assertEq<str>(identifier.lexemeString().toStr(), "main");
 }
 
 @test
@@ -47,9 +48,28 @@ function tokenTaxonomyKeepsLiteralCommentBadAndEofFamiliesDistinct(): void {
   Test::assertEq<TokenKind>(bad.kindValue(), TokenKind::BAD);
   Test::assertEq<TokenKind>(eof.kindValue(), TokenKind::EOF);
 
-  Test::assertEq<str>(literal.lexemeText(), "42");
+  Test::assertEq<str>(literal.lexemeString().toStr(), "42");
   Test::assertEq<u64>(eof.spanStart(), 14);
   Test::assertEq<u64>(eof.spanEnd(), 14);
+}
+
+@test
+function tokenLexemeStringPreservesInteriorNulBytes(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(3);
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 0);
+  @write<u8>(raw + 2, 'b' as u8);
+
+  let lexeme: String = String::create(raw, 3 as u64);
+  let token: Token = Token::badOwned(tokenFixtureSpan(0, 3), &lexeme);
+  let stored: String = token.lexemeString();
+
+  Test::assertEq<u64>(stored.length(), 3);
+  Test::assertEq<u8>(match (stored.byteAt(0)) { Option::SOME(value) -> value, Option::NONE -> 255 }, 'a' as u8);
+  Test::assertEq<u8>(match (stored.byteAt(1)) { Option::SOME(value) -> value, Option::NONE -> 255 }, 0);
+  Test::assertEq<u8>(match (stored.byteAt(2)) { Option::SOME(value) -> value, Option::NONE -> 255 }, 'b' as u8);
+
+  Memory::free(raw);
 }
 
 @test

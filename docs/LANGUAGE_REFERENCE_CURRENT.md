@@ -947,8 +947,9 @@ null
 Character literal notes:
 
 - `'a'` and escapes such as `'\n'` are valid.
-- Unicode escapes are valid only when the code point fits in one byte (`<= 0xFF`).
-- Multi-byte character literals are rejected with `multi-byte char literal; use str`.
+- Unicode escapes are valid when they resolve to one Unicode scalar value.
+- Multi-byte UTF-8 encoding is allowed when the literal still represents exactly one Unicode scalar.
+- Empty literals, multi-scalar literals, and surrogate escapes are rejected.
 
 ### 9.2 Atoms
 

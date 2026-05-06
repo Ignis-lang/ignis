@@ -481,11 +481,11 @@ Supported signatures:
 
 | Type | Representation | C equivalent |
 | --- | --- | --- |
-| `char` | Single byte (`u8`) | `u8` |
+| `char` | One Unicode scalar value | `ignis_char_t` |
 | `str` | UTF-8 NUL-terminated byte slice | `const char*` |
 | `String` | Heap-backed UTF-8 byte buffer (data + len + cap) | `IgnisString` |
 
-Char literals (`'a'`) accept only single-byte ASCII or byte-range escapes (`\u{00}`–`\u{FF}`). Multi-byte char literals produce a compile error.
+Char literals must resolve to exactly one Unicode scalar. Empty literals, multi-scalar literals, and surrogate escapes are rejected.
 
 ### Closures
 

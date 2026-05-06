@@ -1,6 +1,5 @@
 import Char from "std::char";
 import Path from "std::path";
-import Utf8Cursor from "std::string";
 
 function storeSourceSpanPath(storage: &mut Vector<String>, value: String): str {
   let mut storageRef: &mut Vector<String> = storage;
@@ -128,22 +127,25 @@ export record SourceFile {
   }
 
   private lineIndexAt(&self, position: u64): u32 {
-    let mut cursor: Utf8Cursor = self.text.cursor();
     let mut line: u32 = 0;
     let mut limit: u64 = self.text.length();
+    let mut offset: u64 = 0;
 
     if (position < limit) {
       limit = position;
     }
 
-    while (!cursor.isAtEnd() && cursor.position() < limit) {
-      let Option::SOME(current) = cursor.advance() else {
+    while (offset < limit) {
+      let mut endByte: u64 = offset;
+      let Option::SOME(current) = self.text.charAt(offset, &mut endByte) else {
         break;
       };
 
-      if (current.codepoint == '\n' as u32) {
+      if (current == '\n') {
         line += 1;
       }
+
+      offset = endByte;
     }
 
     return line;
@@ -155,20 +157,23 @@ export record SourceFile {
     }
 
     let mut currentLine: u32 = 0;
-    let mut cursor: Utf8Cursor = self.text.cursor();
+    let mut offset: u64 = 0;
 
-    while (!cursor.isAtEnd()) {
-      let Option::SOME(current) = cursor.advance() else {
+    while (offset < self.text.length()) {
+      let mut endByte: u64 = offset;
+      let Option::SOME(current) = self.text.charAt(offset, &mut endByte) else {
         break;
       };
 
-      if (current.codepoint == '\n' as u32) {
+      if (current == '\n') {
         currentLine += 1;
 
         if (currentLine == lineIndex) {
-          return current.endByte;
+          return endByte;
         }
       }
+
+      offset = endByte;
     }
 
     return self.text.length();
@@ -176,46 +181,49 @@ export record SourceFile {
 
   private lineEnd(&self, lineIndex: u32): u64 {
     let start: u64 = self.lineStart(lineIndex);
-    let mut cursor: Utf8Cursor = self.text.cursor();
+    let mut offset: u64 = start;
 
-    while (!cursor.isAtEnd() && cursor.position() < start) {
-      cursor.advance();
-    }
-
-    while (!cursor.isAtEnd()) {
-      let Option::SOME(current) = cursor.advance() else {
+    while (offset < self.text.length()) {
+      let mut endByte: u64 = offset;
+      let Option::SOME(current) = self.text.charAt(offset, &mut endByte) else {
         break;
       };
 
-      if (current.codepoint == '\n' as u32) {
-        return current.endByte;
+      if (current == '\n') {
+        return endByte;
       }
+
+      offset = endByte;
     }
 
     return self.text.length();
   }
 
   private unicodeColumn(start: u64, endExclusive: u64): u32 {
-    let mut cursor: Utf8Cursor = self.text.cursor();
     let mut column: u32 = 0;
     let mut limit: u64 = self.text.length();
+    let mut offset: u64 = 0;
 
     if (endExclusive < limit) {
       limit = endExclusive;
     }
 
-    while (!cursor.isAtEnd() && cursor.position() < limit) {
-      let Option::SOME(current) = cursor.advance() else {
+    while (offset < limit) {
+      let mut endByte: u64 = offset;
+      let Option::SOME(_) = self.text.charAt(offset, &mut endByte) else {
         break;
       };
 
-      if (current.endByte <= start) {
+      if (endByte <= start) {
+        offset = endByte;
         continue;
       }
 
-      if (current.startByte >= start) {
+      if (offset >= start) {
         column += 1;
       }
+
+      offset = endByte;
     }
 
     return column;

@@ -18,7 +18,7 @@ This document describes the Application Binary Interface for the current Ignis c
 - **Implicit integer widening**: Same-sign integers widen implicitly (`u8` → `u32`, `i8` → `i64`). Mixed-sign still requires an explicit cast.
 - **Overload mangling**: Return types are now included in the disambiguation suffix when parameter types are identical.
 - **New std modules**: `path`, `ffi`, `fs`.
-- **`char` ABI mapping**: `char` is emitted as `u8` (`uint8_t`) to keep byte semantics stable across platforms.
+- **`char` ABI mapping**: `char` is emitted as `ignis_char_t`, a Unicode scalar value representation shared with the runtime.
 
 ## Type Mapping
 
@@ -37,7 +37,7 @@ This document describes the Application Binary Interface for the current Ignis c
 | `f32` | `f32` | `float` |
 | `f64` | `f64` | `double` |
 | `boolean` | `boolean` | `uint8_t` |
-| `char` | `u8` | `uint8_t` |
+| `char` | `ignis_char_t` | Unicode scalar value |
 | `str` | `const char*` | `const char*` |
 | `atom` | `ignis_atom_t` | `uint32_t` |
 | `void` | `void` | `void` |
