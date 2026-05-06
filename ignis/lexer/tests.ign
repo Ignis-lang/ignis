@@ -1,0 +1,234 @@
+import Fs from "std::fs";
+import Test from "std::test";
+
+import SourceFile from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+function readFixture(path: str): String {
+  return match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("missing lexer fixture"),
+  };
+}
+
+function lexText(path: str, sourceText: str): LexResult {
+  let source: SourceFile = SourceFile::create(path, sourceText);
+  return Lexer::lex(&source);
+}
+
+function lexFixture(path: str): LexResult {
+  let text: String = readFixture(path);
+  return lexText(path, text.toStr());
+}
+
+function appendKindPrefix(rendered: &mut String, token: &Token): void {
+  let mut output: &mut String = rendered;
+
+  if (token.kindValue() == TokenKind::KEYWORD) {
+    output.pushStr("keyword|");
+    return;
+  }
+
+  if (token.kindValue() == TokenKind::IDENTIFIER) {
+    output.pushStr("identifier|");
+    return;
+  }
+
+  if (token.kindValue() == TokenKind::PUNCTUATION) {
+    output.pushStr("punctuation|");
+    return;
+  }
+
+  if (token.kindValue() == TokenKind::LINE_COMMENT) {
+    output.pushStr("line-comment|");
+    return;
+  }
+
+  if (token.kindValue() == TokenKind::BLOCK_COMMENT) {
+    output.pushStr("block-comment|");
+    return;
+  }
+
+  if (token.kindValue() == TokenKind::OUTER_DOC_COMMENT) {
+    output.pushStr("outer-doc|");
+    return;
+  }
+
+  if (token.kindValue() == TokenKind::INNER_DOC_COMMENT) {
+    output.pushStr("inner-doc|");
+    return;
+  }
+
+  if (token.kindValue() == TokenKind::EOF) {
+    output.pushStr("eof|");
+    return;
+  }
+
+  output.pushStr("other|");
+}
+
+function renderTokens(tokens: TokenStream): String {
+  let mut stream: TokenStream = tokens;
+  let mut rendered: String = String::new();
+
+  while (true) {
+    let token: Token = stream.bump();
+
+    appendKindPrefix(&mut rendered, &token);
+    rendered.pushStr(token.lexemeText());
+    rendered.pushStr("|");
+    rendered.pushStr(String::create(token.spanStart()).toStr());
+    rendered.pushStr("-");
+    rendered.pushStr(String::create(token.spanEnd()).toStr());
+    rendered.pushStr("\n");
+
+    if (token.kindValue() == TokenKind::EOF) {
+      return rendered;
+    }
+  }
+
+  return rendered;
+}
+
+@test
+function lexerLexesCoreOperatorAndPunctuationFamilies(): void {
+  let result: LexResult = lexText(
+    "fixtures/operators.ign",
+    "() {} [] , . .. ... ..= ; @ + ++ += - -- -= -> * *= / /= % %= ! != = == < <= << <<= > >= >> >>= | || |= |> & && &= ^ ^= ~ ~= # ? : ::"
+  );
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_BRACE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_BRACE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_BRACKET);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_BRACKET);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COMMA);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::DOT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RANGE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::VARIADIC);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RANGE_INCLUSIVE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::AT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::PLUS);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::INCREMENT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::ADD_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::MINUS);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::DECREMENT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SUBTRACT_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::ARROW);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::ASTERISK);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::MUL_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SLASH);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::DIV_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::MOD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::MOD_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::BANG);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::BANG_EQUAL);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL_EQUAL);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LESS);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LESS_EQUAL);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_SHIFT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_SHIFT_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::GREATER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::GREATER_EQUAL);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_SHIFT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_SHIFT_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::PIPE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::OR);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::OR_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::PIPE_FORWARD);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::AMPERSAND);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::AND);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::AND_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::CARET);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::XOR_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::TILDE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::NOT_ASSIGN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::HASH);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::QUESTION_MARK);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::DOUBLE_COLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerLexesKeywordsIdentifiersCommentsAndDirectiveMarkersFromFixture(): void {
+  let result: LexResult = lexFixture("test_cases/selfhost/lexer/core.ign");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::OUTER_DOC_COMMENT);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::AT);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::FUNCTION);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::INT32_TYPE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COMMA);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::INT32_TYPE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::INT32_TYPE);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_BRACE);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::LET);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::DOUBLE_COLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::LINE_COMMENT);
+  Test::assertEq<Keyword>(tokens.bump().keywordValue(), Keyword::RETURN);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::GREATER_EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::AND);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LESS_EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::OR);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::BANG_EQUAL);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::SEMICOLON);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_BRACE);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::EOF);
+}
+
+@test
+function lexerCoreFixtureMatchesSnapshot(): void {
+  let result: LexResult = lexFixture("test_cases/selfhost/lexer/core.ign");
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertSnapshot("lexer-core-tokens", renderTokens(result.tokens).toStr());
+}
+
+@test
+function lexerAllowsUtf8InsideCommentsWithoutDiagnostics(): void {
+  let result: LexResult = lexFixture("test_cases/selfhost/lexer/utf8_comments.ign");
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertSnapshot("utf8-comments", renderTokens(result.tokens).toStr());
+}
+
+@test
+function lexerConsumesUtf8ScalarAsOneBadTokenAndKeepsLaterSpansStable(): void {
+  let result: LexResult = lexFixture("test_cases/selfhost/lexer/utf8_bad_scalar.ign");
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+  Test::assertSnapshot("utf8-bad-scalar", renderTokens(result.tokens).toStr());
+}

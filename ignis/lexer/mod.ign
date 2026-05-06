@@ -1,0 +1,413 @@
+import Char from "std::char";
+
+import Diagnostic, DiagnosticBag, DiagnosticCode, LabelKind, Severity, SourceFile from "@compiler::diagnostics";
+import Keyword, Punctuation, SourceCursor, SourceMark, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+function isIdentifierStart(value: char): boolean {
+  return Char::isAsciiAlpha(value) || value == '_';
+}
+
+function isIdentifierContinue(value: char): boolean {
+  return Char::isAsciiAlphanumeric(value) || value == '_';
+}
+
+export record LexResult {
+  public tokens: TokenStream;
+  public diagnostics: DiagnosticBag;
+}
+
+record LexerScanner {
+  cursor: SourceCursor;
+  public diagnostics: DiagnosticBag;
+  public tokens: TokenStream;
+
+  public static create(file: &SourceFile): LexerScanner {
+    return LexerScanner {
+      cursor: SourceCursor::create(file),
+      diagnostics: DiagnosticBag::init(),
+      tokens: TokenStream::create(),
+    };
+  }
+
+  private emitToken(&mut self, token: Token): void {
+    self.tokens.push(token);
+  }
+
+  private emitPunctuation(&mut self, start: SourceMark, punctuation: Punctuation, lexeme: str): void {
+    self.emitToken(Token::punctuation(punctuation, self.cursor.spanFrom(start), lexeme));
+  }
+
+  private emitIdentifierOrKeyword(&mut self, start: SourceMark): void {
+    let lexeme: String = self.cursor.lexemeFrom(start);
+
+    match (Keyword::fromLexeme(&lexeme)) {
+      Option::SOME(keyword) -> self.emitToken(Token::keyword(keyword, self.cursor.spanFrom(start), lexeme.toStr())),
+      Option::NONE -> self.emitToken(Token::identifier(self.cursor.spanFrom(start), lexeme.toStr())),
+    };
+  }
+
+  private emitComment(&mut self, start: SourceMark, kind: TokenKind): void {
+    let lexeme: String = self.cursor.lexemeFrom(start);
+
+    if (kind == TokenKind::OUTER_DOC_COMMENT) {
+      self.emitToken(Token::outerDocComment(self.cursor.spanFrom(start), lexeme.toStr()));
+      return;
+    }
+
+    if (kind == TokenKind::INNER_DOC_COMMENT) {
+      self.emitToken(Token::innerDocComment(self.cursor.spanFrom(start), lexeme.toStr()));
+      return;
+    }
+
+    if (kind == TokenKind::BLOCK_COMMENT) {
+      self.emitToken(Token::blockComment(self.cursor.spanFrom(start), lexeme.toStr()));
+      return;
+    }
+
+    self.emitToken(Token::lineComment(self.cursor.spanFrom(start), lexeme.toStr()));
+  }
+
+  private emitInvalidToken(&mut self, start: SourceMark): void {
+    let span = self.cursor.spanFrom(start);
+    let lexeme: String = self.cursor.lexemeFrom(start);
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::INVALID_TOKEN, "invalid token", span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, "token is not valid here");
+    self.diagnostics.push(diagnostic);
+    self.emitToken(Token::bad(span, lexeme.toStr()));
+  }
+
+  private emitUnterminatedComment(&mut self, start: SourceMark): void {
+    let span = self.cursor.spanFrom(start);
+    let lexeme: String = self.cursor.lexemeFrom(start);
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::UNTERMINATED_COMMENT, "unterminated comment", span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, "comment must end with */");
+    self.diagnostics.push(diagnostic);
+    self.emitToken(Token::bad(span, lexeme.toStr()));
+  }
+
+  private matchAscii(&mut self, expected: char): boolean {
+    let Option::SOME(next) = self.cursor.peekScalar() else {
+      return false;
+    };
+
+    let Option::SOME(actual) = next.ascii() else {
+      return false;
+    };
+
+    if (actual != expected) {
+      return false;
+    }
+
+    self.cursor.advanceScalar();
+    return true;
+  }
+
+  private scanIdentifierTail(&mut self): void {
+    while (let Option::SOME(next) = self.cursor.peekScalar()) {
+      let Option::SOME(ascii) = next.ascii() else {
+        return;
+      };
+
+      if (!isIdentifierContinue(ascii)) {
+        return;
+      }
+
+      self.cursor.advanceScalar();
+    }
+  }
+
+  private scanLineComment(&mut self): void {
+    while (let Option::SOME(next) = self.cursor.peekScalar()) {
+      let Option::SOME(value) = next.ascii() else {
+        self.cursor.advanceScalar();
+        continue;
+      };
+
+      if (value == '\n' || value == '\r') {
+        return;
+      }
+
+      self.cursor.advanceScalar();
+    }
+  }
+
+  private scanBlockCommentBody(&mut self): boolean {
+    while (let Option::SOME(current) = self.cursor.peekScalar()) {
+      if (self.matchAscii('*') && self.matchAscii('/')) {
+        return true;
+      }
+
+      if (!current.isAscii()) {
+        self.cursor.advanceScalar();
+        continue;
+      }
+
+      self.cursor.advanceScalar();
+    }
+
+    return false;
+  }
+
+  private scanSlashFamily(&mut self, start: SourceMark): void {
+    if (self.matchAscii('=')) {
+      self.emitPunctuation(start, Punctuation::DIV_ASSIGN, "/=");
+      return;
+    }
+
+    if (self.matchAscii('/')) {
+      let mut kind: TokenKind = TokenKind::LINE_COMMENT;
+
+      if (self.matchAscii('!')) {
+        kind = TokenKind::INNER_DOC_COMMENT;
+      } else if (self.matchAscii('/')) {
+        if (!self.matchAscii('/')) {
+          kind = TokenKind::OUTER_DOC_COMMENT;
+        }
+      }
+
+      self.scanLineComment();
+      self.emitComment(start, kind);
+      return;
+    }
+
+    if (self.matchAscii('*')) {
+      let mut kind: TokenKind = TokenKind::BLOCK_COMMENT;
+
+      if (self.matchAscii('!')) {
+        kind = TokenKind::INNER_DOC_COMMENT;
+      } else if (self.matchAscii('*')) {
+        kind = TokenKind::OUTER_DOC_COMMENT;
+      }
+
+      if (!self.scanBlockCommentBody()) {
+        self.emitUnterminatedComment(start);
+        return;
+      }
+
+      self.emitComment(start, kind);
+      return;
+    }
+
+    self.emitPunctuation(start, Punctuation::SLASH, "/");
+  }
+
+  private scanDotFamily(&mut self, start: SourceMark): void {
+    if (!self.matchAscii('.')) {
+      self.emitPunctuation(start, Punctuation::DOT, ".");
+      return;
+    }
+
+    if (self.matchAscii('.')) {
+      self.emitPunctuation(start, Punctuation::VARIADIC, "...");
+      return;
+    }
+
+    if (self.matchAscii('=')) {
+      self.emitPunctuation(start, Punctuation::RANGE_INCLUSIVE, "..=");
+      return;
+    }
+
+    self.emitPunctuation(start, Punctuation::RANGE, "..");
+  }
+
+  private scanLessFamily(&mut self, start: SourceMark): void {
+    if (self.matchAscii('<')) {
+      if (self.matchAscii('=')) {
+        self.emitPunctuation(start, Punctuation::LEFT_SHIFT_ASSIGN, "<<=");
+        return;
+      }
+
+      self.emitPunctuation(start, Punctuation::LEFT_SHIFT, "<<");
+      return;
+    }
+
+    if (self.matchAscii('=')) {
+      self.emitPunctuation(start, Punctuation::LESS_EQUAL, "<=");
+      return;
+    }
+
+    self.emitPunctuation(start, Punctuation::LESS, "<");
+  }
+
+  private scanGreaterFamily(&mut self, start: SourceMark): void {
+    if (self.matchAscii('>')) {
+      if (self.matchAscii('=')) {
+        self.emitPunctuation(start, Punctuation::RIGHT_SHIFT_ASSIGN, ">>=");
+        return;
+      }
+
+      self.emitPunctuation(start, Punctuation::RIGHT_SHIFT, ">>");
+      return;
+    }
+
+    if (self.matchAscii('=')) {
+      self.emitPunctuation(start, Punctuation::GREATER_EQUAL, ">=");
+      return;
+    }
+
+    self.emitPunctuation(start, Punctuation::GREATER, ">");
+  }
+
+  private scanPipeFamily(&mut self, start: SourceMark): void {
+    if (self.matchAscii('|')) {
+      self.emitPunctuation(start, Punctuation::OR, "||");
+      return;
+    }
+
+    if (self.matchAscii('>')) {
+      self.emitPunctuation(start, Punctuation::PIPE_FORWARD, "|>");
+      return;
+    }
+
+    if (self.matchAscii('=')) {
+      self.emitPunctuation(start, Punctuation::OR_ASSIGN, "|=");
+      return;
+    }
+
+    self.emitPunctuation(start, Punctuation::PIPE, "|");
+  }
+
+  private scanAmpersandFamily(&mut self, start: SourceMark): void {
+    if (self.matchAscii('&')) {
+      self.emitPunctuation(start, Punctuation::AND, "&&");
+      return;
+    }
+
+    if (self.matchAscii('=')) {
+      self.emitPunctuation(start, Punctuation::AND_ASSIGN, "&=");
+      return;
+    }
+
+    self.emitPunctuation(start, Punctuation::AMPERSAND, "&");
+  }
+
+  private scanGrammarToken(&mut self, start: SourceMark, current: char): void {
+    match (current) {
+      '(' -> self.emitPunctuation(start, Punctuation::LEFT_PAREN, "("),
+      ')' -> self.emitPunctuation(start, Punctuation::RIGHT_PAREN, ")"),
+      '{' -> self.emitPunctuation(start, Punctuation::LEFT_BRACE, "{"),
+      '}' -> self.emitPunctuation(start, Punctuation::RIGHT_BRACE, "}"),
+      '[' -> self.emitPunctuation(start, Punctuation::LEFT_BRACKET, "["),
+      ']' -> self.emitPunctuation(start, Punctuation::RIGHT_BRACKET, "]"),
+      ',' -> self.emitPunctuation(start, Punctuation::COMMA, ","),
+      ';' -> self.emitPunctuation(start, Punctuation::SEMICOLON, ";"),
+      '@' -> self.emitPunctuation(start, Punctuation::AT, "@"),
+      '#' -> self.emitPunctuation(start, Punctuation::HASH, "#"),
+      '?' -> self.emitPunctuation(start, Punctuation::QUESTION_MARK, "?"),
+      '.' -> self.scanDotFamily(start),
+      '+' -> {
+        if (self.matchAscii('+')) {
+          self.emitPunctuation(start, Punctuation::INCREMENT, "++");
+        } else if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::ADD_ASSIGN, "+=");
+        } else {
+          self.emitPunctuation(start, Punctuation::PLUS, "+");
+        }
+      },
+      '-' -> {
+        if (self.matchAscii('-')) {
+          self.emitPunctuation(start, Punctuation::DECREMENT, "--");
+        } else if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::SUBTRACT_ASSIGN, "-=");
+        } else if (self.matchAscii('>')) {
+          self.emitPunctuation(start, Punctuation::ARROW, "->");
+        } else {
+          self.emitPunctuation(start, Punctuation::MINUS, "-");
+        }
+      },
+      '*' -> {
+        if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::MUL_ASSIGN, "*=");
+        } else {
+          self.emitPunctuation(start, Punctuation::ASTERISK, "*");
+        }
+      },
+      '/' -> self.scanSlashFamily(start),
+      '%' -> {
+        if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::MOD_ASSIGN, "%=");
+        } else {
+          self.emitPunctuation(start, Punctuation::MOD, "%");
+        }
+      },
+      '!' -> {
+        if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::BANG_EQUAL, "!=");
+        } else {
+          self.emitPunctuation(start, Punctuation::BANG, "!");
+        }
+      },
+      '=' -> {
+        if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::EQUAL_EQUAL, "==");
+        } else {
+          self.emitPunctuation(start, Punctuation::EQUAL, "=");
+        }
+      },
+      '<' -> self.scanLessFamily(start),
+      '>' -> self.scanGreaterFamily(start),
+      '|' -> self.scanPipeFamily(start),
+      '&' -> self.scanAmpersandFamily(start),
+      '^' -> {
+        if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::XOR_ASSIGN, "^=");
+        } else {
+          self.emitPunctuation(start, Punctuation::CARET, "^");
+        }
+      },
+      '~' -> {
+        if (self.matchAscii('=')) {
+          self.emitPunctuation(start, Punctuation::NOT_ASSIGN, "~=");
+        } else {
+          self.emitPunctuation(start, Punctuation::TILDE, "~");
+        }
+      },
+      ':' -> {
+        if (self.matchAscii(':')) {
+          self.emitPunctuation(start, Punctuation::DOUBLE_COLON, "::");
+        } else {
+          self.emitPunctuation(start, Punctuation::COLON, ":");
+        }
+      },
+      ' ' | '\t' | '\r' | '\n' -> {},
+      _ -> self.emitInvalidToken(start),
+    };
+  }
+
+  public scanAll(&mut self): void {
+    while (!self.cursor.isAtEnd()) {
+      let start: SourceMark = self.cursor.mark();
+      let Option::SOME(current) = self.cursor.advanceScalar() else {
+        break;
+      };
+
+      let Option::SOME(ascii) = current.ascii() else {
+        self.emitInvalidToken(start);
+        continue;
+      };
+
+      if (isIdentifierStart(ascii)) {
+          self.scanIdentifierTail();
+          self.emitIdentifierOrKeyword(start);
+          continue;
+      }
+
+      self.scanGrammarToken(start, ascii);
+    }
+
+    let end: SourceMark = self.cursor.mark();
+    self.emitToken(Token::eof(self.cursor.spanFrom(end)));
+  }
+}
+
+export namespace Lexer {
+  function lex(file: &SourceFile): LexResult {
+    let mut scanner: LexerScanner = LexerScanner::create(file);
+    scanner.scanAll();
+
+    return LexResult {
+      tokens: scanner.tokens,
+      diagnostics: scanner.diagnostics,
+    };
+  }
+}

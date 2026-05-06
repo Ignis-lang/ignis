@@ -1,3 +1,5 @@
+import Utf8ScalarSpan from "std::string";
+
 import SourceFile, SourceSpan from "@compiler::diagnostics";
 
 export record SourceMark {
@@ -31,6 +33,10 @@ export record SourceCursor {
     return self.file.text.byteAt(self.offset + 1);
   }
 
+  public peekScalar(&self): Option<Utf8ScalarSpan> {
+    return self.file.text.scalarSpanAt(self.offset);
+  }
+
   public advance(&mut self): Option<u8> {
     let next: Option<u8> = self.peek();
 
@@ -39,6 +45,17 @@ export record SourceCursor {
     }
 
     return next;
+  }
+
+  public advanceScalar(&mut self): Option<Utf8ScalarSpan> {
+    let decoded: Option<Utf8ScalarSpan> = self.peekScalar();
+
+    if (let Option::SOME(scalar) = decoded) {
+      self.offset = scalar.endByte;
+      return Option::SOME(scalar);
+    }
+
+    return Option::NONE;
   }
 
   public mark(&self): SourceMark {
