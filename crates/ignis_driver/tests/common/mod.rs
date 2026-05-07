@@ -328,9 +328,14 @@ fn compile_to_c(source: &str) -> Result<String, String> {
     let sym_table = result.symbols.borrow();
     collect_mono_roots(&result.defs, &sym_table)
   };
-  let mono_output =
-    ignis_analyzer::mono::Monomorphizer::new(&result.hir, &result.defs, &mut types, result.symbols.clone())
-      .run(&mono_roots);
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &result.hir,
+    &result.defs,
+    &result.namespaces,
+    &mut types,
+    result.symbols.clone(),
+  )
+  .run(&mono_roots);
 
   // Re-borrow for downstream passes
   let sym_table = result.symbols.borrow();
@@ -580,9 +585,14 @@ pub fn compile_ownership_diagnostics(source: &str) -> Result<Vec<String>, String
     let sym_table = result.symbols.borrow();
     collect_mono_roots(&result.defs, &sym_table)
   };
-  let mono_output =
-    ignis_analyzer::mono::Monomorphizer::new(&result.hir, &result.defs, &mut types, result.symbols.clone())
-      .run(&mono_roots);
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &result.hir,
+    &result.defs,
+    &result.namespaces,
+    &mut types,
+    result.symbols.clone(),
+  )
+  .run(&mono_roots);
 
   let sym_table = result.symbols.borrow();
 
@@ -645,9 +655,14 @@ fn compile_to_c_with_ctx(
     let sym_table = result.symbols.borrow();
     collect_mono_roots(&result.defs, &sym_table)
   };
-  let mono_output =
-    ignis_analyzer::mono::Monomorphizer::new(&result.hir, &result.defs, &mut types, result.symbols.clone())
-      .run(&mono_roots);
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &result.hir,
+    &result.defs,
+    &result.namespaces,
+    &mut types,
+    result.symbols.clone(),
+  )
+  .run(&mono_roots);
 
   let sym_table = result.symbols.borrow();
 

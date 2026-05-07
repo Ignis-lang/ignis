@@ -38,9 +38,14 @@ pub fn compile_to_c(source: &str) -> String {
     let sym_table = result.symbols.borrow();
     collect_mono_roots(&result.defs, &sym_table)
   };
-  let mono_output =
-    ignis_analyzer::mono::Monomorphizer::new(&result.hir, &result.defs, &mut types, result.symbols.clone())
-      .run(&mono_roots);
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &result.hir,
+    &result.defs,
+    &result.namespaces,
+    &mut types,
+    result.symbols.clone(),
+  )
+  .run(&mono_roots);
 
   let sym_table = result.symbols.borrow();
 

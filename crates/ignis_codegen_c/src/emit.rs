@@ -525,10 +525,57 @@ impl<'a> CEmitter<'a> {
     dependencies: &mut Vec<DefinitionId>,
     ty: TypeId,
   ) {
-    if let Some(owner_def_id) = self.resolve_droppable_record(ty)
-      && let Some(drop_method_def_id) = self.find_drop_method(owner_def_id)
-    {
-      dependencies.push(drop_method_def_id);
+    let mut visited_types = HashSet::new();
+    self.push_drop_dependencies(dependencies, ty, &mut visited_types);
+  }
+
+  fn push_drop_dependencies(
+    &self,
+    dependencies: &mut Vec<DefinitionId>,
+    ty: TypeId,
+    visited_types: &mut HashSet<TypeId>,
+  ) {
+    if !visited_types.insert(ty) {
+      return;
+    }
+
+    match self.types.get(&ty) {
+      Type::Record(def_id) | Type::Enum(def_id) => {
+        if let Some(drop_method_def_id) = self.find_drop_method(*def_id) {
+          dependencies.push(drop_method_def_id);
+          return;
+        }
+
+        self.push_structural_drop_dependencies(dependencies, *def_id, visited_types);
+      },
+      _ => {},
+    }
+  }
+
+  fn push_structural_drop_dependencies(
+    &self,
+    dependencies: &mut Vec<DefinitionId>,
+    def_id: DefinitionId,
+    visited_types: &mut HashSet<TypeId>,
+  ) {
+    match &self.defs.get(&def_id).kind {
+      DefinitionKind::Record(record_definition) => {
+        for field in &record_definition.fields {
+          if self.types.needs_drop_with_defs(&field.type_id, self.defs) {
+            self.push_drop_dependencies(dependencies, field.type_id, visited_types);
+          }
+        }
+      },
+      DefinitionKind::Enum(enum_definition) => {
+        for variant in &enum_definition.variants {
+          for payload_type in &variant.payload {
+            if self.types.needs_drop_with_defs(payload_type, self.defs) {
+              self.push_drop_dependencies(dependencies, *payload_type, visited_types);
+            }
+          }
+        }
+      },
+      _ => {},
     }
   }
 
@@ -3896,6 +3943,18 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  fn type_definition_mangling_name(
+    &self,
+    def_id: DefinitionId,
+  ) -> String {
+    let def = self.defs.get(&def_id);
+
+    match def.owner_namespace {
+      Some(_) => self.build_mangled_name(def_id),
+      None => self.symbols.get(&def.name).to_string(),
+    }
+  }
+
   fn format_type_for_mangling(
     &self,
     ty: &TypeId,
@@ -3928,17 +3987,9 @@ impl<'a> CEmitter<'a> {
         let parts: Vec<_> = elems.iter().map(|e| self.format_type_for_mangling(e)).collect();
         format!("tup_{}", parts.join("_"))
       },
-      Type::Record(def_id) => {
-        let def = self.defs.get(def_id);
-        self.symbols.get(&def.name).to_string()
-      },
-      Type::Enum(def_id) => {
-        let def = self.defs.get(def_id);
-        self.symbols.get(&def.name).to_string()
-      },
+      Type::Record(def_id) | Type::Enum(def_id) => self.type_definition_mangling_name(*def_id),
       Type::Instance { generic, args } => {
-        let generic_def = self.defs.get(generic);
-        let base_name = self.symbols.get(&generic_def.name).to_string();
+        let base_name = self.type_definition_mangling_name(*generic);
         if args.is_empty() {
           base_name
         } else {
@@ -4747,7 +4798,9 @@ fn collect_struct_dependencies_from_type(
       out.insert(build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types));
     },
     Type::Instance { args, .. } => {
-      out.insert(monomorphized_instance_type_name_standalone(type_id, types, defs, symbols));
+      out.insert(monomorphized_instance_type_name_standalone(
+        type_id, types, defs, symbols, namespaces,
+      ));
       for arg in args {
         collect_struct_dependencies_from_type(*arg, types, defs, symbols, namespaces, out);
       }
@@ -5006,7 +5059,9 @@ fn collect_struct_types_from_type(
       out.insert(name);
     },
     Type::Instance { args, .. } => {
-      out.insert(monomorphized_instance_type_name_standalone(*type_id, types, defs, symbols));
+      out.insert(monomorphized_instance_type_name_standalone(
+        *type_id, types, defs, symbols, namespaces,
+      ));
       for arg in args {
         collect_struct_types_from_type(arg, types, defs, symbols, namespaces, out);
       }
@@ -5205,7 +5260,7 @@ fn build_mangled_name_standalone(
   let has_overloads =
     has_overloads_standalone(def_id, defs) || original_generic_method_has_overloads_standalone(def_id, defs, symbols);
   let param_suffix = if has_overloads {
-    format_param_types_for_mangling_standalone(def_id, defs, types, symbols)
+    format_param_types_for_mangling_standalone(def_id, defs, namespaces, types, symbols)
   } else {
     String::new()
   };
@@ -5356,6 +5411,7 @@ fn original_generic_method_has_overloads_standalone(
 fn format_param_types_for_mangling_standalone(
   def_id: DefinitionId,
   defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
   types: &TypeStore,
   symbols: &SymbolTable,
 ) -> String {
@@ -5364,10 +5420,16 @@ fn format_param_types_for_mangling_standalone(
       let mut parts: Vec<String> = fd
         .params
         .iter()
-        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
+        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, namespaces, symbols))
         .collect();
 
-      parts.push(format_type_for_mangling_standalone(&fd.return_type, types, defs, symbols));
+      parts.push(format_type_for_mangling_standalone(
+        &fd.return_type,
+        types,
+        defs,
+        namespaces,
+        symbols,
+      ));
 
       parts.join("_")
     },
@@ -5375,10 +5437,16 @@ fn format_param_types_for_mangling_standalone(
       let start = if md.is_static { 0 } else { 1 };
       let mut parts: Vec<String> = md.params[start..]
         .iter()
-        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, symbols))
+        .map(|p| format_type_for_mangling_standalone(defs.type_of(p), types, defs, namespaces, symbols))
         .collect();
 
-      parts.push(format_type_for_mangling_standalone(&md.return_type, types, defs, symbols));
+      parts.push(format_type_for_mangling_standalone(
+        &md.return_type,
+        types,
+        defs,
+        namespaces,
+        symbols,
+      ));
 
       parts.join("_")
     },
@@ -5386,10 +5454,26 @@ fn format_param_types_for_mangling_standalone(
   }
 }
 
+fn type_definition_mangling_name_standalone(
+  def_id: DefinitionId,
+  defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
+  symbols: &SymbolTable,
+  types: &TypeStore,
+) -> String {
+  let def = defs.get(&def_id);
+
+  match def.owner_namespace {
+    Some(_) => build_mangled_name_standalone(def_id, defs, namespaces, symbols, types),
+    None => symbols.get(&def.name).to_string(),
+  }
+}
+
 fn format_type_for_mangling_standalone(
   ty: &TypeId,
   types: &TypeStore,
   defs: &DefinitionStore,
+  namespaces: &NamespaceStore,
   symbols: &SymbolTable,
 ) -> String {
   match types.get(ty) {
@@ -5409,40 +5493,53 @@ fn format_type_for_mangling_standalone(
     Type::Atom => "atom".to_string(),
     Type::Void => "void".to_string(),
     Type::Pointer { inner, .. } => {
-      format!("ptr_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
+      format!(
+        "ptr_{}",
+        format_type_for_mangling_standalone(inner, types, defs, namespaces, symbols)
+      )
     },
     Type::Reference { inner, mutable: true } => {
-      format!("mutref_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
+      format!(
+        "mutref_{}",
+        format_type_for_mangling_standalone(inner, types, defs, namespaces, symbols)
+      )
     },
     Type::Reference { inner, mutable: false } => {
-      format!("ref_{}", format_type_for_mangling_standalone(inner, types, defs, symbols))
+      format!(
+        "ref_{}",
+        format_type_for_mangling_standalone(inner, types, defs, namespaces, symbols)
+      )
     },
     Type::Slice { element, .. } => {
-      format!("slice_{}", format_type_for_mangling_standalone(element, types, defs, symbols))
+      format!(
+        "slice_{}",
+        format_type_for_mangling_standalone(element, types, defs, namespaces, symbols)
+      )
     },
     Type::FixedArray { element, .. } => {
-      format!("vec_{}", format_type_for_mangling_standalone(element, types, defs, symbols))
+      format!(
+        "vec_{}",
+        format_type_for_mangling_standalone(element, types, defs, namespaces, symbols)
+      )
     },
     Type::Tuple(elems) => {
       let parts: Vec<_> = elems
         .iter()
-        .map(|e| format_type_for_mangling_standalone(e, types, defs, symbols))
+        .map(|e| format_type_for_mangling_standalone(e, types, defs, namespaces, symbols))
         .collect();
       format!("tup_{}", parts.join("_"))
     },
     Type::Record(def_id) | Type::Enum(def_id) => {
-      let def = defs.get(def_id);
-      symbols.get(&def.name).to_string()
+      type_definition_mangling_name_standalone(*def_id, defs, namespaces, symbols, types)
     },
     Type::Instance { generic, args } => {
-      let def = defs.get(generic);
-      let base = symbols.get(&def.name).to_string();
+      let base = type_definition_mangling_name_standalone(*generic, defs, namespaces, symbols, types);
       if args.is_empty() {
         base
       } else {
         let args_str = args
           .iter()
-          .map(|a| format_type_for_mangling_standalone(a, types, defs, symbols))
+          .map(|a| format_type_for_mangling_standalone(a, types, defs, namespaces, symbols))
           .collect::<Vec<_>>()
           .join("_");
         format!("{}_{}", base, args_str)
@@ -5461,12 +5558,15 @@ fn monomorphized_instance_type_name_standalone(
   types: &TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
 ) -> String {
   match types.get(&type_id) {
     Type::Instance { generic, args } => {
-      monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols)
+      monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols, namespaces)
     },
-    _ => escape_ident(&format_type_for_monomorphized_name_standalone(type_id, types, defs, symbols)),
+    _ => escape_ident(&format_type_for_monomorphized_name_standalone(
+      type_id, types, defs, symbols, namespaces,
+    )),
   }
 }
 
@@ -5476,9 +5576,9 @@ fn monomorphized_instance_name_from_parts_standalone(
   types: &TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
 ) -> String {
-  let generic_def = defs.get(&generic);
-  let base = symbols.get(&generic_def.name).to_string();
+  let base = type_definition_mangling_name_standalone(generic, defs, namespaces, symbols, types);
 
   if args.is_empty() {
     return escape_ident(&base);
@@ -5486,7 +5586,7 @@ fn monomorphized_instance_name_from_parts_standalone(
 
   let args_str = args
     .iter()
-    .map(|arg| format_type_for_monomorphized_name_standalone(*arg, types, defs, symbols))
+    .map(|arg| format_type_for_monomorphized_name_standalone(*arg, types, defs, symbols, namespaces))
     .collect::<Vec<_>>()
     .join("__");
 
@@ -5498,6 +5598,7 @@ fn format_type_for_monomorphized_name_standalone(
   types: &TypeStore,
   defs: &DefinitionStore,
   symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
 ) -> String {
   match types.get(&type_id) {
     Type::I8 => "i8".to_string(),
@@ -5521,7 +5622,7 @@ fn format_type_for_monomorphized_name_standalone(
       format!(
         "{}_{}",
         prefix,
-        format_type_for_monomorphized_name_standalone(*inner, types, defs, symbols)
+        format_type_for_monomorphized_name_standalone(*inner, types, defs, symbols, namespaces)
       )
     },
     Type::Reference { inner, mutable } => {
@@ -5529,7 +5630,7 @@ fn format_type_for_monomorphized_name_standalone(
       format!(
         "{}_{}",
         prefix,
-        format_type_for_monomorphized_name_standalone(*inner, types, defs, symbols)
+        format_type_for_monomorphized_name_standalone(*inner, types, defs, symbols, namespaces)
       )
     },
     Type::Slice { element, mutable } => {
@@ -5537,14 +5638,14 @@ fn format_type_for_monomorphized_name_standalone(
       format!(
         "{}_{}",
         prefix,
-        format_type_for_monomorphized_name_standalone(*element, types, defs, symbols)
+        format_type_for_monomorphized_name_standalone(*element, types, defs, symbols, namespaces)
       )
     },
     Type::FixedArray { element, size } => {
       format!(
         "arr{}_{}",
         size,
-        format_type_for_monomorphized_name_standalone(*element, types, defs, symbols)
+        format_type_for_monomorphized_name_standalone(*element, types, defs, symbols, namespaces)
       )
     },
     Type::Instance { generic, args } => {
@@ -5552,19 +5653,18 @@ fn format_type_for_monomorphized_name_standalone(
       let base = symbols.get(&generic_def.name).to_string();
       let args_str = args
         .iter()
-        .map(|arg| format_type_for_monomorphized_name_standalone(*arg, types, defs, symbols))
+        .map(|arg| format_type_for_monomorphized_name_standalone(*arg, types, defs, symbols, namespaces))
         .collect::<Vec<_>>()
         .join("__");
       format!("{}__{}", base, args_str)
     },
     Type::Record(def_id) | Type::Enum(def_id) => {
-      let def = defs.get(def_id);
-      symbols.get(&def.name).to_string()
+      type_definition_mangling_name_standalone(*def_id, defs, namespaces, symbols, types)
     },
     Type::Tuple(elements) => {
       let elements_str = elements
         .iter()
-        .map(|element| format_type_for_monomorphized_name_standalone(*element, types, defs, symbols))
+        .map(|element| format_type_for_monomorphized_name_standalone(*element, types, defs, symbols, namespaces))
         .collect::<Vec<_>>()
         .join("_");
       format!("tuple_{}", elements_str)
@@ -5630,7 +5730,7 @@ fn format_type_for_name_standalone(
       build_mangled_name_standalone(*def_id, defs, namespaces, symbols, types)
     },
     Type::Instance { generic, args } => {
-      monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols)
+      monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols, namespaces)
     },
     _ => format!("ty{}", ty.index()),
   }
@@ -5723,7 +5823,7 @@ pub fn format_c_type(
       panic!("ICE: Type::Param reached C codegen - monomorphization failed")
     },
     Type::Instance { generic, args } => {
-      let name = monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols);
+      let name = monomorphized_instance_name_from_parts_standalone(*generic, args, types, defs, symbols, namespaces);
       format!("struct {}", name)
     },
     Type::Infer => {

@@ -33,6 +33,7 @@ use ignis_type::definition::{
   FieldDefinition, FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
   SymbolEntry, VariableDefinition, VariantDefinition, Visibility,
 };
+use ignis_type::namespace::NamespaceStore;
 use ignis_type::symbol::SymbolTable;
 use ignis_type::types::{Substitution, Type, TypeId, TypeStore};
 
@@ -105,6 +106,7 @@ pub struct MonoOutput {
 pub struct Monomorphizer<'a> {
   input_hir: &'a HIR,
   input_defs: &'a DefinitionStore,
+  input_namespaces: &'a NamespaceStore,
   types: &'a mut TypeStore,
   symbols: Rc<RefCell<SymbolTable>>,
 
@@ -129,12 +131,14 @@ impl<'a> Monomorphizer<'a> {
   pub fn new(
     input_hir: &'a HIR,
     input_defs: &'a DefinitionStore,
+    input_namespaces: &'a NamespaceStore,
     types: &'a mut TypeStore,
     symbols: Rc<RefCell<SymbolTable>>,
   ) -> Self {
     Self {
       input_hir,
       input_defs,
+      input_namespaces,
       types,
       symbols,
       cache: HashMap::new(),
@@ -238,6 +242,10 @@ impl<'a> Monomorphizer<'a> {
     // Final pass: concretize all Type::Instance in definition types
     self.concretize_all_definition_types();
 
+    // Concretizing by-value field and payload types can instantiate generic records
+    // and their drop methods after the main body-substitution loops have drained.
+    self.process_pending_instantiations();
+
     if is_verbose() {
       eprintln!("[MONO] Monomorphization complete:");
       eprintln!("[MONO]   output_defs count: {}", self.output_defs.iter().count());
@@ -252,6 +260,37 @@ impl<'a> Monomorphizer<'a> {
       hir: self.output_hir,
       defs: self.output_defs,
       instance_map: self.cache,
+    }
+  }
+
+  fn process_pending_instantiations(&mut self) {
+    loop {
+      let pending: Vec<_> = self
+        .cache
+        .keys()
+        .filter(|key| !self.processed.contains(*key))
+        .cloned()
+        .collect();
+
+      if pending.is_empty() && self.worklist.is_empty() {
+        break;
+      }
+
+      for key in pending {
+        let concrete_id = *self.cache.get(&key).unwrap();
+        self.substitute_body(&key, concrete_id);
+        self.processed.insert(key);
+      }
+
+      while let Some(key) = self.worklist.pop_front() {
+        if self.cache.contains_key(&key) {
+          continue;
+        }
+
+        let concrete_id = self.create_concrete_def_shell(&key);
+        self.cache.insert(key.clone(), concrete_id);
+        self.reverse_cache.insert(concrete_id, key.clone());
+      }
     }
   }
 
@@ -315,6 +354,9 @@ impl<'a> Monomorphizer<'a> {
               }
             }
           }
+        },
+        DefinitionKind::Record(_) | DefinitionKind::Enum(_) => {
+          self.concretize_nongeneric_type_definition(def_id);
         },
         DefinitionKind::Method(md) if md.type_params.is_empty() && !self.is_owner_generic(md.owner_type) => {
           // Non-generic method on non-generic owner: concretize return type and parameters
@@ -419,6 +461,8 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
+        self.concretize_nongeneric_type_definition(def_id);
+
         // Non-generic record: copy method bodies
         for method_entry in rd.instance_methods.values() {
           match method_entry {
@@ -466,6 +510,8 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+        self.concretize_nongeneric_type_definition(def_id);
+
         for method_entry in ed.instance_methods.values() {
           match method_entry {
             SymbolEntry::Single(method_id) => {
@@ -490,6 +536,33 @@ impl<'a> Monomorphizer<'a> {
             },
           }
         }
+      },
+      _ => {},
+    }
+  }
+
+  fn concretize_nongeneric_type_definition(
+    &mut self,
+    def_id: DefinitionId,
+  ) {
+    let kind = self.output_defs.get(&def_id).kind.clone();
+
+    match kind {
+      DefinitionKind::Record(mut record_definition) if record_definition.type_params.is_empty() => {
+        for field in &mut record_definition.fields {
+          field.type_id = self.concretize_type(field.type_id);
+        }
+
+        self.output_defs.get_mut(&def_id).kind = DefinitionKind::Record(record_definition);
+      },
+      DefinitionKind::Enum(mut enum_definition) if enum_definition.type_params.is_empty() => {
+        for variant in &mut enum_definition.variants {
+          for payload_type in &mut variant.payload {
+            *payload_type = self.concretize_type(*payload_type);
+          }
+        }
+
+        self.output_defs.get_mut(&def_id).kind = DefinitionKind::Enum(enum_definition);
       },
       _ => {},
     }
@@ -766,10 +839,22 @@ impl<'a> Monomorphizer<'a> {
         let new_expr = self.clone_hir_tree(*expr);
         (HIRKind::TypeOf(new_expr), None)
       },
-      HIRKind::SizeOf(ty) => (HIRKind::SizeOf(*ty), None),
-      HIRKind::AlignOf(ty) => (HIRKind::AlignOf(*ty), None),
-      HIRKind::MaxOf(ty) => (HIRKind::MaxOf(*ty), None),
-      HIRKind::MinOf(ty) => (HIRKind::MinOf(*ty), None),
+      HIRKind::SizeOf(ty) => {
+        let new_ty = self.concretize_type(*ty);
+        (HIRKind::SizeOf(new_ty), None)
+      },
+      HIRKind::AlignOf(ty) => {
+        let new_ty = self.concretize_type(*ty);
+        (HIRKind::AlignOf(new_ty), None)
+      },
+      HIRKind::MaxOf(ty) => {
+        let new_ty = self.concretize_type(*ty);
+        (HIRKind::MaxOf(new_ty), None)
+      },
+      HIRKind::MinOf(ty) => {
+        let new_ty = self.concretize_type(*ty);
+        (HIRKind::MinOf(new_ty), None)
+      },
       HIRKind::FieldAccess { base, field_index } => {
         let new_base = self.clone_hir_tree(*base);
         (
@@ -1199,6 +1284,8 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
+        self.concretize_nongeneric_type_definition(def_id);
+
         for method_entry in ed.instance_methods.values() {
           if let Some(method_id) = method_entry.as_single() {
             self.discover_from_root(*method_id);
@@ -2245,7 +2332,9 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::Cast { expression, target } => {
         let new_expr = self.substitute_hir(*expression, subst);
-        let new_target = self.types.substitute(*target, subst);
+        let substituted_target = self.types.substitute(*target, subst);
+        let new_target = self.concretize_type(substituted_target);
+
         HIRKind::Cast {
           expression: new_expr,
           target: new_target,
@@ -2253,7 +2342,9 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::BitCast { expression, target } => {
         let new_expr = self.substitute_hir(*expression, subst);
-        let new_target = self.types.substitute(*target, subst);
+        let substituted_target = self.types.substitute(*target, subst);
+        let new_target = self.concretize_type(substituted_target);
+
         HIRKind::BitCast {
           expression: new_expr,
           target: new_target,
@@ -2355,7 +2446,8 @@ impl<'a> Monomorphizer<'a> {
       } => {
         let new_data = self.substitute_hir(*data, subst);
         let new_len = self.substitute_hir(*len, subst);
-        let new_element_type = self.types.substitute(*element_type, subst);
+        let substituted_element_type = self.types.substitute(*element_type, subst);
+        let new_element_type = self.concretize_type(substituted_element_type);
         HIRKind::MakeSlice {
           data: new_data,
           len: new_len,
@@ -2367,19 +2459,23 @@ impl<'a> Monomorphizer<'a> {
         HIRKind::TypeOf(new_expr)
       },
       HIRKind::SizeOf(ty) => {
-        let new_ty = self.types.substitute(*ty, subst);
+        let substituted_ty = self.types.substitute(*ty, subst);
+        let new_ty = self.concretize_type(substituted_ty);
         HIRKind::SizeOf(new_ty)
       },
       HIRKind::AlignOf(ty) => {
-        let new_ty = self.types.substitute(*ty, subst);
+        let substituted_ty = self.types.substitute(*ty, subst);
+        let new_ty = self.concretize_type(substituted_ty);
         HIRKind::AlignOf(new_ty)
       },
       HIRKind::MaxOf(ty) => {
-        let new_ty = self.types.substitute(*ty, subst);
+        let substituted_ty = self.types.substitute(*ty, subst);
+        let new_ty = self.concretize_type(substituted_ty);
         HIRKind::MaxOf(new_ty)
       },
       HIRKind::MinOf(ty) => {
-        let new_ty = self.types.substitute(*ty, subst);
+        let substituted_ty = self.types.substitute(*ty, subst);
+        let new_ty = self.concretize_type(substituted_ty);
         HIRKind::MinOf(new_ty)
       },
       HIRKind::FieldAccess { base, field_index } => {
@@ -2987,11 +3083,11 @@ impl<'a> Monomorphizer<'a> {
       },
       Type::FixedArray { element, size } => format!("arr{}_{}", size, self.mangle_type(*element)),
       Type::Instance { generic, args } => {
-        let base = Self::escape(&self.get_def_name(generic));
+        let base = self.mangle_type_definition_name(*generic);
         let args_str = args.iter().map(|a| self.mangle_type(*a)).collect::<Vec<_>>().join("__");
         format!("{}__{}", base, args_str)
       },
-      Type::Record(def_id) | Type::Enum(def_id) => Self::escape(&self.get_def_name(def_id)),
+      Type::Record(def_id) | Type::Enum(def_id) => self.mangle_type_definition_name(*def_id),
       Type::Tuple(elems) => {
         let elems_str = elems.iter().map(|e| self.mangle_type(*e)).collect::<Vec<_>>().join("_");
         format!("tuple_{}", elems_str)
@@ -3011,6 +3107,29 @@ impl<'a> Monomorphizer<'a> {
       Type::Unknown => "unknown".into(),
       Type::NullPtr => "null".into(),
       Type::Error => "error".into(),
+    }
+  }
+
+  fn mangle_type_definition_name(
+    &self,
+    def_id: DefinitionId,
+  ) -> String {
+    let def = self.input_defs.get(&def_id);
+
+    match def.owner_namespace {
+      Some(ns_id) => {
+        let symbols = self.symbols.borrow();
+        let mut parts: Vec<String> = self
+          .input_namespaces
+          .full_path(ns_id)
+          .iter()
+          .map(|symbol| Self::escape(symbols.get(symbol)))
+          .collect();
+
+        parts.push(Self::escape(symbols.get(&def.name)));
+        parts.join("_")
+      },
+      None => Self::escape(&self.get_def_name(&def_id)),
     }
   }
 

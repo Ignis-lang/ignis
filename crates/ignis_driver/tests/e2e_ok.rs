@@ -2034,6 +2034,36 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_owned_field_method_borrows_base_without_copying() {
+  e2e_workspace_std_test(
+    "owned_field_method_borrows_base_without_copying",
+    r#"
+import Vector from "std::vector";
+
+record Module {
+  public names: Vector<String>;
+}
+
+function main(): i32 {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("root"));
+
+  let module: Module = Module { names: names };
+
+  let first: u64 = module.names.length();
+  let second: u64 = module.names.length();
+
+  if (first == 1 && second == 1) {
+    return 0;
+  }
+
+  return 1;
+}
+"#,
+  );
+}
+
 // ========================================================================
 // Lang Traits (@implements)
 // ========================================================================
@@ -6159,6 +6189,104 @@ function classify(x: i32): i32 {
 
 function main(): i32 {
     return classify(10);
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_pointer_cast_to_namespaced_record() {
+  e2e_test(
+    "generic_pointer_cast_to_namespaced_record",
+    r#"
+namespace Ast {
+  namespace Item {
+    record Node {
+      id: u32;
+    }
+  }
+}
+
+function allocate<T>(address: u64): *mut T {
+  let raw: *mut u8 = @pointerFromInteger<*mut u8>(address);
+  return raw as *mut T;
+}
+
+function main(): i32 {
+  let pointer: *mut Ast::Item::Node = allocate<Ast::Item::Node>(0);
+  let address: u64 = @integerFromPointer(pointer);
+
+  if (address == 0) {
+    return 0;
+  }
+
+  return 1;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_generic_mangling_distinguishes_namespaced_leaf_types() {
+  e2e_test(
+    "generic_mangling_distinguishes_namespaced_leaf_types",
+    r#"
+namespace Ast {
+  namespace Item {
+    record Node {
+      public value: i32;
+    }
+  }
+
+  namespace Expression {
+    record Node {
+      public value: i32;
+    }
+  }
+}
+
+function identity<T>(value: T): T {
+  return value;
+}
+
+function main(): i32 {
+  let item: Ast::Item::Node = Ast::Item::Node { value: 20 };
+  let expression: Ast::Expression::Node = Ast::Expression::Node { value: 22 };
+
+  let itemResult: Ast::Item::Node = identity<Ast::Item::Node>(item);
+  let expressionResult: Ast::Expression::Node = identity<Ast::Expression::Node>(expression);
+
+  return itemResult.value + expressionResult.value;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_structural_drop_forces_std_generic_drop_for_namespaced_field() {
+  e2e_workspace_std_test(
+    "structural_drop_forces_std_generic_drop_for_namespaced_field",
+    r#"
+import Vector from "std::vector";
+
+namespace Ast {
+  namespace Item {
+    record Node {
+      public value: i32;
+    }
+  }
+}
+
+record Module {
+  public items: Vector<Ast::Item::Node>;
+}
+
+function main(): i32 {
+  let module: Module = Module {
+    items: Vector::new<Ast::Item::Node>(),
+  };
+
+  return 0;
 }
 "#,
   );

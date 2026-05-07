@@ -1280,8 +1280,11 @@ impl<'a> LoweringContext<'a> {
         let base_ty = base_node.type_id;
         let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. });
 
+        let base_ptr_ty = self.types.pointer(base_ty, mutable);
         let base_ptr = if base_is_ptr {
           self.lower_hir_node(base)?
+        } else if let Some(base_ref) = self.lower_reference(base, mutable, base_ptr_ty, span.clone()) {
+          base_ref
         } else if let HIRKind::Dereference(inner) = &base_node.kind.clone() {
           let inner_node = self.hir.get(*inner);
           let inner_ty = inner_node.type_id;
@@ -1297,7 +1300,6 @@ impl<'a> LoweringContext<'a> {
               value: base_val,
             });
 
-            let base_ptr_ty = self.types.pointer(base_ty, mutable);
             let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
             self.fn_builder().emit(Instr::AddrOfLocal {
               dest: base_ptr_temp,
@@ -1316,7 +1318,6 @@ impl<'a> LoweringContext<'a> {
             value: base_val,
           });
 
-          let base_ptr_ty = self.types.pointer(base_ty, mutable);
           let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
           self.fn_builder().emit(Instr::AddrOfLocal {
             dest: base_ptr_temp,
@@ -3303,9 +3304,12 @@ impl<'a> LoweringContext<'a> {
     // Check if base is already a pointer/reference type
     let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. });
 
+    let base_ptr_ty = self.types.pointer(base_ty, false);
     let base_ptr = if base_is_ptr {
       // Base is already a pointer - lower and use directly
       self.lower_hir_node(base)?
+    } else if let Some(base_ref) = self.lower_reference(base, false, base_ptr_ty, span.clone()) {
+      base_ref
     } else if let HIRKind::Dereference(inner) = &base_node.kind.clone() {
       // Base is a dereference — check if the inner expression is a pointer/reference.
       // This pattern occurs with auto-deref: `self.field` where `self: &mut T` becomes
@@ -3328,7 +3332,6 @@ impl<'a> LoweringContext<'a> {
           value: base_val,
         });
 
-        let base_ptr_ty = self.types.pointer(base_ty, false);
         let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
         self.fn_builder().emit(Instr::AddrOfLocal {
           dest: base_ptr_temp,
@@ -3348,7 +3351,6 @@ impl<'a> LoweringContext<'a> {
         value: base_val,
       });
 
-      let base_ptr_ty = self.types.pointer(base_ty, false);
       let base_ptr_temp = self.fn_builder().alloc_temp(base_ptr_ty, span.clone());
       self.fn_builder().emit(Instr::AddrOfLocal {
         dest: base_ptr_temp,

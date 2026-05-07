@@ -674,9 +674,14 @@ pub fn compile_project(
       // Monomorphization: transform generic HIR into concrete HIR
       // Use a temporary borrow for collect_mono_roots that drops before Monomorphizer::run()
       let mono_roots = collect_mono_roots(&semantic.defs, &semantic.symbols.borrow());
-      let mono_output =
-        ignis_analyzer::mono::Monomorphizer::new(&hir, &semantic.defs, &mut types, semantic.symbols.clone())
-          .run(&mono_roots);
+      let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+        &hir,
+        &semantic.defs,
+        &semantic.namespaces,
+        &mut types,
+        semantic.symbols.clone(),
+      )
+      .run(&mono_roots);
 
       trace_dbg!(&config, DebugTrace::Mono, "monomorphization completed");
 
@@ -1985,9 +1990,14 @@ pub fn run_project_tests(
   };
 
   let mut types = output.types.clone();
-  let mono_output =
-    ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
-      .run(&collect_mono_roots_for_std(&output.defs));
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &output.hir,
+    &output.defs,
+    &output.namespaces,
+    &mut types,
+    output.symbols.clone(),
+  )
+  .run(&collect_mono_roots_for_std(&output.defs));
 
   #[cfg(debug_assertions)]
   mono_output.verify_no_generics(&types);
@@ -2424,9 +2434,14 @@ pub fn run_single_file_tests(
   };
 
   let mut types = output.types.clone();
-  let mono_output =
-    ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
-      .run(&collect_test_mono_roots(&plan));
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &output.hir,
+    &output.defs,
+    &output.namespaces,
+    &mut types,
+    output.symbols.clone(),
+  )
+  .run(&collect_test_mono_roots(&plan));
 
   #[cfg(debug_assertions)]
   mono_output.verify_no_generics(&types);
@@ -2887,9 +2902,14 @@ pub fn run_std_tests(
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
   let mut types = output.types.clone();
-  let mono_output =
-    ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
-      .run(&collect_test_mono_roots(&plan));
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &output.hir,
+    &output.defs,
+    &output.namespaces,
+    &mut types,
+    output.symbols.clone(),
+  )
+  .run(&collect_test_mono_roots(&plan));
 
   #[cfg(debug_assertions)]
   mono_output.verify_no_generics(&types);
@@ -3340,9 +3360,14 @@ pub fn build_std(
     let mut types = output.types.clone();
 
     let mono_roots = collect_mono_roots_for_std(&output.defs);
-    let mono_output =
-      ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
-        .run(&mono_roots);
+    let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+      &output.hir,
+      &output.defs,
+      &output.namespaces,
+      &mut types,
+      output.symbols.clone(),
+    )
+    .run(&mono_roots);
 
     #[cfg(debug_assertions)]
     mono_output.verify_no_generics(&types);
@@ -3500,9 +3525,14 @@ pub fn build_std(
     let mut types = output.types.clone();
 
     let mono_roots = collect_mono_roots_for_std(&output.defs);
-    let mono_output =
-      ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
-        .run(&mono_roots);
+    let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+      &output.hir,
+      &output.defs,
+      &output.namespaces,
+      &mut types,
+      output.symbols.clone(),
+    )
+    .run(&mono_roots);
 
     let sym_table = output.symbols.borrow();
 
@@ -3774,9 +3804,14 @@ pub fn check_std(
     let mut types = output.types.clone();
 
     let mono_roots = collect_mono_roots_for_std(&output.defs);
-    let mono_output =
-      ignis_analyzer::mono::Monomorphizer::new(&output.hir, &output.defs, &mut types, output.symbols.clone())
-        .run(&mono_roots);
+    let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+      &output.hir,
+      &output.defs,
+      &output.namespaces,
+      &mut types,
+      output.symbols.clone(),
+    )
+    .run(&mono_roots);
 
     #[cfg(debug_assertions)]
     mono_output.verify_no_generics(&types);
