@@ -1801,8 +1801,17 @@ impl<'a> Analyzer<'a> {
         DefinitionKind::Namespace(ns_def) => {
           let mut current_ns = ns_def.namespace_id;
 
-          for segment in &ns_path[1..] {
-            current_ns = self.namespaces.lookup_child(current_ns, segment)?;
+          for (index, segment) in ns_path[1..].iter().enumerate() {
+            match self.namespaces.lookup_child(current_ns, segment) {
+              Some(child_ns) => current_ns = child_ns,
+              None => {
+                if index != ns_path.len() - 2 {
+                  return None;
+                }
+
+                return self.resolve_type_member_from_namespace(current_ns, *segment, *def_name);
+              },
+            }
           }
 
           return self
@@ -1836,6 +1845,31 @@ impl<'a> Analyzer<'a> {
     }
 
     None
+  }
+
+  fn resolve_type_member_from_namespace(
+    &self,
+    namespace_id: ignis_type::namespace::NamespaceId,
+    type_name: SymbolId,
+    member_name: SymbolId,
+  ) -> Option<ResolvedPath> {
+    let entry = self.namespaces.lookup_def(namespace_id, &type_name)?;
+    let type_def_id = match entry {
+      SymbolEntry::Single(id) => *id,
+      SymbolEntry::Overload(ids) => ids[0],
+    };
+    let type_def = self.defs.get(&type_def_id);
+
+    match &type_def.kind {
+      DefinitionKind::Enum(ed) => ed
+        .variants_by_name
+        .get(&member_name)
+        .map(|tag| ResolvedPath::EnumVariant {
+          enum_def: type_def_id,
+          variant_index: *tag,
+        }),
+      _ => None,
+    }
   }
 
   fn lookup_pattern_binding_def(

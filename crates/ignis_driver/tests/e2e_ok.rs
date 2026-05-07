@@ -6291,3 +6291,62 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_namespaced_match_payload_binding_preserves_helper_call_args() {
+  e2e_workspace_std_test(
+    "namespaced_match_payload_binding_preserves_helper_call_args",
+    r#"
+import Vector from "std::vector";
+import String from "std::string";
+
+namespace Ast {
+  namespace Source {
+    record Span {
+      public start: u32;
+      public end: u32;
+    }
+  }
+
+  namespace Item {
+    record Function {
+      public span: Ast::Source::Span;
+      public names: Vector<String>;
+    }
+
+    enum Payload {
+      Function(Function),
+      Empty,
+    }
+
+    record Node {
+      public payload: Payload;
+    }
+  }
+}
+
+function appendSpan(start: u32, end: u32): i32 {
+  return (start as i32) + (end as i32);
+}
+
+function main(): i32 {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("a"));
+  names.push(String::create("b"));
+
+  let functionItem: Ast::Item::Function = Ast::Item::Function {
+    span: Ast::Source::Span { start: 20, end: 20 },
+    names: names,
+  };
+  let node: Ast::Item::Node = Ast::Item::Node {
+    payload: Ast::Item::Payload::Function(functionItem),
+  };
+
+  return match (node.payload) {
+    Ast::Item::Payload::Function(item) -> appendSpan(item.span.start, item.span.end) + (item.names.length() as i32),
+    Ast::Item::Payload::Empty -> 1,
+  };
+}
+"#,
+  );
+}
