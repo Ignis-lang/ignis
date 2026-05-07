@@ -13,7 +13,7 @@ use ignis_type::{
   file::SourceMap,
   span::Span,
   symbol::SymbolTable,
-  types::{TypeStore, format_type_name},
+  types::{TypeId, TypeStore, format_type_name},
 };
 
 /// Ownership state for a variable.
@@ -100,6 +100,9 @@ pub struct HirOwnershipChecker<'a> {
   /// Pushed on loop entry, popped on loop exit.
   loop_continue_stack: Vec<bool>,
 
+  /// Variables whose storage contains a field moved out by value.
+  drop_suppressed_vars: HashSet<DefinitionId>,
+
   /// Pre-computed summaries: which parameters each function/method drops.
   /// Built by `build_summaries()` before the main analysis pass.
   summaries: HashMap<DefinitionId, FunctionDropSummary>,
@@ -129,6 +132,7 @@ impl<'a> HirOwnershipChecker<'a> {
       next_alias_set: 0,
       reachable: true,
       loop_continue_stack: Vec::new(),
+      drop_suppressed_vars: HashSet::new(),
       summaries: HashMap::new(),
     }
   }
@@ -581,6 +585,7 @@ impl<'a> HirOwnershipChecker<'a> {
     self.next_alias_set = 0;
     self.reachable = true;
     self.loop_continue_stack.clear();
+    self.drop_suppressed_vars.clear();
     self.current_fn = Some(fn_def_id);
 
     // Push function root scope (no block_hir_id)
@@ -1155,7 +1160,18 @@ impl<'a> HirOwnershipChecker<'a> {
   ) {
     self.check_node(scrutinee);
 
-    if let Some(source_def) = self.get_moved_var(scrutinee) {
+    let scrutinee_ty = self.hir.get(scrutinee).type_id;
+    let moves_scrutinee_payload = arms
+      .iter()
+      .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
+
+    if moves_scrutinee_payload {
+      if let Some(source_def) = self.get_moved_var(scrutinee) {
+        self.try_consume(source_def, span.clone());
+      } else if let Some(owner_def) = self.get_moved_field_owner(scrutinee) {
+        self.drop_suppressed_vars.insert(owner_def);
+      }
+    } else if let Some(source_def) = self.get_moved_var(scrutinee) {
       self.try_consume(source_def, span.clone());
     }
 
@@ -1550,7 +1566,7 @@ impl<'a> HirOwnershipChecker<'a> {
       .owned_vars
       .iter()
       .rev()
-      .filter(|def| self.is_valid(def))
+      .filter(|def| self.is_valid(def) && !self.drop_suppressed_vars.contains(def))
       .copied()
       .collect();
 
@@ -1582,7 +1598,7 @@ impl<'a> HirOwnershipChecker<'a> {
     for scope in self.scope_stack[exit_to_scope_idx..].iter().rev() {
       // Within each scope: reverse declaration order
       for def in scope.owned_vars.iter().rev() {
-        if self.is_valid(def) {
+        if self.is_valid(def) && !self.drop_suppressed_vars.contains(def) {
           drops.push(*def);
         }
       }
@@ -1908,6 +1924,90 @@ impl<'a> HirOwnershipChecker<'a> {
           Some(*def_id)
         } else {
           None
+        }
+      },
+      _ => None,
+    }
+  }
+
+  fn get_moved_field_owner(
+    &self,
+    hir_id: HIRId,
+  ) -> Option<DefinitionId> {
+    let node = self.hir.get(hir_id);
+
+    match &node.kind {
+      HIRKind::FieldAccess { base, .. } => self.get_moved_var(*base).or_else(|| self.get_moved_field_owner(*base)),
+      _ => None,
+    }
+  }
+
+  fn pattern_moves_owned_value(
+    &self,
+    value_ty: TypeId,
+    pattern: &ignis_hir::HIRPattern,
+  ) -> bool {
+    match pattern {
+      ignis_hir::HIRPattern::Binding { .. } => {
+        self.types.needs_drop_with_defs(&value_ty, self.defs) && !self.types.is_copy_with_defs(&value_ty, self.defs)
+      },
+      ignis_hir::HIRPattern::Variant {
+        enum_def,
+        variant_tag,
+        args,
+      } => self
+        .variant_payload_types(value_ty, *enum_def, *variant_tag)
+        .map(|payload_types| {
+          args
+            .iter()
+            .zip(payload_types)
+            .any(|(arg_pattern, arg_ty)| self.pattern_moves_owned_value(arg_ty, arg_pattern))
+        })
+        .unwrap_or(false),
+      ignis_hir::HIRPattern::Tuple { elements } => match self.types.get(&value_ty).clone() {
+        ignis_type::types::Type::Tuple(field_types) => elements
+          .iter()
+          .zip(field_types)
+          .any(|(element_pattern, element_ty)| self.pattern_moves_owned_value(element_ty, element_pattern)),
+        _ => false,
+      },
+      ignis_hir::HIRPattern::Or { patterns } => patterns
+        .iter()
+        .any(|nested_pattern| self.pattern_moves_owned_value(value_ty, nested_pattern)),
+      ignis_hir::HIRPattern::Wildcard
+      | ignis_hir::HIRPattern::Literal { .. }
+      | ignis_hir::HIRPattern::Constant { .. } => false,
+    }
+  }
+
+  fn variant_payload_types(
+    &self,
+    value_ty: TypeId,
+    enum_def: DefinitionId,
+    variant_tag: u32,
+  ) -> Option<Vec<TypeId>> {
+    match self.types.get(&value_ty).clone() {
+      ignis_type::types::Type::Enum(def_id) if def_id == enum_def => match &self.defs.get(&enum_def).kind {
+        DefinitionKind::Enum(ed) => ed
+          .variants
+          .get(variant_tag as usize)
+          .map(|variant| variant.payload.clone()),
+        _ => None,
+      },
+      ignis_type::types::Type::Enum(value_def_id) => match &self.defs.get(&value_def_id).kind {
+        DefinitionKind::Enum(ed) => ed
+          .variants
+          .get(variant_tag as usize)
+          .map(|variant| variant.payload.clone()),
+        _ => None,
+      },
+      ignis_type::types::Type::Instance { generic, .. } if generic == enum_def => {
+        match &self.defs.get(&enum_def).kind {
+          DefinitionKind::Enum(ed) => ed
+            .variants
+            .get(variant_tag as usize)
+            .map(|variant| variant.payload.clone()),
+          _ => None,
         }
       },
       _ => None,

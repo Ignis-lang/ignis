@@ -6350,3 +6350,50 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_match_payload_binding_moves_owned_payload_to_helper() {
+  e2e_workspace_std_test(
+    "match_payload_binding_moves_owned_payload_to_helper",
+    r#"
+import Vector from "std::vector";
+import String from "std::string";
+
+record PayloadRecord {
+  public names: Vector<String>;
+}
+
+enum Payload {
+  Empty,
+  Function(PayloadRecord),
+}
+
+record Node {
+  public payload: Payload;
+}
+
+function renderFunctionItem(item: PayloadRecord): i32 {
+  return item.names.length() as i32;
+}
+
+function main(): i32 {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("a"));
+  names.push(String::create("b"));
+
+  let payload: PayloadRecord = PayloadRecord {
+    names: names,
+  };
+
+  let node: Node = Node {
+    payload: Payload::Function(payload),
+  };
+
+  return match (node.payload) {
+    Payload::Function(item) -> renderFunctionItem(item),
+    Payload::Empty -> 0,
+  };
+}
+"#,
+  );
+}
