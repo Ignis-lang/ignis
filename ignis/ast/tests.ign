@@ -1,52 +1,71 @@
 import Test from "std::test";
+import Vector from "std::vector";
 
-import AstStore, AstTag from "@compiler::ast";
-import Id from "@compiler::ids";
+import SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
 
-type AstId = Id<AstTag>;
+@test
+function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut returnTypeSegments: Vector<String> = Vector::new<String>();
+  let mut functionParameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let expression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: SourceSpan::new("fixtures/ast.ign", 0, 2),
+    value: "42",
+  }));
+  let statement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: SourceSpan::new("fixtures/ast.ign", 3, 11),
+    value: Option::SOME(expression),
+  }));
 
-function assertStoredValue(store: &AstStore<u64>, id: AstId, expected: u64): void {
-  match (store.get(id)) {
-    Option::SOME(value) -> Test::assertEq<u64>(*value, expected),
-    Option::NONE -> @panic("missing stored value"),
+  returnTypeSegments.push(String::create("i32"));
+
+  let returnType: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: SourceSpan::new("fixtures/ast.ign", 12, 15),
+    segments: returnTypeSegments,
+  }));
+  let pattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: SourceSpan::new("fixtures/ast.ign", 16, 21),
+    name: "value",
+    annotation: Option::SOME(returnType),
+  }));
+
+  functionParameters.push(pattern);
+
+  let firstRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: SourceSpan::new("fixtures/ast.ign", 22, 40),
+    name: "main",
+    parameters: functionParameters,
+    returnType: Option::SOME(returnType),
+    body: statement,
+  }));
+  let secondRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: SourceSpan::new("fixtures/ast.ign", 41, 64),
+    name: "Support",
+    items: Vector::new<Ast::ItemId>(),
+  }));
+
+  Test::assertEq<u32>(firstRoot.raw(), 0);
+  Test::assertEq<u32>(secondRoot.raw(), 1);
+  Test::assertEq<u32>(expression.raw(), 0);
+  Test::assertEq<u32>(statement.raw(), 0);
+  Test::assertEq<u32>(returnType.raw(), 0);
+  Test::assertEq<u32>(pattern.raw(), 0);
+
+  Test::assertEq<u64>(module.roots.length(), 2);
+  Test::assertEq<u64>(module.items.length(), 2);
+  Test::assertEq<u64>(module.expressions.length(), 1);
+  Test::assertEq<u64>(module.statements.length(), 1);
+  Test::assertEq<u64>(module.types.length(), 1);
+  Test::assertEq<u64>(module.patterns.length(), 1);
+
+  match (module.roots.get(0)) {
+    Option::SOME(value) -> Test::assertEq<u32>(value.raw(), firstRoot.raw()),
+    Option::NONE -> @panic("missing first root"),
   };
-}
 
-@test
-function astStoreAddGetAndLengthStayStable(): void {
-  let mut store: AstStore<u64> = AstStore::init<u64>();
-
-  let first: AstId = store.add(10);
-  let second: AstId = store.add(20);
-
-  Test::assertEq<u32>(first.raw(), 0);
-  Test::assertEq<u32>(second.raw(), 1);
-  Test::assertEq<u64>(store.length(), 2);
-
-  assertStoredValue(&store, first, 10);
-  assertStoredValue(&store, second, 20);
-}
-
-@test
-function astStoreGetMutPreservesExistingIds(): void {
-  let mut store: AstStore<u64> = AstStore::init<u64>();
-  let first: AstId = store.add(10);
-  let second: AstId = store.add(20);
-
-  match (store.getMut(first)) {
-    Option::SOME(value) -> {
-      *value = 42;
-    },
-    Option::NONE -> @panic("missing mutable stored value"),
+  match (module.roots.get(1)) {
+    Option::SOME(value) -> Test::assertEq<u32>(value.raw(), secondRoot.raw()),
+    Option::NONE -> @panic("missing second root"),
   };
-
-  assertStoredValue(&store, first, 42);
-  assertStoredValue(&store, second, 20);
-}
-
-@test
-function astIdDisplayIsStable(): void {
-  let id: AstId = Id::fromRaw<AstTag>(3);
-
-  Test::assertEq<str>(id.display().toStr(), "Id(3)");
 }
