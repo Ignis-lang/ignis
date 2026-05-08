@@ -1706,11 +1706,16 @@ impl<'a> AstChunkFormatter<'a> {
         }
       },
       ASTExpression::Assignment(assignment) => {
+        let value_precedence = match self.nodes.get(&assignment.value) {
+          ASTNode::Expression(ASTExpression::Match(_)) => 0,
+          _ => 1,
+        };
+
         let formatted = format!(
           "{} {} {}",
           self.format_expression_node(assignment.target, 1, 0)?,
           assignment_operator_text(assignment.operator.clone()),
-          self.format_expression_node(assignment.value, 1, 0)?
+          self.format_expression_node(assignment.value, value_precedence, 0)?
         );
 
         if parent_precedence > 1 {
@@ -2219,7 +2224,23 @@ impl<'a> AstChunkFormatter<'a> {
           .collect::<Vec<_>>()
           .join(", ")
       ),
-      IgnisTypeSyntax::Path { span, .. } => self.slice_span(span).trim().to_string(),
+      IgnisTypeSyntax::Path { span, args, .. } => {
+        let base = self.slice_span(span).trim();
+
+        if args.is_empty() {
+          base.to_string()
+        } else {
+          format!(
+            "{}<{}>",
+            base,
+            args
+              .iter()
+              .map(|arg| self.format_type(arg))
+              .collect::<Vec<_>>()
+              .join(", ")
+          )
+        }
+      },
       IgnisTypeSyntax::Union(items) => items
         .iter()
         .map(|item| self.format_type(item))

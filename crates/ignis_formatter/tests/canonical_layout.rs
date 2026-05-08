@@ -440,6 +440,20 @@ fn formats_match_expression_with_multiple_arms() {
 }
 
 #[test]
+fn formats_assignment_match_expression_without_adding_outer_parentheses() {
+  let formatted = format_text(
+    "function closes(next: Option<char>): boolean { let mut result: boolean = false; result = match (next) { Option::SOME(value) -> value == '/', Option::NONE -> false, }; return result; }\n",
+    &FormatOptions::default(),
+  )
+  .expect("assignment match expression should preserve token shape");
+
+  assert!(
+    formatted.contains("result = match (next) {"),
+    "match expression assigned to a variable must not gain outer parentheses:\n{formatted}"
+  );
+}
+
+#[test]
 fn formats_let_else_with_binding_type() {
   let formatted = format_text(
     "function test(input: Option<i32>): i32 { let Some(value) = input else { return 0; }; return value; }\n",

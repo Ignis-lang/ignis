@@ -93,6 +93,19 @@ fn formats_generic_const_value_slices() {
 }
 
 #[test]
+fn formats_qualified_generic_path_types_without_dropping_args() {
+  let source = "record Module { public items: Ast::Store<Ast::ItemTag,Ast::Item::Node>; }\n";
+
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("qualified generic path type arguments should be preserved");
+
+  assert_eq!(
+    formatted,
+    normalize_expected_indent("record Module {\n    public items: Ast::Store<Ast::ItemTag, Ast::Item::Node>;\n}\n")
+  );
+}
+
+#[test]
 fn formats_generic_record_members_with_vector_callable_types_and_record_initializer_values() {
   let source = "record  ReducerBox<T> { public values: T[]; public reducer: (T,&T)->T; }\nfunction  build<T>( values : T[], reducer : (T,&T)->T ) : ReducerBox<T> { return ReducerBox<T> { values: values, reducer: reducer, }; }\n";
 
