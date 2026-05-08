@@ -1,0 +1,630 @@
+import Id from "@compiler::ids";
+
+export namespace Ast {
+  namespace Serializer {
+    function render(module: &Ast::Module): String {
+      let mut output: String = String::new();
+
+      let roots: String = Ast::Serializer::renderRoots(module);
+      let items: String = Ast::Serializer::renderItems(module);
+      let expressions: String = Ast::Serializer::renderExpressions(module);
+      let statements: String = Ast::Serializer::renderStatements(module);
+      let types: String = Ast::Serializer::renderTypes(module);
+      let patterns: String = Ast::Serializer::renderPatterns(module);
+
+      output.pushStr(roots.toStr());
+      output.pushStr("\n");
+      output.pushStr(items.toStr());
+      output.pushStr("\n");
+      output.pushStr(expressions.toStr());
+      output.pushStr("\n");
+      output.pushStr(statements.toStr());
+      output.pushStr("\n");
+      output.pushStr(types.toStr());
+      output.pushStr("\n");
+      output.pushStr(patterns.toStr());
+
+      return output;
+    }
+
+    function renderRoots(module: &Ast::Module): String {
+      let mut output: String = String::create("roots:\n");
+      let mut index: u64 = 0;
+
+      while (index < module.roots.length()) {
+        let root: Ast::ItemId = match (module.roots.get(index)) {
+          Option::SOME(value) -> *value,
+          Option::NONE -> @panic("missing root item"),
+        };
+
+        output.pushStr("  - ");
+        output.pushStr(Ast::Serializer::renderItemId(root).toStr());
+        output.pushStr("\n");
+        index = index + 1;
+      }
+
+      return output;
+    }
+
+    function renderItems(module: &Ast::Module): String {
+      let mut output: String = String::create("items:\n");
+      let mut index: u64 = 0;
+
+      while (index < module.items.length()) {
+        let id: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(index as u32);
+        let node: &Ast::Item::Node = match (module.items.get(id)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing item node"),
+        };
+
+        output.pushStr("  - ");
+        output.pushStr(Ast::Serializer::renderItemId(id).toStr());
+        output.pushStr(" ");
+        output.pushStr(Ast::Serializer::renderItemNode(node).toStr());
+        output.pushStr("\n");
+        index = index + 1;
+      }
+
+      return output;
+    }
+
+    function renderExpressions(module: &Ast::Module): String {
+      let mut output: String = String::create("expressions:\n");
+      let mut index: u64 = 0;
+
+      while (index < module.expressions.length()) {
+        let id: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(index as u32);
+        let node: &Ast::Expression::Node = match (module.expressions.get(id)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing expression node"),
+        };
+
+        output.pushStr("  - ");
+        output.pushStr(Ast::Serializer::renderExpressionId(id).toStr());
+        output.pushStr(" ");
+        output.pushStr(Ast::Serializer::renderExpressionNode(node).toStr());
+        output.pushStr("\n");
+        index = index + 1;
+      }
+
+      return output;
+    }
+
+    function renderStatements(module: &Ast::Module): String {
+      let mut output: String = String::create("statements:\n");
+      let mut index: u64 = 0;
+
+      while (index < module.statements.length()) {
+        let id: Ast::StatementId = Id::fromRaw<Ast::StatementTag>(index as u32);
+        let node: &Ast::Statement::Node = match (module.statements.get(id)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing statement node"),
+        };
+
+        output.pushStr("  - ");
+        output.pushStr(Ast::Serializer::renderStatementId(id).toStr());
+        output.pushStr(" ");
+        output.pushStr(Ast::Serializer::renderStatementNode(node).toStr());
+        output.pushStr("\n");
+        index = index + 1;
+      }
+
+      return output;
+    }
+
+    function renderTypes(module: &Ast::Module): String {
+      let mut output: String = String::create("types:\n");
+      let mut index: u64 = 0;
+
+      while (index < module.types.length()) {
+        let id: Ast::TypeId = Id::fromRaw<Ast::TypeTag>(index as u32);
+        let node: &Ast::Type::Node = match (module.types.get(id)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing type node"),
+        };
+
+        output.pushStr("  - ");
+        output.pushStr(Ast::Serializer::renderTypeId(id).toStr());
+        output.pushStr(" ");
+        output.pushStr(Ast::Serializer::renderTypeNode(node).toStr());
+        output.pushStr("\n");
+        index = index + 1;
+      }
+
+      return output;
+    }
+
+    function renderPatterns(module: &Ast::Module): String {
+      let mut output: String = String::create("patterns:\n");
+      let mut index: u64 = 0;
+
+      while (index < module.patterns.length()) {
+        let id: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(index as u32);
+        let node: &Ast::Pattern::Node = match (module.patterns.get(id)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing pattern node"),
+        };
+
+        output.pushStr("  - ");
+        output.pushStr(Ast::Serializer::renderPatternId(id).toStr());
+        output.pushStr(" ");
+        output.pushStr(Ast::Serializer::renderPatternNode(node).toStr());
+        output.pushStr("\n");
+        index = index + 1;
+      }
+
+      return output;
+    }
+
+    function renderItemNode(node: &Ast::Item::Node): String {
+      if (let Ast::Item::Node::Function(value) = node) {
+        return Ast::Serializer::renderFunctionItem(value);
+      }
+
+      if (let Ast::Item::Node::Namespace(value) = node) {
+        return Ast::Serializer::renderNamespaceItem(value);
+      }
+
+      if (let Ast::Item::Node::Record(_) = node) {
+        return String::create("Record");
+      }
+
+      if (let Ast::Item::Node::Enum(_) = node) {
+        return String::create("Enum");
+      }
+
+      if (let Ast::Item::Node::Import(_) = node) {
+        return String::create("Import");
+      }
+
+      return String::create("TypeAlias");
+    }
+
+    function renderExpressionNode(node: &Ast::Expression::Node): String {
+      if (let Ast::Expression::Node::Literal(value) = node) {
+        return Ast::Serializer::renderLiteralExpression(value);
+      }
+
+      if (let Ast::Expression::Node::Path(value) = node) {
+        return Ast::Serializer::renderPathExpression(value);
+      }
+
+      if (let Ast::Expression::Node::Match(_) = node) {
+        return String::create("Match");
+      }
+
+      if (let Ast::Expression::Node::Call(_) = node) {
+        return String::create("Call");
+      }
+
+      if (let Ast::Expression::Node::Binary(_) = node) {
+        return String::create("Binary");
+      }
+
+      if (let Ast::Expression::Node::Block(_) = node) {
+        return String::create("Block");
+      }
+
+      return String::create("If");
+    }
+
+    function renderStatementNode(node: &Ast::Statement::Node): String {
+      if (let Ast::Statement::Node::Let(value) = node) {
+        return Ast::Serializer::renderLetStatement(value);
+      }
+
+      if (let Ast::Statement::Node::Return(value) = node) {
+        return Ast::Serializer::renderReturnStatement(value);
+      }
+
+      if (let Ast::Statement::Node::Expression(value) = node) {
+        return Ast::Serializer::renderExpressionStatement(value);
+      }
+
+      if (let Ast::Statement::Node::Break(_) = node) {
+        return String::create("Break");
+      }
+
+      if (let Ast::Statement::Node::Continue(_) = node) {
+        return String::create("Continue");
+      }
+
+      return String::create("Defer");
+    }
+
+    function renderTypeNode(node: &Ast::Type::Node): String {
+      if (let Ast::Type::Node::Path(value) = node) {
+        return Ast::Serializer::renderPathType(value);
+      }
+
+      if (let Ast::Type::Node::Pointer(_) = node) {
+        return String::create("Pointer");
+      }
+
+      if (let Ast::Type::Node::Reference(_) = node) {
+        return String::create("Reference");
+      }
+
+      if (let Ast::Type::Node::Tuple(_) = node) {
+        return String::create("Tuple");
+      }
+
+      if (let Ast::Type::Node::Function(_) = node) {
+        return String::create("Function");
+      }
+
+      return String::create("Generic");
+    }
+
+    function renderPatternNode(node: &Ast::Pattern::Node): String {
+      if (let Ast::Pattern::Node::Binding(value) = node) {
+        return Ast::Serializer::renderBindingPattern(value);
+      }
+
+      if (let Ast::Pattern::Node::Wildcard(value) = node) {
+        return Ast::Serializer::renderWildcardPattern(value);
+      }
+
+      if (let Ast::Pattern::Node::Tuple(value) = node) {
+        return Ast::Serializer::renderTuplePattern(value);
+      }
+
+      if (let Ast::Pattern::Node::Or(value) = node) {
+        return Ast::Serializer::renderOrPattern(value);
+      }
+
+      if (let Ast::Pattern::Node::Literal(_) = node) {
+        return String::create("Literal");
+      }
+
+      return String::create("Path");
+    }
+
+    function renderFunctionItem(node: Ast::Item::Function): String {
+      let mut output: String = String::create("Function span=");
+      let mut parametersText: String = String::create("[");
+      let mut parameterIndex: u64 = 0;
+
+      while (parameterIndex < node.parameters.length()) {
+        if (parameterIndex > 0) {
+          parametersText.pushStr(", ");
+        }
+
+        let value: Ast::PatternId = match (node.parameters.get(parameterIndex)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing function parameter pattern"),
+        };
+
+        parametersText.pushStr(Ast::Serializer::renderPatternId(value).toStr());
+        parameterIndex = parameterIndex + 1;
+      }
+
+      parametersText.pushStr("]");
+
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name).toStr());
+      output.pushStr(" parameters=");
+      output.pushStr(parametersText.toStr());
+      output.pushStr(" returnType=");
+      output.pushStr(Ast::Serializer::renderOptionalTypeId(node.returnType).toStr());
+      output.pushStr(" body=");
+      output.pushStr(Ast::Serializer::renderStatementId(node.body).toStr());
+      return output;
+    }
+
+    function renderNamespaceItem(node: Ast::Item::Namespace): String {
+      let mut output: String = String::create("Namespace span=");
+      let mut itemsText: String = String::create("[");
+      let mut itemIndex: u64 = 0;
+
+      while (itemIndex < node.items.length()) {
+        if (itemIndex > 0) {
+          itemsText.pushStr(", ");
+        }
+
+        let value: Ast::ItemId = match (node.items.get(itemIndex)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing namespace item id"),
+        };
+
+        itemsText.pushStr(Ast::Serializer::renderItemId(value).toStr());
+        itemIndex = itemIndex + 1;
+      }
+
+      itemsText.pushStr("]");
+
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name).toStr());
+      output.pushStr(" items=");
+      output.pushStr(itemsText.toStr());
+      return output;
+    }
+
+    function renderLiteralExpression(node: Ast::Expression::Literal): String {
+      let mut output: String = String::create("Literal span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" value=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.value).toStr());
+      return output;
+    }
+
+    function renderPathExpression(node: Ast::Expression::Path): String {
+      let mut output: String = String::create("Path span=");
+      let mut segmentsText: String = String::create("[");
+      let mut segmentIndex: u64 = 0;
+
+      while (segmentIndex < node.segments.length()) {
+        if (segmentIndex > 0) {
+          segmentsText.pushStr(", ");
+        }
+
+        let value: &String = match (node.segments.get(segmentIndex)) {
+          Option::SOME(text) -> text,
+          Option::NONE -> @panic("missing path segment"),
+        };
+
+        segmentsText.pushStr(Ast::Serializer::renderQuoted(value.toStr()).toStr());
+        segmentIndex = segmentIndex + 1;
+      }
+
+      segmentsText.pushStr("]");
+
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" segments=");
+      output.pushStr(segmentsText.toStr());
+      return output;
+    }
+
+    function renderLetStatement(node: Ast::Statement::Let): String {
+      let mut output: String = String::create("Let span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" pattern=");
+      output.pushStr(Ast::Serializer::renderPatternId(node.pattern).toStr());
+      output.pushStr(" annotation=");
+      output.pushStr(Ast::Serializer::renderOptionalTypeId(node.annotation).toStr());
+      output.pushStr(" value=");
+      output.pushStr(Ast::Serializer::renderOptionalExpressionId(node.value).toStr());
+      return output;
+    }
+
+    function renderReturnStatement(node: Ast::Statement::Return): String {
+      let mut output: String = String::create("Return span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" value=");
+      output.pushStr(Ast::Serializer::renderOptionalExpressionId(node.value).toStr());
+      return output;
+    }
+
+    function renderExpressionStatement(node: Ast::Statement::Expression): String {
+      let mut output: String = String::create("Expression span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" expression=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.expression).toStr());
+      return output;
+    }
+
+    function renderPathType(node: Ast::Type::Path): String {
+      let mut output: String = String::create("Path span=");
+      let mut segmentsText: String = String::create("[");
+      let mut segmentIndex: u64 = 0;
+
+      while (segmentIndex < node.segments.length()) {
+        if (segmentIndex > 0) {
+          segmentsText.pushStr(", ");
+        }
+
+        let value: &String = match (node.segments.get(segmentIndex)) {
+          Option::SOME(text) -> text,
+          Option::NONE -> @panic("missing type path segment"),
+        };
+
+        segmentsText.pushStr(Ast::Serializer::renderQuoted(value.toStr()).toStr());
+        segmentIndex = segmentIndex + 1;
+      }
+
+      segmentsText.pushStr("]");
+
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" segments=");
+      output.pushStr(segmentsText.toStr());
+      return output;
+    }
+
+    function renderBindingPattern(node: Ast::Pattern::Binding): String {
+      let mut output: String = String::create("Binding span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name).toStr());
+      output.pushStr(" annotation=");
+      output.pushStr(Ast::Serializer::renderOptionalTypeId(node.annotation).toStr());
+      return output;
+    }
+
+    function renderWildcardPattern(node: Ast::Pattern::Wildcard): String {
+      let mut output: String = String::create("Wildcard span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      return output;
+    }
+
+    function renderTuplePattern(node: Ast::Pattern::Tuple): String {
+      let mut output: String = String::create("Tuple span=");
+      let mut elementsText: String = String::create("[");
+      let mut elementIndex: u64 = 0;
+
+      while (elementIndex < node.elements.length()) {
+        if (elementIndex > 0) {
+          elementsText.pushStr(", ");
+        }
+
+        let value: Ast::PatternId = match (node.elements.get(elementIndex)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing tuple pattern element"),
+        };
+
+        elementsText.pushStr(Ast::Serializer::renderPatternId(value).toStr());
+        elementIndex = elementIndex + 1;
+      }
+
+      elementsText.pushStr("]");
+
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" elements=");
+      output.pushStr(elementsText.toStr());
+      return output;
+    }
+
+    function renderOrPattern(node: Ast::Pattern::Or): String {
+      let mut output: String = String::create("Or span=");
+      let mut alternativesText: String = String::create("[");
+      let mut alternativeIndex: u64 = 0;
+
+      while (alternativeIndex < node.alternatives.length()) {
+        if (alternativeIndex > 0) {
+          alternativesText.pushStr(", ");
+        }
+
+        let value: Ast::PatternId = match (node.alternatives.get(alternativeIndex)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing or-pattern alternative"),
+        };
+
+        alternativesText.pushStr(Ast::Serializer::renderPatternId(value).toStr());
+        alternativeIndex = alternativeIndex + 1;
+      }
+
+      alternativesText.pushStr("]");
+
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" alternatives=");
+      output.pushStr(alternativesText.toStr());
+      return output;
+    }
+
+    function renderOptionalExpressionId(value: Option<Ast::ExpressionId>): String {
+      if (let Option::SOME(id) = value) {
+        return Ast::Serializer::renderExpressionId(id);
+      }
+
+      return String::create("none");
+    }
+
+    function renderOptionalTypeId(value: Option<Ast::TypeId>): String {
+      if (let Option::SOME(id) = value) {
+        return Ast::Serializer::renderTypeId(id);
+      }
+
+      return String::create("none");
+    }
+
+    function renderItemId(id: Ast::ItemId): String {
+      return Ast::Serializer::renderId("item", id.raw());
+    }
+
+    function renderExpressionId(id: Ast::ExpressionId): String {
+      return Ast::Serializer::renderId("expression", id.raw());
+    }
+
+    function renderStatementId(id: Ast::StatementId): String {
+      return Ast::Serializer::renderId("statement", id.raw());
+    }
+
+    function renderTypeId(id: Ast::TypeId): String {
+      return Ast::Serializer::renderId("type", id.raw());
+    }
+
+    function renderPatternId(id: Ast::PatternId): String {
+      return Ast::Serializer::renderId("pattern", id.raw());
+    }
+
+    function renderId(prefix: str, raw: u32): String {
+      let mut output: String = String::create(prefix);
+      output.pushStr("#");
+      output.pushStr(String::create(raw).toStr());
+      return output;
+    }
+
+    function renderSpan(filePath: str, start: u64, end: u64): String {
+      let mut output: String = String::create(filePath);
+      output.pushStr(":");
+      output.pushStr(String::create(start).toStr());
+      output.pushStr("-");
+      output.pushStr(String::create(end).toStr());
+      return output;
+    }
+
+    function renderQuoted(text: str): String {
+      let mut output: String = String::create("\"");
+      output.pushStr(text);
+      output.pushStr("\"");
+      return output;
+    }
+
+    function renderStringsInline(values: &Vector<String>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: &String = match (values.get(index)) {
+          Option::SOME(text) -> text,
+          Option::NONE -> @panic("missing string entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderQuoted(value.toStr()).toStr());
+        index = index + 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
+    function renderItemIdsInline(values: &Vector<Ast::ItemId>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: Ast::ItemId = match (values.get(index)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing item id entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderItemId(value).toStr());
+        index = index + 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
+    function renderPatternIdsInline(values: &Vector<Ast::PatternId>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: Ast::PatternId = match (values.get(index)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing pattern id entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderPatternId(value).toStr());
+        index = index + 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+  }
+}

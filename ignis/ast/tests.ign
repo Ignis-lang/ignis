@@ -4,6 +4,71 @@ import Vector from "std::vector";
 import SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 
+function buildSnapshotModule(rootName: str): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let literalExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 32, 34),
+    value: "42",
+  }));
+
+  let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 15, 20),
+    name: "value",
+    annotation: Option::NONE,
+  }));
+  module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 45, 46),
+  }));
+
+  let letStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 0, 14),
+    pattern: bindingPattern,
+    annotation: Option::NONE,
+    value: Option::SOME(literalExpression),
+  }));
+  module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 25, 31),
+    value: Option::SOME(literalExpression),
+  }));
+
+  module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 47, 66),
+    name: "Helpers",
+    items: Vector::new<Ast::ItemId>(),
+  }));
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 67, 98),
+    name: rootName,
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: letStatement,
+  }));
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 99, 130),
+    name: "Utility",
+    items: Vector::new<Ast::ItemId>(),
+  }));
+
+  module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 131, 138),
+    elements: Vector::new<Ast::PatternId>(),
+  }));
+  module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 139, 148),
+    expression: literalExpression,
+  }));
+  module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
+    span: SourceSpan::new("fixtures/ast_snapshot.ign", 173, 184),
+    alternatives: Vector::new<Ast::PatternId>(),
+  }));
+
+  return module;
+}
+function expectedSnapshotText(): str {
+  return "roots:\n  - item#1\n  - item#2\n\nitems:\n  - item#0 Namespace span=fixtures/ast_snapshot.ign:47-66 name=\"Helpers\" items=[]\n  - item#1 Function span=fixtures/ast_snapshot.ign:67-98 name=\"main\" parameters=[] returnType=none body=statement#0\n  - item#2 Namespace span=fixtures/ast_snapshot.ign:99-130 name=\"Utility\" items=[]\n\nexpressions:\n  - expression#0 Literal span=fixtures/ast_snapshot.ign:32-34 value=\"42\"\n\nstatements:\n  - statement#0 Let span=fixtures/ast_snapshot.ign:0-14 pattern=pattern#0 annotation=none value=expression#0\n  - statement#1 Return span=fixtures/ast_snapshot.ign:25-31 value=expression#0\n  - statement#2 Expression span=fixtures/ast_snapshot.ign:139-148 expression=expression#0\n\ntypes:\n\npatterns:\n  - pattern#0 Binding span=fixtures/ast_snapshot.ign:15-20 name=\"value\" annotation=none\n  - pattern#1 Wildcard span=fixtures/ast_snapshot.ign:45-46\n  - pattern#2 Tuple span=fixtures/ast_snapshot.ign:131-138 elements=[]\n  - pattern#3 Or span=fixtures/ast_snapshot.ign:173-184 alternatives=[]\n";
+}
 @test
 function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
   let mut module: Ast::Module = Ast::Module::init();
@@ -68,4 +133,24 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
     Option::SOME(value) -> Test::assertEq<u32>(value.raw(), secondRoot.raw()),
     Option::NONE -> @panic("missing second root"),
   };
+}
+
+@test
+function astSerializerSnapshotIsDeterministicAndStable(): void {
+  let module: Ast::Module = buildSnapshotModule("main");
+  let snapshot: String = Ast::Serializer::render(&module);
+
+  Test::assertSnapshot("ast-serializer-stable-module", snapshot.toStr());
+}
+
+@test
+function astSerializerRendersEquivalentModulesIdentically(): void {
+  let leftModule: Ast::Module = buildSnapshotModule("main");
+  let rightModule: Ast::Module = buildSnapshotModule("main");
+  let left: String = Ast::Serializer::render(&leftModule);
+  let right: String = Ast::Serializer::render(&rightModule);
+  let expected: str = expectedSnapshotText();
+
+  Test::assertEq<str>(left.toStr(), right.toStr());
+  Test::assertEq<str>(left.toStr(), expected);
 }
