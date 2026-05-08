@@ -9904,6 +9904,7 @@ impl<'a> Analyzer<'a> {
         | ASTExpression::Path(_)
         | ASTExpression::Dereference(_)
         | ASTExpression::VectorAccess(_)
+        | ASTExpression::MemberAccess(_)
     )
   }
 

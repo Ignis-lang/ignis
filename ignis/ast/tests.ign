@@ -4,17 +4,21 @@ import Vector from "std::vector";
 import SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 
-function buildSnapshotModule(rootName: str): Ast::Module {
+function astText(value: str): String {
+  return value.toString();
+}
+
+function buildSnapshotModule(rootName: String): Ast::Module {
   let mut module: Ast::Module = Ast::Module::init();
 
   let literalExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 32, 34),
-    value: Ast::Expression::LiteralValue::Int32(42),
+    value: Ast::Expression::LiteralValue::Int(42),
   }));
 
   let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 15, 20),
-    name: "value",
+    name: astText("value"),
     annotation: Option::NONE,
   }));
   module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
@@ -34,7 +38,7 @@ function buildSnapshotModule(rootName: str): Ast::Module {
 
   module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 47, 66),
-    name: "Helpers",
+    name: astText("Helpers"),
     items: Vector::new<Ast::ItemId>(),
   }));
 
@@ -47,7 +51,7 @@ function buildSnapshotModule(rootName: str): Ast::Module {
   }));
   module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 99, 130),
-    name: "Utility",
+    name: astText("Utility"),
     items: Vector::new<Ast::ItemId>(),
   }));
 
@@ -67,11 +71,11 @@ function buildSnapshotModule(rootName: str): Ast::Module {
   return module;
 }
 function expectedSnapshotText(): str {
-  return "roots:\n  - item#1\n  - item#2\n\nitems:\n  - item#0 Namespace span=fixtures/ast_snapshot.ign:47-66 name=\"Helpers\" items=[]\n  - item#1 Function span=fixtures/ast_snapshot.ign:67-98 name=\"main\" parameters=[] returnType=none body=statement#0\n  - item#2 Namespace span=fixtures/ast_snapshot.ign:99-130 name=\"Utility\" items=[]\n\nexpressions:\n  - expression#0 Literal span=fixtures/ast_snapshot.ign:32-34 value=Int32(42)\n\nstatements:\n  - statement#0 Let span=fixtures/ast_snapshot.ign:0-14 pattern=pattern#0 annotation=none value=expression#0\n  - statement#1 Return span=fixtures/ast_snapshot.ign:25-31 value=expression#0\n  - statement#2 Expression span=fixtures/ast_snapshot.ign:139-148 expression=expression#0\n\ntypes:\n\npatterns:\n  - pattern#0 Binding span=fixtures/ast_snapshot.ign:15-20 name=\"value\" annotation=none\n  - pattern#1 Wildcard span=fixtures/ast_snapshot.ign:45-46\n  - pattern#2 Tuple span=fixtures/ast_snapshot.ign:131-138 elements=[]\n  - pattern#3 Or span=fixtures/ast_snapshot.ign:173-184 alternatives=[]\n";
+  return "roots:\n  - item#1\n  - item#2\n\nitems:\n  - item#0 Namespace span=fixtures/ast_snapshot.ign:47-66 name=\"Helpers\" items=[]\n  - item#1 Function span=fixtures/ast_snapshot.ign:67-98 name=\"main\" parameters=[] returnType=none body=statement#0\n  - item#2 Namespace span=fixtures/ast_snapshot.ign:99-130 name=\"Utility\" items=[]\n\nexpressions:\n  - expression#0 Literal span=fixtures/ast_snapshot.ign:32-34 value=Int(42)\n\nstatements:\n  - statement#0 Let span=fixtures/ast_snapshot.ign:0-14 pattern=pattern#0 annotation=none value=expression#0\n  - statement#1 Return span=fixtures/ast_snapshot.ign:25-31 value=expression#0\n  - statement#2 Expression span=fixtures/ast_snapshot.ign:139-148 expression=expression#0\n\ntypes:\n\npatterns:\n  - pattern#0 Binding span=fixtures/ast_snapshot.ign:15-20 name=\"value\" annotation=none\n  - pattern#1 Wildcard span=fixtures/ast_snapshot.ign:45-46\n  - pattern#2 Tuple span=fixtures/ast_snapshot.ign:131-138 elements=[]\n  - pattern#3 Or span=fixtures/ast_snapshot.ign:173-184 alternatives=[]\n";
 }
 
 function expectedStructuredLiteralAndBinaryText(): str {
-  return "roots:\n\nitems:\n\nexpressions:\n  - expression#0 Literal span=fixtures/ast_literals.ign:0-2 value=Int32(42)\n  - expression#1 Literal span=fixtures/ast_literals.ign:3-7 value=Boolean(true)\n  - expression#2 Binary span=fixtures/ast_literals.ign:0-7 operator=Add left=expression#0 right=expression#1\n\nstatements:\n\ntypes:\n\npatterns:\n";
+  return "roots:\n\nitems:\n\nexpressions:\n  - expression#0 Literal span=fixtures/ast_literals.ign:0-2 value=Int(42)\n  - expression#1 Literal span=fixtures/ast_literals.ign:3-7 value=Boolean(true)\n  - expression#2 Binary span=fixtures/ast_literals.ign:0-7 operator=Add left=expression#0 right=expression#1\n\nstatements:\n\ntypes:\n\npatterns:\n";
 }
 @test
 function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
@@ -80,7 +84,7 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
   let mut functionParameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   let expression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
     span: SourceSpan::new("fixtures/ast.ign", 0, 2),
-    value: Ast::Expression::LiteralValue::Int32(42),
+    value: Ast::Expression::LiteralValue::Int(42),
   }));
   let statement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
     span: SourceSpan::new("fixtures/ast.ign", 3, 11),
@@ -95,7 +99,7 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
   }));
   let pattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
     span: SourceSpan::new("fixtures/ast.ign", 16, 21),
-    name: "value",
+    name: astText("value"),
     annotation: Option::SOME(returnType),
   }));
 
@@ -103,14 +107,14 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
 
   let firstRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
     span: SourceSpan::new("fixtures/ast.ign", 22, 40),
-    name: "main",
+    name: astText("main"),
     parameters: functionParameters,
     returnType: Option::SOME(returnType),
     body: statement,
   }));
   let secondRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
     span: SourceSpan::new("fixtures/ast.ign", 41, 64),
-    name: "Support",
+    name: astText("Support"),
     items: Vector::new<Ast::ItemId>(),
   }));
 
@@ -144,7 +148,7 @@ function astSerializerRendersStructuredLiteralValuesAndBinaryOperators(): void {
   let mut module: Ast::Module = Ast::Module::init();
   let left: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
     span: SourceSpan::new("fixtures/ast_literals.ign", 0, 2),
-    value: Ast::Expression::LiteralValue::Int32(42),
+    value: Ast::Expression::LiteralValue::Int(42),
   }));
   let right: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
     span: SourceSpan::new("fixtures/ast_literals.ign", 3, 7),
@@ -175,16 +179,16 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
 
   let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
     span: SourceSpan::new("fixtures/ast_parity.ign", 0, 5),
-    name: "value",
+    name: astText("value"),
     annotation: Option::NONE,
   }));
   let variableExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
     span: SourceSpan::new("fixtures/ast_parity.ign", 6, 11),
-    name: "value",
+    name: astText("value"),
   }));
   let fallbackExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
     span: SourceSpan::new("fixtures/ast_parity.ign", 12, 22),
-    value: Ast::Expression::LiteralValue::String("fallback"),
+    value: Ast::Expression::LiteralValue::String(String::create("fallback")),
   }));
 
   vectorElements.push(variableExpression);
@@ -198,7 +202,7 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
     span: SourceSpan::new("fixtures/ast_parity.ign", 41, 53),
     object: variableExpression,
     operator: Ast::Expression::AccessOperator::Dot,
-    member: "length",
+    member: astText("length"),
   }));
   let assignmentExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Assignment(Ast::Expression::Assignment {
     span: SourceSpan::new("fixtures/ast_parity.ign", 54, 70),
@@ -258,7 +262,7 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
   match (module.expressions.get(memberAccessExpression)) {
     Option::SOME(Ast::Expression::Node::MemberAccess(value)) -> {
       Test::assertEq<u32>(value.object.raw(), variableExpression.raw());
-      Test::assertEq<str>(value.member, "length");
+      Test::assertEq<str>(value.member.toStr(), "length");
     },
     _ -> @panic("missing member access expression"),
   };
@@ -303,7 +307,7 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
 
 @test
 function astSerializerSnapshotIsDeterministicAndStable(): void {
-  let module: Ast::Module = buildSnapshotModule("main");
+  let module: Ast::Module = buildSnapshotModule(astText("main"));
   let snapshot: String = Ast::Serializer::render(&module);
 
   Test::assertSnapshot("ast-serializer-stable-module", snapshot.toStr());
@@ -311,8 +315,8 @@ function astSerializerSnapshotIsDeterministicAndStable(): void {
 
 @test
 function astSerializerRendersEquivalentModulesIdentically(): void {
-  let leftModule: Ast::Module = buildSnapshotModule("main");
-  let rightModule: Ast::Module = buildSnapshotModule("main");
+  let leftModule: Ast::Module = buildSnapshotModule(astText("main"));
+  let rightModule: Ast::Module = buildSnapshotModule(astText("main"));
   let left: String = Ast::Serializer::render(&leftModule);
   let right: String = Ast::Serializer::render(&rightModule);
   let expected: str = expectedSnapshotText();
