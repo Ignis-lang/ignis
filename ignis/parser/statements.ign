@@ -1,0 +1,364 @@
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Keyword, Punctuation from "@compiler::syntax";
+
+import _ from "./shared";
+import _ from "./expressions";
+import _ from "./patterns";
+import _ from "./recovery";
+import _ from "./types";
+
+export namespace ParserStatements {
+  record ParsedCondition {
+    public id: Ast::ExpressionId;
+    public span: SourceSpan;
+  }
+
+  function parseConditionExpression(parser: &mut ParserShared::State): Option<ParsedCondition> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atKeyword(Keyword::LET)) {
+      let expressionResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+      let Option::SOME(expression) = expressionResult else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(ParsedCondition {
+        id: expression.id,
+        span: expression.span,
+      });
+    }
+
+    let Option::SOME(letKeyword) = parserRef.expectKeyword(Keyword::LET, "expected 'let' in condition") else {
+      return Option::NONE;
+    };
+    let patternResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+    let Option::SOME(pattern) = patternResult else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition") else {
+      return Option::NONE;
+    };
+    let valueResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+    let Option::SOME(value) = valueResult else {
+      return Option::NONE;
+    };
+
+    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, value.span);
+    let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
+      span: span,
+      pattern: pattern,
+      value: value.id,
+    }));
+
+    return Option::SOME(ParsedCondition {
+      id: expressionId,
+      span: span,
+    });
+  }
+
+  function parseLetStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::LET, "expected 'let'") else {
+      return Option::NONE;
+    };
+    let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
+    let patternResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+    let Option::SOME(pattern) = patternResult else {
+      return Option::NONE;
+    };
+
+    let mut annotation: Option<Ast::TypeId> = Option::NONE;
+    let mut value: Option<Ast::ExpressionId> = Option::NONE;
+
+    if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
+      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
+        return Option::NONE;
+      };
+      annotation = Option::SOME(typeId);
+    }
+
+    if (parserRef.consumePunctuation(Punctuation::EQUAL).isSome()) {
+      let Option::SOME(expression) = ParserExpressions::parseExpression(parserRef) else {
+        return Option::NONE;
+      };
+      value = Option::SOME(expression.id);
+
+      if (parserRef.consumeKeyword(Keyword::ELSE).isSome()) {
+        if (mutable) {
+          parserRef.emitDiagnostic(keyword.span, DiagnosticCode::UNEXPECTED_TOKEN, "unexpected let-else form", "mutable let-else is not supported in selfhost parser yet");
+          return Option::NONE;
+        }
+
+        let elseBranchResult: Option<Ast::StatementId> = ParserStatements::parseBlockStatement(parserRef);
+        let Option::SOME(elseBranch) = elseBranchResult else {
+          return Option::NONE;
+        };
+        let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after let-else statement") else {
+          return Option::NONE;
+        };
+        let letValue: Ast::ExpressionId = match (value) {
+          Option::SOME(expressionId) -> expressionId,
+          Option::NONE -> @panic("missing let-else value"),
+        };
+
+        return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
+          span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+          pattern: pattern,
+          annotation: annotation,
+          value: letValue,
+          elseBranch: elseBranch,
+        })));
+      }
+    }
+
+    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after let statement") else {
+      return Option::NONE;
+    };
+    let span: SourceSpan = ParserShared::mergeSpans(keyword.span, semicolon.span);
+
+    if (mutable) {
+      return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Variable(Ast::Statement::Variable {
+        span: span,
+        mutable: true,
+        pattern: pattern,
+        annotation: annotation,
+        value: value,
+      })));
+    }
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+      span: span,
+      pattern: pattern,
+      annotation: annotation,
+      value: value,
+    })));
+  }
+
+  function parseReturnStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::RETURN, "expected 'return'") else {
+      return Option::NONE;
+    };
+
+    let mut value: Option<Ast::ExpressionId> = Option::NONE;
+
+    if (!parserRef.atPunctuation(Punctuation::SEMICOLON)) {
+      let Option::SOME(expression) = ParserExpressions::parseExpression(parserRef) else {
+        return Option::NONE;
+      };
+
+      value = Option::SOME(expression.id);
+    }
+
+    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after return statement") else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+      span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+      value: value,
+    })));
+  }
+
+  function parseBreakStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::BREAK, "expected 'break'") else {
+      return Option::NONE;
+    };
+    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after break statement") else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Break(Ast::Statement::Break {
+      span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+      value: Option::NONE,
+    })));
+  }
+
+  function parseContinueStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::CONTINUE, "expected 'continue'") else {
+      return Option::NONE;
+    };
+    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after continue statement") else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Continue(Ast::Statement::Continue {
+      span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+    })));
+  }
+
+  function parseIfStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::IF, "expected 'if'") else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'if'") else {
+      return Option::NONE;
+    };
+    let conditionResult: Option<ParsedCondition> = ParserStatements::parseConditionExpression(parserRef);
+    let Option::SOME(condition) = conditionResult else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after if condition") else {
+      return Option::NONE;
+    };
+    let thenBranchResult: Option<Ast::StatementId> = ParserStatements::parseBlockStatement(parserRef);
+    let Option::SOME(thenBranch) = thenBranchResult else {
+      return Option::NONE;
+    };
+
+    let mut elseBranch: Option<Ast::StatementId> = Option::NONE;
+    let mut endSpan: SourceSpan = match (parserRef.module.statements.get(thenBranch)) {
+      Option::SOME(node) -> Ast::Serializer::statementSpan(node),
+      Option::NONE -> keyword.span,
+    };
+
+    if (parserRef.consumeKeyword(Keyword::ELSE).isSome()) {
+      let mut elseStatementResult: Option<Ast::StatementId> = Option::NONE;
+
+      if (parserRef.atKeyword(Keyword::IF)) {
+        elseStatementResult = ParserStatements::parseIfStatement(parserRef);
+      } else {
+        elseStatementResult = ParserStatements::parseBlockStatement(parserRef);
+      }
+
+      let Option::SOME(elseStatement) = elseStatementResult else {
+        return Option::NONE;
+      };
+      elseBranch = Option::SOME(elseStatement);
+      endSpan = match (parserRef.module.statements.get(elseStatement)) {
+        Option::SOME(node) -> Ast::Serializer::statementSpan(node),
+        Option::NONE -> endSpan,
+      };
+    }
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::If(Ast::Statement::If {
+      span: ParserShared::mergeSpans(keyword.span, endSpan),
+      condition: condition.id,
+      thenBranch: thenBranch,
+      elseBranch: elseBranch,
+    })));
+  }
+
+  function parseWhileStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::WHILE, "expected 'while'") else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'while'") else {
+      return Option::NONE;
+    };
+    let conditionResult: Option<ParsedCondition> = ParserStatements::parseConditionExpression(parserRef);
+    let Option::SOME(condition) = conditionResult else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after while condition") else {
+      return Option::NONE;
+    };
+    let bodyResult: Option<Ast::StatementId> = ParserStatements::parseBlockStatement(parserRef);
+    let Option::SOME(body) = bodyResult else {
+      return Option::NONE;
+    };
+    let endSpan: SourceSpan = match (parserRef.module.statements.get(body)) {
+      Option::SOME(node) -> Ast::Serializer::statementSpan(node),
+      Option::NONE -> keyword.span,
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::While(Ast::Statement::While {
+      span: ParserShared::mergeSpans(keyword.span, endSpan),
+      condition: condition.id,
+      body: body,
+    })));
+  }
+
+  function parseExpressionStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(expression) = ParserExpressions::parseExpression(parserRef) else {
+      return Option::NONE;
+    };
+    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after expression statement") else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+      span: ParserShared::mergeSpans(expression.span, semicolon.span),
+      expression: expression.id,
+    })));
+  }
+
+  function parseStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    parserRef.skipTrivia();
+
+    if (parserRef.atKeyword(Keyword::LET)) {
+      return ParserStatements::parseLetStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::IF)) {
+      return ParserStatements::parseIfStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::WHILE)) {
+      return ParserStatements::parseWhileStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::RETURN)) {
+      return ParserStatements::parseReturnStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::BREAK)) {
+      return ParserStatements::parseBreakStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::CONTINUE)) {
+      return ParserStatements::parseContinueStatement(parserRef);
+    }
+
+    if (parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
+      return ParserStatements::parseBlockStatement(parserRef);
+    }
+
+    return ParserStatements::parseExpressionStatement(parserRef);
+  }
+
+  function parseBlockStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(openBrace) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' to start block") else {
+      return Option::NONE;
+    };
+    let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+
+    while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      let Option::SOME(statementId) = ParserStatements::parseStatement(parserRef) else {
+        ParserRecovery::synchronizeBlockStatement(parserRef);
+        continue;
+      };
+
+      statements.push(statementId);
+    }
+
+    if (parserRef.atEof()) {
+      parserRef.emitDiagnostic(openBrace.span, DiagnosticCode::EXPECTED_DELIMITER, "unterminated block", "block must close before end of file");
+      return Option::NONE;
+    }
+
+    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after block") else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+      span: ParserShared::mergeSpans(openBrace.span, closeBrace.span),
+      statements: ParserExpressions::copyStatementIds(&statements),
+      tail: Option::NONE,
+    })));
+  }
+}

@@ -20,6 +20,7 @@ function buildSnapshotModule(rootName: String): Ast::Module {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 15, 20),
     name: astText("value"),
     annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
   }));
   module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 45, 46),
@@ -40,6 +41,7 @@ function buildSnapshotModule(rootName: String): Ast::Module {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 47, 66),
     name: astText("Helpers"),
     items: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
   }));
 
   module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
@@ -48,11 +50,13 @@ function buildSnapshotModule(rootName: String): Ast::Module {
     parameters: Vector::new<Ast::PatternId>(),
     returnType: Option::NONE,
     body: letStatement,
+    metadata: Ast::emptyMetadata(),
   }));
   module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 99, 130),
     name: astText("Utility"),
     items: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
   }));
 
   module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
@@ -76,6 +80,92 @@ function expectedSnapshotText(): str {
 
 function expectedStructuredLiteralAndBinaryText(): str {
   return "roots:\n\nitems:\n\nexpressions:\n  - expression#0 Literal span=fixtures/ast_literals.ign:0-2 value=Int(42)\n  - expression#1 Literal span=fixtures/ast_literals.ign:3-7 value=Boolean(true)\n  - expression#2 Binary span=fixtures/ast_literals.ign:0-7 operator=Add left=expression#0 right=expression#1\n\nstatements:\n\ntypes:\n\npatterns:\n";
+}
+
+@test
+function astSerializerRendersMetadataAndRecordMethods(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut fieldModifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  let mut methodModifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
+  let mut fieldTypeSegments: Vector<String> = Vector::new<String>();
+  let mut recordFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut recordMethods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+
+  fieldModifiers.push(Ast::Modifier::Public);
+  methodModifiers.push(Ast::Modifier::Public);
+  methodModifiers.push(Ast::Modifier::Static);
+  attributes.push(Ast::Attribute {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 7),
+    name: astText("packed"),
+    arguments: Vector::new<String>(),
+  });
+  fieldTypeSegments.push(astText("i32"));
+
+  let fieldType: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 23, 26),
+    segments: fieldTypeSegments,
+  }));
+  let fieldPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 14, 26),
+    name: astText("value"),
+    annotation: Option::SOME(fieldType),
+    metadata: Ast::Metadata {
+      attributes: Vector::new<Ast::Attribute>(),
+      modifiers: fieldModifiers,
+    },
+  }));
+  let methodBody: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 60, 62),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+  let methodItem: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 34, 62),
+    name: astText("init"),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: methodBody,
+    metadata: Ast::Metadata {
+      attributes: Vector::new<Ast::Attribute>(),
+      modifiers: methodModifiers,
+    },
+  }));
+
+  recordMethods.push(methodItem);
+  recordFields.push(fieldPattern);
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 62),
+    name: astText("Packet"),
+    fields: recordFields,
+    methods: recordMethods,
+    metadata: Ast::Metadata {
+      attributes: attributes,
+      modifiers: Vector::new<Ast::Modifier>(),
+    },
+  }));
+
+  let rendered: String = Ast::Serializer::render(&module);
+  let expectedItemMetadata: String = String::create("metadata=attrs[@packed()] modifiers[]");
+  let expectedMethods: String = String::create("methods=[item#0]");
+  let expectedMethodMetadata: String = String::create("metadata=attrs[] modifiers[public, static]");
+  let expectedBindingMetadata: String = String::create("metadata=attrs[] modifiers[public]");
+
+  if (!rendered.contains(&expectedItemMetadata)) {
+    @panic("expected serializer to render item metadata");
+  }
+
+  if (!rendered.contains(&expectedMethods)) {
+    @panic("expected serializer to render record methods");
+  }
+
+  if (!rendered.contains(&expectedMethodMetadata)) {
+    @panic("expected serializer to render method modifiers");
+  }
+
+  if (!rendered.contains(&expectedBindingMetadata)) {
+    @panic("expected serializer to render binding modifiers");
+  }
 }
 @test
 function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
@@ -101,6 +191,7 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
     span: SourceSpan::new("fixtures/ast.ign", 16, 21),
     name: astText("value"),
     annotation: Option::SOME(returnType),
+    metadata: Ast::emptyMetadata(),
   }));
 
   functionParameters.push(pattern);
@@ -111,11 +202,13 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
     parameters: functionParameters,
     returnType: Option::SOME(returnType),
     body: statement,
+    metadata: Ast::emptyMetadata(),
   }));
   let secondRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
     span: SourceSpan::new("fixtures/ast.ign", 41, 64),
     name: astText("Support"),
     items: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
   }));
 
   Test::assertEq<u32>(firstRoot.raw(), 0);
@@ -181,6 +274,7 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
     span: SourceSpan::new("fixtures/ast_parity.ign", 0, 5),
     name: astText("value"),
     annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
   }));
   let variableExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
     span: SourceSpan::new("fixtures/ast_parity.ign", 6, 11),
@@ -241,6 +335,7 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
   let importItem: Ast::ItemId = module.addItem(Ast::Item::Node::Import(Ast::Item::Import {
     span: SourceSpan::new("fixtures/ast_parity.ign", 181, 194),
     path: importPath,
+    metadata: Ast::emptyMetadata(),
   }));
   let itemStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Item(Ast::Statement::Item {
     span: SourceSpan::new("fixtures/ast_parity.ign", 181, 194),

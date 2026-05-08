@@ -1,0 +1,2323 @@
+import Fs from "std::fs";
+import Test from "std::test";
+
+import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Parser from "@compiler::parser";
+
+function readFixture(path: str): String {
+  return match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("missing parser fixture"),
+  };
+}
+
+function expectType(module: &Ast::Module, id: Ast::TypeId): &Ast::Type::Node {
+  return match (module.types.get(id)) {
+    Option::SOME(node) -> node,
+    Option::NONE -> @panic("missing parsed type"),
+  };
+}
+
+function expectStatement(module: &Ast::Module, id: Ast::StatementId): &Ast::Statement::Node {
+  return match (module.statements.get(id)) {
+    Option::SOME(node) -> node,
+    Option::NONE -> @panic("missing parsed statement"),
+  };
+}
+
+function expectExpression(module: &Ast::Module, id: Ast::ExpressionId): &Ast::Expression::Node {
+  return match (module.expressions.get(id)) {
+    Option::SOME(node) -> node,
+    Option::NONE -> @panic("missing parsed expression"),
+  };
+}
+
+function expectPattern(module: &Ast::Module, id: Ast::PatternId): &Ast::Pattern::Node {
+  return match (module.patterns.get(id)) {
+    Option::SOME(node) -> node,
+    Option::NONE -> @panic("missing parsed pattern"),
+  };
+}
+
+function expectItem(module: &Ast::Module, id: Ast::ItemId): &Ast::Item::Node {
+  return match (module.items.get(id)) {
+    Option::SOME(node) -> node,
+    Option::NONE -> @panic("missing parsed item"),
+  };
+}
+
+@test
+function parserParsesTypeAliasAndFunctionFoundation(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_foundation.ign",
+    "type Handler = (i32, Vec<Vec<str>>) -> Result<i32, Error>; function main(value: &mut Vec<Vec<str>>): Handler {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  match (module.roots.get(0)) {
+    Option::SOME(itemId) -> {
+      match (module.items.get(*itemId)) {
+        Option::SOME(Ast::Item::Node::TypeAlias(alias)) -> Test::assertEq<str>(alias.name.toStr(), "Handler"),
+        _ -> @panic("expected type alias root"),
+      };
+    },
+    Option::NONE -> @panic("missing first parser root"),
+  };
+
+  match (module.roots.get(1)) {
+    Option::SOME(itemId) -> {
+      match (module.items.get(*itemId)) {
+        Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+          Test::assertEq<str>(functionItem.name.toStr(), "main");
+          Test::assertEq<u64>(functionItem.parameters.length(), 1);
+
+          let parameterId: Ast::PatternId = match (functionItem.parameters.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing function parameter"),
+          };
+
+          match (module.patterns.get(parameterId)) {
+            Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
+              Test::assertEq<str>(binding.name.toStr(), "value");
+
+              let parameterType: Ast::TypeId = match (binding.annotation) {
+                Option::SOME(typeId) -> typeId,
+                Option::NONE -> @panic("missing function parameter type"),
+              };
+
+              match (expectType(&module, parameterType)) {
+                Ast::Type::Node::Reference(referenceType) -> Test::assertEq<boolean>(referenceType.mutable, true),
+                _ -> @panic("expected reference parameter type"),
+              };
+            },
+            _ -> @panic("expected binding parameter pattern"),
+          };
+        },
+        _ -> @panic("expected function root"),
+      };
+    },
+    Option::NONE -> @panic("missing second parser root"),
+  };
+}
+
+@test
+function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_record_types.ign",
+    "record Buffer { bytes: u8[4]; view: u8[]; handler: (i32, Vec<Vec<str>>) -> Result<Vec<str>, Error>; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let rootId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record root"),
+  };
+
+  match (module.items.get(rootId)) {
+    Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
+      Test::assertEq<str>(recordItem.name.toStr(), "Buffer");
+      Test::assertEq<u64>(recordItem.fields.length(), 3);
+
+      let firstField: Ast::PatternId = match (recordItem.fields.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing first record field"),
+      };
+      let secondField: Ast::PatternId = match (recordItem.fields.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing second record field"),
+      };
+      let thirdField: Ast::PatternId = match (recordItem.fields.get(2)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing third record field"),
+      };
+
+      match (module.patterns.get(firstField)) {
+        Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
+          let typeId: Ast::TypeId = match (binding.annotation) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing fixed array field type"),
+          };
+
+          match (expectType(&module, typeId)) {
+            Ast::Type::Node::FixedArray(arrayType) -> Test::assertEq<u64>(arrayType.size, 4),
+            _ -> @panic("expected fixed array type"),
+          };
+        },
+        _ -> @panic("expected binding field pattern"),
+      };
+
+      match (module.patterns.get(secondField)) {
+        Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
+          let typeId: Ast::TypeId = match (binding.annotation) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing slice field type"),
+          };
+
+          match (expectType(&module, typeId)) {
+            Ast::Type::Node::Slice(_) -> {},
+            _ -> @panic("expected slice type"),
+          };
+        },
+        _ -> @panic("expected binding slice field pattern"),
+      };
+
+      match (module.patterns.get(thirdField)) {
+        Option::SOME(Ast::Pattern::Node::Binding(binding)) -> {
+          let typeId: Ast::TypeId = match (binding.annotation) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing handler field type"),
+          };
+
+          match (expectType(&module, typeId)) {
+            Ast::Type::Node::Function(functionType) -> Test::assertEq<u64>(functionType.parameters.length(), 2),
+            _ -> @panic("expected function type"),
+          };
+        },
+        _ -> @panic("expected binding function field pattern"),
+      };
+    },
+    _ -> @panic("expected record root item"),
+  };
+}
+
+@test
+function parserRecoversToNextTopLevelItemAfterMalformedTypeAlias(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_recovery.ign",
+    "type Broken = ; function recovered(): i32 {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() == 0) {
+    @panic("expected malformed trait recovery to emit diagnostics");
+  }
+
+  if (module.roots.length() != 1) {
+    @panic("expected one recovered root after malformed trait");
+  }
+
+  let rootId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing recovered function root"),
+  };
+
+  match (module.items.get(rootId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> Test::assertEq<str>(functionItem.name.toStr(), "recovered"),
+    _ -> @panic("expected recovered function item"),
+  };
+}
+
+@test
+function parserParsesRealFileShapeWithImportAndReturnLiteral(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_real_file.ign",
+    "import _ from \"@compiler::ast::tests\"; function main(): i32 { return 0; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  let importId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing import root"),
+  };
+
+  match (module.items.get(importId)) {
+    Option::SOME(Ast::Item::Node::Import(importItem)) -> {
+      Test::assertEq<u64>(importItem.path.length(), 1);
+
+      let importPath: &String = match (importItem.path.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing import path"),
+      };
+
+      Test::assertEq<str>(importPath.toStr(), "@compiler::ast::tests");
+    },
+    _ -> @panic("expected import root item"),
+  };
+
+  let functionId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      Test::assertEq<str>(functionItem.name.toStr(), "main");
+
+      let returnTypeId: Ast::TypeId = match (functionItem.returnType) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing function return type"),
+      };
+
+      match (expectType(&module, returnTypeId)) {
+        Ast::Type::Node::Path(pathType) -> {
+          Test::assertEq<u64>(pathType.segments.length(), 1);
+
+          let segment: &String = match (pathType.segments.get(0)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing return type segment"),
+          };
+
+          Test::assertEq<str>(segment.toStr(), "i32");
+        },
+        _ -> @panic("expected path return type"),
+      };
+
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 1);
+
+          let returnStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing return statement"),
+          };
+
+          match (expectStatement(&module, returnStatementId)) {
+            Ast::Statement::Node::Return(returnStatement) -> {
+              let returnValueId: Ast::ExpressionId = match (returnStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing return value"),
+              };
+
+              match (expectExpression(&module, returnValueId)) {
+                Ast::Expression::Node::Literal(literal) -> {
+                  match (literal.value) {
+                    Ast::Expression::LiteralValue::UInt(number) -> Test::assertEq<u64>(number, 0),
+                    _ -> @panic("expected unsigned integer literal"),
+                  };
+                },
+                _ -> @panic("expected literal return expression"),
+              };
+            },
+            _ -> @panic("expected return statement in function body"),
+          };
+        },
+        _ -> @panic("expected function body block"),
+      };
+    },
+    _ -> @panic("expected function root item"),
+  };
+}
+
+@test
+function parserParsesRealIgnisMainFileWithoutDiagnostics(): void {
+  let sourceText: String = readFixture("ignis/main.ign");
+  let source: SourceFile = SourceFile::create("ignis/main.ign", sourceText.toStr());
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 14);
+}
+
+@test
+function parserParsesBareReturnStatementInsideBlock(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_return_void.ign",
+    "function main(): void { return; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing void function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 1);
+
+          let returnStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing bare return statement"),
+          };
+
+          match (expectStatement(&module, returnStatementId)) {
+            Ast::Statement::Node::Return(returnStatement) -> Test::assertEq<boolean>(returnStatement.value.isNone(), true),
+            _ -> @panic("expected bare return statement"),
+          };
+        },
+        _ -> @panic("expected function body block"),
+      };
+    },
+    _ -> @panic("expected function root item"),
+  };
+}
+
+@test
+function parserParsesReturnCallExpressionInsideBlock(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_return_call.ign",
+    "function main(): i32 { return foo(); }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 1);
+
+          let returnStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing return statement"),
+          };
+
+          match (expectStatement(&module, returnStatementId)) {
+            Ast::Statement::Node::Return(returnStatement) -> {
+              let returnValueId: Ast::ExpressionId = match (returnStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing call return value"),
+              };
+
+              match (expectExpression(&module, returnValueId)) {
+                Ast::Expression::Node::Call(call) -> {
+                  Test::assertEq<u64>(call.arguments.length(), 0);
+
+                  match (expectExpression(&module, call.callee)) {
+                    Ast::Expression::Node::Path(path) -> {
+                      Test::assertEq<u64>(path.segments.length(), 1);
+
+                      let segment: &String = match (path.segments.get(0)) {
+                        Option::SOME(value) -> value,
+                        Option::NONE -> @panic("missing call callee segment"),
+                      };
+
+                      Test::assertEq<str>(segment.toStr(), "foo");
+                    },
+                    _ -> @panic("expected path callee for call expression"),
+                  };
+                },
+                _ -> @panic("expected call return expression"),
+              };
+            },
+            _ -> @panic("expected return statement"),
+          };
+        },
+        _ -> @panic("expected block function body"),
+      };
+    },
+    _ -> @panic("expected function root item"),
+  };
+}
+
+@test
+function parserParsesSimplePathExpressionStatementInsideBlock(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_path_statement.ign",
+    "function main(): void { foo; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let expressionLine: String = String::create("Expression span=");
+  let pathLine: String = String::create("Path span=");
+  let fooSegment: String = String::create("segments=[\"foo\"]");
+
+  Test::assert(rendered.contains(&expressionLine));
+  Test::assert(rendered.contains(&pathLine));
+  Test::assert(rendered.contains(&fooSegment));
+}
+
+@test
+function parserRecoversInsideBlockToLaterReturnStatement(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_block_recovery.ign",
+    "function main(): i32 { foo return 7; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let returnLine: String = String::create("Return span=");
+  let literalLine: String = String::create("Literal span=");
+  let recoveredValue: String = String::create("UInt(7)");
+
+  Test::assert(rendered.contains(&returnLine));
+  Test::assert(rendered.contains(&literalLine));
+  Test::assert(rendered.contains(&recoveredValue));
+}
+
+@test
+function parserParsesGroupedAndBinaryPrecedenceExpressions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_grouped_binary.ign",
+    "function main(): void { (1 + 2) * 3; 1 + 2 * 3 == 7; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing grouped precedence function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 2);
+
+          let firstStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing grouped expression statement"),
+          };
+
+          match (expectStatement(&module, firstStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Binary(binaryExpression) -> {
+                  Test::assert(binaryExpression.operator == Ast::Expression::BinaryOperator::Multiply);
+
+                  match (expectExpression(&module, binaryExpression.left)) {
+                    Ast::Expression::Node::Grouped(grouped) -> {
+                      match (expectExpression(&module, grouped.expression)) {
+                        Ast::Expression::Node::Binary(innerBinary) -> Test::assert(innerBinary.operator == Ast::Expression::BinaryOperator::Add),
+                        _ -> @panic("expected grouped inner add expression"),
+                      };
+                    },
+                    _ -> @panic("expected grouped left operand"),
+                  };
+                },
+                _ -> @panic("expected multiply expression statement"),
+              };
+            },
+            _ -> @panic("expected grouped expression statement node"),
+          };
+
+          let secondStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing precedence equality statement"),
+          };
+
+          match (expectStatement(&module, secondStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Binary(binaryExpression) -> {
+                  Test::assert(binaryExpression.operator == Ast::Expression::BinaryOperator::Equal);
+
+                  match (expectExpression(&module, binaryExpression.left)) {
+                    Ast::Expression::Node::Binary(addBinary) -> {
+                      Test::assert(addBinary.operator == Ast::Expression::BinaryOperator::Add);
+
+                      match (expectExpression(&module, addBinary.right)) {
+                        Ast::Expression::Node::Binary(multiplyBinary) -> Test::assert(multiplyBinary.operator == Ast::Expression::BinaryOperator::Multiply),
+                        _ -> @panic("expected multiply on add right-hand side"),
+                      };
+                    },
+                    _ -> @panic("expected add expression on equality left-hand side"),
+                  };
+                },
+                _ -> @panic("expected equality expression statement"),
+              };
+            },
+            _ -> @panic("expected precedence expression statement node"),
+          };
+        },
+        _ -> @panic("expected block function body for grouped precedence test"),
+      };
+    },
+    _ -> @panic("expected grouped precedence function root"),
+  };
+}
+
+@test
+function parserParsesUnaryCallAndMemberExpressions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_unary_member.ign",
+    "function main(): void { -1; !flag; foo.bar(1, 2); }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing unary member function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 3);
+
+          let firstStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing unary negate statement"),
+          };
+          let secondStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing unary not statement"),
+          };
+          let thirdStatementId: Ast::StatementId = match (block.statements.get(2)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing member call statement"),
+          };
+
+          match (expectStatement(&module, firstStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Unary(unary) -> Test::assert(unary.operator == Ast::Expression::UnaryOperator::Negate),
+                _ -> @panic("expected unary negate expression"),
+              };
+            },
+            _ -> @panic("expected unary negate statement"),
+          };
+
+          match (expectStatement(&module, secondStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Unary(unary) -> Test::assert(unary.operator == Ast::Expression::UnaryOperator::Not),
+                _ -> @panic("expected unary not expression"),
+              };
+            },
+            _ -> @panic("expected unary not statement"),
+          };
+
+          match (expectStatement(&module, thirdStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Call(call) -> {
+                  Test::assertEq<u64>(call.arguments.length(), 2);
+
+                  match (expectExpression(&module, call.callee)) {
+                    Ast::Expression::Node::MemberAccess(access) -> {
+                      Test::assert(access.operator == Ast::Expression::AccessOperator::Dot);
+                      Test::assertEq<str>(access.member.toStr(), "bar");
+                    },
+                    _ -> @panic("expected member access call callee"),
+                  };
+                },
+                _ -> @panic("expected call expression"),
+              };
+            },
+            _ -> @panic("expected call expression statement"),
+          };
+        },
+        _ -> @panic("expected block function body for unary member test"),
+      };
+    },
+    _ -> @panic("expected unary member function root"),
+  };
+}
+
+@test
+function parserParsesLetIfWhileBreakAndContinueStatements(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_control_flow.ign",
+    "function main(): void { let value: i32 = 1; let mut counter = 2; if (value) { while (counter) { break; } } else { continue; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing control flow function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 3);
+
+          let firstStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing let statement"),
+          };
+          let secondStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing mutable variable statement"),
+          };
+          let thirdStatementId: Ast::StatementId = match (block.statements.get(2)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing if statement"),
+          };
+
+          match (expectStatement(&module, firstStatementId)) {
+            Ast::Statement::Node::Let(letStatement) -> Test::assertEq<boolean>(letStatement.value.isSome(), true),
+            _ -> @panic("expected let statement node"),
+          };
+
+          match (expectStatement(&module, secondStatementId)) {
+            Ast::Statement::Node::Variable(variableStatement) -> {
+              Test::assertEq<boolean>(variableStatement.mutable, true);
+              Test::assertEq<boolean>(variableStatement.value.isSome(), true);
+            },
+            _ -> @panic("expected mutable variable statement node"),
+          };
+
+          match (expectStatement(&module, thirdStatementId)) {
+            Ast::Statement::Node::If(ifStatement) -> {
+              Test::assertEq<boolean>(ifStatement.elseBranch.isSome(), true);
+
+              match (expectStatement(&module, ifStatement.thenBranch)) {
+                Ast::Statement::Node::Block(thenBlock) -> {
+                  Test::assertEq<u64>(thenBlock.statements.length(), 1);
+
+                  let whileStatementId: Ast::StatementId = match (thenBlock.statements.get(0)) {
+                    Option::SOME(value) -> *value,
+                    Option::NONE -> @panic("missing while statement in then branch"),
+                  };
+
+                  match (expectStatement(&module, whileStatementId)) {
+                    Ast::Statement::Node::While(whileStatement) -> {
+                      match (expectStatement(&module, whileStatement.body)) {
+                        Ast::Statement::Node::Block(whileBlock) -> {
+                          Test::assertEq<u64>(whileBlock.statements.length(), 1);
+
+                          let breakStatementId: Ast::StatementId = match (whileBlock.statements.get(0)) {
+                            Option::SOME(value) -> *value,
+                            Option::NONE -> @panic("missing break statement"),
+                          };
+
+                          match (expectStatement(&module, breakStatementId)) {
+                            Ast::Statement::Node::Break(_) -> {},
+                            _ -> @panic("expected break statement node"),
+                          };
+                        },
+                        _ -> @panic("expected while body block"),
+                      };
+                    },
+                    _ -> @panic("expected while statement node"),
+                  };
+                },
+                _ -> @panic("expected then branch block"),
+              };
+
+              let elseBranchId: Ast::StatementId = match (ifStatement.elseBranch) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing else branch"),
+              };
+
+              match (expectStatement(&module, elseBranchId)) {
+                Ast::Statement::Node::Block(elseBlock) -> {
+                  Test::assertEq<u64>(elseBlock.statements.length(), 1);
+
+                  let continueStatementId: Ast::StatementId = match (elseBlock.statements.get(0)) {
+                    Option::SOME(value) -> *value,
+                    Option::NONE -> @panic("missing continue statement"),
+                  };
+
+                  match (expectStatement(&module, continueStatementId)) {
+                    Ast::Statement::Node::Continue(_) -> {},
+                    _ -> @panic("expected continue statement node"),
+                  };
+                },
+                _ -> @panic("expected else branch block"),
+              };
+            },
+            _ -> @panic("expected if statement node"),
+          };
+        },
+        _ -> @panic("expected block function body for control flow test"),
+      };
+    },
+    _ -> @panic("expected control flow function root"),
+  };
+}
+
+@test
+function parserParsesIfLetTupleLiteralAndWildcardPatterns(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_if_let_patterns.ign",
+    "function main(): void { if (let (0, value, _) = pair) {} }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing if-let patterns function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 1);
+
+          let ifStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing if-let statement"),
+          };
+
+          match (expectStatement(&module, ifStatementId)) {
+            Ast::Statement::Node::If(ifStatement) -> {
+              match (expectExpression(&module, ifStatement.condition)) {
+                Ast::Expression::Node::LetCondition(condition) -> {
+                  match (expectPattern(&module, condition.pattern)) {
+                    Ast::Pattern::Node::Tuple(tuplePattern) -> {
+                      Test::assertEq<u64>(tuplePattern.elements.length(), 3);
+
+                      let firstElement: Ast::PatternId = match (tuplePattern.elements.get(0)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing tuple literal pattern"),
+                      };
+                      let secondElement: Ast::PatternId = match (tuplePattern.elements.get(1)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing tuple binding pattern"),
+                      };
+                      let thirdElement: Ast::PatternId = match (tuplePattern.elements.get(2)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing tuple wildcard pattern"),
+                      };
+
+                      match (expectPattern(&module, firstElement)) {
+                        Ast::Pattern::Node::Literal(_) -> {},
+                        _ -> @panic("expected literal tuple pattern element"),
+                      };
+
+                      match (expectPattern(&module, secondElement)) {
+                        Ast::Pattern::Node::Binding(binding) -> Test::assertEq<str>(binding.name.toStr(), "value"),
+                        _ -> @panic("expected binding tuple pattern element"),
+                      };
+
+                      match (expectPattern(&module, thirdElement)) {
+                        Ast::Pattern::Node::Wildcard(_) -> {},
+                        _ -> @panic("expected wildcard tuple pattern element"),
+                      };
+                    },
+                    _ -> @panic("expected tuple pattern for if-let condition"),
+                  };
+                },
+                _ -> @panic("expected let-condition if expression"),
+              };
+            },
+            _ -> @panic("expected if statement node"),
+          };
+        },
+        _ -> @panic("expected block function body for if-let pattern test"),
+      };
+    },
+    _ -> @panic("expected if-let patterns function root"),
+  };
+}
+
+@test
+function parserParsesWhileLetPathPatterns(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_while_let_patterns.ign",
+    "function main(): void { while (let Some(item) = stream) { break; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing while-let path patterns function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 1);
+
+          let whileStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing while-let statement"),
+          };
+
+          match (expectStatement(&module, whileStatementId)) {
+            Ast::Statement::Node::While(whileStatement) -> {
+              match (expectExpression(&module, whileStatement.condition)) {
+                Ast::Expression::Node::LetCondition(condition) -> {
+                  match (expectPattern(&module, condition.pattern)) {
+                    Ast::Pattern::Node::Path(pathPattern) -> {
+                      Test::assertEq<u64>(pathPattern.segments.length(), 1);
+                      Test::assertEq<u64>(pathPattern.arguments.length(), 1);
+
+                      let payloadPatternId: Ast::PatternId = match (pathPattern.arguments.get(0)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing while-let payload pattern"),
+                      };
+
+                      match (expectPattern(&module, payloadPatternId)) {
+                        Ast::Pattern::Node::Binding(binding) -> Test::assertEq<str>(binding.name.toStr(), "item"),
+                        _ -> @panic("expected binding payload pattern"),
+                      };
+                    },
+                    _ -> @panic("expected path pattern for while-let condition"),
+                  };
+                },
+                _ -> @panic("expected let-condition while expression"),
+              };
+            },
+            _ -> @panic("expected while statement node"),
+          };
+        },
+        _ -> @panic("expected block function body for while-let test"),
+      };
+    },
+    _ -> @panic("expected while-let path patterns function root"),
+  };
+}
+
+@test
+function parserParsesLetElsePathPatterns(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_let_else_patterns.ign",
+    "function main(): void { let Some(result) = input else { return; }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing let-else path patterns function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 1);
+
+          let letElseStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing let-else statement"),
+          };
+
+          match (expectStatement(&module, letElseStatementId)) {
+            Ast::Statement::Node::LetElse(letElseStatement) -> {
+              match (expectPattern(&module, letElseStatement.pattern)) {
+                Ast::Pattern::Node::Path(pathPattern) -> {
+                  Test::assertEq<u64>(pathPattern.segments.length(), 1);
+                  Test::assertEq<u64>(pathPattern.arguments.length(), 1);
+                },
+                _ -> @panic("expected path pattern for let-else statement"),
+              };
+
+              match (expectStatement(&module, letElseStatement.elseBranch)) {
+                Ast::Statement::Node::Block(elseBlock) -> Test::assertEq<u64>(elseBlock.statements.length(), 1),
+                _ -> @panic("expected let-else block branch"),
+              };
+            },
+            _ -> @panic("expected let-else statement node"),
+          };
+        },
+        _ -> @panic("expected block function body for let-else test"),
+      };
+    },
+    _ -> @panic("expected let-else path patterns function root"),
+  };
+}
+
+@test
+function parserParsesIfLetOrPatterns(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_if_let_or_pattern.ign",
+    "function main(): void { if (let 0 | 1 = value) {} }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing if-let or-pattern function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let ifStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing if-let or-pattern statement"),
+          };
+
+          match (expectStatement(&module, ifStatementId)) {
+            Ast::Statement::Node::If(ifStatement) -> {
+              match (expectExpression(&module, ifStatement.condition)) {
+                Ast::Expression::Node::LetCondition(condition) -> {
+                  match (expectPattern(&module, condition.pattern)) {
+                    Ast::Pattern::Node::Or(orPattern) -> {
+                      Test::assertEq<u64>(orPattern.alternatives.length(), 2);
+
+                      let leftId: Ast::PatternId = match (orPattern.alternatives.get(0)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing left or-pattern alternative"),
+                      };
+                      let rightId: Ast::PatternId = match (orPattern.alternatives.get(1)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing right or-pattern alternative"),
+                      };
+
+                      match (expectPattern(&module, leftId)) {
+                        Ast::Pattern::Node::Literal(_) -> {},
+                        _ -> @panic("expected left literal or-pattern alternative"),
+                      };
+
+                      match (expectPattern(&module, rightId)) {
+                        Ast::Pattern::Node::Literal(_) -> {},
+                        _ -> @panic("expected right literal or-pattern alternative"),
+                      };
+                    },
+                    _ -> @panic("expected or-pattern in let-condition"),
+                  };
+                },
+                _ -> @panic("expected let-condition expression for or-pattern test"),
+              };
+            },
+            _ -> @panic("expected if statement node for or-pattern test"),
+          };
+        },
+        _ -> @panic("expected block function body for or-pattern test"),
+      };
+    },
+    _ -> @panic("expected function root for or-pattern test"),
+  };
+}
+
+@test
+function parserParsesBuiltinCallsAndIndexExpressions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_builtin_index.ign",
+    "function main(): void { @read<u8>(buffer[1 + 2]); }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing builtin/index function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing builtin expression statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::BuiltinCall(builtinCall) -> {
+                  Test::assertEq<str>(builtinCall.name.toStr(), "read");
+                  Test::assertEq<u64>(builtinCall.typeArguments.length(), 1);
+                  Test::assertEq<u64>(builtinCall.arguments.length(), 1);
+
+                  let argumentId: Ast::ExpressionId = match (builtinCall.arguments.get(0)) {
+                    Option::SOME(value) -> *value,
+                    Option::NONE -> @panic("missing builtin call argument"),
+                  };
+
+                  match (expectExpression(&module, argumentId)) {
+                    Ast::Expression::Node::VectorAccess(access) -> {
+                      match (expectExpression(&module, access.vector)) {
+                        Ast::Expression::Node::Path(path) -> Test::assertEq<u64>(path.segments.length(), 1),
+                        _ -> @panic("expected path vector expression"),
+                      };
+
+                      match (expectExpression(&module, access.index)) {
+                        Ast::Expression::Node::Binary(binaryExpression) -> {
+                          match (expectExpression(&module, binaryExpression.left)) {
+                            Ast::Expression::Node::Literal(_) -> {},
+                            _ -> @panic("expected literal left operand in vector index expression"),
+                          };
+
+                          match (expectExpression(&module, binaryExpression.right)) {
+                            Ast::Expression::Node::Literal(_) -> {},
+                            _ -> @panic("expected literal right operand in vector index expression"),
+                          };
+                        },
+                        _ -> @panic("expected binary index expression"),
+                      };
+                    },
+                    _ -> @panic("expected vector access builtin argument"),
+                  };
+                },
+                _ -> @panic("expected builtin call expression"),
+              };
+            },
+            _ -> @panic("expected expression statement for builtin/index test"),
+          };
+        },
+        _ -> @panic("expected block function body for builtin/index test"),
+      };
+    },
+    _ -> @panic("expected function root for builtin/index test"),
+  };
+}
+
+@test
+function parserParsesWhileLetQualifiedOrPathPatterns(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_while_let_or_paths.ign",
+    "function main(): void { while (let Some(left) | None = stream) { break; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing while-let or-path function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let whileStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing while-let or-path statement"),
+          };
+
+          match (expectStatement(&module, whileStatementId)) {
+            Ast::Statement::Node::While(whileStatement) -> {
+              match (expectExpression(&module, whileStatement.condition)) {
+                Ast::Expression::Node::LetCondition(condition) -> {
+                  match (expectPattern(&module, condition.pattern)) {
+                    Ast::Pattern::Node::Or(orPattern) -> Test::assertEq<u64>(orPattern.alternatives.length(), 2),
+                    _ -> @panic("expected while-let or-pattern"),
+                  };
+                },
+                _ -> @panic("expected while let-condition expression"),
+              };
+            },
+            _ -> @panic("expected while statement node for or-path test"),
+          };
+        },
+        _ -> @panic("expected block function body for or-path test"),
+      };
+    },
+    _ -> @panic("expected function root for or-path test"),
+  };
+}
+
+@test
+function parserParsesBuiltinCallWithoutTypeArgumentsAndChainedIndexExpressions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_builtin_index_chain.ign",
+    "function main(): void { @panic(\"boom\"); matrix[1][2]; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing builtin/index-chain function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 2);
+
+          let firstStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing builtin statement without type arguments"),
+          };
+          let secondStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing chained index statement"),
+          };
+
+          match (expectStatement(&module, firstStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::BuiltinCall(builtinCall) -> {
+                  Test::assertEq<str>(builtinCall.name.toStr(), "panic");
+                  Test::assertEq<u64>(builtinCall.typeArguments.length(), 0);
+                  Test::assertEq<u64>(builtinCall.arguments.length(), 1);
+                },
+                _ -> @panic("expected builtin call without type arguments"),
+              };
+            },
+            _ -> @panic("expected builtin expression statement without type arguments"),
+          };
+
+          match (expectStatement(&module, secondStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::VectorAccess(outerAccess) -> {
+                  match (expectExpression(&module, outerAccess.vector)) {
+                    Ast::Expression::Node::VectorAccess(_) -> {},
+                    _ -> @panic("expected nested vector access for chained index expression"),
+                  };
+                },
+                _ -> @panic("expected chained vector access expression"),
+              };
+            },
+            _ -> @panic("expected chained index expression statement"),
+          };
+        },
+        _ -> @panic("expected block function body for builtin/index-chain test"),
+      };
+    },
+    _ -> @panic("expected function root for builtin/index-chain test"),
+  };
+}
+
+@test
+function parserParsesRecordInitAndVectorLiteralExpressions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_record_init_vector.ign",
+    "function main(): void { Point { x: 1, y: 2 }; [1, 2, 3]; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record-init/vector function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 2);
+
+          let recordStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing record init statement"),
+          };
+          let vectorStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing vector literal statement"),
+          };
+          match (expectStatement(&module, recordStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::RecordInit(recordInit) -> {
+                  Test::assertEq<u64>(recordInit.fields.length(), 2);
+                  Test::assertEq<u64>(recordInit.typeArguments.length(), 0);
+
+                  match (expectExpression(&module, recordInit.path)) {
+                    Ast::Expression::Node::Path(path) -> Test::assertEq<str>(match (path.segments.get(0)) {
+                      Option::SOME(value) -> value.toStr(),
+                      Option::NONE -> @panic("missing record init path segment"),
+                    }, "Point"),
+                    _ -> @panic("expected path for record init type name"),
+                  };
+                },
+                _ -> @panic("expected record init expression"),
+              };
+            },
+            _ -> @panic("expected record init expression statement"),
+          };
+
+          match (expectStatement(&module, vectorStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Vector(vectorLiteral) -> Test::assertEq<u64>(vectorLiteral.elements.length(), 3),
+                _ -> @panic("expected vector literal expression"),
+              };
+            },
+            _ -> @panic("expected vector literal expression statement"),
+          };
+
+        },
+        _ -> @panic("expected block function body for record init/vector test"),
+      };
+    },
+    _ -> @panic("expected function root for record init/vector test"),
+  };
+}
+
+@test
+function parserParsesMatchExpressionBasics(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_match_basic.ign",
+    "function main(): void { match (value) { 0 -> 1, _ -> 2, }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing match function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing match statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Match(matchExpression) -> {
+                  Test::assertEq<u64>(matchExpression.arms.length(), 2);
+
+                  let firstArm: &Ast::Expression::MatchArm = match (matchExpression.arms.get(0)) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing first match arm"),
+                  };
+                  let secondArm: &Ast::Expression::MatchArm = match (matchExpression.arms.get(1)) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing second match arm"),
+                  };
+
+                  match (expectPattern(&module, firstArm.pattern)) {
+                    Ast::Pattern::Node::Literal(_) -> {},
+                    _ -> @panic("expected literal first match arm pattern"),
+                  };
+
+                  match (expectPattern(&module, secondArm.pattern)) {
+                    Ast::Pattern::Node::Wildcard(_) -> {},
+                    _ -> @panic("expected wildcard second match arm pattern"),
+                  };
+
+                  match (expectExpression(&module, firstArm.body)) {
+                    Ast::Expression::Node::Literal(_) -> {},
+                    _ -> @panic("expected literal first match arm body"),
+                  };
+                },
+                _ -> @panic("expected match expression"),
+              };
+            },
+            _ -> @panic("expected match expression statement"),
+          };
+        },
+        _ -> @panic("expected block function body for match test"),
+      };
+    },
+    _ -> @panic("expected function root for match test"),
+  };
+}
+
+@test
+function parserParsesMatchExpressionPathPatternsWithDestructure(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_match_path_pattern.ign",
+    "function main(): void { match (value) { Option::SOME(item) -> item, Option::NONE -> fallback }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing match-path function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing match-path statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Match(matchExpression) -> {
+                  let firstArm: &Ast::Expression::MatchArm = match (matchExpression.arms.get(0)) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing first path-pattern match arm"),
+                  };
+
+                  match (expectPattern(&module, firstArm.pattern)) {
+                    Ast::Pattern::Node::Path(pathPattern) -> Test::assertEq<u64>(pathPattern.arguments.length(), 1),
+                    _ -> @panic("expected path destructure match pattern"),
+                  };
+                },
+                _ -> @panic("expected match expression with path pattern"),
+              };
+            },
+            _ -> @panic("expected expression statement for path-pattern match"),
+          };
+        },
+        _ -> @panic("expected block body for path-pattern match function"),
+      };
+    },
+    _ -> @panic("expected function root for path-pattern match test"),
+  };
+}
+
+@test
+function parserParsesLambdaExpressionBodies(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_lambda_basic.ign",
+    "function main(): void { let square = (x: i32): i32 -> x * x; let tick = (): void -> { counter = counter + 1; return; }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing lambda function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 2);
+
+          let firstStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing first lambda statement"),
+          };
+          let secondStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing second lambda statement"),
+          };
+
+          match (expectStatement(&module, firstStatementId)) {
+            Ast::Statement::Node::Let(letStatement) -> {
+              let lambdaId: Ast::ExpressionId = match (letStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing expression-body lambda"),
+              };
+
+              match (expectExpression(&module, lambdaId)) {
+                Ast::Expression::Node::Lambda(lambdaExpression) -> {
+                  Test::assertEq<u64>(lambdaExpression.parameters.length(), 1);
+
+                  match (expectStatement(&module, lambdaExpression.body)) {
+                    Ast::Statement::Node::Block(bodyBlock) -> {
+                      Test::assertEq<u64>(bodyBlock.statements.length(), 0);
+                      Test::assertEq<boolean>(bodyBlock.tail.isSome(), true);
+                    },
+                    _ -> @panic("expected lambda expression body block wrapper"),
+                  };
+                },
+                _ -> @panic("expected expression-body lambda expression"),
+              };
+            },
+            _ -> @panic("expected let statement for expression-body lambda"),
+          };
+
+          match (expectStatement(&module, secondStatementId)) {
+            Ast::Statement::Node::Let(letStatement) -> {
+              let lambdaId: Ast::ExpressionId = match (letStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing block-body lambda"),
+              };
+
+              match (expectExpression(&module, lambdaId)) {
+                Ast::Expression::Node::Lambda(lambdaExpression) -> {
+                  Test::assertEq<u64>(lambdaExpression.parameters.length(), 0);
+
+                  match (expectStatement(&module, lambdaExpression.body)) {
+                    Ast::Statement::Node::Block(bodyBlock) -> {
+                      Test::assertEq<u64>(bodyBlock.statements.length(), 2);
+                      Test::assertEq<boolean>(bodyBlock.tail.isSome(), false);
+
+                      let assignmentStatementId: Ast::StatementId = match (bodyBlock.statements.get(0)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing assignment statement inside lambda block body"),
+                      };
+                      let returnStatementId: Ast::StatementId = match (bodyBlock.statements.get(1)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing return statement inside lambda block body"),
+                      };
+
+                      match (expectStatement(&module, assignmentStatementId)) {
+                        Ast::Statement::Node::Expression(expressionStatement) -> {
+                          match (expectExpression(&module, expressionStatement.expression)) {
+                            Ast::Expression::Node::Assignment(_) -> {},
+                            _ -> @panic("expected assignment expression inside lambda block body"),
+                          };
+                        },
+                        _ -> @panic("expected assignment statement inside lambda block body"),
+                      };
+
+                      match (expectStatement(&module, returnStatementId)) {
+                        Ast::Statement::Node::Return(returnStatement) -> Test::assertEq<boolean>(returnStatement.value.isNone(), true),
+                        _ -> @panic("expected bare return statement inside lambda block body"),
+                      };
+                    },
+                    _ -> @panic("expected block-body lambda statement body"),
+                  };
+                },
+                _ -> @panic("expected block-body lambda expression"),
+              };
+            },
+            _ -> @panic("expected let statement for block-body lambda"),
+          };
+        },
+        _ -> @panic("expected block function body for lambda test"),
+      };
+    },
+    _ -> @panic("expected function root for lambda test"),
+  };
+}
+
+@test
+function parserParsesTraitDeclarationsAndExportedTraits(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_declarations.ign",
+    "trait Hash { hash(&self, hasher: &mut Hasher): void; } export trait Eq { equals(&self, other: &Self): boolean; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+  let exportId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing exported trait root"),
+  };
+
+  match (module.items.get(traitId)) {
+    Option::SOME(Ast::Item::Node::Trait(traitItem)) -> {
+      Test::assertEq<str>(traitItem.name.toStr(), "Hash");
+      Test::assertEq<u64>(traitItem.methods.length(), 1);
+
+      let methodId: Ast::ItemId = match (traitItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing trait method"),
+      };
+
+      match (module.items.get(methodId)) {
+        Option::SOME(Ast::Item::Node::Function(methodItem)) -> {
+          Test::assertEq<str>(methodItem.name.toStr(), "hash");
+          Test::assertEq<u64>(methodItem.parameters.length(), 2);
+
+          let receiverId: Ast::PatternId = match (methodItem.parameters.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing trait receiver parameter"),
+          };
+          let argumentId: Ast::PatternId = match (methodItem.parameters.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing trait method argument"),
+          };
+
+          match (expectPattern(&module, receiverId)) {
+            Ast::Pattern::Node::Binding(binding) -> {
+              Test::assertEq<str>(binding.name.toStr(), "self");
+
+              let receiverTypeId: Ast::TypeId = match (binding.annotation) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing synthesized receiver type"),
+              };
+
+              match (expectType(&module, receiverTypeId)) {
+                Ast::Type::Node::Reference(referenceType) -> Test::assertEq<boolean>(referenceType.mutable, false),
+                _ -> @panic("expected reference receiver type"),
+              };
+            },
+            _ -> @panic("expected binding receiver pattern"),
+          };
+
+          match (expectPattern(&module, argumentId)) {
+            Ast::Pattern::Node::Binding(binding) -> {
+              Test::assertEq<str>(binding.name.toStr(), "hasher");
+
+              let argumentTypeId: Ast::TypeId = match (binding.annotation) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing trait method argument type"),
+              };
+
+              match (expectType(&module, argumentTypeId)) {
+                Ast::Type::Node::Reference(referenceType) -> Test::assertEq<boolean>(referenceType.mutable, true),
+                _ -> @panic("expected mutable reference type for trait method argument"),
+              };
+            },
+            _ -> @panic("expected binding trait method argument pattern"),
+          };
+        },
+        _ -> @panic("expected function item inside trait methods"),
+      };
+    },
+    _ -> @panic("expected trait root item"),
+  };
+
+  match (module.items.get(exportId)) {
+    Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
+      match (module.items.get(exportItem.item)) {
+        Option::SOME(Ast::Item::Node::Trait(traitItem)) -> {
+          Test::assertEq<str>(traitItem.name.toStr(), "Eq");
+          Test::assertEq<u64>(traitItem.methods.length(), 1);
+        },
+        _ -> @panic("expected trait inside export wrapper"),
+      };
+    },
+    _ -> @panic("expected export root for exported trait"),
+  };
+}
+
+@test
+function parserRecoversToNextTopLevelItemAfterMalformedTraitDeclaration(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_recovery.ign",
+    "trait Broken { equals(&self): ; } function recovered(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() == 0) {
+    @panic("expected malformed trait recovery to emit diagnostics");
+  }
+
+  if (module.roots.length() != 1) {
+    @panic("expected one recovered root after malformed trait");
+  }
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing recovered function root after malformed trait"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(_)) -> {},
+    _ -> @panic("expected recovered function item after malformed trait"),
+  };
+}
+
+@test
+function parserRecoversAfterMalformedArgumentAndVectorLists(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_malformed_lists.ign",
+    "function first(): i32 { foo(1, ; return 7; } function second(): i32 { [1, ; return 8; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 2);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  let firstFunctionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing first malformed-list function root"),
+  };
+  let secondFunctionId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing second malformed-list function root"),
+  };
+
+  match (module.items.get(firstFunctionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing recovered return after malformed call"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Return(_) -> {},
+            _ -> @panic("expected recovered return after malformed call"),
+          };
+        },
+        _ -> @panic("expected block body for first malformed-list function"),
+      };
+    },
+    _ -> @panic("expected first malformed-list function root"),
+  };
+
+  match (module.items.get(secondFunctionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing recovered return after malformed vector"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Return(_) -> {},
+            _ -> @panic("expected recovered return after malformed vector"),
+          };
+        },
+        _ -> @panic("expected block body for second malformed-list function"),
+      };
+    },
+    _ -> @panic("expected second malformed-list function root"),
+  };
+}
+
+@test
+function parserParsesAttributedRecordConstExternAndEnumDeclarations(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_declaration_surface.ign",
+    "@packed record Packet { value: i32; } const MAX_SIZE: i32 = 7; extern libc { @externName(\"puts\") function puts(message: str): i32; const EOF: i32; } enum Option { Some, None, }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() != 0) {
+    @panic("expected attributed declaration source to parse without diagnostics");
+  }
+
+  if (module.roots.length() != 4) {
+    @panic("expected attributed declaration source to produce four roots");
+  }
+
+  let recordId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing attributed record root"),
+  };
+  let constantId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing constant root"),
+  };
+  let externId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing extern root"),
+  };
+  let enumId: Ast::ItemId = match (module.roots.get(3)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing enum root"),
+  };
+
+  match (module.items.get(recordId)) {
+    Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
+      if (!recordItem.name.equals("Packet")) {
+        @panic("expected attributed record to keep its declaration name");
+      }
+    },
+    _ -> @panic("expected attributed record root item"),
+  };
+
+  match (module.items.get(constantId)) {
+    Option::SOME(Ast::Item::Node::Constant(constantItem)) -> {
+      if (!constantItem.name.equals("MAX_SIZE")) {
+        @panic("expected constant declaration name to be preserved");
+      }
+
+      let constantTypeId: Ast::TypeId = match (constantItem.annotation) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing constant annotation"),
+      };
+
+      match (expectType(&module, constantTypeId)) {
+        Ast::Type::Node::Path(pathType) -> {
+          if (pathType.segments.length() != 1) {
+            @panic("expected constant type path to contain one segment");
+          }
+        },
+        _ -> @panic("expected constant path type"),
+      };
+
+      match (expectExpression(&module, constantItem.value)) {
+        Ast::Expression::Node::Literal(literal) -> {
+          match (literal.value) {
+            Ast::Expression::LiteralValue::UInt(number) -> {
+              if (number != 7) {
+                @panic("expected constant literal value to be 7");
+              }
+            },
+            _ -> @panic("expected unsigned integer constant literal"),
+          };
+        },
+        _ -> @panic("expected literal constant value"),
+      };
+    },
+    _ -> @panic("expected constant root item"),
+  };
+
+  match (module.items.get(externId)) {
+    Option::SOME(Ast::Item::Node::Extern(_)) -> {},
+    _ -> @panic("expected extern root item"),
+  };
+
+  match (module.items.get(enumId)) {
+    Option::SOME(Ast::Item::Node::Enum(enumItem)) -> {
+      if (!enumItem.name.equals("Option")) {
+        @panic("expected enum declaration name to be preserved");
+      }
+
+      if (enumItem.variants.length() != 2) {
+        @panic("expected enum declaration to produce two variants");
+      }
+
+      let firstVariantId: Ast::PatternId = match (enumItem.variants.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing first enum variant"),
+      };
+      let secondVariantId: Ast::PatternId = match (enumItem.variants.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing second enum variant"),
+      };
+
+      match (expectPattern(&module, firstVariantId)) {
+        Ast::Pattern::Node::Path(pathPattern) -> Test::assertEq<str>(match (pathPattern.segments.get(0)) {
+          Option::SOME(value) -> value.toStr(),
+          Option::NONE -> @panic("missing first enum variant segment"),
+        }, "Some"),
+        _ -> @panic("expected first enum path variant"),
+      };
+
+      match (expectPattern(&module, secondVariantId)) {
+        Ast::Pattern::Node::Path(pathPattern) -> Test::assertEq<str>(match (pathPattern.segments.get(0)) {
+          Option::SOME(value) -> value.toStr(),
+          Option::NONE -> @panic("missing second enum variant segment"),
+        }, "None"),
+        _ -> @panic("expected second enum path variant"),
+      };
+    },
+    _ -> @panic("expected enum root item"),
+  };
+}
+
+@test
+function parserRetainsStructuredMetadataOnDeclarations(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_metadata_surface.ign",
+    "@packed record Packet { public value: i32; } export inline function add(a: i32, b: i32): i32 { return a + b; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  let recordId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing attributed record root"),
+  };
+  let exportId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing export root"),
+  };
+
+  match (expectItem(&module, recordId)) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.metadata.attributes.length(), 1);
+
+      let attribute: &Ast::Attribute = match (recordItem.metadata.attributes.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing record attribute"),
+      };
+
+      Test::assertEq<str>(attribute.name.toStr(), "packed");
+      Test::assertEq<u64>(recordItem.fields.length(), 1);
+
+      let fieldId: Ast::PatternId = match (recordItem.fields.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing record field"),
+      };
+
+      match (expectPattern(&module, fieldId)) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          Test::assertEq<u64>(binding.metadata.modifiers.length(), 1);
+
+          let modifier: &Ast::Modifier = match (binding.metadata.modifiers.get(0)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing field modifier"),
+          };
+
+          match (modifier) {
+            Ast::Modifier::Public -> {},
+            _ -> @panic("expected public field modifier"),
+          };
+        },
+        _ -> @panic("expected binding field pattern"),
+      };
+    },
+    _ -> @panic("expected record item"),
+  };
+
+  match (expectItem(&module, exportId)) {
+    Ast::Item::Node::Export(exportItem) -> {
+      match (expectItem(&module, exportItem.item)) {
+        Ast::Item::Node::Function(functionItem) -> {
+          Test::assertEq<u64>(functionItem.metadata.modifiers.length(), 1);
+
+          let modifier: &Ast::Modifier = match (functionItem.metadata.modifiers.get(0)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing exported function modifier"),
+          };
+
+          match (modifier) {
+            Ast::Modifier::Inline -> {},
+            _ -> @panic("expected inline modifier on exported function"),
+          };
+        },
+        _ -> @panic("expected function inside export item"),
+      };
+    },
+    _ -> @panic("expected export item"),
+  };
+}
+
+@test
+function parserParsesRecordFieldsAndMethodsWithModifiers(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_record_members.ign",
+    "record Tracker { public marker: i32; drop(&mut self): void { return; } public static init(value: i32): Tracker { return Tracker { marker: value }; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let recordId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record root"),
+  };
+
+  match (expectItem(&module, recordId)) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.fields.length(), 1);
+      Test::assertEq<u64>(recordItem.methods.length(), 2);
+
+      let dropMethodId: Ast::ItemId = match (recordItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing drop method"),
+      };
+      let initMethodId: Ast::ItemId = match (recordItem.methods.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing init method"),
+      };
+
+      match (expectItem(&module, dropMethodId)) {
+        Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "drop"),
+        _ -> @panic("expected drop function item"),
+      };
+
+      match (expectItem(&module, initMethodId)) {
+        Ast::Item::Node::Function(functionItem) -> {
+          Test::assertEq<str>(functionItem.name.toStr(), "init");
+          Test::assertEq<u64>(functionItem.metadata.modifiers.length(), 2);
+        },
+        _ -> @panic("expected init function item"),
+      };
+    },
+    _ -> @panic("expected record item"),
+  };
+}
+
+@test
+function parserParsesFullStatementSurfaceInsideExpressionBlocks(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_expression_block_surface.ign",
+    "function main(): void { let action = (): i32 -> { let mut value: i32 = 0; if (true) { value = 1; } while (false) { continue; } return value; }; let selected = match (1) { 1 -> { let answer: i32 = 2; answer }, _ -> 0 }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing main function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let actionStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing lambda binding statement"),
+          };
+          let selectedStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing match binding statement"),
+          };
+
+          match (expectStatement(&module, actionStatementId)) {
+            Ast::Statement::Node::Let(letStatement) -> {
+              let lambdaId: Ast::ExpressionId = match (letStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing lambda expression value"),
+              };
+
+              match (expectExpression(&module, lambdaId)) {
+                Ast::Expression::Node::Lambda(lambda) -> {
+                  match (expectStatement(&module, lambda.body)) {
+                    Ast::Statement::Node::Block(body) -> Test::assertEq<u64>(body.statements.length(), 4),
+                    _ -> @panic("expected block lambda body"),
+                  };
+                },
+                _ -> @panic("expected lambda expression"),
+              };
+            },
+            _ -> @panic("expected lambda let statement"),
+          };
+
+          match (expectStatement(&module, selectedStatementId)) {
+            Ast::Statement::Node::Let(letStatement) -> {
+              let matchId: Ast::ExpressionId = match (letStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing match expression value"),
+              };
+
+              match (expectExpression(&module, matchId)) {
+                Ast::Expression::Node::Match(matchExpression) -> {
+                  let firstArm: &Ast::Expression::MatchArm = match (matchExpression.arms.get(0)) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing first match arm"),
+                  };
+
+                  match (expectExpression(&module, firstArm.body)) {
+                    Ast::Expression::Node::Block(blockExpression) -> {
+                      Test::assertEq<u64>(blockExpression.statements.length(), 1);
+                      Test::assertEq<boolean>(blockExpression.tail.isSome(), true);
+                    },
+                    _ -> @panic("expected block expression match arm"),
+                  };
+                },
+                _ -> @panic("expected match expression"),
+              };
+            },
+            _ -> @panic("expected match let statement"),
+          };
+        },
+        _ -> @panic("expected function body block"),
+      };
+    },
+    _ -> @panic("expected main function item"),
+  };
+}
+
+@test
+function parserParsesSelfKeywordMemberAccessInsideRecordMethods(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_record_self_access.ign",
+    "record Tracker { counter: *mut i32; marker: i32; drop(&mut self): void { *self.counter = *self.counter * 10 + self.marker; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let recordId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record root"),
+  };
+
+  match (expectItem(&module, recordId)) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.methods.length(), 1);
+
+      let methodId: Ast::ItemId = match (recordItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing record method"),
+      };
+
+      match (expectItem(&module, methodId)) {
+        Ast::Item::Node::Function(methodItem) -> {
+          match (expectStatement(&module, methodItem.body)) {
+            Ast::Statement::Node::Block(body) -> {
+              Test::assertEq<u64>(body.statements.length(), 1);
+
+              let statementId: Ast::StatementId = match (body.statements.get(0)) {
+                Option::SOME(value) -> *value,
+                Option::NONE -> @panic("missing method body statement"),
+              };
+
+              match (expectStatement(&module, statementId)) {
+                Ast::Statement::Node::Expression(expressionStatement) -> {
+                  match (expectExpression(&module, expressionStatement.expression)) {
+                    Ast::Expression::Node::Assignment(_) -> {},
+                    _ -> @panic("expected assignment expression inside record method body"),
+                  };
+                },
+                _ -> @panic("expected expression statement inside record method body"),
+              };
+            },
+            _ -> @panic("expected block record method body"),
+          };
+        },
+        _ -> @panic("expected record method function item"),
+      };
+    },
+    _ -> @panic("expected record root item"),
+  };
+}
+
+@test
+function parserParsesRealFilesWithMetadataAndRecordMethods(): void {
+  assertRealFileParsesWithoutDiagnostics("example/add.ign");
+  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
+  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+}
+
+@test
+function parserParsesStdVectorTestsFileWithoutDiagnostics(): void {
+  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
+}
+
+@test
+function parserParsesIgnisAstTestsFileWithoutDiagnostics(): void {
+  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+}
+
+@test
+function parserParsesStdVectorThenAstFilesWithoutDiagnostics(): void {
+  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
+  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+}
+
+@test
+function parserParsesExampleThenStdVectorFilesWithoutDiagnostics(): void {
+  assertRealFileParsesWithoutDiagnostics("example/add.ign");
+  assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
+}
+
+function assertRealFileParsesWithoutDiagnostics(path: str): void {
+  let sourceText: String = readFixture(path);
+  let source: SourceFile = SourceFile::create(path, sourceText.toStr());
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() != 0) {
+    if (path.equals("example/add.ign")) {
+      @panic("expected example/add.ign to parse without diagnostics");
+    }
+
+    if (path.equals("std/vector/tests.ign")) {
+      @panic("expected std/vector/tests.ign to parse without diagnostics");
+    }
+
+    if (path.equals("ignis/ast/tests.ign")) {
+      @panic("expected ignis/ast/tests.ign to parse without diagnostics");
+    }
+
+    @panic("expected selected real parser gate file to parse without diagnostics");
+  }
+
+  if (module.roots.length() == 0) {
+    @panic("expected selected real parser gate file to produce roots");
+  }
+}
+
+@test
+function parserRecoversToNextTopLevelItemAfterMalformedConstDeclaration(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_const_recovery.ign",
+    "const BROKEN: = 1; function recovered(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing recovered function root after malformed const"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> Test::assertEq<str>(functionItem.name.toStr(), "recovered"),
+    _ -> @panic("expected recovered function item after malformed const"),
+  };
+}
+
+@test
+function parserParsesExportedNamespaceDeclaration(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_export_namespace.ign",
+    "export namespace Parser { function main(): void {} }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let exportId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing export root"),
+  };
+
+  match (module.items.get(exportId)) {
+    Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
+      match (module.items.get(exportItem.item)) {
+        Option::SOME(Ast::Item::Node::Namespace(namespaceItem)) -> {
+          Test::assertEq<str>(namespaceItem.name.toStr(), "Parser");
+          Test::assertEq<u64>(namespaceItem.items.length(), 1);
+        },
+        _ -> @panic("expected namespace item inside export declaration"),
+      };
+    },
+    _ -> @panic("expected export root item"),
+  };
+}
+
+@test
+function parserParsesGenericCallAndRecordInitTypeArguments(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_generic_call_record_init.ign",
+    "function main(): void { make<Vec<i32>>(values); Box<Vec<i32>> { value: values }; left < right; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing generic expression function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 3);
+
+          let callStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing generic call statement"),
+          };
+          let recordStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing generic record init statement"),
+          };
+          let comparisonStatementId: Ast::StatementId = match (block.statements.get(2)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing comparison expression statement"),
+          };
+
+          match (expectStatement(&module, callStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Call(call) -> Test::assertEq<u64>(call.typeArguments.length(), 1),
+                _ -> @panic("expected generic call expression"),
+              };
+            },
+            _ -> @panic("expected generic call expression statement"),
+          };
+
+          match (expectStatement(&module, recordStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::RecordInit(recordInit) -> Test::assertEq<u64>(recordInit.typeArguments.length(), 1),
+                _ -> @panic("expected generic record init expression"),
+              };
+            },
+            _ -> @panic("expected generic record init expression statement"),
+          };
+
+          match (expectStatement(&module, comparisonStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Binary(binaryExpression) -> {
+                  match (binaryExpression.operator) {
+                    Ast::Expression::BinaryOperator::LessThan -> {},
+                    _ -> @panic("expected less-than operator"),
+                  };
+                },
+                _ -> @panic("expected less-than comparison to remain binary expression"),
+              };
+            },
+            _ -> @panic("expected comparison expression statement"),
+          };
+        },
+        _ -> @panic("expected block function body for generic expression test"),
+      };
+    },
+    _ -> @panic("expected function root for generic expression test"),
+  };
+}

@@ -1,0 +1,228 @@
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Punctuation, Token, TokenKind from "@compiler::syntax";
+
+import _ from "./shared";
+import _ from "./expressions";
+
+export namespace ParserPatterns {
+  function patternSpan(node: &Ast::Pattern::Node): SourceSpan {
+    return match (node) {
+      Ast::Pattern::Node::Wildcard(value) -> value.span,
+      Ast::Pattern::Node::Binding(value) -> value.span,
+      Ast::Pattern::Node::Literal(value) -> value.span,
+      Ast::Pattern::Node::Path(value) -> value.span,
+      Ast::Pattern::Node::Tuple(value) -> value.span,
+      Ast::Pattern::Node::Or(value) -> value.span,
+    };
+  }
+
+  function parseLiteralPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let literalResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseLiteralExpression(parserRef);
+    let Option::SOME(literal) = literalResult else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+      span: literal.span,
+      expression: literal.id,
+    })));
+  }
+
+  function parseTuplePattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(openParen) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start pattern") else {
+      return Option::NONE;
+    };
+
+    if (parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+      parserRef.emitDiagnostic(openParen.span, DiagnosticCode::EXPECTED_TOKEN, "expected tuple pattern", "tuple pattern must contain at least one element");
+      return Option::NONE;
+    }
+
+    let firstResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+    let Option::SOME(first) = firstResult else {
+      return Option::NONE;
+    };
+
+    if (!parserRef.atPunctuation(Punctuation::COMMA)) {
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after grouped pattern") else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(first);
+    }
+
+    let mut elements: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    elements.push(first);
+
+    while (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+      if (parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+        break;
+      }
+
+      let elementResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+      let Option::SOME(element) = elementResult else {
+        return Option::NONE;
+      };
+      elements.push(element);
+    }
+
+    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple pattern") else {
+      return Option::NONE;
+    };
+    let span: SourceSpan = ParserShared::mergeSpans(openParen.span, closeParen.span);
+
+    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+      span: span,
+      elements: ParserShared::copyPatternIds(&elements),
+    })));
+  }
+
+  function parsePathOrBindingPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(firstToken) = parserRef.expectIdentifier("expected pattern") else {
+      return Option::NONE;
+    };
+    let name: String = firstToken.lexemeString();
+
+    if (name.equals("_")) {
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+        span: firstToken.span,
+      })));
+    }
+
+    let mut segments: Vector<String> = Vector::new<String>();
+    segments.push(name.clone());
+    let mut lastSpan: SourceSpan = firstToken.span;
+    let mut qualified: boolean = false;
+
+    while (parserRef.atPunctuation(Punctuation::DOUBLE_COLON)) {
+      qualified = true;
+      parserRef.bump();
+
+      let Option::SOME(segment) = parserRef.expectIdentifier("expected pattern path segment after '::'") else {
+        return Option::NONE;
+      };
+
+      lastSpan = segment.span;
+      segments.push(segment.lexemeString());
+    }
+
+    if (!qualified && !parserRef.atPunctuation(Punctuation::LEFT_PAREN)) {
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+        span: firstToken.span,
+        name: name.clone(),
+        annotation: Option::NONE,
+        metadata: Ast::emptyMetadata(),
+      })));
+    }
+
+    let mut arguments: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+
+    if (parserRef.consumePunctuation(Punctuation::LEFT_PAREN).isSome()) {
+      if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+        while (true) {
+          let argumentResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+          let Option::SOME(argument) = argumentResult else {
+            return Option::NONE;
+          };
+          arguments.push(argument);
+
+          if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+            if (parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+              break;
+            }
+
+            continue;
+          }
+
+          break;
+        }
+      }
+
+      let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after path pattern arguments") else {
+        return Option::NONE;
+      };
+      lastSpan = closeParen.span;
+    }
+
+    let span: SourceSpan = ParserShared::mergeSpans(firstToken.span, lastSpan);
+    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+      span: span,
+      segments: ParserShared::copyStrings(&segments),
+      arguments: ParserShared::copyPatternIds(&arguments),
+    })));
+  }
+
+  function parsePrimaryPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    parserRef.skipTrivia();
+
+    if (let Option::SOME(literal) = ParserPatterns::parseLiteralPattern(parserRef)) {
+      return Option::SOME(literal);
+    }
+
+    let token: Token = parserRef.current();
+
+    if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::LEFT_PAREN) {
+      return ParserPatterns::parseTuplePattern(parserRef);
+    }
+
+    if (token.kindValue() == TokenKind::IDENTIFIER) {
+      return ParserPatterns::parsePathOrBindingPattern(parserRef);
+    }
+
+    parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_TOKEN, "expected pattern", "pattern must be a binding, wildcard, literal, tuple, or path");
+    return Option::NONE;
+  }
+
+  function parsePattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let firstResult: Option<Ast::PatternId> = ParserPatterns::parsePrimaryPattern(parserRef);
+    let Option::SOME(first) = firstResult else {
+      return Option::NONE;
+    };
+
+    if (!parserRef.atPunctuation(Punctuation::PIPE)) {
+      return Option::SOME(first);
+    }
+
+    let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    alternatives.push(first);
+
+    while (parserRef.consumePunctuation(Punctuation::PIPE).isSome()) {
+      let alternativeResult: Option<Ast::PatternId> = ParserPatterns::parsePrimaryPattern(parserRef);
+      let Option::SOME(alternative) = alternativeResult else {
+        return Option::NONE;
+      };
+
+      alternatives.push(alternative);
+    }
+
+    let startPatternNodeResult: Option<&Ast::Pattern::Node> = parserRef.module.patterns.get(first);
+    let Option::SOME(startPatternNode) = startPatternNodeResult else {
+      return Option::NONE;
+    };
+    let startSpan: SourceSpan = ParserPatterns::patternSpan(startPatternNode);
+    let lastIndex: u64 = alternatives.length() - 1;
+    let lastIdResult: Option<&Ast::PatternId> = alternatives.get(lastIndex);
+    let Option::SOME(lastIdRef) = lastIdResult else {
+      return Option::NONE;
+    };
+    let lastId: Ast::PatternId = *lastIdRef;
+    let endPatternNodeResult: Option<&Ast::Pattern::Node> = parserRef.module.patterns.get(lastId);
+    let Option::SOME(endPatternNode) = endPatternNodeResult else {
+      return Option::NONE;
+    };
+    let endSpan: SourceSpan = ParserPatterns::patternSpan(endPatternNode);
+
+    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
+      span: ParserShared::mergeSpans(startSpan, endSpan),
+      alternatives: ParserShared::copyPatternIds(&alternatives),
+    })));
+  }
+}

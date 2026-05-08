@@ -1,0 +1,280 @@
+import Char from "std::char";
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import Diagnostic, DiagnosticBag, DiagnosticCode, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
+import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+export namespace ParserShared {
+  function isTrivia(token: Token): boolean {
+    return token.kindValue() == TokenKind::WHITESPACE
+      || token.kindValue() == TokenKind::LINE_COMMENT
+      || token.kindValue() == TokenKind::BLOCK_COMMENT
+      || token.kindValue() == TokenKind::OUTER_DOC_COMMENT
+      || token.kindValue() == TokenKind::INNER_DOC_COMMENT;
+  }
+
+  function nextSignificantToken(parser: &mut ParserShared::State, startOffset: u64): Token {
+    let parserRef: &mut ParserShared::State = parser;
+    let token: Token = parserRef.tokens.peekNth(startOffset);
+
+    if (ParserShared::isTrivia(token.clone())) {
+      return ParserShared::nextSignificantToken(parserRef, startOffset + 1);
+    }
+
+    return token;
+  }
+
+  function mergeSpans(start: SourceSpan, end: SourceSpan): SourceSpan {
+    return SourceSpan::new(start.filePath, start.start, end.end);
+  }
+
+  function stripQuotes(lexeme: &String): String {
+    if (lexeme.length() < 2) {
+      return lexeme.clone();
+    }
+
+    return lexeme.substringBytes(1, lexeme.length() - 1);
+  }
+
+  function parseUnsignedInteger(lexeme: &String): Option<u64> {
+    let mut value: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < lexeme.length()) {
+      let Option::SOME(digit) = lexeme.charAt(index) else {
+        return Option::NONE;
+      };
+      let Option::SOME(digitValue) = Char::asciiDigitValue(digit) else {
+        return Option::NONE;
+      };
+
+      value = value * 10 + digitValue;
+      index += 1;
+    }
+
+    return Option::SOME(value);
+  }
+
+  function copyTypeIds(source: &Vector<Ast::TypeId>): Vector<Ast::TypeId> {
+    let mut copied: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(*value);
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyPatternIds(source: &Vector<Ast::PatternId>): Vector<Ast::PatternId> {
+    let mut copied: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(*value);
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyItemIds(source: &Vector<Ast::ItemId>): Vector<Ast::ItemId> {
+    let mut copied: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(*value);
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyStatementIds(source: &Vector<Ast::StatementId>): Vector<Ast::StatementId> {
+    let mut copied: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(*value);
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyStrings(source: &Vector<String>): Vector<String> {
+    let mut copied: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(value.clone());
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  record State {
+    public tokens: &mut TokenStream;
+    public diagnostics: &mut DiagnosticBag;
+    public module: &mut Ast::Module;
+
+    public current(&self): Token {
+      return self.tokens.peek();
+    }
+
+    public bump(&mut self): Token {
+      return self.tokens.bump();
+    }
+
+    public skipTrivia(&mut self): void {
+      while (true) {
+        let token: Token = self.current();
+
+        if (token.kindValue() == TokenKind::LINE_COMMENT || token.kindValue() == TokenKind::BLOCK_COMMENT) {
+          self.bump();
+          continue;
+        }
+
+        if (token.kindValue() == TokenKind::OUTER_DOC_COMMENT || token.kindValue() == TokenKind::INNER_DOC_COMMENT) {
+          self.bump();
+          continue;
+        }
+
+        if (token.kindValue() == TokenKind::WHITESPACE) {
+          self.bump();
+          continue;
+        }
+
+        return;
+      }
+    }
+
+    public atEof(&mut self): boolean {
+      self.skipTrivia();
+      return self.current().kindValue() == TokenKind::EOF;
+    }
+
+    public atKeyword(&mut self, keyword: Keyword): boolean {
+      self.skipTrivia();
+      let token: Token = self.current();
+      return token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == keyword;
+    }
+
+    public atPunctuation(&mut self, punctuation: Punctuation): boolean {
+      self.skipTrivia();
+      let token: Token = self.current();
+      return token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == punctuation;
+    }
+
+    public consumeKeyword(&mut self, keyword: Keyword): Option<Token> {
+      if (!self.atKeyword(keyword)) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(self.bump());
+    }
+
+    public consumePunctuation(&mut self, punctuation: Punctuation): Option<Token> {
+      if (!self.atPunctuation(punctuation)) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(self.bump());
+    }
+
+    public emitDiagnostic(&mut self, span: SourceSpan, code: str, message: str, label: str): void {
+      let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+      diagnostic.addLabel(LabelKind::PRIMARY, span, label);
+      self.diagnostics.push(diagnostic);
+    }
+
+    public expected(&mut self, span: SourceSpan, expected: str): void {
+      self.emitDiagnostic(span, DiagnosticCode::EXPECTED_TOKEN, "expected token", expected);
+    }
+
+    public expectIdentifier(&mut self, label: str): Option<Token> {
+      self.skipTrivia();
+      let token: Token = self.current();
+
+      if (token.kindValue() == TokenKind::IDENTIFIER) {
+        return Option::SOME(self.bump());
+      }
+
+      self.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_IDENTIFIER, "expected identifier", label);
+      return Option::NONE;
+    }
+
+    public expectKeyword(&mut self, keyword: Keyword, label: str): Option<Token> {
+      self.skipTrivia();
+      let token: Token = self.current();
+
+      if (token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == keyword) {
+        return Option::SOME(self.bump());
+      }
+
+      self.expected(token.span, label);
+      return Option::NONE;
+    }
+
+    public expectPunctuation(&mut self, punctuation: Punctuation, label: str): Option<Token> {
+      self.skipTrivia();
+      let token: Token = self.current();
+
+      if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == punctuation) {
+        return Option::SOME(self.bump());
+      }
+
+      self.expected(token.span, label);
+      return Option::NONE;
+    }
+
+    public expectGreater(&mut self): Option<Token> {
+      self.skipTrivia();
+      let token: Token = self.current();
+      let span: SourceSpan = token.span;
+
+      if (self.tokens.expectGreater()) {
+        return Option::SOME(token.clone());
+      }
+
+      self.expected(span, "expected '>' to close generic arguments");
+      return Option::NONE;
+    }
+  }
+
+  function createState(tokens: &mut TokenStream, diagnostics: &mut DiagnosticBag, module: &mut Ast::Module): State {
+    return State {
+      tokens: tokens,
+      diagnostics: diagnostics,
+      module: module,
+    };
+  }
+}

@@ -1,0 +1,146 @@
+import SourceSpan from "@compiler::diagnostics";
+import Vector from "std::vector";
+
+export namespace Ast {
+  enum Modifier {
+    Public,
+    Private,
+    Static,
+    Inline,
+    Meta,
+    Declare,
+  }
+
+  record Attribute {
+    public span: SourceSpan;
+    public name: String;
+    public arguments: Vector<String>;
+  }
+
+  record Metadata {
+    public attributes: Vector<Ast::Attribute>;
+    public modifiers: Vector<Ast::Modifier>;
+  }
+
+  function copyAttributeArguments(source: &Vector<String>): Vector<String> {
+    let mut copied: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(value.clone());
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyAttribute(attribute: &Ast::Attribute): Ast::Attribute {
+    return Ast::Attribute {
+      span: attribute.span,
+      name: attribute.name.clone(),
+      arguments: Ast::copyAttributeArguments(&attribute.arguments),
+    };
+  }
+
+  function emptyMetadata(): Ast::Metadata {
+    return Ast::Metadata {
+      attributes: Vector::new<Ast::Attribute>(),
+      modifiers: Vector::new<Ast::Modifier>(),
+    };
+  }
+
+  function metadataHasValues(metadata: &Ast::Metadata): boolean {
+    return metadata.attributes.length() > 0 || metadata.modifiers.length() > 0;
+  }
+
+  function copyMetadata(metadata: &Ast::Metadata): Ast::Metadata {
+    let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+    let mut modifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
+    let mut attributeIndex: u64 = 0;
+    let mut modifierIndex: u64 = 0;
+
+    while (attributeIndex < metadata.attributes.length()) {
+      let Option::SOME(attribute) = metadata.attributes.get(attributeIndex) else {
+        attributeIndex += 1;
+        continue;
+      };
+
+      attributes.push(Ast::copyAttribute(attribute));
+      attributeIndex += 1;
+    }
+
+    while (modifierIndex < metadata.modifiers.length()) {
+      let Option::SOME(modifier) = metadata.modifiers.get(modifierIndex) else {
+        modifierIndex += 1;
+        continue;
+      };
+
+      modifiers.push(*modifier);
+      modifierIndex += 1;
+    }
+
+    return Ast::Metadata {
+      attributes: attributes,
+      modifiers: modifiers,
+    };
+  }
+
+  function mergeMetadata(left: Ast::Metadata, right: Ast::Metadata): Ast::Metadata {
+    let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+    let mut modifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
+    let mut attributeIndex: u64 = 0;
+    let mut modifierIndex: u64 = 0;
+
+    while (attributeIndex < left.attributes.length()) {
+      let Option::SOME(attribute) = left.attributes.get(attributeIndex) else {
+        attributeIndex += 1;
+        continue;
+      };
+
+      attributes.push(Ast::copyAttribute(attribute));
+      attributeIndex += 1;
+    }
+
+    attributeIndex = 0;
+    while (attributeIndex < right.attributes.length()) {
+      let Option::SOME(attribute) = right.attributes.get(attributeIndex) else {
+        attributeIndex += 1;
+        continue;
+      };
+
+      attributes.push(Ast::copyAttribute(attribute));
+      attributeIndex += 1;
+    }
+
+    while (modifierIndex < left.modifiers.length()) {
+      let Option::SOME(modifier) = left.modifiers.get(modifierIndex) else {
+        modifierIndex += 1;
+        continue;
+      };
+
+      modifiers.push(*modifier);
+      modifierIndex += 1;
+    }
+
+    modifierIndex = 0;
+    while (modifierIndex < right.modifiers.length()) {
+      let Option::SOME(modifier) = right.modifiers.get(modifierIndex) else {
+        modifierIndex += 1;
+        continue;
+      };
+
+      modifiers.push(*modifier);
+      modifierIndex += 1;
+    }
+
+    return Ast::Metadata {
+      attributes: attributes,
+      modifiers: modifiers,
+    };
+  }
+}

@@ -1,3 +1,4 @@
+import SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 
 export namespace Ast {
@@ -165,8 +166,8 @@ export namespace Ast {
         return Ast::Serializer::renderNamespaceItem(&value);
       }
 
-      if (let Ast::Item::Node::Record(_) = node) {
-        return String::create("Record");
+      if (let Ast::Item::Node::Record(value) = node) {
+        return Ast::Serializer::renderRecordItem(&value);
       }
 
       if (let Ast::Item::Node::Enum(_) = node) {
@@ -397,6 +398,14 @@ export namespace Ast {
         return String::create("Function");
       }
 
+      if (let Ast::Type::Node::Slice(_) = node) {
+        return String::create("Slice");
+      }
+
+      if (let Ast::Type::Node::FixedArray(_) = node) {
+        return String::create("FixedArray");
+      }
+
       return String::create("Generic");
     }
 
@@ -454,6 +463,30 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderOptionalTypeId(node.returnType).toStr());
       output.pushStr(" body=");
       output.pushStr(Ast::Serializer::renderStatementId(node.body).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
+      return output;
+    }
+
+    function renderRecordItem(node: &Ast::Item::Record): String {
+      let mut output: String = String::create("Record span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
+      output.pushStr(" fields=");
+      output.pushStr(Ast::Serializer::renderPatternIdsInline(&node.fields).toStr());
+      output.pushStr(" methods=");
+      output.pushStr(Ast::Serializer::renderItemIdsInline(&node.methods).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
       return output;
     }
 
@@ -483,6 +516,12 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
       output.pushStr(" items=");
       output.pushStr(itemsText.toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
       return output;
     }
 
@@ -681,7 +720,82 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
       output.pushStr(" annotation=");
       output.pushStr(Ast::Serializer::renderOptionalTypeId(node.annotation).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
       return output;
+    }
+
+    function renderMetadata(metadata: &Ast::Metadata): String {
+      let mut output: String = String::create("attrs[");
+      let mut attributeIndex: u64 = 0;
+
+      while (attributeIndex < metadata.attributes.length()) {
+        if (attributeIndex > 0) {
+          output.pushStr(", ");
+        }
+
+        let attribute: &Ast::Attribute = match (metadata.attributes.get(attributeIndex)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing metadata attribute"),
+        };
+
+        output.pushStr("@");
+        output.pushStr(attribute.name.toStr());
+        output.pushStr("(");
+
+        let mut argumentIndex: u64 = 0;
+        while (argumentIndex < attribute.arguments.length()) {
+          if (argumentIndex > 0) {
+            output.pushStr(", ");
+          }
+
+          let argument: &String = match (attribute.arguments.get(argumentIndex)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing attribute argument"),
+          };
+
+          output.pushStr(argument.toStr());
+          argumentIndex += 1;
+        }
+
+        output.pushStr(")");
+        attributeIndex += 1;
+      }
+
+      output.pushStr("] modifiers[");
+
+      let mut modifierIndex: u64 = 0;
+      while (modifierIndex < metadata.modifiers.length()) {
+        if (modifierIndex > 0) {
+          output.pushStr(", ");
+        }
+
+        let modifier: &Ast::Modifier = match (metadata.modifiers.get(modifierIndex)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing metadata modifier"),
+        };
+
+        output.pushStr(Ast::Serializer::renderModifier(*modifier).toStr());
+        modifierIndex += 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
+    function renderModifier(modifier: Ast::Modifier): String {
+      return match (modifier) {
+        Ast::Modifier::Public -> String::create("public"),
+        Ast::Modifier::Private -> String::create("private"),
+        Ast::Modifier::Static -> String::create("static"),
+        Ast::Modifier::Inline -> String::create("inline"),
+        Ast::Modifier::Meta -> String::create("meta"),
+        Ast::Modifier::Declare -> String::create("declare"),
+      };
     }
 
     function renderWildcardPattern(node: &Ast::Pattern::Wildcard): String {
@@ -851,6 +965,163 @@ export namespace Ast {
 
     function renderTypeId(id: Ast::TypeId): String {
       return Ast::Serializer::renderId("type", id.raw());
+    }
+
+    function expressionSpan(node: &Ast::Expression::Node): SourceSpan {
+      if (let Ast::Expression::Node::Assignment(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Ternary(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Cast(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Literal(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Path(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Call(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Binary(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Dereference(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Grouped(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Tuple(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Unit(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::LetCondition(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Reference(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Unary(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Block(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::If(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Match(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Variable(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Vector(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::VectorAccess(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::PostfixIncrement(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::PostfixDecrement(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::MemberAccess(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::RecordInit(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::BuiltinCall(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Lambda(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::CaptureOverride(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Pipe(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::PipePlaceholder(value) = node) {
+        return value.span;
+      }
+
+      if (let Ast::Expression::Node::Try(value) = node) {
+        return value.span;
+      }
+
+      return SourceSpan::new("", 0, 0);
+    }
+
+    function typeSpan(node: &Ast::Type::Node): SourceSpan {
+      return match (node) {
+        Ast::Type::Node::Path(value) -> value.span,
+        Ast::Type::Node::Pointer(value) -> value.span,
+        Ast::Type::Node::Reference(value) -> value.span,
+        Ast::Type::Node::Tuple(value) -> value.span,
+        Ast::Type::Node::Function(value) -> value.span,
+        Ast::Type::Node::Slice(value) -> value.span,
+        Ast::Type::Node::FixedArray(value) -> value.span,
+        Ast::Type::Node::Generic(value) -> value.span,
+      };
+    }
+
+    function statementSpan(node: &Ast::Statement::Node): SourceSpan {
+      return match (node) {
+        Ast::Statement::Node::Variable(value) -> value.span,
+        Ast::Statement::Node::Let(value) -> value.span,
+        Ast::Statement::Node::LetElse(value) -> value.span,
+        Ast::Statement::Node::Expression(value) -> value.span,
+        Ast::Statement::Node::Block(value) -> value.span,
+        Ast::Statement::Node::If(value) -> value.span,
+        Ast::Statement::Node::While(value) -> value.span,
+        Ast::Statement::Node::For(value) -> value.span,
+        Ast::Statement::Node::ForOf(value) -> value.span,
+        Ast::Statement::Node::Return(value) -> value.span,
+        Ast::Statement::Node::Break(value) -> value.span,
+        Ast::Statement::Node::Continue(value) -> value.span,
+        Ast::Statement::Node::Defer(value) -> value.span,
+        Ast::Statement::Node::Item(value) -> value.span,
+        Ast::Statement::Node::Comment(value) -> value.span,
+      };
     }
 
     function renderPatternId(id: Ast::PatternId): String {
