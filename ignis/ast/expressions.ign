@@ -3,27 +3,157 @@ import Vector from "std::vector";
 
 export namespace Ast {
   namespace Expression {
+    type StringList = Vector<String>;
+    type ExpressionIdList = Vector<Ast::ExpressionId>;
+    type PatternIdList = Vector<Ast::PatternId>;
+    type TypeIdList = Vector<Ast::TypeId>;
+
+    enum LiteralValue {
+      Int32(i32),
+      Int64(i64),
+      UInt32(u32),
+      UInt64(u64),
+      Float64(f64),
+      Boolean(boolean),
+      Character(u32),
+      String(str),
+      Null,
+    }
+
+    enum BinaryOperator {
+      Add,
+      And,
+      BitAnd,
+      BitOr,
+      BitXor,
+      Divide,
+      Equal,
+      GreaterThan,
+      GreaterThanOrEqual,
+      LessThan,
+      LessThanOrEqual,
+      Modulo,
+      Multiply,
+      NotEqual,
+      Or,
+      ShiftLeft,
+      ShiftRight,
+      Subtract,
+    }
+
+    enum UnaryOperator {
+      Not,
+      Negate,
+      Increment,
+      Decrement,
+      BitNot,
+    }
+
+    enum AssignmentOperator {
+      Assign,
+      AddAssign,
+      SubtractAssign,
+      MultiplyAssign,
+      DivideAssign,
+      ModuloAssign,
+      ShiftLeftAssign,
+      ShiftRightAssign,
+      BitAndAssign,
+      BitOrAssign,
+      BitXorAssign,
+      AndAssign,
+      OrAssign,
+    }
+
+    enum AccessOperator {
+      Dot,
+      DoubleColon,
+    }
+
+    enum CaptureOverrideKind {
+      Move,
+      Ref,
+      RefMut,
+    }
+
     record Literal {
       public span: SourceSpan;
-      public value: str;
+      public value: LiteralValue;
+    }
+
+    record Assignment {
+      public span: SourceSpan;
+      public target: Ast::ExpressionId;
+      public value: Ast::ExpressionId;
+      public operator: AssignmentOperator;
     }
 
     record Path {
       public span: SourceSpan;
-      public segments: Vector<String>;
+      public segments: StringList;
     }
 
     record Call {
       public span: SourceSpan;
       public callee: Ast::ExpressionId;
-      public arguments: Vector<Ast::ExpressionId>;
+      public arguments: ExpressionIdList;
     }
 
     record Binary {
       public span: SourceSpan;
-      public operator: str;
+      public operator: BinaryOperator;
       public left: Ast::ExpressionId;
       public right: Ast::ExpressionId;
+    }
+
+    record Ternary {
+      public span: SourceSpan;
+      public condition: Ast::ExpressionId;
+      public thenBranch: Ast::ExpressionId;
+      public elseBranch: Ast::ExpressionId;
+    }
+
+    record Cast {
+      public span: SourceSpan;
+      public expression: Ast::ExpressionId;
+      public targetType: Ast::TypeId;
+    }
+
+    record Dereference {
+      public span: SourceSpan;
+      public operand: Ast::ExpressionId;
+    }
+
+    record Grouped {
+      public span: SourceSpan;
+      public expression: Ast::ExpressionId;
+    }
+
+    record Tuple {
+      public span: SourceSpan;
+      public elements: ExpressionIdList;
+    }
+
+    record Unit {
+      public span: SourceSpan;
+    }
+
+    record LetCondition {
+      public span: SourceSpan;
+      public pattern: Ast::PatternId;
+      public value: Ast::ExpressionId;
+    }
+
+    record Reference {
+      public span: SourceSpan;
+      public mutable: boolean;
+      public target: Ast::ExpressionId;
+    }
+
+    record Unary {
+      public span: SourceSpan;
+      public operator: UnaryOperator;
+      public operand: Ast::ExpressionId;
     }
 
     record Block {
@@ -50,14 +180,116 @@ export namespace Ast {
       public arms: Vector<MatchArm>;
     }
 
+    record Variable {
+      public span: SourceSpan;
+      public name: str;
+    }
+
+    record VectorAccess {
+      public span: SourceSpan;
+      public vector: Ast::ExpressionId;
+      public index: Ast::ExpressionId;
+    }
+
+    record PostfixIncrement {
+      public span: SourceSpan;
+      public operand: Ast::ExpressionId;
+    }
+
+    record PostfixDecrement {
+      public span: SourceSpan;
+      public operand: Ast::ExpressionId;
+    }
+
+    record MemberAccess {
+      public span: SourceSpan;
+      public object: Ast::ExpressionId;
+      public operator: AccessOperator;
+      public member: str;
+    }
+
+    record RecordInitField {
+      public name: str;
+      public value: Ast::ExpressionId;
+    }
+
+    record RecordInit {
+      public span: SourceSpan;
+      public path: Ast::ExpressionId;
+      public fields: Vector<RecordInitField>;
+    }
+
+    record BuiltinCall {
+      public span: SourceSpan;
+      public name: str;
+      public typeArguments: TypeIdList;
+      public arguments: ExpressionIdList;
+    }
+
+    record Lambda {
+      public span: SourceSpan;
+      public parameters: PatternIdList;
+      public returnType: Option<Ast::TypeId>;
+      public body: Ast::StatementId;
+    }
+
+    record CaptureOverride {
+      public span: SourceSpan;
+      public kind: CaptureOverrideKind;
+      public expression: Ast::ExpressionId;
+    }
+
+    record Pipe {
+      public span: SourceSpan;
+      public left: Ast::ExpressionId;
+      public right: Ast::ExpressionId;
+    }
+
+    record PipePlaceholder {
+      public span: SourceSpan;
+    }
+
+    record Try {
+      public span: SourceSpan;
+      public expression: Ast::ExpressionId;
+    }
+
+    record VectorLiteral {
+      public span: SourceSpan;
+      public elements: ExpressionIdList;
+    }
+
     enum Node {
+      Assignment(Assignment),
+      Ternary(Ternary),
+      Cast(Cast),
       Literal(Literal),
       Path(Path),
       Call(Call),
       Binary(Binary),
+      Dereference(Dereference),
+      Grouped(Grouped),
+      Tuple(Tuple),
+      Unit(Unit),
+      LetCondition(LetCondition),
+      Reference(Reference),
+      Unary(Unary),
       Block(Block),
       If(If),
       Match(Match),
+      Variable(Variable),
+      Vector(VectorLiteral),
+      VectorAccess(VectorAccess),
+      PostfixIncrement(PostfixIncrement),
+      PostfixDecrement(PostfixDecrement),
+      MemberAccess(MemberAccess),
+      RecordInit(RecordInit),
+      BuiltinCall(BuiltinCall),
+      Lambda(Lambda),
+      CaptureOverride(CaptureOverride),
+      Pipe(Pipe),
+      PipePlaceholder(PipePlaceholder),
+      Try(Try),
     }
   }
 }

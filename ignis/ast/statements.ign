@@ -1,7 +1,16 @@
 import SourceSpan from "@compiler::diagnostics";
+import Vector from "std::vector";
 
 export namespace Ast {
   namespace Statement {
+    record Variable {
+      public span: SourceSpan;
+      public mutable: boolean;
+      public pattern: Ast::PatternId;
+      public annotation: Option<Ast::TypeId>;
+      public value: Option<Ast::ExpressionId>;
+    }
+
     record Let {
       public span: SourceSpan;
       public pattern: Ast::PatternId;
@@ -9,9 +18,51 @@ export namespace Ast {
       public value: Option<Ast::ExpressionId>;
     }
 
+    record LetElse {
+      public span: SourceSpan;
+      public pattern: Ast::PatternId;
+      public annotation: Option<Ast::TypeId>;
+      public value: Ast::ExpressionId;
+      public elseBranch: Ast::StatementId;
+    }
+
     record Expression {
       public span: SourceSpan;
       public expression: Ast::ExpressionId;
+    }
+
+    record Block {
+      public span: SourceSpan;
+      public statements: Vector<Ast::StatementId>;
+      public tail: Option<Ast::ExpressionId>;
+    }
+
+    record If {
+      public span: SourceSpan;
+      public condition: Ast::ExpressionId;
+      public thenBranch: Ast::StatementId;
+      public elseBranch: Option<Ast::StatementId>;
+    }
+
+    record While {
+      public span: SourceSpan;
+      public condition: Ast::ExpressionId;
+      public body: Ast::StatementId;
+    }
+
+    record For {
+      public span: SourceSpan;
+      public initializer: Option<Ast::StatementId>;
+      public condition: Option<Ast::ExpressionId>;
+      public update: Option<Ast::ExpressionId>;
+      public body: Ast::StatementId;
+    }
+
+    record ForOf {
+      public span: SourceSpan;
+      public pattern: Ast::PatternId;
+      public iterable: Ast::ExpressionId;
+      public body: Ast::StatementId;
     }
 
     record Return {
@@ -33,13 +84,32 @@ export namespace Ast {
       public statement: Ast::StatementId;
     }
 
+    record Item {
+      public span: SourceSpan;
+      public item: Ast::ItemId;
+    }
+
+    record Comment {
+      public span: SourceSpan;
+      public text: str;
+    }
+
     enum Node {
+      Variable(Variable),
       Let(Let),
+      LetElse(LetElse),
       Expression(Expression),
+      Block(Block),
+      If(If),
+      While(While),
+      For(For),
+      ForOf(ForOf),
       Return(Return),
       Break(Break),
       Continue(Continue),
       Defer(Defer),
+      Item(Item),
+      Comment(Comment),
     }
   }
 }

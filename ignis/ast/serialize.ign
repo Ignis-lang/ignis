@@ -177,10 +177,30 @@ export namespace Ast {
         return String::create("Import");
       }
 
+      if (let Ast::Item::Node::Extern(_) = node) {
+        return String::create("Extern");
+      }
+
+      if (let Ast::Item::Node::Constant(_) = node) {
+        return String::create("Constant");
+      }
+
+      if (let Ast::Item::Node::Export(_) = node) {
+        return String::create("Export");
+      }
+
+      if (let Ast::Item::Node::Trait(_) = node) {
+        return String::create("Trait");
+      }
+
       return String::create("TypeAlias");
     }
 
     function renderExpressionNode(node: &Ast::Expression::Node): String {
+      if (let Ast::Expression::Node::Assignment(value) = node) {
+        return Ast::Serializer::renderAssignmentExpression(value);
+      }
+
       if (let Ast::Expression::Node::Literal(value) = node) {
         return Ast::Serializer::renderLiteralExpression(value);
       }
@@ -197,20 +217,116 @@ export namespace Ast {
         return String::create("Call");
       }
 
-      if (let Ast::Expression::Node::Binary(_) = node) {
-        return String::create("Binary");
+      if (let Ast::Expression::Node::Binary(value) = node) {
+        return Ast::Serializer::renderBinaryExpression(value);
+      }
+
+      if (let Ast::Expression::Node::Variable(value) = node) {
+        return Ast::Serializer::renderVariableExpression(value);
+      }
+
+      if (let Ast::Expression::Node::Vector(value) = node) {
+        return Ast::Serializer::renderVectorExpression(value);
+      }
+
+      if (let Ast::Expression::Node::MemberAccess(value) = node) {
+        return Ast::Serializer::renderMemberAccessExpression(value);
       }
 
       if (let Ast::Expression::Node::Block(_) = node) {
         return String::create("Block");
       }
 
+      if (let Ast::Expression::Node::Ternary(_) = node) {
+        return String::create("Ternary");
+      }
+
+      if (let Ast::Expression::Node::Cast(_) = node) {
+        return String::create("Cast");
+      }
+
+      if (let Ast::Expression::Node::Dereference(_) = node) {
+        return String::create("Dereference");
+      }
+
+      if (let Ast::Expression::Node::Grouped(_) = node) {
+        return String::create("Grouped");
+      }
+
+      if (let Ast::Expression::Node::Tuple(_) = node) {
+        return String::create("Tuple");
+      }
+
+      if (let Ast::Expression::Node::Unit(_) = node) {
+        return String::create("Unit");
+      }
+
+      if (let Ast::Expression::Node::LetCondition(_) = node) {
+        return String::create("LetCondition");
+      }
+
+      if (let Ast::Expression::Node::Reference(_) = node) {
+        return String::create("Reference");
+      }
+
+      if (let Ast::Expression::Node::Unary(_) = node) {
+        return String::create("Unary");
+      }
+
+      if (let Ast::Expression::Node::VectorAccess(_) = node) {
+        return String::create("VectorAccess");
+      }
+
+      if (let Ast::Expression::Node::PostfixIncrement(_) = node) {
+        return String::create("PostfixIncrement");
+      }
+
+      if (let Ast::Expression::Node::PostfixDecrement(_) = node) {
+        return String::create("PostfixDecrement");
+      }
+
+      if (let Ast::Expression::Node::RecordInit(_) = node) {
+        return String::create("RecordInit");
+      }
+
+      if (let Ast::Expression::Node::BuiltinCall(_) = node) {
+        return String::create("BuiltinCall");
+      }
+
+      if (let Ast::Expression::Node::Lambda(_) = node) {
+        return String::create("Lambda");
+      }
+
+      if (let Ast::Expression::Node::CaptureOverride(_) = node) {
+        return String::create("CaptureOverride");
+      }
+
+      if (let Ast::Expression::Node::Pipe(_) = node) {
+        return String::create("Pipe");
+      }
+
+      if (let Ast::Expression::Node::PipePlaceholder(_) = node) {
+        return String::create("PipePlaceholder");
+      }
+
+      if (let Ast::Expression::Node::Try(_) = node) {
+        return String::create("Try");
+      }
+
       return String::create("If");
     }
 
     function renderStatementNode(node: &Ast::Statement::Node): String {
+      if (let Ast::Statement::Node::Variable(value) = node) {
+        return Ast::Serializer::renderVariableStatement(value);
+      }
+
       if (let Ast::Statement::Node::Let(value) = node) {
         return Ast::Serializer::renderLetStatement(value);
+      }
+
+      if (let Ast::Statement::Node::LetElse(value) = node) {
+        return Ast::Serializer::renderLetElseStatement(value);
       }
 
       if (let Ast::Statement::Node::Return(value) = node) {
@@ -219,6 +335,34 @@ export namespace Ast {
 
       if (let Ast::Statement::Node::Expression(value) = node) {
         return Ast::Serializer::renderExpressionStatement(value);
+      }
+
+      if (let Ast::Statement::Node::Block(value) = node) {
+        return Ast::Serializer::renderBlockStatement(value);
+      }
+
+      if (let Ast::Statement::Node::Item(value) = node) {
+        return Ast::Serializer::renderItemStatement(value);
+      }
+
+      if (let Ast::Statement::Node::Comment(_) = node) {
+        return String::create("Comment");
+      }
+
+      if (let Ast::Statement::Node::If(_) = node) {
+        return String::create("If");
+      }
+
+      if (let Ast::Statement::Node::While(_) = node) {
+        return String::create("While");
+      }
+
+      if (let Ast::Statement::Node::For(_) = node) {
+        return String::create("For");
+      }
+
+      if (let Ast::Statement::Node::ForOf(_) = node) {
+        return String::create("ForOf");
       }
 
       if (let Ast::Statement::Node::Break(_) = node) {
@@ -346,7 +490,31 @@ export namespace Ast {
       let mut output: String = String::create("Literal span=");
       output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
       output.pushStr(" value=");
-      output.pushStr(Ast::Serializer::renderQuoted(node.value).toStr());
+      output.pushStr(Ast::Serializer::renderLiteralValue(node.value).toStr());
+      return output;
+    }
+
+    function renderAssignmentExpression(node: Ast::Expression::Assignment): String {
+      let mut output: String = String::create("Assignment span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" operator=");
+      output.pushStr(Ast::Serializer::renderAssignmentOperator(node.operator).toStr());
+      output.pushStr(" target=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.target).toStr());
+      output.pushStr(" value=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.value).toStr());
+      return output;
+    }
+
+    function renderBinaryExpression(node: Ast::Expression::Binary): String {
+      let mut output: String = String::create("Binary span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" operator=");
+      output.pushStr(Ast::Serializer::renderBinaryOperator(node.operator).toStr());
+      output.pushStr(" left=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.left).toStr());
+      output.pushStr(" right=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.right).toStr());
       return output;
     }
 
@@ -377,6 +545,34 @@ export namespace Ast {
       return output;
     }
 
+    function renderVariableExpression(node: Ast::Expression::Variable): String {
+      let mut output: String = String::create("Variable span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name).toStr());
+      return output;
+    }
+
+    function renderVectorExpression(node: Ast::Expression::VectorLiteral): String {
+      let mut output: String = String::create("Vector span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" elements=");
+      output.pushStr(Ast::Serializer::renderExpressionIdsInline(node.elements).toStr());
+      return output;
+    }
+
+    function renderMemberAccessExpression(node: Ast::Expression::MemberAccess): String {
+      let mut output: String = String::create("MemberAccess span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" operator=");
+      output.pushStr(Ast::Serializer::renderAccessOperator(node.operator).toStr());
+      output.pushStr(" object=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.object).toStr());
+      output.pushStr(" member=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.member).toStr());
+      return output;
+    }
+
     function renderLetStatement(node: Ast::Statement::Let): String {
       let mut output: String = String::create("Let span=");
       output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
@@ -386,6 +582,34 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderOptionalTypeId(node.annotation).toStr());
       output.pushStr(" value=");
       output.pushStr(Ast::Serializer::renderOptionalExpressionId(node.value).toStr());
+      return output;
+    }
+
+    function renderVariableStatement(node: Ast::Statement::Variable): String {
+      let mut output: String = String::create("Variable span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" mutable=");
+      output.pushStr(Ast::Serializer::renderBoolean(node.mutable).toStr());
+      output.pushStr(" pattern=");
+      output.pushStr(Ast::Serializer::renderPatternId(node.pattern).toStr());
+      output.pushStr(" annotation=");
+      output.pushStr(Ast::Serializer::renderOptionalTypeId(node.annotation).toStr());
+      output.pushStr(" value=");
+      output.pushStr(Ast::Serializer::renderOptionalExpressionId(node.value).toStr());
+      return output;
+    }
+
+    function renderLetElseStatement(node: Ast::Statement::LetElse): String {
+      let mut output: String = String::create("LetElse span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" pattern=");
+      output.pushStr(Ast::Serializer::renderPatternId(node.pattern).toStr());
+      output.pushStr(" annotation=");
+      output.pushStr(Ast::Serializer::renderOptionalTypeId(node.annotation).toStr());
+      output.pushStr(" value=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.value).toStr());
+      output.pushStr(" elseBranch=");
+      output.pushStr(Ast::Serializer::renderStatementId(node.elseBranch).toStr());
       return output;
     }
 
@@ -402,6 +626,24 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
       output.pushStr(" expression=");
       output.pushStr(Ast::Serializer::renderExpressionId(node.expression).toStr());
+      return output;
+    }
+
+    function renderBlockStatement(node: Ast::Statement::Block): String {
+      let mut output: String = String::create("Block span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" statements=");
+      output.pushStr(Ast::Serializer::renderStatementIdsInline(node.statements).toStr());
+      output.pushStr(" tail=");
+      output.pushStr(Ast::Serializer::renderOptionalExpressionId(node.tail).toStr());
+      return output;
+    }
+
+    function renderItemStatement(node: Ast::Statement::Item): String {
+      let mut output: String = String::create("Item span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" item=");
+      output.pushStr(Ast::Serializer::renderItemId(node.item).toStr());
       return output;
     }
 
@@ -518,6 +760,91 @@ export namespace Ast {
       return String::create("none");
     }
 
+    function renderLiteralValue(value: Ast::Expression::LiteralValue): String {
+      if (let Ast::Expression::LiteralValue::Int32(number) = value) {
+        return Ast::Serializer::renderTaggedNumber("Int32", String::create(number));
+      }
+
+      if (let Ast::Expression::LiteralValue::Int64(number) = value) {
+        return Ast::Serializer::renderTaggedNumber("Int64", String::create(number));
+      }
+
+      if (let Ast::Expression::LiteralValue::UInt32(number) = value) {
+        return Ast::Serializer::renderTaggedNumber("UInt32", String::create(number));
+      }
+
+      if (let Ast::Expression::LiteralValue::UInt64(number) = value) {
+        return Ast::Serializer::renderTaggedNumber("UInt64", String::create(number));
+      }
+
+      if (let Ast::Expression::LiteralValue::Float64(number) = value) {
+        return Ast::Serializer::renderTaggedNumber("Float64", String::create(number));
+      }
+
+      if (let Ast::Expression::LiteralValue::Boolean(flag) = value) {
+        return Ast::Serializer::renderTaggedText("Boolean", Ast::Serializer::renderBoolean(flag));
+      }
+
+      if (let Ast::Expression::LiteralValue::Character(codePoint) = value) {
+        return Ast::Serializer::renderTaggedNumber("Character", String::create(codePoint));
+      }
+
+      if (let Ast::Expression::LiteralValue::String(text) = value) {
+        return Ast::Serializer::renderTaggedText("String", Ast::Serializer::renderQuoted(text));
+      }
+
+      return String::create("Null");
+    }
+
+    function renderBinaryOperator(value: Ast::Expression::BinaryOperator): String {
+      return match (value) {
+        Ast::Expression::BinaryOperator::Add -> String::create("Add"),
+        Ast::Expression::BinaryOperator::And -> String::create("And"),
+        Ast::Expression::BinaryOperator::BitAnd -> String::create("BitAnd"),
+        Ast::Expression::BinaryOperator::BitOr -> String::create("BitOr"),
+        Ast::Expression::BinaryOperator::BitXor -> String::create("BitXor"),
+        Ast::Expression::BinaryOperator::Divide -> String::create("Divide"),
+        Ast::Expression::BinaryOperator::Equal -> String::create("Equal"),
+        Ast::Expression::BinaryOperator::GreaterThan -> String::create("GreaterThan"),
+        Ast::Expression::BinaryOperator::GreaterThanOrEqual -> String::create("GreaterThanOrEqual"),
+        Ast::Expression::BinaryOperator::LessThan -> String::create("LessThan"),
+        Ast::Expression::BinaryOperator::LessThanOrEqual -> String::create("LessThanOrEqual"),
+        Ast::Expression::BinaryOperator::Modulo -> String::create("Modulo"),
+        Ast::Expression::BinaryOperator::Multiply -> String::create("Multiply"),
+        Ast::Expression::BinaryOperator::NotEqual -> String::create("NotEqual"),
+        Ast::Expression::BinaryOperator::Or -> String::create("Or"),
+        Ast::Expression::BinaryOperator::ShiftLeft -> String::create("ShiftLeft"),
+        Ast::Expression::BinaryOperator::ShiftRight -> String::create("ShiftRight"),
+        Ast::Expression::BinaryOperator::Subtract -> String::create("Subtract"),
+      };
+    }
+
+    function renderAssignmentOperator(value: Ast::Expression::AssignmentOperator): String {
+      return match (value) {
+        Ast::Expression::AssignmentOperator::Assign -> String::create("Assign"),
+        Ast::Expression::AssignmentOperator::AddAssign -> String::create("AddAssign"),
+        Ast::Expression::AssignmentOperator::SubtractAssign -> String::create("SubtractAssign"),
+        Ast::Expression::AssignmentOperator::MultiplyAssign -> String::create("MultiplyAssign"),
+        Ast::Expression::AssignmentOperator::DivideAssign -> String::create("DivideAssign"),
+        Ast::Expression::AssignmentOperator::ModuloAssign -> String::create("ModuloAssign"),
+        Ast::Expression::AssignmentOperator::ShiftLeftAssign -> String::create("ShiftLeftAssign"),
+        Ast::Expression::AssignmentOperator::ShiftRightAssign -> String::create("ShiftRightAssign"),
+        Ast::Expression::AssignmentOperator::BitAndAssign -> String::create("BitAndAssign"),
+        Ast::Expression::AssignmentOperator::BitOrAssign -> String::create("BitOrAssign"),
+        Ast::Expression::AssignmentOperator::BitXorAssign -> String::create("BitXorAssign"),
+        Ast::Expression::AssignmentOperator::AndAssign -> String::create("AndAssign"),
+        Ast::Expression::AssignmentOperator::OrAssign -> String::create("OrAssign"),
+      };
+    }
+
+    function renderAccessOperator(value: Ast::Expression::AccessOperator): String {
+      if (value == Ast::Expression::AccessOperator::Dot) {
+        return String::create("Dot");
+      }
+
+      return String::create("DoubleColon");
+    }
+
     function renderItemId(id: Ast::ItemId): String {
       return Ast::Serializer::renderId("item", id.raw());
     }
@@ -558,6 +885,30 @@ export namespace Ast {
       let mut output: String = String::create("\"");
       output.pushStr(text);
       output.pushStr("\"");
+      return output;
+    }
+
+    function renderBoolean(value: boolean): String {
+      if (value) {
+        return String::create("true");
+      }
+
+      return String::create("false");
+    }
+
+    function renderTaggedNumber(tag: str, value: String): String {
+      let mut output: String = String::create(tag);
+      output.pushStr("(");
+      output.pushStr(value.toStr());
+      output.pushStr(")");
+      return output;
+    }
+
+    function renderTaggedText(tag: str, value: String): String {
+      let mut output: String = String::create(tag);
+      output.pushStr("(");
+      output.pushStr(value.toStr());
+      output.pushStr(")");
       return output;
     }
 
@@ -620,6 +971,50 @@ export namespace Ast {
         };
 
         output.pushStr(Ast::Serializer::renderPatternId(value).toStr());
+        index = index + 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
+    function renderExpressionIdsInline(values: Vector<Ast::ExpressionId>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: Ast::ExpressionId = match (values.get(index)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing expression id entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderExpressionId(value).toStr());
+        index = index + 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
+    function renderStatementIdsInline(values: Vector<Ast::StatementId>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: Ast::StatementId = match (values.get(index)) {
+          Option::SOME(id) -> *id,
+          Option::NONE -> @panic("missing statement id entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderStatementId(value).toStr());
         index = index + 1;
       }
 
