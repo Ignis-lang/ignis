@@ -241,6 +241,12 @@ pub enum Instr {
     ty: TypeId,
   },
 
+  /// Mark the owned value at `ptr` as moved so later drops skip it.
+  MarkMoved {
+    ptr: Operand,
+    ty: TypeId,
+  },
+
   /// `dest = &drop_glue_<T>` — function pointer `(*mut u8) -> void` that drops T.
   DropGlue {
     dest: TempId,

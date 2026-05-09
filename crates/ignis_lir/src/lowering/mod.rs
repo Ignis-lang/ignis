@@ -3303,6 +3303,7 @@ impl<'a> LoweringContext<'a> {
 
     // Check if base is already a pointer/reference type
     let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. });
+    let should_mark_field_moved = !base_is_ptr && self.types.needs_drop_with_defs(&field_ty, self.defs);
 
     let base_ptr_ty = self.types.pointer(base_ty, false);
     let base_ptr = if base_is_ptr {
@@ -3378,6 +3379,13 @@ impl<'a> LoweringContext<'a> {
       dest,
       ptr: Operand::Temp(field_ptr),
     });
+
+    if should_mark_field_moved {
+      self.fn_builder().emit(Instr::MarkMoved {
+        ptr: Operand::Temp(field_ptr),
+        ty: field_ty,
+      });
+    }
 
     Some(Operand::Temp(dest))
   }

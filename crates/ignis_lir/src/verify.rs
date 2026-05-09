@@ -316,6 +316,9 @@ impl<'a> LirVerifier<'a> {
       Instr::DropInPlace { ptr, .. } => {
         self.check_operand(func, func_name, block_name, ptr, defined_temps);
       },
+      Instr::MarkMoved { ptr, .. } => {
+        self.check_operand(func, func_name, block_name, ptr, defined_temps);
+      },
       Instr::DropGlue { dest, .. } => {
         defined_temps.insert(*dest);
       },

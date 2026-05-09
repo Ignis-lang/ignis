@@ -2790,6 +2790,20 @@ impl<'a> CEmitter<'a> {
         }
       },
 
+      Instr::MarkMoved { ptr, ty } => {
+        if self.types.needs_drop_with_defs(ty, self.defs) {
+          let p = self.format_operand(func, ptr);
+          let c_type = self.format_type(*ty);
+          writeln!(self.output, "{{ {}* __moved = ({}*){}; (void)__moved;", c_type, c_type, p).unwrap();
+          write!(self.output, "    ").unwrap();
+          self.emit_uninitialized_drop_state("(*__moved)", *ty);
+          writeln!(self.output, "}}").unwrap();
+        } else {
+          let p = self.format_operand(func, ptr);
+          writeln!(self.output, "(void){}; /* mark_moved: no-op */", p).unwrap();
+        }
+      },
+
       Instr::DropGlue { dest, ty } => {
         let glue_name = self.drop_glue_name(*ty);
         // Cast to void* — drop glue functions are raw C function pointers passed

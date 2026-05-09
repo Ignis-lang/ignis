@@ -385,6 +385,11 @@ impl<'a> LirPrinter<'a> {
         let ty_str = self.format_type(*ty);
         writeln!(self.output, "    drop_in_place {} : {}", p, ty_str).unwrap();
       },
+      Instr::MarkMoved { ptr, ty } => {
+        let p = self.format_operand(func, ptr);
+        let ty_str = self.format_type(*ty);
+        writeln!(self.output, "    mark_moved {} : {}", p, ty_str).unwrap();
+      },
       Instr::DropGlue { dest, ty } => {
         let ty_str = self.format_type(*ty);
         writeln!(self.output, "    t{} = drop_glue<{}>()", dest.index(), ty_str).unwrap();
