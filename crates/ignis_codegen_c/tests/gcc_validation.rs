@@ -320,6 +320,25 @@ function main(): void {
 }
 
 #[test]
+fn gcc_droppable_local_without_initializer_compiles() {
+  gcc_compiles(
+    r#"
+@implements(Drop)
+record Resource {
+    id: i32;
+    drop(&mut self): void { return; }
+}
+
+function main(): void {
+    let mut resource: Resource;
+    resource = Resource { id: 1 };
+    return;
+}
+"#,
+  );
+}
+
+#[test]
 fn gcc_drop_glue_explicit_method() {
   gcc_compiles(
     r#"

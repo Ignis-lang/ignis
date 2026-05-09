@@ -2146,6 +2146,18 @@ impl<'a> CEmitter<'a> {
     }
 
     writeln!(self.output, "    // Locals").unwrap();
+    let drop_scheduled_locals: HashSet<_> = func
+      .blocks
+      .get_all()
+      .iter()
+      .flat_map(|block| block.instructions.iter())
+      .filter_map(|instruction| match instruction {
+        Instr::Drop { local } => Some(local.index()),
+        _ => None,
+      })
+      .collect();
+    let mut droppable_locals = Vec::new();
+
     for (idx, local) in locals.iter().enumerate() {
       let name = local.name.as_deref().unwrap_or("_");
       if let Type::FixedArray { element, size: n } = self.types.get(&local.ty) {
@@ -2154,9 +2166,66 @@ impl<'a> CEmitter<'a> {
       } else {
         let ty = self.format_var_type(local.ty);
         writeln!(self.output, "    {} l{}; // {}", ty, idx, name).unwrap();
+
+        if drop_scheduled_locals.contains(&(idx as u32)) || self.types.needs_drop_with_defs(&local.ty, self.defs) {
+          droppable_locals.push((idx, local.ty));
+        }
       }
     }
+
+    if !droppable_locals.is_empty() {
+      writeln!(self.output).unwrap();
+      writeln!(
+        self.output,
+        "    // Mark droppable locals as uninitialized until their first store"
+      )
+      .unwrap();
+      for (idx, ty) in droppable_locals {
+        writeln!(self.output, "    __builtin_memset((void*)&l{}, 0, sizeof(l{}));", idx, idx).unwrap();
+        self.emit_uninitialized_drop_state(&format!("l{}", idx), ty);
+      }
+    }
+
     writeln!(self.output).unwrap();
+  }
+
+  fn emit_uninitialized_drop_state(
+    &mut self,
+    expr: &str,
+    ty: TypeId,
+  ) {
+    match self.types.get(&ty).clone() {
+      Type::Record(def_id) => {
+        if self.record_has_drop_trait(def_id) {
+          writeln!(self.output, "    {}.__ignis_drop_state = 1;", expr).unwrap();
+          return;
+        }
+
+        let field_info: Vec<(u32, TypeId)> = {
+          let def = self.defs.get(&def_id);
+          match &def.kind {
+            DefinitionKind::Record(record_definition) => record_definition
+              .fields
+              .iter()
+              .map(|field| (field.index, field.type_id))
+              .collect(),
+            _ => vec![],
+          }
+        };
+
+        for (index, field_ty) in field_info {
+          if self.types.needs_drop_with_defs(&field_ty, self.defs) {
+            self.emit_uninitialized_drop_state(&format!("{}.field_{}", expr, index), field_ty);
+          }
+        }
+      },
+      Type::Enum(def_id) => {
+        if self.record_has_drop_trait(def_id) {
+          writeln!(self.output, "    {}.__ignis_drop_state = 1;", expr).unwrap();
+        }
+      },
+      _ => {},
+    }
   }
 
   fn emit_temps(

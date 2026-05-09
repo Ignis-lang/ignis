@@ -865,3 +865,69 @@ function main(): void {
   );
   assert_snapshot!("c_drop_glue_manual_drop_sets_state", c_code);
 }
+
+#[test]
+fn c_droppable_local_without_initializer_starts_uninitialized() {
+  let c_code = common::compile_to_c(
+    r#"
+@implements(Drop)
+record Resource {
+    id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function main(): void {
+    let mut resource: Resource;
+    resource = Resource { id: 1 };
+    return;
+}
+"#,
+  );
+
+  assert!(
+    c_code.contains("__builtin_memset((void*)&l0, 0, sizeof(l0));"),
+    "expected droppable local to be zero-initialized before first store"
+  );
+  assert!(
+    c_code.contains("l0.__ignis_drop_state = 1;"),
+    "expected droppable local to start marked as already dropped"
+  );
+}
+
+#[test]
+fn c_structural_droppable_local_without_initializer_marks_nested_drop_state() {
+  let c_code = common::compile_to_c(
+    r#"
+@implements(Drop)
+record Resource {
+    id: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Wrapper {
+    resource: Resource;
+}
+
+function main(): void {
+    let mut wrapper: Wrapper;
+    wrapper = Wrapper { resource: Resource { id: 1 } };
+    return;
+}
+"#,
+  );
+
+  assert!(
+    c_code.contains("__builtin_memset((void*)&l0, 0, sizeof(l0));"),
+    "expected structural droppable local to be zero-initialized before first store"
+  );
+  assert!(
+    c_code.contains("l0.field_0.__ignis_drop_state = 1;"),
+    "expected nested droppable field to start marked as already dropped"
+  );
+}
