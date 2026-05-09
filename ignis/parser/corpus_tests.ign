@@ -98,6 +98,46 @@ function collectIgnFiles(rootPath: str): Vector<String> {
   return files;
 }
 
+function pathHasSuffix(path: &String, suffix: str): boolean {
+  let suffixText: String = String::create(suffix);
+
+  if (path.length() < suffixText.length()) {
+    return false;
+  }
+
+  let actualSuffix: String = path.substringBytes(path.length() - suffixText.length(), path.length());
+  return actualSuffix.equals(&suffixText);
+}
+
+function collectDiagnosticFixtureRoots(rootPath: str): Vector<String> {
+  if (!Fs::exists(rootPath)) {
+    return Vector::new<String>();
+  }
+
+  let expectedSuffix: String = String::create("/expected.diagnostics");
+  let walked: Vector<String> = match (Fs::walk(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("failed to walk parser diagnostic corpus"),
+  };
+  let mut roots: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < walked.length()) {
+    let Option::SOME(path) = walked.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (pathHasSuffix(path, expectedSuffix.toStr())) {
+      roots.push(path.substringBytes(0, path.length() - expectedSuffix.length()));
+    }
+
+    index += 1;
+  }
+
+  return roots;
+}
+
 function formatterMirrorCorpusPaths(): Vector<String> {
   let mut paths: Vector<String> = Vector::new<String>();
 
@@ -313,6 +353,20 @@ function assertParserDiagnosticsFixtureMatches(rootPath: str): void {
   }
 }
 
+function assertDiagnosticFixtureCorpusMatches(rootPaths: &Vector<String>): void {
+  let mut index: u64 = 0;
+
+  while (index < rootPaths.length()) {
+    let Option::SOME(rootPath) = rootPaths.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    assertParserDiagnosticsFixtureMatches(rootPath.toStr());
+    index += 1;
+  }
+}
+
 function countApplicablePaths(paths: &Vector<String>): u64 {
   let mut count: u64 = 0;
   let mut index: u64 = 0;
@@ -481,4 +535,23 @@ function parserDiagnosticSnapshotForRecoveryFixture(): void {
 @test
 function parserDiagnosticCompatibilityHarnessMatchesFixture(): void {
   assertParserDiagnosticsFixtureMatches("test_cases/selfhost/parser/diagnostic_recovery");
+}
+
+@test
+function parserMalformedFixtureCorpusMatchesDiagnostics(): void {
+  let fixtureRoots: Vector<String> = collectDiagnosticFixtureRoots("test_cases/selfhost/parser/malformed");
+  Test::assertEq<u64>(fixtureRoots.length(), 2);
+  assertDiagnosticFixtureCorpusMatches(&fixtureRoots);
+}
+
+@test
+function parserTestCasesCorpusIsExercised(): void {
+  let validPaths: Vector<String> = collectIgnFiles("test_cases/parser/valid");
+  let diagnosticRoots: Vector<String> = collectDiagnosticFixtureRoots("test_cases/parser/diagnostic");
+
+  Test::assertEq<u64>(validPaths.length(), 2);
+  Test::assertEq<u64>(diagnosticRoots.length(), 1);
+
+  assertCorpusParsesWithoutDiagnostics(&validPaths);
+  assertDiagnosticFixtureCorpusMatches(&diagnosticRoots);
 }
