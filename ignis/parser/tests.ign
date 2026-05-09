@@ -636,6 +636,74 @@ function parserParsesUtf8CharLiterals(): void {
 }
 
 @test
+function parserParsesBackspaceAndFormFeedCharEscapes(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_char_escapes.ign",
+    "function main(): void { '\\b'; '\\f'; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  match (expectItem(&module, match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing char escape function root"),
+  })) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 2);
+
+          let firstStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing backspace literal statement"),
+          };
+          let secondStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing form-feed literal statement"),
+          };
+
+          match (expectStatement(&module, firstStatementId)) {
+            Ast::Statement::Node::Expression(firstExpressionStatement) -> {
+              match (expectExpression(&module, firstExpressionStatement.expression)) {
+                Ast::Expression::Node::Literal(literal) -> {
+                  match (literal.value) {
+                    Ast::Expression::LiteralValue::Character(value) -> Test::assertEq<char>(value, '\b'),
+                    _ -> @panic("expected backspace character literal"),
+                  };
+                },
+                _ -> @panic("expected literal expression for backspace"),
+              };
+            },
+            _ -> @panic("expected expression statement for backspace"),
+          };
+
+          match (expectStatement(&module, secondStatementId)) {
+            Ast::Statement::Node::Expression(secondExpressionStatement) -> {
+              match (expectExpression(&module, secondExpressionStatement.expression)) {
+                Ast::Expression::Node::Literal(literal) -> {
+                  match (literal.value) {
+                    Ast::Expression::LiteralValue::Character(value) -> Test::assertEq<char>(value, '\f'),
+                    _ -> @panic("expected form-feed character literal"),
+                  };
+                },
+                _ -> @panic("expected literal expression for form-feed"),
+              };
+            },
+            _ -> @panic("expected expression statement for form-feed"),
+          };
+        },
+        _ -> @panic("expected block body for char escape test"),
+      };
+    },
+    _ -> @panic("expected function root for char escape test"),
+  };
+}
+
+@test
 function parserParsesUnaryCallAndMemberExpressions(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_unary_member.ign",

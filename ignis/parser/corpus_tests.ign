@@ -42,18 +42,6 @@ function renderSeverityToken(diagnostic: &Diagnostic): str {
 }
 
 function skipReasonForPath(path: &String): Option<str> {
-  if (pathEquals(path, "std/toml/mod.ign")) {
-    return Option::SOME("std/toml/mod.ign still trips a char-literal parser diagnostic in the TOML lexer implementation");
-  }
-
-  if (pathEquals(path, "std/io/error.ign")) {
-    return Option::SOME("std/io/error.ign still crashes the parser corpus runner on match-guard-heavy code");
-  }
-
-  if (pathEquals(path, "example/allocator/src/main.ign")) {
-    return Option::SOME("example/allocator/src/main.ign still crashes the parser corpus runner after parsing cleanly enough to remove the old hex-only reason");
-  }
-
   return Option::NONE;
 }
 
@@ -402,6 +390,16 @@ function parserCorpusRemovesStaleUtf8CharSkip(): void {
 }
 
 @test
+function parserCorpusRemovesTomlModuleSkip(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/toml/mod.ign");
+}
+
+@test
+function parserCorpusRemovesIoErrorSkip(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/io/error.ign");
+}
+
+@test
 function parserCorpusRemovesStaleEnumMethodSkip(): void {
   assertParsesWithoutDiagnosticsAndIsNotSkipped("example/ignis/src/token/token.ign");
 }
@@ -423,6 +421,11 @@ function parserCorpusParsesSupportedExampleSubsetWithoutDiagnostics(): void {
   let paths: Vector<String> = supportedExampleSubset();
   Test::assertEq<u64>(paths.length(), 3);
   assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusRemovesAllocatorExampleSkip(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("example/allocator/src/main.ign");
 }
 
 @test
