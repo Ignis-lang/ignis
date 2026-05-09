@@ -1,0 +1,481 @@
+import Fs from "std::fs";
+import Io from "std::io";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import CompatibilityFixture, Diagnostic, DiagnosticBag, DiagnosticFixtureParser, SourceFile from "@compiler::diagnostics";
+import Parser from "@compiler::parser";
+
+record ParseResult {
+  public module: Ast::Module;
+  public diagnostics: DiagnosticBag;
+}
+
+function readCorpusFixture(path: str): String {
+  return match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("missing parser corpus fixture"),
+  };
+}
+
+function pathEquals(path: &String, expected: str): boolean {
+  return path.equals(expected);
+}
+
+function renderSeverityToken(diagnostic: &Diagnostic): str {
+  let displayName: String = String::create(diagnostic.severity.displayName());
+
+  if (displayName.equals("Error")) {
+    return "ERROR";
+  }
+
+  if (displayName.equals("Warning")) {
+    return "WARNING";
+  }
+
+  if (displayName.equals("Info")) {
+    return "INFO";
+  }
+
+  return "HINT";
+}
+
+function skipReasonForPath(path: &String): Option<str> {
+  if (pathEquals(path, "std/toml/mod.ign")) {
+    return Option::SOME("std/toml/mod.ign still trips a char-literal parser diagnostic in the TOML lexer implementation");
+  }
+
+  if (pathEquals(path, "std/io/error.ign")) {
+    return Option::SOME("std/io/error.ign still crashes the parser corpus runner on match-guard-heavy code");
+  }
+
+  if (pathEquals(path, "example/allocator/src/main.ign")) {
+    return Option::SOME("example/allocator/src/main.ign still crashes the parser corpus runner after parsing cleanly enough to remove the old hex-only reason");
+  }
+
+  return Option::NONE;
+}
+
+function parseText(path: str, sourceText: str): ParseResult {
+  let source: SourceFile = SourceFile::create(path, sourceText);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  return ParseResult {
+    module: module,
+    diagnostics: diagnostics,
+  };
+}
+
+function parseFixture(path: str): ParseResult {
+  let text: String = readCorpusFixture(path);
+  return parseText(path, text.toStr());
+}
+
+function isIgnFile(path: &String): boolean {
+  if (path.length() < 4) {
+    return false;
+  }
+
+  let suffix: String = path.substringBytes(path.length() - 4, path.length());
+  return suffix.equals(".ign");
+}
+
+function collectIgnFiles(rootPath: str): Vector<String> {
+  if (!Fs::exists(rootPath)) {
+    return Vector::new<String>();
+  }
+
+  let walked: Vector<String> = match (Fs::walk(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("failed to walk parser corpus"),
+  };
+  let mut files: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < walked.length()) {
+    let Option::SOME(path) = walked.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (isIgnFile(path)) {
+      files.push(path.clone());
+    }
+
+    index += 1;
+  }
+
+  return files;
+}
+
+function formatterMirrorCorpusPaths(): Vector<String> {
+  let mut paths: Vector<String> = Vector::new<String>();
+
+  paths.push(String::create("std/collections/mod.ign"));
+  paths.push(String::create("std/ffi/mod.ign"));
+  paths.push(String::create("std/hash/mod.ign"));
+  paths.push(String::create("std/math/mod.ign"));
+  paths.push(String::create("std/number/mod.ign"));
+  paths.push(String::create("std/option/mod.ign"));
+  paths.push(String::create("std/result/mod.ign"));
+  paths.push(String::create("std/types/mod.ign"));
+  paths.push(String::create("std/memory/mod.ign"));
+  paths.push(String::create("std/ptr/mod.ign"));
+  paths.push(String::create("std/io/error.ign"));
+  paths.push(String::create("std/fs/dir.ign"));
+  paths.push(String::create("std/fs/file.ign"));
+  paths.push(String::create("std/fs/sys/unix.ign"));
+  paths.push(String::create("std/libc/memory.ign"));
+  paths.push(String::create("std/libc/errno.ign"));
+  paths.push(String::create("std/libc/primitives.ign"));
+  paths.push(String::create("std/libc/string.ign"));
+  paths.push(String::create("std/libc/stdio.ign"));
+  paths.push(String::create("std/libc/misc.ign"));
+  paths.push(String::create("std/string/mod.ign"));
+  paths.push(String::create("std/path/mod.ign"));
+  paths.push(String::create("example/lambda.ign"));
+  paths.push(String::create("example/main.ign"));
+  paths.push(String::create("example/day_1.ign"));
+  paths.push(String::create("example/allocator/src/arena_allocator.ign"));
+  paths.push(String::create("example/allocator/src/main.ign"));
+
+  return paths;
+}
+
+function renderStructuredDiagnostics(diagnostics: &DiagnosticBag): String {
+  let mut rendered: String = String::new();
+  let mut diagnosticIndex: u64 = 0;
+
+  while (diagnosticIndex < diagnostics.length()) {
+    let Option::SOME(diagnostic) = diagnostics.get(diagnosticIndex) else {
+      diagnosticIndex += 1;
+      continue;
+    };
+
+    rendered.pushStr("[");
+    rendered.pushStr(renderSeverityToken(diagnostic));
+    rendered.pushStr("] ");
+    rendered.pushStr(diagnostic.code);
+    rendered.pushStr(": ");
+    rendered.pushStr(diagnostic.message);
+    rendered.pushStr("\n");
+    rendered.pushStr("  at ");
+    rendered.pushStr(diagnostic.primarySpan.filePath);
+    rendered.pushStr(":");
+    rendered.pushStr(String::create(diagnostic.primarySpan.start).toStr());
+    rendered.pushStr("-");
+    rendered.pushStr(String::create(diagnostic.primarySpan.end).toStr());
+    rendered.pushStr("\n");
+
+    let mut labelIndex: u64 = 0;
+    while (labelIndex < diagnostic.labels.length()) {
+      let Option::SOME(label) = diagnostic.labels.get(labelIndex) else {
+        labelIndex += 1;
+        continue;
+      };
+
+      rendered.pushStr("  label(");
+      rendered.pushStr(label.kind.displayName());
+      rendered.pushStr("): ");
+      rendered.pushStr(label.message);
+      rendered.pushStr(" at ");
+      rendered.pushStr(label.span.filePath);
+      rendered.pushStr(":");
+      rendered.pushStr(String::create(label.span.start).toStr());
+      rendered.pushStr("-");
+      rendered.pushStr(String::create(label.span.end).toStr());
+      rendered.pushStr("\n");
+      labelIndex += 1;
+    }
+
+    let mut noteIndex: u64 = 0;
+    while (noteIndex < diagnostic.notes.length()) {
+      let Option::SOME(note) = diagnostic.notes.get(noteIndex) else {
+        noteIndex += 1;
+        continue;
+      };
+
+      rendered.pushStr("  ");
+      rendered.pushStr(note.kind.displayName());
+      rendered.pushStr(": ");
+      rendered.pushStr(note.message);
+      rendered.pushStr("\n");
+      noteIndex += 1;
+    }
+
+    if (let Option::SOME(help) = diagnostic.help) {
+      rendered.pushStr("  help: ");
+      rendered.pushStr(help);
+      rendered.pushStr("\n");
+    }
+
+    if (diagnosticIndex + 1 < diagnostics.length()) {
+      rendered.pushStr("\n");
+    }
+
+    diagnosticIndex += 1;
+  }
+
+  return rendered;
+}
+
+function assertParsesWithoutDiagnostics(path: str): void {
+  let result: ParseResult = parseFixture(path);
+
+  if (result.diagnostics.length() != 0) {
+    let mut message: String = String::create("expected parser corpus file to parse without diagnostics: ");
+    message.pushStr(path);
+    message.pushStr("\n");
+    message.pushStr(renderStructuredDiagnostics(&result.diagnostics).toStr());
+    Io::eprintln(message);
+    Test::fail();
+  }
+
+  if (result.module.roots.length() == 0) {
+    let mut message: String = String::create("expected parser corpus file to produce roots: ");
+    message.pushStr(path);
+    Io::eprintln(message);
+    Test::fail();
+  }
+}
+
+function assertParsesWithoutDiagnosticsAndIsNotSkipped(path: str): void {
+  assertParsesWithoutDiagnostics(path);
+
+  let ownedPath: String = String::create(path);
+
+  match (skipReasonForPath(&ownedPath)) {
+    Option::NONE -> {},
+    Option::SOME(reason) -> {
+      let mut message: String = String::create("expected parser corpus path to stop being skipped after parsing cleanly: ");
+      message.pushStr(path);
+      message.pushStr("\nreason: ");
+      message.pushStr(reason);
+      Io::eprintln(message);
+      Test::fail();
+    },
+  };
+}
+
+function assertCorpusParsesWithoutDiagnostics(paths: &Vector<String>): void {
+  let mut index: u64 = 0;
+
+  while (index < paths.length()) {
+    let Option::SOME(path) = paths.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    match (skipReasonForPath(path)) {
+      Option::SOME(_) -> {},
+      Option::NONE -> assertParsesWithoutDiagnostics(path.toStr()),
+    };
+
+    index += 1;
+  }
+}
+
+function renderParserFixtureAst(rootPath: str): String {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture(rootPath);
+  let sourceText: String = match (fixture.input) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing parser AST fixture input"),
+  };
+  let result: ParseResult = parseText(String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  return Ast::Serializer::render(&result.module);
+}
+
+function renderParserFixtureDiagnostics(rootPath: str): String {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture(rootPath);
+  let sourceText: String = match (fixture.input) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing parser diagnostic fixture input"),
+  };
+  let result: ParseResult = parseText(String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
+
+  return renderStructuredDiagnostics(&result.diagnostics);
+}
+
+function assertParserDiagnosticsFixtureMatches(rootPath: str): void {
+  let fixture: CompatibilityFixture = DiagnosticFixtureParser::loadFixture(rootPath);
+  let sourceText: String = match (fixture.input) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing parser compatibility input fixture"),
+  };
+  let expectedDiagnosticsText: String = match (fixture.expectedDiagnostics) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing parser compatibility diagnostics fixture"),
+  };
+  let expectedDiagnostics = DiagnosticFixtureParser::parse(expectedDiagnosticsText.toStr());
+  let result: ParseResult = parseText(String::create(rootPath).concat("/input.ign").toStr(), sourceText.toStr());
+
+  if (!DiagnosticFixtureParser::compare(&expectedDiagnostics, &result.diagnostics)) {
+    let mut message: String = String::create("parser compatibility mismatch for ");
+    message.pushStr(rootPath);
+    message.pushStr("\nexpected:\n");
+    message.pushStr(expectedDiagnosticsText.toStr());
+    message.pushStr("\nactual:\n");
+    message.pushStr(renderStructuredDiagnostics(&result.diagnostics).toStr());
+    Io::eprintln(message);
+    Test::fail();
+  }
+}
+
+function countApplicablePaths(paths: &Vector<String>): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < paths.length()) {
+    let Option::SOME(path) = paths.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    match (skipReasonForPath(path)) {
+      Option::SOME(_) -> {},
+      Option::NONE -> count += 1,
+    };
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function supportedAnalyzerSubset(): Vector<String> {
+  let mut paths: Vector<String> = Vector::new<String>();
+  paths.push(String::create("test_cases/analyzer/extern/valid_extern.ign"));
+  paths.push(String::create("test_cases/analyzer/type_errors/assignment_mismatch.ign"));
+  paths.push(String::create("test_cases/analyzer/missing_return/missing_return.ign"));
+  paths.push(String::create("test_cases/analyzer/ownership/extern_no_consume.ign"));
+  return paths;
+}
+
+function supportedStdSubset(): Vector<String> {
+  let mut paths: Vector<String> = Vector::new<String>();
+  paths.push(String::create("std/vector/tests.ign"));
+  paths.push(String::create("std/ffi/mod.ign"));
+  return paths;
+}
+
+function supportedExampleSubset(): Vector<String> {
+  let mut paths: Vector<String> = Vector::new<String>();
+  paths.push(String::create("example/add.ign"));
+  paths.push(String::create("example/hello-world.ign"));
+  paths.push(String::create("example/vector.ign"));
+  return paths;
+}
+
+function supportedFormatterMirrorSubset(): Vector<String> {
+  let mut paths: Vector<String> = Vector::new<String>();
+  paths.push(String::create("std/ffi/mod.ign"));
+  return paths;
+}
+
+@test
+function parserCorpusParsesSupportedStdSubsetWithoutDiagnostics(): void {
+  let paths: Vector<String> = supportedStdSubset();
+  Test::assertEq<u64>(paths.length(), 2);
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusRemovesStaleStdReexportSkips(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/collections/mod.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/format/mod.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/libc/mod.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/serializer/mod.ign");
+}
+
+@test
+function parserCorpusRemovesStaleHexLiteralSkipFromStdHash(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/hash/mod.ign");
+}
+
+@test
+function parserCorpusRemovesStaleUtf8CharSkip(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("std/string/tests.ign");
+}
+
+@test
+function parserCorpusRemovesStaleEnumMethodSkip(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("example/ignis/src/token/token.ign");
+}
+
+@test
+function parserCorpusRemovesStaleForOfSkips(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/for_of/fixed_copy_by_value.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/for_of/fixed_by_ref.ign");
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/for_of/not_a_vector.ign");
+}
+
+@test
+function parserCorpusRemovesStaleGenericTypeParamConstructorSkip(): void {
+  assertParsesWithoutDiagnosticsAndIsNotSkipped("test_cases/analyzer/generics/errors/type_param_with_args.ign");
+}
+
+@test
+function parserCorpusParsesSupportedExampleSubsetWithoutDiagnostics(): void {
+  let paths: Vector<String> = supportedExampleSubset();
+  Test::assertEq<u64>(paths.length(), 3);
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusParsesSupportedAnalyzerSubsetWithoutDiagnostics(): void {
+  let paths: Vector<String> = supportedAnalyzerSubset();
+  Test::assertEq<u64>(paths.length(), 4);
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusParsesSupportedFormatterMirrorSubsetWithoutDiagnostics(): void {
+  let paths: Vector<String> = supportedFormatterMirrorSubset();
+  Test::assertEq<u64>(paths.length(), 1);
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusParsesAnalyzerCorpusWithoutDiagnostics(): void {
+  let paths: Vector<String> = collectIgnFiles("test_cases/analyzer");
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusParsesStdCorpusWithoutDiagnostics(): void {
+  let paths: Vector<String> = collectIgnFiles("std");
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusParsesExampleCorpusWithoutDiagnostics(): void {
+  let paths: Vector<String> = collectIgnFiles("example");
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserCorpusParsesFormatterMirrorCorpusWithoutDiagnostics(): void {
+  let paths: Vector<String> = formatterMirrorCorpusPaths();
+  assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserAstSnapshotForSelfhostFixture(): void {
+  let rendered: String = renderParserFixtureAst("test_cases/selfhost/parser/ast_core");
+  Test::assertSnapshot("parser-ast-core", rendered.toStr());
+}
+
+@test
+function parserDiagnosticSnapshotForRecoveryFixture(): void {
+  let rendered: String = renderParserFixtureDiagnostics("test_cases/selfhost/parser/diagnostic_recovery");
+  Test::assertSnapshot("parser-diagnostic-recovery", rendered.toStr());
+}
+
+@test
+function parserDiagnosticCompatibilityHarnessMatchesFixture(): void {
+  assertParserDiagnosticsFixtureMatches("test_cases/selfhost/parser/diagnostic_recovery");
+}

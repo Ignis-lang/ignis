@@ -2,7 +2,7 @@ import Vector from "std::vector";
 
 import Ast from "@compiler::ast";
 import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
-import Keyword, LiteralKind, Punctuation, Token, TokenKind from "@compiler::syntax";
+import Keyword, LiteralKind, Punctuation, Token, TokenCheckpoint, TokenKind from "@compiler::syntax";
 
 import _ from "./recovery";
 import _ from "./shared";
@@ -337,6 +337,74 @@ export namespace ParserExpressions {
           span: token.span,
         });
       }
+
+      if (token.literalKindValue() == LiteralKind::HEX) {
+        let lexeme: String = parserRef.bump().lexemeString();
+        let Option::SOME(value) = ParserShared::parseHexInteger(&lexeme) else {
+          parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", "hex literal must fit in u64");
+          return Option::NONE;
+        };
+
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+          span: token.span,
+          value: Ast::Expression::LiteralValue::UInt(value),
+        }));
+        return Option::SOME(ParsedExpression {
+          id: expressionId,
+          span: token.span,
+        });
+      }
+
+      if (token.literalKindValue() == LiteralKind::BINARY) {
+        let lexeme: String = parserRef.bump().lexemeString();
+        let Option::SOME(value) = ParserShared::parseBinaryInteger(&lexeme) else {
+          parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", "binary literal must fit in u64");
+          return Option::NONE;
+        };
+
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+          span: token.span,
+          value: Ast::Expression::LiteralValue::UInt(value),
+        }));
+        return Option::SOME(ParsedExpression {
+          id: expressionId,
+          span: token.span,
+        });
+      }
+
+      if (token.literalKindValue() == LiteralKind::FLOAT) {
+        let lexeme: String = parserRef.bump().lexemeString();
+        let Option::SOME(value) = ParserShared::parseFloatLiteral(&lexeme) else {
+          parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", "float literal must be parseable");
+          return Option::NONE;
+        };
+
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+          span: token.span,
+          value: Ast::Expression::LiteralValue::Float(value),
+        }));
+        return Option::SOME(ParsedExpression {
+          id: expressionId,
+          span: token.span,
+        });
+      }
+
+      if (token.literalKindValue() == LiteralKind::CHAR) {
+        let lexeme: String = parserRef.bump().lexemeString();
+        let Option::SOME(value) = ParserShared::parseCharacterLiteral(&lexeme) else {
+          parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", "char literal must contain exactly one character");
+          return Option::NONE;
+        };
+
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+          span: token.span,
+          value: Ast::Expression::LiteralValue::Character(value),
+        }));
+        return Option::SOME(ParsedExpression {
+          id: expressionId,
+          span: token.span,
+        });
+      }
     }
 
     if (token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == Keyword::TRUE) {
@@ -386,6 +454,17 @@ export namespace ParserExpressions {
 
     if (token.kindValue() != TokenKind::IDENTIFIER && !(token.kindValue() == TokenKind::KEYWORD && (token.keywordValue() == Keyword::SELF_ || token.keywordValue() == Keyword::THIS))) {
       return Option::NONE;
+    }
+
+    if (token.kindValue() == TokenKind::IDENTIFIER && token.lexemeString().equals("_")) {
+      let placeholder: Token = parserRef.bump();
+      let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::PipePlaceholder(Ast::Expression::PipePlaceholder {
+        span: placeholder.span,
+      }));
+      return Option::SOME(ParsedExpression {
+        id: expressionId,
+        span: placeholder.span,
+      });
     }
 
     let first: Token = parserRef.bump();
@@ -472,9 +551,10 @@ export namespace ParserExpressions {
 
   function nextSignificantToken(parser: &mut ParserShared::State, startOffset: u64): Token {
     let parserRef: &mut ParserShared::State = parser;
-    let token: Token = parserRef.tokens.peekNth(startOffset);
+    let token: Token = parserRef.tokens.peekNth(startOffset).clone();
+    let kind: TokenKind = token.kindValue();
 
-    if (ParserExpressions::isTrivia(token.clone())) {
+    if (kind == TokenKind::WHITESPACE || kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT) {
       return ParserExpressions::nextSignificantToken(parserRef, startOffset + 1);
     }
 
@@ -637,8 +717,16 @@ export namespace ParserExpressions {
         arguments.push(argument);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
-          if (parserRef.atPunctuation(Punctuation::GREATER) || parserRef.current().punctuationValue() == Punctuation::RIGHT_SHIFT) {
+          if (parserRef.atPunctuation(Punctuation::GREATER)) {
             break;
+          }
+
+          let current: Token = parserRef.current();
+
+          if (current.kindValue() == TokenKind::PUNCTUATION) {
+            if (current.punctuationValue() == Punctuation::RIGHT_SHIFT) {
+              break;
+            }
           }
 
           continue;
@@ -681,6 +769,70 @@ export namespace ParserExpressions {
       name: nameToken.lexemeString(),
       typeArguments: ParserShared::copyTypeIds(&typeArguments),
       arguments: ParserExpressions::copyExpressionIds(&arguments),
+    }));
+    return Option::SOME(ParsedExpression {
+      id: expressionId,
+      span: span,
+    });
+  }
+
+  function captureOverrideKind(name: &String): Option<Ast::Expression::CaptureOverrideKind> {
+    if (name.equals("move")) {
+      return Option::SOME(Ast::Expression::CaptureOverrideKind::Move);
+    }
+
+    if (name.equals("ref")) {
+      return Option::SOME(Ast::Expression::CaptureOverrideKind::Ref);
+    }
+
+    if (name.equals("refMut")) {
+      return Option::SOME(Ast::Expression::CaptureOverrideKind::RefMut);
+    }
+
+    return Option::NONE;
+  }
+
+  function parseCaptureOverrideExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let checkpoint: TokenCheckpoint = parserRef.tokens.checkpoint();
+
+    let Option::SOME(atToken) = parserRef.consumePunctuation(Punctuation::AT) else {
+      return Option::NONE;
+    };
+
+    parserRef.skipTrivia();
+    let nameToken: Token = parserRef.current();
+    if (nameToken.kindValue() != TokenKind::IDENTIFIER) {
+      parserRef.tokens.rewind(checkpoint);
+      return Option::NONE;
+    }
+
+    let overrideName: String = nameToken.lexemeString();
+    let Option::SOME(kind) = ParserExpressions::captureOverrideKind(&overrideName) else {
+      parserRef.tokens.rewind(checkpoint);
+      return Option::NONE;
+    };
+    parserRef.bump();
+
+    parserRef.skipTrivia();
+    let afterName: Token = parserRef.current();
+    if (afterName.kindValue() == TokenKind::PUNCTUATION && (afterName.punctuationValue() == Punctuation::LEFT_PAREN || afterName.punctuationValue() == Punctuation::LESS)) {
+      parserRef.tokens.rewind(checkpoint);
+      return Option::NONE;
+    }
+
+    let expressionResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+    let Option::SOME(expression) = expressionResult else {
+      return Option::NONE;
+    };
+
+    let innerExpressionId: Ast::ExpressionId = expression.id;
+    let innerSpan: SourceSpan = expression.span;
+    let span: SourceSpan = ParserShared::mergeSpans(atToken.span, innerSpan);
+    let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::CaptureOverride(Ast::Expression::CaptureOverride {
+      span: span,
+      kind: kind,
+      expression: innerExpressionId,
     }));
     return Option::SOME(ParsedExpression {
       id: expressionId,
@@ -846,6 +998,7 @@ export namespace ParserExpressions {
 
       copied.push(Ast::Expression::MatchArm {
         pattern: value.pattern,
+        guard: value.guard,
         body: value.body,
       });
       index += 1;
@@ -950,11 +1103,13 @@ export namespace ParserExpressions {
       return Option::NONE;
     };
 
-    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, value.span);
+    let valueId: Ast::ExpressionId = value.id;
+    let valueSpan: SourceSpan = value.span;
+    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, valueSpan);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
       span: span,
       pattern: pattern,
-      value: value.id,
+      value: valueId,
     }));
 
     return Option::SOME(ParsedCondition {
@@ -1161,9 +1316,12 @@ export namespace ParserExpressions {
       return Option::NONE;
     };
 
+    let expressionId: Ast::ExpressionId = expression.id;
+    let expressionSpan: SourceSpan = expression.span;
+
     return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
-      span: ParserShared::mergeSpans(expression.span, semicolon.span),
-      expression: expression.id,
+      span: ParserShared::mergeSpans(expressionSpan, semicolon.span),
+      expression: expressionId,
     })));
   }
 
@@ -1210,15 +1368,18 @@ export namespace ParserExpressions {
         continue;
       };
 
+      let expressionId: Ast::ExpressionId = expression.id;
+      let expressionSpan: SourceSpan = expression.span;
+
       if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isSome()) {
         statements.push(parserRef.module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
-          span: expression.span,
-          expression: expression.id,
+          span: expressionSpan,
+          expression: expressionId,
         })));
         continue;
       }
 
-      tail = Option::SOME(expression.id);
+      tail = Option::SOME(expressionId);
       continue;
     }
 
@@ -1301,6 +1462,15 @@ export namespace ParserExpressions {
         return Option::NONE;
       };
       last = closeParen;
+    }
+
+    if (segments.length() == 1 && arguments.length() == 0) {
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+        span: first.span,
+        name: first.lexemeString(),
+        annotation: Option::NONE,
+        metadata: Ast::emptyMetadata(),
+      })));
     }
 
     return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
@@ -1405,11 +1575,13 @@ export namespace ParserExpressions {
     };
 
     let statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
-    let bodySpan: SourceSpan = ParserShared::mergeSpans(closeParen.span, expression.span);
+    let tailExpressionId: Ast::ExpressionId = expression.id;
+    let expressionSpan: SourceSpan = expression.span;
+    let bodySpan: SourceSpan = ParserShared::mergeSpans(closeParen.span, expressionSpan);
     let body: Ast::StatementId = parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
       span: bodySpan,
       statements: ParserExpressions::copyStatementIds(&statements),
-      tail: Option::SOME(expression.id),
+      tail: Option::SOME(tailExpressionId),
     }));
     let span: SourceSpan = ParserShared::mergeSpans(openParen.span, bodySpan);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
@@ -1448,6 +1620,16 @@ export namespace ParserExpressions {
       let Option::SOME(pattern) = ParserExpressions::parseMatchPattern(parserRef) else {
         return Option::NONE;
       };
+      let mut guard: Option<Ast::ExpressionId> = Option::NONE;
+
+      if (parserRef.consumeKeyword(Keyword::IF).isSome()) {
+        let guardResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+        let Option::SOME(guardExpression) = guardResult else {
+          return Option::NONE;
+        };
+        guard = Option::SOME(guardExpression.id);
+      }
+
       let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::ARROW, "expected '->' after match arm pattern") else {
         return Option::NONE;
       };
@@ -1464,6 +1646,7 @@ export namespace ParserExpressions {
       };
       arms.push(Ast::Expression::MatchArm {
         pattern: pattern,
+        guard: guard,
         body: body.id,
       });
 
@@ -1574,11 +1757,13 @@ export namespace ParserExpressions {
       let Option::SOME(target) = targetResult else {
         return Option::NONE;
       };
-      let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, target.span);
+      let targetId: Ast::ExpressionId = target.id;
+      let targetSpan: SourceSpan = target.span;
+      let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, targetSpan);
       let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Reference(Ast::Expression::Reference {
         span: span,
         mutable: mutable,
-        target: target.id,
+        target: targetId,
       }));
       return Option::SOME(ParsedExpression {
         id: expressionId,
@@ -1592,10 +1777,12 @@ export namespace ParserExpressions {
       let Option::SOME(target) = targetResult else {
         return Option::NONE;
       };
-      let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, target.span);
+      let targetId: Ast::ExpressionId = target.id;
+      let targetSpan: SourceSpan = target.span;
+      let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, targetSpan);
       let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Dereference(Ast::Expression::Dereference {
         span: span,
-        operand: target.id,
+        operand: targetId,
       }));
       return Option::SOME(ParsedExpression {
         id: expressionId,
@@ -1611,11 +1798,13 @@ export namespace ParserExpressions {
     let Option::SOME(operand) = operandResult else {
       return Option::NONE;
     };
-    let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, operand.span);
+    let operandId: Ast::ExpressionId = operand.id;
+    let operandSpan: SourceSpan = operand.span;
+    let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, operandSpan);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Unary(Ast::Expression::Unary {
       span: span,
       operator: operator,
-      operand: operand.id,
+      operand: operandId,
     }));
     return Option::SOME(ParsedExpression {
       id: expressionId,
@@ -1628,6 +1817,10 @@ export namespace ParserExpressions {
 
     if (let Option::SOME(literal) = ParserExpressions::parseLiteralExpression(parserRef)) {
       return Option::SOME(literal);
+    }
+
+    if (let Option::SOME(captureOverride) = ParserExpressions::parseCaptureOverrideExpression(parserRef)) {
+      return Option::SOME(captureOverride);
     }
 
     if (let Option::SOME(builtin) = ParserExpressions::parseBuiltinCallExpression(parserRef)) {
@@ -1680,10 +1873,12 @@ export namespace ParserExpressions {
     let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after call arguments") else {
       return Option::NONE;
     };
-    let span: SourceSpan = ParserShared::mergeSpans(callee.span, closeParen.span);
+    let calleeId: Ast::ExpressionId = callee.id;
+    let calleeSpan: SourceSpan = callee.span;
+    let span: SourceSpan = ParserShared::mergeSpans(calleeSpan, closeParen.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
       span: span,
-      callee: callee.id,
+      callee: calleeId,
       typeArguments: ParserShared::copyTypeIds(&typeArguments),
       arguments: ParserExpressions::copyExpressionIds(&arguments),
     }));
@@ -1721,10 +1916,12 @@ export namespace ParserExpressions {
     let Option::SOME(member) = parserRef.expectIdentifier("expected member name after '.'") else {
       return Option::NONE;
     };
-    let span: SourceSpan = ParserShared::mergeSpans(object.span, member.span);
+    let objectId: Ast::ExpressionId = object.id;
+    let objectSpan: SourceSpan = object.span;
+    let span: SourceSpan = ParserShared::mergeSpans(objectSpan, member.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
       span: span,
-      object: object.id,
+      object: objectId,
       operator: Ast::Expression::AccessOperator::Dot,
       member: member.lexemeString(),
     }));
@@ -1749,11 +1946,14 @@ export namespace ParserExpressions {
     let Option::SOME(closeBracket) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after index expression") else {
       return Option::NONE;
     };
-    let span: SourceSpan = ParserShared::mergeSpans(object.span, closeBracket.span);
+    let objectId: Ast::ExpressionId = object.id;
+    let objectSpan: SourceSpan = object.span;
+    let indexId: Ast::ExpressionId = index.id;
+    let span: SourceSpan = ParserShared::mergeSpans(objectSpan, closeBracket.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::VectorAccess(Ast::Expression::VectorAccess {
       span: span,
-      vector: object.id,
-      index: index.id,
+      vector: objectId,
+      index: indexId,
     }));
     return Option::SOME(ParsedExpression {
       id: expressionId,
@@ -1863,6 +2063,22 @@ export namespace ParserExpressions {
         continue;
       }
 
+      if (parserRef.atPunctuation(Punctuation::BANG)) {
+        let operatorToken: Token = parserRef.bump();
+        let currentExpressionId: Ast::ExpressionId = expression.id;
+        let currentExpressionSpan: SourceSpan = expression.span;
+        let span: SourceSpan = ParserShared::mergeSpans(currentExpressionSpan, operatorToken.span);
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Try(Ast::Expression::Try {
+          span: span,
+          expression: currentExpressionId,
+        }));
+        expression = ParsedExpression {
+          id: expressionId,
+          span: span,
+        };
+        continue;
+      }
+
       return Option::SOME(expression);
     }
 
@@ -1904,11 +2120,42 @@ export namespace ParserExpressions {
           Option::SOME(node) -> Ast::Serializer::typeSpan(node),
           Option::NONE -> operatorToken.span,
         };
-        let span: SourceSpan = ParserShared::mergeSpans(expression.span, endSpan);
+        let currentExpressionId: Ast::ExpressionId = expression.id;
+        let currentExpressionSpan: SourceSpan = expression.span;
+        let span: SourceSpan = ParserShared::mergeSpans(currentExpressionSpan, endSpan);
         let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Cast(Ast::Expression::Cast {
           span: span,
-          expression: expression.id,
+          expression: currentExpressionId,
           targetType: targetType,
+        }));
+        expression = ParsedExpression {
+          id: expressionId,
+          span: span,
+        };
+        continue;
+      }
+
+      if (operatorToken.kindValue() == TokenKind::PUNCTUATION && operatorToken.punctuationValue() == Punctuation::QUESTION_MARK) {
+        let Option::SOME(thenBranch) = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 0) else {
+          return Option::NONE;
+        };
+        let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after ternary then branch") else {
+          return Option::NONE;
+        };
+        let Option::SOME(elseBranch) = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, power.right) else {
+          return Option::NONE;
+        };
+        let currentExpressionId: Ast::ExpressionId = expression.id;
+        let currentExpressionSpan: SourceSpan = expression.span;
+        let thenBranchId: Ast::ExpressionId = thenBranch.id;
+        let elseBranchId: Ast::ExpressionId = elseBranch.id;
+        let elseBranchSpan: SourceSpan = elseBranch.span;
+        let span: SourceSpan = ParserShared::mergeSpans(currentExpressionSpan, elseBranchSpan);
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Ternary(Ast::Expression::Ternary {
+          span: span,
+          condition: currentExpressionId,
+          thenBranch: thenBranchId,
+          elseBranch: elseBranchId,
         }));
         expression = ParsedExpression {
           id: expressionId,
@@ -1920,14 +2167,31 @@ export namespace ParserExpressions {
       let Option::SOME(right) = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, power.right) else {
         return Option::NONE;
       };
-      let span: SourceSpan = ParserShared::mergeSpans(expression.span, right.span);
+      let currentExpressionId: Ast::ExpressionId = expression.id;
+      let currentExpressionSpan: SourceSpan = expression.span;
+      let rightId: Ast::ExpressionId = right.id;
+      let rightSpan: SourceSpan = right.span;
+      let span: SourceSpan = ParserShared::mergeSpans(currentExpressionSpan, rightSpan);
 
       if (let Option::SOME(operator) = ParserExpressions::assignmentOperator(operatorToken.clone())) {
         let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Assignment(Ast::Expression::Assignment {
           span: span,
-          target: expression.id,
-          value: right.id,
+          target: currentExpressionId,
+          value: rightId,
           operator: operator,
+        }));
+        expression = ParsedExpression {
+          id: expressionId,
+          span: span,
+        };
+        continue;
+      }
+
+      if (operatorToken.kindValue() == TokenKind::PUNCTUATION && operatorToken.punctuationValue() == Punctuation::PIPE_FORWARD) {
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Pipe(Ast::Expression::Pipe {
+          span: span,
+          left: currentExpressionId,
+          right: rightId,
         }));
         expression = ParsedExpression {
           id: expressionId,
@@ -1943,8 +2207,8 @@ export namespace ParserExpressions {
       let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Binary(Ast::Expression::Binary {
         span: span,
         operator: operator,
-        left: expression.id,
-        right: right.id,
+        left: currentExpressionId,
+        right: rightId,
       }));
       expression = ParsedExpression {
         id: expressionId,

@@ -115,8 +115,13 @@ function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
 
-  Test::assertEq<u64>(diagnostics.length(), 0);
-  Test::assertEq<u64>(module.roots.length(), 1);
+  if (diagnostics.length() != 0) {
+    @panic("expected enum-with-methods fixture to parse without diagnostics");
+  }
+
+  if (module.roots.length() != 1) {
+    @panic("expected enum-with-methods fixture to produce one root");
+  }
 
   let rootId: Ast::ItemId = match (module.roots.get(0)) {
     Option::SOME(value) -> *value,
@@ -316,6 +321,39 @@ function parserParsesRealFileShapeWithImportAndReturnLiteral(): void {
 }
 
 @test
+function parserParsesImportListWithTrailingCommaBeforeFrom(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_import_trailing_comma.ign",
+    "import Foo,\n  Bar,\nfrom \"std::io\";\nfunction main(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  let importId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing import root"),
+  };
+
+  match (module.items.get(importId)) {
+    Option::SOME(Ast::Item::Node::Import(importItem)) -> {
+      Test::assertEq<u64>(importItem.path.length(), 1);
+
+      let importPath: &String = match (importItem.path.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing import path"),
+      };
+
+      Test::assertEq<str>(importPath.toStr(), "std::io");
+    },
+    _ -> @panic("expected import root item"),
+  };
+}
+
+@test
 function parserParsesRealIgnisMainFileWithoutDiagnostics(): void {
   let sourceText: String = readFixture("ignis/main.ign");
   let source: SourceFile = SourceFile::create("ignis/main.ign", sourceText.toStr());
@@ -324,7 +362,7 @@ function parserParsesRealIgnisMainFileWithoutDiagnostics(): void {
   Parser::parseInto(&source, &mut module, &mut diagnostics);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
-  Test::assertEq<u64>(module.roots.length(), 14);
+  Test::assertEq<u64>(module.roots.length(), 15);
 }
 
 @test
@@ -337,8 +375,13 @@ function parserParsesBareReturnStatementInsideBlock(): void {
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
 
-  Test::assertEq<u64>(diagnostics.length(), 0);
-  Test::assertEq<u64>(module.roots.length(), 1);
+  if (diagnostics.length() != 0) {
+    @panic("expected enum-with-methods fixture to parse without diagnostics");
+  }
+
+  if (module.roots.length() != 1) {
+    @panic("expected enum-with-methods fixture to produce one root");
+  }
 
   let functionId: Ast::ItemId = match (module.roots.get(0)) {
     Option::SOME(value) -> *value,
@@ -378,8 +421,13 @@ function parserParsesReturnCallExpressionInsideBlock(): void {
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
 
-  Test::assertEq<u64>(diagnostics.length(), 0);
-  Test::assertEq<u64>(module.roots.length(), 1);
+  if (diagnostics.length() != 0) {
+    @panic("expected enum-with-methods fixture to parse without diagnostics");
+  }
+
+  if (module.roots.length() != 1) {
+    @panic("expected enum-with-methods fixture to produce one root");
+  }
 
   let functionId: Ast::ItemId = match (module.roots.get(0)) {
     Option::SOME(value) -> *value,
@@ -566,6 +614,25 @@ function parserParsesGroupedAndBinaryPrecedenceExpressions(): void {
     },
     _ -> @panic("expected grouped precedence function root"),
   };
+}
+
+@test
+function parserParsesUtf8CharLiterals(): void {
+  let source: SourceFile = SourceFile::create(
+    "std/char/tests.ign",
+    readFixture("std/char/tests.ign").toStr()
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() != 0) {
+    @panic("expected std/char/tests.ign to parse without diagnostics");
+  }
+
+  if (module.roots.length() == 0) {
+    @panic("expected std/char/tests.ign to produce roots");
+  }
 }
 
 @test
@@ -1428,6 +1495,74 @@ function parserParsesMatchExpressionPathPatternsWithDestructure(): void {
 }
 
 @test
+function parserParsesMatchExpressionGuards(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_match_guard.ign",
+    "function main(): void { match (rawErrno) { k if k == errno -> fallback, _ -> other, }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing guarded match function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing guarded match statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Match(matchExpression) -> {
+                  let firstArm: &Ast::Expression::MatchArm = match (matchExpression.arms.get(0)) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing guarded match arm"),
+                  };
+
+                  match (expectPattern(&module, firstArm.pattern)) {
+                    Ast::Pattern::Node::Binding(binding) -> Test::assertEq<str>(binding.name.toStr(), "k"),
+                    _ -> @panic("expected guarded arm binding pattern"),
+                  };
+
+                  let guardId: Ast::ExpressionId = match (firstArm.guard) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing guarded match arm expression"),
+                  };
+
+                  match (expectExpression(&module, guardId)) {
+                    Ast::Expression::Node::Binary(binaryExpression) -> {
+                      match (binaryExpression.operator) {
+                        Ast::Expression::BinaryOperator::Equal -> {},
+                        _ -> @panic("expected equality operator in guard expression"),
+                      };
+                    },
+                    _ -> @panic("expected equality guard expression"),
+                  };
+                },
+                _ -> @panic("expected guarded match expression"),
+              };
+            },
+            _ -> @panic("expected guarded match expression statement"),
+          };
+        },
+        _ -> @panic("expected block body for guarded match test"),
+      };
+    },
+    _ -> @panic("expected function root for guarded match test"),
+  };
+}
+
+@test
 function parserParsesLambdaExpressionBodies(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_lambda_basic.ign",
@@ -1541,6 +1676,53 @@ function parserParsesLambdaExpressionBodies(): void {
 }
 
 @test
+function parserParsesCaptureOverrideExpressions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_capture_overrides.ign",
+    "function main(): void { let val: i32 = 42; let moved = (): i32 -> @move val; let borrowed = (): i32 -> @ref val; let borrowedMut = (): i32 -> @refMut val; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing capture-override function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 4);
+
+          let movedStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing move capture statement"),
+          };
+          let borrowedStatementId: Ast::StatementId = match (block.statements.get(2)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing ref capture statement"),
+          };
+          let borrowedMutStatementId: Ast::StatementId = match (block.statements.get(3)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing refMut capture statement"),
+          };
+
+          assertCaptureOverrideKind(&module, movedStatementId, Ast::Expression::CaptureOverrideKind::Move);
+          assertCaptureOverrideKind(&module, borrowedStatementId, Ast::Expression::CaptureOverrideKind::Ref);
+          assertCaptureOverrideKind(&module, borrowedMutStatementId, Ast::Expression::CaptureOverrideKind::RefMut);
+        },
+        _ -> @panic("expected block body for capture override test"),
+      };
+    },
+    _ -> @panic("expected function item for capture override test"),
+  };
+}
+
+@test
 function parserParsesTraitDeclarationsAndExportedTraits(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_trait_declarations.ign",
@@ -1637,6 +1819,44 @@ function parserParsesTraitDeclarationsAndExportedTraits(): void {
       };
     },
     _ -> @panic("expected export root for exported trait"),
+  };
+}
+
+@test
+function parserParsesReExportDeclarations(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_reexport.ign",
+    "export HashMap, Hash from \"./hash_map\"; export Eq from \"std::hash\";"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+
+  let firstExportId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing first re-export root"),
+  };
+
+  match (expectItem(&module, firstExportId)) {
+    Ast::Item::Node::Export(exportItem) -> {
+      match (expectItem(&module, exportItem.item)) {
+        Ast::Item::Node::Import(importItem) -> {
+          Test::assertEq<u64>(importItem.path.length(), 1);
+
+          let importPath: &String = match (importItem.path.get(0)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing re-export path"),
+          };
+
+          Test::assertEq<str>(importPath.toStr(), "./hash_map");
+        },
+        _ -> @panic("expected import item inside re-export wrapper"),
+      };
+    },
+    _ -> @panic("expected export wrapper for re-export declaration"),
   };
 }
 
@@ -1854,6 +2074,317 @@ function parserParsesAttributedRecordConstExternAndEnumDeclarations(): void {
       };
     },
     _ -> @panic("expected enum root item"),
+  };
+}
+
+@test
+function parserParsesEnumMethods(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_enum_methods.ign",
+    "enum TokenType { Plus, Minus, public static getKeywordFromString(): i32 { return 0; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() != 0) {
+    @panic("expected enum-with-methods fixture to parse without diagnostics");
+  }
+
+  if (module.roots.length() != 1) {
+    @panic("expected enum-with-methods fixture to produce one root");
+  }
+
+  let enumId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing enum-with-methods root"),
+  };
+
+  match (expectItem(&module, enumId)) {
+    Ast::Item::Node::Enum(enumItem) -> {
+      if (enumItem.variants.length() != 2) {
+        @panic("expected enum-with-methods fixture to keep two variants");
+      }
+
+      if (enumItem.methods.length() != 1) {
+        @panic("expected enum-with-methods fixture to keep one method");
+      }
+
+      let methodId: Ast::ItemId = match (enumItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing enum method item"),
+      };
+
+      match (expectItem(&module, methodId)) {
+        Ast::Item::Node::Function(functionItem) -> {
+          if (!functionItem.name.equals("getKeywordFromString")) {
+            @panic("expected enum method name to remain getKeywordFromString");
+          }
+        },
+        _ -> @panic("expected function item for enum method"),
+      };
+    },
+    _ -> @panic("expected enum item with methods"),
+  };
+}
+
+@test
+function parserParsesEnumInstanceMethodAfterVariants(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_enum_instance_methods.ign",
+    "enum Status { OK, ERROR, equals(&self, other: &Status): boolean { return true; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let enumId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing enum instance-method root"),
+  };
+
+  match (expectItem(&module, enumId)) {
+    Ast::Item::Node::Enum(enumItem) -> {
+      Test::assertEq<u64>(enumItem.variants.length(), 2);
+      Test::assertEq<u64>(enumItem.methods.length(), 1);
+
+      let methodId: Ast::ItemId = match (enumItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing enum instance method item"),
+      };
+
+      match (expectItem(&module, methodId)) {
+        Ast::Item::Node::Function(functionItem) -> {
+          Test::assertEq<str>(functionItem.name.toStr(), "equals");
+          Test::assertEq<u64>(functionItem.parameters.length(), 2);
+
+          let receiverId: Ast::PatternId = match (functionItem.parameters.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing enum instance receiver"),
+          };
+          let otherId: Ast::PatternId = match (functionItem.parameters.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing enum instance argument"),
+          };
+
+          match (expectPattern(&module, receiverId)) {
+            Ast::Pattern::Node::Binding(binding) -> {
+              Test::assertEq<str>(binding.name.toStr(), "self");
+
+              let receiverTypeId: Ast::TypeId = match (binding.annotation) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing enum instance receiver type"),
+              };
+
+              match (expectType(&module, receiverTypeId)) {
+                Ast::Type::Node::Reference(referenceType) -> Test::assertEq<boolean>(referenceType.mutable, false),
+                _ -> @panic("expected reference receiver type for enum instance method"),
+              };
+            },
+            _ -> @panic("expected binding receiver pattern for enum instance method"),
+          };
+
+          match (expectPattern(&module, otherId)) {
+            Ast::Pattern::Node::Binding(binding) -> {
+              Test::assertEq<str>(binding.name.toStr(), "other");
+
+              let otherTypeId: Ast::TypeId = match (binding.annotation) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing enum instance argument type"),
+              };
+
+              match (expectType(&module, otherTypeId)) {
+                Ast::Type::Node::Reference(_) -> {},
+                _ -> @panic("expected reference type for enum instance argument"),
+              };
+            },
+            _ -> @panic("expected binding argument pattern for enum instance method"),
+          };
+        },
+        _ -> @panic("expected function item for enum instance method"),
+      };
+    },
+    _ -> @panic("expected enum item with instance method"),
+  };
+}
+
+@test
+function parserParsesPipeExpressions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_pipe_expression.ign",
+    "function printPart(label: str, value: i32): void { value.toString() |> String::create(label).concat |> Io::println; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing pipe function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing pipe statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Pipe(outerPipe) -> {
+                  match (expectExpression(&module, outerPipe.left)) {
+                    Ast::Expression::Node::Pipe(_) -> {},
+                    _ -> @panic("expected nested pipe on left side of chained pipe"),
+                  };
+
+                  match (expectExpression(&module, outerPipe.right)) {
+                    Ast::Expression::Node::Path(path) -> {
+                      Test::assertEq<str>(match (path.segments.get(0)) {
+                        Option::SOME(value) -> value.toStr(),
+                        Option::NONE -> @panic("missing pipe rhs segment"),
+                      }, "Io");
+                    },
+                    _ -> @panic("expected path rhs for outer pipe"),
+                  };
+                },
+                _ -> @panic("expected pipe expression statement"),
+              };
+            },
+            _ -> @panic("expected expression statement for pipe expression"),
+          };
+        },
+        _ -> @panic("expected block body for pipe expression test"),
+      };
+    },
+    _ -> @panic("expected function item for pipe expression test"),
+  };
+}
+
+@test
+function parserParsesExportedNameWithoutFromClause(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_export_name.ign",
+    "export Layout;"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let exportId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing export-name root"),
+  };
+
+  match (expectItem(&module, exportId)) {
+    Ast::Item::Node::Export(exportItem) -> {
+      match (expectItem(&module, exportItem.item)) {
+        Ast::Item::Node::Import(importItem) -> {
+          Test::assertEq<u64>(importItem.path.length(), 1);
+          Test::assertEq<str>(match (importItem.path.get(0)) {
+            Option::SOME(value) -> value.toStr(),
+            Option::NONE -> @panic("missing export-name path segment"),
+          }, "Layout");
+        },
+        _ -> @panic("expected import-compatible wrapper for export name"),
+      };
+    },
+    _ -> @panic("expected export wrapper for export name"),
+  };
+}
+
+@test
+function parserParsesGenericEnumMethodsWithReceiverAttributes(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_generic_enum_methods.ign",
+    "enum Option<S> { SOME(S), NONE, public map<U>(&self, @noescape f: (S) -> U): Option<U> { return Option::NONE; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let enumId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing generic enum-method root"),
+  };
+
+  match (expectItem(&module, enumId)) {
+    Ast::Item::Node::Enum(enumItem) -> Test::assertEq<u64>(enumItem.methods.length(), 1),
+    _ -> @panic("expected enum item for generic enum-method test"),
+  };
+}
+
+@test
+function parserParsesForOfStatements(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_for_of.ign",
+    "function main(): void { for (let value: &i32 of values) { break; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing for-of function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing for-of statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::ForOf(forOfStatement) -> {
+              match (expectPattern(&module, forOfStatement.pattern)) {
+                Ast::Pattern::Node::Binding(binding) -> {
+                  Test::assertEq<str>(binding.name.toStr(), "value");
+
+                  let annotationId: Ast::TypeId = match (binding.annotation) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing for-of binding annotation"),
+                  };
+
+                  match (expectType(&module, annotationId)) {
+                    Ast::Type::Node::Reference(referenceType) -> Test::assertEq<boolean>(referenceType.mutable, false),
+                    _ -> @panic("expected reference annotation on for-of binding"),
+                  };
+                },
+                _ -> @panic("expected binding pattern for for-of statement"),
+              };
+
+              match (expectStatement(&module, forOfStatement.body)) {
+                Ast::Statement::Node::Block(bodyBlock) -> Test::assertEq<u64>(bodyBlock.statements.length(), 1),
+                _ -> @panic("expected block body for for-of statement"),
+              };
+            },
+            _ -> @panic("expected for-of statement node"),
+          };
+        },
+        _ -> @panic("expected block function body for for-of test"),
+      };
+    },
+    _ -> @panic("expected function root for for-of test"),
   };
 }
 
@@ -2149,6 +2680,17 @@ function parserParsesIgnisAstTestsFileWithoutDiagnostics(): void {
 }
 
 @test
+function parserParsesStdFsDirFileWithoutDiagnostics(): void {
+  assertRealFileParsesWithoutDiagnostics("std/fs/dir.ign");
+}
+
+@test
+function parserParsesExampleThenAstFilesWithoutDiagnostics(): void {
+  assertRealFileParsesWithoutDiagnostics("example/add.ign");
+  assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
+}
+
+@test
 function parserParsesStdVectorThenAstFilesWithoutDiagnostics(): void {
   assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
   assertRealFileParsesWithoutDiagnostics("ignis/ast/tests.ign");
@@ -2186,6 +2728,71 @@ function assertRealFileParsesWithoutDiagnostics(path: str): void {
   if (module.roots.length() == 0) {
     @panic("expected selected real parser gate file to produce roots");
   }
+}
+
+function assertCaptureOverrideKind(
+  module: &Ast::Module,
+  statementId: Ast::StatementId,
+  expectedKind: Ast::Expression::CaptureOverrideKind
+): void {
+  match (expectStatement(module, statementId)) {
+    Ast::Statement::Node::Let(letStatement) -> {
+      let lambdaId: Ast::ExpressionId = match (letStatement.value) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing lambda value for capture override"),
+      };
+
+      match (expectExpression(module, lambdaId)) {
+        Ast::Expression::Node::Lambda(lambdaExpression) -> {
+          match (expectStatement(module, lambdaExpression.body)) {
+            Ast::Statement::Node::Block(bodyBlock) -> {
+              let bodyExpressionId: Ast::ExpressionId = match (bodyBlock.tail) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing capture override tail expression"),
+              };
+
+              match (expectExpression(module, bodyExpressionId)) {
+                Ast::Expression::Node::CaptureOverride(captureOverride) -> {
+                  match (captureOverride.kind) {
+                    Ast::Expression::CaptureOverrideKind::Move -> {
+                      match (expectedKind) {
+                        Ast::Expression::CaptureOverrideKind::Move -> {},
+                        _ -> @panic("expected move capture override kind"),
+                      };
+                    },
+                    Ast::Expression::CaptureOverrideKind::Ref -> {
+                      match (expectedKind) {
+                        Ast::Expression::CaptureOverrideKind::Ref -> {},
+                        _ -> @panic("expected ref capture override kind"),
+                      };
+                    },
+                    Ast::Expression::CaptureOverrideKind::RefMut -> {
+                      match (expectedKind) {
+                        Ast::Expression::CaptureOverrideKind::RefMut -> {},
+                        _ -> @panic("expected refMut capture override kind"),
+                      };
+                    },
+                  };
+
+                  match (expectExpression(module, captureOverride.expression)) {
+                    Ast::Expression::Node::Path(path) -> Test::assertEq<str>(match (path.segments.get(0)) {
+                      Option::SOME(value) -> value.toStr(),
+                      Option::NONE -> @panic("missing capture override inner segment"),
+                    }, "val"),
+                    _ -> @panic("expected path inside capture override"),
+                  };
+                },
+                _ -> @panic("expected capture override tail expression"),
+              };
+            },
+            _ -> @panic("expected block wrapper for capture override lambda body"),
+          };
+        },
+        _ -> @panic("expected lambda expression for capture override"),
+      };
+    },
+    _ -> @panic("expected let statement for capture override"),
+  };
 }
 
 @test

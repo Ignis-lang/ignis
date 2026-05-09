@@ -183,6 +183,65 @@ export namespace ParserDeclarations {
     });
   }
 
+  function consumeOptionalGenericParameterList(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atPunctuation(Punctuation::LESS)) {
+      return true;
+    }
+
+    parserRef.bump();
+    let mut depth: u64 = 1;
+
+    while (depth > 0) {
+      parserRef.skipTrivia();
+
+      if (parserRef.atEof()) {
+        parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::EXPECTED_TOKEN, "unterminated generic parameter list", "expected '>' to close generic parameters");
+        return false;
+      }
+
+      let token: Token = parserRef.bump();
+      if (token.kindValue() != TokenKind::PUNCTUATION) {
+        continue;
+      }
+
+      let punctuation: Punctuation = token.punctuationValue();
+      if (punctuation == Punctuation::LESS) {
+        depth += 1;
+        continue;
+      }
+
+      if (punctuation == Punctuation::GREATER) {
+        depth -= 1;
+        continue;
+      }
+
+      if (punctuation == Punctuation::RIGHT_SHIFT) {
+        if (depth > 1) {
+          depth -= 2;
+        } else {
+          depth = 0;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  function consumeParameterAttributes(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    while (parserRef.atPunctuation(Punctuation::AT)) {
+      let Option::SOME(_) = ParserDeclarations::parseAttribute(parserRef) else {
+        return false;
+      };
+      parserRef.skipTrivia();
+    }
+
+    return true;
+  }
+
   function consumeLeadingModifiers(
     parser: &mut ParserShared::State,
     metadata: &mut Ast::Metadata
@@ -315,6 +374,88 @@ export namespace ParserDeclarations {
     return false;
   }
 
+  function enumMemberLooksLikeMethod(parser: &mut ParserShared::State): boolean {
+    let parserRef: &mut ParserShared::State = parser;
+    let mut offset: u64 = 0;
+    let mut sawName: boolean = false;
+    let mut depth: u64 = 0;
+    let mut genericDepth: u64 = 0;
+
+    while (offset < 32) {
+      let token: Token = parserRef.tokens.peekNth(offset);
+
+      if (ParserShared::isTrivia(token.clone())) {
+        offset += 1;
+        continue;
+      }
+
+      if (!sawName) {
+        if (token.kindValue() == TokenKind::KEYWORD) {
+          let keyword: Keyword = token.keywordValue();
+          if (keyword == Keyword::PUBLIC || keyword == Keyword::PRIVATE || keyword == Keyword::STATIC || keyword == Keyword::INLINE || keyword == Keyword::META || keyword == Keyword::DECLARE) {
+            offset += 1;
+            continue;
+          }
+        }
+
+        if (token.kindValue() == TokenKind::IDENTIFIER || token.kindValue() == TokenKind::KEYWORD) {
+          sawName = true;
+          offset += 1;
+          continue;
+        }
+
+        return false;
+      }
+
+      if (genericDepth > 0) {
+        if (token.kindValue() == TokenKind::PUNCTUATION) {
+          let punctuation: Punctuation = token.punctuationValue();
+
+          if (punctuation == Punctuation::LESS) {
+            genericDepth += 1;
+          } else if (punctuation == Punctuation::GREATER) {
+            genericDepth -= 1;
+          }
+        }
+
+        offset += 1;
+        continue;
+      }
+
+      if (depth > 0) {
+        if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::RIGHT_PAREN) {
+          depth -= 1;
+        } else if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::LEFT_PAREN) {
+          depth += 1;
+        }
+
+        offset += 1;
+        continue;
+      }
+
+      if (token.kindValue() != TokenKind::PUNCTUATION) {
+        return false;
+      }
+
+      let punctuation: Punctuation = token.punctuationValue();
+      if (punctuation == Punctuation::LESS) {
+        genericDepth += 1;
+        offset += 1;
+        continue;
+      }
+
+      if (punctuation == Punctuation::LEFT_PAREN) {
+        depth += 1;
+        offset += 1;
+        continue;
+      }
+
+      return punctuation == Punctuation::COLON || punctuation == Punctuation::LEFT_BRACE;
+    }
+
+    return false;
+  }
+
   function createSelfReceiverPattern(
     parser: &mut ParserShared::State,
     ampersandToken: Token,
@@ -371,6 +512,11 @@ export namespace ParserDeclarations {
     let Option::SOME(nameToken) = parserRef.expectIdentifier("expected trait method name") else {
       return Option::NONE;
     };
+
+    if (!ParserDeclarations::consumeOptionalGenericParameterList(parserRef)) {
+      return Option::NONE;
+    }
+
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after trait method name") else {
       return Option::NONE;
     };
@@ -378,6 +524,10 @@ export namespace ParserDeclarations {
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
       while (true) {
+        if (!ParserDeclarations::consumeParameterAttributes(parserRef)) {
+          return Option::NONE;
+        }
+
         let Option::SOME(parameter) = ParserDeclarations::parseTraitParameterPattern(parserRef) else {
           return Option::NONE;
         };
@@ -470,6 +620,10 @@ export namespace ParserDeclarations {
       };
 
       if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+        if (parserRef.atKeyword(Keyword::FROM)) {
+          break;
+        }
+
         continue;
       }
 
@@ -513,6 +667,11 @@ export namespace ParserDeclarations {
     let Option::SOME(nameToken) = parserRef.expectIdentifier("expected type alias name") else {
       return Option::NONE;
     };
+
+    if (!ParserDeclarations::consumeOptionalGenericParameterList(parserRef)) {
+      return Option::NONE;
+    }
+
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' after type alias name") else {
       return Option::NONE;
     };
@@ -543,6 +702,11 @@ export namespace ParserDeclarations {
     let Option::SOME(nameToken) = parserRef.expectIdentifier("expected function name") else {
       return Option::NONE;
     };
+
+    if (!ParserDeclarations::consumeOptionalGenericParameterList(parserRef)) {
+      return Option::NONE;
+    }
+
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after function name") else {
       return Option::NONE;
     };
@@ -551,6 +715,10 @@ export namespace ParserDeclarations {
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
       while (true) {
+        if (!ParserDeclarations::consumeParameterAttributes(parserRef)) {
+          return Option::NONE;
+        }
+
         let Option::SOME(parameter) = ParserDeclarations::parseBindingPattern(parserRef) else {
           return Option::NONE;
         };
@@ -636,7 +804,17 @@ export namespace ParserDeclarations {
     let Option::SOME(_) = ParserTypes::parseType(parserRef) else {
       return false;
     };
-    return parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after extern function signature").isSome();
+
+    if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isSome()) {
+      return true;
+    }
+
+    if (ParserStatements::parseBlockStatement(parserRef).isSome()) {
+      return true;
+    }
+
+    parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::EXPECTED_TOKEN, "expected token", "expected ';' after extern function signature");
+    return false;
   }
 
   function parseConstantSignatureOnly(parser: &mut ParserShared::State): boolean {
@@ -761,6 +939,11 @@ export namespace ParserDeclarations {
     let Option::SOME(nameToken) = parserRef.expectIdentifier("expected record name") else {
       return Option::NONE;
     };
+
+    if (!ParserDeclarations::consumeOptionalGenericParameterList(parserRef)) {
+      return Option::NONE;
+    }
+
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after record name") else {
       return Option::NONE;
     };
@@ -827,7 +1010,7 @@ export namespace ParserDeclarations {
     let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::NAMESPACE, "expected 'namespace'") else {
       return Option::NONE;
     };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected namespace name") else {
+    let Option::SOME(namespaceName) = ParserDeclarations::parseQualifiedName(parserRef, "expected namespace name") else {
       return Option::NONE;
     };
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after namespace name") else {
@@ -850,7 +1033,7 @@ export namespace ParserDeclarations {
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
-      name: nameToken.lexemeString(),
+      name: namespaceName.name.clone(),
       items: ParserDeclarations::copyItemIds(&items),
       metadata: Ast::copyMetadata(&metadata),
     })));
@@ -868,13 +1051,38 @@ export namespace ParserDeclarations {
     let Option::SOME(nameToken) = parserRef.expectIdentifier("expected enum name") else {
       return Option::NONE;
     };
+
+    if (!ParserDeclarations::consumeOptionalGenericParameterList(parserRef)) {
+      return Option::NONE;
+    }
+
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after enum name") else {
       return Option::NONE;
     };
     let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
     let mut endSpan: SourceSpan = nameToken.span;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      let Option::SOME(memberMetadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
+        return Option::NONE;
+      };
+      parserRef.skipTrivia();
+
+      if (ParserDeclarations::enumMemberLooksLikeMethod(parserRef)) {
+        let Option::SOME(methodId) = ParserDeclarations::parseMethodLikeItem(parserRef, Ast::copyMetadata(&memberMetadata), false) else {
+          return Option::NONE;
+        };
+        methods.push(methodId);
+
+        endSpan = match (parserRef.module.items.get(methodId)) {
+          Option::SOME(node) -> ParserDeclarations::itemSpan(node),
+          Option::NONE -> endSpan,
+        };
+
+        continue;
+      }
+
       let Option::SOME(variantName) = parserRef.expectIdentifier("expected enum variant name") else {
         return Option::NONE;
       };
@@ -910,6 +1118,7 @@ export namespace ParserDeclarations {
       span: ParserShared::mergeSpans(keyword.span, endSpan),
       name: nameToken.lexemeString(),
       variants: ParserDeclarations::copyPatternIds(&variants),
+      methods: ParserDeclarations::copyItemIds(&methods),
       metadata: Ast::copyMetadata(&metadata),
     })));
   }
@@ -926,6 +1135,11 @@ export namespace ParserDeclarations {
     let Option::SOME(nameToken) = parserRef.expectIdentifier("expected trait name") else {
       return Option::NONE;
     };
+
+    if (!ParserDeclarations::consumeOptionalGenericParameterList(parserRef)) {
+      return Option::NONE;
+    }
+
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after trait name") else {
       return Option::NONE;
     };
@@ -1016,8 +1230,67 @@ export namespace ParserDeclarations {
     };
     let metadata: Ast::Metadata = Ast::mergeMetadata(leadingMetadata, innerMetadata);
 
-    let itemResult: Option<Ast::ItemId> = ParserDeclarations::parseTopLevelItemAfterMetadata(parserRef, metadata);
-    let Option::SOME(itemId) = itemResult else {
+    let mut itemIdResult: Option<Ast::ItemId> = Option::NONE;
+
+    if (parserRef.atKeyword(Keyword::IMPORT) || parserRef.atKeyword(Keyword::TYPE) || parserRef.atKeyword(Keyword::FUNCTION) || parserRef.atKeyword(Keyword::RECORD) || parserRef.atKeyword(Keyword::NAMESPACE) || parserRef.atKeyword(Keyword::CONST) || parserRef.atKeyword(Keyword::EXTERN) || parserRef.atKeyword(Keyword::ENUM) || parserRef.atKeyword(Keyword::TRAIT) || parserRef.atKeyword(Keyword::EXPORT)) {
+      itemIdResult = ParserDeclarations::parseTopLevelItemAfterMetadata(parserRef, Ast::copyMetadata(&metadata));
+    } else {
+      let mut importedNames: u64 = 0;
+      let mut exportedNames: Vector<String> = Vector::new<String>();
+
+      while (true) {
+        let Option::SOME(nameToken) = parserRef.expectIdentifier("expected exported name") else {
+          return Option::NONE;
+        };
+        importedNames += 1;
+        exportedNames.push(nameToken.lexemeString());
+
+        if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+          continue;
+        }
+
+        break;
+      }
+
+      if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isSome()) {
+        itemIdResult = Option::SOME(parserRef.module.addItem(Ast::Item::Node::Import(Ast::Item::Import {
+          span: keyword.span,
+          path: ParserShared::copyStrings(&exportedNames),
+          metadata: Ast::copyMetadata(&metadata),
+        })));
+      } else {
+        let Option::SOME(_) = parserRef.expectKeyword(Keyword::FROM, "expected 'from' after export list") else {
+          return Option::NONE;
+        };
+        parserRef.skipTrivia();
+        let pathToken: Token = parserRef.current();
+
+        if (pathToken.kindValue() != TokenKind::LITERAL || pathToken.literalKindValue() != LiteralKind::STRING) {
+          parserRef.emitDiagnostic(pathToken.span, DiagnosticCode::EXPECTED_TOKEN, "expected export path", "re-export path must be a string literal");
+          return Option::NONE;
+        }
+
+        let pathTokenLexeme: String = parserRef.bump().lexemeString();
+        let pathLexeme: String = ParserShared::stripQuotes(&pathTokenLexeme);
+        let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after re-export declaration") else {
+          return Option::NONE;
+        };
+        let mut path: Vector<String> = Vector::new<String>();
+        path.push(pathLexeme);
+
+        itemIdResult = Option::SOME(parserRef.module.addItem(Ast::Item::Node::Import(Ast::Item::Import {
+          span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+          path: ParserShared::copyStrings(&path),
+          metadata: Ast::copyMetadata(&metadata),
+        })));
+      }
+
+      if (importedNames == 0) {
+        return Option::NONE;
+      }
+    }
+
+    let Option::SOME(itemId) = itemIdResult else {
       return Option::NONE;
     };
     let itemSpan: SourceSpan = match (parserRef.module.items.get(itemId)) {

@@ -16,6 +16,41 @@ export namespace ParserStatements {
     public span: SourceSpan;
   }
 
+  function parseForOfPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected loop binding name") else {
+      return Option::NONE;
+    };
+
+    if (nameToken.lexemeString().equals("_")) {
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+        span: nameToken.span,
+      })));
+    }
+
+    let mut annotation: Option<Ast::TypeId> = Option::NONE;
+    let mut span: SourceSpan = nameToken.span;
+
+    if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
+      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
+        return Option::NONE;
+      };
+      annotation = Option::SOME(typeId);
+
+      span = match (parserRef.module.types.get(typeId)) {
+        Option::SOME(node) -> Ast::Serializer::typeSpan(node),
+        Option::NONE -> span,
+      };
+    }
+
+    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+      span: ParserShared::mergeSpans(nameToken.span, span),
+      name: nameToken.lexemeString(),
+      annotation: annotation,
+      metadata: Ast::emptyMetadata(),
+    })));
+  }
+
   function parseConditionExpression(parser: &mut ParserShared::State): Option<ParsedCondition> {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -46,11 +81,13 @@ export namespace ParserStatements {
       return Option::NONE;
     };
 
-    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, value.span);
+    let valueId: Ast::ExpressionId = value.id;
+    let valueSpan: SourceSpan = value.span;
+    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, valueSpan);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
       span: span,
       pattern: pattern,
-      value: value.id,
+      value: valueId,
     }));
 
     return Option::SOME(ParsedCondition {
@@ -193,6 +230,32 @@ export namespace ParserStatements {
     })));
   }
 
+  function parseDeferStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::DEFER, "expected 'defer'") else {
+      return Option::NONE;
+    };
+    let expressionResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+    let Option::SOME(expression) = expressionResult else {
+      return Option::NONE;
+    };
+    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after defer statement") else {
+      return Option::NONE;
+    };
+
+    let expressionId: Ast::ExpressionId = expression.id;
+    let expressionSpan: SourceSpan = expression.span;
+
+    let deferredExpression: Ast::StatementId = parserRef.module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+      span: expressionSpan,
+      expression: expressionId,
+    }));
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Defer(Ast::Statement::Defer {
+      span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+      statement: deferredExpression,
+    })));
+  }
+
   function parseIfStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
     let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::IF, "expected 'if'") else {
@@ -277,6 +340,51 @@ export namespace ParserStatements {
     })));
   }
 
+  function parseForStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::FOR, "expected 'for'") else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'for'") else {
+      return Option::NONE;
+    };
+    let consumedLet: boolean = parserRef.consumeKeyword(Keyword::LET).isSome();
+    let Option::SOME(pattern) = ParserStatements::parseForOfPattern(parserRef) else {
+      return Option::NONE;
+    };
+
+    if (!consumedLet) {
+      parserRef.emitDiagnostic(keyword.span, DiagnosticCode::EXPECTED_TOKEN, "expected for-of loop", "selfhost parser currently supports 'for (let pattern of iterable)' syntax");
+      return Option::NONE;
+    }
+
+    let Option::SOME(_) = parserRef.expectKeyword(Keyword::OF, "expected 'of' in for-of loop") else {
+      return Option::NONE;
+    };
+    let iterableResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+    let Option::SOME(iterable) = iterableResult else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after for-of iterable") else {
+      return Option::NONE;
+    };
+    let bodyResult: Option<Ast::StatementId> = ParserStatements::parseBlockStatement(parserRef);
+    let Option::SOME(body) = bodyResult else {
+      return Option::NONE;
+    };
+    let endSpan: SourceSpan = match (parserRef.module.statements.get(body)) {
+      Option::SOME(node) -> Ast::Serializer::statementSpan(node),
+      Option::NONE -> keyword.span,
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::ForOf(Ast::Statement::ForOf {
+      span: ParserShared::mergeSpans(keyword.span, endSpan),
+      pattern: pattern,
+      iterable: iterable.id,
+      body: body,
+    })));
+  }
+
   function parseExpressionStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -287,9 +395,12 @@ export namespace ParserStatements {
       return Option::NONE;
     };
 
+    let expressionId: Ast::ExpressionId = expression.id;
+    let expressionSpan: SourceSpan = expression.span;
+
     return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
-      span: ParserShared::mergeSpans(expression.span, semicolon.span),
-      expression: expression.id,
+      span: ParserShared::mergeSpans(expressionSpan, semicolon.span),
+      expression: expressionId,
     })));
   }
 
@@ -310,8 +421,16 @@ export namespace ParserStatements {
       return ParserStatements::parseWhileStatement(parserRef);
     }
 
+    if (parserRef.atKeyword(Keyword::FOR)) {
+      return ParserStatements::parseForStatement(parserRef);
+    }
+
     if (parserRef.atKeyword(Keyword::RETURN)) {
       return ParserStatements::parseReturnStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::DEFER)) {
+      return ParserStatements::parseDeferStatement(parserRef);
     }
 
     if (parserRef.atKeyword(Keyword::BREAK)) {

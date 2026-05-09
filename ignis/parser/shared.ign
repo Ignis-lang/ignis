@@ -1,4 +1,5 @@
 import Char from "std::char";
+import LibC, CType from "std::libc";
 import Vector from "std::vector";
 
 import Ast from "@compiler::ast";
@@ -19,9 +20,10 @@ export namespace ParserShared {
 
   function nextSignificantToken(parser: &mut ParserShared::State, startOffset: u64): Token {
     let parserRef: &mut ParserShared::State = parser;
-    let token: Token = parserRef.tokens.peekNth(startOffset);
+    let token: Token = parserRef.tokens.peekNth(startOffset).clone();
+    let kind: TokenKind = token.kindValue();
 
-    if (ParserShared::isTrivia(token.clone())) {
+    if (kind == TokenKind::WHITESPACE || kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT) {
       return ParserShared::nextSignificantToken(parserRef, startOffset + 1);
     }
 
@@ -41,22 +43,136 @@ export namespace ParserShared {
   }
 
   function parseUnsignedInteger(lexeme: &String): Option<u64> {
+    return ParserShared::parseUnsignedIntegerWithRadix(lexeme, 0, 10);
+  }
+
+  function parseDigitForRadix(
+    value: char,
+    radix: u64
+  ): Option<u64> {
+    if (let Option::SOME(digitValue) = Char::asciiDigitValue(value)) {
+      if (digitValue < radix) {
+        return Option::SOME(digitValue);
+      }
+    }
+
+    if (value >= 'a' && value <= 'f') {
+      let digitValue: u64 = 10 + ((value as u64) - ('a' as u64));
+      if (digitValue < radix) {
+        return Option::SOME(digitValue);
+      }
+    }
+
+    if (value >= 'A' && value <= 'F') {
+      let digitValue: u64 = 10 + ((value as u64) - ('A' as u64));
+      if (digitValue < radix) {
+        return Option::SOME(digitValue);
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  function parseUnsignedIntegerWithRadix(
+    lexeme: &String,
+    startIndex: u64,
+    radix: u64
+  ): Option<u64> {
     let mut value: u64 = 0;
-    let mut index: u64 = 0;
+    let mut index: u64 = startIndex;
 
     while (index < lexeme.length()) {
       let Option::SOME(digit) = lexeme.charAt(index) else {
         return Option::NONE;
       };
-      let Option::SOME(digitValue) = Char::asciiDigitValue(digit) else {
+      let Option::SOME(digitValue) = ParserShared::parseDigitForRadix(digit, radix) else {
         return Option::NONE;
       };
 
-      value = value * 10 + digitValue;
+      value = value * radix + digitValue;
       index += 1;
     }
 
     return Option::SOME(value);
+  }
+
+  function parseHexInteger(lexeme: &String): Option<u64> {
+    if (lexeme.length() < 3) {
+      return Option::NONE;
+    }
+
+    return ParserShared::parseUnsignedIntegerWithRadix(lexeme, 2, 16);
+  }
+
+  function parseBinaryInteger(lexeme: &String): Option<u64> {
+    if (lexeme.length() < 3) {
+      return Option::NONE;
+    }
+
+    return ParserShared::parseUnsignedIntegerWithRadix(lexeme, 2, 2);
+  }
+
+  function parseFloatLiteral(lexeme: &String): Option<f64> {
+    return Option::SOME(LibC::Conversion::atof(lexeme.toStr() as CType::CConstStr) as f64);
+  }
+
+  function parseCharacterLiteral(lexeme: &String): Option<char> {
+    let inner: String = ParserShared::stripQuotes(lexeme);
+    let mut endByte: u64 = 0;
+
+    if (inner.length() == 0) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(first) = inner.charAt(0, &mut endByte) else {
+      return Option::NONE;
+    };
+
+    if (first != '\\') {
+      if (endByte == inner.length()) {
+        return Option::SOME(first);
+      }
+
+      return Option::NONE;
+    }
+
+    let Option::SOME(escape) = inner.charAt(endByte, &mut endByte) else {
+      return Option::NONE;
+    };
+
+    if (endByte != inner.length()) {
+      return Option::NONE;
+    }
+
+    if (escape == '0') {
+      return Option::SOME('\0');
+    }
+
+    if (escape == 'n') {
+      return Option::SOME('\n');
+    }
+
+    if (escape == 'r') {
+      return Option::SOME('\r');
+    }
+
+    if (escape == 't') {
+      return Option::SOME('\t');
+    }
+
+    if (escape == '\\') {
+      return Option::SOME('\\');
+    }
+
+    if (escape == '\'') {
+      return Option::SOME('\'');
+    }
+
+    if (escape == '"') {
+      return Option::SOME('"');
+    }
+
+    return Option::NONE;
   }
 
   function copyTypeIds(source: &Vector<Ast::TypeId>): Vector<Ast::TypeId> {
