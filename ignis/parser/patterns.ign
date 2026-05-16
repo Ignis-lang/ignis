@@ -2,10 +2,9 @@ import Vector from "std::vector";
 
 import Ast from "@compiler::ast";
 import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
-import Punctuation, Token, TokenKind from "@compiler::syntax";
+import LiteralKind, Punctuation, Token, TokenKind from "@compiler::syntax";
 
 import _ from "./shared";
-import _ from "./expressions";
 
 export namespace ParserPatterns {
   function patternSpan(node: &Ast::Pattern::Node): SourceSpan {
@@ -21,15 +20,58 @@ export namespace ParserPatterns {
 
   function parseLiteralPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let literalResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseLiteralExpression(parserRef);
-    let Option::SOME(literal) = literalResult else {
-      return Option::NONE;
-    };
+    parserRef.skipTrivia();
+    let token: Token = parserRef.current();
 
-    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
-      span: literal.span,
-      expression: literal.id,
-    })));
+    if (token.kindValue() != TokenKind::LITERAL) {
+      return Option::NONE;
+    }
+
+    if (token.literalKindValue() == LiteralKind::INTEGER) {
+      let lexeme: String = parserRef.bump().lexemeString();
+      let Option::SOME(value) = ParserShared::parseUnsignedInteger(&lexeme) else {
+        parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_PATTERN, "expected pattern", "integer literal pattern must fit in u64");
+        return Option::NONE;
+      };
+      let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+        span: token.span,
+        value: Ast::Expression::LiteralValue::UInt(value),
+      }));
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+        span: token.span,
+        expression: expressionId,
+      })));
+    }
+
+    if (token.literalKindValue() == LiteralKind::STRING) {
+      let lexeme: String = parserRef.bump().lexemeString();
+      let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+        span: token.span,
+        value: Ast::Expression::LiteralValue::String(ParserShared::stripQuotes(&lexeme)),
+      }));
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+        span: token.span,
+        expression: expressionId,
+      })));
+    }
+
+    if (token.literalKindValue() == LiteralKind::CHAR) {
+      let lexeme: String = parserRef.bump().lexemeString();
+      let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+        span: token.span,
+        value: Ast::Expression::LiteralValue::Character(match (ParserShared::parseCharacterLiteral(&lexeme)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("invalid char literal token"),
+        }),
+      }));
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+        span: token.span,
+        expression: expressionId,
+      })));
+    }
+
+    parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_PATTERN, "expected pattern", "literal pattern must be an integer, string, or char literal");
+    return Option::NONE;
   }
 
   function parseTuplePattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {

@@ -74,6 +74,8 @@ pub struct LocalData {
   pub mutable: bool,
   /// Debug name (for pretty printing).
   pub name: Option<String>,
+  /// Whether this local is a shallow borrowed alias and must not run owned drop glue.
+  pub borrowed_alias: bool,
 }
 
 /// Metadata for a temporary value.

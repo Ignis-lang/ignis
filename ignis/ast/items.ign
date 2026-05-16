@@ -2,10 +2,122 @@ import SourceSpan from "@compiler::diagnostics";
 import Vector from "std::vector";
 
 export namespace Ast {
+  record GenericBound {
+    public span: SourceSpan;
+    public segments: Vector<String>;
+  }
+
+  record GenericParam {
+    public span: SourceSpan;
+    public name: String;
+    public bounds: Vector<Ast::GenericBound>;
+  }
+
+  enum ImportBindingKind {
+    Named,
+    Discard,
+  }
+
+  record ImportBinding {
+    public span: SourceSpan;
+    public kind: Ast::ImportBindingKind;
+    public name: Option<String>;
+    public alias: Option<String>;
+  }
+
+  function copyGenericBoundSegments(source: &Vector<String>): Vector<String> {
+    let mut copied: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(value.clone());
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyGenericBounds(source: &Vector<Ast::GenericBound>): Vector<Ast::GenericBound> {
+    let mut copied: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(Ast::GenericBound {
+        span: value.span,
+        segments: Ast::copyGenericBoundSegments(&value.segments),
+      });
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyGenericParams(source: &Vector<Ast::GenericParam>): Vector<Ast::GenericParam> {
+    let mut copied: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(Ast::GenericParam {
+        span: value.span,
+        name: value.name.clone(),
+        bounds: Ast::copyGenericBounds(&value.bounds),
+      });
+      index += 1;
+    }
+
+    return copied;
+  }
+
+  function copyOptionalString(value: Option<String>): Option<String> {
+    if (let Option::SOME(text) = value) {
+      return Option::SOME(text.clone());
+    }
+
+    return Option::NONE;
+  }
+
+  function copyImportBindings(source: &Vector<Ast::ImportBinding>): Vector<Ast::ImportBinding> {
+    let mut copied: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(value) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      copied.push(Ast::ImportBinding {
+        span: value.span,
+        kind: value.kind,
+        name: Ast::copyOptionalString(value.name),
+        alias: Ast::copyOptionalString(value.alias),
+      });
+      index += 1;
+    }
+
+    return copied;
+  }
+
   namespace Item {
     record Function {
       public span: SourceSpan;
       public name: String;
+      public genericParameters: Vector<Ast::GenericParam>;
       public parameters: Vector<Ast::PatternId>;
       public returnType: Option<Ast::TypeId>;
       public body: Ast::StatementId;
@@ -15,6 +127,7 @@ export namespace Ast {
     record Record {
       public span: SourceSpan;
       public name: String;
+      public genericParameters: Vector<Ast::GenericParam>;
       public fields: Vector<Ast::PatternId>;
       public methods: Vector<Ast::ItemId>;
       public metadata: Ast::Metadata;
@@ -23,6 +136,7 @@ export namespace Ast {
     record Enum {
       public span: SourceSpan;
       public name: String;
+      public genericParameters: Vector<Ast::GenericParam>;
       public variants: Vector<Ast::PatternId>;
       public methods: Vector<Ast::ItemId>;
       public metadata: Ast::Metadata;
@@ -37,7 +151,9 @@ export namespace Ast {
 
     record Import {
       public span: SourceSpan;
-      public path: Vector<String>;
+      public items: Vector<Ast::ImportBinding>;
+      public source: String;
+      public sourceSpan: SourceSpan;
       public metadata: Ast::Metadata;
     }
 
@@ -57,13 +173,17 @@ export namespace Ast {
 
     record Export {
       public span: SourceSpan;
-      public item: Ast::ItemId;
+      public declaration: Option<Ast::ItemId>;
+      public items: Vector<Ast::ImportBinding>;
+      public source: Option<String>;
+      public sourceSpan: Option<SourceSpan>;
       public metadata: Ast::Metadata;
     }
 
     record TypeAlias {
       public span: SourceSpan;
       public name: String;
+      public genericParameters: Vector<Ast::GenericParam>;
       public value: Ast::TypeId;
       public metadata: Ast::Metadata;
     }
@@ -71,6 +191,7 @@ export namespace Ast {
     record Trait {
       public span: SourceSpan;
       public name: String;
+      public genericParameters: Vector<Ast::GenericParam>;
       public methods: Vector<Ast::ItemId>;
       public metadata: Ast::Metadata;
     }

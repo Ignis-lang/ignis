@@ -15,6 +15,17 @@ export namespace ParserTypes {
     return token.kindValue() == TokenKind::IDENTIFIER || token.kindValue() == TokenKind::KEYWORD;
   }
 
+  function emitUnsupportedCompoundTypeDiagnostic(parser: &mut ParserShared::State, operator: Token): void {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let detail: str = match (operator.punctuationValue()) {
+      Punctuation::PIPE -> "current Rust and selfhost parsers do not accept union ('|') types yet",
+      Punctuation::AMPERSAND -> "current Rust and selfhost parsers do not accept intersection ('&') types yet",
+      _ -> "current Rust and selfhost parsers do not accept this type operator yet",
+    };
+
+    parserRef.emitDiagnostic(operator.span, DiagnosticCode::EXPECTED_TYPE, "unsupported type operator", detail);
+  }
+
   function parseType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -97,6 +108,16 @@ export namespace ParserTypes {
         element: typeId,
         size: size,
       }));
+    }
+
+    parserRef.skipTrivia();
+    let operator: Token = parserRef.current();
+
+    if (operator.kindValue() == TokenKind::PUNCTUATION && (operator.punctuationValue() == Punctuation::PIPE || operator.punctuationValue() == Punctuation::AMPERSAND)) {
+      let unsupportedOperator: Token = parserRef.bump();
+      ParserTypes::emitUnsupportedCompoundTypeDiagnostic(parserRef, unsupportedOperator);
+      let _ = ParserTypes::parseType(parserRef);
+      return Option::NONE;
     }
 
     return Option::SOME(typeId);

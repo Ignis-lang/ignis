@@ -204,6 +204,7 @@ impl<'a> LoweringContext<'a> {
         ty: param_ty,
         mutable: is_mutable,
         name: Some(param_name),
+        borrowed_alias: false,
       });
 
       self.def_to_local.insert(param_id, local_id);
@@ -264,6 +265,7 @@ impl<'a> LoweringContext<'a> {
               ty: cap.type_in_env,
               mutable: false,
               name: None,
+              borrowed_alias: false,
             });
             self.fn_builder().emit(Instr::Store {
               dest: cap_local,
@@ -289,6 +291,7 @@ impl<'a> LoweringContext<'a> {
               ty: pointee_ty,
               mutable: false,
               name: None,
+              borrowed_alias: false,
             });
             self.fn_builder().emit(Instr::Store {
               dest: cap_local,
@@ -303,6 +306,7 @@ impl<'a> LoweringContext<'a> {
               ty: cap.type_in_env,
               mutable: true,
               name: None,
+              borrowed_alias: false,
             });
             self.fn_builder().emit(Instr::Store {
               dest: cap_local,
@@ -381,6 +385,7 @@ impl<'a> LoweringContext<'a> {
         ty: param_ty,
         mutable: is_mutable,
         name: Some(param_name),
+        borrowed_alias: false,
       });
 
       self.def_to_local.insert(param_id, local_id);
@@ -807,6 +812,7 @@ impl<'a> LoweringContext<'a> {
       ty: result_ty,
       mutable: true,
       name: None,
+      borrowed_alias: false,
     });
 
     // Store left result
@@ -1453,6 +1459,7 @@ impl<'a> LoweringContext<'a> {
       ty: vec_ty,
       mutable: true,
       name: None,
+      borrowed_alias: false,
     });
 
     // Get element type
@@ -1510,6 +1517,7 @@ impl<'a> LoweringContext<'a> {
       ty,
       mutable: is_mutable,
       name: Some(local_name),
+      borrowed_alias: false,
     });
 
     self.def_to_local.insert(name, local);
@@ -1583,6 +1591,7 @@ impl<'a> LoweringContext<'a> {
       ty: value_ty,
       mutable: false,
       name: None,
+      borrowed_alias: false,
     });
 
     self.fn_builder().emit(Instr::Store {
@@ -1590,7 +1599,7 @@ impl<'a> LoweringContext<'a> {
       value: value_op,
     });
 
-    let matches = self.lower_pattern_check(Operand::Local(scrutinee_local), value_ty, pattern, span.clone());
+    let matches = self.lower_pattern_check(Operand::Local(scrutinee_local), value_ty, pattern, span.clone(), false);
 
     let continue_block = self.fn_builder().create_block("let_else_ok");
     let fail_block = self.fn_builder().create_block("let_else_fail");
@@ -2014,6 +2023,7 @@ impl<'a> LoweringContext<'a> {
         ty: result_ty,
         mutable: true,
         name: None,
+        borrowed_alias: false,
       }))
     } else {
       None
@@ -2099,6 +2109,7 @@ impl<'a> LoweringContext<'a> {
         ty: scrutinee_ty,
         mutable: false,
         name: Some("match_scrutinee".to_string()),
+        borrowed_alias: false,
       })
     };
 
@@ -2114,6 +2125,7 @@ impl<'a> LoweringContext<'a> {
         ty: result_ty,
         mutable: true,
         name: Some("match_result".to_string()),
+        borrowed_alias: false,
       }))
     } else {
       None
@@ -2153,7 +2165,8 @@ impl<'a> LoweringContext<'a> {
         source: scrut_local,
       });
 
-      let matches = self.lower_pattern_check(Operand::Temp(scrut_temp), scrutinee_ty, &arm.pattern, span.clone());
+      let matches =
+        self.lower_pattern_check(Operand::Temp(scrut_temp), scrutinee_ty, &arm.pattern, span.clone(), false);
 
       let else_block = if i + 1 < arms.len() {
         check_blocks[i + 1]
@@ -2247,6 +2260,7 @@ impl<'a> LoweringContext<'a> {
         ty: element_ty,
         mutable: false,
         name: Some("match_tuple_element".to_string()),
+        borrowed_alias: false,
       });
 
       self.fn_builder().emit(Instr::Store {
@@ -2263,6 +2277,7 @@ impl<'a> LoweringContext<'a> {
         ty: result_ty,
         mutable: true,
         name: Some("match_result".to_string()),
+        borrowed_alias: false,
       }))
     } else {
       None
@@ -2359,7 +2374,7 @@ impl<'a> LoweringContext<'a> {
             dest: temp,
             source: *local,
           });
-          let nested = self.lower_pattern_check(Operand::Temp(temp), *element_ty, element_pattern, span.clone());
+          let nested = self.lower_pattern_check(Operand::Temp(temp), *element_ty, element_pattern, span.clone(), false);
           let and_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
           self.fn_builder().emit(Instr::BinOp {
             dest: and_temp,
@@ -2414,8 +2429,10 @@ impl<'a> LoweringContext<'a> {
     value_ty: TypeId,
     pattern: &HIRPattern,
     span: Span,
+    borrowed_alias: bool,
   ) -> Operand {
     let bool_ty = self.types.boolean();
+    let borrowed_alias = borrowed_alias || matches!(self.types.get(&value_ty), Type::Reference { .. });
 
     match pattern {
       HIRPattern::Wildcard => {
@@ -2463,11 +2480,13 @@ impl<'a> LoweringContext<'a> {
             DefinitionKind::Variable(var_def) => var_def.mutable,
             _ => false,
           };
+          let binding_borrowed_alias = borrowed_alias && self.types.needs_drop_with_defs(&value_ty, self.defs);
           let local = self.fn_builder().alloc_local(LocalData {
             def_id: Some(*def_id),
             ty: value_ty,
             mutable: binding_mutable,
             name: None,
+            borrowed_alias: binding_borrowed_alias,
           });
           self.def_to_local.insert(*def_id, local);
 
@@ -2616,7 +2635,7 @@ impl<'a> LoweringContext<'a> {
             });
             runtime_field_index += 1;
 
-            self.lower_pattern_check(Operand::Temp(field_temp), field_ty, &args[index], span.clone())
+            self.lower_pattern_check(Operand::Temp(field_temp), field_ty, &args[index], span.clone(), borrowed_alias)
           };
 
           let and_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
@@ -2640,7 +2659,7 @@ impl<'a> LoweringContext<'a> {
         });
 
         for p in patterns {
-          let check = self.lower_pattern_check(value.clone(), value_ty, p, span.clone());
+          let check = self.lower_pattern_check(value.clone(), value_ty, p, span.clone(), borrowed_alias);
           let new_result = self.fn_builder().alloc_temp(bool_ty, span.clone());
           self.fn_builder().emit(Instr::BinOp {
             dest: new_result,
@@ -3208,6 +3227,7 @@ impl<'a> LoweringContext<'a> {
       ty,
       mutable: false,
       name: None,
+      borrowed_alias: false,
     });
 
     self.fn_builder().emit(Instr::Store {
@@ -3233,6 +3253,7 @@ impl<'a> LoweringContext<'a> {
       ty,
       mutable,
       name: None,
+      borrowed_alias: false,
     });
 
     if self.types.needs_drop_with_defs(&ty, self.defs)
@@ -3403,6 +3424,7 @@ impl<'a> LoweringContext<'a> {
       ty: record_ty,
       mutable: true,
       name: None,
+      borrowed_alias: false,
     });
 
     // Lower each field value
@@ -3506,6 +3528,7 @@ impl<'a> LoweringContext<'a> {
       ty: enum_ty,
       mutable: true,
       name: None,
+      borrowed_alias: false,
     });
 
     // Lower payload values

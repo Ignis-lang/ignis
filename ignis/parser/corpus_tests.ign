@@ -418,6 +418,23 @@ function supportedFormatterMirrorSubset(): Vector<String> {
   return paths;
 }
 
+function parserCompletenessMatrixPath(): str {
+  return "docs/selfhost_parser_completeness_matrix.md";
+}
+
+function assertTextContains(text: &String, needle: str): void {
+  let expected: String = String::create(needle);
+
+  if (!text.contains(&expected)) {
+    let mut message: String = String::create("expected text to contain: ");
+    message.pushStr(needle);
+    message.pushStr("\nactual:\n");
+    message.pushStr(text.toStr());
+    Io::eprintln(message);
+    Test::fail();
+  }
+}
+
 @test
 function parserCorpusParsesSupportedStdSubsetWithoutDiagnostics(): void {
   let paths: Vector<String> = supportedStdSubset();
@@ -535,6 +552,20 @@ function parserDiagnosticSnapshotForRecoveryFixture(): void {
 @test
 function parserDiagnosticCompatibilityHarnessMatchesFixture(): void {
   assertParserDiagnosticsFixtureMatches("test_cases/selfhost/parser/diagnostic_recovery");
+}
+
+@test
+function parserCompletenessMatrixExistsAndTracksCurrentCorpusGates(): void {
+  let path: str = parserCompletenessMatrixPath();
+  Test::assert(Fs::exists(path));
+
+  let matrix: String = readCorpusFixture(path);
+  assertTextContains(&matrix, "# Selfhost Parser Completeness Matrix");
+  assertTextContains(&matrix, "std/**/*.ign");
+  assertTextContains(&matrix, "test_cases/analyzer/**/*.ign");
+  assertTextContains(&matrix, "example/**/*.ign");
+  assertTextContains(&matrix, "Generics and bounds");
+  assertTextContains(&matrix, "Import / export structure");
 }
 
 @test

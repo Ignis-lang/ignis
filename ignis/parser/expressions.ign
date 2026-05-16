@@ -1404,13 +1404,18 @@ export namespace ParserExpressions {
     let literalResult: Option<ParsedExpression> = ParserExpressions::parseLiteralExpression(parserRef);
 
     if (let Option::SOME(literal) = literalResult) {
-      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+      let literalPattern: Ast::PatternId = parserRef.module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
         span: literal.span,
         expression: literal.id,
-      })));
+      }));
+      return ParserExpressions::parseMatchPatternOrSuffix(parserRef, literalPattern, literal.span);
     }
 
     let token: Token = parserRef.current();
+    if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::LEFT_PAREN) {
+      return ParserExpressions::parseTupleMatchPattern(parserRef);
+    }
+
     if (token.kindValue() != TokenKind::IDENTIFIER) {
       parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_PATTERN, "expected pattern", "match arm must start with a literal, '_' or identifier path");
       return Option::NONE;
@@ -1418,9 +1423,10 @@ export namespace ParserExpressions {
 
     let first: Token = parserRef.bump();
     if (first.lexemeString().equals("_") && !parserRef.atPunctuation(Punctuation::DOUBLE_COLON)) {
-      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+      let wildcard: Ast::PatternId = parserRef.module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
         span: first.span,
-      })));
+      }));
+      return ParserExpressions::parseMatchPatternOrSuffix(parserRef, wildcard, first.span);
     }
 
     let mut segments: Vector<String> = Vector::new<String>();
@@ -1465,19 +1471,100 @@ export namespace ParserExpressions {
     }
 
     if (segments.length() == 1 && arguments.length() == 0) {
-      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+      let bindingPattern: Ast::PatternId = parserRef.module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
         span: first.span,
         name: first.lexemeString(),
         annotation: Option::NONE,
         metadata: Ast::emptyMetadata(),
-      })));
+      }));
+      return ParserExpressions::parseMatchPatternOrSuffix(parserRef, bindingPattern, first.span);
     }
 
-    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
-      span: ParserShared::mergeSpans(first.span, last.span),
+    let pathSpan: SourceSpan = ParserShared::mergeSpans(first.span, last.span);
+    let pathPattern: Ast::PatternId = parserRef.module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+      span: pathSpan,
       segments: ParserShared::copyStrings(&segments),
       arguments: ParserShared::copyPatternIds(&arguments),
+    }));
+    return ParserExpressions::parseMatchPatternOrSuffix(parserRef, pathPattern, pathSpan);
+  }
+
+  function parseTupleMatchPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let Option::SOME(openParen) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start pattern") else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(first) = ParserExpressions::parseMatchPattern(parserRef) else {
+      return Option::NONE;
+    };
+
+    if (!parserRef.atPunctuation(Punctuation::COMMA)) {
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after grouped pattern") else {
+        return Option::NONE;
+      };
+      return Option::SOME(first);
+    }
+
+    let mut elements: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    elements.push(first);
+
+    while (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+      if (parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+        break;
+      }
+
+      let Option::SOME(element) = ParserExpressions::parseMatchPattern(parserRef) else {
+        return Option::NONE;
+      };
+      elements.push(element);
+    }
+
+    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple pattern") else {
+      return Option::NONE;
+    };
+
+    let tupleSpan: SourceSpan = ParserShared::mergeSpans(openParen.span, closeParen.span);
+    let tuplePattern: Ast::PatternId = parserRef.module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+      span: tupleSpan,
+      elements: ParserShared::copyPatternIds(&elements),
+    }));
+
+    return ParserExpressions::parseMatchPatternOrSuffix(parserRef, tuplePattern, tupleSpan);
+  }
+
+  function parseMatchPatternOrSuffix(parser: &mut ParserShared::State, first: Ast::PatternId, startSpan: SourceSpan): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atPunctuation(Punctuation::PIPE)) {
+      return Option::SOME(first);
+    }
+
+    let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    alternatives.push(first);
+
+    while (parserRef.consumePunctuation(Punctuation::PIPE).isSome()) {
+      let Option::SOME(alternative) = ParserExpressions::parseMatchPattern(parserRef) else {
+        return Option::NONE;
+      };
+      alternatives.push(alternative);
+    }
+
+    return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
+      span: ParserShared::mergeSpans(startSpan, parserRef.current().span),
+      alternatives: ParserShared::copyPatternIds(&alternatives),
     })));
+  }
+
+  function patternSpan(node: &Ast::Pattern::Node): SourceSpan {
+    return match (node) {
+      Ast::Pattern::Node::Wildcard(value) -> value.span,
+      Ast::Pattern::Node::Binding(value) -> value.span,
+      Ast::Pattern::Node::Literal(value) -> value.span,
+      Ast::Pattern::Node::Path(value) -> value.span,
+      Ast::Pattern::Node::Tuple(value) -> value.span,
+      Ast::Pattern::Node::Or(value) -> value.span,
+    };
   }
 
   function parseBlockExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {

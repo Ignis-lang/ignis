@@ -170,12 +170,12 @@ export namespace Ast {
         return Ast::Serializer::renderRecordItem(&value);
       }
 
-      if (let Ast::Item::Node::Enum(_) = node) {
-        return String::create("Enum");
+      if (let Ast::Item::Node::Enum(value) = node) {
+        return Ast::Serializer::renderEnumItem(&value);
       }
 
-      if (let Ast::Item::Node::Import(_) = node) {
-        return String::create("Import");
+      if (let Ast::Item::Node::Import(value) = node) {
+        return Ast::Serializer::renderImportItem(&value);
       }
 
       if (let Ast::Item::Node::Extern(_) = node) {
@@ -186,12 +186,16 @@ export namespace Ast {
         return String::create("Constant");
       }
 
-      if (let Ast::Item::Node::Export(_) = node) {
-        return String::create("Export");
+      if (let Ast::Item::Node::Export(value) = node) {
+        return Ast::Serializer::renderExportItem(&value);
       }
 
-      if (let Ast::Item::Node::Trait(_) = node) {
-        return String::create("Trait");
+      if (let Ast::Item::Node::Trait(value) = node) {
+        return Ast::Serializer::renderTraitItem(&value);
+      }
+
+      if (let Ast::Item::Node::TypeAlias(value) = node) {
+        return Ast::Serializer::renderTypeAliasItem(&value);
       }
 
       return String::create("TypeAlias");
@@ -426,11 +430,15 @@ export namespace Ast {
         return Ast::Serializer::renderOrPattern(&value);
       }
 
-      if (let Ast::Pattern::Node::Literal(_) = node) {
-        return String::create("Literal");
+      if (let Ast::Pattern::Node::Literal(value) = node) {
+        return Ast::Serializer::renderLiteralPattern(&value);
       }
 
-      return String::create("Path");
+      let Ast::Pattern::Node::Path(value) = node else {
+        @panic("unsupported pattern node");
+      };
+
+      return Ast::Serializer::renderPathPattern(&value);
     }
 
     function renderFunctionItem(node: &Ast::Item::Function): String {
@@ -457,6 +465,12 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
       output.pushStr(" name=");
       output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
+
+      if (node.genericParameters.length() > 0) {
+        output.pushStr(" generics=");
+        output.pushStr(Ast::Serializer::renderGenericParamsInline(&node.genericParameters).toStr());
+      }
+
       output.pushStr(" parameters=");
       output.pushStr(parametersText.toStr());
       output.pushStr(" returnType=");
@@ -477,10 +491,122 @@ export namespace Ast {
       output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
       output.pushStr(" name=");
       output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
+
+      if (node.genericParameters.length() > 0) {
+        output.pushStr(" generics=");
+        output.pushStr(Ast::Serializer::renderGenericParamsInline(&node.genericParameters).toStr());
+      }
+
       output.pushStr(" fields=");
       output.pushStr(Ast::Serializer::renderPatternIdsInline(&node.fields).toStr());
       output.pushStr(" methods=");
       output.pushStr(Ast::Serializer::renderItemIdsInline(&node.methods).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
+      return output;
+    }
+
+    function renderEnumItem(node: &Ast::Item::Enum): String {
+      let mut output: String = String::create("Enum span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
+
+      if (node.genericParameters.length() > 0) {
+        output.pushStr(" generics=");
+        output.pushStr(Ast::Serializer::renderGenericParamsInline(&node.genericParameters).toStr());
+      }
+
+      output.pushStr(" variants=");
+      output.pushStr(Ast::Serializer::renderPatternIdsInline(&node.variants).toStr());
+      output.pushStr(" methods=");
+      output.pushStr(Ast::Serializer::renderItemIdsInline(&node.methods).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
+      return output;
+    }
+
+    function renderTraitItem(node: &Ast::Item::Trait): String {
+      let mut output: String = String::create("Trait span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
+
+      if (node.genericParameters.length() > 0) {
+        output.pushStr(" generics=");
+        output.pushStr(Ast::Serializer::renderGenericParamsInline(&node.genericParameters).toStr());
+      }
+
+      output.pushStr(" methods=");
+      output.pushStr(Ast::Serializer::renderItemIdsInline(&node.methods).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
+      return output;
+    }
+
+    function renderTypeAliasItem(node: &Ast::Item::TypeAlias): String {
+      let mut output: String = String::create("TypeAlias span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" name=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.name.toStr()).toStr());
+
+      if (node.genericParameters.length() > 0) {
+        output.pushStr(" generics=");
+        output.pushStr(Ast::Serializer::renderGenericParamsInline(&node.genericParameters).toStr());
+      }
+
+      output.pushStr(" value=");
+      output.pushStr(Ast::Serializer::renderTypeId(node.value).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
+      return output;
+    }
+
+    function renderImportItem(node: &Ast::Item::Import): String {
+      let mut output: String = String::create("Import span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" items=");
+      output.pushStr(Ast::Serializer::renderImportBindingsInline(&node.items).toStr());
+      output.pushStr(" from=");
+      output.pushStr(Ast::Serializer::renderQuoted(node.source.toStr()).toStr());
+      output.pushStr(" sourceSpan=");
+      output.pushStr(Ast::Serializer::renderSpan(node.sourceSpan.filePath, node.sourceSpan.start, node.sourceSpan.end).toStr());
+
+      if (Ast::metadataHasValues(&node.metadata)) {
+        output.pushStr(" metadata=");
+        output.pushStr(Ast::Serializer::renderMetadata(&node.metadata).toStr());
+      }
+
+      return output;
+    }
+
+    function renderExportItem(node: &Ast::Item::Export): String {
+      let mut output: String = String::create("Export span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" declaration=");
+      output.pushStr(Ast::Serializer::renderOptionalItemId(node.declaration).toStr());
+      output.pushStr(" items=");
+      output.pushStr(Ast::Serializer::renderImportBindingsInline(&node.items).toStr());
+      output.pushStr(" from=");
+      output.pushStr(Ast::Serializer::renderOptionalString(node.source).toStr());
+      output.pushStr(" sourceSpan=");
+      output.pushStr(Ast::Serializer::renderOptionalSpan(node.sourceSpan).toStr());
 
       if (Ast::metadataHasValues(&node.metadata)) {
         output.pushStr(" metadata=");
@@ -743,26 +869,7 @@ export namespace Ast {
           Option::NONE -> @panic("missing metadata attribute"),
         };
 
-        output.pushStr("@");
-        output.pushStr(attribute.name.toStr());
-        output.pushStr("(");
-
-        let mut argumentIndex: u64 = 0;
-        while (argumentIndex < attribute.arguments.length()) {
-          if (argumentIndex > 0) {
-            output.pushStr(", ");
-          }
-
-          let argument: &String = match (attribute.arguments.get(argumentIndex)) {
-            Option::SOME(value) -> value,
-            Option::NONE -> @panic("missing attribute argument"),
-          };
-
-          output.pushStr(argument.toStr());
-          argumentIndex += 1;
-        }
-
-        output.pushStr(")");
+        output.pushStr(Ast::Serializer::renderAttribute(attribute).toStr());
         attributeIndex += 1;
       }
 
@@ -787,6 +894,31 @@ export namespace Ast {
       return output;
     }
 
+    function renderAttribute(attribute: &Ast::Attribute): String {
+      let mut output: String = String::create("@");
+      output.pushStr(attribute.name.toStr());
+      output.pushStr("(");
+
+      let mut argumentIndex: u64 = 0;
+      while (argumentIndex < attribute.arguments.length()) {
+        if (argumentIndex > 0) {
+          output.pushStr(", ");
+        }
+
+        let argument: &String = match (attribute.arguments.get(argumentIndex)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("missing attribute argument"),
+        };
+
+        output.pushStr(argument.toStr());
+        argumentIndex += 1;
+      }
+
+      output.pushStr(")@");
+      output.pushStr(Ast::Serializer::renderSpan(attribute.span.filePath, attribute.span.start, attribute.span.end).toStr());
+      return output;
+    }
+
     function renderModifier(modifier: Ast::Modifier): String {
       return match (modifier) {
         Ast::Modifier::Public -> String::create("public"),
@@ -801,6 +933,24 @@ export namespace Ast {
     function renderWildcardPattern(node: &Ast::Pattern::Wildcard): String {
       let mut output: String = String::create("Wildcard span=");
       output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      return output;
+    }
+
+    function renderLiteralPattern(node: &Ast::Pattern::Literal): String {
+      let mut output: String = String::create("Literal span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" expression=");
+      output.pushStr(Ast::Serializer::renderExpressionId(node.expression).toStr());
+      return output;
+    }
+
+    function renderPathPattern(node: &Ast::Pattern::Path): String {
+      let mut output: String = String::create("Path span=");
+      output.pushStr(Ast::Serializer::renderSpan(node.span.filePath, node.span.start, node.span.end).toStr());
+      output.pushStr(" segments=");
+      output.pushStr(Ast::Serializer::renderStringsInline(&node.segments).toStr());
+      output.pushStr(" arguments=");
+      output.pushStr(Ast::Serializer::renderPatternIdsInline(&node.arguments).toStr());
       return output;
     }
 
@@ -858,6 +1008,103 @@ export namespace Ast {
       return output;
     }
 
+    function renderImportBindingsInline(values: &Vector<Ast::ImportBinding>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: &Ast::ImportBinding = match (values.get(index)) {
+          Option::SOME(binding) -> binding,
+          Option::NONE -> @panic("missing import binding entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderImportBinding(value).toStr());
+        index += 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
+    function renderImportBinding(value: &Ast::ImportBinding): String {
+      if (value.kind == Ast::ImportBindingKind::Discard) {
+        let mut discardOutput: String = String::create("Discard@");
+        discardOutput.pushStr(Ast::Serializer::renderSpan(value.span.filePath, value.span.start, value.span.end).toStr());
+        return discardOutput;
+      }
+
+      let mut output: String = String::create("Named(");
+      output.pushStr(Ast::Serializer::renderOptionalString(value.name).toStr());
+
+      if (let Option::SOME(alias) = value.alias) {
+        output.pushStr(" as ");
+        output.pushStr(Ast::Serializer::renderQuoted(alias.toStr()).toStr());
+      }
+
+      output.pushStr(")@");
+      output.pushStr(Ast::Serializer::renderSpan(value.span.filePath, value.span.start, value.span.end).toStr());
+      return output;
+    }
+
+    function renderGenericParamsInline(values: &Vector<Ast::GenericParam>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: &Ast::GenericParam = match (values.get(index)) {
+          Option::SOME(param) -> param,
+          Option::NONE -> @panic("missing generic parameter entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderGenericParam(value).toStr());
+        index += 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
+    function renderGenericParam(value: &Ast::GenericParam): String {
+      let mut output: String = Ast::Serializer::renderQuoted(value.name.toStr());
+
+      if (value.bounds.length() > 0) {
+        output.pushStr(":");
+        output.pushStr(Ast::Serializer::renderGenericBoundsInline(&value.bounds).toStr());
+      }
+
+      return output;
+    }
+
+    function renderGenericBoundsInline(values: &Vector<Ast::GenericBound>): String {
+      let mut output: String = String::create("[");
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let value: &Ast::GenericBound = match (values.get(index)) {
+          Option::SOME(bound) -> bound,
+          Option::NONE -> @panic("missing generic bound entry"),
+        };
+
+        output.pushStr(Ast::Serializer::renderStringsInline(&value.segments).toStr());
+        index += 1;
+      }
+
+      output.pushStr("]");
+      return output;
+    }
+
     function renderOptionalExpressionId(value: Option<Ast::ExpressionId>): String {
       if (let Option::SOME(id) = value) {
         return Ast::Serializer::renderExpressionId(id);
@@ -866,9 +1113,33 @@ export namespace Ast {
       return String::create("none");
     }
 
+    function renderOptionalItemId(value: Option<Ast::ItemId>): String {
+      if (let Option::SOME(id) = value) {
+        return Ast::Serializer::renderItemId(id);
+      }
+
+      return String::create("none");
+    }
+
     function renderOptionalTypeId(value: Option<Ast::TypeId>): String {
       if (let Option::SOME(id) = value) {
         return Ast::Serializer::renderTypeId(id);
+      }
+
+      return String::create("none");
+    }
+
+    function renderOptionalString(value: Option<String>): String {
+      if (let Option::SOME(text) = value) {
+        return Ast::Serializer::renderQuoted(text.toStr());
+      }
+
+      return String::create("none");
+    }
+
+    function renderOptionalSpan(value: Option<SourceSpan>): String {
+      if (let Option::SOME(span) = value) {
+        return Ast::Serializer::renderSpan(span.filePath, span.start, span.end);
       }
 
       return String::create("none");

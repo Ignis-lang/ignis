@@ -47,6 +47,7 @@ function buildSnapshotModule(rootName: String): Ast::Module {
   module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
     span: SourceSpan::new("fixtures/ast_snapshot.ign", 67, 98),
     name: rootName,
+    genericParameters: Vector::new<Ast::GenericParam>(),
     parameters: Vector::new<Ast::PatternId>(),
     returnType: Option::NONE,
     body: letStatement,
@@ -83,31 +84,92 @@ function expectedStructuredLiteralAndBinaryText(): str {
 }
 
 @test
+function astSerializerRendersGenericParametersAndBounds(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut bounds: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
+  let mut boundSegments: Vector<String> = Vector::new<String>();
+  let mut genericParameters: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  let body: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: SourceSpan::new("fixtures/ast_generics.ign", 35, 37),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  boundSegments.push(astText("Hash"));
+  bounds.push(Ast::GenericBound {
+    span: SourceSpan::new("fixtures/ast_generics.ign", 18, 22),
+    segments: boundSegments,
+  });
+  genericParameters.push(Ast::GenericParam {
+    span: SourceSpan::new("fixtures/ast_generics.ign", 15, 22),
+    name: astText("T"),
+    bounds: bounds,
+  });
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: SourceSpan::new("fixtures/ast_generics.ign", 0, 37),
+    name: astText("identity"),
+    genericParameters: genericParameters,
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let rendered: String = Ast::Serializer::render(&module);
+  let expectedGenerics: String = String::create("generics=[\"T\":[[\"Hash\"]]]");
+
+  if (!rendered.contains(&expectedGenerics)) {
+    @panic("expected serializer to render generic parameters and bounds");
+  }
+}
+
+@test
 function astSerializerRendersMetadataAndRecordMethods(): void {
   let mut module: Ast::Module = Ast::Module::init();
   let mut fieldModifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
-  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  let mut itemAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  let mut methodAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  let mut parameterAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
   let mut methodModifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
   let mut fieldTypeSegments: Vector<String> = Vector::new<String>();
   let mut recordFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   let mut recordMethods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  let mut methodParameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut itemAttributeArguments: Vector<String> = Vector::new<String>();
+  let mut methodAttributeArguments: Vector<String> = Vector::new<String>();
+  let mut parameterAttributeArguments: Vector<String> = Vector::new<String>();
 
   fieldModifiers.push(Ast::Modifier::Public);
   methodModifiers.push(Ast::Modifier::Public);
   methodModifiers.push(Ast::Modifier::Static);
-  attributes.push(Ast::Attribute {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 7),
+  itemAttributeArguments.push(astText("\"c\""));
+  itemAttributeArguments.push(astText("level"));
+  methodAttributeArguments.push(astText("init"));
+  parameterAttributeArguments.push(astText("input"));
+  itemAttributes.push(Ast::Attribute {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 18),
     name: astText("packed"),
-    arguments: Vector::new<String>(),
+    arguments: itemAttributeArguments,
+  });
+  methodAttributes.push(Ast::Attribute {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 47, 59),
+    name: astText("builder"),
+    arguments: methodAttributeArguments,
+  });
+  parameterAttributes.push(Ast::Attribute {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 80, 92),
+    name: astText("trace"),
+    arguments: parameterAttributeArguments,
   });
   fieldTypeSegments.push(astText("i32"));
 
   let fieldType: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 23, 26),
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 34, 37),
     segments: fieldTypeSegments,
   }));
   let fieldPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 14, 26),
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 25, 37),
     name: astText("value"),
     annotation: Option::SOME(fieldType),
     metadata: Ast::Metadata {
@@ -115,19 +177,30 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
       modifiers: fieldModifiers,
     },
   }));
+  let methodParameter: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 93, 103),
+    name: astText("value"),
+    annotation: Option::SOME(fieldType),
+    metadata: Ast::Metadata {
+      attributes: parameterAttributes,
+      modifiers: Vector::new<Ast::Modifier>(),
+    },
+  }));
   let methodBody: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 60, 62),
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 117, 119),
     statements: Vector::new<Ast::StatementId>(),
     tail: Option::NONE,
   }));
+  methodParameters.push(methodParameter);
   let methodItem: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 34, 62),
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 47, 119),
     name: astText("init"),
-    parameters: Vector::new<Ast::PatternId>(),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: methodParameters,
     returnType: Option::NONE,
     body: methodBody,
     metadata: Ast::Metadata {
-      attributes: Vector::new<Ast::Attribute>(),
+      attributes: methodAttributes,
       modifiers: methodModifiers,
     },
   }));
@@ -135,24 +208,26 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
   recordMethods.push(methodItem);
   recordFields.push(fieldPattern);
   module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
-    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 62),
+    span: SourceSpan::new("fixtures/ast_metadata.ign", 0, 119),
     name: astText("Packet"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
     fields: recordFields,
     methods: recordMethods,
     metadata: Ast::Metadata {
-      attributes: attributes,
+      attributes: itemAttributes,
       modifiers: Vector::new<Ast::Modifier>(),
     },
   }));
 
   let rendered: String = Ast::Serializer::render(&module);
-  let expectedItemMetadata: String = String::create("metadata=attrs[@packed()] modifiers[]");
+  let expectedItemMetadata: String = String::create("metadata=attrs[@packed(\"c\", level)@fixtures/ast_metadata.ign:0-18] modifiers[]");
   let expectedMethods: String = String::create("methods=[item#0]");
-  let expectedMethodMetadata: String = String::create("metadata=attrs[] modifiers[public, static]");
+  let expectedMethodMetadata: String = String::create("metadata=attrs[@builder(init)@fixtures/ast_metadata.ign:47-59] modifiers[public, static]");
   let expectedBindingMetadata: String = String::create("metadata=attrs[] modifiers[public]");
+  let expectedParameterMetadata: String = String::create("Binding span=fixtures/ast_metadata.ign:93-103 name=\"value\" annotation=type#0 metadata=attrs[@trace(input)@fixtures/ast_metadata.ign:80-92] modifiers[]");
 
   if (!rendered.contains(&expectedItemMetadata)) {
-    @panic("expected serializer to render item metadata");
+    @panic("expected serializer to render item metadata with arguments and span");
   }
 
   if (!rendered.contains(&expectedMethods)) {
@@ -160,13 +235,66 @@ function astSerializerRendersMetadataAndRecordMethods(): void {
   }
 
   if (!rendered.contains(&expectedMethodMetadata)) {
-    @panic("expected serializer to render method modifiers");
+    @panic("expected serializer to render method metadata");
   }
 
   if (!rendered.contains(&expectedBindingMetadata)) {
     @panic("expected serializer to render binding modifiers");
   }
+
+  if (!rendered.contains(&expectedParameterMetadata)) {
+    @panic("expected serializer to render parameter binding metadata with span");
+  }
 }
+@test
+function astSerializerRendersImportAndExportStructure(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut importItems: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  let mut exportItems: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+
+  importItems.push(Ast::ImportBinding {
+    span: SourceSpan::new("fixtures/ast_import_export.ign", 7, 10),
+    kind: Ast::ImportBindingKind::Named,
+    name: Option::SOME(astText("Foo")),
+    alias: Option::NONE,
+  });
+  importItems.push(Ast::ImportBinding {
+    span: SourceSpan::new("fixtures/ast_import_export.ign", 12, 13),
+    kind: Ast::ImportBindingKind::Discard,
+    name: Option::NONE,
+    alias: Option::NONE,
+  });
+  exportItems.push(Ast::ImportBinding {
+    span: SourceSpan::new("fixtures/ast_import_export.ign", 45, 48),
+    kind: Ast::ImportBindingKind::Named,
+    name: Option::SOME(astText("Bar")),
+    alias: Option::NONE,
+  });
+
+  module.addRootItem(Ast::Item::Node::Import(Ast::Item::Import {
+    span: SourceSpan::new("fixtures/ast_import_export.ign", 0, 31),
+    items: importItems,
+    source: astText("std::io"),
+    sourceSpan: SourceSpan::new("fixtures/ast_import_export.ign", 18, 27),
+    metadata: Ast::emptyMetadata(),
+  }));
+  module.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: SourceSpan::new("fixtures/ast_import_export.ign", 32, 60),
+    declaration: Option::NONE,
+    items: exportItems,
+    source: Option::SOME(astText("./bar")),
+    sourceSpan: Option::SOME(SourceSpan::new("fixtures/ast_import_export.ign", 49, 56)),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let rendered: String = Ast::Serializer::render(&module);
+
+  let expectedRenderedNeedle1: String = String::create("Import span=fixtures/ast_import_export.ign:0-31 items=[Named(\"Foo\")@fixtures/ast_import_export.ign:7-10, Discard@fixtures/ast_import_export.ign:12-13] from=\"std::io\" sourceSpan=fixtures/ast_import_export.ign:18-27");
+  Test::assert(rendered.contains(&expectedRenderedNeedle1));
+  let expectedRenderedNeedle2: String = String::create("Export span=fixtures/ast_import_export.ign:32-60 declaration=none items=[Named(\"Bar\")@fixtures/ast_import_export.ign:45-48] from=\"./bar\" sourceSpan=fixtures/ast_import_export.ign:49-56");
+  Test::assert(rendered.contains(&expectedRenderedNeedle2));
+}
+
 @test
 function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
   let mut module: Ast::Module = Ast::Module::init();
@@ -199,6 +327,7 @@ function astModuleAllocatesCategoryLocalIdsAndTracksRoots(): void {
   let firstRoot: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
     span: SourceSpan::new("fixtures/ast.ign", 22, 40),
     name: astText("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
     parameters: functionParameters,
     returnType: Option::SOME(returnType),
     body: statement,
@@ -261,14 +390,121 @@ function astSerializerRendersStructuredLiteralValuesAndBinaryOperators(): void {
 }
 
 @test
+function astSerializerRendersStructuredPatterns(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut bindingAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  let mut bindingAttributeArguments: Vector<String> = Vector::new<String>();
+  let mut bindingModifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
+  let mut annotationSegments: Vector<String> = Vector::new<String>();
+  let mut pathSegments: Vector<String> = Vector::new<String>();
+  let mut tupleElements: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut pathArguments: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut orAlternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let literalExpression: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 46, 47),
+    value: Ast::Expression::LiteralValue::Int(0),
+  }));
+
+  bindingAttributeArguments.push(astText("input"));
+  bindingAttributes.push(Ast::Attribute {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 0, 13),
+    name: astText("trace"),
+    arguments: bindingAttributeArguments,
+  });
+  bindingModifiers.push(Ast::Modifier::Public);
+  annotationSegments.push(astText("Packet"));
+  let annotationType: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 22, 28),
+    segments: annotationSegments,
+  }));
+
+  let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 14, 28),
+    name: astText("value"),
+    annotation: Option::SOME(annotationType),
+    metadata: Ast::Metadata {
+      attributes: bindingAttributes,
+      modifiers: bindingModifiers,
+    },
+  }));
+  let literalPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 46, 47),
+    expression: literalExpression,
+  }));
+  let wildcardPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 49, 50),
+  }));
+
+  tupleElements.push(literalPattern);
+  tupleElements.push(wildcardPattern);
+  let tuplePattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 45, 51),
+    elements: tupleElements,
+  }));
+
+  pathSegments.push(astText("Option"));
+  pathSegments.push(astText("SOME"));
+  pathArguments.push(tuplePattern);
+  pathArguments.push(bindingPattern);
+  let pathPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 30, 58),
+    segments: pathSegments,
+    arguments: pathArguments,
+  }));
+
+  orAlternatives.push(pathPattern);
+  orAlternatives.push(bindingPattern);
+  module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
+    span: SourceSpan::new("fixtures/ast_patterns.ign", 30, 66),
+    alternatives: orAlternatives,
+  }));
+
+  let rendered: String = Ast::Serializer::render(&module);
+  let expectedBinding: String = String::create("Binding span=fixtures/ast_patterns.ign:14-28 name=\"value\" annotation=type#0 metadata=attrs[@trace(input)@fixtures/ast_patterns.ign:0-13] modifiers[public]");
+  let expectedLiteral: String = String::create("Literal span=fixtures/ast_patterns.ign:46-47 expression=expression#0");
+  let expectedWildcard: String = String::create("Wildcard span=fixtures/ast_patterns.ign:49-50");
+  let expectedTuple: String = String::create("Tuple span=fixtures/ast_patterns.ign:45-51 elements=[pattern#1, pattern#2]");
+  let expectedPath: String = String::create("Path span=fixtures/ast_patterns.ign:30-58 segments=[\"Option\", \"SOME\"] arguments=[pattern#3, pattern#0]");
+  let expectedOr: String = String::create("Or span=fixtures/ast_patterns.ign:30-66 alternatives=[pattern#4, pattern#0]");
+
+  if (!rendered.contains(&expectedBinding)) {
+    @panic("expected serializer to render binding pattern annotation and metadata");
+  }
+
+  if (!rendered.contains(&expectedLiteral)) {
+    @panic("expected serializer to render literal pattern expression link");
+  }
+
+  if (!rendered.contains(&expectedWildcard)) {
+    @panic("expected serializer to render wildcard pattern span");
+  }
+
+  if (!rendered.contains(&expectedTuple)) {
+    @panic("expected serializer to render tuple pattern elements");
+  }
+
+  if (!rendered.contains(&expectedPath)) {
+    @panic("expected serializer to render path pattern segments and arguments");
+  }
+
+  if (!rendered.contains(&expectedOr)) {
+    @panic("expected serializer to render or-pattern alternatives");
+  }
+}
+
+@test
 function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
   let mut module: Ast::Module = Ast::Module::init();
-  let mut importPath: Vector<String> = Vector::new<String>();
+  let mut importItems: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   let mut vectorElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
   let mut blockStatements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
 
-  importPath.push(String::create("std"));
-  importPath.push(String::create("io"));
+  importItems.push(Ast::ImportBinding {
+    span: SourceSpan::new("fixtures/ast_parity.ign", 188, 189),
+    kind: Ast::ImportBindingKind::Discard,
+    name: Option::NONE,
+    alias: Option::NONE,
+  });
 
   let bindingPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
     span: SourceSpan::new("fixtures/ast_parity.ign", 0, 5),
@@ -334,7 +570,9 @@ function astModuleRepresentsExpandedParityVariantsWithTypedIds(): void {
   }));
   let importItem: Ast::ItemId = module.addItem(Ast::Item::Node::Import(Ast::Item::Import {
     span: SourceSpan::new("fixtures/ast_parity.ign", 181, 194),
-    path: importPath,
+    items: importItems,
+    source: astText("std::io"),
+    sourceSpan: SourceSpan::new("fixtures/ast_parity.ign", 190, 198),
     metadata: Ast::emptyMetadata(),
   }));
   let itemStatement: Ast::StatementId = module.addStatement(Ast::Statement::Node::Item(Ast::Statement::Item {

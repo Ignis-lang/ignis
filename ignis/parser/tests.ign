@@ -1,7 +1,8 @@
 import Fs from "std::fs";
+import Io from "std::io";
 import Test from "std::test";
 
-import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, SourceFile from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Parser from "@compiler::parser";
 
@@ -106,6 +107,77 @@ function parserParsesTypeAliasAndFunctionFoundation(): void {
 }
 
 @test
+function parserPreservesGenericBoundsOnItemsAndSerializer(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_generic_bounds.ign",
+    "trait Hash { hash(&self): i32; } record Box<T: Hash> { value: T; } function hashValue<T: Hash>(value: T): i32 { return 0; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 3);
+  let expectedRenderedNeedle1: String = String::create("name=\"Box\" generics=[\"T\":[[\"Hash\"]]]");
+  Test::assert(rendered.contains(&expectedRenderedNeedle1));
+  let expectedRenderedNeedle2: String = String::create("name=\"hashValue\" generics=[\"T\":[[\"Hash\"]]]");
+  Test::assert(rendered.contains(&expectedRenderedNeedle2));
+
+  match (expectItem(&module, match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing generic record root"),
+  })) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.genericParameters.length(), 1);
+
+      let genericParam: &Ast::GenericParam = match (recordItem.genericParameters.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing record generic parameter"),
+      };
+      let bound: &Ast::GenericBound = match (genericParam.bounds.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing record generic bound"),
+      };
+      let segment: &String = match (bound.segments.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing record generic bound segment"),
+      };
+
+      Test::assertEq<str>(genericParam.name.toStr(), "T");
+      Test::assertEq<str>(segment.toStr(), "Hash");
+    },
+    _ -> @panic("expected generic record root"),
+  };
+
+  match (expectItem(&module, match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing generic function root"),
+  })) {
+    Ast::Item::Node::Function(functionItem) -> {
+      Test::assertEq<u64>(functionItem.genericParameters.length(), 1);
+
+      let genericParam: &Ast::GenericParam = match (functionItem.genericParameters.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing function generic parameter"),
+      };
+      let bound: &Ast::GenericBound = match (genericParam.bounds.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing function generic bound"),
+      };
+      let segment: &String = match (bound.segments.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing function generic bound segment"),
+      };
+
+      Test::assertEq<str>(genericParam.name.toStr(), "T");
+      Test::assertEq<str>(segment.toStr(), "Hash");
+    },
+    _ -> @panic("expected generic function root"),
+  };
+}
+
+@test
 function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_record_types.ign",
@@ -196,6 +268,74 @@ function parserParsesRecordFieldArrayAndNestedGenericTypes(): void {
 }
 
 @test
+function parserRejectsUnsupportedUnionTypeSyntaxWithTargetedDiagnostic(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_union_type_unsupported.ign",
+    "type Either = Left | Right; function recovered(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing unsupported union type diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, "I0016");
+  Test::assertEq<str>(diagnostic.message, "unsupported type operator");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 19);
+  Test::assertEq<u64>(diagnostic.primarySpan.end, 20);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing recovered function root after unsupported union type"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "recovered"),
+    _ -> @panic("expected recovered function item after unsupported union type"),
+  };
+}
+
+@test
+function parserRejectsUnsupportedIntersectionTypeSyntaxWithTargetedDiagnostic(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_intersection_type_unsupported.ign",
+    "type Both = Left & Right; function recovered(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 1);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing unsupported intersection type diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, "I0016");
+  Test::assertEq<str>(diagnostic.message, "unsupported type operator");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 17);
+  Test::assertEq<u64>(diagnostic.primarySpan.end, 18);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing recovered function root after unsupported intersection type"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "recovered"),
+    _ -> @panic("expected recovered function item after unsupported intersection type"),
+  };
+}
+
+@test
 function parserRecoversToNextTopLevelItemAfterMalformedTypeAlias(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_recovery.ign",
@@ -244,14 +384,20 @@ function parserParsesRealFileShapeWithImportAndReturnLiteral(): void {
 
   match (module.items.get(importId)) {
     Option::SOME(Ast::Item::Node::Import(importItem)) -> {
-      Test::assertEq<u64>(importItem.path.length(), 1);
+      Test::assertEq<u64>(importItem.items.length(), 1);
+      Test::assertEq<str>(importItem.source.toStr(), "@compiler::ast::tests");
+      Test::assertEq<str>(importItem.sourceSpan.filePath, "fixtures/parser_real_file.ign");
 
-      let importPath: &String = match (importItem.path.get(0)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> @panic("missing import path"),
+      match (importItem.items.get(0)) {
+        Option::SOME(binding) -> {
+          Test::assert(binding.kind == Ast::ImportBindingKind::Discard);
+          match (binding.name) {
+            Option::NONE -> {},
+            Option::SOME(_) -> @panic("expected discard binding without name"),
+          };
+        },
+        Option::NONE -> @panic("missing import binding"),
       };
-
-      Test::assertEq<str>(importPath.toStr(), "@compiler::ast::tests");
     },
     _ -> @panic("expected import root item"),
   };
@@ -340,14 +486,23 @@ function parserParsesImportListWithTrailingCommaBeforeFrom(): void {
 
   match (module.items.get(importId)) {
     Option::SOME(Ast::Item::Node::Import(importItem)) -> {
-      Test::assertEq<u64>(importItem.path.length(), 1);
+      Test::assertEq<u64>(importItem.items.length(), 2);
+      Test::assertEq<str>(importItem.source.toStr(), "std::io");
 
-      let importPath: &String = match (importItem.path.get(0)) {
-        Option::SOME(value) -> value,
-        Option::NONE -> @panic("missing import path"),
+      match (importItem.items.get(0)) {
+        Option::SOME(binding) -> Test::assertEq<str>(match (binding.name) {
+          Option::SOME(name) -> name.toStr(),
+          Option::NONE -> @panic("missing first import binding name"),
+        }, "Foo"),
+        Option::NONE -> @panic("missing first import binding"),
       };
-
-      Test::assertEq<str>(importPath.toStr(), "std::io");
+      match (importItem.items.get(1)) {
+        Option::SOME(binding) -> Test::assertEq<str>(match (binding.name) {
+          Option::SOME(name) -> name.toStr(),
+          Option::NONE -> @panic("missing second import binding name"),
+        }, "Bar"),
+        Option::NONE -> @panic("missing second import binding"),
+      };
     },
     _ -> @panic("expected import root item"),
   };
@@ -1563,6 +1718,217 @@ function parserParsesMatchExpressionPathPatternsWithDestructure(): void {
 }
 
 @test
+function parserRetainsStructuredPatternSurface(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_pattern_surface.ign",
+    "function inspect(@trace(input) value: Packet): void { match (packet) { Option::SOME((0 | 1, _, item)) -> value, _ -> value, }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() != 0) {
+    let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+      Option::SOME(value) -> value,
+      Option::NONE -> @panic("missing structured pattern diagnostic"),
+    };
+    Io::eprintln(diagnostic.message);
+    Io::eprintln(String::create(diagnostic.primarySpan.start).toStr());
+    Io::eprintln(String::create(diagnostic.primarySpan.end).toStr());
+    @panic("expected structured pattern fixture to parse without diagnostics");
+  }
+  if (module.roots.length() != 1) {
+    @panic("expected structured pattern fixture to have one root");
+  }
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing structured pattern function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      Test::assertEq<u64>(functionItem.parameters.length(), 1);
+
+      let parameterId: Ast::PatternId = match (functionItem.parameters.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing structured pattern parameter"),
+      };
+
+      match (expectPattern(&module, parameterId)) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          Test::assertEq<str>(binding.name.toStr(), "value");
+          Test::assertEq<u64>(binding.metadata.attributes.length(), 1);
+
+          let parameterAttribute: &Ast::Attribute = match (binding.metadata.attributes.get(0)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing structured pattern parameter attribute"),
+          };
+          let parameterTypeId: Ast::TypeId = match (binding.annotation) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing structured pattern parameter annotation"),
+          };
+
+          Test::assertEq<str>(parameterAttribute.name.toStr(), "trace");
+          Test::assertEq<str>(match (parameterAttribute.arguments.get(0)) {
+            Option::SOME(value) -> value.toStr(),
+            Option::NONE -> @panic("missing structured pattern parameter attribute argument"),
+          }, "input");
+
+          match (expectType(&module, parameterTypeId)) {
+            Ast::Type::Node::Path(pathType) -> Test::assertEq<str>(match (pathType.segments.get(0)) {
+              Option::SOME(value) -> value.toStr(),
+              Option::NONE -> @panic("missing structured pattern parameter type segment"),
+            }, "Packet"),
+            _ -> @panic("expected structured pattern parameter annotation path"),
+          };
+        },
+        _ -> @panic("expected structured binding parameter"),
+      };
+
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing structured pattern match statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Match(matchExpression) -> {
+                  let firstArm: &Ast::Expression::MatchArm = match (matchExpression.arms.get(0)) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing structured pattern first match arm"),
+                  };
+
+                  match (expectPattern(&module, firstArm.pattern)) {
+                    Ast::Pattern::Node::Path(pathPattern) -> {
+                      Test::assertEq<u64>(pathPattern.segments.length(), 2);
+                      Test::assertEq<u64>(pathPattern.arguments.length(), 1);
+                      Test::assertEq<str>(match (pathPattern.segments.get(0)) {
+                        Option::SOME(value) -> value.toStr(),
+                        Option::NONE -> @panic("missing structured path pattern first segment"),
+                      }, "Option");
+                      Test::assertEq<str>(match (pathPattern.segments.get(1)) {
+                        Option::SOME(value) -> value.toStr(),
+                        Option::NONE -> @panic("missing structured path pattern second segment"),
+                      }, "SOME");
+
+                      let payloadId: Ast::PatternId = match (pathPattern.arguments.get(0)) {
+                        Option::SOME(value) -> *value,
+                        Option::NONE -> @panic("missing structured path pattern payload"),
+                      };
+
+                      match (expectPattern(&module, payloadId)) {
+                        Ast::Pattern::Node::Tuple(tuplePattern) -> {
+                          Test::assertEq<u64>(tuplePattern.elements.length(), 3);
+
+                          let firstElementId: Ast::PatternId = match (tuplePattern.elements.get(0)) {
+                            Option::SOME(value) -> *value,
+                            Option::NONE -> @panic("missing structured tuple first element"),
+                          };
+                          let secondElementId: Ast::PatternId = match (tuplePattern.elements.get(1)) {
+                            Option::SOME(value) -> *value,
+                            Option::NONE -> @panic("missing structured tuple second element"),
+                          };
+                          let thirdElementId: Ast::PatternId = match (tuplePattern.elements.get(2)) {
+                            Option::SOME(value) -> *value,
+                            Option::NONE -> @panic("missing structured tuple third element"),
+                          };
+
+                          match (expectPattern(&module, firstElementId)) {
+                            Ast::Pattern::Node::Or(orPattern) -> {
+                              Test::assertEq<u64>(orPattern.alternatives.length(), 2);
+
+                              let leftAlternativeId: Ast::PatternId = match (orPattern.alternatives.get(0)) {
+                                Option::SOME(value) -> *value,
+                                Option::NONE -> @panic("missing structured or-pattern left alternative"),
+                              };
+                              let rightAlternativeId: Ast::PatternId = match (orPattern.alternatives.get(1)) {
+                                Option::SOME(value) -> *value,
+                                Option::NONE -> @panic("missing structured or-pattern right alternative"),
+                              };
+
+                              match (expectPattern(&module, leftAlternativeId)) {
+                                Ast::Pattern::Node::Literal(_) -> {},
+                                _ -> @panic("expected structured left literal or-pattern alternative"),
+                              };
+
+                              match (expectPattern(&module, rightAlternativeId)) {
+                                Ast::Pattern::Node::Literal(_) -> {},
+                                _ -> @panic("expected structured right literal or-pattern alternative"),
+                              };
+                            },
+                            _ -> @panic("expected structured tuple or-pattern element"),
+                          };
+
+                          match (expectPattern(&module, secondElementId)) {
+                            Ast::Pattern::Node::Wildcard(_) -> {},
+                            _ -> @panic("expected structured tuple wildcard element"),
+                          };
+
+                          match (expectPattern(&module, thirdElementId)) {
+                            Ast::Pattern::Node::Binding(binding) -> Test::assertEq<str>(binding.name.toStr(), "item"),
+                            _ -> @panic("expected structured tuple binding element"),
+                          };
+                        },
+                        _ -> @panic("expected structured tuple payload pattern"),
+                      };
+                    },
+                    _ -> @panic("expected structured path match pattern"),
+                  };
+                },
+                _ -> @panic("expected structured match expression"),
+              };
+            },
+            _ -> @panic("expected structured pattern expression statement"),
+          };
+        },
+        _ -> @panic("expected structured pattern block body"),
+      };
+    },
+    _ -> @panic("expected structured pattern function item"),
+  };
+
+  let rendered: String = Ast::Serializer::render(&module);
+  let expectedRenderedNeedle3: String = String::create("Binding span=fixtures/parser_pattern_surface.ign:");
+  if (!rendered.contains(&expectedRenderedNeedle3)) {
+    @panic("expected serializer to render structured binding pattern line");
+  }
+
+  let expectedRenderedNeedle4: String = String::create("metadata=attrs[@trace(input)@fixtures/parser_pattern_surface.ign:");
+  if (!rendered.contains(&expectedRenderedNeedle4)) {
+    @panic("expected serializer to render structured binding metadata");
+  }
+
+  let expectedRenderedNeedle5: String = String::create("segments=[\"Option\", \"SOME\"] arguments=[");
+  if (!rendered.contains(&expectedRenderedNeedle5)) {
+    @panic("expected serializer to render structured path pattern segments and arguments");
+  }
+
+  let expectedRenderedNeedle6: String = String::create("Tuple span=fixtures/parser_pattern_surface.ign:");
+  if (!rendered.contains(&expectedRenderedNeedle6)) {
+    @panic("expected serializer to render structured tuple pattern line");
+  }
+
+  let expectedRenderedNeedle7: String = String::create("Or span=fixtures/parser_pattern_surface.ign:");
+  if (!rendered.contains(&expectedRenderedNeedle7)) {
+    @panic("expected serializer to render structured or-pattern line");
+  }
+
+  let expectedRenderedNeedle8: String = String::create("Wildcard span=fixtures/parser_pattern_surface.ign:");
+  if (!rendered.contains(&expectedRenderedNeedle8)) {
+    @panic("expected serializer to render structured wildcard pattern line");
+  }
+
+  let expectedRenderedNeedle9: String = String::create("Literal span=fixtures/parser_pattern_surface.ign:");
+  if (!rendered.contains(&expectedRenderedNeedle9)) {
+    @panic("expected serializer to render structured literal pattern line");
+  }
+}
+
+@test
 function parserParsesMatchExpressionGuards(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_match_guard.ign",
@@ -1878,7 +2244,12 @@ function parserParsesTraitDeclarationsAndExportedTraits(): void {
 
   match (module.items.get(exportId)) {
     Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
-      match (module.items.get(exportItem.item)) {
+      let exportedTraitId: Ast::ItemId = match (exportItem.declaration) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing exported trait declaration"),
+      };
+
+      match (module.items.get(exportedTraitId)) {
         Option::SOME(Ast::Item::Node::Trait(traitItem)) -> {
           Test::assertEq<str>(traitItem.name.toStr(), "Eq");
           Test::assertEq<u64>(traitItem.methods.length(), 1);
@@ -1910,21 +2281,76 @@ function parserParsesReExportDeclarations(): void {
 
   match (expectItem(&module, firstExportId)) {
     Ast::Item::Node::Export(exportItem) -> {
-      match (expectItem(&module, exportItem.item)) {
-        Ast::Item::Node::Import(importItem) -> {
-          Test::assertEq<u64>(importItem.path.length(), 1);
-
-          let importPath: &String = match (importItem.path.get(0)) {
-            Option::SOME(value) -> value,
-            Option::NONE -> @panic("missing re-export path"),
-          };
-
-          Test::assertEq<str>(importPath.toStr(), "./hash_map");
+      Test::assertEq<boolean>(exportItem.declaration.isNone(), true);
+      Test::assertEq<u64>(exportItem.items.length(), 2);
+      Test::assertEq<str>(match (exportItem.items.get(0)) {
+        Option::SOME(binding) -> match (binding.name) {
+          Option::SOME(name) -> name.toStr(),
+          Option::NONE -> @panic("missing first re-export binding name"),
         },
-        _ -> @panic("expected import item inside re-export wrapper"),
-      };
+        Option::NONE -> @panic("missing first re-export binding"),
+      }, "HashMap");
+      Test::assertEq<str>(match (exportItem.items.get(1)) {
+        Option::SOME(binding) -> match (binding.name) {
+          Option::SOME(name) -> name.toStr(),
+          Option::NONE -> @panic("missing second re-export binding name"),
+        },
+        Option::NONE -> @panic("missing second re-export binding"),
+      }, "Hash");
+      Test::assertEq<str>(match (exportItem.source) {
+        Option::SOME(path) -> path.toStr(),
+        Option::NONE -> @panic("missing re-export path"),
+      }, "./hash_map");
+      Test::assertEq<str>(match (exportItem.sourceSpan) {
+        Option::SOME(span) -> span.filePath,
+        Option::NONE -> @panic("missing re-export from span"),
+      }, "fixtures/parser_reexport.ign");
     },
     _ -> @panic("expected export wrapper for re-export declaration"),
+  };
+}
+
+@test
+function parserPreservesImportAndExportStructureInAstAndSerializer(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_import_export_shape.ign",
+    "import Foo, _ from \"std::io\"; export Bar from \"./bar\";"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&module);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 2);
+  let expectedRenderedNeedle10: String = String::create("items=[Named(\"Foo\")@fixtures/parser_import_export_shape.ign:7-10, Discard@fixtures/parser_import_export_shape.ign:12-13] from=\"std::io\"");
+  Test::assert(rendered.contains(&expectedRenderedNeedle10));
+  let expectedRenderedNeedle11: String = String::create("declaration=none items=[Named(\"Bar\")@fixtures/parser_import_export_shape.ign:37-40] from=\"./bar\"");
+  Test::assert(rendered.contains(&expectedRenderedNeedle11));
+
+  match (expectItem(&module, match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing import root"),
+  })) {
+    Ast::Item::Node::Import(importItem) -> {
+      Test::assertEq<u64>(importItem.items.length(), 2);
+      Test::assertEq<str>(importItem.source.toStr(), "std::io");
+    },
+    _ -> @panic("expected import root"),
+  };
+
+  match (expectItem(&module, match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing export root"),
+  })) {
+    Ast::Item::Node::Export(exportItem) -> {
+      Test::assertEq<u64>(exportItem.items.length(), 1);
+      Test::assertEq<str>(match (exportItem.source) {
+        Option::SOME(value) -> value.toStr(),
+        Option::NONE -> @panic("missing export path"),
+      }, "./bar");
+    },
+    _ -> @panic("expected export root"),
   };
 }
 
@@ -2357,16 +2783,19 @@ function parserParsesExportedNameWithoutFromClause(): void {
 
   match (expectItem(&module, exportId)) {
     Ast::Item::Node::Export(exportItem) -> {
-      match (expectItem(&module, exportItem.item)) {
-        Ast::Item::Node::Import(importItem) -> {
-          Test::assertEq<u64>(importItem.path.length(), 1);
-          Test::assertEq<str>(match (importItem.path.get(0)) {
-            Option::SOME(value) -> value.toStr(),
-            Option::NONE -> @panic("missing export-name path segment"),
-          }, "Layout");
-        },
-        _ -> @panic("expected import-compatible wrapper for export name"),
+      Test::assertEq<boolean>(exportItem.declaration.isNone(), true);
+      Test::assertEq<u64>(exportItem.items.length(), 1);
+      match (exportItem.source) {
+        Option::NONE -> {},
+        Option::SOME(_) -> @panic("expected export without source path"),
       };
+      Test::assertEq<str>(match (exportItem.items.get(0)) {
+        Option::SOME(binding) -> match (binding.name) {
+          Option::SOME(name) -> name.toStr(),
+          Option::NONE -> @panic("missing export-name binding"),
+        },
+        Option::NONE -> @panic("missing export-name item"),
+      }, "Layout");
     },
     _ -> @panic("expected export wrapper for export name"),
   };
@@ -2460,11 +2889,12 @@ function parserParsesForOfStatements(): void {
 function parserRetainsStructuredMetadataOnDeclarations(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_metadata_surface.ign",
-    "@packed record Packet { public value: i32; } export inline function add(a: i32, b: i32): i32 { return a + b; }"
+    "@packed(\"c\", level) public record Packet { @column(id) public value: i32; @builder(init) public static init(@trace(input) value: i32): Packet { return value; } } export inline function add(@trace(left) a: i32, @trace(right) b: i32): i32 { return a + b; }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
+  let rendered: String = Ast::Serializer::render(&module);
 
   Test::assertEq<u64>(diagnostics.length(), 0);
   Test::assertEq<u64>(module.roots.length(), 2);
@@ -2481,28 +2911,58 @@ function parserRetainsStructuredMetadataOnDeclarations(): void {
   match (expectItem(&module, recordId)) {
     Ast::Item::Node::Record(recordItem) -> {
       Test::assertEq<u64>(recordItem.metadata.attributes.length(), 1);
+      Test::assertEq<u64>(recordItem.metadata.modifiers.length(), 1);
 
       let attribute: &Ast::Attribute = match (recordItem.metadata.attributes.get(0)) {
         Option::SOME(value) -> value,
         Option::NONE -> @panic("missing record attribute"),
       };
+      let firstArgument: &String = match (attribute.arguments.get(0)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing first record attribute argument"),
+      };
+      let secondArgument: &String = match (attribute.arguments.get(1)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing second record attribute argument"),
+      };
 
       Test::assertEq<str>(attribute.name.toStr(), "packed");
+      Test::assertEq<str>(firstArgument.toStr(), "\"c\"");
+      Test::assertEq<str>(secondArgument.toStr(), "level");
+      Test::assertEq<str>(attribute.span.filePath, "fixtures/parser_metadata_surface.ign");
+      Test::assert(attribute.span.end > attribute.span.start);
       Test::assertEq<u64>(recordItem.fields.length(), 1);
+      Test::assertEq<u64>(recordItem.methods.length(), 1);
 
       let fieldId: Ast::PatternId = match (recordItem.fields.get(0)) {
         Option::SOME(value) -> *value,
         Option::NONE -> @panic("missing record field"),
       };
+      let methodId: Ast::ItemId = match (recordItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing record method"),
+      };
 
       match (expectPattern(&module, fieldId)) {
         Ast::Pattern::Node::Binding(binding) -> {
+          Test::assertEq<u64>(binding.metadata.attributes.length(), 1);
           Test::assertEq<u64>(binding.metadata.modifiers.length(), 1);
 
+          let fieldAttribute: &Ast::Attribute = match (binding.metadata.attributes.get(0)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing field attribute"),
+          };
           let modifier: &Ast::Modifier = match (binding.metadata.modifiers.get(0)) {
             Option::SOME(value) -> value,
             Option::NONE -> @panic("missing field modifier"),
           };
+
+          Test::assertEq<str>(fieldAttribute.name.toStr(), "column");
+          Test::assertEq<str>(match (fieldAttribute.arguments.get(0)) {
+            Option::SOME(value) -> value.toStr(),
+            Option::NONE -> @panic("missing field attribute argument"),
+          }, "id");
+          Test::assertEq<str>(fieldAttribute.span.filePath, "fixtures/parser_metadata_surface.ign");
 
           match (modifier) {
             Ast::Modifier::Public -> {},
@@ -2511,15 +2971,64 @@ function parserRetainsStructuredMetadataOnDeclarations(): void {
         },
         _ -> @panic("expected binding field pattern"),
       };
+
+      match (expectItem(&module, methodId)) {
+        Ast::Item::Node::Function(functionItem) -> {
+          Test::assertEq<str>(functionItem.name.toStr(), "init");
+          Test::assertEq<u64>(functionItem.metadata.attributes.length(), 1);
+          Test::assertEq<u64>(functionItem.metadata.modifiers.length(), 2);
+          Test::assertEq<u64>(functionItem.parameters.length(), 1);
+
+          let methodAttribute: &Ast::Attribute = match (functionItem.metadata.attributes.get(0)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing method attribute"),
+          };
+          Test::assertEq<str>(methodAttribute.name.toStr(), "builder");
+          Test::assertEq<str>(match (methodAttribute.arguments.get(0)) {
+            Option::SOME(value) -> value.toStr(),
+            Option::NONE -> @panic("missing method attribute argument"),
+          }, "init");
+
+          let parameterId: Ast::PatternId = match (functionItem.parameters.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing method parameter"),
+          };
+
+          match (expectPattern(&module, parameterId)) {
+            Ast::Pattern::Node::Binding(binding) -> {
+              Test::assertEq<u64>(binding.metadata.attributes.length(), 1);
+              let parameterAttribute: &Ast::Attribute = match (binding.metadata.attributes.get(0)) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing method parameter attribute"),
+              };
+
+              Test::assertEq<str>(parameterAttribute.name.toStr(), "trace");
+              Test::assertEq<str>(match (parameterAttribute.arguments.get(0)) {
+                Option::SOME(value) -> value.toStr(),
+                Option::NONE -> @panic("missing method parameter attribute argument"),
+              }, "input");
+              Test::assertEq<str>(parameterAttribute.span.filePath, "fixtures/parser_metadata_surface.ign");
+            },
+            _ -> @panic("expected binding method parameter"),
+          };
+        },
+        _ -> @panic("expected function method item"),
+      };
     },
     _ -> @panic("expected record item"),
   };
 
   match (expectItem(&module, exportId)) {
     Ast::Item::Node::Export(exportItem) -> {
-      match (expectItem(&module, exportItem.item)) {
+      let exportedFunctionId: Ast::ItemId = match (exportItem.declaration) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing exported function declaration"),
+      };
+
+      match (expectItem(&module, exportedFunctionId)) {
         Ast::Item::Node::Function(functionItem) -> {
           Test::assertEq<u64>(functionItem.metadata.modifiers.length(), 1);
+          Test::assertEq<u64>(functionItem.parameters.length(), 2);
 
           let modifier: &Ast::Modifier = match (functionItem.metadata.modifiers.get(0)) {
             Option::SOME(value) -> value,
@@ -2530,12 +3039,41 @@ function parserRetainsStructuredMetadataOnDeclarations(): void {
             Ast::Modifier::Inline -> {},
             _ -> @panic("expected inline modifier on exported function"),
           };
+
+          let firstParameterId: Ast::PatternId = match (functionItem.parameters.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing exported function first parameter"),
+          };
+
+          match (expectPattern(&module, firstParameterId)) {
+            Ast::Pattern::Node::Binding(binding) -> {
+              Test::assertEq<u64>(binding.metadata.attributes.length(), 1);
+              let parameterAttribute: &Ast::Attribute = match (binding.metadata.attributes.get(0)) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing exported function parameter attribute"),
+              };
+
+              Test::assertEq<str>(parameterAttribute.name.toStr(), "trace");
+              Test::assertEq<str>(match (parameterAttribute.arguments.get(0)) {
+                Option::SOME(value) -> value.toStr(),
+                Option::NONE -> @panic("missing exported function parameter attribute argument"),
+              }, "left");
+            },
+            _ -> @panic("expected exported function parameter binding"),
+          };
         },
         _ -> @panic("expected function inside export item"),
       };
     },
     _ -> @panic("expected export item"),
   };
+
+  let expectedRenderedNeedle12: String = String::create("metadata=attrs[@packed(\"c\", level)@fixtures/parser_metadata_surface.ign:");
+  Test::assert(rendered.contains(&expectedRenderedNeedle12));
+  let expectedRenderedNeedle13: String = String::create("metadata=attrs[@builder(init)@fixtures/parser_metadata_surface.ign:");
+  Test::assert(rendered.contains(&expectedRenderedNeedle13));
+  let expectedRenderedNeedle14: String = String::create("metadata=attrs[@trace(input)@fixtures/parser_metadata_surface.ign:");
+  Test::assert(rendered.contains(&expectedRenderedNeedle14));
 }
 
 @test
@@ -2907,7 +3445,12 @@ function parserParsesExportedNamespaceDeclaration(): void {
 
   match (module.items.get(exportId)) {
     Option::SOME(Ast::Item::Node::Export(exportItem)) -> {
-      match (module.items.get(exportItem.item)) {
+      let exportedNamespaceId: Ast::ItemId = match (exportItem.declaration) {
+        Option::SOME(value) -> value,
+        Option::NONE -> @panic("missing exported namespace declaration"),
+      };
+
+      match (module.items.get(exportedNamespaceId)) {
         Option::SOME(Ast::Item::Node::Namespace(namespaceItem)) -> {
           Test::assertEq<str>(namespaceItem.name.toStr(), "Parser");
           Test::assertEq<u64>(namespaceItem.items.length(), 1);

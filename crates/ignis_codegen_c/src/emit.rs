@@ -2167,7 +2167,9 @@ impl<'a> CEmitter<'a> {
         let ty = self.format_var_type(local.ty);
         writeln!(self.output, "    {} l{}; // {}", ty, idx, name).unwrap();
 
-        if drop_scheduled_locals.contains(&(idx as u32)) || self.types.needs_drop_with_defs(&local.ty, self.defs) {
+        if !local.borrowed_alias
+          && (drop_scheduled_locals.contains(&(idx as u32)) || self.types.needs_drop_with_defs(&local.ty, self.defs))
+        {
           droppable_locals.push((idx, local.ty));
         }
       }
@@ -2575,6 +2577,10 @@ impl<'a> CEmitter<'a> {
       },
       Instr::Drop { local } => {
         let local_data = func.locals.get(local);
+        if local_data.borrowed_alias {
+          writeln!(self.output, "/* drop l{}: borrowed alias */", local.index()).unwrap();
+          return;
+        }
         let ty = local_data.ty;
 
         match self.types.get(&ty) {
