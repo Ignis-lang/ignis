@@ -1,0 +1,168 @@
+import Env from "std::env";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import AliasBinding, BuildMode, Config, ConfigDiagnosticCode, ResolvedProject from "@compiler::config";
+import DiagnosticBag from "@compiler::diagnostics";
+
+function fixturePath(relativePath: str): Path::PathBuf {
+  match (Env::currentDir()) {
+    Result::OK(root) -> {
+      return root.join(relativePath).normalize();
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::new();
+    },
+  };
+
+  return Path::PathBuf::new();
+}
+
+function emptyProject(): ResolvedProject {
+  return ResolvedProject {
+    mode: BuildMode::SINGLE_FILE,
+    root: Option::NONE,
+    configPath: Option::NONE,
+    packageName: Option::NONE,
+    packageVersion: Option::NONE,
+    sourceDir: Option::NONE,
+    entry: Path::PathBuf::new(),
+    outDir: Option::NONE,
+    stdEnabled: false,
+    stdRoot: Option::NONE,
+    runtimeRoot: Option::NONE,
+    stdManifestPath: Option::NONE,
+    aliases: Vector::new<AliasBinding>(),
+  };
+}
+
+function expectSingleDiagnosticCode(result: Result<ResolvedProject, DiagnosticBag>, code: str): void {
+  let Result::ERROR(bag) = result else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+}
+
+function assertSomeString(value: Option<String>, expected: str): void {
+  match (value) {
+    Option::SOME(text) -> Test::assertEq<str>(text.toStr(), expected),
+    Option::NONE -> Test::fail(),
+  };
+}
+
+function assertEndsWith(value: &String, suffix: str): void {
+  let suffixText: String = String::create(suffix);
+
+  if (value.length() < suffixText.length()) {
+    Test::fail();
+    return;
+  }
+
+  let actualSuffix: String = value.substringBytes(value.length() - suffixText.length(), value.length());
+  Test::assert(actualSuffix.equals(&suffixText));
+}
+
+@test
+function projectLoaderFindsNearestRootAndReadsCurrentWorkspaceConfig(): void {
+  let start: Path::PathBuf = fixturePath("ignis/parser");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> {
+      assertSomeString(project.packageNameText(), "ignis");
+      assertSomeString(project.packageVersionText(), "0.1.0");
+      Test::assert(project.stdEnabled);
+      Test::assertEq<u64>(project.aliasCount(), 1);
+
+      let Option::SOME(sourceDirText) = project.sourceDirText() else {
+        Test::fail();
+        return;
+      };
+      let entryText: String = project.entryText();
+      let Option::SOME(stdRootText) = project.stdRootText() else {
+        Test::fail();
+        return;
+      };
+      let Option::SOME(runtimeRootText) = project.runtimeRootText() else {
+        Test::fail();
+        return;
+      };
+      let Option::SOME(manifestPathText) = project.stdManifestPathText() else {
+        Test::fail();
+        return;
+      };
+      let Option::SOME(aliasPathText) = project.aliasPathText("@compiler") else {
+        Test::fail();
+        return;
+      };
+
+      assertEndsWith(&sourceDirText, "/ignis");
+      assertEndsWith(&entryText, "/ignis/main.ign");
+      assertEndsWith(&stdRootText, "/std");
+      assertEndsWith(&runtimeRootText, "/std/runtime");
+      assertEndsWith(&manifestPathText, "/std/manifest.toml");
+      assertEndsWith(&aliasPathText, "/ignis");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function projectLoaderSupportsFixtureAliasExtraction(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/project_mode/nested/deeper");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> {
+      assertSomeString(project.packageNameText(), "fixture-project");
+      assertSomeString(project.packageVersionText(), "0.2.0");
+      Test::assertEq<u64>(project.aliasCount(), 2);
+
+      let Option::SOME(firstAliasPathText) = project.aliasPathText("@app") else {
+        Test::fail();
+        return;
+      };
+      let Option::SOME(secondAliasPathText) = project.aliasPathText("@compiler") else {
+        Test::fail();
+        return;
+      };
+
+      assertEndsWith(&firstAliasPathText, "/test_cases/selfhost/resolver/config/project_mode/src/app");
+      assertEndsWith(&secondAliasPathText, "/test_cases/selfhost/resolver/config/project_mode/ignis");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function projectLoaderReportsMissingConfig(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/project_mode/nested/deeper/no_manifest_here");
+  expectSingleDiagnosticCode(Config::loadProject(&start), ConfigDiagnosticCode::CONFIG_NOT_FOUND);
+}
+
+@test
+function projectLoaderReportsMalformedToml(): void {
+  let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/malformed_toml/ignis.toml");
+  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::MALFORMED_TOML);
+}
+
+@test
+function projectLoaderReportsInvalidFieldTypes(): void {
+  let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/invalid_types/ignis.toml");
+  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
+}
+
+@test
+function projectLoaderReportsMissingEntryPath(): void {
+  let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/missing_entry/ignis.toml");
+  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::PATH_NOT_FOUND);
+}

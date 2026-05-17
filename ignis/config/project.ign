@@ -1,0 +1,900 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+import Toml, TomlDocument, TomlValue, TomlValueKind from "std::toml";
+import TomlToken, TomlTokenKind from "std::toml::token";
+import Vector from "std::vector";
+
+import ConfigDiagnosticCode, ConfigDiagnostics from "./diagnostics";
+import DiagnosticBag from "@compiler::diagnostics";
+
+const PROJECT_FILE: str = "ignis.toml";
+const DEFAULT_SOURCE_DIR: str = "src";
+const DEFAULT_ENTRY: str = "main.ign";
+const DEFAULT_OUT_DIR: str = "build";
+
+record ConfigStringValue {
+  public value: String;
+  public start: u64;
+  public end: u64;
+}
+
+export enum BuildMode {
+  PROJECT,
+  SINGLE_FILE,
+}
+
+export record AliasBinding {
+  public name: String;
+  public rawPath: String;
+  public path: Path::PathBuf;
+}
+
+export record ResolvedProject {
+  public mode: BuildMode;
+  public root: Option<Path::PathBuf>;
+  public configPath: Option<Path::PathBuf>;
+  public packageName: Option<String>;
+  public packageVersion: Option<String>;
+  public sourceDir: Option<Path::PathBuf>;
+  public entry: Path::PathBuf;
+  public outDir: Option<Path::PathBuf>;
+  public stdEnabled: boolean;
+  public stdRoot: Option<Path::PathBuf>;
+  public runtimeRoot: Option<Path::PathBuf>;
+  public stdManifestPath: Option<Path::PathBuf>;
+  public aliases: Vector<AliasBinding>;
+
+  public rootText(&self): Option<String> {
+    return match (&self.root) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public configPathText(&self): Option<String> {
+    return match (&self.configPath) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public packageNameText(&self): Option<String> {
+    return match (&self.packageName) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public packageVersionText(&self): Option<String> {
+    return match (&self.packageVersion) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public sourceDirText(&self): Option<String> {
+    return match (&self.sourceDir) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public entryText(&self): String {
+    return self.entry.toString();
+  }
+
+  public outDirText(&self): Option<String> {
+    return match (&self.outDir) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public stdRootText(&self): Option<String> {
+    return match (&self.stdRoot) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public runtimeRootText(&self): Option<String> {
+    return match (&self.runtimeRoot) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public stdManifestPathText(&self): Option<String> {
+    return match (&self.stdManifestPath) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public aliasCount(&self): u64 {
+    return self.aliases.length();
+  }
+
+  public aliasRawPathText(&self, name: str): Option<String> {
+    let mut index: u64 = 0;
+
+    while (index < self.aliases.length()) {
+      let Option::SOME(alias) = self.aliases.get(index) else {
+        return Option::NONE;
+      };
+
+      if (alias.name.equals(name)) {
+        return Option::SOME(alias.rawPath.clone());
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public aliasPathText(&self, name: str): Option<String> {
+    let mut index: u64 = 0;
+
+    while (index < self.aliases.length()) {
+      let Option::SOME(alias) = self.aliases.get(index) else {
+        return Option::NONE;
+      };
+
+      if (alias.name.equals(name)) {
+        return Option::SOME(alias.path.toString());
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+}
+
+function tomlValueString(
+  configPath: &Path::PathBuf,
+  fieldPath: str,
+  value: TomlValue,
+): Result<ConfigStringValue, DiagnosticBag> {
+  let Option::SOME(text) = value.asString() else {
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "a string", value.span.start, value.span.end));
+  };
+
+  let owned: String = String::create(text);
+  if (owned.length() == 0) {
+    return Result::ERROR(ConfigDiagnostics::emptyField(configPath, fieldPath, value.span.start, value.span.end));
+  }
+
+  return Result::OK(ConfigStringValue {
+    value: owned,
+    start: value.span.start,
+    end: value.span.end,
+  });
+}
+
+function optionalString(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str): Result<Option<ConfigStringValue>, DiagnosticBag> {
+  let Option::SOME(value) = document.get(fieldPath) else {
+    return Result::OK(Option::NONE);
+  };
+
+  let Result::OK(text) = tomlValueString(configPath, fieldPath, value) else {
+    let Result::ERROR(bag) = tomlValueString(configPath, fieldPath, value) else {
+      return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "a string", value.span.start, value.span.end));
+    };
+
+    return Result::ERROR(bag);
+  };
+
+  return Result::OK(Option::SOME(text));
+}
+
+function booleanOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: boolean): Result<boolean, DiagnosticBag> {
+  let Option::SOME(value) = document.get(fieldPath) else {
+    return Result::OK(defaultValue);
+  };
+
+  if (value.kind() != TomlValueKind::BOOLEAN) {
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "a boolean", value.span.start, value.span.end));
+  }
+
+  return Result::OK(value.asBoolean());
+}
+
+function resolveProjectPath(root: &Path::PathBuf, value: &String): Path::PathBuf {
+  let rawPath: Path::PathBuf = Path::PathBuf::fromString(value);
+  let resolved: Path::PathBuf = rawPath.isAbsolute() ? rawPath : root.join(value.toStr());
+  return resolved.normalize();
+}
+
+function resolveEnvPath(value: &String): Path::PathBuf {
+  let resolved: Path::PathBuf = Path::PathBuf::fromString(value);
+  return resolved.normalize();
+}
+
+function canonicalExistingPath(configPath: &Path::PathBuf, fieldPath: str, path: &Path::PathBuf): Result<Path::PathBuf, DiagnosticBag> {
+  if (!Fs::exists(path.asStr())) {
+    return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, fieldPath, path));
+  }
+
+  let Result::OK(canonical) = Fs::canonicalize(path) else {
+    return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, fieldPath, path));
+  };
+
+  return Result::OK(canonical);
+}
+
+function manifestPath(stdRoot: &Path::PathBuf): Option<Path::PathBuf> {
+  let candidate: Path::PathBuf = stdRoot.join("manifest.toml");
+
+  if (!Fs::exists(candidate.asStr())) {
+    return Option::NONE;
+  }
+
+  return match (Fs::canonicalize(&candidate)) {
+    Result::OK(path) -> Option::SOME(path),
+    Result::ERROR(_) -> Option::NONE,
+  };
+}
+
+function pushAlias(aliases: &mut Vector<AliasBinding>, alias: &AliasBinding): void {
+  let mut values: &mut Vector<AliasBinding> = aliases;
+  values.push(AliasBinding {
+    name: alias.name.clone(),
+    rawPath: alias.rawPath.clone(),
+    path: alias.path.clone(),
+  });
+}
+
+function cloneOptionString(value: &Option<String>): Option<String> {
+  return match (value) {
+    Option::SOME(text) -> Option::SOME(text.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function cloneOptionPath(value: &Option<Path::PathBuf>): Option<Path::PathBuf> {
+  return match (value) {
+    Option::SOME(path) -> Option::SOME(path.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function cloneAliases(source: &Vector<AliasBinding>): Vector<AliasBinding> {
+  let mut aliases: Vector<AliasBinding> = Vector::new<AliasBinding>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(alias) = source.get(index) else {
+      break;
+    };
+
+    aliases.push(AliasBinding {
+      name: alias.name.clone(),
+      rawPath: alias.rawPath.clone(),
+      path: alias.path.clone(),
+    });
+    index += 1;
+  }
+
+  return aliases;
+}
+
+function tokenIsHeaderStart(tokens: &Vector<TomlToken>, index: u64): boolean {
+  let Option::SOME(token) = tokens.get(index) else {
+    return false;
+  };
+
+  return token.kind == TomlTokenKind::LEFT_BRACKET;
+}
+
+function sectionHeaderName(tokens: &Vector<TomlToken>, index: u64): Option<String> {
+  let Option::SOME(open) = tokens.get(index) else {
+    return Option::NONE;
+  };
+  let Option::SOME(name) = tokens.get(index + 1) else {
+    return Option::NONE;
+  };
+  let Option::SOME(close) = tokens.get(index + 2) else {
+    return Option::NONE;
+  };
+
+  if (open.kind != TomlTokenKind::LEFT_BRACKET || close.kind != TomlTokenKind::RIGHT_BRACKET) {
+    return Option::NONE;
+  }
+
+  if (name.kind != TomlTokenKind::IDENTIFIER && name.kind != TomlTokenKind::STRING) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(name.lexeme.clone());
+}
+
+function skipLine(tokens: &Vector<TomlToken>, index: u64): u64 {
+  let mut next: u64 = index;
+
+  while (true) {
+    let Option::SOME(token) = tokens.get(next) else {
+      return next;
+    };
+
+    if (token.kind == TomlTokenKind::NEWLINE || token.kind == TomlTokenKind::EOF) {
+      return next + 1;
+    }
+
+    next += 1;
+  }
+
+  return next;
+}
+
+function parseAliases(configPath: &Path::PathBuf, root: &Path::PathBuf, source: &String): Result<Vector<AliasBinding>, DiagnosticBag> {
+  let Result::OK(tokens) = Toml::lex(source) else {
+    let Result::ERROR(error) = Toml::lex(source) else {
+      return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, "failed to lex ignis.toml", 0, 0));
+    };
+
+    return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, error.message, error.span.start, error.span.end));
+  };
+
+  let mut aliases: Vector<AliasBinding> = Vector::new<AliasBinding>();
+  let mut inAliases: boolean = false;
+  let mut index: u64 = 0;
+
+  while (true) {
+    let Option::SOME(token) = tokens.get(index) else {
+      break;
+    };
+
+    if (token.kind == TomlTokenKind::EOF) {
+      break;
+    }
+
+    if (tokenIsHeaderStart(&tokens, index)) {
+      let headerName: Option<String> = sectionHeaderName(&tokens, index);
+      if (let Option::SOME(name) = headerName) {
+        let aliasesName: String = String::create("aliases");
+        inAliases = name.equals(&aliasesName);
+      } else {
+        inAliases = false;
+      }
+
+      index = skipLine(&tokens, index);
+      continue;
+    }
+
+    if (!inAliases) {
+      index += 1;
+      continue;
+    }
+
+    if (token.kind == TomlTokenKind::NEWLINE) {
+      index += 1;
+      continue;
+    }
+
+    if (token.kind != TomlTokenKind::IDENTIFIER && token.kind != TomlTokenKind::STRING) {
+      index += 1;
+      continue;
+    }
+
+    let Option::SOME(equalsToken) = tokens.get(index + 1) else {
+      break;
+    };
+
+    if (equalsToken.kind != TomlTokenKind::EQUALS) {
+      index += 1;
+      continue;
+    }
+
+    let Option::SOME(valueToken) = tokens.get(index + 2) else {
+      break;
+    };
+
+    let fieldPath: String = String::create("aliases.").concat(&token.lexeme);
+
+    if (valueToken.kind != TomlTokenKind::STRING) {
+      return Result::ERROR(
+        ConfigDiagnostics::invalidFieldType(
+          configPath,
+          fieldPath.toStr(),
+          "a string",
+          valueToken.span.start,
+          valueToken.span.end,
+        ),
+      );
+    }
+
+    let reservedName: String = String::create("std");
+    if (token.lexeme.equals(&reservedName)) {
+      return Result::ERROR(
+        ConfigDiagnostics::reservedAlias(configPath, token.lexeme.toStr(), token.span.start, token.span.end),
+      );
+    }
+
+    let rawPath: String = valueToken.lexeme.clone();
+    let resolved: Path::PathBuf = resolveProjectPath(root, &rawPath);
+    let Result::OK(canonical) = canonicalExistingPath(configPath, fieldPath.toStr(), &resolved) else {
+      let Result::ERROR(bag) = canonicalExistingPath(configPath, fieldPath.toStr(), &resolved) else {
+        return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, fieldPath.toStr(), &resolved));
+      };
+
+      return Result::ERROR(bag);
+    };
+
+    let alias: AliasBinding = AliasBinding {
+      name: token.lexeme.clone(),
+      rawPath: rawPath,
+      path: canonical,
+    };
+    pushAlias(&mut aliases, &alias);
+
+    index = skipLine(&tokens, index + 3);
+  }
+
+  return Result::OK(aliases);
+}
+
+export namespace Config {
+  function findProjectFile(startPath: &Path::PathBuf): Option<Path::PathBuf> {
+    let mut current: Path::PathBuf = startPath.clone();
+
+    if (let Result::OK(metadata) = Fs::metadata(startPath)) {
+      if (metadata.isFile()) {
+        let Option::SOME(parent) = startPath.parent() else {
+          return Option::NONE;
+        };
+
+        current = parent;
+      }
+    }
+
+    while (true) {
+      let candidate: Path::PathBuf = current.join(PROJECT_FILE);
+      if (Fs::exists(candidate.asStr())) {
+        return Option::SOME(candidate.clone());
+      }
+
+      let Option::SOME(parent) = current.parent() else {
+        return Option::NONE;
+      };
+
+      current = parent;
+    }
+
+    return Option::NONE;
+  }
+
+  function loadProject(startPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
+    let Option::SOME(configPath) = Config::findProjectFile(startPath) else {
+      return Result::ERROR(ConfigDiagnostics::configNotFound(startPath));
+    };
+
+    return Config::loadProjectFile(&configPath);
+  }
+
+  function loadProjectSummary(startPath: &Path::PathBuf): String {
+    let Option::SOME(configPath) = Config::findProjectFile(startPath) else {
+      Test::fail();
+      return String::new();
+    };
+
+    return Config::loadProjectFileSummary(&configPath);
+  }
+
+  function loadProjectFile(configPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
+    let Result::OK(source) = Fs::readToString(configPath) else {
+      return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, PROJECT_FILE, configPath));
+    };
+
+    let Result::OK(document) = Toml::parse(&source) else {
+      let Result::ERROR(error) = Toml::parse(&source) else {
+        return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, "failed to parse ignis.toml", 0, 0));
+      };
+
+      return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, error.message, error.span.start, error.span.end));
+    };
+
+    let Option::SOME(rawRoot) = configPath.parent() else {
+      return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "project.root", configPath));
+    };
+
+    let Result::OK(root) = Fs::canonicalize(&rawRoot) else {
+      return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "project.root", &rawRoot));
+    };
+
+    let packageName: Option<String> = match (optionalString(&document, configPath, "package.name")) {
+      Result::OK(Option::SOME(value)) -> Option::SOME(value.value),
+      Result::OK(Option::NONE) -> Option::NONE,
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+    let packageVersion: Option<String> = match (optionalString(&document, configPath, "package.version")) {
+      Result::OK(Option::SOME(value)) -> Option::SOME(value.value),
+      Result::OK(Option::NONE) -> Option::NONE,
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+
+    let sourceDirValue: ConfigStringValue = match (optionalString(&document, configPath, "build.source_dir")) {
+      Result::OK(Option::SOME(value)) -> value,
+      Result::OK(Option::NONE) -> ConfigStringValue {
+        value: String::create(DEFAULT_SOURCE_DIR),
+        start: 0,
+        end: 0,
+      },
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+    let entryValue: ConfigStringValue = match (optionalString(&document, configPath, "build.entry")) {
+      Result::OK(Option::SOME(value)) -> value,
+      Result::OK(Option::NONE) -> ConfigStringValue {
+        value: String::create(DEFAULT_ENTRY),
+        start: 0,
+        end: 0,
+      },
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+    let outDirValue: ConfigStringValue = match (optionalString(&document, configPath, "build.out_dir")) {
+      Result::OK(Option::SOME(value)) -> value,
+      Result::OK(Option::NONE) -> ConfigStringValue {
+        value: String::create(DEFAULT_OUT_DIR),
+        start: 0,
+        end: 0,
+      },
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+
+    let stdEnabledResult: Result<boolean, DiagnosticBag> = booleanOrDefault(&document, configPath, "ignis.std", true);
+    let Result::OK(stdEnabled) = stdEnabledResult else {
+      let Result::ERROR(bag) = stdEnabledResult else {
+        return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, "ignis.std", "a boolean", 0, 0));
+      };
+
+      return Result::ERROR(bag);
+    };
+
+    let sourceDirResolved: Path::PathBuf = resolveProjectPath(&root, &sourceDirValue.value);
+    let Result::OK(sourceDir) = canonicalExistingPath(configPath, "build.source_dir", &sourceDirResolved) else {
+      let Result::ERROR(bag) = canonicalExistingPath(configPath, "build.source_dir", &sourceDirResolved) else {
+        return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "build.source_dir", &sourceDirResolved));
+      };
+
+      return Result::ERROR(bag);
+    };
+
+    let entryResolved: Path::PathBuf = sourceDir.join(entryValue.value.toStr()).normalize();
+    let Result::OK(entryPath) = canonicalExistingPath(configPath, "build.entry", &entryResolved) else {
+      let Result::ERROR(bag) = canonicalExistingPath(configPath, "build.entry", &entryResolved) else {
+        return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "build.entry", &entryResolved));
+      };
+
+      return Result::ERROR(bag);
+    };
+
+    let outDirResolved: Path::PathBuf = resolveProjectPath(&root, &outDirValue.value);
+
+    let aliases: Vector<AliasBinding> = match (parseAliases(configPath, &root, &source)) {
+      Result::OK(value) -> value,
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+
+    let stdPathValue: Option<ConfigStringValue> = match (optionalString(&document, configPath, "ignis.std_path")) {
+      Result::OK(value) -> value,
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+    let runtimePathValue: Option<ConfigStringValue> = match (optionalString(&document, configPath, "ignis.runtime_path")) {
+      Result::OK(value) -> value,
+      Result::ERROR(bag) -> {
+        return Result::ERROR(bag);
+      },
+    };
+
+    let mut stdRoot: Option<Path::PathBuf> = Option::NONE;
+    let mut stdRootForRuntime: Option<Path::PathBuf> = Option::NONE;
+    let mut stdManifestPath: Option<Path::PathBuf> = Option::NONE;
+    if (stdEnabled) {
+      match (stdPathValue) {
+        Option::SOME(value) -> {
+          let resolved: Path::PathBuf = resolveProjectPath(&root, &value.value);
+          let Result::OK(canonical) = canonicalExistingPath(configPath, "ignis.std_path", &resolved) else {
+            let Result::ERROR(bag) = canonicalExistingPath(configPath, "ignis.std_path", &resolved) else {
+              return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "ignis.std_path", &resolved));
+            };
+
+            return Result::ERROR(bag);
+          };
+
+          stdRootForRuntime = Option::SOME(canonical.clone());
+          stdManifestPath = manifestPath(&canonical);
+          stdRoot = Option::SOME(canonical);
+        },
+        Option::NONE -> {
+          match (Env::var("IGNIS_STD_PATH")) {
+            Result::OK(value) -> {
+              let resolved: Path::PathBuf = resolveEnvPath(&value);
+              let Result::OK(canonical) = canonicalExistingPath(configPath, "IGNIS_STD_PATH", &resolved) else {
+                let Result::ERROR(bag) = canonicalExistingPath(configPath, "IGNIS_STD_PATH", &resolved) else {
+                  return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "IGNIS_STD_PATH", &resolved));
+                };
+
+                return Result::ERROR(bag);
+              };
+
+              stdRootForRuntime = Option::SOME(canonical.clone());
+              stdManifestPath = manifestPath(&canonical);
+              stdRoot = Option::SOME(canonical);
+            },
+            Result::ERROR(_) -> {},
+          };
+        },
+      };
+    } else {
+      match (stdPathValue) {
+        Option::SOME(_) -> {},
+        Option::NONE -> {},
+      };
+    }
+
+    let mut runtimeRoot: Option<Path::PathBuf> = Option::NONE;
+    match (runtimePathValue) {
+      Option::SOME(value) -> {
+        match (stdRootForRuntime) {
+          Option::SOME(_) -> {},
+          Option::NONE -> {},
+        };
+
+        let resolved: Path::PathBuf = resolveProjectPath(&root, &value.value);
+        let Result::OK(canonical) = canonicalExistingPath(configPath, "ignis.runtime_path", &resolved) else {
+          let Result::ERROR(bag) = canonicalExistingPath(configPath, "ignis.runtime_path", &resolved) else {
+            return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "ignis.runtime_path", &resolved));
+          };
+
+          return Result::ERROR(bag);
+        };
+
+        runtimeRoot = Option::SOME(canonical);
+      },
+      Option::NONE -> {
+        match (stdRootForRuntime) {
+          Option::SOME(path) -> {
+            let resolved: Path::PathBuf = path.join("runtime");
+            if (Fs::exists(resolved.asStr())) {
+              match (Fs::canonicalize(&resolved)) {
+                Result::OK(canonical) -> {
+                  runtimeRoot = Option::SOME(canonical);
+                },
+                Result::ERROR(_) -> {},
+              };
+            }
+          },
+          Option::NONE -> {},
+        };
+      },
+    };
+
+    return Result::OK(ResolvedProject {
+      mode: BuildMode::PROJECT,
+      root: Option::SOME(root.clone()),
+      configPath: Option::SOME(configPath.clone()),
+      packageName: cloneOptionString(&packageName),
+      packageVersion: cloneOptionString(&packageVersion),
+      sourceDir: Option::SOME(sourceDir.clone()),
+      entry: entryPath.clone(),
+      outDir: Option::SOME(outDirResolved.clone()),
+      stdEnabled: stdEnabled,
+      stdRoot: cloneOptionPath(&stdRoot),
+      runtimeRoot: cloneOptionPath(&runtimeRoot),
+      stdManifestPath: cloneOptionPath(&stdManifestPath),
+      aliases: cloneAliases(&aliases),
+    });
+  }
+
+  function loadProjectFileSummary(configPath: &Path::PathBuf): String {
+    let startPath: Path::PathBuf = configPath.parent().unwrapOr(Path::PathBuf::new());
+    let Result::OK(project) = Config::loadProjectFile(configPath) else {
+      Test::fail();
+      return String::new();
+    };
+
+    let mut summary: String = String::new();
+    let configText: String = match (Fs::readToString(configPath)) {
+      Result::OK(value) -> value,
+      Result::ERROR(_) -> {
+        Test::fail();
+        return String::new();
+      },
+    };
+
+    let sourceRootText: String = startPath.toString();
+    let rootLine: String = String::create("root=").concat(&sourceRootText).concat("\n");
+    summary.push(&rootLine);
+    summary.push(&configText);
+    summary.pushStr("\n");
+
+    match (project.packageNameText()) {
+      Option::SOME(value) -> {
+        let packageLine: String = String::create("package=").concat(&value).concat("\n");
+        summary.push(&packageLine);
+      },
+      Option::NONE -> {},
+    };
+
+    return summary;
+  }
+}
+
+function fixturePath(relativePath: str): Path::PathBuf {
+  match (Env::currentDir()) {
+    Result::OK(root) -> {
+      return root.join(relativePath).normalize();
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::new();
+    },
+  };
+
+  return Path::PathBuf::new();
+}
+
+function emptyProject(): ResolvedProject {
+  return ResolvedProject {
+    mode: BuildMode::SINGLE_FILE,
+    root: Option::NONE,
+    configPath: Option::NONE,
+    packageName: Option::NONE,
+    packageVersion: Option::NONE,
+    sourceDir: Option::NONE,
+    entry: Path::PathBuf::new(),
+    outDir: Option::NONE,
+    stdEnabled: false,
+    stdRoot: Option::NONE,
+    runtimeRoot: Option::NONE,
+    stdManifestPath: Option::NONE,
+    aliases: Vector::new<AliasBinding>(),
+  };
+}
+
+function expectSingleDiagnosticCode(result: Result<ResolvedProject, DiagnosticBag>, code: str): void {
+  let Result::ERROR(bag) = result else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+}
+
+function assertSomeString(value: Option<String>, expected: str): void {
+  match (value) {
+    Option::SOME(text) -> Test::assertEq<str>(text.toStr(), expected),
+    Option::NONE -> Test::fail(),
+  };
+}
+
+function assertEndsWith(value: &String, suffix: str): void {
+  let suffixText: String = String::create(suffix);
+
+  if (value.length() < suffixText.length()) {
+    Test::fail();
+    return;
+  }
+
+  let actualSuffix: String = value.substringBytes(value.length() - suffixText.length(), value.length());
+  Test::assert(actualSuffix.equals(&suffixText));
+}
+
+function assertContains(text: &String, needle: str): void {
+  let needleText: String = String::create(needle);
+  Test::assert(text.contains(&needleText));
+}
+
+function assertSomeStringEndsWith(value: Option<String>, suffix: str): void {
+  match (value) {
+    Option::SOME(text) -> assertEndsWith(&text, suffix),
+    Option::NONE -> Test::fail(),
+  };
+}
+
+@test
+function projectLoaderConsumesReturnedWorkspaceProjectFields(): void {
+  let start: Path::PathBuf = fixturePath("ignis/parser");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> {
+      assertSomeString(project.packageNameText(), "ignis");
+      assertSomeString(project.packageVersionText(), "0.1.0");
+      assertSomeStringEndsWith(project.rootText(), "/ignisc.rs");
+      assertSomeStringEndsWith(project.configPathText(), "/ignisc.rs/ignis.toml");
+      assertSomeStringEndsWith(project.sourceDirText(), "/ignisc.rs/ignis");
+      let entryText: String = project.entryText();
+      assertEndsWith(&entryText, "/ignisc.rs/ignis/main.ign");
+      assertSomeStringEndsWith(project.outDirText(), "/ignisc.rs/build/selfhost");
+      assertSomeStringEndsWith(project.stdManifestPathText(), "/ignisc.rs/std/manifest.toml");
+      assertSomeStringEndsWith(project.stdRootText(), "/ignisc.rs/std");
+      assertSomeStringEndsWith(project.runtimeRootText(), "/ignisc.rs/std/runtime");
+      Test::assertEq<u64>(project.aliasCount(), 1);
+      assertSomeString(project.aliasRawPathText("@compiler"), "./ignis");
+      assertSomeStringEndsWith(project.aliasPathText("@compiler"), "/ignisc.rs/ignis");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function projectLoaderConsumesReturnedFixtureProjectFieldsAndAliases(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/project_mode/nested/deeper");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> {
+      assertSomeString(project.packageNameText(), "fixture-project");
+      assertSomeString(project.packageVersionText(), "0.2.0");
+      assertSomeStringEndsWith(project.rootText(), "/test_cases/selfhost/resolver/config/project_mode");
+      assertSomeStringEndsWith(project.configPathText(), "/test_cases/selfhost/resolver/config/project_mode/ignis.toml");
+      assertSomeStringEndsWith(project.sourceDirText(), "/test_cases/selfhost/resolver/config/project_mode/src");
+      let entryText: String = project.entryText();
+      assertEndsWith(&entryText, "/test_cases/selfhost/resolver/config/project_mode/src/main.ign");
+      assertSomeStringEndsWith(project.outDirText(), "/test_cases/selfhost/resolver/config/project_mode/build/out");
+      assertSomeStringEndsWith(project.stdManifestPathText(), "/test_cases/selfhost/resolver/config/project_mode/std/manifest.toml");
+      Test::assertEq<u64>(project.aliasCount(), 2);
+      assertSomeString(project.aliasRawPathText("@app"), "./src/app");
+      assertSomeStringEndsWith(project.aliasPathText("@app"), "/test_cases/selfhost/resolver/config/project_mode/src/app");
+      assertSomeString(project.aliasRawPathText("@compiler"), "./ignis");
+      assertSomeStringEndsWith(project.aliasPathText("@compiler"), "/test_cases/selfhost/resolver/config/project_mode/ignis");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function projectLoaderReportsMissingConfig(): void {
+  let tempRoot: Path::PathBuf = Path::PathBuf::create("/tmp/ignis-selfhost-config-no-project");
+  let start: Path::PathBuf = tempRoot.join("nested/path");
+  match (Fs::createDirAll(&start)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  expectSingleDiagnosticCode(Config::loadProject(&start), ConfigDiagnosticCode::CONFIG_NOT_FOUND);
+}
+
+@test
+function projectLoaderReportsMalformedToml(): void {
+  let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/malformed_toml/ignis.toml");
+  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::MALFORMED_TOML);
+}
+
+@test
+function projectLoaderReportsInvalidFieldTypes(): void {
+  let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/invalid_types/ignis.toml");
+  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
+}
+
+@test
+function projectLoaderReportsMissingEntryPath(): void {
+  let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/missing_entry/ignis.toml");
+  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::PATH_NOT_FOUND);
+}
