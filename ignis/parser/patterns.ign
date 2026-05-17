@@ -76,9 +76,7 @@ export namespace ParserPatterns {
 
   function parseTuplePattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(openParen) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start pattern") else {
-      return Option::NONE;
-    };
+    let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start pattern")!;
 
     if (parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
       parserRef.emitDiagnostic(openParen.span, DiagnosticCode::EXPECTED_TOKEN, "expected tuple pattern", "tuple pattern must contain at least one element");
@@ -86,9 +84,7 @@ export namespace ParserPatterns {
     }
 
     let firstResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
-    let Option::SOME(first) = firstResult else {
-      return Option::NONE;
-    };
+    let first = firstResult!;
 
     if (!parserRef.atPunctuation(Punctuation::COMMA)) {
       let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after grouped pattern") else {
@@ -107,15 +103,11 @@ export namespace ParserPatterns {
       }
 
       let elementResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
-      let Option::SOME(element) = elementResult else {
-        return Option::NONE;
-      };
+      let element = elementResult!;
       elements.push(element);
     }
 
-    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple pattern") else {
-      return Option::NONE;
-    };
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple pattern")!;
     let span: SourceSpan = ParserShared::mergeSpans(openParen.span, closeParen.span);
 
     return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
@@ -126,9 +118,7 @@ export namespace ParserPatterns {
 
   function parsePathOrBindingPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(firstToken) = parserRef.expectIdentifier("expected pattern") else {
-      return Option::NONE;
-    };
+    let firstToken = parserRef.expectIdentifier("expected pattern")!;
     let name: String = firstToken.lexemeString();
 
     if (name.equals("_")) {
@@ -146,9 +136,7 @@ export namespace ParserPatterns {
       qualified = true;
       parserRef.bump();
 
-      let Option::SOME(segment) = parserRef.expectIdentifier("expected pattern path segment after '::'") else {
-        return Option::NONE;
-      };
+      let segment = parserRef.expectIdentifier("expected pattern path segment after '::'")!;
 
       lastSpan = segment.span;
       segments.push(segment.lexemeString());
@@ -169,9 +157,7 @@ export namespace ParserPatterns {
       if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
         while (true) {
           let argumentResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
-          let Option::SOME(argument) = argumentResult else {
-            return Option::NONE;
-          };
+          let argument = argumentResult!;
           arguments.push(argument);
 
           if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -186,9 +172,7 @@ export namespace ParserPatterns {
         }
       }
 
-      let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after path pattern arguments") else {
-        return Option::NONE;
-      };
+      let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after path pattern arguments")!;
       lastSpan = closeParen.span;
     }
 
@@ -225,9 +209,7 @@ export namespace ParserPatterns {
   function parsePattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
     let firstResult: Option<Ast::PatternId> = ParserPatterns::parsePrimaryPattern(parserRef);
-    let Option::SOME(first) = firstResult else {
-      return Option::NONE;
-    };
+    let first = firstResult!;
 
     if (!parserRef.atPunctuation(Punctuation::PIPE)) {
       return Option::SOME(first);
@@ -238,28 +220,20 @@ export namespace ParserPatterns {
 
     while (parserRef.consumePunctuation(Punctuation::PIPE).isSome()) {
       let alternativeResult: Option<Ast::PatternId> = ParserPatterns::parsePrimaryPattern(parserRef);
-      let Option::SOME(alternative) = alternativeResult else {
-        return Option::NONE;
-      };
+      let alternative = alternativeResult!;
 
       alternatives.push(alternative);
     }
 
     let startPatternNodeResult: Option<&Ast::Pattern::Node> = parserRef.module.patterns.get(first);
-    let Option::SOME(startPatternNode) = startPatternNodeResult else {
-      return Option::NONE;
-    };
+    let startPatternNode = startPatternNodeResult!;
     let startSpan: SourceSpan = ParserPatterns::patternSpan(startPatternNode);
     let lastIndex: u64 = alternatives.length() - 1;
     let lastIdResult: Option<&Ast::PatternId> = alternatives.get(lastIndex);
-    let Option::SOME(lastIdRef) = lastIdResult else {
-      return Option::NONE;
-    };
+    let lastIdRef = lastIdResult!;
     let lastId: Ast::PatternId = *lastIdRef;
     let endPatternNodeResult: Option<&Ast::Pattern::Node> = parserRef.module.patterns.get(lastId);
-    let Option::SOME(endPatternNode) = endPatternNodeResult else {
-      return Option::NONE;
-    };
+    let endPatternNode = endPatternNodeResult!;
     let endSpan: SourceSpan = ParserPatterns::patternSpan(endPatternNode);
 
     return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {

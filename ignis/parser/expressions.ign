@@ -525,9 +525,7 @@ export namespace ParserExpressions {
     if (!parserRef.atPunctuation(closing)) {
       while (true) {
         let expressionResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-        let Option::SOME(expression) = expressionResult else {
-          return Option::NONE;
-        };
+        let expression = expressionResult!;
         expressions.push(expression.id);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -711,9 +709,7 @@ export namespace ParserExpressions {
 
       while (true) {
         let argumentResult: Option<Ast::TypeId> = ParserTypes::parseType(parserRef);
-        let Option::SOME(argument) = argumentResult else {
-          return Option::NONE;
-        };
+        let argument = argumentResult!;
         arguments.push(argument);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -745,24 +741,14 @@ export namespace ParserExpressions {
 
   function parseBuiltinCallExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(atToken) = parserRef.consumePunctuation(Punctuation::AT) else {
-      return Option::NONE;
-    };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected builtin name after '@'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(typeArguments) = ParserExpressions::parseTypeArgumentList(parserRef) else {
-      return Option::NONE;
-    };
+    let atToken = parserRef.consumePunctuation(Punctuation::AT)!;
+    let nameToken = parserRef.expectIdentifier("expected builtin name after '@'")!;
+    let typeArguments = ParserExpressions::parseTypeArgumentList(parserRef)!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after builtin name") else {
       return Option::NONE;
     };
-    let Option::SOME(arguments) = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_PAREN) else {
-      return Option::NONE;
-    };
-    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after builtin arguments") else {
-      return Option::NONE;
-    };
+    let arguments = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_PAREN)!;
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after builtin arguments")!;
     let span: SourceSpan = ParserShared::mergeSpans(atToken.span, closeParen.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
       span: span,
@@ -796,9 +782,7 @@ export namespace ParserExpressions {
     let mut parserRef: &mut ParserShared::State = parser;
     let checkpoint: TokenCheckpoint = parserRef.tokens.checkpoint();
 
-    let Option::SOME(atToken) = parserRef.consumePunctuation(Punctuation::AT) else {
-      return Option::NONE;
-    };
+    let atToken = parserRef.consumePunctuation(Punctuation::AT)!;
 
     parserRef.skipTrivia();
     let nameToken: Token = parserRef.current();
@@ -822,9 +806,7 @@ export namespace ParserExpressions {
     }
 
     let expressionResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-    let Option::SOME(expression) = expressionResult else {
-      return Option::NONE;
-    };
+    let expression = expressionResult!;
 
     let innerExpressionId: Ast::ExpressionId = expression.id;
     let innerSpan: SourceSpan = expression.span;
@@ -844,15 +826,9 @@ export namespace ParserExpressions {
     parser: &mut ParserShared::State
   ): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(openBracket) = parserRef.expectPunctuation(Punctuation::LEFT_BRACKET, "expected '[' to start vector literal") else {
-      return Option::NONE;
-    };
-    let Option::SOME(elements) = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_BRACKET) else {
-      return Option::NONE;
-    };
-    let Option::SOME(closeBracket) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after vector literal") else {
-      return Option::NONE;
-    };
+    let openBracket = parserRef.expectPunctuation(Punctuation::LEFT_BRACKET, "expected '[' to start vector literal")!;
+    let elements = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_BRACKET)!;
+    let closeBracket = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after vector literal")!;
 
     let span: SourceSpan = ParserShared::mergeSpans(openBracket.span, closeBracket.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Vector(Ast::Expression::VectorLiteral {
@@ -867,17 +843,13 @@ export namespace ParserExpressions {
 
   function parseLambdaParameter(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected lambda parameter name") else {
-      return Option::NONE;
-    };
+    let nameToken = parserRef.expectIdentifier("expected lambda parameter name")!;
 
     let mut annotation: Option<Ast::TypeId> = Option::NONE;
     let mut endSpan: SourceSpan = nameToken.span;
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
-      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let typeId = ParserTypes::parseType(parserRef)!;
 
       annotation = Option::SOME(typeId);
       endSpan = match (parserRef.module.types.get(typeId)) {
@@ -1016,23 +988,17 @@ export namespace ParserExpressions {
 
   function parseInlineReturnStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::RETURN, "expected 'return'") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::RETURN, "expected 'return'")!;
     let mut value: Option<Ast::ExpressionId> = Option::NONE;
 
     if (!parserRef.atPunctuation(Punctuation::SEMICOLON)) {
       let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-      let Option::SOME(expression) = valueResult else {
-        return Option::NONE;
-      };
+      let expression = valueResult!;
 
       value = Option::SOME(expression.id);
     }
 
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after return statement") else {
-      return Option::NONE;
-    };
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after return statement")!;
 
     return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
@@ -1042,12 +1008,8 @@ export namespace ParserExpressions {
 
   function parseInlineBreakStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::BREAK, "expected 'break'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after break statement") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::BREAK, "expected 'break'")!;
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after break statement")!;
 
     return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Break(Ast::Statement::Break {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
@@ -1059,12 +1021,8 @@ export namespace ParserExpressions {
     parser: &mut ParserShared::State
   ): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::CONTINUE, "expected 'continue'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after continue statement") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::CONTINUE, "expected 'continue'")!;
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after continue statement")!;
 
     return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Continue(Ast::Statement::Continue {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
@@ -1078,9 +1036,7 @@ export namespace ParserExpressions {
 
     if (!parserRef.atKeyword(Keyword::LET)) {
       let expressionResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-      let Option::SOME(expression) = expressionResult else {
-        return Option::NONE;
-      };
+      let expression = expressionResult!;
 
       return Option::SOME(ParsedCondition {
         id: expression.id,
@@ -1088,20 +1044,12 @@ export namespace ParserExpressions {
       });
     }
 
-    let Option::SOME(letKeyword) = parserRef.expectKeyword(Keyword::LET, "expected 'let' in condition") else {
-      return Option::NONE;
-    };
+    let letKeyword = parserRef.expectKeyword(Keyword::LET, "expected 'let' in condition")!;
     let patternResult: Option<Ast::PatternId> = ParserExpressions::parseInlineBindingPattern(parserRef);
-    let Option::SOME(pattern) = patternResult else {
-      return Option::NONE;
-    };
-    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition") else {
-      return Option::NONE;
-    };
+    let pattern = patternResult!;
+    parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition")!;
     let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-    let Option::SOME(value) = valueResult else {
-      return Option::NONE;
-    };
+    let value = valueResult!;
 
     let valueId: Ast::ExpressionId = value.id;
     let valueSpan: SourceSpan = value.span;
@@ -1120,16 +1068,12 @@ export namespace ParserExpressions {
 
   function parseInlineBindingPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected binding name") else {
-      return Option::NONE;
-    };
+    let nameToken = parserRef.expectIdentifier("expected binding name")!;
     let mut annotation: Option<Ast::TypeId> = Option::NONE;
     let mut endSpan: SourceSpan = nameToken.span;
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
-      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let typeId = ParserTypes::parseType(parserRef)!;
 
       annotation = Option::SOME(typeId);
       endSpan = match (parserRef.module.types.get(typeId)) {
@@ -1148,41 +1092,29 @@ export namespace ParserExpressions {
 
   function parseInlineLetStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::LET, "expected 'let'") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::LET, "expected 'let'")!;
     let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-    let Option::SOME(pattern) = ParserExpressions::parseInlineBindingPattern(parserRef) else {
-      return Option::NONE;
-    };
+    let pattern = ParserExpressions::parseInlineBindingPattern(parserRef)!;
 
     let mut annotation: Option<Ast::TypeId> = Option::NONE;
     let mut value: Option<Ast::ExpressionId> = Option::NONE;
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
-      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let typeId = ParserTypes::parseType(parserRef)!;
 
       annotation = Option::SOME(typeId);
     }
 
     if (parserRef.consumePunctuation(Punctuation::EQUAL).isSome()) {
       let expressionResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-      let Option::SOME(expression) = expressionResult else {
-        return Option::NONE;
-      };
+      let expression = expressionResult!;
 
       value = Option::SOME(expression.id);
 
       if (parserRef.consumeKeyword(Keyword::ELSE).isSome()) {
         let elseBranchResult: Option<Ast::StatementId> = ParserExpressions::parseInlineBlockStatement(parserRef);
-        let Option::SOME(elseBranch) = elseBranchResult else {
-          return Option::NONE;
-        };
-        let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after let-else statement") else {
-          return Option::NONE;
-        };
+        let elseBranch = elseBranchResult!;
+        let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after let-else statement")!;
         let letValue: Ast::ExpressionId = match (value) {
           Option::SOME(expressionId) -> expressionId,
           Option::NONE -> @panic("missing let-else value"),
@@ -1198,9 +1130,7 @@ export namespace ParserExpressions {
       }
     }
 
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after let statement") else {
-      return Option::NONE;
-    };
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after let statement")!;
     let span: SourceSpan = ParserShared::mergeSpans(keyword.span, semicolon.span);
 
     if (mutable) {
@@ -1223,22 +1153,16 @@ export namespace ParserExpressions {
 
   function parseInlineIfStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::IF, "expected 'if'") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::IF, "expected 'if'")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'if'") else {
       return Option::NONE;
     };
-    let Option::SOME(condition) = ParserExpressions::parseInlineConditionExpression(parserRef) else {
-      return Option::NONE;
-    };
+    let condition = ParserExpressions::parseInlineConditionExpression(parserRef)!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after if condition") else {
       return Option::NONE;
     };
     let thenBranchResult: Option<Ast::StatementId> = ParserExpressions::parseInlineBlockStatement(parserRef);
-    let Option::SOME(thenBranch) = thenBranchResult else {
-      return Option::NONE;
-    };
+    let thenBranch = thenBranchResult!;
 
     let mut elseBranch: Option<Ast::StatementId> = Option::NONE;
     let mut endSpan: SourceSpan = match (parserRef.module.statements.get(thenBranch)) {
@@ -1255,9 +1179,7 @@ export namespace ParserExpressions {
         parsedElse = ParserExpressions::parseInlineBlockStatement(parserRef);
       }
 
-      let Option::SOME(elseStatement) = parsedElse else {
-        return Option::NONE;
-      };
+      let elseStatement = parsedElse!;
 
       elseBranch = Option::SOME(elseStatement);
       endSpan = match (parserRef.module.statements.get(elseStatement)) {
@@ -1276,22 +1198,16 @@ export namespace ParserExpressions {
 
   function parseInlineWhileStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::WHILE, "expected 'while'") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::WHILE, "expected 'while'")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'while'") else {
       return Option::NONE;
     };
-    let Option::SOME(condition) = ParserExpressions::parseInlineConditionExpression(parserRef) else {
-      return Option::NONE;
-    };
+    let condition = ParserExpressions::parseInlineConditionExpression(parserRef)!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after while condition") else {
       return Option::NONE;
     };
     let bodyResult: Option<Ast::StatementId> = ParserExpressions::parseInlineBlockStatement(parserRef);
-    let Option::SOME(body) = bodyResult else {
-      return Option::NONE;
-    };
+    let body = bodyResult!;
     let endSpan: SourceSpan = match (parserRef.module.statements.get(body)) {
       Option::SOME(node) -> Ast::Serializer::statementSpan(node),
       Option::NONE -> condition.span,
@@ -1309,12 +1225,8 @@ export namespace ParserExpressions {
   ): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
     let expressionResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-    let Option::SOME(expression) = expressionResult else {
-      return Option::NONE;
-    };
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after expression statement") else {
-      return Option::NONE;
-    };
+    let expression = expressionResult!;
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after expression statement")!;
 
     let expressionId: Ast::ExpressionId = expression.id;
     let expressionSpan: SourceSpan = expression.span;
@@ -1327,9 +1239,7 @@ export namespace ParserExpressions {
 
   function parseInlineBlockStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(openBrace) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' to start block") else {
-      return Option::NONE;
-    };
+    let openBrace = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' to start block")!;
     let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
     let mut tail: Option<Ast::ExpressionId> = Option::NONE;
 
@@ -1388,9 +1298,7 @@ export namespace ParserExpressions {
       return Option::NONE;
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after block") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after block")!;
 
     return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
       span: ParserShared::mergeSpans(openBrace.span, closeBrace.span),
@@ -1436,9 +1344,7 @@ export namespace ParserExpressions {
 
     while (parserRef.atPunctuation(Punctuation::DOUBLE_COLON)) {
       parserRef.bump();
-      let Option::SOME(segment) = parserRef.expectIdentifier("expected pattern path segment after '::'") else {
-        return Option::NONE;
-      };
+      let segment = parserRef.expectIdentifier("expected pattern path segment after '::'")!;
 
       last = segment.clone();
       segments.push(segment.lexemeString());
@@ -1447,9 +1353,7 @@ export namespace ParserExpressions {
     if (parserRef.consumePunctuation(Punctuation::LEFT_PAREN).isSome()) {
       if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
         while (true) {
-          let Option::SOME(argument) = ParserExpressions::parseMatchPattern(parserRef) else {
-            return Option::NONE;
-          };
+          let argument = ParserExpressions::parseMatchPattern(parserRef)!;
           arguments.push(argument);
 
           if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -1464,9 +1368,7 @@ export namespace ParserExpressions {
         }
       }
 
-      let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after match pattern arguments") else {
-        return Option::NONE;
-      };
+      let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after match pattern arguments")!;
       last = closeParen;
     }
 
@@ -1491,13 +1393,9 @@ export namespace ParserExpressions {
 
   function parseTupleMatchPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(openParen) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start pattern") else {
-      return Option::NONE;
-    };
+    let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start pattern")!;
 
-    let Option::SOME(first) = ParserExpressions::parseMatchPattern(parserRef) else {
-      return Option::NONE;
-    };
+    let first = ParserExpressions::parseMatchPattern(parserRef)!;
 
     if (!parserRef.atPunctuation(Punctuation::COMMA)) {
       let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after grouped pattern") else {
@@ -1514,15 +1412,11 @@ export namespace ParserExpressions {
         break;
       }
 
-      let Option::SOME(element) = ParserExpressions::parseMatchPattern(parserRef) else {
-        return Option::NONE;
-      };
+      let element = ParserExpressions::parseMatchPattern(parserRef)!;
       elements.push(element);
     }
 
-    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple pattern") else {
-      return Option::NONE;
-    };
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple pattern")!;
 
     let tupleSpan: SourceSpan = ParserShared::mergeSpans(openParen.span, closeParen.span);
     let tuplePattern: Ast::PatternId = parserRef.module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
@@ -1544,9 +1438,7 @@ export namespace ParserExpressions {
     alternatives.push(first);
 
     while (parserRef.consumePunctuation(Punctuation::PIPE).isSome()) {
-      let Option::SOME(alternative) = ParserExpressions::parseMatchPattern(parserRef) else {
-        return Option::NONE;
-      };
+      let alternative = ParserExpressions::parseMatchPattern(parserRef)!;
       alternatives.push(alternative);
     }
 
@@ -1570,9 +1462,7 @@ export namespace ParserExpressions {
   function parseBlockExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
     let blockResult: Option<Ast::StatementId> = ParserExpressions::parseInlineBlockStatement(parserRef);
-    let Option::SOME(blockStatementId) = blockResult else {
-      return Option::NONE;
-    };
+    let blockStatementId = blockResult!;
     let mut parsedBlock: Option<ParsedExpression> = Option::NONE;
 
     match (parserRef.module.statements.get(blockStatementId)) {
@@ -1596,16 +1486,12 @@ export namespace ParserExpressions {
 
   function parseLambdaExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(openParen) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start lambda") else {
-      return Option::NONE;
-    };
+    let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start lambda")!;
     let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
       while (true) {
-        let Option::SOME(parameter) = ParserExpressions::parseLambdaParameter(parserRef) else {
-          return Option::NONE;
-        };
+        let parameter = ParserExpressions::parseLambdaParameter(parserRef)!;
         parameters.push(parameter);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -1620,27 +1506,19 @@ export namespace ParserExpressions {
       }
     }
 
-    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after lambda parameters") else {
-      return Option::NONE;
-    };
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after lambda parameters")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after lambda parameters") else {
       return Option::NONE;
     };
-    let Option::SOME(returnType) = ParserTypes::parseType(parserRef) else {
-      return Option::NONE;
-    };
+    let returnType = ParserTypes::parseType(parserRef)!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::ARROW, "expected '->' after lambda return type") else {
       return Option::NONE;
     };
 
     if (parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
       let bodyResult: Option<Ast::StatementId> = ParserExpressions::parseInlineBlockStatement(parserRef);
-      let Option::SOME(bodyStatement) = bodyResult else {
-        return Option::NONE;
-      };
-      let Option::SOME(bodyNode) = parserRef.module.statements.get(bodyStatement) else {
-        return Option::NONE;
-      };
+      let bodyStatement = bodyResult!;
+      let bodyNode = parserRef.module.statements.get(bodyStatement)!;
 
       let bodySpan: SourceSpan = Ast::Serializer::statementSpan(bodyNode);
       let span: SourceSpan = ParserShared::mergeSpans(openParen.span, bodySpan);
@@ -1657,9 +1535,7 @@ export namespace ParserExpressions {
     }
 
     let expressionResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-    let Option::SOME(expression) = expressionResult else {
-      return Option::NONE;
-    };
+    let expression = expressionResult!;
 
     let statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
     let tailExpressionId: Ast::ExpressionId = expression.id;
@@ -1685,16 +1561,12 @@ export namespace ParserExpressions {
 
   function parseMatchExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(matchKeyword) = parserRef.expectKeyword(Keyword::MATCH, "expected 'match'") else {
-      return Option::NONE;
-    };
+    let matchKeyword = parserRef.expectKeyword(Keyword::MATCH, "expected 'match'")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'match'") else {
       return Option::NONE;
     };
     let scrutineeResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-    let Option::SOME(scrutinee) = scrutineeResult else {
-      return Option::NONE;
-    };
+    let scrutinee = scrutineeResult!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after match scrutinee") else {
       return Option::NONE;
     };
@@ -1704,16 +1576,12 @@ export namespace ParserExpressions {
     let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let Option::SOME(pattern) = ParserExpressions::parseMatchPattern(parserRef) else {
-        return Option::NONE;
-      };
+      let pattern = ParserExpressions::parseMatchPattern(parserRef)!;
       let mut guard: Option<Ast::ExpressionId> = Option::NONE;
 
       if (parserRef.consumeKeyword(Keyword::IF).isSome()) {
         let guardResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-        let Option::SOME(guardExpression) = guardResult else {
-          return Option::NONE;
-        };
+        let guardExpression = guardResult!;
         guard = Option::SOME(guardExpression.id);
       }
 
@@ -1728,9 +1596,7 @@ export namespace ParserExpressions {
         bodyResult = ParserExpressions::parseExpression(parserRef);
       }
 
-      let Option::SOME(body) = bodyResult else {
-        return Option::NONE;
-      };
+      let body = bodyResult!;
       arms.push(Ast::Expression::MatchArm {
         pattern: pattern,
         guard: guard,
@@ -1742,9 +1608,7 @@ export namespace ParserExpressions {
       }
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after match arms") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after match arms")!;
     let span: SourceSpan = ParserShared::mergeSpans(matchKeyword.span, closeBrace.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
       span: span,
@@ -1759,14 +1623,10 @@ export namespace ParserExpressions {
 
   function parseGroupedExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(openParen) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start grouped expression") else {
-      return Option::NONE;
-    };
+    let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start grouped expression")!;
 
     if (parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
-      let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after unit expression") else {
-        return Option::NONE;
-      };
+      let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after unit expression")!;
       let span: SourceSpan = ParserShared::mergeSpans(openParen.span, closeParen.span);
       let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Unit(Ast::Expression::Unit {
         span: span,
@@ -1778,9 +1638,7 @@ export namespace ParserExpressions {
     }
 
     let firstResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-    let Option::SOME(first) = firstResult else {
-      return Option::NONE;
-    };
+    let first = firstResult!;
 
     if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
       let mut elements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
@@ -1788,9 +1646,7 @@ export namespace ParserExpressions {
 
       while (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
         let elementResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-        let Option::SOME(element) = elementResult else {
-          return Option::NONE;
-        };
+        let element = elementResult!;
         elements.push(element.id);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -1803,9 +1659,7 @@ export namespace ParserExpressions {
         break;
       }
 
-      let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple expression") else {
-        return Option::NONE;
-      };
+      let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple expression")!;
       let span: SourceSpan = ParserShared::mergeSpans(openParen.span, closeParen.span);
       let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Tuple(Ast::Expression::Tuple {
         span: span,
@@ -1817,9 +1671,7 @@ export namespace ParserExpressions {
       });
     }
 
-    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after grouped expression") else {
-      return Option::NONE;
-    };
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after grouped expression")!;
     let span: SourceSpan = ParserShared::mergeSpans(openParen.span, closeParen.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Grouped(Ast::Expression::Grouped {
       span: span,
@@ -1841,9 +1693,7 @@ export namespace ParserExpressions {
       let operatorToken: Token = parserRef.bump();
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
       let targetResult: Option<ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 80);
-      let Option::SOME(target) = targetResult else {
-        return Option::NONE;
-      };
+      let target = targetResult!;
       let targetId: Ast::ExpressionId = target.id;
       let targetSpan: SourceSpan = target.span;
       let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, targetSpan);
@@ -1861,9 +1711,7 @@ export namespace ParserExpressions {
     if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::ASTERISK) {
       let operatorToken: Token = parserRef.bump();
       let targetResult: Option<ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 80);
-      let Option::SOME(target) = targetResult else {
-        return Option::NONE;
-      };
+      let target = targetResult!;
       let targetId: Ast::ExpressionId = target.id;
       let targetSpan: SourceSpan = target.span;
       let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, targetSpan);
@@ -1877,14 +1725,10 @@ export namespace ParserExpressions {
       });
     }
 
-    let Option::SOME(operator) = ParserExpressions::unaryOperator(token) else {
-      return Option::NONE;
-    };
+    let operator = ParserExpressions::unaryOperator(token)!;
     let operatorToken: Token = parserRef.bump();
     let operandResult: Option<ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 80);
-    let Option::SOME(operand) = operandResult else {
-      return Option::NONE;
-    };
+    let operand = operandResult!;
     let operandId: Ast::ExpressionId = operand.id;
     let operandSpan: SourceSpan = operand.span;
     let span: SourceSpan = ParserShared::mergeSpans(operatorToken.span, operandSpan);
@@ -1953,13 +1797,9 @@ export namespace ParserExpressions {
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start call arguments") else {
       return Option::NONE;
     };
-    let Option::SOME(arguments) = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_PAREN) else {
-      return Option::NONE;
-    };
+    let arguments = ParserExpressions::parseExpressionList(parserRef, Punctuation::RIGHT_PAREN)!;
 
-    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after call arguments") else {
-      return Option::NONE;
-    };
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after call arguments")!;
     let calleeId: Ast::ExpressionId = callee.id;
     let calleeSpan: SourceSpan = callee.span;
     let span: SourceSpan = ParserShared::mergeSpans(calleeSpan, closeParen.span);
@@ -1985,9 +1825,7 @@ export namespace ParserExpressions {
       return Option::NONE;
     }
 
-    let Option::SOME(typeArguments) = ParserExpressions::parseTypeArgumentList(parserRef) else {
-      return Option::NONE;
-    };
+    let typeArguments = ParserExpressions::parseTypeArgumentList(parserRef)!;
 
     return ParserExpressions::parseCallSuffix(parserRef, callee, typeArguments);
   }
@@ -2000,9 +1838,7 @@ export namespace ParserExpressions {
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::DOT, "expected '.' before member access") else {
       return Option::NONE;
     };
-    let Option::SOME(member) = parserRef.expectIdentifier("expected member name after '.'") else {
-      return Option::NONE;
-    };
+    let member = parserRef.expectIdentifier("expected member name after '.'")!;
     let objectId: Ast::ExpressionId = object.id;
     let objectSpan: SourceSpan = object.span;
     let span: SourceSpan = ParserShared::mergeSpans(objectSpan, member.span);
@@ -2027,12 +1863,8 @@ export namespace ParserExpressions {
       return Option::NONE;
     };
     let indexResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-    let Option::SOME(index) = indexResult else {
-      return Option::NONE;
-    };
-    let Option::SOME(closeBracket) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after index expression") else {
-      return Option::NONE;
-    };
+    let index = indexResult!;
+    let closeBracket = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after index expression")!;
     let objectId: Ast::ExpressionId = object.id;
     let objectSpan: SourceSpan = object.span;
     let indexId: Ast::ExpressionId = index.id;
@@ -2066,16 +1898,12 @@ export namespace ParserExpressions {
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
       while (true) {
-        let Option::SOME(nameToken) = parserRef.expectIdentifier("expected record field name") else {
-          return Option::NONE;
-        };
+        let nameToken = parserRef.expectIdentifier("expected record field name")!;
         let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after record field name") else {
           return Option::NONE;
         };
         let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
-        let Option::SOME(value) = valueResult else {
-          return Option::NONE;
-        };
+        let value = valueResult!;
 
         fields.push(Ast::Expression::RecordInitField {
           name: nameToken.lexemeString(),
@@ -2094,9 +1922,7 @@ export namespace ParserExpressions {
       }
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after record initializer") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after record initializer")!;
 
     let span: SourceSpan = ParserShared::mergeSpans(pathSpan, closeBrace.span);
     let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
@@ -2127,25 +1953,19 @@ export namespace ParserExpressions {
       }
 
       if (parserRef.atPunctuation(Punctuation::LEFT_PAREN)) {
-        let Option::SOME(call) = ParserExpressions::parseCallSuffix(parserRef, expression, Vector::new<Ast::TypeId>()) else {
-          return Option::NONE;
-        };
+        let call = ParserExpressions::parseCallSuffix(parserRef, expression, Vector::new<Ast::TypeId>())!;
         expression = call;
         continue;
       }
 
       if (parserRef.atPunctuation(Punctuation::DOT)) {
-        let Option::SOME(access) = ParserExpressions::parseMemberAccessSuffix(parserRef, expression) else {
-          return Option::NONE;
-        };
+        let access = ParserExpressions::parseMemberAccessSuffix(parserRef, expression)!;
         expression = access;
         continue;
       }
 
       if (parserRef.atPunctuation(Punctuation::LEFT_BRACKET)) {
-        let Option::SOME(access) = ParserExpressions::parseIndexSuffix(parserRef, expression) else {
-          return Option::NONE;
-        };
+        let access = ParserExpressions::parseIndexSuffix(parserRef, expression)!;
         expression = access;
         continue;
       }
@@ -2178,12 +1998,8 @@ export namespace ParserExpressions {
   ): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(primary) = ParserExpressions::parsePrimaryExpression(parserRef) else {
-      return Option::NONE;
-    };
-    let Option::SOME(postfix) = ParserExpressions::parsePostfixExpression(parserRef, primary) else {
-      return Option::NONE;
-    };
+    let primary = ParserExpressions::parsePrimaryExpression(parserRef)!;
+    let postfix = ParserExpressions::parsePostfixExpression(parserRef, primary)!;
     let mut expression: ParsedExpression = postfix;
 
     while (true) {
@@ -2200,9 +2016,7 @@ export namespace ParserExpressions {
       parserRef.bump();
 
       if (operatorToken.kindValue() == TokenKind::KEYWORD && operatorToken.keywordValue() == Keyword::AS) {
-        let Option::SOME(targetType) = ParserTypes::parseType(parserRef) else {
-          return Option::NONE;
-        };
+        let targetType = ParserTypes::parseType(parserRef)!;
         let endSpan: SourceSpan = match (parserRef.module.types.get(targetType)) {
           Option::SOME(node) -> Ast::Serializer::typeSpan(node),
           Option::NONE -> operatorToken.span,
@@ -2223,15 +2037,11 @@ export namespace ParserExpressions {
       }
 
       if (operatorToken.kindValue() == TokenKind::PUNCTUATION && operatorToken.punctuationValue() == Punctuation::QUESTION_MARK) {
-        let Option::SOME(thenBranch) = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 0) else {
-          return Option::NONE;
-        };
+        let thenBranch = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 0)!;
         let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after ternary then branch") else {
           return Option::NONE;
         };
-        let Option::SOME(elseBranch) = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, power.right) else {
-          return Option::NONE;
-        };
+        let elseBranch = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, power.right)!;
         let currentExpressionId: Ast::ExpressionId = expression.id;
         let currentExpressionSpan: SourceSpan = expression.span;
         let thenBranchId: Ast::ExpressionId = thenBranch.id;
@@ -2251,9 +2061,7 @@ export namespace ParserExpressions {
         continue;
       }
 
-      let Option::SOME(right) = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, power.right) else {
-        return Option::NONE;
-      };
+      let right = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, power.right)!;
       let currentExpressionId: Ast::ExpressionId = expression.id;
       let currentExpressionSpan: SourceSpan = expression.span;
       let rightId: Ast::ExpressionId = right.id;

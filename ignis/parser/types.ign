@@ -33,9 +33,7 @@ export namespace ParserTypes {
 
     if (let Option::SOME(start) = parserRef.consumePunctuation(Punctuation::AMPERSAND)) {
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-      let Option::SOME(target) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let target = ParserTypes::parseType(parserRef)!;
 
       let end: SourceSpan = match (parserRef.module.types.get(target)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -50,9 +48,7 @@ export namespace ParserTypes {
 
     if (let Option::SOME(start) = parserRef.consumePunctuation(Punctuation::ASTERISK)) {
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-      let Option::SOME(pointee) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let pointee = ParserTypes::parseType(parserRef)!;
 
       let end: SourceSpan = match (parserRef.module.types.get(pointee)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -66,20 +62,14 @@ export namespace ParserTypes {
     }
 
     let initialTypeResult: Option<Ast::TypeId> = ParserTypes::parsePrimaryType(parser);
-    let Option::SOME(initialTypeId) = initialTypeResult else {
-      return Option::NONE;
-    };
+    let initialTypeId = initialTypeResult!;
     let mut typeId: Ast::TypeId = initialTypeId;
 
     while (parserRef.atPunctuation(Punctuation::LEFT_BRACKET)) {
-      let Option::SOME(openBracket) = parserRef.expectPunctuation(Punctuation::LEFT_BRACKET, "expected '[' after type") else {
-        return Option::NONE;
-      };
+      let openBracket = parserRef.expectPunctuation(Punctuation::LEFT_BRACKET, "expected '[' after type")!;
 
       if (parserRef.atPunctuation(Punctuation::RIGHT_BRACKET)) {
-        let Option::SOME(closeBracket) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after slice type") else {
-          return Option::NONE;
-        };
+        let closeBracket = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after slice type")!;
         typeId = parserRef.module.addType(Ast::Type::Node::Slice(Ast::Type::Slice {
           span: ParserShared::mergeSpans(openBracket.span, closeBracket.span),
           element: typeId,
@@ -100,9 +90,7 @@ export namespace ParserTypes {
         parserRef.emitDiagnostic(sizeToken.span, DiagnosticCode::EXPECTED_TYPE, "expected array size", "fixed array size must fit in u64");
         return Option::NONE;
       };
-      let Option::SOME(closeBracket) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after fixed array size") else {
-        return Option::NONE;
-      };
+      let closeBracket = parserRef.expectPunctuation(Punctuation::RIGHT_BRACKET, "expected ']' after fixed array size")!;
       typeId = parserRef.module.addType(Ast::Type::Node::FixedArray(Ast::Type::FixedArray {
         span: ParserShared::mergeSpans(openBracket.span, closeBracket.span),
         element: typeId,
@@ -145,9 +133,7 @@ export namespace ParserTypes {
 
     while (parserRef.atPunctuation(Punctuation::DOUBLE_COLON)) {
       parserRef.bump();
-      let Option::SOME(segment) = parserRef.expectIdentifier("expected type path segment after '::'") else {
-        return Option::NONE;
-      };
+      let segment = parserRef.expectIdentifier("expected type path segment after '::'")!;
       last = segment.clone();
       segments.push(segment.lexemeString());
     }
@@ -165,9 +151,7 @@ export namespace ParserTypes {
     parserRef.bump();
 
     while (true) {
-      let Option::SOME(argument) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let argument = ParserTypes::parseType(parserRef)!;
       arguments.push(argument);
 
       if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -180,9 +164,7 @@ export namespace ParserTypes {
       break;
     }
 
-    let Option::SOME(close) = parserRef.expectGreater() else {
-      return Option::NONE;
-    };
+    let close = parserRef.expectGreater()!;
     return Option::SOME(parserRef.module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
       span: ParserShared::mergeSpans(first.span, close.span),
       base: base,
@@ -193,16 +175,12 @@ export namespace ParserTypes {
   function parseTupleOrFunctionType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(openParen) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start tuple or function type") else {
-      return Option::NONE;
-    };
+    let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start tuple or function type")!;
     let mut elements: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
       while (true) {
-        let Option::SOME(element) = ParserTypes::parseType(parserRef) else {
-          return Option::NONE;
-        };
+        let element = ParserTypes::parseType(parserRef)!;
         elements.push(element);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -216,14 +194,10 @@ export namespace ParserTypes {
       }
     }
 
-    let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple or function parameters") else {
-      return Option::NONE;
-    };
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple or function parameters")!;
     if (parserRef.consumePunctuation(Punctuation::ARROW).isSome()) {
       let functionParameters: Vector<Ast::TypeId> = ParserShared::copyTypeIds(&elements);
-      let Option::SOME(returnType) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let returnType = ParserTypes::parseType(parserRef)!;
       let returnSpan: SourceSpan = match (parserRef.module.types.get(returnType)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
         Option::NONE -> closeParen.span,

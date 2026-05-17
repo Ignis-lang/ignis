@@ -77,16 +77,12 @@ export namespace ParserDeclarations {
   function parseQualifiedName(parser: &mut ParserShared::State, label: str): Option<QualifiedName> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(firstToken) = parserRef.expectIdentifier(label) else {
-      return Option::NONE;
-    };
+    let firstToken = parserRef.expectIdentifier(label)!;
     let mut name: String = firstToken.lexemeString();
     let mut span: SourceSpan = firstToken.span;
 
     while (parserRef.consumePunctuation(Punctuation::DOUBLE_COLON).isSome()) {
-      let Option::SOME(segmentToken) = parserRef.expectIdentifier(label) else {
-        return Option::NONE;
-      };
+      let segmentToken = parserRef.expectIdentifier(label)!;
 
       name.pushStr("::");
       name.pushStr(segmentToken.lexemeString().toStr());
@@ -154,12 +150,8 @@ export namespace ParserDeclarations {
   function parseAttribute(parser: &mut ParserShared::State): Option<Ast::Attribute> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(atToken) = parserRef.expectPunctuation(Punctuation::AT, "expected '@' to start attribute") else {
-      return Option::NONE;
-    };
-    let Option::SOME(attributeName) = ParserDeclarations::parseQualifiedName(parserRef, "expected attribute name") else {
-      return Option::NONE;
-    };
+    let atToken = parserRef.expectPunctuation(Punctuation::AT, "expected '@' to start attribute")!;
+    let attributeName = ParserDeclarations::parseQualifiedName(parserRef, "expected attribute name")!;
     let mut span: SourceSpan = ParserShared::mergeSpans(atToken.span, attributeName.span);
     if (parserRef.consumePunctuation(Punctuation::LEFT_PAREN).isNone()) {
       return Option::SOME(Ast::Attribute {
@@ -187,16 +179,12 @@ export namespace ParserDeclarations {
     let mut parserRef: &mut ParserShared::State = parser;
     let mut segments: Vector<String> = Vector::new<String>();
 
-    let Option::SOME(firstToken) = parserRef.expectIdentifier("expected generic bound") else {
-      return Option::NONE;
-    };
+    let firstToken = parserRef.expectIdentifier("expected generic bound")!;
     let mut span: SourceSpan = firstToken.span;
     segments.push(firstToken.lexemeString());
 
     while (parserRef.consumePunctuation(Punctuation::DOUBLE_COLON).isSome()) {
-      let Option::SOME(segmentToken) = parserRef.expectIdentifier("expected generic bound segment after '::'") else {
-        return Option::NONE;
-      };
+      let segmentToken = parserRef.expectIdentifier("expected generic bound segment after '::'")!;
 
       segments.push(segmentToken.lexemeString());
       span = ParserShared::mergeSpans(span, segmentToken.span);
@@ -212,16 +200,12 @@ export namespace ParserDeclarations {
     let mut parserRef: &mut ParserShared::State = parser;
     let mut bounds: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
 
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected generic parameter") else {
-      return Option::NONE;
-    };
+    let nameToken = parserRef.expectIdentifier("expected generic parameter")!;
     let mut span: SourceSpan = nameToken.span;
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
       while (true) {
-        let Option::SOME(bound) = ParserDeclarations::parseGenericBound(parserRef) else {
-          return Option::NONE;
-        };
+        let bound = ParserDeclarations::parseGenericBound(parserRef)!;
 
         span = ParserShared::mergeSpans(span, bound.span);
         bounds.push(bound);
@@ -253,9 +237,7 @@ export namespace ParserDeclarations {
 
     if (!parserRef.atPunctuation(Punctuation::GREATER)) {
       while (true) {
-        let Option::SOME(parameter) = ParserDeclarations::parseGenericParameter(parserRef) else {
-          return Option::NONE;
-        };
+        let parameter = ParserDeclarations::parseGenericParameter(parserRef)!;
         parameters.push(parameter);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -328,9 +310,7 @@ export namespace ParserDeclarations {
 
     parserRef.skipTrivia();
     while (parserRef.atPunctuation(Punctuation::AT)) {
-      let Option::SOME(attribute) = ParserDeclarations::parseAttribute(parserRef) else {
-        return Option::NONE;
-      };
+      let attribute = ParserDeclarations::parseAttribute(parserRef)!;
       metadata.attributes.push(attribute);
 
       parserRef.skipTrivia();
@@ -346,16 +326,12 @@ export namespace ParserDeclarations {
   ): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected binding name") else {
-      return Option::NONE;
-    };
+    let nameToken = parserRef.expectIdentifier("expected binding name")!;
     let mut annotation: Option<Ast::TypeId> = Option::NONE;
     let mut endSpan: SourceSpan = nameToken.span;
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
-      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let typeId = ParserTypes::parseType(parserRef)!;
       annotation = Option::SOME(typeId);
       endSpan = match (parserRef.module.types.get(typeId)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -528,13 +504,9 @@ export namespace ParserDeclarations {
     let mut parserRef: &mut ParserShared::State = parser;
 
     if (parserRef.atPunctuation(Punctuation::AMPERSAND)) {
-      let Option::SOME(ampersandToken) = parserRef.expectPunctuation(Punctuation::AMPERSAND, "expected '&' to start receiver") else {
-        return Option::NONE;
-      };
+      let ampersandToken = parserRef.expectPunctuation(Punctuation::AMPERSAND, "expected '&' to start receiver")!;
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-      let Option::SOME(selfToken) = parserRef.expectKeyword(Keyword::SELF_, "expected 'self' receiver") else {
-        return Option::NONE;
-      };
+      let selfToken = parserRef.expectKeyword(Keyword::SELF_, "expected 'self' receiver")!;
 
       return Option::SOME(ParserDeclarations::createSelfReceiverPattern(parserRef, ampersandToken, mutable, selfToken, metadata));
     }
@@ -549,12 +521,8 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected trait method name") else {
-      return Option::NONE;
-    };
-    let Option::SOME(genericParameters) = ParserDeclarations::parseOptionalGenericParameterList(parserRef) else {
-      return Option::NONE;
-    };
+    let nameToken = parserRef.expectIdentifier("expected trait method name")!;
+    let genericParameters = ParserDeclarations::parseOptionalGenericParameterList(parserRef)!;
 
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after trait method name") else {
       return Option::NONE;
@@ -563,13 +531,9 @@ export namespace ParserDeclarations {
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
       while (true) {
-        let Option::SOME(parameterMetadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-          return Option::NONE;
-        };
+        let parameterMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
 
-        let Option::SOME(parameter) = ParserDeclarations::parseTraitParameterPattern(parserRef, &parameterMetadata) else {
-          return Option::NONE;
-        };
+        let parameter = ParserDeclarations::parseTraitParameterPattern(parserRef, &parameterMetadata)!;
         parameters.push(parameter);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -590,9 +554,7 @@ export namespace ParserDeclarations {
     let mut returnType: Option<Ast::TypeId> = Option::NONE;
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
-      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let typeId = ParserTypes::parseType(parserRef)!;
       returnType = Option::SOME(typeId);
     }
 
@@ -604,9 +566,7 @@ export namespace ParserDeclarations {
     }));
 
     if (signatureOnly) {
-      let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after trait method signature") else {
-        return Option::NONE;
-      };
+      let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after trait method signature")!;
       endSpan = semicolon.span;
       body = parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
         span: semicolon.span,
@@ -614,9 +574,7 @@ export namespace ParserDeclarations {
         tail: Option::NONE,
       }));
     } else {
-      let Option::SOME(bodyId) = ParserStatements::parseBlockStatement(parserRef) else {
-        return Option::NONE;
-      };
+      let bodyId = ParserStatements::parseBlockStatement(parserRef)!;
       body = bodyId;
       endSpan = match (parserRef.module.statements.get(bodyId)) {
         Option::SOME(node) -> Ast::Serializer::statementSpan(node),
@@ -637,18 +595,14 @@ export namespace ParserDeclarations {
 
   function parseTraitMethodItem(parser: &mut ParserShared::State): Option<Ast::ItemId> {
     let parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(metadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-      return Option::NONE;
-    };
+    let metadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
 
     return ParserDeclarations::parseMethodLikeItem(parserRef, metadata, true);
   }
 
   function parseImportBinding(parser: &mut ParserShared::State): Option<Ast::ImportBinding> {
     let mut parserRef: &mut ParserShared::State = parser;
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected imported name") else {
-      return Option::NONE;
-    };
+    let nameToken = parserRef.expectIdentifier("expected imported name")!;
     let name: String = nameToken.lexemeString();
 
     if (name.equals("_")) {
@@ -673,9 +627,7 @@ export namespace ParserDeclarations {
     let mut items: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
 
     while (true) {
-      let Option::SOME(item) = ParserDeclarations::parseImportBinding(parserRef) else {
-        return Option::NONE;
-      };
+      let item = ParserDeclarations::parseImportBinding(parserRef)!;
       items.push(item);
 
       if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -704,12 +656,8 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::IMPORT, "expected 'import'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(items) = ParserDeclarations::parseImportBindings(parserRef, "expected imported name") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::IMPORT, "expected 'import'")!;
+    let items = ParserDeclarations::parseImportBindings(parserRef, "expected imported name")!;
 
     let Option::SOME(_) = parserRef.expectKeyword(Keyword::FROM, "expected 'from' after import list") else {
       return Option::NONE;
@@ -725,9 +673,7 @@ export namespace ParserDeclarations {
     let sourceSpan: SourceSpan = pathToken.span;
     let pathTokenLexeme: String = parserRef.bump().lexemeString();
     let pathLexeme: String = ParserShared::stripQuotes(&pathTokenLexeme);
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after import declaration") else {
-      return Option::NONE;
-    };
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after import declaration")!;
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Import(Ast::Item::Import {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
       items: Ast::copyImportBindings(&items),
@@ -743,25 +689,15 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::TYPE, "expected 'type'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected type alias name") else {
-      return Option::NONE;
-    };
-    let Option::SOME(genericParameters) = ParserDeclarations::parseOptionalGenericParameterList(parserRef) else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::TYPE, "expected 'type'")!;
+    let nameToken = parserRef.expectIdentifier("expected type alias name")!;
+    let genericParameters = ParserDeclarations::parseOptionalGenericParameterList(parserRef)!;
 
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' after type alias name") else {
       return Option::NONE;
     };
-    let Option::SOME(value) = ParserTypes::parseType(parserRef) else {
-      return Option::NONE;
-    };
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after type alias") else {
-      return Option::NONE;
-    };
+    let value = ParserTypes::parseType(parserRef)!;
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after type alias")!;
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
@@ -778,15 +714,9 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::FUNCTION, "expected 'function'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected function name") else {
-      return Option::NONE;
-    };
-    let Option::SOME(genericParameters) = ParserDeclarations::parseOptionalGenericParameterList(parserRef) else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::FUNCTION, "expected 'function'")!;
+    let nameToken = parserRef.expectIdentifier("expected function name")!;
+    let genericParameters = ParserDeclarations::parseOptionalGenericParameterList(parserRef)!;
 
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after function name") else {
       return Option::NONE;
@@ -796,13 +726,9 @@ export namespace ParserDeclarations {
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
       while (true) {
-        let Option::SOME(parameterMetadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-          return Option::NONE;
-        };
+        let parameterMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
 
-        let Option::SOME(parameter) = ParserDeclarations::parseBindingPatternWithMetadata(parserRef, &parameterMetadata) else {
-          return Option::NONE;
-        };
+        let parameter = ParserDeclarations::parseBindingPatternWithMetadata(parserRef, &parameterMetadata)!;
         parameters.push(parameter);
 
         if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -822,15 +748,11 @@ export namespace ParserDeclarations {
     let mut returnType: Option<Ast::TypeId> = Option::NONE;
 
     if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
-      let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
-        return Option::NONE;
-      };
+      let typeId = ParserTypes::parseType(parserRef)!;
       returnType = Option::SOME(typeId);
     }
 
-    let Option::SOME(body) = ParserStatements::parseBlockStatement(parserRef) else {
-      return Option::NONE;
-    };
+    let body = ParserStatements::parseBlockStatement(parserRef)!;
     let bodySpan: SourceSpan = match (parserRef.module.statements.get(body)) {
       Option::SOME(node) -> Ast::Serializer::statementSpan(node),
       Option::NONE -> keyword.span,
@@ -923,27 +845,17 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::CONST, "expected 'const'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected constant name") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::CONST, "expected 'const'")!;
+    let nameToken = parserRef.expectIdentifier("expected constant name")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after constant name") else {
       return Option::NONE;
     };
-    let Option::SOME(annotation) = ParserTypes::parseType(parserRef) else {
-      return Option::NONE;
-    };
+    let annotation = ParserTypes::parseType(parserRef)!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' after constant type") else {
       return Option::NONE;
     };
-    let Option::SOME(valueExpression) = ParserExpressions::parseExpression(parserRef) else {
-      return Option::NONE;
-    };
-    let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after constant declaration") else {
-      return Option::NONE;
-    };
+    let valueExpression = ParserExpressions::parseExpression(parserRef)!;
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after constant declaration")!;
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
       span: ParserShared::mergeSpans(keyword.span, semicolon.span),
@@ -965,9 +877,7 @@ export namespace ParserDeclarations {
     if (parserRef.consumePunctuation(Punctuation::LEFT_PAREN).isSome()) {
       if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
         while (true) {
-          let Option::SOME(typeId) = ParserTypes::parseType(parserRef) else {
-            return Option::NONE;
-          };
+          let typeId = ParserTypes::parseType(parserRef)!;
 
           let typeSpan: SourceSpan = match (parserRef.module.types.get(typeId)) {
             Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -993,9 +903,7 @@ export namespace ParserDeclarations {
         }
       }
 
-      let Option::SOME(closeParen) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after enum variant payload") else {
-        return Option::NONE;
-      };
+      let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after enum variant payload")!;
       endSpan = closeParen.span;
     }
 
@@ -1015,15 +923,9 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::RECORD, "expected 'record'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected record name") else {
-      return Option::NONE;
-    };
-    let Option::SOME(genericParameters) = ParserDeclarations::parseOptionalGenericParameterList(parserRef) else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::RECORD, "expected 'record'")!;
+    let nameToken = parserRef.expectIdentifier("expected record name")!;
+    let genericParameters = ParserDeclarations::parseOptionalGenericParameterList(parserRef)!;
 
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after record name") else {
       return Option::NONE;
@@ -1033,9 +935,7 @@ export namespace ParserDeclarations {
     let mut endSpan: SourceSpan = nameToken.span;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let Option::SOME(memberMetadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-        return Option::NONE;
-      };
+      let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
       parserRef.skipTrivia();
 
       if (!ParserDeclarations::recordMemberLooksLikeField(parserRef)) {
@@ -1068,9 +968,7 @@ export namespace ParserDeclarations {
       }
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after record fields") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after record fields")!;
     endSpan = closeBrace.span;
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
@@ -1089,12 +987,8 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::NAMESPACE, "expected 'namespace'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(namespaceName) = ParserDeclarations::parseQualifiedName(parserRef, "expected namespace name") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::NAMESPACE, "expected 'namespace'")!;
+    let namespaceName = ParserDeclarations::parseQualifiedName(parserRef, "expected namespace name")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after namespace name") else {
       return Option::NONE;
     };
@@ -1109,9 +1003,7 @@ export namespace ParserDeclarations {
       items.push(itemId);
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after namespace body") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after namespace body")!;
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
@@ -1127,15 +1019,9 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::ENUM, "expected 'enum'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected enum name") else {
-      return Option::NONE;
-    };
-    let Option::SOME(genericParameters) = ParserDeclarations::parseOptionalGenericParameterList(parserRef) else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::ENUM, "expected 'enum'")!;
+    let nameToken = parserRef.expectIdentifier("expected enum name")!;
+    let genericParameters = ParserDeclarations::parseOptionalGenericParameterList(parserRef)!;
 
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after enum name") else {
       return Option::NONE;
@@ -1145,15 +1031,11 @@ export namespace ParserDeclarations {
     let mut endSpan: SourceSpan = nameToken.span;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let Option::SOME(memberMetadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-        return Option::NONE;
-      };
+      let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
       parserRef.skipTrivia();
 
       if (ParserDeclarations::enumMemberLooksLikeMethod(parserRef)) {
-        let Option::SOME(methodId) = ParserDeclarations::parseMethodLikeItem(parserRef, Ast::copyMetadata(&memberMetadata), false) else {
-          return Option::NONE;
-        };
+        let methodId = ParserDeclarations::parseMethodLikeItem(parserRef, Ast::copyMetadata(&memberMetadata), false)!;
         methods.push(methodId);
 
         endSpan = match (parserRef.module.items.get(methodId)) {
@@ -1164,12 +1046,8 @@ export namespace ParserDeclarations {
         continue;
       }
 
-      let Option::SOME(variantName) = parserRef.expectIdentifier("expected enum variant name") else {
-        return Option::NONE;
-      };
-      let Option::SOME(variantId) = ParserDeclarations::createEnumVariantPattern(parserRef, variantName) else {
-        return Option::NONE;
-      };
+      let variantName = parserRef.expectIdentifier("expected enum variant name")!;
+      let variantId = ParserDeclarations::createEnumVariantPattern(parserRef, variantName)!;
       variants.push(variantId);
 
       endSpan = match (parserRef.module.patterns.get(variantId)) {
@@ -1190,9 +1068,7 @@ export namespace ParserDeclarations {
       }
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after enum variants") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after enum variants")!;
     endSpan = closeBrace.span;
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
@@ -1211,15 +1087,9 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::TRAIT, "expected 'trait'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(nameToken) = parserRef.expectIdentifier("expected trait name") else {
-      return Option::NONE;
-    };
-    let Option::SOME(genericParameters) = ParserDeclarations::parseOptionalGenericParameterList(parserRef) else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::TRAIT, "expected 'trait'")!;
+    let nameToken = parserRef.expectIdentifier("expected trait name")!;
+    let genericParameters = ParserDeclarations::parseOptionalGenericParameterList(parserRef)!;
 
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after trait name") else {
       return Option::NONE;
@@ -1227,16 +1097,12 @@ export namespace ParserDeclarations {
     let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let Option::SOME(methodId) = ParserDeclarations::parseTraitMethodItem(parserRef) else {
-        return Option::NONE;
-      };
+      let methodId = ParserDeclarations::parseTraitMethodItem(parserRef)!;
 
       methods.push(methodId);
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after trait body") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after trait body")!;
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Trait(Ast::Item::Trait {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
@@ -1253,12 +1119,8 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::EXTERN, "expected 'extern'") else {
-      return Option::NONE;
-    };
-    let Option::SOME(externName) = ParserDeclarations::parseQualifiedName(parserRef, "expected extern namespace") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::EXTERN, "expected 'extern'")!;
+    let externName = ParserDeclarations::parseQualifiedName(parserRef, "expected extern namespace")!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' after extern namespace") else {
       return Option::NONE;
     };
@@ -1286,9 +1148,7 @@ export namespace ParserDeclarations {
       return Option::NONE;
     }
 
-    let Option::SOME(closeBrace) = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after extern block") else {
-      return Option::NONE;
-    };
+    let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after extern block")!;
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Extern(Ast::Item::Extern {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
@@ -1350,13 +1210,9 @@ export namespace ParserDeclarations {
   ): Option<Ast::ItemId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let Option::SOME(keyword) = parserRef.expectKeyword(Keyword::EXPORT, "expected 'export'") else {
-      return Option::NONE;
-    };
+    let keyword = parserRef.expectKeyword(Keyword::EXPORT, "expected 'export'")!;
 
-    let Option::SOME(innerMetadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-      return Option::NONE;
-    };
+    let innerMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
     let metadata: Ast::Metadata = Ast::mergeMetadata(leadingMetadata, innerMetadata);
 
     let mut declaration: Option<Ast::ItemId> = Option::NONE;
@@ -1366,18 +1222,14 @@ export namespace ParserDeclarations {
     let mut endSpan: SourceSpan = keyword.span;
 
     if (parserRef.atKeyword(Keyword::IMPORT) || parserRef.atKeyword(Keyword::TYPE) || parserRef.atKeyword(Keyword::FUNCTION) || parserRef.atKeyword(Keyword::RECORD) || parserRef.atKeyword(Keyword::NAMESPACE) || parserRef.atKeyword(Keyword::CONST) || parserRef.atKeyword(Keyword::EXTERN) || parserRef.atKeyword(Keyword::ENUM) || parserRef.atKeyword(Keyword::TRAIT)) {
-      let Option::SOME(itemId) = ParserDeclarations::parseExportedDeclarationAfterMetadata(parserRef, Ast::copyMetadata(&metadata)) else {
-        return Option::NONE;
-      };
+      let itemId = ParserDeclarations::parseExportedDeclarationAfterMetadata(parserRef, Ast::copyMetadata(&metadata))!;
       endSpan = match (parserRef.module.items.get(itemId)) {
         Option::SOME(node) -> ParserDeclarations::itemSpan(node),
         Option::NONE -> keyword.span,
       };
       declaration = Option::SOME(itemId);
     } else {
-      let Option::SOME(parsedItems) = ParserDeclarations::parseImportBindings(parserRef, "expected exported name") else {
-        return Option::NONE;
-      };
+      let parsedItems = ParserDeclarations::parseImportBindings(parserRef, "expected exported name")!;
       items = Ast::copyImportBindings(&parsedItems);
 
       if (let Option::SOME(semicolon) = parserRef.consumePunctuation(Punctuation::SEMICOLON)) {
@@ -1397,9 +1249,7 @@ export namespace ParserDeclarations {
         sourceSpan = Option::SOME(pathToken.span);
         let pathTokenLexeme: String = parserRef.bump().lexemeString();
         source = Option::SOME(ParserShared::stripQuotes(&pathTokenLexeme));
-        let Option::SOME(semicolon) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after re-export declaration") else {
-          return Option::NONE;
-        };
+        let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after re-export declaration")!;
         endSpan = semicolon.span;
       }
     }
@@ -1470,9 +1320,7 @@ export namespace ParserDeclarations {
 
     parserRef.skipTrivia();
 
-    let Option::SOME(metadata) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-      return Option::NONE;
-    };
+    let metadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
 
     return ParserDeclarations::parseTopLevelItemAfterMetadata(parserRef, metadata);
   }
