@@ -1,0 +1,286 @@
+import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import ToolchainDiagnosticCode, ToolchainError from "./c_compiler";
+
+/// GCC-backed linker that produces an executable from one or more object files.
+///
+/// Invokes `gcc [flags] [objects] [archives] [libs] -o <output>`.
+/// Returns `Result::OK` on zero exit code; returns `Result::ERROR` containing a
+/// `DiagnosticBag` with a `B4003` error on failure.
+///
+/// Mirrors the Rust oracle `link_executable` / `link_executable_multi` in
+/// `crates/ignis_driver/src/link.rs`.
+export namespace Linker {
+  /// Link object and archive files into an executable.
+  ///
+  /// - `cc`: linker executable (defaults to `"gcc"` when empty).
+  /// - `outputPath`: path for the resulting binary.
+  /// - `objectPaths`: `.o` files to pass as positional arguments.
+  /// - `archivePaths`: `.a` archives to pass as positional arguments (after objects).
+  /// - `libs`: library names for `-l<name>` flags.
+  /// - `extraFlags`: additional flags forwarded verbatim.
+  function link(
+    cc: str,
+    outputPath: &Path::PathBuf,
+    objectPaths: &Vector<String>,
+    archivePaths: &Vector<String>,
+    libs: &Vector<String>,
+    extraFlags: &Vector<String>,
+  ): Result<boolean, DiagnosticBag> {
+    let compiler: str = linkerResolve(cc);
+
+    let mut cmd: Process::Command = Process::Command::new(compiler);
+
+    let mut flagIdx: u64 = 0;
+    while (flagIdx < extraFlags.length()) {
+      let Option::SOME(flag) = extraFlags.get(flagIdx) else { break; };
+      cmd.arg(flag.toStr());
+      flagIdx += 1;
+    }
+
+    let mut objIdx: u64 = 0;
+    while (objIdx < objectPaths.length()) {
+      let Option::SOME(obj) = objectPaths.get(objIdx) else { break; };
+      cmd.arg(obj.toStr());
+      objIdx += 1;
+    }
+
+    let mut arcIdx: u64 = 0;
+    while (arcIdx < archivePaths.length()) {
+      let Option::SOME(arc) = archivePaths.get(arcIdx) else { break; };
+      cmd.arg(arc.toStr());
+      arcIdx += 1;
+    }
+
+    cmd.arg("-o");
+    cmd.arg(outputPath.asStr());
+
+    let mut libIdx: u64 = 0;
+    while (libIdx < libs.length()) {
+      let Option::SOME(lib) = libs.get(libIdx) else { break; };
+      let libFlag: String = String::create("-l").concat(lib.toStr());
+      cmd.arg(libFlag.toStr());
+      libIdx += 1;
+    }
+
+    match (cmd.output()) {
+      Result::OK(out) -> {
+        let status: Process::ExitStatus = out.status();
+
+        if (status.success) {
+          return Result::OK(true);
+        }
+
+        let stderrText: String = out.stderr();
+        let error: ToolchainError = ToolchainError::new(compiler, "linking", stderrText.toStr());
+        let bag: DiagnosticBag = linkerErrorDiag(&error);
+        return Result::ERROR(bag);
+      },
+      Result::ERROR(ioErr) -> {
+        let error: ToolchainError = ToolchainError::new(compiler, "linking", ioErr.errorMessage());
+        let bag: DiagnosticBag = linkerErrorDiag(&error);
+        return Result::ERROR(bag);
+      },
+    };
+
+    return Result::ERROR(DiagnosticBag::init());
+  }
+}
+
+/// Resolve the linker: use `cc` when non-empty; fall back to `"gcc"`.
+function linkerResolve(cc: str): str {
+  let s: String = String::create(cc);
+  let trimmed: String = s.trimAsciiWhitespace();
+  if (trimmed.length() == 0) {
+    return "gcc";
+  }
+  return cc;
+}
+
+/// Build a DiagnosticBag for a link failure.
+function linkerErrorDiag(error: &ToolchainError): DiagnosticBag {
+  let message: String = error.format();
+  let span: SourceSpan = SourceSpan::new("", 0, 0);
+
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    ToolchainDiagnosticCode::LINK_FAILED,
+    message.toStr(),
+    span,
+  );
+
+  diagnostic.addNote(error.stderr.toStr());
+
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}
+
+// ---- Test helpers ----
+
+function linkerFixtureDir(): Path::PathBuf {
+  return match (Env::currentDir()) {
+    Result::OK(root) -> root.join("test_cases/selfhost/build/linker").normalize(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::create("/nonexistent");
+    },
+  };
+}
+
+function linkerReadExpected(filename: str): String {
+  let path: Path::PathBuf = linkerFixtureDir().join(filename);
+  return match (Fs::readToString(&path)) {
+    Result::OK(text) -> text.trimAsciiWhitespace(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+}
+
+/// Compile and archive a small C source to produce a linkable object for link tests.
+///
+/// Returns the object `.o` path on success.
+function linkerCompileTestObject(): Path::PathBuf {
+  let cSrc: str = "int ignis_linker_test_main(void) { return 0; }\nint main(void) { return ignis_linker_test_main(); }\n";
+  let srcPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_linker_test_main.c");
+  let objPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_linker_test_main.o");
+
+  let cSrcStr: String = String::create(cSrc);
+  match (Fs::writeString(&srcPath, &cSrcStr)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::create("/nonexistent");
+    },
+  };
+
+  let mut cmd: Process::Command = Process::Command::new("gcc");
+  cmd.arg("-c");
+  cmd.arg(srcPath.asStr());
+  cmd.arg("-o");
+  cmd.arg(objPath.asStr());
+
+  match (cmd.output()) {
+    Result::OK(out) -> {
+      let status: Process::ExitStatus = out.status();
+      if (!status.success) {
+        Test::fail();
+        return Path::PathBuf::create("/nonexistent");
+      }
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::create("/nonexistent");
+    },
+  };
+
+  return objPath;
+}
+
+@test
+function linkerSuccessfulLink(): void {
+  let objPath: Path::PathBuf = linkerCompileTestObject();
+  let objPathStr: String = objPath.toString();
+
+  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_linker_out");
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(objPathStr.clone());
+
+  let archives: Vector<String> = Vector::new<String>();
+  let libs: Vector<String> = Vector::new<String>();
+  let flags: Vector<String> = Vector::new<String>();
+
+  let result: Result<boolean, DiagnosticBag> = Linker::link(
+    "gcc",
+    &outPath,
+    &objects,
+    &archives,
+    &libs,
+    &flags,
+  );
+
+  let expected: String = linkerReadExpected("expected_link_ok.txt");
+  let mut actual: String = String::create("link_fail");
+  if (let Result::OK(_) = result) {
+    actual = String::create("link_ok");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function linkerFailsOnMissingObject(): void {
+  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_linker_missing_out");
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(String::create("/tmp/ignis_nonexistent_object_zzz.o"));
+
+  let archives: Vector<String> = Vector::new<String>();
+  let libs: Vector<String> = Vector::new<String>();
+  let flags: Vector<String> = Vector::new<String>();
+
+  let result: Result<boolean, DiagnosticBag> = Linker::link(
+    "gcc",
+    &outPath,
+    &objects,
+    &archives,
+    &libs,
+    &flags,
+  );
+
+  let expected: String = linkerReadExpected("expected_link_fail.txt");
+  let mut actual: String = String::create("link_ok");
+  if (let Result::ERROR(_) = result) {
+    actual = String::create("link_fail");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function linkerDefaultsToGccWhenCcEmpty(): void {
+  let objPath: Path::PathBuf = linkerCompileTestObject();
+  let objPathStr: String = objPath.toString();
+
+  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_linker_default_cc");
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(objPathStr.clone());
+
+  let archives: Vector<String> = Vector::new<String>();
+  let libs: Vector<String> = Vector::new<String>();
+  let flags: Vector<String> = Vector::new<String>();
+
+  // Empty cc should resolve to gcc and succeed.
+  let result: Result<boolean, DiagnosticBag> = Linker::link(
+    "",
+    &outPath,
+    &objects,
+    &archives,
+    &libs,
+    &flags,
+  );
+
+  let expected: String = linkerReadExpected("expected_link_ok.txt");
+  let mut actual: String = String::create("link_fail");
+  if (let Result::OK(_) = result) {
+    actual = String::create("link_ok");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function linkerErrorDiagHasCode(): void {
+  let error: ToolchainError = ToolchainError::new("gcc", "linking", "undefined reference to 'main'");
+  let bag: DiagnosticBag = linkerErrorDiag(&error);
+  Test::assert(bag.length() > 0);
+}

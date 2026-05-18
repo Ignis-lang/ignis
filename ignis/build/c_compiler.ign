@@ -1,0 +1,246 @@
+import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+/// Diagnostic codes for toolchain failures.
+export namespace ToolchainDiagnosticCode {
+  const COMPILE_FAILED: str = "B4001";
+  const ARCHIVE_FAILED: str = "B4002";
+  const LINK_FAILED: str = "B4003";
+  const UNSUPPORTED_BACKEND: str = "B4004";
+}
+
+/// A structured toolchain error with the failing tool name, action, and stderr output.
+export record ToolchainError {
+  public tool: String;
+  public action: String;
+  public stderr: String;
+
+  public static new(tool: str, action: str, stderr: str): ToolchainError {
+    return ToolchainError {
+      tool: String::create(tool),
+      action: String::create(action),
+      stderr: String::create(stderr),
+    };
+  }
+
+  /// Format the error for display.
+  public format(&self): String {
+    let mut out: String = String::create(self.tool.toStr());
+    out.pushStr(" ");
+    out.push(&self.action);
+    out.pushStr(" failed: ");
+    out.push(&self.stderr);
+    return out;
+  }
+}
+
+/// Build a synthetic DiagnosticBag for a toolchain failure.
+function toolchainErrorDiag(code: str, error: &ToolchainError): DiagnosticBag {
+  let message: String = error.format();
+  let span: SourceSpan = SourceSpan::new("", 0, 0);
+
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    code,
+    message.toStr(),
+    span,
+  );
+
+  diagnostic.addNote(error.stderr.toStr());
+
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}
+
+/// GCC-backed C-to-object compiler.
+///
+/// Invokes `gcc -c <source> -o <output>` with optional include directories and
+/// extra compiler flags.  Returns `Result::OK` on zero exit code; returns
+/// `Result::ERROR` containing a `DiagnosticBag` with a `B4001` error on failure.
+///
+/// Mirrors the Rust oracle `compile_to_object` in `crates/ignis_driver/src/link.rs`.
+export namespace CCompiler {
+  /// Compile one C source file to an object file.
+  ///
+  /// - `cc`: compiler executable name (e.g. `"gcc"`); defaults to `"gcc"` when empty.
+  /// - `srcPath`: path to the `.c` source file.
+  /// - `objPath`: desired output path for the `.o` object.
+  /// - `includeDirs`: list of `-I` directories passed to the compiler.
+  /// - `extraFlags`: additional flags forwarded verbatim to the compiler.
+  function compileObject(
+    cc: str,
+    srcPath: &Path::PathBuf,
+    objPath: &Path::PathBuf,
+    includeDirs: &Vector<String>,
+    extraFlags: &Vector<String>,
+  ): Result<boolean, DiagnosticBag> {
+    let compiler: str = cCompilerResolve(cc);
+
+    let mut cmd: Process::Command = Process::Command::new(compiler);
+    cmd.arg("-c");
+    cmd.arg(srcPath.asStr());
+    cmd.arg("-o");
+    cmd.arg(objPath.asStr());
+
+    let mut flagIdx: u64 = 0;
+    while (flagIdx < extraFlags.length()) {
+      let Option::SOME(flag) = extraFlags.get(flagIdx) else { break; };
+      cmd.arg(flag.toStr());
+      flagIdx += 1;
+    }
+
+    let mut incIdx: u64 = 0;
+    while (incIdx < includeDirs.length()) {
+      let Option::SOME(dir) = includeDirs.get(incIdx) else { break; };
+      cmd.arg("-I");
+      cmd.arg(dir.toStr());
+      incIdx += 1;
+    }
+
+    match (cmd.output()) {
+      Result::OK(out) -> {
+        let status: Process::ExitStatus = out.status();
+
+        if (status.success) {
+          return Result::OK(true);
+        }
+
+        let stderrText: String = out.stderr();
+        let error: ToolchainError = ToolchainError::new(compiler, "compilation", stderrText.toStr());
+        return Result::ERROR(toolchainErrorDiag(ToolchainDiagnosticCode::COMPILE_FAILED, &error));
+      },
+      Result::ERROR(ioErr) -> {
+        let error: ToolchainError = ToolchainError::new(compiler, "compilation", ioErr.errorMessage());
+        return Result::ERROR(toolchainErrorDiag(ToolchainDiagnosticCode::COMPILE_FAILED, &error));
+      },
+    };
+
+    return Result::ERROR(DiagnosticBag::init());
+  }
+}
+
+/// Resolve the compiler name: use `cc` when non-empty; fall back to `"gcc"`.
+function cCompilerResolve(cc: str): str {
+  let s: String = String::create(cc);
+  let trimmed: String = s.trimAsciiWhitespace();
+  if (trimmed.length() == 0) {
+    return "gcc";
+  }
+  return cc;
+}
+
+// ---- Test helpers ----
+
+function cCompilerFixtureDir(): Path::PathBuf {
+  return match (Env::currentDir()) {
+    Result::OK(root) -> root.join("test_cases/selfhost/build/c_compiler").normalize(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::create("/nonexistent");
+    },
+  };
+}
+
+function cCompilerReadExpected(filename: str): String {
+  let path: Path::PathBuf = cCompilerFixtureDir().join(filename);
+  return match (Fs::readToString(&path)) {
+    Result::OK(text) -> text.trimAsciiWhitespace(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+}
+
+@test
+function cCompilerSuccessfulCompile(): void {
+  let fixtureDir: Path::PathBuf = cCompilerFixtureDir();
+  let srcPath: Path::PathBuf = fixtureDir.join("valid.c");
+  let objPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_compile_valid.o");
+
+  let includes: Vector<String> = Vector::new<String>();
+  let flags: Vector<String> = Vector::new<String>();
+
+  let result: Result<boolean, DiagnosticBag> = CCompiler::compileObject(
+    "gcc",
+    &srcPath,
+    &objPath,
+    &includes,
+    &flags,
+  );
+
+  let expected: String = cCompilerReadExpected("expected_compile_ok.txt");
+  let mut actual: String = String::create("compile_fail");
+  if (let Result::OK(_) = result) {
+    actual = String::create("compile_ok");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function cCompilerFailsOnInvalidSource(): void {
+  let fixtureDir: Path::PathBuf = cCompilerFixtureDir();
+  let srcPath: Path::PathBuf = fixtureDir.join("invalid.c");
+  let objPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_compile_invalid.o");
+
+  let includes: Vector<String> = Vector::new<String>();
+  let flags: Vector<String> = Vector::new<String>();
+
+  let result: Result<boolean, DiagnosticBag> = CCompiler::compileObject(
+    "gcc",
+    &srcPath,
+    &objPath,
+    &includes,
+    &flags,
+  );
+
+  let expected: String = cCompilerReadExpected("expected_compile_fail.txt");
+  let mut actual: String = String::create("compile_ok");
+  if (let Result::ERROR(_) = result) {
+    actual = String::create("compile_fail");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function cCompilerDefaultsToGccWhenCcEmpty(): void {
+  let fixtureDir: Path::PathBuf = cCompilerFixtureDir();
+  let srcPath: Path::PathBuf = fixtureDir.join("valid.c");
+  let objPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_compile_default_cc.o");
+
+  let includes: Vector<String> = Vector::new<String>();
+  let flags: Vector<String> = Vector::new<String>();
+
+  // Empty cc string should resolve to gcc and succeed.
+  let result: Result<boolean, DiagnosticBag> = CCompiler::compileObject(
+    "",
+    &srcPath,
+    &objPath,
+    &includes,
+    &flags,
+  );
+
+  let expected: String = cCompilerReadExpected("expected_compile_ok.txt");
+  let mut actual: String = String::create("compile_fail");
+  if (let Result::OK(_) = result) {
+    actual = String::create("compile_ok");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function cCompilerErrorDiagHasCode(): void {
+  let error: ToolchainError = ToolchainError::new("gcc", "compilation", "error: expected ';'");
+  let bag: DiagnosticBag = toolchainErrorDiag(ToolchainDiagnosticCode::COMPILE_FAILED, &error);
+
+  // Bag must be non-empty.
+  Test::assert(bag.length() > 0);
+}

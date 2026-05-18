@@ -1,0 +1,220 @@
+import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import ToolchainDiagnosticCode, ToolchainError from "./c_compiler";
+
+/// `ar`-backed static archive builder.
+///
+/// Invokes `ar rcs <output> [objects...]` to produce a static library archive
+/// from a list of object files.  Returns `Result::OK` on zero exit code;
+/// returns `Result::ERROR` containing a `DiagnosticBag` with a `B4002` error
+/// on failure.
+///
+/// Mirrors the Rust oracle `link_executable` in `crates/ignis_driver/src/link.rs`
+/// (the `ar` side is the archive step for `libignis_std.a` / `libignis_user.a`).
+export namespace ArchiveTool {
+  /// Create a static library from one or more object files.
+  ///
+  /// - `ar`: archiver executable (defaults to `"ar"` when empty).
+  /// - `outputPath`: desired output `.a` path.
+  /// - `objectPaths`: list of `.o` paths to pack into the archive.
+  function archive(
+    ar: str,
+    outputPath: &Path::PathBuf,
+    objectPaths: &Vector<String>,
+  ): Result<boolean, DiagnosticBag> {
+    let archiver: str = archiveToolResolve(ar);
+
+    let mut cmd: Process::Command = Process::Command::new(archiver);
+    cmd.arg("rcs");
+    cmd.arg(outputPath.asStr());
+
+    let mut idx: u64 = 0;
+    while (idx < objectPaths.length()) {
+      let Option::SOME(obj) = objectPaths.get(idx) else { break; };
+      cmd.arg(obj.toStr());
+      idx += 1;
+    }
+
+    match (cmd.output()) {
+      Result::OK(out) -> {
+        let status: Process::ExitStatus = out.status();
+
+        if (status.success) {
+          return Result::OK(true);
+        }
+
+        let stderrText: String = out.stderr();
+        let error: ToolchainError = ToolchainError::new(archiver, "archive", stderrText.toStr());
+        let bag: DiagnosticBag = archiveToolErrorDiag(&error);
+        return Result::ERROR(bag);
+      },
+      Result::ERROR(ioErr) -> {
+        let error: ToolchainError = ToolchainError::new(archiver, "archive", ioErr.errorMessage());
+        let bag: DiagnosticBag = archiveToolErrorDiag(&error);
+        return Result::ERROR(bag);
+      },
+    };
+
+    return Result::ERROR(DiagnosticBag::init());
+  }
+}
+
+/// Resolve the archiver: use `ar` when non-empty; fall back to `"ar"`.
+function archiveToolResolve(ar: str): str {
+  let s: String = String::create(ar);
+  let trimmed: String = s.trimAsciiWhitespace();
+  if (trimmed.length() == 0) {
+    return "ar";
+  }
+  return ar;
+}
+
+/// Build a DiagnosticBag for an archive failure.
+function archiveToolErrorDiag(error: &ToolchainError): DiagnosticBag {
+  let message: String = error.format();
+  let span: SourceSpan = SourceSpan::new("", 0, 0);
+
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    ToolchainDiagnosticCode::ARCHIVE_FAILED,
+    message.toStr(),
+    span,
+  );
+
+  diagnostic.addNote(error.stderr.toStr());
+
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}
+
+// ---- Test helpers ----
+
+function archiveFixtureDir(): Path::PathBuf {
+  return match (Env::currentDir()) {
+    Result::OK(root) -> root.join("test_cases/selfhost/build/archive").normalize(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::create("/nonexistent");
+    },
+  };
+}
+
+function archiveReadExpected(filename: str): String {
+  let path: Path::PathBuf = archiveFixtureDir().join(filename);
+  return match (Fs::readToString(&path)) {
+    Result::OK(text) -> text.trimAsciiWhitespace(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+}
+
+/// Compile a small C file to produce a real object for archive tests.
+///
+/// Returns the object file path on success, or fails the test on error.
+function archiveCompileTestObject(name: str): Path::PathBuf {
+  let cSrc: String = String::create("int ignis_archive_test_").concat(name).concat("(int x) { return x; }");
+  let cPathStr: String = String::create("/tmp/ignis_archive_src_").concat(name).concat(".c");
+  let objPathStr: String = String::create("/tmp/ignis_archive_obj_").concat(name).concat(".o");
+
+  // Write the source.
+  let srcPath: Path::PathBuf = Path::PathBuf::create(cPathStr.toStr());
+  match (Fs::writeString(&srcPath, &cSrc)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::create("/nonexistent");
+    },
+  };
+
+  // Compile to object.
+  let objPath: Path::PathBuf = Path::PathBuf::create(objPathStr.toStr());
+
+  let mut cmd: Process::Command = Process::Command::new("gcc");
+  cmd.arg("-c");
+  cmd.arg(srcPath.asStr());
+  cmd.arg("-o");
+  cmd.arg(objPath.asStr());
+
+  match (cmd.output()) {
+    Result::OK(out) -> {
+      let status: Process::ExitStatus = out.status();
+      if (!status.success) {
+        Test::fail();
+        return Path::PathBuf::create("/nonexistent");
+      }
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::create("/nonexistent");
+    },
+  };
+
+  return objPath;
+}
+
+@test
+function archiveSuccessfulArchive(): void {
+  let objPath: Path::PathBuf = archiveCompileTestObject("a");
+  let objPathStr: String = objPath.toString();
+
+  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_archive.a");
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(objPathStr.clone());
+
+  let result: Result<boolean, DiagnosticBag> = ArchiveTool::archive(
+    "ar",
+    &outPath,
+    &objects,
+  );
+
+  let expected: String = archiveReadExpected("expected_archive_ok.txt");
+  let mut actual: String = String::create("archive_fail");
+  if (let Result::OK(_) = result) {
+    actual = String::create("archive_ok");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function archiveDefaultsToArWhenEmpty(): void {
+  let objPath: Path::PathBuf = archiveCompileTestObject("b");
+  let objPathStr: String = objPath.toString();
+
+  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_archive_default.a");
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(objPathStr.clone());
+
+  // Empty ar name should resolve to "ar" and succeed.
+  let result: Result<boolean, DiagnosticBag> = ArchiveTool::archive(
+    "",
+    &outPath,
+    &objects,
+  );
+
+  let expected: String = archiveReadExpected("expected_archive_ok.txt");
+  let mut actual: String = String::create("archive_fail");
+  if (let Result::OK(_) = result) {
+    actual = String::create("archive_ok");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function archiveErrorDiagHasCode(): void {
+  let error: ToolchainError = ToolchainError::new("ar", "archive", "ar: no such file");
+  let bag: DiagnosticBag = archiveToolErrorDiag(&error);
+  Test::assert(bag.length() > 0);
+}
