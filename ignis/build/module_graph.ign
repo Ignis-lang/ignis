@@ -1,0 +1,200 @@
+import Path from "std::path";
+import String from "std::string";
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+
+function moduleGraphPathEquals(left: &Path::PathBuf, right: &Path::PathBuf): boolean {
+  let leftText: String = left.toString();
+  let rightText: String = right.toString();
+  return leftText.equals(&rightText);
+}
+
+function moduleGraphContainsIndex(values: &Vector<u64>, target: u64): boolean {
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    let Option::SOME(value) = values.get(index) else {
+      break;
+    };
+
+    if (*value == target) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+export enum BuildModuleKind {
+  PROJECT,
+  STD,
+}
+
+export record BuildGraphEdge {
+  public targetIndex: u64;
+  public source: String;
+  public span: SourceSpan;
+}
+
+export record BuildGraphNode {
+  public path: Path::PathBuf;
+  public kind: BuildModuleKind;
+  public edges: Vector<BuildGraphEdge>;
+}
+
+export record BuildGraph {
+  public nodes: Vector<BuildGraphNode>;
+  public rootIndex: Option<u64>;
+
+  public static init(): BuildGraph {
+    return BuildGraph {
+      nodes: Vector::new<BuildGraphNode>(),
+      rootIndex: Option::NONE,
+    };
+  }
+
+  public nodeCount(&self): u64 {
+    return self.nodes.length();
+  }
+
+  public nodePathText(&self, index: u64): Option<String> {
+    let Option::SOME(node) = self.nodes.get(index) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(node.path.toString());
+  }
+}
+
+export namespace ModuleGraph {
+  function findNodeIndex(graph: &BuildGraph, path: &Path::PathBuf): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < graph.nodes.length()) {
+      let Option::SOME(node) = graph.nodes.get(index) else {
+        break;
+      };
+
+      if (moduleGraphPathEquals(&node.path, path)) {
+        return Option::SOME(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function addNode(graph: &mut BuildGraph, path: &Path::PathBuf, kind: BuildModuleKind): u64 {
+    let mut existingIndex: u64 = 0;
+    while (existingIndex < graph.nodes.length()) {
+      let Option::SOME(existingNode) = graph.nodes.get(existingIndex) else {
+        break;
+      };
+
+      if (moduleGraphPathEquals(&existingNode.path, path)) {
+        return existingIndex;
+      }
+
+      existingIndex += 1;
+    }
+
+    {
+      let mut nodesRef: &mut Vector<BuildGraphNode> = &mut graph.nodes;
+      nodesRef.push(BuildGraphNode {
+        path: path.clone(),
+        kind: kind,
+        edges: Vector::new<BuildGraphEdge>(),
+      });
+    }
+
+    let index: u64 = graph.nodes.length() - 1;
+    match (graph.rootIndex) {
+      Option::SOME(_) -> {},
+      Option::NONE -> {
+        graph.rootIndex = Option::SOME(index);
+      },
+    };
+
+    return index;
+  }
+
+  function setRoot(graph: &mut BuildGraph, index: u64): void {
+    graph.rootIndex = Option::SOME(index);
+  }
+
+  function addEdge(graph: &mut BuildGraph, fromIndex: u64, toIndex: u64, source: &String, span: SourceSpan): void {
+    let Option::SOME(node) = graph.nodes.getMut(fromIndex) else {
+      return;
+    };
+
+    let mut edgeIndex: u64 = 0;
+    while (edgeIndex < node.edges.length()) {
+      let Option::SOME(edge) = node.edges.get(edgeIndex) else {
+        break;
+      };
+
+      if (edge.targetIndex == toIndex) {
+        return;
+      }
+
+      edgeIndex += 1;
+    }
+
+    node.edges.push(BuildGraphEdge {
+      targetIndex: toIndex,
+      source: source.clone(),
+      span: span,
+    });
+  }
+
+  function topologicalOrder(graph: &BuildGraph): Vector<u64> {
+    let mut visited: Vector<u64> = Vector::new<u64>();
+    let mut order: Vector<u64> = Vector::new<u64>();
+
+    match (graph.rootIndex) {
+      Option::SOME(rootIndex) -> ModuleGraph::visit(graph, rootIndex, &mut visited, &mut order),
+      Option::NONE -> {},
+    };
+
+    return order;
+  }
+
+  function visit(graph: &BuildGraph, nodeIndex: u64, visited: &mut Vector<u64>, order: &mut Vector<u64>): void {
+    let mut visitedIndex: u64 = 0;
+    while (visitedIndex < visited.length()) {
+      let Option::SOME(value) = visited.get(visitedIndex) else {
+        break;
+      };
+
+      if (*value == nodeIndex) {
+        return;
+      }
+
+      visitedIndex += 1;
+    }
+
+    let mut visitedRef: &mut Vector<u64> = visited;
+    visitedRef.push(nodeIndex);
+
+    let Option::SOME(node) = graph.nodes.get(nodeIndex) else {
+      return;
+    };
+
+    let mut edgeIndex: u64 = 0;
+    while (edgeIndex < node.edges.length()) {
+      let Option::SOME(edge) = node.edges.get(edgeIndex) else {
+        break;
+      };
+
+      ModuleGraph::visit(graph, edge.targetIndex, visited, order);
+      edgeIndex += 1;
+    }
+
+    let mut orderRef: &mut Vector<u64> = order;
+    orderRef.push(nodeIndex);
+  }
+}

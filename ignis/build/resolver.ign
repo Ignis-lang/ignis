@@ -1,0 +1,916 @@
+import Ast from "@compiler::ast";
+import Diagnostic, DiagnosticBag, LabelKind, Severity, SourceFile, SourceSpan from "@compiler::diagnostics";
+import Parser from "@compiler::parser";
+
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import BuildGraph, BuildModuleKind, ModuleGraph from "./module_graph";
+import Manifest, StdManifest from "./manifest";
+
+const MISSING_MODULE: str = "B2001";
+const AMBIGUOUS_IMPORT: str = "B2002";
+const CYCLIC_IMPORT: str = "B2003";
+
+record ResolvedImportTarget {
+  public path: Path::PathBuf;
+  public kind: BuildModuleKind;
+}
+
+record ParsedImport {
+  public source: String;
+  public span: SourceSpan;
+}
+
+record ResolverAlias {
+  public name: String;
+  public path: Path::PathBuf;
+}
+
+record ResolverProject {
+  public root: Path::PathBuf;
+  public entry: Path::PathBuf;
+  public stdRoot: Path::PathBuf;
+  public stdManifestPath: Path::PathBuf;
+  public aliases: Vector<ResolverAlias>;
+}
+
+record AliasResolution {
+  public basePath: Path::PathBuf;
+  public remainder: String;
+}
+
+export record DiscoveryResult {
+  public graph: BuildGraph;
+  public order: Vector<u64>;
+
+  public orderCount(&self): u64 {
+    return self.order.length();
+  }
+}
+
+function resolverFixturePath(relativePath: str): Path::PathBuf {
+  match (Env::currentDir()) {
+    Result::OK(root) -> {
+      return root.join(relativePath).normalize();
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::new();
+    },
+  };
+
+  return Path::PathBuf::new();
+}
+
+function resolverReadText(path: &Path::PathBuf): String {
+  match (Fs::readToString(path)) {
+    Result::OK(text) -> {
+      return text;
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+
+  return String::new();
+}
+
+function resolverPathEquals(left: &Path::PathBuf, right: &Path::PathBuf): boolean {
+  let leftText: String = left.toString();
+  let rightText: String = right.toString();
+  return leftText.equals(&rightText);
+}
+
+function resolverPathInStack(stack: &mut Vector<Path::PathBuf>, path: &Path::PathBuf): boolean {
+  let mut index: u64 = 0;
+
+  while (index < stack.length()) {
+    let Option::SOME(candidate) = stack.get(index) else {
+      break;
+    };
+
+    if (resolverPathEquals(candidate, path)) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function resolverClonePathStack(stack: &mut Vector<Path::PathBuf>): Vector<Path::PathBuf> {
+  let mut copy: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut index: u64 = 0;
+
+  while (index < stack.length()) {
+    let Option::SOME(path) = stack.get(index) else {
+      break;
+    };
+
+    copy.push(path.clone());
+    index += 1;
+  }
+
+  return copy;
+}
+
+function resolverPathSpan(path: &Path::PathBuf, start: u64, end: u64): SourceSpan {
+  let pathText: String = path.toString();
+  return SourceSpan::new(pathText.toStr(), start, end);
+}
+
+function resolverSingleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}
+
+function resolverSimpleDiagnostic(path: &Path::PathBuf, code: str, message: str): DiagnosticBag {
+  let diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    code,
+    message,
+    resolverPathSpan(path, 0, 0),
+  );
+  return resolverSingleDiagnostic(diagnostic);
+}
+
+function resolverSectionName(line: &String): Option<String> {
+  if (line.length() < 2) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(first) = line.charAt(0) else {
+    return Option::NONE;
+  };
+  let Option::SOME(last) = line.charAt(line.length() - 1) else {
+    return Option::NONE;
+  };
+
+  if (first != '[' || last != ']') {
+    return Option::NONE;
+  }
+
+  return Option::SOME(line.substringBytes(1, line.length() - 1).trimAsciiWhitespace());
+}
+
+function resolverAssignmentKey(line: &String): Option<String> {
+  let Option::SOME(index) = line.indexOfCharFrom('=', 0) else {
+    return Option::NONE;
+  };
+
+  let key: String = line.substringBytes(0, index).trimAsciiWhitespace();
+  if (key.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(key);
+}
+
+function resolverAssignmentValue(line: &String): Option<String> {
+  let Option::SOME(index) = line.indexOfCharFrom('=', 0) else {
+    return Option::NONE;
+  };
+
+  let value: String = line.substringBytes(index + 1, line.length()).trimAsciiWhitespace();
+  if (value.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(value);
+}
+
+function resolverUnquote(text: &String): String {
+  if (text.length() < 2 || !text.startsWith("\"") ) {
+    return text.clone();
+  }
+
+  let Option::SOME(last) = text.charAt(text.length() - 1) else {
+    return text.clone();
+  };
+
+  if (last != '"') {
+    return text.clone();
+  }
+
+  return text.substringBytes(1, text.length() - 1);
+}
+
+function resolverFindProjectFile(startPath: &Path::PathBuf): Option<Path::PathBuf> {
+  let mut current: Path::PathBuf = startPath.clone();
+
+  if (let Result::OK(metadata) = Fs::metadata(startPath)) {
+    if (metadata.isFile()) {
+      let Option::SOME(parent) = startPath.parent() else {
+        return Option::NONE;
+      };
+      current = parent;
+    }
+  }
+
+  while (true) {
+    let candidate: Path::PathBuf = current.join("ignis.toml");
+    if (Fs::exists(candidate.asStr())) {
+      return Option::SOME(candidate.clone());
+    }
+
+    let Option::SOME(parent) = current.parent() else {
+      return Option::NONE;
+    };
+    current = parent;
+  }
+
+  return Option::NONE;
+}
+
+function resolverCanonicalPath(path: &Path::PathBuf, message: str): Result<Path::PathBuf, DiagnosticBag> {
+  if (!Fs::exists(path.asStr())) {
+    return Result::ERROR(resolverSimpleDiagnostic(path, MISSING_MODULE, message));
+  }
+
+  let Result::OK(canonical) = Fs::canonicalize(path) else {
+    return Result::ERROR(resolverSimpleDiagnostic(path, MISSING_MODULE, message));
+  };
+
+  return Result::OK(canonical);
+}
+
+function resolverLoadProject(startPath: &Path::PathBuf): Result<ResolverProject, DiagnosticBag> {
+  let Option::SOME(configPath) = resolverFindProjectFile(startPath) else {
+    return Result::ERROR(resolverSimpleDiagnostic(startPath, MISSING_MODULE, "ignis.toml could not be found"));
+  };
+  let Result::OK(source) = Fs::readToString(&configPath) else {
+    return Result::ERROR(resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "ignis.toml could not be read"));
+  };
+  let Option::SOME(rootPath) = configPath.parent() else {
+    return Result::ERROR(resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "project root could not be resolved"));
+  };
+  let root: Path::PathBuf = resolverCanonicalPath(&rootPath, "project root could not be resolved")!;
+
+  let mut section: String = String::new();
+  let mut sourceDir: String = String::create("src");
+  let mut entryName: String = String::create("main.ign");
+  let mut stdPath: String = String::create("std");
+  let mut aliases: Vector<ResolverAlias> = Vector::new<ResolverAlias>();
+  let lines: Vector<String> = source.lines();
+  let mut lineIndex: u64 = 0;
+
+  while (lineIndex < lines.length()) {
+    let Option::SOME(line) = lines.get(lineIndex) else {
+      break;
+    };
+    let trimmed: String = line.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0 || trimmed.startsWith("#")) {
+      lineIndex += 1;
+      continue;
+    }
+
+    if (let Option::SOME(sectionName) = resolverSectionName(&trimmed)) {
+      section = sectionName.clone();
+      lineIndex += 1;
+      continue;
+    }
+
+    let Option::SOME(keyText) = resolverAssignmentKey(&trimmed) else {
+      lineIndex += 1;
+      continue;
+    };
+    let Option::SOME(valueText) = resolverAssignmentValue(&trimmed) else {
+      lineIndex += 1;
+      continue;
+    };
+
+    let key: String = resolverUnquote(&keyText);
+    let value: String = resolverUnquote(&valueText);
+
+    if (section.equals("build")) {
+      if (key.equals("source_dir")) {
+        sourceDir = value.clone();
+      }
+
+      if (key.equals("entry")) {
+        entryName = value.clone();
+      }
+    }
+
+    if (section.equals("ignis") && key.equals("std_path")) {
+      stdPath = value.clone();
+    }
+
+    if (section.equals("aliases")) {
+      let aliasCandidate: Path::PathBuf = root.join(value.toStr()).normalize();
+      let aliasBase: Path::PathBuf = resolverCanonicalPath(&aliasCandidate, "alias path could not be resolved")!;
+      aliases.push(ResolverAlias {
+        name: key.clone(),
+        path: aliasBase,
+      });
+    }
+
+    lineIndex += 1;
+  }
+
+  let sourceRootCandidate: Path::PathBuf = root.join(sourceDir.toStr()).normalize();
+  let sourceRoot: Path::PathBuf = resolverCanonicalPath(&sourceRootCandidate, "source directory could not be resolved")!;
+  let entryCandidate: Path::PathBuf = sourceRoot.join(entryName.toStr()).normalize();
+  let entryPath: Path::PathBuf = resolverCanonicalPath(&entryCandidate, "entry file could not be resolved")!;
+  let stdRootCandidate: Path::PathBuf = root.join(stdPath.toStr()).normalize();
+  let stdRoot: Path::PathBuf = resolverCanonicalPath(&stdRootCandidate, "std root could not be resolved")!;
+  let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
+  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+
+  return Result::OK(ResolverProject {
+    root: root,
+    entry: entryPath,
+    stdRoot: stdRoot,
+    stdManifestPath: stdManifestPath,
+    aliases: aliases,
+  });
+}
+
+function resolverMissingModuleDiagnostic(currentFile: &Path::PathBuf, importSource: &String, span: SourceSpan): DiagnosticBag {
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    MISSING_MODULE,
+    String::create("module '").concat(importSource).concat("' could not be resolved").toStr(),
+    span,
+  );
+  diagnostic.addLabel(LabelKind::PRIMARY, span, "unresolved import");
+
+  let fileText: String = currentFile.toString();
+  diagnostic.addNote(String::create("while resolving imports for ").concat(&fileText).toStr());
+
+  return resolverSingleDiagnostic(diagnostic);
+}
+
+function resolverAmbiguousImportDiagnostic(
+  currentFile: &Path::PathBuf,
+  importSource: &String,
+  span: SourceSpan,
+  firstCandidate: &Path::PathBuf,
+  secondCandidate: &Path::PathBuf,
+): DiagnosticBag {
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    AMBIGUOUS_IMPORT,
+    String::create("import '").concat(importSource).concat("' resolves to multiple modules").toStr(),
+    span,
+  );
+  diagnostic.addLabel(LabelKind::PRIMARY, span, "ambiguous import");
+
+  let fileText: String = currentFile.toString();
+  let firstText: String = firstCandidate.toString();
+  let secondText: String = secondCandidate.toString();
+  diagnostic.addNote(String::create("while resolving imports for ").concat(&fileText).toStr());
+  diagnostic.addNote(String::create("candidate: ").concat(&firstText).toStr());
+  diagnostic.addNote(String::create("candidate: ").concat(&secondText).toStr());
+
+  return resolverSingleDiagnostic(diagnostic);
+}
+
+function resolverCycleDiagnostic(cycle: &Vector<Path::PathBuf>): DiagnosticBag {
+  let Option::SOME(firstPath) = cycle.get(0) else {
+    let fallback: Path::PathBuf = Path::PathBuf::create("<cycle>");
+    let diagnostic: Diagnostic = Diagnostic::new(
+      Severity::ERROR,
+      CYCLIC_IMPORT,
+      "cyclic module import detected",
+      resolverPathSpan(&fallback, 0, 0),
+    );
+    return resolverSingleDiagnostic(diagnostic);
+  };
+
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    CYCLIC_IMPORT,
+    "cyclic module import detected",
+    resolverPathSpan(firstPath, 0, 0),
+  );
+
+  let cycleText: String = resolverCycleText(cycle);
+  diagnostic.addNote(String::create("cycle: ").concat(&cycleText).toStr());
+
+  return resolverSingleDiagnostic(diagnostic);
+}
+
+function resolverCycleText(cycle: &Vector<Path::PathBuf>): String {
+  let mut text: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < cycle.length()) {
+    let Option::SOME(path) = cycle.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      text.pushStr(" -> ");
+    }
+
+    let pathText: String = path.toString();
+    text.push(&pathText);
+    index += 1;
+  }
+
+  return text;
+}
+
+function resolverFirstSegment(source: &String): String {
+  let separator: String = String::create("::");
+  return match (source.indexOf(&separator)) {
+    Option::SOME(index) -> source.substringBytes(0, index),
+    Option::NONE -> source.clone(),
+  };
+}
+
+function resolverRestSegments(source: &String): Option<String> {
+  let separator: String = String::create("::");
+  return match (source.indexOf(&separator)) {
+    Option::SOME(index) -> Option::SOME(source.substringBytes(index + separator.length(), source.length())),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function resolverReplaceModuleSeparators(text: &String): String {
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(current) = text.charAt(index) else {
+      break;
+    };
+
+    if (current == ':' && index + 1 < text.length()) {
+      let Option::SOME(next) = text.charAt(index + 1) else {
+        break;
+      };
+
+      if (next == ':') {
+        result.pushChar('/');
+        index += 2;
+        continue;
+      }
+    }
+
+    result.pushChar(current);
+    index += 1;
+  }
+
+  return result;
+}
+
+function resolverMergeAliasSegments(remainder: &String, rest: &String): String {
+  let mergedPrefix: String = remainder.concat("::");
+  let merged: String = mergedPrefix.concat(rest);
+  return resolverReplaceModuleSeparators(&merged);
+}
+
+function resolverJoinAliasRemainder(remainder: &String, rest: &Option<String>): String {
+  if (remainder.length() == 0) {
+    return match (rest) {
+      Option::SOME(value) -> resolverReplaceModuleSeparators(&value),
+      Option::NONE -> String::new(),
+    };
+  }
+
+  return match (rest) {
+    Option::SOME(value) -> resolverMergeAliasSegments(remainder, &value),
+    Option::NONE -> resolverReplaceModuleSeparators(remainder),
+  };
+}
+
+function resolverPathWithIgnExtension(basePath: &Path::PathBuf): Path::PathBuf {
+  let pathText: String = basePath.toString().concat(".ign");
+  return Path::PathBuf::fromString(&pathText).normalize();
+}
+
+function resolverCanonicalizeExisting(path: &Path::PathBuf): Result<Path::PathBuf, DiagnosticBag> {
+  let Result::OK(canonical) = Fs::canonicalize(path) else {
+    let span: SourceSpan = resolverPathSpan(path, 0, 0);
+    let mut diagnostic: Diagnostic = Diagnostic::new(
+      Severity::ERROR,
+      MISSING_MODULE,
+      "module path could not be canonicalized",
+      span,
+    );
+    diagnostic.addLabel(LabelKind::PRIMARY, span, "filesystem resolution failed");
+    return Result::ERROR(resolverSingleDiagnostic(diagnostic));
+  };
+
+  return Result::OK(canonical);
+}
+
+function resolverResolveFsPath(
+  currentFile: &Path::PathBuf,
+  importSource: &String,
+  span: SourceSpan,
+  basePath: &Path::PathBuf,
+): Result<Path::PathBuf, DiagnosticBag> {
+  match (basePath.extension()) {
+    Option::SOME(_) -> {
+      if (!Fs::exists(basePath.asStr())) {
+        return Result::ERROR(resolverMissingModuleDiagnostic(currentFile, importSource, span));
+      }
+
+      return resolverCanonicalizeExisting(basePath);
+    },
+    Option::NONE -> {},
+  };
+
+  let fileCandidate: Path::PathBuf = resolverPathWithIgnExtension(basePath);
+  let modCandidate: Path::PathBuf = basePath.join("mod.ign");
+  let hasFileCandidate: boolean = Fs::exists(fileCandidate.asStr());
+  let hasModCandidate: boolean = Fs::exists(modCandidate.asStr());
+
+  if (hasFileCandidate && hasModCandidate) {
+    return Result::ERROR(resolverAmbiguousImportDiagnostic(currentFile, importSource, span, &fileCandidate, &modCandidate));
+  }
+
+  if (hasFileCandidate) {
+    return resolverCanonicalizeExisting(&fileCandidate);
+  }
+
+  if (hasModCandidate) {
+    return resolverCanonicalizeExisting(&modCandidate);
+  }
+
+  return Result::ERROR(resolverMissingModuleDiagnostic(currentFile, importSource, span));
+}
+
+function resolverAliasMatch(project: &ResolverProject, importSource: &String): Option<AliasResolution> {
+  let firstSegment: String = resolverFirstSegment(importSource);
+  let rest: Option<String> = resolverRestSegments(importSource);
+
+  let mut exactIndex: u64 = 0;
+  while (exactIndex < project.aliases.length()) {
+    let Option::SOME(alias) = project.aliases.get(exactIndex) else {
+      break;
+    };
+
+    if (alias.name.equals(&firstSegment)) {
+      let emptyRemainder: String = String::new();
+      return Option::SOME(AliasResolution {
+        basePath: alias.path.clone(),
+        remainder: resolverJoinAliasRemainder(&emptyRemainder, &rest),
+      });
+    }
+
+    exactIndex += 1;
+  }
+
+  let mut bestMatchLength: u64 = 0;
+  let mut bestMatch: Option<AliasResolution> = Option::NONE;
+  let mut prefixIndex: u64 = 0;
+
+  while (prefixIndex < project.aliases.length()) {
+    let Option::SOME(alias) = project.aliases.get(prefixIndex) else {
+      break;
+    };
+
+    if (alias.name.length() < firstSegment.length() && firstSegment.startsWith(alias.name.toStr()) && alias.name.length() > bestMatchLength) {
+      let remainder: String = firstSegment.substringBytes(alias.name.length(), firstSegment.length());
+      bestMatchLength = alias.name.length();
+      bestMatch = Option::SOME(AliasResolution {
+        basePath: alias.path.clone(),
+        remainder: resolverJoinAliasRemainder(&remainder, &rest),
+      });
+    }
+
+    prefixIndex += 1;
+  }
+
+  return bestMatch;
+}
+
+function resolverResolveImport(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+  currentFile: &Path::PathBuf,
+  importSource: &String,
+  span: SourceSpan,
+): Result<ResolvedImportTarget, DiagnosticBag> {
+  if (importSource.startsWith("std::")) {
+    let moduleName: String = importSource.substringBytes(5, importSource.length());
+    let stdRoot: Path::PathBuf = project.stdRoot.clone();
+
+    let mut candidateBase: Path::PathBuf = Path::PathBuf::new();
+    match (manifest.modulePathText(moduleName.toStr())) {
+      Option::SOME(relativePath) -> {
+        candidateBase = stdRoot.join(relativePath.toStr()).normalize();
+      },
+      Option::NONE -> {
+        let relativePath: String = resolverReplaceModuleSeparators(&moduleName);
+        candidateBase = stdRoot.join(relativePath.toStr()).normalize();
+      },
+    };
+
+    let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    return Result::OK(ResolvedImportTarget {
+      path: resolved,
+      kind: BuildModuleKind::STD,
+    });
+  }
+
+  if (let Option::SOME(aliasMatch) = resolverAliasMatch(project, importSource)) {
+    let mut candidateBase: Path::PathBuf = aliasMatch.basePath.clone();
+    if (aliasMatch.remainder.length() > 0) {
+      candidateBase = aliasMatch.basePath.join(aliasMatch.remainder.toStr()).normalize();
+    }
+
+    let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    return Result::OK(ResolvedImportTarget {
+      path: resolved,
+      kind: BuildModuleKind::PROJECT,
+    });
+  }
+
+  if (importSource.startsWith("./") || importSource.startsWith("../")) {
+    let Option::SOME(parent) = currentFile.parent() else {
+      return Result::ERROR(resolverMissingModuleDiagnostic(currentFile, importSource, span));
+    };
+
+    let candidateBase: Path::PathBuf = parent.join(importSource.toStr()).normalize();
+    let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    return Result::OK(ResolvedImportTarget {
+      path: resolved,
+      kind: BuildModuleKind::PROJECT,
+    });
+  }
+
+  let projectRoot: Path::PathBuf = project.root.clone();
+
+  let candidateBase: Path::PathBuf = projectRoot.join(importSource.toStr()).normalize();
+  let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+  return Result::OK(ResolvedImportTarget {
+    path: resolved,
+    kind: BuildModuleKind::PROJECT,
+  });
+}
+
+function resolverExtractImports(path: &Path::PathBuf): Result<Vector<ParsedImport>, DiagnosticBag> {
+  let Result::OK(sourceText) = Fs::readToString(path) else {
+    return Result::ERROR(resolverSingleDiagnostic(Diagnostic::new(
+      Severity::ERROR,
+      MISSING_MODULE,
+      "module source could not be read",
+      resolverPathSpan(path, 0, 0),
+    )));
+  };
+
+  let sourceFile: SourceFile = SourceFile {
+    path: path.clone(),
+    text: sourceText.clone(),
+  };
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+
+  Parser::parseInto(&sourceFile, &mut module, &mut diagnostics);
+  if (!diagnostics.isEmpty()) {
+    return Result::ERROR(diagnostics);
+  }
+
+  let mut imports: Vector<ParsedImport> = Vector::new<ParsedImport>();
+  let mut rootIndex: u64 = 0;
+
+  while (rootIndex < module.roots.length()) {
+    let Option::SOME(itemId) = module.roots.get(rootIndex) else {
+      break;
+    };
+    let Option::SOME(item) = module.items.get(*itemId) else {
+      rootIndex += 1;
+      continue;
+    };
+
+    match (item) {
+      Ast::Item::Node::Import(importItem) -> {
+        imports.push(ParsedImport {
+          source: importItem.source.clone(),
+          span: importItem.sourceSpan,
+        });
+      },
+      Ast::Item::Node::Export(exportItem) -> {
+        match (exportItem.source) {
+          Option::SOME(source) -> {
+            let spanValue: SourceSpan = match (exportItem.sourceSpan) {
+              Option::SOME(value) -> value,
+              Option::NONE -> resolverPathSpan(path, 0, 0),
+            };
+
+            imports.push(ParsedImport {
+              source: source.clone(),
+              span: spanValue,
+            });
+          },
+          Option::NONE -> {},
+        };
+      },
+      _ -> {},
+    };
+
+    rootIndex += 1;
+  }
+
+  return Result::OK(imports);
+}
+
+function resolverDiscoverModule(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+  graph: &mut BuildGraph,
+  currentPath: &Path::PathBuf,
+  kind: BuildModuleKind,
+  stack: &mut Vector<Path::PathBuf>,
+): Result<u64, DiagnosticBag> {
+  let mut existingIndex: u64 = 0;
+  while (existingIndex < graph.nodes.length()) {
+    let Option::SOME(existingNode) = graph.nodes.get(existingIndex) else {
+      break;
+    };
+
+    if (resolverPathEquals(&existingNode.path, currentPath)) {
+      return Result::OK(existingIndex);
+    }
+
+    existingIndex += 1;
+  }
+
+  let currentIndex: u64 = ModuleGraph::addNode(graph, currentPath, kind);
+  let mut stackRef: &mut Vector<Path::PathBuf> = stack;
+  stackRef.push(currentPath.clone());
+
+  let imports: Vector<ParsedImport> = resolverExtractImports(currentPath)!;
+  let mut importIndex: u64 = 0;
+
+  while (importIndex < imports.length()) {
+    let Option::SOME(importItem) = imports.get(importIndex) else {
+      break;
+    };
+
+    let target: ResolvedImportTarget = resolverResolveImport(project, manifest, currentPath, &importItem.source, importItem.span)!;
+    if (resolverPathInStack(stack, &target.path)) {
+      let mut cycle: Vector<Path::PathBuf> = resolverClonePathStack(stack);
+      cycle.push(target.path.clone());
+      return Result::ERROR(resolverCycleDiagnostic(&cycle));
+    }
+
+    let targetIndex: u64 = resolverDiscoverModule(project, manifest, graph, &target.path, target.kind, stack)!;
+    ModuleGraph::addEdge(graph, currentIndex, targetIndex, &importItem.source, importItem.span);
+    importIndex += 1;
+  }
+
+  let Option::SOME(lastPath) = stack.get(stack.length() - 1) else {
+    return Result::OK(currentIndex);
+  };
+
+  if (resolverPathEquals(lastPath, currentPath)) {
+    let mut stackWrite: &mut Vector<Path::PathBuf> = stack;
+    stackWrite.pop();
+  }
+
+  return Result::OK(currentIndex);
+}
+
+function resolverRelativePathText(path: &Path::PathBuf, root: &Path::PathBuf): String {
+  let pathText: String = path.toString();
+  let rootText: String = root.toString();
+
+  if (!pathText.startsWith(rootText.toStr())) {
+    return pathText;
+  }
+
+  let mut start: u64 = rootText.length();
+  if (pathText.length() > start) {
+    if (let Option::SOME(separator) = pathText.charAt(start) && separator == '/') {
+      start += 1;
+    }
+  }
+
+  return pathText.substringBytes(start, pathText.length());
+}
+
+function resolverDiagnosticSummary(bag: &DiagnosticBag): String {
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return String::create(diagnostic.code).concat("|").concat(diagnostic.message);
+}
+
+export namespace Resolver {
+  function discoverProject(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = resolverLoadProject(startPath)!;
+    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
+    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+
+    let mut graph: BuildGraph = BuildGraph::init();
+    let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let rootIndex: u64 = resolverDiscoverModule(&project, &manifest, &mut graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
+    ModuleGraph::setRoot(&mut graph, rootIndex);
+    let order: Vector<u64> = ModuleGraph::topologicalOrder(&graph);
+
+    return Result::OK(DiscoveryResult {
+      graph: graph,
+      order: order,
+    });
+  }
+
+  function orderSummaryRelativeTo(discovery: &DiscoveryResult, root: &Path::PathBuf): String {
+    let mut summary: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < discovery.order.length()) {
+      let Option::SOME(nodeIndex) = discovery.order.get(index) else {
+        break;
+      };
+      let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        summary.pushChar('\n');
+      }
+
+      let relative: String = resolverRelativePathText(&node.path, root);
+      summary.push(&relative);
+      index += 1;
+    }
+
+    return summary;
+  }
+
+  function firstDiagnosticSummary(startPath: &Path::PathBuf): String {
+    let Result::ERROR(bag) = Resolver::discoverProject(startPath) else {
+      Test::fail();
+      return String::new();
+    };
+
+    return resolverDiagnosticSummary(&bag);
+  }
+}
+
+@test
+function resolverDiscoversAcyclicFixtureInDependencyOrder(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let actual: String = Resolver::orderSummaryRelativeTo(&discovery, &fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverDiscoversAliasRelativeStdFixtureInDependencyOrder(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/alias_relative_std");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let actual: String = Resolver::orderSummaryRelativeTo(&discovery, &fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverReportsMissingModuleDiagnostic(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/missing");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverReportsAmbiguousImportDiagnostic(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/ambiguous");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverReportsCycleDiagnostic(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/cycle");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
