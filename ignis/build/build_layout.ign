@@ -1,0 +1,291 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+
+/// Deterministic build output directory structure.
+///
+/// Mirrors the Rust `BuildLayout` oracle in `crates/ignis_driver/src/build_layout.rs`.
+/// Directories follow the pattern:
+///   {base}/std/{include,src,obj,lib}  + {base}/std/.stamp
+///   {base}/user/{include,src,obj,lib} + {base}/user/.stamps/
+///   {base}/bin/
+export record BuildLayout {
+  public base: Path::PathBuf;
+  public projectName: String;
+
+  public static new(projectName: str, base: &Path::PathBuf): BuildLayout {
+    return BuildLayout {
+      base: base.clone(),
+      projectName: String::create(projectName),
+    };
+  }
+
+  // -- Std paths --
+
+  public stdDir(&self): Path::PathBuf {
+    return self.base.join("std");
+  }
+
+  public stdIncludeDir(&self): Path::PathBuf {
+    return self.stdDir().join("include");
+  }
+
+  public stdSrcDir(&self): Path::PathBuf {
+    return self.stdDir().join("src");
+  }
+
+  public stdObjDir(&self): Path::PathBuf {
+    return self.stdDir().join("obj");
+  }
+
+  public stdLibDir(&self): Path::PathBuf {
+    return self.stdDir().join("lib");
+  }
+
+  public stdLibPath(&self): Path::PathBuf {
+    return self.stdLibDir().join("libignis_std.a");
+  }
+
+  public stdStampPath(&self): Path::PathBuf {
+    return self.stdDir().join(".stamp");
+  }
+
+  // -- User paths --
+
+  public userDir(&self): Path::PathBuf {
+    return self.base.join("user");
+  }
+
+  public userIncludeDir(&self): Path::PathBuf {
+    return self.userDir().join("include");
+  }
+
+  public userSrcDir(&self): Path::PathBuf {
+    return self.userDir().join("src");
+  }
+
+  public userObjDir(&self): Path::PathBuf {
+    return self.userDir().join("obj");
+  }
+
+  public userLibDir(&self): Path::PathBuf {
+    return self.userDir().join("lib");
+  }
+
+  public userLibPath(&self): Path::PathBuf {
+    return self.userLibDir().join("libignis_user.a");
+  }
+
+  public userStampsDir(&self): Path::PathBuf {
+    return self.userDir().join(".stamps");
+  }
+
+  /// Per-module stamp preserving source path structure under `.stamps/`.
+  /// Example: `src/math/utils.ign` -> `{base}/user/.stamps/src/math/utils.stamp`
+  public userModuleStampPath(&self, relativeSourcePath: str): Path::PathBuf {
+    let sourcePath: Path::PathBuf = Path::PathBuf::create(relativeSourcePath);
+    let withStamp: Path::PathBuf = buildLayoutReplaceExtension(&sourcePath, "stamp");
+    return self.userStampsDir().join(withStamp.asStr());
+  }
+
+  /// Per-module header preserving source path structure.
+  /// Example: `src/math/utils.ign` -> `{base}/user/include/src/math/utils.h`
+  public userModuleHeader(&self, relativeSourcePath: str): Path::PathBuf {
+    let sourcePath: Path::PathBuf = Path::PathBuf::create(relativeSourcePath);
+    let withH: Path::PathBuf = buildLayoutReplaceExtension(&sourcePath, "h");
+    return self.userIncludeDir().join(withH.asStr());
+  }
+
+  /// Per-module C source preserving source path structure.
+  /// Example: `src/math/utils.ign` -> `{base}/user/src/src/math/utils.c`
+  public userModuleSrc(&self, relativeSourcePath: str): Path::PathBuf {
+    let sourcePath: Path::PathBuf = Path::PathBuf::create(relativeSourcePath);
+    let withC: Path::PathBuf = buildLayoutReplaceExtension(&sourcePath, "c");
+    return self.userSrcDir().join(withC.asStr());
+  }
+
+  /// Per-module object preserving source path structure.
+  /// Example: `src/math/utils.ign` -> `{base}/user/obj/src/math/utils.o`
+  public userModuleObj(&self, relativeSourcePath: str): Path::PathBuf {
+    let sourcePath: Path::PathBuf = Path::PathBuf::create(relativeSourcePath);
+    let withO: Path::PathBuf = buildLayoutReplaceExtension(&sourcePath, "o");
+    return self.userObjDir().join(withO.asStr());
+  }
+
+  // -- Bin paths --
+
+  public binDir(&self): Path::PathBuf {
+    return self.base.join("bin");
+  }
+
+  public binPath(&self): Path::PathBuf {
+    return self.binDir().join(self.projectName.toStr());
+  }
+}
+
+/// Replace the extension of a path with a new one.
+/// `src/math/utils.ign` + `"h"` -> `src/math/utils.h`
+///
+/// Only replaces the extension when a dot appears after the last path separator,
+/// so dotfiles (`.hidden`) have no extension and are left unchanged.
+function buildLayoutReplaceExtension(path: &Path::PathBuf, newExt: str): Path::PathBuf {
+  let pathText: String = path.toString();
+
+  let lastDotOpt: Option<u64> = pathText.findLastByte((b: u8): boolean -> { return b == 46; });
+  let lastSlashOpt: Option<u64> = pathText.findLastByte((b: u8): boolean -> { return b == 47; });
+
+  let mut dotIndex: u64 = pathText.length();
+
+  if (let Option::SOME(dotPos) = lastDotOpt) {
+    let isAfterSlash: boolean = match (lastSlashOpt) {
+      Option::SOME(slashPos) -> dotPos > slashPos,
+      Option::NONE -> true,
+    };
+
+    if (isAfterSlash && dotPos > 0) {
+      dotIndex = dotPos;
+    }
+  }
+
+  let stem: String = pathText.substringBytes(0, dotIndex);
+  let result: String = stem.concat(".").concat(newExt);
+  return Path::PathBuf::fromString(&result);
+}
+
+function buildLayoutFixtureBase(): Path::PathBuf {
+  return Path::PathBuf::create("/tmp/ignis_build_test");
+}
+
+function buildLayoutReadExpected(filename: str): String {
+  let fixtureDir: Path::PathBuf = match (Env::currentDir()) {
+    Result::OK(root) -> root.join("test_cases/selfhost/build/layout").normalize(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+
+  let path: Path::PathBuf = fixtureDir.join(filename);
+  return match (Fs::readToString(&path)) {
+    Result::OK(text) -> text.trimAsciiWhitespace(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+}
+
+function buildLayoutBuildExpectedPaths(): String {
+  let base: Path::PathBuf = buildLayoutFixtureBase();
+  let layout: BuildLayout = BuildLayout::new("myapp", &base);
+
+  let mut result: String = String::new();
+  let std: String = layout.stdDir().toString();
+  let stdInclude: String = layout.stdIncludeDir().toString();
+  let stdSrc: String = layout.stdSrcDir().toString();
+  let stdObj: String = layout.stdObjDir().toString();
+  let stdLib: String = layout.stdLibDir().toString();
+  let stdLibPath: String = layout.stdLibPath().toString();
+  let stdStamp: String = layout.stdStampPath().toString();
+  let user: String = layout.userDir().toString();
+  let userInclude: String = layout.userIncludeDir().toString();
+  let userSrc: String = layout.userSrcDir().toString();
+  let userObj: String = layout.userObjDir().toString();
+  let userLib: String = layout.userLibDir().toString();
+  let userLibPath: String = layout.userLibPath().toString();
+  let userStamps: String = layout.userStampsDir().toString();
+  let bin: String = layout.binDir().toString();
+  let binPath: String = layout.binPath().toString();
+
+  result.pushStr("std=");
+  result.push(&std);
+  result.pushChar('\n');
+  result.pushStr("std_include=");
+  result.push(&stdInclude);
+  result.pushChar('\n');
+  result.pushStr("std_src=");
+  result.push(&stdSrc);
+  result.pushChar('\n');
+  result.pushStr("std_obj=");
+  result.push(&stdObj);
+  result.pushChar('\n');
+  result.pushStr("std_lib=");
+  result.push(&stdLib);
+  result.pushChar('\n');
+  result.pushStr("std_lib_path=");
+  result.push(&stdLibPath);
+  result.pushChar('\n');
+  result.pushStr("std_stamp=");
+  result.push(&stdStamp);
+  result.pushChar('\n');
+  result.pushStr("user=");
+  result.push(&user);
+  result.pushChar('\n');
+  result.pushStr("user_include=");
+  result.push(&userInclude);
+  result.pushChar('\n');
+  result.pushStr("user_src=");
+  result.push(&userSrc);
+  result.pushChar('\n');
+  result.pushStr("user_obj=");
+  result.push(&userObj);
+  result.pushChar('\n');
+  result.pushStr("user_lib=");
+  result.push(&userLib);
+  result.pushChar('\n');
+  result.pushStr("user_lib_path=");
+  result.push(&userLibPath);
+  result.pushChar('\n');
+  result.pushStr("user_stamps=");
+  result.push(&userStamps);
+  result.pushChar('\n');
+  result.pushStr("bin=");
+  result.push(&bin);
+  result.pushChar('\n');
+  result.pushStr("bin_path=");
+  result.push(&binPath);
+
+  return result;
+}
+
+function buildLayoutBuildExpectedModulePaths(): String {
+  let base: Path::PathBuf = buildLayoutFixtureBase();
+  let layout: BuildLayout = BuildLayout::new("myapp", &base);
+  let relPath: str = "src/math/utils.ign";
+
+  let header: String = layout.userModuleHeader(relPath).toString();
+  let src: String = layout.userModuleSrc(relPath).toString();
+  let obj: String = layout.userModuleObj(relPath).toString();
+  let stamp: String = layout.userModuleStampPath(relPath).toString();
+
+  let mut result: String = String::new();
+  result.pushStr("header=");
+  result.push(&header);
+  result.pushChar('\n');
+  result.pushStr("src=");
+  result.push(&src);
+  result.pushChar('\n');
+  result.pushStr("obj=");
+  result.push(&obj);
+  result.pushChar('\n');
+  result.pushStr("stamp=");
+  result.push(&stamp);
+
+  return result;
+}
+
+@test
+function layoutComputesDeterministicBaseDirectories(): void {
+  let actual: String = buildLayoutBuildExpectedPaths();
+  let expected: String = buildLayoutReadExpected("expected_paths.txt");
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function layoutComputesDeterministicModulePaths(): void {
+  let actual: String = buildLayoutBuildExpectedModulePaths();
+  let expected: String = buildLayoutReadExpected("expected_module_paths.txt");
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}

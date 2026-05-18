@@ -1,0 +1,283 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Hasher from "std::hash";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+/// Build configuration that affects output identity.
+///
+/// All fields participate in cache invalidation. Any change to a field
+/// means previously-built artifacts are stale and must be rebuilt.
+///
+/// Mirrors the Rust `BuildFingerprint` in `crates/ignis_driver/src/build_layout.rs`
+/// but extended per Phase 7 spec to include backend, cc, cflagsHash, and stdManifestHash.
+export record BuildFingerprint {
+  public compilerVersion: String;
+  public abiVersion: u32;
+  public targetTriple: String;
+  public backend: String;
+  public cc: String;
+  public cflagsHash: String;
+  public stdManifestHash: String;
+
+  public static new(
+    compilerVersion: str,
+    abiVersion: u32,
+    targetTriple: str,
+    backend: str,
+    cc: str,
+    cflagsHash: str,
+    stdManifestHash: str,
+  ): BuildFingerprint {
+    return BuildFingerprint {
+      compilerVersion: String::create(compilerVersion),
+      abiVersion: abiVersion,
+      targetTriple: String::create(targetTriple),
+      backend: String::create(backend),
+      cc: String::create(cc),
+      cflagsHash: String::create(cflagsHash),
+      stdManifestHash: String::create(stdManifestHash),
+    };
+  }
+}
+
+/// Compute a deterministic FNV-1a fingerprint hash for a string value.
+///
+/// Uses `std::hash::Hasher` (64-bit FNV-1a with fixed seed) and returns the
+/// hash state as a decimal string, avoiding a hex-formatting dependency.
+export function fingerprintHashStr(text: str): String {
+  let mut hasher: Hasher = Hasher::new();
+  hasher.writeStr(text);
+  let value: u64 = hasher.finish();
+  return value.toString();
+}
+
+/// Serialize the fingerprint as a sorted key=value block for use in stamp files.
+///
+/// The block is deterministic: fields appear in alphabetical key order so that
+/// two `BuildFingerprint` values that are field-equal produce byte-identical output.
+export function fingerprintSerialize(fp: &BuildFingerprint): String {
+  let mut out: String = String::new();
+
+  out.pushStr("abi_version=");
+  let abiText: String = fp.abiVersion.toString();
+  out.push(&abiText);
+  out.pushChar('\n');
+
+  out.pushStr("backend=");
+  out.push(&fp.backend);
+  out.pushChar('\n');
+
+  out.pushStr("cc=");
+  out.push(&fp.cc);
+  out.pushChar('\n');
+
+  out.pushStr("cflags_hash=");
+  out.push(&fp.cflagsHash);
+  out.pushChar('\n');
+
+  out.pushStr("compiler_version=");
+  out.push(&fp.compilerVersion);
+  out.pushChar('\n');
+
+  out.pushStr("std_manifest_hash=");
+  out.push(&fp.stdManifestHash);
+  out.pushChar('\n');
+
+  out.pushStr("target_triple=");
+  out.push(&fp.targetTriple);
+
+  return out;
+}
+
+/// Parse a `u32` from decimal digits.
+///
+/// Returns `Option::NONE` if `text` is empty or contains non-digit bytes.
+function fingerprintParseU32(text: &String): Option<u32> {
+  if (text.length() == 0) {
+    return Option::NONE;
+  }
+
+  let mut result: u32 = 0;
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
+    };
+
+    if (byte < 48 || byte > 57) {
+      return Option::NONE;
+    }
+
+    result = result * 10 + ((byte - 48) as u32);
+    index += 1;
+  }
+
+  return Option::SOME(result);
+}
+
+/// Lookup the value for a key in a serialized key=value line.
+///
+/// Scans `lines` for the first line where the part before `=` matches `key`.
+/// Returns the trimmed value after `=`, or an empty String if not found.
+function fingerprintLookupKey(lines: &Vector<String>, key: str): String {
+  let searchKey: String = String::create(key);
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      break;
+    };
+
+    let trimmed: String = line.trimAsciiWhitespace();
+    let Option::SOME(eqIndex) = trimmed.indexOfCharFrom('=', 0) else {
+      index += 1;
+      continue;
+    };
+
+    let lineKey: String = trimmed.substringBytes(0, eqIndex).trimAsciiWhitespace();
+    if (lineKey.equals(&searchKey)) {
+      return trimmed.substringBytes(eqIndex + 1, trimmed.length()).trimAsciiWhitespace();
+    }
+
+    index += 1;
+  }
+
+  return String::new();
+}
+
+/// Parse a fingerprint from a serialized key=value block.
+///
+/// Returns `Option::NONE` if any required field is missing or `abi_version` is not a valid u32.
+export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> {
+  let lines: Vector<String> = text.lines();
+
+  let abiVersionText: String = fingerprintLookupKey(&lines, "abi_version");
+  if (abiVersionText.length() == 0) {
+    return Option::NONE;
+  }
+  let Option::SOME(abiVersion) = fingerprintParseU32(&abiVersionText) else {
+    return Option::NONE;
+  };
+
+  let backend: String = fingerprintLookupKey(&lines, "backend");
+  let cc: String = fingerprintLookupKey(&lines, "cc");
+  let cflagsHash: String = fingerprintLookupKey(&lines, "cflags_hash");
+  let compilerVersion: String = fingerprintLookupKey(&lines, "compiler_version");
+  let stdManifestHash: String = fingerprintLookupKey(&lines, "std_manifest_hash");
+  let targetTriple: String = fingerprintLookupKey(&lines, "target_triple");
+
+  if (compilerVersion.length() == 0 || backend.length() == 0 || cc.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(BuildFingerprint {
+    compilerVersion: compilerVersion,
+    abiVersion: abiVersion,
+    targetTriple: targetTriple,
+    backend: backend,
+    cc: cc,
+    cflagsHash: cflagsHash,
+    stdManifestHash: stdManifestHash,
+  });
+}
+
+/// Check whether two fingerprints are equal by comparing their serialized forms.
+export function fingerprintEquals(left: &BuildFingerprint, right: &BuildFingerprint): boolean {
+  let leftText: String = fingerprintSerialize(left);
+  let rightText: String = fingerprintSerialize(right);
+  return leftText.equals(&rightText);
+}
+
+function fingerprintReadExpected(filename: str): String {
+  let fixtureDir: Path::PathBuf = match (Env::currentDir()) {
+    Result::OK(root) -> root.join("test_cases/selfhost/build/fingerprint").normalize(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+
+  let path: Path::PathBuf = fixtureDir.join(filename);
+  return match (Fs::readToString(&path)) {
+    Result::OK(text) -> text.trimAsciiWhitespace(),
+    Result::ERROR(_) -> {
+      Test::fail();
+      return String::new();
+    },
+  };
+}
+
+function fingerprintBaseline(): BuildFingerprint {
+  return BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz");
+}
+
+@test
+function fingerprintSerializationIsStable(): void {
+  let fp1: BuildFingerprint = fingerprintBaseline();
+  let fp2: BuildFingerprint = fingerprintBaseline();
+
+  let s1: String = fingerprintSerialize(&fp1);
+  let s2: String = fingerprintSerialize(&fp2);
+
+  let expected: String = fingerprintReadExpected("expected_stable.txt");
+  let mut actual: String = String::create("unstable");
+  if (s1.equals(&s2)) {
+    actual = String::create("stable");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintRoundtrip(): void {
+  let fp: BuildFingerprint = fingerprintBaseline();
+  let serialized: String = fingerprintSerialize(&fp);
+  let Option::SOME(deserialized) = fingerprintDeserialize(&serialized) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(fingerprintEquals(&fp, &deserialized), true);
+}
+
+@test
+function fingerprintCompilerVersionChangeInvalidates(): void {
+  let fp1: BuildFingerprint = fingerprintBaseline();
+  let fp2: BuildFingerprint = BuildFingerprint::new("0.2.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz");
+
+  let expected: String = fingerprintReadExpected("expected_invalidated.txt");
+  let mut actual: String = String::create("stable");
+  if (!fingerprintEquals(&fp1, &fp2)) {
+    actual = String::create("invalidated");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintAbiVersionChangeInvalidates(): void {
+  let fp1: BuildFingerprint = fingerprintBaseline();
+  let fp2: BuildFingerprint = BuildFingerprint::new("0.1.0", 2, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz");
+
+  let expected: String = fingerprintReadExpected("expected_invalidated.txt");
+  let mut actual: String = String::create("stable");
+  if (!fingerprintEquals(&fp1, &fp2)) {
+    actual = String::create("invalidated");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintStdManifestHashChangeInvalidates(): void {
+  let fp1: BuildFingerprint = fingerprintBaseline();
+  let fp2: BuildFingerprint = BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-CHANGED");
+
+  let expected: String = fingerprintReadExpected("expected_invalidated.txt");
+  let mut actual: String = String::create("stable");
+  if (!fingerprintEquals(&fp1, &fp2)) {
+    actual = String::create("invalidated");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
