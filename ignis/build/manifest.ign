@@ -1,0 +1,483 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Diagnostic, DiagnosticBag, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
+
+const MISSING_STD_MANIFEST: str = "B1001";
+const MALFORMED_STD_MANIFEST: str = "B1002";
+const INVALID_STD_MANIFEST_FIELD_TYPE: str = "B1003";
+
+function buildManifestPathSpan(path: &Path::PathBuf, start: u64, end: u64): SourceSpan {
+  let pathText: String = path.toString();
+  return SourceSpan::new(pathText.toStr(), start, end);
+}
+
+function buildManifestSingleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}
+
+function buildManifestStdManifestMissing(configPath: &Path::PathBuf, stdRoot: Option<Path::PathBuf>): DiagnosticBag {
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    MISSING_STD_MANIFEST,
+    "std is enabled but std/manifest.toml could not be resolved",
+    buildManifestPathSpan(configPath, 0, 0),
+  );
+  diagnostic.setHelp("set 'ignis.std_path' to a std tree that contains manifest.toml");
+
+  if (let Option::SOME(path) = stdRoot) {
+    let rootText: String = path.toString();
+    diagnostic.addNote(String::create("resolved std root: ").concat(&rootText).toStr());
+  };
+
+  return buildManifestSingleDiagnostic(diagnostic);
+}
+
+function buildManifestMalformedStdManifest(path: &Path::PathBuf, message: str, start: u64, end: u64): DiagnosticBag {
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    MALFORMED_STD_MANIFEST,
+    message,
+    buildManifestPathSpan(path, start, end),
+  );
+  diagnostic.setHelp("fix the TOML syntax before loading the std manifest");
+  return buildManifestSingleDiagnostic(diagnostic);
+}
+
+function buildManifestInvalidStdManifestFieldType(
+  path: &Path::PathBuf,
+  fieldPath: str,
+  expected: str,
+  start: u64,
+  end: u64,
+): DiagnosticBag {
+  let mut diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    INVALID_STD_MANIFEST_FIELD_TYPE,
+    String::create("std manifest field '").concat(fieldPath).concat("' must be ").concat(expected).toStr(),
+    buildManifestPathSpan(path, start, end),
+  );
+  diagnostic.addLabel(LabelKind::PRIMARY, buildManifestPathSpan(path, start, end), "unexpected TOML value kind");
+  return buildManifestSingleDiagnostic(diagnostic);
+}
+
+function buildManifestCloneOptionString(value: &Option<String>): Option<String> {
+  return match (value) {
+    Option::SOME(text) -> Option::SOME(text.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function buildManifestCloneStringVector(source: &Vector<String>): Vector<String> {
+  let mut values: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    values.push(value.clone());
+    index += 1;
+  }
+
+  return values;
+}
+
+record ManifestAssignment {
+  public key: String;
+  public value: String;
+}
+
+function buildManifestSectionName(line: &String): Option<String> {
+  if (line.length() < 2) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(first) = line.charAt(0) else {
+    return Option::NONE;
+  };
+  let Option::SOME(last) = line.charAt(line.length() - 1) else {
+    return Option::NONE;
+  };
+
+  if (first != '[' || last != ']') {
+    return Option::NONE;
+  }
+
+  return Option::SOME(line.substringBytes(1, line.length() - 1).trimAsciiWhitespace());
+}
+
+function buildManifestAssignmentFromLine(line: &String): Option<ManifestAssignment> {
+  let Option::SOME(equalsIndex) = line.indexOfCharFrom('=', 0) else {
+    return Option::NONE;
+  };
+
+  let key: String = line.substringBytes(0, equalsIndex).trimAsciiWhitespace();
+  let value: String = line.substringBytes(equalsIndex + 1, line.length()).trimAsciiWhitespace();
+  if (key.length() == 0 || value.length() == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(ManifestAssignment {
+    key: key,
+    value: value,
+  });
+}
+
+function buildManifestNormalizeKey(value: &String): String {
+  let trimmed: String = value.trimAsciiWhitespace();
+  if (!trimmed.startsWith("\"") || trimmed.length() < 2) {
+    return trimmed;
+  }
+
+  let Option::SOME(last) = trimmed.charAt(trimmed.length() - 1) else {
+    return trimmed;
+  };
+
+  if (last != '"') {
+    return trimmed;
+  }
+
+  return trimmed.substringBytes(1, trimmed.length() - 1);
+}
+
+function buildManifestParseString(
+  manifestPath: &Path::PathBuf,
+  fieldPath: str,
+  valueText: &String,
+  start: u64,
+  end: u64,
+): Result<String, DiagnosticBag> {
+  let trimmed: String = valueText.trimAsciiWhitespace();
+  if (!trimmed.startsWith("\"") || trimmed.length() < 2) {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+  }
+
+  let Option::SOME(last) = trimmed.charAt(trimmed.length() - 1) else {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+  };
+  if (last != '"') {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+  }
+
+  let value: String = trimmed.substringBytes(1, trimmed.length() - 1);
+  if (value.length() == 0) {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a non-empty string", start, end));
+  }
+
+  return Result::OK(value);
+}
+
+function buildManifestParseBoolean(
+  manifestPath: &Path::PathBuf,
+  fieldPath: str,
+  valueText: &String,
+  start: u64,
+  end: u64,
+): Result<boolean, DiagnosticBag> {
+  let trimmed: String = valueText.trimAsciiWhitespace();
+  if (trimmed.equals("true")) {
+    return Result::OK(true);
+  }
+
+  if (trimmed.equals("false")) {
+    return Result::OK(false);
+  }
+
+  return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a boolean", start, end));
+}
+
+function buildManifestParseStringArray(
+  manifestPath: &Path::PathBuf,
+  fieldPath: str,
+  valueText: &String,
+  start: u64,
+  end: u64,
+): Result<Vector<String>, DiagnosticBag> {
+  let trimmed: String = valueText.trimAsciiWhitespace();
+  if (trimmed.length() < 2) {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+  }
+
+  let Option::SOME(first) = trimmed.charAt(0) else {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+  };
+  let Option::SOME(last) = trimmed.charAt(trimmed.length() - 1) else {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+  };
+
+  if (first != '[' || last != ']') {
+    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+  }
+
+  let inner: String = trimmed.substringBytes(1, trimmed.length() - 1).trimAsciiWhitespace();
+  let mut result: Vector<String> = Vector::new<String>();
+
+  if (inner.length() > 0) {
+    let mut cursor: u64 = 0;
+    while (cursor < inner.length()) {
+      let commaIndex: u64 = match (inner.indexOfCharFrom(',', cursor)) {
+        Option::SOME(value) -> value,
+        Option::NONE -> inner.length(),
+      };
+      let part: String = inner.substringBytes(cursor, commaIndex).trimAsciiWhitespace();
+      let item: String = buildManifestParseString(manifestPath, fieldPath, &part, start, end)!;
+      result.push(item);
+
+      if (commaIndex == inner.length()) {
+        break;
+      }
+
+      cursor = commaIndex + 1;
+    }
+  }
+
+  return Result::OK(result);
+}
+
+export record StdManifestModule {
+  public name: String;
+  public path: String;
+}
+
+export record StdManifest {
+  public path: Path::PathBuf;
+  public baseHeader: Option<String>;
+  public baseHeaderQuoted: boolean;
+  public includeDirs: Vector<String>;
+  public modules: Vector<StdManifestModule>;
+  public autoLoadModules: Vector<String>;
+  public compileOnlyModules: Vector<String>;
+
+  public baseHeaderText(&self): Option<String> {
+    return buildManifestCloneOptionString(&self.baseHeader);
+  }
+
+  public includeDirCount(&self): u64 {
+    return self.includeDirs.length();
+  }
+
+  public includeDirText(&self, index: u64): Option<String> {
+    return match (self.includeDirs.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public moduleCount(&self): u64 {
+    return self.modules.length();
+  }
+
+  public modulePathText(&self, name: str): Option<String> {
+    let mut index: u64 = 0;
+
+    while (index < self.modules.length()) {
+      let Option::SOME(module) = self.modules.get(index) else {
+        break;
+      };
+
+      if (module.name.equals(name)) {
+        return Option::SOME(module.path.clone());
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public autoLoadCount(&self): u64 {
+    return self.autoLoadModules.length();
+  }
+
+  public autoLoadText(&self, index: u64): Option<String> {
+    return match (self.autoLoadModules.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public compileOnlyCount(&self): u64 {
+    return self.compileOnlyModules.length();
+  }
+
+  public compileOnlyText(&self, index: u64): Option<String> {
+    return match (self.compileOnlyModules.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+}
+
+export namespace Manifest {
+  function loadFile(manifestPath: &Path::PathBuf): Result<StdManifest, DiagnosticBag> {
+    if (!Fs::exists(manifestPath.asStr())) {
+      return Result::ERROR(buildManifestStdManifestMissing(manifestPath, Option::NONE));
+    }
+
+    let Result::OK(source) = Fs::readToString(manifestPath) else {
+      return Result::ERROR(buildManifestStdManifestMissing(manifestPath, Option::NONE));
+    };
+
+    let lines: Vector<String> = source.lines();
+    let mut currentSection: String = String::new();
+    let mut lineOffset: u64 = 0;
+
+    let mut baseHeader: Option<String> = Option::NONE;
+    let mut baseHeaderQuoted: boolean = true;
+    let mut includeDirs: Vector<String> = Vector::new<String>();
+    let mut modules: Vector<StdManifestModule> = Vector::new<StdManifestModule>();
+    let mut autoLoadModules: Vector<String> = Vector::new<String>();
+    let mut compileOnlyModules: Vector<String> = Vector::new<String>();
+
+    let mut index: u64 = 0;
+    while (index < lines.length()) {
+      let Option::SOME(line) = lines.get(index) else {
+        break;
+      };
+      let trimmed: String = line.trimAsciiWhitespace();
+      let lineStart: u64 = lineOffset;
+      let lineEnd: u64 = lineOffset + line.length();
+
+      if (trimmed.length() == 0 || trimmed.startsWith("#")) {
+        lineOffset += line.length() + 1;
+        index += 1;
+        continue;
+      }
+
+      if (let Option::SOME(sectionName) = buildManifestSectionName(&trimmed)) {
+        currentSection = sectionName.clone();
+        lineOffset += line.length() + 1;
+        index += 1;
+        continue;
+      }
+
+      let Option::SOME(assignment) = buildManifestAssignmentFromLine(&trimmed) else {
+        lineOffset += line.length() + 1;
+        index += 1;
+        continue;
+      };
+
+      if (currentSection.equals("toolchain")) {
+        if (assignment.key.equals("base_header")) {
+          baseHeader = Option::SOME(buildManifestParseString(manifestPath, "toolchain.base_header", &assignment.value, lineStart, lineEnd)!);
+        }
+
+        if (assignment.key.equals("base_header_quoted")) {
+          baseHeaderQuoted = buildManifestParseBoolean(manifestPath, "toolchain.base_header_quoted", &assignment.value, lineStart, lineEnd)!;
+        }
+
+        if (assignment.key.equals("include_dirs")) {
+          includeDirs = buildManifestParseStringArray(manifestPath, "toolchain.include_dirs", &assignment.value, lineStart, lineEnd)!;
+        }
+      }
+
+      if (currentSection.equals("modules")) {
+        let moduleName: String = buildManifestNormalizeKey(&assignment.key);
+        let fieldPath: String = String::create("modules.").concat(&moduleName);
+        let modulePath: String = buildManifestParseString(manifestPath, fieldPath.toStr(), &assignment.value, lineStart, lineEnd)!;
+        modules.push(StdManifestModule {
+          name: moduleName,
+          path: modulePath,
+        });
+      }
+
+      if (currentSection.equals("auto_load") && assignment.key.equals("modules")) {
+        autoLoadModules = buildManifestParseStringArray(manifestPath, "auto_load.modules", &assignment.value, lineStart, lineEnd)!;
+      }
+
+      if (currentSection.equals("compile_only") && assignment.key.equals("modules")) {
+        compileOnlyModules = buildManifestParseStringArray(manifestPath, "compile_only.modules", &assignment.value, lineStart, lineEnd)!;
+      }
+
+      lineOffset += line.length() + 1;
+      index += 1;
+    }
+
+    if (includeDirs.length() == 0) {
+      includeDirs.push(String::create("."));
+    }
+
+    return Result::OK(StdManifest {
+      path: manifestPath.clone(),
+      baseHeader: buildManifestCloneOptionString(&baseHeader),
+      baseHeaderQuoted: baseHeaderQuoted,
+      includeDirs: buildManifestCloneStringVector(&includeDirs),
+      modules: modules,
+      autoLoadModules: buildManifestCloneStringVector(&autoLoadModules),
+      compileOnlyModules: buildManifestCloneStringVector(&compileOnlyModules),
+    });
+  }
+}
+
+function buildManifestFixturePath(relativePath: str): Path::PathBuf {
+  match (Env::currentDir()) {
+    Result::OK(root) -> {
+      return root.join(relativePath).normalize();
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::new();
+    },
+  };
+
+  return Path::PathBuf::new();
+}
+
+function buildManifestExpectSingleDiagnosticCode(result: Result<StdManifest, DiagnosticBag>, code: str): void {
+  let Result::ERROR(bag) = result else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+}
+
+function buildManifestAssertSomeString(value: Option<String>, expected: str): void {
+  match (value) {
+    Option::SOME(text) -> Test::assertEq<str>(text.toStr(), expected),
+    Option::NONE -> Test::fail(),
+  };
+}
+
+@test
+function manifestLoaderReadsFixtureManifestData(): void {
+  let manifestPath: Path::PathBuf = buildManifestFixturePath("test_cases/selfhost/build/config_project/std/manifest.toml");
+
+  match (Manifest::loadFile(&manifestPath)) {
+    Result::OK(manifest) -> {
+      buildManifestAssertSomeString(manifest.baseHeaderText(), "runtime/ignis_rt.h");
+      Test::assert(manifest.baseHeaderQuoted);
+      Test::assertEq<u64>(manifest.includeDirCount(), 2);
+      buildManifestAssertSomeString(manifest.includeDirText(0), ".");
+      buildManifestAssertSomeString(manifest.includeDirText(1), "runtime");
+      Test::assertEq<u64>(manifest.moduleCount(), 2);
+      buildManifestAssertSomeString(manifest.modulePathText("compile"), "compile/mod.ign");
+      buildManifestAssertSomeString(manifest.modulePathText("path"), "path/mod.ign");
+      Test::assertEq<u64>(manifest.autoLoadCount(), 1);
+      buildManifestAssertSomeString(manifest.autoLoadText(0), "path");
+      Test::assertEq<u64>(manifest.compileOnlyCount(), 1);
+      buildManifestAssertSomeString(manifest.compileOnlyText(0), "compile");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function manifestLoaderReportsInvalidFieldTypes(): void {
+  let manifestPath: Path::PathBuf = buildManifestFixturePath("test_cases/selfhost/build/manifest_invalid/manifest.toml");
+  buildManifestExpectSingleDiagnosticCode(Manifest::loadFile(&manifestPath), INVALID_STD_MANIFEST_FIELD_TYPE);
+}

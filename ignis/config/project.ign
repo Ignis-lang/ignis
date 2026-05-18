@@ -41,6 +41,14 @@ export record ResolvedProject {
   public sourceDir: Option<Path::PathBuf>;
   public entry: Path::PathBuf;
   public outDir: Option<Path::PathBuf>;
+  public bin: boolean;
+  public optLevel: u64;
+  public debug: boolean;
+  public target: String;
+  public targetTriple: Option<String>;
+  public cc: String;
+  public cflags: Vector<String>;
+  public emit: Vector<String>;
   public stdEnabled: boolean;
   public stdRoot: Option<Path::PathBuf>;
   public runtimeRoot: Option<Path::PathBuf>;
@@ -89,6 +97,55 @@ export record ResolvedProject {
   public outDirText(&self): Option<String> {
     return match (&self.outDir) {
       Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public binEnabled(&self): boolean {
+    return self.bin;
+  }
+
+  public optLevelValue(&self): u64 {
+    return self.optLevel;
+  }
+
+  public debugEnabled(&self): boolean {
+    return self.debug;
+  }
+
+  public targetText(&self): Option<String> {
+    return Option::SOME(self.target.clone());
+  }
+
+  public targetTripleText(&self): Option<String> {
+    return match (&self.targetTriple) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public ccText(&self): Option<String> {
+    return Option::SOME(self.cc.clone());
+  }
+
+  public cflagCount(&self): u64 {
+    return self.cflags.length();
+  }
+
+  public cflagText(&self, index: u64): Option<String> {
+    return match (self.cflags.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public emitCount(&self): u64 {
+    return self.emit.length();
+  }
+
+  public emitText(&self, index: u64): Option<String> {
+    return match (self.emit.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
       Option::NONE -> Option::NONE,
     };
   }
@@ -192,6 +249,77 @@ function booleanOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, f
   }
 
   return Result::OK(value.asBoolean());
+}
+
+function stringOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: str): Result<String, DiagnosticBag> {
+  let optionValue: Option<ConfigStringValue> = optionalString(document, configPath, fieldPath)!;
+
+  return match (optionValue) {
+    Option::SOME(value) -> Result::OK(value.value),
+    Option::NONE -> Result::OK(String::create(defaultValue)),
+  };
+}
+
+function integerOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: u64): Result<u64, DiagnosticBag> {
+  let Option::SOME(value) = document.get(fieldPath) else {
+    return Result::OK(defaultValue);
+  };
+
+  if (value.kind() != TomlValueKind::INTEGER) {
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "an integer", value.span.start, value.span.end));
+  }
+
+  let integerValue: i64 = value.asInteger();
+  if (integerValue < 0) {
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "a non-negative integer", value.span.start, value.span.end));
+  }
+
+  return Result::OK(integerValue as u64);
+}
+
+function cloneStringVector(source: &Vector<String>): Vector<String> {
+  let mut values: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    values.push(value.clone());
+    index += 1;
+  }
+
+  return values;
+}
+
+function stringArrayOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: &Vector<String>): Result<Vector<String>, DiagnosticBag> {
+  let Option::SOME(value) = document.get(fieldPath) else {
+    return Result::OK(cloneStringVector(defaultValue));
+  };
+
+  if (value.kind() != TomlValueKind::ARRAY) {
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "an array of strings", value.span.start, value.span.end));
+  }
+
+  let Option::SOME(values) = value.asArray() else {
+    return Result::ERROR(ConfigDiagnostics::invalidFieldType(configPath, fieldPath, "an array of strings", value.span.start, value.span.end));
+  };
+
+  let mut result: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    let Option::SOME(item) = values.item(index) else {
+      break;
+    };
+
+    let itemValue: ConfigStringValue = tomlValueString(configPath, fieldPath, item)!;
+    result.push(itemValue.value);
+    index += 1;
+  }
+
+  return Result::OK(result);
 }
 
 function resolveProjectPath(root: &Path::PathBuf, value: &String): Path::PathBuf {
@@ -415,6 +543,37 @@ function parseAliases(configPath: &Path::PathBuf, root: &Path::PathBuf, source: 
   return Result::OK(aliases);
 }
 
+function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, DiagnosticBag> {
+  if (project.stdEnabled) {
+    let Option::SOME(stdManifestPath) = project.stdManifestPathText() else {
+      let configPath: Path::PathBuf = match (&project.configPath) {
+        Option::SOME(path) -> path.clone(),
+        Option::NONE -> Path::PathBuf::create(PROJECT_FILE),
+      };
+      let stdRoot: Path::PathBuf = match (&project.stdRoot) {
+        Option::SOME(path) -> path.clone(),
+        Option::NONE -> Path::PathBuf::create("std"),
+      };
+      return Result::ERROR(ConfigDiagnostics::missingStdManifest(&configPath, &stdRoot));
+    };
+
+    let manifestPath: Path::PathBuf = Path::PathBuf::create(stdManifestPath.toStr());
+    if (!Fs::exists(manifestPath.asStr())) {
+      let configPath: Path::PathBuf = match (&project.configPath) {
+        Option::SOME(path) -> path.clone(),
+        Option::NONE -> Path::PathBuf::create(PROJECT_FILE),
+      };
+      let stdRoot: Path::PathBuf = match (&project.stdRoot) {
+        Option::SOME(path) -> path.clone(),
+        Option::NONE -> Path::PathBuf::create("std"),
+      };
+      return Result::ERROR(ConfigDiagnostics::missingStdManifest(&configPath, &stdRoot));
+    }
+  }
+
+  return Result::OK(project);
+}
+
 export namespace Config {
   function findProjectFile(startPath: &Path::PathBuf): Option<Path::PathBuf> {
     let mut current: Path::PathBuf = startPath.clone();
@@ -443,6 +602,11 @@ export namespace Config {
     };
 
     return Config::loadProjectFile(&configPath);
+  }
+
+  function loadBuildProject(startPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
+    let project: ResolvedProject = Config::loadProject(startPath)!;
+    return requireStdManifest(project);
   }
 
   function loadProjectSummary(startPath: &Path::PathBuf): String {
@@ -512,6 +676,21 @@ export namespace Config {
         end: 0,
       },
     };
+
+    let bin: boolean = booleanOrDefault(&document, configPath, "build.bin", true)!;
+    let optLevel: u64 = integerOrDefault(&document, configPath, "build.opt_level", 0)!;
+    let debug: boolean = booleanOrDefault(&document, configPath, "build.debug", false)!;
+    let target: String = stringOrDefault(&document, configPath, "build.target", "c")!;
+    let targetTripleValue: Option<ConfigStringValue> = optionalString(&document, configPath, "build.target_triple")!;
+    let targetTriple: Option<String> = match (targetTripleValue) {
+      Option::SOME(value) -> Option::SOME(value.value),
+      Option::NONE -> Option::NONE,
+    };
+    let cc: String = stringOrDefault(&document, configPath, "build.cc", "cc")!;
+    let emptyCflags: Vector<String> = Vector::new<String>();
+    let cflags: Vector<String> = stringArrayOrDefault(&document, configPath, "build.cflags", &emptyCflags)!;
+    let emptyEmit: Vector<String> = Vector::new<String>();
+    let emit: Vector<String> = stringArrayOrDefault(&document, configPath, "build.emit", &emptyEmit)!;
 
     let stdEnabled: boolean = booleanOrDefault(&document, configPath, "ignis.std", true)!;
 
@@ -602,12 +781,25 @@ export namespace Config {
       sourceDir: Option::SOME(sourceDir.clone()),
       entry: entryPath.clone(),
       outDir: Option::SOME(outDirResolved.clone()),
+      bin: bin,
+      optLevel: optLevel,
+      debug: debug,
+      target: target.clone(),
+      targetTriple: cloneOptionString(&targetTriple),
+      cc: cc.clone(),
+      cflags: cloneStringVector(&cflags),
+      emit: cloneStringVector(&emit),
       stdEnabled: stdEnabled,
       stdRoot: cloneOptionPath(&stdRoot),
       runtimeRoot: cloneOptionPath(&runtimeRoot),
       stdManifestPath: cloneOptionPath(&stdManifestPath),
       aliases: cloneAliases(&aliases),
     });
+  }
+
+  function loadBuildProjectFile(configPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
+    let project: ResolvedProject = Config::loadProjectFile(configPath)!;
+    return requireStdManifest(project);
   }
 
   function loadProjectFileSummary(configPath: &Path::PathBuf): String {
@@ -668,6 +860,14 @@ function emptyProject(): ResolvedProject {
     sourceDir: Option::NONE,
     entry: Path::PathBuf::new(),
     outDir: Option::NONE,
+    bin: true,
+    optLevel: 0,
+    debug: false,
+    target: String::create("c"),
+    targetTriple: Option::NONE,
+    cc: String::create("cc"),
+    cflags: Vector::new<String>(),
+    emit: Vector::new<String>(),
     stdEnabled: false,
     stdRoot: Option::NONE,
     runtimeRoot: Option::NONE,
@@ -770,6 +970,38 @@ function projectLoaderConsumesReturnedFixtureProjectFieldsAndAliases(): void {
     },
     Result::ERROR(_) -> Test::fail(),
   };
+}
+
+@test
+function projectLoaderConsumesBuildFixtureFields(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/config_project/nested/deeper");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> {
+      assertSomeString(project.packageNameText(), "build-fixture");
+      assertSomeString(project.packageVersionText(), "0.3.0");
+      Test::assert(!project.binEnabled());
+      Test::assertEq<u64>(project.optLevelValue(), 2);
+      Test::assert(project.debugEnabled());
+      assertSomeString(project.targetText(), "iir");
+      assertSomeString(project.targetTripleText(), "x86_64-unknown-linux-gnu");
+      assertSomeString(project.ccText(), "clang");
+      Test::assertEq<u64>(project.cflagCount(), 2);
+      assertSomeString(project.cflagText(0), "-Wall");
+      assertSomeString(project.cflagText(1), "-Winvalid");
+      Test::assertEq<u64>(project.emitCount(), 2);
+      assertSomeString(project.emitText(0), "c");
+      assertSomeString(project.emitText(1), "obj");
+      assertSomeStringEndsWith(project.stdManifestPathText(), "/test_cases/selfhost/build/config_project/std/manifest.toml");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function projectLoaderReportsMissingStdManifestForBuildPlanning(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/build/config_missing_manifest/nested/deeper");
+  expectSingleDiagnosticCode(Config::loadBuildProject(&start), ConfigDiagnosticCode::MISSING_STD_MANIFEST);
 }
 
 @test

@@ -21,6 +21,7 @@ export namespace ConfigDiagnosticCode {
   const EMPTY_FIELD: str = "C1004";
   const RESERVED_ALIAS: str = "C1005";
   const PATH_NOT_FOUND: str = "C1006";
+  const MISSING_STD_MANIFEST: str = "C1007";
 }
 
 export namespace ConfigDiagnostics {
@@ -89,6 +90,19 @@ export namespace ConfigDiagnostics {
     );
     let targetText: String = targetPath.toString();
     diagnostic.addNote(String::create("resolved path: ").concat(&targetText).toStr());
+    return singleDiagnostic(diagnostic);
+  }
+
+  function missingStdManifest(path: &Path::PathBuf, stdRoot: &Path::PathBuf): DiagnosticBag {
+    let mut diagnostic: Diagnostic = Diagnostic::new(
+      Severity::ERROR,
+      ConfigDiagnosticCode::MISSING_STD_MANIFEST,
+      "std is enabled but std/manifest.toml could not be resolved",
+      configPathSpan(path, 0, 0),
+    );
+    let rootText: String = stdRoot.toString();
+    diagnostic.addNote(String::create("resolved std root: ").concat(&rootText).toStr());
+    diagnostic.setHelp("set 'ignis.std_path' to a std tree that contains manifest.toml");
     return singleDiagnostic(diagnostic);
   }
 }
