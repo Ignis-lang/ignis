@@ -1021,16 +1021,6 @@ impl CompilationContext {
     let mut root_import_module_files = HashMap::new();
     let mut per_module_semantic = HashMap::new();
 
-    // Build path_to_file mapping for import path resolution
-    let path_to_file: HashMap<String, ignis_type::file::FileId> = self
-      .module_for_path
-      .iter()
-      .map(|(path, module_id)| {
-        let module = self.module_graph.modules.get(module_id);
-        (path.clone(), module.file_id)
-      })
-      .collect();
-
     // The root module is the last one in topological order
     let root_module_id = self.module_graph.root;
 
@@ -1057,13 +1047,43 @@ impl CompilationContext {
         .filter(|&pid| pid != module_id && export_table.contains_key(&pid))
         .collect();
 
+      // Build a per-module import-path override map.
+      //
+      // `parsed.import_paths` and `module.imports` are parallel: discover_recursive
+      // iterates import_paths sequentially and calls add_import for each one, so
+      // their indices align. We zip them to recover the raw import string that the
+      // analyzer will look up and map it to the exact ModuleId that discovery resolved
+      // for this specific module — preventing collisions when two modules share the
+      // same relative import string (e.g. both import "./layout").
+      //
+      // The per-module map is layered on top of the global aliases: per-module wins.
+      let module_for_path_local: HashMap<String, ModuleId> = {
+        let module_imports = &self.module_graph.modules.get(&module_id).imports;
+        let mut local = self.module_for_path.clone();
+
+        for ((_, import_path, _), import_info) in parsed.import_paths.iter().zip(module_imports.iter()) {
+          local.insert(import_path.clone(), import_info.source_module());
+        }
+
+        local
+      };
+
+      // Build the per-module path_to_file map from the local import resolution.
+      let path_to_file_local: HashMap<String, ignis_type::file::FileId> = module_for_path_local
+        .iter()
+        .map(|(path, mid)| {
+          let file_id = self.module_graph.modules.get(mid).file_id;
+          (path.clone(), file_id)
+        })
+        .collect();
+
       let output = ignis_analyzer::Analyzer::analyze_with_shared_stores(
         &parsed.nodes,
         &parsed.roots,
         self.symbol_table.clone(),
         &export_table,
-        &self.module_for_path,
-        &path_to_file,
+        &module_for_path_local,
+        &path_to_file_local,
         &mut shared_types,
         &mut shared_defs,
         &mut shared_namespaces,
@@ -1345,6 +1365,228 @@ string = "string/mod.ign"
         .and_then(|manifest| manifest.get_module_path("option")),
       Some(&"option/mod.ign".to_string())
     );
+  }
+
+  /// Regression test for the relative-import collision bug (W2).
+  ///
+  /// When two modules in different directories both import a file named
+  /// `./layout`, the global `module_for_path` map only keeps the first
+  /// registration because the second insertion is skipped (the key is
+  /// already mapped to a different ModuleId). Without the per-module
+  /// override, both modules would resolve `./layout` to the same ModuleId,
+  /// causing wrong symbol resolution.
+  ///
+  /// This test verifies that discovery assigns distinct ModuleIds to the
+  /// two `layout.ign` files and that the per-module import override in
+  /// `analyze_modules_collect_all` can correctly reconstruct which
+  /// ModuleId each module's `./layout` import refers to.
+  #[test]
+  fn relative_imports_with_same_string_resolve_per_module() {
+    let temp = tempfile::tempdir().expect("create temp project");
+
+    // Directory layout:
+    //   src/
+    //     main.ign         -- imports ./mod_a and ./mod_b
+    //     mod_a/
+    //       mod.ign        -- exports nothing, imports ./layout
+    //       layout.ign     -- exports LayoutA (distinct from LayoutB)
+    //     mod_b/
+    //       mod.ign        -- exports nothing, imports ./layout
+    //       layout.ign     -- exports LayoutB (distinct from LayoutA)
+
+    let src = temp.path().join("src");
+    let mod_a = src.join("mod_a");
+    let mod_b = src.join("mod_b");
+
+    fs::create_dir_all(&mod_a).expect("create mod_a dir");
+    fs::create_dir_all(&mod_b).expect("create mod_b dir");
+
+    fs::write(
+      src.join("main.ign"),
+      "import _ from \"./mod_a\";\nimport _ from \"./mod_b\";\nfunction main(): i32 { return 0; }\n",
+    )
+    .expect("write main.ign");
+
+    fs::write(
+      mod_a.join("mod.ign"),
+      "export LayoutA from \"./layout\";\n",
+    )
+    .expect("write mod_a/mod.ign");
+
+    fs::write(
+      mod_a.join("layout.ign"),
+      "export record LayoutA {\n  x: i32;\n}\n",
+    )
+    .expect("write mod_a/layout.ign");
+
+    fs::write(
+      mod_b.join("mod.ign"),
+      "export LayoutB from \"./layout\";\n",
+    )
+    .expect("write mod_b/mod.ign");
+
+    fs::write(
+      mod_b.join("layout.ign"),
+      "export record LayoutB {\n  y: i32;\n}\n",
+    )
+    .expect("write mod_b/layout.ign");
+
+    let mut config = IgnisConfig::default();
+    config.std_path = String::new();
+    config.quiet = true;
+
+    let mut ctx = CompilationContext::new(&config);
+    let entry = src.join("main.ign");
+    let root_id = ctx
+      .discover_modules(entry.to_str().expect("entry path"), &config)
+      .expect("discovery must succeed");
+
+    // After discovery, mod_a/layout.ign and mod_b/layout.ign must be separate modules.
+    // Both are registered under the absolute path; collect their ModuleIds.
+    let layout_a_path = mod_a.join("layout.ign");
+    let layout_b_path = mod_b.join("layout.ign");
+
+    // Find the ModuleId for each layout by looking at their file_ids in the source map.
+    let layout_a_file_id = ctx.source_map.lookup_by_path(&layout_a_path);
+    let layout_b_file_id = ctx.source_map.lookup_by_path(&layout_b_path);
+
+    assert!(
+      layout_a_file_id.is_some(),
+      "mod_a/layout.ign must have been parsed and registered in the source map"
+    );
+    assert!(
+      layout_b_file_id.is_some(),
+      "mod_b/layout.ign must have been parsed and registered in the source map"
+    );
+
+    let layout_a_fid = layout_a_file_id.expect("layout_a file_id");
+    let layout_b_fid = layout_b_file_id.expect("layout_b file_id");
+
+    assert_ne!(
+      layout_a_fid, layout_b_fid,
+      "mod_a/layout.ign and mod_b/layout.ign must be distinct files"
+    );
+
+    // Resolve ModuleIds for each layout file via the parsed_modules table.
+    let layout_a_mid = ctx
+      .parsed_modules
+      .iter()
+      .find_map(|(mid, pm)| if pm.file_id == layout_a_fid { Some(*mid) } else { None })
+      .expect("mod_a/layout.ign must have a ModuleId");
+
+    let layout_b_mid = ctx
+      .parsed_modules
+      .iter()
+      .find_map(|(mid, pm)| if pm.file_id == layout_b_fid { Some(*mid) } else { None })
+      .expect("mod_b/layout.ign must have a ModuleId");
+
+    assert_ne!(
+      layout_a_mid, layout_b_mid,
+      "mod_a/layout.ign and mod_b/layout.ign must have distinct ModuleIds"
+    );
+
+    // Verify that the per-module override logic can reconstruct the correct mapping.
+    //
+    // For mod_a/mod.ign: parsed.import_paths[0].1 == "./layout"
+    //                    module.imports[0].source_module() == layout_a_mid
+    //
+    // For mod_b/mod.ign: parsed.import_paths[0].1 == "./layout"
+    //                    module.imports[0].source_module() == layout_b_mid
+    //
+    // If they were the same ModuleId the bug would still be present.
+
+    let mod_a_mid = ctx
+      .parsed_modules
+      .iter()
+      .find_map(|(mid, pm)| {
+        let mod_a_mod_fid = ctx.source_map.lookup_by_path(&mod_a.join("mod.ign"))?;
+        if pm.file_id == mod_a_mod_fid { Some(*mid) } else { None }
+      })
+      .expect("mod_a/mod.ign must have a ModuleId");
+
+    let mod_b_mid = ctx
+      .parsed_modules
+      .iter()
+      .find_map(|(mid, pm)| {
+        let mod_b_mod_fid = ctx.source_map.lookup_by_path(&mod_b.join("mod.ign"))?;
+        if pm.file_id == mod_b_mod_fid { Some(*mid) } else { None }
+      })
+      .expect("mod_b/mod.ign must have a ModuleId");
+
+    let mod_a_module = ctx.module_graph.modules.get(&mod_a_mid);
+    let mod_b_module = ctx.module_graph.modules.get(&mod_b_mid);
+
+    // Each mod.ign has exactly one import (./layout).
+    let mod_a_layout_import = mod_a_module
+      .imports
+      .iter()
+      .find(|imp| imp.source_module() == layout_a_mid);
+    let mod_b_layout_import = mod_b_module
+      .imports
+      .iter()
+      .find(|imp| imp.source_module() == layout_b_mid);
+
+    assert!(
+      mod_a_layout_import.is_some(),
+      "mod_a/mod.ign must import layout_a_mid, not layout_b_mid — the per-module override must resolve correctly"
+    );
+    assert!(
+      mod_b_layout_import.is_some(),
+      "mod_b/mod.ign must import layout_b_mid, not layout_a_mid — the per-module override must resolve correctly"
+    );
+
+    // Finally, verify that the global module_for_path only has one entry for "./layout"
+    // (the bug surface: the second insertion was silently skipped), while the per-module
+    // override correctly provides both.
+    let global_layout_id = ctx.module_for_path.get("./layout").copied();
+    assert!(
+      global_layout_id == Some(layout_a_mid) || global_layout_id == Some(layout_b_mid),
+      "global module_for_path must have exactly one ./layout entry (whichever was registered first)"
+    );
+
+    // The per-module overrides for mod_a and mod_b each have the right mapping.
+    let mod_a_parsed = ctx.parsed_modules.get(&mod_a_mid).expect("mod_a parsed");
+    let mod_a_local: HashMap<String, ModuleId> = {
+      let imports = &ctx.module_graph.modules.get(&mod_a_mid).imports;
+      let mut local = ctx.module_for_path.clone();
+      for ((_, import_path, _), import_info) in mod_a_parsed.import_paths.iter().zip(imports.iter()) {
+        local.insert(import_path.clone(), import_info.source_module());
+      }
+      local
+    };
+
+    let mod_b_parsed = ctx.parsed_modules.get(&mod_b_mid).expect("mod_b parsed");
+    let mod_b_local: HashMap<String, ModuleId> = {
+      let imports = &ctx.module_graph.modules.get(&mod_b_mid).imports;
+      let mut local = ctx.module_for_path.clone();
+      for ((_, import_path, _), import_info) in mod_b_parsed.import_paths.iter().zip(imports.iter()) {
+        local.insert(import_path.clone(), import_info.source_module());
+      }
+      local
+    };
+
+    assert_eq!(
+      mod_a_local.get("./layout"),
+      Some(&layout_a_mid),
+      "per-module override for mod_a must resolve ./layout to layout_a_mid"
+    );
+    assert_eq!(
+      mod_b_local.get("./layout"),
+      Some(&layout_b_mid),
+      "per-module override for mod_b must resolve ./layout to layout_b_mid"
+    );
+
+    // Sanity: if the global map resolved ./layout wrong for one of them,
+    // the per-module maps must differ from each other.
+    assert_ne!(
+      mod_a_local.get("./layout"),
+      mod_b_local.get("./layout"),
+      "mod_a and mod_b must resolve ./layout to different ModuleIds via per-module overrides"
+    );
+
+    // Full compilation must succeed with no errors.
+    let (_, has_errors) = ctx.compile_collect_all(root_id, &config).expect("compile must not fail");
+    assert!(!has_errors, "compilation must produce no errors after per-module import path fix");
   }
 }
 
