@@ -1,27 +1,235 @@
+import Env from "std::env";
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+
 import StdManifest from "./manifest";
 
-export record ResolvedBuildProject {
+// Diagnostic codes for build-config validation errors.
+const BUILD_CONFIG_INVALID_ENTRY: str = "B1010";
+
+function buildConfigSingleDiagnostic(code: str, message: str): DiagnosticBag {
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+  let diagnostic: Diagnostic = Diagnostic::new(
+    Severity::ERROR,
+    code,
+    message,
+    span,
+  );
+  bag.push(diagnostic);
+  return bag;
+}
+
+function buildConfigCloneStringVector(source: &Vector<String>): Vector<String> {
+  let mut result: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    result.push(value.clone());
+    index += 1;
+  }
+
+  return result;
+}
+
+// BuildAlias is a local alias descriptor used by BuildConfig.
+// It mirrors ignis/config/project.ign's AliasBinding but avoids importing
+// @compiler::config directly (which causes linker collisions due to the
+// relative import key collision bug in the Ignis selfhost resolver).
+export record BuildAlias {
+  public name: String;
+  public path: String;
+}
+
+function buildConfigCloneAliases(source: &Vector<BuildAlias>): Vector<BuildAlias> {
+  let mut result: Vector<BuildAlias> = Vector::new<BuildAlias>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(alias) = source.get(index) else {
+      break;
+    };
+
+    result.push(BuildAlias {
+      name: alias.name.clone(),
+      path: alias.path.clone(),
+    });
+    index += 1;
+  }
+
+  return result;
+}
+
+// BuildConfig holds canonicalized, fully-resolved inputs for a build run.
+// All path fields are absolute strings; targetTriple uses an empty-string
+// sentinel for "not set" (W3 workaround for Option<String> codegen issues).
+export record BuildConfig {
+  public root: String;
+  public sourceDir: String;
+  public entry: String;
+  public outDir: String;
+  public aliases: Vector<BuildAlias>;
+  public target: String;
+  public targetTriple: String;
+  public backend: String;
+  public cc: String;
+  public cflags: Vector<String>;
+  public emit: String;
   public stdManifest: Option<StdManifest>;
 
-  public static withStdManifest(manifest: StdManifest): ResolvedBuildProject {
-    return ResolvedBuildProject {
-      stdManifest: Option::SOME(manifest),
+  // fromProject constructs a BuildConfig from pre-extracted string fields.
+  // Callers are expected to derive these from a ResolvedProject
+  // (ignis/config/project.ign). A separate import is avoided to prevent
+  // the linker collision caused by the Ignis relative-import-key collision bug.
+  //
+  // Reports a diagnostic when entry is empty.
+  public static fromProject(
+    root: String,
+    sourceDir: String,
+    entry: String,
+    outDir: String,
+    aliases: Vector<BuildAlias>,
+    target: String,
+    targetTriple: String,
+    cc: String,
+    cflags: Vector<String>,
+    emit: String,
+    manifest: Option<StdManifest>,
+  ): Result<BuildConfig, DiagnosticBag> {
+    if (entry.length() == 0) {
+      return Result::ERROR(buildConfigSingleDiagnostic(
+        BUILD_CONFIG_INVALID_ENTRY,
+        "build entry point could not be resolved",
+      ));
+    }
+
+    // Backend is derived from target; toolchain wrappers enforce final constraints.
+    let backend: String = target.clone();
+
+    let aliasesCopy: Vector<BuildAlias> = buildConfigCloneAliases(&aliases);
+    let cflagsCopy: Vector<String> = buildConfigCloneStringVector(&cflags);
+
+    return Result::OK(BuildConfig {
+      root: root,
+      sourceDir: sourceDir,
+      entry: entry,
+      outDir: outDir,
+      aliases: aliasesCopy,
+      target: target,
+      targetTriple: targetTriple,
+      backend: backend,
+      cc: cc,
+      cflags: cflagsCopy,
+      emit: emit,
+      stdManifest: manifest,
+    });
+  }
+
+  public aliasCount(&self): u64 {
+    return self.aliases.length();
+  }
+
+  public aliasNameText(&self, index: u64): Option<String> {
+    return match (self.aliases.get(index)) {
+      Option::SOME(alias) -> Option::SOME(alias.name.clone()),
+      Option::NONE -> Option::NONE,
     };
   }
 
-  public static withoutStdManifest(): ResolvedBuildProject {
-    return ResolvedBuildProject {
-      stdManifest: Option::NONE,
+  public cflagCount(&self): u64 {
+    return self.cflags.length();
+  }
+
+  public cflagText(&self, index: u64): Option<String> {
+    return match (self.cflags.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
     };
   }
 }
 
-export namespace BuildConfig {
-  function hasStdManifest(project: &ResolvedBuildProject): boolean {
-    return project.stdManifest.isSome();
-  }
+@test
+function buildConfigFromProjectHappyPath(): void {
+  let mut cflags: Vector<String> = Vector::new<String>();
+  cflags.push(String::create("-Wall"));
+  cflags.push(String::create("-O2"));
 
-  function fromStdManifest(manifest: StdManifest): ResolvedBuildProject {
-    return ResolvedBuildProject::withStdManifest(manifest);
-  }
+  let aliases: Vector<BuildAlias> = Vector::new<BuildAlias>();
+
+  let config: BuildConfig = match (BuildConfig::fromProject(
+    String::create("/project/root"),
+    String::create("/project/root/src"),
+    String::create("/project/root/src/main.ign"),
+    String::create("/project/root/build"),
+    aliases,
+    String::create("c"),
+    String::create("x86_64-linux-gnu"),
+    String::create("gcc"),
+    cflags,
+    String::create("c"),
+    Option::NONE,
+  )) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<str>(config.root.toStr(), "/project/root");
+  Test::assertEq<str>(config.sourceDir.toStr(), "/project/root/src");
+  Test::assertEq<str>(config.entry.toStr(), "/project/root/src/main.ign");
+  Test::assertEq<str>(config.outDir.toStr(), "/project/root/build");
+  Test::assertEq<str>(config.target.toStr(), "c");
+  Test::assertEq<str>(config.backend.toStr(), "c");
+  Test::assertEq<str>(config.targetTriple.toStr(), "x86_64-linux-gnu");
+  Test::assertEq<str>(config.cc.toStr(), "gcc");
+  Test::assertEq<u64>(config.cflagCount(), 2);
+  match (config.cflagText(0)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "-Wall"),
+    Option::NONE -> Test::fail(),
+  };
+  match (config.cflagText(1)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "-O2"),
+    Option::NONE -> Test::fail(),
+  };
+  Test::assertEq<str>(config.emit.toStr(), "c");
+  Test::assert(config.stdManifest.isNone());
+}
+
+@test
+function buildConfigFromProjectRejectsEmptyEntry(): void {
+  let aliases: Vector<BuildAlias> = Vector::new<BuildAlias>();
+  let cflags: Vector<String> = Vector::new<String>();
+
+  match (BuildConfig::fromProject(
+    String::create("/root"),
+    String::create("/root/src"),
+    String::new(),
+    String::create("/root/build"),
+    aliases,
+    String::create("c"),
+    String::new(),
+    String::create("cc"),
+    cflags,
+    String::new(),
+    Option::NONE,
+  )) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(bag) -> {
+      Test::assertEq<u64>(bag.length(), 1);
+      match (bag.get(0)) {
+        Option::SOME(diagnostic) -> Test::assertEq<str>(diagnostic.code, BUILD_CONFIG_INVALID_ENTRY),
+        Option::NONE -> Test::fail(),
+      };
+    },
+  };
 }

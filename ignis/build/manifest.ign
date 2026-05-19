@@ -5,67 +5,9 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import Diagnostic, DiagnosticBag, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag from "@compiler::diagnostics";
 
-const MISSING_STD_MANIFEST: str = "B1001";
-const MALFORMED_STD_MANIFEST: str = "B1002";
-const INVALID_STD_MANIFEST_FIELD_TYPE: str = "B1003";
-
-function buildManifestPathSpan(path: &Path::PathBuf, start: u64, end: u64): SourceSpan {
-  let pathText: String = path.toString();
-  return SourceSpan::new(pathText.toStr(), start, end);
-}
-
-function buildManifestSingleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
-  let mut bag: DiagnosticBag = DiagnosticBag::init();
-  bag.push(diagnostic);
-  return bag;
-}
-
-function buildManifestStdManifestMissing(configPath: &Path::PathBuf, stdRoot: Option<Path::PathBuf>): DiagnosticBag {
-  let mut diagnostic: Diagnostic = Diagnostic::new(
-    Severity::ERROR,
-    MISSING_STD_MANIFEST,
-    "std is enabled but std/manifest.toml could not be resolved",
-    buildManifestPathSpan(configPath, 0, 0),
-  );
-  diagnostic.setHelp("set 'ignis.std_path' to a std tree that contains manifest.toml");
-
-  if (let Option::SOME(path) = stdRoot) {
-    let rootText: String = path.toString();
-    diagnostic.addNote(String::create("resolved std root: ").concat(&rootText).toStr());
-  }
-
-  return buildManifestSingleDiagnostic(diagnostic);
-}
-
-function buildManifestMalformedStdManifest(path: &Path::PathBuf, message: str, start: u64, end: u64): DiagnosticBag {
-  let mut diagnostic: Diagnostic = Diagnostic::new(
-    Severity::ERROR,
-    MALFORMED_STD_MANIFEST,
-    message,
-    buildManifestPathSpan(path, start, end),
-  );
-  diagnostic.setHelp("fix the TOML syntax before loading the std manifest");
-  return buildManifestSingleDiagnostic(diagnostic);
-}
-
-function buildManifestInvalidStdManifestFieldType(
-  path: &Path::PathBuf,
-  fieldPath: str,
-  expected: str,
-  start: u64,
-  end: u64,
-): DiagnosticBag {
-  let mut diagnostic: Diagnostic = Diagnostic::new(
-    Severity::ERROR,
-    INVALID_STD_MANIFEST_FIELD_TYPE,
-    String::create("std manifest field '").concat(fieldPath).concat("' must be ").concat(expected).toStr(),
-    buildManifestPathSpan(path, start, end),
-  );
-  diagnostic.addLabel(LabelKind::PRIMARY, buildManifestPathSpan(path, start, end), "unexpected TOML value kind");
-  return buildManifestSingleDiagnostic(diagnostic);
-}
+import BuildDiagnosticCode, BuildDiagnostics from "./diagnostics";
 
 function buildManifestCloneOptionString(value: &Option<String>): Option<String> {
   return match (value) {
@@ -157,19 +99,19 @@ function buildManifestParseString(
 ): Result<String, DiagnosticBag> {
   let trimmed: String = valueText.trimAsciiWhitespace();
   if (!trimmed.startsWith("\"") || trimmed.length() < 2) {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
   }
 
   let Option::SOME(last) = trimmed.charAt(trimmed.length() - 1) else {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
   };
   if (last != '"') {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a string", start, end));
   }
 
   let value: String = trimmed.substringBytes(1, trimmed.length() - 1);
   if (value.length() == 0) {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a non-empty string", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a non-empty string", start, end));
   }
 
   return Result::OK(value);
@@ -191,7 +133,7 @@ function buildManifestParseBoolean(
     return Result::OK(false);
   }
 
-  return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "a boolean", start, end));
+  return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a boolean", start, end));
 }
 
 function buildManifestParseStringArray(
@@ -203,18 +145,18 @@ function buildManifestParseStringArray(
 ): Result<Vector<String>, DiagnosticBag> {
   let trimmed: String = valueText.trimAsciiWhitespace();
   if (trimmed.length() < 2) {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
   }
 
   let Option::SOME(first) = trimmed.charAt(0) else {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
   };
   let Option::SOME(last) = trimmed.charAt(trimmed.length() - 1) else {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
   };
 
   if (first != '[' || last != ']') {
-    return Result::ERROR(buildManifestInvalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
+    return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "an array of strings", start, end));
   }
 
   let inner: String = trimmed.substringBytes(1, trimmed.length() - 1).trimAsciiWhitespace();
@@ -319,11 +261,11 @@ export record StdManifest {
 export namespace Manifest {
   function loadFile(manifestPath: &Path::PathBuf): Result<StdManifest, DiagnosticBag> {
     if (!Fs::exists(manifestPath.asStr())) {
-      return Result::ERROR(buildManifestStdManifestMissing(manifestPath, Option::NONE));
+      return Result::ERROR(BuildDiagnostics::stdManifestMissing(manifestPath, Option::NONE));
     }
 
     let Result::OK(source) = Fs::readToString(manifestPath) else {
-      return Result::ERROR(buildManifestStdManifestMissing(manifestPath, Option::NONE));
+      return Result::ERROR(BuildDiagnostics::stdManifestMissing(manifestPath, Option::NONE));
     };
 
     let lines: Vector<String> = source.lines();
@@ -479,5 +421,5 @@ function manifestLoaderReadsFixtureManifestData(): void {
 @test
 function manifestLoaderReportsInvalidFieldTypes(): void {
   let manifestPath: Path::PathBuf = buildManifestFixturePath("test_cases/selfhost/build/manifest_invalid/manifest.toml");
-  buildManifestExpectSingleDiagnosticCode(Manifest::loadFile(&manifestPath), INVALID_STD_MANIFEST_FIELD_TYPE);
+  buildManifestExpectSingleDiagnosticCode(Manifest::loadFile(&manifestPath), BuildDiagnosticCode::INVALID_STD_MANIFEST_FIELD_TYPE);
 }
