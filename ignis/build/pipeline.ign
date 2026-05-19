@@ -8,8 +8,11 @@ import Test from "std::test";
 import Vector from "std::vector";
 
 import ArchiveTool from "./archive";
+import BuildAlias, BuildConfig from "./config";
+import BuildFingerprint, SourceHash, fingerprintDeserialize, fingerprintEquals, fingerprintHashFile, fingerprintHashStr, fingerprintSerialize, fingerprintTransitiveHash from "./fingerprint";
 import BuildLayout from "./layout";
 import CCompiler from "./c_compiler";
+import Manifest, StdManifest from "./manifest";
 
 /// Diagnostic codes for pipeline-level failures.
 export namespace PipelineDiagnosticCode {
@@ -45,62 +48,353 @@ export record StdBuildResult {
   }
 }
 
+/// Compute a cflags hash by concatenating all flags in order and hashing the result.
+function pipelineCflagsHash(cflags: &Vector<String>): String {
+  let mut combined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < cflags.length()) {
+    let Option::SOME(flag) = cflags.get(index) else {
+      break;
+    };
+    combined.push(flag);
+    index += 1;
+  }
+
+  return fingerprintHashStr(combined.toStr());
+}
+
+/// Hash the content of the manifest file itself.
+function pipelineManifestHash(manifest: &StdManifest): String {
+  return fingerprintHashFile(&manifest.path);
+}
+
+/// Sort a `Vector<String>` in-place using selection sort.
+///
+/// Selection sort is used because `String` values in the backing array cannot
+/// be moved piecemeal by `Vector::sort` (which triggers ICEs for non-Copy types
+/// in the current Ignis codegen).  Module counts are small (tens, not thousands).
+function pipelineSortStrings(paths: &mut Vector<String>): void {
+  let len: u64 = paths.length();
+
+  let mut i: u64 = 0;
+  while (i < len) {
+    // Find the minimum path in paths[i..len].
+    let mut minIdx: u64 = i;
+    let Option::SOME(initialMin) = paths.get(i) else {
+      break;
+    };
+    let mut minPath: String = initialMin.clone();
+
+    let mut j: u64 = i + 1;
+    while (j < len) {
+      let Option::SOME(candidate) = paths.get(j) else {
+        break;
+      };
+      if (candidate.compare(&minPath) < 0) {
+        minIdx = j;
+        minPath = candidate.clone();
+      }
+      j += 1;
+    }
+
+    // Swap paths[i] and paths[minIdx] if needed.
+    if (minIdx != i) {
+      let Option::SOME(iVal) = paths.get(i) else {
+        break;
+      };
+      let iCopy: String = iVal.clone();
+
+      // Remove paths[minIdx] and paths[i], then re-insert in swapped order.
+      // Since Vector has no set/swap, we rebuild by evicting and re-inserting.
+      // Simpler: build a new vector with the swap applied.
+      let mut swapped: Vector<String> = Vector::new<String>();
+      let mut k: u64 = 0;
+      while (k < len) {
+        let Option::SOME(val) = paths.get(k) else {
+          break;
+        };
+        if (k == i) {
+          swapped.push(minPath.clone());
+        } else {
+          if (k == minIdx) {
+            swapped.push(iCopy.clone());
+          } else {
+            swapped.push(val.clone());
+          }
+        }
+        k += 1;
+      }
+
+      // Replace paths content.
+      let mut pathsRef: &mut Vector<String> = paths;
+      pathsRef.clear();
+      let mut li: u64 = 0;
+      while (li < swapped.length()) {
+        let Option::SOME(sv) = swapped.get(li) else {
+          break;
+        };
+        pathsRef.push(sv.clone());
+        li += 1;
+      }
+    }
+
+    i += 1;
+  }
+}
+
+/// Collect per-source hashes for each module in the manifest, sorted alphabetically by path.
+///
+/// For each module, hashes the `.ign` source file at `stdRoot/module.path`.
+/// Entries are returned in alphabetical order so `fingerprintTransitiveHash`
+/// produces a deterministic result regardless of manifest declaration order.
+function pipelineCollectSourceHashes(
+  manifest: &StdManifest,
+  stdRoot: &Path::PathBuf,
+): Vector<SourceHash> {
+  // First, collect all resolved absolute paths (as Strings) and sort them.
+  let mut absPaths: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < manifest.modules.length()) {
+    let Option::SOME(module) = manifest.modules.get(index) else {
+      break;
+    };
+    let srcPath: Path::PathBuf = stdRoot.join(module.path.toStr());
+    absPaths.push(srcPath.toString());
+    index += 1;
+  }
+
+  pipelineSortStrings(&mut absPaths);
+
+  // Now hash each path in sorted order.
+  let mut entries: Vector<SourceHash> = Vector::new<SourceHash>();
+  let mut pi: u64 = 0;
+
+  while (pi < absPaths.length()) {
+    let Option::SOME(pathStr) = absPaths.get(pi) else {
+      break;
+    };
+    let srcPath: Path::PathBuf = Path::PathBuf::fromString(pathStr);
+    let hash: String = fingerprintHashFile(&srcPath);
+
+    entries.push(SourceHash {
+      path: pathStr.clone(),
+      hash: hash,
+    });
+
+    pi += 1;
+  }
+
+  return entries;
+}
+
+/// Compute per-module C source paths for compilation.
+///
+/// Each module's `.ign` path (relative to std root) is mapped to a `.c` file
+/// under `layout.stdSrcDir()`, mirroring the structure that the Ignis codegen
+/// would produce.  Only paths that exist on disk are included.
+function pipelineCollectCSources(
+  manifest: &StdManifest,
+  layout: &BuildLayout,
+): Vector<String> {
+  let mut sources: Vector<String> = Vector::new<String>();
+  let stdSrcDir: Path::PathBuf = layout.stdSrcDir();
+  let mut index: u64 = 0;
+
+  while (index < manifest.modules.length()) {
+    let Option::SOME(module) = manifest.modules.get(index) else {
+      break;
+    };
+
+    let cName: String = pipelineReplaceExtensionStr(module.path.toStr(), "c");
+    let cPath: Path::PathBuf = stdSrcDir.join(cName.toStr());
+
+    if (Fs::exists(cPath.asStr())) {
+      sources.push(cPath.toString());
+    }
+
+    index += 1;
+  }
+
+  return sources;
+}
+
 /// Orchestrate a hosted `buildStd` run.
 ///
 /// Steps:
-///   1. Ensure the std output directories exist.
-///   2. Compile each C source under `stdSrcPaths` to an object in the std obj dir.
-///   3. Archive all produced objects into `libignis_std.a` under the std lib dir.
-///   4. Write the `ignis_std.h` header marker to the std include dir.
+///   1. Load the std manifest from `config.stdManifest` (must be pre-loaded).
+///   2. Compute per-source hashes for all std `.ign` module files.
+///   3. Compute a `BuildFingerprint` from toolchain + source graph fields.
+///   4. Compare against the stamp file at `layout.stdStampPath()`.
+///      If equal and artifacts exist, return immediately as a cache hit.
+///   5. Ensure output directories exist.
+///   6. Compile each C source under `layout.stdSrcDir()` to an object.
+///   7. Archive all objects into `libignis_std.a`.
+///   8. Write the `ignis_std.h` header.
+///   9. Persist the new fingerprint to the stamp file.
+///
+/// Mirrors the design contract in the Phase 7 spec:
+///   Config → Resolver → Layout+Fingerprint → Pipeline → toolchain.
 ///
 /// On any compilation or archive failure this returns a failed `StdBuildResult`.
 /// Callers must check `succeeded` before proceeding to user linking.
-///
-/// Mirrors the Rust oracle `build_std` in `crates/ignis_driver/src/pipeline.rs`.
 export namespace BuildPipeline {
-  /// Build the standard library from a list of C sources.
+  /// Build the standard library, orchestrating the full pipeline slice:
+  /// manifest → source graph → fingerprint → stamp check → toolchain → artifacts.
   ///
-  /// - `layout`: computed output directory structure.
-  /// - `cc`: C compiler executable (empty → "gcc").
-  /// - `ar`: archiver executable (empty → "ar").
-  /// - `stdSrcPaths`: paths to the C source files that make up the std.
-  /// - `stdHeaderContent`: content to write to `ignis_std.h`.
+  /// `config` is taken by value so its `stdManifest` field can be moved out before
+  /// the remaining config fields (cc, cflags, backend, targetTriple) are borrowed.
+  /// This is the established Ignis pattern for partial field consumption; callers
+  /// that need the config after this call must clone it before passing it here.
   function buildStd(
+    config: BuildConfig,
     layout: &BuildLayout,
-    cc: str,
-    ar: str,
-    stdSrcPaths: &Vector<String>,
-    stdHeaderContent: str,
   ): Result<StdBuildResult, DiagnosticBag> {
     let libPath: Path::PathBuf = layout.stdLibPath();
     let headerPath: Path::PathBuf = layout.stdIncludeDir().join("ignis_std.h");
+    let stampPath: Path::PathBuf = layout.stdStampPath();
 
-    // Compile each C source to an object file.
+    // Step 1 — unpack the manifest.
+    let manifest: StdManifest = match (config.stdManifest) {
+      Option::SOME(m) -> m,
+      Option::NONE -> {
+        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          PipelineDiagnosticCode::STD_BUILD_FAILED,
+          "buildStd requires config.stdManifest to be loaded",
+          span,
+        );
+        let mut bag: DiagnosticBag = DiagnosticBag::init();
+        bag.push(diag);
+        return Result::ERROR(bag);
+      },
+    };
+
+    // Step 2 — collect per-source hashes for std .ign files, in alphabetical order.
+    let stdRoot: Path::PathBuf = match (manifest.path.parent()) {
+      Option::SOME(parent) -> parent,
+      Option::NONE -> manifest.path.clone(),
+    };
+
+    // pipelineCollectSourceHashes returns entries already sorted alphabetically by path.
+    let sourceHashes: Vector<SourceHash> = pipelineCollectSourceHashes(&manifest, &stdRoot);
+    let transitiveHash: String = fingerprintTransitiveHash(&sourceHashes);
+
+    // Step 3 — compute fingerprint.
+    let cflagsHash: String = pipelineCflagsHash(&config.cflags);
+    let manifestHash: String = pipelineManifestHash(&manifest);
+
+    let fingerprint: BuildFingerprint = BuildFingerprint::withSources(
+      "0.1.0",
+      1,
+      config.targetTriple.toStr(),
+      config.backend.toStr(),
+      config.cc.toStr(),
+      cflagsHash.toStr(),
+      manifestHash.toStr(),
+      sourceHashes,
+      transitiveHash,
+    );
+
+    // Step 4 — compare stamp file; short-circuit if up-to-date.
+    if (Fs::exists(stampPath.asStr())) {
+      if (let Result::OK(stampContent) = Fs::readToString(&stampPath)) {
+        if (let Option::SOME(existing) = fingerprintDeserialize(&stampContent)) {
+          let libExists: boolean = Fs::exists(libPath.asStr());
+          let headerExists: boolean = Fs::exists(headerPath.asStr());
+
+          if (fingerprintEquals(&fingerprint, &existing) && libExists && headerExists) {
+            // Clone paths for the return value; originals are still needed below if we fall through.
+            return Result::OK(StdBuildResult::success(libPath.clone(), headerPath.clone()));
+          }
+        }
+      }
+    }
+
+    // Step 5 — ensure output directories exist.
+    let stdObjDir: Path::PathBuf = layout.stdObjDir();
+    match (Fs::createDirAll(&stdObjDir)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> {
+        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          PipelineDiagnosticCode::STD_BUILD_FAILED,
+          "failed to create std obj directory",
+          span,
+        );
+        let mut bag: DiagnosticBag = DiagnosticBag::init();
+        bag.push(diag);
+        return Result::ERROR(bag);
+      },
+    };
+    let stdLibDir: Path::PathBuf = layout.stdLibDir();
+    match (Fs::createDirAll(&stdLibDir)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> {
+        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          PipelineDiagnosticCode::STD_BUILD_FAILED,
+          "failed to create std lib directory",
+          span,
+        );
+        let mut bag: DiagnosticBag = DiagnosticBag::init();
+        bag.push(diag);
+        return Result::ERROR(bag);
+      },
+    };
+    let stdIncludeDir: Path::PathBuf = layout.stdIncludeDir();
+    match (Fs::createDirAll(&stdIncludeDir)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> {
+        let span: SourceSpan = SourceSpan::new("<build-config>", 0, 0);
+        let diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          PipelineDiagnosticCode::STD_BUILD_FAILED,
+          "failed to create std include directory",
+          span,
+        );
+        let mut bag: DiagnosticBag = DiagnosticBag::init();
+        bag.push(diag);
+        return Result::ERROR(bag);
+      },
+    };
+
+    // Step 6 — collect C sources and compile to objects.
+    let cSources: Vector<String> = pipelineCollectCSources(&manifest, layout);
     let mut objects: Vector<String> = Vector::new<String>();
     let mut srcIdx: u64 = 0;
 
-    while (srcIdx < stdSrcPaths.length()) {
-      let Option::SOME(srcStr) = stdSrcPaths.get(srcIdx) else {
+    while (srcIdx < cSources.length()) {
+      let Option::SOME(srcStr) = cSources.get(srcIdx) else {
         srcIdx += 1;
         continue;
       };
 
       let srcPath: Path::PathBuf = Path::PathBuf::create(srcStr.toStr());
 
-      // Derive obj path: replace extension with .o and place in std obj dir.
-      let srcName: String = srcPath.toString();
-      let objName: String = pipelineReplaceExtension(&srcName, "o");
-      let objBasename: Path::PathBuf = Path::PathBuf::create(objName.toStr());
-      let objFilename: String = match (objBasename.fileName()) {
-        Option::SOME(name) -> String::create(name.toStr()),
-        Option::NONE -> String::create("module.o"),
-      };
-      let objPath: Path::PathBuf = layout.stdObjDir().join(objFilename.toStr());
+      // Preserve directory structure in the obj dir to avoid basename collisions.
+      let objRelStr: String = pipelineReplaceExtensionStr(srcStr.toStr(), "o");
+      let objPath: Path::PathBuf = layout.stdObjDir().join(objRelStr.toStr());
 
+      // Ensure the parent obj subdirectory exists.
+      let objParent: Path::PathBuf = match (objPath.parent()) {
+        Option::SOME(parent) -> parent,
+        Option::NONE -> layout.stdObjDir(),
+      };
+      match (Fs::createDirAll(&objParent)) {
+        Result::OK(_) -> {},
+        Result::ERROR(_) -> {},
+      };
+
+      let cc: String = config.cc.clone();
       let includes: Vector<String> = Vector::new<String>();
       let flags: Vector<String> = Vector::new<String>();
 
-      match (CCompiler::compileObject(cc, &srcPath, &objPath, &includes, &flags)) {
+      match (CCompiler::compileObject(cc.toStr(), &srcPath, &objPath, &includes, &flags)) {
         Result::OK(_) -> {
           objects.push(objPath.toString());
         },
@@ -112,17 +406,18 @@ export namespace BuildPipeline {
       srcIdx += 1;
     }
 
-    // Archive all objects into libignis_std.a.
-    match (ArchiveTool::archive(ar, &libPath, &objects)) {
+    // Step 7 — archive all objects into libignis_std.a.
+    let ar: String = String::create("ar");
+    match (ArchiveTool::archive(ar.toStr(), &libPath, &objects)) {
       Result::OK(_) -> {},
       Result::ERROR(bag) -> {
         return Result::ERROR(bag);
       },
     };
 
-    // Write the ignis_std.h header marker.
-    let headerContentStr: String = String::create(stdHeaderContent);
-    match (Fs::writeString(&headerPath, &headerContentStr)) {
+    // Step 8 — write ignis_std.h header.
+    let headerContent: String = String::create("/* ignis_std.h — generated by selfhost build pipeline */\n");
+    match (Fs::writeString(&headerPath, &headerContent)) {
       Result::OK(_) -> {},
       Result::ERROR(_) -> {
         let span: SourceSpan = SourceSpan::new("", 0, 0);
@@ -136,6 +431,13 @@ export namespace BuildPipeline {
         bag.push(diag);
         return Result::ERROR(bag);
       },
+    };
+
+    // Step 9 — write fingerprint to stamp file.
+    let stampContent: String = fingerprintSerialize(&fingerprint);
+    match (Fs::writeString(&stampPath, &stampContent)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> {},
     };
 
     return Result::OK(StdBuildResult::success(libPath, headerPath));
@@ -170,15 +472,16 @@ export namespace BuildPipeline {
   }
 }
 
-/// Replace the extension of a path string with a new extension.
+/// Replace the extension of a path string, returning the result as a String.
 ///
 /// Only the portion after the last `/` is considered when looking for the
 /// trailing dot, so directory components with dots are not affected.
-function pipelineReplaceExtension(pathStr: &String, newExt: str): String {
-  let lastDotOpt: Option<u64> = pathStr.findLastByte((b: u8): boolean -> { return b == 46; });
-  let lastSlashOpt: Option<u64> = pathStr.findLastByte((b: u8): boolean -> { return b == 47; });
+function pipelineReplaceExtensionStr(pathStr: str, newExt: str): String {
+  let text: String = String::create(pathStr);
+  let lastDotOpt: Option<u64> = text.findLastByte((b: u8): boolean -> { return b == 46; });
+  let lastSlashOpt: Option<u64> = text.findLastByte((b: u8): boolean -> { return b == 47; });
 
-  let mut dotIndex: u64 = pathStr.length();
+  let mut dotIndex: u64 = text.length();
 
   if (let Option::SOME(dotPos) = lastDotOpt) {
     let isAfterSlash: boolean = match (lastSlashOpt) {
@@ -191,8 +494,15 @@ function pipelineReplaceExtension(pathStr: &String, newExt: str): String {
     }
   }
 
-  let stem: String = pathStr.substringBytes(0, dotIndex);
+  let stem: String = text.substringBytes(0, dotIndex);
   return stem.concat(".").concat(newExt);
+}
+
+/// Replace the extension of a path string with a new extension.
+///
+/// Kept for backward compatibility with `pipelineReplaceExtension`.
+function pipelineReplaceExtension(pathStr: &String, newExt: str): String {
+  return pipelineReplaceExtensionStr(pathStr.toStr(), newExt);
 }
 
 // ---- Test helpers ----
@@ -218,41 +528,11 @@ function pipelineReadExpected(fixture: str, filename: str): String {
   };
 }
 
-/// Compile a minimal C source to a real object file, placed in `dir`.
-///
-/// Returns the object path on success; calls `Test::fail()` and returns a
-/// sentinel path on any error.
-function pipelineCompileMinimalObject(dir: &Path::PathBuf, baseName: str): Path::PathBuf {
-  let cSrc: String = String::create("int ignis_pipeline_").concat(baseName).concat("(void) { return 0; }");
-  let srcPathStr: String = String::create(dir.asStr()).concat("/").concat(baseName).concat(".c");
-  let srcPath: Path::PathBuf = Path::PathBuf::create(srcPathStr.toStr());
-  let tmpObjPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_pipeline_tmp.o");
-
-  match (Fs::writeString(&srcPath, &cSrc)) {
-    Result::OK(_) -> {},
-    Result::ERROR(_) -> {
-      Test::fail();
-      return Path::PathBuf::create("/nonexistent");
-    },
-  };
-
-  let includes: Vector<String> = Vector::new<String>();
-  let flags: Vector<String> = Vector::new<String>();
-
-  match (CCompiler::compileObject("gcc", &srcPath, &tmpObjPath, &includes, &flags)) {
-    Result::OK(_) -> {},
-    Result::ERROR(_) -> {
-      Test::fail();
-      return Path::PathBuf::create("/nonexistent");
-    },
-  };
-
-  return tmpObjPath;
-}
-
 /// Produce a test `BuildLayout` rooted at `/tmp/ignis_pipeline_{tag}`.
 function pipelineTestLayout(tag: str): BuildLayout {
-  let basePath: Path::PathBuf = Path::PathBuf::create("/tmp").join(String::create("ignis_pipeline_").concat(tag).toStr());
+  let basePath: Path::PathBuf = Path::PathBuf::create("/tmp").join(
+    String::create("ignis_pipeline_").concat(tag).toStr()
+  );
   return BuildLayout::new("ignis_std_test", &basePath);
 }
 
@@ -266,22 +546,87 @@ function pipelineEnsureDir(path: &Path::PathBuf): void {
   };
 }
 
+/// Write a minimal C file to `path`.
+function pipelineWriteMinimalC(path: &Path::PathBuf, symbol: str): void {
+  let cSrc: String = String::create("int ").concat(symbol).concat("(void) { return 0; }");
+  match (Fs::writeString(path, &cSrc)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+/// Write a minimal manifest.toml to `dir`, registering one module named `name`
+/// whose source is `modPath` (relative to the std root).
+function pipelineWriteMinimalManifest(dir: &Path::PathBuf, modName: str, modPath: str): void {
+  let content: String = String::create("[modules]\n")
+    .concat(modName)
+    .concat(" = \"")
+    .concat(modPath)
+    .concat("\"\n");
+  let manifestPath: Path::PathBuf = dir.join("manifest.toml");
+  match (Fs::writeString(&manifestPath, &content)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+    },
+  };
+}
+
+/// Build a minimal `BuildConfig` for testing, backed by a fake manifest at
+/// `manifestPath`.
+function pipelineBuildTestConfig(manifestPath: &Path::PathBuf): BuildConfig {
+  let manifest: StdManifest = match (Manifest::loadFile(manifestPath)) {
+    Result::OK(m) -> m,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return BuildConfig {
+        root: String::new(),
+        sourceDir: String::new(),
+        entry: String::create("/nonexistent/main.ign"),
+        outDir: String::new(),
+        aliases: Vector::new<BuildAlias>(),
+        target: String::create("c"),
+        targetTriple: String::new(),
+        backend: String::create("c"),
+        cc: String::create("gcc"),
+        cflags: Vector::new<String>(),
+        emit: String::new(),
+        stdManifest: Option::NONE,
+      };
+    },
+  };
+
+  return BuildConfig {
+    root: String::new(),
+    sourceDir: String::new(),
+    entry: String::create("/nonexistent/main.ign"),
+    outDir: String::new(),
+    aliases: Vector::new<BuildAlias>(),
+    target: String::create("c"),
+    targetTriple: String::create("x86_64-linux"),
+    backend: String::create("c"),
+    cc: String::create("gcc"),
+    cflags: Vector::new<String>(),
+    emit: String::new(),
+    stdManifest: Option::SOME(manifest),
+  };
+}
+
 @test
 function pipelineBuildStdSuccessEmitsHeaderAndArchive(): void {
-  let layout: BuildLayout = pipelineTestLayout("success");
+  let layout: BuildLayout = pipelineTestLayout("success_v2");
 
-  // Ensure output directories exist.
-  let stdObjDir: Path::PathBuf = layout.stdObjDir();
-  let stdLibDir: Path::PathBuf = layout.stdLibDir();
-  let stdIncDir: Path::PathBuf = layout.stdIncludeDir();
-  pipelineEnsureDir(&stdObjDir);
-  pipelineEnsureDir(&stdLibDir);
-  pipelineEnsureDir(&stdIncDir);
+  // Set up the std src directory and write a minimal manifest.
+  let stdFakeRoot: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_pipeline_std_root_v2");
+  pipelineEnsureDir(&stdFakeRoot);
+  pipelineWriteMinimalManifest(&stdFakeRoot, "rt", "rt.ign");
 
-  // Write a minimal C source into the std src area.
-  let srcPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_pipeline_test_rt.c");
-  let cSrc: String = String::create("int ignis_std_rt(void) { return 0; }");
-  match (Fs::writeString(&srcPath, &cSrc)) {
+  // Write the .ign stub so the fingerprint hasher can read it.
+  let ignPath: Path::PathBuf = stdFakeRoot.join("rt.ign");
+  let ignContent: String = String::create("// stub");
+  match (Fs::writeString(&ignPath, &ignContent)) {
     Result::OK(_) -> {},
     Result::ERROR(_) -> {
       Test::fail();
@@ -289,28 +634,28 @@ function pipelineBuildStdSuccessEmitsHeaderAndArchive(): void {
     },
   };
 
-  let mut sources: Vector<String> = Vector::new<String>();
-  sources.push(srcPath.toString());
+  // Write the corresponding .c file under layout.stdSrcDir().
+  let stdSrcDirV2: Path::PathBuf = layout.stdSrcDir();
+  pipelineEnsureDir(&stdSrcDirV2);
+  let cPath: Path::PathBuf = stdSrcDirV2.join("rt.c");
+  pipelineWriteMinimalC(&cPath, "ignis_std_rt_v2");
 
-  let result: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(
-    &layout,
-    "gcc",
-    "ar",
-    &sources,
-    "/* ignis_std.h */\n",
-  );
+  // Load manifest and build config (consumed by buildStd — config is taken by value).
+  let manifestPath: Path::PathBuf = stdFakeRoot.join("manifest.toml");
+  let config: BuildConfig = pipelineBuildTestConfig(&manifestPath);
 
-  // Verify the call succeeded.
+  // Run buildStd (config is moved in).
+  let result: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config, &layout);
+
   let mut buildOk: boolean = false;
   if (let Result::OK(stdResult) = result) {
     buildOk = stdResult.succeeded;
   }
 
-  // Check that libignis_std.a exists on disk.
+  // Verify artifacts on disk.
   let libPath: Path::PathBuf = layout.stdLibPath();
   let libExists: boolean = Fs::exists(libPath.asStr());
 
-  // Check that ignis_std.h exists on disk.
   let headerPath: Path::PathBuf = layout.stdIncludeDir().join("ignis_std.h");
   let headerExists: boolean = Fs::exists(headerPath.asStr());
 
@@ -329,7 +674,6 @@ function pipelineBuildStdSuccessEmitsHeaderAndArchive(): void {
     archiveMarker = String::create("std_archive_present");
   }
 
-  // Runtime linkage: the archive is present means the runtime was linked.
   let mut runtimeMarker: String = String::create("runtime_missing");
   if (buildOk && libExists) {
     runtimeMarker = String::create("runtime_linked");
@@ -358,4 +702,81 @@ function pipelineBuildStdFailureBlocksUserLink(): void {
 
   let expected: String = pipelineReadExpected("build_std_failure", "expected_user_link_blocked.txt");
   Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function pipelineBuildStdCacheHitSkipsRecompile(): void {
+  let layout: BuildLayout = pipelineTestLayout("cache_hit");
+
+  // Set up the std src directory and write a minimal manifest.
+  let stdFakeRoot: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_pipeline_std_root_cache");
+  pipelineEnsureDir(&stdFakeRoot);
+  pipelineWriteMinimalManifest(&stdFakeRoot, "rt", "rt.ign");
+
+  // Write the .ign stub.
+  let ignPath: Path::PathBuf = stdFakeRoot.join("rt.ign");
+  let ignContent: String = String::create("// cache stub");
+  match (Fs::writeString(&ignPath, &ignContent)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // Write the corresponding .c file under layout.stdSrcDir().
+  let stdSrcDirCache: Path::PathBuf = layout.stdSrcDir();
+  pipelineEnsureDir(&stdSrcDirCache);
+  let cPath: Path::PathBuf = stdSrcDirCache.join("rt.c");
+  pipelineWriteMinimalC(&cPath, "ignis_std_rt_cache");
+
+  // buildStd takes config by value; rebuild it for each invocation.
+  let manifestPath: Path::PathBuf = stdFakeRoot.join("manifest.toml");
+
+  // First build — must succeed and produce artifacts.
+  let config1: BuildConfig = pipelineBuildTestConfig(&manifestPath);
+  let result1: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config1, &layout);
+  let mut firstOk: boolean = false;
+  if (let Result::OK(r) = result1) {
+    firstOk = r.succeeded;
+  }
+  Test::assertEq<boolean>(firstOk, true);
+
+  // Verify the stamp file was written.
+  let stampPath: Path::PathBuf = layout.stdStampPath();
+  let stampExists: boolean = Fs::exists(stampPath.asStr());
+  Test::assertEq<boolean>(stampExists, true);
+
+  // Overwrite the archive with a sentinel byte so we can detect if the second
+  // build re-ran gcc (it would overwrite the sentinel file with a real archive).
+  let libPath: Path::PathBuf = layout.stdLibPath();
+  let sentinel: String = String::create("SENTINEL");
+  match (Fs::writeString(&libPath, &sentinel)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // Second build — same config, same sources — must be a cache hit.
+  let config2: BuildConfig = pipelineBuildTestConfig(&manifestPath);
+  let result2: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config2, &layout);
+  let mut secondOk: boolean = false;
+  if (let Result::OK(r) = result2) {
+    secondOk = r.succeeded;
+  }
+  Test::assertEq<boolean>(secondOk, true);
+
+  // If gcc re-ran, the archive would be a real ELF/AR file, not "SENTINEL".
+  // Verify the sentinel is still intact — proving no recompile occurred.
+  let libContent: String = match (Fs::readToString(&libPath)) {
+    Result::OK(text) -> text,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let sentinelStr: String = String::create("SENTINEL");
+  Test::assertEq<boolean>(libContent.equals(&sentinelStr), true);
 }

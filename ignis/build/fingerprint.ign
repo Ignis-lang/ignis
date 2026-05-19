@@ -6,13 +6,24 @@ import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
+/// A per-source file hash entry for fingerprint computation.
+///
+/// `path` is the absolute path of the source file; `hash` is the FNV-1a decimal
+/// hash of its byte content.  Entries in `BuildFingerprint.perSourceHashes` are
+/// kept in alphabetical-by-path order so the overall fingerprint is deterministic.
+export record SourceHash {
+  public path: String;
+  public hash: String;
+}
+
 /// Build configuration that affects output identity.
 ///
 /// All fields participate in cache invalidation. Any change to a field
 /// means previously-built artifacts are stale and must be rebuilt.
 ///
 /// Mirrors the Rust `BuildFingerprint` in `crates/ignis_driver/src/build_layout.rs`
-/// but extended per Phase 7 spec to include backend, cc, cflagsHash, and stdManifestHash.
+/// but extended per Phase 7 spec to include backend, cc, cflagsHash, stdManifestHash,
+/// per-source hashes, and a transitive hash over the full source graph.
 export record BuildFingerprint {
   public compilerVersion: String;
   public abiVersion: u32;
@@ -22,6 +33,17 @@ export record BuildFingerprint {
   public cflagsHash: String;
   public stdManifestHash: String;
 
+  /// One entry per resolved module source, in alphabetical-by-path order.
+  public perSourceHashes: Vector<SourceHash>;
+
+  /// Hash of the concatenation of all perSourceHashes entries (path + hash, in order).
+  /// This provides a single stable value for the entire source graph.
+  public transitiveHash: String;
+
+  /// Construct a fingerprint without source-graph entries.
+  ///
+  /// `perSourceHashes` is empty and `transitiveHash` is empty.
+  /// Used for toolchain-only fingerprints and legacy test fixtures.
   public static new(
     compilerVersion: str,
     abiVersion: u32,
@@ -39,6 +61,36 @@ export record BuildFingerprint {
       cc: String::create(cc),
       cflagsHash: String::create(cflagsHash),
       stdManifestHash: String::create(stdManifestHash),
+      perSourceHashes: Vector::new<SourceHash>(),
+      transitiveHash: String::new(),
+    };
+  }
+
+  /// Construct a fingerprint with source-graph hashes.
+  ///
+  /// Callers must supply `perSourceHashes` already sorted alphabetically by path.
+  /// `transitiveHash` should be computed via `fingerprintTransitiveHash`.
+  public static withSources(
+    compilerVersion: str,
+    abiVersion: u32,
+    targetTriple: str,
+    backend: str,
+    cc: str,
+    cflagsHash: str,
+    stdManifestHash: str,
+    perSourceHashes: Vector<SourceHash>,
+    transitiveHash: String,
+  ): BuildFingerprint {
+    return BuildFingerprint {
+      compilerVersion: String::create(compilerVersion),
+      abiVersion: abiVersion,
+      targetTriple: String::create(targetTriple),
+      backend: String::create(backend),
+      cc: String::create(cc),
+      cflagsHash: String::create(cflagsHash),
+      stdManifestHash: String::create(stdManifestHash),
+      perSourceHashes: perSourceHashes,
+      transitiveHash: transitiveHash,
     };
   }
 }
@@ -54,10 +106,45 @@ export function fingerprintHashStr(text: str): String {
   return value.toString();
 }
 
+/// Compute the transitive hash for a slice of per-source hashes.
+///
+/// Concatenates path + hash for every entry in order, then FNV-1a hashes the result.
+/// The caller is responsible for ensuring `entries` is sorted alphabetically by path.
+export function fingerprintTransitiveHash(entries: &Vector<SourceHash>): String {
+  let mut combined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < entries.length()) {
+    let Option::SOME(entry) = entries.get(index) else {
+      break;
+    };
+
+    combined.push(&entry.path);
+    combined.push(&entry.hash);
+    index += 1;
+  }
+
+  return fingerprintHashStr(combined.toStr());
+}
+
+/// Hash the byte content of a file at `path` using FNV-1a.
+///
+/// Returns the decimal hash string on success, or an empty String on read error.
+/// Intended for small fixture files only; not streaming.
+export function fingerprintHashFile(path: &Path::PathBuf): String {
+  return match (Fs::readToString(path)) {
+    Result::OK(content) -> fingerprintHashStr(content.toStr()),
+    Result::ERROR(_) -> String::new(),
+  };
+}
+
 /// Serialize the fingerprint as a sorted key=value block for use in stamp files.
 ///
-/// The block is deterministic: fields appear in alphabetical key order so that
-/// two `BuildFingerprint` values that are field-equal produce byte-identical output.
+/// The block is deterministic: fixed fields appear in alphabetical key order,
+/// followed by `per_source_hashes` entries (one per line as `path|hash`),
+/// then `transitive_hash`.
+///
+/// Two `BuildFingerprint` values that are field-equal produce byte-identical output.
 export function fingerprintSerialize(fp: &BuildFingerprint): String {
   let mut out: String = String::new();
 
@@ -82,12 +169,36 @@ export function fingerprintSerialize(fp: &BuildFingerprint): String {
   out.push(&fp.compilerVersion);
   out.pushChar('\n');
 
+  out.pushStr("per_source_count=");
+  let perSourceCount: u64 = fp.perSourceHashes.length();
+  let countText: String = perSourceCount.toString();
+  out.push(&countText);
+  out.pushChar('\n');
+
+  // Emit one `per_source=path|hash` line per entry, in the stored (alphabetical) order.
+  let mut srcIdx: u64 = 0;
+  while (srcIdx < fp.perSourceHashes.length()) {
+    let Option::SOME(entry) = fp.perSourceHashes.get(srcIdx) else {
+      break;
+    };
+    out.pushStr("per_source=");
+    out.push(&entry.path);
+    out.pushChar('|');
+    out.push(&entry.hash);
+    out.pushChar('\n');
+    srcIdx += 1;
+  }
+
   out.pushStr("std_manifest_hash=");
   out.push(&fp.stdManifestHash);
   out.pushChar('\n');
 
   out.pushStr("target_triple=");
   out.push(&fp.targetTriple);
+  out.pushChar('\n');
+
+  out.pushStr("transitive_hash=");
+  out.push(&fp.transitiveHash);
 
   return out;
 }
@@ -149,6 +260,57 @@ function fingerprintLookupKey(lines: &Vector<String>, key: str): String {
   return String::new();
 }
 
+/// Parse all `per_source=path|hash` lines from a serialized block.
+///
+/// Returns entries in the order they appear; the caller (serialize) guarantees
+/// they were written in alphabetical order.
+function fingerprintParsePerSource(lines: &Vector<String>): Vector<SourceHash> {
+  let mut entries: Vector<SourceHash> = Vector::new<SourceHash>();
+  let key: String = String::create("per_source");
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      break;
+    };
+
+    let trimmed: String = line.trimAsciiWhitespace();
+
+    // Check for "per_source=" prefix.
+    let Option::SOME(eqIndex) = trimmed.indexOfCharFrom('=', 0) else {
+      index += 1;
+      continue;
+    };
+
+    let lineKey: String = trimmed.substringBytes(0, eqIndex).trimAsciiWhitespace();
+    if (!lineKey.equals(&key)) {
+      index += 1;
+      continue;
+    }
+
+    let value: String = trimmed.substringBytes(eqIndex + 1, trimmed.length());
+
+    // Split on the first `|` to separate path from hash.
+    let pipeOpt: Option<u64> = value.indexOfCharFrom('|', 0);
+    let Option::SOME(pipeIdx) = pipeOpt else {
+      index += 1;
+      continue;
+    };
+
+    let entryPath: String = value.substringBytes(0, pipeIdx);
+    let entryHash: String = value.substringBytes(pipeIdx + 1, value.length());
+
+    entries.push(SourceHash {
+      path: entryPath,
+      hash: entryHash,
+    });
+
+    index += 1;
+  }
+
+  return entries;
+}
+
 /// Parse a fingerprint from a serialized key=value block.
 ///
 /// Returns `Option::NONE` if any required field is missing or `abi_version` is not a valid u32.
@@ -169,10 +331,13 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
   let compilerVersion: String = fingerprintLookupKey(&lines, "compiler_version");
   let stdManifestHash: String = fingerprintLookupKey(&lines, "std_manifest_hash");
   let targetTriple: String = fingerprintLookupKey(&lines, "target_triple");
+  let transitiveHash: String = fingerprintLookupKey(&lines, "transitive_hash");
 
   if (compilerVersion.length() == 0 || backend.length() == 0 || cc.length() == 0) {
     return Option::NONE;
   }
+
+  let perSourceHashes: Vector<SourceHash> = fingerprintParsePerSource(&lines);
 
   return Option::SOME(BuildFingerprint {
     compilerVersion: compilerVersion,
@@ -182,6 +347,8 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
     cc: cc,
     cflagsHash: cflagsHash,
     stdManifestHash: stdManifestHash,
+    perSourceHashes: perSourceHashes,
+    transitiveHash: transitiveHash,
   });
 }
 
@@ -280,4 +447,95 @@ function fingerprintStdManifestHashChangeInvalidates(): void {
     actual = String::create("invalidated");
   }
   Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintSourceChangeInvalidates(): void {
+  // Write two fixture source files to /tmp.
+  let src1Path: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_fp_test_src1.c");
+  let src2Path: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_fp_test_src2.c");
+
+  let content1: String = String::create("int foo(void) { return 1; }");
+  let content2: String = String::create("int bar(void) { return 2; }");
+
+  match (Fs::writeString(&src1Path, &content1)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  match (Fs::writeString(&src2Path, &content2)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // Compute per-source hashes for both files (in alphabetical order by path).
+  let hash1: String = fingerprintHashFile(&src1Path);
+  let hash2: String = fingerprintHashFile(&src2Path);
+
+  let mut sources1: Vector<SourceHash> = Vector::new<SourceHash>();
+  sources1.push(SourceHash {
+    path: src1Path.toString(),
+    hash: hash1.clone(),
+  });
+  sources1.push(SourceHash {
+    path: src2Path.toString(),
+    hash: hash2.clone(),
+  });
+
+  let transitive1: String = fingerprintTransitiveHash(&sources1);
+
+  let fp1: BuildFingerprint = BuildFingerprint::withSources(
+    "0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash", "manifest-hash",
+    sources1,
+    transitive1,
+  );
+
+  // Mutate src1: write different content.
+  let contentModified: String = String::create("int foo(void) { return 99; }");
+  match (Fs::writeString(&src1Path, &contentModified)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // Recompute hashes after mutation.
+  let hash1Modified: String = fingerprintHashFile(&src1Path);
+  let hash2Again: String = fingerprintHashFile(&src2Path);
+
+  let mut sources2: Vector<SourceHash> = Vector::new<SourceHash>();
+  sources2.push(SourceHash {
+    path: src1Path.toString(),
+    hash: hash1Modified.clone(),
+  });
+  sources2.push(SourceHash {
+    path: src2Path.toString(),
+    hash: hash2Again.clone(),
+  });
+
+  let transitive2: String = fingerprintTransitiveHash(&sources2);
+
+  let fp2: BuildFingerprint = BuildFingerprint::withSources(
+    "0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash", "manifest-hash",
+    sources2,
+    transitive2,
+  );
+
+  // The fingerprints must differ because src1 changed.
+  Test::assertEq<boolean>(fingerprintEquals(&fp1, &fp2), false);
+
+  // The perSourceHash for src1 must differ between the two fingerprints.
+  let src1HashBefore: String = hash1.clone();
+  let src1HashAfter: String = hash1Modified.clone();
+  Test::assertEq<boolean>(src1HashBefore.equals(&src1HashAfter), false);
+
+  // src2 is unchanged — its hash must be the same in both.
+  Test::assertEq<boolean>(hash2.equals(&hash2Again), true);
 }
