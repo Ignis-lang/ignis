@@ -164,6 +164,14 @@ export namespace ModuleGraph {
   }
 
   function visit(graph: &BuildGraph, nodeIndex: u64, visited: &mut Vector<u64>, order: &mut Vector<u64>): void {
+    // `visited` is the "black" (fully processed) set.  A node is added to `visited`
+    // only after all its transitive dependencies have been emitted (post-order DFS).
+    //
+    // Invariant: the resolver rejects cycles before topologicalOrder is called, so
+    // a node cannot be re-entered while it is still on the DFS call stack.  Therefore
+    // "in visited" is equivalent to "fully processed", and checking visited is
+    // sufficient to prevent duplicate emissions (e.g. in a diamond dependency where
+    // A→B, A→C, B→D, C→D: D is visited on the first path and skipped on the second).
     let mut visitedIndex: u64 = 0;
     while (visitedIndex < visited.length()) {
       let Option::SOME(value) = visited.get(visitedIndex) else {
@@ -176,9 +184,6 @@ export namespace ModuleGraph {
 
       visitedIndex += 1;
     }
-
-    let mut visitedRef: &mut Vector<u64> = visited;
-    visitedRef.push(nodeIndex);
 
     let Option::SOME(node) = graph.nodes.get(nodeIndex) else {
       return;
@@ -193,6 +198,10 @@ export namespace ModuleGraph {
       ModuleGraph::visit(graph, edge.targetIndex, visited, order);
       edgeIndex += 1;
     }
+
+    // Mark black and emit in post-order (dependencies before dependents).
+    let mut visitedRef: &mut Vector<u64> = visited;
+    visitedRef.push(nodeIndex);
 
     let mut orderRef: &mut Vector<u64> = order;
     orderRef.push(nodeIndex);

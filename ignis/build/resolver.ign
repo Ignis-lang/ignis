@@ -573,12 +573,18 @@ function resolverAliasMatch(project: &ResolverProject, importSource: &String): O
       break;
     };
 
-    if (alias.name.length() < firstSegment.length() && firstSegment.startsWith(alias.name.toStr()) && alias.name.length() > bestMatchLength) {
-      let remainder: String = firstSegment.substringBytes(alias.name.length(), firstSegment.length());
+    // Require a "::" boundary after the alias name so that an alias "comp" does not
+    // shadow an import "compiler::foo".  The import source must start with exactly
+    // "<alias.name>::" to qualify as a prefix match.
+    let aliasWithSep: String = alias.name.concat("::");
+    if (importSource.startsWith(aliasWithSep.toStr()) && alias.name.length() > bestMatchLength) {
+      let subPath: String = importSource.substringBytes(aliasWithSep.length(), importSource.length());
+      let subPathOpt: Option<String> = Option::SOME(subPath);
+      let emptyRemainder: String = String::new();
       bestMatchLength = alias.name.length();
       bestMatch = Option::SOME(AliasResolution {
         basePath: alias.path.clone(),
-        remainder: resolverJoinAliasRemainder(&remainder, &rest),
+        remainder: resolverJoinAliasRemainder(&emptyRemainder, &subPathOpt),
       });
     }
 
@@ -903,6 +909,36 @@ function resolverReportsAmbiguousImportDiagnostic(): void {
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
   let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverAliasPrefixDoesNotShadowLongerSegment(): void {
+  // Alias "comp" must NOT resolve the import "compiler::types": "compiler" starts
+  // with "comp" but is a distinct segment — no "::" boundary follows "comp" in
+  // "compiler::types", so the alias must not match.
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/alias_boundary");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverDiscoversAcyclicDiamondInDependencyOrder(): void {
+  // Diamond: main imports B and C; both B and C import D.
+  // D must appear exactly once in topo order, before B and C.
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/diamond");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let actual: String = Resolver::orderSummaryRelativeTo(&discovery, &fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 
