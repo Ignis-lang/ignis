@@ -478,14 +478,14 @@ impl<'a> CEmitter<'a> {
       }
     }
 
-    if !self.is_entry_user_module(target_module_id) {
-      forced.retain(|def_id| {
-        !self.is_missing_std_archive_generic_specialization(*def_id)
-          || self.is_std_test_def(*def_id)
-          || self.definition_depends_on_user_type(*def_id)
-          || self.definition_mangled_name_mentions_user_type(*def_id)
-      });
-    }
+    // Every entry in `forced` is a cross-module std definition reachable from this
+    // module and is emitted with internal (`static`) linkage when it is missing from
+    // the std archive (see the linkage handling in `emit_function`). A specialization
+    // that std never instantiated -- e.g. `Vector<u8>::toSlice` over a primitive
+    // element type -- is absent from the archive, so it must be emitted locally in
+    // every user module that reaches it, regardless of whether its signature mentions
+    // a user type. Dropping such defs here previously produced linker errors like
+    // `undefined reference to 'Vector____u8____toSlice'` from non-entry user modules.
 
     forced
   }
@@ -831,23 +831,6 @@ impl<'a> CEmitter<'a> {
       })
       .filter(|(_, candidate)| self.is_std_test_local_user_type(candidate.owner_module))
       .map(|(_, candidate)| self.symbols.get(&candidate.name))
-      .any(|candidate_name| raw_name.contains(candidate_name))
-  }
-
-  fn definition_mangled_name_mentions_user_type(
-    &self,
-    def_id: DefinitionId,
-  ) -> bool {
-    let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
-
-    self
-      .defs
-      .iter()
-      .filter_map(|(candidate_id, candidate)| match &candidate.kind {
-        DefinitionKind::Record(_) | DefinitionKind::Enum(_) if self.classify(candidate_id).is_user() => Some(candidate),
-        _ => None,
-      })
-      .map(|candidate| self.symbols.get(&candidate.name))
       .any(|candidate_name| raw_name.contains(candidate_name))
   }
 

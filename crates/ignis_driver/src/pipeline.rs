@@ -2970,6 +2970,22 @@ pub fn run_std_tests(
     .include_dirs
     .push(input.layout.user_include_dir());
 
+  // Symbols already provided by the std archive. Per-module emission needs this so it
+  // can force-emit (with internal linkage) std generic specializations that std never
+  // instantiated -- e.g. `Vector<u8>::toSlice` over a primitive element type -- which
+  // would otherwise be left as an unresolved external reference.
+  let std_defined_symbols = match &link_plan.std_archive {
+    Some(archive_path) => match collect_archive_defined_symbols(archive_path) {
+      Ok(symbols) => Some(symbols),
+      Err(error) => {
+        cmd_fail!(&config, "Test setup failed", start.elapsed());
+        eprintln!("{} {}", "Error:".red().bold(), error);
+        return Err(());
+      },
+    },
+    None => None,
+  };
+
   let mut user_object_paths = Vec::new();
 
   for source_path in &test_sources {
@@ -3069,7 +3085,7 @@ pub fn run_std_tests(
         module_paths: &module_paths,
         user_module_headers: &user_module_headers,
         std_path: input.source_dir.as_path(),
-        std_defined_symbols: None,
+        std_defined_symbols: std_defined_symbols.as_ref(),
       }),
     ) {
       Ok(contents) => contents,
