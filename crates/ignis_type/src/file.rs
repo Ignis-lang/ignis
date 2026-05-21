@@ -361,4 +361,44 @@ mod tests {
     let eof = Span::new(file, BytePosition(9), BytePosition(9));
     assert_eq!(source_map.snippet(eof), "   2 | last\n     |     ^");
   }
+
+  #[test]
+  fn snippet_counts_wide_cjk_scalar_as_single_column() {
+    let mut source_map = SourceMap::new();
+    // '世' is three UTF-8 bytes (offsets 1..4) but a single Unicode scalar.
+    let file = source_map.add_virtual("wide", "a世b".to_string());
+    let span = Span::new(file, BytePosition(1), BytePosition(4));
+
+    assert_eq!(source_map.snippet(span), "   1 | a世b\n     |  ^");
+  }
+
+  #[test]
+  fn snippet_counts_each_wide_scalar_as_one_caret() {
+    let mut source_map = SourceMap::new();
+    // '世' and '界' are three bytes each; the span covers both (offsets 0..6).
+    let file = source_map.add_virtual("wide", "世界x".to_string());
+    let span = Span::new(file, BytePosition(0), BytePosition(6));
+
+    assert_eq!(source_map.snippet(span), "   1 | 世界x\n     | ^^");
+  }
+
+  #[test]
+  fn snippet_counts_astral_emoji_scalar_as_single_column() {
+    let mut source_map = SourceMap::new();
+    // '😀' is a four-byte astral-plane scalar (offsets 0..4).
+    let file = source_map.add_virtual("emoji", "😀x".to_string());
+    let span = Span::new(file, BytePosition(0), BytePosition(4));
+
+    assert_eq!(source_map.snippet(span), "   1 | 😀x\n     | ^");
+  }
+
+  #[test]
+  fn snippet_offsets_caret_past_leading_wide_scalar() {
+    let mut source_map = SourceMap::new();
+    // The caret must sit at column 1: the leading '世' counts as one column.
+    let file = source_map.add_virtual("wide", "世a".to_string());
+    let span = Span::new(file, BytePosition(3), BytePosition(4));
+
+    assert_eq!(source_map.snippet(span), "   1 | 世a\n     |  ^");
+  }
 }
