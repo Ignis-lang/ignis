@@ -40,15 +40,22 @@ pub(crate) fn format_inline_or_multiline(
   prefix: &str,
   items: &[String],
   suffix: &str,
-  indent_level: usize,
+  leading_offset: usize,
   config: &FormatterConfig,
   multiline_trailing_comma: bool,
+  reserved_trailing: usize,
 ) -> Doc {
   let joined = items.join(", ");
   let flat = format!("{prefix}{joined}{suffix}");
-  let indent_prefix = config.indent_columns(indent_level);
 
-  if indent_prefix + flat.len() <= config.line_width {
+  // `leading_offset` is the column at which `prefix` begins. Callers whose
+  // `prefix` already embeds its own indentation pass 0; callers that splice
+  // the result mid-line pass the column where that splice starts.
+  //
+  // `reserved_trailing` reserves columns for content appended on the same line
+  // after the suffix (e.g. ` {` for a body, `;` for a declaration), so the
+  // combined first line never exceeds `line_width`.
+  if leading_offset + flat.len() + reserved_trailing <= config.line_width {
     return Doc::text(flat);
   }
 

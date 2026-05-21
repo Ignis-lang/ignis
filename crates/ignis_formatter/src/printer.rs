@@ -51,7 +51,7 @@ fn render_items(
           output.push('\n');
         }
 
-        let formatted = indent_block(region.raw.trim_end(), indent_level, config);
+        let formatted = indent_block(region.raw.trim(), indent_level, config);
         if formatted.is_empty() {
           continue;
         }

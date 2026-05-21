@@ -1320,7 +1320,15 @@ impl<'a> AstChunkFormatter<'a> {
               .map(|type_| self.format_type(type_))
               .collect::<Vec<_>>();
             rendered.push_str(&render_doc(
-              &format_inline_or_multiline("(", &payload, ")", indent_level + 1, self.config, false),
+              &format_inline_or_multiline(
+                "(",
+                &payload,
+                ")",
+                self.config.indent_columns(indent_level + 1),
+                self.config,
+                false,
+                0,
+              ),
               self.config,
               indent_level + 1,
             ));
@@ -1541,13 +1549,18 @@ impl<'a> AstChunkFormatter<'a> {
     body: Option<NodeId>,
     indent_level: usize,
   ) -> Result<String, LayoutFailure> {
+    // Reserve columns for what gets appended on the signature's first line:
+    // ` {` when a body follows, `;` for a bodiless declaration.
+    let reserved_trailing = if body.is_some() { " {".len() } else { ";".len() };
+
     let signature_doc = format_inline_or_multiline(
       &format!("{header}("),
       parameters,
       &format!("): {}", self.format_type(return_type)),
-      indent_level,
+      0,
       self.config,
       has_trailing_comma,
+      reserved_trailing,
     );
 
     let mut formatted = render_doc(&signature_doc, self.config, indent_level);
@@ -2013,7 +2026,7 @@ impl<'a> AstChunkFormatter<'a> {
       .collect::<Result<Vec<_>, _>>()?;
 
     let formatted = format!(
-      "match ({}) {{ {}, }}",
+      "match ({}) {{ {} }}",
       self.format_expression_node(match_expression.scrutinee, 0, 0)?,
       arms.join(", ")
     );
