@@ -1,5 +1,7 @@
 import Char from "std::char";
 import Path from "std::path";
+import Id from "@compiler::ids";
+import IndexVec from "@compiler::indexing";
 
 function storeSourceSpanPath(storage: &mut Vector<String>, value: String): str {
   let mut storageRef: &mut Vector<String> = storage;
@@ -97,10 +99,83 @@ export record SourceSpan {
     return self.start == self.end;
   }
 
+  /// Returns the file-independent byte range of this span, dropping the path.
+  ///
+  /// Built as a record literal rather than `TextRange::new(...)` on purpose:
+  /// calling another record's static constructor from inside a `&self` method
+  /// currently miscompiles (LIR return-type mismatch).
+  public range(&self): TextRange {
+    return TextRange {
+      start: self.start,
+      end: self.end,
+    };
+  }
+
   equals(&self, other: &SourceSpan): boolean {
     let leftPath: str = self.filePath;
     let rightPath: str = other.filePath;
     return @eq<str>(&leftPath, &rightPath) && self.start == other.start && self.end == other.end;
+  }
+}
+
+/// A half-open byte range `[start, end)` within some source text, independent
+/// of any particular file.
+///
+/// `SourceSpan` is the file-qualified counterpart; use `TextRange` when offsets
+/// are computed or compared without caring which file they came from.
+export record TextRange {
+  public start: u64;
+  public end: u64;
+
+  public static new(start: u64, end: u64): TextRange {
+    return TextRange {
+      start: start,
+      end: end,
+    };
+  }
+
+  public static emptyAt(position: u64): TextRange {
+    return TextRange {
+      start: position,
+      end: position,
+    };
+  }
+
+  /// Returns the smallest range covering both `left` and `right`.
+  public static merge(left: &TextRange, right: &TextRange): TextRange {
+    let mut start: u64 = left.start;
+    if (right.start < start) {
+      start = right.start;
+    }
+
+    let mut end: u64 = left.end;
+    if (right.end > end) {
+      end = right.end;
+    }
+
+    return TextRange::new(start, end);
+  }
+
+  /// Returns the length of the range in bytes, or 0 for an invalid range.
+  public length(&self): u64 {
+    if (self.end >= self.start) {
+      return self.end - self.start;
+    }
+
+    return 0;
+  }
+
+  public isEmpty(&self): boolean {
+    return self.length() == 0;
+  }
+
+  public isValid(&self): boolean {
+    return self.start <= self.end;
+  }
+
+  /// Returns true if `position` falls within the half-open range `[start, end)`.
+  public contains(&self, position: u64): boolean {
+    return self.start <= position && position < self.end;
   }
 }
 
@@ -354,5 +429,96 @@ export record SourceFile {
     }
 
     return rendered;
+  }
+}
+
+record FileTag {}
+
+/// Stable handle for a `SourceFile` registered in a `SourceMap`.
+export type FileId = Id<FileTag>;
+
+/// Registry of source files addressed by stable `FileId` handles.
+///
+/// A `SourceMap` owns every `SourceFile` it holds and hands out `FileId`s for
+/// later lookup. `addFile` deduplicates by path so requesting the same file
+/// twice returns the same handle; `addVirtual` always allocates a fresh entry
+/// for synthetic, path-less sources. Position resolution (`lineCol`,
+/// `byteLineCol`, `snippet`) is delegated to the addressed `SourceFile`.
+export record SourceMap {
+  files: IndexVec<FileTag, SourceFile>;
+
+  public static new(): SourceMap {
+    return SourceMap {
+      files: IndexVec::new<FileTag, SourceFile>(),
+    };
+  }
+
+  public addFile(&mut self, path: str, text: str): FileId {
+    if (let Option::SOME(existing) = self.lookupByPath(path)) {
+      return existing;
+    }
+
+    return self.files.push(SourceFile::create(path, text));
+  }
+
+  public addVirtual(&mut self, label: str, text: str): FileId {
+    let virtualPath: String = String::create("<").concat(label).concat(">");
+
+    return self.files.push(SourceFile::create(virtualPath.toStr(), text));
+  }
+
+  public get(&self, id: FileId): Option<&SourceFile> {
+    return self.files.get(id);
+  }
+
+  public lookupByPath(&self, path: str): Option<FileId> {
+    let mut index: u64 = 0;
+
+    while (index < self.files.length()) {
+      let id: FileId = Id::fromRaw<FileTag>(index as u32);
+
+      let Option::SOME(existing) = self.files.get(id) else {
+        break;
+      };
+
+      let existingPath: String = existing.path.toString();
+      let existingStr: str = existingPath.toStr();
+
+      if (@eq<str>(&existingStr, &path)) {
+        return Option::SOME(id);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  public fileCount(&self): u64 {
+    return self.files.length();
+  }
+
+  public lineCol(&self, id: FileId, position: u64): Option<SourceLocation> {
+    let Option::SOME(file) = self.files.get(id) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(file.lineCol(position));
+  }
+
+  public byteLineCol(&self, id: FileId, position: u64): Option<SourceLocation> {
+    let Option::SOME(file) = self.files.get(id) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(file.byteLineCol(position));
+  }
+
+  public snippet(&self, id: FileId, span: SourceSpan): Option<String> {
+    let Option::SOME(file) = self.files.get(id) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(file.snippet(span));
   }
 }

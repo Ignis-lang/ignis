@@ -1,7 +1,14 @@
 import Fs from "std::fs";
 import Test from "std::test";
 
-import SourceFile, SourceLocation, SourceSpan from "@compiler::diagnostics";
+import
+  FileId,
+  SourceFile,
+  SourceLocation,
+  SourceMap,
+  SourceSpan,
+  TextRange,
+from "@compiler::diagnostics";
 
 function readUtf8Fixture(path: str): String {
   return match (Fs::readToString(path)) {
@@ -92,4 +99,113 @@ function sourceSnippetRendersMultilineSpanLikeStage0(): void {
   let rendered: String = source.snippet(SourceSpan::new("fixtures/multiline.ign", 2, 10));
 
   Test::assertEq<str>(rendered.toStr(), "   1 | alpha\n     |   ^^^\n   2 | beta\n     | ^^^^");
+}
+
+@test
+function textRangeReportsLengthEmptinessAndContains(): void {
+  let range: TextRange = TextRange::new(2, 5);
+
+  Test::assertEq<u64>(range.length(), 3);
+  Test::assert(!range.isEmpty());
+  Test::assert(range.isValid());
+
+  Test::assert(!range.contains(1));
+  Test::assert(range.contains(2));
+  Test::assert(range.contains(4));
+  Test::assert(!range.contains(5));
+
+  let empty: TextRange = TextRange::emptyAt(7);
+  Test::assertEq<u64>(empty.length(), 0);
+  Test::assert(empty.isEmpty());
+}
+
+@test
+function textRangeMergeCoversBothRanges(): void {
+  let left: TextRange = TextRange::new(2, 4);
+  let right: TextRange = TextRange::new(6, 9);
+  let merged: TextRange = TextRange::merge(&left, &right);
+
+  Test::assertEq<u64>(merged.start, 2);
+  Test::assertEq<u64>(merged.end, 9);
+}
+
+@test
+function sourceMapDeduplicatesFilesByPath(): void {
+  let mut map: SourceMap = SourceMap::new();
+  let first: FileId = map.addFile("fixtures/input.ign", "alpha");
+  let second: FileId = map.addFile("fixtures/input.ign", "alpha");
+  let other: FileId = map.addFile("fixtures/other.ign", "beta");
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assert(first.raw() != other.raw());
+  Test::assertEq<u64>(map.fileCount(), 2);
+}
+
+@test
+function sourceMapLooksUpRegisteredPaths(): void {
+  let mut map: SourceMap = SourceMap::new();
+  let id: FileId = map.addFile("fixtures/input.ign", "alpha");
+
+  let Option::SOME(found) = map.lookupByPath("fixtures/input.ign") else {
+    Test::assert(false);
+    return;
+  };
+
+  Test::assertEq<u32>(found.raw(), id.raw());
+  Test::assert(map.lookupByPath("fixtures/missing.ign").isNone());
+}
+
+@test
+function sourceMapDelegatesResolutionToRegisteredFile(): void {
+  let mut map: SourceMap = SourceMap::new();
+  let id: FileId = map.addFile("fixtures/multiline.ign", "alpha\nbeta\ngamma");
+
+  let Option::SOME(location) = map.lineCol(id, 8) else {
+    Test::assert(false);
+    return;
+  };
+
+  Test::assertEq<u32>(location.line, 2);
+  Test::assertEq<u32>(location.column, 3);
+
+  let Option::SOME(rendered) = map.snippet(id, SourceSpan::new("fixtures/multiline.ign", 2, 10)) else {
+    Test::assert(false);
+    return;
+  };
+
+  Test::assertEq<str>(rendered.toStr(), "   1 | alpha\n     |   ^^^\n   2 | beta\n     | ^^^^");
+}
+
+@test
+function sourceMapRegistersVirtualFiles(): void {
+  let mut map: SourceMap = SourceMap::new();
+  let id: FileId = map.addVirtual("synthetic", "generated");
+
+  let Option::SOME(file) = map.get(id) else {
+    Test::assert(false);
+    return;
+  };
+
+  Test::assertEq<str>(file.text.toStr(), "generated");
+  Test::assertEq<u64>(map.fileCount(), 1);
+}
+
+@test
+function sourceMapReturnsNoneForUnknownFileId(): void {
+  let mut populated: SourceMap = SourceMap::new();
+  let id: FileId = populated.addFile("fixtures/input.ign", "alpha");
+
+  let empty: SourceMap = SourceMap::new();
+
+  Test::assert(empty.get(id).isNone());
+  Test::assert(empty.lineCol(id, 0).isNone());
+}
+
+@test
+function sourceSpanExposesFileIndependentRange(): void {
+  let span: SourceSpan = SourceSpan::new("fixtures/input.ign", 4, 10);
+  let range: TextRange = span.range();
+
+  Test::assertEq<u64>(range.start, 4);
+  Test::assertEq<u64>(range.end, 10);
 }
