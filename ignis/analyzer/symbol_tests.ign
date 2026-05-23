@@ -1,0 +1,78 @@
+import Test from "std::test";
+
+import Symbol from "@compiler::symbols";
+
+import Analyzer from "@compiler::analyzer";
+
+@test
+function symbolTableInternReturnsDeterministicInsertionOrderIds(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  Test::assertEq<u32>(table.intern("x").raw(), 0);
+  Test::assertEq<u32>(table.intern("y").raw(), 1);
+  Test::assertEq<u32>(table.intern("z").raw(), 2);
+}
+
+@test
+function symbolTableInternIsIdempotentForSameName(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let firstId: Analyzer::SymbolId = table.intern("x");
+  let secondId: Analyzer::SymbolId = table.intern("x");
+
+  Test::assertEq<u32>(firstId.raw(), secondId.raw());
+  Test::assertEq<u64>(table.length(), 1);
+}
+
+@test
+function symbolTableInternReturnsDistinctIdsForDistinctNames(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let xId: Analyzer::SymbolId = table.intern("x");
+  let yId: Analyzer::SymbolId = table.intern("y");
+  let zId: Analyzer::SymbolId = table.intern("z");
+
+  Test::assert(xId.raw() != yId.raw());
+  Test::assert(xId.raw() != zId.raw());
+  Test::assert(yId.raw() != zId.raw());
+}
+
+@test
+function symbolTableResolveRoundTripsInternedNames(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let fooId: Analyzer::SymbolId = table.intern("foo");
+
+  match (table.resolve(fooId)) {
+    Option::SOME(name) -> Test::assertEq<str>(name, "foo"),
+    Option::NONE -> @panic("expected Some(\"foo\") but got None"),
+  };
+}
+
+@test
+function symbolTableResolveReturnsNoneForUnknownId(): void {
+  let table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  match (table.resolve(Symbol::fromRaw(999))) {
+    Option::SOME(_) -> @panic("expected None but got Some"),
+    Option::NONE -> Test::assert(true),
+  };
+}
+
+@test
+function symbolTableLengthMatchesInsertedDistinctNames(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  table.intern("a");
+  table.intern("b");
+  table.intern("a");
+
+  Test::assertEq<u64>(table.length(), 2);
+}
+
+@test
+function symbolIdAndSymbolShareRawConstructor(): void {
+  let symbolId: Analyzer::SymbolId = Symbol::fromRaw(7);
+
+  Test::assertEq<u32>(symbolId.raw(), 7);
+}

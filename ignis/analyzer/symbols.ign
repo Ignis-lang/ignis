@@ -1,0 +1,32 @@
+import Symbol from "@compiler::symbols";
+import StringInterner from "@compiler::interning";
+
+export namespace Analyzer {
+  /// Interned identifier handle used across binder/resolver/typeck.
+  /// Aliased to the selfhost-wide `Symbol` so the analyzer interoperates with
+  /// lexer/parser-produced symbols without conversion.
+  type SymbolId = Symbol;
+
+  /// Owns the interner that maps identifier strings to `Analyzer::SymbolId`
+  /// in deterministic insertion order. Mirrors the Rust analyzer's
+  /// `SymbolTable` (`crates/ignis_type/src/symbol.rs`).
+  record SymbolTable {
+    interner: StringInterner;
+
+    public static init(): SymbolTable {
+      return SymbolTable { interner: StringInterner::init() };
+    }
+
+    public intern(&mut self, name: str): Analyzer::SymbolId {
+      return self.interner.intern(name);
+    }
+
+    public resolve(&self, id: Analyzer::SymbolId): Option<str> {
+      return self.interner.resolve(id);
+    }
+
+    public length(&self): u64 {
+      return self.interner.length();
+    }
+  }
+}
