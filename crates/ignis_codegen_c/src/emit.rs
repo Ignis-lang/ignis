@@ -656,7 +656,13 @@ impl<'a> CEmitter<'a> {
         return true;
       }
 
-      current_namespace = namespace_def.owner_namespace;
+      // Walk the namespace tree parent, not the definition's owner_namespace.
+      // The two differ when a nested namespace is declared as a top-level item
+      // (e.g. `namespace LibC::Memory {}`), where the definition has
+      // owner_namespace = None but the tree parent is `LibC`. Following the
+      // tree parent matches what is_effectively_public_for_header does, so the
+      // C source and the emitted header agree on linkage.
+      current_namespace = self.namespaces.get(&namespace_id).parent;
     }
 
     false
