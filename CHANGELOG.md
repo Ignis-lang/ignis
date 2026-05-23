@@ -9,7 +9,7 @@ byte-backed UTF-8 string semantics, and the first collections foundation in the 
 
 ### Breaking Changes
 
-- `char` is now restricted to single-byte values and is emitted as `u8`, aligning the language with the v0.4 UTF-8 byte-backed string model.
+- `char` is now one Unicode scalar value and is emitted as `ignis_char_t`, aligning the language with the v0.4 UTF-8 byte-backed string model.
 - The old `@configFlag(...)` builtin flow was replaced by compile-time directive expressions and conditional item support.
 
 ### Features
