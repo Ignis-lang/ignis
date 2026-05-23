@@ -1,0 +1,156 @@
+import Eq from "std::hash";
+
+import IndexVec from "@compiler::indexing";
+
+export namespace Analyzer {
+  @implements(Eq)
+  enum Type {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+    BOOLEAN,
+    CHAR,
+    STR,
+    VOID,
+    NEVER,
+
+    public name(&self): str {
+      return match (self) {
+        Analyzer::Type::I8 -> "i8",
+        Analyzer::Type::I16 -> "i16",
+        Analyzer::Type::I32 -> "i32",
+        Analyzer::Type::I64 -> "i64",
+        Analyzer::Type::U8 -> "u8",
+        Analyzer::Type::U16 -> "u16",
+        Analyzer::Type::U32 -> "u32",
+        Analyzer::Type::U64 -> "u64",
+        Analyzer::Type::F32 -> "f32",
+        Analyzer::Type::F64 -> "f64",
+        Analyzer::Type::BOOLEAN -> "boolean",
+        Analyzer::Type::CHAR -> "char",
+        Analyzer::Type::STR -> "str",
+        Analyzer::Type::VOID -> "void",
+        Analyzer::Type::NEVER -> "never",
+      };
+    }
+
+    public equals(&self, other: &Analyzer::Type): boolean {
+      return match (self) {
+        Analyzer::Type::I8 -> *other == Analyzer::Type::I8,
+        Analyzer::Type::I16 -> *other == Analyzer::Type::I16,
+        Analyzer::Type::I32 -> *other == Analyzer::Type::I32,
+        Analyzer::Type::I64 -> *other == Analyzer::Type::I64,
+        Analyzer::Type::U8 -> *other == Analyzer::Type::U8,
+        Analyzer::Type::U16 -> *other == Analyzer::Type::U16,
+        Analyzer::Type::U32 -> *other == Analyzer::Type::U32,
+        Analyzer::Type::U64 -> *other == Analyzer::Type::U64,
+        Analyzer::Type::F32 -> *other == Analyzer::Type::F32,
+        Analyzer::Type::F64 -> *other == Analyzer::Type::F64,
+        Analyzer::Type::BOOLEAN -> *other == Analyzer::Type::BOOLEAN,
+        Analyzer::Type::CHAR -> *other == Analyzer::Type::CHAR,
+        Analyzer::Type::STR -> *other == Analyzer::Type::STR,
+        Analyzer::Type::VOID -> *other == Analyzer::Type::VOID,
+        Analyzer::Type::NEVER -> *other == Analyzer::Type::NEVER,
+      };
+    }
+  }
+
+  /// Owns all interned types and caches one canonical `Analyzer::TypeId` per primitive.
+  /// The set of primitives is finite and known at construction time, so the
+  /// store eagerly allocates one slot per variant during `init()`.
+  record TypeStore {
+    types: IndexVec<Analyzer::TypeTag, Analyzer::Type>;
+    primI8: Analyzer::TypeId;
+    primI16: Analyzer::TypeId;
+    primI32: Analyzer::TypeId;
+    primI64: Analyzer::TypeId;
+    primU8: Analyzer::TypeId;
+    primU16: Analyzer::TypeId;
+    primU32: Analyzer::TypeId;
+    primU64: Analyzer::TypeId;
+    primF32: Analyzer::TypeId;
+    primF64: Analyzer::TypeId;
+    primBoolean: Analyzer::TypeId;
+    primChar: Analyzer::TypeId;
+    primStr: Analyzer::TypeId;
+    primVoid: Analyzer::TypeId;
+    primNever: Analyzer::TypeId;
+
+    public static init(): TypeStore {
+      let mut storage: IndexVec<Analyzer::TypeTag, Analyzer::Type> = IndexVec::new<Analyzer::TypeTag, Analyzer::Type>();
+
+      let idI8: Analyzer::TypeId = storage.push(Analyzer::Type::I8);
+      let idI16: Analyzer::TypeId = storage.push(Analyzer::Type::I16);
+      let idI32: Analyzer::TypeId = storage.push(Analyzer::Type::I32);
+      let idI64: Analyzer::TypeId = storage.push(Analyzer::Type::I64);
+      let idU8: Analyzer::TypeId = storage.push(Analyzer::Type::U8);
+      let idU16: Analyzer::TypeId = storage.push(Analyzer::Type::U16);
+      let idU32: Analyzer::TypeId = storage.push(Analyzer::Type::U32);
+      let idU64: Analyzer::TypeId = storage.push(Analyzer::Type::U64);
+      let idF32: Analyzer::TypeId = storage.push(Analyzer::Type::F32);
+      let idF64: Analyzer::TypeId = storage.push(Analyzer::Type::F64);
+      let idBoolean: Analyzer::TypeId = storage.push(Analyzer::Type::BOOLEAN);
+      let idChar: Analyzer::TypeId = storage.push(Analyzer::Type::CHAR);
+      let idStr: Analyzer::TypeId = storage.push(Analyzer::Type::STR);
+      let idVoid: Analyzer::TypeId = storage.push(Analyzer::Type::VOID);
+      let idNever: Analyzer::TypeId = storage.push(Analyzer::Type::NEVER);
+
+      return TypeStore {
+        types: storage,
+        primI8: idI8,
+        primI16: idI16,
+        primI32: idI32,
+        primI64: idI64,
+        primU8: idU8,
+        primU16: idU16,
+        primU32: idU32,
+        primU64: idU64,
+        primF32: idF32,
+        primF64: idF64,
+        primBoolean: idBoolean,
+        primChar: idChar,
+        primStr: idStr,
+        primVoid: idVoid,
+        primNever: idNever,
+      };
+    }
+
+    /// Returns the canonical `Analyzer::TypeId` for a primitive variant. The store keeps
+    /// at most one slot per primitive, so this is the public interning entry
+    /// point for primitive types.
+    public intern(&self, kind: Analyzer::Type): Analyzer::TypeId {
+      return match (kind) {
+        Analyzer::Type::I8 -> self.primI8,
+        Analyzer::Type::I16 -> self.primI16,
+        Analyzer::Type::I32 -> self.primI32,
+        Analyzer::Type::I64 -> self.primI64,
+        Analyzer::Type::U8 -> self.primU8,
+        Analyzer::Type::U16 -> self.primU16,
+        Analyzer::Type::U32 -> self.primU32,
+        Analyzer::Type::U64 -> self.primU64,
+        Analyzer::Type::F32 -> self.primF32,
+        Analyzer::Type::F64 -> self.primF64,
+        Analyzer::Type::BOOLEAN -> self.primBoolean,
+        Analyzer::Type::CHAR -> self.primChar,
+        Analyzer::Type::STR -> self.primStr,
+        Analyzer::Type::VOID -> self.primVoid,
+        Analyzer::Type::NEVER -> self.primNever,
+      };
+    }
+
+    public get(&self, id: Analyzer::TypeId): Option<&Analyzer::Type> {
+      return self.types.get(id);
+    }
+
+    public length(&self): u64 {
+      return self.types.length();
+    }
+  }
+}

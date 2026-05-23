@@ -1,0 +1,97 @@
+import Test from "std::test";
+
+import Id from "@compiler::ids";
+
+import Analyzer from "@compiler::analyzer";
+
+@test
+function typeStoreInitAssignsDeterministicIdsToPrimitives(): void {
+  let store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  Test::assertEq<u32>(store.intern(Analyzer::Type::I8).raw(), 0);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::I16).raw(), 1);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::I32).raw(), 2);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::I64).raw(), 3);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::U8).raw(), 4);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::U16).raw(), 5);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::U32).raw(), 6);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::U64).raw(), 7);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::F32).raw(), 8);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::F64).raw(), 9);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::BOOLEAN).raw(), 10);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::CHAR).raw(), 11);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::STR).raw(), 12);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::VOID).raw(), 13);
+  Test::assertEq<u32>(store.intern(Analyzer::Type::NEVER).raw(), 14);
+}
+
+@test
+function typeStoreInternIsIdempotentForSamePrimitive(): void {
+  let store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let firstI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let secondI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  Test::assertEq<u32>(firstI32.raw(), secondI32.raw());
+}
+
+@test
+function typeStoreInternReturnsDistinctIdsForDistinctPrimitives(): void {
+  let store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let i32Id: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let i64Id: Analyzer::TypeId = store.intern(Analyzer::Type::I64);
+  let strId: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  Test::assert(i32Id.raw() != i64Id.raw());
+  Test::assert(i32Id.raw() != strId.raw());
+  Test::assert(i64Id.raw() != strId.raw());
+}
+
+@test
+function typeStoreGetReturnsInternedType(): void {
+  let store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let id: Analyzer::TypeId = store.intern(Analyzer::Type::BOOLEAN);
+
+  match (store.get(id)) {
+    Option::SOME(type_) -> Test::assert(type_.equals(&Analyzer::Type::BOOLEAN)),
+    Option::NONE -> @panic("expected interned primitive type"),
+  };
+}
+
+@test
+function typeStoreLengthMatchesPrimitiveCount(): void {
+  let store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  Test::assertEq<u64>(store.length(), 15);
+}
+
+@test
+function typeNameReturnsCanonicalLabelForEachPrimitive(): void {
+  Test::assertEq<str>(Analyzer::Type::I8.name(), "i8");
+  Test::assertEq<str>(Analyzer::Type::I16.name(), "i16");
+  Test::assertEq<str>(Analyzer::Type::I32.name(), "i32");
+  Test::assertEq<str>(Analyzer::Type::I64.name(), "i64");
+  Test::assertEq<str>(Analyzer::Type::U8.name(), "u8");
+  Test::assertEq<str>(Analyzer::Type::U16.name(), "u16");
+  Test::assertEq<str>(Analyzer::Type::U32.name(), "u32");
+  Test::assertEq<str>(Analyzer::Type::U64.name(), "u64");
+  Test::assertEq<str>(Analyzer::Type::F32.name(), "f32");
+  Test::assertEq<str>(Analyzer::Type::F64.name(), "f64");
+  Test::assertEq<str>(Analyzer::Type::BOOLEAN.name(), "boolean");
+  Test::assertEq<str>(Analyzer::Type::CHAR.name(), "char");
+  Test::assertEq<str>(Analyzer::Type::STR.name(), "str");
+  Test::assertEq<str>(Analyzer::Type::VOID.name(), "void");
+  Test::assertEq<str>(Analyzer::Type::NEVER.name(), "never");
+}
+
+@test
+function typeIdAndDefinitionIdAndModuleIdShareRawConstructor(): void {
+  let typeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(7);
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(7);
+  let modId: Analyzer::ModuleId = Id::fromRaw<Analyzer::ModuleTag>(7);
+
+  Test::assertEq<u32>(typeId.raw(), 7);
+  Test::assertEq<u32>(defId.raw(), 7);
+  Test::assertEq<u32>(modId.raw(), 7);
+}
