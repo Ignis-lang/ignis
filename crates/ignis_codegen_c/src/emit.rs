@@ -2051,9 +2051,33 @@ impl<'a> CEmitter<'a> {
     };
 
     // Public functions must not be `static` -- conflicts with the header declaration.
+    // Module-private free functions are translation-unit-local: without `static`,
+    // identically-named private functions across modules collide at link time
+    // even after the overload-suffix mangling, because two `function readFixture(path: str): String`
+    // in different files share the same signature and therefore the same mangled
+    // name. Marking them `static` gives each TU its own copy and resolves the
+    // collision.
+    //
+    // Two exceptions to the !is_public -> static rule:
+    //
+    // - `@test` functions: the generated test harness lives in a separate
+    //   translation unit and references them via `extern void`, so they must
+    //   keep external linkage even when their owning namespace is private.
+    //
+    // - Methods (DefinitionKind::Method): methods of an exported record can be
+    //   invoked from another module even when the method itself is not marked
+    //   public. The caller's translation unit emits a forward declaration and
+    //   relies on external linkage at the definition; marking the definition
+    //   `static` would break the cross-module call.
     if !func.is_extern {
       let mut is_public = self.is_effectively_public(def_id);
-      let mut needs_internal_linkage = false;
+      let def_kind = &self.defs.get(&def_id).kind;
+      let is_method = matches!(def_kind, DefinitionKind::Method(_));
+      let is_test_function = matches!(
+        def_kind,
+        DefinitionKind::Function(function_def) if function_def.has_test_attr()
+      );
+      let mut needs_internal_linkage = !is_public && !is_method && !is_test_function;
       let is_forced_cross_module_helper = self.forced_emit_defs.contains(&def_id)
         && self
           .target
@@ -3824,9 +3848,18 @@ impl<'a> CEmitter<'a> {
     let def = self.defs.get(&def_id);
     let raw_name = self.symbols.get(&def.name).to_string();
 
-    let has_overloads = self.has_overloads(def_id) || self.original_generic_method_has_overloads(def_id);
-
-    let param_suffix = if has_overloads {
+    // Mirror build_mangled_name_standalone: every Function gets a param suffix
+    // unconditionally so that bare names like `abs` do not clash with libc /
+    // runtime symbols. Methods only get the suffix when actually overloaded
+    // (they already carry an owner_type prefix and any monomorphization
+    // suffix, so adding an unconditional param tail bloats them without
+    // disambiguation benefit).
+    let needs_param_suffix = match &def.kind {
+      DefinitionKind::Function(_) => true,
+      DefinitionKind::Method(_) => self.has_overloads(def_id) || self.original_generic_method_has_overloads(def_id),
+      _ => false,
+    };
+    let param_suffix = if needs_param_suffix {
       self.format_param_types_for_mangling(def_id)
     } else {
       String::new()
@@ -5334,10 +5367,22 @@ fn build_mangled_name_standalone(
     return USER_MAIN_SYMBOL.to_string();
   }
 
-  // Check for overloads to determine if we need a parameter suffix
-  let has_overloads =
-    has_overloads_standalone(def_id, defs) || original_generic_method_has_overloads_standalone(def_id, defs, symbols);
-  let param_suffix = if has_overloads {
+  // Ignis supports function overloading, so the C symbol for every non-extern
+  // function must encode the parameter and return types. Doing it unconditionally
+  // (rather than only when a same-name sibling is detected) keeps user functions
+  // from accidentally clashing with libc / runtime symbols of the same bare
+  // name (e.g. `function abs(n: i32): i32` vs the C library `abs`). Methods
+  // already carry an owner-type prefix and a generic specialization suffix, so
+  // the param suffix is appended to the inner method name in the namespaced
+  // branch below.
+  let needs_param_suffix = match &def.kind {
+    DefinitionKind::Function(_) => true,
+    DefinitionKind::Method(_) => {
+      has_overloads_standalone(def_id, defs) || original_generic_method_has_overloads_standalone(def_id, defs, symbols)
+    },
+    _ => false,
+  };
+  let param_suffix = if needs_param_suffix {
     format_param_types_for_mangling_standalone(def_id, defs, namespaces, types, symbols)
   } else {
     String::new()
@@ -6313,11 +6358,11 @@ mod tests {
     .emit();
 
     assert!(
-      c_code.contains("void assertEq____str(void);"),
+      c_code.contains("void assertEq____str_void(void);"),
       "expected a prototype for the forced std::test generic specialization"
     );
     assert!(
-      c_code.contains("static void assertEq____str(void)"),
+      c_code.contains("static void assertEq____str_void(void)"),
       "expected the forced std::test generic specialization to be emitted with internal linkage"
     );
   }

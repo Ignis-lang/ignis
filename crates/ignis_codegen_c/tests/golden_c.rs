@@ -43,11 +43,11 @@ function main(): void {
   );
 
   assert!(
-    c_code.contains("boolean Align_isPowerOfTwo(u64 value)"),
+    c_code.contains("boolean Align_isPowerOfTwo_u64_bool(u64 value)"),
     "expected exported namespace member to be emitted"
   );
   assert!(
-    !c_code.contains("static boolean Align_isPowerOfTwo(u64 value)"),
+    !c_code.contains("static boolean Align_isPowerOfTwo_u64_bool(u64 value)"),
     "expected exported namespace member to keep external linkage"
   );
 }
@@ -72,11 +72,11 @@ function main(): void {
   );
 
   assert!(
-    c_code.contains("i32 LibC_File_write(i32 value)"),
+    c_code.contains("i32 LibC_File_write_i32_i32(i32 value)"),
     "expected nested exported namespace member to be emitted"
   );
   assert!(
-    !c_code.contains("static i32 LibC_File_write(i32 value)"),
+    !c_code.contains("static i32 LibC_File_write_i32_i32(i32 value)"),
     "expected nested exported namespace member to keep external linkage"
   );
 }
