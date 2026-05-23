@@ -1,0 +1,128 @@
+import Test from "std::test";
+
+import Id from "@compiler::ids";
+
+import Analyzer from "@compiler::analyzer";
+
+@test
+function definitionStoreInitIsEmpty(): void {
+  let store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  Test::assertEq<u64>(store.length(), 0);
+
+  match (store.get(Id::fromRaw<Analyzer::DefinitionTag>(0))) {
+    Option::SOME(_) -> @panic("expected None on empty store but got Some"),
+    Option::NONE -> Test::assert(true),
+  };
+}
+
+@test
+function definitionStorePushAssignsDeterministicInsertionOrderIds(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSym: Analyzer::SymbolId = table.intern("func");
+  let recSym: Analyzer::SymbolId = table.intern("rec");
+  let enumSym: Analyzer::SymbolId = table.intern("enumVal");
+  let varSym: Analyzer::SymbolId = table.intern("var");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(funcSym));
+  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(recSym));
+  let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(enumSym));
+  let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(varSym));
+
+  Test::assertEq<u32>(id0.raw(), 0);
+  Test::assertEq<u32>(id1.raw(), 1);
+  Test::assertEq<u32>(id2.raw(), 2);
+  Test::assertEq<u32>(id3.raw(), 3);
+  Test::assertEq<u64>(store.length(), 4);
+}
+
+@test
+function definitionStoreGetRoundTripsEachVariant(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSym: Analyzer::SymbolId = table.intern("func");
+  let recSym: Analyzer::SymbolId = table.intern("rec");
+  let enumSym: Analyzer::SymbolId = table.intern("enumVal");
+  let varSym: Analyzer::SymbolId = table.intern("var");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(funcSym));
+  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(recSym));
+  let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(enumSym));
+  let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(varSym));
+
+  match (store.get(id0)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(name) -> Test::assertEq<u32>(name.raw(), funcSym.raw()),
+      Analyzer::Definition::Record(_) -> @panic("expected Function variant"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Function variant"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Function variant"),
+    },
+    Option::NONE -> @panic("expected Some for id0 but got None"),
+  };
+
+  match (store.get(id1)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_) -> @panic("expected Record variant"),
+      Analyzer::Definition::Record(name) -> Test::assertEq<u32>(name.raw(), recSym.raw()),
+      Analyzer::Definition::Enum(_) -> @panic("expected Record variant"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record variant"),
+    },
+    Option::NONE -> @panic("expected Some for id1 but got None"),
+  };
+
+  match (store.get(id2)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_) -> @panic("expected Enum variant"),
+      Analyzer::Definition::Record(_) -> @panic("expected Enum variant"),
+      Analyzer::Definition::Enum(name) -> Test::assertEq<u32>(name.raw(), enumSym.raw()),
+      Analyzer::Definition::Variable(_) -> @panic("expected Enum variant"),
+    },
+    Option::NONE -> @panic("expected Some for id2 but got None"),
+  };
+
+  match (store.get(id3)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_) -> @panic("expected Variable variant"),
+      Analyzer::Definition::Record(_) -> @panic("expected Variable variant"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Variable variant"),
+      Analyzer::Definition::Variable(name) -> Test::assertEq<u32>(name.raw(), varSym.raw()),
+    },
+    Option::NONE -> @panic("expected Some for id3 but got None"),
+  };
+}
+
+@test
+function definitionStoreLengthCountsDuplicatePushes(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("foo");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(sym));
+  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(sym));
+
+  Test::assertEq<u64>(store.length(), 2);
+  Test::assert(id0.raw() != id1.raw());
+}
+
+@test
+function definitionNameReturnsEmbeddedSymbolIdForEachVariant(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSym: Analyzer::SymbolId = table.intern("func");
+  let recSym: Analyzer::SymbolId = table.intern("rec");
+  let enumSym: Analyzer::SymbolId = table.intern("enumVal");
+  let varSym: Analyzer::SymbolId = table.intern("var");
+
+  let funcDef: Analyzer::Definition = Analyzer::Definition::Function(funcSym);
+  let recDef: Analyzer::Definition = Analyzer::Definition::Record(recSym);
+  let enumDef: Analyzer::Definition = Analyzer::Definition::Enum(enumSym);
+  let varDef: Analyzer::Definition = Analyzer::Definition::Variable(varSym);
+
+  Test::assertEq<u32>(funcDef.name().raw(), funcSym.raw());
+  Test::assertEq<u32>(recDef.name().raw(), recSym.raw());
+  Test::assertEq<u32>(enumDef.name().raw(), enumSym.raw());
+  Test::assertEq<u32>(varDef.name().raw(), varSym.raw());
+}

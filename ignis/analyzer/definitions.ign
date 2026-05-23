@@ -1,0 +1,49 @@
+import IndexVec from "@compiler::indexing";
+
+export namespace Analyzer {
+  /// A named declaration in the analyzer's definition store.
+  /// Each variant carries the interned symbol for the declaration's name.
+  /// Method `name()` is exhaustive — no wildcard arm — so adding a future
+  /// variant forces a compile error at every call site.
+  enum Definition {
+    Function(Analyzer::SymbolId),
+    Record(Analyzer::SymbolId),
+    Enum(Analyzer::SymbolId),
+    Variable(Analyzer::SymbolId),
+
+    /// Returns the interned symbol for this definition's declared name.
+    public name(&self): Analyzer::SymbolId {
+      return match (self) {
+        Analyzer::Definition::Function(name) -> name,
+        Analyzer::Definition::Record(name)   -> name,
+        Analyzer::Definition::Enum(name)     -> name,
+        Analyzer::Definition::Variable(name) -> name,
+      };
+    }
+  }
+
+  /// Flat, insertion-ordered store of all definitions visible in a module.
+  /// Mirrors the slice-1 `TypeStore` shape: no interning, no caches, `init()`
+  /// returns empty and `push` is the sole allocator.
+  record DefinitionStore {
+    definitions: IndexVec<Analyzer::DefinitionTag, Analyzer::Definition>;
+
+    public static init(): DefinitionStore {
+      return DefinitionStore {
+        definitions: IndexVec::new<Analyzer::DefinitionTag, Analyzer::Definition>(),
+      };
+    }
+
+    public push(&mut self, def: Analyzer::Definition): Analyzer::DefinitionId {
+      return self.definitions.push(def);
+    }
+
+    public get(&self, id: Analyzer::DefinitionId): Option<&Analyzer::Definition> {
+      return self.definitions.get(id);
+    }
+
+    public length(&self): u64 {
+      return self.definitions.length();
+    }
+  }
+}
