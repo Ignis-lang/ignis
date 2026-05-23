@@ -4,6 +4,11 @@ import Id from "@compiler::ids";
 import IndexVec from "@compiler::indexing";
 
 export namespace Analyzer {
+  /// Wrapper record for the Tuple variant payload. Holds element types in order.
+  record TupleType {
+    public elements: Vector<Analyzer::TypeId>;
+  }
+
   @implements(Eq)
   enum Type {
     I8,
@@ -26,6 +31,7 @@ export namespace Analyzer {
     Reference(Analyzer::TypeId),
     Slice(Analyzer::TypeId),
     FixedArray(Analyzer::TypeId, u64),
+    Tuple(Analyzer::TupleType),
 
     public name(&self): str {
       return match (self) {
@@ -48,6 +54,7 @@ export namespace Analyzer {
         Analyzer::Type::Reference(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Slice(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::FixedArray(_, _) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Tuple(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
       };
     }
 
@@ -78,6 +85,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::I16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -99,6 +107,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::I32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -120,6 +129,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::I64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -141,6 +151,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::U8 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -162,6 +173,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::U16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -183,6 +195,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::U32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -204,6 +217,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::U64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -225,6 +239,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::F32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -246,6 +261,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::F64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -267,6 +283,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::BOOLEAN -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -288,6 +305,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::CHAR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -309,6 +327,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::STR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -330,6 +349,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::VOID -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -351,6 +371,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::NEVER -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -372,6 +393,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::Pointer(p) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -393,6 +415,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::Reference(r) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -414,6 +437,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(s) -> r.equals(&s),
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::Slice(e) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -435,6 +459,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(f) -> e.equals(&f),
           Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
         },
         Analyzer::Type::FixedArray(e, n) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -456,8 +481,57 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(f, m) -> e.equals(&f) && n == m,
+          Analyzer::Type::Tuple(_) -> false,
+        },
+        Analyzer::Type::Tuple(a) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(b) -> Analyzer::Type::tupleElementsEqual(&a.elements, &b.elements),
         },
       };
+    }
+
+    /// Compares two element vectors for structural equality element-by-element.
+    /// Short-circuits false if lengths differ; then checks each index via TypeId::equals.
+    private static tupleElementsEqual(
+      left: &Vector<Analyzer::TypeId>,
+      right: &Vector<Analyzer::TypeId>,
+    ): boolean {
+      if (left.length() != right.length()) {
+        return false;
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < left.length()) {
+        let Option::SOME(l) = left.get(index) else { return false; };
+        let Option::SOME(r) = right.get(index) else { return false; };
+
+        if (!l.equals(r)) {
+          return false;
+        }
+
+        index += 1;
+      }
+
+      return true;
     }
   }
 
@@ -547,6 +621,7 @@ export namespace Analyzer {
         Analyzer::Type::Reference(r) -> self.internCompound(Analyzer::Type::Reference(r)),
         Analyzer::Type::Slice(e) -> self.internCompound(Analyzer::Type::Slice(e)),
         Analyzer::Type::FixedArray(e, n) -> self.internCompound(Analyzer::Type::FixedArray(e, n)),
+        Analyzer::Type::Tuple(t) -> self.internCompound(Analyzer::Type::Tuple(t)),
       };
     }
 
@@ -595,6 +670,40 @@ export namespace Analyzer {
       return self.intern(Analyzer::Type::FixedArray(element, length));
     }
 
+    /// Returns the canonical id for a tuple with the given element types (in order).
+    /// Takes ownership of `elements`; the vector is moved into storage on cache miss.
+    public tuple(&mut self, elements: Vector<Analyzer::TypeId>): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Tuple(Analyzer::TupleType { elements: elements }));
+    }
+
+    /// Formats a tuple type as a comma-separated parenthesized list.
+    /// Empty tuple -> "()", single element -> "(i32)", multiple -> "(i32, str)".
+    private tupleNameOf(&self, elements: &Vector<Analyzer::TypeId>): String {
+      if (elements.length() == 0) {
+        return String::create("()");
+      }
+
+      let mut result: String = String::create("(");
+      let mut index: u64 = 0;
+
+      while (index < elements.length()) {
+        let Option::SOME(elementId) = elements.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result = result.concat(", ");
+        }
+
+        result = result.concat(self.nameOf(*elementId).toStr());
+
+        index += 1;
+      }
+
+      return result.concat(")");
+    }
+
     /// Recursively resolves a `TypeId` to its canonical string name.
     ///
     /// For primitive ids, delegates to `Analyzer::Type::name()`.
@@ -622,6 +731,7 @@ export namespace Analyzer {
           Analyzer::Type::Reference(referent) -> String::create("&").concat(self.nameOf(referent).toStr()),
           Analyzer::Type::Slice(element) -> self.nameOf(element).concat("[]"),
           Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
+          Analyzer::Type::Tuple(t) -> self.tupleNameOf(&t.elements),
         };
       }
 

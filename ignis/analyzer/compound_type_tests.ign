@@ -201,6 +201,7 @@ function getRoundTripsCompoundVariants(): void {
       Analyzer::Type::Reference(_) -> @panic("expected Slice variant"),
       Analyzer::Type::Slice(e) -> Test::assertEq<u32>(e.raw(), idI32.raw()),
       Analyzer::Type::FixedArray(_, _) -> @panic("expected Slice variant"),
+      Analyzer::Type::Tuple(_) -> @panic("expected Slice variant"),
     },
   };
 
@@ -231,6 +232,143 @@ function getRoundTripsCompoundVariants(): void {
         Test::assertEq<u32>(e.raw(), idI32.raw());
         Test::assertEq<u64>(length, 16);
       },
+      Analyzer::Type::Tuple(_) -> @panic("expected FixedArray variant"),
     },
   };
+}
+
+@test
+function emptyTupleInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let elements1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  let first: Analyzer::TypeId = store.tuple(elements1);
+
+  let lengthAfterFirst: u64 = store.length();
+
+  let elements2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  let second: Analyzer::TypeId = store.tuple(elements2);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assertEq<u64>(store.length(), lengthAfterFirst);
+}
+
+@test
+function singleElementTupleInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut elements1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements1.push(idI32);
+  let first: Analyzer::TypeId = store.tuple(elements1);
+
+  let mut elements2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements2.push(idI32);
+  let second: Analyzer::TypeId = store.tuple(elements2);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assert(first.raw() != idI32.raw());
+}
+
+@test
+function multiElementTupleInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut elements1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements1.push(idI32);
+  elements1.push(idStr);
+  let first: Analyzer::TypeId = store.tuple(elements1);
+
+  let lengthAfterFirst: u64 = store.length();
+
+  let mut elements2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements2.push(idI32);
+  elements2.push(idStr);
+  let second: Analyzer::TypeId = store.tuple(elements2);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assertEq<u64>(store.length(), lengthAfterFirst);
+}
+
+@test
+function tupleOfDifferentOrderAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut elements1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements1.push(idI32);
+  elements1.push(idStr);
+  let first: Analyzer::TypeId = store.tuple(elements1);
+
+  let mut elements2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements2.push(idStr);
+  elements2.push(idI32);
+  let second: Analyzer::TypeId = store.tuple(elements2);
+
+  Test::assert(first.raw() != second.raw());
+}
+
+@test
+function tupleOfDifferentArityAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut elements1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements1.push(idI32);
+  let t1: Analyzer::TypeId = store.tuple(elements1);
+
+  let mut elements2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements2.push(idI32);
+  elements2.push(idI32);
+  let t2: Analyzer::TypeId = store.tuple(elements2);
+
+  let mut elements3: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements3.push(idI32);
+  elements3.push(idI32);
+  elements3.push(idI32);
+  let t3: Analyzer::TypeId = store.tuple(elements3);
+
+  Test::assert(t1.raw() != t2.raw());
+  Test::assert(t1.raw() != t3.raw());
+  Test::assert(t2.raw() != t3.raw());
+}
+
+@test
+function compoundTypeNameOfEmptyTuple(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  let tupleId: Analyzer::TypeId = store.tuple(elements);
+
+  Test::assertEq<str>(store.nameOf(tupleId).toStr(), "()");
+}
+
+@test
+function compoundTypeNameOfSingleElementTuple(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  let tupleId: Analyzer::TypeId = store.tuple(elements);
+
+  Test::assertEq<str>(store.nameOf(tupleId).toStr(), "(i32)");
+}
+
+@test
+function compoundTypeNameOfMultiElementTupleWithCompoundInside(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let ptrStr: Analyzer::TypeId = store.pointer(idStr);
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+  elements.push(ptrStr);
+  let tupleId: Analyzer::TypeId = store.tuple(elements);
+
+  Test::assertEq<str>(store.nameOf(tupleId).toStr(), "(i32, *str)");
 }
