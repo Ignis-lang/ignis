@@ -1,0 +1,236 @@
+import Test from "std::test";
+
+import Id from "@compiler::ids";
+
+import Analyzer from "@compiler::analyzer";
+
+// TASK 0 probe result: PATH B — == does not work on Analyzer::Type (enum with payload variants).
+// The compiler rejected *other == Analyzer::Type::I8 with A0019 for ALL arms once payload variants
+// were added. The full nested-match form (TASK 2b) is used for equals().
+@test
+function probeEqOnPayloadVariant(): void {
+  let idZero: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+  let pointer1: Analyzer::Type = Analyzer::Type::Pointer(idZero);
+  let pointer2: Analyzer::Type = Analyzer::Type::Pointer(idZero);
+  let reference1: Analyzer::Type = Analyzer::Type::Reference(idZero);
+
+  Test::assert(pointer1.equals(&pointer2));
+  Test::assert(!pointer1.equals(&reference1));
+}
+
+@test
+function pointerInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let first: Analyzer::TypeId = store.pointer(idI32);
+  let second: Analyzer::TypeId = store.pointer(idI32);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+}
+
+@test
+function referenceInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let first: Analyzer::TypeId = store.reference(idStr);
+  let second: Analyzer::TypeId = store.reference(idStr);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+}
+
+@test
+function sliceInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idBoolean: Analyzer::TypeId = store.intern(Analyzer::Type::BOOLEAN);
+
+  let first: Analyzer::TypeId = store.slice(idBoolean);
+  let second: Analyzer::TypeId = store.slice(idBoolean);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+}
+
+@test
+function fixedArrayInterningIsIdempotentForSameElementAndLength(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI64: Analyzer::TypeId = store.intern(Analyzer::Type::I64);
+
+  let first: Analyzer::TypeId = store.fixedArray(idI64, 8);
+  let second: Analyzer::TypeId = store.fixedArray(idI64, 8);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+}
+
+@test
+function pointerOfDifferentInnerTypesAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idI64: Analyzer::TypeId = store.intern(Analyzer::Type::I64);
+
+  let ptrI32: Analyzer::TypeId = store.pointer(idI32);
+  let ptrI64: Analyzer::TypeId = store.pointer(idI64);
+
+  Test::assert(ptrI32.raw() != ptrI64.raw());
+}
+
+@test
+function fixedArrayDifferentLengthsAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let fa4: Analyzer::TypeId = store.fixedArray(idI32, 4);
+  let fa8: Analyzer::TypeId = store.fixedArray(idI32, 8);
+
+  Test::assert(fa4.raw() != fa8.raw());
+}
+
+@test
+function pointerVsReferenceWithSameInnerAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let ptrId: Analyzer::TypeId = store.pointer(idI32);
+  let refId: Analyzer::TypeId = store.reference(idI32);
+  let sliceId: Analyzer::TypeId = store.slice(idI32);
+
+  Test::assert(ptrId.raw() != refId.raw());
+  Test::assert(ptrId.raw() != sliceId.raw());
+  Test::assert(refId.raw() != sliceId.raw());
+}
+
+@test
+function constructorDoesNotDuplicateOnSecondCall(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  store.pointer(idI32);
+
+  let lengthAfterFirst: u64 = store.length();
+
+  store.pointer(idI32);
+
+  Test::assertEq<u64>(store.length(), lengthAfterFirst);
+}
+
+@test
+function compoundTypeNameOfPointer(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let ptrId: Analyzer::TypeId = store.pointer(idI32);
+
+  Test::assertEq<str>(store.nameOf(ptrId).toStr(), "*i32");
+}
+
+@test
+function compoundTypeNameOfReference(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let refId: Analyzer::TypeId = store.reference(idStr);
+
+  Test::assertEq<str>(store.nameOf(refId).toStr(), "&str");
+}
+
+@test
+function compoundTypeNameOfSlice(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idBoolean: Analyzer::TypeId = store.intern(Analyzer::Type::BOOLEAN);
+  let sliceId: Analyzer::TypeId = store.slice(idBoolean);
+
+  Test::assertEq<str>(store.nameOf(sliceId).toStr(), "boolean[]");
+}
+
+@test
+function compoundTypeNameOfFixedArray(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let faId: Analyzer::TypeId = store.fixedArray(idI32, 4);
+
+  Test::assertEq<str>(store.nameOf(faId).toStr(), "i32[4]");
+}
+
+@test
+function compoundTypeNameOfNestedPointerOfSliceOfI32(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let sliceId: Analyzer::TypeId = store.slice(idI32);
+  let ptrOfSliceId: Analyzer::TypeId = store.pointer(sliceId);
+
+  Test::assertEq<str>(store.nameOf(ptrOfSliceId).toStr(), "*i32[]");
+}
+
+@test
+function equalsDistinguishesPointerFromReference(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let ptrType: Analyzer::Type = Analyzer::Type::Pointer(idI32);
+  let refType: Analyzer::Type = Analyzer::Type::Reference(idI32);
+
+  Test::assert(!ptrType.equals(&refType));
+  Test::assert(!refType.equals(&ptrType));
+}
+
+@test
+function getRoundTripsCompoundVariants(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let sliceId: Analyzer::TypeId = store.slice(idI32);
+
+  match (store.get(sliceId)) {
+    Option::NONE -> @panic("expected SOME for slice id"),
+    Option::SOME(type_) -> match (type_) {
+      Analyzer::Type::I8 -> @panic("expected Slice variant"),
+      Analyzer::Type::I16 -> @panic("expected Slice variant"),
+      Analyzer::Type::I32 -> @panic("expected Slice variant"),
+      Analyzer::Type::I64 -> @panic("expected Slice variant"),
+      Analyzer::Type::U8 -> @panic("expected Slice variant"),
+      Analyzer::Type::U16 -> @panic("expected Slice variant"),
+      Analyzer::Type::U32 -> @panic("expected Slice variant"),
+      Analyzer::Type::U64 -> @panic("expected Slice variant"),
+      Analyzer::Type::F32 -> @panic("expected Slice variant"),
+      Analyzer::Type::F64 -> @panic("expected Slice variant"),
+      Analyzer::Type::BOOLEAN -> @panic("expected Slice variant"),
+      Analyzer::Type::CHAR -> @panic("expected Slice variant"),
+      Analyzer::Type::STR -> @panic("expected Slice variant"),
+      Analyzer::Type::VOID -> @panic("expected Slice variant"),
+      Analyzer::Type::NEVER -> @panic("expected Slice variant"),
+      Analyzer::Type::Pointer(_) -> @panic("expected Slice variant"),
+      Analyzer::Type::Reference(_) -> @panic("expected Slice variant"),
+      Analyzer::Type::Slice(e) -> Test::assertEq<u32>(e.raw(), idI32.raw()),
+      Analyzer::Type::FixedArray(_, _) -> @panic("expected Slice variant"),
+    },
+  };
+
+  let faId: Analyzer::TypeId = store.fixedArray(idI32, 16);
+
+  match (store.get(faId)) {
+    Option::NONE -> @panic("expected SOME for fixed array id"),
+    Option::SOME(type_) -> match (type_) {
+      Analyzer::Type::I8 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::I16 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::I32 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::I64 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::U8 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::U16 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::U32 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::U64 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::F32 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::F64 -> @panic("expected FixedArray variant"),
+      Analyzer::Type::BOOLEAN -> @panic("expected FixedArray variant"),
+      Analyzer::Type::CHAR -> @panic("expected FixedArray variant"),
+      Analyzer::Type::STR -> @panic("expected FixedArray variant"),
+      Analyzer::Type::VOID -> @panic("expected FixedArray variant"),
+      Analyzer::Type::NEVER -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Pointer(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Reference(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Slice(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::FixedArray(e, length) -> {
+        Test::assertEq<u32>(e.raw(), idI32.raw());
+        Test::assertEq<u64>(length, 16);
+      },
+    },
+  };
+}

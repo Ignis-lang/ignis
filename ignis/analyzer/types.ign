@@ -1,5 +1,6 @@
 import Eq from "std::hash";
 
+import Id from "@compiler::ids";
 import IndexVec from "@compiler::indexing";
 
 export namespace Analyzer {
@@ -21,6 +22,11 @@ export namespace Analyzer {
     VOID,
     NEVER,
 
+    Pointer(Analyzer::TypeId),
+    Reference(Analyzer::TypeId),
+    Slice(Analyzer::TypeId),
+    FixedArray(Analyzer::TypeId, u64),
+
     public name(&self): str {
       return match (self) {
         Analyzer::Type::I8 -> "i8",
@@ -38,26 +44,419 @@ export namespace Analyzer {
         Analyzer::Type::STR -> "str",
         Analyzer::Type::VOID -> "void",
         Analyzer::Type::NEVER -> "never",
+        Analyzer::Type::Pointer(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Reference(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Slice(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::FixedArray(_, _) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
       };
     }
 
+    // Exhaustive nested-match equality. Each outer arm matches one variant of `self`,
+    // then an inner match enumerates every variant of `other`. The matching variant
+    // returns the structural result; every other variant returns false.
+    // No wildcard `_` arms are used so that adding a future variant forces a compile
+    // error at every match site, preserving exhaustiveness discipline.
     public equals(&self, other: &Analyzer::Type): boolean {
       return match (self) {
-        Analyzer::Type::I8 -> *other == Analyzer::Type::I8,
-        Analyzer::Type::I16 -> *other == Analyzer::Type::I16,
-        Analyzer::Type::I32 -> *other == Analyzer::Type::I32,
-        Analyzer::Type::I64 -> *other == Analyzer::Type::I64,
-        Analyzer::Type::U8 -> *other == Analyzer::Type::U8,
-        Analyzer::Type::U16 -> *other == Analyzer::Type::U16,
-        Analyzer::Type::U32 -> *other == Analyzer::Type::U32,
-        Analyzer::Type::U64 -> *other == Analyzer::Type::U64,
-        Analyzer::Type::F32 -> *other == Analyzer::Type::F32,
-        Analyzer::Type::F64 -> *other == Analyzer::Type::F64,
-        Analyzer::Type::BOOLEAN -> *other == Analyzer::Type::BOOLEAN,
-        Analyzer::Type::CHAR -> *other == Analyzer::Type::CHAR,
-        Analyzer::Type::STR -> *other == Analyzer::Type::STR,
-        Analyzer::Type::VOID -> *other == Analyzer::Type::VOID,
-        Analyzer::Type::NEVER -> *other == Analyzer::Type::NEVER,
+        Analyzer::Type::I8 -> match (other) {
+          Analyzer::Type::I8 -> true,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::I16 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> true,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::I32 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> true,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::I64 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> true,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::U8 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> true,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::U16 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> true,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::U32 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> true,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::U64 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> true,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::F32 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> true,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::F64 -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> true,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::BOOLEAN -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> true,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::CHAR -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> true,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::STR -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> true,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::VOID -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> true,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::NEVER -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> true,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::Pointer(p) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(q) -> p.equals(&q),
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::Reference(r) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(s) -> r.equals(&s),
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::Slice(e) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(f) -> e.equals(&f),
+          Analyzer::Type::FixedArray(_, _) -> false,
+        },
+        Analyzer::Type::FixedArray(e, n) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(f, m) -> e.equals(&f) && n == m,
+        },
       };
     }
   }
@@ -122,10 +521,12 @@ export namespace Analyzer {
       };
     }
 
-    /// Returns the canonical `Analyzer::TypeId` for a primitive variant. The store keeps
-    /// at most one slot per primitive, so this is the public interning entry
-    /// point for primitive types.
-    public intern(&self, kind: Analyzer::Type): Analyzer::TypeId {
+    /// Returns the canonical `Analyzer::TypeId` for any type variant.
+    ///
+    /// Primitive arms short-circuit in O(1) via cached field lookup.
+    /// Compound arms perform a linear scan of `self.types` via `Analyzer::Type::equals`
+    /// to find an existing match before inserting; on miss, the new entry is pushed.
+    public intern(&mut self, kind: Analyzer::Type): Analyzer::TypeId {
       return match (kind) {
         Analyzer::Type::I8 -> self.primI8,
         Analyzer::Type::I16 -> self.primI16,
@@ -142,7 +543,89 @@ export namespace Analyzer {
         Analyzer::Type::STR -> self.primStr,
         Analyzer::Type::VOID -> self.primVoid,
         Analyzer::Type::NEVER -> self.primNever,
+        Analyzer::Type::Pointer(p) -> self.internCompound(Analyzer::Type::Pointer(p)),
+        Analyzer::Type::Reference(r) -> self.internCompound(Analyzer::Type::Reference(r)),
+        Analyzer::Type::Slice(e) -> self.internCompound(Analyzer::Type::Slice(e)),
+        Analyzer::Type::FixedArray(e, n) -> self.internCompound(Analyzer::Type::FixedArray(e, n)),
       };
+    }
+
+    /// Performs a linear scan of `self.types` for a structurally equal entry.
+    /// Inserts a new entry on miss and returns the resulting id.
+    /// Must only be called for compound (non-primitive) variants.
+    private internCompound(&mut self, kind: Analyzer::Type): Analyzer::TypeId {
+      let length: u64 = self.types.length();
+      let mut index: u64 = 0;
+
+      while (index < length) {
+        let id: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(index as u32);
+
+        match (self.types.get(id)) {
+          Option::SOME(existing) -> {
+            if (existing.equals(&kind)) {
+              return id;
+            }
+          },
+          Option::NONE -> {},
+        };
+
+        index += 1;
+      }
+
+      return self.types.push(kind);
+    }
+
+    /// Returns the canonical id for a pointer-to-`pointee` type.
+    public pointer(&mut self, pointee: Analyzer::TypeId): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Pointer(pointee));
+    }
+
+    /// Returns the canonical id for a reference-to-`referent` type.
+    public reference(&mut self, referent: Analyzer::TypeId): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Reference(referent));
+    }
+
+    /// Returns the canonical id for a slice-of-`element` type.
+    public slice(&mut self, element: Analyzer::TypeId): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Slice(element));
+    }
+
+    /// Returns the canonical id for a fixed-array-of-`element` with `length` elements.
+    public fixedArray(&mut self, element: Analyzer::TypeId, length: u64): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::FixedArray(element, length));
+    }
+
+    /// Recursively resolves a `TypeId` to its canonical string name.
+    ///
+    /// For primitive ids, delegates to `Analyzer::Type::name()`.
+    /// For compound ids, builds the name string by recursing through the inner id(s).
+    /// Panics if the id is not present in the store.
+    public nameOf(&self, id: Analyzer::TypeId): String {
+      if (let Option::SOME(type_) = self.types.get(id)) {
+        return match (type_) {
+          Analyzer::Type::I8 -> String::create(type_.name()),
+          Analyzer::Type::I16 -> String::create(type_.name()),
+          Analyzer::Type::I32 -> String::create(type_.name()),
+          Analyzer::Type::I64 -> String::create(type_.name()),
+          Analyzer::Type::U8 -> String::create(type_.name()),
+          Analyzer::Type::U16 -> String::create(type_.name()),
+          Analyzer::Type::U32 -> String::create(type_.name()),
+          Analyzer::Type::U64 -> String::create(type_.name()),
+          Analyzer::Type::F32 -> String::create(type_.name()),
+          Analyzer::Type::F64 -> String::create(type_.name()),
+          Analyzer::Type::BOOLEAN -> String::create(type_.name()),
+          Analyzer::Type::CHAR -> String::create(type_.name()),
+          Analyzer::Type::STR -> String::create(type_.name()),
+          Analyzer::Type::VOID -> String::create(type_.name()),
+          Analyzer::Type::NEVER -> String::create(type_.name()),
+          Analyzer::Type::Pointer(pointee) -> String::create("*").concat(self.nameOf(pointee).toStr()),
+          Analyzer::Type::Reference(referent) -> String::create("&").concat(self.nameOf(referent).toStr()),
+          Analyzer::Type::Slice(element) -> self.nameOf(element).concat("[]"),
+          Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
+        };
+      }
+
+      @panic("TypeStore::nameOf: unknown TypeId");
     }
 
     public get(&self, id: Analyzer::TypeId): Option<&Analyzer::Type> {
