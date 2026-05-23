@@ -2096,7 +2096,18 @@ impl<'a> LoweringContext<'a> {
     let scrutinee_val = self.lower_hir_node(scrutinee)?;
     let scrutinee_ty = self.hir.get(scrutinee).type_id;
 
-    let track_scrutinee_drop = self.types.needs_drop_with_defs(&scrutinee_ty, self.defs)
+    // A scrutinee that aliases storage owned by another place (e.g. a record
+    // field access or array index) cannot be drop-tracked on the synthetic
+    // match local: the synthetic local is a byte copy, and dropping it would
+    // double-free the owner's value. For Variable scrutinees the HIR ownership
+    // checker already consumes the variable in this same case (see
+    // ownership_hir::check_match), so drop-tracking the synthetic local is
+    // correct there. Owned rvalues (calls, constructors, etc.) still need
+    // drop tracking when no arm extracts the inner value.
+    let scrutinee_aliases_external_storage = Self::hir_aliases_external_storage(self.hir.get(scrutinee));
+
+    let track_scrutinee_drop = !scrutinee_aliases_external_storage
+      && self.types.needs_drop_with_defs(&scrutinee_ty, self.defs)
       && !arms
         .iter()
         .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
@@ -2241,6 +2252,20 @@ impl<'a> LoweringContext<'a> {
       });
       Operand::Temp(temp)
     })
+  }
+
+  /// True when the HIR node refers to storage owned by an external place
+  /// (record field, array element, dereferenced pointer, static slot). A
+  /// `Variable` is excluded because the HIR ownership checker consumes the
+  /// variable in `check_match`, transferring its drop to the match scrutinee.
+  fn hir_aliases_external_storage(node: &ignis_hir::HIRNode) -> bool {
+    matches!(
+      node.kind,
+      HIRKind::FieldAccess { .. }
+        | HIRKind::Index { .. }
+        | HIRKind::Dereference(_)
+        | HIRKind::StaticAccess { .. }
+    )
   }
 
   fn lower_tuple_match(
