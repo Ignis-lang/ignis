@@ -52,6 +52,29 @@ impl<'a> Analyzer<'a> {
   ) {
     self.reset_scopes(roots);
     let ctx = TypecheckContext::new();
+
+    // Global signature pre-pass: resolve return/param types for every function
+    // and method, plus field types for every record/enum, before any body is
+    // typechecked. Without this, a body that calls a forward-declared method
+    // (e.g. `B::new()` from a record declared before `B`) would observe the
+    // binder's `Type::Error` placeholder for that method's return type and
+    // silently propagate Error through the call, surfacing later only as an
+    // LIR `ReturnTypeMismatch`. Resolving signatures is idempotent (the type
+    // store dedups), so the body pass below can re-run the same work safely.
+    //
+    // The pre-pass walks each scope-bearing container in two stages: it first
+    // defines every item in the current scope (so sibling short-name type refs
+    // resolve regardless of declaration order), then recurses to resolve the
+    // items' signatures. Diagnostics emitted during the pre-pass are dropped:
+    // the body pass redoes the same work and will re-emit any genuine error,
+    // so retaining the pre-pass copy would only produce duplicates.
+    let diagnostics_before_pre_pass = self.diagnostics.len();
+    self.pre_define_items(roots);
+    for root in roots {
+      self.pre_resolve_signatures(root);
+    }
+    self.diagnostics.truncate(diagnostics_before_pre_pass);
+
     for root in roots {
       self.typecheck_node(root, ScopeKind::Global, &ctx);
     }
@@ -61,6 +84,220 @@ impl<'a> Analyzer<'a> {
     self.report_unresolved_nulls();
 
     self.zonk_all_inference_vars();
+  }
+
+  /// Pre-defines every reachable top-level item in the current scope chain so
+  /// short-name sibling type references (e.g. `kind: ErrorKind` inside a record
+  /// declared next to `ErrorKind` in the same namespace) resolve during the
+  /// signature pre-pass, regardless of declaration order. Idempotent: calling
+  /// `define_decl_in_current_scope` again for an already-defined symbol is a
+  /// no-op.
+  fn pre_define_items(
+    &mut self,
+    items: &[NodeId],
+  ) {
+    for item in items {
+      self.pre_define_node(item);
+    }
+  }
+
+  fn pre_define_node(
+    &mut self,
+    node_id: &NodeId,
+  ) {
+    let node = self.ast_node(node_id).clone();
+    let ASTNode::Statement(statement) = node else {
+      return;
+    };
+
+    match statement {
+      ASTStatement::Function(_)
+      | ASTStatement::Record(_)
+      | ASTStatement::Enum(_)
+      | ASTStatement::TypeAlias(_)
+      | ASTStatement::Trait(_)
+      | ASTStatement::Constant(_)
+      | ASTStatement::Variable(_) => {
+        self.define_decl_in_current_scope(node_id);
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        self.define_decl_in_current_scope(node_id);
+        // Recurse so deeply-nested decls are also pre-defined (cross-namespace
+        // short-name lookups still depend on item ordering, just like the body
+        // pass).
+        self.pre_define_items(&ns_stmt.items);
+      },
+      ASTStatement::Export(export_stmt) => {
+        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
+          self.pre_define_node(&decl);
+        }
+      },
+      ASTStatement::Extern(extern_stmt) => {
+        for item in &extern_stmt.items {
+          self.pre_define_node(item);
+        }
+      },
+      _ => {},
+    }
+  }
+
+  /// Resolves return/param types for every function and method, plus field
+  /// types for every record/enum, without typechecking any body. Recurses into
+  /// namespaces and exports so nested decls are reached too. Only touches
+  /// `type_id`/`return_type` fields on existing definitions and balances
+  /// generic-scope pushes; never defines decls in the user scope chain or
+  /// pushes function/block scopes.
+  fn pre_resolve_signatures(
+    &mut self,
+    node_id: &NodeId,
+  ) {
+    let node = self.ast_node(node_id).clone();
+
+    let ASTNode::Statement(statement) = node else {
+      return;
+    };
+
+    match statement {
+      ASTStatement::Function(func) => {
+        let def_id = self.lookup_def(node_id).cloned();
+
+        if let Some(def_id) = def_id {
+          self.enter_type_params_scope(&def_id);
+
+          let return_type = self.resolve_type_syntax_with_span(&func.signature.return_type, &func.signature.span);
+
+          let param_ids = match &self.defs.get(&def_id).kind {
+            DefinitionKind::Function(func_def) => func_def.params.clone(),
+            _ => Vec::new(),
+          };
+
+          for (param, param_id) in func.signature.parameters.iter().zip(param_ids.iter()) {
+            let param_type = self.resolve_type_syntax_with_span(&param.type_, &param.span);
+
+            if let DefinitionKind::Parameter(param_def) = &mut self.defs.get_mut(param_id).kind {
+              param_def.type_id = param_type;
+              param_def.mutable = param.metadata.is_mutable();
+            }
+          }
+
+          if let DefinitionKind::Function(func_def) = &mut self.defs.get_mut(&def_id).kind {
+            func_def.return_type = return_type;
+          }
+
+          self.exit_type_params_scope(&def_id);
+        }
+      },
+      ASTStatement::Record(rec) => {
+        let Some(record_def_id) = self.lookup_def(node_id).cloned() else {
+          return;
+        };
+
+        self.enter_type_params_scope(&record_def_id);
+
+        // Resolve field types so methods that touch fields see the right types.
+        for item in &rec.items {
+          if let ASTRecordItem::Field(field) = item {
+            let field_type = self.resolve_type_syntax_with_span(&field.type_, &field.span);
+
+            if field.is_static() {
+              if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind
+                && let Some(const_def_id) = rd.static_fields.get(&field.name).cloned()
+                && let DefinitionKind::Constant(const_def) = &mut self.defs.get_mut(&const_def_id).kind
+              {
+                const_def.type_id = field_type;
+              }
+            } else if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
+              let field_def_id = rd
+                .fields
+                .iter()
+                .find(|f| f.name == field.name)
+                .map(|f| f.def_id);
+
+              if let Some(field_def_id) = field_def_id
+                && let DefinitionKind::Field(field_def) = &mut self.defs.get_mut(&field_def_id).kind
+              {
+                field_def.type_id = field_type;
+              }
+            }
+          }
+        }
+
+        // Resolve every method signature. `resolve_method_signature` enters/exits
+        // its own type-params scope internally.
+        for item in &rec.items {
+          if let ASTRecordItem::Method(method) = item {
+            let method_def_id = if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
+              let entry = if method.is_static() {
+                rd.static_methods.get(&method.name)
+              } else {
+                rd.instance_methods.get(&method.name)
+              };
+              match entry {
+                Some(SymbolEntry::Single(id)) => Some(*id),
+                Some(SymbolEntry::Overload(group)) => group.iter().copied().find(|id| self.defs.get(id).span == method.span),
+                None => None,
+              }
+            } else {
+              None
+            };
+
+            if let Some(method_def_id) = method_def_id {
+              self.resolve_method_signature(&method_def_id, method);
+            }
+          }
+        }
+
+        self.exit_type_params_scope(&record_def_id);
+      },
+      ASTStatement::Enum(en) => {
+        let Some(enum_def_id) = self.lookup_def(node_id).cloned() else {
+          return;
+        };
+
+        self.enter_type_params_scope(&enum_def_id);
+
+        for item in &en.items {
+          if let ignis_ast::statements::enum_::ASTEnumItem::Method(method) = item {
+            let method_def_id = if let DefinitionKind::Enum(ed) = &self.defs.get(&enum_def_id).kind {
+              let entry = if method.is_static() {
+                ed.static_methods.get(&method.name)
+              } else {
+                ed.instance_methods.get(&method.name)
+              };
+              match entry {
+                Some(SymbolEntry::Single(id)) => Some(*id),
+                Some(SymbolEntry::Overload(group)) => group.iter().copied().find(|id| self.defs.get(id).span == method.span),
+                None => None,
+              }
+            } else {
+              None
+            };
+
+            if let Some(method_def_id) = method_def_id {
+              self.resolve_method_signature(&method_def_id, method);
+            }
+          }
+        }
+
+        self.exit_type_params_scope(&enum_def_id);
+      },
+      ASTStatement::Namespace(ns_stmt) => {
+        for item in &ns_stmt.items {
+          self.pre_resolve_signatures(item);
+        }
+      },
+      ASTStatement::Export(export_stmt) => {
+        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
+          self.pre_resolve_signatures(&decl);
+        }
+      },
+      ASTStatement::Extern(extern_stmt) => {
+        for item in &extern_stmt.items {
+          self.pre_resolve_signatures(item);
+        }
+      },
+      _ => {},
+    }
   }
 
   fn typecheck_node(
