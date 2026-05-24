@@ -19,6 +19,133 @@ import _ from "@compiler::diagnostics::source_tests";
 import _ from "@compiler::config";
 import _ from "@compiler::build";
 
-function main(): i32 {
+import Fs from "std::fs";
+import Io from "std::io";
+import Process from "std::process";
+import String from "std::string";
+import Vector from "std::vector";
+
+import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::diagnostics";
+import ParseOutput, Parser from "@compiler::parser";
+
+/// Count diagnostics in `bag` whose severity equals `target`.
+function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diag) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diag.severity == target) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Format a per-phase status line like `  lex  : ok (0 errors, 0 warnings)`.
+function formatPhaseLine(name: str, errors: u64, warnings: u64): String {
+  let status: str = errors == 0 ? "ok" : "fail";
+
+  return String::create("  ")
+    .concat(name)
+    .concat(": ")
+    .concat(status)
+    .concat(" (")
+    .concat(errors)
+    .concat(" errors, ")
+    .concat(warnings)
+    .concat(" warnings)");
+}
+
+/// Render and print a diagnostic bag to stderr if it is non-empty.
+function renderBagToStderr(bag: &DiagnosticBag, file: &SourceFile): void {
+  if (bag.isEmpty()) {
+    return;
+  }
+
+  let rendered: String = DiagnosticRenderer::renderBag(bag, file, true);
+  Io::eprintln(rendered);
+}
+
+/// Drive the selfhost compiler pipeline against a single source file.
+///
+/// Today this covers `lex -> parse` and renders diagnostics from both phases.
+/// The analyzer port is in progress (see ignis/analyzer/), so semantic checks
+/// are reported as `skipped` rather than silently passing.
+///
+/// Returns 0 on success, 1 on any error (I/O, lex, or parse).
+function compileFile(path: &String): i32 {
+  Io::println(String::create("ignis selfhost (partial pipeline)"));
+  Io::println(String::create("  source: ").concat(path.toStr()));
+
+  let text: String = match (Fs::readToString(path)) {
+    Result::OK(content) -> content,
+    Result::ERROR(_) -> {
+      Io::eprintln(String::create("error: cannot read source file: ").concat(path.toStr()));
+      return 1;
+    },
+  };
+
+  let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
+
+  let output: ParseOutput = Parser::parseFile(&file);
+
+  let lexErrors: u64 = countBySeverity(&output.lexDiagnostics, Severity::ERROR);
+  let lexWarnings: u64 = countBySeverity(&output.lexDiagnostics, Severity::WARNING);
+  let parseErrors: u64 = countBySeverity(&output.parseDiagnostics, Severity::ERROR);
+  let parseWarnings: u64 = countBySeverity(&output.parseDiagnostics, Severity::WARNING);
+
+  Io::println(formatPhaseLine("lex  ", lexErrors, lexWarnings));
+  Io::println(formatPhaseLine("parse", parseErrors, parseWarnings));
+
+  let rootCount: u64 = output.module.roots.length();
+  Io::println(String::create("  roots: ").concat(rootCount));
+  Io::println(String::create("  analyze: skipped (selfhost analyzer port in progress)"));
+
+  renderBagToStderr(&output.lexDiagnostics, &file);
+  renderBagToStderr(&output.parseDiagnostics, &file);
+
+  let totalErrors: u64 = lexErrors + parseErrors;
+  let totalWarnings: u64 = lexWarnings + parseWarnings;
+
+  Io::println(
+    String::create("  summary: ")
+      .concat(totalErrors)
+      .concat(" errors, ")
+      .concat(totalWarnings)
+      .concat(" warnings")
+  );
+
+  if (totalErrors > 0) {
+    return 1;
+  }
+
   return 0;
+}
+
+/// CLI entry point.
+///
+/// Without arguments the binary exits cleanly (so `ignis test` can still
+/// discover @test functions via the imports above). With one positional
+/// argument the binary treats it as a path to an Ignis source file and runs
+/// the selfhost pipeline against it.
+function main(): i32 {
+  let args: Vector<String> = Process::args();
+
+  if (args.length() <= 1) {
+    return 0;
+  }
+
+  let Option::SOME(pathArg) = args.get(1) else {
+    return 0;
+  };
+
+  return compileFile(pathArg);
 }

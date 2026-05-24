@@ -10,6 +10,15 @@ import Ast from "@compiler::ast";
 import DiagnosticBag, SourceFile from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
 
+/// Result of parsing a full source file: the populated module plus the
+/// diagnostics produced by lexing and parsing as separate bags so callers
+/// can report them per phase.
+export record ParseOutput {
+  public module: Ast::Module;
+  public lexDiagnostics: DiagnosticBag;
+  public parseDiagnostics: DiagnosticBag;
+}
+
 export namespace Parser {
   function parseInto(
     file: &SourceFile,
@@ -27,5 +36,36 @@ export namespace Parser {
 
       parser.module.roots.push(itemId);
     }
+  }
+
+  /// Lex and parse `file` end-to-end, returning the populated module and the
+  /// diagnostics from each phase. This is the high-level entry point for the
+  /// driver and CLI: it owns the AST module so the caller does not need to
+  /// pre-allocate one.
+  function parseFile(file: &SourceFile): ParseOutput {
+    let mut module: Ast::Module = Ast::Module::init();
+    let mut parseDiagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut lexResult: LexResult = Lexer::lex(file);
+
+    let mut parser: ParserShared::State = ParserShared::createState(
+      &mut lexResult.tokens,
+      &mut parseDiagnostics,
+      &mut module,
+    );
+
+    while (!parser.atEof()) {
+      let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(&mut parser) else {
+        ParserRecovery::synchronizeTopLevel(&mut parser);
+        continue;
+      };
+
+      parser.module.roots.push(itemId);
+    }
+
+    return ParseOutput {
+      module: module,
+      lexDiagnostics: lexResult.diagnostics,
+      parseDiagnostics: parseDiagnostics,
+    };
   }
 }
