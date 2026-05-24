@@ -8919,6 +8919,10 @@ impl<'a> Analyzer<'a> {
           return self.types.boolean();
         }
 
+        if matches!(self.types.get(&left_type), Type::Boolean) && matches!(self.types.get(&right_type), Type::Boolean) {
+          return self.types.boolean();
+        }
+
         let mut resolved_left = left_type;
         let mut resolved_right = right_type;
 

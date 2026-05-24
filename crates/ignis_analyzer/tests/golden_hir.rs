@@ -186,6 +186,26 @@ function compare(a: i32, b: i32): boolean {
 }
 
 #[test]
+fn hir_boolean_equality() {
+  let result = common::analyze(
+    r#"
+function compareBools(a: boolean, b: boolean): boolean {
+    let eq: boolean = a == b;
+    let ne: boolean = a != b;
+    return eq && ne;
+}
+"#,
+  );
+
+  assert!(
+    result.output.diagnostics.is_empty(),
+    "boolean == boolean and != must typecheck without diagnostics: {:?}",
+    result.output.diagnostics
+  );
+  assert_snapshot!("hir_boolean_equality", common::format_hir(&result));
+}
+
+#[test]
 fn hir_logical_operators() {
   let result = common::analyze(
     r#"

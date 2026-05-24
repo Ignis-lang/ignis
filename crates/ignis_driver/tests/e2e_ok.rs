@@ -204,6 +204,29 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_boolean_equality() {
+  e2e_test(
+    "boolean_equality",
+    r#"
+function main(): i32 {
+    let t: boolean = true;
+    let f: boolean = false;
+    let eqSame: boolean = t == t;
+    let eqDiff: boolean = t == f;
+    let neSame: boolean = t != t;
+    let neDiff: boolean = t != f;
+
+    if (!eqSame) { return 1; }
+    if (eqDiff) { return 2; }
+    if (neSame) { return 3; }
+    if (!neDiff) { return 4; }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_arithmetic_sub() {
   e2e_test(
     "arithmetic_sub",
