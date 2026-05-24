@@ -202,6 +202,7 @@ function getRoundTripsCompoundVariants(): void {
       Analyzer::Type::Slice(e) -> Test::assertEq<u32>(e.raw(), idI32.raw()),
       Analyzer::Type::FixedArray(_, _) -> @panic("expected Slice variant"),
       Analyzer::Type::Tuple(_) -> @panic("expected Slice variant"),
+      Analyzer::Type::Function(_) -> @panic("expected Slice variant"),
     },
   };
 
@@ -233,6 +234,7 @@ function getRoundTripsCompoundVariants(): void {
         Test::assertEq<u64>(length, 16);
       },
       Analyzer::Type::Tuple(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Function(_) -> @panic("expected FixedArray variant"),
     },
   };
 }
@@ -371,4 +373,248 @@ function compoundTypeNameOfMultiElementTupleWithCompoundInside(): void {
   let tupleId: Analyzer::TypeId = store.tuple(elements);
 
   Test::assertEq<str>(store.nameOf(tupleId).toStr(), "(i32, *str)");
+}
+
+@test
+function equalsTrueForIdenticalFunctionSignatures(): void {
+  let idZero: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+  let ft1: Analyzer::FunctionType = Analyzer::FunctionType { params: Vector::new<Analyzer::TypeId>(), returnType: idZero };
+  let ft2: Analyzer::FunctionType = Analyzer::FunctionType { params: Vector::new<Analyzer::TypeId>(), returnType: idZero };
+
+  let type1: Analyzer::Type = Analyzer::Type::Function(ft1);
+  let type2: Analyzer::Type = Analyzer::Type::Function(ft2);
+
+  Test::assert(type1.equals(&type2));
+}
+
+@test
+function functionInterningIsIdempotentForEmptyParams(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = store.intern(Analyzer::Type::VOID);
+
+  let first: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), voidId);
+
+  let lengthAfterFirst: u64 = store.length();
+
+  let second: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), voidId);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assertEq<u64>(store.length(), lengthAfterFirst);
+}
+
+@test
+function functionInterningIsIdempotentForSingleParam(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params1.push(idI32);
+  let first: Analyzer::TypeId = store.functionType(params1, idI32);
+
+  let mut params2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params2.push(idI32);
+  let second: Analyzer::TypeId = store.functionType(params2, idI32);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+}
+
+@test
+function functionInterningIsIdempotentForMultiParam(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idBoolean: Analyzer::TypeId = store.intern(Analyzer::Type::BOOLEAN);
+
+  let mut params1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params1.push(idI32);
+  params1.push(idStr);
+  let first: Analyzer::TypeId = store.functionType(params1, idBoolean);
+
+  let lengthAfterFirst: u64 = store.length();
+
+  let mut params2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params2.push(idI32);
+  params2.push(idStr);
+  let second: Analyzer::TypeId = store.functionType(params2, idBoolean);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assertEq<u64>(store.length(), lengthAfterFirst);
+}
+
+@test
+function functionDifferentReturnTypesAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let f1: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let f2: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idStr);
+
+  Test::assert(f1.raw() != f2.raw());
+}
+
+@test
+function functionDifferentArityAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut params1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params1.push(idI32);
+  let f1: Analyzer::TypeId = store.functionType(params1, idI32);
+
+  let mut params2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params2.push(idI32);
+  params2.push(idStr);
+  let f2: Analyzer::TypeId = store.functionType(params2, idI32);
+
+  Test::assert(f1.raw() != f2.raw());
+}
+
+@test
+function functionDifferentParamOrderAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut params1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params1.push(idI32);
+  params1.push(idStr);
+  let f1: Analyzer::TypeId = store.functionType(params1, idI32);
+
+  let mut params2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params2.push(idStr);
+  params2.push(idI32);
+  let f2: Analyzer::TypeId = store.functionType(params2, idI32);
+
+  Test::assert(f1.raw() != f2.raw());
+}
+
+@test
+function functionDistinctFromTupleWithSameElements(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let voidId: Analyzer::TypeId = store.intern(Analyzer::Type::VOID);
+
+  let mut tupleElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  tupleElements.push(idI32);
+  let tupleId: Analyzer::TypeId = store.tuple(tupleElements);
+
+  let mut fnParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fnParams.push(idI32);
+  let fnId: Analyzer::TypeId = store.functionType(fnParams, voidId);
+
+  Test::assert(tupleId.raw() != fnId.raw());
+}
+
+@test
+function compoundTypeNameOfEmptyFunction(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = store.intern(Analyzer::Type::VOID);
+
+  let fId: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), voidId);
+
+  Test::assertEq<str>(store.nameOf(fId).toStr(), "fn() -> void");
+}
+
+@test
+function compoundTypeNameOfSingleParamFunction(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params.push(idI32);
+  let fId: Analyzer::TypeId = store.functionType(params, idI32);
+
+  Test::assertEq<str>(store.nameOf(fId).toStr(), "fn(i32) -> i32");
+}
+
+@test
+function compoundTypeNameOfMultiParamFunction(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+  let idBoolean: Analyzer::TypeId = store.intern(Analyzer::Type::BOOLEAN);
+
+  let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params.push(idI32);
+  params.push(idStr);
+  let fId: Analyzer::TypeId = store.functionType(params, idBoolean);
+
+  Test::assertEq<str>(store.nameOf(fId).toStr(), "fn(i32, str) -> boolean");
+}
+
+@test
+function compoundTypeNameOfFunctionWithCompoundParam(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let ptrI32: Analyzer::TypeId = store.pointer(idI32);
+  let sliceStr: Analyzer::TypeId = store.slice(idStr);
+
+  let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params.push(ptrI32);
+  let fId: Analyzer::TypeId = store.functionType(params, sliceStr);
+
+  Test::assertEq<str>(store.nameOf(fId).toStr(), "fn(*i32) -> str[]");
+}
+
+@test
+function compoundTypeNameOfHigherOrderFunction(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let inner: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), idI32);
+  let outer: Analyzer::TypeId = store.functionType(Vector::new<Analyzer::TypeId>(), inner);
+
+  Test::assertEq<str>(store.nameOf(outer).toStr(), "fn() -> fn() -> i32");
+}
+
+@test
+function equalsFalseForFunctionVsTuple(): void {
+  let idZero: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+  let ft: Analyzer::FunctionType = Analyzer::FunctionType { params: Vector::new<Analyzer::TypeId>(), returnType: idZero };
+  let tt: Analyzer::TupleType = Analyzer::TupleType { elements: Vector::new<Analyzer::TypeId>() };
+
+  let fnType: Analyzer::Type = Analyzer::Type::Function(ft);
+  let tupleType: Analyzer::Type = Analyzer::Type::Tuple(tt);
+
+  Test::assert(!fnType.equals(&tupleType));
+  Test::assert(!tupleType.equals(&fnType));
+}
+
+@test
+function equalsFalseForFunctionWithDifferentReturnTypes(): void {
+  let idZero: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+  let idOne: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(1);
+
+  let ft1: Analyzer::FunctionType = Analyzer::FunctionType { params: Vector::new<Analyzer::TypeId>(), returnType: idZero };
+  let ft2: Analyzer::FunctionType = Analyzer::FunctionType { params: Vector::new<Analyzer::TypeId>(), returnType: idOne };
+
+  let type1: Analyzer::Type = Analyzer::Type::Function(ft1);
+  let type2: Analyzer::Type = Analyzer::Type::Function(ft2);
+
+  Test::assert(!type1.equals(&type2));
+}
+
+@test
+function equalsFalseForFunctionWithDifferentParams(): void {
+  let idZero: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+  let idOne: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(1);
+
+  let mut params1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params1.push(idZero);
+  let ft1: Analyzer::FunctionType = Analyzer::FunctionType { params: params1, returnType: idZero };
+
+  let mut params2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  params2.push(idOne);
+  let ft2: Analyzer::FunctionType = Analyzer::FunctionType { params: params2, returnType: idZero };
+
+  let type1: Analyzer::Type = Analyzer::Type::Function(ft1);
+  let type2: Analyzer::Type = Analyzer::Type::Function(ft2);
+
+  Test::assert(!type1.equals(&type2));
 }

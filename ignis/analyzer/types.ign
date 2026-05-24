@@ -9,6 +9,13 @@ export namespace Analyzer {
     public elements: Vector<Analyzer::TypeId>;
   }
 
+  /// Wrapper record for the Function variant payload.
+  /// Holds parameter types in declaration order and the return type.
+  record FunctionType {
+    public params: Vector<Analyzer::TypeId>;
+    public returnType: Analyzer::TypeId;
+  }
+
   @implements(Eq)
   enum Type {
     I8,
@@ -32,6 +39,7 @@ export namespace Analyzer {
     Slice(Analyzer::TypeId),
     FixedArray(Analyzer::TypeId, u64),
     Tuple(Analyzer::TupleType),
+    Function(Analyzer::FunctionType),
 
     public name(&self): str {
       return match (self) {
@@ -55,6 +63,7 @@ export namespace Analyzer {
         Analyzer::Type::Slice(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::FixedArray(_, _) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Tuple(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Function(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
       };
     }
 
@@ -86,6 +95,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::I16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -108,6 +118,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::I32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -130,6 +141,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::I64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -152,6 +164,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::U8 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -174,6 +187,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::U16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -196,6 +210,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::U32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -218,6 +233,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::U64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -240,6 +256,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::F32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -262,6 +279,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::F64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -284,6 +302,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::BOOLEAN -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -306,6 +325,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::CHAR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -328,6 +348,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::STR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -350,6 +371,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::VOID -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -372,6 +394,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::NEVER -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -394,6 +417,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::Pointer(p) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -416,6 +440,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::Reference(r) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -438,6 +463,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::Slice(e) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -460,6 +486,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(f) -> e.equals(&f),
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::FixedArray(e, n) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -482,6 +509,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(f, m) -> e.equals(&f) && n == m,
           Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
         },
         Analyzer::Type::Tuple(a) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -503,14 +531,38 @@ export namespace Analyzer {
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
-          Analyzer::Type::Tuple(b) -> Analyzer::Type::tupleElementsEqual(&a.elements, &b.elements),
+          Analyzer::Type::Tuple(b) -> Analyzer::Type::typeIdVectorsEqual(&a.elements, &b.elements),
+          Analyzer::Type::Function(_) -> false,
+        },
+        Analyzer::Type::Function(f) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(g) -> Analyzer::Type::typeIdVectorsEqual(&f.params, &g.params) && f.returnType.raw() == g.returnType.raw(),
         },
       };
     }
 
-    /// Compares two element vectors for structural equality element-by-element.
+    /// Compares two TypeId vectors for structural equality element-by-element.
     /// Short-circuits false if lengths differ; then checks each index via TypeId::equals.
-    private static tupleElementsEqual(
+    private static typeIdVectorsEqual(
       left: &Vector<Analyzer::TypeId>,
       right: &Vector<Analyzer::TypeId>,
     ): boolean {
@@ -622,6 +674,7 @@ export namespace Analyzer {
         Analyzer::Type::Slice(e) -> self.internCompound(Analyzer::Type::Slice(e)),
         Analyzer::Type::FixedArray(e, n) -> self.internCompound(Analyzer::Type::FixedArray(e, n)),
         Analyzer::Type::Tuple(t) -> self.internCompound(Analyzer::Type::Tuple(t)),
+        Analyzer::Type::Function(f) -> self.internCompound(Analyzer::Type::Function(f)),
       };
     }
 
@@ -676,6 +729,13 @@ export namespace Analyzer {
       return self.intern(Analyzer::Type::Tuple(Analyzer::TupleType { elements: elements }));
     }
 
+    /// Returns the canonical id for a function type with the given parameter types and return type.
+    /// Takes ownership of `params`; the vector is moved into storage on cache miss.
+    /// Named `functionType` because `function` is a reserved keyword in Ignis.
+    public functionType(&mut self, params: Vector<Analyzer::TypeId>, returnType: Analyzer::TypeId): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Function(Analyzer::FunctionType { params: params, returnType: returnType }));
+    }
+
     /// Formats a tuple type as a comma-separated parenthesized list.
     /// Empty tuple -> "()", single element -> "(i32)", multiple -> "(i32, str)".
     private tupleNameOf(&self, elements: &Vector<Analyzer::TypeId>): String {
@@ -702,6 +762,34 @@ export namespace Analyzer {
       }
 
       return result.concat(")");
+    }
+
+    /// Formats a function type as "fn(p1, p2) -> r".
+    /// Empty params produce "fn() -> r". Parameters are joined with ", ".
+    /// Recurses through nameOf for each param and the return type.
+    private functionNameOf(&self, fn_: &Analyzer::FunctionType): String {
+      let mut result: String = String::create("fn(");
+      let mut index: u64 = 0;
+
+      while (index < fn_.params.length()) {
+        let Option::SOME(paramId) = fn_.params.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result = result.concat(", ");
+        }
+
+        result = result.concat(self.nameOf(*paramId).toStr());
+
+        index += 1;
+      }
+
+      result = result.concat(") -> ");
+      result = result.concat(self.nameOf(fn_.returnType).toStr());
+
+      return result;
     }
 
     /// Recursively resolves a `TypeId` to its canonical string name.
@@ -732,6 +820,7 @@ export namespace Analyzer {
           Analyzer::Type::Slice(element) -> self.nameOf(element).concat("[]"),
           Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
           Analyzer::Type::Tuple(t) -> self.tupleNameOf(&t.elements),
+          Analyzer::Type::Function(f) -> self.functionNameOf(&f),
         };
       }
 
