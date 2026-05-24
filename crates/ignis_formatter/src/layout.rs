@@ -2656,9 +2656,15 @@ impl<'a> AstChunkFormatter<'a> {
       last_block.placement = CommentPlacement::Leading;
     }
 
-    let has_detached_block = blocks
-      .iter()
-      .any(|block| matches!(block.placement, CommentPlacement::Detached));
+    // The trailing blank line is a separator between the comment block and
+    // whatever follows. Only emit it when the LAST comment is still detached
+    // post-promotion -- if we promoted it to Leading (because the source did
+    // not preserve detached spacing at the tail), adding a blank line here
+    // would change comment ownership on the round-trip and trip safety
+    // validation (e.g. `// A` \n \n `// B` \n `let x` inside a block body).
+    let last_block_is_detached = blocks
+      .last()
+      .is_some_and(|block| matches!(block.placement, CommentPlacement::Detached));
 
     if separate_from_previous && !output.ends_with("\n\n") {
       output.push('\n');
@@ -2666,7 +2672,7 @@ impl<'a> AstChunkFormatter<'a> {
 
     self.push_comment_blocks(output, &blocks, indent_level, false);
 
-    if has_detached_block && !output.ends_with("\n\n") {
+    if last_block_is_detached && !output.ends_with("\n\n") {
       output.push('\n');
     }
 

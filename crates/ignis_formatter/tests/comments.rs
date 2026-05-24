@@ -363,3 +363,16 @@ fn preserves_comment_inside_block_body() {
 
   assert_snapshot!("preserves_comment_inside_block_body", formatted);
 }
+
+#[test]
+fn preserves_blank_separated_line_comments_before_statement_in_block_body() {
+  // Regression: `// A` blank `// B` `let x` inside a function body used to
+  // produce an extra blank line between B and `let`, changing comment
+  // ownership (B from Leading to Detached) and tripping safety validation.
+  let source = "function someFunction(): void {\n  // comment A.\n\n  // comment B.\n  let mut x: i32 = 0;\n}\n";
+
+  let formatted = format_text(source, &FormatOptions::default())
+    .expect("blank-separated line comments inside block body must round-trip stably");
+
+  assert_eq!(formatted, source);
+}
