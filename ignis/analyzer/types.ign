@@ -16,6 +16,13 @@ export namespace Analyzer {
     public returnType: Analyzer::TypeId;
   }
 
+  /// Wrapper record for the Reference variant payload.
+  /// Holds the referent type id and a `mutable` flag distinguishing `&T` from `&mut T`.
+  record ReferenceType {
+    public referent: Analyzer::TypeId;
+    public mutable: boolean;
+  }
+
   @implements(Eq)
   enum Type {
     I8,
@@ -35,7 +42,7 @@ export namespace Analyzer {
     NEVER,
 
     Pointer(Analyzer::TypeId),
-    Reference(Analyzer::TypeId),
+    Reference(Analyzer::ReferenceType),
     Slice(Analyzer::TypeId),
     FixedArray(Analyzer::TypeId, u64),
     Tuple(Analyzer::TupleType),
@@ -495,7 +502,7 @@ export namespace Analyzer {
           Analyzer::Type::VOID -> false,
           Analyzer::Type::NEVER -> false,
           Analyzer::Type::Pointer(_) -> false,
-          Analyzer::Type::Reference(s) -> r.equals(&s),
+          Analyzer::Type::Reference(s) -> r.referent.raw() == s.referent.raw() && @eq<boolean>(&r.mutable, &s.mutable),
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
           Analyzer::Type::Tuple(_) -> false,
@@ -806,9 +813,14 @@ export namespace Analyzer {
       return self.intern(Analyzer::Type::Pointer(pointee));
     }
 
-    /// Returns the canonical id for a reference-to-`referent` type.
+    /// Returns the canonical id for an immutable reference to `referent` (&T).
     public reference(&mut self, referent: Analyzer::TypeId): Analyzer::TypeId {
-      return self.intern(Analyzer::Type::Reference(referent));
+      return self.intern(Analyzer::Type::Reference(Analyzer::ReferenceType { referent: referent, mutable: false }));
+    }
+
+    /// Returns the canonical id for a mutable reference to `referent` (&mut T).
+    public mutableReference(&mut self, referent: Analyzer::TypeId): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Reference(Analyzer::ReferenceType { referent: referent, mutable: true }));
     }
 
     /// Returns the canonical id for a slice-of-`element` type.
@@ -874,6 +886,16 @@ export namespace Analyzer {
       return result.concat(")");
     }
 
+    /// Formats a reference type as "&T" when immutable, "&mut T" when mutable.
+    /// Recurses through nameOf for the referent name.
+    private referenceNameOf(&self, refType: &Analyzer::ReferenceType): String {
+      if (refType.mutable) {
+        return String::create("&mut ").concat(self.nameOf(refType.referent).toStr());
+      }
+
+      return String::create("&").concat(self.nameOf(refType.referent).toStr());
+    }
+
     /// Formats a function type as "fn(p1, p2) -> r".
     /// Empty params produce "fn() -> r". Parameters are joined with ", ".
     /// Recurses through nameOf for each param and the return type.
@@ -926,7 +948,7 @@ export namespace Analyzer {
           Analyzer::Type::VOID -> String::create(type_.name()),
           Analyzer::Type::NEVER -> String::create(type_.name()),
           Analyzer::Type::Pointer(pointee) -> String::create("*").concat(self.nameOf(pointee).toStr()),
-          Analyzer::Type::Reference(referent) -> String::create("&").concat(self.nameOf(referent).toStr()),
+          Analyzer::Type::Reference(refType) -> self.referenceNameOf(&refType),
           Analyzer::Type::Slice(element) -> self.nameOf(element).concat("[]"),
           Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
           Analyzer::Type::Tuple(t) -> self.tupleNameOf(&t.elements),
