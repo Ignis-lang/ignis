@@ -229,7 +229,11 @@ function tomlValueString(
   });
 }
 
-function optionalString(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str): Result<Option<ConfigStringValue>, DiagnosticBag> {
+function optionalString(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf,
+  fieldPath: str
+): Result<Option<ConfigStringValue>, DiagnosticBag> {
   let Option::SOME(value) = document.get(fieldPath) else {
     return Result::OK(Option::NONE);
   };
@@ -239,7 +243,12 @@ function optionalString(document: &TomlDocument, configPath: &Path::PathBuf, fie
   return Result::OK(Option::SOME(text));
 }
 
-function booleanOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: boolean): Result<boolean, DiagnosticBag> {
+function booleanOrDefault(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf,
+  fieldPath: str,
+  defaultValue: boolean
+): Result<boolean, DiagnosticBag> {
   let Option::SOME(value) = document.get(fieldPath) else {
     return Result::OK(defaultValue);
   };
@@ -251,7 +260,12 @@ function booleanOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, f
   return Result::OK(value.asBoolean());
 }
 
-function stringOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: str): Result<String, DiagnosticBag> {
+function stringOrDefault(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf,
+  fieldPath: str,
+  defaultValue: str
+): Result<String, DiagnosticBag> {
   let optionValue: Option<ConfigStringValue> = optionalString(document, configPath, fieldPath)!;
 
   return match (optionValue) {
@@ -260,7 +274,12 @@ function stringOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fi
   };
 }
 
-function integerOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: u64): Result<u64, DiagnosticBag> {
+function integerOrDefault(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf,
+  fieldPath: str,
+  defaultValue: u64
+): Result<u64, DiagnosticBag> {
   let Option::SOME(value) = document.get(fieldPath) else {
     return Result::OK(defaultValue);
   };
@@ -293,7 +312,12 @@ function cloneStringVector(source: &Vector<String>): Vector<String> {
   return values;
 }
 
-function stringArrayOrDefault(document: &TomlDocument, configPath: &Path::PathBuf, fieldPath: str, defaultValue: &Vector<String>): Result<Vector<String>, DiagnosticBag> {
+function stringArrayOrDefault(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf,
+  fieldPath: str,
+  defaultValue: &Vector<String>
+): Result<Vector<String>, DiagnosticBag> {
   let Option::SOME(value) = document.get(fieldPath) else {
     return Result::OK(cloneStringVector(defaultValue));
   };
@@ -333,7 +357,11 @@ function resolveEnvPath(value: &String): Path::PathBuf {
   return resolved.normalize();
 }
 
-function canonicalExistingPath(configPath: &Path::PathBuf, fieldPath: str, path: &Path::PathBuf): Result<Path::PathBuf, DiagnosticBag> {
+function canonicalExistingPath(
+  configPath: &Path::PathBuf,
+  fieldPath: str,
+  path: &Path::PathBuf
+): Result<Path::PathBuf, DiagnosticBag> {
   if (!Fs::exists(path.asStr())) {
     return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, fieldPath, path));
   }
@@ -443,7 +471,11 @@ function skipLine(tokens: &Vector<TomlToken>, index: u64): u64 {
   return next;
 }
 
-function parseAliases(configPath: &Path::PathBuf, root: &Path::PathBuf, source: &String): Result<Vector<AliasBinding>, DiagnosticBag> {
+function parseAliases(
+  configPath: &Path::PathBuf,
+  root: &Path::PathBuf,
+  source: &String
+): Result<Vector<AliasBinding>, DiagnosticBag> {
   let tokens: Vector<TomlToken> = match (Toml::lex(source)) {
     Result::OK(value) -> value,
     Result::ERROR(error) -> {
@@ -797,7 +829,9 @@ export namespace Config {
     });
   }
 
-  function loadBuildProjectFile(configPath: &Path::PathBuf): Result<ResolvedProject, DiagnosticBag> {
+  function loadBuildProjectFile(
+    configPath: &Path::PathBuf
+  ): Result<ResolvedProject, DiagnosticBag> {
     let project: ResolvedProject = Config::loadProjectFile(configPath)!;
     return requireStdManifest(project);
   }
@@ -876,7 +910,10 @@ function emptyProject(): ResolvedProject {
   };
 }
 
-function expectSingleDiagnosticCode(result: Result<ResolvedProject, DiagnosticBag>, code: str): void {
+function expectSingleDiagnosticCode(
+  result: Result<ResolvedProject, DiagnosticBag>,
+  code: str
+): void {
   let Result::ERROR(bag) = result else {
     Test::fail();
     return;

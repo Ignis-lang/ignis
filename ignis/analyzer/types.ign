@@ -2,6 +2,7 @@ import Eq from "std::hash";
 
 import Id from "@compiler::ids";
 import IndexVec from "@compiler::indexing";
+import Symbol from "@compiler::symbols";
 
 export namespace Analyzer {
   /// Wrapper record for the Tuple variant payload. Holds element types in order.
@@ -21,6 +22,18 @@ export namespace Analyzer {
   record ReferenceType {
     public referent: Analyzer::TypeId;
     public mutable: boolean;
+  }
+
+  /// Wrapper record for the Instance variant payload.
+  ///
+  /// Represents a generic nominal type applied to concrete type arguments
+  /// before monomorphization, e.g. `Vector<i32>` resolves to
+  /// `Instance(InstanceType { definition: <Vector defId>, typeArguments: [<i32 id>] })`.
+  /// After monomorphization, instances are replaced by their specialized
+  /// `Record(...)` / `Enum(...)` ids; verifiers may assert no `Instance` remains.
+  record InstanceType {
+    public definition: Analyzer::DefinitionId;
+    public typeArguments: Vector<Analyzer::TypeId>;
   }
 
   @implements(Eq)
@@ -50,6 +63,16 @@ export namespace Analyzer {
     Record(Analyzer::DefinitionId),
     Enum(Analyzer::DefinitionId),
 
+    /// Unresolved generic type parameter, identified by the interned symbol of
+    /// its declared name. Lives until monomorphization substitutes it for a
+    /// concrete `TypeId`.
+    Param(Symbol),
+
+    /// Generic nominal instantiated with concrete type arguments. Replaced by
+    /// `Record(...)` or `Enum(...)` for the monomorphized definition once
+    /// `Monomorphizer::run` completes.
+    Instance(Analyzer::InstanceType),
+
     public name(&self): str {
       return match (self) {
         Analyzer::Type::I8 -> "i8",
@@ -75,6 +98,8 @@ export namespace Analyzer {
         Analyzer::Type::Function(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Record(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Enum(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Param(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Instance(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
       };
     }
 
@@ -109,6 +134,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::I16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -134,6 +161,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::I32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -159,6 +188,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::I64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -184,6 +215,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::U8 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -209,6 +242,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::U16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -234,6 +269,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::U32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -259,6 +296,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::U64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -284,6 +323,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::F32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -309,6 +350,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::F64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -334,6 +377,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::BOOLEAN -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -359,6 +404,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::CHAR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -384,6 +431,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::STR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -409,6 +458,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::VOID -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -434,6 +485,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::NEVER -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -459,6 +512,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::Pointer(p) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -484,6 +539,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::Reference(r) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -509,6 +566,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::Slice(e) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -534,6 +593,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::FixedArray(e, n) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -559,6 +620,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::Tuple(a) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -584,6 +647,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::Function(f) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -609,6 +674,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(g) -> Analyzer::Type::typeIdVectorsEqual(&f.params, &g.params) && f.returnType.raw() == g.returnType.raw(),
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::Record(defId) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -634,6 +701,8 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(otherDefId) -> defId.raw() == otherDefId.raw(),
           Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
         },
         Analyzer::Type::Enum(defId) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -659,6 +728,62 @@ export namespace Analyzer {
           Analyzer::Type::Function(_) -> false,
           Analyzer::Type::Record(_) -> false,
           Analyzer::Type::Enum(otherDefId) -> defId.raw() == otherDefId.raw(),
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
+        },
+        Analyzer::Type::Param(s1) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
+          Analyzer::Type::Record(_) -> false,
+          Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(s2) -> s1.equals(&s2),
+          Analyzer::Type::Instance(_) -> false,
+        },
+        Analyzer::Type::Instance(i1) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
+          Analyzer::Type::Record(_) -> false,
+          Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(i2) -> i1.definition.raw() == i2.definition.raw() && Analyzer::Type::typeIdVectorsEqual(&i1.typeArguments, &i2.typeArguments),
         },
       };
     }
@@ -676,8 +801,12 @@ export namespace Analyzer {
       let mut index: u64 = 0;
 
       while (index < left.length()) {
-        let Option::SOME(l) = left.get(index) else { return false; };
-        let Option::SOME(r) = right.get(index) else { return false; };
+        let Option::SOME(l) = left.get(index) else {
+          return false;
+        };
+        let Option::SOME(r) = right.get(index) else {
+          return false;
+        };
 
         if (!l.equals(r)) {
           return false;
@@ -780,6 +909,8 @@ export namespace Analyzer {
         Analyzer::Type::Function(f) -> self.internCompound(Analyzer::Type::Function(f)),
         Analyzer::Type::Record(defId) -> self.internCompound(Analyzer::Type::Record(defId)),
         Analyzer::Type::Enum(defId) -> self.internCompound(Analyzer::Type::Enum(defId)),
+        Analyzer::Type::Param(symbol) -> self.internCompound(Analyzer::Type::Param(symbol)),
+        Analyzer::Type::Instance(instance) -> self.internCompound(Analyzer::Type::Instance(instance)),
       };
     }
 
@@ -842,7 +973,11 @@ export namespace Analyzer {
     /// Returns the canonical id for a function type with the given parameter types and return type.
     /// Takes ownership of `params`; the vector is moved into storage on cache miss.
     /// Named `functionType` because `function` is a reserved keyword in Ignis.
-    public functionType(&mut self, params: Vector<Analyzer::TypeId>, returnType: Analyzer::TypeId): Analyzer::TypeId {
+    public functionType(
+      &mut self,
+      params: Vector<Analyzer::TypeId>,
+      returnType: Analyzer::TypeId
+    ): Analyzer::TypeId {
       return self.intern(Analyzer::Type::Function(Analyzer::FunctionType { params: params, returnType: returnType }));
     }
 
@@ -856,6 +991,31 @@ export namespace Analyzer {
     /// Named `enumType` because `enum` is a reserved keyword in Ignis.
     public enumType(&mut self, defId: Analyzer::DefinitionId): Analyzer::TypeId {
       return self.intern(Analyzer::Type::Enum(defId));
+    }
+
+    /// Returns the canonical id for an unresolved generic parameter identified by `name`.
+    ///
+    /// Two `Param` calls with the same interned `Symbol` return the same id;
+    /// distinct symbols produce distinct ids even when their textual names match,
+    /// preserving the binder's notion of identity across scopes.
+    public param(&mut self, name: Symbol): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Param(name));
+    }
+
+    /// Returns the canonical id for a generic nominal applied to `typeArguments`.
+    ///
+    /// Takes ownership of `typeArguments`; the vector is moved into storage on
+    /// cache miss. Two instances are structurally equal when both the definition
+    /// id and the ordered type argument ids match.
+    public instance(
+      &mut self,
+      definition: Analyzer::DefinitionId,
+      typeArguments: Vector<Analyzer::TypeId>,
+    ): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Instance(Analyzer::InstanceType {
+        definition: definition,
+        typeArguments: typeArguments,
+      }));
     }
 
     /// Formats a tuple type as a comma-separated parenthesized list.
@@ -955,10 +1115,38 @@ export namespace Analyzer {
           Analyzer::Type::Function(f) -> self.functionNameOf(&f),
           Analyzer::Type::Record(defId) -> String::create("<record:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
           Analyzer::Type::Enum(defId) -> String::create("<enum:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
+          Analyzer::Type::Param(symbol) -> String::create("<param:Symbol(").concat(String::create(symbol.raw()).toStr()).concat(")>"),
+          Analyzer::Type::Instance(instance) -> self.instanceNameOf(&instance),
         };
       }
 
       @panic("TypeStore::nameOf: unknown TypeId");
+    }
+
+    /// Formats an instance type as "<instance:DefId(N)<arg1, arg2>>" using
+    /// the same definition-id placeholder as Record/Enum until the
+    /// DefinitionStore/SymbolTable threading lands.
+    private instanceNameOf(&self, instance: &Analyzer::InstanceType): String {
+      let mut result: String = String::create("<instance:DefId(")
+        .concat(String::create(instance.definition.raw()).toStr())
+        .concat(")<");
+
+      let mut index: u64 = 0;
+      while (index < instance.typeArguments.length()) {
+        let Option::SOME(argId) = instance.typeArguments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result = result.concat(", ");
+        }
+
+        result = result.concat(self.nameOf(*argId).toStr());
+        index += 1;
+      }
+
+      return result.concat(">>");
     }
 
     public get(&self, id: Analyzer::TypeId): Option<&Analyzer::Type> {

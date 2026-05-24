@@ -1,5 +1,6 @@
 import Test from "std::test";
 
+import Symbol from "@compiler::symbols";
 import Id from "@compiler::ids";
 
 import Analyzer from "@compiler::analyzer";
@@ -205,6 +206,8 @@ function getRoundTripsCompoundVariants(): void {
       Analyzer::Type::Function(_) -> @panic("expected Slice variant"),
       Analyzer::Type::Record(_) -> @panic("expected Slice variant"),
       Analyzer::Type::Enum(_) -> @panic("expected Slice variant"),
+      Analyzer::Type::Param(_) -> @panic("expected Slice variant"),
+      Analyzer::Type::Instance(_) -> @panic("expected Slice variant"),
     },
   };
 
@@ -239,6 +242,8 @@ function getRoundTripsCompoundVariants(): void {
       Analyzer::Type::Function(_) -> @panic("expected FixedArray variant"),
       Analyzer::Type::Record(_) -> @panic("expected FixedArray variant"),
       Analyzer::Type::Enum(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Param(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Instance(_) -> @panic("expected FixedArray variant"),
     },
   };
 }
@@ -746,6 +751,8 @@ function recordRoundTripPreservesDefinitionId(): void {
       Analyzer::Type::Function(_) -> @panic("expected Record variant"),
       Analyzer::Type::Record(d) -> Test::assertEq<u32>(d.raw(), 99),
       Analyzer::Type::Enum(_) -> @panic("expected Record variant"),
+      Analyzer::Type::Param(_) -> @panic("expected Record variant"),
+      Analyzer::Type::Instance(_) -> @panic("expected Record variant"),
     },
   };
 }
@@ -783,6 +790,8 @@ function enumRoundTripPreservesDefinitionId(): void {
       Analyzer::Type::Function(_) -> @panic("expected Enum variant"),
       Analyzer::Type::Record(_) -> @panic("expected Enum variant"),
       Analyzer::Type::Enum(d) -> Test::assertEq<u32>(d.raw(), 3),
+      Analyzer::Type::Param(_) -> @panic("expected Enum variant"),
+      Analyzer::Type::Instance(_) -> @panic("expected Enum variant"),
     },
   };
 }
@@ -877,4 +886,199 @@ function equalsFalseForFunctionWithDifferentParams(): void {
   let type2: Analyzer::Type = Analyzer::Type::Function(ft2);
 
   Test::assert(!type1.equals(&type2));
+}
+
+@test
+function paramInternIsStableForSameSymbol(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let sym: Symbol = Symbol::fromRaw(7);
+
+  let id1: Analyzer::TypeId = store.param(sym);
+  let id2: Analyzer::TypeId = store.param(sym);
+
+  Test::assertEq<u32>(id1.raw(), id2.raw());
+}
+
+@test
+function paramInternIsDistinctForDifferentSymbols(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let id1: Analyzer::TypeId = store.param(Symbol::fromRaw(1));
+  let id2: Analyzer::TypeId = store.param(Symbol::fromRaw(2));
+
+  Test::assert(id1.raw() != id2.raw());
+}
+
+@test
+function paramRoundTripPreservesSymbol(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let id: Analyzer::TypeId = store.param(Symbol::fromRaw(42));
+
+  match (store.get(id)) {
+    Option::NONE -> @panic("expected SOME for param type id"),
+    Option::SOME(type_) -> match (type_) {
+      Analyzer::Type::I8 -> @panic("expected Param variant"),
+      Analyzer::Type::I16 -> @panic("expected Param variant"),
+      Analyzer::Type::I32 -> @panic("expected Param variant"),
+      Analyzer::Type::I64 -> @panic("expected Param variant"),
+      Analyzer::Type::U8 -> @panic("expected Param variant"),
+      Analyzer::Type::U16 -> @panic("expected Param variant"),
+      Analyzer::Type::U32 -> @panic("expected Param variant"),
+      Analyzer::Type::U64 -> @panic("expected Param variant"),
+      Analyzer::Type::F32 -> @panic("expected Param variant"),
+      Analyzer::Type::F64 -> @panic("expected Param variant"),
+      Analyzer::Type::BOOLEAN -> @panic("expected Param variant"),
+      Analyzer::Type::CHAR -> @panic("expected Param variant"),
+      Analyzer::Type::STR -> @panic("expected Param variant"),
+      Analyzer::Type::VOID -> @panic("expected Param variant"),
+      Analyzer::Type::NEVER -> @panic("expected Param variant"),
+      Analyzer::Type::Pointer(_) -> @panic("expected Param variant"),
+      Analyzer::Type::Reference(_) -> @panic("expected Param variant"),
+      Analyzer::Type::Slice(_) -> @panic("expected Param variant"),
+      Analyzer::Type::FixedArray(_, _) -> @panic("expected Param variant"),
+      Analyzer::Type::Tuple(_) -> @panic("expected Param variant"),
+      Analyzer::Type::Function(_) -> @panic("expected Param variant"),
+      Analyzer::Type::Record(_) -> @panic("expected Param variant"),
+      Analyzer::Type::Enum(_) -> @panic("expected Param variant"),
+      Analyzer::Type::Param(symbol) -> Test::assertEq<u32>(symbol.raw(), 42),
+      Analyzer::Type::Instance(_) -> @panic("expected Param variant"),
+    },
+  };
+}
+
+@test
+function instanceInternIsStableForSameDefAndArgs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(11);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut args1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args1.push(idI32);
+  let id1: Analyzer::TypeId = store.instance(defId, args1);
+
+  let mut args2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args2.push(idI32);
+  let id2: Analyzer::TypeId = store.instance(defId, args2);
+
+  Test::assertEq<u32>(id1.raw(), id2.raw());
+}
+
+@test
+function instanceInternIsDistinctForDifferentDefs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut args1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args1.push(idI32);
+  let id1: Analyzer::TypeId = store.instance(Id::fromRaw<Analyzer::DefinitionTag>(1), args1);
+
+  let mut args2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args2.push(idI32);
+  let id2: Analyzer::TypeId = store.instance(Id::fromRaw<Analyzer::DefinitionTag>(2), args2);
+
+  Test::assert(id1.raw() != id2.raw());
+}
+
+@test
+function instanceInternIsDistinctForDifferentArgs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(5);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut args1: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args1.push(idI32);
+  let id1: Analyzer::TypeId = store.instance(defId, args1);
+
+  let mut args2: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args2.push(idStr);
+  let id2: Analyzer::TypeId = store.instance(defId, args2);
+
+  Test::assert(id1.raw() != id2.raw());
+}
+
+@test
+function instanceRoundTripPreservesDefinitionAndArgs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(77);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+  args.push(idStr);
+  let id: Analyzer::TypeId = store.instance(defId, args);
+
+  match (store.get(id)) {
+    Option::NONE -> @panic("expected SOME for instance type id"),
+    Option::SOME(type_) -> match (type_) {
+      Analyzer::Type::I8 -> @panic("expected Instance variant"),
+      Analyzer::Type::I16 -> @panic("expected Instance variant"),
+      Analyzer::Type::I32 -> @panic("expected Instance variant"),
+      Analyzer::Type::I64 -> @panic("expected Instance variant"),
+      Analyzer::Type::U8 -> @panic("expected Instance variant"),
+      Analyzer::Type::U16 -> @panic("expected Instance variant"),
+      Analyzer::Type::U32 -> @panic("expected Instance variant"),
+      Analyzer::Type::U64 -> @panic("expected Instance variant"),
+      Analyzer::Type::F32 -> @panic("expected Instance variant"),
+      Analyzer::Type::F64 -> @panic("expected Instance variant"),
+      Analyzer::Type::BOOLEAN -> @panic("expected Instance variant"),
+      Analyzer::Type::CHAR -> @panic("expected Instance variant"),
+      Analyzer::Type::STR -> @panic("expected Instance variant"),
+      Analyzer::Type::VOID -> @panic("expected Instance variant"),
+      Analyzer::Type::NEVER -> @panic("expected Instance variant"),
+      Analyzer::Type::Pointer(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::Reference(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::Slice(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::FixedArray(_, _) -> @panic("expected Instance variant"),
+      Analyzer::Type::Tuple(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::Function(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::Record(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::Enum(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::Param(_) -> @panic("expected Instance variant"),
+      Analyzer::Type::Instance(instance) -> {
+        Test::assertEq<u32>(instance.definition.raw(), 77);
+        Test::assertEq<u64>(instance.typeArguments.length(), 2);
+
+        match (instance.typeArguments.get(0)) {
+          Option::SOME(argId) -> Test::assertEq<u32>(argId.raw(), idI32.raw()),
+          Option::NONE -> @panic("expected first type argument"),
+        };
+
+        match (instance.typeArguments.get(1)) {
+          Option::SOME(argId) -> Test::assertEq<u32>(argId.raw(), idStr.raw()),
+          Option::NONE -> @panic("expected second type argument"),
+        };
+      },
+    },
+  };
+}
+
+@test
+function nameOfParamReturnsPlaceholderWithSymbolId(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let id: Analyzer::TypeId = store.param(Symbol::fromRaw(13));
+
+  let expected: String = String::create("<param:Symbol(13)>");
+  let actual: String = store.nameOf(id);
+
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function nameOfInstanceReturnsPlaceholderWithArgs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(4);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+  args.push(idStr);
+  let id: Analyzer::TypeId = store.instance(defId, args);
+
+  let expected: String = String::create("<instance:DefId(4)<i32, str>>");
+  let actual: String = store.nameOf(id);
+
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
