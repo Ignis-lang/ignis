@@ -203,6 +203,8 @@ function getRoundTripsCompoundVariants(): void {
       Analyzer::Type::FixedArray(_, _) -> @panic("expected Slice variant"),
       Analyzer::Type::Tuple(_) -> @panic("expected Slice variant"),
       Analyzer::Type::Function(_) -> @panic("expected Slice variant"),
+      Analyzer::Type::Record(_) -> @panic("expected Slice variant"),
+      Analyzer::Type::Enum(_) -> @panic("expected Slice variant"),
     },
   };
 
@@ -235,6 +237,8 @@ function getRoundTripsCompoundVariants(): void {
       },
       Analyzer::Type::Tuple(_) -> @panic("expected FixedArray variant"),
       Analyzer::Type::Function(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Record(_) -> @panic("expected FixedArray variant"),
+      Analyzer::Type::Enum(_) -> @panic("expected FixedArray variant"),
     },
   };
 }
@@ -598,6 +602,211 @@ function equalsFalseForFunctionWithDifferentReturnTypes(): void {
   let type2: Analyzer::Type = Analyzer::Type::Function(ft2);
 
   Test::assert(!type1.equals(&type2));
+}
+
+@test
+function recordTypeInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+
+  let lengthBefore: u64 = store.length();
+
+  let first: Analyzer::TypeId = store.recordType(defId);
+  let second: Analyzer::TypeId = store.recordType(defId);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assertEq<u64>(store.length(), lengthBefore + 1);
+}
+
+@test
+function enumTypeInterningIsIdempotent(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(7);
+
+  let lengthBefore: u64 = store.length();
+
+  let first: Analyzer::TypeId = store.enumType(defId);
+  let second: Analyzer::TypeId = store.enumType(defId);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+  Test::assertEq<u64>(store.length(), lengthBefore + 1);
+}
+
+@test
+function distinctDefinitionIdsProduceDistinctRecordTypeIds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defIdA: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+  let defIdB: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(1);
+
+  let lengthBefore: u64 = store.length();
+
+  let idA: Analyzer::TypeId = store.recordType(defIdA);
+  let idB: Analyzer::TypeId = store.recordType(defIdB);
+
+  Test::assert(idA.raw() != idB.raw());
+  Test::assertEq<u64>(store.length(), lengthBefore + 2);
+}
+
+@test
+function distinctDefinitionIdsProduceDistinctEnumTypeIds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defIdA: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+  let defIdB: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(1);
+
+  let idA: Analyzer::TypeId = store.enumType(defIdA);
+  let idB: Analyzer::TypeId = store.enumType(defIdB);
+
+  Test::assert(idA.raw() != idB.raw());
+}
+
+@test
+function recordAndEnumWithSameDefinitionIdAreDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(42);
+
+  let lengthBefore: u64 = store.length();
+
+  let recId: Analyzer::TypeId = store.recordType(defId);
+  let enumId: Analyzer::TypeId = store.enumType(defId);
+
+  Test::assert(recId.raw() != enumId.raw());
+  Test::assertEq<u64>(store.length(), lengthBefore + 2);
+}
+
+@test
+function nominalTypeIsNotEqualToStructuralType(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  elements.push(idI32);
+
+  store.recordType(defId);
+  let tupId: Analyzer::TypeId = store.tuple(elements);
+
+  let recType: Analyzer::Type = Analyzer::Type::Record(defId);
+
+  match (store.get(tupId)) {
+    Option::NONE -> @panic("expected tuple type"),
+    Option::SOME(t) -> Test::assert(!recType.equals(t)),
+  };
+}
+
+@test
+function recordEqualsItself(): void {
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(5);
+
+  let recType1: Analyzer::Type = Analyzer::Type::Record(defId);
+  let recType2: Analyzer::Type = Analyzer::Type::Record(defId);
+
+  Test::assert(recType1.equals(&recType2));
+}
+
+@test
+function enumEqualsItself(): void {
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(3);
+
+  let enumType1: Analyzer::Type = Analyzer::Type::Enum(defId);
+  let enumType2: Analyzer::Type = Analyzer::Type::Enum(defId);
+
+  Test::assert(enumType1.equals(&enumType2));
+}
+
+@test
+function recordRoundTripPreservesDefinitionId(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let id: Analyzer::TypeId = store.recordType(defId);
+
+  match (store.get(id)) {
+    Option::NONE -> @panic("expected SOME for record type id"),
+    Option::SOME(type_) -> match (type_) {
+      Analyzer::Type::I8 -> @panic("expected Record variant"),
+      Analyzer::Type::I16 -> @panic("expected Record variant"),
+      Analyzer::Type::I32 -> @panic("expected Record variant"),
+      Analyzer::Type::I64 -> @panic("expected Record variant"),
+      Analyzer::Type::U8 -> @panic("expected Record variant"),
+      Analyzer::Type::U16 -> @panic("expected Record variant"),
+      Analyzer::Type::U32 -> @panic("expected Record variant"),
+      Analyzer::Type::U64 -> @panic("expected Record variant"),
+      Analyzer::Type::F32 -> @panic("expected Record variant"),
+      Analyzer::Type::F64 -> @panic("expected Record variant"),
+      Analyzer::Type::BOOLEAN -> @panic("expected Record variant"),
+      Analyzer::Type::CHAR -> @panic("expected Record variant"),
+      Analyzer::Type::STR -> @panic("expected Record variant"),
+      Analyzer::Type::VOID -> @panic("expected Record variant"),
+      Analyzer::Type::NEVER -> @panic("expected Record variant"),
+      Analyzer::Type::Pointer(_) -> @panic("expected Record variant"),
+      Analyzer::Type::Reference(_) -> @panic("expected Record variant"),
+      Analyzer::Type::Slice(_) -> @panic("expected Record variant"),
+      Analyzer::Type::FixedArray(_, _) -> @panic("expected Record variant"),
+      Analyzer::Type::Tuple(_) -> @panic("expected Record variant"),
+      Analyzer::Type::Function(_) -> @panic("expected Record variant"),
+      Analyzer::Type::Record(d) -> Test::assertEq<u32>(d.raw(), 99),
+      Analyzer::Type::Enum(_) -> @panic("expected Record variant"),
+    },
+  };
+}
+
+@test
+function enumRoundTripPreservesDefinitionId(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(3);
+
+  let id: Analyzer::TypeId = store.enumType(defId);
+
+  match (store.get(id)) {
+    Option::NONE -> @panic("expected SOME for enum type id"),
+    Option::SOME(type_) -> match (type_) {
+      Analyzer::Type::I8 -> @panic("expected Enum variant"),
+      Analyzer::Type::I16 -> @panic("expected Enum variant"),
+      Analyzer::Type::I32 -> @panic("expected Enum variant"),
+      Analyzer::Type::I64 -> @panic("expected Enum variant"),
+      Analyzer::Type::U8 -> @panic("expected Enum variant"),
+      Analyzer::Type::U16 -> @panic("expected Enum variant"),
+      Analyzer::Type::U32 -> @panic("expected Enum variant"),
+      Analyzer::Type::U64 -> @panic("expected Enum variant"),
+      Analyzer::Type::F32 -> @panic("expected Enum variant"),
+      Analyzer::Type::F64 -> @panic("expected Enum variant"),
+      Analyzer::Type::BOOLEAN -> @panic("expected Enum variant"),
+      Analyzer::Type::CHAR -> @panic("expected Enum variant"),
+      Analyzer::Type::STR -> @panic("expected Enum variant"),
+      Analyzer::Type::VOID -> @panic("expected Enum variant"),
+      Analyzer::Type::NEVER -> @panic("expected Enum variant"),
+      Analyzer::Type::Pointer(_) -> @panic("expected Enum variant"),
+      Analyzer::Type::Reference(_) -> @panic("expected Enum variant"),
+      Analyzer::Type::Slice(_) -> @panic("expected Enum variant"),
+      Analyzer::Type::FixedArray(_, _) -> @panic("expected Enum variant"),
+      Analyzer::Type::Tuple(_) -> @panic("expected Enum variant"),
+      Analyzer::Type::Function(_) -> @panic("expected Enum variant"),
+      Analyzer::Type::Record(_) -> @panic("expected Enum variant"),
+      Analyzer::Type::Enum(d) -> Test::assertEq<u32>(d.raw(), 3),
+    },
+  };
+}
+
+@test
+function nameOfRecordReturnsPlaceholder(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let defId0: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+  let id0: Analyzer::TypeId = store.recordType(defId0);
+  Test::assertEq<str>(store.nameOf(id0).toStr(), "<record:DefId(0)>");
+
+  let defId42: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(42);
+  let id42: Analyzer::TypeId = store.recordType(defId42);
+  Test::assertEq<str>(store.nameOf(id42).toStr(), "<record:DefId(42)>");
+}
+
+@test
+function nameOfEnumReturnsPlaceholder(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let defId7: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(7);
+  let id7: Analyzer::TypeId = store.enumType(defId7);
+  Test::assertEq<str>(store.nameOf(id7).toStr(), "<enum:DefId(7)>");
 }
 
 @test
