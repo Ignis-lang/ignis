@@ -1,0 +1,303 @@
+import Test from "std::test";
+
+import Analyzer from "@compiler::analyzer";
+
+/// Push a fixed, canonical intern sequence into `store` and return the
+/// raw ids in push order. Mixes primitives and compound types so a
+/// regression in either path is observable. Caller-owned store keeps
+/// the helper side-effect free at the suite level.
+function canonicalTypeInternSequence(store: &mut Analyzer::TypeStore): Vector<u32> {
+  let mut storeRef: &mut Analyzer::TypeStore = store;
+  let mut ids: Vector<u32> = Vector::new<u32>();
+
+  let i32Id: Analyzer::TypeId = storeRef.intern(Analyzer::Type::I32);
+  ids.push(i32Id.raw());
+
+  let boolId: Analyzer::TypeId = storeRef.intern(Analyzer::Type::BOOLEAN);
+  ids.push(boolId.raw());
+
+  ids.push(storeRef.pointer(i32Id).raw());
+  ids.push(storeRef.reference(i32Id).raw());
+  ids.push(storeRef.slice(boolId).raw());
+  ids.push(storeRef.fixedArray(i32Id, 4).raw());
+
+  let mut tupleElems: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  tupleElems.push(i32Id);
+  tupleElems.push(boolId);
+  ids.push(storeRef.tuple(tupleElems).raw());
+
+  return ids;
+}
+
+/// Push four canonical definitions covering Function, Record, Enum,
+/// Variable variants. Returns raw ids in push order.
+function canonicalDefinitionPushSequence(
+  defs: &mut Analyzer::DefinitionStore,
+  types: &mut Analyzer::TypeStore,
+  funcSym: Analyzer::SymbolId,
+  recSym: Analyzer::SymbolId,
+  enumSym: Analyzer::SymbolId,
+  varSym: Analyzer::SymbolId,
+): Vector<u32> {
+  let mut defsRef: &mut Analyzer::DefinitionStore = defs;
+  let mut typesRef: &mut Analyzer::TypeStore = types;
+  let mut ids: Vector<u32> = Vector::new<u32>();
+
+  let voidId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+  let boolId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::BOOLEAN);
+  let stubTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::I32);
+
+  ids.push(defsRef.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: funcSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+  })).raw());
+
+  ids.push(defsRef.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  })).raw());
+
+  ids.push(defsRef.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  })).raw());
+
+  ids.push(defsRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+    name: varSym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    declaredType: boolId,
+    mutable: false,
+  })).raw());
+
+  return ids;
+}
+
+/// Assert two id vectors have identical length and element-wise equal
+/// `u32` content. Halts the test on first mismatch via Test::assertEq.
+function assertIdVectorsEqual(a: &Vector<u32>, b: &Vector<u32>): void {
+  Test::assertEq<u64>(a.length(), b.length());
+
+  let mut i: u64 = 0;
+
+  while (i < a.length()) {
+    let Option::SOME(av) = a.get(i) else {
+      @panic("vector a missing element");
+    };
+    let Option::SOME(bv) = b.get(i) else {
+      @panic("vector b missing element");
+    };
+
+    Test::assertEq<u32>(*av, *bv);
+    i += 1;
+  }
+}
+
+@test
+function typeStoreCompoundPushAssignsSequentialIdsAfterPrimitives(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  // Primitives occupy 0..14; length == 15 confirms correct registration count.
+  Test::assertEq<u64>(store.length(), 15);
+
+  let i32Id: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let ptrId: Analyzer::TypeId = store.pointer(i32Id);
+  let sliceId: Analyzer::TypeId = store.slice(i32Id);
+
+  let mut tupleElems: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  tupleElems.push(i32Id);
+  tupleElems.push(i32Id);
+  let tupleId: Analyzer::TypeId = store.tuple(tupleElems);
+
+  Test::assertEq<u32>(ptrId.raw(), 15);
+  Test::assertEq<u32>(sliceId.raw(), 16);
+  Test::assertEq<u32>(tupleId.raw(), 17);
+  Test::assertEq<u64>(store.length(), 18);
+}
+
+@test
+function typeStoreTwoFreshStoresProduceIdenticalIdsForSameSequence(): void {
+  let mut storeA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut storeB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+
+  let idsA: Vector<u32> = canonicalTypeInternSequence(&mut storeA);
+  let idsB: Vector<u32> = canonicalTypeInternSequence(&mut storeB);
+
+  assertIdVectorsEqual(&idsA, &idsB);
+}
+
+@test
+function typeStoreInternedHitReturnsExistingIdAndDoesNotAdvanceCounter(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let i32Id: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let firstPtr: Analyzer::TypeId = store.pointer(i32Id);
+  let lengthAfterFirst: u64 = store.length();
+
+  let _unrelated: Analyzer::TypeId = store.slice(i32Id);
+  let lengthAfterUnrelated: u64 = store.length();
+
+  let secondPtr: Analyzer::TypeId = store.pointer(i32Id);
+  let lengthAfterSecond: u64 = store.length();
+
+  Test::assertEq<u32>(firstPtr.raw(), secondPtr.raw());
+  Test::assertEq<u64>(lengthAfterSecond, lengthAfterUnrelated);
+  Test::assert(lengthAfterUnrelated > lengthAfterFirst);
+}
+
+@test
+function definitionStoreTwoFreshStoresProduceIdenticalIdsForSameSequence(): void {
+  let mut tableA: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSymA: Analyzer::SymbolId = tableA.intern("func");
+  let recSymA: Analyzer::SymbolId = tableA.intern("rec");
+  let enumSymA: Analyzer::SymbolId = tableA.intern("enumVal");
+  let varSymA: Analyzer::SymbolId = tableA.intern("var");
+
+  let mut typesA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defsA: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let idsA: Vector<u32> = canonicalDefinitionPushSequence(
+    &mut defsA,
+    &mut typesA,
+    funcSymA,
+    recSymA,
+    enumSymA,
+    varSymA,
+  );
+
+  let mut tableB: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSymB: Analyzer::SymbolId = tableB.intern("func");
+  let recSymB: Analyzer::SymbolId = tableB.intern("rec");
+  let enumSymB: Analyzer::SymbolId = tableB.intern("enumVal");
+  let varSymB: Analyzer::SymbolId = tableB.intern("var");
+
+  let mut typesB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defsB: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let idsB: Vector<u32> = canonicalDefinitionPushSequence(
+    &mut defsB,
+    &mut typesB,
+    funcSymB,
+    recSymB,
+    enumSymB,
+    varSymB,
+  );
+
+  assertIdVectorsEqual(&idsA, &idsB);
+}
+
+@test
+function definitionStorePushAfterClearedStoreRestartsAtZero(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("foo");
+
+  let mut typesA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidA: Analyzer::TypeId = typesA.intern(Analyzer::Type::VOID);
+  let mut defsA: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let firstA: Analyzer::DefinitionId = defsA.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidA,
+  }));
+
+  let mut typesB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidB: Analyzer::TypeId = typesB.intern(Analyzer::Type::VOID);
+  let mut defsB: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let firstB: Analyzer::DefinitionId = defsB.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidB,
+  }));
+
+  Test::assertEq<u32>(firstA.raw(), 0);
+  Test::assertEq<u32>(firstB.raw(), 0);
+}
+
+@test
+function combinedTypeAndDefinitionStoreReplayIsByteForByteStable(): void {
+  let mut tableA: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSymA: Analyzer::SymbolId = tableA.intern("func");
+  let recSymA: Analyzer::SymbolId = tableA.intern("rec");
+  let enumSymA: Analyzer::SymbolId = tableA.intern("enumVal");
+  let varSymA: Analyzer::SymbolId = tableA.intern("var");
+
+  let mut typesA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defsA: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut mergedA: Vector<u32> = Vector::new<u32>();
+
+  let typeIdsA: Vector<u32> = canonicalTypeInternSequence(&mut typesA);
+  let defIdsA: Vector<u32> = canonicalDefinitionPushSequence(
+    &mut defsA,
+    &mut typesA,
+    funcSymA,
+    recSymA,
+    enumSymA,
+    varSymA,
+  );
+  let extraTypeA: u32 = typesA.intern(Analyzer::Type::U64).raw();
+
+  let mut idxA: u64 = 0;
+  while (idxA < typeIdsA.length()) {
+    let Option::SOME(v) = typeIdsA.get(idxA) else { @panic("missing typeIdsA element"); };
+    mergedA.push(*v);
+    idxA += 1;
+  }
+
+  let mut idxA2: u64 = 0;
+  while (idxA2 < defIdsA.length()) {
+    let Option::SOME(v) = defIdsA.get(idxA2) else { @panic("missing defIdsA element"); };
+    mergedA.push(*v);
+    idxA2 += 1;
+  }
+
+  mergedA.push(extraTypeA);
+
+  let mut tableB: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSymB: Analyzer::SymbolId = tableB.intern("func");
+  let recSymB: Analyzer::SymbolId = tableB.intern("rec");
+  let enumSymB: Analyzer::SymbolId = tableB.intern("enumVal");
+  let varSymB: Analyzer::SymbolId = tableB.intern("var");
+
+  let mut typesB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defsB: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut mergedB: Vector<u32> = Vector::new<u32>();
+
+  let typeIdsB: Vector<u32> = canonicalTypeInternSequence(&mut typesB);
+  let defIdsB: Vector<u32> = canonicalDefinitionPushSequence(
+    &mut defsB,
+    &mut typesB,
+    funcSymB,
+    recSymB,
+    enumSymB,
+    varSymB,
+  );
+  let extraTypeB: u32 = typesB.intern(Analyzer::Type::U64).raw();
+
+  let mut idxB: u64 = 0;
+  while (idxB < typeIdsB.length()) {
+    let Option::SOME(v) = typeIdsB.get(idxB) else { @panic("missing typeIdsB element"); };
+    mergedB.push(*v);
+    idxB += 1;
+  }
+
+  let mut idxB2: u64 = 0;
+  while (idxB2 < defIdsB.length()) {
+    let Option::SOME(v) = defIdsB.get(idxB2) else { @panic("missing defIdsB element"); };
+    mergedB.push(*v);
+    idxB2 += 1;
+  }
+
+  mergedB.push(extraTypeB);
+
+  assertIdVectorsEqual(&mergedA, &mergedB);
+}
