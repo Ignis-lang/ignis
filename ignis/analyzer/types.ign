@@ -4,6 +4,10 @@ import Id from "@compiler::ids";
 import IndexVec from "@compiler::indexing";
 import Symbol from "@compiler::symbols";
 
+import _ from "./ids";
+import _ from "./symbols";
+import _ from "./definitions";
+
 export namespace Analyzer {
   /// Wrapper record for the Tuple variant payload. Holds element types in order.
   record TupleType {
@@ -1089,6 +1093,9 @@ export namespace Analyzer {
     /// For primitive ids, delegates to `Analyzer::Type::name()`.
     /// For compound ids, builds the name string by recursing through the inner id(s).
     /// Panics if the id is not present in the store.
+    ///
+    /// For user-facing diagnostics that need real nominal names (record, enum,
+    /// type parameter names from source), use `nameOfResolved` instead.
     public nameOf(&self, id: Analyzer::TypeId): String {
       if (let Option::SOME(type_) = self.types.get(id)) {
         return match (type_) {
@@ -1147,6 +1154,273 @@ export namespace Analyzer {
       }
 
       return result.concat(">>");
+    }
+
+    /// Resolves the real name of a record definition. On lookup miss or wrong
+    /// definition kind, falls back to the `<record:DefId(N)>` placeholder.
+    private recordNameOfResolved(
+      &self,
+      defId: Analyzer::DefinitionId,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      let fallback: String = String::create("<record:DefId(")
+        .concat(String::create(defId.raw()).toStr())
+        .concat(")>");
+
+      if (let Option::SOME(def) = defs.get(defId)) {
+        return match (def) {
+          Analyzer::Definition::Record(rec) -> match (syms.resolve(rec.name)) {
+            Option::SOME(name) -> String::create(name),
+            Option::NONE -> fallback,
+          },
+          Analyzer::Definition::Function(_) -> fallback,
+          Analyzer::Definition::Enum(_) -> fallback,
+          Analyzer::Definition::Variable(_) -> fallback,
+          Analyzer::Definition::Field(_) -> fallback,
+          Analyzer::Definition::Variant(_) -> fallback,
+          Analyzer::Definition::TypeParam(_) -> fallback,
+        };
+      }
+
+      return fallback;
+    }
+
+    /// Resolves the real name of an enum definition. On lookup miss or wrong
+    /// definition kind, falls back to the `<enum:DefId(N)>` placeholder.
+    private enumNameOfResolved(
+      &self,
+      defId: Analyzer::DefinitionId,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      let fallback: String = String::create("<enum:DefId(")
+        .concat(String::create(defId.raw()).toStr())
+        .concat(")>");
+
+      if (let Option::SOME(def) = defs.get(defId)) {
+        return match (def) {
+          Analyzer::Definition::Enum(e) -> match (syms.resolve(e.name)) {
+            Option::SOME(name) -> String::create(name),
+            Option::NONE -> fallback,
+          },
+          Analyzer::Definition::Function(_) -> fallback,
+          Analyzer::Definition::Record(_) -> fallback,
+          Analyzer::Definition::Variable(_) -> fallback,
+          Analyzer::Definition::Field(_) -> fallback,
+          Analyzer::Definition::Variant(_) -> fallback,
+          Analyzer::Definition::TypeParam(_) -> fallback,
+        };
+      }
+
+      return fallback;
+    }
+
+    /// Formats a tuple type as a comma-separated parenthesized list, using
+    /// `nameOfResolved` for each element to produce real nominal names.
+    private tupleNameOfResolved(
+      &self,
+      elements: &Vector<Analyzer::TypeId>,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      if (elements.length() == 0) {
+        return String::create("()");
+      }
+
+      let mut result: String = String::create("(");
+      let mut index: u64 = 0;
+
+      while (index < elements.length()) {
+        let Option::SOME(elementId) = elements.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result = result.concat(", ");
+        }
+
+        result = result.concat(self.nameOfResolved(*elementId, defs, syms).toStr());
+
+        index += 1;
+      }
+
+      return result.concat(")");
+    }
+
+    /// Formats a reference type as "&T" or "&mut T", using `nameOfResolved`
+    /// for the referent to produce real nominal names.
+    private referenceNameOfResolved(
+      &self,
+      refType: &Analyzer::ReferenceType,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      if (refType.mutable) {
+        return String::create("&mut ")
+          .concat(self.nameOfResolved(refType.referent, defs, syms).toStr());
+      }
+
+      return String::create("&")
+        .concat(self.nameOfResolved(refType.referent, defs, syms).toStr());
+    }
+
+    /// Formats a function type as "fn(p1, p2) -> r", using `nameOfResolved`
+    /// for each parameter and the return type to produce real nominal names.
+    private functionNameOfResolved(
+      &self,
+      fn_: &Analyzer::FunctionType,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      let mut result: String = String::create("fn(");
+      let mut index: u64 = 0;
+
+      while (index < fn_.params.length()) {
+        let Option::SOME(paramId) = fn_.params.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result = result.concat(", ");
+        }
+
+        result = result.concat(self.nameOfResolved(*paramId, defs, syms).toStr());
+
+        index += 1;
+      }
+
+      result = result.concat(") -> ");
+      result = result.concat(self.nameOfResolved(fn_.returnType, defs, syms).toStr());
+
+      return result;
+    }
+
+    /// Formats an instance type with real nominal name resolved from `defs` and
+    /// `syms`. Produces `Name<arg1, arg2>` for non-empty type arguments; bare
+    /// `Name` when empty. Falls back to `<instance:DefId(N)<args>>` on lookup miss.
+    private instanceNameOfResolved(
+      &self,
+      inst: &Analyzer::InstanceType,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      let nominalName: String = match (defs.get(inst.definition)) {
+        Option::NONE -> String::create("<instance:DefId(")
+          .concat(String::create(inst.definition.raw()).toStr())
+          .concat(")>"),
+        Option::SOME(def) -> match (def) {
+          Analyzer::Definition::Record(rec) -> match (syms.resolve(rec.name)) {
+            Option::SOME(name) -> String::create(name),
+            Option::NONE -> String::create("<instance:DefId(")
+              .concat(String::create(inst.definition.raw()).toStr())
+              .concat(")>"),
+          },
+          Analyzer::Definition::Enum(e) -> match (syms.resolve(e.name)) {
+            Option::SOME(name) -> String::create(name),
+            Option::NONE -> String::create("<instance:DefId(")
+              .concat(String::create(inst.definition.raw()).toStr())
+              .concat(")>"),
+          },
+          Analyzer::Definition::Function(_) -> String::create("<instance:DefId(")
+            .concat(String::create(inst.definition.raw()).toStr())
+            .concat(")>"),
+          Analyzer::Definition::Variable(_) -> String::create("<instance:DefId(")
+            .concat(String::create(inst.definition.raw()).toStr())
+            .concat(")>"),
+          Analyzer::Definition::Field(_) -> String::create("<instance:DefId(")
+            .concat(String::create(inst.definition.raw()).toStr())
+            .concat(")>"),
+          Analyzer::Definition::Variant(_) -> String::create("<instance:DefId(")
+            .concat(String::create(inst.definition.raw()).toStr())
+            .concat(")>"),
+          Analyzer::Definition::TypeParam(_) -> String::create("<instance:DefId(")
+            .concat(String::create(inst.definition.raw()).toStr())
+            .concat(")>"),
+        },
+      };
+
+      if (inst.typeArguments.length() == 0) {
+        return nominalName;
+      }
+
+      let mut result: String = nominalName.concat("<");
+      let mut index: u64 = 0;
+
+      while (index < inst.typeArguments.length()) {
+        let Option::SOME(argId) = inst.typeArguments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result = result.concat(", ");
+        }
+
+        result = result.concat(self.nameOfResolved(*argId, defs, syms).toStr());
+
+        index += 1;
+      }
+
+      return result.concat(">");
+    }
+
+    /// Recursively resolves a `TypeId` to a human-readable name by consulting
+    /// `defs` and `syms` for nominal types (records, enums, type parameters).
+    ///
+    /// Unlike `nameOf`, this method never panics: all unknown-id paths return
+    /// a deterministic placeholder string. Prefer this method for any
+    /// user-facing diagnostic output that must show real source-level names.
+    public nameOfResolved(
+      &self,
+      id: Analyzer::TypeId,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      if (let Option::SOME(type_) = self.types.get(id)) {
+        return match (type_) {
+          Analyzer::Type::I8 -> String::create(type_.name()),
+          Analyzer::Type::I16 -> String::create(type_.name()),
+          Analyzer::Type::I32 -> String::create(type_.name()),
+          Analyzer::Type::I64 -> String::create(type_.name()),
+          Analyzer::Type::U8 -> String::create(type_.name()),
+          Analyzer::Type::U16 -> String::create(type_.name()),
+          Analyzer::Type::U32 -> String::create(type_.name()),
+          Analyzer::Type::U64 -> String::create(type_.name()),
+          Analyzer::Type::F32 -> String::create(type_.name()),
+          Analyzer::Type::F64 -> String::create(type_.name()),
+          Analyzer::Type::BOOLEAN -> String::create(type_.name()),
+          Analyzer::Type::CHAR -> String::create(type_.name()),
+          Analyzer::Type::STR -> String::create(type_.name()),
+          Analyzer::Type::VOID -> String::create(type_.name()),
+          Analyzer::Type::NEVER -> String::create(type_.name()),
+          Analyzer::Type::Pointer(pointee) -> String::create("*")
+            .concat(self.nameOfResolved(pointee, defs, syms).toStr()),
+          Analyzer::Type::Reference(refType) -> self.referenceNameOfResolved(&refType, defs, syms),
+          Analyzer::Type::Slice(element) -> self.nameOfResolved(element, defs, syms).concat("[]"),
+          Analyzer::Type::FixedArray(element, length) -> self.nameOfResolved(element, defs, syms)
+            .concat("[")
+            .concat(String::create(length).toStr())
+            .concat("]"),
+          Analyzer::Type::Tuple(t) -> self.tupleNameOfResolved(&t.elements, defs, syms),
+          Analyzer::Type::Function(f) -> self.functionNameOfResolved(&f, defs, syms),
+          Analyzer::Type::Record(defId) -> self.recordNameOfResolved(defId, defs, syms),
+          Analyzer::Type::Enum(defId) -> self.enumNameOfResolved(defId, defs, syms),
+          Analyzer::Type::Param(symbol) -> match (syms.resolve(symbol)) {
+            Option::SOME(name) -> String::create(name),
+            Option::NONE -> String::create("<param:Symbol(")
+              .concat(String::create(symbol.raw()).toStr())
+              .concat(")>"),
+          },
+          Analyzer::Type::Instance(inst) -> self.instanceNameOfResolved(&inst, defs, syms),
+        };
+      }
+
+      return String::create("<unknown-type:TypeId(")
+        .concat(String::create(id.raw()).toStr())
+        .concat(")>");
     }
 
     public get(&self, id: Analyzer::TypeId): Option<&Analyzer::Type> {

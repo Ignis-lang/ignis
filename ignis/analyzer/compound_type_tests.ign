@@ -1082,3 +1082,204 @@ function nameOfInstanceReturnsPlaceholderWithArgs(): void {
 
   Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
+
+// ─── Fixture helpers ──────────────────────────────────────────────────────────
+
+/// Creates a minimal `RecordDef` in `defs` with the given name interned into
+/// `syms`, and a corresponding `Type::Record` entry in `store`. Returns the
+/// `DefinitionId` of the newly created record.
+function mkRecordDef(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+): Analyzer::DefinitionId {
+  let mut symsRef: &mut Analyzer::SymbolTable = syms;
+  let mut defsRef: &mut Analyzer::DefinitionStore = defs;
+  let mut storeRef: &mut Analyzer::TypeStore = store;
+
+  let sym: Analyzer::SymbolId = symsRef.intern(name);
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(defsRef.length() as u32);
+  let typeId: Analyzer::TypeId = storeRef.recordType(defId);
+  let def: Analyzer::Definition = Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: typeId,
+  });
+
+  defsRef.push(def);
+
+  return defId;
+}
+
+/// Creates a minimal `EnumDef` in `defs` with the given name interned into
+/// `syms`, and a corresponding `Type::Enum` entry in `store`. Returns the
+/// `DefinitionId` of the newly created enum.
+function mkEnumDef(
+  syms: &mut Analyzer::SymbolTable,
+  defs: &mut Analyzer::DefinitionStore,
+  store: &mut Analyzer::TypeStore,
+  name: str,
+): Analyzer::DefinitionId {
+  let mut symsRef: &mut Analyzer::SymbolTable = syms;
+  let mut defsRef: &mut Analyzer::DefinitionStore = defs;
+  let mut storeRef: &mut Analyzer::TypeStore = store;
+
+  let sym: Analyzer::SymbolId = symsRef.intern(name);
+  let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(defsRef.length() as u32);
+  let typeId: Analyzer::TypeId = storeRef.enumType(defId);
+  let def: Analyzer::Definition = Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    typeId: typeId,
+  });
+
+  defsRef.push(def);
+
+  return defId;
+}
+
+// ─── nameOfResolved tests ─────────────────────────────────────────────────────
+
+@test
+function nameOfResolvedReturnsPrimitiveName(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idBoolean: Analyzer::TypeId = store.intern(Analyzer::Type::BOOLEAN);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  Test::assertEq<str>(store.nameOfResolved(idI32, &defs, &syms).toStr(), "i32");
+  Test::assertEq<str>(store.nameOfResolved(idBoolean, &defs, &syms).toStr(), "boolean");
+  Test::assertEq<str>(store.nameOfResolved(idStr, &defs, &syms).toStr(), "str");
+}
+
+@test
+function nameOfResolvedReturnsRecordRealName(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = mkRecordDef(&mut syms, &mut defs, &mut store, "Vector");
+  let typeId: Analyzer::TypeId = store.recordType(defId);
+
+  Test::assertEq<str>(store.nameOfResolved(typeId, &defs, &syms).toStr(), "Vector");
+}
+
+@test
+function nameOfResolvedFallsBackOnUnknownDef(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId999: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(999);
+  let typeId: Analyzer::TypeId = store.recordType(defId999);
+
+  Test::assertEq<str>(store.nameOfResolved(typeId, &defs, &syms).toStr(), "<record:DefId(999)>");
+}
+
+@test
+function nameOfResolvedReturnsEnumRealName(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = mkEnumDef(&mut syms, &mut defs, &mut store, "Option");
+  let typeId: Analyzer::TypeId = store.enumType(defId);
+
+  Test::assertEq<str>(store.nameOfResolved(typeId, &defs, &syms).toStr(), "Option");
+}
+
+@test
+function nameOfResolvedReturnsParamRealName(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let sym: Analyzer::SymbolId = syms.intern("T");
+  let typeId: Analyzer::TypeId = store.param(sym);
+
+  Test::assertEq<str>(store.nameOfResolved(typeId, &defs, &syms).toStr(), "T");
+}
+
+@test
+function nameOfResolvedFallsBackOnUnresolvedSymbol(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let sym99: Analyzer::SymbolId = Symbol::fromRaw(99);
+  let typeId: Analyzer::TypeId = store.param(sym99);
+
+  Test::assertEq<str>(store.nameOfResolved(typeId, &defs, &syms).toStr(), "<param:Symbol(99)>");
+}
+
+@test
+function nameOfResolvedFormatsInstanceWithArgs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = mkRecordDef(&mut syms, &mut defs, &mut store, "Vector");
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+  let instId: Analyzer::TypeId = store.instance(defId, args);
+
+  Test::assertEq<str>(store.nameOfResolved(instId, &defs, &syms).toStr(), "Vector<i32>");
+}
+
+@test
+function nameOfResolvedFormatsInstanceWithMultipleArgs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = mkEnumDef(&mut syms, &mut defs, &mut store, "Result");
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+  args.push(idStr);
+  let instId: Analyzer::TypeId = store.instance(defId, args);
+
+  Test::assertEq<str>(store.nameOfResolved(instId, &defs, &syms).toStr(), "Result<i32, str>");
+}
+
+@test
+function nameOfResolvedFormatsInstanceWithEmptyArgs(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = mkRecordDef(&mut syms, &mut defs, &mut store, "SomeRec");
+  let emptyArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  let instId: Analyzer::TypeId = store.instance(defId, emptyArgs);
+
+  Test::assertEq<str>(store.nameOfResolved(instId, &defs, &syms).toStr(), "SomeRec");
+}
+
+@test
+function nameOfResolvedRecursesIntoCompounds(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let defId: Analyzer::DefinitionId = mkRecordDef(&mut syms, &mut defs, &mut store, "Vector");
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+  let instId: Analyzer::TypeId = store.instance(defId, args);
+  let refId: Analyzer::TypeId = store.reference(instId);
+
+  Test::assertEq<str>(store.nameOfResolved(refId, &defs, &syms).toStr(), "&Vector<i32>");
+}
