@@ -614,3 +614,1659 @@ function binderSkipsFunctionRoots(): void {
   // No diagnostics.
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
+
+/// Phase 1.1 RED: DefinitionStore::replace round-trip.
+/// Push a Definition::Record placeholder, call defStore.replace with an updated
+/// RecordDef, then assert defStore.get returns the updated payload.
+@test
+function binderReplaceRoundTrip(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let sentinelId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+  let symFoo: Analyzer::SymbolId = symbols.intern("Foo");
+  let symBar: Analyzer::SymbolId = symbols.intern("Bar");
+
+  // Push a placeholder record named "Foo".
+  let placeholder: Analyzer::RecordDef = Analyzer::RecordDef {
+    name: symFoo,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: sentinelId,
+  };
+  let defId: Analyzer::DefinitionId = defStore.push(Analyzer::Definition::Record(placeholder));
+
+  // Build an updated record named "Bar" to replace with.
+  let updated: Analyzer::RecordDef = Analyzer::RecordDef {
+    name: symBar,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: sentinelId,
+  };
+  let replaced: boolean = defStore.replace(defId, Analyzer::Definition::Record(updated));
+
+  // replace must report success.
+  Test::assertEq<boolean>(replaced, true);
+
+  // defStore.get must now return the updated record ("Bar").
+  match (defStore.get(defId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u32>(rec.name.raw(), symBar.raw());
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected Record, got Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record, got Function"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record, got Variable"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record, got Field"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record, got Variant"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record, got TypeParam"),
+    },
+    Option::NONE -> @panic("expected defStore.get to return SOME after replace"),
+  };
+}
+
+/// Phase 1.3 RED: completeRoots on empty roots + empty pass-1 output is a no-op.
+/// defStore.length() == 0, typeStore unchanged, no diagnostics.
+@test
+function binderCompleteRootsEmptyIsNoOp(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let roots: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+
+  // Run pass-1 on empty roots.
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Run pass-2 on empty roots.
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  Test::assertEq<u64>(defStore.length(), 0);
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+
+/// Phase 2.1 RED: Record with zero fields is completed correctly.
+/// After completeRoots: RecordDef.fields is empty, RecordDef.typeId != VOID sentinel,
+/// TypeStore grew by exactly 1.
+@test
+function binderCompleteRecordZeroFields(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreBeforePass1: u64 = typeStore.length();
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Pass-1 must not grow TypeStore.
+  Test::assertEq<u64>(typeStore.length(), typeStoreBeforePass1);
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // defStore should still have exactly 1 entry (the RecordDef itself, no sub-defs).
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // TypeStore grew by exactly 1 (Type::Record(defId)).
+  Test::assertEq<u64>(typeStore.length(), typeStoreBeforePass1 + 1);
+
+  // Retrieve the RecordDef and verify it was completed.
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        // Fields vector must be empty (zero fields).
+        Test::assertEq<u64>(rec.fields.length(), 0);
+
+        // typeId must not be the VOID sentinel — it should be the real Type::Record.
+        let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+        Test::assertEq<boolean>(rec.typeId.raw() == voidId.raw(), false);
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected Record"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+
+  // No diagnostics.
+  Test::assertEq<u64>(_pass2.diagnostics.length(), 0);
+}
+
+/// Phase 2.3 RED: Record with 2 named fields is completed correctly.
+/// After completeRoots: defStore grew by 2 (two FieldDefs), RecordDef.fields.length == 2,
+/// each field's index correct (0, 1), each field's fieldType == VOID sentinel.
+@test
+function binderCompleteRecordWithFields(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Add two field patterns (Pattern::Binding).
+  let field0Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("x"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let field1Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("y"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(field0Id);
+  fields.push(field1Id);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Vec2"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let defStoreAfterPass1: u64 = defStore.length();
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // defStore grew by 2 (two FieldDef sub-defs added).
+  Test::assertEq<u64>(defStore.length(), defStoreAfterPass1 + 2);
+
+  // Retrieve the RecordDef and verify fields.
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u64>(rec.fields.length(), 2);
+
+        // Check first field.
+        let Option::SOME(field0DefId) = rec.fields.get(0) else {
+          @panic("missing field 0");
+        };
+
+        match (defStore.get(*field0DefId)) {
+          Option::SOME(f0) -> match (f0) {
+            Analyzer::Definition::Field(fd) -> {
+              Test::assertEq<u32>(fd.index, 0);
+              Test::assertEq<u32>(fd.fieldType.raw(), voidId.raw());
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected Field"),
+            Analyzer::Definition::Enum(_) -> @panic("expected Field"),
+            Analyzer::Definition::Function(_) -> @panic("expected Field"),
+            Analyzer::Definition::Variable(_) -> @panic("expected Field"),
+            Analyzer::Definition::Variant(_) -> @panic("expected Field"),
+            Analyzer::Definition::TypeParam(_) -> @panic("expected Field"),
+          },
+          Option::NONE -> @panic("field 0 not found"),
+        };
+
+        // Check second field.
+        let Option::SOME(field1DefId) = rec.fields.get(1) else {
+          @panic("missing field 1");
+        };
+
+        match (defStore.get(*field1DefId)) {
+          Option::SOME(f1) -> match (f1) {
+            Analyzer::Definition::Field(fd) -> {
+              Test::assertEq<u32>(fd.index, 1);
+              Test::assertEq<u32>(fd.fieldType.raw(), voidId.raw());
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected Field"),
+            Analyzer::Definition::Enum(_) -> @panic("expected Field"),
+            Analyzer::Definition::Function(_) -> @panic("expected Field"),
+            Analyzer::Definition::Variable(_) -> @panic("expected Field"),
+            Analyzer::Definition::Variant(_) -> @panic("expected Field"),
+            Analyzer::Definition::TypeParam(_) -> @panic("expected Field"),
+          },
+          Option::NONE -> @panic("field 1 not found"),
+        };
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected Record"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+
+  Test::assertEq<u64>(_pass2.diagnostics.length(), 0);
+}
+
+/// Phase 3.1 RED: Enum with zero variants is completed correctly.
+/// After completeRoots: EnumDef.variants is empty, EnumDef.typeId != VOID, TypeStore grew by 1.
+@test
+function binderCompleteEnumZeroVariants(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let enumId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // defStore: only 1 entry (the EnumDef itself, no variant sub-defs).
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // TypeStore grew by exactly 1.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore + 1);
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, enumId.raw()) else {
+    @panic("enum not found in pass-1 output");
+  };
+
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Enum(en) -> {
+        Test::assertEq<u64>(en.variants.length(), 0);
+        Test::assertEq<boolean>(en.typeId.raw() == voidId.raw(), false);
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Field(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Enum"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+
+  Test::assertEq<u64>(_pass2.diagnostics.length(), 0);
+}
+
+/// Phase 3.3 RED: Enum with mixed unit and payload variants.
+/// One unit variant (tag 0, empty payload) and one 2-payload variant (tag 1, 2 VOID sentinels).
+@test
+function binderCompleteEnumMixedVariants(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Unit variant: Pattern::Binding("Red").
+  let unitPatId: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("Red"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Payload variant: Pattern::Path with segments=["Some"] and 2 argument patterns.
+  let arg0Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+    span: dummySpan(),
+  }));
+  let arg1Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+    span: dummySpan(),
+  }));
+
+  let mut payloadArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  payloadArgs.push(arg0Id);
+  payloadArgs.push(arg1Id);
+
+  let mut pathSegs: Vector<String> = Vector::new<String>();
+  pathSegs.push(String::create("Rgba"));
+
+  let payloadPatId: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: dummySpan(),
+    segments: pathSegs,
+    arguments: payloadArgs,
+  }));
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(unitPatId);
+  variants.push(payloadPatId);
+
+  let enumId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // defStore grew by 2 (1 EnumDef pre-existing + 2 VariantDefs = 3 total; 1 was from pass-1).
+  // More precisely: pass-1 allocated 1, pass-2 allocated 2 sub-defs => 3 total.
+  Test::assertEq<u64>(defStore.length(), 3);
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, enumId.raw()) else {
+    @panic("enum not found in pass-1 output");
+  };
+
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Enum(en) -> {
+        Test::assertEq<u64>(en.variants.length(), 2);
+
+        // Check unit variant (tag 0, empty payload).
+        let Option::SOME(v0Id) = en.variants.get(0) else {
+          @panic("missing variant 0");
+        };
+
+        match (defStore.get(*v0Id)) {
+          Option::SOME(vd0) -> match (vd0) {
+            Analyzer::Definition::Variant(v) -> {
+              Test::assertEq<u32>(v.tagValue, 0);
+              Test::assertEq<u64>(v.payload.length(), 0);
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Enum(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Function(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Variable(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Field(_) -> @panic("expected Variant"),
+            Analyzer::Definition::TypeParam(_) -> @panic("expected Variant"),
+          },
+          Option::NONE -> @panic("variant 0 not found"),
+        };
+
+        // Check payload variant (tag 1, 2 VOID sentinel entries).
+        let Option::SOME(v1Id) = en.variants.get(1) else {
+          @panic("missing variant 1");
+        };
+
+        match (defStore.get(*v1Id)) {
+          Option::SOME(vd1) -> match (vd1) {
+            Analyzer::Definition::Variant(v) -> {
+              Test::assertEq<u32>(v.tagValue, 1);
+              Test::assertEq<u64>(v.payload.length(), 2);
+
+              let Option::SOME(p0) = v.payload.get(0) else {
+                @panic("missing payload 0");
+              };
+              let Option::SOME(p1) = v.payload.get(1) else {
+                @panic("missing payload 1");
+              };
+              Test::assertEq<u32>(p0.raw(), voidId.raw());
+              Test::assertEq<u32>(p1.raw(), voidId.raw());
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Enum(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Function(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Variable(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Field(_) -> @panic("expected Variant"),
+            Analyzer::Definition::TypeParam(_) -> @panic("expected Variant"),
+          },
+          Option::NONE -> @panic("variant 1 not found"),
+        };
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Field(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Enum"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 4.1 RED: Record with 1 type parameter, zero fields.
+/// After completeRoots: defStore grew by 1 (TypeParamDef), RecordDef.typeParams.length == 1,
+/// TypeParamDef.index == 0.
+@test
+function binderCompleteRecordWithTypeParam(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: dummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Box"),
+    genericParameters: genericParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let defStoreAfterPass1: u64 = defStore.length();
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // defStore grew by 1 (one TypeParamDef).
+  Test::assertEq<u64>(defStore.length(), defStoreAfterPass1 + 1);
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u64>(rec.typeParams.length(), 1);
+
+        let Option::SOME(tpId) = rec.typeParams.get(0) else {
+          @panic("missing type param");
+        };
+
+        match (defStore.get(*tpId)) {
+          Option::SOME(tp) -> match (tp) {
+            Analyzer::Definition::TypeParam(tpd) -> {
+              Test::assertEq<u32>(tpd.index, 0);
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected TypeParam"),
+            Analyzer::Definition::Enum(_) -> @panic("expected TypeParam"),
+            Analyzer::Definition::Function(_) -> @panic("expected TypeParam"),
+            Analyzer::Definition::Variable(_) -> @panic("expected TypeParam"),
+            Analyzer::Definition::Field(_) -> @panic("expected TypeParam"),
+            Analyzer::Definition::Variant(_) -> @panic("expected TypeParam"),
+          },
+          Option::NONE -> @panic("type param def not found"),
+        };
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected Record"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 4.3 RED: TypeAlias with 1 type param is completed (no new type interned, type params added).
+/// Per spec: TypeAlias is a no-op in pass-2 for TypeStore growth beyond the 1-entry rule.
+/// Actually per design §3.5: typeId advances from VOID to Type::Record(defId), so TypeStore DOES grow by 1.
+/// Corrected: asserts TypeStore grew by 1 and typeParams length 1.
+@test
+function binderCompleteTypeAliasWithTypeParam(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("i32"));
+  let targetTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: dummySpan(),
+    segments: segments,
+  }));
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: dummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let aliasId: Ast::ItemId = module.addRootItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
+    span: dummySpan(),
+    name: String::create("Result"),
+    genericParameters: genericParams,
+    value: targetTypeId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let defStoreAfterPass1: u64 = defStore.length();
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // TypeAlias grows TypeStore by 1 (Type::Record(defId)) and defStore by 1 (TypeParamDef).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore + 1);
+  Test::assertEq<u64>(defStore.length(), defStoreAfterPass1 + 1);
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, aliasId.raw()) else {
+    @panic("alias not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u64>(rec.typeParams.length(), 1);
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected Record (alias stand-in)"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 5.1 RED: Top-level function with 2 params and explicit return type.
+/// After completeRoots: defStore grew by 3 (FunctionDef + 2 param VariableDefs),
+/// FunctionDef.params.length == 2, each param's declaredType == VOID sentinel,
+/// FunctionDef.returnType == VOID sentinel, TypeStore unchanged.
+@test
+function binderBindFunctionTwoParams(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let param0Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("x"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let param1Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("y"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(param0Id);
+  params.push(param1Id);
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  // Add explicit return type annotation.
+  let mut retSegs: Vector<String> = Vector::new<String>();
+  retSegs.push(String::create("i32"));
+  let retTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: dummySpan(),
+    segments: retSegs,
+  }));
+
+  let fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("add"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(retTypeId),
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Pass-1 skips functions — defStore stays empty.
+  Test::assertEq<u64>(defStore.length(), 0);
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // defStore grew by 3: FunctionDef + 2 param VariableDefs.
+  Test::assertEq<u64>(defStore.length(), 3);
+
+  // TypeStore must not grow for functions.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+
+  // The function must be in pass-2 output nodeIds.
+  let Option::SOME(fnDefId) = Analyzer::Binder::findDef(&pass2, fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  match (defStore.get(fnDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(fn_) -> {
+        Test::assertEq<u64>(fn_.params.length(), 2);
+        Test::assertEq<u32>(fn_.returnType.raw(), voidId.raw());
+
+        // Check first param.
+        let Option::SOME(p0Id) = fn_.params.get(0) else {
+          @panic("missing param 0");
+        };
+
+        match (defStore.get(*p0Id)) {
+          Option::SOME(p0) -> match (p0) {
+            Analyzer::Definition::Variable(v) -> {
+              Test::assertEq<u32>(v.declaredType.raw(), voidId.raw());
+              Test::assertEq<boolean>(v.mutable, false);
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+            Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+            Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+            Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+            Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+            Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+          },
+          Option::NONE -> @panic("param 0 not found"),
+        };
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Function"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Function"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Function"),
+      Analyzer::Definition::Field(_) -> @panic("expected Function"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Function"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 0);
+}
+
+/// Phase 5.3 RED: Function with 1 type parameter.
+/// After completeRoots: defStore grew by 2 (FunctionDef + TypeParamDef),
+/// FunctionDef.typeParams.length == 1.
+@test
+function binderBindFunctionWithTypeParams(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: dummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("identity"),
+    genericParameters: genericParams,
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // FunctionDef + 1 TypeParamDef = 2 definitions.
+  Test::assertEq<u64>(defStore.length(), 2);
+
+  let Option::SOME(fnDefId) = Analyzer::Binder::findDef(&pass2, fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  match (defStore.get(fnDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(fn_) -> {
+        Test::assertEq<u64>(fn_.typeParams.length(), 1);
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Function"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Function"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Function"),
+      Analyzer::Definition::Field(_) -> @panic("expected Function"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Function"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 6.1 RED: Top-level constant.
+/// After completeRoots: defStore grew by 1, VariableDef.mutable == false,
+/// declaredType == VOID sentinel, TypeStore unchanged, pass-2 output maps the constant's NodeId.
+@test
+function binderBindConstant(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  // Add a dummy expression for the constant value.
+  let mut litSegs: Vector<String> = Vector::new<String>();
+  litSegs.push(String::create("i32"));
+  let typeAnnotId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: dummySpan(),
+    segments: litSegs,
+  }));
+
+  // Constant value: an integer literal expression (value is ignored by the binder).
+  let exprId: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: dummySpan(),
+    value: Ast::Expression::LiteralValue::Int(42),
+  }));
+
+  let constId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: dummySpan(),
+    name: String::create("MAX"),
+    annotation: Option::SOME(typeAnnotId),
+    value: exprId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Pass-1 skips constants.
+  Test::assertEq<u64>(defStore.length(), 0);
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // 1 VariableDef allocated.
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // TypeStore must not grow.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+
+  // The constant must be in pass-2 output.
+  let Option::SOME(constDefId) = Analyzer::Binder::findDef(&pass2, constId.raw()) else {
+    @panic("constant not found in pass-2 output");
+  };
+
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  match (defStore.get(constDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Variable(v) -> {
+        Test::assertEq<boolean>(v.mutable, false);
+        Test::assertEq<u32>(v.declaredType.raw(), voidId.raw());
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 0);
+}
+
+/// Phase 7.1 RED: Function inside a Namespace is bound by completeRoots.
+/// After completeRoots: defStore grew by 2 (FunctionDef + 1 param VariableDef),
+/// pass-2 output maps the function's NodeId.
+@test
+function binderCompleteFunctionInsideNamespace(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let paramId: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("x"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(paramId);
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  // Add the function as a non-root item.
+  let fnId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("abs"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(fnId);
+
+  let _nsId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Math"),
+    items: nsItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Pass-1 allocates 1 definition for the namespace itself.
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // Pass-2 adds FunctionDef + param VariableDef = 2 more. Total = 3.
+  Test::assertEq<u64>(defStore.length(), 3);
+
+  // Function must be in pass-2 output.
+  let Option::SOME(_fnDefId) = Analyzer::Binder::findDef(&pass2, fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 0);
+}
+
+/// Phase 7.3 RED: Export wrapping a Constant — the constant gets a VariableDef.
+@test
+function binderCompleteExportUnwrap(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let exprId: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: dummySpan(),
+    value: Ast::Expression::LiteralValue::Int(0),
+  }));
+
+  let constId: Ast::ItemId = module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: dummySpan(),
+    name: String::create("VERSION"),
+    annotation: Option::NONE,
+    value: exprId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let _exportId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: dummySpan(),
+    declaration: Option::SOME(constId),
+    items: Vector::new<Ast::ImportBinding>(),
+    source: Option::NONE,
+    sourceSpan: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // The constant wrapped in Export must get a VariableDef.
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  let Option::SOME(constDefId) = Analyzer::Binder::findDef(&pass2, constId.raw()) else {
+    @panic("constant not found in pass-2 output after Export unwrap");
+  };
+
+  match (defStore.get(constDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Variable(_) -> {},
+      Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 8.1 RED: Duplicate field names in a record.
+/// 1 diagnostic emitted, defStore grew by 1 (only first field allocated), RecordDef.fields.length == 1.
+@test
+function binderDuplicateFieldName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let field0Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("x"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let field1Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("x"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(field0Id);
+  fields.push(field1Id);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Bad"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // Exactly 1 diagnostic.
+  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+
+  // Only 1 FieldDef allocated (first "x" kept, second "x" skipped).
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u64>(rec.fields.length(), 1);
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected Record"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 8.3 RED: Duplicate variant names in an enum.
+/// 1 diagnostic, EnumDef.variants.length == 1.
+@test
+function binderDuplicateVariantName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let var0Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("Red"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let var1Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("Red"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(var0Id);
+  variants.push(var1Id);
+
+  let enumId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, enumId.raw()) else {
+    @panic("enum not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Enum(en) -> {
+        Test::assertEq<u64>(en.variants.length(), 1);
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Field(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Enum"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 8.5 RED: Duplicate parameter names in a function.
+/// 1 diagnostic, FunctionDef.params.length == 1.
+@test
+function binderDuplicateParamName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let param0Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("x"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let param1Id: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("x"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(param0Id);
+  params.push(param1Id);
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let _fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("bad"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+
+  // FunctionDef + 1 param (second "x" skipped) = 2 defs.
+  Test::assertEq<u64>(defStore.length(), 2);
+
+  let Option::SOME(fnDefId) = Analyzer::Binder::findDef(&pass2, _fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  match (defStore.get(fnDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(fn_) -> {
+        Test::assertEq<u64>(fn_.params.length(), 1);
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Function"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Function"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Function"),
+      Analyzer::Definition::Field(_) -> @panic("expected Function"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Function"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Phase 8.7 RED: Duplicate function names in a namespace.
+/// 1 diagnostic, only first function's DefinitionId in pass-2 output.
+@test
+function binderDuplicateFunctionName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let fn1Id: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("foo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let fn2Id: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("foo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(fn1Id);
+  nsItems.push(fn2Id);
+
+  let _nsId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Ns"),
+    items: nsItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // 1 diagnostic for duplicate "foo".
+  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+
+  // First "foo" is in pass-2 output.
+  match (Analyzer::Binder::findDef(&pass2, fn1Id.raw())) {
+    Option::SOME(_) -> {},
+    Option::NONE -> @panic("first 'foo' function not found in pass-2 output"),
+  };
+
+  // Second "foo" is NOT in pass-2 output.
+  match (Analyzer::Binder::findDef(&pass2, fn2Id.raw())) {
+    Option::SOME(_) -> @panic("second 'foo' should not be in pass-2 output"),
+    Option::NONE -> {},
+  };
+}
+
+/// Phase 9.1 RED: Two independent pass-1 + pass-2 sequences over structurally identical
+/// AST inputs produce byte-identical DefinitionId ordinals and same TypeStore length.
+@test
+function binderPass2ProducesIdenticalOutputsAcrossTwoRuns(): void {
+  // Build module A: Record<T> with 1 field, Enum with 2 variants, Function with 1 param.
+
+  // Run A.
+  let mut moduleA: Ast::Module = Ast::Module::init();
+
+  let fieldAId: Ast::PatternId = moduleA.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("val"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut fieldsA: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fieldsA.push(fieldAId);
+
+  let mut tpA: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  tpA.push(Ast::GenericParam {
+    span: dummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let _recIdA: Ast::ItemId = moduleA.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Box"),
+    genericParameters: tpA,
+    fields: fieldsA,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let var0A: Ast::PatternId = moduleA.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("A"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let var1A: Ast::PatternId = moduleA.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("B"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut variantsA: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variantsA.push(var0A);
+  variantsA.push(var1A);
+
+  let _enumIdA: Ast::ItemId = moduleA.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Dir"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variantsA,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let paramA: Ast::PatternId = moduleA.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("n"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut paramsA: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  paramsA.push(paramA);
+  let bodyA: Ast::StatementId = moduleA.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+  let _fnIdA: Ast::ItemId = moduleA.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("abs"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: paramsA,
+    returnType: Option::NONE,
+    body: bodyA,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut defStoreA: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStoreA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbolsA: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let pass1A: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &moduleA.roots,
+    &mut defStoreA,
+    &mut typeStoreA,
+    &mut symbolsA,
+    &moduleA,
+  );
+
+  let pass2A: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &moduleA.roots,
+    &mut defStoreA,
+    &mut typeStoreA,
+    &mut symbolsA,
+    &moduleA,
+    &pass1A,
+  );
+
+  // Run B: identical structure.
+  let mut moduleB: Ast::Module = Ast::Module::init();
+
+  let fieldBId: Ast::PatternId = moduleB.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("val"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut fieldsB: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fieldsB.push(fieldBId);
+
+  let mut tpB: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  tpB.push(Ast::GenericParam {
+    span: dummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let _recIdB: Ast::ItemId = moduleB.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Box"),
+    genericParameters: tpB,
+    fields: fieldsB,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let var0B: Ast::PatternId = moduleB.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("A"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let var1B: Ast::PatternId = moduleB.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("B"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut variantsB: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variantsB.push(var0B);
+  variantsB.push(var1B);
+
+  let _enumIdB: Ast::ItemId = moduleB.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Dir"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variantsB,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let paramB: Ast::PatternId = moduleB.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("n"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut paramsB: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  paramsB.push(paramB);
+  let bodyB: Ast::StatementId = moduleB.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+  let _fnIdB: Ast::ItemId = moduleB.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("abs"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: paramsB,
+    returnType: Option::NONE,
+    body: bodyB,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut defStoreB: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStoreB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbolsB: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let pass1B: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &moduleB.roots,
+    &mut defStoreB,
+    &mut typeStoreB,
+    &mut symbolsB,
+    &moduleB,
+  );
+
+  let pass2B: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &moduleB.roots,
+    &mut defStoreB,
+    &mut typeStoreB,
+    &mut symbolsB,
+    &moduleB,
+    &pass1B,
+  );
+
+  // Both runs must produce the same defStore length and typeStore length.
+  Test::assertEq<u64>(defStoreA.length(), defStoreB.length());
+  Test::assertEq<u64>(typeStoreA.length(), typeStoreB.length());
+
+  // pass-2 outputs must have the same nodeIds/defIds count and ordinals.
+  Test::assertEq<u64>(pass2A.nodeIds.length(), pass2B.nodeIds.length());
+  Test::assertEq<u64>(pass2A.defIds.length(), pass2B.defIds.length());
+
+  let count: u64 = pass2A.defIds.length();
+  let mut index: u64 = 0;
+  while (index < count) {
+    if (let Option::SOME(idA) = pass2A.defIds.get(index)) {
+      if (let Option::SOME(idB) = pass2B.defIds.get(index)) {
+        Test::assertEq<u32>(idA.raw(), idB.raw());
+      }
+    }
+    index += 1;
+  }
+
+  // pass-1 outputs must also be identical (same ordinals).
+  Test::assertEq<u64>(pass1A.defIds.length(), pass1B.defIds.length());
+  let pass1Count: u64 = pass1A.defIds.length();
+  let mut pass1Index: u64 = 0;
+  while (pass1Index < pass1Count) {
+    if (let Option::SOME(idA) = pass1A.defIds.get(pass1Index)) {
+      if (let Option::SOME(idB) = pass1B.defIds.get(pass1Index)) {
+        Test::assertEq<u32>(idA.raw(), idB.raw());
+      }
+    }
+    pass1Index += 1;
+  }
+}

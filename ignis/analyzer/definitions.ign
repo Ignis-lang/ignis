@@ -150,5 +150,21 @@ export namespace Analyzer {
     public length(&self): u64 {
       return self.definitions.length();
     }
+
+    /// Replace the definition at `id` with `def`. Returns `false` if `id` is out of bounds.
+    ///
+    /// Caller is responsible for preserving the variant tag — patching a Record with an
+    /// Enum is permitted by the type system but breaks every downstream invariant.
+    /// Uses `IndexVec::getMut` for in-place mutation (avoids move-in-one-branch
+    /// ownership errors that affect `IndexVec::set` on non-Copy types).
+    public replace(&mut self, id: Analyzer::DefinitionId, def: Analyzer::Definition): boolean {
+      let Option::SOME(slot) = self.definitions.getMut(id) else {
+        return false;
+      };
+
+      *slot = def;
+
+      return true;
+    }
   }
 }

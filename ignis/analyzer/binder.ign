@@ -299,6 +299,731 @@ export namespace Analyzer {
       }
     }
 
+    /// Emit a diagnostic for a duplicate named slot (field, variant, parameter, or function).
+    /// Uses `DiagnosticCode::TYPE_ALREADY_DEFINED` per design §5 (reuse existing code with
+    /// a discriminator string rather than adding new diagnostic codes for each slot kind).
+    function emitDuplicateNameDiagnostic(
+      state: &mut Analyzer::Binder::BinderState,
+      kind: str,
+      name: str,
+      span: SourceSpan,
+    ): void {
+      let message: String = String::create("duplicate ").concat(kind).concat(": ").concat(name);
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::TYPE_ALREADY_DEFINED,
+        message.toStr(),
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, "second declaration here");
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// Allocate `Definition::TypeParam` sub-defs for each generic parameter in source order.
+    ///
+    /// Bounds are intentionally ignored in this slice — only name and positional index are
+    /// recorded. A future slice attaches bound descriptors to `TypeParamDef`. Duplicate
+    /// type-parameter names emit a diagnostic and skip the duplicate.
+    function bindTypeParams(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      generics: &Vector<Ast::GenericParam>,
+      owner: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut seenSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut index: u64 = 0;
+
+      while (index < generics.length()) {
+        let Option::SOME(gp) = generics.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+        let sym: Analyzer::SymbolId = symbolsRef.intern(gp.name.toStr());
+
+        // Linear duplicate check among already-seen type-param names.
+        let mut isDuplicate: boolean = false;
+        let mut seenIndex: u64 = 0;
+        while (seenIndex < seenSyms.length()) {
+          if (let Option::SOME(seenSym) = seenSyms.get(seenIndex)) {
+            if (seenSym.raw() == sym.raw()) {
+              isDuplicate = true;
+            }
+          }
+          seenIndex += 1;
+        }
+
+        if (isDuplicate) {
+          emitDuplicateNameDiagnostic(state, "type parameter", gp.name.toStr(), gp.span);
+          index += 1;
+          continue;
+        }
+
+        seenSyms.push(sym);
+
+        let tpDef: Analyzer::TypeParamDef = Analyzer::TypeParamDef {
+          name: sym,
+          owner: owner,
+          index: index as u32,
+        };
+        let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+        let tpId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::TypeParam(tpDef));
+        out.push(tpId);
+
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Allocate `Definition::Field` sub-defs for each field pattern in source order.
+    ///
+    /// Each field must be a `Pattern::Binding` node. Duplicate field names emit a
+    /// diagnostic and skip allocation for the duplicate. Wildcard and non-Binding
+    /// patterns are silently skipped. The `index` on each `FieldDef` is the zero-based
+    /// position within the successfully-allocated fields (not the raw pattern index).
+    function bindFields(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      fieldPatternIds: &Vector<Ast::PatternId>,
+      owner: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut seenSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+      let mut index: u64 = 0;
+
+      while (index < fieldPatternIds.length()) {
+        let Option::SOME(patId) = fieldPatternIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let patOpt: Option<&Ast::Pattern::Node> = ast.patterns.get(*patId);
+
+        if (let Option::SOME(pat) = patOpt) {
+          match (pat) {
+            Ast::Pattern::Node::Binding(b) -> {
+              let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+              let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
+
+              let mut isDuplicate: boolean = false;
+              let mut seenIndex: u64 = 0;
+              while (seenIndex < seenSyms.length()) {
+                if (let Option::SOME(seenSym) = seenSyms.get(seenIndex)) {
+                  if (seenSym.raw() == sym.raw()) {
+                    isDuplicate = true;
+                  }
+                }
+                seenIndex += 1;
+              }
+
+              if (isDuplicate) {
+                emitDuplicateNameDiagnostic(state, "field name", b.name.toStr(), b.span);
+              } else {
+                seenSyms.push(sym);
+                let fieldDef: Analyzer::FieldDef = Analyzer::FieldDef {
+                  name: sym,
+                  fieldType: sentinelId,
+                  owner: owner,
+                  index: out.length() as u32,
+                };
+                let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+                let fieldId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Field(fieldDef));
+                out.push(fieldId);
+              }
+            },
+            Ast::Pattern::Node::Wildcard(_) -> {},
+            Ast::Pattern::Node::Path(_) -> {},
+            Ast::Pattern::Node::Literal(_) -> {},
+            Ast::Pattern::Node::Tuple(_) -> {},
+            Ast::Pattern::Node::Or(_) -> {},
+          };
+        }
+
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Allocate `Definition::Variant` sub-defs for each variant pattern in source order.
+    ///
+    /// Unit variants use a `Pattern::Binding` node (empty payload). Payload variants use a
+    /// `Pattern::Path` node: the last path segment is the variant name and `arguments.length()`
+    /// VOID sentinels fill `payload`. Duplicate variant names emit a diagnostic. `tagValue`
+    /// is assigned sequentially starting at 0 for each successfully-allocated variant.
+    function bindVariants(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      variantPatternIds: &Vector<Ast::PatternId>,
+      owner: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut seenSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+      let mut tagValue: u32 = 0;
+      let mut index: u64 = 0;
+
+      while (index < variantPatternIds.length()) {
+        let Option::SOME(patId) = variantPatternIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let patOpt: Option<&Ast::Pattern::Node> = ast.patterns.get(*patId);
+
+        if (let Option::SOME(pat) = patOpt) {
+          // Determine variant name and payload count from the pattern kind.
+          // Binding -> unit variant, Path -> named variant with payload slots.
+          match (pat) {
+            Ast::Pattern::Node::Binding(b) -> {
+              let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+              let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
+
+              let mut isDuplicate: boolean = false;
+              let mut seenIndex: u64 = 0;
+              while (seenIndex < seenSyms.length()) {
+                if (let Option::SOME(seenSym) = seenSyms.get(seenIndex)) {
+                  if (seenSym.raw() == sym.raw()) {
+                    isDuplicate = true;
+                  }
+                }
+                seenIndex += 1;
+              }
+
+              if (isDuplicate) {
+                emitDuplicateNameDiagnostic(state, "variant name", b.name.toStr(), b.span);
+              } else {
+                seenSyms.push(sym);
+                let payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+                let variantDef: Analyzer::VariantDef = Analyzer::VariantDef {
+                  name: sym,
+                  payload: payload,
+                  owner: owner,
+                  tagValue: tagValue,
+                };
+                let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+                let variantId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variant(variantDef));
+                out.push(variantId);
+                tagValue += 1;
+              }
+            },
+            Ast::Pattern::Node::Path(p) -> {
+              // Path pattern: last segment is the variant name.
+              let segLen: u64 = p.segments.length();
+              if (segLen > 0) {
+                let Option::SOME(lastName) = p.segments.get(segLen - 1) else {
+                  index += 1;
+                  continue;
+                };
+
+                let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+                let sym: Analyzer::SymbolId = symbolsRef.intern(lastName.toStr());
+
+                let mut isDuplicate: boolean = false;
+                let mut seenIndex: u64 = 0;
+                while (seenIndex < seenSyms.length()) {
+                  if (let Option::SOME(seenSym) = seenSyms.get(seenIndex)) {
+                    if (seenSym.raw() == sym.raw()) {
+                      isDuplicate = true;
+                    }
+                  }
+                  seenIndex += 1;
+                }
+
+                if (isDuplicate) {
+                  emitDuplicateNameDiagnostic(state, "variant name", lastName.toStr(), p.span);
+                } else {
+                  seenSyms.push(sym);
+
+                  // Build VOID-sentinel payload: one entry per argument.
+                  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+                  let mut payloadIndex: u64 = 0;
+                  while (payloadIndex < p.arguments.length()) {
+                    payload.push(sentinelId);
+                    payloadIndex += 1;
+                  }
+
+                  let variantDef: Analyzer::VariantDef = Analyzer::VariantDef {
+                    name: sym,
+                    payload: payload,
+                    owner: owner,
+                    tagValue: tagValue,
+                  };
+                  let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+                  let variantId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variant(variantDef));
+                  out.push(variantId);
+                  tagValue += 1;
+                }
+              }
+            },
+            Ast::Pattern::Node::Wildcard(_) -> {},
+            Ast::Pattern::Node::Literal(_) -> {},
+            Ast::Pattern::Node::Tuple(_) -> {},
+            Ast::Pattern::Node::Or(_) -> {},
+          };
+        }
+
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Allocate `Definition::Variable` sub-defs for each function parameter in source order.
+    ///
+    /// Each parameter is expected to be a `Pattern::Binding` node. Duplicate parameter names
+    /// emit a diagnostic and skip allocation. All `declaredType` slots use the VOID sentinel —
+    /// the resolver fills in real types. `mutable` is false at the binder level.
+    function bindParameters(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      paramPatternIds: &Vector<Ast::PatternId>,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut seenSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+      let mut index: u64 = 0;
+
+      while (index < paramPatternIds.length()) {
+        let Option::SOME(patId) = paramPatternIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let patOpt: Option<&Ast::Pattern::Node> = ast.patterns.get(*patId);
+
+        if (let Option::SOME(pat) = patOpt) {
+          match (pat) {
+            Ast::Pattern::Node::Binding(b) -> {
+              let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+              let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
+
+              let mut isDuplicate: boolean = false;
+              let mut seenIndex: u64 = 0;
+              while (seenIndex < seenSyms.length()) {
+                if (let Option::SOME(seenSym) = seenSyms.get(seenIndex)) {
+                  if (seenSym.raw() == sym.raw()) {
+                    isDuplicate = true;
+                  }
+                }
+                seenIndex += 1;
+              }
+
+              if (isDuplicate) {
+                emitDuplicateNameDiagnostic(state, "parameter name", b.name.toStr(), b.span);
+              } else {
+                seenSyms.push(sym);
+                let paramDef: Analyzer::VariableDef = Analyzer::VariableDef {
+                  name: sym,
+                  visibility: Analyzer::Visibility::PUBLIC,
+                  declaredType: sentinelId,
+                  mutable: false,
+                };
+                let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+                let paramId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(paramDef));
+                out.push(paramId);
+              }
+            },
+            Ast::Pattern::Node::Wildcard(_) -> {},
+            Ast::Pattern::Node::Path(_) -> {},
+            Ast::Pattern::Node::Literal(_) -> {},
+            Ast::Pattern::Node::Tuple(_) -> {},
+            Ast::Pattern::Node::Or(_) -> {},
+          };
+        }
+
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Complete a Record placeholder installed by pass-1: allocate TypeParam and Field
+    /// sub-defs, intern `Type::Record(defId)`, and back-patch the placeholder via replace.
+    ///
+    /// Skips silently if `pass1` has no entry for `itemId` (e.g., it was a duplicate).
+    /// Does NOT walk `methods` — deferred per ADR-5.
+    function completeRecord(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      itemId: Ast::ItemId,
+      rec: &Ast::Item::Record,
+      pass1: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      // Read name and visibility from the placeholder before allocating sub-defs.
+      // This scopes the immutable borrow of defStore so it ends before replace.
+      let defOpt: Option<&Analyzer::Definition> = defStore.get(defId);
+      let Option::SOME(existing) = defOpt else {
+        return;
+      };
+
+      let placeholderName: Analyzer::SymbolId = existing.name();
+      let isRecord: boolean = match (existing) {
+        Analyzer::Definition::Record(_) -> true,
+        Analyzer::Definition::Enum(_) -> false,
+        Analyzer::Definition::Function(_) -> false,
+        Analyzer::Definition::Variable(_) -> false,
+        Analyzer::Definition::Field(_) -> false,
+        Analyzer::Definition::Variant(_) -> false,
+        Analyzer::Definition::TypeParam(_) -> false,
+      };
+
+      if (!isRecord) {
+        @panic("completeRecord: non-Record at Record defId — invariant broken");
+      }
+
+      // Immutable borrow of defStore is released here. Now allocate sub-defs.
+      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &rec.genericParameters, defId);
+      let fields: Vector<Analyzer::DefinitionId> = bindFields(state, defStore, typeStore, symbols, ast, &rec.fields, defId);
+
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Record(defId));
+
+      let newRec: Analyzer::RecordDef = Analyzer::RecordDef {
+        name: placeholderName,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: typeParams,
+        fields: fields,
+        typeId: realTypeId,
+      };
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      defsRef.replace(defId, Analyzer::Definition::Record(newRec));
+      // TODO(methods-binder): walk rec.methods to bind method functions. Deferred ADR-5.
+    }
+
+    /// Complete an Enum placeholder installed by pass-1: allocate TypeParam and Variant
+    /// sub-defs, intern `Type::Enum(defId)`, and back-patch the placeholder via replace.
+    ///
+    /// Symmetric to `completeRecord`. Does NOT walk `methods` — deferred per ADR-5.
+    function completeEnum(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      itemId: Ast::ItemId,
+      en: &Ast::Item::Enum,
+      pass1: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      // Read name from the placeholder before allocating sub-defs to scope the borrow.
+      let defOpt: Option<&Analyzer::Definition> = defStore.get(defId);
+      let Option::SOME(existing) = defOpt else {
+        return;
+      };
+
+      let placeholderName: Analyzer::SymbolId = existing.name();
+      let isEnum: boolean = match (existing) {
+        Analyzer::Definition::Enum(_) -> true,
+        Analyzer::Definition::Record(_) -> false,
+        Analyzer::Definition::Function(_) -> false,
+        Analyzer::Definition::Variable(_) -> false,
+        Analyzer::Definition::Field(_) -> false,
+        Analyzer::Definition::Variant(_) -> false,
+        Analyzer::Definition::TypeParam(_) -> false,
+      };
+
+      if (!isEnum) {
+        @panic("completeEnum: non-Enum at Enum defId — invariant broken");
+      }
+
+      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &en.genericParameters, defId);
+      let variants: Vector<Analyzer::DefinitionId> = bindVariants(state, defStore, typeStore, symbols, ast, &en.variants, defId);
+
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Enum(defId));
+
+      let newEnum: Analyzer::EnumDef = Analyzer::EnumDef {
+        name: placeholderName,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: typeParams,
+        variants: variants,
+        typeId: realTypeId,
+      };
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      defsRef.replace(defId, Analyzer::Definition::Enum(newEnum));
+      // TODO(methods-binder): walk en.methods to bind method functions. Deferred ADR-5.
+    }
+
+    /// Complete a TypeAlias placeholder (pass-1 Record stand-in).
+    ///
+    /// Binds type parameters only. Alias body resolution is deferred to the
+    /// resolver/typecheck phase. The placeholder typeId advances from VOID to
+    /// `Type::Record(defId)` so downstream phases see a non-VOID entry.
+    function completeTypeAlias(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      itemId: Ast::ItemId,
+      alias: &Ast::Item::TypeAlias,
+      pass1: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      // Read placeholder name before allocating sub-defs to scope the immutable borrow.
+      let defOpt: Option<&Analyzer::Definition> = defStore.get(defId);
+      let Option::SOME(existing) = defOpt else {
+        return;
+      };
+
+      let placeholderName: Analyzer::SymbolId = existing.name();
+
+      // Allocate type params (immutable borrow on defStore released above).
+      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &alias.genericParameters, defId);
+
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Record(defId));
+
+      // TypeAlias fields are empty (no fields — it is a stand-in Record placeholder).
+      let newRec: Analyzer::RecordDef = Analyzer::RecordDef {
+        name: placeholderName,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: typeParams,
+        fields: Vector::new<Analyzer::DefinitionId>(),
+        typeId: realTypeId,
+      };
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      defsRef.replace(defId, Analyzer::Definition::Record(newRec));
+    }
+
+    /// Complete a Trait placeholder (pass-1 Record stand-in).
+    ///
+    /// Binds type parameters only. Trait methods are deferred per ADR-5 — a follow-up
+    /// slice introduces `RecordDef.methods` and the recursion. The placeholder typeId
+    /// advances to `Type::Record(defId)`.
+    function completeTrait(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      itemId: Ast::ItemId,
+      trait_: &Ast::Item::Trait,
+      pass1: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      let defOpt: Option<&Analyzer::Definition> = defStore.get(defId);
+      let Option::SOME(existing) = defOpt else {
+        return;
+      };
+
+      let placeholderName: Analyzer::SymbolId = existing.name();
+
+      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &trait_.genericParameters, defId);
+
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Record(defId));
+
+      let newRec: Analyzer::RecordDef = Analyzer::RecordDef {
+        name: placeholderName,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: typeParams,
+        fields: Vector::new<Analyzer::DefinitionId>(),
+        typeId: realTypeId,
+      };
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      defsRef.replace(defId, Analyzer::Definition::Record(newRec));
+      // TODO(methods-binder): walk trait_.methods to bind trait method stubs. Deferred ADR-5.
+    }
+
+    /// Bind a new `Definition::Function` for a top-level or namespace-scoped function.
+    ///
+    /// Allocates a placeholder FunctionDef, populates TypeParam and Variable sub-defs,
+    /// and back-patches via replace. All type slots use the VOID sentinel — the resolver
+    /// fills in real types. TypeStore MUST NOT grow for functions (no `Type::Function`
+    /// entry is interned here per spec §function-binding).
+    function bindFunction(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      itemId: Ast::ItemId,
+      fn_: &Ast::Item::Function,
+      scopeKey: u64,
+    ): void {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
+
+      let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+      if (let Option::SOME(_) = duplicateOpt) {
+        emitDuplicateNameDiagnostic(state, "function name", fn_.name.toStr(), fn_.span);
+        return;
+      }
+
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+
+      // Push a placeholder FunctionDef first so sub-defs can reference the owner defId.
+      let placeholderFn: Analyzer::FunctionDef = Analyzer::FunctionDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: Vector::new<Analyzer::DefinitionId>(),
+        params: Vector::new<Analyzer::DefinitionId>(),
+        returnType: sentinelId,
+      };
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Function(placeholderFn));
+
+      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &fn_.genericParameters, defId);
+      let params: Vector<Analyzer::DefinitionId> = bindParameters(state, defStore, typeStore, symbols, ast, &fn_.parameters);
+
+      // Back-patch with fully-populated FunctionDef.
+      let newFn: Analyzer::FunctionDef = Analyzer::FunctionDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: typeParams,
+        params: params,
+        returnType: sentinelId,
+      };
+      let mut defsRef2: &mut Analyzer::DefinitionStore = defStore;
+      defsRef2.replace(defId, Analyzer::Definition::Function(newFn));
+
+      recordScopeEntry(state, scopeKey, sym, fn_.span);
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.nodeIds.push(itemId.raw());
+      stateRef.defIds.push(defId);
+    }
+
+    /// Bind a `Definition::Variable` (with `mutable = false`) for a module-level constant.
+    ///
+    /// `Item::Variable` does not exist at module scope (OQ3 confirmed) — only
+    /// `Item::Constant` does. The constant's value expression is intentionally ignored;
+    /// typechecking resolves it. TypeStore MUST NOT grow (VOID sentinel for `declaredType`).
+    function bindConstant(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      itemId: Ast::ItemId,
+      c: &Ast::Item::Constant,
+      scopeKey: u64,
+    ): void {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(c.name.toStr());
+
+      let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+      if (let Option::SOME(_) = duplicateOpt) {
+        emitDuplicateNameDiagnostic(state, "constant name", c.name.toStr(), c.span);
+        return;
+      }
+
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+
+      let varDef: Analyzer::VariableDef = Analyzer::VariableDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        declaredType: sentinelId,
+        mutable: false,
+      };
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(varDef));
+
+      recordScopeEntry(state, scopeKey, sym, c.span);
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.nodeIds.push(itemId.raw());
+      stateRef.defIds.push(defId);
+    }
+
+    /// Dispatch pass-2 completion for a single item.
+    ///
+    /// Mirrors `predeclareItem` in shape. Handles Record, Enum, TypeAlias, Trait,
+    /// Function, Constant, Namespace (recursing into children), and Export
+    /// (unwrapping the inner declaration). Silently skips Import and Extern.
+    ///
+    /// `scopeKey` is the raw u64 of the enclosing namespace item, or 0 for global scope.
+    function completeItem(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      itemId: Ast::ItemId,
+      scopeKey: u64,
+      pass1: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let nodeOpt: Option<&Ast::Item::Node> = ast.items.get(itemId);
+
+      if (let Option::SOME(node) = nodeOpt) {
+        match (node) {
+          Ast::Item::Node::Record(r) -> {
+            completeRecord(state, defStore, typeStore, symbols, ast, itemId, &r, pass1);
+          },
+          Ast::Item::Node::Enum(e) -> {
+            completeEnum(state, defStore, typeStore, symbols, ast, itemId, &e, pass1);
+          },
+          Ast::Item::Node::TypeAlias(a) -> {
+            completeTypeAlias(state, defStore, typeStore, symbols, itemId, &a, pass1);
+          },
+          Ast::Item::Node::Trait(t) -> {
+            completeTrait(state, defStore, typeStore, symbols, itemId, &t, pass1);
+          },
+          Ast::Item::Node::Function(f) -> {
+            bindFunction(state, defStore, typeStore, symbols, ast, itemId, &f, scopeKey);
+          },
+          Ast::Item::Node::Constant(c) -> {
+            bindConstant(state, defStore, typeStore, symbols, itemId, &c, scopeKey);
+          },
+          Ast::Item::Node::Namespace(ns) -> {
+            let childScopeKey: u64 = itemId.raw() as u64;
+            let mut childIndex: u64 = 0;
+
+            while (childIndex < ns.items.length()) {
+              if (let Option::SOME(childId) = ns.items.get(childIndex)) {
+                completeItem(state, defStore, typeStore, symbols, ast, *childId, childScopeKey, pass1);
+              }
+              childIndex += 1;
+            }
+          },
+          Ast::Item::Node::Export(ex) -> {
+            if (let Option::SOME(innerItemId) = ex.declaration) {
+              completeItem(state, defStore, typeStore, symbols, ast, innerItemId, scopeKey, pass1);
+            }
+          },
+          Ast::Item::Node::Extern(_) -> {},
+          Ast::Item::Node::Import(_) -> {},
+        };
+      }
+    }
+
     /// Walk `roots` and predeclare every type declaration found (depth-first,
     /// pre-order). Returns a `BinderOutput` with the allocated definitions and
     /// any duplicate-name diagnostics.
@@ -344,6 +1069,62 @@ export namespace Analyzer {
       };
 
       return output;
+    }
+
+    /// Walk `roots` and complete every type declaration found in pass-1, and
+    /// bind every function and constant declaration (not handled in pass-1).
+    ///
+    /// MUST be called exactly once per module, after `predeclareRoots` has
+    /// completed. Re-running with the same `pass1` output would double-allocate
+    /// sub-definitions.
+    ///
+    /// Returns an extended `BinderOutput` that appends Function and Constant
+    /// entries to the pass-1 `nodeIds`/`defIds` vectors and merges diagnostics.
+    /// Pass-1 entries (Records, Enums, etc.) are not re-inserted into the output
+    /// mapping — they remain in `pass1` and callers should consult both outputs.
+    function completeRoots(
+      roots: &Vector<Ast::ItemId>,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+    ): Analyzer::Binder::BinderOutput {
+      // TODO(cross-pass-duplicates): pass-2 starts with an empty scope, so a
+      // function whose name collides with a pass-1 Record/Enum/TypeAlias/Trait
+      // is NOT flagged as a duplicate. Resolver slice should either close this
+      // gap or document the contract that name-collision across passes is the
+      // resolver's responsibility.
+      let nodeIds: Vector<u32> = Vector::new<u32>();
+      let defIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let diagnostics: DiagnosticBag = DiagnosticBag::init();
+      let scopeKeys: Vector<u64> = Vector::new<u64>();
+      let scopeSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let scopeSpans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+
+      let mut state: Analyzer::Binder::BinderState = Analyzer::Binder::BinderState {
+        nodeIds: nodeIds,
+        defIds: defIds,
+        diagnostics: diagnostics,
+        scopeKeys: scopeKeys,
+        scopeSyms: scopeSyms,
+        scopeSpans: scopeSpans,
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < roots.length()) {
+        if (let Option::SOME(itemId) = roots.get(index)) {
+          completeItem(&mut state, defStore, typeStore, symbols, ast, *itemId, 0, pass1);
+        }
+        index += 1;
+      }
+
+      return Analyzer::Binder::BinderOutput {
+        nodeIds: state.nodeIds,
+        defIds: state.defIds,
+        diagnostics: state.diagnostics,
+      };
     }
   }
 }
